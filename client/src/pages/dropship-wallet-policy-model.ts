@@ -39,6 +39,9 @@ export const DROPSHIP_WALLET_POLICY_MAX_ADVANCE_FEE_BPS = 10_000;
 /** A year. Mirrors MAX_TIER_CHANGE_GRACE_DAYS and `dropship_wallet_policies_grace_days_chk`. */
 export const DROPSHIP_WALLET_POLICY_MAX_TIER_CHANGE_GRACE_DAYS = 365;
 
+/** 10%. Mirrors MAX_CARD_FUNDING_FEE_BPS (the shared misconfiguration guard) and `dropship_wallet_policies_card_fee_chk`. */
+export const DROPSHIP_WALLET_POLICY_MAX_CARD_FEE_BPS = 1_000;
+
 /** The server bound on every cents field (`positiveCentsSchema`). */
 const MAX_CENTS = Number.MAX_SAFE_INTEGER;
 
@@ -62,6 +65,9 @@ const walletPolicyLimitsSchema = z.object({
   advanceFeeBps: z.number().int(),
   advanceCapCents: z.number().int(),
   tierChangeGraceDays: z.number().int(),
+  // Funding design phase 7: the card fee (held at zero) and the card minimum deposit are limits too.
+  cardFundingFeeBps: z.number().int(),
+  cardFundingMinCents: z.number().int(),
 });
 
 const walletPolicyRecordSchema = z.object({
@@ -87,19 +93,6 @@ const walletPolicyImpactSchema = z.object({
   evaluatedAt: z.string(),
 });
 
-/**
- * `editable` is typed as a boolean rather than the literal `false` the server
- * serves today: this surface never renders an input for the fee, so a future
- * server that flipped the flag must not take the whole page down over a
- * display-only field.
- */
-const walletPolicyCardFeeSchema = z.object({
-  bps: z.number().int(),
-  envKey: z.string(),
-  editable: z.boolean(),
-  readOnlyReason: z.string(),
-});
-
 const walletPolicyEnvKeysSchema = z.object({
   autoReloadMinTriggerCents: z.string().nullable(),
   caseTierMinimumCents: z.string().nullable(),
@@ -113,6 +106,9 @@ const walletPolicyEnvKeysSchema = z.object({
   advanceFeeBps: z.string().nullable(),
   advanceCapCents: z.string().nullable(),
   tierChangeGraceDays: z.string().nullable(),
+  // The card fee keeps its variable as the fallback only; the card minimum is policy-only.
+  cardFundingFeeBps: z.string().nullable(),
+  cardFundingMinCents: z.string().nullable(),
 });
 
 /**
@@ -137,7 +133,6 @@ export const dropshipWalletPolicyOverviewSchema = z.object({
   limitsSource: z.enum(["policy", "environment"]),
   envLimits: walletPolicyLimitsSchema,
   envKeys: walletPolicyEnvKeysSchema,
-  cardFundingFee: walletPolicyCardFeeSchema,
   impact: walletPolicyImpactSchema,
   /** Absent from a server one release behind; the panel then shows no enforcement line. */
   listingTierEnforcement: z.object({
@@ -174,7 +169,6 @@ export const dropshipWalletPolicyMutationSchema = z.object({
 export type DropshipWalletPolicyLimitsView = z.infer<typeof walletPolicyLimitsSchema>;
 export type DropshipWalletPolicyRecordView = z.infer<typeof walletPolicyRecordSchema>;
 export type DropshipWalletPolicyImpactView = z.infer<typeof walletPolicyImpactSchema>;
-export type DropshipWalletPolicyCardFeeView = z.infer<typeof walletPolicyCardFeeSchema>;
 export type DropshipWalletPolicyEnvKeysView = z.infer<typeof walletPolicyEnvKeysSchema>;
 export type DropshipWalletPolicyOverview = z.infer<typeof dropshipWalletPolicyOverviewSchema>;
 export type DropshipWalletPolicyMutation = z.infer<typeof dropshipWalletPolicyMutationSchema>;
@@ -246,6 +240,9 @@ export interface DropshipWalletPolicyForm {
   advanceCapDollars: string;
   /** Whole days as typed. */
   tierChangeGraceDays: string;
+  /** Percent as typed; converted to basis points on parse. Zero since the pricing decision of 2026-09-23. */
+  cardFundingFeePercent: string;
+  cardFundingMinDollars: string;
   /** Optional operator note recorded with the new version. */
   changeNote: string;
 }
@@ -267,8 +264,8 @@ export interface DropshipWalletPolicyLimitDescriptor {
 }
 
 /**
- * The ten limits in display order, with the form field each one edits. The
- * panel walks this list instead of hard-coding ten rows twice (form + "where
+ * The twelve limits in display order, with the form field each one edits. The
+ * panel walks this list instead of hard-coding twelve rows twice (form + "where
  * the value came from" table).
  */
 export const DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS: readonly DropshipWalletPolicyLimitDescriptor[] = [
@@ -352,6 +349,22 @@ export const DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS: readonly DropshipWalletPo
     allowZero: true,
     help: "How long a vendor below a raised tier minimum keeps that tier's listings before they are unpublished. Zero enforces immediately.",
   },
+  {
+    limitField: "cardFundingFeeBps",
+    formField: "cardFundingFeePercent",
+    label: "Card funding fee",
+    unit: "bps",
+    allowZero: true,
+    help: "Fee on top of every card charge: a card deposit, a routine card top-up and a backup-card cover. Zero since the pricing decision of 2026-09-23; a vendor who agreed to a lower rate is never charged more until they confirm the new one.",
+  },
+  {
+    limitField: "cardFundingMinCents",
+    formField: "cardFundingMinDollars",
+    label: "Card minimum deposit",
+    unit: "cents",
+    allowZero: false,
+    help: "Smallest card deposit a vendor may make. Bank deposits keep the manual top-up minimum. Never above the manual top-up maximum.",
+  },
 ];
 
 const FORM_FIELD_BY_LIMIT_FIELD: Record<
@@ -368,6 +381,8 @@ const FORM_FIELD_BY_LIMIT_FIELD: Record<
   advanceFeeBps: "advanceFeePercent",
   advanceCapCents: "advanceCapDollars",
   tierChangeGraceDays: "tierChangeGraceDays",
+  cardFundingFeeBps: "cardFundingFeePercent",
+  cardFundingMinCents: "cardFundingMinDollars",
 };
 
 /** A blank form, used before the overview has loaded. Never submitted. */
@@ -382,6 +397,8 @@ export const emptyDropshipWalletPolicyForm: DropshipWalletPolicyForm = Object.fr
   advanceFeePercent: "",
   advanceCapDollars: "",
   tierChangeGraceDays: "",
+  cardFundingFeePercent: "",
+  cardFundingMinDollars: "",
   changeNote: "",
 });
 
@@ -400,6 +417,8 @@ export function dropshipWalletPolicyFormFromLimits(
     advanceFeePercent: basisPointsToPercentInput(limits.advanceFeeBps),
     advanceCapDollars: centsToDollarInput(limits.advanceCapCents),
     tierChangeGraceDays: String(limits.tierChangeGraceDays),
+    cardFundingFeePercent: basisPointsToPercentInput(limits.cardFundingFeeBps),
+    cardFundingMinDollars: centsToDollarInput(limits.cardFundingMinCents),
     // A note describes THIS change, so it never carries over from the version in force.
     changeNote: "",
   };
@@ -465,6 +484,12 @@ export function dropshipWalletPolicyInvariantViolations(
       message: "Case tier minimum must be at least the pack tier minimum.",
     });
   }
+  if (limits.cardFundingMinCents > limits.manualFundingMaxCents) {
+    violations.push({
+      field: "cardFundingMinCents",
+      message: "Card minimum deposit must be at most the manual top-up maximum.",
+    });
+  }
   if (limits.holdExpiryWarningMinutes >= limits.defaultPaymentHoldTimeoutMinutes) {
     violations.push({
       field: "holdExpiryWarningMinutes",
@@ -486,7 +511,7 @@ export type ParsedDropshipWalletPolicyForm =
 
 /**
  * Parses the whole form, reporting EVERY problem at once. Per-field ranges
- * first; the cross-field rules only run once all ten numbers are known, since
+ * first; the cross-field rules only run once all twelve numbers are known, since
  * comparing a missing value to a present one says nothing useful.
  */
 export function parseDropshipWalletPolicyForm(
@@ -516,6 +541,8 @@ export function parseDropshipWalletPolicyForm(
   const advanceFee = readPercent(form.advanceFeePercent, "Advance fee", errors, "advanceFeePercent");
   const advanceCap = readDollars(form.advanceCapDollars, "Advance cap", errors, "advanceCapDollars", { allowZero: true });
   const graceDays = readDays(form.tierChangeGraceDays, "Tier change grace", errors, "tierChangeGraceDays");
+  const cardFee = readPercent(form.cardFundingFeePercent, "Card funding fee", errors, "cardFundingFeePercent", DROPSHIP_WALLET_POLICY_MAX_CARD_FEE_BPS);
+  const cardMin = readDollars(form.cardFundingMinDollars, "Card minimum deposit", errors, "cardFundingMinDollars");
 
   const note = form.changeNote.trim();
   if (note.length > MAX_CHANGE_NOTE_LENGTH) {
@@ -525,6 +552,7 @@ export function parseDropshipWalletPolicyForm(
   if (
     trigger === null || caseTier === null || amount === null || manualMin === null || manualMax === null
     || holdTimeout === null || warning === null || advanceFee === null || advanceCap === null || graceDays === null
+    || cardFee === null || cardMin === null
   ) {
     return { success: false, errors };
   }
@@ -540,6 +568,8 @@ export function parseDropshipWalletPolicyForm(
     advanceFeeBps: advanceFee,
     advanceCapCents: advanceCap,
     tierChangeGraceDays: graceDays,
+    cardFundingFeeBps: cardFee,
+    cardFundingMinCents: cardMin,
   };
   for (const violation of dropshipWalletPolicyInvariantViolations(limits)) {
     const field = FORM_FIELD_BY_LIMIT_FIELD[violation.field];
@@ -589,12 +619,13 @@ function readPercent(
   label: string,
   errors: DropshipWalletPolicyFormErrors,
   field: DropshipWalletPolicyFormField,
+  maximumBps: number = DROPSHIP_WALLET_POLICY_MAX_ADVANCE_FEE_BPS,
 ): number | null {
   const parsed = parsePercentToBasisPoints(value);
-  if (parsed.ok) return parsed.bps;
-  errors[field] = parsed.reason === "range"
-    ? `${label} cannot exceed 100%.`
-    : `${label} must be a percentage of zero or more, with at most two decimal places.`;
+  if (parsed.ok && parsed.bps <= maximumBps) return parsed.bps;
+  errors[field] = !parsed.ok && parsed.reason === "format"
+    ? `${label} must be a percentage of zero or more, with at most two decimal places.`
+    : `${label} cannot exceed ${basisPointsToPercentInput(maximumBps).replace(/\.00$/, "")}%.`;
   return null;
 }
 
@@ -757,6 +788,8 @@ export interface DropshipWalletPolicyVersionRequest {
   advanceFeeBps: number;
   advanceCapCents: number;
   tierChangeGraceDays: number;
+  cardFundingFeeBps: number;
+  cardFundingMinCents: number;
   changeNote: string | null;
   idempotencyKey: string;
 }
@@ -796,6 +829,8 @@ export function buildDropshipWalletPolicyVersionRequest(input: {
     advanceFeeBps: input.limits.advanceFeeBps,
     advanceCapCents: input.limits.advanceCapCents,
     tierChangeGraceDays: input.limits.tierChangeGraceDays,
+    cardFundingFeeBps: input.limits.cardFundingFeeBps,
+    cardFundingMinCents: input.limits.cardFundingMinCents,
     changeNote: changeNote ? changeNote : null,
     idempotencyKey,
   };

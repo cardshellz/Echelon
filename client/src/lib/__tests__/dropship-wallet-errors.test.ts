@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { describeWalletError } from "../dropship-wallet-errors";
 
-const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
+const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
 const face = (code: string | null, surface: "put" | "get" | "delete" | "checkout" | "setup" | "usdc" | "other" = "other", context: Record<string, unknown> | null = null) =>
   describeWalletError(code, "server message", context, { surface, limits: LIMITS });
 
@@ -58,5 +58,17 @@ describe("USDC deposit refusals (funding design phase 6)", () => {
     expect(face("DROPSHIP_USDC_DEPOSITS_NOT_OFFERED", "usdc")).toEqual({ text: "USDC deposits are not available right now.", recovery: "refetch" });
     expect(face("DROPSHIP_USDC_DEPOSIT_ADDRESS_CONFLICT", "usdc")).toEqual({ text: "We could not assign your deposit address. Contact Card Shellz support if this persists.", recovery: "none" });
     expect(face("DROPSHIP_USDC_DEPOSIT_ADDRESS_DERIVATION_MISMATCH", "usdc")).toMatchObject({ recovery: "none" });
+  });
+});
+
+describe("a deposit outside the bounds (funding design phase 7)", () => {
+  it("names the bounds the server applied, so a card deposit is held to the card minimum, and falls back to the general ones", () => {
+    expect(face("DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE", "checkout", { rail: "stripe_card", minCents: 10_000, maxCents: 500_000 }).text)
+      .toBe("Amounts must be between $100 and $5,000.");
+    expect(face("DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE", "checkout", { rail: "stripe_ach", minCents: 1_000, maxCents: 500_000 }).text)
+      .toBe("Amounts must be between $10 and $5,000.");
+    // An older server names no bounds; a malformed one is ignored.
+    expect(face("DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE", "checkout").text).toBe("Amounts must be between $10 and $5,000.");
+    expect(face("DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE", "checkout", { minCents: "100", maxCents: -1 }).text).toBe("Amounts must be between $10 and $5,000.");
   });
 });

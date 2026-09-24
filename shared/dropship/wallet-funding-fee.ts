@@ -20,8 +20,14 @@ export const CARD_FUNDING_FEE_RAIL = "stripe_card" as const;
 /** 100 bps = 1%. */
 export const BASIS_POINTS_PER_WHOLE = 10_000;
 
-/** 3%: the launch policy. Overridable with DROPSHIP_CARD_FUNDING_FEE_BPS. */
-export const DEFAULT_CARD_FUNDING_FEE_BPS = 300;
+/**
+ * Zero: no processing fee on any rail (funding design phase 7, owner decision
+ * 2026-09-23). The rate in force is the wallet policy's `cardFundingFeeBps`;
+ * this constant is only the fallback when no policy row exists and
+ * DROPSHIP_CARD_FUNDING_FEE_BPS is unset. The fee stays a setting so the
+ * disclosure machinery keeps working should a fee ever return.
+ */
+export const DEFAULT_CARD_FUNDING_FEE_BPS = 0;
 
 /**
  * Misconfiguration guard, not a business limit. A rate above 10% is far more

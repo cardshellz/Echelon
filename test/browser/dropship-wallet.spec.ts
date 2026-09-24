@@ -493,7 +493,7 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
     "While it is on the way, an order it cannot pay for is charged to Visa ending in 4242 for the shortfall plus 3%.",
   ]);
   await radio(page, "Pay with", "Card (3% fee)").click();
-  await expect(deposit.getByTestId("wallet-rail-notes").getByRole("listitem")).toHaveText(["Card fee: 3% on top of the amount.", "Available at once."]);
+  await expect(deposit.getByTestId("wallet-rail-notes").getByRole("listitem")).toHaveText(["Card fee: 3% on top of the amount.", "Deposits of $100 or more.", "Available at once."]);
   await radio(page, "Pay with", "Bank account (no fee)").click();
   await expect(deposit).not.toContainText(/autopay|daily check|first top-up/i);
   await expect(deposit.getByTestId("wallet-impact")).toHaveCount(0);
@@ -518,7 +518,7 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await expect(manage.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $800 · routine top-ups never more than $800 in one charge.");
   await expect(manage.getByTestId("wallet-plan-backup-card")).toContainText("Visa ending in 4242 · expires 12/27");
   await expect(manage.getByTestId("wallet-plan-limits")).toContainText("24 hours — set by CardShellz for every wallet.");
-  await expect(manage.getByTestId("wallet-plan-authorization")).toContainText("at a 3% card fee");
+  await expect(manage.getByTestId("wallet-plan-authorization")).toContainText("with 3% fee on card charges");
   await expect(manage.getByTestId("wallet-deposit-callout")).toBeVisible();
   await expect(manage.getByRole("button", { name: "Back to onboarding" })).toBeVisible();
   await expect(manage.getByTestId("wallet-auto-reload-off")).toBeVisible();
@@ -764,6 +764,27 @@ test("manage: adding money by card, bank or USDC quotes the fee honestly and ret
   expect(state.fundingSessions[1]).toEqual({ fundingMethodId: 30, amountCents: 50_000, returnTo: HARNESS_PATH });
   await expect(page.getByTestId("wallet-pending")).toContainText("$500 on the way — a bank transfer takes up to 5 business days (our assumption) to land");
   await expect(page.getByText(/a few days/)).toHaveCount(0);
+  finish(state);
+});
+
+test("manage: with no card fee, every card surface says so, a fee cut keeps the record refreshable, and a card deposit keeps its own minimum", async ({ page }) => {
+  const state = await setup(page, { vendorStatus: "active", methods: [CARD, BANK], autoReload: doneAutoReload(), balanceCents: 4_250, cardFundingFeeBps: 0, proofs: ALL_PROOFS });
+  const manage = page.getByTestId("wallet-manage");
+  // The recorded 3% still covers the vendor; the cut applies at once and the banner offers to refresh the record.
+  await expect(page.getByTestId("wallet-acknowledgement-needed")).toContainText("Card Shellz removed the card fee (you agreed to a 3% fee). Automatic charges already use the lower rate; confirm to keep your record current.");
+  await expect(manage.getByTestId("wallet-plan-authorization")).toContainText("with 3% fee on card charges; card charges now carry no fee — confirm the new terms above.");
+  await expect(manage.getByTestId("wallet-plan-backup-card")).toContainText("Charged only for the shortfall on an order, up to $5,000 in one payment");
+  await expect(page.getByText(/0%/)).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Add money" }).click();
+  const panel = page.getByTestId("wallet-add-money");
+  await radio(page, "Pay with", "Card (no fee)").click();
+  await expect(panel.getByTestId("wallet-funding-quote")).toHaveText("No fee. Your card is charged $250.00, and it goes into your wallet, available at once.");
+  // A card deposit below the $100 card minimum is refused before Stripe is involved; the message names the card's bounds.
+  await panel.getByLabel("Or another amount").fill("50");
+  await panel.getByRole("button", { name: "Continue on Stripe" }).click();
+  await expect(panel.getByRole("alert")).toHaveText("Amounts must be between $100 and $5,000.");
+  expect(state.fundingSessions).toEqual([]);
   finish(state);
 });
 

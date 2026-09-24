@@ -55,7 +55,6 @@ describe("dropship admin wallet policy routes", () => {
     expect(permissionChecks).toContainEqual(["dropship", "view"]);
     expect(response.body).toMatchObject({
       limitsSource: "policy",
-      cardFundingFee: { bps: 300, editable: false },
       impact: { vendorsBelowMinimumFloor: 4, vendorsBelowMinimumSingleTopUpLimit: 7 },
     });
   });
@@ -253,7 +252,6 @@ class FakeService {
       limitsSource: "policy",
       envLimits: {},
       envKeys: {},
-      cardFundingFee: { bps: 300, envKey: "DROPSHIP_CARD_FUNDING_FEE_BPS", editable: false, readOnlyReason: "…" },
       impact: { vendorsBelowMinimumFloor: 4, vendorsBelowMinimumSingleTopUpLimit: 7 },
       generatedAt: new Date("2026-09-19T10:00:00.000Z"),
     };

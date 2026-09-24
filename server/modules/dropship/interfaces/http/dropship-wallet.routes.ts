@@ -457,6 +457,8 @@ function serializeVendorWalletView(
       autoReloadMinAmountCents: wallet.limits.autoReloadMinAmountCents,
       manualFundingMinCents: wallet.limits.manualFundingMinCents,
       manualFundingMaxCents: wallet.limits.manualFundingMaxCents,
+      // A card deposit's own minimum (funding design phase 7); bank deposits keep manualFundingMinCents.
+      cardFundingMinCents: wallet.limits.cardFundingMinCents,
       defaultPaymentHoldTimeoutMinutes: wallet.limits.defaultPaymentHoldTimeoutMinutes,
       holdExpiryWarningMinutes: wallet.limits.holdExpiryWarningMinutes,
       advanceFeeBps: wallet.limits.advanceFeeBps,

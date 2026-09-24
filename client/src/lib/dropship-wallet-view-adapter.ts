@@ -123,6 +123,8 @@ export interface WalletLimits {
   advanceCapCents: number;
   /** Days a vendor below a raised tier minimum keeps that tier's listings. */
   tierChangeGraceDays: number;
+  /** Smallest card deposit (funding design phase 7); bank deposits keep manualFundingMinCents. */
+  cardFundingMinCents: number;
 }
 
 export type WalletListingTier = "pack" | "case";
@@ -345,6 +347,7 @@ const rawLimitsSchema = z.object({
   autoReloadMinAmountCents: cents,
   manualFundingMinCents: cents,
   manualFundingMaxCents: cents,
+  cardFundingMinCents: cents.optional(),
   defaultPaymentHoldTimeoutMinutes: z.number().int().positive(),
   holdExpiryWarningMinutes: z.number().int().positive(),
   advanceFeeBps: z.number().int().nonnegative().optional(),
@@ -460,6 +463,7 @@ export const CLIENT_FALLBACK_LIMITS: WalletLimits = Object.freeze({
   autoReloadMinAmountCents: 10_000,
   manualFundingMinCents: 1_000,
   manualFundingMaxCents: 500_000,
+  cardFundingMinCents: 10_000,
   defaultPaymentHoldTimeoutMinutes: 1_440,
   holdExpiryWarningMinutes: 120,
   advanceFeeBps: 100,
@@ -601,9 +605,12 @@ export function deriveSetupStatus(input: {
   const sourceReady = source !== null && source.status === "active" && (source.rail === "stripe_card" || source.rail === "stripe_ach");
   const backup = enabled ? input.fundingMethods.find((method) => method.fundingMethodId === autoReload?.backstopFundingMethodId) ?? null : null;
   const backupReady = backup !== null && backup.roles.chargeable;
+  // Agreed at or above the rate in force: a fee cut never un-acknowledges a
+  // vendor (the server holds unattended charges to the lower of the two).
   const acknowledged = autoReload !== null
     && autoReload.acknowledgedAt !== null
-    && autoReload.acknowledgedCardFeeBps === input.cardFundingFeeBps;
+    && autoReload.acknowledgedCardFeeBps !== null
+    && autoReload.acknowledgedCardFeeBps >= input.cardFundingFeeBps;
   const done = sourceReady && backupReady;
   return { sourceReady, backupReady, acknowledged, done, launchReady: done && acknowledged };
 }

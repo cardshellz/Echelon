@@ -121,3 +121,89 @@ describe("0681 dropship wallet policy migration", () => {
     }
   });
 });
+
+const cardFeeMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0701_dropship_wallet_card_fee_policy.sql"),
+  "utf8",
+);
+
+describe("0701 dropship wallet card fee policy migration", () => {
+  it("adds the card fee (held at zero) and the card minimum deposit as policy columns, then drops their defaults", () => {
+    for (const statement of [
+      "ADD COLUMN IF NOT EXISTS card_funding_fee_bps integer NOT NULL DEFAULT 0",
+      "ADD COLUMN IF NOT EXISTS card_funding_minimum_cents bigint NOT NULL DEFAULT 10000",
+      "ALTER COLUMN card_funding_fee_bps DROP DEFAULT",
+      "ALTER COLUMN card_funding_minimum_cents DROP DEFAULT",
+    ]) {
+      expect(cardFeeMigrationSql).toContain(statement);
+    }
+    expect(cardFeeMigrationSql).not.toMatch(/_cents\s+(numeric|decimal|real|double)/i);
+  });
+
+  it("expresses the invariants as CHECK constraints, mirroring the shared fee guard and the domain rule", () => {
+    expect(cardFeeMigrationSql).toContain("CHECK (card_funding_fee_bps BETWEEN 0 AND 1000)");
+    expect(cardFeeMigrationSql).toContain("CHECK (card_funding_minimum_cents > 0)");
+    expect(cardFeeMigrationSql).toContain("CHECK (card_funding_minimum_cents <= manual_top_up_maximum_cents)");
+    // The backfill runs before the range constraint, with the guard off for exactly that statement.
+    expect(cardFeeMigrationSql.indexOf("SET card_funding_minimum_cents = manual_top_up_maximum_cents"))
+      .toBeLessThan(cardFeeMigrationSql.indexOf("dropship_wallet_policies_card_minimum_range_chk"));
+    expect(cardFeeMigrationSql).toContain("DISABLE TRIGGER dropship_wallet_policies_guard_trg");
+    expect(cardFeeMigrationSql).toContain("ENABLE TRIGGER dropship_wallet_policies_guard_trg");
+  });
+
+  it("teaches the immutability guard the new columns", () => {
+    expect(cardFeeMigrationSql).toContain("CREATE OR REPLACE FUNCTION dropship.dropship_wallet_policies_guard()");
+    for (const column of [
+      "NEW.card_funding_fee_bps IS DISTINCT FROM OLD.card_funding_fee_bps",
+      "NEW.card_funding_minimum_cents IS DISTINCT FROM OLD.card_funding_minimum_cents",
+      // Every earlier column stays guarded.
+      "NEW.advance_fee_bps IS DISTINCT FROM OLD.advance_fee_bps",
+      "NEW.tier_change_grace_days IS DISTINCT FROM OLD.tier_change_grace_days",
+      "NEW.minimum_floor_cents IS DISTINCT FROM OLD.minimum_floor_cents",
+    ]) {
+      expect(cardFeeMigrationSql).toContain(column);
+    }
+  });
+
+  it("stores the vendor's acknowledged rate on the settings row, both columns together, and backfills it from the audit trail", () => {
+    expect(cardFeeMigrationSql).toContain("ADD COLUMN IF NOT EXISTS acknowledged_card_fee_bps integer");
+    expect(cardFeeMigrationSql).toContain("ADD COLUMN IF NOT EXISTS acknowledged_at timestamptz");
+    expect(cardFeeMigrationSql).toContain("CHECK (acknowledged_card_fee_bps IS NULL OR acknowledged_card_fee_bps BETWEEN 0 AND 1000)");
+    expect(cardFeeMigrationSql).toContain("CHECK ((acknowledged_card_fee_bps IS NULL) = (acknowledged_at IS NULL))");
+    // The backfill takes the latest configure event per row, prefers the explicit acknowledgement, and never overwrites a stored one.
+    expect(cardFeeMigrationSql).toContain("e.event_type = 'wallet_auto_reload_configured'");
+    expect(cardFeeMigrationSql).toContain("NULLIF(e.payload->>'acknowledgedCardFeeBps', 'null')::integer");
+    expect(cardFeeMigrationSql).toContain("NULLIF(e.payload->>'cardFundingFeeBps', 'null')::integer");
+    expect(cardFeeMigrationSql).toContain("ORDER BY e.entity_id, e.created_at DESC, e.id DESC");
+    expect(cardFeeMigrationSql).toContain("AND s.acknowledged_card_fee_bps IS NULL");
+  });
+
+  it("is re-runnable: every statement is guarded", () => {
+    const statements = cardFeeMigrationSql
+      .replace(/\$\$[\s\S]*?\$\$/g, () => "<<plpgsql body>>")
+      .split(/;\s*$/m)
+      .map((statement) => statement.replace(/--[^\n]*/g, "").trim())
+      .filter((statement) => statement.length > 0);
+    const droppedConstraints = new Set<string>();
+    for (const statement of statements) {
+      const dropped = /DROP CONSTRAINT IF EXISTS (\w+)/i.exec(statement)?.[1];
+      if (dropped) droppedConstraints.add(dropped);
+      const added = /ADD CONSTRAINT (\w+)/i.exec(statement)?.[1];
+      const guarded =
+        /^ALTER TABLE [\w.]+\s+ADD COLUMN IF NOT EXISTS/i.test(statement)
+        || /^ALTER TABLE [\w.]+\s+ALTER COLUMN \w+ DROP DEFAULT/i.test(statement)
+        || /^ALTER TABLE [\w.]+\s+DROP CONSTRAINT IF EXISTS/i.test(statement)
+        || /^ALTER TABLE [\w.]+\s+(DISABLE|ENABLE) TRIGGER dropship_wallet_policies_guard_trg/i.test(statement)
+        // The backfills match no row on a re-run: the first only rows above the maximum, the second only rows still NULL.
+        || (/^UPDATE dropship\.dropship_wallet_policies/i.test(statement) && /WHERE card_funding_minimum_cents > manual_top_up_maximum_cents/i.test(statement))
+        || (/^UPDATE dropship\.dropship_auto_reload_settings/i.test(statement) && /acknowledged_card_fee_bps IS NULL/i.test(statement))
+        // An ADD CONSTRAINT is safe only because the same constraint was dropped IF EXISTS before it.
+        || (added !== undefined && droppedConstraints.has(added))
+        || /^CREATE OR REPLACE FUNCTION/i.test(statement)
+        || /^DROP TRIGGER IF EXISTS/i.test(statement)
+        || /^CREATE TRIGGER dropship_wallet_policies_guard_trg/i.test(statement)
+        || /^COMMENT ON/i.test(statement);
+      expect(guarded, `unguarded statement: ${statement.slice(0, 80)}`).toBe(true);
+    }
+  });
+});

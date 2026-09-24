@@ -162,7 +162,7 @@ describe("DropshipPortalWallet contract", () => {
 
   it("adds money with the top-up step's picks again, opening on what autopay would pull next", () => {
     const controls = between("function FundingControls", "function UsdcFundingPanel");
-    expect(controls).toContain("const options = depositOptions({ minimumCents: floorCents, topUpCents, limits });");
+    expect(controls).toContain("const options = depositOptions({ minimumCents: floorCents, topUpCents, limits, rail: rail === \"stripe_card\" ? \"stripe_card\" : \"stripe_ach\" });");
     expect(controls).toContain("depositDefaultCents(options, nextTopUpCents({ floorCents, topUpCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents }))");
     expect(controls).toContain("hint={describeDepositOption(option)}");
     expect(controls).toContain('testId={`wallet-deposit-${option.factor === null ? "top-up" : `${option.factor}x`}`}');

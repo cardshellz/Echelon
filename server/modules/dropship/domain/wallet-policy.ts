@@ -1,8 +1,8 @@
 /**
  * Dropship wallet policy — the limits the vendor wallet enforces.
  *
- * Ten numbers, staff-managed as versioned data
- * (`dropship.dropship_wallet_policies`, migrations 0682 and 0683):
+ * Twelve numbers, staff-managed as versioned data
+ * (`dropship.dropship_wallet_policies`, migrations 0682, 0683 and 0701):
  *
  *   - the two LISTING TIER minimums. A vendor selling eaches and inner packs
  *     (variant type P, B) keeps at least the pack tier minimum; a vendor with
@@ -19,7 +19,11 @@
  *     amount an order is accepted against, and the global cap on that amount.
  *     A cap of zero advances nothing — arithmetic, not a flag;
  *   - the GRACE PERIOD a vendor below a raised tier minimum keeps that tier's
- *     listings before they are unpublished.
+ *     listings before they are unpublished;
+ *   - the CARD FEE (basis points) on top of every card charge, held at zero
+ *     since funding design phase 7 (no processing fee on any rail), and the
+ *     CARD MINIMUM DEPOSIT a vendor-initiated card top-up may not go below.
+ *     Bank deposits keep the general manual minimum.
  *
  * This module holds the PURE part: the shape, the documented fallback used when
  * no policy row exists, and the invariants, so the SQL CHECK constraints and
@@ -31,6 +35,12 @@
  */
 
 import { DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES } from "../../../../shared/schema/dropship.schema";
+import {
+  DEFAULT_CARD_FUNDING_FEE_BPS,
+  MAX_CARD_FUNDING_FEE_BPS,
+  isValidCardFundingFeeBps,
+} from "../../../../shared/dropship/wallet-funding-fee";
+import { DropshipError } from "./errors";
 
 /**
  * The resolved limits. Field names match the vendor wallet DTO
@@ -61,6 +71,15 @@ export interface DropshipWalletPolicyLimits {
   advanceCapCents: number;
   /** Days a vendor below a raised tier minimum keeps that tier's listings before they are unpublished. */
   tierChangeGraceDays: number;
+  /**
+   * Fee, in basis points, on top of every card charge: a card deposit, a
+   * routine card top-up and a backup-card cover. Zero since funding design
+   * phase 7 (no processing fee on any rail); kept as a setting so the
+   * disclosure machinery keeps working should a fee ever return.
+   */
+  cardFundingFeeBps: number;
+  /** Smallest vendor-initiated card deposit. Bank deposits keep `manualFundingMinCents`. */
+  cardFundingMinCents: number;
 }
 
 /**
@@ -111,6 +130,13 @@ export const DEFAULT_ADVANCE_CAP_CENTS = 50_000;
 export const DEFAULT_TIER_CHANGE_GRACE_DAYS = 14;
 
 /**
+ * The card minimum deposit (owner decision, 2026-09-23): $100. Card deposits
+ * carry no fee, so the minimum is what keeps Stripe's fixed per-charge cost
+ * from being paid on trivial amounts. Bank deposits keep the general minimum.
+ */
+export const DEFAULT_CARD_FUNDING_MIN_CENTS = 10_000;
+
+/**
  * 30 days. The ceiling the auto-reload input schema already enforces and the
  * `dropship_wallet_policies_hold_timeout_chk` CHECK constraint mirrors.
  */
@@ -124,9 +150,10 @@ export const MAX_TIER_CHANGE_GRACE_DAYS = 365;
 
 /**
  * The environment variable each limit falls back to, for the admin read. The
- * limits introduced by the funding design (case tier, advance, grace) and the
- * hold timeout have no environment override: their fallback is the documented
- * default in this module, and the policy row is the only way to move them.
+ * limits introduced by the funding design (case tier, advance, grace, card
+ * minimum) and the hold timeout have no environment override: their fallback
+ * is the documented default in this module, and the policy row is the only
+ * way to move them. The card fee keeps its variable as the fallback only.
  */
 export const DROPSHIP_WALLET_POLICY_ENV_KEYS = Object.freeze({
   autoReloadMinTriggerCents: "DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS",
@@ -141,18 +168,41 @@ export const DROPSHIP_WALLET_POLICY_ENV_KEYS = Object.freeze({
   advanceFeeBps: null,
   advanceCapCents: null,
   tierChangeGraceDays: null,
+  cardFundingFeeBps: "DROPSHIP_CARD_FUNDING_FEE_BPS",
+  cardFundingMinCents: null,
 });
 
 /**
  * A positive integer from the environment, or the documented default. A
  * malformed value falls back rather than throwing: these are floors, and a
  * typo must not take the wallet page down. A value that matters enough to
- * refuse (the card fee rate) is handled separately, in the wallet service.
+ * refuse (the card fee rate) is handled separately, below.
  */
 export function parsePositiveEnvInteger(value: string | undefined, fallback: number): number {
   if (!value?.trim()) return fallback;
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * The card fee rate the environment falls back to. Unlike the auto-reload
+ * floors, a bad value here is refused rather than defaulted: a typo would
+ * otherwise be charged to vendors' cards silently. Undefined or blank means
+ * the launch default (zero since funding design phase 7). The policy row, when
+ * one exists, carries the rate in force; this is only the fallback.
+ */
+export function resolveDropshipCardFundingFeeBps(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.DROPSHIP_CARD_FUNDING_FEE_BPS;
+  if (raw === undefined || !raw.trim()) return DEFAULT_CARD_FUNDING_FEE_BPS;
+  const parsed = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
+  if (!isValidCardFundingFeeBps(parsed)) {
+    throw new DropshipError(
+      "DROPSHIP_CARD_FUNDING_FEE_MISCONFIGURED",
+      "Dropship card funding fee is misconfigured.",
+      { env: "DROPSHIP_CARD_FUNDING_FEE_BPS", value: raw, maxBps: MAX_CARD_FUNDING_FEE_BPS },
+    );
+  }
+  return parsed;
 }
 
 /**
@@ -195,6 +245,8 @@ export function resolveDropshipWalletPolicyLimitsFromEnv(
     advanceFeeBps: DEFAULT_ADVANCE_FEE_BPS,
     advanceCapCents: DEFAULT_ADVANCE_CAP_CENTS,
     tierChangeGraceDays: DEFAULT_TIER_CHANGE_GRACE_DAYS,
+    cardFundingFeeBps: resolveDropshipCardFundingFeeBps(env),
+    cardFundingMinCents: DEFAULT_CARD_FUNDING_MIN_CENTS,
   };
 }
 
@@ -204,8 +256,8 @@ export interface WalletPolicyInvariantViolation {
 }
 
 /**
- * The cross-field rules, mirroring the CHECK constraints in migrations 0682 and
- * 0683. Returns every violation rather than the first, so staff fix one form
+ * The cross-field rules, mirroring the CHECK constraints in migrations 0682,
+ * 0683 and 0701. Returns every violation rather than the first, so staff fix one form
  * instead of playing whack-a-mole. Per-field positivity/range is left to the
  * Zod schema at the boundary; this function assumes integers and checks the
  * relationships.
@@ -231,6 +283,12 @@ export function walletPolicyInvariantViolations(
     violations.push({
       field: "caseTierMinimumCents",
       message: "Case tier minimum must be at least the pack tier minimum.",
+    });
+  }
+  if (limits.cardFundingMinCents > limits.manualFundingMaxCents) {
+    violations.push({
+      field: "cardFundingMinCents",
+      message: "Card minimum deposit must be at most the manual top-up maximum.",
     });
   }
   if (limits.holdExpiryWarningMinutes >= limits.defaultPaymentHoldTimeoutMinutes) {
