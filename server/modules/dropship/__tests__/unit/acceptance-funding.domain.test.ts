@@ -253,37 +253,50 @@ describe("decideAcceptanceFunding", () => {
 
 describe("decideCardBackstopCharge", () => {
   it("does nothing when the balance already covers the order", () => {
-    expect(decideCardBackstopCharge({ availableBalanceCents: 5_000, minimumBalanceCents: 10_000, requiredBalanceCents: 5_000, singleChargeLimitCents: 10_000 }))
+    expect(decideCardBackstopCharge({ availableBalanceCents: 5_000, minimumBalanceCents: 10_000, requiredBalanceCents: 5_000, singleChargeLimitCents: 10_000, chargeCeilingCents: 500_000 }))
       .toEqual({ outcome: "not_needed" });
   });
 
-  it("charges back to the minimum when the limit allows it", () => {
-    expect(decideCardBackstopCharge({ availableBalanceCents: 2_000, minimumBalanceCents: 10_000, requiredBalanceCents: 5_000, singleChargeLimitCents: 20_000 }))
+  it("charges back to the minimum when the vendor's bound allows it", () => {
+    expect(decideCardBackstopCharge({ availableBalanceCents: 2_000, minimumBalanceCents: 10_000, requiredBalanceCents: 5_000, singleChargeLimitCents: 20_000, chargeCeilingCents: 500_000 }))
       .toEqual({ outcome: "charge", amountCents: 8_000, gapCents: 3_000, backToMinimumCents: 8_000 });
   });
 
-  it("charges the limit when it sits between the gap and back-to-minimum, instead of skipping", () => {
-    expect(decideCardBackstopCharge({ availableBalanceCents: 2_000, minimumBalanceCents: 10_000, requiredBalanceCents: 5_000, singleChargeLimitCents: 4_000 }))
+  it("refills only up to the vendor's bound when it sits between the gap and back-to-minimum", () => {
+    expect(decideCardBackstopCharge({ availableBalanceCents: 2_000, minimumBalanceCents: 10_000, requiredBalanceCents: 5_000, singleChargeLimitCents: 4_000, chargeCeilingCents: 500_000 }))
       .toEqual({ outcome: "charge", amountCents: 4_000, gapCents: 3_000, backToMinimumCents: 8_000 });
   });
 
-  it("charges the whole order gap when the order is larger than the minimum", () => {
-    expect(decideCardBackstopCharge({ availableBalanceCents: 1_000, minimumBalanceCents: 10_000, requiredBalanceCents: 25_000, singleChargeLimitCents: 30_000 }))
+  it("charges the whole gap when the order is larger than the minimum", () => {
+    expect(decideCardBackstopCharge({ availableBalanceCents: 1_000, minimumBalanceCents: 10_000, requiredBalanceCents: 25_000, singleChargeLimitCents: 30_000, chargeCeilingCents: 500_000 }))
       .toEqual({ outcome: "charge", amountCents: 24_000, gapCents: 24_000, backToMinimumCents: 24_000 });
   });
 
-  it("refuses when even the limit cannot cover the gap", () => {
-    expect(decideCardBackstopCharge({ availableBalanceCents: 1_000, minimumBalanceCents: 10_000, requiredBalanceCents: 25_000, singleChargeLimitCents: 20_000 }))
-      .toEqual({ outcome: "limit_below_gap", gapCents: 24_000, limitCents: 20_000 });
+  it("still charges the whole gap when the vendor's bound is below it: the bound is a promise about top-ups, not orders", () => {
+    expect(decideCardBackstopCharge({ availableBalanceCents: 1_000, minimumBalanceCents: 10_000, requiredBalanceCents: 25_000, singleChargeLimitCents: 20_000, chargeCeilingCents: 500_000 }))
+      .toEqual({ outcome: "charge", amountCents: 24_000, gapCents: 24_000, backToMinimumCents: 24_000 });
+    // A bound below the gap adds no refill on top of it; one above it refills up to the bound.
+    expect(decideCardBackstopCharge({ availableBalanceCents: 1_000, minimumBalanceCents: 30_000, requiredBalanceCents: 25_000, singleChargeLimitCents: 20_000, chargeCeilingCents: 500_000 }))
+      .toEqual({ outcome: "charge", amountCents: 24_000, gapCents: 24_000, backToMinimumCents: 29_000 });
+    expect(decideCardBackstopCharge({ availableBalanceCents: 1_000, minimumBalanceCents: 30_000, requiredBalanceCents: 25_000, singleChargeLimitCents: 26_000, chargeCeilingCents: 500_000 }))
+      .toEqual({ outcome: "charge", amountCents: 26_000, gapCents: 24_000, backToMinimumCents: 29_000 });
   });
 
-  it("counts a negative balance in the gap and charges back to minimum without a limit", () => {
-    expect(decideCardBackstopCharge({ availableBalanceCents: -30_300, minimumBalanceCents: 10_000, requiredBalanceCents: 40_000, singleChargeLimitCents: null }))
+  it("holds the order when the gap is above the program's ceiling on a single payment, and trims only the refill otherwise", () => {
+    expect(decideCardBackstopCharge({ availableBalanceCents: 1_000, minimumBalanceCents: 10_000, requiredBalanceCents: 25_000, singleChargeLimitCents: 30_000, chargeCeilingCents: 20_000 }))
+      .toEqual({ outcome: "ceiling_below_gap", gapCents: 24_000, ceilingCents: 20_000 });
+    expect(decideCardBackstopCharge({ availableBalanceCents: 1_000, minimumBalanceCents: 30_000, requiredBalanceCents: 25_000, singleChargeLimitCents: null, chargeCeilingCents: 26_000 }))
+      .toEqual({ outcome: "charge", amountCents: 26_000, gapCents: 24_000, backToMinimumCents: 29_000 });
+  });
+
+  it("counts a negative balance in the gap and charges back to minimum without a bound or a ceiling", () => {
+    expect(decideCardBackstopCharge({ availableBalanceCents: -30_300, minimumBalanceCents: 10_000, requiredBalanceCents: 40_000, singleChargeLimitCents: null, chargeCeilingCents: null }))
       .toEqual({ outcome: "charge", amountCents: 70_300, gapCents: 70_300, backToMinimumCents: 70_300 });
   });
 
   it("refuses negative minimums, requirements or limits", () => {
-    expect(() => decideCardBackstopCharge({ availableBalanceCents: 0, minimumBalanceCents: -1, requiredBalanceCents: 1, singleChargeLimitCents: null })).toThrowError(DropshipError);
-    expect(() => decideCardBackstopCharge({ availableBalanceCents: 0, minimumBalanceCents: 1, requiredBalanceCents: 1, singleChargeLimitCents: -1 })).toThrowError(DropshipError);
+    expect(() => decideCardBackstopCharge({ availableBalanceCents: 0, minimumBalanceCents: -1, requiredBalanceCents: 1, singleChargeLimitCents: null, chargeCeilingCents: null })).toThrowError(DropshipError);
+    expect(() => decideCardBackstopCharge({ availableBalanceCents: 0, minimumBalanceCents: 1, requiredBalanceCents: 1, singleChargeLimitCents: -1, chargeCeilingCents: null })).toThrowError(DropshipError);
+    expect(() => decideCardBackstopCharge({ availableBalanceCents: 0, minimumBalanceCents: 1, requiredBalanceCents: 1, singleChargeLimitCents: null, chargeCeilingCents: -1 })).toThrowError(DropshipError);
   });
 });

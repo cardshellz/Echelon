@@ -247,30 +247,33 @@ export type DropshipCardBackstopDecision =
   | { outcome: "not_needed" }
   | {
       outcome: "charge";
-      /** What the wallet must receive: min(back to minimum, the vendor's single-charge limit), never below the gap. */
+      /** What the wallet must receive: the gap, plus a refill toward the minimum within the vendor's single-charge bound, never above the program ceiling. */
       amountCents: number;
       gapCents: number;
       backToMinimumCents: number;
     }
-  | { outcome: "limit_below_gap"; gapCents: number; limitCents: number };
+  | { outcome: "ceiling_below_gap"; gapCents: number; ceilingCents: number };
 
 /**
- * The card charge for an order the balance cannot cover (funding design:
- * "min(back-to-minimum, vendor's limit), never less than the gap").
+ * The card charge for an order the balance cannot cover (funding design
+ * phase 7: "the whole shortfall, whatever its size").
  *
- * Back to minimum is what restores the vendor's floor after the order pays;
- * it is never less than the gap. The vendor's single-charge limit bounds every
- * off-session card charge, so the amount is the smaller of the two — and when
- * even the limit cannot cover the gap, nothing is charged and the order waits.
- * Before this rule the whole back-to-minimum amount was required, so a limit
- * between the gap and that amount left the order held with a card that could
- * have paid for it.
+ * The gap is always covered: an order the vendor sold goes out. Beyond the
+ * gap the charge also brings the balance back toward the minimum, and only
+ * that refill part is shaped by the vendor's single-charge bound, which is a
+ * promise about routine top-ups, not about orders. The one ceiling is the
+ * program's limit on any single payment (the policy's manual funding
+ * maximum): a gap above it is not charged and the order waits. Before phase 7
+ * the bound capped the whole charge, so a large order sat held with a card
+ * that could have paid for it.
  */
 export function decideCardBackstopCharge(input: {
   availableBalanceCents: number;
   minimumBalanceCents: number;
   requiredBalanceCents: number;
   singleChargeLimitCents: number | null;
+  /** The program's ceiling on any single payment; null means none. */
+  chargeCeilingCents: number | null;
 }): DropshipCardBackstopDecision {
   assertInteger(input.availableBalanceCents, "availableBalanceCents");
   assertCents(input.minimumBalanceCents, "minimumBalanceCents");
@@ -278,17 +281,22 @@ export function decideCardBackstopCharge(input: {
   if (input.singleChargeLimitCents !== null) {
     assertCents(input.singleChargeLimitCents, "singleChargeLimitCents");
   }
+  if (input.chargeCeilingCents !== null) {
+    assertCents(input.chargeCeilingCents, "chargeCeilingCents");
+  }
   const gapCents = input.requiredBalanceCents - input.availableBalanceCents;
   if (gapCents <= 0) {
     return { outcome: "not_needed" };
   }
-  const backToMinimumCents = Math.max(input.minimumBalanceCents, input.requiredBalanceCents) - input.availableBalanceCents;
-  const amountCents = input.singleChargeLimitCents === null
-    ? backToMinimumCents
-    : Math.min(backToMinimumCents, input.singleChargeLimitCents);
-  if (amountCents < gapCents) {
-    return { outcome: "limit_below_gap", gapCents, limitCents: input.singleChargeLimitCents ?? amountCents };
+  if (input.chargeCeilingCents !== null && gapCents > input.chargeCeilingCents) {
+    return { outcome: "ceiling_below_gap", gapCents, ceilingCents: input.chargeCeilingCents };
   }
+  const backToMinimumCents = Math.max(input.minimumBalanceCents, input.requiredBalanceCents) - input.availableBalanceCents;
+  // The bound shapes only the refill beyond the gap; the gap itself is never cut.
+  const refillCents = input.singleChargeLimitCents === null
+    ? backToMinimumCents
+    : Math.max(gapCents, Math.min(backToMinimumCents, input.singleChargeLimitCents));
+  const amountCents = input.chargeCeilingCents === null ? refillCents : Math.min(refillCents, input.chargeCeilingCents);
   return { outcome: "charge", amountCents, gapCents, backToMinimumCents };
 }
 

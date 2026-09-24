@@ -547,6 +547,8 @@ function skipReasonPhraseFor(reason: string): string {
       return "autopay is off";
     case "amount_exceeds_max_single_reload":
       return "the amount is more than autopay may charge in one go";
+    case "amount_exceeds_funding_ceiling":
+      return "the shortfall is more than any single payment may be";
     case "funding_method_required":
     case "funding_method_missing":
       return "there is no bank account or card to charge";
