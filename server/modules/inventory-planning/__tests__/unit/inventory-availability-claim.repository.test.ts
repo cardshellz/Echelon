@@ -606,13 +606,13 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     expect(reviewWriter.recordReview).not.toHaveBeenCalled();
   });
 
-  it.each(["regular", "assembly", "assembly_rejected"] as const)("picks exact WMS progress and rolls back owner/fence failures: %s", async (mode) => {
+  it.each(["regular", "assembly", "assembly_rejected", "correction"] as const)("picks exact WMS progress and rolls back owner/fence failures: %s", async (mode) => {
     const plan = packageClaimPlan();
     let rejectWmsProgress = false;
     let existingPicked = 0;
     let existingPickedLocation = 2;
     const command = {
-      ...(mode === "regular" ? {} : { assemblyWork: { taskId: "1", expectedVersion: 3, confirmPhysicalOutput: true as const } }),
+      ...(mode.startsWith("assembly") ? { assemblyWork: { taskId: "1", expectedVersion: 3, confirmPhysicalOutput: true as const } } : {}),
       claimId: "9",
       orderItemId: 71,
       warehouseLocationId: 2,
@@ -622,6 +622,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       actor: "test-user",
       reason: "picker completed line",
       wmsProgress: {
+        ...(mode === "correction" ? { pickCorrectionId: 1, pickCorrectionRevision: 2, expectedFulfilledQuantity: 3 } : {}),
         expectedStatus: "pending" as const,
         expectedPickedQuantity: 0,
         targetStatus: "completed" as const,
@@ -631,6 +632,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     const fake = createPool(async (text) => {
       if (text.startsWith("BEGIN") || text === "COMMIT" || text === "ROLLBACK") return { rows: [] };
       if (text.includes("FROM inventory.availability_claim_commands")) return { rows: [] };
+      if (text.includes("FROM wms.pick_corrections")) return { rows: [{ id: 1 }] };
       if (text.includes("FROM inventory.availability_runtime_authority")) {
         return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "2" }] };
       }

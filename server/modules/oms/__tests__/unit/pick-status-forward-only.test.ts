@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
  * pick queue resurfaced it for re-picking. Two invariants close that:
  *
  *  1. The canonical projection derives item status from
- *     GREATEST(picked_quantity, shipped_quantity) — a partial package can
+ *     actual picked_quantity — a partial package can
  *     never demote a completed pick (shipped-only derivation is banned).
  *  2. Every pending-pick predicate treats a physically picked line
  *     (picked_quantity >= quantity) as NOT pickable, whatever its label.
@@ -17,12 +17,11 @@ const read = (p: string) =>
   readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8");
 
 describe("pick status is forward-only under shipment projection", () => {
-  it("the projection derives status from GREATEST(picked, shipped)", () => {
+  it("the projection preserves actual picks without fabricating picks from a label", () => {
     const src = read("../../../wms/channel-fulfillment-projection.repository.ts");
-    const greatestStatus = src.match(
-      /GREATEST\(\s*COALESCE\(order_item\.picked_quantity, 0\),\s*COALESCE\(shipped\.shipped_quantity, 0\)\s*\)/g,
-    ) ?? [];
-    expect(greatestStatus.length).toBeGreaterThanOrEqual(2);
+    expect(src).toContain("COALESCE(order_item.picked_quantity, 0) >= order_item.quantity");
+    expect(src).not.toContain("picked_quantity =");
+    expect(src).toContain("await observeMissingPick(");
     // shipped-only demotion must never come back
     expect(src).not.toMatch(/WHEN shipped\.shipped_quantity > 0 THEN 'in_progress'/);
   });

@@ -52,6 +52,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useSettings } from "@/lib/settings";
 import { useAuth } from "@/lib/auth";
+import { PickCorrections } from "@/features/picking/PickCorrections";
 import AssemblyHandoffPanel from "@/pages/warehouse-work/AssemblyHandoffPanel";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -671,6 +672,14 @@ import {
 } from "@/lib/sounds";
 
 export default function Picking() {
+  const { user, hasPermission } = useAuth();
+  return <>
+    {user && hasPermission("picking", "view") && <PickCorrections userId={user.id} canPerform={hasPermission("picking", "perform")} />}
+    <PickingWorkspace />
+  </>;
+}
+
+function PickingWorkspace() {
   // Get current user for role-based UI
   const { user, hasPermission } = useAuth();
   const isAdminOrLead = user && (user.role === "admin" || user.role === "lead");

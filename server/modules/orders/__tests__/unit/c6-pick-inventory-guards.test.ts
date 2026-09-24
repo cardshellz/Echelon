@@ -49,7 +49,9 @@ describe("D-PICKGUARD: pickItem order-state guard", () => {
   });
 
   it("throws IntegrityError for cancelled orders", () => {
-    expect(LEGACY_PICK_TRANSACTION).toContain('["cancelled", "shipped"]');
+    expect(LEGACY_PICK_TRANSACTION).toContain('orderState.warehouse_status === "cancelled"');
+    expect(LEGACY_PICK_TRANSACTION).toContain('orderState.warehouse_status === "shipped" && !input.pickCorrectionId');
+    expect(LEGACY_PICK_TRANSACTION).toContain("await requireCorrectivePick(tx");
     expect(LEGACY_PICK_TRANSACTION).toContain("IntegrityError");
   });
 

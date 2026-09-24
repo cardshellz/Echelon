@@ -2985,7 +2985,10 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           .update(carrierDispatchCommands)
           .set({
             status: input.outcome,
+            // A person resolving physical custody is not a failed transport
+            // attempt. Preserve attempt history without spending that budget.
             consecutiveFailureCount: input.outcome === "succeeded"
+              || (input.outcome === "retry_scheduled" && input.errorCode === "PICK_CORRECTION_REQUIRED")
               ? 0
               : sql`${carrierDispatchCommands.consecutiveFailureCount} + 1`,
             nextAttemptAt: input.nextAttemptAt,

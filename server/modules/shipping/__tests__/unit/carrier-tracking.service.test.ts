@@ -968,6 +968,28 @@ describe("CarrierTrackingService", () => {
     );
   });
 
+  it("keeps a human-owned pick correction retryable beyond the transport retry limit", async () => {
+    const { repository } = repositoryWithCandidates([]);
+    vi.mocked(repository.claimDispatchCommands).mockResolvedValue([{
+      id: 703, shippingProviderLabelId: 10, carrierTrackingEventId: 101,
+      provider: "shipstation", providerLabelId: "442000001", providerOrderId: "755000001",
+      providerOrderKey: "echelon-wms-shp-4814", trackingNumber: "1Z999AA10123456784",
+      normalizedTrackingNumber: "1Z999AA10123456784", carrier: "ups", serviceCode: "ups_ground",
+      dispatchOccurredAt: now, attemptNumber: 101, consecutiveFailureCount: 100,
+      startedAt: now, leaseOwner: "dispatch-worker", leaseExpiresAt: new Date(now.getTime() + 60_000),
+    }]);
+    const service = new CarrierTrackingService({ repository, clock: { now: () => new Date(now) },
+      logger: logger(), dispatchLeaseOwner: "dispatch-worker",
+      dispatchAuthority: { confirmDispatch: vi.fn().mockRejectedValue(new CarrierDispatchAuthorityError(
+        "PICK_CORRECTION_REQUIRED", "Waiting for the picker", { retryable: true })) },
+    });
+    await service.dispatchConfirmedPackages(25);
+    expect(repository.finalizeDispatchAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "retry_scheduled", errorCode: "PICK_CORRECTION_REQUIRED",
+      nextAttemptAt: new Date(now.getTime() + 5 * 60 * 1_000),
+    }));
+  });
+
   it("reports the persisted dispatch outcome when finalization replays an existing attempt", async () => {
     const { repository } = repositoryWithCandidates([]);
     vi.mocked(repository.claimDispatchCommands).mockResolvedValue([{

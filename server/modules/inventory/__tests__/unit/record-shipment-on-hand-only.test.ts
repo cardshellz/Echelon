@@ -45,6 +45,21 @@ describe("InventoryUseCases.recordShipment — deductFromOnHandOnly", () => {
     return { tx, rootDb, storage, lotService };
   }
 
+  it("does not touch bins, lots or reservations while a pick correction is open", async () => {
+    const { rootDb, storage, lotService, tx } = harness();
+    tx.execute.mockImplementation(async query => new PgDialect().sqlToQuery(query).sql.includes("wms.pick_corrections")
+      ? { rows: [{ id: 100 }] } : emptyLegacyQuery(query));
+    const { InventoryUseCases } = await import("../../application/inventory.use-cases");
+    const inventory = new InventoryUseCases(rootDb as any, storage, lotService as any, null as any);
+    await expect(inventory.recordShipment({ productVariantId: 30, warehouseLocationId: 20,
+      qty: 2, orderId: 40, orderItemId: 50, shipmentId: "SHIP-WAIT", userId: "tester" }))
+      .rejects.toMatchObject({ code: "PICK_CORRECTION_REQUIRED" });
+    expect(storage.lockInventoryLevel).not.toHaveBeenCalled();
+    expect(storage.adjustInventoryLevel).not.toHaveBeenCalled();
+    expect(storage.createInventoryTransaction).not.toHaveBeenCalled();
+    expect(lotService.withTx).not.toHaveBeenCalled();
+  });
+
   it("deducts on-hand + releases reservation, leaving the picked pool untouched", async () => {
     const { rootDb, storage, lotService, tx } = harness();
     const { InventoryUseCases } = await import("../../application/inventory.use-cases");

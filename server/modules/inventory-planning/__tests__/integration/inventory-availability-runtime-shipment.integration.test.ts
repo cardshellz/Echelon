@@ -63,6 +63,21 @@ describeDatabase.sequential("authority-aware shipment connected PostgreSQL runti
   });
   afterAll(async () => { await database?.close(); });
 
+  it("waits for missing-pick resolution before consuming canonical custody, then resumes exactly once", async () => {
+    await pool.query(`INSERT INTO wms.physical_shipments VALUES(700,'shipped');
+      INSERT INTO wms.pick_corrections(order_item_id,physical_shipment_id,declared_quantity,state,created_at,updated_at)
+      VALUES(71,700,5,'confirmation_required',NOW(),NOW())`);
+    const f = recorder(); const before = await state();
+    await expect(f.service.recordShipment(input)).rejects.toMatchObject({ code: "PICK_CORRECTION_REQUIRED" });
+    expect(await state()).toEqual(before);
+    await pool.query("UPDATE wms.pick_corrections SET state='resolved'");
+    await f.service.recordShipment(input);
+    const committed = await state();
+    await f.service.recordShipment(input);
+    expect(await state()).toEqual(committed);
+    expect(committed.receipts).toHaveLength(1);
+  });
+
   it.each([false, true])("routes one source and replays across physical materialization, physicalFirst=%s", async (physicalFirst) => {
     const materialize = () => pool.query(`INSERT INTO wms.physical_shipments VALUES(700,'shipped');
       INSERT INTO wms.physical_shipment_items(id,physical_shipment_id,legacy_wms_shipment_item_id,wms_order_item_id,product_variant_id,quantity_shipped)

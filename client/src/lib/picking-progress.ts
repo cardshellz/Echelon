@@ -20,8 +20,8 @@ function nonNegativeInteger(value: number): number {
 
 /**
  * Picking progress is cumulative against the authorized WMS line quantity.
- * Fulfilled quantity is already a subset of picked quantity, so it can prove
- * the minimum picked quantity but must never be subtracted from the pick target.
+ * Shipment declarations do not prove a bin/lot pick. Missing pick evidence is
+ * handled by the durable corrective-picking workflow, never by this projection.
  */
 export function derivePickerLineProgress(
   input: PickerLineProgressInput,
@@ -29,17 +29,14 @@ export function derivePickerLineProgress(
   const targetQuantity = nonNegativeInteger(input.quantity);
   const pickedQuantity = Math.min(
     targetQuantity,
-    Math.max(
-      nonNegativeInteger(input.pickedQuantity),
-      nonNegativeInteger(input.fulfilledQuantity),
-    ),
+    nonNegativeInteger(input.pickedQuantity),
   );
 
-  const status = input.status === "short" || input.status === "completed"
+  const status = input.status === "short"
     ? input.status
     : targetQuantity === 0 || pickedQuantity >= targetQuantity
       ? "completed"
-      : input.status;
+      : input.status === "completed" ? "pending" : input.status;
 
   return { targetQuantity, pickedQuantity, status };
 }

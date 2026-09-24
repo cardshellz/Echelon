@@ -36,6 +36,7 @@ import type {
   InventoryAvailabilityRuntimeClaimExecutor,
 } from "../inventory-planning/application/inventory-availability-runtime-claim.service";
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { requireCorrectivePick, PickCorrectionError } from "../wms/pick-correction.repository";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -1127,6 +1128,8 @@ export class PickingUseCases {
       userId?: string;
       pickMethod?: string;
       inventoryCore: InventoryCore;
+      pickCorrectionId?: number;
+      pickCorrectionRevision?: number;
     },
   ): Promise<PickProgressAtomicResult> {
     const lockedOrder = await tx.execute(sql`
@@ -1139,7 +1142,7 @@ export class PickingUseCases {
       throw new IntegrityError(`Order ${input.beforeItem.orderId} not found`);
     }
     const orderState = lockedOrder.rows[0];
-    if (["cancelled", "shipped"].includes(orderState.warehouse_status)) {
+    if (orderState.warehouse_status === "cancelled" || (orderState.warehouse_status === "shipped" && !input.pickCorrectionId)) {
       throw new IntegrityError(
         `Cannot pick item ${input.itemId}: order ${input.beforeItem.orderId} is ${orderState.warehouse_status}`,
       );
@@ -1152,7 +1155,7 @@ export class PickingUseCases {
     }
 
     const locked = await tx.execute(sql`
-      SELECT status, picked_quantity, quantity, short_reason, picked_at
+      SELECT status, picked_quantity, fulfilled_quantity, quantity, short_reason, picked_at
       FROM wms.order_items
       WHERE id = ${input.itemId}
       FOR UPDATE
@@ -1160,6 +1163,21 @@ export class PickingUseCases {
     if (!locked.rows?.length) throw new IntegrityError(`Item ${input.itemId} not found`);
     const lockedStatus = locked.rows[0].status as ItemStatus;
     const lockedPickedQuantity = Number(locked.rows[0].picked_quantity ?? 0);
+    if (!input.pickCorrectionId && Number(locked.rows[0].fulfilled_quantity ?? 0) > lockedPickedQuantity)
+      throw new PickCorrectionError("PICK_CORRECTION_REQUIRED", "Answer the missing-pick confirmation before recording this pick.");
+    if (input.pickCorrectionId) {
+      await tx.execute(sql`SELECT id FROM wms.pick_corrections WHERE id=${input.pickCorrectionId} FOR UPDATE`);
+      await requireCorrectivePick(tx, { correctionId: input.pickCorrectionId, orderItemId: input.itemId,
+        targetPickedQuantity: input.effectivePickedQuantity, actor: input.userId,
+        expectedRevision: input.pickCorrectionRevision });
+      const posted = await tx.execute(sql`SELECT COALESCE(SUM(-variant_qty_delta),0)::integer AS quantity,
+        COUNT(*) FILTER (WHERE variant_qty_delta IS NULL OR variant_qty_delta >= 0)::integer AS unproven
+        FROM inventory.inventory_transactions WHERE order_item_id=${input.itemId} AND transaction_type='ship'`);
+      if (Number(posted.rows[0]?.quantity ?? 0) > lockedPickedQuantity || Number(posted.rows[0]?.unproven ?? 0) > 0) {
+        throw new PickCorrectionError("POSTED_INVENTORY_REVIEW_REQUIRED",
+          "Shipping already deducted units without matching pick evidence. Inventory review is required; this correction did not deduct them again.");
+      }
+    }
     const lockedQuantity = Number(locked.rows[0].quantity ?? 0);
     const targetShortReason = input.status === "short"
       ? input.shortReason ?? input.beforeItem.shortReason ?? null
@@ -1247,6 +1265,8 @@ export class PickingUseCases {
     shortReason?: string;
     userId?: string;
     status: ItemStatus;
+    pickCorrectionId?: number;
+    pickCorrectionRevision?: number;
   }): Promise<PickProgressAtomicResult> {
     return this.db.transaction(async (tx: any) => {
       const lockedOrder = await tx.execute(sql`
@@ -1259,7 +1279,8 @@ export class PickingUseCases {
         throw new IntegrityError(`Order ${input.beforeItem.orderId} not found`);
       }
       const orderState = lockedOrder.rows[0];
-      if (["cancelled", "shipped"].includes(orderState.warehouse_status)) {
+      if (orderState.warehouse_status === "cancelled"
+        || (orderState.warehouse_status === "shipped" && !input.pickCorrectionId)) {
         throw new IntegrityError(
           `Cannot pick item ${input.itemId}: order ${input.beforeItem.orderId} is ${orderState.warehouse_status}`,
         );
@@ -1272,7 +1293,7 @@ export class PickingUseCases {
       }
 
       const locked = await tx.execute(sql`
-        SELECT status, picked_quantity, quantity, short_reason, picked_at
+        SELECT status, picked_quantity, fulfilled_quantity, quantity, short_reason, picked_at
         FROM wms.order_items
         WHERE id = ${input.itemId}
         FOR UPDATE
@@ -1280,6 +1301,14 @@ export class PickingUseCases {
       if (!locked.rows?.length) throw new IntegrityError(`Item ${input.itemId} not found`);
       const lockedStatus = locked.rows[0].status as ItemStatus;
       const lockedPickedQuantity = Number(locked.rows[0].picked_quantity ?? 0);
+      if (!input.pickCorrectionId && Number(locked.rows[0].fulfilled_quantity ?? 0) > lockedPickedQuantity)
+        throw new PickCorrectionError("PICK_CORRECTION_REQUIRED", "Answer the missing-pick confirmation before recording this pick.");
+      if (input.pickCorrectionId) {
+        await tx.execute(sql`SELECT id FROM wms.pick_corrections WHERE id=${input.pickCorrectionId} FOR UPDATE`);
+        await requireCorrectivePick(tx, { correctionId: input.pickCorrectionId, orderItemId: input.itemId,
+          targetPickedQuantity: input.effectivePickedQuantity, actor: input.userId,
+          expectedRevision: input.pickCorrectionRevision });
+      }
       const lockedQuantity = Number(locked.rows[0].quantity ?? 0);
       const expectedPickedQuantity = Number(input.beforeItem.pickedQuantity ?? 0);
       const targetShortReason = input.status === "short"
@@ -1443,6 +1472,8 @@ export class PickingUseCases {
       sessionId?: string;
       pickMethod?: string;
       status: ItemStatus;
+      pickCorrectionId?: number;
+      pickCorrectionRevision?: number;
     },
   ): Promise<PickProgressAtomicResult> {
     const alreadyPickedQuantity = Number(input.beforeItem.pickedQuantity ?? 0);
@@ -1456,7 +1487,7 @@ export class PickingUseCases {
       });
     }
     if (!Number.isSafeInteger(alreadyFulfilledQuantity) || alreadyFulfilledQuantity < 0
-      || alreadyFulfilledQuantity > alreadyPickedQuantity) {
+      || (alreadyFulfilledQuantity > alreadyPickedQuantity && !input.pickCorrectionId)) {
       throw new IntegrityError("Canonical pick progress has invalid fulfilled custody", {
         reason: "canonical_fulfilled_custody_invalid",
         orderId: input.beforeItem.orderId,
@@ -1499,6 +1530,8 @@ export class PickingUseCases {
       expectedFulfilledQuantity: alreadyFulfilledQuantity,
       targetStatus: input.status,
       targetPickedQuantity: input.effectivePickedQuantity,
+      ...(input.pickCorrectionId ? { pickCorrectionId: input.pickCorrectionId,
+        pickCorrectionRevision: input.pickCorrectionRevision } : {}),
       targetShortReason: input.status === "short"
         ? input.shortReason ?? input.beforeItem.shortReason ?? null
         : null,
@@ -1552,7 +1585,9 @@ export class PickingUseCases {
           "CLAIM_LEVEL_CONFLICT",
           "CLAIM_LOT_CONFLICT",
         ]);
-        if (!observationEligibleCodes.has(structuredErrorCode(recordedError) ?? "")) throw recordedError;
+        // A retrospective Yes is not a fresh observation of stock in the bin.
+        if (input.pickMethod === "missed_pick_confirmation"
+          || !observationEligibleCodes.has(structuredErrorCode(recordedError) ?? "")) throw recordedError;
         canonicalResult = await run("reconcile_picker_observation");
       }
     }
@@ -1612,6 +1647,8 @@ export class PickingUseCases {
       deviceType?: string;
       sessionId?: string;
       pickMethod?: string;
+      pickCorrectionId?: number;
+      pickCorrectionRevision?: number;
     },
   ): Promise<PickProgressAtomicResult> {
     if (!this.runtimeClaimExecutor) {
@@ -1653,6 +1690,9 @@ export class PickingUseCases {
     userId?: string;
     deviceType?: string;
     sessionId?: string;
+    /** Server-owned correction authorization; never accepted by the ordinary HTTP pick route. */
+    pickCorrectionId?: number;
+    pickCorrectionRevision?: number;
   }): Promise<PickItemResult> {
     const {
       status,
@@ -1695,6 +1735,13 @@ export class PickingUseCases {
       });
     }
     const orderForPick = await this.storage.getOrderById(beforeItem.orderId);
+    if (params.pickCorrectionId) {
+      await requireCorrectivePick(this.db, { correctionId: params.pickCorrectionId, orderItemId: itemId,
+        targetPickedQuantity: Number(pickedQuantity), actor: userId,
+        expectedRevision: params.pickCorrectionRevision });
+    } else if (Number(beforeItem.fulfilledQuantity ?? 0) > Number(beforeItem.pickedQuantity ?? 0)) {
+      throw new PickCorrectionError("PICK_CORRECTION_REQUIRED", "Answer the missing-pick confirmation before recording this pick.");
+    }
 
     if (orderForPick?.onHold === 1) {
       const message = `Cannot pick item ${itemId}: order ${beforeItem.orderId} is on hold`;
@@ -1714,7 +1761,8 @@ export class PickingUseCases {
       return { success: false, error: "order_on_hold", message };
     }
 
-    if (orderForPick && ["cancelled", "shipped"].includes(orderForPick.warehouseStatus)) {
+    if (orderForPick && (orderForPick.warehouseStatus === "cancelled"
+      || (orderForPick.warehouseStatus === "shipped" && !params.pickCorrectionId))) {
       const message = `Cannot pick item ${itemId}: order ${beforeItem.orderId} is ${orderForPick.warehouseStatus}`;
       await this.logRejectedPickCommand({
         beforeItem,
@@ -1949,6 +1997,8 @@ export class PickingUseCases {
         deviceType,
         sessionId,
         pickMethod,
+        pickCorrectionId: params.pickCorrectionId,
+        pickCorrectionRevision: params.pickCorrectionRevision,
       });
 
       if (atomicResult.idempotentReplay) {
@@ -2296,7 +2346,8 @@ export class PickingUseCases {
     const settings = await this.getPickSettings();
     const postPickStatus = forcePostPickStatus
       ?? await this.resolvePostPickStatusForOrder(item.orderId, settings.postPickStatus);
-    await this.storage.updateOrderProgress(item.orderId, postPickStatus);
+    // Corrective work is a child of the original order, not a reversal of shipment history.
+    if (!params.pickCorrectionId) await this.storage.updateOrderProgress(item.orderId, postPickStatus);
 
     if (pickDeductResult && !pickDeductResult.success) {
       return { success: false, error: pickDeductResult.error, message: pickDeductResult.message };
@@ -2702,6 +2753,11 @@ export class PickingUseCases {
     let prePickReplen: PrePickReplenResult | undefined;
 
     if (systemQtyAvailableForPick < pickedQty) {
+      // A retrospective Yes is not an observation of stock presently in this bin.
+      if (opts.pickMethod === "missed_pick_confirmation") {
+        throw new PickCorrectionError("SOURCE_INVENTORY_REVIEW_REQUIRED",
+          "The recorded source bin cannot cover this missed pick. Inventory review is required; no stock was added.");
+      }
       const isScanVerified = opts.pickMethod === "scan";
       const canTrustLocation = locationResolution === "assigned" || locationResolution === "explicit";
       const locationIsPickerSafe =

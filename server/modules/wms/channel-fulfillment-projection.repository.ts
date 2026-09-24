@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { deriveWmsShippingProgress, type WmsShippingProgressLine } from "@shared/wms-shipping-progress";
 import type { WmsWarehouseStatus } from "@shared/enums/order-status";
 import { shippingProgressLine, wmsShippingProgressQuery, type WmsShippingProgressRow } from "./shipping-progress.query";
+import { observeMissingPick } from "./pick-correction.repository";
 
 export class WmsFulfillmentProjectionError extends Error {
   constructor(
@@ -23,6 +24,7 @@ export class WmsFulfillmentProjectionError extends Error {
 export async function projectPhysicalShipmentToWms(
   transaction: any,
   physicalShipmentId: number,
+  clock: () => Date = () => new Date(),
 ): Promise<void> {
   if (!Number.isInteger(physicalShipmentId) || physicalShipmentId <= 0) {
     throw new WmsFulfillmentProjectionError(
@@ -71,7 +73,7 @@ export async function projectPhysicalShipmentToWms(
   `);
   const orderIds = affected.rows.map((row: { order_id: number }) => Number(row.order_id));
 
-  await transaction.execute(sql`
+  const projectedItems = await transaction.execute(sql`
     WITH affected AS (
       SELECT DISTINCT item.wms_order_item_id
       FROM wms.physical_shipment_items item
@@ -99,33 +101,24 @@ export async function projectPhysicalShipmentToWms(
     )
     UPDATE wms.order_items order_item
     SET fulfilled_quantity = LEAST(order_item.quantity, shipped.shipped_quantity),
-        picked_quantity = LEAST(
-          order_item.quantity,
-          GREATEST(
-            COALESCE(order_item.picked_quantity, 0),
-            COALESCE(shipped.shipped_quantity, 0)
-          )
-        ),
         status = CASE
-          WHEN GREATEST(
-            COALESCE(order_item.picked_quantity, 0),
-            COALESCE(shipped.shipped_quantity, 0)
-          ) >= order_item.quantity THEN 'completed'
-          WHEN GREATEST(
-            COALESCE(order_item.picked_quantity, 0),
-            COALESCE(shipped.shipped_quantity, 0)
-          ) > 0 THEN 'in_progress'
+          WHEN COALESCE(order_item.picked_quantity, 0) >= order_item.quantity THEN 'completed'
+          WHEN COALESCE(order_item.picked_quantity, 0) > 0 THEN 'in_progress'
           ELSE order_item.status
-        END,
-        picked_at = CASE
-          WHEN shipped.shipped_quantity > 0 AND order_item.picked_at IS NULL THEN NOW()
-          ELSE order_item.picked_at
         END
     FROM shipped
     WHERE order_item.id = shipped.wms_order_item_id
       AND order_item.requires_shipping = 1
       AND order_item.status <> 'cancelled'
+    RETURNING order_item.id, order_item.fulfilled_quantity, order_item.picked_quantity
   `);
+
+  // A provider declaration owns box contents, not bin/lot pick evidence.
+  // Retain the missing movement as work instead of manufacturing a picked counter.
+  for (const row of projectedItems.rows) {
+    await observeMissingPick(transaction, { orderItemId: Number(row.id), physicalShipmentId,
+      declaredQuantity: Number(row.fulfilled_quantity), pickedQuantity: Number(row.picked_quantity), occurredAt: clock() });
+  }
 
   if (orderIds.length === 0) return;
   const result = await transaction.execute(wmsShippingProgressQuery(orderIds));

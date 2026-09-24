@@ -4668,6 +4668,12 @@ export function createShipStationService(
       ? error as { code?: unknown; name?: unknown; message?: unknown }
       : {};
     const sourceCode = typeof source.code === "string" ? source.code : null;
+    if (sourceCode === "PICK_CORRECTION_REQUIRED") {
+      return new CarrierDispatchAuthorityError(sourceCode,
+        "Shipment inventory is waiting for a corrective pick.", {
+          retryable: true, context: { commandId: input.commandId, providerLabelId: input.providerLabelId }, cause: error,
+        });
+    }
     const sourceName = typeof source.name === "string" ? source.name : null;
     const sourceMessage = error instanceof Error
       ? error.message

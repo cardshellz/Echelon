@@ -58,7 +58,8 @@ suite("physical-line shipping status PostgreSQL guarantees", () => {
     const migration = (name: string) => readFileSync(resolve(process.cwd(), "migrations", name), "utf8");
     database = await createInventoryCutoverTestDatabase(url, disposable,
       prerequisites + migration("115_fulfillment_canonical_shadow_tables.sql") + currentItemColumns
-      + migration("182_physical_shipment_item_quantity_adjustments.sql"));
+      + migration("182_physical_shipment_item_quantity_adjustments.sql")
+      + migration("0702_corrective_picking.sql"));
     db = drizzle(database.pool);
   });
   beforeEach(async () => {
@@ -179,9 +180,10 @@ suite("physical-line shipping status PostgreSQL guarantees", () => {
       VALUES ($1,-2,'historical_provider_package_repartition','00000000-0000-0000-0000-000000000001',
         'test-zero','integration-test','Correct over-attributed package',$2)`, [physical.physicalItemId, now]);
     await db.transaction(tx => projectPhysicalShipmentToWms(tx, physical.packageId));
-    // An audited shipping correction does not undo actual historical picking.
-    expect(await status()).toBe("in_progress");
-    expect((await rollup()).warehouseStatus).toBe("in_progress");
+    // No physical pick was ever recorded. A withdrawn label cannot manufacture one.
+    expect(await status()).toBe("ready");
+    expect((await rollup()).warehouseStatus).toBe("ready");
+    expect((await database.pool.query("SELECT state FROM wms.pick_corrections")).rows).toEqual([{ state: "resolved" }]);
     expect((await database.pool.query("SELECT fulfilled_quantity FROM wms.order_items WHERE id=1")).rows[0].fulfilled_quantity).toBe(0);
   });
   it("rejects a historical channel-created physical package through request-item lineage too", async () => {
