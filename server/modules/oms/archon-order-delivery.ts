@@ -4,6 +4,10 @@ import { commerceSnapshotSchema } from "../../../shared/archon-commerce-contract
 import { classifyCommerceOrigin } from "./archon-commerce-origin";
 import { readStorefrontAcquisition } from "./archon-acquisition-contract";
 import { extractMarketingConsent } from "./marketing-consent";
+import {
+  extractReconciledShopifyLines,
+  extractShopifySalesFinancials,
+} from "./archon-sales-financials";
 import { extractShopifyDiscountEvidence } from "./archon-discount-evidence";
 /** Read one consistent OMS snapshot. No calls to marketplaces or inventory writes. */
 export async function loadArchonSnapshot(
@@ -35,6 +39,23 @@ export async function loadArchonSnapshot(
   );
   const raw = o.raw_payload?.order ?? o.raw_payload ?? {};
   const dropship = origin.connector === "dropship";
+  const discountEvidence =
+    origin.connector === "shopify"
+      ? extractShopifyDiscountEvidence(o.raw_payload, o.currency)
+      : undefined;
+  const financials =
+    origin.connector === "shopify"
+      ? extractShopifySalesFinancials(
+          o.raw_payload,
+          discountEvidence,
+          String(o.external_order_id),
+          o.currency,
+        )
+      : undefined;
+  // Archon receives one reconciled provider financial snapshot. This changes no
+  // OMS order, inventory, payment, or fulfillment state. Refunds stay separate.
+  if (financials && Number(o.refund_amount_cents) > financials.orderTotalCents)
+    throw new Error("ARCHON_REFUND_EXCEEDS_PROVIDER_TOTAL");
   const payload = {
     event: "order.snapshot",
     revision,
@@ -57,15 +78,20 @@ export async function loadArchonSnapshot(
       marketing_attribution: dropship
         ? []
         : readStorefrontAcquisition(raw).touches,
-      total_cents: Number(o.total_cents),
-      subtotal_cents: Number(o.subtotal_cents),
-      shipping_cents: Number(o.shipping_cents),
-      tax_cents: Number(o.tax_cents),
-      discount_cents: Number(o.discount_cents),
-      discount_evidence:
-        origin.connector === "shopify"
-          ? extractShopifyDiscountEvidence(o.raw_payload, o.currency)
-          : undefined,
+      total_cents: financials?.orderTotalCents ?? Number(o.total_cents),
+      subtotal_cents:
+        financials?.netMerchandiseCents ?? Number(o.subtotal_cents),
+      shipping_cents:
+        financials?.grossShippingCents ?? Number(o.shipping_cents),
+      tax_cents: financials
+        ? financials.taxAddedCents + financials.taxIncludedCents
+        : Number(o.tax_cents),
+      discount_cents: financials
+        ? financials.merchandiseDiscountCents + financials.shippingDiscountCents
+        : Number(o.discount_cents),
+      discount_evidence: discountEvidence
+        ? { ...discountEvidence, ...(financials ? { financials } : {}) }
+        : undefined,
       refund_cents: Number(o.refund_amount_cents),
       currency: o.currency,
       financial_status:
@@ -80,15 +106,17 @@ export async function loadArchonSnapshot(
       // Wholesale order totals must not be presented as partner retail line revenue.
       line_items: dropship
         ? []
-        : lines.rows.map((l) => ({
-            sku: l.sku,
-            title: l.title,
-            quantity: l.quantity,
-            price_cents: Number(l.retail_price_cents),
-            discount_cents: Number(l.total_discount_cents),
-            product_id: l.external_product_id,
-            fulfillment_status: l.fulfillment_status,
-          })),
+        : financials
+          ? extractReconciledShopifyLines(o.raw_payload, financials)
+          : lines.rows.map((l) => ({
+              sku: l.sku,
+              title: l.title,
+              quantity: l.quantity,
+              price_cents: Number(l.retail_price_cents),
+              discount_cents: Number(l.total_discount_cents),
+              product_id: l.external_product_id,
+              fulfillment_status: l.fulfillment_status,
+            })),
     },
   };
   return commerceSnapshotSchema.parse(payload);
