@@ -16,7 +16,7 @@ import type {
   ClaimedCarrierTrackingSubscription,
   ShippingProviderLabelLinkResult,
   StoredCarrierDispatchAttempt,
-  StoredCarrierTrackingEvent,
+  StoredCarrierTrackingReconciliationEvent,
   StoredShippingProviderLabelObservation,
 } from "./carrier-tracking.repository";
 import {
@@ -40,6 +40,10 @@ import {
   type ShipStationTrackingIdentity,
   type ShipStationTrackingHydrationRequest,
 } from "./shipstation-tracking-events.client";
+
+type CarrierTrackingMatchInput =
+  | { source: "new"; event: NormalizedCarrierTrackingEvent }
+  | { source: "stored"; event: StoredCarrierTrackingReconciliationEvent };
 
 const DEFAULT_RECONCILIATION_LIMIT = 100;
 const DEFAULT_SUBSCRIPTION_BATCH_LIMIT = 25;
@@ -290,7 +294,7 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
       request,
       this.dependencies.clock.now(),
     );
-    const result = await this.persistAndMatch(event);
+    const result = await this.persistAndMatch({ source: "new", event });
     this.logResult("CARRIER_TRACKING_PROVIDER_SNAPSHOT_INGESTED", event, result);
     return result;
   }
@@ -496,7 +500,7 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
 
     for (const event of events) {
       try {
-        const result = await this.persistAndMatch(event);
+        const result = await this.persistAndMatch({ source: "stored", event });
         if (result.matchStatus === "matched") summary.matched += 1;
         else summary.unresolved += 1;
         if (result.matchAttemptInserted) summary.attemptsAppended += 1;
@@ -753,7 +757,7 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
           request,
           this.dependencies.clock.now(),
         );
-        result = await this.persistAndMatch(event);
+        result = await this.persistAndMatch({ source: "new", event });
       } catch (error) {
         providerError = error;
       }
@@ -1199,12 +1203,17 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
   }
 
   private async persistAndMatch(
-    event: NormalizedCarrierTrackingEvent,
-    persistedEvent?: StoredCarrierTrackingEvent,
+    input: CarrierTrackingMatchInput,
   ): Promise<CarrierTrackingNormalizedIngestResult> {
+    const event = input.event;
     return this.dependencies.repository.transaction(async (transaction) => {
       await transaction.acquireTrackingLock(event.provider, event.normalizedTrackingNumber);
-      const storedEvent = persistedEvent ?? await transaction.insertOrGetEvent(event);
+      // A replayed event already has a durable row identity. Re-inserting it
+      // would serialize the audit payload and attempt an insert followed by a
+      // re-read for every event in the sweep, without changing the evidence.
+      const storedEvent = input.source === "stored"
+        ? { id: input.event.id, inserted: false }
+        : await transaction.insertOrGetEvent(input.event);
       const candidates = await transaction.findMatchCandidates(event);
       const resolution = resolveCarrierTrackingMatch(candidates);
 
@@ -1261,7 +1270,10 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
 
   private logResult(
     code: string,
-    event: NormalizedCarrierTrackingEvent,
+    event: Pick<
+      NormalizedCarrierTrackingEvent,
+      "provider" | "normalizedTrackingNumber" | "providerStatusCode" | "canonicalStatus" | "dispatchEvidence"
+    >,
     result: CarrierTrackingNormalizedIngestResult,
   ): void {
     const logEvent: CarrierTrackingLogEvent = {

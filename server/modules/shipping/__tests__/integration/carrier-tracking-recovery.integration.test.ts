@@ -285,6 +285,54 @@ databaseSuite.sequential("carrier tracking recovery PostgreSQL guarantees", () =
     expect((await repository.listEventsPendingReconciliation(2, later(1_800_000))).map(event => event.trackingNumber)).toEqual([tracks[1]]);
   });
 
+  it("reconciles a persisted event without loading or rewriting its audit payload", async () => {
+    const trackingNumber = "1ZTEST000000000019";
+    const labelId = await seedLabel(trackingNumber);
+    // The label link is already established; this case exercises event replay,
+    // not the independent provider-label link recovery query.
+    await pool.query(
+      "UPDATE wms.shipping_provider_labels SET last_link_reconciled_at = $1 WHERE id = $2",
+      [now, labelId],
+    );
+    const event = normalizeShipStationTrackingWebhook({
+      resource_type: "API_TRACK",
+      resource_url: `https://api.shipstation.com/v2/tracking?carrier_code=ups&tracking_number=${trackingNumber}`,
+      data: snapshot(trackingNumber),
+    }, earlier);
+    const stored = await repository.transaction(tx => tx.insertOrGetEvent(event));
+
+    const pending = await repository.listEventsPendingReconciliation(25, now);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ id: stored.id, eventHash: event.eventHash });
+    expect(pending[0]).not.toHaveProperty("sanitizedPayload");
+
+    const errorLogs = vi.fn();
+    const sweep = new CarrierTrackingService({
+      repository,
+      clock: { now: () => new Date(now) },
+      logger: { info: vi.fn(), warn: vi.fn(), error: errorLogs },
+    });
+    const result = await sweep.reconcileUnresolved(25);
+    expect(errorLogs).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      scanned: 1,
+      matched: 1,
+      errors: 0,
+    });
+    const events = await pool.query<{ id: string; sanitized_payload: Record<string, unknown> }>(
+      "SELECT id::text, sanitized_payload FROM wms.carrier_tracking_events",
+    );
+    expect(events.rows).toEqual([{
+      id: String(stored.id),
+      sanitized_payload: event.sanitizedPayload,
+    }]);
+    const attempts = await pool.query<{ count: number }>(
+      "SELECT COUNT(*)::int AS count FROM wms.carrier_tracking_event_matches WHERE carrier_tracking_event_id = $1",
+      [stored.id],
+    );
+    expect(attempts.rows).toEqual([{ count: 1 }]);
+  });
+
   it.each([{ direction: "return" as const }, { voided: true }])("does not poll or dispatch ineligible labels: %j", async (options) => {
     await seedLabel("1ZTEST000000000020", options);
     const test = service();
