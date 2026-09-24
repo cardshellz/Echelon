@@ -298,7 +298,14 @@ surface says so); the add-money step no longer describes autopay, shows the
 balance as its own element, and states the picked rail's terms as short
 bullets (`describeDepositRail`: fee, landing time, the credit rule from the
 account's three facts, and the backup card while a transfer lands), with
-"Skip for now" and no Back.
+"Skip for now" and no Back. The card fee (held at zero) and the card minimum
+deposit ($100) are wallet-policy limits staff edit on the Wallet Policy tab
+(migration 0700; the environment variable is only the fee's fallback). The
+rate a vendor acknowledged is stored on their settings row, backfilled from
+the audit trail; an unattended card charge never carries more than it, an
+agreement at or above the live rate is current, and a fee cut applies at
+once. A card deposit is held to the card minimum on the server and in the
+add-money controls, and every vendor surface reads "no fee" at zero.
 
 **Still open, not designed here:** credit against a business account's first
 bank transfer (today one earlier transfer from the account must have
