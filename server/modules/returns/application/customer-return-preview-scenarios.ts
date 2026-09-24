@@ -1,4 +1,5 @@
 import type { ReturnPortalPreviewState, ReturnPreviewScenarioId } from "../../../../shared/returns/customer-return-preview.contract";
+import type { CustomerReturnBoxOption } from "../../../../shared/returns/customer-return-parcel";
 import {
   DEFAULT_CUSTOMER_RETURN_WINDOW_DAYS,
   type CustomerReturnEligibilityInput,
@@ -18,7 +19,8 @@ type ScenarioDescription = ReturnPortalPreviewState["scenarios"][number];
 export interface CustomerReturnPreviewScenario {
   description: ScenarioDescription;
   facts: CustomerReturnEligibilityInput;
-  displayLines: { id: string; title: string; variant: string | null }[];
+  displayLines: { id: string; title: string; variant: string | null; unitWeightGrams: number }[];
+  boxOptions: CustomerReturnBoxOption[];
 }
 
 const descriptions: readonly ScenarioDescription[] = [
@@ -61,7 +63,17 @@ export function readCustomerReturnPreviewScenario(id: ReturnPreviewScenarioId): 
       id: line.lineId,
       title: line.sku === "SAMPLE-STORAGE" ? "Sample card storage box" : "Sample collector sleeves",
       variant: line.sku === "SAMPLE-STORAGE" ? "Black" : "100 count · Clear",
+      unitWeightGrams: line.sku === "SAMPLE-STORAGE" ? 250 : 100,
     })),
+    // Fictional measurements for each fictional outbound allocation. They are
+    // not live carton defaults and must never be applied to real orders.
+    boxOptions: lines.flatMap((line, lineIndex) => line.allocations.map((source, allocationIndex) => ({
+      id: `sample-box-${lineIndex + 1}-${allocationIndex + 1}`,
+      dimensions: line.sku === "SAMPLE-STORAGE"
+        ? { lengthMm: 304.8, widthMm: 254, heightMm: 152.4 }
+        : { lengthMm: 254, widthMm: 203.2, heightMm: 101.6 },
+      items: [{ lineId: line.lineId, quantity: source.quantity }],
+    }))),
   };
 }
 

@@ -6,9 +6,7 @@ import {
   PositiveCentsSchema,
 } from "../../../../shared/validation/currency";
 import {
-  DEFAULT_CARD_FUNDING_FEE_BPS,
   MAX_CARD_FUNDING_FEE_BPS,
-  isValidCardFundingFeeBps,
   quoteWalletFunding,
   type WalletFundingQuote,
 } from "../../../../shared/dropship/wallet-funding-fee";
@@ -112,6 +110,17 @@ export const dropshipWalletLedgerTypeSchema = z.enum([
   /** A settled credit taken back by a dispute or ACH return, and its return when the dispute is won (migration 0689). */
   "funding_reversal",
   "funding_reinstated",
+  /**
+   * The spend-only rewards balance (migration 0702): earned on a settled
+   * transfer, spent on an order debit, taken back with the transfer that
+   * earned them and returned when that dispute is won, redeemed outside the
+   * wallet (no writer at launch).
+   */
+  "rewards_earned",
+  "rewards_spent",
+  "rewards_reversed",
+  "rewards_reinstated",
+  "rewards_redeemed",
 ]);
 export type DropshipWalletLedgerType = z.infer<typeof dropshipWalletLedgerTypeSchema>;
 
@@ -349,6 +358,12 @@ export const registerDropshipUsdcBaseFundingMethodForMemberInputSchema = z.objec
 export type CreditDropshipWalletFundingInput = z.infer<typeof creditDropshipWalletFundingInputSchema>;
 export type DebitDropshipWalletForOrderInput = z.infer<typeof debitDropshipWalletForOrderInputSchema>;
 export type ConfigureDropshipAutoReloadInput = z.infer<typeof configureDropshipAutoReloadInputSchema>;
+
+/** The vendor's rewards spend preference (funding design phase 7). */
+export const setDropshipRewardsSpendPreferenceInputSchema = z.object({
+  spendRewardsFirst: z.boolean(),
+}).strict();
+export type SetDropshipRewardsSpendPreferenceInput = z.infer<typeof setDropshipRewardsSpendPreferenceInputSchema>;
 export type CreateDropshipStripeFundingSetupSessionInput = z.infer<typeof createDropshipStripeFundingSetupSessionInputSchema>;
 export type CreateDropshipStripeWalletFundingSessionInput = z.infer<typeof createDropshipStripeWalletFundingSessionInputSchema>;
 export type CreditDropshipWalletManualFundingInput = z.infer<typeof creditDropshipWalletManualFundingInputSchema>;
@@ -365,6 +380,13 @@ export interface DropshipWalletAccountRecord {
   vendorId: number;
   availableBalanceCents: number;
   pendingBalanceCents: number;
+  /**
+   * The spend-only rewards balance (funding design phase 7): money Card
+   * Shellz issued on settled bank and USDC transfers. Never paid out, never
+   * counted toward the minimum, the credit allowance or a top-up trigger, and
+   * never negative.
+   */
+  rewardsBalanceCents: number;
   currency: string;
   status: string;
   createdAt: Date;
@@ -397,6 +419,20 @@ export interface DropshipAutoReloadSettingRecord {
   /** What each automatic refill pulls; null pulls the minimum (migration 0690). */
   topUpAmountCents: number | null;
   paymentHoldTimeoutMinutes: number;
+  /**
+   * The card fee rate the vendor agreed to when they turned autopay on, and
+   * when (migration 0701). Null on a row saved before the acknowledgement was
+   * stored, or by a client that sent none; an unattended charge then carries
+   * the live rate, as before.
+   */
+  acknowledgedCardFeeBps: number | null;
+  acknowledgedAt: Date | null;
+  /**
+   * True: each order debit takes rewards first and cash second (the
+   * default). False: the vendor saves their rewards and orders are paid from
+   * cash (migration 0702).
+   */
+  spendRewardsFirst: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -411,6 +447,8 @@ export interface DropshipWalletLedgerRecord {
   currency: string;
   availableBalanceAfterCents: number | null;
   pendingBalanceAfterCents: number | null;
+  /** The rewards balance after this line; null on lines written before migration 0702 or by writers that never move rewards. */
+  rewardsBalanceAfterCents: number | null;
   referenceType: string | null;
   referenceId: string | null;
   idempotencyKey: string | null;
@@ -938,6 +976,8 @@ export interface DropshipWalletRepository {
   creditFunding(input: CreateDropshipWalletFundingLedgerInput): Promise<DropshipWalletMutationResult>;
   debitOrder(input: CreateDropshipWalletOrderDebitInput): Promise<DropshipWalletMutationResult>;
   configureAutoReload(input: ConfigureDropshipAutoReloadRepositoryInput): Promise<DropshipAutoReloadSettingRecord>;
+  /** Save whether rewards pay first on each order or are kept, with its audit row (funding design phase 7). */
+  setRewardsSpendPreference(input: SetDropshipRewardsSpendPreferenceRepositoryInput): Promise<DropshipAutoReloadSettingRecord>;
   getReusableFundingProviderCustomerId(input: {
     vendorId: number;
     provider: "stripe";
@@ -1016,6 +1056,14 @@ export interface ConfigureDropshipAutoReloadRepositoryInput extends ResolvedDrop
   updatedAt: Date;
 }
 
+export interface SetDropshipRewardsSpendPreferenceRepositoryInput {
+  vendorId: number;
+  spendRewardsFirst: boolean;
+  /** The signed-in member who chose, for the audit row. */
+  actorMemberId: string;
+  updatedAt: Date;
+}
+
 export interface UpsertDropshipFundingMethodRepositoryInput extends RegisterDropshipFundingMethodInput {
   updatedAt: Date;
 }
@@ -1082,11 +1130,12 @@ export class DropshipWalletService {
       now,
     });
     const advanceContext = await this.deps.repository.readAdvanceContext({ vendorId, now });
+    const limits = await this.walletLimits();
     return {
       ...overview,
-      cardFundingFeeBps: this.cardFundingFeeBps(),
+      cardFundingFeeBps: this.feeBpsFrom(limits),
       usdcBaseDepositAddress: this.usdcBaseDepositAddress(),
-      limits: await this.walletLimits(),
+      limits,
       advance: advanceContext
         ? assessAdvanceStanding({
             availableBalanceCents: overview.account.availableBalanceCents,
@@ -1293,7 +1342,7 @@ export class DropshipWalletService {
     const parsed = resolveAutoReloadAmounts(parseWalletInput(configureDropshipAutoReloadInputSchema, input));
     const limits = await this.walletLimits();
     assertAutoReloadConfigIsUsable(parsed, limits);
-    const cardFundingFeeBps = this.cardFundingFeeBps();
+    const cardFundingFeeBps = this.feeBpsFrom(limits);
     assertCardFeeAcknowledgementIsCurrent(parsed, cardFundingFeeBps);
     await this.assertAutoReloadMayBeDisabled(parsed);
     const updatedAt = this.deps.clock.now();
@@ -1318,6 +1367,33 @@ export class DropshipWalletService {
         autoReloadMinTriggerCents: limits.autoReloadMinTriggerCents,
         autoReloadMinAmountCents: limits.autoReloadMinAmountCents,
       },
+    });
+    return setting;
+  }
+
+  /**
+   * The vendor's choice between spending rewards first on each order (the
+   * default) and saving them (funding design phase 7). A preference, not a
+   * money movement: no proof of a sensitive action is required; the audit
+   * row commits with the change.
+   */
+  async setRewardsSpendPreferenceForMember(
+    memberId: string,
+    input: unknown,
+  ): Promise<DropshipAutoReloadSettingRecord> {
+    const parsed = parseWalletInput(setDropshipRewardsSpendPreferenceInputSchema, input);
+    const provisioned = await this.provisionVendor(memberId);
+    const vendorId = provisioned.vendor.vendorId;
+    const setting = await this.deps.repository.setRewardsSpendPreference({
+      vendorId,
+      spendRewardsFirst: parsed.spendRewardsFirst,
+      actorMemberId: memberId,
+      updatedAt: this.deps.clock.now(),
+    });
+    this.deps.logger.info({
+      code: "DROPSHIP_WALLET_REWARDS_PREFERENCE_SAVED",
+      message: "Dropship wallet rewards spend preference was saved.",
+      context: { vendorId, memberId, spendRewardsFirst: setting.spendRewardsFirst },
     });
     return setting;
   }
@@ -1476,7 +1552,6 @@ export class DropshipWalletService {
       );
     }
 
-    assertStripeWalletFundingAmount(parsed.amountCents, await this.walletLimits());
     const provisioned = await this.provisionVendor(memberId);
     const vendor = provisioned.vendor;
     const wallet = await this.deps.repository.getOverview({
@@ -1514,7 +1589,11 @@ export class DropshipWalletService {
       );
     }
 
-    const quote = this.quoteFunding(fundingMethod.rail, parsed.amountCents);
+    // The minimum depends on the rail (a card deposit has its own), so the
+    // amount is checked once the method, and with it the rail, is known.
+    const limits = await this.walletLimits();
+    assertStripeWalletFundingAmount(parsed.amountCents, fundingMethod.rail, limits);
+    const quote = this.quoteFunding(fundingMethod.rail, parsed.amountCents, this.feeBpsFrom(limits));
     const now = this.deps.clock.now();
     const session = await provider.createStripeWalletFundingSession({
       vendorId: vendor.vendorId,
@@ -1635,12 +1714,19 @@ export class DropshipWalletService {
       return this.skipAutoReload(parsed, "funding_method_provider_identity_required", wallet.account.currency, chargeMethod.fundingMethodId);
     }
 
+    // The policy in force: the fee rate for the charge and, for a held order,
+    // the ceiling on any single payment. A held order's card charge covers its
+    // whole gap (funding design phase 7); routine reloads keep the vendor's own
+    // bound.
+    const limits = await this.walletLimits();
+    const chargeCeilingCents = parsed.reason === "payment_hold" ? limits.manualFundingMaxCents : null;
     const amount = calculateAutoReloadAmount({
       availableBalanceCents: wallet.account.availableBalanceCents,
       pendingBalanceCents: wallet.account.pendingBalanceCents,
       minimumBalanceCents: setting.minimumBalanceCents,
       topUpAmountCents: setting.topUpAmountCents,
       maxSingleReloadCents: setting.maxSingleReloadCents,
+      chargeCeilingCents,
       requiredBalanceCents: parsed.requiredBalanceCents ?? null,
       reason: parsed.reason,
     });
@@ -1652,7 +1738,7 @@ export class DropshipWalletService {
     // plus the fee. The wallet is credited from the quote, never from what
     // Stripe echoes back, and the two are cross-checked so a charge that does
     // not match the quote is refused rather than booked.
-    const quote = this.quoteFunding(chargeMethod.rail, amount.amountCents);
+    const quote = this.quoteFunding(chargeMethod.rail, amount.amountCents, this.unattendedFeeBps(limits, setting));
     const paymentIntent = await provider.createStripeAutoReloadPaymentIntent({
       vendorId: parsed.vendorId,
       fundingMethodId: chargeMethod.fundingMethodId,
@@ -2316,8 +2402,27 @@ export class DropshipWalletService {
       : resolveDropshipWalletPolicyLimitsFromEnv();
   }
 
-  private cardFundingFeeBps(): number {
-    return this.deps.cardFundingFeeBps ?? resolveDropshipCardFundingFeeBps();
+  /** The card fee rate in force: the injected override under test, else the policy's. */
+  private feeBpsFrom(limits: Pick<DropshipWalletPolicyLimits, "cardFundingFeeBps">): number {
+    return this.deps.cardFundingFeeBps ?? limits.cardFundingFeeBps;
+  }
+
+  /**
+   * The rate an unattended card charge (a routine top-up, a backup-card cover)
+   * may carry: never above the rate the vendor acknowledged when they turned
+   * autopay on. Staff can raise the policy's fee, and the mandate promises the
+   * vendor confirms before paying more, so until they re-acknowledge, the rate
+   * they agreed to holds. A lower live rate always applies. A row without an
+   * acknowledgement (saved by an older client) pays the live rate, as before.
+   */
+  private unattendedFeeBps(
+    limits: Pick<DropshipWalletPolicyLimits, "cardFundingFeeBps">,
+    setting: { acknowledgedCardFeeBps: number | null },
+  ): number {
+    const live = this.feeBpsFrom(limits);
+    // A row read before migration 0701 carries no acknowledgement at all.
+    const acknowledged = setting.acknowledgedCardFeeBps ?? null;
+    return acknowledged === null ? live : Math.min(live, acknowledged);
   }
 
   /**
@@ -2346,8 +2451,8 @@ export class DropshipWalletService {
       : this.deps.usdcBaseDepositAddress;
   }
 
-  private quoteFunding(rail: DropshipStripeFundingSetupRail, creditCents: number): WalletFundingQuote {
-    return quoteWalletFunding({ rail, creditCents, cardFeeBps: this.cardFundingFeeBps() });
+  private quoteFunding(rail: DropshipStripeFundingSetupRail, creditCents: number, cardFeeBps: number): WalletFundingQuote {
+    return quoteWalletFunding({ rail, creditCents, cardFeeBps });
   }
 
   private async provisionVendor(memberId: string): Promise<DropshipProvisionVendorRepositoryResult> {
@@ -2480,6 +2585,8 @@ function calculateAutoReloadAmount(input: {
   minimumBalanceCents: number;
   topUpAmountCents: number | null;
   maxSingleReloadCents: number | null;
+  /** The program's ceiling on any single payment; only a held order's charge is measured against it. */
+  chargeCeilingCents: number | null;
   requiredBalanceCents: number | null;
   reason: HandleDropshipAutoReloadInput["reason"];
 }):
@@ -2491,12 +2598,13 @@ function calculateAutoReloadAmount(input: {
       minimumBalanceCents: input.minimumBalanceCents,
       requiredBalanceCents: input.requiredBalanceCents ?? 0,
       singleChargeLimitCents: input.maxSingleReloadCents,
+      chargeCeilingCents: input.chargeCeilingCents,
     });
     if (charge.outcome === "not_needed") {
       return { outcome: "skipped", skipReason: "balance_already_sufficient" };
     }
-    if (charge.outcome === "limit_below_gap") {
-      return { outcome: "skipped", skipReason: "amount_exceeds_max_single_reload" };
+    if (charge.outcome === "ceiling_below_gap") {
+      return { outcome: "skipped", skipReason: "amount_exceeds_funding_ceiling" };
     }
     return { outcome: "funding_created", amountCents: charge.amountCents, refill: null };
   }
@@ -2524,8 +2632,9 @@ function calculateAutoReloadAmount(input: {
  * Skip reasons that mean the wallet has no usable backstop. Each one leaves the
  * next order that outruns the balance in payment hold, so they are anomalies a
  * human should see, not routine outcomes. `auto_reload_disabled`,
- * `balance_already_sufficient` and `amount_exceeds_max_single_reload` are
- * deliberately absent: those are the policy working as configured.
+ * `balance_already_sufficient` and `amount_exceeds_funding_ceiling` are
+ * deliberately absent: those are the policy working as configured (a held
+ * order above the ceiling is already reported by the hold notice).
  */
 const AUTO_RELOAD_SKIPS_NEEDING_ATTENTION: ReadonlySet<string> = new Set([
   "funding_provider_not_configured",
@@ -2627,24 +2736,9 @@ function cardFeeForCredit(quote: WalletFundingQuote): DropshipWalletFundingCardF
     : undefined;
 }
 
-/**
- * The card fee rate in force. Unlike the auto-reload floors, a bad value here
- * is refused rather than defaulted: a typo would otherwise be charged to
- * vendors' cards silently. Undefined or blank means the launch default.
- */
-export function resolveDropshipCardFundingFeeBps(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env.DROPSHIP_CARD_FUNDING_FEE_BPS;
-  if (raw === undefined || !raw.trim()) return DEFAULT_CARD_FUNDING_FEE_BPS;
-  const parsed = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
-  if (!isValidCardFundingFeeBps(parsed)) {
-    throw new DropshipError(
-      "DROPSHIP_CARD_FUNDING_FEE_MISCONFIGURED",
-      "Dropship card funding fee is misconfigured.",
-      { env: "DROPSHIP_CARD_FUNDING_FEE_BPS", value: raw, maxBps: MAX_CARD_FUNDING_FEE_BPS },
-    );
-  }
-  return parsed;
-}
+// The fee's environment fallback lives with the other policy fallbacks; kept
+// importable from here for the callers that learned it at this path.
+export { resolveDropshipCardFundingFeeBps } from "../domain/wallet-policy";
 
 /**
  * The USDC (Base) deposit address vendors fund the wallet with. Unset means
@@ -2668,16 +2762,20 @@ export function resolveDropshipUsdcBaseDepositAddress(env: NodeJS.ProcessEnv = p
 
 /**
  * A vendor who enables auto-reload agrees to the card fee rate on screen. A
- * client that sends the rate it displayed is refused when that rate is no
- * longer the one in force — the screen was stale — so the vendor re-reads
- * before agreeing. Older clients send nothing and are not gated.
+ * client that sends a rate BELOW the one in force is refused — the screen was
+ * stale and the vendor would be charged more than they saw — so the vendor
+ * re-reads before agreeing. A rate at or above the live one is an agreement
+ * that covers it: after a fee cut (funding design phase 7) the recorded 3%
+ * still stands as the ceiling an unattended charge may carry, and an ordinary
+ * save carrying it must not be refused. Older clients send nothing and are
+ * not gated.
  */
 function assertCardFeeAcknowledgementIsCurrent(
   input: ConfigureDropshipAutoReloadInput,
   cardFundingFeeBps: number,
 ): void {
   if (!input.enabled || input.acknowledgedCardFeeBps === undefined) return;
-  if (input.acknowledgedCardFeeBps !== cardFundingFeeBps) {
+  if (input.acknowledgedCardFeeBps < cardFundingFeeBps) {
     throw new DropshipError(
       "DROPSHIP_CARD_FUNDING_FEE_ACKNOWLEDGEMENT_STALE",
       "The card fee shown has changed. Reload the page and review it before turning on auto-reload.",
@@ -2692,26 +2790,29 @@ function assertCardFeeAcknowledgementIsCurrent(
  * `limits` is the resolved wallet policy — the active
  * `dropship.dropship_wallet_policies` row, or the environment fallback. This
  * function reads NO ambient state, so the bounds a vendor is held to are
- * exactly the bounds the wallet page showed them.
+ * exactly the bounds the wallet page showed them. The minimum depends on the
+ * rail: a card deposit has its own (funding design phase 7); a bank deposit
+ * keeps the general manual minimum. The maximum is the same on both.
  */
 export function assertStripeWalletFundingAmount(
   amountCents: number,
-  limits: Pick<DropshipWalletPolicyLimits, "manualFundingMinCents" | "manualFundingMaxCents">,
+  rail: DropshipStripeFundingSetupRail,
+  limits: Pick<DropshipWalletPolicyLimits, "manualFundingMinCents" | "manualFundingMaxCents" | "cardFundingMinCents">,
 ): void {
-  const minCents = limits.manualFundingMinCents;
+  const minCents = rail === "stripe_card" ? limits.cardFundingMinCents : limits.manualFundingMinCents;
   const maxCents = limits.manualFundingMaxCents;
   if (minCents > maxCents) {
     throw new DropshipError(
       "DROPSHIP_WALLET_FUNDING_LIMITS_INVALID",
       "Dropship wallet funding limits are misconfigured.",
-      { minCents, maxCents },
+      { rail, minCents, maxCents },
     );
   }
   if (amountCents < minCents || amountCents > maxCents) {
     throw new DropshipError(
       "DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE",
       "Dropship wallet funding amount is outside the configured range.",
-      { amountCents, minCents, maxCents },
+      { amountCents, rail, minCents, maxCents },
     );
   }
 }

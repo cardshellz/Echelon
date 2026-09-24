@@ -46,9 +46,12 @@ zero for that tier's SKUs (`domain/listing-tiers.ts`, the hourly reconciler).
    cannot cover whole goes to the card. Eligibility is judged per bank
    account: company account holder, a balance read through Stripe Financial
    Connections when it was linked, and one earlier pull from it settled.
-3. **Card backstop** — the order-processing pass charges the card for
-   `min(back-to-minimum, single top-up limit)`, never less than the gap; when
-   even the limit cannot cover the gap nothing is charged and the order waits.
+3. **Card backstop** — the order-processing pass charges the card the whole
+   gap, plus a refill back to the minimum only within the single top-up bound,
+   and never more than the policy's manual funding maximum in one charge
+   (`decideCardBackstopCharge`). An order whose gap alone is above that
+   maximum is not charged and waits. Phase 7: the bound shapes routine
+   top-ups, not what a held order may be charged.
 4. **Payment hold** — 24 hours (policy), then the order is cancelled.
 
 When a pending credit settles, the existing settlement path adds it to
@@ -115,7 +118,9 @@ fixed presets below the minimum are gone. `domain/autopay-refill.ts`:
 
 - refill (after any order debit and at the daily check, while the balance
   counting pending is under the minimum): pull the top-up amount, or the
-  whole shortfall when that is more, never past the single-charge bound;
+  whole shortfall when that is more, never past the single-charge bound
+  (a held order's backup-card charge is not a refill: it takes the whole
+  gap, up to the policy's manual funding maximum — phase 3, item 3);
 - the bound is the server's, max(minimum, top-up amount), derived when the
   client sends none (`max_single_reload_cents` keeps it; an older client's
   own bound is honoured while it covers both amounts). A deep negative is
@@ -231,5 +236,98 @@ refuses a private key outright). Migration 0691; the words are in
   warning: only USDC on the Base network; anything else sent there cannot be
   recovered. The vendor is told when a deposit lands and if one is voided.
 
-All six phases of the funding design are delivered; later work (a USDC
-autopay pull from a self-custody wallet) is not designed here.
+Phases 1 to 6 are delivered. Phase 7 below records the pricing and rewards
+decisions of 2026-09-23 ahead of their build; a USDC autopay pull from a
+self-custody wallet is still not designed here.
+
+## Pricing and rewards (phase 7)
+
+Owner decisions of 2026-09-23. They replace the card fee described under
+"Sources" and in phase 5; the sections above stay as the record of what
+shipped.
+
+**Pricing.** No processing fee on any rail. A vendor already pays their
+marketplace's fees, and a second fee on top made every money screen harder
+to read. Card transfers are free but never below a card minimum deposit
+($100 at launch); bank and USDC keep the general minimum. The card fee stays
+a setting held at zero, so the disclosure machinery (the acknowledgement in
+the mandate, the fee on every quote) keeps working should a fee ever return.
+The fee and the per-rail minimum deposits become editable on the admin
+Wallet Policy tab; today the fee is an environment variable shown there
+read-only.
+
+**Rewards.** In place of a fee on card, an incentive on the free rails: every
+bank or USDC transfer earns rewards at a per-rail rate (1% at launch, card
+0%), credited when the transfer settles. Deposits and automatic top-ups
+alike, so the rule reads "bank and USDC earn 1%". Rewards are earned on
+transfers rather than on orders because that is the only way "card earns
+nothing" can be true: once money is in the wallet it is all the same money.
+
+Rewards are a third balance on the wallet account, integer cents, with their
+own ledger lines (earned, spent, reversed, redeemed). They are money Card
+Shellz issues, so:
+
+- spend-only: never paid out, and left out of any refund on account closure;
+- never counted toward the minimum, the credit allowance or a top-up trigger,
+  and never treated as cash by the treasury reconciliation;
+- a returned or disputed transfer takes back the rewards it earned; a part
+  already spent comes out of the cash balance through the existing reversal;
+- a cancelled or refunded order returns its rewards share to rewards, not to
+  cash;
+- the rate setting has a ceiling, so a typo cannot pay out 100%;
+- no expiry at launch (a setting later).
+
+**Spending.** The main use is lower product cost: by default each order debit
+takes rewards first and cash second, and the order shows both parts. A vendor
+can switch to "save my rewards" and spend the balance later. Redemption
+outside inventory comes later, each option behind an admin toggle: a coupon
+code for cardshellz.com, and one for the cardshellz.io store once it exists.
+A redemption debits the rewards balance and never touches the Shellz Club
+points ledger.
+
+**Separation from Shellz Club rewards.** The two programs never pool. A .ops
+member still earns Shellz Club rewards on retail purchases, and those can
+never be spent on .ops orders or product cost; wallet rewards never become
+Shellz Club points. Each balance is spent only in the system that owns it,
+so no order ever depends on a two-system transaction.
+
+**Built with this phase:** the held-order backup-card charge covers the
+whole shortfall, up to the policy's manual funding maximum in one payment
+(the single-charge bound now shapes routine top-ups only, and every vendor
+surface says so); the add-money step no longer describes autopay, shows the
+balance as its own element, and states the picked rail's terms as short
+bullets (`describeDepositRail`: fee, landing time, the credit rule from the
+account's three facts, and the backup card while a transfer lands), with
+"Skip for now" and no Back. The card fee (held at zero) and the card minimum
+deposit ($100) are wallet-policy limits staff edit on the Wallet Policy tab
+(migration 0701; the environment variable is only the fee's fallback). The
+rate a vendor acknowledged is stored on their settings row, backfilled from
+the audit trail; an unattended card charge never carries more than it, an
+agreement at or above the live rate is current, and a fee cut applies at
+once. A card deposit is held to the card minimum on the server and in the
+add-money controls, and every vendor surface reads "no fee" at zero.
+The rewards money paths (migration 0702): the wallet account carries a
+third, spend-only `rewards_balance_cents` (never negative) and every ledger
+line snapshots it; a settled bank or USDC credit earns rewards in the
+settlement's own transaction, at the per-rail rate read on the same client
+from the policy in force (`rewards_rate_bank_bps`, `rewards_rate_usdc_bps`,
+`rewards_rate_card_bps`: 1%, 1%, 0% at launch, each under a 10% ceiling,
+editable on the Wallet Policy tab), rounded down, once per credit
+(`rewards_earned`); a manual staff credit earns nothing. Each order debit
+takes rewards first and cash second (`rewards_spent`, then `order_debit` for
+what cash still owes; an order rewards pay in full posts no cash row and is
+never refused for a negative cash balance), unless the vendor saved their
+rewards (`spend_rewards_first` on their settings row,
+`PUT /api/dropship/wallet/rewards/preference`); a hold and the card backstop
+are sized on the cash the order still needs. A dispute takes the credit's
+rewards back pro rata: what is still in the balance leaves it
+(`rewards_reversed`), the part already spent comes out of cash through the
+same `funding_reversal` row; a won dispute gives both back
+(`rewards_reinstated`). Not built yet: the vendor-facing rewards surface
+(balance, ledger words, the "save my rewards" switch), the rewards share of a
+return credit, coupon redemption (`rewards_redeemed` has no writer).
+
+**Still open, not designed here:** credit against a business account's first
+bank transfer (today one earlier transfer from the account must have
+settled), and a USDC pull contract for automatic top-ups from a
+self-custody wallet.

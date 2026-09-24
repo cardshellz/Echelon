@@ -18,6 +18,8 @@ import * as eligibilityDomain from "../../domain/customer-return-eligibility";
 
 const service = new CustomerReturnPreviewService();
 const lookup = { scenarioId: "split_delivered" as const, orderReference: "TEST-1001" };
+const dimensions = { lengthMm: 254, widthMm: 203.2, heightMm: 101.6 };
+const customBox = { dimensions, originalBoxId: null };
 
 function reviewInput(): ReturnPreviewReviewInput {
   return {
@@ -27,8 +29,8 @@ function reviewInput(): ReturnPreviewReviewInput {
       { lineId: "sample-line-2", quantity: 1, reasonCode: "no_longer_needed" },
     ],
     parcels: [
-      { items: [{ lineId: "sample-line-1", quantity: 1 }, { lineId: "sample-line-2", quantity: 1 }] },
-      { items: [{ lineId: "sample-line-1", quantity: 2 }] },
+      { ...customBox, items: [{ lineId: "sample-line-1", quantity: 1 }, { lineId: "sample-line-2", quantity: 1 }] },
+      { ...customBox, items: [{ lineId: "sample-line-1", quantity: 2 }] },
     ],
   };
 }
@@ -152,6 +154,8 @@ describe("CustomerReturnPreviewService review", () => {
     expect(returnPreviewReviewSchema.safeParse(result).success).toBe(true);
     expect(result).toMatchObject({ mode: "admin_preview", effects: "none", refundMethod: "manual_shopify", orderReference: "TEST-1001", selectedQuantity: 4 });
     expect(result.parcels.map(parcel => parcel.number)).toEqual([1, 2]);
+    expect(result.parcels.map(parcel => parcel.weightGrams)).toEqual([200, 200]);
+    expect(result.parcels.map(parcel => parcel.dimensions)).toEqual([dimensions, dimensions]);
     expect(result.parcels[0].items.map(item => [item.lineId, item.quantity])).toEqual([["sample-line-1", 1], ["sample-line-2", 1]]);
     expect(result.parcels[1].items).toMatchObject([{ lineId: "sample-line-1", quantity: 2 }]);
     expect(input).toEqual(before);
@@ -221,7 +225,7 @@ describe("CustomerReturnPreviewService review", () => {
     ["outside_window", "TEST-1005", "sample-line-1", 1],
   ] as const)("blocks unavailable units for %s/%s/%s", (scenarioId, orderReference, lineId, quantity) => {
     expectPreviewError(() => service.review({ scenarioId, orderReference,
-      selections: [{ lineId, quantity, reasonCode: null }], parcels: [{ items: [{ lineId, quantity }] }],
+      selections: [{ lineId, quantity, reasonCode: null }], parcels: [{ ...customBox, items: [{ lineId, quantity }] }],
     }), "RETURN_PREVIEW_QUANTITY_UNAVAILABLE", 409);
   });
 
@@ -230,7 +234,7 @@ describe("CustomerReturnPreviewService review", () => {
     ["already_returning", "TEST-1004", "sample-line-1"],
   ] as const)("accepts the one remaining eligible unit in %s", (scenarioId, orderReference, lineId) => {
     expect(service.review({ scenarioId, orderReference,
-      selections: [{ lineId, quantity: 1, reasonCode: null }], parcels: [{ items: [{ lineId, quantity: 1 }] }],
+      selections: [{ lineId, quantity: 1, reasonCode: null }], parcels: [{ ...customBox, items: [{ lineId, quantity: 1 }] }],
     }).selectedQuantity).toBe(1);
   });
 
@@ -243,7 +247,7 @@ describe("CustomerReturnPreviewService review", () => {
     [{ items: [{ lineId: "unknown", quantity: 1 }] }],
     [{ items: [{ lineId: "sample-line-1", quantity: 1 }, { lineId: "sample-line-1", quantity: 2 }, { lineId: "sample-line-2", quantity: 1 }] }],
     [{ items: [{ lineId: "sample-line-1", quantity: Number.MAX_SAFE_INTEGER }] }],
-  ].map(parcels => ({ parcels })))("rejects missing, duplicated, unknown, overpacked or unconserved box contents", ({ parcels }) => {
+  ].map(parcels => ({ parcels: parcels.map(parcel => ({ ...customBox, ...parcel })) })))("rejects missing, duplicated, unknown, overpacked or unconserved box contents", ({ parcels }) => {
     expectPreviewError(() => service.review({ ...reviewInput(), parcels }), "RETURN_PREVIEW_PARCELS_INVALID", 400);
   });
 

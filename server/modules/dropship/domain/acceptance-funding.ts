@@ -4,6 +4,10 @@
  * Funding design phase 3 (owner decisions, 2026-09-20). When an order's debit
  * outruns the available balance, acceptance walks a fixed order of sources:
  *
+ *   0. rewards              — the spend-only balance pays first, unless the
+ *                             vendor is saving it (phase 7,
+ *                             domain/wallet-rewards.ts); the waterfall below
+ *                             runs on what cash still owes;
  *   1. available balance    — free;
  *   2. pending-ACH advance  — the order is accepted against bank transfers
  *                             still settling, for a fee on the amount used,
@@ -40,6 +44,7 @@ import { roundHalfUp } from "../../../../shared/utils/money";
 import { DropshipError } from "./errors";
 import type { DropshipFundingAccountHolderType } from "./funding-method";
 import type { DropshipAdvanceCapSource } from "./vendor-credit";
+import { decideRewardsSpend } from "./wallet-rewards";
 
 export const DROPSHIP_ACCEPTANCE_FUNDING_INVALID = "DROPSHIP_ACCEPTANCE_FUNDING_INVALID";
 
@@ -124,13 +129,22 @@ export type DropshipAdvanceRefusal =
       capCents: number;
     };
 
+/**
+ * Every outcome carries `rewardsCents`: the part of the debit the rewards
+ * balance pays (zero without rewards facts or when the vendor saves them).
+ * For a hold it is what rewards would pay, so the shortfall and the card
+ * backstop are sized on the cash the order still needs.
+ */
 export type DropshipAcceptanceFundingDecision =
-  | { outcome: "accepted"; source: "available"; advance: null }
-  | { outcome: "accepted"; source: "advance"; advance: DropshipAcceptanceAdvance }
+  | { outcome: "accepted"; source: "available"; advance: null; rewardsCents: number }
+  /** Rewards covered the whole debit: nothing is drawn from cash, whatever its balance. */
+  | { outcome: "accepted"; source: "rewards"; advance: null; rewardsCents: number }
+  | { outcome: "accepted"; source: "advance"; advance: DropshipAcceptanceAdvance; rewardsCents: number }
   | {
       outcome: "payment_hold";
       reason: "vendor_paused" | "insufficient_balance";
       advance: null;
+      rewardsCents: number;
       /** What the order was short by and why the advance did not cover it; null for a standing hold. */
       shortfall: { gapCents: number; advanceRefusal: DropshipAdvanceRefusal } | null;
     };
@@ -142,6 +156,12 @@ export interface DropshipAcceptanceFundingInput {
   standingHold: boolean;
   /** Null when the advance facts could not be read: the order then holds rather than guesses. */
   advance: DropshipAdvanceContext | null;
+  /**
+   * The rewards facts read under the same wallet lock as the balances
+   * (phase 7). Absent when the caller has none: the order is then paid from
+   * cash alone.
+   */
+  rewards?: { balanceCents: number; spendFirst: boolean };
 }
 
 /** The fee for advancing `advanceCents` at `feeBps`, rounded half up at the sub-cent boundary. */
@@ -192,13 +212,36 @@ export function decideAcceptanceFunding(input: DropshipAcceptanceFundingInput): 
   if (input.totalDebitCents <= 0) {
     throw invalid("totalDebitCents must be positive.", { totalDebitCents: input.totalDebitCents });
   }
+  // Rewards are split off before anything else so that a standing hold and a
+  // shortfall both report the cash the order still needs.
+  const split = input.rewards
+    ? decideRewardsSpend({
+        rewardsBalanceCents: input.rewards.balanceCents,
+        totalDebitCents: input.totalDebitCents,
+        spendRewardsFirst: input.rewards.spendFirst,
+      })
+    : { rewardsCents: 0, cashCents: input.totalDebitCents };
+  const rewardsCents = split.rewardsCents;
+  const hold = (
+    gapCents: number,
+    advanceRefusal: DropshipAdvanceRefusal,
+  ): DropshipAcceptanceFundingDecision => ({
+    outcome: "payment_hold",
+    reason: "insufficient_balance",
+    advance: null,
+    rewardsCents,
+    shortfall: { gapCents, advanceRefusal },
+  });
   if (input.standingHold) {
-    return { outcome: "payment_hold", reason: "vendor_paused", advance: null, shortfall: null };
+    return { outcome: "payment_hold", reason: "vendor_paused", advance: null, rewardsCents, shortfall: null };
   }
-  if (input.availableBalanceCents >= input.totalDebitCents) {
-    return { outcome: "accepted", source: "available", advance: null };
+  if (split.cashCents === 0) {
+    return { outcome: "accepted", source: "rewards", advance: null, rewardsCents };
   }
-  const gapCents = input.totalDebitCents - input.availableBalanceCents;
+  if (input.availableBalanceCents >= split.cashCents) {
+    return { outcome: "accepted", source: "available", advance: null, rewardsCents };
+  }
+  const gapCents = split.cashCents - input.availableBalanceCents;
   if (input.advance === null) {
     return hold(gapCents, { code: "advance_unavailable" });
   }
@@ -209,9 +252,10 @@ export function decideAcceptanceFunding(input: DropshipAcceptanceFundingInput): 
   if (standing.eligiblePendingCents === 0) {
     return hold(gapCents, { code: "no_eligible_source", reasons: standing.reasons });
   }
-  // The debit less any positive balance is what pending money pays for; when
-  // the balance is already negative the whole debit is advanced.
-  const advanceCents = input.totalDebitCents - Math.max(0, input.availableBalanceCents);
+  // The cash part of the debit less any positive balance is what pending
+  // money pays for; when the balance is already negative the whole cash part
+  // is advanced.
+  const advanceCents = split.cashCents - Math.max(0, input.availableBalanceCents);
   const feeCents = calculateAdvanceFeeCents(advanceCents, standing.policy.feeBps);
   const exposureAfterCents = gapCents + feeCents;
   if (exposureAfterCents > standing.allowanceCents) {
@@ -226,6 +270,7 @@ export function decideAcceptanceFunding(input: DropshipAcceptanceFundingInput): 
   return {
     outcome: "accepted",
     source: "advance",
+    rewardsCents,
     advance: {
       advanceCents,
       feeCents,
@@ -247,30 +292,33 @@ export type DropshipCardBackstopDecision =
   | { outcome: "not_needed" }
   | {
       outcome: "charge";
-      /** What the wallet must receive: min(back to minimum, the vendor's single-charge limit), never below the gap. */
+      /** What the wallet must receive: the gap, plus a refill toward the minimum within the vendor's single-charge bound, never above the program ceiling. */
       amountCents: number;
       gapCents: number;
       backToMinimumCents: number;
     }
-  | { outcome: "limit_below_gap"; gapCents: number; limitCents: number };
+  | { outcome: "ceiling_below_gap"; gapCents: number; ceilingCents: number };
 
 /**
- * The card charge for an order the balance cannot cover (funding design:
- * "min(back-to-minimum, vendor's limit), never less than the gap").
+ * The card charge for an order the balance cannot cover (funding design
+ * phase 7: "the whole shortfall, whatever its size").
  *
- * Back to minimum is what restores the vendor's floor after the order pays;
- * it is never less than the gap. The vendor's single-charge limit bounds every
- * off-session card charge, so the amount is the smaller of the two — and when
- * even the limit cannot cover the gap, nothing is charged and the order waits.
- * Before this rule the whole back-to-minimum amount was required, so a limit
- * between the gap and that amount left the order held with a card that could
- * have paid for it.
+ * The gap is always covered: an order the vendor sold goes out. Beyond the
+ * gap the charge also brings the balance back toward the minimum, and only
+ * that refill part is shaped by the vendor's single-charge bound, which is a
+ * promise about routine top-ups, not about orders. The one ceiling is the
+ * program's limit on any single payment (the policy's manual funding
+ * maximum): a gap above it is not charged and the order waits. Before phase 7
+ * the bound capped the whole charge, so a large order sat held with a card
+ * that could have paid for it.
  */
 export function decideCardBackstopCharge(input: {
   availableBalanceCents: number;
   minimumBalanceCents: number;
   requiredBalanceCents: number;
   singleChargeLimitCents: number | null;
+  /** The program's ceiling on any single payment; null means none. */
+  chargeCeilingCents: number | null;
 }): DropshipCardBackstopDecision {
   assertInteger(input.availableBalanceCents, "availableBalanceCents");
   assertCents(input.minimumBalanceCents, "minimumBalanceCents");
@@ -278,17 +326,22 @@ export function decideCardBackstopCharge(input: {
   if (input.singleChargeLimitCents !== null) {
     assertCents(input.singleChargeLimitCents, "singleChargeLimitCents");
   }
+  if (input.chargeCeilingCents !== null) {
+    assertCents(input.chargeCeilingCents, "chargeCeilingCents");
+  }
   const gapCents = input.requiredBalanceCents - input.availableBalanceCents;
   if (gapCents <= 0) {
     return { outcome: "not_needed" };
   }
-  const backToMinimumCents = Math.max(input.minimumBalanceCents, input.requiredBalanceCents) - input.availableBalanceCents;
-  const amountCents = input.singleChargeLimitCents === null
-    ? backToMinimumCents
-    : Math.min(backToMinimumCents, input.singleChargeLimitCents);
-  if (amountCents < gapCents) {
-    return { outcome: "limit_below_gap", gapCents, limitCents: input.singleChargeLimitCents ?? amountCents };
+  if (input.chargeCeilingCents !== null && gapCents > input.chargeCeilingCents) {
+    return { outcome: "ceiling_below_gap", gapCents, ceilingCents: input.chargeCeilingCents };
   }
+  const backToMinimumCents = Math.max(input.minimumBalanceCents, input.requiredBalanceCents) - input.availableBalanceCents;
+  // The bound shapes only the refill beyond the gap; the gap itself is never cut.
+  const refillCents = input.singleChargeLimitCents === null
+    ? backToMinimumCents
+    : Math.max(gapCents, Math.min(backToMinimumCents, input.singleChargeLimitCents));
+  const amountCents = input.chargeCeilingCents === null ? refillCents : Math.min(refillCents, input.chargeCeilingCents);
   return { outcome: "charge", amountCents, gapCents, backToMinimumCents };
 }
 
@@ -344,15 +397,6 @@ function validatePolicy(policy: DropshipAdvancePolicy): DropshipAdvancePolicy {
     throw invalid("capSource must be 'policy' or 'vendor_override'.", { capSource: policy.capSource });
   }
   return { feeBps: policy.feeBps, capCents: policy.capCents, capSource: policy.capSource };
-}
-
-function hold(gapCents: number, advanceRefusal: DropshipAdvanceRefusal): DropshipAcceptanceFundingDecision {
-  return {
-    outcome: "payment_hold",
-    reason: "insufficient_balance",
-    advance: null,
-    shortfall: { gapCents, advanceRefusal },
-  };
 }
 
 function assertInteger(value: number, field: string): void {

@@ -76,12 +76,16 @@ export interface WalletAutoReload {
   backstopFundingMethodId: number | null;
   acknowledgedCardFeeBps: number | null;
   acknowledgedAt: string | null;
+  /** True: rewards pay first on each order; false: the vendor saves them (funding design phase 7). */
+  spendRewardsFirst: boolean;
 }
 
 export type WalletLedgerReason =
   | "daily_top_up" | "after_order_top_up" | "activation_top_up" | "covered_held_order" | "manual_top_up"
   | "usdc_deposit" | "admin_credit" | "order" | "advance_fee" | "funding_reversed" | "funding_reinstated"
-  | "return_fee" | "return_credit" | "insurance_pool_credit" | "other";
+  | "return_fee" | "return_credit" | "insurance_pool_credit"
+  | "rewards_earned" | "rewards_spent" | "rewards_reversed" | "rewards_reinstated" | "rewards_redeemed"
+  | "other";
 
 export interface WalletLedgerEntry {
   ledgerEntryId: number;
@@ -92,6 +96,8 @@ export interface WalletLedgerEntry {
   /** Signed: a return fee can leave the balance below zero. */
   availableBalanceAfterCents: number | null;
   pendingBalanceAfterCents: number | null;
+  /** Null on lines written before the rewards balance existed, or by writers that never move it. */
+  rewardsBalanceAfterCents: number | null;
   createdAt: string;
   settledAt: string | null;
   reason: WalletLedgerReason;
@@ -123,6 +129,12 @@ export interface WalletLimits {
   advanceCapCents: number;
   /** Days a vendor below a raised tier minimum keeps that tier's listings. */
   tierChangeGraceDays: number;
+  /** Smallest card deposit (funding design phase 7); bank deposits keep manualFundingMinCents. */
+  cardFundingMinCents: number;
+  /** What a settled transfer earns into the spend-only rewards balance, in basis points, per rail (funding design phase 7). */
+  rewardsRateBankBps: number;
+  rewardsRateUsdcBps: number;
+  rewardsRateCardBps: number;
 }
 
 export type WalletListingTier = "pack" | "case";
@@ -225,7 +237,14 @@ export interface WalletUsdcDeposit {
 }
 
 export interface DropshipWalletView {
-  account: { availableBalanceCents: number; pendingBalanceCents: number; currency: string; status: string };
+  account: {
+    availableBalanceCents: number;
+    pendingBalanceCents: number;
+    /** The spend-only rewards balance (funding design phase 7); zero from an older server. */
+    rewardsBalanceCents: number;
+    currency: string;
+    status: string;
+  };
   autoReload: WalletAutoReload | null;
   fundingMethods: WalletFundingMethod[];
   recentLedger: WalletLedgerEntry[];
@@ -307,12 +326,15 @@ const rawAutoReloadSchema = z.object({
   backstopFundingMethodId: z.number().int().nullable().optional(),
   acknowledgedCardFeeBps: z.number().int().nullable().optional(),
   acknowledgedAt: z.string().nullable().optional(),
+  spendRewardsFirst: z.boolean().optional(),
 }).passthrough();
 
 const ledgerReasonSchema = z.enum([
   "daily_top_up", "after_order_top_up", "activation_top_up", "covered_held_order", "manual_top_up",
   "usdc_deposit", "admin_credit", "order", "advance_fee", "funding_reversed", "funding_reinstated",
-  "return_fee", "return_credit", "insurance_pool_credit", "other",
+  "return_fee", "return_credit", "insurance_pool_credit",
+  "rewards_earned", "rewards_spent", "rewards_reversed", "rewards_reinstated", "rewards_redeemed",
+  "other",
 ]);
 
 const rawLedgerEntrySchema = z.object({
@@ -323,6 +345,7 @@ const rawLedgerEntrySchema = z.object({
   currency: z.string(),
   availableBalanceAfterCents: signedCents.nullable(),
   pendingBalanceAfterCents: signedCents.nullable(),
+  rewardsBalanceAfterCents: cents.nullable().optional(),
   referenceType: z.string().nullable().optional(),
   createdAt: isoString,
   settledAt: z.string().nullable(),
@@ -345,11 +368,15 @@ const rawLimitsSchema = z.object({
   autoReloadMinAmountCents: cents,
   manualFundingMinCents: cents,
   manualFundingMaxCents: cents,
+  cardFundingMinCents: cents.optional(),
   defaultPaymentHoldTimeoutMinutes: z.number().int().positive(),
   holdExpiryWarningMinutes: z.number().int().positive(),
   advanceFeeBps: z.number().int().nonnegative().optional(),
   advanceCapCents: z.number().int().nonnegative().optional(),
   tierChangeGraceDays: z.number().int().nonnegative().optional(),
+  rewardsRateBankBps: z.number().int().nonnegative().optional(),
+  rewardsRateUsdcBps: z.number().int().nonnegative().optional(),
+  rewardsRateCardBps: z.number().int().nonnegative().optional(),
 });
 
 const rawListingTierStatusSchema = z.object({
@@ -416,6 +443,7 @@ export const rawWalletResponseSchema = z.object({
     account: z.object({
       availableBalanceCents: signedCents,
       pendingBalanceCents: signedCents,
+      rewardsBalanceCents: cents.optional(),
       currency: z.string(),
       status: z.string(),
     }).passthrough(),
@@ -460,11 +488,16 @@ export const CLIENT_FALLBACK_LIMITS: WalletLimits = Object.freeze({
   autoReloadMinAmountCents: 10_000,
   manualFundingMinCents: 1_000,
   manualFundingMaxCents: 500_000,
+  cardFundingMinCents: 10_000,
   defaultPaymentHoldTimeoutMinutes: 1_440,
   holdExpiryWarningMinutes: 120,
   advanceFeeBps: 100,
   advanceCapCents: 50_000,
   tierChangeGraceDays: 14,
+  // Funding design phase 7 launch rates: bank and USDC earn 1%, card earns nothing.
+  rewardsRateBankBps: 100,
+  rewardsRateUsdcBps: 100,
+  rewardsRateCardBps: 0,
 });
 
 /** The keys of `value` whose entries are defined, so a spread never overwrites a default with `undefined`. */
@@ -601,9 +634,12 @@ export function deriveSetupStatus(input: {
   const sourceReady = source !== null && source.status === "active" && (source.rail === "stripe_card" || source.rail === "stripe_ach");
   const backup = enabled ? input.fundingMethods.find((method) => method.fundingMethodId === autoReload?.backstopFundingMethodId) ?? null : null;
   const backupReady = backup !== null && backup.roles.chargeable;
+  // Agreed at or above the rate in force: a fee cut never un-acknowledges a
+  // vendor (the server holds unattended charges to the lower of the two).
   const acknowledged = autoReload !== null
     && autoReload.acknowledgedAt !== null
-    && autoReload.acknowledgedCardFeeBps === input.cardFundingFeeBps;
+    && autoReload.acknowledgedCardFeeBps !== null
+    && autoReload.acknowledgedCardFeeBps >= input.cardFundingFeeBps;
   const done = sourceReady && backupReady;
   return { sourceReady, backupReady, acknowledged, done, launchReady: done && acknowledged };
 }
@@ -631,6 +667,16 @@ export function deriveLedgerReason(entry: Pick<RawLedgerEntry, "type" | "reason"
       return "return_credit";
     case "insurance_pool_credit":
       return "insurance_pool_credit";
+    case "rewards_earned":
+      return "rewards_earned";
+    case "rewards_spent":
+      return "rewards_spent";
+    case "rewards_reversed":
+      return "rewards_reversed";
+    case "rewards_reinstated":
+      return "rewards_reinstated";
+    case "rewards_redeemed":
+      return "rewards_redeemed";
     case "funding":
       break;
     default:
@@ -688,6 +734,8 @@ export function adaptWalletView(raw: unknown): DropshipWalletView {
       backstopFundingMethodId: backstop.backstopFundingMethodId,
       acknowledgedCardFeeBps: acknowledgement.acknowledgedCardFeeBps,
       acknowledgedAt: acknowledgement.acknowledgedAt,
+      // An older server serves no preference; the documented default is to spend first.
+      spendRewardsFirst: wallet.autoReload.spendRewardsFirst ?? true,
     }
     : null;
 
@@ -723,6 +771,7 @@ export function adaptWalletView(raw: unknown): DropshipWalletView {
       currency: entry.currency,
       availableBalanceAfterCents: entry.availableBalanceAfterCents,
       pendingBalanceAfterCents: entry.pendingBalanceAfterCents,
+      rewardsBalanceAfterCents: entry.rewardsBalanceAfterCents ?? null,
       createdAt: entry.createdAt,
       settledAt: entry.settledAt,
       reason: deriveLedgerReason(entry),
@@ -757,6 +806,8 @@ export function adaptWalletView(raw: unknown): DropshipWalletView {
     account: {
       availableBalanceCents: wallet.account.availableBalanceCents,
       pendingBalanceCents: wallet.account.pendingBalanceCents,
+      // An older server serves no rewards balance; zero is the truthful reading of "none".
+      rewardsBalanceCents: wallet.account.rewardsBalanceCents ?? 0,
       currency: wallet.account.currency,
       status: wallet.account.status,
     },

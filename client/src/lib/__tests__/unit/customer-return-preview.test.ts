@@ -21,6 +21,10 @@ import {
   type CustomerReturnFlowOrder,
   type CustomerReturnFlowReview,
 } from "@shared/returns/customer-return-flow.contract";
+import { customPreviewParcelSize } from "../../customer-return-parcels";
+
+const dimensions = { lengthMm: 254, widthMm: 203.2, heightMm: 152.4 };
+const customSize = customPreviewParcelSize(dimensions);
 
 const order: CustomerReturnFlowOrder = {
   sourceRevision: null,
@@ -29,12 +33,23 @@ const order: CustomerReturnFlowOrder = {
   evaluatedAt: "2026-02-01T00:00:00Z",
   returnWindowEndsAt: "2027-01-01T00:00:00Z",
   message: null,
+  boxOptions: [
+    {
+      id: "box-1",
+      dimensions,
+      items: [
+        { lineId: "line-a", quantity: 3 },
+        { lineId: "line-b", quantity: 1 },
+      ],
+    },
+  ],
   lines: [
     {
       id: "line-a",
       title: "Sleeves",
       variant: "Blue",
       sku: "SAME",
+      unitWeightGrams: 10.2,
       purchasedQuantity: 3,
       deliveredQuantity: 3,
       alreadyReturningQuantity: 1,
@@ -46,6 +61,7 @@ const order: CustomerReturnFlowOrder = {
       title: "Sleeves",
       variant: "Blue",
       sku: "SAME",
+      unitWeightGrams: 20,
       purchasedQuantity: 1,
       deliveredQuantity: 1,
       alreadyReturningQuantity: 0,
@@ -57,6 +73,7 @@ const order: CustomerReturnFlowOrder = {
       title: "Box",
       variant: null,
       sku: null,
+      unitWeightGrams: null,
       purchasedQuantity: 1,
       deliveredQuantity: 0,
       alreadyReturningQuantity: 0,
@@ -159,12 +176,14 @@ describe("customer return preview drafts", () => {
   });
 
   it("defaults all selected lines to one box independently of outbound packages", () => {
-    const parcels = singlePreviewParcel(selections);
+    const parcels = singlePreviewParcel(selections, order);
     const input = buildPreviewReviewInput(order, selections, parcels);
     expect(input.ok).toBe(true);
     if (!input.ok) return;
     expect(input.value.parcels).toEqual([
       {
+        dimensions,
+        originalBoxId: "box-1",
         items: [
           { lineId: "line-a", quantity: 2 },
           { lineId: "line-b", quantity: 1 },
@@ -183,7 +202,7 @@ describe("customer return preview drafts", () => {
     const result = buildPreviewReviewInput(
       { ...order, sourceRevision },
       selections,
-      singlePreviewParcel(selections),
+      singlePreviewParcel(selections, order),
     );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -195,6 +214,7 @@ describe("customer return preview drafts", () => {
     const input = buildPreviewReviewInput(order, selections, [
       {
         key: 1,
+        size: customSize,
         items: [
           { lineId: "line-a", quantity: "1" },
           { lineId: "line-b", quantity: "1" },
@@ -202,6 +222,7 @@ describe("customer return preview drafts", () => {
       },
       {
         key: 2,
+        size: customSize,
         items: [
           { lineId: "line-a", quantity: "1" },
           { lineId: "line-b", quantity: "0" },
@@ -246,7 +267,9 @@ describe("customer return preview drafts", () => {
     "rejects underpacking, overpacking, unknown or duplicated identities",
     (...items) => {
       expect(
-        buildPreviewReviewInput(order, selections, [{ key: 1, items }]).ok,
+        buildPreviewReviewInput(order, selections, [
+          { key: 1, items, size: customSize },
+        ]).ok,
       ).toBe(false);
     },
   );
@@ -254,8 +277,12 @@ describe("customer return preview drafts", () => {
   it("rejects an extra empty box rather than silently removing it", () => {
     expect(
       buildPreviewReviewInput(order, selections, [
-        ...singlePreviewParcel(selections),
-        { key: 2, items: [{ lineId: "line-a", quantity: "0" }] },
+        ...singlePreviewParcel(selections, order),
+        {
+          key: 2,
+          size: customSize,
+          items: [{ lineId: "line-a", quantity: "0" }],
+        },
       ]),
     ).toEqual({
       ok: false,
@@ -325,7 +352,12 @@ describe("customer return preview response verification", () => {
       selectedQuantity: 1,
       refundMethod: "manual_shopify",
       parcels: [
-        { number: 1, items: [{ lineId: "line-a", title, quantity: 1 }] },
+        {
+          number: 1,
+          dimensions,
+          weightGrams: 11,
+          items: [{ lineId: "line-a", title, quantity: 1 }],
+        },
       ],
     };
     expect(
@@ -337,6 +369,8 @@ describe("customer return preview response verification", () => {
         parcels: [
           {
             number: 1,
+            dimensions,
+            weightGrams: 11,
             items: [{ lineId: "line-a", title: "T".repeat(1001), quantity: 1 }],
           },
         ],
@@ -380,7 +414,7 @@ describe("customer return preview response verification", () => {
     const input = buildPreviewReviewInput(
       order,
       selections,
-      singlePreviewParcel(selections),
+      singlePreviewParcel(selections, order),
     );
     if (!input.ok) throw new Error(input.message);
     const response: CustomerReturnFlowReview = {
@@ -392,6 +426,8 @@ describe("customer return preview response verification", () => {
       parcels: [
         {
           number: 1,
+          dimensions,
+          weightGrams: 41,
           items: [
             { lineId: "line-b", title: "Sleeves", quantity: 1 },
             { lineId: "line-a", title: "Sleeves", quantity: 2 },
@@ -400,18 +436,20 @@ describe("customer return preview response verification", () => {
       ],
     };
     expect(() =>
-      assertPreviewReviewMatches(response, input.value),
+      assertPreviewReviewMatches(response, input.value, order),
     ).not.toThrow();
     expect(() =>
       assertPreviewReviewMatches(
         { ...response, sourceRevision: "a".repeat(64) },
         input.value,
+        order,
       ),
     ).toThrow();
     expect(() =>
       assertPreviewReviewMatches(
         { ...response, selectedQuantity: 4 },
         input.value,
+        order,
       ),
     ).toThrow();
     expect(() =>
@@ -421,6 +459,8 @@ describe("customer return preview response verification", () => {
           parcels: [
             {
               number: 1,
+              dimensions,
+              weightGrams: 41,
               items: [
                 { lineId: "line-a", title: "Sleeves", quantity: 1 },
                 { lineId: "line-a", title: "Sleeves", quantity: 2 },
@@ -429,6 +469,7 @@ describe("customer return preview response verification", () => {
           ],
         },
         input.value,
+        order,
       ),
     ).toThrow();
   });

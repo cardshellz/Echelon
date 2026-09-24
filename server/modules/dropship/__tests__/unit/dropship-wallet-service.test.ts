@@ -56,6 +56,7 @@ import {
   ArchiveDropshipFundingMethodRepositoryInput,
   DropshipProviderDetachResult,
   RecordDropshipFundingMethodDetachOutcomeRepositoryInput,
+  SetDropshipRewardsSpendPreferenceRepositoryInput,
 } from "../../application/dropship-wallet-service";
 
 const now = new Date("2026-05-01T20:00:00.000Z");
@@ -80,6 +81,8 @@ describe("DropshipWalletService", () => {
     walletPolicy?: DropshipWalletPolicyResolver;
     usdcBaseDepositAddress?: string | null;
     usdcDepositAddressLookup?: (vendorId: number) => Promise<string | null>;
+    /** The live card fee rate; the launch-era 3% unless a test says otherwise. */
+    cardFundingFeeBps?: number;
   } = {}): DropshipWalletService {
     return new DropshipWalletService({
       vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
@@ -100,8 +103,8 @@ describe("DropshipWalletService", () => {
         warn: (event) => logs.push({ ...event, level: "warn" }),
         error: (event) => logs.push({ ...event, level: "error" }),
       },
-      // The launch rate, pinned so the assertions below do not depend on the environment.
-      cardFundingFeeBps: 300,
+      // Pinned so the assertions below do not depend on the environment or a policy row.
+      cardFundingFeeBps: overrides.cardFundingFeeBps ?? 300,
     });
   }
 
@@ -1192,7 +1195,7 @@ describe("DropshipWalletService", () => {
     });
   });
 
-  it("skips payment-hold auto-reload when the needed amount exceeds the configured max", async () => {
+  it("charges a held order its whole gap even when the vendor's single-charge bound is below it", async () => {
     repository.autoReload = makeAutoReloadSetting({
       fundingMethodId: 99,
       minimumBalanceCents: 5000,
@@ -1207,11 +1210,46 @@ describe("DropshipWalletService", () => {
       idempotencyKey: "auto-reload-intake-456",
     });
 
-    expect(result).toMatchObject({
-      outcome: "skipped",
-      skipReason: "amount_exceeds_max_single_reload",
+    // The bound is a promise about routine top-ups; an order the vendor sold goes out.
+    expect(result).toMatchObject({ outcome: "funding_created", fundingMethodId: 99, amountCents: 7500 });
+    expect(repository.ledger[0]).toMatchObject({ amountCents: 7500, fundingMethodId: 99 });
+  });
+
+  it("holds the order when its gap is above the program's ceiling on a single payment", async () => {
+    repository.autoReload = makeAutoReloadSetting({
       fundingMethodId: 99,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: 25000,
     });
+    const lowCeiling: DropshipWalletPolicyResolver = {
+      resolveWalletLimits: async () => ({
+        autoReloadMinTriggerCents: 5_000,
+        autoReloadMinAmountCents: 5_000,
+        manualFundingMinCents: 1_000,
+        manualFundingMaxCents: 6_000,
+        cardFundingFeeBps: 0,
+        cardFundingMinCents: 1_000,
+        rewardsRateBankBps: 100,
+        rewardsRateUsdcBps: 100,
+        rewardsRateCardBps: 0,
+        defaultPaymentHoldTimeoutMinutes: 1_440,
+        holdExpiryWarningMinutes: 120,
+        caseTierMinimumCents: 50_000,
+        advanceFeeBps: 100,
+        advanceCapCents: 50_000,
+        tierChangeGraceDays: 14,
+      }),
+    };
+
+    const result = await buildService({ walletPolicy: lowCeiling }).handleAutoReload({
+      vendorId: 10,
+      reason: "payment_hold",
+      requiredBalanceCents: 7500,
+      intakeId: 456,
+      idempotencyKey: "auto-reload-intake-456",
+    });
+
+    expect(result).toMatchObject({ outcome: "skipped", skipReason: "amount_exceeds_funding_ceiling", fundingMethodId: 99 });
     expect(repository.ledger).toHaveLength(0);
   });
 
@@ -1252,6 +1290,77 @@ describe("DropshipWalletService", () => {
       code: "DROPSHIP_AUTO_RELOAD_FUNDING_CREATED",
       context: expect.objectContaining({ amountCents: 6500, cardFeeCents: 195, cardFeeBps: 300, chargedCents: 6695 }),
     });
+  });
+
+  it("holds an unattended card charge to the rate the vendor acknowledged when the live rate is higher", async () => {
+    // Staff raised the fee to 3% after this vendor agreed to 2%: the mandate
+    // promises they confirm before paying more, so the cover is charged at 2%.
+    repository.autoReload = makeAutoReloadSetting({
+      fundingMethodId: 99,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: 25000,
+      acknowledgedCardFeeBps: 200,
+      acknowledgedAt: now,
+    });
+    repository.account = { ...repository.account, availableBalanceCents: 1000 };
+
+    const result = await service.handleAutoReload({
+      vendorId: 10,
+      reason: "payment_hold",
+      requiredBalanceCents: 7500,
+      intakeId: 456,
+      idempotencyKey: "auto-reload-intake-456",
+    });
+
+    expect(fundingProvider.paymentIntentInputs).toEqual([
+      expect.objectContaining({ rail: "stripe_card", amountCents: 6500, cardFee: { feeCents: 130, feeBps: 200 } }),
+    ]);
+    expect(result).toMatchObject({ outcome: "funding_created", amountCents: 6500, cardFeeCents: 130, chargedCents: 6630 });
+  });
+
+  it("charges the lower live rate when the vendor acknowledged a higher one", async () => {
+    // The fee dropped to zero (funding design phase 7) after this vendor agreed to 3%: they pay nothing.
+    repository.autoReload = makeAutoReloadSetting({
+      fundingMethodId: 99,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: 25000,
+      acknowledgedCardFeeBps: 300,
+      acknowledgedAt: now,
+    });
+    repository.account = { ...repository.account, availableBalanceCents: 1000 };
+    const free = await buildService({ cardFundingFeeBps: 0 }).handleAutoReload({
+      vendorId: 10,
+      reason: "payment_hold",
+      requiredBalanceCents: 7500,
+      intakeId: 456,
+      idempotencyKey: "auto-reload-intake-456",
+    });
+    expect(fundingProvider.paymentIntentInputs).toEqual([
+      expect.objectContaining({ rail: "stripe_card", amountCents: 6500, cardFee: { feeCents: 0, feeBps: 0 } }),
+    ]);
+    expect(free).toMatchObject({ outcome: "funding_created", amountCents: 6500, cardFeeCents: 0, chargedCents: 6500 });
+  });
+
+  it("charges the live rate when nothing was acknowledged (a row saved before the acknowledgement was stored)", async () => {
+    repository.autoReload = makeAutoReloadSetting({
+      fundingMethodId: 99,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: 25000,
+      acknowledgedCardFeeBps: null,
+      acknowledgedAt: null,
+    });
+    repository.account = { ...repository.account, availableBalanceCents: 1000 };
+    const live = await service.handleAutoReload({
+      vendorId: 10,
+      reason: "payment_hold",
+      requiredBalanceCents: 7500,
+      intakeId: 457,
+      idempotencyKey: "auto-reload-intake-457",
+    });
+    expect(fundingProvider.paymentIntentInputs).toEqual([
+      expect.objectContaining({ rail: "stripe_card", amountCents: 6500, cardFee: { feeCents: 195, feeBps: 300 } }),
+    ]);
+    expect(live).toMatchObject({ outcome: "funding_created", amountCents: 6500, cardFeeCents: 195, chargedCents: 6695 });
   });
 
   it("charges a bank reload exactly the reload amount and records no fee", async () => {
@@ -1350,6 +1459,11 @@ describe("DropshipWalletService", () => {
       advanceFeeBps: 150,
       advanceCapCents: 75_000,
       tierChangeGraceDays: 21,
+      cardFundingFeeBps: 0,
+      cardFundingMinCents: 12_500,
+      rewardsRateBankBps: 100,
+      rewardsRateUsdcBps: 100,
+      rewardsRateCardBps: 0,
     };
     const policy: DropshipWalletPolicyResolver = { resolveWalletLimits: async () => ({ ...publishedLimits }) };
 
@@ -1371,6 +1485,11 @@ describe("DropshipWalletService", () => {
         advanceFeeBps: 100,
         advanceCapCents: 50_000,
         tierChangeGraceDays: 14,
+        cardFundingFeeBps: 0,
+        cardFundingMinCents: 10_000,
+        rewardsRateBankBps: 100,
+        rewardsRateUsdcBps: 100,
+        rewardsRateCardBps: 0,
       });
     });
 
@@ -1420,38 +1539,64 @@ describe("DropshipWalletService", () => {
       });
     });
 
-    it("enforces the published manual top-up bounds on a funding session", async () => {
+    it("enforces the published manual top-up bounds on a funding session, with the card minimum on a card", async () => {
       const policyService = buildService({ walletPolicy: policy });
-
-      await expect(policyService.createStripeWalletFundingSessionForMember("member-1", {
-        fundingMethodId: 99,
-        amountCents: 2_000,
+      repository.fundingMethods.push(makeFundingMethod({ fundingMethodId: 98, rail: "stripe_ach", providerPaymentMethodId: "pm_bank", displayLabel: "Chase ending in 1234" }));
+      const request = (fundingMethodId: number, amountCents: number) => policyService.createStripeWalletFundingSessionForMember("member-1", {
+        fundingMethodId,
+        amountCents,
         successUrl: "https://cardshellz.io/wallet?wallet_funding=success",
         cancelUrl: "https://cardshellz.io/wallet?wallet_funding=cancelled",
-      })).rejects.toMatchObject({
-        code: "DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE",
-        context: expect.objectContaining({ minCents: 2_500, maxCents: 60_000 }),
       });
 
+      // A card deposit is held to the card minimum (funding design phase 7); a
+      // bank deposit to the general one. Both name the PUBLISHED bounds.
+      await expect(request(99, 5_000)).rejects.toMatchObject({
+        code: "DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE",
+        context: expect.objectContaining({ rail: "stripe_card", minCents: 12_500, maxCents: 60_000 }),
+      });
+      await expect(request(98, 2_000)).rejects.toMatchObject({
+        code: "DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE",
+        context: expect.objectContaining({ rail: "stripe_ach", minCents: 2_500, maxCents: 60_000 }),
+      });
+      await expect(request(98, 5_000)).resolves.toMatchObject({ amountCents: 5_000 });
+
       // Above the published ceiling but well inside the environment default.
-      await expect(policyService.createStripeWalletFundingSessionForMember("member-1", {
-        fundingMethodId: 99,
-        amountCents: 100_000,
-        successUrl: "https://cardshellz.io/wallet?wallet_funding=success",
-        cancelUrl: "https://cardshellz.io/wallet?wallet_funding=cancelled",
-      })).rejects.toMatchObject({
+      await expect(request(99, 100_000)).rejects.toMatchObject({
         code: "DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE",
         context: expect.objectContaining({ maxCents: 60_000 }),
       });
 
-      const session = await policyService.createStripeWalletFundingSessionForMember("member-1", {
-        fundingMethodId: 99,
-        amountCents: 25_000,
-        successUrl: "https://cardshellz.io/wallet?wallet_funding=success",
-        cancelUrl: "https://cardshellz.io/wallet?wallet_funding=cancelled",
-      });
+      const session = await request(99, 25_000);
       expect(session).toMatchObject({ amountCents: 25_000 });
     });
+  });
+
+  it("accepts an acknowledgement at or above the live rate, and stores it with the row (funding design phase 7)", async () => {
+    // The fee was cut to zero after this vendor agreed to 3%: their agreement
+    // covers the lower rate, so an ordinary save carrying it is not stale.
+    const setting = await buildService({ cardFundingFeeBps: 0 }).configureAutoReload({
+      vendorId: 10,
+      fundingMethodId: 99,
+      enabled: true,
+      minimumBalanceCents: 10000,
+      maxSingleReloadCents: 25000,
+      paymentHoldTimeoutMinutes: 2880,
+      acknowledgedCardFeeBps: 300,
+    });
+    expect(setting).toMatchObject({ acknowledgedCardFeeBps: 300, acknowledgedAt: now });
+    expect(repository.lastConfigureInput).toMatchObject({ cardFundingFeeBps: 0, acknowledgedCardFeeBps: 300 });
+
+    // A client that sent no acknowledgement stores none.
+    const unacknowledged = await service.configureAutoReload({
+      vendorId: 10,
+      fundingMethodId: 99,
+      enabled: true,
+      minimumBalanceCents: 10000,
+      maxSingleReloadCents: 25000,
+      paymentHoldTimeoutMinutes: 2880,
+    });
+    expect(unacknowledged).toMatchObject({ acknowledgedCardFeeBps: null, acknowledgedAt: null });
   });
 
   it("records the fee rate the vendor agreed to when auto-reload is configured", async () => {
@@ -1901,9 +2046,9 @@ describe("DropshipWalletService advance and bank balance (funding design phase 3
 });
 
 describe("resolveDropshipCardFundingFeeBps", () => {
-  it("defaults to the launch rate when nothing is configured", () => {
-    expect(resolveDropshipCardFundingFeeBps({})).toBe(300);
-    expect(resolveDropshipCardFundingFeeBps({ DROPSHIP_CARD_FUNDING_FEE_BPS: "  " })).toBe(300);
+  it("defaults to no fee when nothing is configured (funding design phase 7)", () => {
+    expect(resolveDropshipCardFundingFeeBps({})).toBe(0);
+    expect(resolveDropshipCardFundingFeeBps({ DROPSHIP_CARD_FUNDING_FEE_BPS: "  " })).toBe(0);
   });
 
   it("honours a configured rate, including zero", () => {
@@ -2073,6 +2218,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
           externalTransactionId: input.externalTransactionId ?? replay.externalTransactionId,
           availableBalanceAfterCents: availableBalanceCents,
           pendingBalanceAfterCents: pendingBalanceCents,
+          rewardsBalanceAfterCents: null,
           metadata: {
             ...replay.metadata,
             requestHash: input.requestHash,
@@ -2109,6 +2255,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       currency: input.currency,
       availableBalanceAfterCents: availableBalanceCents,
       pendingBalanceAfterCents: pendingBalanceCents,
+      rewardsBalanceAfterCents: null,
       referenceType: input.referenceType,
       referenceId: input.referenceId,
       idempotencyKey: input.idempotencyKey,
@@ -2145,6 +2292,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       status: "failed",
       availableBalanceAfterCents: this.account.availableBalanceCents,
       pendingBalanceAfterCents: pendingBalanceCents,
+      rewardsBalanceAfterCents: null,
       metadata: {
         ...entry.metadata,
         failure: {
@@ -2196,6 +2344,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       currency: credit.currency,
       availableBalanceAfterCents: availableBalanceCents,
       pendingBalanceAfterCents: this.account.pendingBalanceCents,
+      rewardsBalanceAfterCents: null,
       referenceType: "stripe_dispute",
       referenceId: input.providerDisputeId,
       idempotencyKey: `stripe-dispute:${input.providerDisputeId}`,
@@ -2240,6 +2389,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       currency: reversal.currency,
       availableBalanceAfterCents: availableBalanceCents,
       pendingBalanceAfterCents: this.account.pendingBalanceCents,
+      rewardsBalanceAfterCents: null,
       referenceType: "stripe_dispute_reinstated",
       referenceId: input.providerDisputeId,
       idempotencyKey: `stripe-dispute-reinstated:${input.providerDisputeId}`,
@@ -2300,6 +2450,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       currency: input.currency,
       availableBalanceAfterCents: availableBalanceCents,
       pendingBalanceAfterCents: this.account.pendingBalanceCents,
+      rewardsBalanceAfterCents: null,
       referenceType,
       referenceId,
       idempotencyKey: input.idempotencyKey,
@@ -2350,6 +2501,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       currency: input.currency,
       availableBalanceAfterCents: availableBalanceCents,
       pendingBalanceAfterCents: this.account.pendingBalanceCents,
+      rewardsBalanceAfterCents: null,
       referenceType,
       referenceId,
       idempotencyKey: input.idempotencyKey,
@@ -2359,6 +2511,20 @@ class FakeWalletRepository implements DropshipWalletRepository {
       settledAt: input.occurredAt,
     });
     return { account: this.account, ledgerEntry, idempotentReplay: false };
+  }
+
+  preferenceInputs: SetDropshipRewardsSpendPreferenceRepositoryInput[] = [];
+
+  async setRewardsSpendPreference(
+    input: SetDropshipRewardsSpendPreferenceRepositoryInput,
+  ): Promise<DropshipAutoReloadSettingRecord> {
+    this.preferenceInputs.push(input);
+    this.autoReload = {
+      ...(this.autoReload ?? makeAutoReloadSetting({ vendorId: input.vendorId, fundingMethodId: null })),
+      spendRewardsFirst: input.spendRewardsFirst,
+      updatedAt: input.updatedAt,
+    };
+    return this.autoReload;
   }
 
   async configureAutoReload(
@@ -2375,6 +2541,11 @@ class FakeWalletRepository implements DropshipWalletRepository {
       maxSingleReloadCents: input.maxSingleReloadCents,
       topUpAmountCents: input.topUpAmountCents,
       paymentHoldTimeoutMinutes: input.paymentHoldTimeoutMinutes,
+      // Same rule as the real repository: the acknowledgement is stored with the row when the client sent one.
+      acknowledgedCardFeeBps: input.acknowledgedCardFeeBps ?? null,
+      acknowledgedAt: input.acknowledgedCardFeeBps === undefined ? null : input.updatedAt,
+      // The autopay upsert never touches the rewards preference (migration 0702).
+      spendRewardsFirst: this.autoReload?.spendRewardsFirst ?? true,
       createdAt: this.autoReload?.createdAt ?? input.updatedAt,
       updatedAt: input.updatedAt,
     };
@@ -2616,6 +2787,7 @@ function makeAccount(): DropshipWalletAccountRecord {
     vendorId: 10,
     availableBalanceCents: 0,
     pendingBalanceCents: 0,
+    rewardsBalanceCents: 0,
     currency: "USD",
     status: "active",
     createdAt: now,
@@ -2635,6 +2807,9 @@ function makeAutoReloadSetting(
     maxSingleReloadCents: 25000,
     topUpAmountCents: null,
     paymentHoldTimeoutMinutes: 2880,
+    acknowledgedCardFeeBps: null,
+    acknowledgedAt: null,
+    spendRewardsFirst: true,
     createdAt: now,
     updatedAt: now,
     ...overrides,
@@ -3052,6 +3227,17 @@ describe("DropshipWalletService.removeFundingMethodForMember (funding method rem
     expect(repository.detachOutcomeInputs.at(-1)).toMatchObject({ fundingMethodId: 200, outcome: "not_applicable", errorCode: null });
   });
 
+  it("saves the vendor's rewards spend preference through the repository, with the member as the actor (funding design phase 7)", async () => {
+    const setting = await service.setRewardsSpendPreferenceForMember("member-1", { spendRewardsFirst: false });
+
+    expect(setting.spendRewardsFirst).toBe(false);
+    expect(repository.preferenceInputs).toEqual([{ vendorId: 10, spendRewardsFirst: false, actorMemberId: "member-1", updatedAt: now }]);
+    expect(logs.some((log) => log.code === "DROPSHIP_WALLET_REWARDS_PREFERENCE_SAVED")).toBe(true);
+    await expect(service.setRewardsSpendPreferenceForMember("member-1", { spendRewardsFirst: "yes" })).rejects.toBeInstanceOf(DropshipError);
+    await expect(service.setRewardsSpendPreferenceForMember("member-1", { spendRewardsFirst: true, extra: 1 })).rejects.toBeInstanceOf(DropshipError);
+    expect(repository.preferenceInputs).toHaveLength(1);
+  });
+
   it("refuses the autopay source, a method with a top-up pending, and the last card of a live vendor, detaching nothing", async () => {
     repository.autoReload = {
       autoReloadSettingId: 1,
@@ -3062,6 +3248,9 @@ describe("DropshipWalletService.removeFundingMethodForMember (funding method rem
       maxSingleReloadCents: null,
       topUpAmountCents: null,
       paymentHoldTimeoutMinutes: 1440,
+      acknowledgedCardFeeBps: null,
+      acknowledgedAt: null,
+      spendRewardsFirst: true,
       createdAt: now,
       updatedAt: now,
     };

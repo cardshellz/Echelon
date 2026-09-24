@@ -11,10 +11,13 @@ import {
 import { decideFundingMethodRemoval } from "../domain/funding-method-removal";
 import type { DropshipAdvanceContext } from "../domain/acceptance-funding";
 import { decideFundingReversal } from "../domain/funding-reversal";
+import { decideRewardsAccrual, decideRewardsClawback, type DropshipRewardsRail } from "../domain/wallet-rewards";
+import { loadRewardsRatesInForceWithClient } from "./dropship-wallet-rewards.reader";
 import { pauseDropshipVendorWithClient } from "./dropship-vendor-standing.repository";
 import { usdcTransactionReferenceId } from "../application/dropship-wallet-service";
 import { loadAdvancePolicyWithClient, loadAdvanceSourcesWithClient } from "./dropship-advance.reader";
 import type {
+  SetDropshipRewardsSpendPreferenceRepositoryInput,
   ArchiveDropshipFundingMethodRepositoryInput,
   ConfigureDropshipAutoReloadRepositoryInput,
   CreateDropshipConfirmedUsdcFundingRepositoryInput,
@@ -53,6 +56,7 @@ interface WalletAccountRow {
   vendor_id: number;
   available_balance_cents: string | number;
   pending_balance_cents: string | number;
+  rewards_balance_cents: string | number;
   currency: string;
   status: string;
   created_at: Date;
@@ -87,6 +91,9 @@ interface AutoReloadRow {
   max_single_reload_cents: string | number | null;
   top_up_amount_cents: string | number | null;
   payment_hold_timeout_minutes: number;
+  acknowledged_card_fee_bps: number | null;
+  acknowledged_at: Date | null;
+  spend_rewards_first: boolean;
   created_at: Date;
   updated_at: Date;
 }
@@ -101,6 +108,7 @@ interface WalletLedgerRow {
   currency: string;
   available_balance_after_cents: string | number | null;
   pending_balance_after_cents: string | number | null;
+  rewards_balance_after_cents: string | number | null;
   reference_type: string | null;
   reference_id: string | null;
   idempotency_key: string | null;
@@ -282,9 +290,15 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
             payload: serializeLedgerForAudit(settled.ledgerEntry),
             createdAt: input.occurredAt,
           });
+          const accrued = await accrueRewardsForSettledCreditWithClient(client, {
+            account: settled.account,
+            credit: settled.ledgerEntry,
+            rail: input.rail,
+            occurredAt: input.occurredAt,
+          });
           await client.query("COMMIT");
           return {
-            account: settled.account,
+            account: accrued?.account ?? settled.account,
             ledgerEntry: settled.ledgerEntry,
             idempotentReplay: false,
           };
@@ -328,6 +342,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         currency: input.currency,
         availableBalanceAfterCents: nextAvailable,
         pendingBalanceAfterCents: nextPending,
+        rewardsBalanceAfterCents: account.rewardsBalanceCents,
         referenceType: input.referenceType,
         referenceId: input.referenceId,
         idempotencyKey: input.idempotencyKey,
@@ -345,9 +360,19 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         payload: serializeLedgerForAudit(ledgerEntry),
         createdAt: input.occurredAt,
       });
+      // A settled credit earns its rewards here, in the same transaction; a
+      // pending one earns them when it settles.
+      const accrued = input.status === "settled"
+        ? await accrueRewardsForSettledCreditWithClient(client, {
+            account: updatedAccount,
+            credit: ledgerEntry,
+            rail: input.rail,
+            occurredAt: input.occurredAt,
+          })
+        : null;
       await client.query("COMMIT");
       return {
-        account: updatedAccount,
+        account: accrued?.account ?? updatedAccount,
         ledgerEntry,
         idempotentReplay: false,
       };
@@ -469,6 +494,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         currency: input.currency,
         availableBalanceAfterCents: nextAvailable,
         pendingBalanceAfterCents: account.pendingBalanceCents,
+        rewardsBalanceAfterCents: account.rewardsBalanceCents,
         referenceType,
         referenceId,
         idempotencyKey: input.idempotencyKey,
@@ -519,9 +545,15 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         payload: serializeUsdcLedgerForAudit(usdcLedgerEntry),
         createdAt: input.occurredAt,
       });
+      const accrued = await accrueRewardsForSettledCreditWithClient(client, {
+        account: updatedAccount,
+        credit: ledgerEntry,
+        rail: "usdc_base",
+        occurredAt: input.occurredAt,
+      });
       await client.query("COMMIT");
       return {
-        account: updatedAccount,
+        account: accrued?.account ?? updatedAccount,
         ledgerEntry,
         usdcLedgerEntry,
         idempotentReplay: false,
@@ -601,6 +633,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         currency: input.currency,
         availableBalanceAfterCents: nextAvailable,
         pendingBalanceAfterCents: account.pendingBalanceCents,
+        rewardsBalanceAfterCents: account.rewardsBalanceCents,
         referenceType,
         referenceId,
         idempotencyKey: input.idempotencyKey,
@@ -660,8 +693,8 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         `INSERT INTO dropship.dropship_auto_reload_settings
           (vendor_id, funding_method_id, enabled, minimum_balance_cents,
            max_single_reload_cents, payment_hold_timeout_minutes, created_at, updated_at,
-           top_up_amount_cents)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8)
+           top_up_amount_cents, acknowledged_card_fee_bps, acknowledged_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9, $10)
          ON CONFLICT (vendor_id) DO UPDATE
            SET funding_method_id = EXCLUDED.funding_method_id,
                enabled = EXCLUDED.enabled,
@@ -669,10 +702,12 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
                max_single_reload_cents = EXCLUDED.max_single_reload_cents,
                top_up_amount_cents = EXCLUDED.top_up_amount_cents,
                payment_hold_timeout_minutes = EXCLUDED.payment_hold_timeout_minutes,
+               acknowledged_card_fee_bps = EXCLUDED.acknowledged_card_fee_bps,
+               acknowledged_at = EXCLUDED.acknowledged_at,
                updated_at = EXCLUDED.updated_at
          RETURNING id, vendor_id, funding_method_id, enabled, minimum_balance_cents,
                    max_single_reload_cents, top_up_amount_cents, payment_hold_timeout_minutes,
-                   created_at, updated_at`,
+                   acknowledged_card_fee_bps, acknowledged_at, spend_rewards_first, created_at, updated_at`,
         [
           input.vendorId,
           input.fundingMethodId,
@@ -682,6 +717,11 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
           input.paymentHoldTimeoutMinutes,
           input.updatedAt,
           input.topUpAmountCents,
+          // The rate the vendor agreed to is stored with the row (migration
+          // 0701), so an unattended charge can be held to it; a client that
+          // sent none leaves it null and pays the live rate.
+          input.acknowledgedCardFeeBps ?? null,
+          input.acknowledgedCardFeeBps === undefined ? null : input.updatedAt,
         ],
       );
       const setting = mapAutoReloadRow(requiredRow(
@@ -752,6 +792,48 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
    * is recorded and moves nothing. A replayed scan (the cursor did not
    * advance after a failure) finds its own row and moves nothing twice.
    */
+  async setRewardsSpendPreference(
+    input: SetDropshipRewardsSpendPreferenceRepositoryInput,
+  ): Promise<DropshipAutoReloadSettingRecord> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      // The settings row exists for every provisioned vendor; a vendor whose
+      // scaffolding predates it gets the defaults first, then the choice.
+      await ensureDropshipWalletScaffoldingForVendor(client, { vendorId: input.vendorId, now: input.updatedAt });
+      const result = await client.query<AutoReloadRow>(
+        `UPDATE dropship.dropship_auto_reload_settings
+         SET spend_rewards_first = $2,
+             updated_at = $3
+         WHERE vendor_id = $1
+         RETURNING id, vendor_id, funding_method_id, enabled, minimum_balance_cents,
+                   max_single_reload_cents, top_up_amount_cents, payment_hold_timeout_minutes,
+                   acknowledged_card_fee_bps, acknowledged_at, spend_rewards_first, created_at, updated_at`,
+        [input.vendorId, input.spendRewardsFirst, input.updatedAt],
+      );
+      const setting = mapAutoReloadRow(requiredRow(
+        result.rows[0],
+        "Dropship rewards preference update did not return a row.",
+      ));
+      await recordWalletAuditEvent(client, {
+        vendorId: input.vendorId,
+        entityType: "dropship_auto_reload_settings",
+        entityId: String(setting.autoReloadSettingId),
+        eventType: "wallet_rewards_preference_saved",
+        payload: { spendRewardsFirst: setting.spendRewardsFirst },
+        createdAt: input.updatedAt,
+        actor: { type: "member", id: input.actorMemberId },
+      });
+      await client.query("COMMIT");
+      return setting;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async observeUsdcDeposit(input: ObserveDropshipUsdcDepositRepositoryInput): Promise<DropshipUsdcDepositLedgerResult> {
     const client = await this.dbPool.connect();
     try {
@@ -839,6 +921,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         currency: input.currency,
         availableBalanceAfterCents: nextAvailable,
         pendingBalanceAfterCents: nextPending,
+        rewardsBalanceAfterCents: account.rewardsBalanceCents,
         referenceType,
         referenceId,
         idempotencyKey: `usdc-deposit:${referenceId}`,
@@ -886,8 +969,16 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         payload: serializeUsdcLedgerForAudit(usdcLedgerEntry),
         createdAt: input.occurredAt,
       });
+      const accrued = input.status === "settled"
+        ? await accrueRewardsForSettledCreditWithClient(client, {
+            account: updatedAccount,
+            credit: ledgerEntry,
+            rail: "usdc_base",
+            occurredAt: input.occurredAt,
+          })
+        : null;
       await client.query("COMMIT");
-      return { account: updatedAccount, ledgerEntry, usdcLedgerEntry, idempotentReplay: false };
+      return { account: accrued?.account ?? updatedAccount, ledgerEntry, usdcLedgerEntry, idempotentReplay: false };
     } catch (error) {
       await rollbackQuietly(client);
       if (isUniqueViolation(error)) {
@@ -958,8 +1049,14 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         payload: serializeUsdcLedgerForAudit(updatedUsdc),
         createdAt: input.occurredAt,
       });
+      const accrued = await accrueRewardsForSettledCreditWithClient(client, {
+        account: settled.account,
+        credit: settled.ledgerEntry,
+        rail: "usdc_base",
+        occurredAt: input.occurredAt,
+      });
       await client.query("COMMIT");
-      return { account: settled.account, ledgerEntry: settled.ledgerEntry, usdcLedgerEntry: updatedUsdc, idempotentReplay: false };
+      return { account: accrued?.account ?? settled.account, ledgerEntry: settled.ledgerEntry, usdcLedgerEntry: updatedUsdc, idempotentReplay: false };
     } catch (error) {
       await rollbackQuietly(client);
       throw error;
@@ -1378,14 +1475,32 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
           { vendorId: credit.vendorId, walletAccountId: credit.walletAccountId, retryable: false },
         );
       }
+      // The rewards the credit earned go back too (funding design phase 7):
+      // what is still in the rewards balance leaves it, and the part already
+      // spent comes out of cash through this same reversal.
+      const earned = await findLedgerByReferenceWithClient(client, {
+        referenceType: REWARDS_EARNED_REFERENCE_TYPE,
+        referenceId: String(credit.ledgerEntryId),
+        type: "rewards_earned",
+        forUpdate: false,
+      });
+      const clawback = decideRewardsClawback({
+        earnedCents: earned?.amountCents ?? 0,
+        creditAmountCents: credit.amountCents,
+        reversalCents: decision.reversalCents,
+        rewardsBalanceCents: account.rewardsBalanceCents,
+      });
+      const cashReversalCents = decision.reversalCents + clawback.fromCashCents;
       // The balance may go negative: the money left with the bank, and the
       // negative is the receivable the daily wallet run collects.
-      const nextAvailable = account.availableBalanceCents - decision.reversalCents;
+      const nextAvailable = account.availableBalanceCents - cashReversalCents;
+      const nextRewards = account.rewardsBalanceCents - clawback.fromRewardsCents;
       const updatedAccount = await updateWalletBalancesWithClient(client, {
         walletAccountId: account.walletAccountId,
         vendorId: credit.vendorId,
         availableBalanceCents: nextAvailable,
         pendingBalanceCents: account.pendingBalanceCents,
+        rewardsBalanceCents: nextRewards,
         updatedAt: input.occurredAt,
       });
       const reversal = await insertLedgerEntryWithClient(client, {
@@ -1393,10 +1508,11 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         vendorId: credit.vendorId,
         type: "funding_reversal",
         status: "settled",
-        amountCents: -decision.reversalCents,
+        amountCents: -cashReversalCents,
         currency: credit.currency,
         availableBalanceAfterCents: nextAvailable,
         pendingBalanceAfterCents: account.pendingBalanceCents,
+        rewardsBalanceAfterCents: nextRewards,
         referenceType: DISPUTE_REVERSAL_REFERENCE_TYPE,
         referenceId: input.providerDisputeId,
         idempotencyKey: `stripe-dispute:${input.providerDisputeId}`,
@@ -1413,6 +1529,15 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
           disputeStatus: input.disputeStatus,
           disputeReason: input.disputeReason,
           rail: credit.metadata.rail ?? null,
+          // The credit's rewards: how much this reversal takes back, and how
+          // much of that came out of cash because it was already spent.
+          rewardsClawback: {
+            rewardsLedgerEntryId: earned?.ledgerEntryId ?? null,
+            earnedCents: earned?.amountCents ?? 0,
+            clawbackCents: clawback.clawbackCents,
+            fromRewardsCents: clawback.fromRewardsCents,
+            fromCashCents: clawback.fromCashCents,
+          },
         },
         createdAt: input.occurredAt,
         settledAt: input.occurredAt,
@@ -1424,11 +1549,52 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         eventType: "wallet_funding_reversed",
         payload: {
           ...serializeLedgerForAudit(reversal),
-          before: { availableBalanceCents: account.availableBalanceCents },
-          after: { availableBalanceCents: nextAvailable },
+          before: { availableBalanceCents: account.availableBalanceCents, rewardsBalanceCents: account.rewardsBalanceCents },
+          after: { availableBalanceCents: nextAvailable, rewardsBalanceCents: nextRewards },
         },
         createdAt: input.occurredAt,
       });
+      if (clawback.fromRewardsCents > 0) {
+        const rewardsReversal = await insertLedgerEntryWithClient(client, {
+          walletAccountId: account.walletAccountId,
+          vendorId: credit.vendorId,
+          type: "rewards_reversed",
+          status: "settled",
+          amountCents: -clawback.fromRewardsCents,
+          currency: credit.currency,
+          availableBalanceAfterCents: nextAvailable,
+          pendingBalanceAfterCents: account.pendingBalanceCents,
+          rewardsBalanceAfterCents: nextRewards,
+          referenceType: DISPUTE_REWARDS_REVERSAL_REFERENCE_TYPE,
+          referenceId: input.providerDisputeId,
+          idempotencyKey: `stripe-dispute-rewards:${input.providerDisputeId}`,
+          fundingMethodId: credit.fundingMethodId,
+          externalTransactionId: null,
+          metadata: {
+            provider: input.provider,
+            providerDisputeId: input.providerDisputeId,
+            reversalLedgerEntryId: reversal.ledgerEntryId,
+            fundingLedgerEntryId: credit.ledgerEntryId,
+            rewardsLedgerEntryId: earned?.ledgerEntryId ?? null,
+            clawbackCents: clawback.clawbackCents,
+            fromCashCents: clawback.fromCashCents,
+          },
+          createdAt: input.occurredAt,
+          settledAt: input.occurredAt,
+        });
+        await recordWalletAuditEvent(client, {
+          vendorId: credit.vendorId,
+          entityType: "dropship_wallet_ledger",
+          entityId: String(rewardsReversal.ledgerEntryId),
+          eventType: "wallet_rewards_reversed",
+          payload: {
+            ...serializeLedgerForAudit(rewardsReversal),
+            before: { rewardsBalanceCents: account.rewardsBalanceCents },
+            after: { rewardsBalanceCents: nextRewards },
+          },
+          createdAt: input.occurredAt,
+        });
+      }
       // Same transaction as the reversal: the vendor is paused because this
       // credit was taken back, and the two facts commit or roll back together.
       const pause = input.pauseVendor
@@ -1544,13 +1710,24 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
           { vendorId: reversal.vendorId, walletAccountId: reversal.walletAccountId, retryable: false },
         );
       }
+      // The reversal's amount already includes any spent rewards it took from
+      // cash; the rewards it took from the rewards balance come back to it.
+      const rewardsReversal = await findLedgerByReferenceWithClient(client, {
+        referenceType: DISPUTE_REWARDS_REVERSAL_REFERENCE_TYPE,
+        referenceId: input.providerDisputeId,
+        type: "rewards_reversed",
+        forUpdate: false,
+      });
+      const rewardsBackCents = rewardsReversal ? -rewardsReversal.amountCents : 0;
       const amountCents = -reversal.amountCents;
       const nextAvailable = account.availableBalanceCents + amountCents;
+      const nextRewards = account.rewardsBalanceCents + rewardsBackCents;
       const updatedAccount = await updateWalletBalancesWithClient(client, {
         walletAccountId: account.walletAccountId,
         vendorId: reversal.vendorId,
         availableBalanceCents: nextAvailable,
         pendingBalanceCents: account.pendingBalanceCents,
+        rewardsBalanceCents: nextRewards,
         updatedAt: input.occurredAt,
       });
       const reinstatement = await insertLedgerEntryWithClient(client, {
@@ -1562,6 +1739,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         currency: reversal.currency,
         availableBalanceAfterCents: nextAvailable,
         pendingBalanceAfterCents: account.pendingBalanceCents,
+        rewardsBalanceAfterCents: nextRewards,
         referenceType: DISPUTE_REINSTATEMENT_REFERENCE_TYPE,
         referenceId: input.providerDisputeId,
         idempotencyKey: `stripe-dispute-reinstated:${input.providerDisputeId}`,
@@ -1584,11 +1762,50 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         eventType: "wallet_funding_reinstated",
         payload: {
           ...serializeLedgerForAudit(reinstatement),
-          before: { availableBalanceCents: account.availableBalanceCents },
-          after: { availableBalanceCents: nextAvailable },
+          before: { availableBalanceCents: account.availableBalanceCents, rewardsBalanceCents: account.rewardsBalanceCents },
+          after: { availableBalanceCents: nextAvailable, rewardsBalanceCents: nextRewards },
         },
         createdAt: input.occurredAt,
       });
+      if (rewardsReversal && rewardsBackCents > 0) {
+        const rewardsReinstatement = await insertLedgerEntryWithClient(client, {
+          walletAccountId: account.walletAccountId,
+          vendorId: reversal.vendorId,
+          type: "rewards_reinstated",
+          status: "settled",
+          amountCents: rewardsBackCents,
+          currency: reversal.currency,
+          availableBalanceAfterCents: nextAvailable,
+          pendingBalanceAfterCents: account.pendingBalanceCents,
+          rewardsBalanceAfterCents: nextRewards,
+          referenceType: DISPUTE_REWARDS_REINSTATEMENT_REFERENCE_TYPE,
+          referenceId: input.providerDisputeId,
+          idempotencyKey: `stripe-dispute-rewards-reinstated:${input.providerDisputeId}`,
+          fundingMethodId: reversal.fundingMethodId,
+          externalTransactionId: null,
+          metadata: {
+            provider: input.provider,
+            providerEventId: input.providerEventId,
+            providerDisputeId: input.providerDisputeId,
+            rewardsReversalLedgerEntryId: rewardsReversal.ledgerEntryId,
+            reinstatementLedgerEntryId: reinstatement.ledgerEntryId,
+          },
+          createdAt: input.occurredAt,
+          settledAt: input.occurredAt,
+        });
+        await recordWalletAuditEvent(client, {
+          vendorId: reversal.vendorId,
+          entityType: "dropship_wallet_ledger",
+          entityId: String(rewardsReinstatement.ledgerEntryId),
+          eventType: "wallet_rewards_reinstated",
+          payload: {
+            ...serializeLedgerForAudit(rewardsReinstatement),
+            before: { rewardsBalanceCents: account.rewardsBalanceCents },
+            after: { rewardsBalanceCents: nextRewards },
+          },
+          createdAt: input.occurredAt,
+        });
+      }
       await client.query("COMMIT");
       return {
         vendorId: reversal.vendorId,
@@ -2294,6 +2511,91 @@ async function voidPendingFundingWithClient(
   return { account: updatedAccount, ledgerEntry: failedEntry };
 }
 
+/**
+ * Rewards on a funding credit that just settled (funding design phase 7):
+ * the amount credited times the rail's rate in force, read on this client so
+ * the accrual is decided in the transaction that settles the credit. One
+ * `rewards_earned` row per credit, referenced by the credit's ledger id, so a
+ * replayed settlement finds the row and moves nothing. A zero rate or an
+ * amount too small to earn a cent writes nothing: the ledger refuses a zero
+ * amount, and the credit's own row already records the settlement.
+ */
+async function accrueRewardsForSettledCreditWithClient(
+  client: PoolClient,
+  input: {
+    account: DropshipWalletAccountRecord;
+    credit: DropshipWalletLedgerRecord;
+    rail: DropshipRewardsRail;
+    occurredAt: Date;
+  },
+): Promise<{ account: DropshipWalletAccountRecord; ledgerEntry: DropshipWalletLedgerRecord } | null> {
+  const rates = await loadRewardsRatesInForceWithClient(client);
+  const decision = decideRewardsAccrual({
+    rail: input.rail,
+    creditAmountCents: input.credit.amountCents,
+    rates,
+  });
+  if (decision.rewardsCents === 0) {
+    return null;
+  }
+  const referenceId = String(input.credit.ledgerEntryId);
+  const existing = await findLedgerByReferenceWithClient(client, {
+    referenceType: REWARDS_EARNED_REFERENCE_TYPE,
+    referenceId,
+    type: "rewards_earned",
+    forUpdate: false,
+  });
+  if (existing) {
+    return { account: input.account, ledgerEntry: existing };
+  }
+  const nextRewards = input.account.rewardsBalanceCents + decision.rewardsCents;
+  const updatedAccount = await updateWalletBalancesWithClient(client, {
+    walletAccountId: input.account.walletAccountId,
+    vendorId: input.account.vendorId,
+    availableBalanceCents: input.account.availableBalanceCents,
+    pendingBalanceCents: input.account.pendingBalanceCents,
+    rewardsBalanceCents: nextRewards,
+    updatedAt: input.occurredAt,
+  });
+  const ledgerEntry = await insertLedgerEntryWithClient(client, {
+    walletAccountId: input.account.walletAccountId,
+    vendorId: input.account.vendorId,
+    type: "rewards_earned",
+    status: "settled",
+    amountCents: decision.rewardsCents,
+    currency: input.credit.currency,
+    availableBalanceAfterCents: input.account.availableBalanceCents,
+    pendingBalanceAfterCents: input.account.pendingBalanceCents,
+    rewardsBalanceAfterCents: nextRewards,
+    referenceType: REWARDS_EARNED_REFERENCE_TYPE,
+    referenceId,
+    idempotencyKey: `rewards-earned:${referenceId}`,
+    fundingMethodId: input.credit.fundingMethodId,
+    externalTransactionId: null,
+    metadata: {
+      fundingLedgerEntryId: input.credit.ledgerEntryId,
+      creditAmountCents: input.credit.amountCents,
+      rateBps: decision.rateBps,
+      rail: input.rail,
+    },
+    createdAt: input.occurredAt,
+    settledAt: input.occurredAt,
+  });
+  await recordWalletAuditEvent(client, {
+    vendorId: input.account.vendorId,
+    entityType: "dropship_wallet_ledger",
+    entityId: String(ledgerEntry.ledgerEntryId),
+    eventType: "wallet_rewards_earned",
+    payload: {
+      ...serializeLedgerForAudit(ledgerEntry),
+      before: { rewardsBalanceCents: input.account.rewardsBalanceCents },
+      after: { rewardsBalanceCents: nextRewards },
+    },
+    createdAt: input.occurredAt,
+  });
+  return { account: updatedAccount, ledgerEntry };
+}
+
 async function settlePendingFundingWithClient(
   client: PoolClient,
   input: {
@@ -2381,7 +2683,7 @@ async function updateLedgerSettlementWithClient(
        AND type = 'funding'
        AND status = 'pending'
      RETURNING id, wallet_account_id, vendor_id, type, status, amount_cents, currency,
-               available_balance_after_cents, pending_balance_after_cents,
+               available_balance_after_cents, pending_balance_after_cents, rewards_balance_after_cents,
                reference_type, reference_id, idempotency_key, funding_method_id,
                external_transaction_id, metadata, created_at, settled_at`,
     [
@@ -2401,6 +2703,14 @@ async function updateLedgerSettlementWithClient(
 /** Reference types of the two rows a dispute can add to the ledger (funding design phase 4). */
 const DISPUTE_REVERSAL_REFERENCE_TYPE = "stripe_dispute";
 const DISPUTE_REINSTATEMENT_REFERENCE_TYPE = "stripe_dispute_reinstated";
+/**
+ * Reference types of the rewards rows (funding design phase 7). Each names a
+ * distinct row for one funding credit or one dispute, under the ledger's
+ * unique (reference_type, reference_id) index.
+ */
+const REWARDS_EARNED_REFERENCE_TYPE = "wallet_funding_rewards";
+const DISPUTE_REWARDS_REVERSAL_REFERENCE_TYPE = "stripe_dispute_rewards";
+const DISPUTE_REWARDS_REINSTATEMENT_REFERENCE_TYPE = "stripe_dispute_rewards_reinstated";
 
 /**
  * A ledger row by its provider reference, across vendors: a dispute names
@@ -2418,7 +2728,7 @@ async function findLedgerByReferenceWithClient(
 ): Promise<DropshipWalletLedgerRecord | null> {
   const result = await client.query<WalletLedgerRow>(
     `SELECT id, wallet_account_id, vendor_id, type, status, amount_cents, currency,
-            available_balance_after_cents, pending_balance_after_cents,
+            available_balance_after_cents, pending_balance_after_cents, rewards_balance_after_cents,
             reference_type, reference_id, idempotency_key, funding_method_id,
             external_transaction_id, metadata, created_at, settled_at
      FROM dropship.dropship_wallet_ledger
@@ -2443,7 +2753,7 @@ async function findFundingLedgerByReferenceWithClient(
 ): Promise<DropshipWalletLedgerRecord | null> {
   const result = await client.query<WalletLedgerRow>(
     `SELECT id, wallet_account_id, vendor_id, type, status, amount_cents, currency,
-            available_balance_after_cents, pending_balance_after_cents,
+            available_balance_after_cents, pending_balance_after_cents, rewards_balance_after_cents,
             reference_type, reference_id, idempotency_key, funding_method_id,
             external_transaction_id, metadata, created_at, settled_at
      FROM dropship.dropship_wallet_ledger
@@ -2480,7 +2790,7 @@ async function updateLedgerFailureWithClient(
        AND type = 'funding'
        AND status = 'pending'
      RETURNING id, wallet_account_id, vendor_id, type, status, amount_cents, currency,
-               available_balance_after_cents, pending_balance_after_cents,
+               available_balance_after_cents, pending_balance_after_cents, rewards_balance_after_cents,
                reference_type, reference_id, idempotency_key, funding_method_id,
                external_transaction_id, metadata, created_at, settled_at`,
     [
@@ -2559,7 +2869,7 @@ async function getOrCreateWalletAccountWithClient(
     [input.vendorId, input.currency, input.now],
   );
   const result = await client.query<WalletAccountRow>(
-    `SELECT id, vendor_id, available_balance_cents, pending_balance_cents,
+    `SELECT id, vendor_id, available_balance_cents, pending_balance_cents, rewards_balance_cents,
             currency, status, created_at, updated_at
      FROM dropship.dropship_wallet_accounts
      WHERE vendor_id = $1
@@ -2582,7 +2892,7 @@ async function loadWalletAccountByIdWithClient(
   },
 ): Promise<DropshipWalletAccountRecord | null> {
   const result = await client.query<WalletAccountRow>(
-    `SELECT id, vendor_id, available_balance_cents, pending_balance_cents,
+    `SELECT id, vendor_id, available_balance_cents, pending_balance_cents, rewards_balance_cents,
             currency, status, created_at, updated_at
      FROM dropship.dropship_wallet_accounts
      WHERE id = $1
@@ -2601,6 +2911,8 @@ async function updateWalletBalancesWithClient(
     vendorId: number;
     availableBalanceCents: number;
     pendingBalanceCents: number;
+    /** The rewards balance to store; left as it is when absent (most cash moves never touch it). */
+    rewardsBalanceCents?: number;
     updatedAt: Date;
   },
 ): Promise<DropshipWalletAccountRecord> {
@@ -2608,10 +2920,11 @@ async function updateWalletBalancesWithClient(
     `UPDATE dropship.dropship_wallet_accounts
      SET available_balance_cents = $3,
          pending_balance_cents = $4,
-         updated_at = $5
+         updated_at = $5,
+         rewards_balance_cents = COALESCE($6, rewards_balance_cents)
      WHERE id = $1
        AND vendor_id = $2
-     RETURNING id, vendor_id, available_balance_cents, pending_balance_cents,
+     RETURNING id, vendor_id, available_balance_cents, pending_balance_cents, rewards_balance_cents,
                currency, status, created_at, updated_at`,
     [
       input.walletAccountId,
@@ -2619,6 +2932,7 @@ async function updateWalletBalancesWithClient(
       input.availableBalanceCents,
       input.pendingBalanceCents,
       input.updatedAt,
+      input.rewardsBalanceCents ?? null,
     ],
   );
   return mapWalletAccountRow(requiredRow(
@@ -2735,7 +3049,7 @@ async function findReplayLedgerWithClient(
 ): Promise<DropshipWalletLedgerRecord | null> {
   const result = await client.query<WalletLedgerRow>(
     `SELECT id, wallet_account_id, vendor_id, type, status, amount_cents, currency,
-            available_balance_after_cents, pending_balance_after_cents,
+            available_balance_after_cents, pending_balance_after_cents, rewards_balance_after_cents,
             reference_type, reference_id, idempotency_key, funding_method_id,
             external_transaction_id, metadata, created_at, settled_at
      FROM dropship.dropship_wallet_ledger
@@ -2771,18 +3085,21 @@ async function insertLedgerEntryWithClient(
     metadata: Record<string, unknown>;
     createdAt: Date;
     settledAt: Date | null;
+    /** The rewards balance after this line (migration 0702); every writer here states it. */
+    rewardsBalanceAfterCents: number;
   },
 ): Promise<DropshipWalletLedgerRecord> {
   const result = await client.query<WalletLedgerRow>(
     `INSERT INTO dropship.dropship_wallet_ledger
       (wallet_account_id, vendor_id, type, status, amount_cents, currency,
-       available_balance_after_cents, pending_balance_after_cents,
+       available_balance_after_cents, pending_balance_after_cents, rewards_balance_after_cents,
        reference_type, reference_id, idempotency_key, funding_method_id,
-       external_transaction_id, metadata, created_at, settled_at)
+       external_transaction_id, metadata, created_at, settled_at,
+       rewards_balance_after_cents)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-             $9, $10, $11, $12, $13, $14::jsonb, $15, $16)
+             $9, $10, $11, $12, $13, $14::jsonb, $15, $16, $17)
      RETURNING id, wallet_account_id, vendor_id, type, status, amount_cents, currency,
-               available_balance_after_cents, pending_balance_after_cents,
+               available_balance_after_cents, pending_balance_after_cents, rewards_balance_after_cents,
                reference_type, reference_id, idempotency_key, funding_method_id,
                external_transaction_id, metadata, created_at, settled_at`,
     [
@@ -2802,6 +3119,7 @@ async function insertLedgerEntryWithClient(
       JSON.stringify(input.metadata),
       input.createdAt,
       input.settledAt,
+      input.rewardsBalanceAfterCents,
     ],
   );
   return mapLedgerRow(requiredRow(
@@ -2819,7 +3137,7 @@ async function loadWalletLedgerByIdWithClient(
 ): Promise<DropshipWalletLedgerRecord> {
   const result = await client.query<WalletLedgerRow>(
     `SELECT id, wallet_account_id, vendor_id, type, status, amount_cents, currency,
-            available_balance_after_cents, pending_balance_after_cents,
+            available_balance_after_cents, pending_balance_after_cents, rewards_balance_after_cents,
             reference_type, reference_id, idempotency_key, funding_method_id,
             external_transaction_id, metadata, created_at, settled_at
      FROM dropship.dropship_wallet_ledger
@@ -2986,7 +3304,7 @@ async function getAutoReloadSettingWithClient(
   const result = await client.query<AutoReloadRow>(
     `SELECT id, vendor_id, funding_method_id, enabled, minimum_balance_cents,
             max_single_reload_cents, top_up_amount_cents, payment_hold_timeout_minutes,
-            created_at, updated_at
+            acknowledged_card_fee_bps, acknowledged_at, spend_rewards_first, created_at, updated_at
      FROM dropship.dropship_auto_reload_settings
      WHERE vendor_id = $1
      LIMIT 1`,
@@ -3019,7 +3337,7 @@ async function listLedgerWithClient(
 ): Promise<DropshipWalletLedgerRecord[]> {
   const result = await client.query<WalletLedgerRow>(
     `SELECT id, wallet_account_id, vendor_id, type, status, amount_cents, currency,
-            available_balance_after_cents, pending_balance_after_cents,
+            available_balance_after_cents, pending_balance_after_cents, rewards_balance_after_cents,
             reference_type, reference_id, idempotency_key, funding_method_id,
             external_transaction_id, metadata, created_at, settled_at
      FROM dropship.dropship_wallet_ledger
@@ -3129,6 +3447,7 @@ function serializeLedgerForAudit(ledgerEntry: DropshipWalletLedgerRecord): Recor
     currency: ledgerEntry.currency,
     availableBalanceAfterCents: ledgerEntry.availableBalanceAfterCents,
     pendingBalanceAfterCents: ledgerEntry.pendingBalanceAfterCents,
+    rewardsBalanceAfterCents: ledgerEntry.rewardsBalanceAfterCents,
     referenceType: ledgerEntry.referenceType,
     referenceId: ledgerEntry.referenceId,
     idempotencyKey: ledgerEntry.idempotencyKey,
@@ -3163,6 +3482,7 @@ function mapWalletAccountRow(row: WalletAccountRow): DropshipWalletAccountRecord
     vendorId: row.vendor_id,
     availableBalanceCents: toSafeInteger(row.available_balance_cents, "available_balance_cents"),
     pendingBalanceCents: toSafeInteger(row.pending_balance_cents, "pending_balance_cents"),
+    rewardsBalanceCents: toSafeInteger(row.rewards_balance_cents, "rewards_balance_cents"),
     currency: row.currency,
     status: row.status,
     createdAt: row.created_at,
@@ -3232,6 +3552,10 @@ function mapAutoReloadRow(row: AutoReloadRow): DropshipAutoReloadSettingRecord {
       ? null
       : toSafeInteger(row.top_up_amount_cents, "top_up_amount_cents"),
     paymentHoldTimeoutMinutes: row.payment_hold_timeout_minutes,
+    acknowledgedCardFeeBps: row.acknowledged_card_fee_bps ?? null,
+    acknowledgedAt: row.acknowledged_at ?? null,
+    // Rewards pay first unless the vendor chose otherwise (migration 0702).
+    spendRewardsFirst: row.spend_rewards_first ?? true,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -3252,6 +3576,9 @@ function mapLedgerRow(row: WalletLedgerRow): DropshipWalletLedgerRecord {
     pendingBalanceAfterCents: row.pending_balance_after_cents === null
       ? null
       : toSafeInteger(row.pending_balance_after_cents, "pending_balance_after_cents"),
+    rewardsBalanceAfterCents: row.rewards_balance_after_cents === null || row.rewards_balance_after_cents === undefined
+      ? null
+      : toSafeInteger(row.rewards_balance_after_cents, "rewards_balance_after_cents"),
     referenceType: row.reference_type,
     referenceId: row.reference_id,
     idempotencyKey: row.idempotency_key,

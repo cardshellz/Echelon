@@ -34,6 +34,11 @@ const fallbackLimits: DropshipWalletPolicyLimits = {
   advanceFeeBps: 100,
   advanceCapCents: 50_000,
   tierChangeGraceDays: 14,
+  cardFundingFeeBps: 0,
+  cardFundingMinCents: 10_000,
+  rewardsRateBankBps: 100,
+  rewardsRateUsdcBps: 100,
+  rewardsRateCardBps: 0,
 };
 
 const publishedLimits: DropshipWalletPolicyLimits = {
@@ -47,6 +52,11 @@ const publishedLimits: DropshipWalletPolicyLimits = {
   advanceFeeBps: 150,
   advanceCapCents: 75_000,
   tierChangeGraceDays: 21,
+  cardFundingFeeBps: 250,
+  cardFundingMinCents: 12_500,
+  rewardsRateBankBps: 100,
+  rewardsRateUsdcBps: 100,
+  rewardsRateCardBps: 0,
 };
 
 const validInput = {
@@ -84,7 +94,6 @@ describe("DropshipWalletPolicyService", () => {
         error: (event) => logs.push({ ...event, level: "error" }),
       },
       env: emptyEnv,
-      cardFundingFeeBps: 300,
     });
   });
 
@@ -197,7 +206,7 @@ describe("DropshipWalletPolicyService", () => {
   });
 
   describe("getOverview", () => {
-    it("serves the policy, the fallback values it overrides, the read-only fee and the impact", async () => {
+    it("serves the policy, the fallback values it overrides, and the impact", async () => {
       repository.activePolicy = makePolicy(publishedLimits);
       repository.counts = {
         vendorsBelowMinimumFloor: 4,
@@ -214,12 +223,12 @@ describe("DropshipWalletPolicyService", () => {
       expect(overview.envKeys.autoReloadMinTriggerCents).toBe("DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS");
       expect(overview.envKeys.caseTierMinimumCents).toBeNull();
       expect(overview.envKeys.advanceCapCents).toBeNull();
-      expect(overview.cardFundingFee).toMatchObject({
-        bps: 300,
-        envKey: "DROPSHIP_CARD_FUNDING_FEE_BPS",
-        editable: false,
-      });
-      expect(overview.cardFundingFee.readOnlyReason).toContain("never agreed to");
+      // The card fee is a limit like any other since funding design phase 7; the
+      // read-only view is gone with the reason for it.
+      expect(overview.limits.cardFundingFeeBps).toBe(250);
+      expect(overview.envKeys.cardFundingFeeBps).toBe("DROPSHIP_CARD_FUNDING_FEE_BPS");
+      expect(overview.envKeys.cardFundingMinCents).toBeNull();
+      expect(overview).not.toHaveProperty("cardFundingFee");
       expect(overview.impact).toMatchObject({
         proposedAutoReloadMinTriggerCents: 9_000,
         proposedAutoReloadMinAmountCents: 20_000,
@@ -422,8 +431,17 @@ describe("DropshipWalletPolicyService", () => {
       expect(result.policy.limits).toMatchObject({ advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0 });
     });
 
+    it("accepts a zero card fee, refuses one above the misconfiguration guard, and refuses a card minimum above the manual maximum", async () => {
+      const zeroFee = await service.createPolicyVersion({ ...validInput, cardFundingFeeBps: 0 });
+      expect(zeroFee.policy.limits).toMatchObject({ cardFundingFeeBps: 0, cardFundingMinCents: 12_500 });
+      await expect(service.createPolicyVersion({ ...validInput, idempotencyKey: "wallet-policy-002", cardFundingFeeBps: 1_001 }))
+        .rejects.toMatchObject({ code: "DROPSHIP_WALLET_POLICY_INVALID_INPUT" });
+      await expect(service.createPolicyVersion({ ...validInput, idempotencyKey: "wallet-policy-003", cardFundingMinCents: 60_001 }))
+        .rejects.toMatchObject({ code: "DROPSHIP_WALLET_POLICY_INVALID_INPUT" });
+    });
+
     it("refuses an unknown field rather than silently dropping it", async () => {
-      await expect(service.createPolicyVersion({ ...validInput, cardFundingFeeBps: 500 }))
+      await expect(service.createPolicyVersion({ ...validInput, surchargeBps: 500 }))
         .rejects.toMatchObject({ code: "DROPSHIP_WALLET_POLICY_INVALID_INPUT" });
     });
 

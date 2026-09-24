@@ -130,11 +130,13 @@ describe("dropship wallet routes card fee exposure", () => {
   const now = "2026-09-16T12:00:00.000Z";
   let server: { url: string; close: () => Promise<void> };
   let configureInputs: unknown[];
+  let preferenceInputs: unknown[];
   let configureError: unknown;
   let walletError: unknown;
 
   beforeEach(async () => {
     configureInputs = [];
+    preferenceInputs = [];
     configureError = null;
     walletError = null;
     for (const level of ["error", "warn", "info"] as const) {
@@ -161,6 +163,9 @@ describe("dropship wallet routes card fee exposure", () => {
             advanceFeeBps: 150,
             advanceCapCents: 75_000,
             tierChangeGraceDays: 21,
+            rewardsRateBankBps: 100,
+            rewardsRateUsdcBps: 100,
+            rewardsRateCardBps: 0,
           },
         };
       },
@@ -190,6 +195,14 @@ describe("dropship wallet routes card fee exposure", () => {
         return {
           autoReloadSettingId: 1, vendorId: 10, fundingMethodId: 10, enabled: true, minimumBalanceCents: 5000,
           maxSingleReloadCents: 25_000, paymentHoldTimeoutMinutes: 2880, createdAt: now, updatedAt: now,
+        };
+      },
+      setRewardsSpendPreferenceForMember: async (memberId: string, input: unknown) => {
+        preferenceInputs.push({ memberId, input });
+        return {
+          autoReloadSettingId: 1, vendorId: 10, fundingMethodId: null, enabled: true, minimumBalanceCents: 5000,
+          maxSingleReloadCents: null, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2880, acknowledgedCardFeeBps: null,
+          acknowledgedAt: null, spendRewardsFirst: (input as { spendRewardsFirst: boolean }).spendRewardsFirst, createdAt: now, updatedAt: now,
         };
       },
       createStripeWalletFundingSessionForMember: async () => ({
@@ -240,6 +253,10 @@ describe("dropship wallet routes card fee exposure", () => {
       advanceFeeBps: 150,
       advanceCapCents: 75_000,
       tierChangeGraceDays: 21,
+      // What a settled transfer earns into the rewards balance (funding design phase 7).
+      rewardsRateBankBps: 100,
+      rewardsRateUsdcBps: 100,
+      rewardsRateCardBps: 0,
       // Served so the wallet page knows whether "link it again" is a real fix.
       bankBalanceReadOffered: false,
     });
@@ -306,6 +323,18 @@ describe("dropship wallet routes card fee exposure", () => {
     }]);
     // Not defaulted to null here: the service derives the bound only when nothing was sent.
     expect((configureInputs[0] as Record<string, unknown>).maxSingleReloadCents).toBeUndefined();
+  });
+
+  it("saves the rewards spend preference for the signed-in member without a sensitive-action proof (funding design phase 7)", async () => {
+    const response = await jsonRequest(`${server.url}/api/dropship/wallet/rewards/preference`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ spendRewardsFirst: false }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.autoReload).toMatchObject({ spendRewardsFirst: false });
+    expect(preferenceInputs).toEqual([{ memberId: "member-1", input: { spendRewardsFirst: false } }]);
   });
 
   it("reports a stale fee acknowledgement as a conflict the vendor resolves by re-reading, not as bad input", async () => {

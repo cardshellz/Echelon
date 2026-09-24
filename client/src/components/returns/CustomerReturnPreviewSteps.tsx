@@ -13,6 +13,14 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { CustomerReturnParcelDetails } from "./CustomerReturnParcelDetails";
+import {
+  customPreviewParcelSize,
+  formatPreviewDimensions,
+  formatPreviewProductWeight,
+  previewParcelProductWeight,
+  reconcilePreviewParcelSize,
+} from "@/lib/customer-return-parcels";
 import {
   MAX_RETURN_FLOW_PARCELS,
   type CustomerReturnFlowOrder,
@@ -104,14 +112,18 @@ export function PreviewItems({
 }) {
   const available = order.lines.some((line) => line.eligibleQuantity > 0);
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {order.message && <PreviewNote>{order.message}</PreviewNote>}
       {!order.lines.length && (
         <PreviewNote>
           There are no items available for return on this order.
         </PreviewNote>
       )}
-      <div className="space-y-4">
+      <div className="divide-y overflow-hidden rounded-lg border">
+        <div className="flex items-center justify-between gap-3 bg-muted/30 px-3 py-2 text-xs font-medium sm:px-4">
+          <span>Items</span>
+          <span className="text-muted-foreground">Quantity / available</span>
+        </div>
         {order.lines.map((line, index) => {
           const description = describePreviewItem(order, line.id);
           const draft = drafts.find((item) => item.lineId === line.id)!;
@@ -120,67 +132,100 @@ export function PreviewItems({
           const quantityId = `preview-quantity-${index}`;
           const reasonId = `preview-reason-${index}`;
           const helpId = `preview-line-help-${index}`;
+          const availableId = `preview-line-available-${index}`;
+          const messageId = `preview-line-message-${index}`;
+          // The quantity denominator already shows ordinary availability. Keep
+          // additional counts visible when they explain a restricted quantity.
+          const showDetails =
+            line.eligibleQuantity !== line.purchasedQuantity ||
+            line.deliveredQuantity !== line.purchasedQuantity ||
+            line.alreadyReturningQuantity !== 0 ||
+            Boolean(line.message);
           return (
             <article
               key={line.id}
               data-testid={`preview-line-${line.id}`}
-              className={`min-w-0 rounded-xl border p-4 sm:p-5 ${selected ? "border-primary/50 bg-primary/[0.025]" : "bg-background"}`}
+              className={`grid min-w-0 grid-cols-[minmax(0,1fr)_6.5rem] items-start gap-x-3 gap-y-2 p-3 sm:grid-cols-[minmax(0,1fr)_11rem_6.5rem] sm:items-center sm:px-4 ${selected ? "bg-muted/20" : "bg-background"}`}
             >
-              <div className="flex min-w-0 items-start gap-4">
+              <div className="col-span-2 flex min-w-0 items-start gap-2.5 sm:col-span-1">
                 <div
-                  className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-lg ${disabled ? "bg-muted text-muted-foreground" : "bg-primary/10 text-primary"}`}
+                  aria-hidden="true"
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border bg-background text-muted-foreground"
                 >
-                  <Package aria-hidden="true" className="h-6 w-6" />
+                  <Package className="h-4 w-4" />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <h3 className="break-words font-semibold leading-snug">
+                  <h3 className="break-words text-sm font-medium leading-5">
                     {line.title}
                   </h3>
-                  <p className="mt-1 break-words text-sm text-muted-foreground">
-                    {description.context}
+                  <p className="mt-0.5 flex flex-wrap items-baseline gap-x-1.5 break-words text-xs leading-4 text-muted-foreground">
+                    <span className="min-w-0 break-words">
+                      {description.context}
+                    </span>
+                    {line.sku && (
+                      <span className="min-w-0 break-all text-[11px]">
+                        {line.sku}
+                      </span>
+                    )}
                   </p>
-                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                  <p
+                    id={helpId}
+                    className={
+                      showDetails
+                        ? "mt-1 text-xs leading-4 text-muted-foreground"
+                        : "sr-only"
+                    }
+                  >
                     {line.purchasedQuantity} ordered · {line.deliveredQuantity}{" "}
                     confirmed delivered
                     {line.alreadyReturningQuantity !== null &&
                       line.alreadyReturningQuantity > 0 &&
                       ` · ${line.alreadyReturningQuantity} already in a return`}
+                    {line.alreadyReturningQuantity === null && (
+                      <span className="block">
+                        Return history needs verification
+                      </span>
+                    )}
                   </p>
-                  {line.alreadyReturningQuantity === null && (
-                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                      Return history needs verification
-                    </p>
-                  )}
                   <p
-                    className={`mt-2 text-xs font-medium ${disabled ? "text-muted-foreground" : "text-primary"}`}
+                    id={availableId}
+                    className={
+                      disabled
+                        ? "mt-1 text-xs font-medium text-muted-foreground"
+                        : "sr-only"
+                    }
                   >
                     {disabled
                       ? "Not available to return"
                       : `${line.eligibleQuantity} available to return`}
                   </p>
+                  {line.message && (
+                    <p
+                      id={messageId}
+                      className="mt-1 text-xs leading-4 text-muted-foreground"
+                    >
+                      {line.message}
+                    </p>
+                  )}
                 </div>
               </div>
-              {line.message && (
-                <p
-                  id={helpId}
-                  className="mt-4 text-sm leading-relaxed text-muted-foreground"
+              <div className="col-start-2 row-start-2 min-w-0 sm:col-start-3 sm:row-start-1">
+                <Label htmlFor={quantityId} className="sr-only">
+                  Return quantity
+                </Label>
+                <div
+                  className={`flex min-w-0 items-center rounded-md border border-input bg-background focus-within:ring-2 focus-within:ring-ring ${disabled ? "opacity-50" : ""}`}
                 >
-                  {line.message}
-                </p>
-              )}
-              <div className="mt-4 grid items-end gap-4 sm:grid-cols-[120px_minmax(0,1fr)]">
-                <div className="space-y-2">
-                  <Label htmlFor={quantityId}>Quantity</Label>
                   <Input
                     id={quantityId}
                     aria-label={`Return quantity for ${description.accessibleName}`}
-                    aria-describedby={line.message ? helpId : undefined}
+                    aria-describedby={`${availableId} ${helpId}${line.message ? ` ${messageId}` : ""}`}
                     type="number"
                     inputMode="numeric"
                     min="0"
                     max={line.eligibleQuantity}
                     step="1"
-                    className="min-h-11"
+                    className="h-11 min-w-0 flex-1 border-0 px-2 text-center tabular-nums shadow-none focus-visible:ring-0 sm:h-9"
                     value={draft.quantity}
                     disabled={disabled}
                     onChange={(event) =>
@@ -193,52 +238,60 @@ export function PreviewItems({
                       )
                     }
                   />
+                  <span
+                    aria-hidden="true"
+                    className="max-w-[3rem] shrink-0 break-all py-1 pr-2 text-xs leading-4 tabular-nums text-muted-foreground"
+                  >
+                    / {line.eligibleQuantity}
+                  </span>
                 </div>
-                {selected && (
-                  <div className="min-w-0 space-y-2">
-                    <Label htmlFor={reasonId}>
-                      Reason{" "}
-                      <span className="font-normal text-muted-foreground">
-                        (optional)
-                      </span>
-                    </Label>
-                    <select
-                      id={reasonId}
-                      aria-label={`Reason for returning ${description.accessibleName} (optional)`}
-                      className={previewSelectClass}
-                      value={draft.reasonCode ?? ""}
-                      onChange={(event) =>
-                        onChange(
-                          drafts.map((item) =>
-                            item.lineId === line.id
-                              ? {
-                                  ...item,
-                                  reasonCode:
-                                    reasons.find(
-                                      (reason) =>
-                                        reason.value === event.target.value,
-                                    )?.value ?? null,
-                                }
-                              : item,
-                          ),
-                        )
-                      }
-                    >
-                      <option value="">No reason selected</option>
-                      {reasons.map((reason) => (
-                        <option key={reason.value} value={reason.value}>
-                          {reason.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
               </div>
+              {selected && (
+                <div className="col-start-1 row-start-2 min-w-0 sm:col-start-2 sm:row-start-1">
+                  <Label htmlFor={reasonId} className="sr-only">
+                    Reason (optional)
+                  </Label>
+                  <select
+                    id={reasonId}
+                    aria-label={`Reason for returning ${description.accessibleName} (optional)`}
+                    className="h-11 w-full min-w-0 rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:h-9"
+                    value={draft.reasonCode ?? ""}
+                    title={
+                      reasons.find(
+                        (reason) => reason.value === draft.reasonCode,
+                      )?.label ?? "Reason (optional)"
+                    }
+                    onChange={(event) =>
+                      onChange(
+                        drafts.map((item) =>
+                          item.lineId === line.id
+                            ? {
+                                ...item,
+                                reasonCode:
+                                  reasons.find(
+                                    (reason) =>
+                                      reason.value === event.target.value,
+                                  )?.value ?? null,
+                              }
+                            : item,
+                        ),
+                      )
+                    }
+                  >
+                    <option value="">Reason (optional)</option>
+                    {reasons.map((reason) => (
+                      <option key={reason.value} value={reason.value}>
+                        {reason.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </article>
           );
         })}
       </div>
-      <div className="flex flex-col-reverse gap-3 border-t pt-6 sm:flex-row sm:justify-between">
+      <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-between">
         <Button variant="ghost" className="min-h-11" onClick={onBack}>
           <ArrowLeft className="mr-2 h-4 w-4" />
           Back to order
@@ -269,12 +322,19 @@ export function PreviewPacking({
   onContinue: () => void;
   onBack: () => void;
 }) {
+  const weightNeedsVerification = parcels.some(
+    (parcel) =>
+      previewParcelProductWeight(order, parcel).status === "unverified",
+  );
   function addBox() {
     const key = Math.max(0, ...parcels.map((parcel) => parcel.key)) + 1;
     onChange([
       ...parcels,
       {
         key,
+        size: order.boxOptions.length
+          ? { kind: "unselected" }
+          : customPreviewParcelSize(),
         items: selections.map((item) => ({
           lineId: item.lineId,
           quantity: "0",
@@ -324,6 +384,19 @@ export function PreviewPacking({
                 </Button>
               )}
             </div>
+            <CustomerReturnParcelDetails
+              order={order}
+              parcel={parcel}
+              boxNumber={index + 1}
+              busy={busy}
+              onChange={(next) =>
+                onChange(
+                  parcels.map((candidate) =>
+                    candidate.key === parcel.key ? next : candidate,
+                  ),
+                )
+              }
+            />
             <div className="space-y-4">
               {selections.map((selection, itemIndex) => {
                 const line = order.lines.find(
@@ -363,7 +436,7 @@ export function PreviewPacking({
                         onChange(
                           parcels.map((candidate) =>
                             candidate.key === parcel.key
-                              ? {
+                              ? reconcilePreviewParcelSize(order, {
                                   ...candidate,
                                   items: candidate.items.map((item) =>
                                     item.lineId === line.id
@@ -373,7 +446,7 @@ export function PreviewPacking({
                                         }
                                       : item,
                                   ),
-                                }
+                                })
                               : candidate,
                           ),
                         )
@@ -455,7 +528,11 @@ export function PreviewPacking({
           <ArrowLeft className="mr-2 h-4 w-4" />
           Back to items
         </Button>
-        <Button className="min-h-11" onClick={onContinue} disabled={busy}>
+        <Button
+          className="min-h-11"
+          onClick={onContinue}
+          disabled={busy || weightNeedsVerification}
+        >
           {busy ? (
             <>
               <Loader2
@@ -506,6 +583,10 @@ export function PreviewReview({
               <Package aria-hidden="true" className="h-5 w-5 text-primary" />
               Box {parcel.number}
             </h3>
+            <p className="mb-4 text-sm text-muted-foreground">
+              {formatPreviewDimensions(parcel.dimensions)} · Product weight:{" "}
+              {formatPreviewProductWeight(parcel.weightGrams)}
+            </p>
             <ul className="space-y-3">
               {parcel.items.map((item) => (
                 <li

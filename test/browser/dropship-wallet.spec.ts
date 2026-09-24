@@ -343,7 +343,7 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await expect(intro).toContainText("costs 3% on top of the amount");
   await expect(intro).toContainText("USDC costs nothing.");
   await expect(intro).toContainText("the same gap is never pulled twice");
-  await expect(intro).toContainText("Autopay never takes more than the larger of your minimum and your top-up amount in one charge.");
+  await expect(intro).toContainText("Routine top-ups never take more than the larger of your minimum and your top-up amount in one charge.");
   await expect(intro).toContainText("You can also add money yourself at any time.");
   await expect(intro).toContainText("for a 1% fee on the amount used, at most $500 outstanding at a time");
   await expect(intro).toContainText("cancelled after your hold time (24 hours)");
@@ -418,14 +418,14 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await expect(radio(page, "Top-up amount", "$1,500")).toContainText("3× your minimum");
   await expect(radio(page, "Top-up amount", "$2,500")).toContainText("5× your minimum");
   await expect(floor.getByTestId("wallet-guidance-parked")).toContainText("Autopay keeps at least $500 in the wallet, topping up by $1,000 at a time.");
-  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Autopay never takes more than $1,000 in one charge (your top-up amount)");
+  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Routine top-ups never take more than $1,000 in one charge (your top-up amount)");
   await radio(page, "Top-up amount", "$500").click();
   await expect(floor.getByTestId("wallet-impact")).toContainText("Keeping $500 means routine top-ups are free");
   await expect(floor.getByTestId("wallet-guidance-fee")).toContainText("Card fees: $0 on routine top-ups. Only a shortfall is charged 3% — for example a $75 order with $20 available charges your backup card $55 + $1.65.");
   await expect(floor.getByTestId("wallet-guidance-parked")).toContainText("Autopay keeps at least $500 in the wallet, topping up by $500 at a time.");
   await expect(floor.getByTestId("wallet-guidance-activation")).toContainText("$500 from Chase ending in 1234");
   await expect(floor.getByTestId("wallet-guidance-activation")).toContainText("first daily check after you activate");
-  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Autopay never takes more than $500 in one charge (your minimum)");
+  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Routine top-ups never take more than $500 in one charge (your minimum)");
   await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("2 hours");
   // An amount of the vendor's own: it has to clear the policy's smallest top-up, then the bound follows it and no quick pick is selected.
   await page.getByTestId("wallet-top-up-custom").fill("50");
@@ -435,7 +435,7 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await expect(page.getByRole("radiogroup", { name: "Top-up amount" }).getByRole("radio", { checked: true })).toHaveCount(0);
   await expect(floor.getByTestId("wallet-guidance-parked")).toContainText("topping up by $800 at a time");
   await expect(floor.getByTestId("wallet-guidance-activation")).toContainText("$800 from Chase ending in 1234");
-  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Autopay never takes more than $800 in one charge (your top-up amount)");
+  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Routine top-ups never take more than $800 in one charge (your top-up amount)");
   await expectNoHorizontalScroll(page);
   await shot(page, "03-floor-guidance");
   await floor.getByRole("button", { name: "Continue" }).click();
@@ -462,15 +462,15 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await expect(summary).toContainText("$500");
   await expect(summary).not.toContainText("a day");
   await expect(summary).toContainText("Visa ending in 4242");
-  await expect(summary).toContainText("$800. Autopay never takes more than $800 in one charge.");
+  await expect(summary).toContainText("$800. Routine top-ups never take more than $800 in one charge.");
   await expect(summary).toContainText("24 hours — set by CardShellz for every wallet.");
   const mandate = review.getByTestId("wallet-mandate");
-  for (const phrase of ["your minimum of $500", "your top-up amount of $800", "shortfall", "up to $800", "24 hours", "2 hours", "before it lands",
+  for (const phrase of ["your minimum of $500", "your top-up amount of $800", "shortfall", "whatever its size (up to $5,000)", "24 hours", "2 hours", "before it lands",
     "If a return fee has taken your balance below zero, the shortfall includes that amount.", "Adding money by card now avoids that", "for automatic top-ups and covers", "first daily check after you activate"]) {
     await expect(mandate).toContainText(phrase);
   }
   // The single-charge bound is explained in full here, beside the numbers themselves; the intro only states the rule.
-  await expect(mandate).toContainText("Never take more than $800 in one charge — the larger of your minimum and your top-up amount.");
+  await expect(mandate).toContainText("Routine top-ups never take more than $800 in one charge — the larger of your minimum and your top-up amount. A held order is different: your backup card is charged its whole shortfall, up to $5,000, the most any single payment may be.");
   await expect(review.getByTestId("wallet-plan-sentence")).toContainText("you keep $500 in your wallet; when an order takes it lower, autopay pulls $800 from your bank for free");
   await expect(review.getByTestId("wallet-activation-quote")).toContainText("$800 bank transfer");
   await expect(review.getByTestId("wallet-fee-acknowledgement-line")).toContainText("records that you agree to the 3% fee");
@@ -483,9 +483,22 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   // Step 6: recommended, never a gate.
   const deposit = page.getByTestId("wallet-step-deposit");
   await expect(deposit.getByRole("heading", { name: "Add money now (recommended)" })).toBeVisible();
-  await expect(deposit).toContainText("first daily check after you activate");
-  // The amounts are the top-up step's picks again — the $500 minimum, the vendor's own $800 top-up and the multiples — opening on the $800 the copy names; nothing below the minimum is offered.
-  await expect(deposit).toContainText("That first top-up is $800 from");
+  // The balance stands on its own, the picked way to pay lists its terms, and nothing here is about autopay (funding design phase 7).
+  await expect(deposit.getByTestId("wallet-deposit-available")).toHaveText("$0.00");
+  await expect(deposit.getByTestId("wallet-deposit-pending")).toHaveCount(0);
+  await expect(deposit.getByTestId("wallet-rail-notes").getByRole("listitem")).toHaveText([
+    "No fee.",
+    "Takes up to 5 business days (our assumption) to land, and counts toward your minimum as soon as it shows as on the way.",
+    "A business bank account can qualify to pay for orders while a transfer is still on the way; a personal account pays only once the money lands.",
+    "While it is on the way, an order it cannot pay for is charged to Visa ending in 4242 for the shortfall plus 3%.",
+  ]);
+  await radio(page, "Pay with", "Card (3% fee)").click();
+  await expect(deposit.getByTestId("wallet-rail-notes").getByRole("listitem")).toHaveText(["Card fee: 3% on top of the amount.", "Deposits of $100 or more.", "Available at once."]);
+  await radio(page, "Pay with", "Bank account (no fee)").click();
+  await expect(deposit).not.toContainText(/autopay|daily check|first top-up/i);
+  await expect(deposit.getByTestId("wallet-impact")).toHaveCount(0);
+  await expect(deposit.getByRole("button", { name: "Back", exact: true })).toHaveCount(0);
+  // The amounts are the top-up step's picks again — the $500 minimum, the vendor's own $800 top-up and the multiples — opening on the $800 top-up; nothing below the minimum is offered.
   await expect(page.getByRole("radiogroup", { name: "Amount", exact: true }).getByRole("radio")).toHaveCount(5);
   for (const [amount, hint] of [["$500", "Your minimum"], ["$800", "Your top-up amount"], ["$1,000", "2× your minimum"], ["$1,500", "3× your minimum"], ["$2,500", "5× your minimum"]]) {
     await expect(radio(page, "Amount", amount)).toContainText(hint);
@@ -495,17 +508,17 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await expect(deposit).toContainText("we may ask you to confirm it is you again");
   await expectNoHorizontalScroll(page);
   await shot(page, "06-deposit");
-  await deposit.getByRole("button", { name: "Not now" }).click();
+  await deposit.getByRole("button", { name: "Skip for now" }).click();
 
   const manage = page.getByTestId("wallet-manage");
   await expect(manage).toBeVisible();
   await expect(manage.getByTestId("wallet-plan-source")).toContainText("Chase ending in 1234 · bank account · no fee");
   await expect(manage.getByTestId("wallet-plan-floor")).toContainText("$500 — autopay tops it up after any order that takes it lower, and at the daily check.");
   await expect(manage.getByTestId("wallet-plan-floor")).not.toContainText("a day");
-  await expect(manage.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $800 · never more than $800 in one charge.");
+  await expect(manage.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $800 · routine top-ups never more than $800 in one charge.");
   await expect(manage.getByTestId("wallet-plan-backup-card")).toContainText("Visa ending in 4242 · expires 12/27");
   await expect(manage.getByTestId("wallet-plan-limits")).toContainText("24 hours — set by CardShellz for every wallet.");
-  await expect(manage.getByTestId("wallet-plan-authorization")).toContainText("at a 3% card fee");
+  await expect(manage.getByTestId("wallet-plan-authorization")).toContainText("with 3% fee on card charges");
   await expect(manage.getByTestId("wallet-deposit-callout")).toBeVisible();
   await expect(manage.getByRole("button", { name: "Back to onboarding" })).toBeVisible();
   await expect(manage.getByTestId("wallet-auto-reload-off")).toBeVisible();
@@ -534,7 +547,7 @@ test("card vendor: steps 4 and 6 are satisfied rows, the bound is the minimum, a
   await expect(radio(page, "Minimum", "$100")).toContainText("Singles, packs and inner packs");
   await expect(floor).toContainText("$3 at $100, $30 at $1,000");
   await expect(floor.getByTestId("wallet-guidance-activation")).toContainText("$103");
-  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Autopay never takes more than $100 in one charge (your minimum)");
+  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Routine top-ups never take more than $100 in one charge (your minimum)");
   await shot(page, "card-03-floor");
   await floor.getByRole("button", { name: "Continue" }).click();
 
@@ -544,7 +557,7 @@ test("card vendor: steps 4 and 6 are satisfied rows, the bound is the minimum, a
   await expect(steps).toContainText("First top-up ·");
   await expect(steps).toContainText("$103");
   const review = page.getByTestId("wallet-step-review");
-  await expect(review.getByTestId("wallet-review-summary")).toContainText("$100 — your minimum. Autopay never takes more than $100 in one charge.");
+  await expect(review.getByTestId("wallet-review-summary")).toContainText("$100 — your minimum. Routine top-ups never take more than $100 in one charge.");
   await expect(review.getByTestId("wallet-review-summary")).toContainText("Visa ending in 4242 — also your autopay source");
   await expect(review.getByTestId("wallet-mandate")).toContainText("or a bank transfer you started is returned before it lands");
   await expect(review.getByTestId("wallet-mandate")).toContainText("$100 + $3 = $103");
@@ -589,20 +602,20 @@ test("manage: changing the minimum moves the bound with it, the top-up amount is
   await expect(page.getByTestId("wallet-auto-reload-off")).toHaveCount(0);
   await shot(page, "manage-01-plan");
   // The stored bound ($500) shows until the amounts change; the minimum editor then shows the bound the server will derive.
-  await expect(plan.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $250 (your minimum) · never more than $500 in one charge.");
+  await expect(plan.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $250 (your minimum) · routine top-ups never more than $500 in one charge.");
   await plan.getByTestId("wallet-plan-floor").getByRole("button", { name: "Change" }).click();
   await expect(radio(page, "Minimum", "$100")).toHaveAttribute("aria-checked", "true");
   await expect(radio(page, "Top-up amount", "$100")).toHaveAttribute("aria-checked", "true");
   await radio(page, "Minimum", "$500").click();
   await expect(radio(page, "Top-up amount", "$500")).toHaveAttribute("aria-checked", "true");
   await expect(radio(page, "Top-up amount", "$2,500")).toContainText("5× your minimum");
-  await expect(plan.getByTestId("wallet-floor-limit-note")).toContainText("Autopay never takes more than $500 in one charge (your minimum)");
+  await expect(plan.getByTestId("wallet-floor-limit-note")).toContainText("Routine top-ups never take more than $500 in one charge (your minimum)");
   await expectNoHorizontalScroll(page);
   await shot(page, "manage-02-floor-editor");
   await plan.getByRole("button", { name: "Save", exact: true }).click();
   expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 50_000, topUpAmountCents: null, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
   await expect(plan.getByTestId("wallet-plan-floor")).toContainText("$500 — autopay tops it up after any order that takes it lower");
-  await expect(plan.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $500 (your minimum) · never more than $500 in one charge.");
+  await expect(plan.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $500 (your minimum) · routine top-ups never more than $500 in one charge.");
 
   // The hold time is CardShellz's setting: shown from the served warning window, never chosen here.
   await expect(plan.getByTestId("wallet-plan-limits")).toContainText("24 hours — set by CardShellz for every wallet.");
@@ -613,12 +626,12 @@ test("manage: changing the minimum moves the bound with it, the top-up amount is
   // A top-up amount of its own: bigger, fewer pulls, and the bound follows it.
   await plan.getByTestId("wallet-plan-floor").getByRole("button", { name: "Change" }).click();
   await page.getByTestId("wallet-top-up-custom").fill("2500");
-  await expect(plan.getByTestId("wallet-floor-limit-note")).toContainText("Autopay never takes more than $2,500 in one charge (your top-up amount)");
+  await expect(plan.getByTestId("wallet-floor-limit-note")).toContainText("Routine top-ups never take more than $2,500 in one charge (your top-up amount)");
   await shot(page, "manage-03-top-up-editor");
   await plan.getByRole("button", { name: "Save", exact: true }).click();
   expect(state.autoReloadWrites[1]).toMatchObject({ topUpAmountCents: 250_000, minimumBalanceCents: 50_000, paymentHoldTimeoutMinutes: 1440 });
   expect(state.autoReloadWrites[1]).not.toHaveProperty("maxSingleReloadCents");
-  await expect(plan.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $2,500 · never more than $2,500 in one charge.");
+  await expect(plan.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $2,500 · routine top-ups never more than $2,500 in one charge.");
   finish(state);
 });
 
@@ -751,6 +764,27 @@ test("manage: adding money by card, bank or USDC quotes the fee honestly and ret
   expect(state.fundingSessions[1]).toEqual({ fundingMethodId: 30, amountCents: 50_000, returnTo: HARNESS_PATH });
   await expect(page.getByTestId("wallet-pending")).toContainText("$500 on the way — a bank transfer takes up to 5 business days (our assumption) to land");
   await expect(page.getByText(/a few days/)).toHaveCount(0);
+  finish(state);
+});
+
+test("manage: with no card fee, every card surface says so, a fee cut keeps the record refreshable, and a card deposit keeps its own minimum", async ({ page }) => {
+  const state = await setup(page, { vendorStatus: "active", methods: [CARD, BANK], autoReload: doneAutoReload(), balanceCents: 4_250, cardFundingFeeBps: 0, proofs: ALL_PROOFS });
+  const manage = page.getByTestId("wallet-manage");
+  // The recorded 3% still covers the vendor; the cut applies at once and the banner offers to refresh the record.
+  await expect(page.getByTestId("wallet-acknowledgement-needed")).toContainText("Card Shellz removed the card fee (you agreed to a 3% fee). Automatic charges already use the lower rate; confirm to keep your record current.");
+  await expect(manage.getByTestId("wallet-plan-authorization")).toContainText("with 3% fee on card charges; card charges now carry no fee — confirm the new terms above.");
+  await expect(manage.getByTestId("wallet-plan-backup-card")).toContainText("Charged only for the shortfall on an order, up to $5,000 in one payment");
+  await expect(page.getByText(/0%/)).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Add money" }).click();
+  const panel = page.getByTestId("wallet-add-money");
+  await radio(page, "Pay with", "Card (no fee)").click();
+  await expect(panel.getByTestId("wallet-funding-quote")).toHaveText("No fee. Your card is charged $250.00, and it goes into your wallet, available at once.");
+  // A card deposit below the $100 card minimum is refused before Stripe is involved; the message names the card's bounds.
+  await panel.getByLabel("Or another amount").fill("50");
+  await panel.getByRole("button", { name: "Continue on Stripe" }).click();
+  await expect(panel.getByRole("alert")).toHaveText("Amounts must be between $100 and $5,000.");
+  expect(state.fundingSessions).toEqual([]);
   finish(state);
 });
 
@@ -944,13 +978,15 @@ test("the step list walks back and forward without losing a choice, and manage k
   await expect(page.locator('[data-testid="wallet-step-link-source"]')).toHaveCount(0);
   await expect(page.locator('[data-testid="wallet-step-link-floor"]')).toHaveCount(0);
   await expect(stepLink(page, "intro")).toBeVisible();
-  await deposit.getByRole("button", { name: "Back", exact: true }).click();
+  // The add-money step has no Back: the step list is the way to the review.
+  await expect(deposit.getByRole("button", { name: "Back", exact: true })).toHaveCount(0);
+  await clickStep(page, "authorize");
   const reviewAgain = page.getByTestId("wallet-step-review");
   await expect(reviewAgain.getByTestId("wallet-review-summary")).toContainText("Chase ending in 1234 (bank account, no fee)");
   await expect(reviewAgain.getByRole("button", { name: "Change" })).toHaveCount(0);
   await clickStep(page, "deposit");
   await expect(deposit.getByRole("heading", { name: "Add money now (recommended)" })).toBeVisible();
-  await deposit.getByRole("button", { name: "Not now" }).click();
+  await deposit.getByRole("button", { name: "Skip for now" }).click();
 
   // Past setup the rules are still one click away, collapsed until asked for.
   const how = page.getByTestId("wallet-how-it-works");

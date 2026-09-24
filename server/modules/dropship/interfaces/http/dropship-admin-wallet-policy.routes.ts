@@ -5,20 +5,19 @@ import { DropshipError } from "../../domain/errors";
 import { createDropshipWalletPolicyServiceFromEnv } from "../../infrastructure/dropship-wallet-policy.factory";
 
 /**
- * Admin surface for the staff-managed wallet policy (migrations 0682, 0683)
- * and the per-vendor credit profile.
+ * Admin surface for the staff-managed wallet policy (migrations 0682, 0683,
+ * 0701) and the per-vendor credit profile.
  *
  * The limits are versioned and immutable: POST publishes a NEW VERSION and
  * retires the current one; there is no PATCH. The credit profile is mutable
  * configuration set with PUT. Routes orchestrate only — every rule, default
  * and count lives in DropshipWalletPolicyService.
  *
- * The card funding fee is served read-only on the GET. It is NOT editable here:
- * a vendor's agreement to a rate is recorded only in an audit payload, not on
- * their settings row, and unattended auto-reload charges quote the live rate,
- * so an editable fee would charge vendors a rate they never agreed to. Storing
- * the acknowledgement on the settings row is the prerequisite and is separate
- * work. The service carries the same note in its response payload.
+ * The card funding fee is one of the limits since funding design phase 7
+ * (held at zero). A vendor's acknowledged rate is stored on their settings
+ * row, and an unattended charge never carries more than the rate they agreed
+ * to (DropshipWalletService.unattendedFeeBps), so staff raising the fee here
+ * cannot charge a vendor a rate they never agreed to.
  */
 export function registerDropshipAdminWalletPolicyRoutes(
   app: Express,

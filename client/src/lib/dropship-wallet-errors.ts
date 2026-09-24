@@ -83,8 +83,13 @@ export function describeWalletError(
         text: `Your floor or limit is outside the allowed range: floor at least ${formatWholeDollars(limits.autoReloadMinTriggerCents)}, limit at least ${formatWholeDollars(limits.autoReloadMinAmountCents)} and at least your floor.`,
         recovery: { step: "floor" },
       };
-    case "DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE":
-      return { text: `Amounts must be between ${formatWholeDollars(limits.manualFundingMinCents)} and ${formatWholeDollars(limits.manualFundingMaxCents)}.`, recovery: "none" };
+    case "DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE": {
+      // The server names the bounds it applied: a card deposit has its own
+      // minimum (funding design phase 7). An older server names none.
+      const minCents = integerFromContext(context, "minCents") ?? limits.manualFundingMinCents;
+      const maxCents = integerFromContext(context, "maxCents") ?? limits.manualFundingMaxCents;
+      return { text: `Amounts must be between ${formatWholeDollars(minCents)} and ${formatWholeDollars(maxCents)}.`, recovery: "none" };
+    }
     case "DROPSHIP_FUNDING_METHOD_RAIL_UNSUPPORTED":
     case "DROPSHIP_FUNDING_METHOD_PROVIDER_CUSTOMER_REQUIRED":
       return { text: "This account cannot be used for a payment right now. Add money later from Wallet.", recovery: "refetch" };
@@ -123,4 +128,10 @@ export function describeWalletError(
     return { text: "Stripe is busy. Try again in a moment.", recovery: "none" };
   }
   return { text: message.trim() || "Something went wrong on our side. Nothing was changed unless it shows below after a reload.", recovery: "refetch" };
+}
+
+/** A non-negative integer the server put in the error context, or null when it is absent or not one. */
+function integerFromContext(context: Record<string, unknown> | null, key: string): number | null {
+  const value = context?.[key];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }

@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  MAX_RETURN_ORIGINAL_BOXES, customerReturnBoxOptionSchema, customerReturnDimensionsSchema,
+  customerReturnParcelWeightSchema, customerReturnUnitWeightSchema,
+} from "./customer-return-parcel";
 
 // Bounds for this read-only flow. Live label-service parcel limits remain a
 // separate shipping policy and cannot be inferred from this UI payload bound.
@@ -34,6 +38,7 @@ export const customerReturnFlowOrderSchema = z
     evaluatedAt: z.string().datetime(),
     returnWindowEndsAt: z.string().datetime(),
     message: z.string().max(500).nullable(),
+    boxOptions: z.array(customerReturnBoxOptionSchema).max(MAX_RETURN_ORIGINAL_BOXES),
     lines: z
       .array(
         z
@@ -42,6 +47,7 @@ export const customerReturnFlowOrderSchema = z
             title: z.string().min(1).max(1000),
             variant: z.string().max(1000).nullable(),
             sku: z.string().max(255).nullable(),
+            unitWeightGrams: customerReturnUnitWeightSchema,
             purchasedQuantity: quantity,
             deliveredQuantity: quantity,
             // Unknown history must not be represented as zero available claims.
@@ -78,6 +84,8 @@ export const customerReturnFlowReviewInputSchema = z
       .array(
         z
           .object({
+            dimensions: customerReturnDimensionsSchema,
+            originalBoxId: z.string().min(1).max(255).nullable(),
             items: z
               .array(z.object({ lineId, quantity: positiveQuantity }).strict())
               .min(1)
@@ -104,6 +112,8 @@ export const customerReturnFlowReviewSchema = z
         z
           .object({
             number: z.number().int().positive().max(MAX_RETURN_FLOW_PARCELS),
+            dimensions: customerReturnDimensionsSchema,
+            weightGrams: customerReturnParcelWeightSchema,
             items: z
               .array(
                 z

@@ -364,7 +364,6 @@ export function DropshipWalletPolicyPanel({
             }
           />
 
-          <CardFundingFeePanel fee={overview.cardFundingFee} />
         </>
       )}
     </div>
@@ -515,32 +514,6 @@ export function DropshipWalletPolicyImpactPanel({
           block publishing.
         </p>
       )}
-    </section>
-  );
-}
-
-/**
- * The card funding fee, shown exactly as served. There is no input here on
- * purpose: the server owns the rate and explains why it cannot be edited from
- * this page.
- */
-function CardFundingFeePanel({
-  fee,
-}: {
-  fee: DropshipWalletPolicyOverview["cardFundingFee"];
-}) {
-  return (
-    <section className="rounded-md border bg-card p-4" data-testid="wallet-policy-card-fee">
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 className="font-semibold">Card funding fee</h3>
-        <Badge variant="outline">Read-only</Badge>
-      </div>
-      <p className="mt-2 text-sm">
-        <span className="font-medium tabular-nums">{formatDropshipBasisPoints(fee.bps)}</span>{" "}
-        ({fee.bps} bps), from{" "}
-        <span className="font-medium">{fee.envKey}</span>.
-      </p>
-      <p className="mt-2 text-sm text-muted-foreground">{fee.readOnlyReason}</p>
     </section>
   );
 }
