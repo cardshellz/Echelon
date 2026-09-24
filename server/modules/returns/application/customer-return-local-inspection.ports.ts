@@ -4,6 +4,8 @@ const id = z.number().int().positive().safe();
 const quantity = z.number().int().nonnegative().safe();
 const identity = z.string().min(1).max(255);
 const timestamp = z.string().datetime({ offset: true });
+// Canonical catalog column is numeric(10,2), in grams per ordered variant.
+export const MAX_CATALOG_RETURN_UNIT_WEIGHT_GRAMS = 99_999_999.99;
 
 /** Inspection bounds are rejection limits, never permission to truncate evidence. */
 export const CUSTOMER_RETURN_INSPECTION_LIMITS = Object.freeze({
@@ -26,6 +28,7 @@ export const customerReturnLocalLineSchema = z.object({
   title: z.string().max(300).nullable(), variantTitle: z.string().max(200).nullable(),
   sku: z.string().max(100).nullable(), quantity,
   requiresShipping: z.boolean().nullable(),
+  unitWeightGrams: z.number().positive().finite().max(MAX_CATALOG_RETURN_UNIT_WEIGHT_GRAMS).nullable(),
 }).strict();
 export const customerReturnLocalWmsItemSchema = z.object({
   wmsOrderId: id, wmsOrderItemId: id, omsOrderLineId: id.nullable(),
@@ -73,6 +76,7 @@ export const customerReturnLocalPackageItemSchema = z.object({
   correctionForPhysicalShipmentItemId: id.nullable(),
   originalQuantity: quantity, effectiveQuantity: quantity,
   status: identity, provider: identity,
+  providerPhysicalShipmentId: identity,
   trackingNumber: z.string().max(200).nullable(), carrier: z.string().max(100).nullable(),
 }).strict();
 export const customerReturnLocalPackageLabelSchema = z.object({

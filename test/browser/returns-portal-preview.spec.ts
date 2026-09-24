@@ -8,6 +8,7 @@ import {
   CUSTOMER_RETURN_PORTAL_ACCESS_PATH as ACCESS_PATH,
   CUSTOMER_RETURN_PORTAL_LEGACY_PATH as LEGACY_PATH,
 } from "../../shared/returns/customer-return-portal-paths";
+import { customerReturnLiveReviewInputSchema } from "../../shared/returns/customer-return-live.contract";
 
 async function expectStandalone(page: Page) {
   await expect(page).toHaveTitle(/Card Shellz/i);
@@ -54,6 +55,55 @@ async function signIn(page: Page) {
     .click();
 }
 
+async function enterCustomBoxDimensions(
+  page: Page,
+  number: number,
+  length = "12",
+  width = "10",
+  height = "6",
+) {
+  const box = page.getByTestId(`preview-box-${number}`);
+  const change = box.getByRole("button", {
+    name: `Change size for box ${number}`,
+    exact: true,
+  });
+  if (await change.isVisible()) await change.click();
+  const size = box.getByLabel(`Box size for box ${number}`, { exact: true });
+  if (await size.isVisible()) await size.selectOption("custom");
+  await box
+    .getByLabel(`Length of box ${number} in inches`, { exact: true })
+    .fill(length);
+  await box
+    .getByLabel(`Width of box ${number} in inches`, { exact: true })
+    .fill(width);
+  await box
+    .getByLabel(`Height of box ${number} in inches`, { exact: true })
+    .fill(height);
+}
+
+/** Existing journeys explicitly supply their actual box size when no unique original fits. */
+async function reviewPackedReturn(page: Page) {
+  const boxes = page.locator('[data-testid^="preview-box-"]');
+  for (let index = 0; index < (await boxes.count()); index += 1) {
+    const number = index + 1;
+    const size = boxes
+      .nth(index)
+      .getByLabel(`Box size for box ${number}`, { exact: true });
+    const length = boxes
+      .nth(index)
+      .getByLabel(`Length of box ${number} in inches`, { exact: true });
+    if (
+      ((await size.isVisible()) && (await size.inputValue()) === "") ||
+      ((await length.isVisible()) && (await length.inputValue()) === "")
+    ) {
+      await enterCustomBoxDimensions(page, number);
+    }
+  }
+  await page
+    .getByRole("button", { name: "Review return", exact: true })
+    .click();
+}
+
 test("split shipments can be reviewed in two boxes without live effects", async ({
   page,
 }, testInfo) => {
@@ -91,6 +141,15 @@ test("split shipments can be reviewed in two boxes without live effects", async 
   await page
     .getByRole("button", { name: "Add another box", exact: true })
     .click();
+  await expect(
+    page.getByLabel("Box size for box 1", { exact: true }),
+  ).toHaveValue("");
+  await expect(
+    page.getByLabel("Box size for box 2", { exact: true }),
+  ).toHaveValue("");
+  await expect(
+    page.getByLabel("Product weight for box 2", { exact: true }),
+  ).toHaveText("Add items to calculate");
   await page
     .getByLabel(
       "Quantity of item 1: Sample collector sleeves (100 count · Clear) in box 1",
@@ -103,9 +162,21 @@ test("split shipments can be reviewed in two boxes without live effects", async 
       { exact: true },
     )
     .fill("2");
-  await page
-    .getByRole("button", { name: "Review return", exact: true })
-    .click();
+  await expect(
+    page.getByLabel("Product weight for box 1", { exact: true }),
+  ).toHaveText("0.772 lb");
+  await expect(
+    page.getByLabel("Product weight for box 2", { exact: true }),
+  ).toHaveText("0.441 lb");
+  await expect(
+    page
+      .getByTestId("preview-box-2")
+      .getByText("Original box size · 10 × 8 × 4 in", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Change size for box 2", exact: true }),
+  ).toBeVisible();
+  await reviewPackedReturn(page);
   await expect(
     page.getByRole("button", { name: "Back to packing", exact: true }),
   ).toBeVisible();
@@ -376,9 +447,7 @@ test("same-name purchased lines remain distinguishable by sight and accessible n
       { exact: true },
     ),
   ).toHaveValue("1");
-  await page
-    .getByRole("button", { name: "Review return", exact: true })
-    .click();
+  await reviewPackedReturn(page);
   await expect(
     page.getByRole("heading", { name: "Review your return", exact: true }),
   ).toBeVisible();
@@ -655,9 +724,7 @@ test("live order lookup is the default and a review carries the selected shop an
   await page
     .getByRole("button", { name: "Continue to packing", exact: true })
     .click();
-  await page
-    .getByRole("button", { name: "Review return", exact: true })
-    .click();
+  await reviewPackedReturn(page);
   await expect(
     page.getByRole("heading", { name: "Review your return", exact: true }),
   ).toBeVisible();
@@ -693,6 +760,7 @@ test("the full maximum available quantity remains readable without horizontal ov
     route.fulfill({
       json: {
         ...order,
+        boxOptions: [],
         lines: [
           {
             ...order.lines[0],
@@ -758,6 +826,294 @@ test("the full maximum available quantity remains readable without horizontal ov
   ).toBe(true);
   expect(fixture.failures).toEqual([]);
 });
+
+test("one matching original box defaults its dimensions and custom edits survive Back and reason changes", async ({
+  page,
+}, testInfo) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  await page.goto(PORTAL_PATH);
+  await page.getByLabel("Order number", { exact: true }).fill("LIVE-1001");
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  const item = page.getByTestId("preview-line-sample-line-2");
+  await item.getByRole("spinbutton").fill("1");
+  await page
+    .getByRole("button", { name: "Continue to packing", exact: true })
+    .click();
+  const box = page.getByTestId("preview-box-1");
+  await expect(
+    box.getByText("Original box size · 10 × 8 × 4 in", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    box.getByLabel("Product weight for box 1", { exact: true }),
+  ).toHaveText("0.22 lb");
+  await expect(box.getByRole("spinbutton", { name: /weight/i })).toHaveCount(0);
+  await page.getByTestId("preview-canvas").screenshot({
+    path: testInfo.outputPath("packing-original-size.png"),
+  });
+  await enterCustomBoxDimensions(page, 1, "12.125", "8", "4");
+  await page.getByTestId("preview-canvas").screenshot({
+    path: testInfo.outputPath("packing-custom-size.png"),
+  });
+  await reviewPackedReturn(page);
+  await expect(
+    page.getByRole("heading", { name: "Review your return", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("12.125 × 8 × 4 in · Product weight: 0.22 lb", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  const review = fixture.previewRequests.find(
+    (request) => request.path === `${PREVIEW_API}/live/review`,
+  );
+  expect(review?.body).toMatchObject({
+    parcels: [
+      {
+        originalBoxId: null,
+        dimensions: { lengthMm: 307.975, widthMm: 203.2, heightMm: 101.6 },
+      },
+    ],
+  });
+  await page
+    .getByRole("button", { name: "Back to packing", exact: true })
+    .click();
+  await expect(
+    box.getByLabel("Length of box 1 in inches", { exact: true }),
+  ).toHaveValue("12.125");
+  await page
+    .getByRole("button", { name: "Back to items", exact: true })
+    .click();
+  await item.getByRole("combobox").selectOption("damaged");
+  await page
+    .getByRole("button", { name: "Continue to packing", exact: true })
+    .click();
+  await expect(
+    box.getByLabel("Length of box 1 in inches", { exact: true }),
+  ).toHaveValue("12.125");
+  expect(fixture.failures).toEqual([]);
+});
+
+test("multiple original boxes require an explicit size choice", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  await page.goto(PORTAL_PATH);
+  await page.getByLabel("Order number", { exact: true }).fill("LIVE-1001");
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  await page
+    .getByTestId("preview-line-sample-line-1")
+    .getByRole("spinbutton")
+    .fill("1");
+  await page
+    .getByRole("button", { name: "Continue to packing", exact: true })
+    .click();
+  const box = page.getByTestId("preview-box-1");
+  const size = box.getByLabel("Box size for box 1", { exact: true });
+  await expect(size).toHaveValue("");
+  await expect(
+    box.getByRole("button", { name: "Change size for box 1", exact: true }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "Review return", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText("Choose a box size");
+  expect(
+    fixture.previewRequests.some(
+      (request) => request.path === `${PREVIEW_API}/live/review`,
+    ),
+  ).toBe(false);
+  await size.selectOption("original:sample-box-1-1");
+  await reviewPackedReturn(page);
+  await expect(
+    page.getByRole("heading", { name: "Review your return", exact: true }),
+  ).toBeVisible();
+  expect(
+    fixture.previewRequests.find(
+      (request) => request.path === `${PREVIEW_API}/live/review`,
+    )?.body,
+  ).toMatchObject({
+    parcels: [
+      {
+        originalBoxId: "sample-box-1-1",
+        dimensions: { lengthMm: 254, widthMm: 203.2, heightMm: 101.6 },
+      },
+    ],
+  });
+  expect(fixture.failures).toEqual([]);
+});
+
+test("missing original dimensions require custom dimensions before review", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  await page.route(`**${PREVIEW_API}/live/order`, (route) =>
+    route.fulfill({
+      json: {
+        ...fixture.liveOrder(),
+        boxOptions: [],
+      },
+    }),
+  );
+  await page.goto(PORTAL_PATH);
+  await page.getByLabel("Order number", { exact: true }).fill("LIVE-1001");
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  await page
+    .getByTestId("preview-line-sample-line-2")
+    .getByRole("spinbutton")
+    .fill("1");
+  await page
+    .getByRole("button", { name: "Continue to packing", exact: true })
+    .click();
+  const box = page.getByTestId("preview-box-1");
+  await expect(
+    box.getByLabel("Length of box 1 in inches", { exact: true }),
+  ).toHaveValue("");
+  await expect(
+    box.getByLabel("Box size for box 1", { exact: true }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "Review return", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Enter the length, width, and height",
+  );
+  expect(
+    fixture.previewRequests.some(
+      (request) => request.path === `${PREVIEW_API}/live/review`,
+    ),
+  ).toBe(false);
+  await enterCustomBoxDimensions(page, 1, "11", "9", "5");
+  await reviewPackedReturn(page);
+  await expect(
+    page.getByRole("heading", { name: "Review your return", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("11 × 9 × 5 in · Product weight: 0.22 lb", { exact: true }),
+  ).toBeVisible();
+  expect(
+    fixture.previewRequests.find(
+      (request) => request.path === `${PREVIEW_API}/live/review`,
+    )?.body,
+  ).toMatchObject({
+    parcels: [
+      {
+        originalBoxId: null,
+        dimensions: { lengthMm: 279.4, widthMm: 228.6, heightMm: 127 },
+      },
+    ],
+  });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("missing product weight cannot be edited or reviewed as zero", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const order = fixture.liveOrder();
+  await page.route(`**${PREVIEW_API}/live/order`, (route) =>
+    route.fulfill({
+      json: {
+        ...order,
+        boxOptions: [],
+        lines: order.lines.map((line, index) =>
+          index === 0 ? { ...line, unitWeightGrams: null } : line,
+        ),
+      },
+    }),
+  );
+  await page.goto(PORTAL_PATH);
+  await page.getByLabel("Order number", { exact: true }).fill("LIVE-1001");
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  await page
+    .getByTestId("preview-line-sample-line-1")
+    .getByRole("spinbutton")
+    .fill("1");
+  await page
+    .getByRole("button", { name: "Continue to packing", exact: true })
+    .click();
+  const box = page.getByTestId("preview-box-1");
+  await expect(
+    box.getByLabel("Product weight for box 1", { exact: true }),
+  ).toHaveText("Weight needs verification");
+  await expect(
+    box.getByLabel("Length of box 1 in inches", { exact: true }),
+  ).toHaveValue("");
+  await enterCustomBoxDimensions(page, 1);
+  await expect(
+    page.getByRole("button", { name: "Review return", exact: true }),
+  ).toBeDisabled();
+  await expect(box.getByRole("spinbutton", { name: /weight/i })).toHaveCount(0);
+  expect(
+    fixture.previewRequests.some(
+      (request) => request.path === `${PREVIEW_API}/live/review`,
+    ),
+  ).toBe(false);
+  expect(fixture.failures).toEqual([]);
+});
+
+for (const mismatch of ["dimensions", "weight"] as const) {
+  test(`a review with changed ${mismatch} cannot display a successful return plan`, async ({
+    page,
+  }) => {
+    const fixture = await installReturnPreviewFixtures(page);
+    await page.route(`**${PREVIEW_API}/live/review`, (route) => {
+      const input = customerReturnLiveReviewInputSchema.parse(
+        route.request().postDataJSON(),
+      );
+      const checked = fixture.service.review({
+        scenarioId: "split_delivered",
+        orderReference: "TEST-1001",
+        selections: input.selections,
+        parcels: input.parcels,
+      });
+      return route.fulfill({
+        json: {
+          ...checked,
+          mode: "admin_live",
+          sourceRevision: input.sourceRevision,
+          orderReference: input.orderReference,
+          parcels: checked.parcels.map((parcel, index) =>
+            index !== 0
+              ? parcel
+              : mismatch === "weight"
+                ? { ...parcel, weightGrams: parcel.weightGrams + 1 }
+                : {
+                    ...parcel,
+                    dimensions: {
+                      ...parcel.dimensions,
+                      lengthMm: parcel.dimensions.lengthMm + 25.4,
+                    },
+                  },
+          ),
+        },
+      });
+    });
+    await page.goto(PORTAL_PATH);
+    await page.getByLabel("Order number", { exact: true }).fill("LIVE-1001");
+    await page.getByRole("button", { name: "Find order", exact: true }).click();
+    await page
+      .getByTestId("preview-line-sample-line-2")
+      .getByRole("spinbutton")
+      .fill("1");
+    await page
+      .getByRole("button", { name: "Continue to packing", exact: true })
+      .click();
+    await reviewPackedReturn(page);
+    await expect(page.getByRole("alert")).toContainText(
+      "did not match your boxes",
+    );
+    await expect(
+      page.getByRole("heading", { name: "Review your return", exact: true }),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("preview-box-1")).toBeVisible();
+    expect(fixture.failures).toEqual([]);
+  });
+}
 
 test("an unavailable live catalog stays visible and sample orders require an explicit switch", async ({
   page,
@@ -878,9 +1234,7 @@ test("a stale live review clears old quantities and requires a fresh order looku
   await page
     .getByRole("button", { name: "Continue to packing", exact: true })
     .click();
-  await page
-    .getByRole("button", { name: "Review return", exact: true })
-    .click();
+  await reviewPackedReturn(page);
   await expect(page.getByRole("alert")).toContainText(
     "return availability changed",
   );
@@ -939,9 +1293,7 @@ test("unknown return history blocks only its item while another item can be revi
   await page
     .getByRole("button", { name: "Continue to packing", exact: true })
     .click();
-  await page
-    .getByRole("button", { name: "Review return", exact: true })
-    .click();
+  await reviewPackedReturn(page);
   await expect(
     page.getByRole("heading", { name: "Review your return", exact: true }),
   ).toBeVisible();
@@ -1013,9 +1365,7 @@ test("a live source outage during review preserves packing but never shows a suc
   await page
     .getByRole("button", { name: "Continue to packing", exact: true })
     .click();
-  await page
-    .getByRole("button", { name: "Review return", exact: true })
-    .click();
+  await reviewPackedReturn(page);
   await expect(page.getByRole("alert")).toContainText(
     "temporarily unavailable",
   );

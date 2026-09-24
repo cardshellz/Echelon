@@ -9,6 +9,8 @@ import type {
 } from "@shared/returns/customer-return-preview.contract";
 import type { CustomerReturnFlowReviewInput } from "@shared/returns/customer-return-flow.contract";
 
+const dimensions = { lengthMm: 254, widthMm: 203.2, heightMm: 152.4 };
+
 const sampleOrder: ReturnPreviewOrder = {
   mode: "admin_preview",
   scenarioId: "split_delivered",
@@ -17,12 +19,20 @@ const sampleOrder: ReturnPreviewOrder = {
   evaluatedAt: "2026-02-01T00:00:00Z",
   returnWindowEndsAt: "2027-01-01T00:00:00Z",
   message: null,
+  boxOptions: [
+    {
+      id: "original-1",
+      dimensions,
+      items: [{ lineId: "line-1", quantity: 2 }],
+    },
+  ],
   lines: [
     {
       id: "line-1",
       title: "Sleeves",
       variant: "Clear",
       sku: "SLV",
+      unitWeightGrams: 100,
       purchasedQuantity: 2,
       deliveredQuantity: 2,
       alreadyReturningQuantity: 0,
@@ -37,7 +47,12 @@ const sampleReview: ReturnPreviewReview = {
   orderReference: "#1001",
   selectedQuantity: 1,
   parcels: [
-    { number: 1, items: [{ lineId: "line-1", title: "Sleeves", quantity: 1 }] },
+    {
+      number: 1,
+      dimensions,
+      weightGrams: 100,
+      items: [{ lineId: "line-1", title: "Sleeves", quantity: 1 }],
+    },
   ],
   refundMethod: "manual_shopify",
 };
@@ -45,7 +60,13 @@ const input: CustomerReturnFlowReviewInput = {
   orderReference: "#1001",
   sourceRevision: null,
   selections: [{ lineId: "line-1", quantity: 1, reasonCode: null }],
-  parcels: [{ items: [{ lineId: "line-1", quantity: 1 }] }],
+  parcels: [
+    {
+      dimensions,
+      originalBoxId: "original-1",
+      items: [{ lineId: "line-1", quantity: 1 }],
+    },
+  ],
 };
 function response(body: unknown) {
   return new Response(JSON.stringify(body), { status: 200 });

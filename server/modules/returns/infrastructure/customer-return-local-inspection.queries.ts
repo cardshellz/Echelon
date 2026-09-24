@@ -28,9 +28,11 @@ export const inspectionQueries = Object.freeze({
     FROM oms.oms_orders oo WHERE oo.channel_id = $1 AND oo.external_order_number = ANY($2::text[])
     ORDER BY oo.id LIMIT 2`,
 
-  lines: `SELECT id AS "omsOrderLineId", external_line_item_id AS "externalLineItemId",
-    title, variant_title AS "variantTitle", sku, quantity, requires_shipping AS "requiresShipping"
-    FROM oms.oms_order_lines WHERE order_id = $1 ORDER BY id LIMIT $2`,
+  lines: `SELECT line.id AS "omsOrderLineId", line.external_line_item_id AS "externalLineItemId",
+    line.title, line.variant_title AS "variantTitle", line.sku, line.quantity, line.requires_shipping AS "requiresShipping",
+    variant.weight_grams::text AS "unitWeightGrams"
+    FROM oms.oms_order_lines line LEFT JOIN catalog.product_variants variant ON variant.id = line.product_variant_id
+    WHERE line.order_id = $1 ORDER BY line.id LIMIT $2`,
 
   wmsItems: `SELECT wi.id AS "wmsOrderItemId", wo.id AS "wmsOrderId", wi.oms_order_line_id AS "omsOrderLineId",
     wo.channel_id AS "channelId", wo.source, wo.oms_fulfillment_order_id AS "omsOrderReference",
@@ -106,20 +108,27 @@ export const inspectionQueries = Object.freeze({
     WHERE p.oms_order_id = $1
     ) evidence ORDER BY kind, "bindingId" LIMIT $4`,
 
-  packageItems: `SELECT item.id AS "physicalShipmentItemId", item.physical_shipment_id AS "physicalShipmentId",
+  // Expand exact candidate packages to ALL their retained contents. A box with
+  // another order's or unattributable contents must not become a partial box option.
+  packageItems: `WITH candidate_packages AS (
+    SELECT DISTINCT candidate.physical_shipment_id FROM wms.physical_shipment_items candidate
+    LEFT JOIN wms.fulfillment_plan_lines plan ON plan.id = candidate.fulfillment_plan_line_id
+    WHERE candidate.wms_order_item_id = ANY($1::int[]) OR candidate.replacement_for_order_item_id = ANY($1::int[])
+      OR plan.oms_order_line_id = ANY($2::bigint[]) OR candidate.id = ANY($3::bigint[])
+      OR candidate.physical_shipment_id = ANY($4::bigint[])
+    ) SELECT item.id AS "physicalShipmentItemId", item.physical_shipment_id AS "physicalShipmentId",
     item.wms_order_item_id AS "wmsOrderItemId", plan.oms_order_line_id AS "omsOrderLineId",
     item.legacy_wms_shipment_item_id AS "legacyShipmentItemId", legacy.shipment_id AS "legacyShipmentId",
     item.shipment_item_purpose AS purpose, item.replacement_for_order_item_id AS "replacementForOrderItemId",
     item.correction_for_physical_shipment_item_id AS "correctionForPhysicalShipmentItemId",
     item.quantity_shipped AS "originalQuantity", COALESCE(effective.quantity_shipped, 0) AS "effectiveQuantity",
-    shipment.status, shipment.provider, shipment.tracking_number AS "trackingNumber", shipment.carrier
+    shipment.status, shipment.provider, shipment.provider_physical_shipment_id AS "providerPhysicalShipmentId",
+    shipment.tracking_number AS "trackingNumber", shipment.carrier
     FROM wms.physical_shipment_items item JOIN wms.physical_shipments shipment ON shipment.id = item.physical_shipment_id
     LEFT JOIN wms.effective_physical_shipment_items effective ON effective.id = item.id
     LEFT JOIN wms.fulfillment_plan_lines plan ON plan.id = item.fulfillment_plan_line_id
     LEFT JOIN wms.outbound_shipment_items legacy ON legacy.id = item.legacy_wms_shipment_item_id
-    WHERE item.wms_order_item_id = ANY($1::int[]) OR item.replacement_for_order_item_id = ANY($1::int[])
-      OR plan.oms_order_line_id = ANY($2::bigint[]) OR item.id = ANY($3::bigint[])
-      OR item.physical_shipment_id = ANY($4::bigint[])
+    WHERE item.physical_shipment_id IN (SELECT physical_shipment_id FROM candidate_packages)
     ORDER BY item.id LIMIT $5`,
 
   // Only an exact physical-package link is emitted. Request/order-level and

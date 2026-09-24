@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  MAX_RETURN_ORIGINAL_BOXES, customerReturnBoxOptionSchema, customerReturnDimensionsSchema,
+  customerReturnParcelWeightSchema, customerReturnUnitWeightSchema,
+} from "./customer-return-parcel";
 
 // Preview payload bounds, not a live shipping policy. Live parcel limits must
 // come from the configured shipping service when that adapter is connected.
@@ -45,11 +49,13 @@ export const returnPreviewOrderSchema = z.object({
   evaluatedAt: z.string().datetime(),
   returnWindowEndsAt: z.string().datetime(),
   message: z.string().max(500).nullable(),
+  boxOptions: z.array(customerReturnBoxOptionSchema).max(MAX_RETURN_ORIGINAL_BOXES),
   lines: z.array(z.object({
     id: lineId,
     title: z.string().min(1).max(255),
     variant: z.string().max(255).nullable(),
     sku: z.string().max(255).nullable(),
+    unitWeightGrams: customerReturnUnitWeightSchema,
     purchasedQuantity: quantity,
     deliveredQuantity: quantity,
     alreadyReturningQuantity: quantity,
@@ -66,6 +72,8 @@ export const returnPreviewReviewInputSchema = returnPreviewLookupInputSchema.ext
     reasonCode: returnPreviewReasonSchema.nullable(),
   }).strict()).min(1).max(MAX_PREVIEW_LINES),
   parcels: z.array(z.object({
+    dimensions: customerReturnDimensionsSchema,
+    originalBoxId: z.string().min(1).max(255).nullable(),
     items: z.array(z.object({ lineId, quantity: positiveQuantity }).strict())
       .min(1).max(MAX_PREVIEW_LINES),
   }).strict()).min(1).max(MAX_PREVIEW_PARCELS),
@@ -79,6 +87,8 @@ export const returnPreviewReviewSchema = z.object({
   selectedQuantity: positiveQuantity,
   parcels: z.array(z.object({
     number: z.number().int().positive().max(MAX_PREVIEW_PARCELS),
+    dimensions: customerReturnDimensionsSchema,
+    weightGrams: customerReturnParcelWeightSchema,
     items: z.array(z.object({
       lineId,
       title: z.string().min(1).max(255),

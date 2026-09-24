@@ -1,8 +1,12 @@
 import { customerReturnFlowReviewInputSchema } from "../../../../shared/returns/customer-return-flow.contract";
+import {
+  calculateCustomerReturnProductWeight, sameCustomerReturnDimensions,
+  type CustomerReturnBoxOption,
+} from "../../../../shared/returns/customer-return-parcel";
 
 const planSchema = customerReturnFlowReviewInputSchema.pick({ selections: true, parcels: true });
 export class CustomerReturnBoxPlanError extends Error {
-  constructor(readonly kind: "selection" | "quantity" | "parcels", message: string) {
+  constructor(readonly kind: "selection" | "quantity" | "parcels" | "weight", message: string) {
     super(message);
     this.name = "CustomerReturnBoxPlanError";
   }
@@ -10,7 +14,9 @@ export class CustomerReturnBoxPlanError extends Error {
 
 /** Shared sample/live conservation check. This validates a plan without reserving units. */
 export function validateCustomerReturnBoxPlan(
-  lines: ReadonlyArray<{ id: string; title: string; eligibleQuantity: number }>, raw: unknown,
+  lines: ReadonlyArray<{ id: string; title: string; eligibleQuantity: number; unitWeightGrams: number | null }>,
+  raw: unknown,
+  boxOptions: readonly CustomerReturnBoxOption[] = [],
 ) {
   const parsed = planSchema.safeParse(raw);
   if (!parsed.success) throw new CustomerReturnBoxPlanError("selection", "Choose valid items and quantities.");
@@ -34,6 +40,12 @@ export function validateCustomerReturnBoxPlan(
   }
   const packedQuantities = new Map<string, number>();
   const parcels = input.parcels.map((parcel, index) => {
+    if (parcel.originalBoxId !== null) {
+      const original = boxOptions.find(box => box.id === parcel.originalBoxId);
+      if (!original || !sameCustomerReturnDimensions(original.dimensions, parcel.dimensions)) {
+        throw new CustomerReturnBoxPlanError("parcels", "The original box size changed. Choose the box size again.");
+      }
+    }
     const linesInParcel = new Set<string>();
     const items = parcel.items.map(item => {
       const selection = selections.get(item.lineId);
@@ -49,7 +61,13 @@ export function validateCustomerReturnBoxPlan(
       packedQuantities.set(item.lineId, packed + item.quantity);
       return { lineId: item.lineId, title: selection.title, quantity: item.quantity };
     });
-    return { number: index + 1, items };
+    const weightGrams = calculateCustomerReturnProductWeight(items.map(item => ({
+      quantity: item.quantity, unitWeightGrams: available.get(item.lineId)!.unitWeightGrams,
+    })));
+    if (weightGrams === null) {
+      throw new CustomerReturnBoxPlanError("weight", `The product weight for box ${index + 1} needs verification. Contact us for help with your return.`);
+    }
+    return { number: index + 1, items, dimensions: { ...parcel.dimensions }, weightGrams };
   });
   for (const [lineId, selection] of selections) {
     if (packedQuantities.get(lineId) !== selection.quantity) {

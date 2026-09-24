@@ -164,7 +164,7 @@ export function CustomerReturnFlow({
       setError(selected.message);
       return;
     }
-    if (!parcels.length) setParcels(singlePreviewParcel(selected.value));
+    if (!parcels.length) setParcels(singlePreviewParcel(selected.value, order));
     setReview(null);
     setError(null);
     setStep("packing");
@@ -185,7 +185,7 @@ export function CustomerReturnFlow({
     const { controller, sequence } = beginRequest();
     try {
       const checked = await gateway.review(input.value, controller.signal);
-      assertPreviewReviewMatches(checked, input.value);
+      assertPreviewReviewMatches(checked, input.value, order);
       if (!current(sequence, controller)) return;
       setReview(checked);
       setStep("review");
