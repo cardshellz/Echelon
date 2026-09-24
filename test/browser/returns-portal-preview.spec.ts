@@ -683,6 +683,82 @@ test("live order lookup is the default and a review carries the selected shop an
   expect(fixture.failures).toEqual([]);
 });
 
+test("the full maximum available quantity remains readable without horizontal overflow", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const order = fixture.liveOrder();
+  const maximumQuantity = Number.MAX_SAFE_INTEGER;
+  await page.route(`**${PREVIEW_API}/live/order`, (route) =>
+    route.fulfill({
+      json: {
+        ...order,
+        lines: [
+          {
+            ...order.lines[0],
+            purchasedQuantity: maximumQuantity,
+            deliveredQuantity: maximumQuantity,
+            alreadyReturningQuantity: 0,
+            eligibleQuantity: maximumQuantity,
+            message: null,
+          },
+        ],
+      },
+    }),
+  );
+  await page.goto(PORTAL_PATH);
+  await page.getByLabel("Order number", { exact: true }).fill("LIVE-1001");
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+
+  const line = page.getByTestId("preview-line-sample-line-1");
+  const denominator = line.getByText(`/ ${maximumQuantity}`, { exact: true });
+  await expect(line.getByRole("spinbutton")).toHaveAttribute(
+    "max",
+    String(maximumQuantity),
+  );
+  await denominator.scrollIntoViewIfNeeded();
+  await expect(denominator).toBeVisible();
+  await expect(denominator).toHaveText(`/ ${maximumQuantity}`);
+  const geometry = await denominator.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const bounds = element.getBoundingClientRect();
+    const fragments = Array.from(range.getClientRects()).filter(
+      (rect) => rect.width > 0 && rect.height > 0,
+    );
+    // A text Range includes clipped glyphs. Checking every fragment catches
+    // ellipsis/overflow clipping even when textContent still has all digits.
+    const tolerance = 1;
+    return {
+      hasText: fragments.length > 0,
+      allTextFits: fragments.every(
+        (rect) =>
+          rect.left >= bounds.left - tolerance &&
+          rect.right <= bounds.right + tolerance &&
+          rect.top >= bounds.top - tolerance &&
+          rect.bottom <= bounds.bottom + tolerance,
+      ),
+    };
+  });
+  expect(geometry).toEqual({ hasText: true, allTextFits: true });
+  expect(
+    await line.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth,
+    ),
+  ).toBe(true);
+  expect(
+    await page
+      .getByTestId("preview-canvas")
+      .evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  expect(fixture.failures).toEqual([]);
+});
+
 test("an unavailable live catalog stays visible and sample orders require an explicit switch", async ({
   page,
 }) => {

@@ -215,7 +215,7 @@ export function CustomerReturnFlow({
       aria-label="Customer return experience"
       className="mx-auto w-full max-w-3xl scroll-mt-20 overflow-hidden rounded-2xl border bg-card shadow-sm"
     >
-      <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-950 px-5 py-5 text-white sm:px-8">
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-950 px-4 py-4 text-white sm:px-6">
         <div className="flex items-center gap-2.5">
           <Package aria-hidden="true" className="h-6 w-6 text-blue-400" />
           <span className="text-lg font-bold tracking-tight">CARD SHELLZ</span>
@@ -224,14 +224,14 @@ export function CustomerReturnFlow({
           </span>
         </div>
       </div>
-      <div className="p-5 sm:p-8">
-        <ol aria-label="Return steps" className="mb-8 grid grid-cols-4 gap-2">
+      <div className="p-4 sm:p-6">
+        <ol aria-label="Return steps" className="mb-6 grid grid-cols-4 gap-2">
           {steps.map((candidate, index) => (
             <li
               key={candidate.id}
               aria-current={step === candidate.id ? "step" : undefined}
               className={cn(
-                "min-w-0 space-y-2 border-t-2 pt-3",
+                "min-w-0 space-y-2 border-t-2 pt-2",
                 index <= stepIndex ? "border-primary" : "border-muted",
               )}
             >
@@ -263,11 +263,11 @@ export function CustomerReturnFlow({
             </li>
           ))}
         </ol>
-        <div className="mb-6 space-y-2">
+        <div className="mb-4 space-y-1.5">
           <h1
             ref={heading}
             tabIndex={-1}
-            className="text-2xl font-semibold tracking-tight outline-none sm:text-3xl"
+            className="text-xl font-semibold tracking-tight outline-none sm:text-2xl"
           >
             {headings[step]}
           </h1>
