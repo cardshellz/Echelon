@@ -25,6 +25,9 @@ const launchDefaults: DropshipWalletPolicyLimits = {
   // Funding design phase 7: no processing fee; a $100 card minimum deposit.
   cardFundingFeeBps: 0,
   cardFundingMinCents: 10_000,
+  rewardsRateBankBps: 100,
+  rewardsRateUsdcBps: 100,
+  rewardsRateCardBps: 0,
 };
 
 describe("resolveDropshipWalletPolicyLimitsFromEnv", () => {
@@ -132,6 +135,9 @@ describe("walletPolicyInvariantViolations", () => {
     expect(walletPolicyInvariantViolations({
       ...launchDefaults,
       cardFundingMinCents: 500_001,
+      rewardsRateBankBps: 100,
+      rewardsRateUsdcBps: 100,
+      rewardsRateCardBps: 0,
     })).toEqual([{
       field: "cardFundingMinCents",
       message: "Card minimum deposit must be at most the manual top-up maximum.",
@@ -139,6 +145,9 @@ describe("walletPolicyInvariantViolations", () => {
     expect(walletPolicyInvariantViolations({
       ...launchDefaults,
       cardFundingMinCents: 500_000,
+      rewardsRateBankBps: 100,
+      rewardsRateUsdcBps: 100,
+      rewardsRateCardBps: 0,
     })).toEqual([]);
   });
 
@@ -209,6 +218,9 @@ describe("walletPolicyInvariantViolations", () => {
       holdExpiryWarningMinutes: 60,
       cardFundingFeeBps: 0,
       cardFundingMinCents: 10_000,
+      rewardsRateBankBps: 100,
+      rewardsRateUsdcBps: 100,
+      rewardsRateCardBps: 0,
       advanceFeeBps: 100,
       advanceCapCents: 50_000,
       tierChangeGraceDays: 14,

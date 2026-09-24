@@ -56,6 +56,7 @@ import {
   ArchiveDropshipFundingMethodRepositoryInput,
   DropshipProviderDetachResult,
   RecordDropshipFundingMethodDetachOutcomeRepositoryInput,
+  SetDropshipRewardsSpendPreferenceRepositoryInput,
 } from "../../application/dropship-wallet-service";
 
 const now = new Date("2026-05-01T20:00:00.000Z");
@@ -1228,6 +1229,9 @@ describe("DropshipWalletService", () => {
         manualFundingMaxCents: 6_000,
         cardFundingFeeBps: 0,
         cardFundingMinCents: 1_000,
+        rewardsRateBankBps: 100,
+        rewardsRateUsdcBps: 100,
+        rewardsRateCardBps: 0,
         defaultPaymentHoldTimeoutMinutes: 1_440,
         holdExpiryWarningMinutes: 120,
         caseTierMinimumCents: 50_000,
@@ -1457,6 +1461,9 @@ describe("DropshipWalletService", () => {
       tierChangeGraceDays: 21,
       cardFundingFeeBps: 0,
       cardFundingMinCents: 12_500,
+      rewardsRateBankBps: 100,
+      rewardsRateUsdcBps: 100,
+      rewardsRateCardBps: 0,
     };
     const policy: DropshipWalletPolicyResolver = { resolveWalletLimits: async () => ({ ...publishedLimits }) };
 
@@ -1480,6 +1487,9 @@ describe("DropshipWalletService", () => {
         tierChangeGraceDays: 14,
         cardFundingFeeBps: 0,
         cardFundingMinCents: 10_000,
+        rewardsRateBankBps: 100,
+        rewardsRateUsdcBps: 100,
+        rewardsRateCardBps: 0,
       });
     });
 
@@ -2208,6 +2218,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
           externalTransactionId: input.externalTransactionId ?? replay.externalTransactionId,
           availableBalanceAfterCents: availableBalanceCents,
           pendingBalanceAfterCents: pendingBalanceCents,
+          rewardsBalanceAfterCents: null,
           metadata: {
             ...replay.metadata,
             requestHash: input.requestHash,
@@ -2244,6 +2255,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       currency: input.currency,
       availableBalanceAfterCents: availableBalanceCents,
       pendingBalanceAfterCents: pendingBalanceCents,
+      rewardsBalanceAfterCents: null,
       referenceType: input.referenceType,
       referenceId: input.referenceId,
       idempotencyKey: input.idempotencyKey,
@@ -2280,6 +2292,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       status: "failed",
       availableBalanceAfterCents: this.account.availableBalanceCents,
       pendingBalanceAfterCents: pendingBalanceCents,
+      rewardsBalanceAfterCents: null,
       metadata: {
         ...entry.metadata,
         failure: {
@@ -2331,6 +2344,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       currency: credit.currency,
       availableBalanceAfterCents: availableBalanceCents,
       pendingBalanceAfterCents: this.account.pendingBalanceCents,
+      rewardsBalanceAfterCents: null,
       referenceType: "stripe_dispute",
       referenceId: input.providerDisputeId,
       idempotencyKey: `stripe-dispute:${input.providerDisputeId}`,
@@ -2375,6 +2389,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       currency: reversal.currency,
       availableBalanceAfterCents: availableBalanceCents,
       pendingBalanceAfterCents: this.account.pendingBalanceCents,
+      rewardsBalanceAfterCents: null,
       referenceType: "stripe_dispute_reinstated",
       referenceId: input.providerDisputeId,
       idempotencyKey: `stripe-dispute-reinstated:${input.providerDisputeId}`,
@@ -2435,6 +2450,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       currency: input.currency,
       availableBalanceAfterCents: availableBalanceCents,
       pendingBalanceAfterCents: this.account.pendingBalanceCents,
+      rewardsBalanceAfterCents: null,
       referenceType,
       referenceId,
       idempotencyKey: input.idempotencyKey,
@@ -2485,6 +2501,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       currency: input.currency,
       availableBalanceAfterCents: availableBalanceCents,
       pendingBalanceAfterCents: this.account.pendingBalanceCents,
+      rewardsBalanceAfterCents: null,
       referenceType,
       referenceId,
       idempotencyKey: input.idempotencyKey,
@@ -2494,6 +2511,20 @@ class FakeWalletRepository implements DropshipWalletRepository {
       settledAt: input.occurredAt,
     });
     return { account: this.account, ledgerEntry, idempotentReplay: false };
+  }
+
+  preferenceInputs: SetDropshipRewardsSpendPreferenceRepositoryInput[] = [];
+
+  async setRewardsSpendPreference(
+    input: SetDropshipRewardsSpendPreferenceRepositoryInput,
+  ): Promise<DropshipAutoReloadSettingRecord> {
+    this.preferenceInputs.push(input);
+    this.autoReload = {
+      ...(this.autoReload ?? makeAutoReloadSetting({ vendorId: input.vendorId, fundingMethodId: null })),
+      spendRewardsFirst: input.spendRewardsFirst,
+      updatedAt: input.updatedAt,
+    };
+    return this.autoReload;
   }
 
   async configureAutoReload(
@@ -2513,6 +2544,8 @@ class FakeWalletRepository implements DropshipWalletRepository {
       // Same rule as the real repository: the acknowledgement is stored with the row when the client sent one.
       acknowledgedCardFeeBps: input.acknowledgedCardFeeBps ?? null,
       acknowledgedAt: input.acknowledgedCardFeeBps === undefined ? null : input.updatedAt,
+      // The autopay upsert never touches the rewards preference (migration 0702).
+      spendRewardsFirst: this.autoReload?.spendRewardsFirst ?? true,
       createdAt: this.autoReload?.createdAt ?? input.updatedAt,
       updatedAt: input.updatedAt,
     };
@@ -2754,6 +2787,7 @@ function makeAccount(): DropshipWalletAccountRecord {
     vendorId: 10,
     availableBalanceCents: 0,
     pendingBalanceCents: 0,
+    rewardsBalanceCents: 0,
     currency: "USD",
     status: "active",
     createdAt: now,
@@ -2775,6 +2809,7 @@ function makeAutoReloadSetting(
     paymentHoldTimeoutMinutes: 2880,
     acknowledgedCardFeeBps: null,
     acknowledgedAt: null,
+    spendRewardsFirst: true,
     createdAt: now,
     updatedAt: now,
     ...overrides,
@@ -3192,6 +3227,17 @@ describe("DropshipWalletService.removeFundingMethodForMember (funding method rem
     expect(repository.detachOutcomeInputs.at(-1)).toMatchObject({ fundingMethodId: 200, outcome: "not_applicable", errorCode: null });
   });
 
+  it("saves the vendor's rewards spend preference through the repository, with the member as the actor (funding design phase 7)", async () => {
+    const setting = await service.setRewardsSpendPreferenceForMember("member-1", { spendRewardsFirst: false });
+
+    expect(setting.spendRewardsFirst).toBe(false);
+    expect(repository.preferenceInputs).toEqual([{ vendorId: 10, spendRewardsFirst: false, actorMemberId: "member-1", updatedAt: now }]);
+    expect(logs.some((log) => log.code === "DROPSHIP_WALLET_REWARDS_PREFERENCE_SAVED")).toBe(true);
+    await expect(service.setRewardsSpendPreferenceForMember("member-1", { spendRewardsFirst: "yes" })).rejects.toBeInstanceOf(DropshipError);
+    await expect(service.setRewardsSpendPreferenceForMember("member-1", { spendRewardsFirst: true, extra: 1 })).rejects.toBeInstanceOf(DropshipError);
+    expect(repository.preferenceInputs).toHaveLength(1);
+  });
+
   it("refuses the autopay source, a method with a top-up pending, and the last card of a live vendor, detaching nothing", async () => {
     repository.autoReload = {
       autoReloadSettingId: 1,
@@ -3204,6 +3250,7 @@ describe("DropshipWalletService.removeFundingMethodForMember (funding method rem
       paymentHoldTimeoutMinutes: 1440,
       acknowledgedCardFeeBps: null,
       acknowledgedAt: null,
+      spendRewardsFirst: true,
       createdAt: now,
       updatedAt: now,
     };

@@ -110,6 +110,17 @@ export const dropshipWalletLedgerTypeSchema = z.enum([
   /** A settled credit taken back by a dispute or ACH return, and its return when the dispute is won (migration 0689). */
   "funding_reversal",
   "funding_reinstated",
+  /**
+   * The spend-only rewards balance (migration 0702): earned on a settled
+   * transfer, spent on an order debit, taken back with the transfer that
+   * earned them and returned when that dispute is won, redeemed outside the
+   * wallet (no writer at launch).
+   */
+  "rewards_earned",
+  "rewards_spent",
+  "rewards_reversed",
+  "rewards_reinstated",
+  "rewards_redeemed",
 ]);
 export type DropshipWalletLedgerType = z.infer<typeof dropshipWalletLedgerTypeSchema>;
 
@@ -347,6 +358,12 @@ export const registerDropshipUsdcBaseFundingMethodForMemberInputSchema = z.objec
 export type CreditDropshipWalletFundingInput = z.infer<typeof creditDropshipWalletFundingInputSchema>;
 export type DebitDropshipWalletForOrderInput = z.infer<typeof debitDropshipWalletForOrderInputSchema>;
 export type ConfigureDropshipAutoReloadInput = z.infer<typeof configureDropshipAutoReloadInputSchema>;
+
+/** The vendor's rewards spend preference (funding design phase 7). */
+export const setDropshipRewardsSpendPreferenceInputSchema = z.object({
+  spendRewardsFirst: z.boolean(),
+}).strict();
+export type SetDropshipRewardsSpendPreferenceInput = z.infer<typeof setDropshipRewardsSpendPreferenceInputSchema>;
 export type CreateDropshipStripeFundingSetupSessionInput = z.infer<typeof createDropshipStripeFundingSetupSessionInputSchema>;
 export type CreateDropshipStripeWalletFundingSessionInput = z.infer<typeof createDropshipStripeWalletFundingSessionInputSchema>;
 export type CreditDropshipWalletManualFundingInput = z.infer<typeof creditDropshipWalletManualFundingInputSchema>;
@@ -363,6 +380,13 @@ export interface DropshipWalletAccountRecord {
   vendorId: number;
   availableBalanceCents: number;
   pendingBalanceCents: number;
+  /**
+   * The spend-only rewards balance (funding design phase 7): money Card
+   * Shellz issued on settled bank and USDC transfers. Never paid out, never
+   * counted toward the minimum, the credit allowance or a top-up trigger, and
+   * never negative.
+   */
+  rewardsBalanceCents: number;
   currency: string;
   status: string;
   createdAt: Date;
@@ -403,6 +427,12 @@ export interface DropshipAutoReloadSettingRecord {
    */
   acknowledgedCardFeeBps: number | null;
   acknowledgedAt: Date | null;
+  /**
+   * True: each order debit takes rewards first and cash second (the
+   * default). False: the vendor saves their rewards and orders are paid from
+   * cash (migration 0702).
+   */
+  spendRewardsFirst: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -417,6 +447,8 @@ export interface DropshipWalletLedgerRecord {
   currency: string;
   availableBalanceAfterCents: number | null;
   pendingBalanceAfterCents: number | null;
+  /** The rewards balance after this line; null on lines written before migration 0702 or by writers that never move rewards. */
+  rewardsBalanceAfterCents: number | null;
   referenceType: string | null;
   referenceId: string | null;
   idempotencyKey: string | null;
@@ -944,6 +976,8 @@ export interface DropshipWalletRepository {
   creditFunding(input: CreateDropshipWalletFundingLedgerInput): Promise<DropshipWalletMutationResult>;
   debitOrder(input: CreateDropshipWalletOrderDebitInput): Promise<DropshipWalletMutationResult>;
   configureAutoReload(input: ConfigureDropshipAutoReloadRepositoryInput): Promise<DropshipAutoReloadSettingRecord>;
+  /** Save whether rewards pay first on each order or are kept, with its audit row (funding design phase 7). */
+  setRewardsSpendPreference(input: SetDropshipRewardsSpendPreferenceRepositoryInput): Promise<DropshipAutoReloadSettingRecord>;
   getReusableFundingProviderCustomerId(input: {
     vendorId: number;
     provider: "stripe";
@@ -1019,6 +1053,14 @@ export type ResolvedDropshipAutoReloadConfig =
 export interface ConfigureDropshipAutoReloadRepositoryInput extends ResolvedDropshipAutoReloadConfig {
   /** The card fee rate in force when the vendor agreed, recorded in the audit trail. */
   cardFundingFeeBps: number;
+  updatedAt: Date;
+}
+
+export interface SetDropshipRewardsSpendPreferenceRepositoryInput {
+  vendorId: number;
+  spendRewardsFirst: boolean;
+  /** The signed-in member who chose, for the audit row. */
+  actorMemberId: string;
   updatedAt: Date;
 }
 
@@ -1325,6 +1367,33 @@ export class DropshipWalletService {
         autoReloadMinTriggerCents: limits.autoReloadMinTriggerCents,
         autoReloadMinAmountCents: limits.autoReloadMinAmountCents,
       },
+    });
+    return setting;
+  }
+
+  /**
+   * The vendor's choice between spending rewards first on each order (the
+   * default) and saving them (funding design phase 7). A preference, not a
+   * money movement: no proof of a sensitive action is required; the audit
+   * row commits with the change.
+   */
+  async setRewardsSpendPreferenceForMember(
+    memberId: string,
+    input: unknown,
+  ): Promise<DropshipAutoReloadSettingRecord> {
+    const parsed = parseWalletInput(setDropshipRewardsSpendPreferenceInputSchema, input);
+    const provisioned = await this.provisionVendor(memberId);
+    const vendorId = provisioned.vendor.vendorId;
+    const setting = await this.deps.repository.setRewardsSpendPreference({
+      vendorId,
+      spendRewardsFirst: parsed.spendRewardsFirst,
+      actorMemberId: memberId,
+      updatedAt: this.deps.clock.now(),
+    });
+    this.deps.logger.info({
+      code: "DROPSHIP_WALLET_REWARDS_PREFERENCE_SAVED",
+      message: "Dropship wallet rewards spend preference was saved.",
+      context: { vendorId, memberId, spendRewardsFirst: setting.spendRewardsFirst },
     });
     return setting;
   }

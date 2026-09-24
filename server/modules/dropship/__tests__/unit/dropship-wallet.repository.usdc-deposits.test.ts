@@ -21,13 +21,14 @@ function makePool(query: (sql: string, params?: unknown[]) => Promise<{ rows: un
 }
 
 function makeAccountRow(overrides: Record<string, unknown> = {}) {
-  return { id: 5, vendor_id: 10, available_balance_cents: "1000", pending_balance_cents: "4000", currency: "USD", status: "active", created_at: occurredAt, updated_at: occurredAt, ...overrides };
+  return { id: 5, vendor_id: 10, available_balance_cents: "1000", pending_balance_cents: "4000", rewards_balance_cents: "0", currency: "USD", status: "active", created_at: occurredAt, updated_at: occurredAt, ...overrides };
 }
 
 function makeLedgerRow(overrides: Record<string, unknown> = {}) {
   return {
     id: 1, wallet_account_id: 5, vendor_id: 10, type: "funding", status: "pending", amount_cents: "2512", currency: "USD",
     available_balance_after_cents: "1000", pending_balance_after_cents: "6512",
+    rewards_balance_after_cents: null,
     reference_type: "usdc_base_transaction", reference_id: `8453:${TX}:7`, idempotency_key: `usdc-deposit:8453:${TX}:7`,
     funding_method_id: null, external_transaction_id: TX, metadata: { rail: "usdc_base" }, created_at: occurredAt, settled_at: null,
     ...overrides,
@@ -68,13 +69,25 @@ function fakeDatabase(options: { usdcRow?: Record<string, unknown> | null; ledge
     if (sql.includes("INSERT INTO dropship.dropship_wallet_accounts")) return { rows: [] };
     if (sql.includes("FROM dropship.dropship_wallet_accounts")) return { rows: [makeAccountRow(options.accountRow)] };
     if (sql.includes("UPDATE dropship.dropship_wallet_accounts")) {
+      // The rewards accrual (funding design phase 7) sets the rewards balance; every cash move leaves it as it is.
+      if (args?.[5] !== null && args?.[5] !== undefined) {
+        params.rewardsBalances = args ?? [];
+        return { rows: [makeAccountRow({ available_balance_cents: String(args?.[2]), pending_balance_cents: String(args?.[3]), rewards_balance_cents: String(args?.[5]) })] };
+      }
       params.balances = args ?? [];
       return { rows: [makeAccountRow({ available_balance_cents: String(args?.[2]), pending_balance_cents: String(args?.[3]) })] };
     }
     if (sql.includes("INSERT INTO dropship.dropship_wallet_ledger")) {
+      if (args?.[2] === "rewards_earned") {
+        params.rewardsInsert = args ?? [];
+        return { rows: [makeLedgerRow({ id: 900, type: "rewards_earned", status: "settled", amount_cents: String(args?.[4]), rewards_balance_after_cents: String(args?.[16]), settled_at: args?.[15] ?? null })] };
+      }
       params.ledgerInsert = args ?? [];
       return { rows: [makeLedgerRow({ status: args?.[3], amount_cents: String(args?.[4]), available_balance_after_cents: String(args?.[6]), pending_balance_after_cents: String(args?.[7]), settled_at: args?.[15] ?? null })] };
     }
+    // The accrual's own reads: the policy table is absent (launch rates apply) and no rewards row exists yet.
+    if (sql.includes("to_regclass")) return { rows: [{ present: null }] };
+    if (sql.includes("FROM dropship.dropship_wallet_ledger") && args?.[0] === "wallet_funding_rewards") return { rows: [] };
     if (sql.includes("UPDATE dropship.dropship_wallet_ledger")) {
       params.ledgerUpdate = args ?? [];
       return { rows: [makeLedgerRow({ status: sql.includes("status = 'failed'") ? "failed" : "settled", ...(options.ledgerRow ?? {}), settled_at: sql.includes("status = 'failed'") ? null : occurredAt })] };
@@ -114,7 +127,7 @@ describe("PgDropshipWalletRepository watched USDC deposits (funding design phase
     expect(result.usdcLedgerEntry).toMatchObject({ status: "pending", logIndex: 7, dustAtomicUnits: "3456", walletLedgerId: 1 });
     // The observation lookup is keyed by (chain, transaction, log).
     expect(db.params.usdcSelect).toEqual([8453, TX, 7]);
-    expect(db.params.balances).toEqual([5, 10, 1000, 6512, occurredAt]);
+    expect(db.params.balances).toEqual([5, 10, 1000, 6512, occurredAt, null]);
     expect(db.params.ledgerInsert?.slice(2, 13)).toEqual(["funding", "pending", 2512, "USD", 1000, 6512, "usdc_base_transaction", `8453:${TX}:7`, `usdc-deposit:8453:${TX}:7`, null, TX]);
     expect(JSON.parse(String(db.params.ledgerInsert?.[13]))).toMatchObject({ rail: "usdc_base", source: "chain_watcher", logIndex: 7, blockNumber: 35_000_000, dustAtomicUnits: "3456", depositAddressId: 3, requestHash: "hash-1" });
     expect(db.params.ledgerInsert?.[15]).toBeNull();
@@ -131,7 +144,12 @@ describe("PgDropshipWalletRepository watched USDC deposits (funding design phase
     expect(db.params.ledgerInsert?.[15]).toEqual(occurredAt);
     expect(db.params.usdcInsert?.[8]).toBe("settled");
     expect(db.params.usdcInsert?.[10]).toEqual(occurredAt);
-    expect(db.params.audits).toEqual(["wallet_funding_settled", "wallet_usdc_deposit_observed"]);
+    // A settled USDC transfer earns rewards at the launch rate (1%, rounded down) in the same transaction (funding design phase 7).
+    expect(db.params.audits).toEqual(["wallet_funding_settled", "wallet_usdc_deposit_observed", "wallet_rewards_earned"]);
+    expect(db.params.rewardsInsert?.slice(2, 5)).toEqual(["rewards_earned", "settled", 25]);
+    expect(db.params.rewardsInsert?.slice(8, 11)).toEqual(["wallet_funding_rewards", "1", "rewards-earned:1"]);
+    expect(db.params.rewardsInsert?.[16]).toBe(25);
+    expect(db.params.rewardsBalances?.[5]).toBe(25);
   });
 
   it("records dust without moving money or writing a ledger row", async () => {
@@ -199,10 +217,11 @@ describe("PgDropshipWalletRepository watched USDC deposits (funding design phase
 
     expect(result.idempotentReplay).toBe(false);
     expect(db.params.usdcSelect).toEqual([9, 10]);
-    expect(db.params.balances).toEqual([5, 10, 3512, 1488, occurredAt]);
+    expect(db.params.balances).toEqual([5, 10, 3512, 1488, occurredAt, null]);
     expect(db.params.usdcUpdate).toEqual([9, 10, "settled", 61, 35_000_000, BLOCK_HASH, occurredAt, null]);
     expect(result.usdcLedgerEntry).toMatchObject({ status: "settled", confirmations: 61, settledAt: occurredAt });
-    expect(db.params.audits).toEqual(["wallet_funding_settled", "wallet_usdc_deposit_settled"]);
+    expect(db.params.audits).toEqual(["wallet_funding_settled", "wallet_usdc_deposit_settled", "wallet_rewards_earned"]);
+    expect(db.params.rewardsInsert?.slice(2, 5)).toEqual(["rewards_earned", "settled", 25]);
     expect(db.statements.at(-1)).toBe("COMMIT");
   });
 
@@ -225,7 +244,7 @@ describe("PgDropshipWalletRepository watched USDC deposits (funding design phase
     const result = await db.repository.voidUsdcDeposit({ vendorId: 10, usdcLedgerEntryId: 9, reasonCode: "DROPSHIP_USDC_DEPOSIT_REORGED", reasonMessage: "The receipt disappeared.", occurredAt });
 
     expect(result.idempotentReplay).toBe(false);
-    expect(db.params.balances).toEqual([5, 10, 1000, 1488, occurredAt]);
+    expect(db.params.balances).toEqual([5, 10, 1000, 1488, occurredAt, null]);
     expect(JSON.parse(String(db.params.ledgerUpdate?.[4]))).toMatchObject({ failure: { code: "DROPSHIP_USDC_DEPOSIT_REORGED", message: "The receipt disappeared.", providerStatus: "reorged", providerEventId: `usdc-deposit-void:8453:${TX}:7` } });
     expect(db.params.usdcUpdate).toEqual([9, 10, "voided", 0, 35_000_000, BLOCK_HASH, null, occurredAt]);
     expect(db.params.audits).toEqual(["wallet_funding_failed", "wallet_usdc_deposit_voided"]);

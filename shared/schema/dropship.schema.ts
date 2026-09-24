@@ -151,6 +151,15 @@ export const dropshipWalletLedgerTypeEnum = [
   // when the dispute is won (migration 0689).
   "funding_reversal",
   "funding_reinstated",
+  // The spend-only rewards balance (migration 0702): earned on a settled
+  // transfer, spent on an order debit, taken back with the transfer that
+  // earned them and returned when that dispute is won, redeemed outside the
+  // wallet (no writer at launch).
+  "rewards_earned",
+  "rewards_spent",
+  "rewards_reversed",
+  "rewards_reinstated",
+  "rewards_redeemed",
 ] as const;
 export type DropshipWalletLedgerType =
   (typeof dropshipWalletLedgerTypeEnum)[number];
@@ -1503,6 +1512,11 @@ export const dropshipWalletAccounts = dropshipSchema.table(
     pendingBalanceCents: bigint("pending_balance_cents", { mode: "number" })
       .notNull()
       .default(0),
+    // The spend-only rewards balance (migration 0702): issued by Card Shellz
+    // on settled bank and USDC transfers, never paid out, never negative.
+    rewardsBalanceCents: bigint("rewards_balance_cents", { mode: "number" })
+      .notNull()
+      .default(0),
     currency: varchar("currency", { length: 3 }).notNull().default("USD"),
     status: varchar("status", { length: 30 }).notNull().default("active"),
     createdAt: timestamp("created_at", { withTimezone: true })
@@ -1521,6 +1535,10 @@ export const dropshipWalletAccounts = dropshipSchema.table(
     check(
       "dropship_wallet_pending_chk",
       sql`${table.pendingBalanceCents} >= 0`,
+    ),
+    check(
+      "dropship_wallet_rewards_chk",
+      sql`${table.rewardsBalanceCents} >= 0`,
     ),
   ],
 );
@@ -1591,6 +1609,9 @@ export const dropshipAutoReloadSettings = dropshipSchema.table(
     paymentHoldTimeoutMinutes: integer("payment_hold_timeout_minutes")
       .notNull()
       .default(DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES),
+    // True: each order debit takes rewards first and cash second; false: the
+    // vendor saves their rewards (migration 0702).
+    spendRewardsFirst: boolean("spend_rewards_first").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
@@ -1640,6 +1661,11 @@ export const dropshipWalletLedger = dropshipSchema.table(
     pendingBalanceAfterCents: bigint("pending_balance_after_cents", {
       mode: "number",
     }),
+    // NULL on lines written before migration 0702 or by writers that never
+    // move rewards.
+    rewardsBalanceAfterCents: bigint("rewards_balance_after_cents", {
+      mode: "number",
+    }),
     referenceType: varchar("reference_type", { length: 80 }),
     referenceId: varchar("reference_id", { length: 255 }),
     idempotencyKey: varchar("idempotency_key", { length: 200 }),
@@ -1666,7 +1692,7 @@ export const dropshipWalletLedger = dropshipSchema.table(
     index("dropship_wallet_ledger_vendor_idx").on(table.vendorId),
     check(
       "dropship_wallet_ledger_type_chk",
-      sql`${table.type} IN ('funding','order_debit','refund_credit','return_credit','return_fee','insurance_pool_credit','manual_adjustment','advance_fee','funding_reversal','funding_reinstated')`,
+      sql`${table.type} IN ('funding','order_debit','refund_credit','return_credit','return_fee','insurance_pool_credit','manual_adjustment','advance_fee','funding_reversal','funding_reinstated','rewards_earned','rewards_spent','rewards_reversed','rewards_reinstated','rewards_redeemed')`,
     ),
     check(
       "dropship_wallet_ledger_status_chk",
@@ -1685,6 +1711,10 @@ export const dropshipWalletLedger = dropshipSchema.table(
     check(
       "dropship_wallet_ledger_pending_after_chk",
       sql`${table.pendingBalanceAfterCents} IS NULL OR ${table.pendingBalanceAfterCents} >= 0`,
+    ),
+    check(
+      "dropship_wallet_ledger_rewards_after_chk",
+      sql`${table.rewardsBalanceAfterCents} IS NULL OR ${table.rewardsBalanceAfterCents} >= 0`,
     ),
   ],
 );

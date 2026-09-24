@@ -34,6 +34,9 @@ import {
  *   tier_change_grace_days               -> tierChangeGraceDays
  *   card_funding_fee_bps                 -> cardFundingFeeBps
  *   card_funding_minimum_cents           -> cardFundingMinCents
+ *   rewards_rate_bank_bps                -> rewardsRateBankBps
+ *   rewards_rate_usdc_bps                -> rewardsRateUsdcBps
+ *   rewards_rate_card_bps                -> rewardsRateCardBps
  *
  * Published rows are immutable (DB trigger); a change inserts a new version and
  * retires the previous one inside ONE transaction with its command row and its
@@ -65,6 +68,9 @@ interface PolicyRow {
   tier_change_grace_days: number;
   card_funding_fee_bps: number;
   card_funding_minimum_cents: string | number;
+  rewards_rate_bank_bps: number;
+  rewards_rate_usdc_bps: number;
+  rewards_rate_card_bps: number;
   is_active: boolean;
   change_note: string | null;
   created_at: Date;
@@ -197,8 +203,9 @@ export class PgDropshipWalletPolicyRepository implements DropshipWalletPolicyRep
            default_payment_hold_timeout_minutes, hold_expiry_warning_minutes,
            advance_fee_bps, advance_cap_cents, tier_change_grace_days,
            card_funding_fee_bps, card_funding_minimum_cents,
+           rewards_rate_bank_bps, rewards_rate_usdc_bps, rewards_rate_card_bps,
            is_active, change_note, created_at, created_by_actor_type, created_by_actor_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, true, $14, $15, $16, $17)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, true, $17, $18, $19, $20)
          RETURNING *`,
         [
           version,
@@ -214,6 +221,9 @@ export class PgDropshipWalletPolicyRepository implements DropshipWalletPolicyRep
           input.limits.tierChangeGraceDays,
           input.limits.cardFundingFeeBps,
           input.limits.cardFundingMinCents,
+          input.limits.rewardsRateBankBps,
+          input.limits.rewardsRateUsdcBps,
+          input.limits.rewardsRateCardBps,
           input.changeNote,
           input.now,
           input.actor.actorType,
@@ -304,6 +314,9 @@ function mapPolicyRow(row: PolicyRow): DropshipWalletPolicyRecord {
     tierChangeGraceDays: nonNegativeInteger(row.tier_change_grace_days, "tier_change_grace_days"),
     cardFundingFeeBps: nonNegativeInteger(row.card_funding_fee_bps, "card_funding_fee_bps"),
     cardFundingMinCents: money(row.card_funding_minimum_cents, "card_funding_minimum_cents"),
+    rewardsRateBankBps: nonNegativeInteger(row.rewards_rate_bank_bps, "rewards_rate_bank_bps"),
+    rewardsRateUsdcBps: nonNegativeInteger(row.rewards_rate_usdc_bps, "rewards_rate_usdc_bps"),
+    rewardsRateCardBps: nonNegativeInteger(row.rewards_rate_card_bps, "rewards_rate_card_bps"),
   };
   return {
     policyId: row.id,

@@ -168,7 +168,7 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
     walletInsert: { match: "INSERT INTO dropship.dropship_wallet_accounts", rows: [] },
     walletSelect: {
       match: "FROM dropship.dropship_wallet_accounts",
-      rows: [{ id: 1, vendor_id: 10, available_balance_cents: WALLET_BALANCE_CENTS, pending_balance_cents: 0, currency: "USD", status: "active" }],
+      rows: [{ id: 1, vendor_id: 10, available_balance_cents: WALLET_BALANCE_CENTS, pending_balance_cents: 0, rewards_balance_cents: 0, currency: "USD", status: "active" }],
     },
     // The wallet policy table is absent by default, so the hold falls back to
     // the vendor row and then the documented default; a dedicated test covers
@@ -367,7 +367,7 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
       ...advancePresent(),
       walletSelect: {
         match: "FROM dropship.dropship_wallet_accounts",
-        rows: [{ id: 1, vendor_id: 10, available_balance_cents: 1_000, pending_balance_cents: 50_000, currency: "USD", status: "active" }],
+        rows: [{ id: 1, vendor_id: 10, available_balance_cents: 1_000, pending_balance_cents: 50_000, rewards_balance_cents: 0, currency: "USD", status: "active" }],
       },
       advanceSources: {
         match: "FROM dropship.dropship_funding_methods m",
@@ -428,7 +428,7 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
       ...advancePresent(),
       walletSelect: {
         match: "FROM dropship.dropship_wallet_accounts",
-        rows: [{ id: 1, vendor_id: 10, available_balance_cents: 1_000, pending_balance_cents: 50_000, currency: "USD", status: "active" }],
+        rows: [{ id: 1, vendor_id: 10, available_balance_cents: 1_000, pending_balance_cents: 50_000, rewards_balance_cents: 0, currency: "USD", status: "active" }],
       },
       advanceSources: {
         match: "FROM dropship.dropship_funding_methods m",
@@ -728,6 +728,7 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
           vendor_id: 10,
           available_balance_cents: 100,
           pending_balance_cents: 0,
+          rewards_balance_cents: 0,
           currency: "USD",
           status: "active",
         }],
@@ -766,7 +767,7 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
       },
       walletSelect: {
         match: "FROM dropship.dropship_wallet_accounts",
-        rows: [{ id: 1, vendor_id: 10, available_balance_cents: 100, pending_balance_cents: 0, currency: "USD", status: "active" }],
+        rows: [{ id: 1, vendor_id: 10, available_balance_cents: 100, pending_balance_cents: 0, rewards_balance_cents: 0, currency: "USD", status: "active" }],
       },
       // The policy table exists and its active row says 24 hours; the vendor
       // row still carries the old 48-hour default and must not win.
@@ -792,8 +793,10 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
       paymentHoldExpiresAt: new Date("2026-09-13T15:00:00.000Z"),
     });
     expect(db.statements("FROM dropship.dropship_wallet_policies")).toHaveLength(1);
-    // The vendor row is not consulted once the policy has answered.
-    expect(db.statements("FROM dropship.dropship_auto_reload_settings")).toHaveLength(0);
+    // The vendor row is not consulted for the hold length once the policy has
+    // answered; the settings row is still read for the rewards preference.
+    expect(db.statements("SELECT payment_hold_timeout_minutes")).toHaveLength(0);
+    expect(db.statements("SELECT spend_rewards_first")).toHaveLength(1);
   });
 
   it("falls back to the vendor row for the hold length when the policy table is absent", async () => {
@@ -808,7 +811,7 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
       },
       walletSelect: {
         match: "FROM dropship.dropship_wallet_accounts",
-        rows: [{ id: 1, vendor_id: 10, available_balance_cents: 100, pending_balance_cents: 0, currency: "USD", status: "active" }],
+        rows: [{ id: 1, vendor_id: 10, available_balance_cents: 100, pending_balance_cents: 0, rewards_balance_cents: 0, currency: "USD", status: "active" }],
       },
       holdTimeout: {
         match: "FROM dropship.dropship_auto_reload_settings",
@@ -1108,5 +1111,94 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     expect(db.statements("UPDATE dropship.dropship_order_acceptance_claim_attempts")).toHaveLength(0);
     expect(db.statements("UPDATE dropship.dropship_order_intake")).toHaveLength(1);
     expect(db.calls.at(-1)?.sql).toBe("COMMIT");
+  });
+});
+
+describe("PgDropshipOrderAcceptanceRepository rewards at the debit (funding design phase 7)", () => {
+  const expectedDebit = UNIT_COST_CENTS * 2 + SHIPPING_CENTS;
+
+  function walletWithRewards(rewardsCents: number, availableCents = WALLET_BALANCE_CENTS) {
+    return {
+      walletSelect: {
+        match: "FROM dropship.dropship_wallet_accounts",
+        rows: [{ id: 1, vendor_id: 10, available_balance_cents: availableCents, pending_balance_cents: 0, rewards_balance_cents: rewardsCents, currency: "USD", status: "active" }],
+      },
+    };
+  }
+
+  it("spends rewards first and cash second: two rows, both balances moved, the split on the record", async () => {
+    const db = createFakeDb(baseHandlers(walletWithRewards(300)));
+    const { repository } = createRepository(db, availableCost());
+
+    const result = await repository.acceptOrder(acceptanceInput());
+
+    expect(result).toMatchObject({ outcome: "accepted", totalDebitCents: expectedDebit, rewardsCents: 300, idempotentReplay: false });
+    const [walletUpdate] = db.statements("UPDATE dropship.dropship_wallet_accounts");
+    expect(walletUpdate.params[2]).toBe(WALLET_BALANCE_CENTS - (expectedDebit - 300));
+    expect(walletUpdate.params[4]).toBe(0);
+
+    const [cashRow, rewardsRow] = db.statements("INSERT INTO dropship.dropship_wallet_ledger");
+    expect(cashRow.params[2]).toBe(-(expectedDebit - 300));
+    expect(cashRow.params[10]).toBe(0);
+    expect(JSON.parse(String(cashRow.params[8]))).toMatchObject({ totalDebitCents: expectedDebit, rewardsSpentCents: 300, cashDebitCents: expectedDebit - 300 });
+    expect(rewardsRow.sql).toContain("'rewards_spent'");
+    expect(rewardsRow.sql).toContain("'order_intake_rewards'");
+    expect(rewardsRow.params[2]).toBe(-300);
+    expect(rewardsRow.params[7]).toMatch(/:rewards$/);
+    expect(JSON.parse(String(rewardsRow.params[8]))).toMatchObject({ intakeId: acceptanceInput().intakeId, orderDebitLedgerEntryId: 77, totalDebitCents: expectedDebit, cashDebitCents: expectedDebit - 300, rewardsBalanceBeforeCents: 300 });
+    expect(rewardsRow.params[10]).toBe(0);
+    const audits = db.statements("INSERT INTO dropship.dropship_audit_events").map((call) => call.sql.match(/'(wallet_[a-z_]+)'/)?.[1]);
+    expect(audits).toContain("wallet_order_debited");
+    expect(audits).toContain("wallet_rewards_spent");
+  });
+
+  it("an order the rewards balance pays in full posts no cash row; the rewards row is the record, whatever the cash balance", async () => {
+    const db = createFakeDb(baseHandlers(walletWithRewards(expectedDebit + 5, -2_000)));
+    const { repository } = createRepository(db, availableCost());
+
+    const result = await repository.acceptOrder(acceptanceInput());
+
+    expect(result).toMatchObject({ outcome: "accepted", rewardsCents: expectedDebit, walletLedgerEntryId: 77 });
+    const [walletUpdate] = db.statements("UPDATE dropship.dropship_wallet_accounts");
+    expect(walletUpdate.params[2]).toBe(-2_000);
+    expect(walletUpdate.params[4]).toBe(5);
+    const rows = db.statements("INSERT INTO dropship.dropship_wallet_ledger");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].sql).toContain("'rewards_spent'");
+    expect(rows[0].params[2]).toBe(-expectedDebit);
+  });
+
+  it("a vendor saving their rewards pays from cash alone", async () => {
+    const db = createFakeDb(baseHandlers({
+      ...walletWithRewards(50_000),
+      holdTimeout: { match: "FROM dropship.dropship_auto_reload_settings", rows: [{ payment_hold_timeout_minutes: 2_880, spend_rewards_first: false }] },
+    }));
+    const { repository } = createRepository(db, availableCost());
+
+    const result = await repository.acceptOrder(acceptanceInput());
+
+    expect(result).toMatchObject({ outcome: "accepted", rewardsCents: 0 });
+    const [walletUpdate] = db.statements("UPDATE dropship.dropship_wallet_accounts");
+    expect(walletUpdate.params[2]).toBe(WALLET_BALANCE_CENTS - expectedDebit);
+    expect(walletUpdate.params[4]).toBe(50_000);
+    const rows = db.statements("INSERT INTO dropship.dropship_wallet_ledger");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].sql).toContain("'order_debit'");
+    expect(rows[0].params[2]).toBe(-expectedDebit);
+  });
+
+  it("holds an order the cash cannot cover after rewards, reporting the rewards part so the card covers only the rest", async () => {
+    const db = createFakeDb(baseHandlers(walletWithRewards(300, 100)));
+    const { repository } = createRepository(db, availableCost());
+
+    const result = await repository.acceptOrder(acceptanceInput());
+
+    expect(result).toMatchObject({ outcome: "payment_hold", totalDebitCents: expectedDebit, rewardsCents: 300 });
+    expect(db.statements("INSERT INTO dropship.dropship_wallet_ledger")).toHaveLength(0);
+    const holdAudit = db.statements("INSERT INTO dropship.dropship_audit_events").find((call) => call.params.includes("order_acceptance_payment_hold"));
+    const payload = holdAudit?.params
+      .map((param) => { try { return JSON.parse(String(param)) as Record<string, unknown>; } catch { return null; } })
+      .find((value) => value !== null && typeof value === "object" && "shortfall" in value);
+    expect(payload).toMatchObject({ rewardsBalanceCents: 300, rewardsCents: 300, shortfall: { gapCents: expectedDebit - 300 - 100 } });
   });
 });

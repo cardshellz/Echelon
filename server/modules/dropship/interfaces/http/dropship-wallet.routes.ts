@@ -248,6 +248,20 @@ export function registerDropshipWalletRoutes(
     },
   );
 
+  // The vendor's choice between spending rewards first on each order and
+  // saving them (funding design phase 7). A preference, not a money movement,
+  // so no proof of a sensitive action is asked for.
+  app.put("/api/dropship/wallet/rewards/preference", requireDropshipAuth, async (req, res) => {
+    try {
+      const setting = await service.setRewardsSpendPreferenceForMember(req.session.dropship!.memberId, {
+        spendRewardsFirst: req.body?.spendRewardsFirst,
+      });
+      return res.json({ autoReload: setting });
+    } catch (error) {
+      return sendDropshipWalletError(res, error);
+    }
+  });
+
   app.post(
     "/api/dropship/wallet/funding-methods/stripe/setup-session",
     requireDropshipAuth,
@@ -464,6 +478,11 @@ function serializeVendorWalletView(
       advanceFeeBps: wallet.limits.advanceFeeBps,
       advanceCapCents: wallet.limits.advanceCapCents,
       tierChangeGraceDays: wallet.limits.tierChangeGraceDays,
+      // What a settled transfer earns into the spend-only rewards balance, per
+      // rail (funding design phase 7).
+      rewardsRateBankBps: wallet.limits.rewardsRateBankBps,
+      rewardsRateUsdcBps: wallet.limits.rewardsRateUsdcBps,
+      rewardsRateCardBps: wallet.limits.rewardsRateCardBps,
       // Whether linking a bank account reads its balance at all. False means no
       // account can become advance-eligible, however many times it is relinked,
       // so the vendor must be told that rather than told to try again.

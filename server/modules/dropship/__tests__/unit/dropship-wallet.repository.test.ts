@@ -38,7 +38,7 @@ describe("PgDropshipWalletRepository.failPendingFunding", () => {
         return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "4000" })] };
       }
       if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
-        expect(params).toEqual([5, 10, 1000, 0, occurredAt]);
+        expect(params).toEqual([5, 10, 1000, 0, occurredAt, null]);
         return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "0" })] };
       }
       if (sqlText.startsWith("UPDATE dropship.dropship_wallet_ledger")) {
@@ -234,6 +234,7 @@ function makeLedgerRow(overrides: Record<string, unknown> = {}) {
     currency: "USD",
     available_balance_after_cents: "1000",
     pending_balance_after_cents: "4000",
+    rewards_balance_after_cents: null,
     reference_type: "stripe_payment_intent",
     reference_id: "pi_ach_1",
     idempotency_key: "stripe-funding:pi_ach_1",
@@ -265,6 +266,7 @@ function makeAccountRow(overrides: Record<string, unknown> = {}) {
     id: 5,
     vendor_id: 10,
     available_balance_cents: "1000",
+    rewards_balance_cents: "0",
     pending_balance_cents: "4000",
     currency: "USD",
     status: "active",
@@ -493,6 +495,11 @@ describe("PgDropshipWalletRepository funding reversals (funding design phase 4)"
           return { rows: [settledCredit()] };
         }
         expect(sqlText).not.toContain("FOR UPDATE");
+        // The credit's rewards row is read too (funding design phase 7); this credit earned none.
+        if (params?.[0] === "wallet_funding_rewards") {
+          expect(params).toEqual(["wallet_funding_rewards", "1", "rewards_earned"]);
+          return { rows: [] };
+        }
         expect(params).toEqual(["stripe_dispute", "dp_1", "funding_reversal"]);
         return { rows: [] };
       }
@@ -503,7 +510,8 @@ describe("PgDropshipWalletRepository funding reversals (funding design phase 4)"
       }
       if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
         // The balance goes negative: the money left with the bank, and the pending side is untouched.
-        expect(params).toEqual([5, 10, -3000, 4000, occurredAt]);
+        // The rewards balance is restated (nothing earned, nothing taken back).
+        expect(params).toEqual([5, 10, -3000, 4000, occurredAt, 0]);
         return { rows: [makeAccountRow({ available_balance_cents: "-3000", pending_balance_cents: "4000" })] };
       }
       if (sqlText.startsWith("INSERT INTO dropship.dropship_wallet_ledger")) {
@@ -515,8 +523,9 @@ describe("PgDropshipWalletRepository funding reversals (funding design phase 4)"
           provider: "stripe", providerEventId: "evt_dp_1", providerDisputeId: "dp_1", providerPaymentIntentId: "pi_ach_1",
           fundingLedgerEntryId: 1, creditAmountCents: 4000, disputeAmountCents: 4000,
           disputeStatus: "needs_response", disputeReason: "fraudulent", rail: "stripe_ach",
+          rewardsClawback: { rewardsLedgerEntryId: null, earnedCents: 0, clawbackCents: 0, fromRewardsCents: 0, fromCashCents: 0 },
         });
-        expect(params?.slice(14)).toEqual([occurredAt, occurredAt]);
+        expect(params?.slice(14)).toEqual([occurredAt, occurredAt, 0]);
         return { rows: [reversalRow()] };
       }
       if (sqlText.includes("INSERT INTO dropship.dropship_audit_events") && sqlText.includes("'dropship_vendor'")) {
@@ -555,6 +564,7 @@ describe("PgDropshipWalletRepository funding reversals (funding design phase 4)"
     });
     expect(statements).toEqual([
       "BEGIN",
+      "SELECT id,",
       "SELECT id,",
       "SELECT id,",
       "SELECT id,",
@@ -628,7 +638,7 @@ describe("PgDropshipWalletRepository funding reversals (funding design phase 4)"
         return { rows: [makeAccountRow({ available_balance_cents: "5000", pending_balance_cents: "0" })] };
       }
       if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
-        expect(params).toEqual([5, 10, 1000, 0, occurredAt]);
+        expect(params).toEqual([5, 10, 1000, 0, occurredAt, 0]);
         return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "0" })] };
       }
       if (sqlText.startsWith("INSERT INTO dropship.dropship_wallet_ledger")) {
@@ -674,7 +684,7 @@ describe("PgDropshipWalletRepository funding reversals (funding design phase 4)"
     expect(result).toMatchObject({ outcome: "reversed", idempotentReplay: true, vendorPaused: null, reversal: { ledgerEntryId: 2 } });
     // The loser rolls back and reads the winner's row without a second transaction or a second pause attempt.
     expect(statements).toEqual([
-      "BEGIN", "SELECT", "SELECT", "SELECT", "UPDATE", "INSERT", "ROLLBACK",
+      "BEGIN", "SELECT", "SELECT", "SELECT", "SELECT", "UPDATE", "INSERT", "ROLLBACK",
       "SELECT", "SELECT", "SELECT",
     ]);
   });
@@ -691,6 +701,11 @@ describe("PgDropshipWalletRepository funding reversals (funding design phase 4)"
           return { rows: [reversalRow()] };
         }
         expect(sqlText).not.toContain("FOR UPDATE");
+        // The rewards the reversal took back are read too (funding design phase 7); none here.
+        if (params?.[0] === "stripe_dispute_rewards") {
+          expect(params).toEqual(["stripe_dispute_rewards", "dp_1", "rewards_reversed"]);
+          return { rows: [] };
+        }
         expect(params).toEqual(["stripe_dispute_reinstated", "dp_1", "funding_reinstated"]);
         return { rows: [] };
       }
@@ -700,7 +715,7 @@ describe("PgDropshipWalletRepository funding reversals (funding design phase 4)"
         return { rows: [makeAccountRow({ available_balance_cents: "-3000", pending_balance_cents: "4000" })] };
       }
       if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
-        expect(params).toEqual([5, 10, 1000, 4000, occurredAt]);
+        expect(params).toEqual([5, 10, 1000, 4000, occurredAt, 0]);
         return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "4000" })] };
       }
       if (sqlText.startsWith("INSERT INTO dropship.dropship_wallet_ledger")) {
@@ -711,7 +726,7 @@ describe("PgDropshipWalletRepository funding reversals (funding design phase 4)"
         expect(JSON.parse(String(params?.[13]))).toEqual({
           provider: "stripe", providerEventId: "evt_dp_won", providerDisputeId: "dp_1", reversalLedgerEntryId: 2, fundingLedgerEntryId: 1,
         });
-        expect(params?.slice(14)).toEqual([occurredAt, occurredAt]);
+        expect(params?.slice(14)).toEqual([occurredAt, occurredAt, 0]);
         return { rows: [reinstatementRow()] };
       }
       if (sqlText.includes("INSERT INTO dropship.dropship_audit_events")) {
@@ -735,6 +750,7 @@ describe("PgDropshipWalletRepository funding reversals (funding design phase 4)"
     });
     expect(statements).toEqual([
       "BEGIN",
+      "SELECT id,",
       "SELECT id,",
       "SELECT id,",
       "SELECT id,",
@@ -1050,5 +1066,271 @@ describe("PgDropshipWalletRepository funding method removal", () => {
     await expect(new PgDropshipWalletRepository(makePool(query)).recordFundingMethodDetachOutcome({
       vendorId: 10, fundingMethodId: 30, outcome: "detached", errorCode: null, recordedAt: archivedAt,
     })).rejects.toMatchObject({ code: "DROPSHIP_FUNDING_METHOD_NOT_ARCHIVED" });
+  });
+});
+
+describe("PgDropshipWalletRepository rewards (funding design phase 7)", () => {
+  const credit = (overrides: Record<string, unknown> = {}) => ({
+    vendorId: 10,
+    walletAccountId: null,
+    rail: "stripe_ach" as const,
+    status: "settled" as const,
+    amountCents: 4000,
+    currency: "USD",
+    referenceType: "stripe_payment_intent",
+    referenceId: "pi_1",
+    idempotencyKey: "stripe-funding:pi_1",
+    requestHash: "hash-1",
+    occurredAt,
+    ...overrides,
+  });
+
+  /** A database with a wallet holding $10 cash and $0.50 of rewards, a bank rate of 1.5%, and no rows for this credit yet. */
+  function rewardsDatabase(options: { rates?: Record<string, number> | null; earned?: Record<string, unknown> | null; policyTable?: boolean } = {}) {
+    const statements: string[] = [];
+    const updates: unknown[][] = [];
+    const inserts: unknown[][] = [];
+    const audits: string[] = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      statements.push(sqlText.trim().split(/\s+/).slice(0, 2).join(" "));
+      if (sqlText.includes("to_regclass")) return { rows: [{ present: options.policyTable === false ? null : "dropship.dropship_wallet_policies" }] };
+      if (sqlText.includes("FROM dropship.dropship_wallet_policies")) {
+        return { rows: options.rates === null ? [] : [options.rates ?? { rewards_rate_bank_bps: 150, rewards_rate_usdc_bps: 100, rewards_rate_card_bps: 0 }] };
+      }
+      if (sqlText.startsWith("INSERT INTO dropship.dropship_wallet_accounts")) return { rows: [] };
+      if (sqlText.includes("FROM dropship.dropship_wallet_accounts")) {
+        return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "0", rewards_balance_cents: "50" })] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_wallet_ledger")) {
+        // The replay lookup is keyed by vendor; the accrual's lookup by the rewards reference.
+        if (params?.[0] === "wallet_funding_rewards") return { rows: options.earned ? [makeLedgerRow(options.earned)] : [] };
+        return { rows: [] };
+      }
+      if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
+        updates.push(params ?? []);
+        return { rows: [makeAccountRow({
+          available_balance_cents: String(params?.[2]), pending_balance_cents: String(params?.[3]),
+          rewards_balance_cents: params?.[5] === null || params?.[5] === undefined ? "50" : String(params?.[5]),
+        })] };
+      }
+      if (sqlText.startsWith("INSERT INTO dropship.dropship_wallet_ledger")) {
+        inserts.push(params ?? []);
+        return { rows: [makeLedgerRow({
+          id: params?.[2] === "rewards_earned" ? 9 : 1, type: params?.[2], status: params?.[3], amount_cents: String(params?.[4]),
+          rewards_balance_after_cents: params?.[16] ?? null, settled_at: params?.[15] ?? null,
+        })] };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_audit_events")) {
+        audits.push(String(params?.[3]));
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+    return { statements, updates, inserts, audits, repository: new PgDropshipWalletRepository(makePool(query)) };
+  }
+
+  it("a settled bank credit earns rewards at the rate in force, rounded down, in the same transaction", async () => {
+    const db = rewardsDatabase();
+
+    const result = await db.repository.creditFunding(credit());
+
+    expect(result.idempotentReplay).toBe(false);
+    expect(result.ledgerEntry).toMatchObject({ type: "funding", status: "settled", amountCents: 4000 });
+    // The account handed back carries the rewards the credit just earned: $0.50 + 1.5% of $40.
+    expect(result.account.rewardsBalanceCents).toBe(110);
+    expect(db.updates).toEqual([
+      [5, 10, 5000, 0, occurredAt, null],
+      [5, 10, 5000, 0, occurredAt, 110],
+    ]);
+    expect(db.inserts).toHaveLength(2);
+    expect(db.inserts[1].slice(2, 11)).toEqual([
+      "rewards_earned", "settled", 60, "USD", 5000, 0, "wallet_funding_rewards", "1", "rewards-earned:1",
+    ]);
+    expect(JSON.parse(String(db.inserts[1][13]))).toEqual({ fundingLedgerEntryId: 1, creditAmountCents: 4000, rateBps: 150, rail: "stripe_ach" });
+    expect(db.inserts[1].slice(14)).toEqual([occurredAt, occurredAt, 110]);
+    expect(db.audits).toEqual(["wallet_funding_settled", "wallet_rewards_earned"]);
+    expect(db.statements.at(-1)).toBe("COMMIT");
+  });
+
+  it("a card credit earns nothing at the launch rate, and a pending credit nothing until it settles", async () => {
+    const card = rewardsDatabase();
+    await card.repository.creditFunding(credit({ rail: "stripe_card", referenceId: "pi_card", idempotencyKey: "stripe-funding:pi_card" }));
+    expect(card.updates).toHaveLength(1);
+    expect(card.inserts).toHaveLength(1);
+    expect(card.audits).toEqual(["wallet_funding_settled"]);
+
+    const pending = rewardsDatabase();
+    await pending.repository.creditFunding(credit({ status: "pending" }));
+    expect(pending.statements.some((statement) => statement.startsWith("SELECT to_regclass"))).toBe(false);
+    expect(pending.audits).toEqual(["wallet_funding_pending"]);
+  });
+
+  it("uses the launch rates when no policy row exists, and posts no second accrual for a credit that already earned", async () => {
+    const launch = rewardsDatabase({ rates: null });
+    const result = await launch.repository.creditFunding(credit());
+    expect(result.account.rewardsBalanceCents).toBe(90); // 1% of $40 on top of $0.50
+    expect(launch.inserts[1][4]).toBe(40);
+
+    const replay = rewardsDatabase({ earned: { id: 9, type: "rewards_earned", status: "settled", amount_cents: "60" } });
+    await replay.repository.creditFunding(credit());
+    expect(replay.updates).toHaveLength(1);
+    expect(replay.inserts).toHaveLength(1);
+    expect(replay.audits).toEqual(["wallet_funding_settled"]);
+  });
+
+  it("refuses a stored rate outside the ceiling instead of paying it out", async () => {
+    const corrupt = rewardsDatabase({ rates: { rewards_rate_bank_bps: 5000, rewards_rate_usdc_bps: 100, rewards_rate_card_bps: 0 } });
+    await expect(corrupt.repository.creditFunding(credit())).rejects.toMatchObject({ code: "DROPSHIP_WALLET_REWARDS_RATE_UNREADABLE" });
+    expect(corrupt.statements.at(-1)).toBe("ROLLBACK");
+  });
+
+  it("a reversal takes back the rewards the credit earned: what is still in the balance leaves it, the rest comes out of cash", async () => {
+    const statements: string[] = [];
+    const inserts: unknown[][] = [];
+    const audits: string[] = [];
+    let update: unknown[] | null = null;
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      statements.push(sqlText.trim().split(/\s+/)[0]);
+      if (sqlText.includes("FROM dropship.dropship_wallet_ledger")) {
+        if (params?.[0] === "stripe_payment_intent") {
+          return { rows: [makeLedgerRow({ status: "settled", settled_at: occurredAt, available_balance_after_cents: "5000", pending_balance_after_cents: "0" })] };
+        }
+        if (params?.[0] === "wallet_funding_rewards") {
+          return { rows: [makeLedgerRow({ id: 9, type: "rewards_earned", status: "settled", amount_cents: "40", reference_type: "wallet_funding_rewards", reference_id: "1", idempotency_key: "rewards-earned:1" })] };
+        }
+        return { rows: [] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_wallet_accounts")) {
+        return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "4000", rewards_balance_cents: "15" })] };
+      }
+      if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
+        update = params ?? [];
+        return { rows: [makeAccountRow({ available_balance_cents: String(params?.[2]), pending_balance_cents: String(params?.[3]), rewards_balance_cents: String(params?.[5]) })] };
+      }
+      if (sqlText.startsWith("INSERT INTO dropship.dropship_wallet_ledger")) {
+        inserts.push(params ?? []);
+        return { rows: [makeLedgerRow({ id: params?.[2] === "funding_reversal" ? 2 : 4, type: params?.[2], status: "settled", amount_cents: String(params?.[4]), rewards_balance_after_cents: params?.[16] ?? null })] };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_audit_events")) {
+        audits.push(String(params?.[3]));
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await new PgDropshipWalletRepository(makePool(query)).reverseSettledFunding({
+      provider: "stripe", providerPaymentIntentId: "pi_ach_1", providerDisputeId: "dp_1", providerEventId: "evt_dp_1",
+      disputeAmountCents: 4000, currency: "USD", disputeStatus: "needs_response", disputeReason: "fraudulent", occurredAt, pauseVendor: null,
+    });
+
+    // $40 earned on the credit: $0.15 is still in the rewards balance, $0.25 was spent and comes out of cash with the $40.
+    expect(update).toEqual([5, 10, -3025, 4000, occurredAt, 0]);
+    expect(inserts).toHaveLength(2);
+    expect(inserts[0].slice(2, 5)).toEqual(["funding_reversal", "settled", -4025]);
+    expect(JSON.parse(String(inserts[0][13])).rewardsClawback).toEqual({
+      rewardsLedgerEntryId: 9, earnedCents: 40, clawbackCents: 40, fromRewardsCents: 15, fromCashCents: 25,
+    });
+    expect(inserts[0][16]).toBe(0);
+    expect(inserts[1].slice(2, 11)).toEqual([
+      "rewards_reversed", "settled", -15, "USD", -3025, 4000, "stripe_dispute_rewards", "dp_1", "stripe-dispute-rewards:dp_1",
+    ]);
+    expect(JSON.parse(String(inserts[1][13]))).toMatchObject({ reversalLedgerEntryId: 2, fundingLedgerEntryId: 1, rewardsLedgerEntryId: 9, clawbackCents: 40, fromCashCents: 25 });
+    expect(audits).toEqual(["wallet_funding_reversed", "wallet_rewards_reversed"]);
+    expect(result).toMatchObject({ outcome: "reversed", reversal: { ledgerEntryId: 2, amountCents: -4025 }, account: { availableBalanceCents: -3025, rewardsBalanceCents: 0 } });
+    expect(statements.at(-1)).toBe("COMMIT");
+  });
+
+  it("a won dispute gives the rewards back with the cash, each on its own row", async () => {
+    const inserts: unknown[][] = [];
+    const audits: string[] = [];
+    let update: unknown[] | null = null;
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      if (sqlText.includes("FROM dropship.dropship_wallet_ledger")) {
+        if (params?.[0] === "stripe_dispute") {
+          return { rows: [makeLedgerRow({ id: 2, type: "funding_reversal", status: "settled", amount_cents: "-4025", reference_type: "stripe_dispute", reference_id: "dp_1", metadata: { fundingLedgerEntryId: 1 } })] };
+        }
+        if (params?.[0] === "stripe_dispute_rewards") {
+          return { rows: [makeLedgerRow({ id: 4, type: "rewards_reversed", status: "settled", amount_cents: "-15", reference_type: "stripe_dispute_rewards", reference_id: "dp_1" })] };
+        }
+        return { rows: [] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_wallet_accounts")) {
+        return { rows: [makeAccountRow({ available_balance_cents: "-3025", pending_balance_cents: "4000", rewards_balance_cents: "0" })] };
+      }
+      if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
+        update = params ?? [];
+        return { rows: [makeAccountRow({ available_balance_cents: String(params?.[2]), pending_balance_cents: String(params?.[3]), rewards_balance_cents: String(params?.[5]) })] };
+      }
+      if (sqlText.startsWith("INSERT INTO dropship.dropship_wallet_ledger")) {
+        inserts.push(params ?? []);
+        return { rows: [makeLedgerRow({ id: params?.[2] === "funding_reinstated" ? 3 : 5, type: params?.[2], status: "settled", amount_cents: String(params?.[4]) })] };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_audit_events")) {
+        audits.push(String(params?.[3]));
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await new PgDropshipWalletRepository(makePool(query)).reinstateReversedFunding({
+      provider: "stripe", providerDisputeId: "dp_1", providerEventId: "evt_dp_won", occurredAt,
+    });
+
+    expect(update).toEqual([5, 10, 1000, 4000, occurredAt, 15]);
+    expect(inserts[0].slice(2, 5)).toEqual(["funding_reinstated", "settled", 4025]);
+    expect(inserts[0][16]).toBe(15);
+    expect(inserts[1].slice(2, 11)).toEqual([
+      "rewards_reinstated", "settled", 15, "USD", 1000, 4000, "stripe_dispute_rewards_reinstated", "dp_1", "stripe-dispute-rewards-reinstated:dp_1",
+    ]);
+    expect(JSON.parse(String(inserts[1][13]))).toMatchObject({ rewardsReversalLedgerEntryId: 4, reinstatementLedgerEntryId: 3 });
+    expect(audits).toEqual(["wallet_funding_reinstated", "wallet_rewards_reinstated"]);
+    expect(result).toMatchObject({ reinstatement: { ledgerEntryId: 3, amountCents: 4025 }, account: { availableBalanceCents: 1000, rewardsBalanceCents: 15 } });
+  });
+
+  it("saves the vendor's rewards spend preference on their settings row with its audit row, scaffolding the row first", async () => {
+    const updatedAt = new Date("2026-09-24T12:00:00.000Z");
+    const statements: string[] = [];
+    const captured: { update: unknown[] | null; audit: unknown[] | null } = { update: null, audit: null };
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      statements.push(sqlText.trim().split(/\s+/).slice(0, 2).join(" "));
+      if (sqlText.includes("FROM dropship.dropship_wallet_accounts")) return { rows: [makeAccountRow()] };
+      if (sqlText.startsWith("UPDATE dropship.dropship_auto_reload_settings")) {
+        captured.update = params ?? [];
+        expect(sqlText).toContain("SET spend_rewards_first = $2");
+        return { rows: [{
+          id: 7, vendor_id: 10, funding_method_id: null, enabled: true, minimum_balance_cents: "5000", max_single_reload_cents: null,
+          top_up_amount_cents: null, payment_hold_timeout_minutes: 2880, acknowledged_card_fee_bps: null, acknowledged_at: null,
+          spend_rewards_first: params?.[1], created_at: updatedAt, updated_at: updatedAt,
+        }] };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_audit_events")) {
+        captured.audit = params ?? [];
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+
+    const setting = await new PgDropshipWalletRepository(makePool(query)).setRewardsSpendPreference({
+      vendorId: 10, spendRewardsFirst: false, actorMemberId: "member-1", updatedAt,
+    });
+
+    expect(setting).toMatchObject({ autoReloadSettingId: 7, vendorId: 10, spendRewardsFirst: false });
+    expect(captured.update).toEqual([10, false, updatedAt]);
+    expect(captured.audit?.slice(0, 4)).toEqual([10, "dropship_auto_reload_settings", "7", "wallet_rewards_preference_saved"]);
+    expect(JSON.parse(String(captured.audit?.[4]))).toEqual({ spendRewardsFirst: false });
+    expect(captured.audit?.slice(6, 8)).toEqual(["member", "member-1"]);
+    expect(statements).toEqual([
+      "BEGIN",
+      "INSERT INTO",
+      "SELECT id,",
+      "INSERT INTO",
+      "UPDATE dropship.dropship_auto_reload_settings",
+      "INSERT INTO",
+      "COMMIT",
+    ]);
   });
 });
