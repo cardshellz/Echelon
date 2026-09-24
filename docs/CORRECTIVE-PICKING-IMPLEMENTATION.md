@@ -51,6 +51,7 @@ Local validation on 2026-09-24, rebased onto `origin/main` at `cd6d306a8d4ba528d
 
 - Full Vitest run: **17,459 passed**, **0 failed**, **1,720 skipped** (including environment-gated database suites). This is not a claim that every database suite ran.
 - Nine explicitly enabled disposable-PostgreSQL suites: **215 passed**, no skipped tests. These cover correction workflow, shipping projection, canonical dispatch/publication, raw ShipStation package allocation, carrier retry recovery, legacy shipment authority, lot parity and the procurement-to-sale cost flow.
+- Shared shipment-fixture regression run: **124 passed**, no skipped tests, across eight connected database suites and one fixture guard. This overlaps some suites above; the counts are not additive. CI exposed a derived cleanup statement that omitted its operational-receipt dependencies after the new tables were added; its fix and guard preserve all base cleanup tables in the same transaction-safe truncate statement.
 - Desktop/mobile corrective-pick and existing pick-inventory browser journeys: **56 passed**. The settled Yes/No screenshots were visually checked, and the dialog is asserted to fit both viewports.
 - Application, server-test and client-test TypeScript checks passed; the production bundle build passed.
 - `scripts/ci/postgres-test-manifest.ts` includes the new correction suite. Existing legacy shipment and procurement fixtures install the actual correction migration; the PostgreSQL manifest guard preserves every prior suite.
