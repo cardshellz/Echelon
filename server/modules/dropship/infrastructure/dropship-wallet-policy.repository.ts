@@ -32,6 +32,8 @@ import {
  *   advance_fee_bps                      -> advanceFeeBps
  *   advance_cap_cents                    -> advanceCapCents
  *   tier_change_grace_days               -> tierChangeGraceDays
+ *   card_funding_fee_bps                 -> cardFundingFeeBps
+ *   card_funding_minimum_cents           -> cardFundingMinCents
  *
  * Published rows are immutable (DB trigger); a change inserts a new version and
  * retires the previous one inside ONE transaction with its command row and its
@@ -61,6 +63,8 @@ interface PolicyRow {
   advance_fee_bps: number;
   advance_cap_cents: string | number;
   tier_change_grace_days: number;
+  card_funding_fee_bps: number;
+  card_funding_minimum_cents: string | number;
   is_active: boolean;
   change_note: string | null;
   created_at: Date;
@@ -192,8 +196,9 @@ export class PgDropshipWalletPolicyRepository implements DropshipWalletPolicyRep
            manual_top_up_minimum_cents, manual_top_up_maximum_cents,
            default_payment_hold_timeout_minutes, hold_expiry_warning_minutes,
            advance_fee_bps, advance_cap_cents, tier_change_grace_days,
+           card_funding_fee_bps, card_funding_minimum_cents,
            is_active, change_note, created_at, created_by_actor_type, created_by_actor_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true, $12, $13, $14, $15)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, true, $14, $15, $16, $17)
          RETURNING *`,
         [
           version,
@@ -207,6 +212,8 @@ export class PgDropshipWalletPolicyRepository implements DropshipWalletPolicyRep
           input.limits.advanceFeeBps,
           input.limits.advanceCapCents,
           input.limits.tierChangeGraceDays,
+          input.limits.cardFundingFeeBps,
+          input.limits.cardFundingMinCents,
           input.changeNote,
           input.now,
           input.actor.actorType,
@@ -295,6 +302,8 @@ function mapPolicyRow(row: PolicyRow): DropshipWalletPolicyRecord {
     advanceFeeBps: nonNegativeInteger(row.advance_fee_bps, "advance_fee_bps"),
     advanceCapCents: nonNegativeMoney(row.advance_cap_cents, "advance_cap_cents"),
     tierChangeGraceDays: nonNegativeInteger(row.tier_change_grace_days, "tier_change_grace_days"),
+    cardFundingFeeBps: nonNegativeInteger(row.card_funding_fee_bps, "card_funding_fee_bps"),
+    cardFundingMinCents: money(row.card_funding_minimum_cents, "card_funding_minimum_cents"),
   };
   return {
     policyId: row.id,

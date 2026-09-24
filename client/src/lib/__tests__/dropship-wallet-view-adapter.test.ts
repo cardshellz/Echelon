@@ -54,7 +54,7 @@ describe("adaptWalletView", () => {
   });
 
   it("uses every served §4.1 field as-is and applies no fallback", () => {
-    const limits = { autoReloadMinTriggerCents: 5000, caseTierMinimumCents: 40000, autoReloadMinAmountCents: 10000, manualFundingMinCents: 1000, manualFundingMaxCents: 500000, defaultPaymentHoldTimeoutMinutes: 2880, holdExpiryWarningMinutes: 90, advanceFeeBps: 125, advanceCapCents: 30000, tierChangeGraceDays: 7, bankBalanceReadOffered: false };
+    const limits = { autoReloadMinTriggerCents: 5000, caseTierMinimumCents: 40000, autoReloadMinAmountCents: 10000, manualFundingMinCents: 1000, manualFundingMaxCents: 500000, defaultPaymentHoldTimeoutMinutes: 2880, holdExpiryWarningMinutes: 90, advanceFeeBps: 125, advanceCapCents: 30000, tierChangeGraceDays: 7, cardFundingMinCents: 15000, bankBalanceReadOffered: false };
     const setupStatus = { sourceReady: true, backupReady: true, acknowledged: false, done: true, launchReady: false };
     const view = adaptWalletView(rawWallet({
       autoReload: rawAutoReload({ backstopFundingMethodId: 11, acknowledgedCardFeeBps: 250, acknowledgedAt: LATER }),
@@ -103,7 +103,7 @@ describe("adaptWalletView", () => {
     expect(CLIENT_FALLBACK_LIMITS).toEqual({
       autoReloadMinTriggerCents: 10_000, caseTierMinimumCents: 50_000, autoReloadMinAmountCents: 10_000,
       manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 1_440,
-      holdExpiryWarningMinutes: 120, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false,
+      holdExpiryWarningMinutes: 120, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, cardFundingMinCents: 10_000, bankBalanceReadOffered: false,
     });
   });
 
@@ -204,7 +204,7 @@ function servedListingTiers() {
 }
 
 function servedLimits() {
-  return { autoReloadMinTriggerCents: 5000, caseTierMinimumCents: 40000, autoReloadMinAmountCents: 10000, manualFundingMinCents: 1000, manualFundingMaxCents: 500000, defaultPaymentHoldTimeoutMinutes: 2880, holdExpiryWarningMinutes: 90, advanceFeeBps: 125, advanceCapCents: 30000, tierChangeGraceDays: 7, bankBalanceReadOffered: false };
+  return { autoReloadMinTriggerCents: 5000, caseTierMinimumCents: 40000, autoReloadMinAmountCents: 10000, manualFundingMinCents: 1000, manualFundingMaxCents: 500000, defaultPaymentHoldTimeoutMinutes: 2880, holdExpiryWarningMinutes: 90, advanceFeeBps: 125, advanceCapCents: 30000, tierChangeGraceDays: 7, cardFundingMinCents: 15000, bankBalanceReadOffered: false };
 }
 
 function servedSetupStatus() {
@@ -239,5 +239,19 @@ describe("USDC deposit position (funding design phase 6)", () => {
     expect(adaptWalletView(rawWallet()).usdcDeposit).toBeNull();
     expect(() => adaptWalletView(rawWallet({ usdcDeposit: { ...usdcDeposit, settleTag: "latest" } }))).toThrow();
     expect(() => adaptWalletView(rawWallet({ usdcDeposit: { ...usdcDeposit, minConfirmations: 0 } }))).toThrow();
+  });
+});
+
+describe("acknowledgement after a fee cut (funding design phase 7)", () => {
+  it("counts an agreement at or above the live rate as acknowledged, and one below it as stale", () => {
+    const view = adaptWalletView(rawWallet({
+      cardFundingFeeBps: 0,
+      autoReload: rawAutoReload({ acknowledgedCardFeeBps: 300, acknowledgedAt: STAMP }),
+      fundingMethods: [rawMethod(), rawMethod({ fundingMethodId: 30, rail: "stripe_ach", displayLabel: "Chase ending in 1234", isDefault: false })],
+    }));
+    expect(view.setupStatus).toMatchObject({ acknowledged: true, launchReady: true });
+    expect(deriveSetupStatus({ autoReload: { ...view.autoReload!, acknowledgedCardFeeBps: 300 }, fundingMethods: view.fundingMethods, cardFundingFeeBps: 0 })).toMatchObject({ acknowledged: true });
+    expect(deriveSetupStatus({ autoReload: { ...view.autoReload!, acknowledgedCardFeeBps: 0 }, fundingMethods: view.fundingMethods, cardFundingFeeBps: 200 })).toMatchObject({ acknowledged: false, launchReady: false });
+    expect(deriveSetupStatus({ autoReload: { ...view.autoReload!, acknowledgedCardFeeBps: null, acknowledgedAt: null }, fundingMethods: view.fundingMethods, cardFundingFeeBps: 0 })).toMatchObject({ acknowledged: false });
   });
 });

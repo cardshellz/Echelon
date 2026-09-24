@@ -53,6 +53,8 @@ function overviewFixture(
       advanceFeeBps: 100,
       advanceCapCents: 50_000,
       tierChangeGraceDays: 14,
+      cardFundingFeeBps: 0,
+      cardFundingMinCents: 10_000,
     },
     limitsSource: "environment",
     envLimits: {
@@ -66,6 +68,8 @@ function overviewFixture(
       advanceFeeBps: 100,
       advanceCapCents: 50_000,
       tierChangeGraceDays: 14,
+      cardFundingFeeBps: 0,
+      cardFundingMinCents: 10_000,
     },
     envKeys: {
       autoReloadMinTriggerCents: "DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS",
@@ -80,13 +84,8 @@ function overviewFixture(
       advanceFeeBps: null,
       advanceCapCents: null,
       tierChangeGraceDays: null,
-    },
-    cardFundingFee: {
-      bps: 290,
-      envKey: "DROPSHIP_CARD_FUNDING_FEE_BPS",
-      editable: false,
-      readOnlyReason:
-        "A vendor's agreement to the card fee is recorded only in an audit payload, not on their settings row.",
+      cardFundingFeeBps: "DROPSHIP_CARD_FUNDING_FEE_BPS",
+      cardFundingMinCents: null,
     },
     // Deliberately inconsistent with `limits`: a page that computed the counts
     // from the form could not produce these numbers.
@@ -217,7 +216,7 @@ describe("dropship wallet policy tab", () => {
     );
     const inputs = tags(html, "input");
     const textareas = tags(html, "textarea");
-    expect(inputs).toHaveLength(10);
+    expect(inputs).toHaveLength(12);
     expect(textareas).toHaveLength(1);
     for (const element of [...inputs, ...textareas]) {
       expect(element).toMatch(DISABLED_ATTRIBUTE);
@@ -228,10 +227,13 @@ describe("dropship wallet policy tab", () => {
     expect(tags(html, "fieldset")[0]).toMatch(DISABLED_ATTRIBUTE);
   });
 
-  it("opens the ten limit boxes for an operator who may manage operations", () => {
+  it("opens the twelve limit boxes for an operator who may manage operations", () => {
     const html = renderPanel({ canEdit: true, overview: overviewFixture() });
     const inputs = tags(html, "input");
-    expect(inputs).toHaveLength(10);
+    expect(inputs).toHaveLength(12);
+    // The card fee and the card minimum are ordinary limits since funding design phase 7.
+    expect(html).toContain("Card funding fee (%)");
+    expect(html).toContain("Card minimum deposit ($)");
     // The new limits are labelled in their own units, never as dollars.
     expect(html).toContain("Case tier minimum ($)");
     expect(html).toContain("Advance fee (%)");
@@ -289,18 +291,14 @@ describe("dropship wallet policy tab", () => {
     );
   });
 
-  it("serves the card funding fee read-only, with no input and the server's reason", () => {
-    const fee = section(renderPanel({ overview: overviewFixture() }), "wallet-policy-card-fee");
-    expect(fee).toContain("2.90%");
-    expect(fee).toContain("(290 bps)");
-    expect(fee).toContain("DROPSHIP_CARD_FUNDING_FEE_BPS");
-    expect(fee).toContain(
-      "A vendor&#x27;s agreement to the card fee is recorded only in an audit payload, not on their settings row.",
-    );
-    expect(fee).not.toContain("<input");
-    expect(fee).not.toContain("<textarea");
-    expect(panelSource).not.toContain("cardFundingFeeBps");
-    expect(panelSource).not.toMatch(/onChange=\{[^}]*bps/);
+  it("no longer carries a read-only card fee block: the fee is one of the limits", () => {
+    const html = renderPanel({ overview: overviewFixture() });
+    expect(html).not.toContain("wallet-policy-card-fee");
+    expect(html).not.toContain("Read-only");
+    expect(html).toContain("Card funding fee");
+    expect(html).toContain("Environment variable DROPSHIP_CARD_FUNDING_FEE_BPS");
+    expect(panelSource).not.toContain("CardFundingFeePanel");
+    expect(panelSource).not.toContain("readOnlyReason");
   });
 
   it("says where each value in force came from, including the schema default", () => {

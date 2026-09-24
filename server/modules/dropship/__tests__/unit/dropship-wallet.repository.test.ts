@@ -818,6 +818,7 @@ describe("PgDropshipWalletRepository.configureAutoReload (funding design phase 5
       if (sql.includes("INSERT INTO dropship.dropship_auto_reload_settings")) {
         captured.upsert = params;
         expect(sql).toContain("top_up_amount_cents = EXCLUDED.top_up_amount_cents");
+        expect(sql).toContain("acknowledged_card_fee_bps = EXCLUDED.acknowledged_card_fee_bps");
         return { rows: [makeAutoReloadRow({ max_single_reload_cents: "150000", top_up_amount_cents: "150000" })] };
       }
       if (sql.includes("INSERT INTO dropship.dropship_audit_events")) {
@@ -831,8 +832,9 @@ describe("PgDropshipWalletRepository.configureAutoReload (funding design phase 5
       makeConfigureInput({ maxSingleReloadCents: 150_000, topUpAmountCents: 150_000 }),
     );
 
-    // Parameter order is the contract with the SQL: $7 is reused for both timestamps, $8 is the top-up amount.
-    expect(captured.upsert).toEqual([10, 100, true, 50_000, 150_000, 1440, updatedAt, 150_000]);
+    // Parameter order is the contract with the SQL: $7 is reused for both timestamps, $8 is the top-up amount,
+    // $9 and $10 the acknowledged card fee rate and when it was agreed (migration 0700).
+    expect(captured.upsert).toEqual([10, 100, true, 50_000, 150_000, 1440, updatedAt, 150_000, 300, updatedAt]);
     expect(setting).toMatchObject({
       autoReloadSettingId: 7,
       minimumBalanceCents: 50_000,

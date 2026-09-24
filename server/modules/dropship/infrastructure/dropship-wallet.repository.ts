@@ -87,6 +87,8 @@ interface AutoReloadRow {
   max_single_reload_cents: string | number | null;
   top_up_amount_cents: string | number | null;
   payment_hold_timeout_minutes: number;
+  acknowledged_card_fee_bps: number | null;
+  acknowledged_at: Date | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -660,8 +662,8 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         `INSERT INTO dropship.dropship_auto_reload_settings
           (vendor_id, funding_method_id, enabled, minimum_balance_cents,
            max_single_reload_cents, payment_hold_timeout_minutes, created_at, updated_at,
-           top_up_amount_cents)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8)
+           top_up_amount_cents, acknowledged_card_fee_bps, acknowledged_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9, $10)
          ON CONFLICT (vendor_id) DO UPDATE
            SET funding_method_id = EXCLUDED.funding_method_id,
                enabled = EXCLUDED.enabled,
@@ -669,10 +671,12 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
                max_single_reload_cents = EXCLUDED.max_single_reload_cents,
                top_up_amount_cents = EXCLUDED.top_up_amount_cents,
                payment_hold_timeout_minutes = EXCLUDED.payment_hold_timeout_minutes,
+               acknowledged_card_fee_bps = EXCLUDED.acknowledged_card_fee_bps,
+               acknowledged_at = EXCLUDED.acknowledged_at,
                updated_at = EXCLUDED.updated_at
          RETURNING id, vendor_id, funding_method_id, enabled, minimum_balance_cents,
                    max_single_reload_cents, top_up_amount_cents, payment_hold_timeout_minutes,
-                   created_at, updated_at`,
+                   acknowledged_card_fee_bps, acknowledged_at, created_at, updated_at`,
         [
           input.vendorId,
           input.fundingMethodId,
@@ -682,6 +686,11 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
           input.paymentHoldTimeoutMinutes,
           input.updatedAt,
           input.topUpAmountCents,
+          // The rate the vendor agreed to is stored with the row (migration
+          // 0700), so an unattended charge can be held to it; a client that
+          // sent none leaves it null and pays the live rate.
+          input.acknowledgedCardFeeBps ?? null,
+          input.acknowledgedCardFeeBps === undefined ? null : input.updatedAt,
         ],
       );
       const setting = mapAutoReloadRow(requiredRow(
@@ -2986,7 +2995,7 @@ async function getAutoReloadSettingWithClient(
   const result = await client.query<AutoReloadRow>(
     `SELECT id, vendor_id, funding_method_id, enabled, minimum_balance_cents,
             max_single_reload_cents, top_up_amount_cents, payment_hold_timeout_minutes,
-            created_at, updated_at
+            acknowledged_card_fee_bps, acknowledged_at, created_at, updated_at
      FROM dropship.dropship_auto_reload_settings
      WHERE vendor_id = $1
      LIMIT 1`,
@@ -3232,6 +3241,8 @@ function mapAutoReloadRow(row: AutoReloadRow): DropshipAutoReloadSettingRecord {
       ? null
       : toSafeInteger(row.top_up_amount_cents, "top_up_amount_cents"),
     paymentHoldTimeoutMinutes: row.payment_hold_timeout_minutes,
+    acknowledgedCardFeeBps: row.acknowledged_card_fee_bps ?? null,
+    acknowledgedAt: row.acknowledged_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

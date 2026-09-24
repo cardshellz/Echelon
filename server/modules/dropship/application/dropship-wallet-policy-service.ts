@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import { z } from "zod";
+import { MAX_CARD_FUNDING_FEE_BPS } from "../../../../shared/dropship/wallet-funding-fee";
 import { DropshipError } from "../domain/errors";
 import {
   resolveEffectiveAdvanceCapCents,
@@ -21,15 +22,14 @@ import {
   type DropshipEnforcedListingTierMinimums,
   type DropshipListingTierPolicyVersion,
 } from "../domain/listing-tiers";
-import { resolveDropshipCardFundingFeeBps } from "./dropship-wallet-service";
 import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
 
 /**
  * Dropship wallet policy service.
  *
  * Staff edit the wallet's limits here instead of through dyno config. A change
- * is a NEW VERSION of `dropship.dropship_wallet_policies` (migrations 0682 and
- * 0683); published rows are immutable, and exactly one row is active. Reads
+ * is a NEW VERSION of `dropship.dropship_wallet_policies` (migrations 0682,
+ * 0683 and 0700); published rows are immutable, and exactly one row is active. Reads
  * fall back to the documented defaults when no row exists, so an empty
  * database (dev) or the window before the migration lands still serves a
  * wallet.
@@ -71,6 +71,10 @@ export const createDropshipWalletPolicyVersionInputSchema = z.object({
   advanceFeeBps: z.number().int().min(0).max(MAX_ADVANCE_FEE_BPS),
   advanceCapCents: nonNegativeCentsSchema,
   tierChangeGraceDays: z.number().int().min(0).max(MAX_TIER_CHANGE_GRACE_DAYS),
+  // The card fee is bounded by the shared misconfiguration guard (10%), not a
+  // business ceiling: zero is the policy since funding design phase 7.
+  cardFundingFeeBps: z.number().int().min(0).max(MAX_CARD_FUNDING_FEE_BPS),
+  cardFundingMinCents: positiveCentsSchema,
   changeNote: noteSchema,
   idempotencyKey: idempotencyKeySchema,
   actor: actorSchema,
@@ -150,25 +154,6 @@ export interface DropshipWalletPolicyImpact {
   evaluatedAt: Date;
 }
 
-/**
- * The card funding fee, served READ-ONLY.
- *
- * It is deliberately NOT editable here. A vendor's agreement to a rate is
- * recorded today only in an audit payload written when they saved auto-reload
- * (`configureAutoReload` -> `cardFundingFeeBps`), not on the settings row, and
- * unattended auto-reload charges quote the LIVE rate
- * (`DropshipWalletService.quoteFunding`). An editable fee would therefore
- * charge vendors a rate they never agreed to, silently, on a schedule. Storing
- * the acknowledgement on the settings row is the prerequisite, and is separate
- * work; until then the rate moves only through a deliberate config change.
- */
-export interface DropshipWalletPolicyCardFeeView {
-  bps: number;
-  envKey: string;
-  editable: false;
-  readOnlyReason: string;
-}
-
 export interface DropshipWalletPolicyOverview {
   /** The active policy row, or null when the wallet is still on the fallback defaults. */
   policy: DropshipWalletPolicyRecord | null;
@@ -179,7 +164,6 @@ export interface DropshipWalletPolicyOverview {
   envLimits: DropshipWalletPolicyLimits;
   /** Which environment variable backs each limit (null: no env override exists). */
   envKeys: typeof DROPSHIP_WALLET_POLICY_ENV_KEYS;
-  cardFundingFee: DropshipWalletPolicyCardFeeView;
   impact: DropshipWalletPolicyImpact;
   /**
    * The listing tier minimums enforced right now and any raise still inside
@@ -275,8 +259,6 @@ export class DropshipWalletPolicyService implements DropshipWalletPolicyResolver
       logger: DropshipLogger;
       /** Environment used for the fallback layer. Injected so reads are deterministic under test. */
       env?: NodeJS.ProcessEnv;
-      /** Card fee rate override; the environment's rate when absent. Injected so tests are deterministic. */
-      cardFundingFeeBps?: number;
     },
   ) {}
 
@@ -295,8 +277,9 @@ export class DropshipWalletPolicyService implements DropshipWalletPolicyResolver
 
   /**
    * Everything the admin screen needs in one read: the active policy, the
-   * fallback values it overrides, the read-only card fee rate, and the impact
-   * of a proposal (defaulting to the limits already in force).
+   * fallback values it overrides, and the impact of a proposal (defaulting to
+   * the limits already in force). The card fee is one of the limits since
+   * funding design phase 7; it is no longer a read-only environment value.
    */
   async getOverview(proposal: unknown = {}): Promise<DropshipWalletPolicyOverview> {
     const parsed = parseWalletPolicyInput(dropshipWalletPolicyImpactInputSchema, proposal);
@@ -309,7 +292,6 @@ export class DropshipWalletPolicyService implements DropshipWalletPolicyResolver
       limitsSource: effective.policy ? "policy" : "environment",
       envLimits: this.envLimits(),
       envKeys: DROPSHIP_WALLET_POLICY_ENV_KEYS,
-      cardFundingFee: this.cardFundingFeeView(),
       impact,
       listingTierEnforcement: await this.resolveListingTierMinimums(generatedAt),
       generatedAt,
@@ -367,6 +349,8 @@ export class DropshipWalletPolicyService implements DropshipWalletPolicyResolver
       advanceFeeBps: parsed.advanceFeeBps,
       advanceCapCents: parsed.advanceCapCents,
       tierChangeGraceDays: parsed.tierChangeGraceDays,
+      cardFundingFeeBps: parsed.cardFundingFeeBps,
+      cardFundingMinCents: parsed.cardFundingMinCents,
     };
     const changeNote = parsed.changeNote ?? null;
     const now = this.deps.clock.now();
@@ -587,18 +571,6 @@ export class DropshipWalletPolicyService implements DropshipWalletPolicyResolver
   private envLimits(): DropshipWalletPolicyLimits {
     return resolveDropshipWalletPolicyLimitsFromEnv(this.deps.env);
   }
-
-  private cardFundingFeeView(): DropshipWalletPolicyCardFeeView {
-    return {
-      bps: this.deps.cardFundingFeeBps ?? resolveDropshipCardFundingFeeBps(this.deps.env),
-      envKey: "DROPSHIP_CARD_FUNDING_FEE_BPS",
-      editable: false,
-      readOnlyReason:
-        "A vendor's agreement to the card fee is recorded only in an audit payload, not on their settings row, "
-        + "and unattended auto-reload charges quote the live rate. Making the fee editable here would charge vendors "
-        + "a rate they never agreed to. Storing the acknowledgement is the prerequisite and is separate work.",
-    };
-  }
 }
 
 /** Stable request fingerprint: the same proposal under the same key is a replay. */
@@ -619,6 +591,8 @@ export function hashWalletPolicyRequest(value: {
       advanceFeeBps: value.limits.advanceFeeBps,
       advanceCapCents: value.limits.advanceCapCents,
       tierChangeGraceDays: value.limits.tierChangeGraceDays,
+      cardFundingFeeBps: value.limits.cardFundingFeeBps,
+      cardFundingMinCents: value.limits.cardFundingMinCents,
     },
     changeNote: value.changeNote,
   })).digest("hex");

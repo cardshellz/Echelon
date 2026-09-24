@@ -22,6 +22,9 @@ const launchDefaults: DropshipWalletPolicyLimits = {
   advanceFeeBps: 100,
   advanceCapCents: 50_000,
   tierChangeGraceDays: 14,
+  // Funding design phase 7: no processing fee; a $100 card minimum deposit.
+  cardFundingFeeBps: 0,
+  cardFundingMinCents: 10_000,
 };
 
 describe("resolveDropshipWalletPolicyLimitsFromEnv", () => {
@@ -36,6 +39,7 @@ describe("resolveDropshipWalletPolicyLimitsFromEnv", () => {
       DROPSHIP_STRIPE_MIN_WALLET_FUNDING_CENTS: "2500",
       DROPSHIP_STRIPE_MAX_WALLET_FUNDING_CENTS: "250000",
       DROPSHIP_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES: "45",
+      DROPSHIP_CARD_FUNDING_FEE_BPS: "250",
     })).toEqual({
       ...launchDefaults,
       autoReloadMinTriggerCents: 7_500,
@@ -43,6 +47,7 @@ describe("resolveDropshipWalletPolicyLimitsFromEnv", () => {
       manualFundingMinCents: 2_500,
       manualFundingMaxCents: 250_000,
       holdExpiryWarningMinutes: 45,
+      cardFundingFeeBps: 250,
     });
     // The hold timeout, the case tier, the advance and the grace have no
     // environment override: the policy row is the only way to move them.
@@ -51,6 +56,17 @@ describe("resolveDropshipWalletPolicyLimitsFromEnv", () => {
     expect(DROPSHIP_WALLET_POLICY_ENV_KEYS.advanceFeeBps).toBeNull();
     expect(DROPSHIP_WALLET_POLICY_ENV_KEYS.advanceCapCents).toBeNull();
     expect(DROPSHIP_WALLET_POLICY_ENV_KEYS.tierChangeGraceDays).toBeNull();
+    // The card minimum is policy-only; the card fee keeps its variable as the fallback.
+    expect(DROPSHIP_WALLET_POLICY_ENV_KEYS.cardFundingMinCents).toBeNull();
+    expect(DROPSHIP_WALLET_POLICY_ENV_KEYS.cardFundingFeeBps).toBe("DROPSHIP_CARD_FUNDING_FEE_BPS");
+  });
+
+  it("refuses a card fee it cannot trust instead of defaulting it, unlike the floors", () => {
+    for (const bad of ["abc", "-1", "12.5", "1001", "3%"]) {
+      expect(() => resolveDropshipWalletPolicyLimitsFromEnv({ DROPSHIP_CARD_FUNDING_FEE_BPS: bad }))
+        .toThrow(expect.objectContaining({ code: "DROPSHIP_CARD_FUNDING_FEE_MISCONFIGURED" }));
+    }
+    expect(resolveDropshipWalletPolicyLimitsFromEnv({ DROPSHIP_CARD_FUNDING_FEE_BPS: "  " }).cardFundingFeeBps).toBe(0);
   });
 
   it("raises the case tier with an environment pack floor above it, so the fallback never breaks its own invariant", () => {
@@ -110,6 +126,20 @@ describe("walletPolicyInvariantViolations", () => {
     })).toEqual([
       expect.objectContaining({ field: "manualFundingMaxCents" }),
     ]);
+  });
+
+  it("refuses a card minimum above the manual maximum and allows one equal to it", () => {
+    expect(walletPolicyInvariantViolations({
+      ...launchDefaults,
+      cardFundingMinCents: 500_001,
+    })).toEqual([{
+      field: "cardFundingMinCents",
+      message: "Card minimum deposit must be at most the manual top-up maximum.",
+    }]);
+    expect(walletPolicyInvariantViolations({
+      ...launchDefaults,
+      cardFundingMinCents: 500_000,
+    })).toEqual([]);
   });
 
   it("refuses a top-up limit that can never clear the trigger", () => {
@@ -177,12 +207,15 @@ describe("walletPolicyInvariantViolations", () => {
       manualFundingMaxCents: 8_000,
       defaultPaymentHoldTimeoutMinutes: 60,
       holdExpiryWarningMinutes: 60,
+      cardFundingFeeBps: 0,
+      cardFundingMinCents: 10_000,
       advanceFeeBps: 100,
       advanceCapCents: 50_000,
       tierChangeGraceDays: 14,
     });
     expect(violations.map((violation) => violation.field).sort()).toEqual([
       "autoReloadMinAmountCents",
+      "cardFundingMinCents",
       "caseTierMinimumCents",
       "holdExpiryWarningMinutes",
       "manualFundingMaxCents",
