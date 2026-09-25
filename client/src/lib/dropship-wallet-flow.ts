@@ -602,6 +602,11 @@ export interface WalletFlowState {
   reachableSteps: WalletFlowStep[];
   needsAcknowledgement: boolean;
   feeRecordMissing: boolean;
+  /**
+   * The card fee rose above the rate the vendor agreed to, so unattended
+   * charges stay at the agreed rate until they confirm. Null otherwise: a fee
+   * cut needs nothing from the vendor and is not shown as a change.
+   */
   feeChange: { recordedBps: number; currentBps: number } | null;
   source: { rail: WalletSourceRail; method: WalletFundingMethod } | null;
   suggestedSourceMethodId: number | null;
@@ -632,15 +637,15 @@ export function deriveWalletFlow(input: {
   const onboarding = input.vendorStatus === "onboarding";
 
   const feeRecordMissing = authorized && autoReload.acknowledgedAt === null;
-  const feeChange = autoReload && autoReload.acknowledgedCardFeeBps !== null && autoReload.acknowledgedCardFeeBps !== wallet.cardFundingFeeBps
+  // Only a raise is a change the vendor must act on. After a cut the server
+  // already holds unattended charges to the lower rate and still accepts the
+  // recorded one, so the vendor is asked nothing and told nothing about it.
+  const feeChange = autoReload && autoReload.acknowledgedCardFeeBps !== null && wallet.cardFundingFeeBps > autoReload.acknowledgedCardFeeBps
     ? { recordedBps: autoReload.acknowledgedCardFeeBps, currentBps: wallet.cardFundingFeeBps }
     : null;
-  // A banner is owed while the server says the agreement is missing or stale,
-  // and after a fee cut too: the cut applies to unattended charges at once (the
-  // record still covers the vendor), but the plan row points at the banner to
-  // refresh it. A raise stays the server's verdict, never second-guessed here.
-  const feeCut = feeChange !== null && feeChange.currentBps < feeChange.recordedBps;
-  const needsAcknowledgement = done && (!wallet.setupStatus.acknowledged || feeCut);
+  // A banner is owed only while the server says the agreement is missing or
+  // stale; that verdict is never second-guessed here.
+  const needsAcknowledgement = done && !wallet.setupStatus.acknowledged;
 
   const sourceCandidates = wallet.fundingMethods.filter((method) => method.status === "active" && isSourceRail(method.rail));
   const configuredSource = authorized ? sourceCandidates.find((method) => method.fundingMethodId === autoReload.fundingMethodId) ?? null : null;
@@ -1237,17 +1242,17 @@ export function acknowledgementForSave(input: {
       feeChangeNote: null,
     };
   }
-  if (recorded !== current) {
-    // A raise waits for the vendor's word; a cut applies to unattended charges
-    // at once (the server holds them to the lower of the two rates).
+  if (current > recorded) {
+    // A raise waits for the vendor's word; this save does not give it.
     return {
       acknowledgedCardFeeBps: recorded,
       saveLabel: "Save",
-      feeChangeNote: current > recorded
-        ? `Card charges now carry ${cardFeeNoun(current)} (you agreed to ${cardFeeNoun(recorded)}). Automatic top-ups and covers ${recorded > 0 ? `stay at ${formatFeeRate(recorded)}` : "stay free"} until you confirm the new terms above; this save does not change that.`
-        : `Card charges now carry ${cardFeeNoun(current)} (you agreed to ${cardFeeNoun(recorded)}); automatic top-ups and covers already use the lower rate. Confirm the new terms above when you like; this save keeps your record as it is.`,
+      feeChangeNote: `Card charges now carry ${cardFeeNoun(current)} (you agreed to ${cardFeeNoun(recorded)}). Automatic top-ups and covers ${recorded > 0 ? `stay at ${formatFeeRate(recorded)}` : "stay free"} until you confirm the new terms above; this save does not change that.`,
     };
   }
+  // Equal, or a cut: the server accepts a record at or above the live rate and
+  // charges the lower of the two, so the save carries the record unchanged and
+  // says nothing about it.
   return { acknowledgedCardFeeBps: recorded, saveLabel: "Save", feeChangeNote: null };
 }
 
@@ -1579,14 +1584,37 @@ export function describeRoleGap(gap: "backupCard" | "source", input: { holdTimeo
   return "Autopay source needed — your autopay source was removed at Stripe or can no longer be charged, so routine top-ups are not running. Held orders are still covered by your backup card. Choose another source.";
 }
 
-/** The acknowledgement banner's three faces (spec §2.8). */
+/**
+ * The acknowledgement banner's two faces (spec §2.8): the terms need
+ * confirming, or the card fee rose above the agreed rate. A cut is never a
+ * banner (see `deriveWalletFlow`), so anything but a raise reads as the first.
+ */
 export function describeAcknowledgementBanner(input: { feeChange: { recordedBps: number; currentBps: number } | null; onboarding: boolean }): string {
-  if (!input.feeChange) {
+  if (!input.feeChange || input.feeChange.currentBps <= input.feeChange.recordedBps) {
     return `Please review and confirm your autopay terms. Nothing changes until you confirm.${input.onboarding ? " You cannot activate until you do." : ""}`;
   }
   const { recordedBps, currentBps } = input.feeChange;
+  return `Card Shellz changed the card fee: card charges now carry ${cardFeeNoun(currentBps)} (you agreed to ${cardFeeNoun(recordedBps)}). Until you confirm, automatic top-ups and covers ${recordedBps > 0 ? `stay at ${formatFeeRate(recordedBps)}` : "stay free"}; money you add yourself shows the current fee on Stripe's page before you pay.`;
+}
+
+/**
+ * The plan's Authorization row. It states the recorded rate only where that
+ * is also the rate in force, or where a raise is waiting on the vendor; after
+ * a cut it names the current fee without restating the old one, because the
+ * old rate no longer affects anything the vendor pays.
+ */
+export function describeAuthorizationRecord(input: {
+  acknowledgedAtLabel: string | null;
+  recordedBps: number | null;
+  currentBps: number;
+}): string {
+  const { acknowledgedAtLabel, recordedBps, currentBps } = input;
+  if (acknowledgedAtLabel === null || recordedBps === null) return "Not on record — confirm your terms above.";
   if (currentBps > recordedBps) {
-    return `Card Shellz changed the card fee: card charges now carry ${cardFeeNoun(currentBps)} (you agreed to ${cardFeeNoun(recordedBps)}). Until you confirm, automatic top-ups and covers ${recordedBps > 0 ? `stay at ${formatFeeRate(recordedBps)}` : "stay free"}; money you add yourself shows the current fee on Stripe's page before you pay.`;
+    return `Recorded ${acknowledgedAtLabel} with ${describeCardFee(recordedBps)} on card charges; card charges now carry ${cardFeeNoun(currentBps)} — confirm the new terms above.`;
   }
-  return `Card Shellz ${currentBps === 0 ? "removed the card fee" : `lowered the card fee to ${formatFeeRate(currentBps)}`} (you agreed to ${cardFeeNoun(recordedBps)}). Automatic charges already use the lower rate; confirm to keep your record current.`;
+  if (currentBps < recordedBps) {
+    return `Recorded ${acknowledgedAtLabel}. Card charges carry ${cardFeeNoun(currentBps)}; the terms above are the current terms.`;
+  }
+  return `Recorded ${acknowledgedAtLabel} with ${describeCardFee(currentBps)} on card charges. The terms above are the current terms.`;
 }
