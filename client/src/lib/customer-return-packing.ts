@@ -1,4 +1,5 @@
 import {
+  MAX_RETURN_FLOW_LINES,
   MAX_RETURN_FLOW_PARCELS,
   type CustomerReturnFlowOrder,
 } from "@shared/returns/customer-return-flow.contract";
@@ -9,6 +10,8 @@ import {
 } from "./customer-return-parcels";
 
 type PackingSelections = readonly { lineId: string; quantity: number }[];
+// Match the purchased-line identity bound in customer-return-flow.contract.ts.
+const MAX_PACKING_LINE_ID_LENGTH = 255;
 
 function sumQuantities(values: readonly (number | null)[]): number | null {
   let total = 0;
@@ -102,6 +105,180 @@ export function summarizePreviewPacking(
 
 export type PreviewPackingSummary = ReturnType<typeof summarizePreviewPacking>;
 
+export interface PreviewPackingSource {
+  lineId: string;
+  fromParcelKey: number | null;
+  quantity: number;
+}
+
+type PackingSources =
+  | { ok: true; sources: PreviewPackingSource[] }
+  | { ok: false };
+
+/** Only proven, positive allocations can be offered as sources for another box. */
+export function previewPackingSources(
+  selections: PackingSelections,
+  parcels: readonly PreviewParcelDraft[],
+  targetParcelKey: number,
+): PackingSources {
+  if (
+    !Array.isArray(selections) ||
+    selections.length === 0 ||
+    selections.length > MAX_RETURN_FLOW_LINES ||
+    !Array.isArray(parcels) ||
+    parcels.length === 0 ||
+    parcels.length > MAX_RETURN_FLOW_PARCELS
+  )
+    return { ok: false };
+
+  const allocations = new Map<
+    string,
+    { selected: number; packed: number; boxes: Map<number, number> }
+  >();
+  for (const selection of selections) {
+    if (
+      !selection ||
+      typeof selection.lineId !== "string" ||
+      selection.lineId.length === 0 ||
+      selection.lineId.length > MAX_PACKING_LINE_ID_LENGTH ||
+      allocations.has(selection.lineId) ||
+      !Number.isSafeInteger(selection.quantity) ||
+      selection.quantity <= 0
+    )
+      return { ok: false };
+    allocations.set(selection.lineId, {
+      selected: selection.quantity,
+      packed: 0,
+      boxes: new Map(),
+    });
+  }
+  if (sumQuantities(selections.map((selection) => selection.quantity)) === null)
+    return { ok: false };
+
+  const parcelKeys = new Set<number>();
+  for (const parcel of parcels) {
+    if (
+      !parcel ||
+      !Number.isSafeInteger(parcel.key) ||
+      parcel.key < 0 ||
+      parcelKeys.has(parcel.key) ||
+      !Array.isArray(parcel.items) ||
+      parcel.items.length > MAX_RETURN_FLOW_LINES
+    )
+      return { ok: false };
+    parcelKeys.add(parcel.key);
+    const itemIds = new Set<string>();
+    for (const item of parcel.items) {
+      if (
+        !item ||
+        typeof item.quantity !== "string" ||
+        itemIds.has(item.lineId)
+      )
+        return { ok: false };
+      const allocation = allocations.get(item.lineId);
+      const quantity = readPreviewQuantity(item.quantity);
+      if (
+        !allocation ||
+        quantity === null ||
+        quantity > allocation.selected - allocation.packed
+      )
+        return { ok: false };
+      itemIds.add(item.lineId);
+      allocation.packed += quantity;
+      allocation.boxes.set(parcel.key, quantity);
+    }
+  }
+  if (!parcelKeys.has(targetParcelKey)) return { ok: false };
+
+  const sources: PreviewPackingSource[] = [];
+  for (const [lineId, allocation] of allocations) {
+    const unassigned = allocation.selected - allocation.packed;
+    if (unassigned > 0)
+      sources.push({ lineId, fromParcelKey: null, quantity: unassigned });
+    for (const [fromParcelKey, quantity] of allocation.boxes) {
+      if (fromParcelKey !== targetParcelKey && quantity > 0)
+        sources.push({ lineId, fromParcelKey, quantity });
+    }
+  }
+  return { ok: true, sources };
+}
+
+export interface PreviewPackingTransfer {
+  lineId: string;
+  fromParcelKey: number | null;
+  toParcelKey: number;
+  quantity: number;
+}
+
+type PackingTransferResult =
+  | { kind: "updated"; parcels: PreviewParcelDraft[] }
+  | { kind: "invalid_context" }
+  | { kind: "invalid_quantity" };
+
+/** Re-read current availability and update both allocations as one immutable edit. */
+export function transferPreviewPackingQuantity(
+  order: CustomerReturnFlowOrder,
+  selections: PackingSelections,
+  parcels: readonly PreviewParcelDraft[],
+  transfer: PreviewPackingTransfer,
+): PackingTransferResult {
+  if (!Number.isSafeInteger(transfer.quantity) || transfer.quantity <= 0)
+    return { kind: "invalid_quantity" };
+  const available = previewPackingSources(
+    selections,
+    parcels,
+    transfer.toParcelKey,
+  );
+  if (
+    !available.ok ||
+    transfer.fromParcelKey === transfer.toParcelKey ||
+    (transfer.fromParcelKey !== null &&
+      !parcels.some((parcel) => parcel.key === transfer.fromParcelKey)) ||
+    !selections.some((selection) => selection.lineId === transfer.lineId) ||
+    new Set(order.lines.map((line) => line.id)).size !== order.lines.length ||
+    selections.some(
+      (selection) => !order.lines.some((line) => line.id === selection.lineId),
+    )
+  )
+    return { kind: "invalid_context" };
+  const source = available.sources.find(
+    (candidate) =>
+      candidate.lineId === transfer.lineId &&
+      candidate.fromParcelKey === transfer.fromParcelKey,
+  );
+  if (!source || transfer.quantity > source.quantity)
+    return { kind: "invalid_quantity" };
+
+  return {
+    kind: "updated",
+    parcels: parcels.map((parcel) => {
+      if (
+        parcel.key !== transfer.toParcelKey &&
+        parcel.key !== transfer.fromParcelKey
+      )
+        return parcel;
+      // The complete plan was validated above, including missing entries as zero.
+      // Moving an existing allocation (or unassigned remainder) keeps the target
+      // at or below the validated safe selected quantity, so addition cannot overflow.
+      const current = quantityInBox(parcel, transfer.lineId)!;
+      const quantity = String(
+        parcel.key === transfer.toParcelKey
+          ? current + transfer.quantity
+          : current - transfer.quantity,
+      );
+      const hasItem = parcel.items.some(
+        (item) => item.lineId === transfer.lineId,
+      );
+      const items = hasItem
+        ? parcel.items.map((item) =>
+            item.lineId === transfer.lineId ? { ...item, quantity } : item,
+          )
+        : [...parcel.items, { lineId: transfer.lineId, quantity }];
+      return reconcilePreviewParcelSize(order, { ...parcel, items });
+    }),
+  };
+}
+
 /** A unit already assigned to another box cannot be assigned a second time. */
 export function previewParcelQuantityLimit(
   selections: PackingSelections,
@@ -192,7 +369,7 @@ export function previewPackingItemContext(
   );
   const parts = [
     sameDisplay.length > 1 ? `Order item ${index + 1}` : null,
-    variant ? `Option: ${variant}` : null,
+    variant,
   ];
   return parts.filter(Boolean).join(" · ") || null;
 }
