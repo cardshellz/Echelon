@@ -10,11 +10,13 @@ import {
 } from "../../customer-return-parcels";
 import {
   changePreviewPackingQuantity,
+  movePreviewPackingItems,
+  previewPackingAllocations,
   previewPackingItemContext,
-  previewPackingSources,
   previewParcelQuantityLimit,
   summarizePreviewPacking,
-  transferPreviewPackingQuantity,
+  type PreviewPackingMoveCommand,
+  type PreviewPackingMoveItem,
 } from "../../customer-return-packing";
 
 const order: CustomerReturnFlowOrder = {
@@ -290,36 +292,10 @@ describe("packing edits and item descriptions", () => {
   });
 });
 
-describe("positive packing sources", () => {
-  it("offers only unassigned units and positive quantities in other boxes, preserving purchased-line identities", () => {
-    const parcels = [
-      box(1, { a: "1", b: "0" }),
-      box(2, {}),
-      box(3, { a: "0", b: "1" }),
-    ];
-    expect(previewPackingSources(selected, parcels, 2)).toEqual({
-      ok: true,
-      sources: [
-        { lineId: "a", fromParcelKey: null, quantity: 1 },
-        { lineId: "a", fromParcelKey: 1, quantity: 1 },
-        { lineId: "b", fromParcelKey: 3, quantity: 1 },
-      ],
-    });
-    expect(previewPackingSources(selected, parcels, 1)).toEqual({
-      ok: true,
-      sources: [
-        { lineId: "a", fromParcelKey: null, quantity: 1 },
-        { lineId: "b", fromParcelKey: 3, quantity: 1 },
-      ],
-    });
-    expect(
-      previewPackingSources(selected, [box(1, { a: "2", b: "1" })], 1),
-    ).toEqual({ ok: true, sources: [] });
-  });
-
+describe("validated packing allocations", () => {
   it("accepts incomplete contents, blank zero drafts, empty boxes and nonsequential keys", () => {
     expect(
-      previewPackingSources(selected, [box(0, { a: "" }), box(90, {})], 90),
+      previewPackingAllocations(selected, [box(0, { a: "" }), box(90, {})]),
     ).toEqual({
       ok: true,
       sources: [
@@ -330,7 +306,6 @@ describe("positive packing sources", () => {
   });
 
   it.each([
-    ["missing target", [box(2, {})]],
     ["duplicate keys", [box(1, {}), box(1, {})]],
     [
       "duplicate items",
@@ -374,16 +349,14 @@ describe("positive packing sources", () => {
   ] satisfies [string, PreviewParcelDraft[]][])(
     "rejects %s",
     (_label, parcels) => {
-      expect(previewPackingSources(selected, parcels, 1)).toEqual({
+      expect(previewPackingAllocations(selected, parcels)).toEqual({
         ok: false,
       });
       const before = structuredClone(parcels);
       expect(
-        transferPreviewPackingQuantity(order, selected, parcels, {
-          lineId: "a",
-          fromParcelKey: null,
-          toParcelKey: 1,
-          quantity: 1,
+        movePreviewPackingItems(order, selected, parcels, {
+          items: [{ lineId: "a", fromParcelKey: null, quantity: 1 }],
+          destination: { kind: "new" },
         }),
       ).toEqual({ kind: "invalid_context" });
       expect(parcels).toEqual(before);
@@ -394,11 +367,10 @@ describe("positive packing sources", () => {
     "rejects invalid draft %s anywhere, including an unrelated line",
     (raw) => {
       expect(
-        previewPackingSources(
-          selected,
-          [box(1, { a: "1" }), box(2, { b: raw })],
-          1,
-        ),
+        previewPackingAllocations(selected, [
+          box(1, { a: "1" }),
+          box(2, { b: raw }),
+        ]),
       ).toEqual({ ok: false });
     },
   );
@@ -421,105 +393,279 @@ describe("positive packing sources", () => {
       quantity: 1,
     })),
   ])("rejects malformed or unsafe selections %#", (...entries) => {
-    expect(previewPackingSources(entries, [box(1, {})], 1)).toEqual({
+    expect(previewPackingAllocations(entries, [box(1, {})])).toEqual({
       ok: false,
     });
   });
 });
 
-describe("atomic packing transfers", () => {
-  it("partially moves then fully moves a source, preserving every line's packed total and original state", () => {
+describe("atomic move and split commands", () => {
+  const existing = { kind: "existing", parcelKey: 2 } as const;
+  const newBox = { kind: "new" } as const;
+
+  it("projects all positive source pools without excluding any target", () => {
     const parcels = [
-      box(1, { a: "2", b: "1" }),
-      box(2, { a: "0" }),
+      box(1, { a: "1", b: "0" }),
+      box(2, { b: "1" }),
       box(3, {}),
     ];
-    const before = structuredClone(parcels);
-    const partial = transferPreviewPackingQuantity(order, selected, parcels, {
-      lineId: "a",
-      fromParcelKey: 1,
-      toParcelKey: 2,
-      quantity: 1,
+    expect(previewPackingAllocations(selected, parcels)).toEqual({
+      ok: true,
+      sources: [
+        { lineId: "a", fromParcelKey: null, quantity: 1 },
+        { lineId: "a", fromParcelKey: 1, quantity: 1 },
+        { lineId: "b", fromParcelKey: 2, quantity: 1 },
+      ],
     });
-    if (partial.kind !== "updated") throw new Error("Expected partial move");
-    expect(partial.parcels[0].items).toEqual([
+    expect(previewPackingAllocations(selected, [box(1, { a: "3" })])).toEqual({
+      ok: false,
+    });
+  });
+
+  it("partially moves to an existing box while preserving all per-line totals and explicit sizes", () => {
+    const parcels = [box(1, { a: "2", b: "1" }), box(2, {}), box(3, {})];
+    const before = structuredClone(parcels);
+    const result = movePreviewPackingItems(order, selected, parcels, {
+      items: [{ lineId: "a", fromParcelKey: 1, quantity: 1 }],
+      destination: existing,
+    });
+    if (result.kind !== "updated") throw new Error("Expected partial move");
+    expect(result.removedParcelKeys).toEqual([]);
+    expect(result.destinationParcelKey).toBe(2);
+    expect(result.parcels[0].items).toEqual([
       { lineId: "a", quantity: "1" },
       { lineId: "b", quantity: "1" },
     ]);
-    expect(partial.parcels[1].items).toEqual([{ lineId: "a", quantity: "1" }]);
-    expect(partial.parcels[2]).toBe(parcels[2]);
-    expect(summarizePreviewPacking(selected, partial.parcels).lines).toEqual(
-      summarizePreviewPacking(selected, parcels).lines,
+    expect(result.parcels[1].items).toEqual([{ lineId: "a", quantity: "1" }]);
+    expect(result.parcels.map((parcel) => parcel.size)).toEqual(
+      parcels.map((parcel) => parcel.size),
     );
-    const full = transferPreviewPackingQuantity(
-      order,
-      selected,
-      partial.parcels,
-      {
-        lineId: "a",
-        fromParcelKey: 1,
-        toParcelKey: 2,
-        quantity: 1,
-      },
-    );
-    if (full.kind !== "updated") throw new Error("Expected remaining move");
-    expect(full.parcels[0].items[0].quantity).toBe("0");
-    expect(full.parcels[1].items[0].quantity).toBe("2");
-    expect(summarizePreviewPacking(selected, full.parcels).lines).toEqual(
+    expect(result.parcels[2]).toBe(parcels[2]);
+    expect(summarizePreviewPacking(selected, result.parcels).lines).toEqual(
       summarizePreviewPacking(selected, parcels).lines,
     );
     expect(parcels).toEqual(before);
-    expect(partial.parcels[0].items[0].quantity).toBe("1");
   });
 
-  it("adds only truly unassigned units to an absent target entry", () => {
-    const parcels = [box(1, { a: "1", b: "1" }), box(2, {})];
-    const result = transferPreviewPackingQuantity(order, selected, parcels, {
-      lineId: "a",
-      fromParcelKey: null,
-      toParcelKey: 2,
-      quantity: 1,
-    });
-    if (result.kind !== "updated") throw new Error("Expected addition");
-    expect(result.parcels[1].items).toEqual([{ lineId: "a", quantity: "1" }]);
-    expect(result.parcels[0]).toBe(parcels[0]);
-    expect(summarizePreviewPacking(selected, result.parcels).ready).toBe(true);
-    expect(previewPackingSources(selected, result.parcels, 2)).toEqual({
-      ok: true,
-      sources: [
-        { lineId: "a", fromParcelKey: 1, quantity: 1 },
+  it("moves a full multi-line source into an existing box and removes only that emptied donor", () => {
+    const parcels = [box(1, { a: "2", b: "1" }), box(2, {}), box(99, {})];
+    const result = movePreviewPackingItems(order, selected, parcels, {
+      items: [
         { lineId: "b", fromParcelKey: 1, quantity: 1 },
+        { lineId: "a", fromParcelKey: 1, quantity: 2 },
       ],
+      destination: existing,
     });
+    if (result.kind !== "updated") throw new Error("Expected full move");
+    expect(result.removedParcelKeys).toEqual([1]);
+    expect(result.parcels.map((parcel) => parcel.key)).toEqual([2, 99]);
+    expect(result.parcels[0].items).toEqual([
+      { lineId: "a", quantity: "2" },
+      { lineId: "b", quantity: "1" },
+    ]);
+    expect(result.parcels[1]).toBe(parcels[2]);
+    expect(result.parcels[0].size).toBe(parcels[1].size);
   });
 
-  it.each([null, 1])(
-    "rejects stale source availability for source %s",
-    (fromParcelKey) => {
-      const parcels =
-        fromParcelKey === null
-          ? [box(1, { b: "1" }), box(2, {}), box(3, {})]
-          : [box(1, { a: "2", b: "1" }), box(2, {}), box(3, {})];
-      const first = transferPreviewPackingQuantity(order, selected, parcels, {
-        lineId: "a",
-        fromParcelKey,
-        toParcelKey: 2,
-        quantity: 2,
+  it("previews a partial split into a new box without changing input or inheriting donor dimensions", () => {
+    const parcels = [box(1, { a: "2", b: "1" })];
+    const command: PreviewPackingMoveCommand = {
+      items: [{ lineId: "a", fromParcelKey: 1, quantity: 1 }],
+      destination: newBox,
+    };
+    const before = structuredClone({ order, selected, parcels, command });
+    const preview = movePreviewPackingItems(order, selected, parcels, command);
+    const again = movePreviewPackingItems(order, selected, parcels, command);
+    expect(again).toEqual(preview);
+    expect({ order, selected, parcels, command }).toEqual(before);
+    if (preview.kind !== "updated") throw new Error("Expected split preview");
+    expect(preview.destinationParcelKey).toBe(2);
+    expect(preview.removedParcelKeys).toEqual([]);
+    expect(preview.parcels[0].size).toBe(parcels[0].size);
+    expect(preview.parcels[1]).toEqual({
+      key: 2,
+      items: [{ lineId: "a", quantity: "1" }],
+      size: customPreviewParcelSize(),
+    });
+    // Discarding a preview (canceling) leaves the original single box intact.
+    expect(parcels.length).toBe(1);
+  });
+
+  it.each([existing, newBox])(
+    "combines one purchased line from multiple donors and unassigned units into $kind destination",
+    (destination) => {
+      const selections = [
+        { lineId: "a", quantity: 5 },
+        { lineId: "b", quantity: 1 },
+      ];
+      const parcels = [
+        box(1, { a: "1", b: "1" }),
+        box(2, { a: "2" }),
+        box(3, { a: "1" }),
+      ];
+      const target =
+        destination.kind === "existing"
+          ? ({ kind: "existing", parcelKey: 3 } as const)
+          : destination;
+      const result = movePreviewPackingItems(order, selections, parcels, {
+        items: [
+          { lineId: "a", fromParcelKey: 1, quantity: 1 },
+          { lineId: "a", fromParcelKey: 2, quantity: 2 },
+          { lineId: "a", fromParcelKey: null, quantity: 1 },
+        ],
+        destination: target,
       });
-      if (first.kind !== "updated")
-        throw new Error("Expected initial allocation");
-      const before = structuredClone(first.parcels);
-      expect(
-        transferPreviewPackingQuantity(order, selected, first.parcels, {
-          lineId: "a",
-          fromParcelKey,
-          toParcelKey: 3,
-          quantity: 1,
-        }),
-      ).toEqual({ kind: "invalid_quantity" });
-      expect(first.parcels).toEqual(before);
+      if (result.kind !== "updated") throw new Error("Expected combined move");
+      expect(result.removedParcelKeys).toEqual([2]);
+      const destinationBox = result.parcels.find(
+        (parcel) => parcel.key === result.destinationParcelKey,
+      )!;
+      expect(destinationBox.items).toEqual([
+        { lineId: "a", quantity: destination.kind === "existing" ? "5" : "4" },
+      ]);
+      expect(summarizePreviewPacking(selections, result.parcels).lines).toEqual(
+        [
+          { lineId: "a", selectedQuantity: 5, packedQuantity: 5 },
+          { lineId: "b", selectedQuantity: 1, packedQuantity: 1 },
+        ],
+      );
     },
   );
+
+  it("merges multiple fully emptied donors into a genuinely new box", () => {
+    const result = movePreviewPackingItems(
+      order,
+      selected,
+      [box(1, { a: "2" }), box(2, { b: "1" })],
+      {
+        items: [
+          { lineId: "a", fromParcelKey: 1, quantity: 2 },
+          { lineId: "b", fromParcelKey: 2, quantity: 1 },
+        ],
+        destination: newBox,
+      },
+    );
+    if (result.kind !== "updated") throw new Error("Expected consolidation");
+    expect(result.removedParcelKeys).toEqual([1, 2]);
+    expect(result.destinationParcelKey).toBe(3);
+    expect(result.parcels).toEqual([
+      {
+        key: 3,
+        items: [
+          { lineId: "a", quantity: "2" },
+          { lineId: "b", quantity: "1" },
+        ],
+        size: customPreviewParcelSize(),
+      },
+    ]);
+  });
+
+  it.each([
+    {
+      selections: [{ lineId: "a", quantity: 1 }],
+      parcels: [box(1, { a: "1" })],
+      items: [{ lineId: "a", fromParcelKey: 1, quantity: 1 }],
+    },
+    {
+      selections: selected,
+      parcels: [box(1, { a: "2", b: "1" })],
+      items: [
+        { lineId: "a", fromParcelKey: 1, quantity: 2 },
+        { lineId: "b", fromParcelKey: 1, quantity: 1 },
+      ],
+    },
+  ])(
+    "rejects pure reboxing without creating a box %#",
+    ({ selections, parcels, items }) => {
+      const before = structuredClone(parcels);
+      expect(
+        movePreviewPackingItems(order, selections, parcels, {
+          items,
+          destination: newBox,
+        }),
+      ).toEqual({ kind: "unchanged" });
+      expect(parcels).toEqual(before);
+    },
+  );
+
+  it("enforces selected-unit count on the final plan without deleting unrelated empty boxes", () => {
+    const parcels = [box(1, {})];
+    expect(
+      movePreviewPackingItems(order, [{ lineId: "a", quantity: 1 }], parcels, {
+        items: [{ lineId: "a", fromParcelKey: null, quantity: 1 }],
+        destination: newBox,
+      }),
+    ).toEqual({ kind: "box_limit" });
+    expect(parcels).toEqual([box(1, {})]);
+  });
+
+  it("allows a twentieth box but prevents a twenty-first box", () => {
+    for (const count of [19, 20]) {
+      const parcels = Array.from({ length: count }, (_, i) =>
+        box(i + 1, { a: i === 0 ? "2" : "1" }),
+      );
+      const result = movePreviewPackingItems(
+        order,
+        [{ lineId: "a", quantity: count + 1 }],
+        parcels,
+        {
+          items: [{ lineId: "a", fromParcelKey: 1, quantity: 1 }],
+          destination: newBox,
+        },
+      );
+      if (count === 20) expect(result).toEqual({ kind: "box_limit" });
+      else {
+        if (result.kind !== "updated")
+          throw new Error("Expected twentieth box");
+        expect(result.parcels.length).toBe(20);
+      }
+    }
+  });
+
+  it("evaluates the cap after donor removal without reusing a removed key", () => {
+    const parcels = Array.from({ length: 20 }, (_, i) =>
+      box(i + 1, { a: i < 2 ? "2" : "1" }),
+    );
+    const result = movePreviewPackingItems(
+      order,
+      [{ lineId: "a", quantity: 22 }],
+      parcels,
+      {
+        items: [
+          { lineId: "a", fromParcelKey: 1, quantity: 2 },
+          { lineId: "a", fromParcelKey: 2, quantity: 1 },
+        ],
+        destination: newBox,
+      },
+    );
+    if (result.kind !== "updated")
+      throw new Error("Expected net-zero box growth");
+    expect(result.removedParcelKeys).toEqual([1]);
+    expect(result.destinationParcelKey).toBe(21);
+    expect(result.parcels.length).toBe(20);
+    expect(
+      movePreviewPackingItems(order, [{ lineId: "a", quantity: 22 }], parcels, {
+        items: [{ lineId: "a", fromParcelKey: 1, quantity: 2 }],
+        destination: newBox,
+      }),
+    ).toEqual({ kind: "unchanged" });
+  });
+
+  it("allocates safe deterministic keys even when an existing key is at MAX_SAFE_INTEGER", () => {
+    const parcels = [
+      box(Number.MAX_SAFE_INTEGER, { a: "2" }),
+      box(1, { b: "1" }),
+    ];
+    const result = movePreviewPackingItems(order, selected, parcels, {
+      items: [
+        { lineId: "a", fromParcelKey: Number.MAX_SAFE_INTEGER, quantity: 1 },
+      ],
+      destination: newBox,
+    });
+    if (result.kind !== "updated")
+      throw new Error("Expected bounded unused key");
+    expect(result.destinationParcelKey).toBe(2);
+  });
 
   it.each([
     0,
@@ -529,106 +675,183 @@ describe("atomic packing transfers", () => {
     Number.POSITIVE_INFINITY,
     Number.MAX_SAFE_INTEGER + 1,
     3,
-  ])(
-    "rejects invalid or unavailable amount %s without mutation",
-    (quantity) => {
+  ])("rejects invalid or unavailable quantity %s atomically", (quantity) => {
+    const parcels = [box(1, { a: "2", b: "1" }), box(2, {})];
+    const before = structuredClone(parcels);
+    expect(
+      movePreviewPackingItems(order, selected, parcels, {
+        items: [
+          { lineId: "b", fromParcelKey: 1, quantity: 1 },
+          { lineId: "a", fromParcelKey: 1, quantity },
+        ],
+        destination: existing,
+      }),
+    ).toEqual({ kind: "invalid_quantity" });
+    expect(parcels).toEqual(before);
+  });
+
+  it.each([
+    { items: [], expected: "invalid_quantity" },
+    {
+      items: [
+        { lineId: "a", fromParcelKey: 1, quantity: 1 },
+        { lineId: "a", fromParcelKey: 1, quantity: 1 },
+      ],
+      expected: "invalid_context",
+    },
+    {
+      items: [{ lineId: "unknown", fromParcelKey: 1, quantity: 1 }],
+      expected: "invalid_context",
+    },
+    {
+      items: [{ lineId: "a", fromParcelKey: 999, quantity: 1 }],
+      expected: "invalid_context",
+    },
+    {
+      items: [{ lineId: "a", fromParcelKey: 2, quantity: 1 }],
+      expected: "invalid_context",
+    },
+    {
+      items: [{ lineId: "a", fromParcelKey: null, quantity: 1 }],
+      expected: "invalid_quantity",
+    },
+  ] satisfies { items: PreviewPackingMoveItem[]; expected: string }[])(
+    "rejects invalid batch context %#",
+    ({ items, expected }) => {
       const parcels = [box(1, { a: "2", b: "1" }), box(2, {})];
       const before = structuredClone(parcels);
       expect(
-        transferPreviewPackingQuantity(order, selected, parcels, {
-          lineId: "a",
-          fromParcelKey: 1,
-          toParcelKey: 2,
-          quantity,
+        movePreviewPackingItems(order, selected, parcels, {
+          items,
+          destination: existing,
         }),
-      ).toEqual({ kind: "invalid_quantity" });
+      ).toEqual({ kind: expected });
       expect(parcels).toEqual(before);
     },
   );
 
-  it.each([
-    { lineId: "a", fromParcelKey: 1, toParcelKey: 1 },
-    { lineId: "a", fromParcelKey: 999, toParcelKey: 2 },
-    { lineId: "a", fromParcelKey: 1, toParcelKey: 999 },
-    { lineId: "unknown", fromParcelKey: 1, toParcelKey: 2 },
-  ])("rejects missing or identical transfer context %#", (transfer) => {
-    const parcels = [box(1, { a: "2", b: "1" }), box(2, {})];
+  it("rejects stale quantities or missing destinations without applying valid earlier entries", () => {
+    const parcels = [box(1, { a: "1", b: "1" }), box(2, { a: "1" })];
     const before = structuredClone(parcels);
     expect(
-      transferPreviewPackingQuantity(order, selected, parcels, {
-        ...transfer,
-        quantity: 1,
+      movePreviewPackingItems(order, selected, parcels, {
+        items: [
+          { lineId: "b", fromParcelKey: 1, quantity: 1 },
+          { lineId: "a", fromParcelKey: 1, quantity: 2 },
+        ],
+        destination: existing,
+      }),
+    ).toEqual({ kind: "invalid_quantity" });
+    expect(
+      movePreviewPackingItems(order, selected, parcels, {
+        items: [{ lineId: "a", fromParcelKey: 1, quantity: 1 }],
+        destination: { kind: "existing", parcelKey: 999 },
       }),
     ).toEqual({ kind: "invalid_context" });
     expect(parcels).toEqual(before);
   });
 
-  it("rejects missing or ambiguous purchased order-line identities even with valid allocations", () => {
-    const parcels = [box(1, { a: "2", b: "1" }), box(2, {})];
-    for (const lines of [
-      [order.lines[0]],
-      [order.lines[0], order.lines[0], order.lines[1]],
-    ]) {
+  it("rejects missing or ambiguous purchased identities", () => {
+    const command: PreviewPackingMoveCommand = {
+      items: [{ lineId: "a", fromParcelKey: 1, quantity: 1 }],
+      destination: newBox,
+    };
+    for (const lines of [[order.lines[0]], [...order.lines, order.lines[0]]]) {
       expect(
-        transferPreviewPackingQuantity({ ...order, lines }, selected, parcels, {
-          lineId: "a",
-          fromParcelKey: 1,
-          toParcelKey: 2,
-          quantity: 1,
-        }),
+        movePreviewPackingItems(
+          { ...order, lines },
+          selected,
+          [box(1, { a: "2", b: "1" })],
+          command,
+        ),
       ).toEqual({ kind: "invalid_context" });
     }
   });
 
-  it("rejects missing or zero source allocations without taking units from another purchased line", () => {
-    for (const source of [box(1, { b: "1" }), box(1, { a: "0", b: "1" })]) {
-      expect(
-        transferPreviewPackingQuantity(
-          order,
-          selected,
-          [source, box(2, { a: "2" })],
+  it("conserves MAX_SAFE_INTEGER exactly when combining multiple pools", () => {
+    const selections = [{ lineId: "a", quantity: Number.MAX_SAFE_INTEGER }];
+    const result = movePreviewPackingItems(
+      order,
+      selections,
+      [box(1, { a: String(Number.MAX_SAFE_INTEGER - 2) }), box(2, { a: "1" })],
+      {
+        items: [
           {
             lineId: "a",
             fromParcelKey: 1,
-            toParcelKey: 2,
-            quantity: 1,
+            quantity: Number.MAX_SAFE_INTEGER - 2,
           },
-        ),
-      ).toEqual({ kind: "invalid_quantity" });
-    }
-  });
-
-  it("conserves exact safe-integer boundaries and rejects overflow instead of rounding", () => {
-    const selections = [{ lineId: "a", quantity: Number.MAX_SAFE_INTEGER }];
-    const parcels = [
-      box(1, { a: String(Number.MAX_SAFE_INTEGER - 1) }),
-      box(2, { a: "1" }),
-    ];
-    const result = transferPreviewPackingQuantity(order, selections, parcels, {
-      lineId: "a",
-      fromParcelKey: 1,
-      toParcelKey: 2,
-      quantity: Number.MAX_SAFE_INTEGER - 1,
-    });
-    if (result.kind !== "updated")
-      throw new Error("Expected exact boundary move");
-    expect(result.parcels[0].items[0].quantity).toBe("0");
-    expect(result.parcels[1].items[0].quantity).toBe(
-      String(Number.MAX_SAFE_INTEGER),
+          { lineId: "a", fromParcelKey: null, quantity: 1 },
+        ],
+        destination: existing,
+      },
     );
+    if (result.kind !== "updated") throw new Error("Expected exact large move");
+    expect(result.parcels).toHaveLength(1);
+    expect(result.parcels[0].items).toEqual([
+      { lineId: "a", quantity: String(Number.MAX_SAFE_INTEGER) },
+    ]);
     expect(
-      summarizePreviewPacking(selections, result.parcels).packedQuantity,
-    ).toBe(Number.MAX_SAFE_INTEGER);
-    expect(
-      previewPackingSources(
-        selections,
-        [box(1, { a: String(Number.MAX_SAFE_INTEGER) }), box(2, { a: "1" })],
-        2,
-      ),
+      previewPackingAllocations(selections, [
+        box(1, { a: String(Number.MAX_SAFE_INTEGER) }),
+        box(2, { a: "1" }),
+      ]),
     ).toEqual({ ok: false });
   });
 
-  it("reconciles automatic dimensions for both the emptied source and newly populated target", () => {
+  it("adds unassigned units to a missing target row without changing other boxes", () => {
+    const parcels = [box(1, { a: "1", b: "1" }), box(2, {})];
+    const result = movePreviewPackingItems(order, selected, parcels, {
+      items: [{ lineId: "a", fromParcelKey: null, quantity: 1 }],
+      destination: existing,
+    });
+    if (result.kind !== "updated")
+      throw new Error("Expected unassigned addition");
+    expect(result.parcels[0]).toBe(parcels[0]);
+    expect(result.parcels[1].items).toEqual([{ lineId: "a", quantity: "1" }]);
+    expect(summarizePreviewPacking(selected, result.parcels).ready).toBe(true);
+  });
+
+  it.each([null, 1])(
+    "re-reads depleted source %s after a successful move",
+    (fromParcelKey) => {
+      const parcels =
+        fromParcelKey === null
+          ? [box(1, { b: "1" }), box(2, {}), box(3, {})]
+          : [box(1, { a: "2", b: "1" }), box(2, {}), box(3, {})];
+      const first = movePreviewPackingItems(order, selected, parcels, {
+        items: [{ lineId: "a", fromParcelKey, quantity: 2 }],
+        destination: existing,
+      });
+      if (first.kind !== "updated") throw new Error("Expected initial move");
+      const before = structuredClone(first.parcels);
+      expect(
+        movePreviewPackingItems(order, selected, first.parcels, {
+          items: [{ lineId: "a", fromParcelKey, quantity: 1 }],
+          destination: { kind: "existing", parcelKey: 3 },
+        }),
+      ).toEqual({ kind: "invalid_quantity" });
+      expect(first.parcels).toEqual(before);
+    },
+  );
+
+  it.each([null, "0"])(
+    "cannot move a missing or zero source allocation %#",
+    (quantity) => {
+      const parcels = [
+        box(1, quantity === null ? { b: "1" } : { a: quantity, b: "1" }),
+        box(2, { a: "2" }),
+      ];
+      expect(
+        movePreviewPackingItems(order, selected, parcels, {
+          items: [{ lineId: "a", fromParcelKey: 1, quantity: 1 }],
+          destination: existing,
+        }),
+      ).toEqual({ kind: "invalid_quantity" });
+    },
+  );
+
+  it("removes an emptied automatic donor and suggests the destination's final matching size", () => {
     const sizedOrder = {
       ...order,
       boxOptions: [
@@ -646,47 +869,105 @@ describe("atomic packing transfers", () => {
       },
       { ...box(2, {}), size: { kind: "unselected" } },
     ];
-    const before = structuredClone(parcels);
-    const result = transferPreviewPackingQuantity(
+    const result = movePreviewPackingItems(
       sizedOrder,
       [{ lineId: "a", quantity: 2 }],
       parcels,
       {
-        lineId: "a",
-        fromParcelKey: 1,
-        toParcelKey: 2,
-        quantity: 2,
+        items: [{ lineId: "a", fromParcelKey: 1, quantity: 2 }],
+        destination: existing,
       },
     );
     if (result.kind !== "updated")
-      throw new Error("Expected dimension reconciliation");
-    expect(result.parcels[0].size).toEqual({ kind: "unselected" });
-    expect(result.parcels[1].size).toEqual({
+      throw new Error("Expected reconciled destination");
+    expect(result.removedParcelKeys).toEqual([1]);
+    expect(result.parcels[0].size).toEqual({
       kind: "original",
       originalBoxId: "original-a",
       automatic: true,
     });
-    expect(parcels).toEqual(before);
   });
 
-  it("preserves explicit original and custom dimensions, even after emptying or adding contents", () => {
+  it("reconciles automatic dimensions once from final contents regardless of move-item order", () => {
+    const sizedOrder = {
+      ...order,
+      lines: [...order.lines, { ...order.lines[0], id: "c" }],
+      boxOptions: [
+        {
+          id: "first",
+          dimensions,
+          items: [
+            { lineId: "a", quantity: 1 },
+            { lineId: "c", quantity: 1 },
+          ],
+        },
+        {
+          id: "all",
+          dimensions,
+          items: [
+            { lineId: "a", quantity: 1 },
+            { lineId: "b", quantity: 1 },
+            { lineId: "c", quantity: 1 },
+          ],
+        },
+      ],
+    };
+    const selections = ["a", "b", "c"].map((lineId) => ({
+      lineId,
+      quantity: 1,
+    }));
+    const parcels: PreviewParcelDraft[] = [
+      box(1, { b: "1", c: "1" }),
+      {
+        ...box(2, { a: "1" }),
+        size: { kind: "original", originalBoxId: "first", automatic: true },
+      },
+    ];
+    const items = [
+      { lineId: "b", fromParcelKey: 1, quantity: 1 },
+      { lineId: "c", fromParcelKey: 1, quantity: 1 },
+    ];
+    const forward = movePreviewPackingItems(sizedOrder, selections, parcels, {
+      items,
+      destination: existing,
+    });
+    const backward = movePreviewPackingItems(sizedOrder, selections, parcels, {
+      items: [...items].reverse(),
+      destination: existing,
+    });
+    expect(forward).toEqual(backward);
+    if (forward.kind !== "updated")
+      throw new Error("Expected final-content reconciliation");
+    expect(forward.parcels[0].size).toEqual({ kind: "unselected" });
+    expect(forward.parcels[0].items).toEqual(
+      ["a", "b", "c"].map((lineId) => ({ lineId, quantity: "1" })),
+    );
+  });
+
+  it("initializes a new box from final contents while retaining a surviving customer's explicit choice", () => {
+    const sizedOrder = {
+      ...order,
+      boxOptions: [
+        { id: "a", dimensions, items: [{ lineId: "a", quantity: 1 }] },
+      ],
+    };
     const parcels: PreviewParcelDraft[] = [
       {
         ...box(1, { a: "2", b: "1" }),
         size: { kind: "original", originalBoxId: "chosen", automatic: false },
       },
-      box(2, {}),
     ];
-    const result = transferPreviewPackingQuantity(order, selected, parcels, {
-      lineId: "a",
-      fromParcelKey: 1,
-      toParcelKey: 2,
-      quantity: 2,
+    const result = movePreviewPackingItems(sizedOrder, selected, parcels, {
+      items: [{ lineId: "a", fromParcelKey: 1, quantity: 1 }],
+      destination: newBox,
     });
     if (result.kind !== "updated")
-      throw new Error("Expected explicit-size move");
-    expect(result.parcels.map((parcel) => parcel.size)).toEqual(
-      parcels.map((parcel) => parcel.size),
-    );
+      throw new Error("Expected suggested new size");
+    expect(result.parcels[0].size).toBe(parcels[0].size);
+    expect(result.parcels[1].size).toEqual({
+      kind: "original",
+      originalBoxId: "a",
+      automatic: true,
+    });
   });
 });

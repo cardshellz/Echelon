@@ -60,7 +60,7 @@ export function CustomerReturnPackingSummary({
           Change return items
         </Button>
       </div>
-      <div aria-live="polite" aria-atomic="true" className="min-w-0 space-y-2">
+      <div className="min-w-0 space-y-2">
         <div
           data-testid="packing-summary-total"
           className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs tabular-nums"
