@@ -8,7 +8,6 @@ import {
   dimensionInputToMm,
   formatDimensionInches,
 } from "@shared/shipping/dimensions";
-import { formatMeasurementInput, GRAMS_PER_POUND } from "./variant-package";
 
 export type PreviewParcelSize =
   | { kind: "unselected" }
@@ -188,8 +187,4 @@ export function formatPreviewDimensions(
   dimensions: CustomerReturnDimensions,
 ): string {
   return `${formatDimensionInches(dimensions.lengthMm)} × ${formatDimensionInches(dimensions.widthMm)} × ${formatDimensionInches(dimensions.heightMm)} in`;
-}
-
-export function formatPreviewProductWeight(weightGrams: number): string {
-  return `${formatMeasurementInput(weightGrams, GRAMS_PER_POUND)} lb`;
 }

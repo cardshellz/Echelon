@@ -5,7 +5,6 @@ import type { CustomerReturnFlowOrder } from "@shared/returns/customer-return-fl
 import {
   customPreviewParcelSize,
   formatPreviewDimensions,
-  formatPreviewProductWeight,
   previewParcelProductWeight,
   type PreviewParcelDraft,
 } from "@/lib/customer-return-parcels";
@@ -35,30 +34,13 @@ export function CustomerReturnParcelDetails({
   const original = order.boxOptions.find(
     (option) => option.id === originalBoxId,
   );
-  const weightText =
-    weight.status === "ready"
-      ? formatPreviewProductWeight(weight.weightGrams)
-      : weight.status === "empty"
-        ? "Add items to calculate"
-        : weight.status === "invalid"
-          ? "Check item quantities"
-          : "Weight needs verification";
   const sizeId = `return-box-${parcel.key}-size`;
   return (
     <div className="mb-4 space-y-3 border-b pb-4">
-      <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
-        <span className="text-muted-foreground">Product weight</span>
-        <output
-          aria-label={`Product weight for box ${boxNumber}`}
-          aria-live="polite"
-          className="font-medium tabular-nums"
-        >
-          {weightText}
-        </output>
-      </div>
       {weight.status === "unverified" && (
         <p className="text-sm text-muted-foreground">
-          We need to verify an item's weight before this box can be reviewed.
+          We cannot prepare this box for return yet. Please contact support for
+          help.
         </p>
       )}
       {original && parcel.size.kind === "original" ? (
