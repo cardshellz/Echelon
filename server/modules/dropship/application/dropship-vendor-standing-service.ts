@@ -280,7 +280,7 @@ export class DropshipVendorStandingService {
       critical: false,
       channels: ["email", "in_app"],
       title: "Selling has resumed",
-      message: `Your wallet is funded again (${formatNotificationCurrency(funding.availableBalanceCents, funding.currency)} available). Orders are being accepted and your listings are back on sale.`,
+      message: `Your wallet is funded again (${formatNotificationCurrency(funding.availableBalanceCents, funding.currency)} available). Orders are being accepted and your listings are live again.`,
       payload: {
         vendorId: standing.vendorId,
         standingRevision: standing.standingRevision,
@@ -507,7 +507,7 @@ function pauseMessageFor(reason: DropshipVendorStandingReason, evidence: Record<
       ? `A payment${amount ? ` of ${amount}` : ""} you added to your wallet was disputed and taken back by your bank.`
       : `A bank transfer${amount ? ` of ${amount}` : ""} to your wallet was returned by your bank.`
     : `Your saved card was declined${declineDetail} when we tried to top up your wallet${amount ? ` by ${amount}` : ""}.`;
-  return `${how} Orders are not being accepted and your listings show nothing for sale until your wallet is funded again. Add funds by ACH or update your card in Wallet; selling resumes on its own once your balance is back to the minimum.`;
+  return `${how} Orders are not being accepted and your listings show no stock until your wallet is funded again. Add funds by ACH or update your card in Wallet; selling resumes on its own once your balance is back to your reserve.`;
 }
 
 function requireStanding(standing: DropshipVendorStandingRecord | null, vendorId: number): DropshipVendorStandingRecord {

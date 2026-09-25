@@ -455,7 +455,7 @@ export class DropshipListingTierService {
         eventType: DROPSHIP_NOTIFICATION_EVENTS.LISTING_TIER_GRACE_NOTICE,
         critical: true,
         channels: ["email", "in_app"],
-        title: `The ${tierLabel(tier)} minimum rises to ${formatNotificationCurrency(upcoming.minimumCents, funding.currency)} on ${formatNotificationDate(upcoming.enforcesAt)}`,
+        title: `The ${tierLabel(tier)} reserve rises to ${formatNotificationCurrency(upcoming.minimumCents, funding.currency)} on ${formatNotificationDate(upcoming.enforcesAt)}`,
         message: graceMessage(tier, status, funding, upcoming.minimumCents, upcoming.enforcesAt),
         payload: {
           vendorId,
@@ -481,15 +481,16 @@ export class DropshipListingTierService {
   }
 }
 
+/** The tier as vendors see it named: the Pack tier (singles, packs, inner packs) and the Case tier. */
 function tierLabel(tier: DropshipListingTier): string {
-  return tier === "case" ? "case listing" : "pack and inner pack listing";
+  return tier === "case" ? "Case tier" : "Pack tier";
 }
 
 function heldTitle(status: DropshipListingTierStatus, currency: string): string {
   const minimum = formatNotificationCurrency(status.minimumCents, currency);
   return status.tier === "case"
-    ? `Case listings are off sale until your balance reaches ${minimum}`
-    : `Your listings are off sale until your wallet keeps the ${minimum} minimum`;
+    ? `Your Case tier is not active: your balance is below the ${minimum} reserve`
+    : `Your Pack tier is not active: your wallet does not keep the ${minimum} reserve`;
 }
 
 function heldMessage(status: DropshipListingTierStatus, funding: DropshipVendorListingTierFundingSnapshot): string {
@@ -500,16 +501,16 @@ function heldMessage(status: DropshipListingTierStatus, funding: DropshipVendorL
     ? ` (including ${formatNotificationCurrency(funding.pendingBalanceCents, funding.currency)} still settling)`
     : "";
   if (status.tier === "case") {
-    return `Your wallet has ${counted}${pending}. Case listings need ${minimum}; add ${shortfall} and they go back on sale on their own. Pack and inner pack listings are not affected.`;
+    return `Your wallet has ${counted}${pending}. The Case tier needs a ${minimum} reserve; add ${shortfall} and your case listings go live again automatically. Pack tier listings are not affected.`;
   }
   const kept = funding.minimumBalanceCents === null
-    ? "no minimum is set"
-    : `your minimum is ${formatNotificationCurrency(funding.minimumBalanceCents, funding.currency)}`;
-  return `Card Shellz requires every wallet to keep at least ${minimum} for pack and inner pack listings. Right now ${kept} and your wallet has ${counted}${pending}. Raise your minimum to ${minimum}, or add ${shortfall}, and your listings go back on sale on their own.`;
+    ? "no reserve is set"
+    : `your reserve is ${formatNotificationCurrency(funding.minimumBalanceCents, funding.currency)}`;
+  return `Card Shellz requires every wallet to keep a reserve of at least ${minimum} for the Pack tier (singles, packs and inner packs). Right now ${kept} and your wallet has ${counted}${pending}. Raise your reserve to ${minimum}, or add ${shortfall}, and your listings go live again automatically.`;
 }
 
 function releasedTitle(tier: DropshipListingTier): string {
-  return tier === "case" ? "Case listings are back on sale" : "Your listings are back on sale";
+  return tier === "case" ? "Your Case tier is active again" : "Your Pack tier is active again";
 }
 
 function releasedMessage(
@@ -520,8 +521,8 @@ function releasedMessage(
   const counted = formatNotificationCurrency(funding.availableBalanceCents + funding.pendingBalanceCents, funding.currency);
   const minimum = formatNotificationCurrency(status.minimumCents, funding.currency);
   return tier === "case"
-    ? `Your wallet has ${counted}, at or above the ${minimum} case minimum, so your case listings are back on sale.`
-    : `Your wallet keeps the ${minimum} minimum again, so your pack and inner pack listings are back on sale.`;
+    ? `Your wallet has ${counted}, at or above the ${minimum} Case tier reserve, so your case listings are live again.`
+    : `Your wallet keeps the ${minimum} reserve again, so your Pack tier listings are live again.`;
 }
 
 function graceMessage(
@@ -536,12 +537,12 @@ function graceMessage(
   const counted = formatNotificationCurrency(funding.availableBalanceCents + funding.pendingBalanceCents, funding.currency);
   const date = formatNotificationDate(enforcesAt);
   if (tier === "case") {
-    return `Card Shellz is raising the minimum wallet balance for case listings from ${current} to ${upcoming}. Your wallet has ${counted} today; bring it to ${upcoming} before ${date} to keep your case listings on sale.`;
+    return `Card Shellz is raising the Case tier reserve from ${current} to ${upcoming}. Your wallet has ${counted} today; bring it to ${upcoming} before ${date} to keep your case listings live.`;
   }
   const kept = funding.minimumBalanceCents === null
-    ? "no minimum is set"
-    : `your minimum is ${formatNotificationCurrency(funding.minimumBalanceCents, funding.currency)}`;
-  return `Card Shellz is raising the minimum wallet balance for pack and inner pack listings from ${current} to ${upcoming}. Today ${kept} and your wallet has ${counted}; raise your minimum to ${upcoming} before ${date} to keep those listings on sale.`;
+    ? "no reserve is set"
+    : `your reserve is ${formatNotificationCurrency(funding.minimumBalanceCents, funding.currency)}`;
+  return `Card Shellz is raising the Pack tier reserve from ${current} to ${upcoming}. Today ${kept} and your wallet has ${counted}; raise your reserve to ${upcoming} before ${date} to keep those listings live.`;
 }
 
 function holdReason(vendorId: number, tier: DropshipListingTier, held: boolean, revision: number): string {

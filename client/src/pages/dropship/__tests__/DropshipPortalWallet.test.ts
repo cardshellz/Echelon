@@ -141,7 +141,7 @@ describe("DropshipPortalWallet contract", () => {
 
   it("offers the two tier minimums on the minimum step and nothing to guess or type for the amount", () => {
     const step = between("function FloorStep", "function centsToDollarText");
-    expect(step).toContain('aria-label="Minimum"');
+    expect(step).toContain('aria-label="Reserve"');
     expect(step).toContain("const options = minimumOptions(limits);");
     expect(step).toContain("useState(minimumOptionFor(initialFloorCents, limits))");
     expect(step).toContain("hint={describeMinimumOption(option.tier)}");

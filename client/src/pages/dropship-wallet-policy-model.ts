@@ -295,18 +295,18 @@ export const DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS: readonly DropshipWalletPo
   {
     limitField: "autoReloadMinTriggerCents",
     formField: "autoReloadMinTriggerDollars",
-    label: "Pack tier minimum",
+    label: "Pack tier reserve",
     unit: "cents",
     allowZero: false,
-    help: "The lowest minimum balance any vendor may keep; applies to vendors selling eaches and inner packs. Auto-reload fires below a vendor's minimum.",
+    help: "The lowest reserve any vendor may keep; the Pack tier (singles, packs and inner packs) needs it. Autopay tops a wallet up when it falls below the vendor's reserve.",
   },
   {
     limitField: "caseTierMinimumCents",
     formField: "caseTierMinimumDollars",
-    label: "Case tier minimum",
+    label: "Case tier reserve",
     unit: "cents",
     allowZero: false,
-    help: "Vendors with case listings enabled must keep at least this. Never below the pack tier minimum.",
+    help: "The balance a vendor needs for the Case tier, which adds case listings. Never below the Pack tier reserve.",
   },
   {
     limitField: "autoReloadMinAmountCents",
@@ -314,7 +314,7 @@ export const DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS: readonly DropshipWalletPo
     label: "Minimum single top-up limit",
     unit: "cents",
     allowZero: false,
-    help: "Smallest permitted single auto-reload top-up. Never below the pack tier minimum, or a top-up could not clear the trigger.",
+    help: "Smallest permitted single auto-reload top-up. Never below the Pack tier reserve, or a top-up could not clear the trigger.",
   },
   {
     limitField: "manualFundingMinCents",
@@ -370,7 +370,7 @@ export const DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS: readonly DropshipWalletPo
     label: "Tier change grace",
     unit: "days",
     allowZero: true,
-    help: "How long a vendor below a raised tier minimum keeps that tier's listings before they are unpublished. Zero enforces immediately.",
+    help: "How long a vendor below a raised tier reserve keeps that tier's listings before they are unpublished. Zero enforces immediately.",
   },
   {
     limitField: "cardFundingFeeBps",
@@ -543,13 +543,13 @@ export function dropshipWalletPolicyInvariantViolations(
     violations.push({
       field: "autoReloadMinAmountCents",
       message:
-        "Minimum single top-up limit must be at least the minimum floor, otherwise a top-up can never clear the trigger.",
+        "Minimum single top-up limit must be at least the Pack tier reserve, otherwise a top-up can never clear the trigger.",
     });
   }
   if (limits.caseTierMinimumCents < limits.autoReloadMinTriggerCents) {
     violations.push({
       field: "caseTierMinimumCents",
-      message: "Case tier minimum must be at least the pack tier minimum.",
+      message: "Case tier reserve must be at least the Pack tier reserve.",
     });
   }
   if (limits.cardFundingMinCents > limits.manualFundingMaxCents) {
@@ -587,8 +587,8 @@ export function parseDropshipWalletPolicyForm(
 ): ParsedDropshipWalletPolicyForm {
   const errors: DropshipWalletPolicyFormErrors = {};
 
-  const trigger = readDollars(form.autoReloadMinTriggerDollars, "Pack tier minimum", errors, "autoReloadMinTriggerDollars");
-  const caseTier = readDollars(form.caseTierMinimumDollars, "Case tier minimum", errors, "caseTierMinimumDollars");
+  const trigger = readDollars(form.autoReloadMinTriggerDollars, "Pack tier reserve", errors, "autoReloadMinTriggerDollars");
+  const caseTier = readDollars(form.caseTierMinimumDollars, "Case tier reserve", errors, "caseTierMinimumDollars");
   const amount = readDollars(form.autoReloadMinAmountDollars, "Minimum single top-up limit", errors, "autoReloadMinAmountDollars");
   const manualMin = readDollars(form.manualFundingMinDollars, "Manual top-up minimum", errors, "manualFundingMinDollars");
   const manualMax = readDollars(form.manualFundingMaxDollars, "Manual top-up maximum", errors, "manualFundingMaxDollars");

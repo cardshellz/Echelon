@@ -250,7 +250,7 @@ describe("dropship wallet policy tab", () => {
     expect(html).toContain("Card funding fee (%)");
     expect(html).toContain("Card minimum deposit ($)");
     // The new limits are labelled in their own units, never as dollars.
-    expect(html).toContain("Case tier minimum ($)");
+    expect(html).toContain("Case tier reserve ($)");
     expect(html).toContain("Advance fee (%)");
     expect(html).toContain("Advance cap ($)");
     expect(html).toContain("Tier change grace (days)");
@@ -286,7 +286,7 @@ describe("dropship wallet policy tab", () => {
         proposalError: null,
       }),
     );
-    expect(measuring).toContain("Measuring the proposed minimums…");
+    expect(measuring).toContain("Measuring the proposed reserves…");
     // The last counts the server returned stay on screen while a new
     // measurement is in flight, rather than blanking out.
     expect(measuring).toContain("7 of 19");
@@ -295,7 +295,7 @@ describe("dropship wallet policy tab", () => {
       createElement(DropshipWalletPolicyImpactPanel, {
         impact,
         isMeasuringProposal: false,
-        proposalError: "The proposed minimums could not be measured.",
+        proposalError: "The proposed reserves could not be measured.",
       }),
     );
     expect(failed).toContain('role="alert"');

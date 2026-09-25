@@ -124,11 +124,11 @@ describe("describeOnboardingStep", () => {
 
     const ready = describeOnboardingStep(step("wallet_payment", "complete"), state({ wallet: { hasCardBackstop: true, autoReloadConfigured: true, walletReady: true } }));
     expect(ready).toMatchObject({ tone: "complete", action: { kind: "navigate", label: "Open wallet", path: "/wallet" } });
-    expect(ready.detail).toBe("Autopay from your bank account to your minimum; backup card on file. Your first automatic top-up runs on the first daily check after you activate (a bank transfer lands in up to 5 business days — our assumption).");
+    expect(ready.detail).toBe("Autopay from your bank account to your reserve; backup card on file. Your first automatic top-up runs on the first daily check after you activate (a bank transfer lands in up to 5 business days — our assumption).");
     expect(ready.detail).not.toContain("Nothing is charged until you accept an order");
 
     const cardSource = describeOnboardingStep(step("wallet_payment", "complete"), state({ wallet: { hasCardBackstop: true, autoReloadConfigured: true, walletReady: true, autoReloadFundingMethodIsCard: true } }));
-    expect(cardSource.detail).toBe("Autopay from your card to your minimum; backup card on file. Your first automatic top-up runs on the first daily check after you activate.");
+    expect(cardSource.detail).toBe("Autopay from your card to your reserve; backup card on file. Your first automatic top-up runs on the first daily check after you activate.");
 
     const funded = describeOnboardingStep(step("wallet_payment", "complete"), state({ wallet: { hasCardBackstop: true, autoReloadConfigured: true, walletReady: true, hasSpendableBalance: true, availableBalanceCents: 12_345 } }));
     expect(funded.detail.startsWith("$123.45 available. Autopay from your bank account")).toBe(true);

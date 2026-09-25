@@ -450,7 +450,7 @@ export class DropshipWalletMaintenanceService {
     });
     await this.notifyVendor({
       run: attention,
-      title: "Your wallet is below its minimum and autopay could not top it up",
+      title: "Your wallet is below its reserve and autopay could not top it up",
       message: attentionMessageFor(skipReason),
       payload: { skipReason, fundingMethodId: reload.fundingMethodId },
     });
@@ -519,7 +519,7 @@ export class DropshipWalletMaintenanceService {
       if (pause?.outcome !== "paused") {
         await this.notifyVendor({
           run: declined,
-          title: "Your wallet is below its minimum: the autopay charge was declined",
+          title: "Your wallet is below its reserve: the autopay charge was declined",
           message: declineMessageFor(errorContext),
           payload: {
             failureCode: errorCode,
@@ -694,29 +694,29 @@ function classifyReloadError(error: unknown): ReloadFailureClass {
   return "unclassified";
 }
 
-/** The vendor's side of a low-balance alert, in the wallet's words: minimum, autopay, bank account or card. */
+/** The vendor's side of a low-balance alert, in the wallet's words: reserve, autopay, bank account or card. */
 function attentionMessageFor(skipReason: string): string {
   switch (skipReason) {
     case "amount_exceeds_max_single_reload":
-      return "Your wallet is below its minimum, and the top-up needed is more than autopay may charge in one go. Add money in Wallet.";
+      return "Your wallet is below its reserve, and the top-up needed is more than autopay may charge in one go. Add money in Wallet.";
     case "auto_reload_disabled":
-      return "Your wallet is below its minimum and autopay is off, so nothing is topping it up. Turn autopay on in Wallet, or add money, so orders never wait for a payment.";
+      return "Your wallet is below its reserve and autopay is off, so nothing is topping it up. Turn autopay on in Wallet, or add money, so orders never wait for a payment.";
     case "funding_method_required":
     case "funding_method_missing":
-      return "Your wallet is below its minimum and autopay has no bank account or card to pull from. Choose one in Wallet, or add money.";
+      return "Your wallet is below its reserve and autopay has no bank account or card to pull from. Choose one in Wallet, or add money.";
     case "funding_method_not_active":
     case "funding_method_provider_identity_required":
     case "funding_method_rail_unsupported":
-      return "Your wallet is below its minimum and autopay cannot charge your saved bank account or card. Update it in Wallet, or add money.";
+      return "Your wallet is below its reserve and autopay cannot charge your saved bank account or card. Update it in Wallet, or add money.";
     default:
-      return `Your wallet is below its minimum and autopay could not top it up (${skipReason}). Check your bank account or card in Wallet, or add money.`;
+      return `Your wallet is below its reserve and autopay could not top it up (${skipReason}). Check your bank account or card in Wallet, or add money.`;
   }
 }
 
 function declineMessageFor(errorContext: Record<string, unknown>): string {
   const declineCode = typeof errorContext.stripeDeclineCode === "string" ? errorContext.stripeDeclineCode : null;
   const detail = declineCode ? ` (${declineCode.replace(/_/g, " ")})` : "";
-  return `We tried to top your wallet up to its minimum and your saved bank account or card was declined${detail}. Update it in Wallet or add money by bank transfer. Orders that arrive before the balance is restored will wait for payment.`;
+  return `We tried to top your wallet up to its reserve and your saved bank account or card was declined${detail}. Update it in Wallet or add money by bank transfer. Orders that arrive before the balance is restored will wait for payment.`;
 }
 
 function parseMaintenanceInput(input: unknown): RunDropshipWalletMaintenanceInput {

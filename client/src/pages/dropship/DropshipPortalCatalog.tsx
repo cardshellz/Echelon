@@ -1340,7 +1340,7 @@ function CatalogTable({
                       data-testid={`catalog-tier-off-sale-${row.productVariantId}`}
                       title={describeCatalogListingTier(row.listingTier)}
                     >
-                      {row.listingTier.tier === "case" ? "Cases off sale" : "Off sale"}
+                      {row.listingTier.tier === "case" ? "Case tier not active" : "Pack tier not active"}
                     </Badge>
                   )}
                 </TableCell>
@@ -1405,18 +1405,20 @@ function pushButtonIcon(pendingListingAction: PendingListingAction, emailCodeSen
   return <ArrowRight className="h-4 w-4" />;
 }
 
-/** Why a selected SKU is not on sale, in the vendor's words: the gate and what closes it. */
+/** Why a selected SKU's tier is not active, in the vendor's words: the reserve and what closes the gap. */
 export function describeCatalogListingTier(tier: DropshipCatalogListingTier): string {
   const minimum = formatCatalogDollars(tier.minimumCents);
   const shortfall = formatCatalogDollars(tier.shortfallCents);
   if (tier.tier === "case") {
-    return `Case listings go on sale once your wallet balance (counting money still settling) reaches ${minimum}. You are ${shortfall} short. Pack and inner pack listings are not affected.`;
+    return `The Case tier is not active: case listings go live once your wallet balance (counting money still settling) reaches the ${minimum} reserve. You are ${shortfall} short. Pack tier listings are not affected.`;
   }
-  return `Pack and inner pack listings need your wallet to keep the ${minimum} minimum: an auto-reload minimum at ${minimum} or a balance at ${minimum}. You are ${shortfall} short.`;
+  return `The Pack tier is not active: your wallet needs to keep the ${minimum} reserve, either as your autopay reserve or as your balance. You are ${shortfall} short.`;
 }
 
+/** Whole dollars when there are no cents ($500), else both cent digits ($10.50, never $10.5). Display only. */
 function formatCatalogDollars(centsValue: number): string {
-  return `$${(centsValue / 100).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+  const fractionDigits = centsValue % 100 === 0 ? 0 : 2;
+  return `$${(centsValue / 100).toLocaleString("en-US", { minimumFractionDigits: fractionDigits, maximumFractionDigits: 2 })}`;
 }
 
 function canSelectRow(row: DropshipCatalogRow): boolean {

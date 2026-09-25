@@ -26,6 +26,18 @@ describe("product-cost preview issues", () => {
   });
 });
 
+describe("listing tier preview issues", () => {
+  it("names the tier and its reserve, never on sale or off sale", () => {
+    expect(formatListingPreviewIssue("listing_tier:pack_tier_minimum_not_kept"))
+      .toBe("Pack tier not active: your wallet does not keep the Pack tier reserve. Raise your reserve or add money in Wallet.");
+    expect(formatListingPreviewIssue("listing_tier:case_tier_balance_below_minimum"))
+      .toBe("Case tier not active: case listings need your balance to reach the Case tier reserve. Add money in Wallet and they go live automatically.");
+    for (const code of ["listing_tier:pack_tier_minimum_not_kept", "listing_tier:case_tier_balance_below_minimum"]) {
+      expect(formatListingPreviewIssue(code)).not.toMatch(/on sale|off sale|minimum/i);
+    }
+  });
+});
+
 describe("listing preview rendering bounds", () => {
   const rows = Array.from({ length: 10000 }, (_, index) => ({ productVariantId: index + 1, title: `Product ${index + 1}`, sku: `SKU-${index + 1}` } as DropshipListingPreviewRow));
   it("mounts one bounded page without mutating or sorting the source", () => {

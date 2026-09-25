@@ -27,9 +27,19 @@ receivable the daily wallet run collects.
 Two admin-set minimums on the versioned policy row (`migrations/0683`):
 pack tier (eaches, inner packs) and case tier. The pack tier is kept when the
 vendor's auto-reload floor or their balance (pending counts) is at the
-minimum; cases are on sale once the balance counting pending reaches the case
-minimum. A raised minimum is enforced after the grace period, by publishing
+minimum; the case tier is active once the balance counting pending reaches the
+case minimum. A raised minimum is enforced after the grace period, by publishing
 zero for that tier's SKUs (`domain/listing-tiers.ts`, the hourly reconciler).
+
+**The words vendors and staff see** (owner decision, 2026-09-25): the balance a
+vendor keeps is their **reserve** (the auto-reload floor is "your reserve"; each
+tier's minimum is its reserve), the tiers are the **Pack tier** (singles, packs
+and inner packs) and the **Case tier** (adds cases), and each is **Active** or
+**Not active**; listings are "live" or "paused", never "on sale" or "off sale".
+Code identifiers keep their names (`minimum_floor_cents`,
+`case_tier_minimum_cents`, `pack_tier_minimum_not_kept`); only the copy
+changed. Other minimums keep the word: the card minimum deposit, the manual
+top-up bounds and the minimum single top-up limit.
 
 ## The shortfall waterfall at acceptance (phase 3)
 
@@ -102,7 +112,7 @@ The minimum step offers exactly those two amounts, as the served policy sets
 them (`minimumOptions` in `client/src/lib/dropship-wallet-flow.ts`): nothing
 else to type and nothing to guess — the earlier daily-cost guesser and
 free-form amount are gone. It opens on the pack minimum, or the case minimum
-while the vendor's cases are on sale; a minimum saved before the step was
+while the vendor's case tier is active; a minimum saved before the step was
 narrowed opens on the tier it falls in. An optional **top-up amount**
 (`top_up_amount_cents`, migration 0690; null pulls the minimum) says how
 much each automatic refill pulls, so a vendor who wants fewer pulls takes

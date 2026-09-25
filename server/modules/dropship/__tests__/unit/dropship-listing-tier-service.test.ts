@@ -111,12 +111,12 @@ describe("DropshipListingTierService", () => {
         eventType: "dropship_listing_tier_held",
         critical: true,
         channels: ["email", "in_app"],
-        title: "Case listings are off sale until your balance reaches USD $500.00",
+        title: "Your Case tier is not active: your balance is below the USD $500.00 reserve",
         idempotencyKey: "dropship-listing-tier:10:case:held:1",
         payload: expect.objectContaining({ tier: "case", revision: 1, minimumCents: 50_000, shortfallCents: 38_000, availableBalanceCents: 12_000 }),
       });
-      expect(notificationSender.sent[0].message).toContain("Your wallet has USD $120.00. Case listings need USD $500.00; add USD $380.00");
-      expect(notificationSender.sent[0].message).toContain("Pack and inner pack listings are not affected.");
+      expect(notificationSender.sent[0].message).toContain("Your wallet has USD $120.00. The Case tier needs a USD $500.00 reserve; add USD $380.00");
+      expect(notificationSender.sent[0].message).toContain("Pack tier listings are not affected.");
       expect(logs.find((entry) => entry.code === "DROPSHIP_LISTING_TIER_HOLD_CHANGED")).toMatchObject({ level: "info", context: expect.objectContaining({ before: [], after: ["case"], revision: 1 }) });
       expect(logs.find((entry) => entry.code === "DROPSHIP_LISTING_TIER_HOLDS_APPLIED")).toMatchObject({ level: "info" });
       expect(logs.filter((entry) => entry.level === "error")).toHaveLength(0);
@@ -158,7 +158,7 @@ describe("DropshipListingTierService", () => {
       expect(notificationSender.sent[0]).toMatchObject({
         eventType: "dropship_listing_tier_released",
         critical: false,
-        title: "Case listings are back on sale",
+        title: "Your Case tier is active again",
         idempotencyKey: "dropship-listing-tier:10:case:released:4",
       });
     });
@@ -175,9 +175,9 @@ describe("DropshipListingTierService", () => {
         ["dropship_listing_tier_held", "dropship-listing-tier:10:pack:held:1"],
         ["dropship_listing_tier_held", "dropship-listing-tier:10:case:held:1"],
       ]);
-      expect(notificationSender.sent[0].title).toBe("Your listings are off sale until your wallet keeps the USD $100.00 minimum");
-      expect(notificationSender.sent[0].message).toContain("your minimum is USD $50.00 and your wallet has USD $90.00");
-      expect(notificationSender.sent[0].message).toContain("Raise your minimum to USD $100.00, or add USD $10.00");
+      expect(notificationSender.sent[0].title).toBe("Your Pack tier is not active: your wallet does not keep the USD $100.00 reserve");
+      expect(notificationSender.sent[0].message).toContain("your reserve is USD $50.00 and your wallet has USD $90.00");
+      expect(notificationSender.sent[0].message).toContain("Raise your reserve to USD $100.00, or add USD $10.00");
     });
 
     it("keeps a deferred hold unapplied and retries the same revision under the same keys next tick", async () => {
@@ -283,11 +283,11 @@ describe("DropshipListingTierService", () => {
       ]);
       expect(notificationSender.sent[0]).toMatchObject({
         critical: true,
-        title: "The pack and inner pack listing minimum rises to USD $100.00 on September 25, 2026",
+        title: "The Pack tier reserve rises to USD $100.00 on September 25, 2026",
         payload: expect.objectContaining({ policyVersion: 2, currentMinimumCents: 5_000, upcomingMinimumCents: 10_000, enforcesAt: at(24).toISOString() }),
       });
-      expect(notificationSender.sent[0].message).toContain("raise your minimum to USD $100.00 before September 25, 2026");
-      expect(notificationSender.sent[1].title).toBe("The case listing minimum rises to USD $500.00 on September 25, 2026");
+      expect(notificationSender.sent[0].message).toContain("raise your reserve to USD $100.00 before September 25, 2026");
+      expect(notificationSender.sent[1].title).toBe("The Case tier reserve rises to USD $500.00 on September 25, 2026");
 
       // The next tick repeats the send under the same keys; the notification service deduplicates by key.
       const second = await service.reconcileListingTiers({ workerId: "worker-1" });

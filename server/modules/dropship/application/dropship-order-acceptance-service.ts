@@ -475,7 +475,7 @@ export class DropshipOrderAcceptanceService {
       message: accepted
         ? `Order intake ${result.intakeId} was accepted into fulfillment for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.${advanceSentenceFor(result)}${chargeSentenceFor(reload)}`
         : result.paymentHoldReason === "vendor_paused"
-          ? `Order intake ${result.intakeId} is waiting because selling is paused. Fund your wallet back to its minimum before ${deadline} and it will be accepted for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.`
+          ? `Order intake ${result.intakeId} is waiting because selling is paused. Fund your wallet back to its reserve before ${deadline} and it will be accepted for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.`
           : `Order intake ${result.intakeId} is on payment hold and requires ${formatNotificationCurrency(result.totalDebitCents, result.currency)} before ${deadline}.${reloadSentenceFor(reload)}`,
       payload: {
         intakeId: result.intakeId,

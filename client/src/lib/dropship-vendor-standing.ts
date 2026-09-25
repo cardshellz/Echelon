@@ -45,9 +45,9 @@ export function describeVendorStanding(vendor: DropshipVendorStandingSnapshot): 
       : vendor.standingReason === "operator"
         ? "Card Shellz paused your account."
         : "Your account is paused.";
-  const consequence = "Orders are not being accepted and your listings show nothing for sale.";
+  const consequence = "Orders are not being accepted and your listings show no stock.";
   const action = needsFunds
-    ? `${consequence} Add funds or update your card; selling resumes on its own once your balance is back to the minimum.`
+    ? `${consequence} Add funds or update your card; selling resumes on its own once your balance is back to your reserve.`
     : `${consequence} Contact Card Shellz support to resume.`;
   return {
     title: "Selling is paused",

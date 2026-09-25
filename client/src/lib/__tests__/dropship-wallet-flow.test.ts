@@ -470,18 +470,18 @@ describe("copy", () => {
   it("words the bank mandate from the numbers: the minimum, the top-up amount and the bound", () => {
     const lines = describeMandate(terms);
     expect(lines).toHaveLength(6);
-    expect(lines[0]).toBe("Debit Chase ending in 1234 whenever an order takes your balance below your minimum of $250, and at the daily check: your top-up amount of $250 (your minimum), or more if that alone would not bring you back to $250. No fee. Money already on its way counts, so the same gap is not debited twice.");
+    expect(lines[0]).toBe("Debit Chase ending in 1234 whenever an order takes your balance below your reserve of $250, and at the daily check: your top-up amount of $250 (your reserve), or more if that alone would not bring you back to $250. No fee. Money already on its way counts, so the same gap is not debited twice.");
     expect(lines[1]).toContain("While your account is active, charge Visa ending in 4242 only when an order needs more than your available balance: the shortfall plus the 3% card fee, whatever its size (up to $5,000)");
     expect(lines[1]).toContain("even while a bank top-up is still landing or your autopay source cannot be charged");
     expect(lines[1]).toContain("a $75 order with $20 available charges $55 + $1.65");
     expect(lines[1]).toContain("If a return fee has taken your balance below zero, the shortfall includes that amount.");
-    expect(lines[2]).toBe("Routine top-ups never take more than $500 in one charge — the larger of your minimum and your top-up amount. A held order is different: your backup card is charged its whole shortfall, up to $5,000, the most any single payment may be. An order short by more than $5,000 is not charged: it waits for you to add money and is cancelled if still unpaid after 48 hours. We email you 2 hours before that.");
+    expect(lines[2]).toBe("Routine top-ups never take more than $500 in one charge — the larger of your reserve and your top-up amount. A held order is different: your backup card is charged its whole shortfall, up to $5,000, the most any single payment may be. An order short by more than $5,000 is not charged: it waits for you to add money and is cancelled if still unpaid after 48 hours. We email you 2 hours before that.");
     expect(lines[3]).toContain("first daily check after you activate (about midnight UTC)");
     expect(lines[3]).toContain("Adding money by card now avoids that");
     expect(lines[3]).toContain("debits Chase ending in 1234 for your top-up amount ($250), or more if that alone would not reach $250");
     expect(lines[4]).toContain("before it lands");
     expect(lines[4]).toContain("We do not retry");
-    expect(lines[5]).toContain("autopay stays on; the source, minimum, top-up amount and backup card can be changed at any time in Wallet");
+    expect(lines[5]).toContain("autopay stays on; the source, reserve, top-up amount and backup card can be changed at any time in Wallet");
     expect(lines[5]).toContain("for automatic top-ups and covers");
     expect(lines[5]).toContain("shows the current fee on Stripe's page");
     const joined = lines.join(" ");
@@ -495,14 +495,14 @@ describe("copy", () => {
 
   it("words the card mandate with the routine top-up's fee and the bank-return clause", () => {
     const lines = describeMandate({ ...terms, sourceRail: "stripe_card", sourceLabel: "Visa ending in 4242", floorCents: 10_000, limitCents: 25_000 });
-    expect(lines[0]).toBe("Charge Visa ending in 4242, plus the 3% fee, whenever an order takes your balance below your minimum of $100, and at the daily check: your top-up amount of $100 (your minimum), or more if that alone would not bring you back to $100 ($100 + $3 = $103 for a routine top-up).");
+    expect(lines[0]).toBe("Charge Visa ending in 4242, plus the 3% fee, whenever an order takes your balance below your reserve of $100, and at the daily check: your top-up amount of $100 (your reserve), or more if that alone would not bring you back to $100 ($100 + $3 = $103 for a routine top-up).");
     expect(lines[1]).toContain("Visa ending in 4242 is also your backup card");
     expect(lines[1]).toContain("whatever its size (up to $5,000)");
     expect(lines[1]).toContain("If a return fee has taken your balance below zero, the shortfall includes that amount.");
     expect(lines[3]).toContain("charges Visa ending in 4242 your top-up amount ($100), or more if that alone would not reach $100");
     expect(lines[4]).toContain("or a bank transfer you started is returned before it lands");
-    expect(describePlanSentence({ ...terms, sourceRail: "stripe_card", sourceLabel: "Visa ending in 4242", floorCents: 10_000 })).toBe("In one sentence: you keep $100 in your wallet, topped up by $100 from your Visa ending in 4242 at 3%; the same card covers any shortfall.");
-    expect(describePlanSentence(terms)).toBe("In one sentence: you keep $250 in your wallet; when an order takes it lower, autopay pulls $250 from your bank for free, and your Visa ending in 4242 covers any shortfall plus 3%.");
+    expect(describePlanSentence({ ...terms, sourceRail: "stripe_card", sourceLabel: "Visa ending in 4242", floorCents: 10_000 })).toBe("In one sentence: you keep a $100 reserve in your wallet, topped up by $100 from your Visa ending in 4242 at 3%; the same card covers any shortfall.");
+    expect(describePlanSentence(terms)).toBe("In one sentence: you keep a $250 reserve in your wallet; when an order takes it lower, autopay pulls $250 from your bank for free, and your Visa ending in 4242 covers any shortfall plus 3%.");
     expect(describePlanSentence({ ...terms, topUpCents: 40_000 })).toContain("autopay pulls $400 from your bank for free");
   });
 
@@ -513,18 +513,18 @@ describe("copy", () => {
     expect(intro.topics).toHaveLength(6);
     expect(intro.topics.map((topic) => topic.lead)).toEqual([
       "What your wallet is.",
-      "What you can sell, and the minimum it needs.",
-      "Keeping it funded: your minimum and autopay.",
+      "What you can sell: your listing tier.",
+      "Keeping it funded: your reserve and autopay.",
       "Ways to pay, and what each costs.",
       "Orders while a transfer lands, and your backup card.",
       "If a payment fails or is taken back.",
     ]);
     expect(intro.topics[0].detail).toBe("A prepaid deposit Card Shellz holds for your store. Every order you accept is paid from it: the product cost plus shipping, with nothing added on top. A return fee comes out of it too, and so does a payment your bank takes back after it landed; either can take the balance below zero.");
-    expect(intro.topics[1].detail).toBe("Singles, packs and inner packs are on sale while you keep at least $50 in your wallet. Cases are on sale once your balance, counting money on its way, has reached $500. If Card Shellz raises a minimum you keep selling for 14 days after the notice, then that tier comes off sale until you are back above it.");
-    expect(intro.topics[2].detail).toBe("You choose the minimum you keep — at least $50, or $500 to sell cases. Whenever an order takes your balance below it, and at a daily check, autopay pulls a top-up from your bank account or card: your top-up amount, which is your minimum unless you set another, or more if that alone would not reach your minimum. Money already on its way counts, so the same gap is never pulled twice. Routine top-ups never take more than the larger of your minimum and your top-up amount in one charge. You can also add money yourself at any time.");
+    expect(intro.topics[1].detail).toBe("The Pack tier (singles, packs and inner packs) is active while you keep a reserve of at least $50 in your wallet. The Case tier adds cases once your balance, counting money on its way, has reached $500. If Card Shellz raises a tier's reserve you keep selling for 14 days after the notice; after that the tier is not active until you are back above it.");
+    expect(intro.topics[2].detail).toBe("You choose the reserve you keep — at least $50, or $500 for the Case tier. Whenever an order takes your balance below it, and at a daily check, autopay pulls a top-up from your bank account or card: your top-up amount, which is your reserve unless you set another, or more if that alone would not reach your reserve. Money already on its way counts, so the same gap is never pulled twice. Routine top-ups never take more than the larger of your reserve and your top-up amount in one charge. You can also add money yourself at any time.");
     expect(intro.topics[3].detail).toBe("A bank account costs nothing and takes up to 5 business days to land (our estimate). A card lands at once and costs 3% on top of the amount, whether autopay charged it, you added money yourself, or it covered an order. USDC costs nothing." + REWARDS_RULE);
     expect(intro.topics[4].detail).toBe("Money that has landed pays for orders first. A bank transfer still on its way can pay too, once the account it comes from qualifies — a business account, a balance we could read when it was linked, and one earlier transfer from it landed — for a 1% fee on the amount used, at most $500 outstanding at a time. If an order still needs more than your balance, we charge your backup card for the whole difference plus 3%, up to $5,000 in one payment, and send the order out. An order the card cannot cover waits 48 hours for you to add money, then is cancelled.");
-    expect(intro.topics[5].detail).toBe("Selling pauses: your listings show nothing for sale, and orders already waiting are cancelled after your hold time (48 hours). We email you, and we do not retry the charge ourselves. A payment your bank takes back after it landed is taken out of your wallet the same way. Selling starts again on its own once your balance is back at your minimum.");
+    expect(intro.topics[5].detail).toBe("Selling pauses: your listings show no stock, and orders already waiting are cancelled after your hold time (48 hours). We email you, and we do not retry the charge ourselves. A payment your bank takes back after it landed is taken out of your wallet the same way. Selling starts again on its own once your balance is back at your reserve.");
     // USDC is named only where a deposit address exists, and never with a timing claim: nothing in the code watches the chain.
     const noUsdc = describeIntro({ cardFundingFeeBps: 300, usdcOffered: false, holdTimeoutMinutes: 2_880, limits });
     expect(noUsdc.topics[3].detail).not.toContain("USDC");
@@ -536,8 +536,8 @@ describe("copy", () => {
       holdTimeoutMinutes: 720,
       limits: { ...limits, autoReloadMinTriggerCents: 2_500, caseTierMinimumCents: 75_000, tierChangeGraceDays: 30, advanceFeeBps: 150, advanceCapCents: 100_000 },
     });
-    expect(other.topics[1].detail).toContain("at least $25 in your wallet. Cases are on sale once your balance, counting money on its way, has reached $750. If Card Shellz raises a minimum you keep selling for 30 days");
-    expect(other.topics[2].detail).toContain("at least $25, or $750 to sell cases");
+    expect(other.topics[1].detail).toContain("at least $25 in your wallet. The Case tier adds cases once your balance, counting money on its way, has reached $750. If Card Shellz raises a tier's reserve you keep selling for 30 days");
+    expect(other.topics[2].detail).toContain("at least $25, or $750 for the Case tier");
     expect(other.topics[3].detail).toContain("costs 2.5% on top of the amount");
     expect(other.topics[4].detail).toContain("for a 1.5% fee on the amount used, at most $1,000 outstanding at a time");
     expect(other.topics[4].detail).toContain("waits 12 hours for you to add money");
@@ -737,8 +737,8 @@ describe("the minimum: two tier options", () => {
     expect(minimumOptions(LIMITS)).toEqual([{ tier: "pack", cents: 5_000 }, { tier: "case", cents: 50_000 }]);
     expect(minimumOptions({ autoReloadMinTriggerCents: 50_000, caseTierMinimumCents: 50_000 })).toEqual([{ tier: "pack", cents: 50_000 }]);
     expect(minimumOptions({ autoReloadMinTriggerCents: 60_000, caseTierMinimumCents: 50_000 })).toEqual([{ tier: "pack", cents: 60_000 }]);
-    expect(describeMinimumOption("pack")).toBe("Singles, packs and inner packs");
-    expect(describeMinimumOption("case")).toBe("Cases too");
+    expect(describeMinimumOption("pack")).toBe("Pack tier: singles, packs and inner packs");
+    expect(describeMinimumOption("case")).toBe("Case tier: adds cases");
   });
 
   it("reads any saved amount as the tier it falls in", () => {
@@ -769,9 +769,9 @@ describe("the top-up amount's quick picks", () => {
     // LIMITS' smallest top-up is $100: at a $50 minimum only 2× and above clear it.
     expect(topUpOptions(5_000, LIMITS)).toEqual([{ factor: 1, cents: 5_000 }, { factor: 2, cents: 10_000 }, { factor: 3, cents: 15_000 }, { factor: 5, cents: 25_000 }]);
     expect(topUpOptions(2_000, LIMITS)).toEqual([{ factor: 1, cents: 2_000 }, { factor: 5, cents: 10_000 }]);
-    expect(describeTopUpOption({ factor: 1, cents: 10_000 })).toBe("Your minimum");
-    expect(describeTopUpOption({ factor: 2, cents: 20_000 })).toBe("2× your minimum");
-    expect(describeTopUpOption({ factor: 5, cents: 50_000 })).toBe("5× your minimum");
+    expect(describeTopUpOption({ factor: 1, cents: 10_000 })).toBe("Your reserve");
+    expect(describeTopUpOption({ factor: 2, cents: 20_000 })).toBe("2× your reserve");
+    expect(describeTopUpOption({ factor: 5, cents: 50_000 })).toBe("5× your reserve");
     expect(() => topUpOptions(-1, LIMITS)).toThrow(RangeError);
   });
 
@@ -813,8 +813,8 @@ describe("adding money: the top-up step's picks again", () => {
     // A multiple the top-up step hides (under LIMITS' $100 smallest top-up) stays hidden here.
     expect(depositOptions({ minimumCents: 2_000, topUpCents: null, limits: LIMITS, rail: "stripe_ach" })).toEqual([{ factor: 1, cents: 2_000 }, { factor: 5, cents: 10_000 }]);
     expect(() => depositOptions({ minimumCents: 10_000, topUpCents: -1, limits: LIMITS, rail: "stripe_ach" })).toThrow(RangeError);
-    expect(describeDepositOption({ factor: 1, cents: 10_000 })).toBe("Your minimum");
-    expect(describeDepositOption({ factor: 3, cents: 30_000 })).toBe("3× your minimum");
+    expect(describeDepositOption({ factor: 1, cents: 10_000 })).toBe("Your reserve");
+    expect(describeDepositOption({ factor: 3, cents: 30_000 })).toBe("3× your reserve");
     expect(describeDepositOption({ factor: null, cents: 80_000 })).toBe("Your top-up amount");
   });
 
@@ -831,7 +831,7 @@ describe("adding money: the top-up step's picks again", () => {
 });
 
 /** The rewards rule as the rules page states it at the launch rates with USDC on offer. */
-const REWARDS_RULE = " Bank and USDC transfers earn 1% in rewards points when they land; a card charge earns none. 100 points are worth $1 on your orders. Points are used only on your orders here, and only once you choose in Wallet to auto-apply them; until you choose, they are saved up. New points do not expire. They are not cash: they cannot be paid out, do not count toward your minimum, and a payment your bank takes back takes its points back too.";
+const REWARDS_RULE = " Bank and USDC transfers earn 1% in rewards points when they land; a card charge earns none. 100 points are worth $1 on your orders. Points are used only on your orders here, and only once you choose in Wallet to auto-apply them; until you choose, they are saved up. New points do not expire. They are not cash: they cannot be paid out, do not count toward your reserve, and a payment your bank takes back takes its points back too.";
 
 describe("rewards in the wallet's words (funding design phase 7)", () => {
   const rates = { rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, rewardsExpiryDays: null };
@@ -949,7 +949,7 @@ describe("the add-money step's terms per way to pay", () => {
   it("lists a bank transfer's fee, landing time, credit and backup-card terms without an advance position", () => {
     expect(describeDepositRail({ ...bank, advance: null })).toEqual([
       "No fee.",
-      "Takes up to 5 business days (our assumption) to land, and counts toward your minimum as soon as it shows as on the way.",
+      "Takes up to 5 business days (our assumption) to land, and counts toward your reserve as soon as it shows as on the way.",
       "Earns 1% in rewards points once it lands.",
       "A business bank account can qualify to pay for orders while a transfer is still on the way; a personal account pays only once the money lands.",
       "While it is on the way, an order it cannot pay for is charged to Visa ending in 4242 for the shortfall plus 3%.",
@@ -1002,11 +1002,11 @@ describe("no card fee (funding design phase 7)", () => {
     expect(bank[1]).toContain("a $75 order with $20 available charges $55.");
     expect(bank[5]).toContain("Card charges carry no fee today, and that is the rate you agree to for automatic top-ups and covers; if Card Shellz ever adds a fee, we ask you to confirm before charging one.");
     const card = describeMandate({ ...free, sourceRail: "stripe_card", sourceLabel: "Visa ending in 4242", floorCents: 10_000, limitCents: 25_000 });
-    expect(card[0]).toBe("Charge Visa ending in 4242, with no fee, whenever an order takes your balance below your minimum of $100, and at the daily check: your top-up amount of $100 (your minimum), or more if that alone would not bring you back to $100.");
+    expect(card[0]).toBe("Charge Visa ending in 4242, with no fee, whenever an order takes your balance below your reserve of $100, and at the daily check: your top-up amount of $100 (your reserve), or more if that alone would not bring you back to $100.");
     expect(card[1]).toContain("is charged the shortfall, whatever its size (up to $5,000), and goes out at once; the next routine top-up then brings the balance back to $100 (no fee)");
     expect([...bank, ...card].join(" ")).not.toMatch(/0%|plus 0|\$0\.00 fee/);
-    expect(describePlanSentence(free)).toBe("In one sentence: you keep $250 in your wallet; when an order takes it lower, autopay pulls $250 from your bank for free, and your Visa ending in 4242 covers any shortfall.");
-    expect(describePlanSentence({ ...free, sourceRail: "stripe_card", sourceLabel: "Visa ending in 4242", floorCents: 10_000 })).toBe("In one sentence: you keep $100 in your wallet, topped up by $100 from your Visa ending in 4242 with no fee; the same card covers any shortfall.");
+    expect(describePlanSentence(free)).toBe("In one sentence: you keep a $250 reserve in your wallet; when an order takes it lower, autopay pulls $250 from your bank for free, and your Visa ending in 4242 covers any shortfall.");
+    expect(describePlanSentence({ ...free, sourceRail: "stripe_card", sourceLabel: "Visa ending in 4242", floorCents: 10_000 })).toBe("In one sentence: you keep a $100 reserve in your wallet, topped up by $100 from your Visa ending in 4242 with no fee; the same card covers any shortfall.");
     expect(describeActivationTopUp({ cardFundingFeeBps: 0 })).toContain("orders are charged to your backup card with no fee.");
     expect(describeActivationQuote({ terms: { ...free, sourceRail: "stripe_card", sourceLabel: "Visa ending in 4242", floorCents: 10_000 }, availableCents: 0, pendingCents: 0 }))
       .toBe("Balance now $0, so the first daily check after you activate charges $100 to Visa ending in 4242 (no fee), landing at once.");

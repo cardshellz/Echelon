@@ -80,7 +80,7 @@ export function describeWalletError(
     case "DROPSHIP_AUTO_RELOAD_AMOUNT_BELOW_MINIMUM":
     case "DROPSHIP_AUTO_RELOAD_INVALID_LIMITS":
       return {
-        text: `Your floor or limit is outside the allowed range: floor at least ${formatWholeDollars(limits.autoReloadMinTriggerCents)}, limit at least ${formatWholeDollars(limits.autoReloadMinAmountCents)} and at least your floor.`,
+        text: `Your reserve or top-up limit is outside the allowed range: reserve at least ${formatWholeDollars(limits.autoReloadMinTriggerCents)}, top-up limit at least ${formatWholeDollars(limits.autoReloadMinAmountCents)} and at least your reserve.`,
         recovery: { step: "floor" },
       };
     case "DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE": {
