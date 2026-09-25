@@ -37,6 +37,7 @@ import type {
   WalletLimits,
   WalletAdvance,
   WalletAdvanceReason,
+  WalletRewardsNextExpiry,
   WalletUsdcDeposit,
 } from "./dropship-wallet-view-adapter";
 
@@ -377,7 +378,7 @@ export const LEDGER_REASON_LABELS: Readonly<Record<WalletLedgerReason, string>> 
   rewards_spent: "Rewards used on an order",
   rewards_reversed: "Rewards taken back with a reversed payment",
   rewards_reinstated: "Rewards returned",
-  rewards_redeemed: "Rewards redeemed",
+  rewards_expired: "Rewards expired",
   return_fee: "Return fee",
   return_credit: "Return credit",
   insurance_pool_credit: "Insurance pool credit",
@@ -389,15 +390,22 @@ export const LEDGER_REASON_LABELS: Readonly<Record<WalletLedgerReason, string>> 
 // when they land, at the per-rail rates the server serves, 100 points per
 // dollar (one point per cent, so the stored cents are the points). They are
 // used only on .ops orders, and only once the vendor chooses to auto-apply
-// them; until then they are saved. Auto-apply is never a default.
+// them; until then they are saved. Auto-apply is never a default. Staff may
+// set an expiry (migration 0705): points keep the setting they were earned
+// under, and the ones closest to expiring are used first.
 // ---------------------------------------------------------------------------
 
 /** The ledger kinds that move the rewards balance rather than the cash balance. */
 export const REWARDS_LEDGER_REASONS: ReadonlySet<WalletLedgerReason> = new Set<WalletLedgerReason>([
-  "rewards_earned", "rewards_spent", "rewards_reversed", "rewards_reinstated", "rewards_redeemed",
+  "rewards_earned", "rewards_spent", "rewards_reversed", "rewards_reinstated", "rewards_expired",
 ]);
 
 export type WalletRewardsRates = Pick<WalletLimits, "rewardsRateBankBps" | "rewardsRateUsdcBps" | "rewardsRateCardBps">;
+/** The rates and the expiry setting: everything the rules sentence states. */
+export type WalletRewardsRules = WalletRewardsRates & Pick<WalletLimits, "rewardsExpiryDays">;
+
+/** The server's bound on the expiry setting (domain/wallet-rewards-expiry.ts): ten years. */
+const MAX_REWARDS_EXPIRY_DAYS = 3_650;
 export type WalletRewardsRail = WalletSourceRail | "usdc_base";
 
 const REWARDS_RATE_FIELDS = ["rewardsRateBankBps", "rewardsRateUsdcBps", "rewardsRateCardBps"] as const;
@@ -440,13 +448,14 @@ export function describeRewardsEarning(rail: WalletRewardsRail, rates: WalletRew
 
 /**
  * The rewards rule for the rules page: the per-rail rates, what a point is
- * worth, how points are used, and what they can never do. Empty when the
- * program is off. The rates are named per rail whenever they differ, and as
- * one rate when bank and USDC match (the launch setting: "bank and USDC earn
- * 1%").
+ * worth, how points are used, when they expire, and what they can never do.
+ * Empty when the program is off. The rates are named per rail whenever they
+ * differ, and as one rate when bank and USDC match (the launch setting: "bank
+ * and USDC earn 1%").
  */
-export function describeRewardsRule(rates: WalletRewardsRates, usdcOffered: boolean): string {
+export function describeRewardsRule(rates: WalletRewardsRules, usdcOffered: boolean): string {
   if (!rewardsOffered(rates)) return "";
+  const expiry = describeRewardsExpiryRule(rates.rewardsExpiryDays);
   const bank = formatFeeRate(rates.rewardsRateBankBps);
   const usdc = formatFeeRate(rates.rewardsRateUsdcBps);
   const card = formatFeeRate(rates.rewardsRateCardBps);
@@ -457,7 +466,48 @@ export function describeRewardsRule(rates: WalletRewardsRates, usdcOffered: bool
       ? `Bank and USDC transfers earn ${bank} in rewards points when they land`
       : `A bank transfer earns ${bank} in rewards points when it lands, a USDC transfer ${usdc}`;
   const cardClause = rates.rewardsRateCardBps > 0 ? `a card charge earns ${card} at once` : "a card charge earns none";
-  return ` ${earning}; ${cardClause}. ${REWARDS_POINTS_SENTENCE} Points are used only on your orders here, and only once you choose in Wallet to auto-apply them; until you choose, they are saved up. They are not cash: they cannot be paid out, do not count toward your minimum, and a payment your bank takes back takes its points back too.`;
+  return ` ${earning}; ${cardClause}. ${REWARDS_POINTS_SENTENCE} Points are used only on your orders here, and only once you choose in Wallet to auto-apply them; until you choose, they are saved up. ${expiry} They are not cash: they cannot be paid out, do not count toward your minimum, and a payment your bank takes back takes its points back too.`;
+}
+
+/**
+ * What happens to points earned from now on (migration 0705). Points keep the
+ * setting they were earned under, so the sentence speaks of new points; the
+ * next-expiry line under the points figure says what is actually due.
+ */
+export function describeRewardsExpiryRule(rewardsExpiryDays: number | null): string {
+  if (rewardsExpiryDays === null) return "New points do not expire.";
+  if (!Number.isSafeInteger(rewardsExpiryDays) || rewardsExpiryDays < 1 || rewardsExpiryDays > MAX_REWARDS_EXPIRY_DAYS) {
+    throw new RangeError(`rewardsExpiryDays must be null or a whole number of days from 1 to ${MAX_REWARDS_EXPIRY_DAYS}, got ${rewardsExpiryDays}`);
+  }
+  const days = `${rewardsExpiryDays.toLocaleString("en-US")} day${rewardsExpiryDays === 1 ? "" : "s"}`;
+  return `New points expire ${days} after they are earned, and the points closest to expiring are used first.`;
+}
+
+/**
+ * The soonest points leave the balance unless used, for the line under the
+ * points figure, or null when none are set to expire. The date is the
+ * viewer's own calendar date of the expiry instant (`timeZone` pins it for a
+ * test). Points past their instant stay in the balance until the wallet run
+ * removes them, and the line says so rather than showing a date gone by as
+ * still ahead.
+ */
+export function describeRewardsNextExpiry(
+  next: WalletRewardsNextExpiry | null,
+  options: { now: Date; timeZone?: string },
+): string | null {
+  if (next === null) return null;
+  if (!Number.isSafeInteger(next.cents) || next.cents <= 0) {
+    throw new RangeError(`next expiry cents must be a positive safe integer, got ${next.cents}`);
+  }
+  const expiresAt = new Date(next.expiresAt);
+  if (Number.isNaN(expiresAt.getTime())) throw new RangeError(`next expiry expiresAt must be a valid instant, got ${next.expiresAt}`);
+  const date = expiresAt.toLocaleDateString("en-US", { timeZone: options.timeZone, year: "numeric", month: "long", day: "numeric" });
+  const amount = `${formatPoints(next.cents)} (${formatSignedCents(next.cents)})`;
+  const plural = next.cents !== 1;
+  if (expiresAt.getTime() <= options.now.getTime()) {
+    return `${amount} reached ${plural ? "their" : "its"} expiry date on ${date} and ${plural ? "are" : "is"} being removed.`;
+  }
+  return `${amount} ${plural ? "expire" : "expires"} on ${date}.`;
 }
 
 /** The one sentence that names the unit, worded once and quoted wherever points are explained. */

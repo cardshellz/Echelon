@@ -465,6 +465,11 @@ function serializeVendorWalletView(
     ...serializeWalletOverview(wallet),
     listingTiers: serializeListingTiers(listingTiers),
     usdcDeposit,
+    // The soonest rewards points expire unless used (funding design phase 7):
+    // integer cents (one point per cent) and an ISO instant, or null.
+    rewardsNextExpiry: wallet.rewardsNextExpiry
+      ? { expiresAt: wallet.rewardsNextExpiry.expiresAt.toISOString(), cents: wallet.rewardsNextExpiry.cents }
+      : null,
     limits: {
       autoReloadMinTriggerCents: wallet.limits.autoReloadMinTriggerCents,
       caseTierMinimumCents: wallet.limits.caseTierMinimumCents,
@@ -483,6 +488,8 @@ function serializeVendorWalletView(
       rewardsRateBankBps: wallet.limits.rewardsRateBankBps,
       rewardsRateUsdcBps: wallet.limits.rewardsRateUsdcBps,
       rewardsRateCardBps: wallet.limits.rewardsRateCardBps,
+      // Days until unused points expire, or null for never (funding design phase 7).
+      rewardsExpiryDays: wallet.limits.rewardsExpiryDays,
       // Whether linking a bank account reads its balance at all. False means no
       // account can become advance-eligible, however many times it is relinked,
       // so the vendor must be told that rather than told to try again.

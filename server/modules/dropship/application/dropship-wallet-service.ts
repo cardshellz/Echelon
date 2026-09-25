@@ -111,16 +111,16 @@ export const dropshipWalletLedgerTypeSchema = z.enum([
   "funding_reversal",
   "funding_reinstated",
   /**
-   * The spend-only rewards balance (migration 0702): earned on a settled
-   * transfer, spent on an order debit, taken back with the transfer that
-   * earned them and returned when that dispute is won, redeemed outside the
-   * wallet (no writer at launch).
+   * Rewards points (migration 0702): earned on a settled transfer, spent on
+   * an order debit, taken back with the transfer that earned them and
+   * returned when that dispute is won; expired when unused past their date
+   * (migration 0705, which retired the never-written coupon kind).
    */
   "rewards_earned",
   "rewards_spent",
   "rewards_reversed",
   "rewards_reinstated",
-  "rewards_redeemed",
+  "rewards_expired",
 ]);
 export type DropshipWalletLedgerType = z.infer<typeof dropshipWalletLedgerTypeSchema>;
 
@@ -484,11 +484,19 @@ export interface DropshipUsdcLedgerEntryRecord {
   voidedAt: Date | null;
 }
 
+/** The soonest instant rewards points leave the balance unless used, and how many (migration 0705). */
+export interface DropshipRewardsNextExpiryRecord {
+  expiresAt: Date;
+  cents: number;
+}
+
 export interface DropshipWalletOverview {
   account: DropshipWalletAccountRecord;
   autoReload: DropshipAutoReloadSettingRecord | null;
   fundingMethods: DropshipFundingMethodRecord[];
   recentLedger: DropshipWalletLedgerRecord[];
+  /** Null when no points are set to expire: none held, or none earned while an expiry was set. */
+  rewardsNextExpiry: DropshipRewardsNextExpiryRecord | null;
 }
 
 /** The overview as served to a vendor or admin: stored state plus the fee policy in force. */

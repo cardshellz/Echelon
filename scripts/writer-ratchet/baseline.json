@@ -356,6 +356,12 @@
   "dropship.dropship_wallet_policies": [
     "modules/dropship"
   ],
+  "dropship.dropship_wallet_rewards_lot_movements": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_wallet_rewards_lots": [
+    "modules/dropship"
+  ],
   "dropship.dropship_zone_rules": [
     "modules/dropship"
   ],

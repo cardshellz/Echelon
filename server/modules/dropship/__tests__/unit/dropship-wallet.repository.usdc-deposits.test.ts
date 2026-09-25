@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Pool, PoolClient } from "pg";
 import { PgDropshipWalletRepository } from "../../infrastructure/dropship-wallet.repository";
 import type { ObserveDropshipUsdcDepositRepositoryInput } from "../../application/dropship-wallet-service";
+import { createFakeRewardsLots } from "../fixtures/fake-rewards-lots";
 
 vi.hoisted(() => {
   process.env.DATABASE_URL = process.env.DATABASE_URL ?? "postgres://test:test@localhost:5432/test";
@@ -64,8 +65,12 @@ function observation(overrides: Partial<ObserveDropshipUsdcDepositRepositoryInpu
 function fakeDatabase(options: { usdcRow?: Record<string, unknown> | null; ledgerRow?: Record<string, unknown>; accountRow?: Record<string, unknown>; usdcInsertError?: Error } = {}) {
   const statements: string[] = [];
   const params: Record<string, unknown[]> = {};
+  // The rewards lots (migration 0705) the accrual opens for the points a deposit earns.
+  const lots = createFakeRewardsLots();
   const query = vi.fn(async (sql: string, args?: unknown[]) => {
     statements.push(sql.trim().split(/\s+/).slice(0, 2).join(" "));
+    const lotAnswer = lots.handle(sql, args);
+    if (lotAnswer) return lotAnswer;
     if (sql.includes("INSERT INTO dropship.dropship_wallet_accounts")) return { rows: [] };
     if (sql.includes("FROM dropship.dropship_wallet_accounts")) return { rows: [makeAccountRow(options.accountRow)] };
     if (sql.includes("UPDATE dropship.dropship_wallet_accounts")) {
@@ -112,7 +117,7 @@ function fakeDatabase(options: { usdcRow?: Record<string, unknown> | null; ledge
     }
     return { rows: [] };
   });
-  return { query, statements, params, repository: new PgDropshipWalletRepository(makePool(query)) };
+  return { query, statements, params, lots, repository: new PgDropshipWalletRepository(makePool(query)) };
 }
 
 describe("PgDropshipWalletRepository watched USDC deposits (funding design phase 6)", () => {
@@ -150,6 +155,8 @@ describe("PgDropshipWalletRepository watched USDC deposits (funding design phase
     expect(db.params.rewardsInsert?.slice(8, 11)).toEqual(["wallet_funding_rewards", "1", "rewards-earned:1"]);
     expect(db.params.rewardsInsert?.[16]).toBe(25);
     expect(db.params.rewardsBalances?.[5]).toBe(25);
+    // The points are a lot of their own, tied to their row, never expiring at the launch setting.
+    expect(db.lots.lots).toEqual([expect.objectContaining({ source: "earned", origin_ledger_entry_id: 900, remaining_cents: 25, expires_at: null })]);
   });
 
   it("records dust without moving money or writing a ledger row", async () => {

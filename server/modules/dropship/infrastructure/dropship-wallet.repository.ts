@@ -12,7 +12,22 @@ import { decideFundingMethodRemoval } from "../domain/funding-method-removal";
 import type { DropshipAdvanceContext } from "../domain/acceptance-funding";
 import { decideFundingReversal } from "../domain/funding-reversal";
 import { decideRewardsAccrual, decideRewardsClawback, type DropshipRewardsRail } from "../domain/wallet-rewards";
-import { loadRewardsRatesInForceWithClient } from "./dropship-wallet-rewards.reader";
+import { isRewardsLotDue, orderRewardsLotsForUse, rewardsLotExpiresAt } from "../domain/wallet-rewards-expiry";
+import { loadRewardsPolicyInForceWithClient } from "./dropship-wallet-rewards.reader";
+import {
+  addEarnedRewardsLotWithClient,
+  countRewardsLotExpiriesWithClient,
+  loadRewardsNextExpiryWithClient,
+  reconcileRewardsLotsWithClient,
+  restoreRewardsToLotsWithClient,
+  takeRewardsFromLotsWithClient,
+} from "./dropship-wallet-rewards-lots";
+import type {
+  DropshipExpiredRewardsLot,
+  DropshipRewardsExpiryAccountOutcome,
+  DropshipRewardsExpiryAccountRef,
+  DropshipRewardsExpiryRepository,
+} from "../application/dropship-wallet-rewards-expiry-service";
 import { pauseDropshipVendorWithClient } from "./dropship-vendor-standing.repository";
 import { usdcTransactionReferenceId } from "../application/dropship-wallet-service";
 import { loadAdvancePolicyWithClient, loadAdvanceSourcesWithClient } from "./dropship-advance.reader";
@@ -162,7 +177,8 @@ const USDC_LEDGER_COLUMNS = `id, vendor_id, wallet_ledger_id, chain_id, transact
             status, observed_at, settled_at, log_index, block_number, block_hash,
             token_address, deposit_address_id, dust_atomic_units, voided_at`;
 
-export class PgDropshipWalletRepository implements DropshipWalletRepository, DropshipUsdcDepositLedgerRepository {
+export class PgDropshipWalletRepository
+  implements DropshipWalletRepository, DropshipUsdcDepositLedgerRepository, DropshipRewardsExpiryRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
 
   async getOrCreateWalletAccount(input: {
@@ -200,12 +216,14 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
       const fundingMethods = await listFundingMethodsWithClient(client, input.vendorId);
       const autoReload = await getAutoReloadSettingWithClient(client, input.vendorId);
       const recentLedger = await listLedgerWithClient(client, input.vendorId, input.ledgerLimit);
+      const rewardsNextExpiry = await loadRewardsNextExpiryWithClient(client, account.walletAccountId);
       await client.query("COMMIT");
       return {
         account,
         fundingMethods,
         autoReload,
         recentLedger,
+        rewardsNextExpiry,
       };
     } catch (error) {
       await rollbackQuietly(client);
@@ -1555,6 +1573,16 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         createdAt: input.occurredAt,
       });
       if (clawback.fromRewardsCents > 0) {
+        // The points leave the credit's own lot first (migration 0705), then
+        // the others in use order: they are the points this credit earned.
+        const lots = await reconcileRewardsLotsWithClient(client, {
+          account,
+          cause: "rewards_reversed",
+          now: input.occurredAt,
+        });
+        const earnedLot = earned
+          ? lots.find((lot) => lot.source === "earned" && lot.originLedgerEntryId === earned.ledgerEntryId) ?? null
+          : null;
         const rewardsReversal = await insertLedgerEntryWithClient(client, {
           walletAccountId: account.walletAccountId,
           vendorId: credit.vendorId,
@@ -1582,6 +1610,14 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
           createdAt: input.occurredAt,
           settledAt: input.occurredAt,
         });
+        const lotTakes = await takeRewardsFromLotsWithClient(client, {
+          walletAccountId: account.walletAccountId,
+          lots,
+          amountCents: clawback.fromRewardsCents,
+          ledgerEntryId: rewardsReversal.ledgerEntryId,
+          preferredLotId: earnedLot?.lotId ?? null,
+          now: input.occurredAt,
+        });
         await recordWalletAuditEvent(client, {
           vendorId: credit.vendorId,
           entityType: "dropship_wallet_ledger",
@@ -1589,6 +1625,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
           eventType: "wallet_rewards_reversed",
           payload: {
             ...serializeLedgerForAudit(rewardsReversal),
+            rewardsLotTakes: lotTakes,
             before: { rewardsBalanceCents: account.rewardsBalanceCents },
             after: { rewardsBalanceCents: nextRewards },
           },
@@ -1768,6 +1805,11 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         createdAt: input.occurredAt,
       });
       if (rewardsReversal && rewardsBackCents > 0) {
+        await reconcileRewardsLotsWithClient(client, {
+          account,
+          cause: "rewards_reinstated",
+          now: input.occurredAt,
+        });
         const rewardsReinstatement = await insertLedgerEntryWithClient(client, {
           walletAccountId: account.walletAccountId,
           vendorId: reversal.vendorId,
@@ -1793,6 +1835,15 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
           createdAt: input.occurredAt,
           settledAt: input.occurredAt,
         });
+        // Back to the lots the clawback took them from, each keeping its own
+        // expiry date (migration 0705).
+        const restored = await restoreRewardsToLotsWithClient(client, {
+          account,
+          takenByLedgerEntryId: rewardsReversal.ledgerEntryId,
+          ledgerEntryId: rewardsReinstatement.ledgerEntryId,
+          amountCents: rewardsBackCents,
+          now: input.occurredAt,
+        });
         await recordWalletAuditEvent(client, {
           vendorId: reversal.vendorId,
           entityType: "dropship_wallet_ledger",
@@ -1800,6 +1851,8 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
           eventType: "wallet_rewards_reinstated",
           payload: {
             ...serializeLedgerForAudit(rewardsReinstatement),
+            rewardsLotRestores: restored.restores,
+            rewardsRestoredLotId: restored.restoredLot?.lotId ?? null,
             before: { rewardsBalanceCents: account.rewardsBalanceCents },
             after: { rewardsBalanceCents: nextRewards },
           },
@@ -1851,6 +1904,145 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
       });
       if (!account) return null;
       return { vendorId: reversal.vendorId, account, reversal, reinstatement, idempotentReplay: true };
+    } finally {
+      client.release();
+    }
+  }
+
+  async listWalletAccountsWithDueRewards(input: { now: Date; limit: number }): Promise<DropshipRewardsExpiryAccountRef[]> {
+    const result = await this.dbPool.query<{ wallet_account_id: number; vendor_id: number }>(
+      `SELECT wallet_account_id, vendor_id
+       FROM dropship.dropship_wallet_rewards_lots
+       WHERE remaining_cents > 0
+         AND expires_at IS NOT NULL
+         AND expires_at <= $1
+       GROUP BY wallet_account_id, vendor_id
+       ORDER BY MIN(expires_at) ASC, wallet_account_id ASC
+       LIMIT $2`,
+      [input.now, input.limit],
+    );
+    return result.rows.map((row) => ({ walletAccountId: row.wallet_account_id, vendorId: row.vendor_id }));
+  }
+
+  /**
+   * Expires what is left of each of the wallet's lots past its date (funding
+   * design phase 7, migration 0705): one `rewards_expired` row per lot, its
+   * lot movement and audit row, and the rewards balance lowered by the total,
+   * in one transaction under the wallet account row lock. The row's reference
+   * is the lot and how many times it has expired: a lot a won dispute refilled
+   * after it expired can expire again, and each time is its own row.
+   *
+   * Points expire whatever the account's status: their life was fixed when
+   * they were earned.
+   */
+  async expireDueRewardsForAccount(
+    input: DropshipRewardsExpiryAccountRef & { now: Date },
+  ): Promise<DropshipRewardsExpiryAccountOutcome> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const account = await loadWalletAccountByIdWithClient(client, {
+        vendorId: input.vendorId,
+        walletAccountId: input.walletAccountId,
+        forUpdate: true,
+      });
+      if (!account) {
+        throw new DropshipError(
+          "DROPSHIP_WALLET_ACCOUNT_NOT_FOUND",
+          "Dropship wallet account was not found.",
+          { vendorId: input.vendorId, walletAccountId: input.walletAccountId, classification: "fatal" },
+        );
+      }
+      const lots = await reconcileRewardsLotsWithClient(client, {
+        account,
+        cause: "rewards_expired",
+        now: input.now,
+      });
+      const due = orderRewardsLotsForUse(lots.filter((lot) => isRewardsLotDue(lot, input.now)));
+      const expiredLots: DropshipExpiredRewardsLot[] = [];
+      let rewardsBalanceCents = account.rewardsBalanceCents;
+      for (const lot of due) {
+        const sequence = (await countRewardsLotExpiriesWithClient(client, lot.lotId)) + 1;
+        const referenceId = `${lot.lotId}:${sequence}`;
+        const nextRewards = rewardsBalanceCents - lot.remainingCents;
+        const ledgerEntry = await insertLedgerEntryWithClient(client, {
+          walletAccountId: account.walletAccountId,
+          vendorId: account.vendorId,
+          type: "rewards_expired",
+          status: "settled",
+          amountCents: -lot.remainingCents,
+          currency: account.currency,
+          availableBalanceAfterCents: account.availableBalanceCents,
+          pendingBalanceAfterCents: account.pendingBalanceCents,
+          rewardsBalanceAfterCents: nextRewards,
+          referenceType: REWARDS_EXPIRY_REFERENCE_TYPE,
+          referenceId,
+          idempotencyKey: `rewards-expired:${referenceId}`,
+          fundingMethodId: null,
+          externalTransactionId: null,
+          metadata: {
+            rewardsLotId: lot.lotId,
+            lotSource: lot.source,
+            originLedgerEntryId: lot.originLedgerEntryId,
+            earnedCents: lot.earnedCents,
+            earnedAt: lot.earnedAt.toISOString(),
+            expiryDays: lot.expiryDays,
+            expiresAt: lot.expiresAt?.toISOString() ?? null,
+            expiredCents: lot.remainingCents,
+            sequence,
+          },
+          createdAt: input.now,
+          settledAt: input.now,
+        });
+        await takeRewardsFromLotsWithClient(client, {
+          walletAccountId: account.walletAccountId,
+          lots: [lot],
+          amountCents: lot.remainingCents,
+          ledgerEntryId: ledgerEntry.ledgerEntryId,
+          now: input.now,
+        });
+        await recordWalletAuditEvent(client, {
+          vendorId: account.vendorId,
+          entityType: "dropship_wallet_ledger",
+          entityId: String(ledgerEntry.ledgerEntryId),
+          eventType: "wallet_rewards_expired",
+          payload: {
+            ...serializeLedgerForAudit(ledgerEntry),
+            rewardsLotId: lot.lotId,
+            before: { rewardsBalanceCents },
+            after: { rewardsBalanceCents: nextRewards },
+          },
+          createdAt: input.now,
+        });
+        expiredLots.push({
+          lotId: lot.lotId,
+          cents: lot.remainingCents,
+          ledgerEntryId: ledgerEntry.ledgerEntryId,
+          expiresAt: lot.expiresAt,
+        });
+        rewardsBalanceCents = nextRewards;
+      }
+      if (expiredLots.length > 0) {
+        await updateWalletBalancesWithClient(client, {
+          walletAccountId: account.walletAccountId,
+          vendorId: account.vendorId,
+          availableBalanceCents: account.availableBalanceCents,
+          pendingBalanceCents: account.pendingBalanceCents,
+          rewardsBalanceCents,
+          updatedAt: input.now,
+        });
+      }
+      await client.query("COMMIT");
+      return {
+        walletAccountId: account.walletAccountId,
+        vendorId: account.vendorId,
+        expiredLots,
+        rewardsBalanceBeforeCents: account.rewardsBalanceCents,
+        rewardsBalanceAfterCents: rewardsBalanceCents,
+      };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
     } finally {
       client.release();
     }
@@ -2519,6 +2711,10 @@ async function voidPendingFundingWithClient(
  * replayed settlement finds the row and moves nothing. A zero rate or an
  * amount too small to earn a cent writes nothing: the ledger refuses a zero
  * amount, and the credit's own row already records the settlement.
+ *
+ * The points become a lot of their own (migration 0705), dated from the
+ * expiry setting in force now, so a later change to the setting leaves them
+ * as they were earned.
  */
 async function accrueRewardsForSettledCreditWithClient(
   client: PoolClient,
@@ -2529,11 +2725,11 @@ async function accrueRewardsForSettledCreditWithClient(
     occurredAt: Date;
   },
 ): Promise<{ account: DropshipWalletAccountRecord; ledgerEntry: DropshipWalletLedgerRecord } | null> {
-  const rates = await loadRewardsRatesInForceWithClient(client);
+  const policy = await loadRewardsPolicyInForceWithClient(client);
   const decision = decideRewardsAccrual({
     rail: input.rail,
     creditAmountCents: input.credit.amountCents,
-    rates,
+    rates: policy.rates,
   });
   if (decision.rewardsCents === 0) {
     return null;
@@ -2548,6 +2744,12 @@ async function accrueRewardsForSettledCreditWithClient(
   if (existing) {
     return { account: input.account, ledgerEntry: existing };
   }
+  await reconcileRewardsLotsWithClient(client, {
+    account: input.account,
+    cause: "rewards_earned",
+    now: input.occurredAt,
+  });
+  const expiresAt = rewardsLotExpiresAt({ earnedAt: input.occurredAt, expiryDays: policy.expiryDays });
   const nextRewards = input.account.rewardsBalanceCents + decision.rewardsCents;
   const updatedAccount = await updateWalletBalancesWithClient(client, {
     walletAccountId: input.account.walletAccountId,
@@ -2577,9 +2779,20 @@ async function accrueRewardsForSettledCreditWithClient(
       creditAmountCents: input.credit.amountCents,
       rateBps: decision.rateBps,
       rail: input.rail,
+      // When these points expire, fixed now: null is never.
+      expiryDays: policy.expiryDays,
+      expiresAt: expiresAt?.toISOString() ?? null,
     },
     createdAt: input.occurredAt,
     settledAt: input.occurredAt,
+  });
+  const lot = await addEarnedRewardsLotWithClient(client, {
+    account: input.account,
+    ledgerEntryId: ledgerEntry.ledgerEntryId,
+    cents: decision.rewardsCents,
+    earnedAt: input.occurredAt,
+    expiryDays: policy.expiryDays,
+    now: input.occurredAt,
   });
   await recordWalletAuditEvent(client, {
     vendorId: input.account.vendorId,
@@ -2588,6 +2801,7 @@ async function accrueRewardsForSettledCreditWithClient(
     eventType: "wallet_rewards_earned",
     payload: {
       ...serializeLedgerForAudit(ledgerEntry),
+      rewardsLotId: lot.lotId,
       before: { rewardsBalanceCents: input.account.rewardsBalanceCents },
       after: { rewardsBalanceCents: nextRewards },
     },
@@ -2711,6 +2925,8 @@ const DISPUTE_REINSTATEMENT_REFERENCE_TYPE = "stripe_dispute_reinstated";
 const REWARDS_EARNED_REFERENCE_TYPE = "wallet_funding_rewards";
 const DISPUTE_REWARDS_REVERSAL_REFERENCE_TYPE = "stripe_dispute_rewards";
 const DISPUTE_REWARDS_REINSTATEMENT_REFERENCE_TYPE = "stripe_dispute_rewards_reinstated";
+/** One `rewards_expired` row per lot and expiry, referenced `${lotId}:${sequence}` (migration 0705). */
+const REWARDS_EXPIRY_REFERENCE_TYPE = "wallet_rewards_lot_expiry";
 
 /**
  * A ledger row by its provider reference, across vendors: a dispute names

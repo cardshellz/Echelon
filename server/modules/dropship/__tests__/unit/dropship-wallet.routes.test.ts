@@ -166,7 +166,9 @@ describe("dropship wallet routes card fee exposure", () => {
             rewardsRateBankBps: 100,
             rewardsRateUsdcBps: 100,
             rewardsRateCardBps: 0,
+            rewardsExpiryDays: 180,
           },
+          rewardsNextExpiry: { expiresAt: new Date("2026-12-01T00:00:00.000Z"), cents: 1_250 },
         };
       },
       getWalletForVendor: async () => ({
@@ -188,6 +190,8 @@ describe("dropship wallet routes card fee exposure", () => {
           advanceCapCents: 75_000,
           tierChangeGraceDays: 21,
         },
+        // Present on the record; the admin serializer must still leave it out.
+        rewardsNextExpiry: { expiresAt: new Date("2026-12-01T00:00:00.000Z"), cents: 1_250 },
       }),
       configureAutoReload: async (input: unknown) => {
         configureInputs.push(input);
@@ -257,9 +261,18 @@ describe("dropship wallet routes card fee exposure", () => {
       rewardsRateBankBps: 100,
       rewardsRateUsdcBps: 100,
       rewardsRateCardBps: 0,
+      // Days until unused points expire, or null for never (migration 0705).
+      rewardsExpiryDays: 180,
       // Served so the wallet page knows whether "link it again" is a real fix.
       bankBalanceReadOffered: false,
     });
+  });
+
+  it("serves the soonest points expiry as integer cents and an ISO instant", async () => {
+    const response = await jsonRequest(`${server.url}/api/dropship/wallet`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.wallet.rewardsNextExpiry).toEqual({ expiresAt: "2026-12-01T00:00:00.000Z", cents: 1_250 });
   });
 
   it("serves the listing tiers the vendor is held to, with the raise in grace and its date", async () => {
@@ -284,6 +297,7 @@ describe("dropship wallet routes card fee exposure", () => {
     expect(response.status).toBe(200);
     expect(response.body.wallet.limits).toBeUndefined();
     expect(response.body.wallet.listingTiers).toBeUndefined();
+    expect(response.body.wallet.rewardsNextExpiry).toBeUndefined();
     expect(response.body.wallet.cardFundingFeeBps).toBe(300);
   });
 

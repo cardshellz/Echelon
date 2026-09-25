@@ -26,6 +26,7 @@ import {
   parseDropshipWalletPolicyMutation,
   parseDropshipWalletPolicyOverview,
   parsePercentToBasisPoints,
+  parseExpiryDays,
   parseWholeDays,
   type DropshipWalletPolicyForm,
   type DropshipWalletPolicyLimitsView,
@@ -48,6 +49,8 @@ const LIMITS: DropshipWalletPolicyLimitsView = {
   rewardsRateBankBps: 100,
   rewardsRateUsdcBps: 100,
   rewardsRateCardBps: 0,
+  // Migration 0705: points never expire at launch.
+  rewardsExpiryDays: null,
 };
 
 function baselineForm(patch: Partial<DropshipWalletPolicyForm> = {}): DropshipWalletPolicyForm {
@@ -108,8 +111,11 @@ describe("dropship wallet policy form model", () => {
       rewardsRateBankPercent: "1.00",
       rewardsRateUsdcPercent: "1.00",
       rewardsRateCardPercent: "0.00",
+      // Blank is never.
+      rewardsExpiryDays: "",
       changeNote: "",
     });
+    expect(dropshipWalletPolicyFormFromLimits({ ...LIMITS, rewardsExpiryDays: 365 }).rewardsExpiryDays).toBe("365");
     expect(centsToDollarInput(1)).toBe("0.01");
     expect(centsToDollarInput(0)).toBe("0.00");
     expect(centsToDollarInput(123_456)).toBe("1234.56");
@@ -117,7 +123,7 @@ describe("dropship wallet policy form model", () => {
     expect(basisPointsToPercentInput(0)).toBe("0.00");
   });
 
-  it("lists the fifteen limits in display order, each mapped to its own form field", () => {
+  it("lists the sixteen limits in display order, each mapped to its own form field", () => {
     expect(DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS.map((descriptor) => descriptor.limitField)).toEqual([
       "autoReloadMinTriggerCents",
       "caseTierMinimumCents",
@@ -134,11 +140,34 @@ describe("dropship wallet policy form model", () => {
       "rewardsRateBankBps",
       "rewardsRateUsdcBps",
       "rewardsRateCardBps",
+      "rewardsExpiryDays",
     ]);
-    expect(new Set(DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS.map((descriptor) => descriptor.formField)).size).toBe(15);
+    expect(new Set(DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS.map((descriptor) => descriptor.formField)).size).toBe(16);
+    expect(DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS.at(-1)).toMatchObject({ label: "Rewards points expiry", unit: "days_or_never" });
     // Only the advance fee, the advance cap, the grace, the card fee and the rewards rates may be zero.
     expect(DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS.filter((descriptor) => descriptor.allowZero).map((descriptor) => descriptor.limitField))
       .toEqual(["advanceFeeBps", "advanceCapCents", "tierChangeGraceDays", "cardFundingFeeBps", "rewardsRateBankBps", "rewardsRateUsdcBps", "rewardsRateCardBps"]);
+  });
+
+  it("reads the points expiry box: blank is never, whole days from 1 to 3,650, anything else refused", () => {
+    expect(parseExpiryDays("")).toEqual({ ok: true, days: null });
+    expect(parseExpiryDays("   ")).toEqual({ ok: true, days: null });
+    expect(parseExpiryDays("365")).toEqual({ ok: true, days: 365 });
+    expect(parseExpiryDays(" 1 ")).toEqual({ ok: true, days: 1 });
+    expect(parseExpiryDays("3650")).toEqual({ ok: true, days: 3_650 });
+    expect(parseExpiryDays("3651")).toEqual({ ok: false, reason: "range" });
+    expect(parseExpiryDays("0")).toEqual({ ok: false, reason: "format" });
+    expect(parseExpiryDays("-5")).toEqual({ ok: false, reason: "format" });
+    expect(parseExpiryDays("30.5")).toEqual({ ok: false, reason: "format" });
+    expect(parseExpiryDays("never")).toEqual({ ok: false, reason: "format" });
+
+    const never = parseDropshipWalletPolicyForm(baselineForm({ rewardsExpiryDays: "" }));
+    expect(never.success && never.limits.rewardsExpiryDays).toBeNull();
+    const days = parseDropshipWalletPolicyForm(baselineForm({ rewardsExpiryDays: "180" }));
+    expect(days.success && days.limits.rewardsExpiryDays).toBe(180);
+    // Setting an expiry where there was none is a change worth publishing.
+    expect(isDropshipWalletPolicyFormDirty(baselineForm({ rewardsExpiryDays: "180" }), LIMITS)).toBe(true);
+    expect(isDropshipWalletPolicyFormDirty(baselineForm(), LIMITS)).toBe(false);
   });
 
   it("parses dollars and percents into integers without floating-point arithmetic", () => {
@@ -194,6 +223,7 @@ describe("dropship wallet policy form model", () => {
       rewardsRateBankPercent: "11",
       rewardsRateUsdcPercent: "-1",
       rewardsRateCardPercent: "1",
+      rewardsExpiryDays: "0",
       changeNote: "",
     });
     expect(parsed.success).toBe(false);
@@ -204,6 +234,7 @@ describe("dropship wallet policy form model", () => {
     expect(parsed.errors.rewardsRateBankPercent).toBe("Rewards on bank transfers cannot exceed 10%.");
     expect(parsed.errors.rewardsRateUsdcPercent).toContain("percentage of zero or more");
     expect(parsed.errors.rewardsRateCardPercent).toBeUndefined();
+    expect(parsed.errors.rewardsExpiryDays).toBe("Rewards points expiry must be blank (never) or a whole number of days from 1 to 3,650.");
     expect(parsed.errors.manualFundingMinDollars).toContain("greater than zero");
     expect(parsed.errors.manualFundingMaxDollars).toContain("at most two decimal places");
     expect(parsed.errors.defaultPaymentHoldTimeoutMinutes).toBe(
@@ -345,6 +376,7 @@ describe("dropship wallet policy form model", () => {
       rewardsRateBankBps: 100,
       rewardsRateUsdcBps: 100,
       rewardsRateCardBps: 0,
+      rewardsExpiryDays: null,
     }).map((violation) => violation.field)).toEqual([
       "manualFundingMaxCents",
       "autoReloadMinAmountCents",
@@ -402,8 +434,11 @@ describe("dropship wallet policy form model", () => {
       + "|defaultPaymentHoldTimeoutMinutes=1440|holdExpiryWarningMinutes=120"
       + "|advanceFeeBps=100|advanceCapCents=50000|tierChangeGraceDays=14"
       + "|cardFundingFeeBps=0|cardFundingMinCents=10000"
-      + "|rewardsRateBankBps=100|rewardsRateUsdcBps=100|rewardsRateCardBps=0",
+      + "|rewardsRateBankBps=100|rewardsRateUsdcBps=100|rewardsRateCardBps=0"
+      + "|rewardsExpiryDays=null",
     );
+    expect(dropshipWalletPolicyLimitsKey({ ...LIMITS, rewardsExpiryDays: 365 }))
+      .not.toBe(dropshipWalletPolicyLimitsKey(LIMITS));
     expect(dropshipWalletPolicyLimitsKey({ ...LIMITS, advanceCapCents: 50_001 }))
       .not.toBe(dropshipWalletPolicyLimitsKey(LIMITS));
   });
@@ -458,11 +493,17 @@ describe("dropship wallet policy form model", () => {
       "idempotencyKey",
       "manualFundingMaxCents",
       "manualFundingMinCents",
+      "rewardsExpiryDays",
       "rewardsRateBankBps",
       "rewardsRateCardBps",
       "rewardsRateUsdcBps",
       "tierChangeGraceDays",
     ]);
+    // Never is sent as null, never left out: the server requires the key on every version.
+    expect(request.rewardsExpiryDays).toBeNull();
+    expect(buildDropshipWalletPolicyVersionRequest({
+      limits: { ...LIMITS, rewardsExpiryDays: 180 }, changeNote: null, idempotencyKey: "dropship-wallet-policy:0d9f",
+    }).rewardsExpiryDays).toBe(180);
     expect(request).toMatchObject({
       ...LIMITS,
       changeNote: "Raised the floor for Q4.",
@@ -561,6 +602,7 @@ describe("dropship wallet policy form model", () => {
         rewardsRateBankBps: null,
         rewardsRateUsdcBps: null,
         rewardsRateCardBps: null,
+        rewardsExpiryDays: null,
       },
       impact: {
         proposedAutoReloadMinTriggerCents: 10_000,
