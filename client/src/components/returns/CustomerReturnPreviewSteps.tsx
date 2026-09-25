@@ -1,7 +1,7 @@
+import { useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
-  Check,
   Info,
   Loader2,
   Package,
@@ -14,15 +14,20 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CustomerReturnParcelDetails } from "./CustomerReturnParcelDetails";
+import { CustomerReturnPackingSummary } from "./CustomerReturnPackingSummary";
+import {
+  changePreviewPackingQuantity,
+  previewPackingItemContext,
+  previewParcelQuantityLimit,
+  summarizePreviewPacking,
+} from "@/lib/customer-return-packing";
 import {
   customPreviewParcelSize,
   formatPreviewDimensions,
   formatPreviewProductWeight,
   previewParcelProductWeight,
-  reconcilePreviewParcelSize,
 } from "@/lib/customer-return-parcels";
 import {
-  MAX_RETURN_FLOW_PARCELS,
   type CustomerReturnFlowOrder,
   type CustomerReturnFlowReason,
   type CustomerReturnFlowReview,
@@ -322,11 +327,19 @@ export function PreviewPacking({
   onContinue: () => void;
   onBack: () => void;
 }) {
+  const [quantityError, setQuantityError] = useState<{
+    parcelKey: number;
+    lineId: string;
+    message: string;
+  } | null>(null);
+  const summary = summarizePreviewPacking(selections, parcels);
   const weightNeedsVerification = parcels.some(
     (parcel) =>
       previewParcelProductWeight(order, parcel).status === "unverified",
   );
   function addBox() {
+    if (busy || !summary.canAddBox) return;
+    setQuantityError(null);
     const key = Math.max(0, ...parcels.map((parcel) => parcel.key)) + 1;
     onChange([
       ...parcels,
@@ -345,8 +358,9 @@ export function PreviewPacking({
   return (
     <div className="space-y-6">
       <PreviewNote>
-        Items that arrived in separate shipments can go back together. Start
-        with one box, or add another if you need more room.
+        Pack the items you selected across your boxes. Items from separate
+        shipments can go back together. To return more items, choose Change
+        return items below.
       </PreviewNote>
       <div className="space-y-4">
         {parcels.map((parcel, index) => (
@@ -371,13 +385,14 @@ export function PreviewPacking({
                   aria-label={`Remove box ${index + 1}`}
                   className="min-h-11"
                   disabled={busy}
-                  onClick={() =>
+                  onClick={() => {
+                    setQuantityError(null);
                     onChange(
                       parcels.filter(
                         (candidate) => candidate.key !== parcel.key,
                       ),
-                    )
-                  }
+                    );
+                  }}
                 >
                   <Trash2 className="mr-1 h-4 w-4" />
                   Remove
@@ -403,55 +418,89 @@ export function PreviewPacking({
                   (item) => item.id === selection.lineId,
                 )!;
                 const description = describePreviewItem(order, line.id);
+                const context = previewPackingItemContext(order, line.id);
                 const quantityId = `preview-box-${parcel.key}-quantity-${itemIndex}`;
+                const maximum = previewParcelQuantityLimit(
+                  selections,
+                  parcels,
+                  parcel.key,
+                  line.id,
+                );
+                const rejected =
+                  quantityError?.parcelKey === parcel.key &&
+                  quantityError.lineId === line.id
+                    ? quantityError.message
+                    : null;
                 return (
-                  <div
-                    key={line.id}
-                    className="flex min-w-0 items-center gap-4"
-                  >
-                    <Label
-                      htmlFor={quantityId}
-                      className="min-w-0 flex-1 break-words font-normal leading-relaxed"
-                    >
-                      {line.title}
-                      <span className="mt-1 block text-xs text-muted-foreground">
-                        {description.context}
-                      </span>
-                    </Label>
-                    <Input
-                      id={quantityId}
-                      aria-label={`Quantity of ${description.accessibleName} in box ${index + 1}`}
-                      type="number"
-                      min="0"
-                      max={selection.quantity}
-                      step="1"
-                      inputMode="numeric"
-                      className="min-h-11 w-20 shrink-0"
-                      disabled={busy}
-                      value={
-                        parcel.items.find((item) => item.lineId === line.id)
-                          ?.quantity ?? "0"
-                      }
-                      onChange={(event) =>
-                        onChange(
-                          parcels.map((candidate) =>
-                            candidate.key === parcel.key
-                              ? reconcilePreviewParcelSize(order, {
-                                  ...candidate,
-                                  items: candidate.items.map((item) =>
-                                    item.lineId === line.id
-                                      ? {
-                                          ...item,
-                                          quantity: event.target.value,
-                                        }
-                                      : item,
-                                  ),
-                                })
-                              : candidate,
-                          ),
-                        )
-                      }
-                    />
+                  <div key={line.id} className="space-y-2">
+                    <div className="flex min-w-0 items-center gap-4">
+                      <Label
+                        htmlFor={quantityId}
+                        className="min-w-0 flex-1 break-words font-normal leading-relaxed"
+                      >
+                        {line.title}
+                        {context && (
+                          <span className="mt-1 block text-xs text-muted-foreground">
+                            {context}
+                          </span>
+                        )}
+                      </Label>
+                      <Input
+                        id={quantityId}
+                        aria-label={`Quantity of ${description.accessibleName} in box ${index + 1}`}
+                        type="number"
+                        min="0"
+                        max={maximum ?? undefined}
+                        step="1"
+                        inputMode="numeric"
+                        className="min-h-11 w-20 shrink-0"
+                        disabled={busy}
+                        aria-describedby={
+                          rejected ? `${quantityId}-error` : undefined
+                        }
+                        value={
+                          parcel.items.find((item) => item.lineId === line.id)
+                            ?.quantity ?? "0"
+                        }
+                        onChange={(event) => {
+                          const edit = changePreviewPackingQuantity(
+                            order,
+                            selections,
+                            parcels,
+                            parcel.key,
+                            line.id,
+                            event.target.value,
+                          );
+                          if (edit.kind === "updated") {
+                            setQuantityError(null);
+                            onChange(edit.parcels);
+                            return;
+                          }
+                          const assigned =
+                            edit.kind === "already_assigned"
+                              ? selection.quantity - edit.maximum
+                              : 0;
+                          const message =
+                            edit.kind === "already_assigned"
+                              ? `You selected ${selection.quantity} for return. ${assigned > 0 ? `${assigned} already assigned to other boxes. ` : ""}Up to ${edit.maximum} can go in this box. Move items from another box or choose Change return items to return more.`
+                              : "Check this item's quantities in the other boxes first, or choose Change return items.";
+                          setQuantityError({
+                            parcelKey: parcel.key,
+                            lineId: line.id,
+                            message,
+                          });
+                        }}
+                      />
+                    </div>
+                    {rejected && (
+                      <p
+                        id={`${quantityId}-error`}
+                        role="alert"
+                        className="text-xs leading-relaxed text-destructive"
+                      >
+                        {rejected}
+                      </p>
+                    )}
                   </div>
                 );
               })}
@@ -462,67 +511,26 @@ export function PreviewPacking({
       <Button
         variant="outline"
         className="min-h-11 w-full border-dashed"
-        disabled={busy || parcels.length >= MAX_RETURN_FLOW_PARCELS}
+        disabled={busy || !summary.canAddBox}
         onClick={addBox}
       >
         <Plus className="mr-2 h-4 w-4" />
         Add another box
       </Button>
-      <div className="space-y-2 rounded-xl bg-muted/60 p-4" aria-live="polite">
-        <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-          Packing checklist
+      {!summary.canAddBox && (
+        <p className="text-xs text-muted-foreground">
+          {summary.selectedQuantity === 1
+            ? "You selected 1 item, so your return needs one box. Choose Change return items below to add more items."
+            : `You can use up to ${summary.maximumBoxes} boxes for the items selected.`}
         </p>
-        {selections.map((selection) => {
-          const line = order.lines.find(
-            (item) => item.id === selection.lineId,
-          )!;
-          const description = describePreviewItem(order, line.id);
-          const quantities = parcels.map((parcel) =>
-            readPreviewQuantity(
-              parcel.items.find((item) => item.lineId === line.id)?.quantity ??
-                "0",
-            ),
-          );
-          const total = quantities.some((quantity) => quantity === null)
-            ? null
-            : quantities.reduce<number>(
-                (sum, quantity) => sum + (quantity ?? 0),
-                0,
-              );
-          const matches = total === selection.quantity;
-          return (
-            <div
-              key={selection.lineId}
-              className="flex items-start gap-2 text-sm"
-            >
-              {matches ? (
-                <Check
-                  aria-hidden="true"
-                  className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600"
-                />
-              ) : (
-                <span
-                  aria-hidden="true"
-                  className="mt-1 h-3.5 w-3.5 shrink-0 rounded-full border border-muted-foreground"
-                />
-              )}
-              <span className="min-w-0 flex-1 break-words">
-                {line.title}
-                <span className="mt-1 block text-xs text-muted-foreground">
-                  {description.context}
-                </span>
-              </span>
-              <span
-                className={`shrink-0 text-xs leading-5 ${matches ? "text-emerald-700 dark:text-emerald-400" : "font-medium text-muted-foreground"}`}
-              >
-                {total === null || !Number.isSafeInteger(total)
-                  ? "Check quantity"
-                  : `${total} of ${selection.quantity} packed`}
-              </span>
-            </div>
-          );
-        })}
-      </div>
+      )}
+      <CustomerReturnPackingSummary
+        order={order}
+        summary={summary}
+        boxCount={parcels.length}
+        busy={busy}
+        onChangeItems={onBack}
+      />
       <div className="flex flex-col-reverse gap-3 border-t pt-6 sm:flex-row sm:justify-between">
         <Button variant="ghost" className="min-h-11" onClick={onBack}>
           <ArrowLeft className="mr-2 h-4 w-4" />
@@ -531,7 +539,7 @@ export function PreviewPacking({
         <Button
           className="min-h-11"
           onClick={onContinue}
-          disabled={busy || weightNeedsVerification}
+          disabled={busy || weightNeedsVerification || !summary.ready}
         >
           {busy ? (
             <>
