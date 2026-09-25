@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -15,12 +15,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CustomerReturnParcelDetails } from "./CustomerReturnParcelDetails";
 import { CustomerReturnPackingSummary } from "./CustomerReturnPackingSummary";
-import {
-  changePreviewPackingQuantity,
-  previewPackingItemContext,
-  previewParcelQuantityLimit,
-  summarizePreviewPacking,
-} from "@/lib/customer-return-packing";
+import { CustomerReturnBoxContents } from "./CustomerReturnBoxContents";
+import { summarizePreviewPacking } from "@/lib/customer-return-packing";
 import {
   customPreviewParcelSize,
   formatPreviewDimensions,
@@ -326,11 +322,8 @@ export function PreviewPacking({
   onContinue: () => void;
   onBack: () => void;
 }) {
-  const [quantityError, setQuantityError] = useState<{
-    parcelKey: number;
-    lineId: string;
-    message: string;
-  } | null>(null);
+  const boxesHeading = useRef<HTMLHeadingElement>(null);
+  const [newBoxKey, setNewBoxKey] = useState<number | null>(null);
   const summary = summarizePreviewPacking(selections, parcels);
   const weightNeedsVerification = parcels.some(
     (parcel) =>
@@ -338,8 +331,8 @@ export function PreviewPacking({
   );
   function addBox() {
     if (busy || !summary.canAddBox) return;
-    setQuantityError(null);
     const key = Math.max(0, ...parcels.map((parcel) => parcel.key)) + 1;
+    setNewBoxKey(key);
     onChange([
       ...parcels,
       {
@@ -356,12 +349,47 @@ export function PreviewPacking({
   }
   return (
     <div className="space-y-6">
-      <PreviewNote>
-        Pack the items you selected across your boxes. Items from separate
-        shipments can go back together. To return more items, choose Change
-        return items below.
-      </PreviewNote>
-      <div className="space-y-4">
+      <CustomerReturnPackingSummary
+        order={order}
+        summary={summary}
+        boxCount={parcels.length}
+        busy={busy}
+        onChangeItems={onBack}
+      />
+      <section
+        aria-labelledby="return-boxes-title"
+        data-testid="packing-boxes"
+        className="space-y-4"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h2
+              ref={boxesHeading}
+              tabIndex={-1}
+              id="return-boxes-title"
+              className="font-semibold"
+            >
+              Your boxes
+            </h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Each box shows only the items you put in it.
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            className="min-h-11"
+            disabled={busy || !summary.canAddBox}
+            onClick={addBox}
+          >
+            <Plus aria-hidden="true" className="h-4 w-4" /> Add another box
+          </Button>
+        </div>
+        {!summary.canAddBox && summary.selectedQuantity === 1 && (
+          <p className="text-xs text-muted-foreground">
+            You are returning one item, so one box is enough. Use Change return
+            items above to add more.
+          </p>
+        )}
         {parcels.map((parcel, index) => (
           <section
             key={parcel.key}
@@ -374,7 +402,7 @@ export function PreviewPacking({
                 id={`preview-box-title-${parcel.key}`}
                 className="flex items-center gap-2 font-semibold"
               >
-                <Package aria-hidden="true" className="h-5 w-5 text-primary" />
+                <Package aria-hidden="true" className="h-5 w-5 text-primary" />{" "}
                 Box {index + 1}
               </h3>
               {parcels.length > 1 && (
@@ -385,7 +413,7 @@ export function PreviewPacking({
                   className="min-h-11"
                   disabled={busy}
                   onClick={() => {
-                    setQuantityError(null);
+                    boxesHeading.current?.focus();
                     onChange(
                       parcels.filter(
                         (candidate) => candidate.key !== parcel.key,
@@ -393,8 +421,7 @@ export function PreviewPacking({
                     );
                   }}
                 >
-                  <Trash2 className="mr-1 h-4 w-4" />
-                  Remove
+                  <Trash2 aria-hidden="true" className="h-4 w-4" /> Remove box
                 </Button>
               )}
             </div>
@@ -411,175 +438,23 @@ export function PreviewPacking({
                 )
               }
             />
-            <div className="space-y-4">
-              {selections.map((selection, itemIndex) => {
-                const line = order.lines.find(
-                  (item) => item.id === selection.lineId,
-                )!;
-                const description = describePreviewItem(order, line.id);
-                const context = previewPackingItemContext(order, line.id);
-                const quantityId = `preview-box-${parcel.key}-quantity-${itemIndex}`;
-                const rawQuantity =
-                  parcel.items.find((item) => item.lineId === line.id)
-                    ?.quantity ?? "0";
-                const quantity = readPreviewQuantity(rawQuantity);
-                const packedQuantity = summary.lines[itemIndex].packedQuantity;
-                const otherBoxesQuantity =
-                  quantity !== null && packedQuantity !== null
-                    ? packedQuantity - quantity
-                    : null;
-                const progressId = `${quantityId}-progress`;
-                const elsewhereId = `${quantityId}-elsewhere`;
-                const maximum = previewParcelQuantityLimit(
-                  selections,
-                  parcels,
-                  parcel.key,
-                  line.id,
-                );
-                const rejected =
-                  quantityError?.parcelKey === parcel.key &&
-                  quantityError.lineId === line.id
-                    ? quantityError.message
-                    : null;
-                return (
-                  <div
-                    key={line.id}
-                    data-testid={`packing-item-${parcel.key}-${line.id}`}
-                    className="space-y-2"
-                  >
-                    <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">
-                      <Label
-                        htmlFor={quantityId}
-                        className="min-w-0 flex-1 basis-40 break-words font-normal leading-relaxed"
-                      >
-                        {line.title}
-                        {context && (
-                          <span className="mt-1 block text-xs text-muted-foreground">
-                            {context}
-                          </span>
-                        )}
-                      </Label>
-                      <div className="max-w-full space-y-1">
-                        <div className="flex max-w-full flex-wrap items-center justify-center rounded-md border border-input bg-background shadow-sm focus-within:ring-2 focus-within:ring-ring">
-                          <Input
-                            id={quantityId}
-                            aria-label={`Quantity of ${description.accessibleName} in box ${index + 1}`}
-                            type="number"
-                            min="0"
-                            max={maximum ?? undefined}
-                            step="1"
-                            inputMode="numeric"
-                            className="min-h-11 max-w-full shrink-0 border-0 px-2 text-center tabular-nums shadow-none focus-visible:ring-0"
-                            style={{
-                              width: `calc(${Math.max(rawQuantity.length, 2)}ch + 2.5rem)`,
-                            }}
-                            disabled={busy}
-                            aria-invalid={quantity === null || undefined}
-                            aria-describedby={`${progressId}${otherBoxesQuantity !== null && otherBoxesQuantity > 0 ? ` ${elsewhereId}` : ""}${rejected ? ` ${quantityId}-error` : ""}`}
-                            value={rawQuantity}
-                            onChange={(event) => {
-                              const edit = changePreviewPackingQuantity(
-                                order,
-                                selections,
-                                parcels,
-                                parcel.key,
-                                line.id,
-                                event.target.value,
-                              );
-                              if (edit.kind === "updated") {
-                                setQuantityError(null);
-                                onChange(edit.parcels);
-                                return;
-                              }
-                              const assigned =
-                                edit.kind === "already_assigned"
-                                  ? selection.quantity - edit.maximum
-                                  : 0;
-                              const message =
-                                edit.kind === "already_assigned"
-                                  ? `You selected ${selection.quantity} for return. ${assigned > 0 ? `${assigned} already assigned to other boxes. ` : ""}Up to ${edit.maximum} can go in this box. Move items from another box or choose Change return items to return more.`
-                                  : "Check this item's quantities in the other boxes first, or choose Change return items.";
-                              setQuantityError({
-                                parcelKey: parcel.key,
-                                lineId: line.id,
-                                message,
-                              });
-                            }}
-                          />
-                          <span
-                            aria-hidden="true"
-                            className="shrink-0 py-1 pr-3 text-sm tabular-nums text-muted-foreground"
-                          >
-                            of {selection.quantity}
-                          </span>
-                        </div>
-                        <p
-                          aria-hidden="true"
-                          className={`text-center text-xs ${quantity === null ? "text-destructive" : "text-muted-foreground"}`}
-                        >
-                          {quantity === null
-                            ? "Enter a whole number"
-                            : "added to this box"}
-                        </p>
-                        <p id={progressId} className="sr-only">
-                          {quantity === null
-                            ? "Enter a whole number of items for this box."
-                            : `${quantity} of ${selection.quantity} added to this box.`}
-                        </p>
-                        {otherBoxesQuantity !== null &&
-                          otherBoxesQuantity > 0 && (
-                            <p
-                              id={elsewhereId}
-                              className="break-words text-center text-xs text-muted-foreground"
-                            >
-                              {otherBoxesQuantity} in other boxes
-                            </p>
-                          )}
-                      </div>
-                    </div>
-                    {rejected && (
-                      <p
-                        id={`${quantityId}-error`}
-                        role="alert"
-                        className="text-xs leading-relaxed text-destructive"
-                      >
-                        {rejected}
-                      </p>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+            <CustomerReturnBoxContents
+              order={order}
+              selections={selections}
+              parcels={parcels}
+              parcel={parcel}
+              boxNumber={index + 1}
+              busy={busy}
+              summary={summary}
+              autoFocus={newBoxKey === parcel.key}
+              onChange={onChange}
+            />
           </section>
         ))}
-      </div>
-      <Button
-        variant="outline"
-        className="min-h-11 w-full border-dashed"
-        disabled={busy || !summary.canAddBox}
-        onClick={addBox}
-      >
-        <Plus className="mr-2 h-4 w-4" />
-        Add another box
-      </Button>
-      {!summary.canAddBox && (
-        <p className="text-xs text-muted-foreground">
-          {summary.selectedQuantity === 1
-            ? "You selected 1 item, so your return needs one box. Choose Change return items below to add more items."
-            : `You can use up to ${summary.maximumBoxes} boxes for the items selected.`}
-        </p>
-      )}
-      <CustomerReturnPackingSummary
-        order={order}
-        summary={summary}
-        boxCount={parcels.length}
-        busy={busy}
-        onChangeItems={onBack}
-      />
+      </section>
       <div className="flex flex-col-reverse gap-3 border-t pt-6 sm:flex-row sm:justify-between">
         <Button variant="ghost" className="min-h-11" onClick={onBack}>
-          <ArrowLeft className="mr-2 h-4 w-4" />
-          Back to items
+          <ArrowLeft className="mr-2 h-4 w-4" /> Back to items
         </Button>
         <Button
           className="min-h-11"
@@ -591,13 +466,12 @@ export function PreviewPacking({
               <Loader2
                 aria-hidden="true"
                 className="mr-2 h-4 w-4 animate-spin"
-              />
+              />{" "}
               Checking your return…
             </>
           ) : (
             <>
-              Review return
-              <ArrowRight className="ml-2 h-4 w-4" />
+              Review return <ArrowRight className="ml-2 h-4 w-4" />
             </>
           )}
         </Button>
@@ -605,7 +479,6 @@ export function PreviewPacking({
     </div>
   );
 }
-
 export function PreviewReview({
   order,
   review,
