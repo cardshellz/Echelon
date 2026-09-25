@@ -3092,7 +3092,7 @@ async function insertLedgerEntryWithClient(
   const result = await client.query<WalletLedgerRow>(
     `INSERT INTO dropship.dropship_wallet_ledger
       (wallet_account_id, vendor_id, type, status, amount_cents, currency,
-       available_balance_after_cents, pending_balance_after_cents, rewards_balance_after_cents,
+       available_balance_after_cents, pending_balance_after_cents,
        reference_type, reference_id, idempotency_key, funding_method_id,
        external_transaction_id, metadata, created_at, settled_at,
        rewards_balance_after_cents)
