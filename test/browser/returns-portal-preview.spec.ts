@@ -56,6 +56,89 @@ async function signIn(page: Page) {
     .click();
 }
 
+async function expectNoCustomerWeights(page: Page) {
+  const canvas = page.getByTestId("preview-canvas");
+  await expect(canvas.getByText(/\b(?:weight|lb|lbs|oz|grams)\b/i)).toHaveCount(
+    0,
+  );
+  await expect(canvas.getByLabel(/weight/i)).toHaveCount(0);
+}
+
+async function expectPackingLine(
+  page: Page,
+  lineId: string,
+  selected: number,
+  packed: number | "Check",
+) {
+  const row = page.getByTestId(`packing-summary-line-${lineId}`);
+  await expect(row.getByRole("cell")).toHaveText([
+    String(selected),
+    String(packed),
+  ]);
+}
+
+async function expectPackingSummaryFirst(page: Page) {
+  const summary = page.getByTestId("packing-summary");
+  await expect(
+    summary.getByRole("heading", { name: "Items to return", exact: true }),
+  ).toBeVisible();
+  await expect(summary.getByRole("columnheader")).toHaveText([
+    "Product",
+    "To return",
+    "In boxes",
+  ]);
+  expect(
+    await summary.evaluate((element) => {
+      const firstBox = document.querySelector('[data-testid="preview-box-1"]');
+      return (
+        firstBox !== null &&
+        Boolean(
+          element.compareDocumentPosition(firstBox) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+        ) &&
+        element.getBoundingClientRect().bottom <=
+          firstBox.getBoundingClientRect().top
+      );
+    }),
+  ).toBe(true);
+}
+
+async function openBoxItems(page: Page, boxNumber: number) {
+  await page
+    .getByRole("button", {
+      name: `Add or move items to box ${boxNumber}`,
+      exact: true,
+    })
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: `Add items to Box ${boxNumber}`,
+    exact: true,
+  });
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+async function transferBoxItems(
+  page: Page,
+  targetBox: number,
+  source: number | "unassigned",
+  lineId: string,
+  quantity: number,
+) {
+  const dialog = await openBoxItems(page, targetBox);
+  const row = dialog.getByTestId(`packing-source-${source}-${lineId}`);
+  await expect(row).toBeVisible();
+  await expect(row.getByRole("spinbutton")).toHaveValue("1");
+  await row.getByRole("spinbutton").fill(String(quantity));
+  await row
+    .getByRole("button", {
+      name: source === "unassigned" ? "Add to box" : "Move to box",
+      exact: true,
+    })
+    .click();
+  await expect(dialog).toHaveCount(0);
+}
+
 async function enterCustomBoxDimensions(
   page: Page,
   number: number,
@@ -121,6 +204,7 @@ test("split shipments can be reviewed in two boxes without live effects", async 
     page.getByTestId("preview-canvas").getByText("Preview", { exact: true }),
   ).toHaveCount(0);
   await page.screenshot({
+    animations: "disabled",
     path: testInfo.outputPath("standalone-portal.png"),
     fullPage: true,
   });
@@ -133,6 +217,7 @@ test("split shipments can be reviewed in two boxes without live effects", async 
   await sleeves.getByRole("spinbutton").fill("3");
   await storage.getByRole("spinbutton").fill("1");
   await page.screenshot({
+    animations: "disabled",
     path: testInfo.outputPath("item-selection.png"),
     fullPage: true,
   });
@@ -140,38 +225,28 @@ test("split shipments can be reviewed in two boxes without live effects", async 
     .getByRole("button", { name: "Continue to packing", exact: true })
     .click();
   const summary = page.getByTestId("packing-summary");
+  const totals = page.getByTestId("packing-summary-total");
+  await expectPackingSummaryFirst(page);
+  await expect(totals).toContainText("4 items to return");
+  await expect(totals).toContainText("1 box");
   await expect(
-    summary.getByText("Return summary", { exact: true }),
+    summary.getByText("All items are in boxes", { exact: true }),
+  ).toBeVisible();
+  await expectPackingLine(page, "sample-line-1", 3, 3);
+  await expectPackingLine(page, "sample-line-3", 1, 1);
+  await expect(
+    page.getByTestId("preview-box-1").getByText("Black", { exact: true }),
   ).toBeVisible();
   await expect(
-    summary.getByText("Across all boxes", { exact: true }),
-  ).toBeVisible();
-  await expect(page.getByTestId("packing-summary-total")).toContainText(
-    "Selected: 4",
-  );
-  await expect(page.getByTestId("packing-summary-total")).toContainText(
-    "Packed: 4",
-  );
-  await expect(
-    page.getByTestId("packing-summary-line-sample-line-1"),
-  ).toContainText("Selected: 3");
-  await expect(
-    page.getByTestId("packing-summary-line-sample-line-1"),
-  ).toContainText("Packed: 3");
-  await expect(
-    page.getByTestId("packing-summary-line-sample-line-3"),
-  ).toContainText("Selected: 1");
-  await expect(
-    page.getByTestId("packing-summary-line-sample-line-3"),
-  ).toContainText("Packed: 1");
-  await expect(
-    page
-      .getByTestId("preview-box-1")
-      .getByText("Option: Black", { exact: true }),
-  ).toBeVisible();
+    page.getByTestId("preview-canvas").getByText(/Option:/),
+  ).toHaveCount(0);
   await page
     .getByRole("button", { name: "Add another box", exact: true })
     .click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(
+    page.getByTestId("preview-box-2").locator('[data-testid^="packing-item-"]'),
+  ).toHaveCount(0);
   await expect(
     page.getByLabel("Box size for box 1", { exact: true }),
   ).toHaveValue("");
@@ -179,50 +254,44 @@ test("split shipments can be reviewed in two boxes without live effects", async 
     page.getByLabel("Box size for box 2", { exact: true }),
   ).toHaveValue("");
   await expect(
-    page.getByLabel("Product weight for box 2", { exact: true }),
-  ).toHaveText("Add items to calculate");
-  await page
-    .getByLabel(
-      "Quantity of item 1: Sample collector sleeves (100 count · Clear) in box 1",
-      { exact: true },
-    )
-    .fill("1");
-  await expect(
-    page.getByTestId("packing-summary-line-sample-line-1"),
-  ).toContainText("Packed: 1");
-  await expect(
-    page.getByTestId("packing-summary-line-sample-line-3"),
-  ).toContainText("Packed: 1");
-  await expect(page.getByTestId("packing-summary-total")).toContainText(
-    "Selected: 4",
-  );
-  await expect(page.getByTestId("packing-summary-total")).toContainText(
-    "Packed: 2",
-  );
-  await expect(
     page.getByRole("button", { name: "Review return", exact: true }),
   ).toBeDisabled();
-  await page
-    .getByLabel(
-      "Quantity of item 1: Sample collector sleeves (100 count · Clear) in box 2",
-      { exact: true },
-    )
-    .fill("2");
+  const dialog = await openBoxItems(page, 2);
+  const source = dialog.getByTestId("packing-source-1-sample-line-1");
   await expect(
-    page.getByTestId("packing-summary-line-sample-line-1"),
-  ).toContainText("Packed: 3");
-  await expect(page.getByTestId("packing-summary-total")).toContainText(
-    "Packed: 4",
-  );
-  await expect(page.getByTestId("packing-summary-total")).toContainText(
-    "2 boxes",
-  );
+    source.getByText("From Box 1 · 3 available", { exact: true }),
+  ).toBeVisible();
+  const sourceQuantity = source.getByRole("spinbutton", {
+    name: "Quantity of item 1: Sample collector sleeves (100 count · Clear) to add from box 1",
+    exact: true,
+  });
+  await expect(sourceQuantity).toHaveValue("1");
+  await expect(sourceQuantity).toHaveAttribute("max", "3");
+  await sourceQuantity.fill("2");
+  await source
+    .getByRole("button", { name: "Move to box", exact: true })
+    .click();
+  await expect(dialog).toHaveCount(0);
   await expect(
-    page.getByLabel("Product weight for box 1", { exact: true }),
-  ).toHaveText("0.772 lb");
+    page.getByRole("button", {
+      name: "Add or move items to box 2",
+      exact: true,
+    }),
+  ).toBeFocused();
+  await expectPackingLine(page, "sample-line-1", 3, 3);
+  await expectPackingLine(page, "sample-line-3", 1, 1);
+  await expect(totals).toContainText("2 boxes");
   await expect(
-    page.getByLabel("Product weight for box 2", { exact: true }),
-  ).toHaveText("0.441 lb");
+    page.getByTestId("packing-item-1-sample-line-1").getByRole("spinbutton"),
+  ).toHaveValue("1");
+  await expect(
+    page.getByTestId("packing-item-1-sample-line-3").getByRole("spinbutton"),
+  ).toHaveValue("1");
+  await expect(
+    page.getByTestId("packing-item-2-sample-line-1").getByRole("spinbutton"),
+  ).toHaveValue("2");
+  await expect(page.getByTestId("packing-item-2-sample-line-3")).toHaveCount(0);
+  await expectNoCustomerWeights(page);
   await expect(
     page
       .getByTestId("preview-box-2")
@@ -231,6 +300,11 @@ test("split shipments can be reviewed in two boxes without live effects", async 
   await expect(
     page.getByRole("button", { name: "Change size for box 2", exact: true }),
   ).toBeVisible();
+  await page.screenshot({
+    animations: "disabled",
+    path: testInfo.outputPath("packing-contents-summary-first.png"),
+    fullPage: true,
+  });
   await reviewPackedReturn(page);
   await expect(
     page.getByRole("button", { name: "Back to packing", exact: true }),
@@ -241,6 +315,7 @@ test("split shipments can be reviewed in two boxes without live effects", async 
   await expect(
     page.getByRole("button", { name: "Get return labels", exact: true }),
   ).toBeDisabled();
+  await expectNoCustomerWeights(page);
   await expect(
     page
       .getByTestId("preview-canvas")
@@ -266,6 +341,7 @@ test("split shipments can be reviewed in two boxes without live effects", async 
     ],
   });
   await page.screenshot({
+    animations: "disabled",
     path: testInfo.outputPath("return-review.png"),
     fullPage: true,
   });
@@ -328,12 +404,21 @@ test("a single selected unit cannot be duplicated and changed selections can be 
   });
   await expect(addBox).toBeDisabled();
   await expect(page.locator('[data-testid^="preview-box-"]')).toHaveCount(1);
-  await expect(totals).toContainText("Selected: 1");
-  await expect(totals).toContainText("Packed: 1");
+  await expect(totals).toContainText("1 item to return");
   await expect(totals).toContainText("1 box");
-  await expect(lineSummary).toContainText("Selected: 1");
-  await expect(lineSummary).toContainText("Packed: 1");
+  await expectPackingLine(page, "sample-line-1", 1, 1);
+  const firstItem = page.getByTestId("packing-item-1-sample-line-1");
+  const secondItem = page.getByTestId("packing-item-2-sample-line-1");
+  await expect(firstItem.getByRole("spinbutton")).toHaveAccessibleDescription(
+    "1 of 1 added to this box.",
+  );
+  await expect(firstItem.getByText("of 1", { exact: true })).toBeVisible();
+  await expect(
+    firstItem.getByText("added to this box", { exact: true }),
+  ).toBeVisible();
+  await expectNoCustomerWeights(page);
   await summary.screenshot({
+    animations: "disabled",
     path: testInfo.outputPath("packing-summary-single-unit.png"),
   });
   await summary
@@ -353,12 +438,19 @@ test("a single selected unit cannot be duplicated and changed selections can be 
     { exact: true },
   );
   await expect(firstQuantity).toHaveValue("2");
-  await expect(page.locator('[data-testid^="preview-box-"]')).toHaveCount(1);
+  await expect(firstQuantity).toHaveAccessibleDescription(
+    "2 of 2 added to this box.",
+  );
   await expect(addBox).toBeEnabled();
   await addBox.click();
   await expect(addBox).toBeDisabled();
-  await expect(secondQuantity).toHaveValue("0");
-  await expect(secondQuantity).toHaveAttribute("max", "0");
+  await page.getByRole("button", { name: "Remove box 2", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Your boxes", exact: true }),
+  ).toBeFocused();
+  await addBox.click();
+  await expect(secondItem).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(review).toBeDisabled();
   await expect(
     summary.getByText(
@@ -366,50 +458,96 @@ test("a single selected unit cannot be duplicated and changed selections can be 
       { exact: true },
     ),
   ).toBeVisible();
-  await secondQuantity.fill("1");
-  await expect(secondQuantity).toHaveValue("0");
-  await expect(page.getByRole("alert")).toContainText("already assigned");
-  await expect(page.getByRole("alert")).toContainText("Change return items");
-  await expect(totals).toContainText("Selected: 2");
-  await expect(totals).toContainText("Packed: 2");
   await firstQuantity.fill("0.5");
   await expect(firstQuantity).toHaveValue("0.5");
+  await expect(firstQuantity).toHaveAccessibleDescription(
+    "Enter a whole number of items for this box.",
+  );
   await expect(review).toBeDisabled();
-  await expect(
-    totals.getByText("Packed: Check quantity", { exact: true }),
-  ).toBeVisible();
+  await expectPackingLine(page, "sample-line-1", 2, "Check");
   await expect(
     summary.getByText("Check the item quantities before continuing.", {
       exact: true,
     }),
   ).toBeVisible();
   await firstQuantity.fill("");
-  await expect(review).toBeDisabled();
-  await expect(totals).toContainText("Packed: 0");
-  await firstQuantity.fill("1");
-  await expect(totals).toContainText("Packed: 1");
-  await expect(lineSummary).toContainText("Selected: 2");
-  await expect(lineSummary).toContainText("Packed: 1");
+  await expect(firstQuantity).toBeFocused();
+  await expect(firstItem).toBeVisible();
+  await expectPackingLine(page, "sample-line-1", 2, 0);
+  await expect(firstQuantity).toHaveAccessibleDescription(
+    "0 of 2 added to this box.",
+  );
+  await firstQuantity.press("Tab");
   await expect(
-    lineSummary.getByText("1 still to pack.", { exact: true }),
+    page.getByRole("button", {
+      name: "Add or move items to box 1",
+      exact: true,
+    }),
+  ).toBeFocused();
+  await transferBoxItems(page, 1, "unassigned", "sample-line-1", 1);
+  await expectPackingLine(page, "sample-line-1", 2, 1);
+  await expect(
+    lineSummary.getByText("1 still to add to a box.", { exact: true }),
   ).toBeVisible();
-  await expect(secondQuantity).toHaveAttribute("max", "1");
-  await expect(review).toBeDisabled();
-  await secondQuantity.fill("1");
-  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(secondItem).toHaveCount(0);
+  const dialog = await openBoxItems(page, 2);
+  const unassigned = dialog.getByTestId(
+    "packing-source-unassigned-sample-line-1",
+  );
+  await expect(
+    unassigned.getByText("Not in a box · 1 available", { exact: true }),
+  ).toBeVisible();
+  const quantity = unassigned.getByRole("spinbutton", {
+    name: "Quantity of item 1: Sample collector sleeves (100 count · Clear) to add from items not in a box",
+    exact: true,
+  });
+  await expect(quantity).toHaveValue("1");
+  await expect(quantity).toHaveAttribute("max", "1");
+  await unassigned
+    .getByRole("button", { name: "Add to box", exact: true })
+    .click();
+  await expect(dialog).toHaveCount(0);
   await expect(firstQuantity).toHaveAttribute("max", "1");
   await expect(secondQuantity).toHaveAttribute("max", "1");
-  await expect(lineSummary).toContainText("Packed: 2");
-  await expect(totals).toContainText("Selected: 2");
-  await expect(totals).toContainText("Packed: 2");
+  await expect(firstQuantity).toHaveAccessibleDescription(
+    "1 of 2 added to this box. 1 in other boxes",
+  );
+  await expect(secondQuantity).toHaveAccessibleDescription(
+    "1 of 2 added to this box. 1 in other boxes",
+  );
+  await expect(firstItem.getByText("of 2", { exact: true })).toBeVisible();
+  await expect(secondItem.getByText("of 2", { exact: true })).toBeVisible();
+  await firstQuantity.fill("2");
+  await expect(firstQuantity).toHaveValue("1");
+  await expect(page.getByRole("alert")).toContainText(
+    "Up to 1 can go in this box",
+  );
+  await expect(page.getByRole("alert")).toContainText("Add or move items");
+  await page.getByRole("button", { name: "Remove box 2", exact: true }).click();
+  await expect(firstQuantity).toHaveAttribute("max", "2");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await addBox.click();
+  await transferBoxItems(page, 2, "unassigned", "sample-line-1", 1);
+  await expectPackingLine(page, "sample-line-1", 2, 2);
+  await firstQuantity.fill("");
+  await firstQuantity.fill("1");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(totals).toContainText("2 items to return");
   await expect(totals).toContainText("2 boxes");
   await enterCustomBoxDimensions(page, 1);
   await enterCustomBoxDimensions(page, 2);
   await expect(review).toBeEnabled();
+  await expectNoCustomerWeights(page);
+  await secondItem.screenshot({
+    animations: "disabled",
+    path: testInfo.outputPath("packing-quantity-context.png"),
+  });
   await summary.screenshot({
+    animations: "disabled",
     path: testInfo.outputPath("packing-summary-split-units.png"),
   });
   await page.screenshot({
+    animations: "disabled",
     path: testInfo.outputPath("packing-summary-split-flow.png"),
     fullPage: true,
   });
@@ -435,7 +573,6 @@ test("a single selected unit cannot be duplicated and changed selections can be 
   });
   expect(fixture.failures).toEqual([]);
 });
-
 test("packing never adds more boxes than the shared parcel limit", async ({
   page,
 }) => {
@@ -482,7 +619,7 @@ test("packing never adds more boxes than the shared parcel limit", async ({
   );
   await expect(addBox).toBeDisabled();
   await expect(page.getByTestId("packing-summary-total")).toContainText(
-    `Selected: ${selectedQuantity}`,
+    `${selectedQuantity} items to return`,
   );
   await expect(page.getByTestId("packing-summary-total")).toContainText(
     `${MAX_RETURN_FLOW_PARCELS} boxes`,
@@ -659,9 +796,9 @@ test("an old order response cannot replace a newly selected scenario", async ({
   expect(fixture.failures).toEqual([]);
 });
 
-test("same-name purchased lines remain distinguishable by sight and accessible name", async ({
+test("same-name purchased lines stay distinct through transfers, removal, and unassigned re-add", async ({
   page,
-}) => {
+}, testInfo) => {
   const fixture = await installReturnPreviewFixtures(page);
   await page.goto(PORTAL_PATH);
   await useSampleSource(page);
@@ -687,41 +824,170 @@ test("same-name purchased lines remain distinguishable by sight and accessible n
   await page
     .getByRole("button", { name: "Continue to packing", exact: true })
     .click();
+  const first = page.getByTestId("packing-item-1-sample-line-1");
+  const sameName = page.getByTestId("packing-item-1-sample-line-2");
+  await expect(first.getByRole("spinbutton")).toHaveAccessibleName(
+    "Quantity of item 1: Sample collector sleeves (100 count · Clear) in box 1",
+  );
+  await expect(sameName.getByRole("spinbutton")).toHaveAccessibleName(
+    "Quantity of item 2: Sample collector sleeves (100 count · Clear) in box 1",
+  );
   await expect(
-    page.getByLabel(
-      "Quantity of item 1: Sample collector sleeves (100 count · Clear) in box 1",
-      { exact: true },
-    ),
-  ).toHaveValue("2");
-  await expect(
-    page.getByLabel(
-      "Quantity of item 2: Sample collector sleeves (100 count · Clear) in box 1",
-      { exact: true },
-    ),
-  ).toHaveValue("1");
-  await expect(
-    page
-      .getByTestId("preview-box-1")
-      .getByText("Order item 1 · Option: 100 count · Clear", { exact: true }),
+    first.getByText("Order item 1 · 100 count · Clear", { exact: true }),
   ).toBeVisible();
   await expect(
-    page
-      .getByTestId("preview-box-1")
-      .getByText("Order item 2 · Option: 100 count · Clear", { exact: true }),
+    sameName.getByText("Order item 2 · 100 count · Clear", { exact: true }),
   ).toBeVisible();
+  await expectPackingSummaryFirst(page);
+  await page
+    .getByRole("button", { name: "Add another box", exact: true })
+    .click();
+  await expect(
+    page.getByTestId("preview-box-2").locator('[data-testid^="packing-item-"]'),
+  ).toHaveCount(0);
+  const dialog = await openBoxItems(page, 2);
+  await expect(dialog.locator('[data-testid^="packing-source-"]')).toHaveCount(
+    2,
+  );
+  await expect(
+    dialog.getByTestId("packing-source-unassigned-sample-line-1"),
+  ).toHaveCount(0);
+  await expect(
+    dialog.getByTestId("packing-source-unassigned-sample-line-2"),
+  ).toHaveCount(0);
+  const source = dialog.getByTestId("packing-source-1-sample-line-1");
+  const otherSource = dialog.getByTestId("packing-source-1-sample-line-2");
+  const amount = source.getByRole("spinbutton", {
+    name: "Quantity of item 1: Sample collector sleeves (100 count · Clear) to add from box 1",
+    exact: true,
+  });
+  await expect(otherSource.getByRole("spinbutton")).toHaveAccessibleName(
+    "Quantity of item 2: Sample collector sleeves (100 count · Clear) to add from box 1",
+  );
+  await expect(
+    source.getByText("From Box 1 · 2 available", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    otherSource.getByText("From Box 1 · 1 available", { exact: true }),
+  ).toBeVisible();
+  await expect(amount).toHaveValue("1");
+  await expect(amount).toHaveAttribute("max", "2");
+  await page.screenshot({
+    animations: "disabled",
+    path: testInfo.outputPath("packing-add-or-move-picker.png"),
+    fullPage: true,
+  });
+  const move = source.getByRole("button", { name: "Move to box", exact: true });
+  for (const invalid of ["", "0", "0.5", "3"]) {
+    await amount.fill(invalid);
+    await expect(move).toBeDisabled();
+    await expect(
+      source.getByText("Enter a whole number from 1 to 2.", { exact: true }),
+    ).toBeVisible();
+    await expect(first.locator('input[type="number"]')).toHaveValue("2");
+    await expect(sameName.locator('input[type="number"]')).toHaveValue("1");
+    await expect(
+      page
+        .getByTestId("preview-box-2")
+        .locator('[data-testid^="packing-item-"]'),
+    ).toHaveCount(0);
+  }
+  await amount.fill("1");
+  await expect(move).toBeEnabled();
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    page.getByRole("button", {
+      name: "Add or move items to box 2",
+      exact: true,
+    }),
+  ).toBeFocused();
+  await expect(first.locator('input[type="number"]')).toHaveValue("2");
+  await expect(sameName.locator('input[type="number"]')).toHaveValue("1");
+  await expectPackingLine(page, "sample-line-1", 2, 2);
+  await expectPackingLine(page, "sample-line-2", 1, 1);
+  expect(
+    fixture.previewRequests.some((request) => request.path.endsWith("/review")),
+  ).toBe(false);
+
+  await transferBoxItems(page, 2, 1, "sample-line-2", 1);
+  await expect(sameName).toHaveCount(0);
+  await expect(first.locator('input[type="number"]')).toHaveValue("2");
+  const moved = page.getByTestId("packing-item-2-sample-line-2");
+  await expect(moved.getByRole("spinbutton")).toHaveValue("1");
+  await expect(page.getByTestId("packing-item-2-sample-line-1")).toHaveCount(0);
+  await moved
+    .getByRole("button", {
+      name: "Remove item 2: Sample collector sleeves (100 count · Clear) from box 2",
+      exact: true,
+    })
+    .click();
+  await expect(moved).toHaveCount(0);
+  await expect(
+    page.getByRole("button", {
+      name: "Add or move items to box 2",
+      exact: true,
+    }),
+  ).toBeFocused();
+  await expectPackingLine(page, "sample-line-1", 2, 2);
+  await expectPackingLine(page, "sample-line-2", 1, 0);
+  await transferBoxItems(page, 2, "unassigned", "sample-line-2", 1);
+  await expect(moved.getByRole("spinbutton")).toHaveValue("1");
+  await transferBoxItems(page, 2, 1, "sample-line-1", 1);
+  await expect(first.getByRole("spinbutton")).toHaveValue("1");
+  const split = page.getByTestId("packing-item-2-sample-line-1");
+  await expect(split.getByRole("spinbutton")).toHaveValue("1");
+  await split.getByRole("spinbutton").fill("0");
+  await expect(split.getByRole("spinbutton")).toBeFocused();
+  await expect(split).toBeVisible();
+  await expectPackingLine(page, "sample-line-1", 2, 1);
+  const readd = await openBoxItems(page, 2);
+  await expect(split).toHaveCount(0);
+  const unassigned = readd.getByTestId(
+    "packing-source-unassigned-sample-line-1",
+  );
+  await expect(
+    unassigned.getByText("Not in a box · 1 available", { exact: true }),
+  ).toBeVisible();
+  await unassigned
+    .getByRole("button", { name: "Add to box", exact: true })
+    .click();
+  await expect(readd).toHaveCount(0);
+  await expect(split.getByRole("spinbutton")).toHaveValue("1");
+  await expect(sameName).toHaveCount(0);
+  await expectPackingLine(page, "sample-line-1", 2, 2);
+  await expectPackingLine(page, "sample-line-2", 1, 1);
+  await expect(page.getByTestId("packing-summary-total")).toContainText(
+    "3 items to return",
+  );
+  await expect(page.getByTestId("packing-summary-total")).toContainText(
+    "2 boxes",
+  );
+  await expectNoCustomerWeights(page);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    animations: "disabled",
+    path: testInfo.outputPath("packing-positive-contents-only.png"),
+    fullPage: true,
+  });
   await reviewPackedReturn(page);
   await expect(
     page.getByRole("heading", { name: "Review your return", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByText("Item 1 · 100 count · Clear", { exact: true }),
-  ).toBeVisible();
+  ).toHaveCount(2);
   await expect(
     page.getByText("Item 2 · 100 count · Clear", { exact: true }),
   ).toBeVisible();
   const reviews = fixture.previewRequests.filter(
     (request) => request.path === `${PREVIEW_API}/review`,
   );
+  expect(reviews).toHaveLength(1);
   expect(reviews[0].body).toMatchObject({
     selections: [
       { lineId: "sample-line-1", quantity: 2, reasonCode: null },
@@ -731,10 +997,18 @@ test("same-name purchased lines remain distinguishable by sight and accessible n
         reasonCode: "ordered_by_mistake",
       },
     ],
+    parcels: [
+      { items: [{ lineId: "sample-line-1", quantity: 1 }] },
+      {
+        items: [
+          { lineId: "sample-line-1", quantity: 1 },
+          { lineId: "sample-line-2", quantity: 1 },
+        ],
+      },
+    ],
   });
   expect(fixture.failures).toEqual([]);
 });
-
 test("the legacy shortcut redirects to the standalone customer portal", async ({
   page,
 }) => {
@@ -762,6 +1036,7 @@ test("an anonymous visitor sees only the private access gate", async ({
   await expect(page.getByLabel("Sample order", { exact: true })).toHaveCount(0);
   await expectStandalone(page);
   await page.screenshot({
+    animations: "disabled",
     path: testInfo.outputPath("private-access-gate.png"),
     fullPage: true,
   });
@@ -1014,7 +1289,7 @@ test("live order lookup is the default and a review carries the selected shop an
 
 test("the full maximum available quantity remains readable without horizontal overflow", async ({
   page,
-}) => {
+}, testInfo) => {
   const fixture = await installReturnPreviewFixtures(page);
   const order = fixture.liveOrder();
   const maximumQuantity = Number.MAX_SAFE_INTEGER;
@@ -1026,6 +1301,7 @@ test("the full maximum available quantity remains readable without horizontal ov
         lines: [
           {
             ...order.lines[0],
+            unitWeightGrams: 1,
             purchasedQuantity: maximumQuantity,
             deliveredQuantity: maximumQuantity,
             alreadyReturningQuantity: 0,
@@ -1076,6 +1352,113 @@ test("the full maximum available quantity remains readable without horizontal ov
       (element) => element.scrollWidth <= element.clientWidth,
     ),
   ).toBe(true);
+  await line.getByRole("spinbutton").fill(String(maximumQuantity));
+  await page
+    .getByRole("button", { name: "Continue to packing", exact: true })
+    .click();
+  const packingItem = page.getByTestId("packing-item-1-sample-line-1");
+  const packingQuantity = packingItem.getByRole("spinbutton");
+  const packingDenominator = packingItem.getByText(`of ${maximumQuantity}`, {
+    exact: true,
+  });
+  await expect(packingQuantity).toHaveAttribute("max", String(maximumQuantity));
+  await expect(packingQuantity).toHaveAccessibleDescription(
+    `${maximumQuantity} of ${maximumQuantity} added to this box.`,
+  );
+  expect(
+    await packingItem.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth,
+    ),
+  ).toBe(true);
+  expect(
+    await page
+      .getByTestId("preview-canvas")
+      .evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await packingItem.screenshot({
+    animations: "disabled",
+    path: testInfo.outputPath("packing-maximum-quantity-context.png"),
+  });
+  await packingQuantity.fill("1");
+  await expect(packingQuantity).toHaveAccessibleDescription(
+    `1 of ${maximumQuantity} added to this box.`,
+  );
+  await packingDenominator.scrollIntoViewIfNeeded();
+  await expect(packingDenominator).toBeVisible();
+  await expect(packingDenominator).toHaveText(`of ${maximumQuantity}`);
+  const packingGeometry = await packingDenominator.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const bounds = element.getBoundingClientRect();
+    const fragments = Array.from(range.getClientRects()).filter(
+      (rect) => rect.width > 0 && rect.height > 0,
+    );
+    const tolerance = 1;
+    return {
+      hasText: fragments.length > 0,
+      allTextFits: fragments.every(
+        (rect) =>
+          rect.left >= bounds.left - tolerance &&
+          rect.right <= bounds.right + tolerance &&
+          rect.top >= bounds.top - tolerance &&
+          rect.bottom <= bounds.bottom + tolerance,
+      ),
+    };
+  });
+  expect(packingGeometry).toEqual({ hasText: true, allTextFits: true });
+  expect(
+    await packingItem.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth,
+    ),
+  ).toBe(true);
+  await page
+    .getByRole("button", { name: "Add another box", exact: true })
+    .click();
+  await expect(page.getByTestId("packing-item-2-sample-line-1")).toHaveCount(0);
+  const dialog = await openBoxItems(page, 2);
+  const unassigned = dialog.getByTestId(
+    "packing-source-unassigned-sample-line-1",
+  );
+  const amount = unassigned.getByRole("spinbutton");
+  await expect(amount).toHaveValue("1");
+  await expect(amount).toHaveAttribute("max", String(maximumQuantity - 1));
+  await expect(
+    unassigned.getByText(`Not in a box · ${maximumQuantity - 1} available`, {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await amount.fill(String(maximumQuantity - 1));
+  await expect(amount).toHaveValue(String(maximumQuantity - 1));
+  expect(
+    await dialog.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    animations: "disabled",
+    path: testInfo.outputPath("packing-maximum-quantity-picker.png"),
+    fullPage: true,
+  });
+  await unassigned
+    .getByRole("button", { name: "Add to box", exact: true })
+    .click();
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    page.getByTestId("packing-item-2-sample-line-1").getByRole("spinbutton"),
+  ).toHaveValue(String(maximumQuantity - 1));
+  await expect(packingQuantity).toHaveValue("1");
+  await expectPackingLine(
+    page,
+    "sample-line-1",
+    maximumQuantity,
+    maximumQuantity,
+  );
+  await expectNoCustomerWeights(page);
   expect(
     await page
       .getByTestId("preview-canvas")
@@ -1105,15 +1488,15 @@ test("one matching original box defaults its dimensions and custom edits survive
   await expect(
     box.getByText("Original box size · 10 × 8 × 4 in", { exact: true }),
   ).toBeVisible();
-  await expect(
-    box.getByLabel("Product weight for box 1", { exact: true }),
-  ).toHaveText("0.22 lb");
+  await expectNoCustomerWeights(page);
   await expect(box.getByRole("spinbutton", { name: /weight/i })).toHaveCount(0);
   await page.getByTestId("preview-canvas").screenshot({
+    animations: "disabled",
     path: testInfo.outputPath("packing-original-size.png"),
   });
   await enterCustomBoxDimensions(page, 1, "12.125", "8", "4");
   await page.getByTestId("preview-canvas").screenshot({
+    animations: "disabled",
     path: testInfo.outputPath("packing-custom-size.png"),
   });
   await reviewPackedReturn(page);
@@ -1121,10 +1504,11 @@ test("one matching original box defaults its dimensions and custom edits survive
     page.getByRole("heading", { name: "Review your return", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByText("12.125 × 8 × 4 in · Product weight: 0.22 lb", {
+    page.getByText("12.125 × 8 × 4 in", {
       exact: true,
     }),
   ).toBeVisible();
+  await expectNoCustomerWeights(page);
   const review = fixture.previewRequests.find(
     (request) => request.path === `${PREVIEW_API}/live/review`,
   );
@@ -1249,9 +1633,8 @@ test("missing original dimensions require custom dimensions before review", asyn
   await expect(
     page.getByRole("heading", { name: "Review your return", exact: true }),
   ).toBeVisible();
-  await expect(
-    page.getByText("11 × 9 × 5 in · Product weight: 0.22 lb", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByText("11 × 9 × 5 in", { exact: true })).toBeVisible();
+  await expectNoCustomerWeights(page);
   expect(
     fixture.previewRequests.find(
       (request) => request.path === `${PREVIEW_API}/live/review`,
@@ -1300,8 +1683,12 @@ test("missing product weight cannot be edited or reviewed as zero", async ({
     .click();
   const box = page.getByTestId("preview-box-1");
   await expect(
-    box.getByLabel("Product weight for box 1", { exact: true }),
-  ).toHaveText("Weight needs verification");
+    box.getByText(
+      "We cannot prepare this box for return yet. Please contact support for help.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expectNoCustomerWeights(page);
   await expect(
     box.getByLabel("Length of box 1 in inches", { exact: true }),
   ).toHaveValue("");
