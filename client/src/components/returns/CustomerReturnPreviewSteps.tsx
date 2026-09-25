@@ -24,7 +24,6 @@ import {
 import {
   customPreviewParcelSize,
   formatPreviewDimensions,
-  formatPreviewProductWeight,
   previewParcelProductWeight,
 } from "@/lib/customer-return-parcels";
 import {
@@ -420,6 +419,17 @@ export function PreviewPacking({
                 const description = describePreviewItem(order, line.id);
                 const context = previewPackingItemContext(order, line.id);
                 const quantityId = `preview-box-${parcel.key}-quantity-${itemIndex}`;
+                const rawQuantity =
+                  parcel.items.find((item) => item.lineId === line.id)
+                    ?.quantity ?? "0";
+                const quantity = readPreviewQuantity(rawQuantity);
+                const packedQuantity = summary.lines[itemIndex].packedQuantity;
+                const otherBoxesQuantity =
+                  quantity !== null && packedQuantity !== null
+                    ? packedQuantity - quantity
+                    : null;
+                const progressId = `${quantityId}-progress`;
+                const elsewhereId = `${quantityId}-elsewhere`;
                 const maximum = previewParcelQuantityLimit(
                   selections,
                   parcels,
@@ -432,11 +442,15 @@ export function PreviewPacking({
                     ? quantityError.message
                     : null;
                 return (
-                  <div key={line.id} className="space-y-2">
-                    <div className="flex min-w-0 items-center gap-4">
+                  <div
+                    key={line.id}
+                    data-testid={`packing-item-${parcel.key}-${line.id}`}
+                    className="space-y-2"
+                  >
+                    <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">
                       <Label
                         htmlFor={quantityId}
-                        className="min-w-0 flex-1 break-words font-normal leading-relaxed"
+                        className="min-w-0 flex-1 basis-40 break-words font-normal leading-relaxed"
                       >
                         {line.title}
                         {context && (
@@ -445,52 +459,83 @@ export function PreviewPacking({
                           </span>
                         )}
                       </Label>
-                      <Input
-                        id={quantityId}
-                        aria-label={`Quantity of ${description.accessibleName} in box ${index + 1}`}
-                        type="number"
-                        min="0"
-                        max={maximum ?? undefined}
-                        step="1"
-                        inputMode="numeric"
-                        className="min-h-11 w-20 shrink-0"
-                        disabled={busy}
-                        aria-describedby={
-                          rejected ? `${quantityId}-error` : undefined
-                        }
-                        value={
-                          parcel.items.find((item) => item.lineId === line.id)
-                            ?.quantity ?? "0"
-                        }
-                        onChange={(event) => {
-                          const edit = changePreviewPackingQuantity(
-                            order,
-                            selections,
-                            parcels,
-                            parcel.key,
-                            line.id,
-                            event.target.value,
-                          );
-                          if (edit.kind === "updated") {
-                            setQuantityError(null);
-                            onChange(edit.parcels);
-                            return;
-                          }
-                          const assigned =
-                            edit.kind === "already_assigned"
-                              ? selection.quantity - edit.maximum
-                              : 0;
-                          const message =
-                            edit.kind === "already_assigned"
-                              ? `You selected ${selection.quantity} for return. ${assigned > 0 ? `${assigned} already assigned to other boxes. ` : ""}Up to ${edit.maximum} can go in this box. Move items from another box or choose Change return items to return more.`
-                              : "Check this item's quantities in the other boxes first, or choose Change return items.";
-                          setQuantityError({
-                            parcelKey: parcel.key,
-                            lineId: line.id,
-                            message,
-                          });
-                        }}
-                      />
+                      <div className="max-w-full space-y-1">
+                        <div className="flex max-w-full flex-wrap items-center justify-center rounded-md border border-input bg-background shadow-sm focus-within:ring-2 focus-within:ring-ring">
+                          <Input
+                            id={quantityId}
+                            aria-label={`Quantity of ${description.accessibleName} in box ${index + 1}`}
+                            type="number"
+                            min="0"
+                            max={maximum ?? undefined}
+                            step="1"
+                            inputMode="numeric"
+                            className="min-h-11 max-w-full shrink-0 border-0 px-2 text-center tabular-nums shadow-none focus-visible:ring-0"
+                            style={{
+                              width: `calc(${Math.max(rawQuantity.length, 2)}ch + 2.5rem)`,
+                            }}
+                            disabled={busy}
+                            aria-invalid={quantity === null || undefined}
+                            aria-describedby={`${progressId}${otherBoxesQuantity !== null && otherBoxesQuantity > 0 ? ` ${elsewhereId}` : ""}${rejected ? ` ${quantityId}-error` : ""}`}
+                            value={rawQuantity}
+                            onChange={(event) => {
+                              const edit = changePreviewPackingQuantity(
+                                order,
+                                selections,
+                                parcels,
+                                parcel.key,
+                                line.id,
+                                event.target.value,
+                              );
+                              if (edit.kind === "updated") {
+                                setQuantityError(null);
+                                onChange(edit.parcels);
+                                return;
+                              }
+                              const assigned =
+                                edit.kind === "already_assigned"
+                                  ? selection.quantity - edit.maximum
+                                  : 0;
+                              const message =
+                                edit.kind === "already_assigned"
+                                  ? `You selected ${selection.quantity} for return. ${assigned > 0 ? `${assigned} already assigned to other boxes. ` : ""}Up to ${edit.maximum} can go in this box. Move items from another box or choose Change return items to return more.`
+                                  : "Check this item's quantities in the other boxes first, or choose Change return items.";
+                              setQuantityError({
+                                parcelKey: parcel.key,
+                                lineId: line.id,
+                                message,
+                              });
+                            }}
+                          />
+                          <span
+                            aria-hidden="true"
+                            className="shrink-0 py-1 pr-3 text-sm tabular-nums text-muted-foreground"
+                          >
+                            of {selection.quantity}
+                          </span>
+                        </div>
+                        <p
+                          aria-hidden="true"
+                          className={`text-center text-xs ${quantity === null ? "text-destructive" : "text-muted-foreground"}`}
+                        >
+                          {quantity === null
+                            ? "Enter a whole number"
+                            : "added to this box"}
+                        </p>
+                        <p id={progressId} className="sr-only">
+                          {quantity === null
+                            ? "Enter a whole number of items for this box."
+                            : `${quantity} of ${selection.quantity} added to this box.`}
+                        </p>
+                        {otherBoxesQuantity !== null &&
+                          otherBoxesQuantity > 0 && (
+                            <p
+                              id={elsewhereId}
+                              className="break-words text-center text-xs text-muted-foreground"
+                            >
+                              {otherBoxesQuantity} in other boxes
+                            </p>
+                          )}
+                      </div>
                     </div>
                     {rejected && (
                       <p
@@ -592,8 +637,7 @@ export function PreviewReview({
               Box {parcel.number}
             </h3>
             <p className="mb-4 text-sm text-muted-foreground">
-              {formatPreviewDimensions(parcel.dimensions)} · Product weight:{" "}
-              {formatPreviewProductWeight(parcel.weightGrams)}
+              {formatPreviewDimensions(parcel.dimensions)}
             </p>
             <ul className="space-y-3">
               {parcel.items.map((item) => (
