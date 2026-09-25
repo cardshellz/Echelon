@@ -28,6 +28,8 @@ const launchDefaults: DropshipWalletPolicyLimits = {
   rewardsRateBankBps: 100,
   rewardsRateUsdcBps: 100,
   rewardsRateCardBps: 0,
+  // Points never expire at launch (owner decision, 2026-09-24; migration 0705).
+  rewardsExpiryDays: null,
 };
 
 describe("resolveDropshipWalletPolicyLimitsFromEnv", () => {
@@ -62,6 +64,8 @@ describe("resolveDropshipWalletPolicyLimitsFromEnv", () => {
     // The card minimum is policy-only; the card fee keeps its variable as the fallback.
     expect(DROPSHIP_WALLET_POLICY_ENV_KEYS.cardFundingMinCents).toBeNull();
     expect(DROPSHIP_WALLET_POLICY_ENV_KEYS.cardFundingFeeBps).toBe("DROPSHIP_CARD_FUNDING_FEE_BPS");
+    // The points expiry is policy-only too.
+    expect(DROPSHIP_WALLET_POLICY_ENV_KEYS.rewardsExpiryDays).toBeNull();
   });
 
   it("refuses a card fee it cannot trust instead of defaulting it, unlike the floors", () => {
@@ -221,6 +225,7 @@ describe("walletPolicyInvariantViolations", () => {
       rewardsRateBankBps: 100,
       rewardsRateUsdcBps: 100,
       rewardsRateCardBps: 0,
+      rewardsExpiryDays: 3_650,
       advanceFeeBps: 100,
       advanceCapCents: 50_000,
       tierChangeGraceDays: 14,

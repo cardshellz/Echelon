@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import { z } from "zod";
 import { MAX_CARD_FUNDING_FEE_BPS } from "../../../../shared/dropship/wallet-funding-fee";
 import { MAX_REWARDS_RATE_BPS } from "../domain/wallet-rewards";
+import { MAX_REWARDS_EXPIRY_DAYS } from "../domain/wallet-rewards-expiry";
 import { DropshipError } from "../domain/errors";
 import {
   resolveEffectiveAdvanceCapCents,
@@ -81,6 +82,9 @@ export const createDropshipWalletPolicyVersionInputSchema = z.object({
   rewardsRateBankBps: z.number().int().min(0).max(MAX_REWARDS_RATE_BPS),
   rewardsRateUsdcBps: z.number().int().min(0).max(MAX_REWARDS_RATE_BPS),
   rewardsRateCardBps: z.number().int().min(0).max(MAX_REWARDS_RATE_BPS),
+  // Days until unused points expire, or null for never (funding design phase
+  // 7). Stated on every version: never defaulted.
+  rewardsExpiryDays: z.number().int().min(1).max(MAX_REWARDS_EXPIRY_DAYS).nullable(),
   changeNote: noteSchema,
   idempotencyKey: idempotencyKeySchema,
   actor: actorSchema,
@@ -360,6 +364,7 @@ export class DropshipWalletPolicyService implements DropshipWalletPolicyResolver
       rewardsRateBankBps: parsed.rewardsRateBankBps,
       rewardsRateUsdcBps: parsed.rewardsRateUsdcBps,
       rewardsRateCardBps: parsed.rewardsRateCardBps,
+      rewardsExpiryDays: parsed.rewardsExpiryDays,
     };
     const changeNote = parsed.changeNote ?? null;
     const now = this.deps.clock.now();
@@ -605,6 +610,7 @@ export function hashWalletPolicyRequest(value: {
       rewardsRateBankBps: value.limits.rewardsRateBankBps,
       rewardsRateUsdcBps: value.limits.rewardsRateUsdcBps,
       rewardsRateCardBps: value.limits.rewardsRateCardBps,
+      rewardsExpiryDays: value.limits.rewardsExpiryDays,
     },
     changeNote: value.changeNote,
   })).digest("hex");

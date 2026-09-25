@@ -36,11 +36,11 @@ describe("0702 dropship wallet rewards migration", () => {
     expect(migrationSql).toContain(`CHECK (type IN (${LEDGER_KINDS.map((kind) => `'${kind}'`).join(",")}))`);
   });
 
-  it("keeps the Drizzle declaration in step with the constraint", () => {
-    for (const kind of ["rewards_earned", "rewards_spent", "rewards_reversed", "rewards_reinstated", "rewards_redeemed"]) {
+  it("keeps the Drizzle declaration in step with the columns it added", () => {
+    // The kinds' current list is 0705's to pin (it retired the coupon kind); the four 0702 kinds that stayed are still declared.
+    for (const kind of ["rewards_earned", "rewards_spent", "rewards_reversed", "rewards_reinstated"]) {
       expect(schema).toContain(`"${kind}"`);
     }
-    expect(schema).toContain(`IN (${LEDGER_KINDS.map((kind) => `'${kind}'`).join(",")})`);
     expect(schema).toContain('rewardsBalanceCents: bigint("rewards_balance_cents"');
     expect(schema).toContain('rewardsBalanceAfterCents: bigint("rewards_balance_after_cents"');
     // 0704 made the choice nullable with no default (auto-apply must be chosen); the column itself is still declared.

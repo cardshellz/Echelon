@@ -15,7 +15,8 @@
  * server re-checks every rule.
  *
  * Money is integer cents throughout — no floating point anywhere in this file.
- * Fees are basis points. Timings are whole minutes or whole days.
+ * Fees are basis points. Timings are whole minutes or whole days; the points
+ * expiry is whole days or blank for never.
  */
 
 import { z } from "zod";
@@ -43,6 +44,8 @@ export const DROPSHIP_WALLET_POLICY_MAX_TIER_CHANGE_GRACE_DAYS = 365;
 export const DROPSHIP_WALLET_POLICY_MAX_CARD_FEE_BPS = 1_000;
 /** 10%: the ceiling on each rewards rate (funding design phase 7), so a typo cannot pay out 100%. */
 export const DROPSHIP_WALLET_POLICY_MAX_REWARDS_RATE_BPS = 1_000;
+/** Ten years. Mirrors MAX_REWARDS_EXPIRY_DAYS and `dropship_wallet_policies_rewards_expiry_chk` (migration 0705). */
+export const DROPSHIP_WALLET_POLICY_MAX_REWARDS_EXPIRY_DAYS = 3_650;
 
 /** The server bound on every cents field (`positiveCentsSchema`). */
 const MAX_CENTS = Number.MAX_SAFE_INTEGER;
@@ -74,6 +77,8 @@ const walletPolicyLimitsSchema = z.object({
   rewardsRateBankBps: z.number().int(),
   rewardsRateUsdcBps: z.number().int(),
   rewardsRateCardBps: z.number().int(),
+  // Migration 0705: days until unused points expire; null is never.
+  rewardsExpiryDays: z.number().int().min(1).max(DROPSHIP_WALLET_POLICY_MAX_REWARDS_EXPIRY_DAYS).nullable(),
 });
 
 const walletPolicyRecordSchema = z.object({
@@ -115,10 +120,11 @@ const walletPolicyEnvKeysSchema = z.object({
   // The card fee keeps its variable as the fallback only; the card minimum is policy-only.
   cardFundingFeeBps: z.string().nullable(),
   cardFundingMinCents: z.string().nullable(),
-  // The rewards rates are policy-only.
+  // The rewards rates and the points expiry are policy-only.
   rewardsRateBankBps: z.string().nullable(),
   rewardsRateUsdcBps: z.string().nullable(),
   rewardsRateCardBps: z.string().nullable(),
+  rewardsExpiryDays: z.string().nullable(),
 });
 
 /**
@@ -257,6 +263,8 @@ export interface DropshipWalletPolicyForm {
   rewardsRateBankPercent: string;
   rewardsRateUsdcPercent: string;
   rewardsRateCardPercent: string;
+  /** Whole days as typed; blank means points never expire. */
+  rewardsExpiryDays: string;
   /** Optional operator note recorded with the new version. */
   changeNote: string;
 }
@@ -265,7 +273,8 @@ export type DropshipWalletPolicyFormField = keyof DropshipWalletPolicyForm;
 
 export type DropshipWalletPolicyLimitField = keyof DropshipWalletPolicyLimitsView;
 
-export type DropshipWalletPolicyLimitUnit = "cents" | "minutes" | "bps" | "days";
+/** `days_or_never` is the points expiry: whole days, or blank (null) for never. */
+export type DropshipWalletPolicyLimitUnit = "cents" | "minutes" | "bps" | "days" | "days_or_never";
 
 export interface DropshipWalletPolicyLimitDescriptor {
   limitField: DropshipWalletPolicyLimitField;
@@ -278,9 +287,9 @@ export interface DropshipWalletPolicyLimitDescriptor {
 }
 
 /**
- * The twelve limits in display order, with the form field each one edits. The
- * panel walks this list instead of hard-coding twelve rows twice (form + "where
- * the value came from" table).
+ * Every limit in display order, with the form field each one edits. The panel
+ * walks this list instead of hard-coding each row twice (form + "where the
+ * value came from" table).
  */
 export const DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS: readonly DropshipWalletPolicyLimitDescriptor[] = [
   {
@@ -403,6 +412,14 @@ export const DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS: readonly DropshipWalletPo
     allowZero: true,
     help: "What a settled card charge earns in rewards. Zero at launch: cards earn nothing; never above 10%.",
   },
+  {
+    limitField: "rewardsExpiryDays",
+    formField: "rewardsExpiryDays",
+    label: "Rewards points expiry",
+    unit: "days_or_never",
+    allowZero: false,
+    help: "Days after they are earned that unused points expire. Leave blank for never, the launch setting. A change applies to points earned after it; points already earned keep their date. At most 3,650 days.",
+  },
 ];
 
 const FORM_FIELD_BY_LIMIT_FIELD: Record<
@@ -424,6 +441,7 @@ const FORM_FIELD_BY_LIMIT_FIELD: Record<
   rewardsRateBankBps: "rewardsRateBankPercent",
   rewardsRateUsdcBps: "rewardsRateUsdcPercent",
   rewardsRateCardBps: "rewardsRateCardPercent",
+  rewardsExpiryDays: "rewardsExpiryDays",
 };
 
 /** A blank form, used before the overview has loaded. Never submitted. */
@@ -443,6 +461,7 @@ export const emptyDropshipWalletPolicyForm: DropshipWalletPolicyForm = Object.fr
   rewardsRateBankPercent: "",
   rewardsRateUsdcPercent: "",
   rewardsRateCardPercent: "",
+  rewardsExpiryDays: "",
   changeNote: "",
 });
 
@@ -466,6 +485,8 @@ export function dropshipWalletPolicyFormFromLimits(
     rewardsRateBankPercent: basisPointsToPercentInput(limits.rewardsRateBankBps),
     rewardsRateUsdcPercent: basisPointsToPercentInput(limits.rewardsRateUsdcBps),
     rewardsRateCardPercent: basisPointsToPercentInput(limits.rewardsRateCardBps),
+    // Blank is never: the form shows what the operator would type for it.
+    rewardsExpiryDays: limits.rewardsExpiryDays === null ? "" : String(limits.rewardsExpiryDays),
     // A note describes THIS change, so it never carries over from the version in force.
     changeNote: "",
   };
@@ -593,6 +614,7 @@ export function parseDropshipWalletPolicyForm(
   const rewardsBank = readPercent(form.rewardsRateBankPercent, "Rewards on bank transfers", errors, "rewardsRateBankPercent", DROPSHIP_WALLET_POLICY_MAX_REWARDS_RATE_BPS);
   const rewardsUsdc = readPercent(form.rewardsRateUsdcPercent, "Rewards on USDC transfers", errors, "rewardsRateUsdcPercent", DROPSHIP_WALLET_POLICY_MAX_REWARDS_RATE_BPS);
   const rewardsCard = readPercent(form.rewardsRateCardPercent, "Rewards on card charges", errors, "rewardsRateCardPercent", DROPSHIP_WALLET_POLICY_MAX_REWARDS_RATE_BPS);
+  const rewardsExpiry = readExpiryDays(form.rewardsExpiryDays, "Rewards points expiry", errors, "rewardsExpiryDays");
 
   const note = form.changeNote.trim();
   if (note.length > MAX_CHANGE_NOTE_LENGTH) {
@@ -603,6 +625,7 @@ export function parseDropshipWalletPolicyForm(
     trigger === null || caseTier === null || amount === null || manualMin === null || manualMax === null
     || holdTimeout === null || warning === null || advanceFee === null || advanceCap === null || graceDays === null
     || cardFee === null || cardMin === null || rewardsBank === null || rewardsUsdc === null || rewardsCard === null
+    || !rewardsExpiry.ok
   ) {
     return { success: false, errors };
   }
@@ -623,6 +646,7 @@ export function parseDropshipWalletPolicyForm(
     rewardsRateBankBps: rewardsBank,
     rewardsRateUsdcBps: rewardsUsdc,
     rewardsRateCardBps: rewardsCard,
+    rewardsExpiryDays: rewardsExpiry.days,
   };
   for (const violation of dropshipWalletPolicyInvariantViolations(limits)) {
     const field = FORM_FIELD_BY_LIMIT_FIELD[violation.field];
@@ -694,6 +718,35 @@ function readDays(
     ? `${label} cannot exceed ${DROPSHIP_WALLET_POLICY_MAX_TIER_CHANGE_GRACE_DAYS} days.`
     : `${label} must be a whole number of days, zero or more.`;
   return null;
+}
+
+/**
+ * The points expiry box. Blank is a real answer (never), so the result
+ * carries its own success flag rather than using null for failure.
+ */
+function readExpiryDays(
+  value: string,
+  label: string,
+  errors: DropshipWalletPolicyFormErrors,
+  field: DropshipWalletPolicyFormField,
+): { ok: true; days: number | null } | { ok: false } {
+  const parsed = parseExpiryDays(value);
+  if (parsed.ok) return parsed;
+  errors[field] = `${label} must be blank (never) or a whole number of days from 1 to ${DROPSHIP_WALLET_POLICY_MAX_REWARDS_EXPIRY_DAYS.toLocaleString("en-US")}.`;
+  return { ok: false };
+}
+
+type ParsedExpiryDays = { ok: true; days: number | null } | { ok: false; reason: "format" | "range" };
+
+/** "" -> never (null); "365" -> 365. Zero is refused: a point that expires the day it is earned is a typo, not a policy. */
+export function parseExpiryDays(value: string): ParsedExpiryDays {
+  const normalized = value.trim();
+  if (normalized === "") return { ok: true, days: null };
+  if (!/^\d+$/.test(normalized)) return { ok: false, reason: "format" };
+  const days = Number(normalized);
+  if (!Number.isSafeInteger(days) || days > DROPSHIP_WALLET_POLICY_MAX_REWARDS_EXPIRY_DAYS) return { ok: false, reason: "range" };
+  if (days < 1) return { ok: false, reason: "format" };
+  return { ok: true, days };
 }
 
 type ParsedDollars = { ok: true; cents: number } | { ok: false; reason: "format" | "range" };
@@ -846,6 +899,8 @@ export interface DropshipWalletPolicyVersionRequest {
   rewardsRateBankBps: number;
   rewardsRateUsdcBps: number;
   rewardsRateCardBps: number;
+  /** Null is never; the server requires the key on every version. */
+  rewardsExpiryDays: number | null;
   changeNote: string | null;
   idempotencyKey: string;
 }
@@ -890,6 +945,7 @@ export function buildDropshipWalletPolicyVersionRequest(input: {
     rewardsRateBankBps: input.limits.rewardsRateBankBps,
     rewardsRateUsdcBps: input.limits.rewardsRateUsdcBps,
     rewardsRateCardBps: input.limits.rewardsRateCardBps,
+    rewardsExpiryDays: input.limits.rewardsExpiryDays,
     changeNote: changeNote ? changeNote : null,
     idempotencyKey,
   };

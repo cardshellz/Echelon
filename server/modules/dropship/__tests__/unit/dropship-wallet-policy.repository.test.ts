@@ -20,6 +20,7 @@ const limits = {
   rewardsRateBankBps: 100,
   rewardsRateUsdcBps: 100,
   rewardsRateCardBps: 0,
+  rewardsExpiryDays: 365,
 };
 
 const command = {
@@ -96,6 +97,32 @@ describe("PgDropshipWalletPolicyRepository", () => {
     });
   });
 
+  describe("rewards expiry (migration 0705)", () => {
+    it("reads a null expiry as never and refuses one outside whole days 1 to 3650", async () => {
+      const never = vi.fn(async (_sql: string, _values?: unknown[]) => result([{ ...policyRow(), rewards_expiry_days: null }]));
+      const policy = await new PgDropshipWalletPolicyRepository({ query: never } as unknown as Pool).getActivePolicy();
+      expect(policy?.limits.rewardsExpiryDays).toBeNull();
+
+      for (const bad of [0, 3_651, 12.5, "abc"]) {
+        const corrupt = vi.fn(async (_sql: string, _values?: unknown[]) => result([{ ...policyRow(), rewards_expiry_days: bad }]));
+        await expect(new PgDropshipWalletPolicyRepository({ query: corrupt } as unknown as Pool).getActivePolicy())
+          .rejects.toMatchObject({
+            code: "DROPSHIP_WALLET_POLICY_INVALID_STORED_VALUE",
+            context: expect.objectContaining({ classification: "fatal", column: "rewards_expiry_days" }),
+          });
+      }
+    });
+
+    it("stores a null expiry as null, never as a number", async () => {
+      const client = new ScriptedClient();
+      await new PgDropshipWalletPolicyRepository(poolFor(client)).createPolicyVersion({
+        ...command,
+        limits: { ...limits, rewardsExpiryDays: null },
+      });
+      expect(client.paramsFor("INSERT INTO dropship.dropship_wallet_policies")?.[16]).toBeNull();
+    });
+  });
+
   describe("countVendorsBelowLimits", () => {
     it("counts active vendors below each proposed floor without touching their rows", async () => {
       const query = vi.fn(async (_sql: string, _values?: unknown[]) => result([{ below_floor: "4", below_limit: "7", total: "31" }]));
@@ -159,7 +186,7 @@ describe("PgDropshipWalletPolicyRepository", () => {
       expect(insert).toContain("case_tier_minimum_cents");
       expect(insert).toContain("advance_fee_bps, advance_cap_cents, tier_change_grace_days");
       expect(insert).toContain("card_funding_fee_bps, card_funding_minimum_cents");
-      expect(insert).toContain("rewards_rate_bank_bps, rewards_rate_usdc_bps, rewards_rate_card_bps");
+      expect(insert).toContain("rewards_rate_bank_bps, rewards_rate_usdc_bps, rewards_rate_card_bps, rewards_expiry_days");
       expect(client.queries.some((query) => query.includes("INSERT INTO dropship.dropship_audit_events"))).toBe(true);
 
       // The audit row carries the real staff actor, never 'system'.
@@ -173,8 +200,8 @@ describe("PgDropshipWalletPolicyRepository", () => {
 
       // The insert carries integer cents, bps and days exactly as given, in column order.
       const insertParams = client.paramsFor("INSERT INTO dropship.dropship_wallet_policies");
-      expect(insertParams?.slice(0, 16)).toEqual([4, 9_000, 55_000, 20_000, 2_500, 60_000, 1_440, 45, 150, 75_000, 21, 250, 12_500, 100, 100, 0]);
-      expect(insertParams?.slice(16)).toEqual(["Autumn cohort floors.", now, "admin", "admin-1"]);
+      expect(insertParams?.slice(0, 17)).toEqual([4, 9_000, 55_000, 20_000, 2_500, 60_000, 1_440, 45, 150, 75_000, 21, 250, 12_500, 100, 100, 0, 365]);
+      expect(insertParams?.slice(17)).toEqual(["Autumn cohort floors.", now, "admin", "admin-1"]);
     });
 
     it("skips the retire when no version has ever been published", async () => {
@@ -337,6 +364,7 @@ function policyRow(): Record<string, unknown> {
     rewards_rate_bank_bps: 100,
     rewards_rate_usdc_bps: 100,
     rewards_rate_card_bps: 0,
+    rewards_expiry_days: 365,
     is_active: true,
     change_note: "Autumn cohort floors.",
     created_at: now,

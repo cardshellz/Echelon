@@ -7,13 +7,18 @@ import type {
   ReconcileDropshipListingTiersInput,
 } from "../../application/dropship-listing-tier-service";
 import type { DropshipNoInspectionWatcherResult } from "../../application/dropship-no-inspection-watcher-service";
+import type { DropshipRewardsExpiryResult } from "../../application/dropship-wallet-rewards-expiry-service";
 
 describe("runDropshipReturnsMaintenanceSweep", () => {
-  it("runs wallet maintenance, the standing reconcile and the no-inspection watcher in that order with one worker id and batch size", async () => {
+  it("runs wallet maintenance, the standing reconcile, the listing tiers, the no-inspection watcher and the points expiry in that order with one worker id and batch size", async () => {
     const order: string[] = [];
     const maintenanceInputs: unknown[] = [];
     const standingInputs: unknown[] = [];
     const watcherInputs: unknown[] = [];
+    const expiryInputs: unknown[] = [];
+    const rewardsExpiry: DropshipRewardsExpiryResult = {
+      scannedCount: 1, expiredAccountCount: 1, expiredLotCount: 2, expiredCents: 350, failedCount: 0,
+    };
     const walletMaintenance: DropshipWalletMaintenanceResult = {
       runDate: "2026-05-01",
       scannedCount: 3,
@@ -67,15 +72,24 @@ describe("runDropshipReturnsMaintenanceSweep", () => {
           return noInspection;
         },
       },
+      rewardsExpiryService: {
+        runExpiry: async (input) => {
+          order.push("expiry");
+          expiryInputs.push(input);
+          return rewardsExpiry;
+        },
+      },
     });
 
     expect(maintenanceInputs).toEqual([{ workerId: "worker-test", limit: 25 }]);
     expect(standingInputs).toEqual([{ workerId: "worker-test", limit: 25 }]);
     expect(tierInputs).toEqual([{ workerId: "worker-test", limit: 25 }]);
     expect(watcherInputs).toEqual([{ workerId: "worker-test", limit: 25 }]);
+    expect(expiryInputs).toEqual([{ workerId: "worker-test", limit: 25 }]);
     // A top-up that settled during wallet maintenance resumes the vendor on the
-    // same tick, and the listing tiers are decided after both.
-    expect(order).toEqual(["wallet", "standing", "tiers", "watcher"]);
-    expect(result).toEqual({ walletMaintenance, vendorStanding, listingTiers, noInspection });
+    // same tick, and the listing tiers are decided after both. The points
+    // expiry runs last, so a failure there never holds up the others.
+    expect(order).toEqual(["wallet", "standing", "tiers", "watcher", "expiry"]);
+    expect(result).toEqual({ walletMaintenance, vendorStanding, listingTiers, noInspection, rewardsExpiry });
   });
 });

@@ -262,7 +262,8 @@ export function DropshipWalletPolicyPanel({
             <h3 className="font-semibold">New policy version</h3>
             <p className="text-sm text-muted-foreground">
               Amounts are dollars and are stored as whole cents. The advance fee is a percentage
-              stored as whole basis points. Timings are whole minutes or whole days.
+              stored as whole basis points. Timings are whole minutes or whole days; the points
+              expiry is whole days, or blank for never.
               {canEdit
                 ? " Publishing retires the current version in the same transaction."
                 : " The dropship manage-operations permission is required to change these values."}
@@ -283,6 +284,7 @@ export function DropshipWalletPolicyPanel({
                     <Input
                       id={inputId}
                       inputMode={descriptor.unit === "cents" || descriptor.unit === "bps" ? "decimal" : "numeric"}
+                      placeholder={descriptor.unit === "days_or_never" ? "Never" : undefined}
                       value={form[descriptor.formField]}
                       disabled={!canEdit || busy}
                       onChange={(event) =>
@@ -528,6 +530,8 @@ function unitSuffix(unit: DropshipWalletPolicyLimitUnit): string {
       return " (%)";
     case "days":
       return " (days)";
+    case "days_or_never":
+      return " (days, blank for never)";
   }
 }
 
@@ -537,6 +541,8 @@ function formatLimit(
   unit: DropshipWalletPolicyLimitUnit,
 ): string {
   const value = limits[field];
+  // Only the points expiry can be null, and null is "never".
+  if (value === null) return "Never";
   switch (unit) {
     case "cents":
       return formatCents(value);
@@ -545,6 +551,7 @@ function formatLimit(
     case "bps":
       return formatDropshipBasisPoints(value);
     case "days":
+    case "days_or_never":
       return `${value.toLocaleString("en-US")} ${value === 1 ? "day" : "days"}`;
   }
 }

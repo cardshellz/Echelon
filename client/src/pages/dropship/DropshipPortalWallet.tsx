@@ -119,6 +119,7 @@ import {
   describeLedgerAmount,
   describeRewardsBalance,
   describeRewardsEarning,
+  describeRewardsNextExpiry,
   describeRewardsPreferenceSaved,
   describeRewardsUse,
   describeRoleGap,
@@ -404,7 +405,7 @@ export default function DropshipPortalWallet() {
       setNotice({ scope, tone: "error", text: caught instanceof Error && caught.message.trim() ? caught.message : "Wallet request failed." });
       return;
     }
-    const limits = wallet?.limits ?? { bankBalanceReadOffered: false, autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, cardFundingMinCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0, rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0 };
+    const limits = wallet?.limits ?? { bankBalanceReadOffered: false, autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, cardFundingMinCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0, rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0, rewardsExpiryDays: null };
     const face = describeWalletError(caught.code, caught.message, caught.context, { surface, limits });
     if (caught.code === "DROPSHIP_CARD_FUNDING_FEE_MISCONFIGURED") setFeeMisconfigured(true);
     if (face.recovery === "verify") {
@@ -629,7 +630,7 @@ export default function DropshipPortalWallet() {
 
   const walletErrorText = walletQuery.error
     ? describeWalletError(walletQuery.error instanceof DropshipApiError ? walletQuery.error.code : null, queryErrorMessage(walletQuery.error, "Unable to load your wallet."), null, {
-      surface: "get", limits: { bankBalanceReadOffered: false, autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, cardFundingMinCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0, rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0 },
+      surface: "get", limits: { bankBalanceReadOffered: false, autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, cardFundingMinCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0, rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0, rewardsExpiryDays: null },
     }).text
     : null;
 
@@ -2555,11 +2556,13 @@ function SavedMethods({
  * vendor's choice is doing (or that none is made), and the choice itself as
  * the page's whole-clickable radio pair (the page has no switches: a money
  * choice is always a named option). Neither option is selected until the
- * vendor chooses: auto-apply is never a default.
+ * vendor chooses: auto-apply is never a default. When staff have set an
+ * expiry, the soonest points to expire are named under the figure.
  */
 function RewardsBalance({ wallet, feedback, onSave }: { wallet: DropshipWalletView; feedback: Feedback; onSave: (spendRewardsFirst: boolean) => Promise<void> }) {
   const spendFirst = wallet.autoReload?.spendRewardsFirst ?? null;
   const balance = describeRewardsBalance(wallet.account.rewardsBalanceCents);
+  const nextExpiry = describeRewardsNextExpiry(wallet.rewardsNextExpiry, { now: new Date() });
   // Without a settings row there is nothing to save the choice on; the server scaffolds one with autopay.
   const disabled = feedback.busy || !wallet.autoReload;
   return (
@@ -2570,6 +2573,7 @@ function RewardsBalance({ wallet, feedback, onSave }: { wallet: DropshipWalletVi
           <div className="mt-1 text-2xl font-semibold" data-testid="wallet-rewards-balance">{balance.points}</div>
           <div className="text-sm text-zinc-500" data-testid="wallet-rewards-value">worth {balance.value} on your orders</div>
           <p className="mt-1 text-sm text-zinc-500" data-testid="wallet-rewards-use">{describeRewardsUse(spendFirst)}</p>
+          {nextExpiry && <p className="mt-1 text-sm text-amber-700" data-testid="wallet-rewards-next-expiry">{nextExpiry}</p>}
         </div>
         <div role="radiogroup" aria-label="Rewards" className="flex flex-wrap gap-2">
           <RadioChip label="Auto-apply to orders" selected={spendFirst === true} disabled={disabled} onSelect={() => { if (spendFirst !== true) void onSave(true); }} testId="wallet-rewards-spend" />

@@ -151,15 +151,15 @@ export const dropshipWalletLedgerTypeEnum = [
   // when the dispute is won (migration 0689).
   "funding_reversal",
   "funding_reinstated",
-  // The spend-only rewards balance (migration 0702): earned on a settled
-  // transfer, spent on an order debit, taken back with the transfer that
-  // earned them and returned when that dispute is won, redeemed outside the
-  // wallet (no writer at launch).
+  // Rewards points (migration 0702): earned on a settled transfer, spent on
+  // an order debit, taken back with the transfer that earned them and
+  // returned when that dispute is won; expired when unused past their date
+  // (migration 0705, which also retired the never-written coupon kind).
   "rewards_earned",
   "rewards_spent",
   "rewards_reversed",
   "rewards_reinstated",
-  "rewards_redeemed",
+  "rewards_expired",
 ] as const;
 export type DropshipWalletLedgerType =
   (typeof dropshipWalletLedgerTypeEnum)[number];
@@ -1695,7 +1695,7 @@ export const dropshipWalletLedger = dropshipSchema.table(
     index("dropship_wallet_ledger_vendor_idx").on(table.vendorId),
     check(
       "dropship_wallet_ledger_type_chk",
-      sql`${table.type} IN ('funding','order_debit','refund_credit','return_credit','return_fee','insurance_pool_credit','manual_adjustment','advance_fee','funding_reversal','funding_reinstated','rewards_earned','rewards_spent','rewards_reversed','rewards_reinstated','rewards_redeemed')`,
+      sql`${table.type} IN ('funding','order_debit','refund_credit','return_credit','return_fee','insurance_pool_credit','manual_adjustment','advance_fee','funding_reversal','funding_reinstated','rewards_earned','rewards_spent','rewards_reversed','rewards_reinstated','rewards_expired')`,
     ),
     check(
       "dropship_wallet_ledger_status_chk",
@@ -1719,6 +1719,125 @@ export const dropshipWalletLedger = dropshipSchema.table(
       "dropship_wallet_ledger_rewards_after_chk",
       sql`${table.rewardsBalanceAfterCents} IS NULL OR ${table.rewardsBalanceAfterCents} >= 0`,
     ),
+  ],
+);
+
+/**
+ * Rewards points by where they came from and when they expire (migration
+ * 0705). The sum of `remainingCents` per wallet account equals the account's
+ * `rewardsBalanceCents`, which stays the money authority; the lots say which
+ * of those points expire when. Only earned lots carry an expiry. Mutable
+ * (`remainingCents`), every change explained by a movement row below.
+ */
+export const dropshipWalletRewardsLotSourceEnum = [
+  // One per rewards_earned ledger row.
+  "earned",
+  // The points an account held when lots began, opened at its first touch.
+  "opening_balance",
+  // Points a won dispute returned whose clawback predates lots.
+  "restored",
+  // Points a writer moved without lots: an anomaly a person reviews.
+  "reconciled",
+] as const;
+export type DropshipWalletRewardsLotSource =
+  (typeof dropshipWalletRewardsLotSourceEnum)[number];
+
+export const dropshipWalletRewardsLots = dropshipSchema.table(
+  "dropship_wallet_rewards_lots",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    // Financial history is never deleted: every reference restricts.
+    walletAccountId: integer("wallet_account_id")
+      .notNull()
+      .references(() => dropshipWalletAccounts.id, { onDelete: "restrict" }),
+    vendorId: integer("vendor_id")
+      .notNull()
+      .references(() => dropshipVendors.id, { onDelete: "restrict" }),
+    source: varchar("source", { length: 30 }).notNull(),
+    // The ledger row that created the lot: rewards_earned or rewards_reinstated.
+    originLedgerEntryId: integer("origin_ledger_entry_id").references(
+      () => dropshipWalletLedger.id,
+      { onDelete: "restrict" },
+    ),
+    earnedCents: bigint("earned_cents", { mode: "number" }).notNull(),
+    remainingCents: bigint("remaining_cents", { mode: "number" }).notNull(),
+    earnedAt: timestamp("earned_at", { withTimezone: true }).notNull(),
+    // NULL: never expires. Set only on earned lots, from the policy in force.
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    expiryDays: integer("expiry_days"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("dropship_wallet_rewards_lots_origin_idx")
+      .on(table.originLedgerEntryId)
+      .where(sql`${table.originLedgerEntryId} IS NOT NULL`),
+    uniqueIndex("dropship_wallet_rewards_lots_opening_idx")
+      .on(table.walletAccountId)
+      .where(sql`${table.source} = 'opening_balance'`),
+    index("dropship_wallet_rewards_lots_account_idx").on(table.walletAccountId),
+    index("dropship_wallet_rewards_lots_due_idx")
+      .on(table.expiresAt)
+      .where(sql`${table.remainingCents} > 0 AND ${table.expiresAt} IS NOT NULL`),
+    check(
+      "dropship_wallet_rewards_lots_source_chk",
+      sql`${table.source} IN ('earned','opening_balance','restored','reconciled')`,
+    ),
+    check(
+      "dropship_wallet_rewards_lots_origin_chk",
+      sql`(${table.source} IN ('earned','restored')) = (${table.originLedgerEntryId} IS NOT NULL)`,
+    ),
+    check(
+      "dropship_wallet_rewards_lots_amount_chk",
+      sql`${table.earnedCents} > 0 AND ${table.remainingCents} >= 0 AND ${table.remainingCents} <= ${table.earnedCents}`,
+    ),
+    check(
+      "dropship_wallet_rewards_lots_expiry_chk",
+      sql`(${table.expiresAt} IS NULL) = (${table.expiryDays} IS NULL) AND (${table.expiryDays} IS NULL OR ${table.expiryDays} BETWEEN 1 AND 3650) AND (${table.expiresAt} IS NULL OR (${table.source} = 'earned' AND ${table.expiresAt} > ${table.earnedAt}))`,
+    ),
+  ],
+);
+
+/**
+ * Every movement of points in or out of a lot (migration 0705): against the
+ * ledger row that caused it (a spend, a clawback, a returned clawback, an
+ * expiry), or, with no ledger row, a reconciliation of the lots to the
+ * balance. Append-only: a DB trigger refuses UPDATE and DELETE.
+ */
+export const dropshipWalletRewardsLotMovementReasonEnum = ["ledger", "reconciliation"] as const;
+export type DropshipWalletRewardsLotMovementReason =
+  (typeof dropshipWalletRewardsLotMovementReasonEnum)[number];
+
+export const dropshipWalletRewardsLotMovements = dropshipSchema.table(
+  "dropship_wallet_rewards_lot_movements",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    lotId: integer("lot_id")
+      .notNull()
+      .references(() => dropshipWalletRewardsLots.id, { onDelete: "restrict" }),
+    ledgerEntryId: integer("ledger_entry_id").references(
+      () => dropshipWalletLedger.id,
+      { onDelete: "restrict" },
+    ),
+    reason: varchar("reason", { length: 30 }).notNull(),
+    // Negative: points left the lot. Positive: points returned to it.
+    amountCents: bigint("amount_cents", { mode: "number" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("dropship_wallet_rewards_lot_movements_ledger_idx")
+      .on(table.ledgerEntryId, table.lotId)
+      .where(sql`${table.ledgerEntryId} IS NOT NULL`),
+    index("dropship_wallet_rewards_lot_movements_lot_idx").on(table.lotId),
+    check(
+      "dropship_wallet_rewards_lot_movements_reason_chk",
+      sql`${table.reason} IN ('ledger','reconciliation')`,
+    ),
+    check(
+      "dropship_wallet_rewards_lot_movements_ledger_chk",
+      sql`(${table.reason} = 'ledger') = (${table.ledgerEntryId} IS NOT NULL)`,
+    ),
+    check("dropship_wallet_rewards_lot_movements_amount_chk", sql`${table.amountCents} <> 0`),
   ],
 );
 

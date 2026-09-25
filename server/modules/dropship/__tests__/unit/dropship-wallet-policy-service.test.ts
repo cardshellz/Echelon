@@ -39,6 +39,7 @@ const fallbackLimits: DropshipWalletPolicyLimits = {
   rewardsRateBankBps: 100,
   rewardsRateUsdcBps: 100,
   rewardsRateCardBps: 0,
+  rewardsExpiryDays: null,
 };
 
 const publishedLimits: DropshipWalletPolicyLimits = {
@@ -57,6 +58,7 @@ const publishedLimits: DropshipWalletPolicyLimits = {
   rewardsRateBankBps: 100,
   rewardsRateUsdcBps: 100,
   rewardsRateCardBps: 0,
+  rewardsExpiryDays: 365,
 };
 
 const validInput = {
@@ -323,6 +325,8 @@ describe("DropshipWalletPolicyService", () => {
         { advanceFeeBps: 151 },
         { advanceCapCents: 75_001 },
         { tierChangeGraceDays: 22 },
+        { rewardsExpiryDays: 366 },
+        { rewardsExpiryDays: null },
       ]) {
         expect(hashWalletPolicyRequest({ limits: { ...publishedLimits, ...patch }, changeNote: null }))
           .not.toBe(first);
@@ -414,6 +418,10 @@ describe("DropshipWalletPolicyService", () => {
         { advanceCapCents: 0.5 },
         { tierChangeGraceDays: -1 },
         { tierChangeGraceDays: 366 },
+        { rewardsExpiryDays: 0 },
+        { rewardsExpiryDays: 3_651 },
+        { rewardsExpiryDays: 30.5 },
+        { rewardsExpiryDays: "365" },
       ]) {
         await expect(service.createPolicyVersion({ ...validInput, ...patch }))
           .rejects.toMatchObject({ code: "DROPSHIP_WALLET_POLICY_INVALID_INPUT" });
@@ -437,6 +445,19 @@ describe("DropshipWalletPolicyService", () => {
       await expect(service.createPolicyVersion({ ...validInput, idempotencyKey: "wallet-policy-002", cardFundingFeeBps: 1_001 }))
         .rejects.toMatchObject({ code: "DROPSHIP_WALLET_POLICY_INVALID_INPUT" });
       await expect(service.createPolicyVersion({ ...validInput, idempotencyKey: "wallet-policy-003", cardFundingMinCents: 60_001 }))
+        .rejects.toMatchObject({ code: "DROPSHIP_WALLET_POLICY_INVALID_INPUT" });
+    });
+
+    it("accepts no expiry (null) and the ten-year ceiling for the points expiry", async () => {
+      const never = await service.createPolicyVersion({ ...validInput, rewardsExpiryDays: null });
+      expect(never.policy.limits.rewardsExpiryDays).toBeNull();
+      const ceiling = await service.createPolicyVersion({ ...validInput, idempotencyKey: "wallet-policy-002", rewardsExpiryDays: 3_650 });
+      expect(ceiling.policy.limits.rewardsExpiryDays).toBe(3_650);
+    });
+
+    it("refuses a version that leaves the points expiry out instead of reading it as never", async () => {
+      const { rewardsExpiryDays: _omitted, ...withoutExpiry } = validInput;
+      await expect(service.createPolicyVersion(withoutExpiry))
         .rejects.toMatchObject({ code: "DROPSHIP_WALLET_POLICY_INVALID_INPUT" });
     });
 

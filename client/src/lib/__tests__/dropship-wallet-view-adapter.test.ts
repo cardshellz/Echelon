@@ -46,22 +46,23 @@ describe("adaptWalletView", () => {
     expect(view.advance).toBeNull();
     expect(view.clientFallbacks.sort()).toEqual([
       "acknowledgement_assumed_from_settings_row", "advance_not_served", "backstop_from_first_active_card", "bank_details_from_label", "card_details_from_label",
-      "ledger_reason_derived", "limits_from_documented_defaults", "listing_tiers_not_served", "roles_derived", "setup_status_derived",
+      "ledger_reason_derived", "limits_from_documented_defaults", "listing_tiers_not_served", "rewards_next_expiry_not_served", "roles_derived", "setup_status_derived",
     ]);
+    expect(view.rewardsNextExpiry).toBeNull();
     // The page never sees provider internals.
     expect(view.account).not.toHaveProperty("walletAccountId");
     expect(view.fundingMethods[0]).not.toHaveProperty("isDefault");
   });
 
   it("uses every served §4.1 field as-is and applies no fallback", () => {
-    const limits = { autoReloadMinTriggerCents: 5000, caseTierMinimumCents: 40000, autoReloadMinAmountCents: 10000, manualFundingMinCents: 1000, manualFundingMaxCents: 500000, defaultPaymentHoldTimeoutMinutes: 2880, holdExpiryWarningMinutes: 90, advanceFeeBps: 125, advanceCapCents: 30000, tierChangeGraceDays: 7, cardFundingMinCents: 15000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, bankBalanceReadOffered: false };
+    const limits = { autoReloadMinTriggerCents: 5000, caseTierMinimumCents: 40000, autoReloadMinAmountCents: 10000, manualFundingMinCents: 1000, manualFundingMaxCents: 500000, defaultPaymentHoldTimeoutMinutes: 2880, holdExpiryWarningMinutes: 90, advanceFeeBps: 125, advanceCapCents: 30000, tierChangeGraceDays: 7, cardFundingMinCents: 15000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, rewardsExpiryDays: 180, bankBalanceReadOffered: false };
     const setupStatus = { sourceReady: true, backupReady: true, acknowledged: false, done: true, launchReady: false };
     const view = adaptWalletView(rawWallet({
       autoReload: rawAutoReload({ backstopFundingMethodId: 11, acknowledgedCardFeeBps: 250, acknowledgedAt: LATER }),
       fundingMethods: [rawMethod({ status: "active", card: { brand: "Visa", last4: "4242", expMonth: 12, expYear: 2027 }, roles: { isAutoReloadSource: false, isBackupCard: true, chargeable: true } })],
       recentLedger: [{ ledgerEntryId: 2, type: "funding", status: "settled", amountCents: 5500, currency: "USD", availableBalanceAfterCents: 0, pendingBalanceAfterCents: 0, createdAt: STAMP, settledAt: STAMP,
         reason: "covered_held_order", fundingMethodId: 10, cardFee: { feeCents: 165, feeBps: 300, chargedCents: 5665 }, failure: null }],
-      limits, setupStatus, listingTiers: servedListingTiers(), advance: servedAdvance(),
+      limits, setupStatus, listingTiers: servedListingTiers(), advance: servedAdvance(), rewardsNextExpiry: null,
     }));
     expect(view.autoReload).toMatchObject({ backstopFundingMethodId: 11, acknowledgedCardFeeBps: 250, acknowledgedAt: LATER });
     expect(view.fundingMethods[0].card).toEqual({ brand: "Visa", last4: "4242", expMonth: 12, expYear: 2027 });
@@ -83,11 +84,13 @@ describe("adaptWalletView", () => {
       ],
       limits: { ...servedLimits(), rewardsRateBankBps: 125, rewardsRateUsdcBps: 100, rewardsRateCardBps: 50 },
       listingTiers: servedListingTiers(), setupStatus: servedSetupStatus(), advance: servedAdvance(),
+      rewardsNextExpiry: { expiresAt: LATER, cents: 1_234 },
     }));
     expect(served.account.rewardsBalanceCents).toBe(1234);
     expect(served.autoReload?.spendRewardsFirst).toBe(false);
     expect(served.limits).toMatchObject({ rewardsRateBankBps: 125, rewardsRateUsdcBps: 100, rewardsRateCardBps: 50 });
     expect(served.recentLedger.map((entry) => [entry.reason, entry.rewardsBalanceAfterCents])).toEqual([["rewards_earned", 1234], ["rewards_spent", 934]]);
+    expect(served.rewardsNextExpiry).toEqual({ expiresAt: LATER, cents: 1_234 });
     expect(served.clientFallbacks).toEqual([]);
 
     const older = adaptWalletView(rawWallet({ autoReload: rawAutoReload(), recentLedger: [{ ledgerEntryId: 2, type: "funding", status: "settled", amountCents: 5500, currency: "USD", availableBalanceAfterCents: 0, pendingBalanceAfterCents: 0, createdAt: STAMP, settledAt: STAMP }] }));
@@ -102,8 +105,8 @@ describe("adaptWalletView", () => {
 
   it("takes the advance position as served, treats a served null as an answer, and refuses a malformed one", () => {
     const advance = servedAdvance();
-    expect(adaptWalletView(rawWallet({ advance, listingTiers: servedListingTiers(), limits: servedLimits(), setupStatus: servedSetupStatus() })).clientFallbacks).toEqual([]);
-    const served = adaptWalletView(rawWallet({ advance: null, listingTiers: servedListingTiers(), limits: servedLimits(), setupStatus: servedSetupStatus() }));
+    expect(adaptWalletView(rawWallet({ advance, listingTiers: servedListingTiers(), limits: servedLimits(), setupStatus: servedSetupStatus(), rewardsNextExpiry: null })).clientFallbacks).toEqual([]);
+    const served = adaptWalletView(rawWallet({ advance: null, listingTiers: servedListingTiers(), limits: servedLimits(), setupStatus: servedSetupStatus(), rewardsNextExpiry: null }));
     expect(served.advance).toBeNull();
     expect(served.clientFallbacks).toEqual([]);
     expect(adaptWalletView(rawWallet({ advance })).advance).toEqual(advance);
@@ -130,8 +133,29 @@ describe("adaptWalletView", () => {
     expect(CLIENT_FALLBACK_LIMITS).toEqual({
       autoReloadMinTriggerCents: 10_000, caseTierMinimumCents: 50_000, autoReloadMinAmountCents: 10_000,
       manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 1_440,
-      holdExpiryWarningMinutes: 120, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, cardFundingMinCents: 10_000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, bankBalanceReadOffered: false,
+      holdExpiryWarningMinutes: 120, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, cardFundingMinCents: 10_000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, rewardsExpiryDays: null, bankBalanceReadOffered: false,
     });
+  });
+
+  it("carries the points expiry setting and the soonest expiry as served, reads expired-points lines, and refuses malformed ones (migration 0705)", () => {
+    const never = adaptWalletView(rawWallet({ limits: { ...servedLimits(), rewardsExpiryDays: null }, rewardsNextExpiry: null }));
+    // A served null is an answer (never), not a gap to fill.
+    expect(never.limits.rewardsExpiryDays).toBeNull();
+    expect(never.clientFallbacks).not.toContain("limits_from_documented_defaults");
+    expect(never.clientFallbacks).not.toContain("rewards_next_expiry_not_served");
+    expect(adaptWalletView(rawWallet({ limits: { ...servedLimits(), rewardsExpiryDays: 365 } })).limits.rewardsExpiryDays).toBe(365);
+
+    const expired = adaptWalletView(rawWallet({
+      recentLedger: [{ ledgerEntryId: 5, type: "rewards_expired", status: "settled", amountCents: -500, currency: "USD", availableBalanceAfterCents: 5000, pendingBalanceAfterCents: 0, rewardsBalanceAfterCents: 734, createdAt: STAMP, settledAt: STAMP, referenceType: "wallet_rewards_lot_expiry" }],
+    }));
+    expect(expired.recentLedger[0]).toMatchObject({ reason: "rewards_expired", amountCents: -500, rewardsBalanceAfterCents: 734 });
+
+    for (const rewardsExpiryDays of [0, 3_651, 12.5]) {
+      expect(() => adaptWalletView(rawWallet({ limits: { ...servedLimits(), rewardsExpiryDays } }))).toThrow();
+    }
+    for (const rewardsNextExpiry of [{ expiresAt: LATER, cents: 0 }, { expiresAt: LATER, cents: -5 }, { expiresAt: LATER, cents: 1.5 }, { cents: 5 }]) {
+      expect(() => adaptWalletView(rawWallet({ rewardsNextExpiry }))).toThrow();
+    }
   });
 
   it("accepts a negative available balance and rejects a body that breaks today's contract", () => {
@@ -231,7 +255,7 @@ function servedListingTiers() {
 }
 
 function servedLimits() {
-  return { autoReloadMinTriggerCents: 5000, caseTierMinimumCents: 40000, autoReloadMinAmountCents: 10000, manualFundingMinCents: 1000, manualFundingMaxCents: 500000, defaultPaymentHoldTimeoutMinutes: 2880, holdExpiryWarningMinutes: 90, advanceFeeBps: 125, advanceCapCents: 30000, tierChangeGraceDays: 7, cardFundingMinCents: 15000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, bankBalanceReadOffered: false };
+  return { autoReloadMinTriggerCents: 5000, caseTierMinimumCents: 40000, autoReloadMinAmountCents: 10000, manualFundingMinCents: 1000, manualFundingMaxCents: 500000, defaultPaymentHoldTimeoutMinutes: 2880, holdExpiryWarningMinutes: 90, advanceFeeBps: 125, advanceCapCents: 30000, tierChangeGraceDays: 7, cardFundingMinCents: 15000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, rewardsExpiryDays: null, bankBalanceReadOffered: false };
 }
 
 function servedSetupStatus() {
