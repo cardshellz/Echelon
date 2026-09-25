@@ -1,8 +1,9 @@
 /**
  * Dropship wallet policy — the limits the vendor wallet enforces.
  *
- * Fifteen numbers, staff-managed as versioned data
- * (`dropship.dropship_wallet_policies`, migrations 0682, 0683, 0701 and 0702):
+ * Sixteen values, staff-managed as versioned data
+ * (`dropship.dropship_wallet_policies`, migrations 0682, 0683, 0701, 0702 and
+ * 0705):
  *
  *   - the two LISTING TIER minimums. A vendor selling eaches and inner packs
  *     (variant type P, B) keeps at least the pack tier minimum; a vendor with
@@ -27,7 +28,10 @@
  *   - the REWARDS RATES (basis points), one per rail: what a settled transfer
  *     earns into the spend-only rewards balance (1% on bank and USDC, 0% on
  *     card at launch), each under a 10% ceiling so a typo cannot pay out
- *     100% (domain/wallet-rewards.ts).
+ *     100% (domain/wallet-rewards.ts);
+ *   - the REWARDS EXPIRY: how many days after they are earned unused points
+ *     expire, or never (null, the launch setting). The one value that may be
+ *     null (domain/wallet-rewards-expiry.ts).
  *
  * This module holds the PURE part: the shape, the documented fallback used when
  * no policy row exists, and the invariants, so the SQL CHECK constraints and
@@ -35,7 +39,8 @@
  * database.
  *
  * Money is integer cents. Fees are basis points. Timings are whole minutes or
- * whole days. Nothing here reads the database or the clock.
+ * whole days, and the expiry is whole days or null. Nothing here reads the
+ * database or the clock.
  */
 
 import { DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES } from "../../../../shared/schema/dropship.schema";
@@ -50,6 +55,7 @@ import {
   DEFAULT_REWARDS_RATE_CARD_BPS,
   DEFAULT_REWARDS_RATE_USDC_BPS,
 } from "./wallet-rewards";
+import { DEFAULT_REWARDS_EXPIRY_DAYS } from "./wallet-rewards-expiry";
 
 /**
  * The resolved limits. Field names match the vendor wallet DTO
@@ -97,6 +103,12 @@ export interface DropshipWalletPolicyLimits {
   rewardsRateBankBps: number;
   rewardsRateUsdcBps: number;
   rewardsRateCardBps: number;
+  /**
+   * Days after they are earned that unused rewards points expire, or null for
+   * never (funding design phase 7). Fixed on each earning when it is made, so
+   * a change applies to points earned after it.
+   */
+  rewardsExpiryDays: number | null;
 }
 
 /**
@@ -168,7 +180,7 @@ export const MAX_TIER_CHANGE_GRACE_DAYS = 365;
 /**
  * The environment variable each limit falls back to, for the admin read. The
  * limits introduced by the funding design (case tier, advance, grace, card
- * minimum, rewards rates) and the hold timeout have no environment override: their fallback
+ * minimum, rewards rates and expiry) and the hold timeout have no environment override: their fallback
  * is the documented default in this module, and the policy row is the only
  * way to move them. The card fee keeps its variable as the fallback only.
  */
@@ -190,6 +202,7 @@ export const DROPSHIP_WALLET_POLICY_ENV_KEYS = Object.freeze({
   rewardsRateBankBps: null,
   rewardsRateUsdcBps: null,
   rewardsRateCardBps: null,
+  rewardsExpiryDays: null,
 });
 
 /**
@@ -270,6 +283,7 @@ export function resolveDropshipWalletPolicyLimitsFromEnv(
     rewardsRateBankBps: DEFAULT_REWARDS_RATE_BANK_BPS,
     rewardsRateUsdcBps: DEFAULT_REWARDS_RATE_USDC_BPS,
     rewardsRateCardBps: DEFAULT_REWARDS_RATE_CARD_BPS,
+    rewardsExpiryDays: DEFAULT_REWARDS_EXPIRY_DAYS,
   };
 }
 
@@ -280,7 +294,7 @@ export interface WalletPolicyInvariantViolation {
 
 /**
  * The cross-field rules, mirroring the CHECK constraints in migrations 0682,
- * 0683 and 0701 (0702 adds per-field ranges only). Returns every violation rather than the first, so staff fix one form
+ * 0683 and 0701 (0702 and 0705 add per-field ranges only). Returns every violation rather than the first, so staff fix one form
  * instead of playing whack-a-mole. Per-field positivity/range is left to the
  * Zod schema at the boundary; this function assumes integers and checks the
  * relationships.

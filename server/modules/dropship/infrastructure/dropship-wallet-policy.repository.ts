@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
+import { isValidRewardsExpiryDays } from "../domain/wallet-rewards-expiry";
 import type { DropshipWalletPolicyLimits } from "../domain/wallet-policy";
 import type {
   CreateDropshipWalletPolicyVersionRepositoryInput,
@@ -37,6 +38,7 @@ import {
  *   rewards_rate_bank_bps                -> rewardsRateBankBps
  *   rewards_rate_usdc_bps                -> rewardsRateUsdcBps
  *   rewards_rate_card_bps                -> rewardsRateCardBps
+ *   rewards_expiry_days                  -> rewardsExpiryDays (NULL is never)
  *
  * Published rows are immutable (DB trigger); a change inserts a new version and
  * retires the previous one inside ONE transaction with its command row and its
@@ -71,6 +73,7 @@ interface PolicyRow {
   rewards_rate_bank_bps: number;
   rewards_rate_usdc_bps: number;
   rewards_rate_card_bps: number;
+  rewards_expiry_days: number | null;
   is_active: boolean;
   change_note: string | null;
   created_at: Date;
@@ -203,9 +206,9 @@ export class PgDropshipWalletPolicyRepository implements DropshipWalletPolicyRep
            default_payment_hold_timeout_minutes, hold_expiry_warning_minutes,
            advance_fee_bps, advance_cap_cents, tier_change_grace_days,
            card_funding_fee_bps, card_funding_minimum_cents,
-           rewards_rate_bank_bps, rewards_rate_usdc_bps, rewards_rate_card_bps,
+           rewards_rate_bank_bps, rewards_rate_usdc_bps, rewards_rate_card_bps, rewards_expiry_days,
            is_active, change_note, created_at, created_by_actor_type, created_by_actor_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, true, $17, $18, $19, $20)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, true, $18, $19, $20, $21)
          RETURNING *`,
         [
           version,
@@ -224,6 +227,7 @@ export class PgDropshipWalletPolicyRepository implements DropshipWalletPolicyRep
           input.limits.rewardsRateBankBps,
           input.limits.rewardsRateUsdcBps,
           input.limits.rewardsRateCardBps,
+          input.limits.rewardsExpiryDays,
           input.changeNote,
           input.now,
           input.actor.actorType,
@@ -317,6 +321,7 @@ function mapPolicyRow(row: PolicyRow): DropshipWalletPolicyRecord {
     rewardsRateBankBps: nonNegativeInteger(row.rewards_rate_bank_bps, "rewards_rate_bank_bps"),
     rewardsRateUsdcBps: nonNegativeInteger(row.rewards_rate_usdc_bps, "rewards_rate_usdc_bps"),
     rewardsRateCardBps: nonNegativeInteger(row.rewards_rate_card_bps, "rewards_rate_card_bps"),
+    rewardsExpiryDays: expiryDays(row.rewards_expiry_days, "rewards_expiry_days"),
   };
   return {
     policyId: row.id,
@@ -368,6 +373,21 @@ function minutes(value: number, column: string): number {
 }
 
 /** Basis points and grace days: whole numbers, zero allowed. */
+/** Null (never) or whole days within the policy bound; anything else is a stored-data fault. */
+/** Only a stored null is "never": a missing or malformed value is refused, as for every other column. */
+function expiryDays(value: number | null, column: string): number | null {
+  if (value === null) return null;
+  const parsed = Number(value);
+  if (!isValidRewardsExpiryDays(parsed)) {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_POLICY_INVALID_STORED_VALUE",
+      "Stored wallet policy rewards expiry is not null or a whole number of days within the bound.",
+      { classification: "fatal", column, value },
+    );
+  }
+  return parsed;
+}
+
 function nonNegativeInteger(value: number, column: string): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 0) {

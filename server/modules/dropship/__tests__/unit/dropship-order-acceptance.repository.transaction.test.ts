@@ -14,6 +14,7 @@ import type { Pool, PoolClient } from "pg";
 import type { DropshipProductCost, DropshipProductCostReader } from "../../application/dropship-product-cost";
 import type { DropshipOrderAcceptanceInput } from "../../application/dropship-order-acceptance-service";
 import { PgDropshipOrderAcceptanceRepository } from "../../infrastructure/dropship-order-acceptance.repository";
+import { createFakeRewardsLots, type FakeRewardsLotsSeed } from "../fixtures/fake-rewards-lots";
 
 const ACCEPTED_AT = new Date("2026-09-12T15:00:00.000Z");
 const VARIANT_ID = 66;
@@ -25,11 +26,15 @@ interface QueryCall { sql: string; params: unknown[] }
 
 type RowHandler = { match: string; rows: unknown[] | ((params: unknown[]) => unknown[]) };
 
-function createFakeDb(handlers: RowHandler[]) {
+/** The lot tables (migration 0705) are answered by an in-memory stand-in, seeded per test when rewards are spent. */
+function createFakeDb(handlers: RowHandler[], lotsSeed: FakeRewardsLotsSeed = {}) {
   const calls: QueryCall[] = [];
+  const lots = createFakeRewardsLots(lotsSeed);
   const query = vi.fn(async (sql: string, params: unknown[] = []) => {
     calls.push({ sql, params });
     if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+    const lotAnswer = lots.handle(sql, params);
+    if (lotAnswer) return { rows: lotAnswer.rows, rowCount: lotAnswer.rows.length };
     const handler = handlers.find((candidate) => sql.includes(candidate.match));
     if (!handler) throw new Error(`Unexpected statement in acceptance transaction: ${sql.trim().slice(0, 90)}`);
     const rows = typeof handler.rows === "function" ? handler.rows(params) : handler.rows;
@@ -38,7 +43,7 @@ function createFakeDb(handlers: RowHandler[]) {
   const client = { query, release: vi.fn() } as unknown as PoolClient;
   const pool = { connect: vi.fn(async () => client) } as unknown as Pool;
   const statements = (fragment: string) => calls.filter((call) => call.sql.includes(fragment));
-  return { pool, client, calls, statements };
+  return { pool, client, calls, statements, lots };
 }
 
 function intakeRow(overrides: Record<string, unknown> = {}) {
@@ -1149,9 +1154,42 @@ describe("PgDropshipOrderAcceptanceRepository rewards at the debit (funding desi
     expect(rewardsRow.params[7]).toMatch(/:rewards$/);
     expect(JSON.parse(String(rewardsRow.params[8]))).toMatchObject({ intakeId: acceptanceInput().intakeId, orderDebitLedgerEntryId: 77, totalDebitCents: expectedDebit, cashDebitCents: expectedDebit - 300, rewardsBalanceBeforeCents: 300 });
     expect(rewardsRow.params[10]).toBe(0);
-    const audits = db.statements("INSERT INTO dropship.dropship_audit_events").map((call) => call.sql.match(/'(wallet_[a-z_]+)'/)?.[1]);
+    const audits = db.statements("INSERT INTO dropship.dropship_audit_events").map((call) => call.sql.match(/'(wallet_[a-z_]+)'/)?.[1] ?? call.params[3]);
     expect(audits).toContain("wallet_order_debited");
     expect(audits).toContain("wallet_rewards_spent");
+    // The 300 points held before lots existed open the account's first lot, and the spend leaves it.
+    expect(audits).toContain("wallet_rewards_lots_opened");
+    expect(db.lots.lots).toEqual([expect.objectContaining({ wallet_account_id: 1, source: "opening_balance", earned_cents: 300, remaining_cents: 0 })]);
+    expect(db.lots.movements).toEqual([expect.objectContaining({ ledger_entry_id: 77, reason: "ledger", amount_cents: -300 })]);
+  });
+
+  it("spends the points closest to expiring first, never-expiring points last", async () => {
+    const soon = new Date(ACCEPTED_AT.getTime() + 5 * 86_400_000);
+    const later = new Date(ACCEPTED_AT.getTime() + 50 * 86_400_000);
+    const db = createFakeDb(baseHandlers(walletWithRewards(3_500)), {
+      lots: [
+        { id: 1, wallet_account_id: 1, source: "opening_balance", remaining_cents: 2_000 },
+        { id: 2, wallet_account_id: 1, source: "earned", origin_ledger_entry_id: 40, remaining_cents: 1_000, expires_at: later, expiry_days: 90 },
+        { id: 3, wallet_account_id: 1, source: "earned", origin_ledger_entry_id: 41, remaining_cents: 500, expires_at: soon, expiry_days: 90 },
+      ],
+    });
+    const { repository } = createRepository(db, availableCost());
+
+    const result = await repository.acceptOrder(acceptanceInput());
+
+    expect(result).toMatchObject({ outcome: "accepted", rewardsCents: expectedDebit });
+    expect(db.lots.movements.map((movement) => [movement.lot_id, movement.amount_cents])).toEqual([
+      [3, -500],
+      [2, -1_000],
+      [1, -(expectedDebit - 1_500)],
+    ]);
+    expect(db.lots.remainingFor(1)).toBe(3_500 - expectedDebit);
+    const spendAudit = db.statements("INSERT INTO dropship.dropship_audit_events").find((call) => call.sql.includes("'wallet_rewards_spent'"));
+    expect(JSON.parse(String(spendAudit?.params[2])).rewardsLotTakes).toEqual([
+      { lotId: 3, cents: 500 },
+      { lotId: 2, cents: 1_000 },
+      { lotId: 1, cents: expectedDebit - 1_500 },
+    ]);
   });
 
   it("an order the rewards balance pays in full posts no cash row; the rewards row is the record, whatever the cash balance", async () => {

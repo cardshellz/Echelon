@@ -264,8 +264,8 @@ transfers rather than on orders because that is the only way "card earns
 nothing" can be true: once money is in the wallet it is all the same money.
 
 Rewards are a third balance on the wallet account, integer cents, with their
-own ledger lines (earned, spent, reversed, redeemed). They are money Card
-Shellz issues, so:
+own ledger lines (earned, spent, reversed, reinstated, and since migration
+0705 expired). They are money Card Shellz issues, so:
 
 - spend-only: never paid out, and left out of any refund on account closure;
 - never counted toward the minimum, the credit allowance or a top-up trigger,
@@ -275,7 +275,7 @@ Shellz issues, so:
 - a cancelled or refunded order returns its rewards share to rewards, not to
   cash;
 - the rate setting has a ceiling, so a typo cannot pay out 100%;
-- no expiry at launch (a setting later).
+- no expiry at launch; staff can set one (built in migration 0705).
 
 **Spending.** Rewards are points, 100 per dollar (one per cent, so the
 stored cents are the points), and their only use is lower product cost on
@@ -285,8 +285,8 @@ auto-apply their points; until they choose, the points are saved up.
 Auto-apply is never a default (owner decision of 2026-09-24, which also
 dropped the earlier idea of redeeming points as store coupon codes: points
 never leave the wallet). Points get an expiry set by staff, with "never" as
-an option (to be built; none at launch). They never touch the Shellz Club
-points ledger.
+an option (never at launch; built in migration 0705). They never touch the
+Shellz Club points ledger.
 
 **Separation from Shellz Club rewards.** The two programs never pool. A .ops
 member still earns Shellz Club rewards on retail purchases, and those can
@@ -344,10 +344,33 @@ that moved points shows its amount and its points balance after in points;
 and an order shows both parts of its payment (the order detail serves the
 `rewards_spent` row beside the `order_debit` row, a hold serves the points
 share its event recorded, and the accept response carries `rewardsCents`).
-Not built yet: the points expiry setting and its sweep, the points share
-of a return credit, and the admin order view of the split.
-`rewards_redeemed` stays in the ledger vocabulary with no writer; it is
-retired with the next ledger-kind change.
+The points expiry (migration 0705): staff set on the Wallet Policy tab how
+many days after they are earned unused points expire, from 1 to 3,650, or
+blank for never, the launch setting (`rewards_expiry_days`). Each earning is
+a lot (`dropship_wallet_rewards_lots`) whose expiry date is fixed when it is
+earned, so a change applies to points earned after it. The rewards balance
+stays the money authority and the lots index it: every rewards writer moves
+both in one transaction under the wallet account row lock, and every
+movement in or out of a lot is recorded against the ledger row that caused
+it (`dropship_wallet_rewards_lot_movements`, append-only). Points leave lots
+soonest-expiring first, never-expiring last, oldest first among equals. A
+clawback takes from the disputed credit's own lot first, and a won dispute
+puts the points back into the lots they came from, keeping their dates: a
+lot whose date passed in the meantime expires at the next wallet run. There
+is no backfill. The first writer to touch an account opens its first lot for
+the points it already holds, never expiring. A later mismatch between the
+lots and the balance (the previous release while this one deploys, or a
+defect) is corrected with a warning audit row: in the vendor's favour when
+the lots hold too few points (a never-expiring lot), in use order when they
+hold too many. The hourly maintenance run expires what is left of each lot
+past its date as a `rewards_expired` line, one per lot, referenced by the
+lot and how many times it has expired. The wallet page names the soonest
+points to expire under the points figure; the rules page states the setting
+for new points. No email is sent when points expire. The `rewards_redeemed`
+kind, which never had a writer, left the ledger vocabulary in the same
+migration, which stops rather than proceeds if a row carrying it exists.
+Not built yet: the points share of a return credit, and the admin order view
+of the split.
 
 **Still open, not designed here:** credit against a business account's first
 bank transfer (today one earlier transfer from the account must have

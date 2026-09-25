@@ -5,6 +5,7 @@ import { createDropshipWalletMaintenanceServiceFromEnv } from "./dropship-wallet
 import { createDropshipNoInspectionWatcherServiceFromEnv } from "./dropship-no-inspection-watcher.factory";
 import { createDropshipVendorStandingServiceFromEnv } from "./dropship-vendor-standing.factory";
 import { createDropshipListingTierServiceFromEnv } from "./dropship-listing-tier.factory";
+import { createDropshipRewardsExpiryServiceFromEnv } from "./dropship-wallet-rewards-expiry.factory";
 import type {
   DropshipListingTierReconcileResult,
   ReconcileDropshipListingTiersInput,
@@ -18,10 +19,14 @@ import type {
   ReconcileDropshipVendorStandingInput,
 } from "../application/dropship-vendor-standing-service";
 import type { DropshipNoInspectionWatcherResult } from "../application/dropship-no-inspection-watcher-service";
+import type {
+  DropshipRewardsExpiryResult,
+  RunDropshipRewardsExpiryInput,
+} from "../application/dropship-wallet-rewards-expiry-service";
 
 /**
- * Dropship maintenance runner: an hourly tick covering three jobs that share
- * a schedule.
+ * Dropship maintenance runner: an hourly tick covering the jobs that share a
+ * schedule.
  *
  *  1. Wallet maintenance: once per vendor per UTC day, top every active
  *     vendor's wallet up to its minimum through the routine auto-reload.
@@ -33,6 +38,10 @@ import type { DropshipNoInspectionWatcherResult } from "../application/dropship-
  *     top-up that just settled resumes the vendor on the same tick.
  *  3. No-inspection watcher (D3): queue lost-in-transit RMAs for human
  *     review. Idempotent per RMA.
+ *  4. Rewards points expiry (funding design phase 7): what is left of each
+ *     rewards lot past its date leaves the rewards balance as a ledger row.
+ *     Last, so a failure here never holds up the jobs above; nothing above
+ *     reads the rewards balance.
  *
  * The worker keeps its historical name and environment variables
  * (`DROPSHIP_RETURNS_MAINTENANCE_*`) so existing deployments do not silently
@@ -57,6 +66,10 @@ interface ListingTierRunnerService {
   reconcileListingTiers(input: ReconcileDropshipListingTiersInput): Promise<DropshipListingTierReconcileResult>;
 }
 
+interface RewardsExpiryRunnerService {
+  runExpiry(input: RunDropshipRewardsExpiryInput): Promise<DropshipRewardsExpiryResult>;
+}
+
 const DROPSHIP_RETURNS_MAINTENANCE_LOCK_ID = 736211;
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000; // hourly tick; wallet maintenance is once-per-day per vendor, retries ride the tick
 const DEFAULT_BATCH_SIZE = 100;
@@ -66,6 +79,7 @@ export async function runDropshipReturnsMaintenanceSweep(input: {
   vendorStandingService?: VendorStandingRunnerService;
   listingTierService?: ListingTierRunnerService;
   noInspectionWatcherService?: NoInspectionWatcherRunnerService;
+  rewardsExpiryService?: RewardsExpiryRunnerService;
   batchSize?: number;
   workerId?: string;
 } = {}): Promise<{
@@ -73,6 +87,7 @@ export async function runDropshipReturnsMaintenanceSweep(input: {
   vendorStanding: DropshipVendorStandingReconcileResult;
   listingTiers: DropshipListingTierReconcileResult;
   noInspection: DropshipNoInspectionWatcherResult;
+  rewardsExpiry: DropshipRewardsExpiryResult;
 }> {
   const workerId = input.workerId ?? defaultWorkerId();
   const batchSize = input.batchSize
@@ -85,6 +100,8 @@ export async function runDropshipReturnsMaintenanceSweep(input: {
     ?? createDropshipListingTierServiceFromEnv();
   const noInspectionWatcherService = input.noInspectionWatcherService
     ?? createDropshipNoInspectionWatcherServiceFromEnv();
+  const rewardsExpiryService = input.rewardsExpiryService
+    ?? createDropshipRewardsExpiryServiceFromEnv();
 
   const walletMaintenance = await walletMaintenanceService.runMaintenance({
     workerId,
@@ -104,7 +121,11 @@ export async function runDropshipReturnsMaintenanceSweep(input: {
     workerId,
     limit: batchSize,
   });
-  return { walletMaintenance, vendorStanding, listingTiers, noInspection };
+  const rewardsExpiry = await rewardsExpiryService.runExpiry({
+    workerId,
+    limit: batchSize,
+  });
+  return { walletMaintenance, vendorStanding, listingTiers, noInspection, rewardsExpiry };
 }
 
 export function startDropshipReturnsMaintenanceWorker(): void {
@@ -138,6 +159,8 @@ export function startDropshipReturnsMaintenanceWorker(): void {
           || result.listingTiers.deferredCount > 0
           || result.listingTiers.failedCount > 0
           || result.noInspection.queuedCount > 0
+          || result.rewardsExpiry.expiredLotCount > 0
+          || result.rewardsExpiry.failedCount > 0
         ) {
           console.info(JSON.stringify({
             code: "DROPSHIP_RETURNS_MAINTENANCE_SWEEP_COMPLETED",
@@ -161,6 +184,7 @@ export function startDropshipReturnsMaintenanceWorker(): void {
                 queuedCount: result.noInspection.queuedCount,
                 skippedCount: result.noInspection.skippedCount,
               },
+              rewardsExpiry: result.rewardsExpiry,
             },
           }));
         }

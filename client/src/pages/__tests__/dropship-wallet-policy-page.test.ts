@@ -58,6 +58,7 @@ function overviewFixture(
       rewardsRateBankBps: 100,
       rewardsRateUsdcBps: 100,
       rewardsRateCardBps: 0,
+      rewardsExpiryDays: null,
     },
     limitsSource: "environment",
     envLimits: {
@@ -76,6 +77,7 @@ function overviewFixture(
       rewardsRateBankBps: 100,
       rewardsRateUsdcBps: 100,
       rewardsRateCardBps: 0,
+      rewardsExpiryDays: null,
     },
     envKeys: {
       autoReloadMinTriggerCents: "DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS",
@@ -95,6 +97,7 @@ function overviewFixture(
       rewardsRateBankBps: null,
       rewardsRateUsdcBps: null,
       rewardsRateCardBps: null,
+      rewardsExpiryDays: null,
     },
     // Deliberately inconsistent with `limits`: a page that computed the counts
     // from the form could not produce these numbers.
@@ -225,7 +228,7 @@ describe("dropship wallet policy tab", () => {
     );
     const inputs = tags(html, "input");
     const textareas = tags(html, "textarea");
-    expect(inputs).toHaveLength(15);
+    expect(inputs).toHaveLength(16);
     expect(textareas).toHaveLength(1);
     for (const element of [...inputs, ...textareas]) {
       expect(element).toMatch(DISABLED_ATTRIBUTE);
@@ -236,10 +239,13 @@ describe("dropship wallet policy tab", () => {
     expect(tags(html, "fieldset")[0]).toMatch(DISABLED_ATTRIBUTE);
   });
 
-  it("opens the fifteen limit boxes for an operator who may manage operations", () => {
+  it("opens the sixteen limit boxes for an operator who may manage operations", () => {
     const html = renderPanel({ canEdit: true, overview: overviewFixture() });
     const inputs = tags(html, "input");
-    expect(inputs).toHaveLength(15);
+    expect(inputs).toHaveLength(16);
+    // The points expiry (migration 0705) is whole days, and blank reads as never.
+    expect(html).toContain("Rewards points expiry (days, blank for never)");
+    expect(inputs.some((input) => input.includes('placeholder="Never"'))).toBe(true);
     // The card fee and the card minimum are ordinary limits since funding design phase 7.
     expect(html).toContain("Card funding fee (%)");
     expect(html).toContain("Card minimum deposit ($)");
@@ -324,6 +330,12 @@ describe("dropship wallet policy tab", () => {
     // Each new limit is printed in its own unit.
     expect(html).toContain("1.00%");
     expect(html).toContain("14 days");
+    // No expiry is printed as the word, never as a number of days.
+    expect(html).toContain(">Never<");
+    const withExpiry = renderPanel({ overview: overviewFixture({
+      limits: { ...overviewFixture().limits, rewardsExpiryDays: 365 },
+    }) });
+    expect(withExpiry).toContain("365 days");
   });
 
   it("names the published version and its author once a policy row exists", () => {

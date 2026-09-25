@@ -11,6 +11,7 @@ import {
   type DropshipAdvanceRefusal,
 } from "../domain/acceptance-funding";
 import { loadAdvancePolicyWithClient, loadAdvanceSourcesWithClient } from "./dropship-advance.reader";
+import { reconcileRewardsLotsWithClient, takeRewardsFromLotsWithClient } from "./dropship-wallet-rewards-lots";
 import { resolveAcceptanceUnitCost } from "../domain/order-acceptance-cost";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 import type { NormalizedDropshipOrderPayload } from "../application/dropship-order-intake-service";
@@ -2362,6 +2363,17 @@ async function debitWalletWithClient(
   }
   let rewardsLedgerEntryId: number | null = null;
   if (rewardsCents > 0) {
+    // The lots say which points go (migration 0705): soonest to expire
+    // first. Reconciled against the balance as locked, before this spend.
+    const rewardsLots = await reconcileRewardsLotsWithClient(client, {
+      account: {
+        walletAccountId: input.wallet.walletAccountId,
+        vendorId: input.plan.vendorId,
+        rewardsBalanceCents: input.wallet.rewardsBalanceCents,
+      },
+      cause: "rewards_spent",
+      now: input.input.acceptedAt,
+    });
     const result = await client.query<WalletLedgerIdRow>(
       `INSERT INTO dropship.dropship_wallet_ledger
         (wallet_account_id, vendor_id, type, status, amount_cents, currency,
@@ -2395,6 +2407,13 @@ async function debitWalletWithClient(
       ],
     );
     rewardsLedgerEntryId = requiredRow(result.rows[0], "Dropship wallet rewards spend insert did not return a row.").id;
+    const rewardsLotTakes = await takeRewardsFromLotsWithClient(client, {
+      walletAccountId: input.wallet.walletAccountId,
+      lots: rewardsLots,
+      amountCents: rewardsCents,
+      ledgerEntryId: rewardsLedgerEntryId,
+      now: input.input.acceptedAt,
+    });
     await client.query(
       `INSERT INTO dropship.dropship_audit_events
         (vendor_id, entity_type, entity_id, event_type,
@@ -2412,6 +2431,7 @@ async function debitWalletWithClient(
           totalDebitCents: input.plan.totalDebitCents,
           rewardsBalanceBeforeCents: input.wallet.rewardsBalanceCents,
           rewardsBalanceAfterCents: rewardsAfterCents,
+          rewardsLotTakes,
         }),
         input.input.acceptedAt,
       ],

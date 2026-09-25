@@ -54,6 +54,8 @@ interface StubState {
   pendingCents: number;
   /** The spend-only rewards balance (funding design phase 7). */
   rewardsCents: number;
+  /** The soonest points expiry (migration 0705); null leaves the field out, as a server one release behind does. */
+  rewardsNextExpiry: { expiresAt: string; cents: number } | null;
   ledger: Record<string, unknown>[];
   cardFundingFeeBps: number;
   limits: Record<string, number> | null;
@@ -110,7 +112,8 @@ function walletJson(state: StubState) {
     ...(state.usdcDeposit ? { usdcDeposit: state.usdcDeposit } : {}),
     ...(state.limits ? { limits: state.limits } : {}),
     ...(state.listingTiers ? { listingTiers: state.listingTiers } : {}),
-    ...(state.advance ? { advance: state.advance } : {}) } };
+    ...(state.advance ? { advance: state.advance } : {}),
+    ...(state.rewardsNextExpiry ? { rewardsNextExpiry: state.rewardsNextExpiry } : {}) } };
 }
 
 /** The bank account (method 30) qualifies with $400 on the way; the card never appears. */
@@ -137,7 +140,7 @@ function listingTiersJson() {
 }
 
 async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNESS_PATH) {
-  const state: StubState = { methods: [], holdSetupConfirmation: false, usdcDepositAddress: null, usdcDeposit: null, autoReload: null, balanceCents: 0, pendingCents: 0, rewardsCents: 0, ledger: [], cardFundingFeeBps: 300, limits: null, listingTiers: null, advance: null,
+  const state: StubState = { methods: [], holdSetupConfirmation: false, usdcDepositAddress: null, usdcDeposit: null, autoReload: null, balanceCents: 0, pendingCents: 0, rewardsCents: 0, rewardsNextExpiry: null, ledger: [], cardFundingFeeBps: 300, limits: null, listingTiers: null, advance: null,
     proofs: {}, failChallenge: false, deleteRefusal: null, detachOutcome: "detached", putRefusalOnce: null, vendorStatus: "onboarding", vendorStandingReason: null,
     walletReads: 0, nextCardId: 10, nextBankId: 30, setupSessions: [], autoReloadWrites: [], preferenceWrites: [], fundingSessions: [], usdcRegistrations: [], usdcAddressRequests: 0, deletes: [], bodies: [],
     codesSent: [], unexpected: [], errors: [], ...initial };
@@ -777,6 +780,57 @@ test("manage: rewards are points with their value beside, the choice starts unma
   await expect(rewards.getByTestId("wallet-rewards-use")).toHaveText("Saved up: your cash pays for orders. Auto-apply them whenever you want to use them. 100 points are worth $1 on your orders.");
   await shot(page, "manage-rewards-02-chosen");
   finish(state);
+});
+
+test.describe("points expiry (migration 0705)", () => {
+  // The expiry line names the viewer's own calendar date; pinning the zone keeps the date the same on every machine.
+  test.use({ timezoneId: "America/New_York" });
+
+  test("manage: the soonest points to expire are named under the figure, expired points read in points, and the rules state the expiry", async ({ page }) => {
+    const ledger = [
+      { ledgerEntryId: 102, type: "rewards_expired", status: "settled", amountCents: -300, currency: "USD", availableBalanceAfterCents: 4_250, pendingBalanceAfterCents: 0, rewardsBalanceAfterCents: 1_250, createdAt: LATER, settledAt: LATER, referenceType: "wallet_rewards_lot_expiry", metadata: {} },
+      { ledgerEntryId: 100, type: "rewards_earned", status: "settled", amountCents: 1_550, currency: "USD", availableBalanceAfterCents: 4_250, pendingBalanceAfterCents: 0, rewardsBalanceAfterCents: 1_550, createdAt: STAMP, settledAt: STAMP, metadata: {} },
+    ];
+    const limits = {
+      autoReloadMinTriggerCents: 10_000, caseTierMinimumCents: 50_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000,
+      cardFundingMinCents: 10_000, defaultPaymentHoldTimeoutMinutes: 1_440, holdExpiryWarningMinutes: 120, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14,
+      rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, rewardsExpiryDays: 90,
+    };
+    // Noon in New York on December 1, 2030: in the future whenever this runs, and the same date in the pinned zone.
+    const state = await setup(page, {
+      vendorStatus: "active", methods: [CARD, BANK], autoReload: doneAutoReload({ spendRewardsFirst: true }), balanceCents: 4_250, rewardsCents: 1_250, ledger, limits,
+      rewardsNextExpiry: { expiresAt: "2030-12-01T17:00:00.000Z", cents: 500 }, usdcDepositAddress: DEPOSIT_ADDRESS, proofs: ALL_PROOFS,
+    });
+    const rewards = page.getByTestId("wallet-balance").getByTestId("wallet-rewards");
+    await expect(rewards.getByTestId("wallet-rewards-balance")).toHaveText("1,250 points");
+    await expect(rewards.getByTestId("wallet-rewards-next-expiry")).toHaveText("500 points ($5.00) expire on December 1, 2030.");
+    await expectNoHorizontalScroll(page);
+    await shot(page, "manage-rewards-03-next-expiry");
+
+    // The expired points are their own activity line, in points, against the points balance.
+    const rows = page.getByTestId("wallet-activity").getByRole("row");
+    await expect(rows.nth(1)).toContainText("Rewards expired");
+    await expect(rows.nth(1)).toContainText("−300 points");
+    await expect(rows.nth(1)).toContainText("1,250 points");
+    await expect(rows.nth(1)).not.toContainText("$");
+
+    // The rules say what happens to points earned from now on.
+    const rules = page.getByTestId("wallet-how-it-works");
+    await rules.getByRole("button", { name: "How your wallet works" }).click();
+    await expect(rules).toContainText("until you choose, they are saved up. New points expire 90 days after they are earned, and the points closest to expiring are used first. They are not cash");
+    finish(state);
+  });
+
+  test("manage: with nothing set to expire there is no expiry line, and the rules say new points do not expire", async ({ page }) => {
+    const state = await setup(page, { vendorStatus: "active", methods: [CARD, BANK], autoReload: doneAutoReload(), balanceCents: 4_250, rewardsCents: 1_250, usdcDepositAddress: DEPOSIT_ADDRESS, proofs: ALL_PROOFS });
+    const rewards = page.getByTestId("wallet-balance").getByTestId("wallet-rewards");
+    await expect(rewards.getByTestId("wallet-rewards-balance")).toHaveText("1,250 points");
+    await expect(rewards.getByTestId("wallet-rewards-next-expiry")).toHaveCount(0);
+    const rules = page.getByTestId("wallet-how-it-works");
+    await rules.getByRole("button", { name: "How your wallet works" }).click();
+    await expect(rules).toContainText("until you choose, they are saved up. New points do not expire. They are not cash");
+    finish(state);
+  });
 });
 
 test("manage: adding money by card, bank or USDC quotes the fee honestly and returns with the right banner", async ({ page }) => {

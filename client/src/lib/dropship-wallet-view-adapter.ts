@@ -88,7 +88,7 @@ export type WalletLedgerReason =
   | "daily_top_up" | "after_order_top_up" | "activation_top_up" | "covered_held_order" | "manual_top_up"
   | "usdc_deposit" | "admin_credit" | "order" | "advance_fee" | "funding_reversed" | "funding_reinstated"
   | "return_fee" | "return_credit" | "insurance_pool_credit"
-  | "rewards_earned" | "rewards_spent" | "rewards_reversed" | "rewards_reinstated" | "rewards_redeemed"
+  | "rewards_earned" | "rewards_spent" | "rewards_reversed" | "rewards_reinstated" | "rewards_expired"
   | "other";
 
 export interface WalletLedgerEntry {
@@ -139,6 +139,19 @@ export interface WalletLimits {
   rewardsRateBankBps: number;
   rewardsRateUsdcBps: number;
   rewardsRateCardBps: number;
+  /**
+   * Days after they are earned that points earned now expire, or null for
+   * never (migration 0705). Points keep the setting they were earned under.
+   */
+  rewardsExpiryDays: number | null;
+}
+
+/** The soonest points leave the rewards balance unless used: how many, and when. */
+export interface WalletRewardsNextExpiry {
+  /** ISO instant. It can be in the past for up to an hour: the wallet run removes them on its next pass. */
+  expiresAt: string;
+  /** Points, which are cents (100 points per dollar). */
+  cents: number;
 }
 
 export type WalletListingTier = "pack" | "case";
@@ -222,7 +235,8 @@ export type WalletClientFallback =
   | "ledger_reason_derived"
   | "setup_status_derived"
   | "listing_tiers_not_served"
-  | "advance_not_served";
+  | "advance_not_served"
+  | "rewards_next_expiry_not_served";
 
 /**
  * The vendor's USDC deposit position (funding design phase 6): whether the
@@ -262,6 +276,8 @@ export interface DropshipWalletView {
   listingTiers: WalletListingTiers | null;
   /** The pending-transfer advance position; null when the server could not read the policy or did not serve it. */
   advance: WalletAdvance | null;
+  /** The soonest points expiry; null when no points are set to expire, or a server one release behind did not serve it. */
+  rewardsNextExpiry: WalletRewardsNextExpiry | null;
   /** Which parts of this view the client derived because the server did not serve them. Empty once the server serves the full DTO. */
   clientFallbacks: WalletClientFallback[];
 }
@@ -274,6 +290,8 @@ export interface DropshipWalletView {
 const isoString = z.string().min(1);
 const signedCents = z.number().int();
 const cents = z.number().int().nonnegative();
+/** The server's bound on the expiry setting (domain/wallet-rewards-expiry.ts, migration 0705): ten years. */
+const REWARDS_EXPIRY_DAYS_MAX = 3_650;
 
 const rawUsdcDepositSchema = z.object({
   offered: z.boolean(),
@@ -337,7 +355,7 @@ const ledgerReasonSchema = z.enum([
   "daily_top_up", "after_order_top_up", "activation_top_up", "covered_held_order", "manual_top_up",
   "usdc_deposit", "admin_credit", "order", "advance_fee", "funding_reversed", "funding_reinstated",
   "return_fee", "return_credit", "insurance_pool_credit",
-  "rewards_earned", "rewards_spent", "rewards_reversed", "rewards_reinstated", "rewards_redeemed",
+  "rewards_earned", "rewards_spent", "rewards_reversed", "rewards_reinstated", "rewards_expired",
   "other",
 ]);
 
@@ -381,6 +399,13 @@ const rawLimitsSchema = z.object({
   rewardsRateBankBps: z.number().int().nonnegative().optional(),
   rewardsRateUsdcBps: z.number().int().nonnegative().optional(),
   rewardsRateCardBps: z.number().int().nonnegative().optional(),
+  // Null is a served answer (never); absent means a server one release behind.
+  rewardsExpiryDays: z.number().int().min(1).max(REWARDS_EXPIRY_DAYS_MAX).nullable().optional(),
+});
+
+const rawRewardsNextExpirySchema = z.object({
+  expiresAt: isoString,
+  cents: z.number().int().positive(),
 });
 
 const rawListingTierStatusSchema = z.object({
@@ -462,6 +487,8 @@ export const rawWalletResponseSchema = z.object({
     listingTiers: rawListingTiersSchema.optional(),
     // Null is a served answer ("the policy could not be read"); absent means an older server.
     advance: rawAdvanceSchema.nullable().optional(),
+    // Null is a served answer (nothing set to expire); absent means an older server.
+    rewardsNextExpiry: rawRewardsNextExpirySchema.nullable().optional(),
   }).passthrough(),
 });
 
@@ -502,6 +529,8 @@ export const CLIENT_FALLBACK_LIMITS: WalletLimits = Object.freeze({
   rewardsRateBankBps: 100,
   rewardsRateUsdcBps: 100,
   rewardsRateCardBps: 0,
+  // Points never expire at launch (owner decision, 2026-09-24).
+  rewardsExpiryDays: null,
 });
 
 /** The keys of `value` whose entries are defined, so a spread never overwrites a default with `undefined`. */
@@ -679,8 +708,8 @@ export function deriveLedgerReason(entry: Pick<RawLedgerEntry, "type" | "reason"
       return "rewards_reversed";
     case "rewards_reinstated":
       return "rewards_reinstated";
-    case "rewards_redeemed":
-      return "rewards_redeemed";
+    case "rewards_expired":
+      return "rewards_expired";
     case "funding":
       break;
     default:
@@ -806,6 +835,13 @@ export function adaptWalletView(raw: unknown): DropshipWalletView {
   const advance: WalletAdvance | null = wallet.advance ?? null;
   if (wallet.advance === undefined) fallbacks.add("advance_not_served");
 
+  // A server that does not serve it does not expire points either, so none
+  // shown is the truthful reading; the fallback is still named.
+  const rewardsNextExpiry: WalletRewardsNextExpiry | null = wallet.rewardsNextExpiry
+    ? { expiresAt: wallet.rewardsNextExpiry.expiresAt, cents: wallet.rewardsNextExpiry.cents }
+    : null;
+  if (wallet.rewardsNextExpiry === undefined) fallbacks.add("rewards_next_expiry_not_served");
+
   return {
     account: {
       availableBalanceCents: wallet.account.availableBalanceCents,
@@ -837,6 +873,7 @@ export function adaptWalletView(raw: unknown): DropshipWalletView {
     setupStatus,
     listingTiers,
     advance,
+    rewardsNextExpiry,
     clientFallbacks: [...fallbacks],
   };
 }

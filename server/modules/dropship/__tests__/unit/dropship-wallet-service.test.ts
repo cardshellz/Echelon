@@ -1232,6 +1232,7 @@ describe("DropshipWalletService", () => {
         rewardsRateBankBps: 100,
         rewardsRateUsdcBps: 100,
         rewardsRateCardBps: 0,
+        rewardsExpiryDays: null,
         defaultPaymentHoldTimeoutMinutes: 1_440,
         holdExpiryWarningMinutes: 120,
         caseTierMinimumCents: 50_000,
@@ -1464,6 +1465,7 @@ describe("DropshipWalletService", () => {
       rewardsRateBankBps: 100,
       rewardsRateUsdcBps: 100,
       rewardsRateCardBps: 0,
+      rewardsExpiryDays: 180,
     };
     const policy: DropshipWalletPolicyResolver = { resolveWalletLimits: async () => ({ ...publishedLimits }) };
 
@@ -1490,7 +1492,14 @@ describe("DropshipWalletService", () => {
         rewardsRateBankBps: 100,
         rewardsRateUsdcBps: 100,
         rewardsRateCardBps: 0,
+        rewardsExpiryDays: null,
       });
+    });
+
+    it("serves the soonest points expiry with the wallet, as the lots report it", async () => {
+      repository.rewardsNextExpiry = { expiresAt: new Date("2026-12-01T00:00:00.000Z"), cents: 1_250 };
+      const wallet = await service.getWalletForVendor(10);
+      expect(wallet.rewardsNextExpiry).toEqual({ expiresAt: new Date("2026-12-01T00:00:00.000Z"), cents: 1_250 });
     });
 
     it("enforces the published auto-reload floors, not the environment defaults", async () => {
@@ -2130,6 +2139,8 @@ class FakeWalletRepository implements DropshipWalletRepository {
   ];
   autoReload: DropshipAutoReloadSettingRecord | null = null;
   ledger: DropshipWalletLedgerRecord[] = [];
+  /** The soonest points expiry the lots would report; none by default. */
+  rewardsNextExpiry: DropshipWalletOverview["rewardsNextExpiry"] = null;
   usdcLedger: DropshipUsdcLedgerEntryRecord[] = [];
   /** The advance facts the view composes from; null models an unreadable policy. */
   advanceContext: DropshipAdvanceContext | null = null;
@@ -2187,6 +2198,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       autoReload: this.autoReload,
       fundingMethods: this.fundingMethods,
       recentLedger: this.ledger,
+      rewardsNextExpiry: this.rewardsNextExpiry,
     };
   }
 

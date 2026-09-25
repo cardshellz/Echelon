@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Pool, PoolClient } from "pg";
 import { PgDropshipWalletRepository } from "../../infrastructure/dropship-wallet.repository";
+import type { ReverseDropshipSettledFundingRepositoryInput } from "../../application/dropship-wallet-service";
+import { createFakeRewardsLots, type FakeRewardsLotsSeed } from "../fixtures/fake-rewards-lots";
 
 vi.hoisted(() => {
   process.env.DATABASE_URL = process.env.DATABASE_URL ?? "postgres://test:test@localhost:5432/test";
@@ -1084,19 +1086,37 @@ describe("PgDropshipWalletRepository rewards (funding design phase 7)", () => {
     occurredAt,
     ...overrides,
   });
+  const DAY_MS = 86_400_000;
 
-  /** A database with a wallet holding $10 cash and $0.50 of rewards, a bank rate of 1.5%, and no rows for this credit yet. */
-  function rewardsDatabase(options: { rates?: Record<string, number> | null; earned?: Record<string, unknown> | null; policyTable?: boolean } = {}) {
+  /**
+   * A database with a wallet holding $10 cash and 50 points of rewards, a bank
+   * rate of 1.5%, points that never expire unless `expiryDays` says otherwise,
+   * no lots unless seeded, and no rows for this credit yet.
+   */
+  function rewardsDatabase(options: {
+    rates?: Record<string, number> | null;
+    expiryDays?: number | null;
+    earned?: Record<string, unknown> | null;
+    policyTable?: boolean;
+    lots?: FakeRewardsLotsSeed["lots"];
+  } = {}) {
     const statements: string[] = [];
     const updates: unknown[][] = [];
     const inserts: unknown[][] = [];
     const audits: string[] = [];
+    const auditParams: unknown[][] = [];
+    const lots = createFakeRewardsLots({ lots: options.lots });
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
       const sqlText = String(sql);
       statements.push(sqlText.trim().split(/\s+/).slice(0, 2).join(" "));
+      const lotAnswer = lots.handle(sqlText, params);
+      if (lotAnswer) return lotAnswer;
       if (sqlText.includes("to_regclass")) return { rows: [{ present: options.policyTable === false ? null : "dropship.dropship_wallet_policies" }] };
       if (sqlText.includes("FROM dropship.dropship_wallet_policies")) {
-        return { rows: options.rates === null ? [] : [options.rates ?? { rewards_rate_bank_bps: 150, rewards_rate_usdc_bps: 100, rewards_rate_card_bps: 0 }] };
+        return { rows: options.rates === null ? [] : [{
+          ...(options.rates ?? { rewards_rate_bank_bps: 150, rewards_rate_usdc_bps: 100, rewards_rate_card_bps: 0 }),
+          rewards_expiry_days: options.expiryDays ?? null,
+        }] };
       }
       if (sqlText.startsWith("INSERT INTO dropship.dropship_wallet_accounts")) return { rows: [] };
       if (sqlText.includes("FROM dropship.dropship_wallet_accounts")) {
@@ -1123,11 +1143,12 @@ describe("PgDropshipWalletRepository rewards (funding design phase 7)", () => {
       }
       if (sqlText.includes("INSERT INTO dropship.dropship_audit_events")) {
         audits.push(String(params?.[3]));
+        auditParams.push(params ?? []);
         return { rows: [] };
       }
       return { rows: [] };
     });
-    return { statements, updates, inserts, audits, repository: new PgDropshipWalletRepository(makePool(query)) };
+    return { statements, updates, inserts, audits, auditParams, lots, repository: new PgDropshipWalletRepository(makePool(query)) };
   }
 
   it("a settled bank credit earns rewards at the rate in force, rounded down, in the same transaction", async () => {
@@ -1137,7 +1158,7 @@ describe("PgDropshipWalletRepository rewards (funding design phase 7)", () => {
 
     expect(result.idempotentReplay).toBe(false);
     expect(result.ledgerEntry).toMatchObject({ type: "funding", status: "settled", amountCents: 4000 });
-    // The account handed back carries the rewards the credit just earned: $0.50 + 1.5% of $40.
+    // The account handed back carries the rewards the credit just earned: 50 points + 1.5% of $40.
     expect(result.account.rewardsBalanceCents).toBe(110);
     expect(db.updates).toEqual([
       [5, 10, 5000, 0, occurredAt, null],
@@ -1147,10 +1168,44 @@ describe("PgDropshipWalletRepository rewards (funding design phase 7)", () => {
     expect(db.inserts[1].slice(2, 11)).toEqual([
       "rewards_earned", "settled", 60, "USD", 5000, 0, "wallet_funding_rewards", "1", "rewards-earned:1",
     ]);
-    expect(JSON.parse(String(db.inserts[1][13]))).toEqual({ fundingLedgerEntryId: 1, creditAmountCents: 4000, rateBps: 150, rail: "stripe_ach" });
+    expect(JSON.parse(String(db.inserts[1][13]))).toEqual({
+      fundingLedgerEntryId: 1, creditAmountCents: 4000, rateBps: 150, rail: "stripe_ach", expiryDays: null, expiresAt: null,
+    });
     expect(db.inserts[1].slice(14)).toEqual([occurredAt, occurredAt, 110]);
-    expect(db.audits).toEqual(["wallet_funding_settled", "wallet_rewards_earned"]);
+    // The 50 points held before lots existed open the account's first lot, never
+    // expiring; the new points are a lot of their own, tied to their row.
+    expect(db.lots.lots).toEqual([
+      expect.objectContaining({ source: "opening_balance", origin_ledger_entry_id: null, earned_cents: 50, remaining_cents: 50, expires_at: null }),
+      expect.objectContaining({ source: "earned", origin_ledger_entry_id: 9, earned_cents: 60, remaining_cents: 60, earned_at: occurredAt, expires_at: null, expiry_days: null }),
+    ]);
+    expect(db.audits).toEqual(["wallet_funding_settled", "wallet_rewards_lots_opened", "wallet_rewards_earned"]);
+    const opened = db.auditParams[1];
+    expect(opened.slice(1, 4)).toEqual(["dropship_wallet_account", "5", "wallet_rewards_lots_opened"]);
+    expect(opened[6]).toBe("info");
+    expect(JSON.parse(String(opened[4]))).toMatchObject({ cause: "rewards_earned", source: "opening_balance", rewardsBalanceCents: 50, lotsCentsBefore: 0, addedCents: 50 });
+    expect(JSON.parse(String(db.auditParams[2][4]))).toMatchObject({ rewardsLotId: 101 });
     expect(db.statements.at(-1)).toBe("COMMIT");
+  });
+
+  it("dates the new lot from the expiry in force when the points are earned, and records the date on the row", async () => {
+    const db = rewardsDatabase({
+      expiryDays: 365,
+      lots: [{ id: 3, source: "opening_balance", remaining_cents: 50 }],
+    });
+
+    await db.repository.creditFunding(credit());
+
+    const expiresAt = new Date(occurredAt.getTime() + 365 * DAY_MS);
+    expect(JSON.parse(String(db.inserts[1][13]))).toMatchObject({ expiryDays: 365, expiresAt: expiresAt.toISOString() });
+    expect(db.lots.lots[1]).toMatchObject({ source: "earned", origin_ledger_entry_id: 9, remaining_cents: 60, expires_at: expiresAt, expiry_days: 365 });
+    // The lots already matched the balance: nothing to open or reconcile.
+    expect(db.audits).toEqual(["wallet_funding_settled", "wallet_rewards_earned"]);
+  });
+
+  it("refuses a stored expiry that is not null or whole days 1 to 3650, instead of reading it as never", async () => {
+    const corrupt = rewardsDatabase({ expiryDays: 0 });
+    await expect(corrupt.repository.creditFunding(credit())).rejects.toMatchObject({ code: "DROPSHIP_WALLET_REWARDS_EXPIRY_UNREADABLE" });
+    expect(corrupt.statements.at(-1)).toBe("ROLLBACK");
   });
 
   it("a card credit earns nothing at the launch rate, and a pending credit nothing until it settles", async () => {
@@ -1159,6 +1214,7 @@ describe("PgDropshipWalletRepository rewards (funding design phase 7)", () => {
     expect(card.updates).toHaveLength(1);
     expect(card.inserts).toHaveLength(1);
     expect(card.audits).toEqual(["wallet_funding_settled"]);
+    expect(card.lots.lots).toEqual([]);
 
     const pending = rewardsDatabase();
     await pending.repository.creditFunding(credit({ status: "pending" }));
@@ -1169,14 +1225,19 @@ describe("PgDropshipWalletRepository rewards (funding design phase 7)", () => {
   it("uses the launch rates when no policy row exists, and posts no second accrual for a credit that already earned", async () => {
     const launch = rewardsDatabase({ rates: null });
     const result = await launch.repository.creditFunding(credit());
-    expect(result.account.rewardsBalanceCents).toBe(90); // 1% of $40 on top of $0.50
+    expect(result.account.rewardsBalanceCents).toBe(90); // 1% of $40 on top of 50 points
     expect(launch.inserts[1][4]).toBe(40);
+    expect(launch.lots.lots.map((lot) => [lot.source, lot.remaining_cents, lot.expires_at])).toEqual([
+      ["opening_balance", 50, null],
+      ["earned", 40, null],
+    ]);
 
     const replay = rewardsDatabase({ earned: { id: 9, type: "rewards_earned", status: "settled", amount_cents: "60" } });
     await replay.repository.creditFunding(credit());
     expect(replay.updates).toHaveLength(1);
     expect(replay.inserts).toHaveLength(1);
     expect(replay.audits).toEqual(["wallet_funding_settled"]);
+    expect(replay.lots.lots).toEqual([]);
   });
 
   it("refuses a stored rate outside the ceiling instead of paying it out", async () => {
@@ -1185,14 +1246,57 @@ describe("PgDropshipWalletRepository rewards (funding design phase 7)", () => {
     expect(corrupt.statements.at(-1)).toBe("ROLLBACK");
   });
 
-  it("a reversal takes back the rewards the credit earned: what is still in the balance leaves it, the rest comes out of cash", async () => {
+  it("gives the vendor a never-expiring lot, with a warning to review, when the lots hold fewer points than the balance", async () => {
+    const db = rewardsDatabase({ lots: [{ id: 3, source: "earned", origin_ledger_entry_id: 2, remaining_cents: 20, earned_cents: 20 }] });
+
+    await db.repository.creditFunding(credit());
+
+    expect(db.lots.lots.map((lot) => [lot.source, lot.remaining_cents, lot.expires_at])).toEqual([
+      ["earned", 20, null],
+      ["reconciled", 30, null],
+      ["earned", 60, null],
+    ]);
+    expect(db.audits).toEqual(["wallet_funding_settled", "wallet_rewards_lots_reconciled", "wallet_rewards_earned"]);
+    const reconciled = db.auditParams[1];
+    expect(reconciled[6]).toBe("warning");
+    expect(JSON.parse(String(reconciled[4]))).toMatchObject({ cause: "rewards_earned", source: "reconciled", rewardsBalanceCents: 50, lotsCentsBefore: 20, addedCents: 30 });
+  });
+
+  it("brings lots holding more than the balance down in use order, recorded as reconciliation movements with a warning", async () => {
+    const soon = new Date(occurredAt.getTime() + 10 * DAY_MS);
+    const db = rewardsDatabase({
+      lots: [
+        { id: 3, source: "opening_balance", remaining_cents: 40 },
+        { id: 4, source: "earned", origin_ledger_entry_id: 2, remaining_cents: 30, earned_cents: 30, expires_at: soon, expiry_days: 30 },
+      ],
+    });
+
+    await db.repository.creditFunding(credit());
+
+    // 70 points of lots against a 50-point balance: the 20 extra leave the lot expiring first.
+    expect(db.lots.lots.find((lot) => lot.id === 4)?.remaining_cents).toBe(10);
+    expect(db.lots.lots.find((lot) => lot.id === 3)?.remaining_cents).toBe(40);
+    expect(db.lots.movements).toEqual([
+      expect.objectContaining({ lot_id: 4, ledger_entry_id: null, reason: "reconciliation", amount_cents: -20 }),
+    ]);
+    expect(db.audits).toEqual(["wallet_funding_settled", "wallet_rewards_lots_reconciled", "wallet_rewards_earned"]);
+    expect(db.auditParams[1][6]).toBe("warning");
+    expect(JSON.parse(String(db.auditParams[1][4]))).toMatchObject({ removedCents: 20, lotsCentsBefore: 70, takes: [{ lotId: 4, cents: 20 }] });
+  });
+
+  /** The reversal database: a $40 bank credit (row 1) that earned 40 points (row 9), and 15 points left in the balance. */
+  function reversalDatabase(seed: FakeRewardsLotsSeed) {
     const statements: string[] = [];
     const inserts: unknown[][] = [];
     const audits: string[] = [];
-    let update: unknown[] | null = null;
+    const auditParams: unknown[][] = [];
+    const lots = createFakeRewardsLots(seed);
+    const captured: { update: unknown[] | null } = { update: null };
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
       const sqlText = String(sql);
       statements.push(sqlText.trim().split(/\s+/)[0]);
+      const lotAnswer = lots.handle(sqlText, params);
+      if (lotAnswer) return lotAnswer;
       if (sqlText.includes("FROM dropship.dropship_wallet_ledger")) {
         if (params?.[0] === "stripe_payment_intent") {
           return { rows: [makeLedgerRow({ status: "settled", settled_at: occurredAt, available_balance_after_cents: "5000", pending_balance_after_cents: "0" })] };
@@ -1206,7 +1310,7 @@ describe("PgDropshipWalletRepository rewards (funding design phase 7)", () => {
         return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "4000", rewards_balance_cents: "15" })] };
       }
       if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
-        update = params ?? [];
+        captured.update = params ?? [];
         return { rows: [makeAccountRow({ available_balance_cents: String(params?.[2]), pending_balance_cents: String(params?.[3]), rewards_balance_cents: String(params?.[5]) })] };
       }
       if (sqlText.startsWith("INSERT INTO dropship.dropship_wallet_ledger")) {
@@ -1215,39 +1319,65 @@ describe("PgDropshipWalletRepository rewards (funding design phase 7)", () => {
       }
       if (sqlText.includes("INSERT INTO dropship.dropship_audit_events")) {
         audits.push(String(params?.[3]));
+        auditParams.push(params ?? []);
         return { rows: [] };
       }
       return { rows: [] };
     });
+    return { statements, inserts, audits, auditParams, lots, captured, repository: new PgDropshipWalletRepository(makePool(query)) };
+  }
 
-    const result = await new PgDropshipWalletRepository(makePool(query)).reverseSettledFunding({
-      provider: "stripe", providerPaymentIntentId: "pi_ach_1", providerDisputeId: "dp_1", providerEventId: "evt_dp_1",
-      disputeAmountCents: 4000, currency: "USD", disputeStatus: "needs_response", disputeReason: "fraudulent", occurredAt, pauseVendor: null,
+  const dispute: ReverseDropshipSettledFundingRepositoryInput = {
+    provider: "stripe", providerPaymentIntentId: "pi_ach_1", providerDisputeId: "dp_1", providerEventId: "evt_dp_1",
+    disputeAmountCents: 4000, currency: "USD", disputeStatus: "needs_response", disputeReason: "fraudulent", occurredAt, pauseVendor: null,
+  };
+
+  it("a reversal takes back the rewards the credit earned: what is still in the balance leaves it, the rest comes out of cash", async () => {
+    // The credit's own lot keeps 10 of its 40 points; another credit's lot, expiring sooner, holds 5.
+    const db = reversalDatabase({
+      lots: [
+        { id: 1, source: "earned", origin_ledger_entry_id: 9, earned_cents: 40, remaining_cents: 10, expires_at: new Date(occurredAt.getTime() + 300 * DAY_MS), expiry_days: 365 },
+        { id: 2, source: "earned", origin_ledger_entry_id: 7, earned_cents: 20, remaining_cents: 5, expires_at: new Date(occurredAt.getTime() + 20 * DAY_MS), expiry_days: 365 },
+      ],
     });
 
-    // $40 earned on the credit: $0.15 is still in the rewards balance, $0.25 was spent and comes out of cash with the $40.
-    expect(update).toEqual([5, 10, -3025, 4000, occurredAt, 0]);
-    expect(inserts).toHaveLength(2);
-    expect(inserts[0].slice(2, 5)).toEqual(["funding_reversal", "settled", -4025]);
-    expect(JSON.parse(String(inserts[0][13])).rewardsClawback).toEqual({
+    const result = await db.repository.reverseSettledFunding(dispute);
+
+    // 40 points earned on the credit: 15 are still in the rewards balance, 25 were spent and come out of cash with the $40.
+    expect(db.captured.update).toEqual([5, 10, -3025, 4000, occurredAt, 0]);
+    expect(db.inserts).toHaveLength(2);
+    expect(db.inserts[0].slice(2, 5)).toEqual(["funding_reversal", "settled", -4025]);
+    expect(JSON.parse(String(db.inserts[0][13])).rewardsClawback).toEqual({
       rewardsLedgerEntryId: 9, earnedCents: 40, clawbackCents: 40, fromRewardsCents: 15, fromCashCents: 25,
     });
-    expect(inserts[0][16]).toBe(0);
-    expect(inserts[1].slice(2, 11)).toEqual([
+    expect(db.inserts[0][16]).toBe(0);
+    expect(db.inserts[1].slice(2, 11)).toEqual([
       "rewards_reversed", "settled", -15, "USD", -3025, 4000, "stripe_dispute_rewards", "dp_1", "stripe-dispute-rewards:dp_1",
     ]);
-    expect(JSON.parse(String(inserts[1][13]))).toMatchObject({ reversalLedgerEntryId: 2, fundingLedgerEntryId: 1, rewardsLedgerEntryId: 9, clawbackCents: 40, fromCashCents: 25 });
-    expect(audits).toEqual(["wallet_funding_reversed", "wallet_rewards_reversed"]);
+    expect(JSON.parse(String(db.inserts[1][13]))).toMatchObject({ reversalLedgerEntryId: 2, fundingLedgerEntryId: 1, rewardsLedgerEntryId: 9, clawbackCents: 40, fromCashCents: 25 });
+    // The credit's own lot gives its points first, although the other lot expires sooner.
+    expect(db.lots.movements).toEqual([
+      expect.objectContaining({ lot_id: 1, ledger_entry_id: 4, reason: "ledger", amount_cents: -10 }),
+      expect.objectContaining({ lot_id: 2, ledger_entry_id: 4, reason: "ledger", amount_cents: -5 }),
+    ]);
+    expect(db.lots.remainingFor(5)).toBe(0);
+    expect(db.audits).toEqual(["wallet_funding_reversed", "wallet_rewards_reversed"]);
+    expect(JSON.parse(String(db.auditParams[1][4]))).toMatchObject({ rewardsLotTakes: [{ lotId: 1, cents: 10 }, { lotId: 2, cents: 5 }] });
     expect(result).toMatchObject({ outcome: "reversed", reversal: { ledgerEntryId: 2, amountCents: -4025 }, account: { availableBalanceCents: -3025, rewardsBalanceCents: 0 } });
-    expect(statements.at(-1)).toBe("COMMIT");
+    expect(db.statements.at(-1)).toBe("COMMIT");
   });
 
-  it("a won dispute gives the rewards back with the cash, each on its own row", async () => {
+  /** The reinstatement database: dispute dp_1 reversed $40.25 (row 2) and took 15 points (row 4); the wallet holds none now. */
+  function reinstatementDatabase(seed: FakeRewardsLotsSeed) {
     const inserts: unknown[][] = [];
     const audits: string[] = [];
-    let update: unknown[] | null = null;
+    const auditParams: unknown[][] = [];
+    const lots = createFakeRewardsLots(seed);
+    const captured: { update: unknown[] | null } = { update: null };
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
       const sqlText = String(sql);
+      const lotAnswer = lots.handle(sqlText, params);
+      if (lotAnswer) return lotAnswer;
       if (sqlText.includes("FROM dropship.dropship_wallet_ledger")) {
         if (params?.[0] === "stripe_dispute") {
           return { rows: [makeLedgerRow({ id: 2, type: "funding_reversal", status: "settled", amount_cents: "-4025", reference_type: "stripe_dispute", reference_id: "dp_1", metadata: { fundingLedgerEntryId: 1 } })] };
@@ -1261,7 +1391,7 @@ describe("PgDropshipWalletRepository rewards (funding design phase 7)", () => {
         return { rows: [makeAccountRow({ available_balance_cents: "-3025", pending_balance_cents: "4000", rewards_balance_cents: "0" })] };
       }
       if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
-        update = params ?? [];
+        captured.update = params ?? [];
         return { rows: [makeAccountRow({ available_balance_cents: String(params?.[2]), pending_balance_cents: String(params?.[3]), rewards_balance_cents: String(params?.[5]) })] };
       }
       if (sqlText.startsWith("INSERT INTO dropship.dropship_wallet_ledger")) {
@@ -1270,24 +1400,268 @@ describe("PgDropshipWalletRepository rewards (funding design phase 7)", () => {
       }
       if (sqlText.includes("INSERT INTO dropship.dropship_audit_events")) {
         audits.push(String(params?.[3]));
+        auditParams.push(params ?? []);
         return { rows: [] };
       }
       return { rows: [] };
     });
+    return { inserts, audits, auditParams, lots, captured, repository: new PgDropshipWalletRepository(makePool(query)) };
+  }
 
-    const result = await new PgDropshipWalletRepository(makePool(query)).reinstateReversedFunding({
-      provider: "stripe", providerDisputeId: "dp_1", providerEventId: "evt_dp_won", occurredAt,
+  const won = { provider: "stripe" as const, providerDisputeId: "dp_1", providerEventId: "evt_dp_won", occurredAt };
+
+  it("a won dispute gives the rewards back with the cash, each on its own row, to the lots they came from", async () => {
+    const lotExpiry = new Date(occurredAt.getTime() + 300 * DAY_MS);
+    const db = reinstatementDatabase({
+      lots: [
+        { id: 1, source: "earned", origin_ledger_entry_id: 9, earned_cents: 40, remaining_cents: 0, expires_at: lotExpiry, expiry_days: 365 },
+        { id: 2, source: "earned", origin_ledger_entry_id: 7, earned_cents: 20, remaining_cents: 0, expires_at: lotExpiry, expiry_days: 365 },
+      ],
+      movements: [
+        { lot_id: 1, ledger_entry_id: 4, amount_cents: -10 },
+        { lot_id: 2, ledger_entry_id: 4, amount_cents: -5 },
+      ],
     });
 
-    expect(update).toEqual([5, 10, 1000, 4000, occurredAt, 15]);
-    expect(inserts[0].slice(2, 5)).toEqual(["funding_reinstated", "settled", 4025]);
-    expect(inserts[0][16]).toBe(15);
-    expect(inserts[1].slice(2, 11)).toEqual([
+    const result = await db.repository.reinstateReversedFunding(won);
+
+    expect(db.captured.update).toEqual([5, 10, 1000, 4000, occurredAt, 15]);
+    expect(db.inserts[0].slice(2, 5)).toEqual(["funding_reinstated", "settled", 4025]);
+    expect(db.inserts[0][16]).toBe(15);
+    expect(db.inserts[1].slice(2, 11)).toEqual([
       "rewards_reinstated", "settled", 15, "USD", 1000, 4000, "stripe_dispute_rewards_reinstated", "dp_1", "stripe-dispute-rewards-reinstated:dp_1",
     ]);
-    expect(JSON.parse(String(inserts[1][13]))).toMatchObject({ rewardsReversalLedgerEntryId: 4, reinstatementLedgerEntryId: 3 });
-    expect(audits).toEqual(["wallet_funding_reinstated", "wallet_rewards_reinstated"]);
+    expect(JSON.parse(String(db.inserts[1][13]))).toMatchObject({ rewardsReversalLedgerEntryId: 4, reinstatementLedgerEntryId: 3 });
+    // Each lot gets back what the clawback took from it, keeping its own expiry date.
+    expect(db.lots.lots.map((lot) => [lot.id, lot.remaining_cents, lot.expires_at])).toEqual([[1, 10, lotExpiry], [2, 5, lotExpiry]]);
+    expect(db.lots.movements.slice(2)).toEqual([
+      expect.objectContaining({ lot_id: 1, ledger_entry_id: 5, reason: "ledger", amount_cents: 10 }),
+      expect.objectContaining({ lot_id: 2, ledger_entry_id: 5, reason: "ledger", amount_cents: 5 }),
+    ]);
+    expect(db.audits).toEqual(["wallet_funding_reinstated", "wallet_rewards_reinstated"]);
+    expect(JSON.parse(String(db.auditParams[1][4]))).toMatchObject({
+      rewardsLotRestores: [{ lotId: 1, cents: 10 }, { lotId: 2, cents: 5 }],
+      rewardsRestoredLotId: null,
+    });
     expect(result).toMatchObject({ reinstatement: { ledgerEntryId: 3, amountCents: 4025 }, account: { availableBalanceCents: 1000, rewardsBalanceCents: 15 } });
+  });
+
+  it("returns points a clawback took before lots existed as one never-expiring lot, created with the row that returns them", async () => {
+    const db = reinstatementDatabase({});
+
+    await db.repository.reinstateReversedFunding(won);
+
+    expect(db.lots.lots).toEqual([
+      expect.objectContaining({ source: "restored", origin_ledger_entry_id: 5, earned_cents: 15, remaining_cents: 15, expires_at: null }),
+    ]);
+    expect(JSON.parse(String(db.auditParams[1][4]))).toMatchObject({ rewardsLotRestores: [], rewardsRestoredLotId: 100 });
+  });
+
+  it("refuses a clawback whose lot movements hold more points than the dispute returns, rolling the reinstatement back", async () => {
+    const db = reinstatementDatabase({
+      lots: [{ id: 1, source: "earned", origin_ledger_entry_id: 9, earned_cents: 60, remaining_cents: 0 }],
+      movements: [{ lot_id: 1, ledger_entry_id: 4, amount_cents: -50 }],
+    });
+
+    await expect(db.repository.reinstateReversedFunding(won)).rejects.toMatchObject({
+      code: "DROPSHIP_WALLET_REWARDS_LOTS_INVALID",
+      context: expect.objectContaining({ classification: "fatal", amountCents: 15, movementCents: 50 }),
+    });
+    expect(db.lots.lots[0].remaining_cents).toBe(0);
+  });
+
+  describe("expiry sweep (migration 0705)", () => {
+    const now = new Date("2026-09-25T06:00:00.000Z");
+    const past = (days: number) => new Date(now.getTime() - days * DAY_MS);
+    const future = (days: number) => new Date(now.getTime() + days * DAY_MS);
+
+    /** A wallet holding `rewardsBalanceCents` points across the seeded lots; ledger rows get ids from 201. */
+    function sweepDatabase(options: {
+      rewardsBalanceCents: number;
+      seed: FakeRewardsLotsSeed;
+      account?: boolean;
+    }) {
+      const statements: string[] = [];
+      const inserts: unknown[][] = [];
+      const audits: string[] = [];
+      const auditParams: unknown[][] = [];
+      const updates: unknown[][] = [];
+      const lots = createFakeRewardsLots(options.seed);
+      let nextLedgerId = 201;
+      const query = vi.fn(async (sql: string, params?: unknown[]) => {
+        const sqlText = String(sql);
+        statements.push(sqlText.trim().split(/\s+/)[0]);
+        const lotAnswer = lots.handle(sqlText, params);
+        if (lotAnswer) return lotAnswer;
+        if (sqlText.includes("FROM dropship.dropship_wallet_accounts")) {
+          return { rows: options.account === false ? [] : [makeAccountRow({
+            available_balance_cents: "2500", pending_balance_cents: "0", rewards_balance_cents: String(options.rewardsBalanceCents),
+          })] };
+        }
+        if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
+          updates.push(params ?? []);
+          return { rows: [makeAccountRow({ available_balance_cents: String(params?.[2]), pending_balance_cents: String(params?.[3]), rewards_balance_cents: String(params?.[5]) })] };
+        }
+        if (sqlText.startsWith("INSERT INTO dropship.dropship_wallet_ledger")) {
+          inserts.push(params ?? []);
+          const id = nextLedgerId++;
+          lots.recordLedgerEntry(id, String(params?.[2]));
+          return { rows: [makeLedgerRow({
+            id, type: params?.[2], status: params?.[3], amount_cents: String(params?.[4]), reference_type: params?.[8], reference_id: params?.[9],
+            rewards_balance_after_cents: params?.[16] ?? null, settled_at: params?.[15] ?? null,
+          })] };
+        }
+        if (sqlText.includes("INSERT INTO dropship.dropship_audit_events")) {
+          audits.push(String(params?.[3]));
+          auditParams.push(params ?? []);
+          return { rows: [] };
+        }
+        return { rows: [] };
+      });
+      return { statements, inserts, audits, auditParams, updates, lots, query, repository: new PgDropshipWalletRepository(makePool(query)) };
+    }
+
+    it("lists the wallets holding points past their date, the longest overdue first, from the due-lot index", async () => {
+      const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [{ wallet_account_id: 5, vendor_id: 10 }, { wallet_account_id: 8, vendor_id: 12 }] }));
+
+      const due = await new PgDropshipWalletRepository(makePool(query)).listWalletAccountsWithDueRewards({ now, limit: 50 });
+
+      expect(due).toEqual([{ walletAccountId: 5, vendorId: 10 }, { walletAccountId: 8, vendorId: 12 }]);
+      const [sql, params] = query.mock.calls[0] ?? [];
+      expect(String(sql)).toContain("FROM dropship.dropship_wallet_rewards_lots");
+      expect(String(sql)).toContain("remaining_cents > 0");
+      expect(String(sql)).toContain("expires_at <= $1");
+      expect(String(sql)).toContain("ORDER BY MIN(expires_at) ASC, wallet_account_id ASC");
+      expect(String(sql)).not.toMatch(/\b(UPDATE|INSERT|DELETE)\b/);
+      expect(params).toEqual([now, 50]);
+    });
+
+    it("expires what is left of each lot past its date: one row per lot, soonest first, the balance lowered once, in one transaction", async () => {
+      const db = sweepDatabase({
+        rewardsBalanceCents: 90,
+        seed: {
+          lots: [
+            { id: 11, source: "earned", origin_ledger_entry_id: 3, earned_cents: 50, remaining_cents: 20, earned_at: past(40), expires_at: past(10), expiry_days: 30 },
+            { id: 12, source: "earned", origin_ledger_entry_id: 4, earned_cents: 30, remaining_cents: 30, earned_at: past(60), expires_at: past(30), expiry_days: 30 },
+            { id: 13, source: "earned", origin_ledger_entry_id: 6, earned_cents: 25, remaining_cents: 25, earned_at: past(5), expires_at: future(25), expiry_days: 30 },
+            { id: 14, source: "opening_balance", remaining_cents: 15 },
+          ],
+        },
+      });
+
+      const outcome = await db.repository.expireDueRewardsForAccount({ walletAccountId: 5, vendorId: 10, now });
+
+      expect(outcome).toEqual({
+        walletAccountId: 5,
+        vendorId: 10,
+        rewardsBalanceBeforeCents: 90,
+        rewardsBalanceAfterCents: 40,
+        expiredLots: [
+          { lotId: 12, cents: 30, ledgerEntryId: 201, expiresAt: past(30) },
+          { lotId: 11, cents: 20, ledgerEntryId: 202, expiresAt: past(10) },
+        ],
+      });
+      expect(db.inserts.map((params) => params.slice(2, 12))).toEqual([
+        ["rewards_expired", "settled", -30, "USD", 2500, 0, "wallet_rewards_lot_expiry", "12:1", "rewards-expired:12:1", null],
+        ["rewards_expired", "settled", -20, "USD", 2500, 0, "wallet_rewards_lot_expiry", "11:1", "rewards-expired:11:1", null],
+      ]);
+      expect(db.inserts.map((params) => params[16])).toEqual([60, 40]);
+      expect(JSON.parse(String(db.inserts[0][13]))).toEqual({
+        rewardsLotId: 12, lotSource: "earned", originLedgerEntryId: 4, earnedCents: 30, earnedAt: past(60).toISOString(),
+        expiryDays: 30, expiresAt: past(30).toISOString(), expiredCents: 30, sequence: 1,
+      });
+      expect(db.lots.movements).toEqual([
+        expect.objectContaining({ lot_id: 12, ledger_entry_id: 201, reason: "ledger", amount_cents: -30 }),
+        expect.objectContaining({ lot_id: 11, ledger_entry_id: 202, reason: "ledger", amount_cents: -20 }),
+      ]);
+      expect(db.lots.lots.map((lot) => [lot.id, lot.remaining_cents])).toEqual([[11, 0], [12, 0], [13, 25], [14, 15]]);
+      // Cash untouched; only the rewards balance moves.
+      expect(db.updates).toEqual([[5, 10, 2500, 0, now, 40]]);
+      expect(db.audits).toEqual(["wallet_rewards_expired", "wallet_rewards_expired"]);
+      expect(JSON.parse(String(db.auditParams[1][4]))).toMatchObject({ rewardsLotId: 11, before: { rewardsBalanceCents: 60 }, after: { rewardsBalanceCents: 40 } });
+      expect(db.statements[0]).toBe("BEGIN");
+      expect(db.statements.at(-1)).toBe("COMMIT");
+    });
+
+    it("finds nothing to do on a replay: an expired lot holds no points", async () => {
+      const db = sweepDatabase({
+        rewardsBalanceCents: 15,
+        seed: { lots: [
+          { id: 12, source: "earned", origin_ledger_entry_id: 4, earned_cents: 30, remaining_cents: 0, expires_at: past(30), expiry_days: 30 },
+          { id: 14, source: "opening_balance", remaining_cents: 15 },
+        ] },
+      });
+
+      const outcome = await db.repository.expireDueRewardsForAccount({ walletAccountId: 5, vendorId: 10, now });
+
+      expect(outcome.expiredLots).toEqual([]);
+      expect(outcome.rewardsBalanceAfterCents).toBe(15);
+      expect(db.inserts).toEqual([]);
+      expect(db.updates).toEqual([]);
+      expect(db.audits).toEqual([]);
+      expect(db.statements.at(-1)).toBe("COMMIT");
+    });
+
+    it("gives a lot refilled after it expired its own second expiry row", async () => {
+      const db = sweepDatabase({
+        rewardsBalanceCents: 10,
+        seed: {
+          lots: [{ id: 12, source: "earned", origin_ledger_entry_id: 4, earned_cents: 30, remaining_cents: 10, expires_at: past(30), expiry_days: 30 }],
+          movements: [
+            { lot_id: 12, ledger_entry_id: 70, amount_cents: -10 },
+            { lot_id: 12, ledger_entry_id: 71, amount_cents: -20 },
+            { lot_id: 12, ledger_entry_id: 72, amount_cents: 10 },
+          ],
+          // 70: the points a dispute took; 71: the first expiry; 72: the won dispute returning them.
+          ledgerTypes: { 70: "rewards_reversed", 71: "rewards_expired", 72: "rewards_reinstated" },
+        },
+      });
+
+      await db.repository.expireDueRewardsForAccount({ walletAccountId: 5, vendorId: 10, now });
+
+      expect(db.inserts.map((params) => params.slice(8, 11))).toEqual([["wallet_rewards_lot_expiry", "12:2", "rewards-expired:12:2"]]);
+      expect(JSON.parse(String(db.inserts[0][13]))).toMatchObject({ sequence: 2, expiredCents: 10 });
+    });
+
+    it("reconciles the lots before expiring, so points the lots do not account for are never expired", async () => {
+      // A 30-point balance against a due lot of 50: only the 30 the balance holds can leave.
+      const db = sweepDatabase({
+        rewardsBalanceCents: 30,
+        seed: { lots: [{ id: 12, source: "earned", origin_ledger_entry_id: 4, earned_cents: 50, remaining_cents: 50, expires_at: past(1), expiry_days: 30 }] },
+      });
+
+      const outcome = await db.repository.expireDueRewardsForAccount({ walletAccountId: 5, vendorId: 10, now });
+
+      expect(db.audits).toEqual(["wallet_rewards_lots_reconciled", "wallet_rewards_expired"]);
+      expect(outcome.expiredLots).toEqual([{ lotId: 12, cents: 30, ledgerEntryId: 201, expiresAt: past(1) }]);
+      expect(db.updates).toEqual([[5, 10, 2500, 0, now, 0]]);
+    });
+
+    it("refuses a wallet account that does not exist, rolling back", async () => {
+      const db = sweepDatabase({ rewardsBalanceCents: 0, seed: {}, account: false });
+
+      await expect(db.repository.expireDueRewardsForAccount({ walletAccountId: 5, vendorId: 10, now }))
+        .rejects.toMatchObject({ code: "DROPSHIP_WALLET_ACCOUNT_NOT_FOUND" });
+      expect(db.statements.at(-1)).toBe("ROLLBACK");
+    });
+
+    it("serves the soonest expiry with the wallet overview, read-only", async () => {
+      const db = sweepDatabase({
+        rewardsBalanceCents: 75,
+        seed: { lots: [
+          { id: 12, source: "earned", remaining_cents: 30, expires_at: future(40), expiry_days: 90 },
+          { id: 13, source: "earned", remaining_cents: 20, expires_at: future(10), expiry_days: 90 },
+          { id: 14, source: "earned", remaining_cents: 5, expires_at: future(10), expiry_days: 90 },
+          { id: 15, source: "opening_balance", remaining_cents: 20 },
+        ] },
+      });
+
+      const overview = await db.repository.getOverview({ vendorId: 10, ledgerLimit: 5, now });
+
+      expect(overview.rewardsNextExpiry).toEqual({ expiresAt: future(10), cents: 25 });
+      expect(db.lots.movements).toEqual([]);
+      expect(db.audits).toEqual([]);
+    });
   });
 
   it("saves the vendor's rewards spend preference on their settings row with its audit row, scaffolding the row first", async () => {

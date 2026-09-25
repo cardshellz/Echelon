@@ -40,6 +40,8 @@ import {
   describeLedgerAmount,
   describeRewardsBalance,
   describeRewardsEarning,
+  describeRewardsExpiryRule,
+  describeRewardsNextExpiry,
   describeRewardsPreferenceSaved,
   describeRewardsRule,
   describeRewardsUse,
@@ -90,7 +92,7 @@ import type {
 const STAMP = "2026-09-15T00:00:00.000Z";
 const LATER = "2026-09-16T00:00:00.000Z";
 const NOW = new Date("2026-09-18T12:00:00.000Z");
-const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
+const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, rewardsExpiryDays: null, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
 
 function method(overrides: Partial<WalletFundingMethod> & { fundingMethodId: number }): WalletFundingMethod {
   const rail = overrides.rail ?? "stripe_card";
@@ -110,7 +112,7 @@ function wallet(overrides: Partial<DropshipWalletView> = {}): DropshipWalletView
     account: { availableBalanceCents: 0, pendingBalanceCents: 0, rewardsBalanceCents: 0, currency: "USD", status: "active" },
     autoReload: null, fundingMethods: [], recentLedger: [], cardFundingFeeBps: 300, usdcBaseDepositAddress: null, usdcDeposit: null,
     limits: LIMITS, setupStatus: { sourceReady: false, backupReady: false, acknowledged: false, done: false, launchReady: false }, listingTiers: null, advance: null,
-    clientFallbacks: [],
+    rewardsNextExpiry: null, clientFallbacks: [],
   };
   return { ...base, ...overrides };
 }
@@ -499,7 +501,7 @@ describe("copy", () => {
   });
 
   it("pins the rules page: six topics, each a lead and its detail, quoting only the values the server enforces", () => {
-    const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
+    const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, rewardsExpiryDays: null, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
     const intro = describeIntro({ cardFundingFeeBps: 300, usdcOffered: true, holdTimeoutMinutes: 2_880, limits });
     expect(intro.lede).toBe("Your wallet is the deposit Card Shellz draws on for the orders you sell. Here is what it holds, what it lets you sell, how it stays funded, and what happens when a payment fails.");
     expect(intro.topics).toHaveLength(6);
@@ -680,7 +682,7 @@ describe("advance copy (funding design phase 3)", () => {
 });
 
 describe("USDC deposits in the wallet's words (funding design phase 6)", () => {
-  const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
+  const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, rewardsExpiryDays: null, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
   const watched: WalletUsdcDeposit = { offered: true, watched: true, chainId: 8453, tokenAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", minConfirmations: 6, settleTag: "safe", address: null };
   const unwatched: WalletUsdcDeposit = { ...watched, watched: false };
   const notOffered: WalletUsdcDeposit = { ...watched, offered: false, watched: false };
@@ -823,10 +825,10 @@ describe("adding money: the top-up step's picks again", () => {
 });
 
 /** The rewards rule as the rules page states it at the launch rates with USDC on offer. */
-const REWARDS_RULE = " Bank and USDC transfers earn 1% in rewards points when they land; a card charge earns none. 100 points are worth $1 on your orders. Points are used only on your orders here, and only once you choose in Wallet to auto-apply them; until you choose, they are saved up. They are not cash: they cannot be paid out, do not count toward your minimum, and a payment your bank takes back takes its points back too.";
+const REWARDS_RULE = " Bank and USDC transfers earn 1% in rewards points when they land; a card charge earns none. 100 points are worth $1 on your orders. Points are used only on your orders here, and only once you choose in Wallet to auto-apply them; until you choose, they are saved up. New points do not expire. They are not cash: they cannot be paid out, do not count toward your minimum, and a payment your bank takes back takes its points back too.";
 
 describe("rewards in the wallet's words (funding design phase 7)", () => {
-  const rates = { rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0 };
+  const rates = { rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, rewardsExpiryDays: null };
 
   it("names what each way to pay earns, and when, only while some rail earns", () => {
     expect(describeRewardsEarning("stripe_ach", rates)).toBe("Earns 1% in rewards points once it lands.");
@@ -847,11 +849,49 @@ describe("rewards in the wallet's words (funding design phase 7)", () => {
     expect(describeRewardsRule(rates, true)).toBe(REWARDS_RULE);
     expect(describeRewardsRule(rates, false)).toContain(" A bank transfer earns 1% in rewards points when it lands; a card charge earns none.");
     expect(describeRewardsRule(rates, false)).not.toContain("USDC");
-    expect(describeRewardsRule({ rewardsRateBankBps: 100, rewardsRateUsdcBps: 200, rewardsRateCardBps: 50 }, true))
+    expect(describeRewardsRule({ rewardsRateBankBps: 100, rewardsRateUsdcBps: 200, rewardsRateCardBps: 50, rewardsExpiryDays: null }, true))
       .toContain(" A bank transfer earns 1% in rewards points when it lands, a USDC transfer 2%; a card charge earns 0.5% at once.");
     // The rule never promises auto-apply: it is the vendor's choice, and saving is what happens until they make it.
     expect(describeRewardsRule(rates, true)).toContain("only once you choose in Wallet to auto-apply them; until you choose, they are saved up.");
-    expect(describeRewardsRule({ rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0 }, true)).toBe("");
+    expect(describeRewardsRule({ rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0, rewardsExpiryDays: 90 }, true)).toBe("");
+  });
+
+  it("states the expiry for points earned from now on: never at launch, or the days staff set", () => {
+    expect(describeRewardsExpiryRule(null)).toBe("New points do not expire.");
+    expect(describeRewardsExpiryRule(365)).toBe("New points expire 365 days after they are earned, and the points closest to expiring are used first.");
+    expect(describeRewardsExpiryRule(1)).toBe("New points expire 1 day after they are earned, and the points closest to expiring are used first.");
+    expect(describeRewardsExpiryRule(3_650)).toContain("expire 3,650 days after");
+    expect(describeRewardsRule({ ...rates, rewardsExpiryDays: 90 }, true))
+      .toContain("until you choose, they are saved up. New points expire 90 days after they are earned, and the points closest to expiring are used first. They are not cash");
+    // A setting outside the server's bound is refused, never rendered.
+    for (const bad of [0, 3_651, 1.5, -1]) {
+      expect(() => describeRewardsExpiryRule(bad)).toThrow(RangeError);
+    }
+  });
+
+  it("names the soonest points to expire under the figure, in the viewer's calendar, or nothing when none are set to", () => {
+    const now = new Date("2026-09-25T12:00:00.000Z");
+    expect(describeRewardsNextExpiry(null, { now })).toBeNull();
+    expect(describeRewardsNextExpiry({ expiresAt: "2026-12-01T15:00:00.000Z", cents: 1_250 }, { now, timeZone: "UTC" }))
+      .toBe("1,250 points ($12.50) expire on December 1, 2026.");
+    expect(describeRewardsNextExpiry({ expiresAt: "2026-12-01T15:00:00.000Z", cents: 1 }, { now, timeZone: "UTC" }))
+      .toBe("1 point ($0.01) expires on December 1, 2026.");
+    // The date is the viewer's own: early on December 1 in UTC is still November 30 in Los Angeles.
+    expect(describeRewardsNextExpiry({ expiresAt: "2026-12-01T03:00:00.000Z", cents: 500 }, { now, timeZone: "America/Los_Angeles" }))
+      .toBe("500 points ($5.00) expire on November 30, 2026.");
+    // Past its instant but not yet removed by the wallet run: said as it is, never as a date still ahead.
+    expect(describeRewardsNextExpiry({ expiresAt: "2026-09-25T11:00:00.000Z", cents: 500 }, { now, timeZone: "UTC" }))
+      .toBe("500 points ($5.00) reached their expiry date on September 25, 2026 and are being removed.");
+    expect(describeRewardsNextExpiry({ expiresAt: "2026-09-25T12:00:00.000Z", cents: 1 }, { now, timeZone: "UTC" }))
+      .toBe("1 point ($0.01) reached its expiry date on September 25, 2026 and is being removed.");
+    expect(() => describeRewardsNextExpiry({ expiresAt: "2026-12-01T15:00:00.000Z", cents: 0 }, { now })).toThrow(RangeError);
+    expect(() => describeRewardsNextExpiry({ expiresAt: "not a date", cents: 5 }, { now })).toThrow(RangeError);
+  });
+
+  it("labels expired points in the activity list in points, against the rewards balance", () => {
+    expect(LEDGER_REASON_LABELS.rewards_expired).toBe("Rewards expired");
+    expect(describeLedgerAmount({ reason: "rewards_expired", amountCents: -500 })).toBe("−500 points");
+    expect(ledgerBalanceAfter({ reason: "rewards_expired", availableBalanceAfterCents: 40_000, rewardsBalanceAfterCents: 250 })).toEqual({ balance: "rewards", cents: 250 });
   });
 
   it("words the balance line for each choice, and for no choice yet, which saves", () => {
@@ -884,7 +924,7 @@ describe("rewards in the wallet's words (funding design phase 7)", () => {
     // A row that never recorded the balance it moved shows nothing rather than the other balance.
     expect(ledgerBalanceAfter({ reason: "rewards_reversed", availableBalanceAfterCents: 40_000, rewardsBalanceAfterCents: null })).toBeNull();
     expect(ledgerBalanceAfter({ reason: "return_fee", availableBalanceAfterCents: null, rewardsBalanceAfterCents: 400 })).toBeNull();
-    expect([...REWARDS_LEDGER_REASONS].sort()).toEqual(["rewards_earned", "rewards_redeemed", "rewards_reinstated", "rewards_reversed", "rewards_spent"]);
+    expect([...REWARDS_LEDGER_REASONS].sort()).toEqual(["rewards_earned", "rewards_expired", "rewards_reinstated", "rewards_reversed", "rewards_spent"]);
   });
 });
 
