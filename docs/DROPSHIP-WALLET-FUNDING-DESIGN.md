@@ -307,7 +307,9 @@ deposit ($100) are wallet-policy limits staff edit on the Wallet Policy tab
 rate a vendor acknowledged is stored on their settings row, backfilled from
 the audit trail; an unattended card charge never carries more than it, an
 agreement at or above the live rate is current, and a fee cut applies at
-once. A card deposit is held to the card minimum on the server and in the
+once. A cut asks the vendor nothing: no banner, no note beside Save, and the
+Authorization row names the current fee without restating the agreed one.
+Only a raise asks the vendor to confirm. A card deposit is held to the card minimum on the server and in the
 add-money controls, and every vendor surface reads "no fee" at zero.
 The rewards money paths (migration 0702): the wallet account carries a
 third, spend-only `rewards_balance_cents` (never negative) and every ledger
