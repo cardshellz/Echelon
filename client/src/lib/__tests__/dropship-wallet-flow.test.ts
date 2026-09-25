@@ -28,6 +28,7 @@ import {
   draftAfterSourceChoice,
   draftAtStep,
   describeAcknowledgementBanner,
+  describeAuthorizationRecord,
   describeActivationQuote,
   describeActivationTopUp,
   cardFeeAt,
@@ -207,7 +208,12 @@ describe("deriveWalletFlow", () => {
     expect(derive(doneWallet({ cardFundingFeeBps: 350 })).needsAcknowledgement).toBe(false);
     expect(describeAcknowledgementBanner({ feeChange: null, onboarding: true })).toBe("Please review and confirm your autopay terms. Nothing changes until you confirm. You cannot activate until you do.");
     expect(describeAcknowledgementBanner({ feeChange: { recordedBps: 300, currentBps: 350 }, onboarding: false })).toContain("automatic top-ups and covers stay at 3%; money you add yourself shows the current fee on Stripe's page");
-    expect(describeAcknowledgementBanner({ feeChange: { recordedBps: 300, currentBps: 250 }, onboarding: false })).toContain("Automatic charges already use the lower rate");
+    // A cut needs nothing from the vendor: no fee change, no banner, whatever the record says.
+    const cut = doneWallet({ cardFundingFeeBps: 0 });
+    expect(derive(cut)).toMatchObject({ needsAcknowledgement: false, feeRecordMissing: false, feeChange: null });
+    expect(derive(doneWallet({ cardFundingFeeBps: 250 }))).toMatchObject({ needsAcknowledgement: false, feeChange: null });
+    // Handed a cut anyway, the banner reads as a plain confirmation and never restates the old rate.
+    expect(describeAcknowledgementBanner({ feeChange: { recordedBps: 300, currentBps: 250 }, onboarding: false })).toBe("Please review and confirm your autopay terms. Nothing changes until you confirm.");
   });
 
   it("reports how far the flow reached and which steps that makes reachable", () => {
@@ -1014,15 +1020,28 @@ describe("no card fee (funding design phase 7)", () => {
     expect(intro.topics[3].detail).not.toContain("0%");
   });
 
-  it("explains a fee cut as free charges and a raise as waiting on the vendor's word", () => {
-    const cut = acknowledgementForSave({ autoReload: { ...doneWallet().autoReload!, acknowledgedCardFeeBps: 300 }, cardFundingFeeBps: 0 });
-    expect(cut).toMatchObject({ acknowledgedCardFeeBps: 300, saveLabel: "Save" });
-    expect(cut.feeChangeNote).toBe("Card charges now carry no fee (you agreed to a 3% fee); automatic top-ups and covers already use the lower rate. Confirm the new terms above when you like; this save keeps your record as it is.");
+  it("says nothing about a fee cut and explains a raise as waiting on the vendor's word", () => {
+    // The save still carries the recorded rate: the server accepts a record at or above the live rate.
+    expect(acknowledgementForSave({ autoReload: { ...doneWallet().autoReload!, acknowledgedCardFeeBps: 300 }, cardFundingFeeBps: 0 }))
+      .toEqual({ acknowledgedCardFeeBps: 300, saveLabel: "Save", feeChangeNote: null });
     expect(acknowledgementForSave({ autoReload: { ...doneWallet().autoReload!, acknowledgedCardFeeBps: null }, cardFundingFeeBps: 0 }).saveLabel).toBe("Save and accept the card terms (no fee)");
     expect(describeAcknowledgementBanner({ feeChange: { recordedBps: 300, currentBps: 0 }, onboarding: false }))
-      .toBe("Card Shellz removed the card fee (you agreed to a 3% fee). Automatic charges already use the lower rate; confirm to keep your record current.");
+      .toBe("Please review and confirm your autopay terms. Nothing changes until you confirm.");
     expect(describeAcknowledgementBanner({ feeChange: { recordedBps: 0, currentBps: 200 }, onboarding: false }))
       .toBe("Card Shellz changed the card fee: card charges now carry a 2% fee (you agreed to no fee). Until you confirm, automatic top-ups and covers stay free; money you add yourself shows the current fee on Stripe's page before you pay.");
+  });
+
+  it("words the Authorization row without restating a rate that no longer applies", () => {
+    const at = "Sep 22, 2026, 1:05 PM";
+    expect(describeAuthorizationRecord({ acknowledgedAtLabel: null, recordedBps: 300, currentBps: 0 })).toBe("Not on record — confirm your terms above.");
+    expect(describeAuthorizationRecord({ acknowledgedAtLabel: at, recordedBps: null, currentBps: 0 })).toBe("Not on record — confirm your terms above.");
+    expect(describeAuthorizationRecord({ acknowledgedAtLabel: at, recordedBps: 300, currentBps: 300 }))
+      .toBe("Recorded Sep 22, 2026, 1:05 PM with 3% fee on card charges. The terms above are the current terms.");
+    expect(describeAuthorizationRecord({ acknowledgedAtLabel: at, recordedBps: 0, currentBps: 200 }))
+      .toBe("Recorded Sep 22, 2026, 1:05 PM with no fee on card charges; card charges now carry a 2% fee — confirm the new terms above.");
+    const cut = describeAuthorizationRecord({ acknowledgedAtLabel: at, recordedBps: 300, currentBps: 0 });
+    expect(cut).toBe("Recorded Sep 22, 2026, 1:05 PM. Card charges carry no fee; the terms above are the current terms.");
+    expect(cut).not.toContain("3%");
   });
 
   it("offers a card deposit only the picks at or above the card minimum", () => {

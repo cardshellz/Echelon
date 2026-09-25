@@ -93,6 +93,7 @@ import {
   draftAtStep,
   describeAcknowledgementBanner,
   describeActivationQuote,
+  describeAuthorizationRecord,
   describeAdvanceReason,
   describeAdvanceStanding,
   describeBackupFollow,
@@ -110,7 +111,6 @@ import {
   depositOptions,
   describeDepositOption,
   cardFeeAt,
-  cardFeeNoun,
   cardFeeOnTop,
   describeCardFee,
   describeDepositRail,
@@ -2150,11 +2150,11 @@ function ManageView({
               {formatDurationMinutes(flow.holdTimeoutMinutes)} — set by CardShellz for every wallet. {describeHoldTimeLine(wallet.limits.holdExpiryWarningMinutes)}
             </PlanRow>
             <PlanRow testId="wallet-plan-authorization" label="Authorization" busy={planFeedback.busy} onChange={null}>
-              {wallet.autoReload?.acknowledgedAt === null || wallet.autoReload?.acknowledgedCardFeeBps === null
-                ? "Not on record — confirm your terms above."
-                : flow.feeChange
-                  ? `Recorded ${formatDateTime(wallet.autoReload?.acknowledgedAt)} with ${describeCardFee(flow.feeChange.recordedBps)} on card charges; card charges now carry ${cardFeeNoun(flow.feeChange.currentBps)} — confirm the new terms above.`
-                  : `Recorded ${formatDateTime(wallet.autoReload?.acknowledgedAt)} with ${describeCardFee(wallet.cardFundingFeeBps)} on card charges. The terms above are the current terms.`}
+              {describeAuthorizationRecord({
+                acknowledgedAtLabel: wallet.autoReload?.acknowledgedAt ? formatDateTime(wallet.autoReload.acknowledgedAt) : null,
+                recordedBps: wallet.autoReload?.acknowledgedCardFeeBps ?? null,
+                currentBps: wallet.cardFundingFeeBps,
+              })}
             </PlanRow>
             <PlanRow testId="wallet-plan-auto-reload" label="Autopay" busy={planFeedback.busy} onChange={null}>
               On

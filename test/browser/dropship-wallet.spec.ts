@@ -888,12 +888,15 @@ test("manage: adding money by card, bank or USDC quotes the fee honestly and ret
   finish(state);
 });
 
-test("manage: with no card fee, every card surface says so, a fee cut keeps the record refreshable, and a card deposit keeps its own minimum", async ({ page }) => {
+test("manage: with no card fee, every card surface says so, a fee cut asks the vendor nothing, and a card deposit keeps its own minimum", async ({ page }) => {
   const state = await setup(page, { vendorStatus: "active", methods: [CARD, BANK], autoReload: doneAutoReload(), balanceCents: 4_250, cardFundingFeeBps: 0, proofs: ALL_PROOFS });
   const manage = page.getByTestId("wallet-manage");
-  // The recorded 3% still covers the vendor; the cut applies at once and the banner offers to refresh the record.
-  await expect(page.getByTestId("wallet-acknowledgement-needed")).toContainText("Card Shellz removed the card fee (you agreed to a 3% fee). Automatic charges already use the lower rate; confirm to keep your record current.");
-  await expect(manage.getByTestId("wallet-plan-authorization")).toContainText("with 3% fee on card charges; card charges now carry no fee — confirm the new terms above.");
+  // The vendor's record says 3%; the cut applies at once, so there is no banner and the old rate is not restated.
+  await expect(manage.getByTestId("wallet-plan-authorization")).toContainText("Card charges carry no fee; the terms above are the current terms.");
+  await expect(page.getByTestId("wallet-acknowledgement-needed")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Confirm terms" })).toHaveCount(0);
+  await expect(page.getByText(/you agreed/)).toHaveCount(0);
+  await expect(page.getByText(/3%/)).toHaveCount(0);
   await expect(manage.getByTestId("wallet-plan-backup-card")).toContainText("Charged only for the shortfall on an order, up to $5,000 in one payment");
   await expect(page.getByText(/0%/)).toHaveCount(0);
 
