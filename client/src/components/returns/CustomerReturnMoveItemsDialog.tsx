@@ -33,6 +33,7 @@ export interface CustomerReturnMoveRequest {
   lineId?: string;
   destination?: PreviewPackingMoveDestination;
   removeSource?: boolean;
+  intent?: "drop" | "split";
 }
 
 interface MoveDraft {
@@ -88,6 +89,11 @@ export function CustomerReturnMoveItemsDialog({
   onCloseAutoFocus: () => void;
 }) {
   const id = useId();
+  const isDrop = request.intent === "drop";
+  const isSplit = request.intent === "split";
+  const singleProduct =
+    request.lineId !== undefined && !request.removeSource && !isSplit;
+  const fixedDestination = isDrop || isSplit;
   const allocations = previewPackingAllocations(selections, parcels);
   const sources = allocations.ok
     ? allocations.sources.filter(
@@ -108,6 +114,11 @@ export function CustomerReturnMoveItemsDialog({
   const contextValid =
     allocations.ok &&
     sources.length > 0 &&
+    (!isDrop ||
+      (singleProduct &&
+        request.destination !== undefined &&
+        request.sourceParcelKey !== null)) &&
+    (!isSplit || (!request.removeSource && request.sourceParcelKey !== null)) &&
     (request.sourceParcelKey === null || sourceIndex >= 0) &&
     (!request.removeSource || request.sourceParcelKey !== null) &&
     (request.lineId === undefined ||
@@ -128,6 +139,14 @@ export function CustomerReturnMoveItemsDialog({
       : sourceQuantity > 1);
   const [destinationValue, setDestinationValue] = useState(() => {
     const preferred = request.destination;
+    if (isSplit) return "new";
+    if (isDrop) {
+      return preferred?.kind === "new"
+        ? "new"
+        : preferred?.kind === "existing"
+          ? `box-${preferred.parcelKey}`
+          : "";
+    }
     if (
       preferred?.kind === "existing" &&
       targets.some((parcel) => parcel.key === preferred.parcelKey)
@@ -144,7 +163,8 @@ export function CustomerReturnMoveItemsDialog({
           source.lineId,
           {
             selected: Boolean(
-              request.removeSource || request.lineId === source.lineId,
+              request.removeSource ||
+                (!isSplit && request.lineId === source.lineId),
             ),
             quantity: String(
               destinationValue === "new" &&
@@ -207,11 +227,15 @@ export function CustomerReturnMoveItemsDialog({
     : null;
   const previewError = !contextValid
     ? "These items are no longer available. Close this window and check your boxes."
-    : wouldOnlyReplaceBox
-      ? `Leave at least one item in ${sourceName}, or choose an existing box.`
-      : preview && preview.kind !== "updated"
-        ? moveError(preview.kind)
-        : null;
+    : !destination && fixedDestination
+      ? "This destination is no longer available. Close this window and choose another box."
+      : wouldOnlyReplaceBox
+        ? fixedDestination
+          ? `Leave at least one item in ${sourceName}.`
+          : `Leave at least one item in ${sourceName}, or choose an existing box.`
+        : preview && preview.kind !== "updated"
+          ? moveError(preview.kind)
+          : null;
   const error = applyError ?? previewError;
   const ready = !busy && command !== null && preview?.kind === "updated";
   const destinationIndex = parcels.findIndex(
@@ -221,14 +245,37 @@ export function CustomerReturnMoveItemsDialog({
     destination?.kind === "new" ? "New box" : `Box ${destinationIndex + 1}`;
   const title = request.removeSource
     ? `Remove ${sourceName}`
-    : request.sourceParcelKey === null
-      ? "Add items to a box"
-      : `Move items from ${sourceName}`;
+    : isSplit
+      ? `Split ${sourceName}`
+      : isDrop
+        ? request.destination?.kind === "new"
+          ? "Move to a new box"
+          : destinationParcel
+            ? `Move to ${destinationName}`
+            : "Move items"
+        : request.sourceParcelKey === null
+          ? "Add items to a box"
+          : `Move items from ${sourceName}`;
   const action = request.removeSource
     ? "Remove box and move items"
-    : destination?.kind === "new"
-      ? "Create box and move"
-      : "Move items";
+    : isSplit
+      ? "Create box"
+      : isDrop
+        ? "Move items"
+        : destination?.kind === "new"
+          ? "Create box and move"
+          : "Move items";
+  const visibleSources = singleProduct
+    ? sources.filter((source) => source.lineId === request.lineId)
+    : sources;
+  const showMoveTotals = !singleProduct && !isSplit && !isDrop;
+  const destinationRenumbered =
+    preview?.kind === "updated" &&
+    destinationParcel !== undefined &&
+    destinationIndex !==
+      preview.parcels.findIndex(
+        (parcel) => parcel.key === preview.destinationParcelKey,
+      );
 
   function updateDraft(lineId: string, patch: Partial<MoveDraft>) {
     setDrafts((current) => {
@@ -296,7 +343,7 @@ export function CustomerReturnMoveItemsDialog({
       }}
     >
       <DialogContent
-        className="max-h-[85dvh] overflow-y-auto sm:max-w-xl"
+        className={`max-h-[85dvh] overflow-y-auto ${singleProduct ? "sm:max-w-md" : "sm:max-w-xl"}`}
         onCloseAutoFocus={(event) => {
           event.preventDefault();
           onCloseAutoFocus();
@@ -304,10 +351,16 @@ export function CustomerReturnMoveItemsDialog({
       >
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>
+          <DialogDescription className={isDrop ? "sr-only" : undefined}>
             {request.removeSource
               ? "All items in this box will move together. Choose the box they should go in."
-              : "Choose the items, quantities, and box. Nothing changes until you confirm."}
+              : isSplit
+                ? "Choose what to put in a new box. Leave at least one item in this box."
+                : isDrop
+                  ? "Choose how many to move."
+                  : singleProduct
+                    ? "Choose a box and how many to move."
+                    : "Choose the items, quantities, and box. Nothing changes until you confirm."}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -318,37 +371,39 @@ export function CustomerReturnMoveItemsDialog({
             apply();
           }}
         >
-          <div className="space-y-1.5">
-            <Label htmlFor={`${id}-destination`}>Destination box</Label>
-            <select
-              id={`${id}-destination`}
-              aria-label="Destination box"
-              aria-describedby={error ? `${id}-error` : undefined}
-              className="min-h-11 w-full min-w-0 rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              value={destinationValue}
-              disabled={busy || !contextValid}
-              onChange={(event) => changeDestination(event.target.value)}
-            >
-              <option value="">Choose a box</option>
-              {destinationValue && !destination && (
-                <option value={destinationValue} disabled>
-                  Destination unavailable
-                </option>
-              )}
-              {targets.map((parcel) => (
-                <option key={parcel.key} value={`box-${parcel.key}`}>
-                  Box{" "}
-                  {parcels.findIndex(
-                    (candidate) => candidate.key === parcel.key,
-                  ) + 1}
-                </option>
-              ))}
-              {canCreateBox && <option value="new">New box</option>}
-            </select>
-          </div>
+          {!fixedDestination && (
+            <div className="space-y-1.5">
+              <Label htmlFor={`${id}-destination`}>Destination box</Label>
+              <select
+                id={`${id}-destination`}
+                aria-label="Destination box"
+                aria-describedby={error ? `${id}-error` : undefined}
+                className="min-h-11 w-full min-w-0 rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                value={destinationValue}
+                disabled={busy || !contextValid}
+                onChange={(event) => changeDestination(event.target.value)}
+              >
+                <option value="">Choose a box</option>
+                {destinationValue && !destination && (
+                  <option value={destinationValue} disabled>
+                    Destination unavailable
+                  </option>
+                )}
+                {targets.map((parcel) => (
+                  <option key={parcel.key} value={`box-${parcel.key}`}>
+                    Box{" "}
+                    {parcels.findIndex(
+                      (candidate) => candidate.key === parcel.key,
+                    ) + 1}
+                  </option>
+                ))}
+                {canCreateBox && <option value="new">New box</option>}
+              </select>
+            </div>
+          )}
           {contextValid && (
             <div className="divide-y rounded-lg border">
-              {sources.map((source, index) => {
+              {visibleSources.map((source, index) => {
                 const line = order.lines.find(
                   (item) => item.id === source.lineId,
                 )!;
@@ -368,6 +423,16 @@ export function CustomerReturnMoveItemsDialog({
                     quantity < 1 ||
                     quantity > source.quantity);
                 const helpId = `${id}-quantity-help-${index}`;
+                const product = (
+                  <span className="min-w-0 break-words text-sm [overflow-wrap:anywhere]">
+                    {line.title}
+                    {context && (
+                      <span className="mt-1 block text-xs text-muted-foreground">
+                        {context}
+                      </span>
+                    )}
+                  </span>
+                );
                 return (
                   <div
                     key={line.id}
@@ -375,65 +440,66 @@ export function CustomerReturnMoveItemsDialog({
                     className="min-w-0 space-y-2 p-3"
                   >
                     <div className="flex min-w-0 flex-wrap items-start gap-3">
-                      <label
-                        htmlFor={`${id}-select-${index}`}
-                        className="flex min-h-11 min-w-0 flex-1 basis-36 items-start gap-2 py-1"
-                      >
-                        <input
-                          id={`${id}-select-${index}`}
-                          type="checkbox"
-                          className="mt-0.5 h-5 w-5 shrink-0 accent-primary"
-                          aria-label={`Select ${description.accessibleName} to move`}
-                          checked={draft.selected}
-                          disabled={busy || request.removeSource}
-                          onChange={(event) =>
-                            updateDraft(line.id, {
-                              selected: event.target.checked,
-                            })
-                          }
-                        />
-                        <span className="min-w-0 break-words text-sm [overflow-wrap:anywhere]">
-                          {line.title}
-                          {context && (
-                            <span className="mt-1 block text-xs text-muted-foreground">
-                              {context}
-                            </span>
-                          )}
-                        </span>
-                      </label>
-                      <div className="max-w-full space-y-1">
-                        <Label
-                          htmlFor={`${id}-quantity-${index}`}
-                          className="text-xs"
+                      {singleProduct ? (
+                        <div className="min-w-0 flex-1 basis-36 py-1">
+                          {product}
+                        </div>
+                      ) : (
+                        <label
+                          htmlFor={`${id}-select-${index}`}
+                          className="flex min-h-11 min-w-0 flex-1 basis-36 items-start gap-2 py-1"
                         >
-                          Quantity to move
-                        </Label>
-                        <Input
-                          id={`${id}-quantity-${index}`}
-                          type="number"
-                          inputMode="numeric"
-                          min="1"
-                          max={source.quantity}
-                          step="1"
-                          className="min-h-11 max-w-full text-center tabular-nums"
-                          style={{
-                            width: `calc(${Math.max(draft.quantity.length, 2)}ch + 2.5rem)`,
-                          }}
-                          aria-label={`Quantity of ${description.accessibleName} to move`}
-                          aria-invalid={invalid || undefined}
-                          aria-describedby={helpId}
-                          disabled={
-                            busy || request.removeSource || !draft.selected
-                          }
-                          value={draft.quantity}
-                          onChange={(event) =>
-                            updateDraft(line.id, {
-                              quantity: event.target.value,
-                              quantityEdited: true,
-                            })
-                          }
-                        />
-                      </div>
+                          <input
+                            id={`${id}-select-${index}`}
+                            type="checkbox"
+                            className="mt-0.5 h-5 w-5 shrink-0 accent-primary"
+                            aria-label={`Select ${description.accessibleName} to move`}
+                            checked={draft.selected}
+                            disabled={busy || request.removeSource}
+                            onChange={(event) =>
+                              updateDraft(line.id, {
+                                selected: event.target.checked,
+                              })
+                            }
+                          />
+                          {product}
+                        </label>
+                      )}
+                      {(!singleProduct || source.quantity > 1) && (
+                        <div className="max-w-full space-y-1">
+                          <Label
+                            htmlFor={`${id}-quantity-${index}`}
+                            className="text-xs"
+                          >
+                            Quantity to move
+                          </Label>
+                          <Input
+                            id={`${id}-quantity-${index}`}
+                            type="number"
+                            inputMode="numeric"
+                            min="1"
+                            max={source.quantity}
+                            step="1"
+                            className="min-h-11 max-w-full text-center tabular-nums"
+                            style={{
+                              width: `calc(${Math.max(draft.quantity.length, 2)}ch + 2.5rem)`,
+                            }}
+                            aria-label={`Quantity of ${description.accessibleName} to move`}
+                            aria-invalid={invalid || undefined}
+                            aria-describedby={helpId}
+                            disabled={
+                              busy || request.removeSource || !draft.selected
+                            }
+                            value={draft.quantity}
+                            onChange={(event) =>
+                              updateDraft(line.id, {
+                                quantity: event.target.value,
+                                quantityEdited: true,
+                              })
+                            }
+                          />
+                        </div>
+                      )}
                     </div>
                     <p
                       id={helpId}
@@ -462,52 +528,58 @@ export function CustomerReturnMoveItemsDialog({
               Select at least one item to move.
             </p>
           )}
-          {preview?.kind === "updated" && (
-            <section
-              aria-label="Move preview"
-              aria-live="polite"
-              className="space-y-2 rounded-lg bg-muted/50 p-3 text-sm"
-            >
-              <p className="font-medium">Before → After</p>
-              <dl className="space-y-1 tabular-nums">
-                <div className="flex flex-wrap justify-between gap-x-3">
-                  <dt>{sourceName}</dt>
-                  <dd className="break-all">
-                    {sourceQuantity} →{" "}
-                    {request.sourceParcelKey === null
-                      ? sourceQuantity - (movingQuantity ?? 0)
-                      : (boxQuantity(
-                          preview.parcels.find(
-                            (parcel) => parcel.key === request.sourceParcelKey,
-                          ),
-                        ) ?? "Check quantity")}{" "}
-                    items
-                  </dd>
-                </div>
-                <div className="flex flex-wrap justify-between gap-x-3">
-                  <dt>{destinationName}</dt>
-                  <dd className="break-all">
-                    {boxQuantity(destinationParcel) ?? "Check quantity"} →{" "}
-                    {boxQuantity(
-                      preview.parcels.find(
-                        (parcel) => parcel.key === preview.destinationParcelKey,
-                      ),
-                    ) ?? "Check quantity"}{" "}
-                    items
-                  </dd>
-                </div>
-              </dl>
-              {preview.removedParcelKeys.map((key) => (
-                <p key={key} className="text-xs text-muted-foreground">
-                  Box {parcels.findIndex((parcel) => parcel.key === key) + 1}{" "}
-                  will be removed because all its items are moving.
-                </p>
-              ))}
-              {destinationParcel &&
-                destinationIndex !==
-                  preview.parcels.findIndex(
-                    (parcel) => parcel.key === preview.destinationParcelKey,
-                  ) && (
+          {!isDrop &&
+            preview?.kind === "updated" &&
+            (showMoveTotals ||
+              preview.removedParcelKeys.length > 0 ||
+              destinationRenumbered) && (
+              <section
+                aria-label="Move preview"
+                aria-live="polite"
+                className="space-y-2 rounded-lg bg-muted/50 p-3 text-sm"
+              >
+                {showMoveTotals && (
+                  <>
+                    <p className="font-medium">Before → After</p>
+                    <dl className="space-y-1 tabular-nums">
+                      <div className="flex flex-wrap justify-between gap-x-3">
+                        <dt>{sourceName}</dt>
+                        <dd className="break-all">
+                          {sourceQuantity} →{" "}
+                          {request.sourceParcelKey === null
+                            ? sourceQuantity - (movingQuantity ?? 0)
+                            : (boxQuantity(
+                                preview.parcels.find(
+                                  (parcel) =>
+                                    parcel.key === request.sourceParcelKey,
+                                ),
+                              ) ?? "Check quantity")}{" "}
+                          items
+                        </dd>
+                      </div>
+                      <div className="flex flex-wrap justify-between gap-x-3">
+                        <dt>{destinationName}</dt>
+                        <dd className="break-all">
+                          {boxQuantity(destinationParcel) ?? "Check quantity"} →{" "}
+                          {boxQuantity(
+                            preview.parcels.find(
+                              (parcel) =>
+                                parcel.key === preview.destinationParcelKey,
+                            ),
+                          ) ?? "Check quantity"}{" "}
+                          items
+                        </dd>
+                      </div>
+                    </dl>
+                  </>
+                )}
+                {preview.removedParcelKeys.map((key) => (
+                  <p key={key} className="text-xs text-muted-foreground">
+                    Box {parcels.findIndex((parcel) => parcel.key === key) + 1}{" "}
+                    will be removed because all its items are moving.
+                  </p>
+                ))}
+                {destinationRenumbered && (
                   <p className="text-xs text-muted-foreground">
                     {destinationName} will be shown as Box{" "}
                     {preview.parcels.findIndex(
@@ -516,8 +588,8 @@ export function CustomerReturnMoveItemsDialog({
                     after the empty box is removed.
                   </p>
                 )}
-            </section>
-          )}
+              </section>
+            )}
           <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
             <Button
               type="button"

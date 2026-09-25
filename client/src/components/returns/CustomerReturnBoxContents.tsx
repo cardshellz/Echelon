@@ -63,27 +63,6 @@ export function CustomerReturnBoxContents({
             data-testid={`packing-item-${parcel.key}-${line.id}`}
             className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2 py-3 first:pt-0 last:pb-0"
           >
-            {canMove && item.packed !== null && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                tabIndex={-1}
-                className="hidden h-11 w-8 shrink-0 cursor-grab active:cursor-grabbing [@media(pointer:fine)]:inline-flex"
-                draggable={!busy}
-                disabled={busy}
-                aria-label={`Drag ${description.accessibleName} from box ${boxNumber}`}
-                title="Drag to another box, or click to move"
-                onClick={(event) => onMove(line.id, event.currentTarget)}
-                onDragStart={(event) => onDragStart(event, line.id)}
-                onDragEnd={onDragEnd}
-              >
-                <GripVertical
-                  aria-hidden="true"
-                  className="h-4 w-4 text-muted-foreground"
-                />
-              </Button>
-            )}
             <div className="min-w-0 flex-1 basis-40">
               <p className="break-words text-sm font-medium leading-5">
                 {line.title}
@@ -111,12 +90,23 @@ export function CustomerReturnBoxContents({
               {canMove && item.packed !== null && (
                 <Button
                   variant="outline"
-                  className="min-h-11 px-3"
+                  className="min-h-11 px-3 [@media(pointer:fine)]:cursor-grab [@media(pointer:fine)]:active:cursor-grabbing"
                   disabled={busy}
+                  draggable={!busy}
                   aria-label={`Move ${description.accessibleName} from box ${boxNumber}`}
+                  title="Drag to another box, or click to choose a box"
                   onClick={(event) => onMove(line.id, event.currentTarget)}
+                  onDragStart={(event) => onDragStart(event, line.id)}
+                  onDragEnd={onDragEnd}
                 >
-                  <ArrowRightLeft aria-hidden="true" className="h-3.5 w-3.5" />{" "}
+                  <GripVertical
+                    aria-hidden="true"
+                    className="hidden h-3.5 w-3.5 [@media(pointer:fine)]:block"
+                  />
+                  <ArrowRightLeft
+                    aria-hidden="true"
+                    className="h-3.5 w-3.5 [@media(pointer:fine)]:hidden"
+                  />
                   Move
                 </Button>
               )}
