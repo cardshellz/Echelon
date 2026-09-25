@@ -161,7 +161,8 @@ export interface DropshipAcceptanceFundingInput {
    * (phase 7). Absent when the caller has none: the order is then paid from
    * cash alone.
    */
-  rewards?: { balanceCents: number; spendFirst: boolean };
+  /** The rewards balance and the vendor's choice: true auto-applies, false saves, null (not chosen) saves. */
+  rewards?: { balanceCents: number; spendFirst: boolean | null };
 }
 
 /** The fee for advancing `advanceCents` at `feeBps`, rounded half up at the sub-cent boundary. */

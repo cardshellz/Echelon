@@ -3554,8 +3554,8 @@ function mapAutoReloadRow(row: AutoReloadRow): DropshipAutoReloadSettingRecord {
     paymentHoldTimeoutMinutes: row.payment_hold_timeout_minutes,
     acknowledgedCardFeeBps: row.acknowledged_card_fee_bps ?? null,
     acknowledgedAt: row.acknowledged_at ?? null,
-    // Rewards pay first unless the vendor chose otherwise (migration 0702).
-    spendRewardsFirst: row.spend_rewards_first ?? true,
+    // The vendor's choice, or null while they have not made one (migration 0704).
+    spendRewardsFirst: typeof row.spend_rewards_first === "boolean" ? row.spend_rewards_first : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

@@ -5,14 +5,17 @@ import {
   type DropshipOrderDetail,
   type DropshipOrderListItem,
 } from "@/lib/dropship-ops-surface";
+import { formatPoints } from "@/lib/dropship-wallet-guidance";
 
 /**
  * How an order was, or will be, paid from the wallet, in the vendor's words
- * (funding design phase 7). Every order debit takes rewards first and cash
- * second unless the vendor saved their rewards, so an accepted order has up
- * to two ledger rows behind it: the cash row (`order_debit`) and the rewards
- * row (`rewards_spent`). The page shows both parts and never adds them up
- * itself beyond what the two rows say.
+ * (funding design phase 7). An order debit takes rewards points first and
+ * cash second once the vendor chose to auto-apply their points, so an
+ * accepted order has up to two ledger rows behind it: the cash row
+ * (`order_debit`) and the points row (`rewards_spent`). Points are shown as
+ * points (100 per dollar, one per cent) with the dollar value beside. The
+ * page shows both parts and never adds them up itself beyond what the two
+ * rows say.
  */
 
 export interface OrderPaymentPart {
@@ -34,7 +37,7 @@ export function describeOrderPayment(order: Pick<DropshipOrderDetail, "walletLed
   const rewardsCents = rewards ? magnitude(rewards.amountCents) : 0;
   const parts: OrderPaymentPart[] = [{ label: "Paid from your wallet", value: formatCents(cashCents + rewardsCents) }];
   if (rewards) {
-    parts.push({ label: "From rewards", value: formatCents(rewardsCents) });
+    parts.push({ label: "From rewards points", value: describePointsValue(rewardsCents) });
     parts.push({ label: "From cash", value: formatCents(cashCents) });
   }
   if (cash) {
@@ -42,9 +45,14 @@ export function describeOrderPayment(order: Pick<DropshipOrderDetail, "walletLed
     parts.push({ label: "Cash balance after", value: cash.availableBalanceAfterCents === null ? "Not recorded" : formatCents(cash.availableBalanceAfterCents) });
   }
   if (rewards) {
-    parts.push({ label: "Rewards balance after", value: rewards.rewardsBalanceAfterCents === null ? "Not recorded" : formatCents(rewards.rewardsBalanceAfterCents) });
+    parts.push({ label: "Points after", value: rewards.rewardsBalanceAfterCents === null ? "Not recorded" : describePointsValue(rewards.rewardsBalanceAfterCents) });
   }
   return parts;
+}
+
+/** Points with their dollar value: "500 points ($5.00)". */
+function describePointsValue(cents: number): string {
+  return `${formatPoints(cents)} (${formatCents(cents)})`;
 }
 
 /**
@@ -64,7 +72,7 @@ export function describeHeldOrderNeed(hold: NonNullable<DropshipOrderListItem["p
   if (rewardsCents === 0) return [{ label: "Amount needed", value: formatCents(hold.totalDebitCents) }];
   return [
     { label: "Amount needed", value: formatCents(hold.totalDebitCents) },
-    { label: "Rewards will cover", value: formatCents(rewardsCents) },
+    { label: "Points will cover", value: describePointsValue(rewardsCents) },
     { label: "Cash still needed", value: formatCents(hold.totalDebitCents - rewardsCents) },
   ];
 }
@@ -74,7 +82,7 @@ export function describeOrderAcceptance(result: DropshipOrderAcceptResponse["res
   const rewardsCents = result.rewardsCents ?? 0;
   assertCents(result.totalDebitCents, "totalDebitCents");
   assertCents(rewardsCents, "rewardsCents");
-  const rewardsClause = rewardsCents > 0 ? ` (${formatCents(rewardsCents)} from rewards)` : "";
+  const rewardsClause = rewardsCents > 0 ? ` (${formatPoints(rewardsCents)} from rewards)` : "";
   if (result.outcome === "payment_hold") {
     return `Order intake ${result.intakeId} placed on payment hold for ${formatCents(result.totalDebitCents)}${rewardsClause}.`;
   }

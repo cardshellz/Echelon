@@ -428,11 +428,12 @@ export interface DropshipAutoReloadSettingRecord {
   acknowledgedCardFeeBps: number | null;
   acknowledgedAt: Date | null;
   /**
-   * True: each order debit takes rewards first and cash second (the
-   * default). False: the vendor saves their rewards and orders are paid from
-   * cash (migration 0702).
+   * The vendor's choice for their rewards points (funding design phase 7):
+   * true auto-applies them to each order debit before cash, false saves them,
+   * null means they have not chosen yet, which reads as saved. Auto-apply is
+   * never a default (migration 0704).
    */
-  spendRewardsFirst: boolean;
+  spendRewardsFirst: boolean | null;
   createdAt: Date;
   updatedAt: Date;
 }

@@ -37,6 +37,8 @@ import {
   REWARDS_LEDGER_REASONS,
   buildRewardsPreferenceInput,
   describeDepositRail,
+  describeLedgerAmount,
+  describeRewardsBalance,
   describeRewardsEarning,
   describeRewardsPreferenceSaved,
   describeRewardsRule,
@@ -180,7 +182,7 @@ describe("deriveWalletFlow", () => {
   });
 
   it("treats the seed row (enabled, no method) as not authorized", () => {
-    const seed = wallet({ autoReload: { autoReloadSettingId: 1, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: null, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2_880, fundingMethodId: null, updatedAt: STAMP, backstopFundingMethodId: null, acknowledgedCardFeeBps: null, acknowledgedAt: null, spendRewardsFirst: true } });
+    const seed = wallet({ autoReload: { autoReloadSettingId: 1, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: null, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2_880, fundingMethodId: null, updatedAt: STAMP, backstopFundingMethodId: null, acknowledgedCardFeeBps: null, acknowledgedAt: null, spendRewardsFirst: null } });
     expect(derive(seed)).toMatchObject({ authorized: false, feeRecordMissing: false, roleGaps: { backupCard: false, source: false }, canTurnOffAutoReload: false });
   });
 
@@ -536,11 +538,11 @@ describe("copy", () => {
     const whole = [intro.lede, ...intro.topics.flatMap((topic) => [topic.lead, topic.detail])].join(" ");
     expect(whole).not.toMatch(/single top-up limit|Never charge more than|step 5|floor|auto-reload|backstop/);
     // Exactly the enforced amounts are quoted: the two tier minimums (twice), the card fee (twice), the rewards rate, the advance fee and its cap, and the single-payment ceiling.
-    expect(whole.match(/\$[\d,]*\d|\d+(?:\.\d+)?%/g)).toEqual(["$50", "$500", "$50", "$500", "3%", "1%", "1%", "$500", "3%", "$5,000"]);
+    expect(whole.match(/\$[\d,]*\d|\d+(?:\.\d+)?%/g)).toEqual(["$50", "$500", "$50", "$500", "3%", "1%", "$1", "1%", "$500", "3%", "$5,000"]);
     // With the program off, the rules page says nothing about rewards; without USDC on offer, the rule names the bank alone.
     const off = describeIntro({ cardFundingFeeBps: 300, usdcOffered: true, holdTimeoutMinutes: 2_880, limits: { ...limits, rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0 } });
     expect([off.lede, ...off.topics.flatMap((topic) => [topic.lead, topic.detail])].join(" ")).not.toMatch(/reward/i);
-    expect(noUsdc.topics[3].detail).toContain(" A bank transfer earns 1% in rewards when it lands; a card charge earns none.");
+    expect(noUsdc.topics[3].detail).toContain(" A bank transfer earns 1% in rewards points when it lands; a card charge earns none.");
     expect(describeActivationTopUp({ cardFundingFeeBps: 300 })).toBe("Your first automatic top-up runs on the first daily check after you activate (about midnight UTC). Until it lands, orders are charged to your backup card at 3%. Adding money by card now avoids that.");
     expect(describeHoldTimeLine(120)).toContain("for orders held from now on");
     expect(describeHoldTimeLine(120)).toContain("We email you 2 hours before.");
@@ -821,17 +823,17 @@ describe("adding money: the top-up step's picks again", () => {
 });
 
 /** The rewards rule as the rules page states it at the launch rates with USDC on offer. */
-const REWARDS_RULE = " Bank and USDC transfers earn 1% in rewards when they land; a card charge earns none. Rewards pay for your orders before your cash unless you choose to save them in Wallet. They are not cash: they cannot be paid out, do not count toward your minimum, and a payment your bank takes back takes its rewards back too.";
+const REWARDS_RULE = " Bank and USDC transfers earn 1% in rewards points when they land; a card charge earns none. 100 points are worth $1 on your orders. Points are used only on your orders here, and only once you choose in Wallet to auto-apply them; until you choose, they are saved up. They are not cash: they cannot be paid out, do not count toward your minimum, and a payment your bank takes back takes its points back too.";
 
 describe("rewards in the wallet's words (funding design phase 7)", () => {
   const rates = { rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0 };
 
   it("names what each way to pay earns, and when, only while some rail earns", () => {
-    expect(describeRewardsEarning("stripe_ach", rates)).toBe("Earns 1% in rewards once it lands.");
-    expect(describeRewardsEarning("usdc_base", rates)).toBe("Earns 1% in rewards once the transfer settles.");
-    expect(describeRewardsEarning("stripe_card", rates)).toBe("Earns no rewards.");
-    expect(describeRewardsEarning("stripe_card", { ...rates, rewardsRateCardBps: 25 })).toBe("Earns 0.25% in rewards, available at once.");
-    expect(describeRewardsEarning("stripe_ach", { ...rates, rewardsRateBankBps: 150 })).toBe("Earns 1.5% in rewards once it lands.");
+    expect(describeRewardsEarning("stripe_ach", rates)).toBe("Earns 1% in rewards points once it lands.");
+    expect(describeRewardsEarning("usdc_base", rates)).toBe("Earns 1% in rewards points once the transfer settles.");
+    expect(describeRewardsEarning("stripe_card", rates)).toBe("Earns no rewards points.");
+    expect(describeRewardsEarning("stripe_card", { ...rates, rewardsRateCardBps: 25 })).toBe("Earns 0.25% in rewards points, at once.");
+    expect(describeRewardsEarning("stripe_ach", { ...rates, rewardsRateBankBps: 150 })).toBe("Earns 1.5% in rewards points once it lands.");
     const off = { rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0 };
     expect(rewardsOffered(off)).toBe(false);
     expect(describeRewardsEarning("stripe_ach", off)).toBeNull();
@@ -843,21 +845,35 @@ describe("rewards in the wallet's words (funding design phase 7)", () => {
 
   it("states the rule from the served rates: one sentence when bank and USDC match, each named when they differ, USDC only where offered", () => {
     expect(describeRewardsRule(rates, true)).toBe(REWARDS_RULE);
-    expect(describeRewardsRule(rates, false)).toContain(" A bank transfer earns 1% in rewards when it lands; a card charge earns none.");
+    expect(describeRewardsRule(rates, false)).toContain(" A bank transfer earns 1% in rewards points when it lands; a card charge earns none.");
     expect(describeRewardsRule(rates, false)).not.toContain("USDC");
     expect(describeRewardsRule({ rewardsRateBankBps: 100, rewardsRateUsdcBps: 200, rewardsRateCardBps: 50 }, true))
-      .toContain(" A bank transfer earns 1% in rewards when it lands, a USDC transfer 2%; a card charge earns 0.5% at once.");
+      .toContain(" A bank transfer earns 1% in rewards points when it lands, a USDC transfer 2%; a card charge earns 0.5% at once.");
+    // The rule never promises auto-apply: it is the vendor's choice, and saving is what happens until they make it.
+    expect(describeRewardsRule(rates, true)).toContain("only once you choose in Wallet to auto-apply them; until you choose, they are saved up.");
     expect(describeRewardsRule({ rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0 }, true)).toBe("");
   });
 
-  it("words the balance line, the switch's request and its confirmation from one flag, turned the vendor's way round", () => {
-    expect(describeRewardsUse(true)).toBe("Pays for your orders before your cash. Not cash: it cannot be paid out and does not count toward your minimum.");
-    expect(describeRewardsUse(false)).toBe("Saved: your cash pays for orders while this is on. Not cash: it cannot be paid out and does not count toward your minimum.");
-    // The switch is "save my rewards": on means the server must stop spending them first.
-    expect(buildRewardsPreferenceInput(true)).toEqual({ spendRewardsFirst: false });
-    expect(buildRewardsPreferenceInput(false)).toEqual({ spendRewardsFirst: true });
-    expect(describeRewardsPreferenceSaved(true)).toBe("Saved. Your cash pays for orders; your rewards stay put.");
-    expect(describeRewardsPreferenceSaved(false)).toBe("Saved. Rewards pay for your orders before your cash.");
+  it("words the balance line for each choice, and for no choice yet, which saves", () => {
+    expect(describeRewardsUse(null)).toBe("Not chosen yet, so your points are saved up. Choose to auto-apply them to your orders, or keep saving them. 100 points are worth $1 on your orders.");
+    expect(describeRewardsUse(true)).toBe("Auto-applied to your orders before your cash. 100 points are worth $1 on your orders.");
+    expect(describeRewardsUse(false)).toBe("Saved up: your cash pays for orders. Auto-apply them whenever you want to use them. 100 points are worth $1 on your orders.");
+    // The request is the choice itself: true auto-applies, false saves up; nothing is turned round.
+    expect(buildRewardsPreferenceInput(true)).toEqual({ spendRewardsFirst: true });
+    expect(buildRewardsPreferenceInput(false)).toEqual({ spendRewardsFirst: false });
+    expect(describeRewardsPreferenceSaved(true)).toBe("Saved. Your points are auto-applied to your orders before your cash.");
+    expect(describeRewardsPreferenceSaved(false)).toBe("Saved. Your points are kept; your cash pays for orders.");
+  });
+
+  it("shows points at 100 per dollar with the value beside, and activity amounts in the row's own unit", () => {
+    expect(describeRewardsBalance(1_250)).toEqual({ points: "1,250 points", value: "$12.50" });
+    expect(describeRewardsBalance(0)).toEqual({ points: "0 points", value: "$0.00" });
+    expect(describeRewardsBalance(1)).toEqual({ points: "1 point", value: "$0.01" });
+    expect(describeLedgerAmount({ reason: "rewards_earned", amountCents: 1_500 })).toBe("1,500 points");
+    expect(describeLedgerAmount({ reason: "rewards_spent", amountCents: -250 })).toBe("−250 points");
+    expect(describeLedgerAmount({ reason: "manual_top_up", amountCents: 25_000 })).toBe("$250.00");
+    expect(describeLedgerAmount({ reason: "order", amountCents: -9_500 })).toBe("−$95.00");
+    expect(() => describeRewardsBalance(1.5)).toThrow(RangeError);
   });
 
   it("points an activity row's balance-after figure at the balance the row moved", () => {
@@ -877,10 +893,10 @@ describe("the add-money step's terms per way to pay", () => {
   const bank = { rail: "stripe_ach" as const, cardFundingFeeBps: 300, backupLabel: "Visa ending in 4242", cardMinimumCents: 10_000, bankFundingMethodId: 30, advance: null, rewardsRates: rates };
 
   it("lists a card's fee and that the money is available at once; a zero fee reads as none", () => {
-    expect(describeDepositRail({ ...bank, rail: "stripe_card" })).toEqual(["Card fee: 3% on top of the amount.", "Deposits of $100 or more.", "Available at once.", "Earns no rewards."]);
-    expect(describeDepositRail({ ...bank, rail: "stripe_card", cardFundingFeeBps: 0 })).toEqual(["No fee.", "Deposits of $100 or more.", "Available at once.", "Earns no rewards."]);
+    expect(describeDepositRail({ ...bank, rail: "stripe_card" })).toEqual(["Card fee: 3% on top of the amount.", "Deposits of $100 or more.", "Available at once.", "Earns no rewards points."]);
+    expect(describeDepositRail({ ...bank, rail: "stripe_card", cardFundingFeeBps: 0 })).toEqual(["No fee.", "Deposits of $100 or more.", "Available at once.", "Earns no rewards points."]);
     // A card rate says what a card earns; with the program off, no bullet mentions rewards at all.
-    expect(describeDepositRail({ ...bank, rail: "stripe_card", rewardsRates: { ...rates, rewardsRateCardBps: 50 } })[3]).toBe("Earns 0.5% in rewards, available at once.");
+    expect(describeDepositRail({ ...bank, rail: "stripe_card", rewardsRates: { ...rates, rewardsRateCardBps: 50 } })[3]).toBe("Earns 0.5% in rewards points, at once.");
     expect(describeDepositRail({ ...bank, rail: "stripe_card", rewardsRates: { rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0 } })).toHaveLength(3);
   });
 
@@ -888,14 +904,14 @@ describe("the add-money step's terms per way to pay", () => {
     expect(describeDepositRail({ ...bank, advance: null })).toEqual([
       "No fee.",
       "Takes up to 5 business days (our assumption) to land, and counts toward your minimum as soon as it shows as on the way.",
-      "Earns 1% in rewards once it lands.",
+      "Earns 1% in rewards points once it lands.",
       "A business bank account can qualify to pay for orders while a transfer is still on the way; a personal account pays only once the money lands.",
       "While it is on the way, an order it cannot pay for is charged to Visa ending in 4242 for the shortfall plus 3%.",
     ]);
     // A zero card fee drops the fee clause rather than promising "plus 0%".
     expect(describeDepositRail({ ...bank, advance: null, cardFundingFeeBps: 0 })[4]).toBe("While it is on the way, an order it cannot pay for is charged to Visa ending in 4242 for the shortfall.");
     // A bank rate of zero while the card earns: the bullet says so; the program off: no bullet.
-    expect(describeDepositRail({ ...bank, advance: null, rewardsRates: { rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 100 } })[2]).toBe("Earns no rewards.");
+    expect(describeDepositRail({ ...bank, advance: null, rewardsRates: { rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 100 } })[2]).toBe("Earns no rewards points.");
     expect(describeDepositRail({ ...bank, advance: null, rewardsRates: { rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0 } })).toHaveLength(4);
   });
 

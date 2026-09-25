@@ -278,20 +278,24 @@ describe("DropshipPortalWallet contract", () => {
 });
 
 describe("rewards on the wallet page (funding design phase 7)", () => {
-  it("shows the rewards balance as its own element with the save-my-rewards switch, in the model's words", () => {
+  it("shows the points as their own element with the choice as a radio pair that starts unselected, in the model's words", () => {
     const block = between("function RewardsBalance", "function describeBalanceAfterCell");
     expect(block).toContain('data-testid="wallet-rewards"');
     expect(block).toContain('data-testid="wallet-rewards-balance"');
-    expect(block).toContain("formatCents(wallet.account.rewardsBalanceCents)");
+    expect(block).toContain('data-testid="wallet-rewards-value"');
+    expect(block).toContain("const balance = describeRewardsBalance(wallet.account.rewardsBalanceCents);");
+    expect(block).toContain("{balance.points}");
+    expect(block).toContain("worth {balance.value} on your orders");
     expect(block).toContain("{describeRewardsUse(spendFirst)}");
-    // The choice is the page's radio pair, never a switch: "save my rewards" is the opposite of the server's spend-first flag,
-    // a re-click of the chosen option sends nothing, and both wait for the settings row the choice is saved on.
-    expect(block).toContain("const spendFirst = wallet.autoReload?.spendRewardsFirst ?? true;");
+    // The choice is the page's radio pair, never a switch, and neither option is selected until the vendor chooses:
+    // auto-apply is never a default. A re-click of the chosen option sends nothing; both wait for the settings row.
+    expect(block).toContain("const spendFirst = wallet.autoReload?.spendRewardsFirst ?? null;");
     expect(block).toContain("const disabled = feedback.busy || !wallet.autoReload;");
     expect(block).toContain('<div role="radiogroup" aria-label="Rewards"');
-    expect(block).toContain('<RadioChip label="Use on orders first" selected={spendFirst} disabled={disabled} onSelect={() => { if (!spendFirst) void onSave(false); }} testId="wallet-rewards-spend" />');
-    expect(block).toContain('<RadioChip label="Save my rewards" selected={!spendFirst} disabled={disabled} onSelect={() => { if (spendFirst) void onSave(true); }} testId="wallet-rewards-save" />');
-    expect(block).not.toMatch(/1%|\d+%|"\$|<Switch/);
+    expect(block).toContain('<RadioChip label="Auto-apply to orders" selected={spendFirst === true} disabled={disabled} onSelect={() => { if (spendFirst !== true) void onSave(true); }} testId="wallet-rewards-spend" />');
+    expect(block).toContain('<RadioChip label="Save them up" selected={spendFirst === false} disabled={disabled} onSelect={() => { if (spendFirst !== false) void onSave(false); }} testId="wallet-rewards-save" />');
+    expect(block).not.toMatch(/1%|\d+%|"\$|<Switch|\?\? true/);
+    expect(block).not.toContain("formatCents(");
     // The balance section renders it once, above the add-money panel.
     expect(between('data-testid="wallet-balance"', 'data-testid="wallet-add-money"')).toContain('<RewardsBalance wallet={wallet} feedback={feedback("rewards")} onSave={onSaveRewardsPreference} />');
     expect(source.match(/<RewardsBalance /g)).toHaveLength(1);
@@ -300,18 +304,20 @@ describe("rewards on the wallet page (funding design phase 7)", () => {
   it("saves the preference through the model's request and words, with no step-up and a refetch", () => {
     const handler = between("function saveRewardsPreference", "function removeMethod");
     expect(handler).toContain('run("rewards", "put", async () => {');
-    expect(handler).toContain('putJson<{ autoReload: unknown }>("/api/dropship/wallet/rewards/preference", buildRewardsPreferenceInput(saveRewards));');
+    expect(handler).toContain('putJson<{ autoReload: unknown }>("/api/dropship/wallet/rewards/preference", buildRewardsPreferenceInput(spendRewardsFirst));');
     expect(handler).toContain("await refreshAfterWalletChange();");
-    expect(handler).toContain("describeRewardsPreferenceSaved(saveRewards)");
+    expect(handler).toContain("describeRewardsPreferenceSaved(spendRewardsFirst)");
     expect(handler).not.toContain("withVerification");
   });
 
-  it("names the balance a rewards row moved in Activity, and what USDC earns under its address", () => {
+  it("shows a rewards row's amount and balance in points in Activity, and what USDC earns under its address", () => {
+    expect(source).toContain('<TableCell className="text-right font-mono">{describeLedgerAmount(entry)}</TableCell>');
     expect(source).toContain('<TableCell className="text-right font-mono">{describeBalanceAfterCell(entry)}</TableCell>');
     expect(source).not.toContain("formatSignedCents(entry.availableBalanceAfterCents)");
+    expect(source).not.toContain("formatSignedCents(entry.amountCents)");
     const cell = between("function describeBalanceAfterCell", "function ActivitySection");
     expect(cell).toContain("ledgerBalanceAfter(entry)");
-    expect(cell).toContain('`${formatSignedCents(after.cents)} rewards`');
+    expect(cell).toContain('after.balance === "rewards" ? formatPoints(after.cents) : formatSignedCents(after.cents)');
     expect(source.match(/data-testid="wallet-usdc-rewards"/g)).toHaveLength(2);
     expect(source.match(/describeRewardsEarning\("usdc_base", wallet\.limits\)/g)).toHaveLength(1);
     expect(source.match(/\{usdcRewards && <p className="text-sm text-zinc-600" data-testid="wallet-usdc-rewards">\{usdcRewards\}<\/p>\}/g)).toHaveLength(2);

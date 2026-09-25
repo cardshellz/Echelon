@@ -43,7 +43,8 @@ describe("0702 dropship wallet rewards migration", () => {
     expect(schema).toContain(`IN (${LEDGER_KINDS.map((kind) => `'${kind}'`).join(",")})`);
     expect(schema).toContain('rewardsBalanceCents: bigint("rewards_balance_cents"');
     expect(schema).toContain('rewardsBalanceAfterCents: bigint("rewards_balance_after_cents"');
-    expect(schema).toContain('spendRewardsFirst: boolean("spend_rewards_first").notNull().default(true)');
+    // 0704 made the choice nullable with no default (auto-apply must be chosen); the column itself is still declared.
+    expect(schema).toContain('spendRewardsFirst: boolean("spend_rewards_first")');
   });
 
   it("adds the three per-rail rates as policy columns under the 10% ceiling, then drops their defaults", () => {

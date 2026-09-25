@@ -59,6 +59,7 @@ import {
   chargeBoundCents,
   firstFillFeeCents,
   formatDurationMinutes,
+  formatPoints,
   formatSignedCents,
   formatWholeDollars,
   nextTopUpCents,
@@ -115,6 +116,8 @@ import {
   describeDepositRail,
   describePendingBalance,
   describePlanSentence,
+  describeLedgerAmount,
+  describeRewardsBalance,
   describeRewardsEarning,
   describeRewardsPreferenceSaved,
   describeRewardsUse,
@@ -548,12 +551,12 @@ export default function DropshipPortalWallet() {
     });
   }
 
-  /** The save-my-rewards choice (funding design phase 7): a preference, not a charge, so no step-up is asked. */
-  async function saveRewardsPreference(saveRewards: boolean): Promise<void> {
+  /** The rewards choice (funding design phase 7): auto-apply or save up. A preference, not a charge, so no step-up is asked. */
+  async function saveRewardsPreference(spendRewardsFirst: boolean): Promise<void> {
     await run("rewards", "put", async () => {
-      await putJson<{ autoReload: unknown }>("/api/dropship/wallet/rewards/preference", buildRewardsPreferenceInput(saveRewards));
+      await putJson<{ autoReload: unknown }>("/api/dropship/wallet/rewards/preference", buildRewardsPreferenceInput(spendRewardsFirst));
       await refreshAfterWalletChange();
-      setNotice({ scope: "rewards", tone: "success", text: describeRewardsPreferenceSaved(saveRewards) });
+      setNotice({ scope: "rewards", tone: "success", text: describeRewardsPreferenceSaved(spendRewardsFirst) });
     });
   }
 
@@ -1966,7 +1969,7 @@ function ManageView({
   onAddFunds: (rail: WalletSourceRail, amountCents: number) => Promise<void>;
   onSaveUsdc: (input: { walletAddress: string; displayLabel: string }) => Promise<void>;
   onRequestUsdcAddress: () => Promise<void>;
-  onSaveRewardsPreference: (saveRewards: boolean) => Promise<void>;
+  onSaveRewardsPreference: (spendRewardsFirst: boolean) => Promise<void>;
   onBackToOnboarding: () => void;
 }) {
   const plan = planFromWallet(wallet);
@@ -2547,27 +2550,30 @@ function SavedMethods({
 }
 
 /**
- * The rewards balance (funding design phase 7): its own figure next to the
- * cash balance, the line saying how it is used, and the "save my rewards"
- * choice as the page's whole-clickable radio pair (the page has no switches:
- * a money choice is always a named option). "Save my rewards" is the
- * opposite of the server's spend-first flag; the model does the turning.
+ * The rewards points (funding design phase 7): their own figure next to the
+ * cash balance with the dollar value beside, the line saying what the
+ * vendor's choice is doing (or that none is made), and the choice itself as
+ * the page's whole-clickable radio pair (the page has no switches: a money
+ * choice is always a named option). Neither option is selected until the
+ * vendor chooses: auto-apply is never a default.
  */
-function RewardsBalance({ wallet, feedback, onSave }: { wallet: DropshipWalletView; feedback: Feedback; onSave: (saveRewards: boolean) => Promise<void> }) {
-  const spendFirst = wallet.autoReload?.spendRewardsFirst ?? true;
+function RewardsBalance({ wallet, feedback, onSave }: { wallet: DropshipWalletView; feedback: Feedback; onSave: (spendRewardsFirst: boolean) => Promise<void> }) {
+  const spendFirst = wallet.autoReload?.spendRewardsFirst ?? null;
+  const balance = describeRewardsBalance(wallet.account.rewardsBalanceCents);
   // Without a settings row there is nothing to save the choice on; the server scaffolds one with autopay.
   const disabled = feedback.busy || !wallet.autoReload;
   return (
     <div className="mt-4 rounded-md border border-zinc-200 bg-zinc-50 p-3" data-testid="wallet-rewards">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <div className="text-sm text-zinc-500">Rewards</div>
-          <div className="mt-1 text-2xl font-semibold" data-testid="wallet-rewards-balance">{formatCents(wallet.account.rewardsBalanceCents)}</div>
+          <div className="text-sm text-zinc-500">Rewards points</div>
+          <div className="mt-1 text-2xl font-semibold" data-testid="wallet-rewards-balance">{balance.points}</div>
+          <div className="text-sm text-zinc-500" data-testid="wallet-rewards-value">worth {balance.value} on your orders</div>
           <p className="mt-1 text-sm text-zinc-500" data-testid="wallet-rewards-use">{describeRewardsUse(spendFirst)}</p>
         </div>
         <div role="radiogroup" aria-label="Rewards" className="flex flex-wrap gap-2">
-          <RadioChip label="Use on orders first" selected={spendFirst} disabled={disabled} onSelect={() => { if (!spendFirst) void onSave(false); }} testId="wallet-rewards-spend" />
-          <RadioChip label="Save my rewards" selected={!spendFirst} disabled={disabled} onSelect={() => { if (spendFirst) void onSave(true); }} testId="wallet-rewards-save" />
+          <RadioChip label="Auto-apply to orders" selected={spendFirst === true} disabled={disabled} onSelect={() => { if (spendFirst !== true) void onSave(true); }} testId="wallet-rewards-spend" />
+          <RadioChip label="Save them up" selected={spendFirst === false} disabled={disabled} onSelect={() => { if (spendFirst !== false) void onSave(false); }} testId="wallet-rewards-save" />
         </div>
       </div>
       <SectionFeedback {...feedback} />
@@ -2575,11 +2581,11 @@ function RewardsBalance({ wallet, feedback, onSave }: { wallet: DropshipWalletVi
   );
 }
 
-/** "Balance after" for an activity row: the cash balance, or the rewards balance for a rewards row, named as such. */
+/** "Balance after" for an activity row: the cash balance, or the points balance for a rewards row, in points. */
 function describeBalanceAfterCell(entry: DropshipWalletView["recentLedger"][number]): string {
   const after = ledgerBalanceAfter(entry);
   if (after === null) return "—";
-  return after.balance === "rewards" ? `${formatSignedCents(after.cents)} rewards` : formatSignedCents(after.cents);
+  return after.balance === "rewards" ? formatPoints(after.cents) : formatSignedCents(after.cents);
 }
 
 function ActivitySection({ wallet }: { wallet: DropshipWalletView }) {
@@ -2619,7 +2625,7 @@ function ActivitySection({ wallet }: { wallet: DropshipWalletView }) {
                     {entry.failure && <span className="block text-xs text-red-700">Failed: {entry.failure.code ?? entry.failure.message ?? "unknown"}</span>}
                   </TableCell>
                   <TableCell><Badge variant="outline">{formatStatus(entry.status)}</Badge></TableCell>
-                  <TableCell className="text-right font-mono">{formatSignedCents(entry.amountCents)}</TableCell>
+                  <TableCell className="text-right font-mono">{describeLedgerAmount(entry)}</TableCell>
                   <TableCell className="text-right font-mono">{describeBalanceAfterCell(entry)}</TableCell>
                   <TableCell className="whitespace-nowrap text-sm text-zinc-500">{formatDateTime(entry.createdAt)}</TableCell>
                 </TableRow>

@@ -8,8 +8,9 @@
  *
  *   - they are EARNED when a transfer settles, on the amount credited to the
  *     wallet, rounded DOWN to the cent (a gift never rounds up);
- *   - they are SPENT first on each order debit, cash second, unless the
- *     vendor chose to save them;
+ *   - they are SPENT first on each order debit, cash second, only once the
+ *     vendor has chosen to auto-apply them; a vendor who has not chosen, or
+ *     who chose to save, keeps them (auto-apply is never a default);
  *   - a returned or disputed transfer takes them back pro rata to the amount
  *     reversed: what is still in the rewards balance leaves it, and the part
  *     already spent comes out of the cash balance through the existing
@@ -114,21 +115,26 @@ export interface DropshipRewardsSpendDecision {
 
 /**
  * How an order debit splits between rewards and cash. Rewards pay first, up
- * to the rewards balance, unless the vendor is saving them; cash pays the
- * rest. The split never depends on the cash balance: rewards are spent
- * whether or not cash could have covered the order.
+ * to the rewards balance, only when the vendor chose to auto-apply them
+ * (`spendRewardsFirst === true`); a vendor who chose to save them, or who has
+ * not chosen (`null`), pays from cash alone. The split never depends on the
+ * cash balance: auto-applied rewards are spent whether or not cash could
+ * have covered the order.
  */
 export function decideRewardsSpend(input: {
   rewardsBalanceCents: number;
   totalDebitCents: number;
-  spendRewardsFirst: boolean;
+  spendRewardsFirst: boolean | null;
 }): DropshipRewardsSpendDecision {
   assertCents(input.rewardsBalanceCents, "rewardsBalanceCents");
   assertCents(input.totalDebitCents, "totalDebitCents");
   if (input.totalDebitCents <= 0) {
     throw invalid("totalDebitCents must be positive.", { totalDebitCents: input.totalDebitCents });
   }
-  const rewardsCents = input.spendRewardsFirst ? Math.min(input.rewardsBalanceCents, input.totalDebitCents) : 0;
+  if (input.spendRewardsFirst !== true && input.spendRewardsFirst !== false && input.spendRewardsFirst !== null) {
+    throw invalid("spendRewardsFirst must be true, false or null.", { spendRewardsFirst: input.spendRewardsFirst });
+  }
+  const rewardsCents = input.spendRewardsFirst === true ? Math.min(input.rewardsBalanceCents, input.totalDebitCents) : 0;
   return { rewardsCents, cashCents: input.totalDebitCents - rewardsCents };
 }
 
