@@ -2,7 +2,8 @@ import { test, expect, type Page } from "playwright/test";
 import { resolve } from "node:path";
 
 async function setup(page: Page, mode = "wms", fail = false) {
-  const state = { fail, handledFail: fail, total: 201, requests: [] as string[], writes: [] as string[], errors: [] as string[] };
+  const state = { fail, handledFail: fail, total: 201, requests: [] as string[], writes: [] as string[], errors: [] as string[],
+    historyGates: new Map<string, Promise<void>>() };
   page.on("pageerror", error => state.errors.push(error.message));
   await page.route("**/api/**", async route => {
     const url = new URL(route.request().url());
@@ -32,16 +33,20 @@ async function setup(page: Page, mode = "wms", fail = false) {
     if (url.pathname === "/api/oms/orders/stats") body = {};
     if (url.pathname === "/api/test/page-data") body = { ok: true };
     if (url.pathname === "/api/picking/history") {
+      const search = url.searchParams.get("search") ?? "";
+      const gate = state.historyGates.get(search);
+      if (gate) await gate;
       const offset = Number(url.searchParams.get("offset") ?? 0);
-      const searching = !!url.searchParams.get("search");
+      const searching = !!search;
+      const total = search === "NOT-FOUND" ? 0 : searching ? 1 : state.total;
       const id = searching ? 900 : offset + 1;
-      body = { orders: offset >= (searching ? 1 : state.total) ? [] : [{
+      body = { orders: offset >= total ? [] : [{
         id, orderNumber: searching ? "#62770" : `OLD-ORDER-${id}`, customerName: "Historical Customer",
         warehouseStatus: "shipped", channelName: "Test store", warehouseId: 1,
         createdAt: "2020-01-01T00:00:00Z", completedAt: "2020-01-02T00:00:00Z",
         lastPickAt: "2020-01-02T00:00:00Z", lastPickerName: "Recorded picker",
         items: [{ id: 1, sku: "GLV-TOP-35PT-P50", name: "Glove-fit sleeves", quantity: 5, pickedQuantity: 5, status: "completed", pickedAt: "2020-01-02T00:00:00Z" }],
-      }], total: searching ? 1 : state.total, limit: 50, offset };
+      }], total, limit: 50, offset };
     }
     await route.fulfill({ json: body });
   });
@@ -212,6 +217,81 @@ test("picking history failure is visible, retries, and marks a failed refresh st
   await page.getByRole("button", { name: "Refresh history" }).click();
   await expect(page.getByRole("alert")).toContainText("last successful load");
   await expect(page.getByTestId("history-order-1")).toBeVisible();
+  expect(state.errors).toEqual([]);
+});
+
+test("history search immediately replaces an old empty result with visible progress, including during debounce", async ({ page }) => {
+  await page.clock.install();
+  const state = await setup(page, "picking");
+  await page.getByTestId("filter-done").click();
+  await expect(page.getByTestId("history-order-1")).toBeVisible();
+  await page.getByTestId("input-search-queue").fill("NOT-FOUND");
+  await page.clock.fastForward(300);
+  await expect(page.getByText("No picking history matches your search.")).toBeVisible();
+  let release!: () => void;
+  state.historyGates.set("62770", new Promise<void>(resolve => { release = resolve; }));
+  try {
+    await page.getByTestId("input-search-queue").fill("62770");
+    await expect(page.getByRole("status")).toContainText("Searching all picking history for “62770”…");
+    await expect(page.getByText("No picking history matches your search.")).toHaveCount(0);
+    expect(state.requests.some(path => path.includes("search=62770"))).toBe(false);
+    await page.clock.fastForward(300);
+    await expect.poll(() => state.requests.some(path => path.includes("search=62770"))).toBe(true);
+    await expect(page.getByRole("region", { name: "Picking history" })).toHaveAttribute("aria-busy", "true");
+    await expect(page.getByRole("button", { name: "Refresh history" })).toBeDisabled();
+    await expect(page.getByText("No picking history matches your search.")).toHaveCount(0);
+    release();
+    await expect(page.getByTestId("history-order-900")).toContainText("#62770");
+    await expect(page.getByRole("status")).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Picking history" })).toHaveAttribute("aria-busy", "false");
+  } finally { release(); }
+  expect(state.writes).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
+test("a late response for an older search cannot replace the current order", async ({ page }) => {
+  await page.clock.install();
+  const state = await setup(page, "picking");
+  let release!: () => void;
+  state.historyGates.set("NOT-FOUND", new Promise<void>(resolve => { release = resolve; }));
+  try {
+    await page.getByTestId("filter-done").click();
+    await expect(page.getByTestId("history-order-1")).toBeVisible();
+    await page.getByTestId("input-search-queue").fill("NOT-FOUND");
+    await page.clock.fastForward(300);
+    await expect.poll(() => state.requests.some(path => path.includes("search=NOT-FOUND"))).toBe(true);
+    await page.getByTestId("input-search-queue").fill("62770");
+    await page.clock.fastForward(300);
+    await expect(page.getByTestId("history-order-900")).toBeVisible();
+    release();
+    await expect(page.getByTestId("history-order-900")).toContainText("#62770");
+    await expect(page.getByText("No picking history matches your search.")).toHaveCount(0);
+  } finally { release(); }
+  expect(state.errors).toEqual([]);
+});
+
+test("a stalled history search times out visibly and can be retried", async ({ page }) => {
+  await page.clock.install();
+  const state = await setup(page, "picking");
+  let release!: () => void;
+  state.historyGates.set("62770", new Promise<void>(resolve => { release = resolve; }));
+  try {
+    await page.getByTestId("filter-done").click();
+    await expect(page.getByTestId("history-order-1")).toBeVisible();
+    await page.getByTestId("input-search-queue").fill("62770");
+    await page.clock.fastForward(300);
+    await expect.poll(() => state.requests.some(path => path.includes("search=62770"))).toBe(true);
+    await page.clock.fastForward(10_000);
+    await expect(page.getByRole("alert")).toContainText("Could not load picking history");
+    await expect(page.getByText("The picking history search took too long. Please try again.")).toBeVisible();
+    await expect(page.getByText("No picking history matches your search.")).toHaveCount(0);
+    state.historyGates.delete("62770");
+    release();
+    await page.getByRole("button", { name: "Try again", exact: true }).click();
+    await expect(page.getByTestId("history-order-900")).toBeVisible();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+  } finally { release(); }
+  expect(state.writes).toEqual([]);
   expect(state.errors).toEqual([]);
 });
 
