@@ -19,6 +19,7 @@ import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
 import { recomputeOrderStatusFromShipments } from "./shipment-rollup";
 import { transitionOrderStatus, completeOrder } from "./order-status-core";
 import { completeWmsOrderAndRelease, type ReservationReleaser } from "./cancel-wms-order";
+import { hasLiveOmsDemandNotCarriedByWms } from "./wms-terminal-transition-guard";
 import type { WmsWarehouseStatus } from "@shared/enums/order-status";
 import {
   completePendingNonShippingWmsOrderItems,
@@ -735,6 +736,20 @@ export const orderMethods: IOrderStorage = {
         );
         if (pendingShippable.length === 0) {
           try {
+            // Never complete an order whose live OMS order still owes units
+            // that no live WMS line carries — those lines were lost (e.g.
+            // #63275) and the WMS sync restores them. Checked inside the try
+            // so a guard failure leaves the order alone rather than completing it.
+            if (await hasLiveOmsDemandNotCarriedByWms(db, order.id)) {
+              console.debug(JSON.stringify({
+                level: "debug",
+                code: "WMS_SELF_HEAL_SKIPPED_OMS_STILL_OWES",
+                action: "pick_queue_self_heal",
+                outcome: "skipped",
+                context: { wms_order_id: order.id, order_number: order.orderNumber },
+              }));
+              continue;
+            }
             // 'completed' is terminal for demand: release leftover reservations
             // (short/cancelled-item residue) on entry, or they leak forever.
             const result = pickQueueReservation

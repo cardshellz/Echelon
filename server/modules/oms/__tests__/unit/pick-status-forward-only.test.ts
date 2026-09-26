@@ -33,7 +33,8 @@ describe("pick status is forward-only under shipment projection", () => {
     ) ?? [];
     expect(sqlGuards.length).toBe(2);
     expect(storage).toContain("(i.pickedQuantity ?? 0) < (i.quantity ?? 0)");
-    const idx = read("../../../../index.ts");
-    expect(idx).toContain("AND COALESCE(oi.picked_quantity, 0) < COALESCE(oi.quantity, 0)");
+    // The startup zombie repair SQL moved out of index.ts (2026-09-21).
+    const zombieRepair = read("../../../orders/zombie-order-repair.ts");
+    expect(zombieRepair).toContain("AND COALESCE(oi.picked_quantity, 0) < COALESCE(oi.quantity, 0)");
   });
 });
