@@ -16,6 +16,9 @@ import {
   defaultMinimumCents,
   deriveWalletFlow,
   describeMinimumOption,
+  describeListingTierRow,
+  describeReserveLine,
+  LISTING_TIERS_RULE,
   describeTopUpOption,
   minimumOptionFor,
   minimumOptions,
@@ -521,7 +524,7 @@ describe("copy", () => {
       "If a payment fails or is taken back.",
     ]);
     expect(intro.topics[0].detail).toBe("A prepaid deposit Card Shellz holds for your store. Every order you accept is paid from it: the product cost plus shipping, with nothing added on top. A return fee comes out of it too, and so does a payment your bank takes back after it landed; either can take the balance below zero.");
-    expect(intro.topics[1].detail).toBe("The Pack tier (singles, packs and inner packs) is active while you keep a reserve of at least $50 in your wallet. The Case tier adds cases once your balance, counting money on its way, has reached $500. If Card Shellz raises a tier's reserve you keep selling for 14 days after the notice; after that the tier is not active until you are back above it.");
+    expect(intro.topics[1].detail).toBe("Your reserve decides your tier: $50 for the Pack tier (singles, packs and inner packs), or $500 for the Case tier, which adds cases. A tier turns on once your balance also reaches its amount; bank transfers on their way count. After that it stays on while your reserve covers it, even if an order briefly takes your balance lower, because autopay tops it back up. If Card Shellz raises a tier's amount, vendors already in the tier keep it for 14 days after the notice; raise your reserve before then to keep it.");
     expect(intro.topics[2].detail).toBe("You choose the reserve you keep — at least $50, or $500 for the Case tier. Whenever an order takes your balance below it, and at a daily check, autopay pulls a top-up from your bank account or card: your top-up amount, which is your reserve unless you set another, or more if that alone would not reach your reserve. Money already on its way counts, so the same gap is never pulled twice. Routine top-ups never take more than the larger of your reserve and your top-up amount in one charge. You can also add money yourself at any time.");
     expect(intro.topics[3].detail).toBe("A bank account costs nothing and takes up to 5 business days to land (our estimate). A card lands at once and costs 3% on top of the amount, whether autopay charged it, you added money yourself, or it covered an order. USDC costs nothing." + REWARDS_RULE);
     expect(intro.topics[4].detail).toBe("Money that has landed pays for orders first. A bank transfer still on its way can pay too, once the account it comes from qualifies — a business account, a balance we could read when it was linked, and one earlier transfer from it landed — for a 1% fee on the amount used, at most $500 outstanding at a time. If an order still needs more than your balance, we charge your backup card for the whole difference plus 3%, up to $5,000 in one payment, and send the order out. An order the card cannot cover waits 48 hours for you to add money, then is cancelled.");
@@ -537,7 +540,8 @@ describe("copy", () => {
       holdTimeoutMinutes: 720,
       limits: { ...limits, autoReloadMinTriggerCents: 2_500, caseTierMinimumCents: 75_000, tierChangeGraceDays: 30, advanceFeeBps: 150, advanceCapCents: 100_000 },
     });
-    expect(other.topics[1].detail).toContain("at least $25 in your wallet. The Case tier adds cases once your balance, counting money on its way, has reached $750. If Card Shellz raises a tier's reserve you keep selling for 30 days");
+    expect(other.topics[1].detail).toContain("$25 for the Pack tier (singles, packs and inner packs), or $750 for the Case tier, which adds cases.");
+    expect(other.topics[1].detail).toContain("vendors already in the tier keep it for 30 days after the notice");
     expect(other.topics[2].detail).toContain("at least $25, or $750 for the Case tier");
     expect(other.topics[3].detail).toContain("costs 2.5% on top of the amount");
     expect(other.topics[4].detail).toContain("for a 1.5% fee on the amount used, at most $1,000 outstanding at a time");
@@ -730,9 +734,15 @@ describe("USDC deposits in the wallet's words (funding design phase 6)", () => {
 });
 
 describe("the minimum: two tier options", () => {
-  const onSale = { tier: "pack" as const, eligible: true, reason: null, minimumCents: 5_000, shortfallCents: 0, upcoming: null };
-  const casesOnSale = { pack: onSale, case: { ...onSale, tier: "case" as const, minimumCents: 50_000 }, generatedAt: STAMP };
-  const casesOffSale = { ...casesOnSale, case: { ...casesOnSale.case, eligible: false, reason: "case_tier_balance_below_minimum" as const, shortfallCents: 38_000 } };
+  const onSale = {
+    tier: "pack" as const, eligible: true, reason: null, policyMinimumCents: 5_000, minimumCents: 5_000, alreadyOn: true,
+    reserveShortfallCents: 0, balanceShortfallCents: 0, upcoming: null,
+  };
+  const casesOnSale = { pack: onSale, case: { ...onSale, tier: "case" as const, policyMinimumCents: 50_000, minimumCents: 50_000 }, generatedAt: STAMP };
+  const casesOffSale = {
+    ...casesOnSale,
+    case: { ...casesOnSale.case, eligible: false, reason: "balance_below_tier" as const, alreadyOn: false, balanceShortfallCents: 38_000 },
+  };
 
   it("offers the pack and case minimums the policy serves, and only the pack one when the policy makes them equal", () => {
     expect(minimumOptions(LIMITS)).toEqual([{ tier: "pack", cents: 5_000 }, { tier: "case", cents: 50_000 }]);
@@ -759,6 +769,76 @@ describe("the minimum: two tier options", () => {
     expect(defaultMinimumCents(wallet({ listingTiers: casesOnSale }))).toBe(50_000);
     // A policy with one option has nothing higher to open on.
     expect(defaultMinimumCents({ limits: { ...LIMITS, autoReloadMinTriggerCents: 50_000 }, listingTiers: casesOnSale })).toBe(50_000);
+  });
+});
+
+describe("reserve and listing tiers", () => {
+  const base = {
+    tier: "pack" as const, eligible: true, reason: null, policyMinimumCents: 10_000, minimumCents: 10_000, alreadyOn: false,
+    reserveShortfallCents: 0, balanceShortfallCents: 0, upcoming: null,
+  };
+
+  it("states the rule once, in whole sentences, without the words the owner struck", () => {
+    expect(LISTING_TIERS_RULE).toBe(
+      "Your reserve is the balance autopay keeps in your wallet. A tier turns on when your reserve and your balance both reach its amount, "
+      + "and stays on while your reserve covers it, even if an order briefly takes your balance lower. Bank transfers on their way count toward your balance.",
+    );
+    expect(LISTING_TIERS_RULE).not.toMatch(/settling|on sale|off sale|minimum/i);
+  });
+
+  it("names the saved reserve, or says there is none with autopay off", () => {
+    expect(describeReserveLine(10_000)).toBe("Your reserve: $100");
+    expect(describeReserveLine(null)).toBe("No reserve: autopay is off.");
+    expect(() => describeReserveLine(-1)).toThrow(RangeError);
+  });
+
+  it("titles each tier with the published amount, not the one still enforced in a grace period", () => {
+    expect(describeListingTierRow({ ...base, minimumCents: 5_000 }, 10_000).title).toBe("Pack tier · $100");
+    expect(describeListingTierRow({ ...base, tier: "case", policyMinimumCents: 50_000, minimumCents: 50_000 }, 50_000))
+      .toMatchObject({ title: "Case tier · $500", covers: "Adds cases." });
+    expect(describeListingTierRow(base, 10_000).covers).toBe("Singles, packs and inner packs.");
+  });
+
+  it("says a reserve with no money behind it does not turn a tier on: the dogfood wallet of 2026-09-26", () => {
+    // A $100 reserve, $0 in the wallet, nothing on its way.
+    const pack = { ...base, eligible: false, reason: "balance_below_tier" as const, balanceShortfallCents: 10_000 };
+    const cases = {
+      ...base, tier: "case" as const, eligible: false, reason: "reserve_below_tier" as const, policyMinimumCents: 50_000, minimumCents: 50_000,
+      reserveShortfallCents: 40_000, balanceShortfallCents: 50_000,
+    };
+    expect(describeListingTierRow(pack, 10_000).status).toBe("Your balance needs to reach $100. You need $100 more.");
+    expect(describeListingTierRow(cases, 10_000).status).toBe("This tier needs a reserve of $500. Your reserve is $100.");
+  });
+
+  it("tells an active tier's vendor their listings are live, and that a dip keeps them live while autopay refills", () => {
+    expect(describeListingTierRow(base, 10_000).status).toBe("Your pack listings are live.");
+    expect(describeListingTierRow({ ...base, tier: "case", alreadyOn: true, balanceShortfallCents: 8_000 }, 50_000).status)
+      .toBe("Your case listings are live and stay live while autopay tops your balance back up to your reserve.");
+  });
+
+  it("asks for autopay when it is off", () => {
+    const off = { ...base, eligible: false, reason: "autopay_off" as const, reserveShortfallCents: 10_000 };
+    expect(describeListingTierRow(off, null).status).toBe("Turn on autopay with a reserve of at least $100 to use this tier.");
+  });
+
+  it("warns only when a raise would turn the tier off, with the date in UTC and the one fix", () => {
+    const raise = { minimumCents: 10_000, policyVersion: 2, enforcesAt: "2026-10-04T00:00:00.000Z", affectsVendor: true };
+    const member = { ...base, alreadyOn: true, minimumCents: 5_000, reserveShortfallCents: 5_000, upcoming: raise };
+    expect(describeListingTierRow(member, 5_000).warning)
+      .toBe("Card Shellz is raising this tier to $100 on October 4, 2026. Raise your reserve to $100 before then to keep your pack listings live.");
+    expect(describeListingTierRow({ ...member, upcoming: { ...raise, affectsVendor: false } }, 10_000).warning).toBeNull();
+    expect(describeListingTierRow(base, 10_000).warning).toBeNull();
+    // A member below the published amount on a pre-raise reserve: autopay only refills to that reserve, so no refill promise, just the warning.
+    const dipped = { ...member, balanceShortfallCents: 7_000 };
+    expect(describeListingTierRow(dipped, 5_000)).toMatchObject({
+      status: "Your pack listings are live.",
+      warning: "Card Shellz is raising this tier to $100 on October 4, 2026. Raise your reserve to $100 before then to keep your pack listings live.",
+    });
+  });
+
+  it("shows cents in full wherever the amount has them", () => {
+    const short = { ...base, eligible: false, reason: "balance_below_tier" as const, balanceShortfallCents: 1_234 };
+    expect(describeListingTierRow(short, 10_000).status).toBe("Your balance needs to reach $100. You need $12.34 more.");
   });
 });
 

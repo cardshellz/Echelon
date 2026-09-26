@@ -24,12 +24,37 @@ receivable the daily wallet run collects.
 
 ## Tiers (phase 1 and 2, merged)
 
-Two admin-set minimums on the versioned policy row (`migrations/0683`):
-pack tier (eaches, inner packs) and case tier. The pack tier is kept when the
-vendor's auto-reload floor or their balance (pending counts) is at the
-minimum; the case tier is active once the balance counting pending reaches the
-case minimum. A raised minimum is enforced after the grace period, by publishing
-zero for that tier's SKUs (`domain/listing-tiers.ts`, the hourly reconciler).
+Two admin-set amounts on the versioned policy row (`migrations/0683`): pack
+tier (eaches, inner packs) and case tier. A paused tier publishes zero for its
+SKUs (`domain/listing-tiers.ts`, the hourly reconciler).
+
+**One rule for both tiers** (owner decision, 2026-09-26, replacing the
+September rule under which an auto-reload floor alone kept the pack tier — a
+$100 reserve with $0 in the wallet read as Active):
+
+- A tier turns on when the vendor's reserve (the autopay minimum balance) and
+  the wallet's money (available plus pending) both reach the tier's amount. A
+  reserve with no money behind it turns nothing on; a $100 reserve never opens
+  the case tier, whatever the balance or the top-up amount.
+- Once on, a tier stays on while the reserve still covers the amount in force:
+  a balance that dips after an order, a fee or a return does not pause it,
+  because autopay refills to the reserve after every order and on the daily
+  run. It turns off when the reserve stops covering it (lowered, or autopay
+  off) or when the vendor is paused; then it has to be reached again with
+  money. "On at the last check" is the `tiers_on` this rule recorded at its
+  last check (migration 0706). Rows the September rule wrote have none, so
+  each vendor's first check after deploy decides from money; and because only
+  the current code writes `tiers_on`, a September process still running
+  during a deploy cannot make its decision pass for the current rule's.
+- Grace: a raised amount grandfathers vendors already in the tier until the
+  version's grace period ends (their reserve only has to cover the previous
+  amount until then). A vendor joining the tier meets the published amount at
+  once, and the published amount is the only one vendors are shown (the tier
+  card, the reserve options, the notices). A grace notice goes only to a
+  vendor the raise would turn off: the tier is on and the reserve is below the
+  raised amount.
+- The wallet page shows the reserve and the tiers in one card inside the
+  balance section; the reserve's Change opens the plan's reserve editor.
 
 **The words vendors and staff see** (owner decision, 2026-09-25): the balance a
 vendor keeps is their **reserve** (the auto-reload floor is "your reserve"; each

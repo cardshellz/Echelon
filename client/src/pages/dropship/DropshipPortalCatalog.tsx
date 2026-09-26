@@ -1405,14 +1405,21 @@ function pushButtonIcon(pendingListingAction: PendingListingAction, emailCodeSen
   return <ArrowRight className="h-4 w-4" />;
 }
 
-/** Why a selected SKU's tier is not active, in the vendor's words: the reserve and what closes the gap. */
+/**
+ * Why a selected SKU's tier is not active, in the vendor's words: what the
+ * tier needs and what to change, from the server's reason. The amount is the
+ * published one, the same the wallet shows.
+ */
 export function describeCatalogListingTier(tier: DropshipCatalogListingTier): string {
-  const minimum = formatCatalogDollars(tier.minimumCents);
-  const shortfall = formatCatalogDollars(tier.shortfallCents);
-  if (tier.tier === "case") {
-    return `The Case tier is not active: case listings go live once your wallet balance (counting money still settling) reaches the ${minimum} reserve. You are ${shortfall} short. Pack tier listings are not affected.`;
+  const name = tier.tier === "case" ? "Case tier" : "Pack tier";
+  const amount = formatCatalogDollars(tier.policyMinimumCents);
+  if (tier.reason === "autopay_off") {
+    return `The ${name} is not active: autopay is off, so your wallet has no reserve. Turn on autopay with a reserve of at least ${amount} in Wallet.`;
   }
-  return `The Pack tier is not active: your wallet needs to keep the ${minimum} reserve, either as your autopay reserve or as your balance. You are ${shortfall} short.`;
+  if (tier.reason === "reserve_below_tier") {
+    return `The ${name} is not active: it needs a reserve of ${amount}. Raise your reserve in Wallet.`;
+  }
+  return `The ${name} is not active: your balance needs to reach ${amount}. You need ${formatCatalogDollars(tier.balanceShortfallCents)} more.`;
 }
 
 /** Whole dollars when there are no cents ($500), else both cent digits ($10.50, never $10.5). Display only. */

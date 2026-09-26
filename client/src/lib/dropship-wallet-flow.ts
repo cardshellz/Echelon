@@ -37,6 +37,8 @@ import type {
   WalletLimits,
   WalletAdvance,
   WalletAdvanceReason,
+  WalletListingTier,
+  WalletListingTierStatus,
   WalletRewardsNextExpiry,
   WalletUsdcDeposit,
 } from "./dropship-wallet-view-adapter";
@@ -806,6 +808,95 @@ export function defaultMinimumCents(wallet: Pick<DropshipWalletView, "limits" | 
 }
 
 // ---------------------------------------------------------------------------
+// Reserve and listing tiers: the words for the server's tier decision
+// ---------------------------------------------------------------------------
+
+/** The tier as vendors see it named. */
+export function listingTierName(tier: WalletListingTier): string {
+  return tier === "case" ? "Case tier" : "Pack tier";
+}
+
+/** What a tier covers, shown under its name. */
+export function listingTierCovers(tier: WalletListingTier): string {
+  return tier === "case" ? "Adds cases." : "Singles, packs and inner packs.";
+}
+
+/**
+ * The tier rule in the vendor's words, above the tiers. It restates
+ * `domain/listing-tiers.ts`: both amounts reached to turn a tier on, the
+ * reserve alone to keep it, credits on their way counted.
+ */
+export const LISTING_TIERS_RULE =
+  "Your reserve is the balance autopay keeps in your wallet. A tier turns on when your reserve and your balance both reach its amount, "
+  + "and stays on while your reserve covers it, even if an order briefly takes your balance lower. Bank transfers on their way count toward your balance.";
+
+/** The reserve line above the tiers: the saved reserve, or why there is none. */
+export function describeReserveLine(reserveCents: number | null): string {
+  if (reserveCents === null) return "No reserve: autopay is off.";
+  assertCents(reserveCents, "reserveCents");
+  return `Your reserve: ${formatWholeDollars(reserveCents)}`;
+}
+
+export interface ListingTierRowCopy {
+  /** "Pack tier · $100": the published amount, the one the reserve options offer. */
+  title: string;
+  covers: string;
+  /** Where the vendor stands in this tier and what turns it on. */
+  status: string;
+  /** A raise that would turn the tier off, with the date and the fix; null when none applies. */
+  warning: string | null;
+}
+
+/**
+ * One tier row, from the server's decision and the vendor's reserve. Every
+ * amount is the published one, so the row, the reserve options and the
+ * notices always name the same number.
+ */
+export function describeListingTierRow(tier: WalletListingTierStatus, reserveCents: number | null): ListingTierRowCopy {
+  if (reserveCents !== null) assertCents(reserveCents, "reserveCents");
+  const amount = formatWholeDollars(tier.policyMinimumCents);
+  return {
+    title: `${listingTierName(tier.tier)} · ${amount}`,
+    covers: listingTierCovers(tier.tier),
+    status: listingTierStatusLine(tier, reserveCents, amount),
+    warning: tier.upcoming?.affectsVendor ? listingTierRaiseWarning(tier, tier.upcoming.minimumCents, tier.upcoming.enforcesAt) : null,
+  };
+}
+
+function listingTierStatusLine(tier: WalletListingTierStatus, reserveCents: number | null, amount: string): string {
+  const listings = tier.tier === "case" ? "case listings" : "pack listings";
+  if (tier.eligible) {
+    // On from an earlier check and below its amount now: the reserve keeps it
+    // and autopay refills to the reserve. Only promised when the reserve
+    // covers the published amount; a member on a pre-raise reserve gets the
+    // raise warning instead, since autopay refills only to that reserve.
+    const refills = tier.balanceShortfallCents > 0 && reserveCents !== null && reserveCents >= tier.policyMinimumCents;
+    return refills
+      ? `Your ${listings} are live and stay live while autopay tops your balance back up to your reserve.`
+      : `Your ${listings} are live.`;
+  }
+  if (tier.reason === "autopay_off") return `Turn on autopay with a reserve of at least ${amount} to use this tier.`;
+  if (tier.reason === "reserve_below_tier") {
+    return `This tier needs a reserve of ${amount}. Your reserve is ${formatWholeDollars(reserveCents ?? 0)}.`;
+  }
+  return `Your balance needs to reach ${amount}. You need ${formatWholeDollars(tier.balanceShortfallCents)} more.`;
+}
+
+function listingTierRaiseWarning(tier: WalletListingTierStatus, raisedCents: number, enforcesAtIso: string): string {
+  const raised = formatWholeDollars(raisedCents);
+  const date = formatTierDate(enforcesAtIso);
+  const listings = tier.tier === "case" ? "case listings" : "pack listings";
+  return `Card Shellz is raising this tier to ${raised} on ${date}. Raise your reserve to ${raised} before then to keep your ${listings} live.`;
+}
+
+/** The enforcement date as a calendar date in UTC, the zone the server computes it in. */
+function formatTierDate(iso: string): string {
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) throw new Error(`Invalid tier enforcement date: ${iso}`);
+  return date.toLocaleDateString("en-US", { timeZone: "UTC", year: "numeric", month: "long", day: "numeric" });
+}
+
+// ---------------------------------------------------------------------------
 // The top-up amount: the minimum, a multiple of it, or an amount of the vendor's own
 // ---------------------------------------------------------------------------
 
@@ -1139,7 +1230,7 @@ export function describeIntro(input: {
       },
       {
         lead: "What you can sell: your listing tier.",
-        detail: `The Pack tier (singles, packs and inner packs) is active while you keep a reserve of at least ${pack} in your wallet. The Case tier adds cases once your balance, counting money on its way, has reached ${cases}. If Card Shellz raises a tier's reserve you keep selling for ${grace} after the notice; after that the tier is not active until you are back above it.`,
+        detail: `Your reserve decides your tier: ${pack} for the Pack tier (singles, packs and inner packs), or ${cases} for the Case tier, which adds cases. A tier turns on once your balance also reaches its amount; bank transfers on their way count. After that it stays on while your reserve covers it, even if an order briefly takes your balance lower, because autopay tops it back up. If Card Shellz raises a tier's amount, vendors already in the tier keep it for ${grace} after the notice; raise your reserve before then to keep it.`,
       },
       {
         lead: "Keeping it funded: your reserve and autopay.",

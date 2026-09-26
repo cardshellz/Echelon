@@ -1,29 +1,39 @@
 import { isVariantUomType, type VariantUomType } from "../../../../shared/catalog/variant-uom";
+import type { DropshipVendorStatus } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "./errors";
 
 /**
  * Listing tiers (pure rules).
  *
- * A vendor's catalog sells in two tiers, each with its own minimum wallet
- * balance set by staff on the wallet policy: the pack tier (eaches, packs and
- * inner packs; the policy's `minimum_floor_cents`) and the case tier (cases
- * and anything larger; `case_tier_minimum_cents`, never below the pack tier).
- * One wallet, one balance: the tiers only decide what a vendor may have on
- * sale.
+ * A vendor's catalog sells in two tiers, each with an amount set by staff on
+ * the wallet policy: the pack tier (eaches, packs and inner packs; the
+ * policy's `minimum_floor_cents`) and the case tier (cases and anything
+ * larger; `case_tier_minimum_cents`, never below the pack tier). The vendor's
+ * reserve is their autopay minimum balance: what autopay keeps in the wallet.
+ * One wallet, one balance: the tiers only decide what a vendor may have live.
  *
- * Locked rules (owner decisions, September 2026):
- * - Pack tier: the vendor keeps the pack minimum — by an auto-reload floor at
- *   or above it, or by an actual balance (pending credits count) at or above
- *   it. A vendor who does neither has their pack listings taken off sale.
- * - Case tier: case listings are on sale once the balance, counting credits
- *   still settling, has reached the case minimum, and off sale while it is
- *   below. Listing is just listing; order acceptance still enforces funds.
- * - Raising a tier minimum grandfathers vendors for the policy's grace
- *   period: the previous minimum stays enforced until `created_at + grace
- *   days` of the version that raised it, then the new one applies. Lowering
- *   takes effect immediately. Every published version is immutable, so the
- *   enforced minimum at any instant is a pure function of the version
- *   history and the clock.
+ * Locked rules (owner decisions, 26 September 2026; they replace the
+ * September rule under which a reserve alone kept the pack tier):
+ * - One rule for both tiers. A tier turns on when the reserve and the
+ *   wallet's money (the balance plus credits still on their way) both reach
+ *   the tier's amount. A reserve with no money behind it turns nothing on.
+ * - Once on, a tier stays on while the reserve still covers the tier's
+ *   amount. A balance that dips after an order, a fee or a return does not
+ *   turn it off: autopay tops the wallet back up to the reserve after every
+ *   order and on the daily run. It turns off when the reserve stops covering
+ *   it (lowered, or autopay off) or when the vendor is paused (a failed
+ *   payment pauses the whole store); then it has to be reached again.
+ * - "On at the last check" is the tiers this rule recorded as on at its last
+ *   check (`tiers_on`, migration 0706). A decision the September rule wrote
+ *   has none, because that rule could keep a tier on with a reserve alone.
+ * - Raising a tier's amount grandfathers vendors already in the tier for the
+ *   grace period of the version that raised it: until `created_at + grace
+ *   days` their reserve only has to cover the previous amount. A vendor
+ *   joining the tier meets the published amount at once, which is also the
+ *   amount every vendor is shown. Lowering takes effect immediately. Every
+ *   published version is immutable, so the enforced amount at any instant is
+ *   a pure function of the version history and the clock.
+ * - Listing is just listing; order acceptance still enforces funds.
  *
  * Nothing here reads the clock or the database: the application service
  * supplies both.
@@ -75,10 +85,16 @@ export interface DropshipUpcomingListingTierMinimum {
 
 export interface DropshipEnforcedListingTierMinimum {
   tier: DropshipListingTier;
-  /** The minimum in force now. */
+  /** The amount in force now for a vendor already in the tier. */
   minimumCents: number;
   /** The policy version whose value is in force. */
   version: number;
+  /**
+   * The amount the latest published version sets: what a vendor joining the
+   * tier needs, what the reserve options offer and what vendors are shown.
+   * Above `minimumCents` only while a raise is in its grace period.
+   */
+  policyMinimumCents: number;
   /** A raise still inside its grace period, or null when nothing is pending. */
   upcoming: DropshipUpcomingListingTierMinimum | null;
 }
@@ -92,12 +108,14 @@ interface EnforcementStep {
 }
 
 /**
- * The minimum in force for each tier at `now`, from the immutable version
- * history. A version that raised a tier over the version before it is
- * enforced at its publish time plus its own grace period; a version that
- * lowered or kept the tier is enforced at publish time. The enforced minimum
- * is the highest version already enforced; `upcoming` is the version that
- * will be enforced next, if any.
+ * The amounts for each tier at `now`, from the immutable version history. A
+ * version that raised a tier over the version before it is enforced at its
+ * publish time plus its own grace period; a version that lowered or kept the
+ * tier is enforced at publish time. The enforced amount is the highest
+ * version already enforced; `upcoming` is the version that will be enforced
+ * next, if any; the policy amount is the latest version's. Every version
+ * after the enforced one is a raise still in grace (a lowering is enforced at
+ * once), so the policy amount is never below the enforced one.
  */
 export function resolveEnforcedListingTierMinimums(
   versions: readonly DropshipListingTierPolicyVersion[],
@@ -148,7 +166,14 @@ function resolveTier(
       .sort((left, right) => right.version - left.version)[0]!;
     upcoming = { minimumCents: next.minimumCents, version: next.version, enforcesAt: next.enforcesAt };
   }
-  return { tier, minimumCents: enforced.minimumCents, version: enforced.version, upcoming };
+  const latest = steps[steps.length - 1]!;
+  return {
+    tier,
+    minimumCents: enforced.minimumCents,
+    version: enforced.version,
+    policyMinimumCents: latest.minimumCents,
+    upcoming,
+  };
 }
 
 function normalizeVersions(
@@ -182,27 +207,62 @@ function normalizeVersions(
 
 /** The funding facts one vendor's tier standing is decided from. */
 export interface DropshipVendorListingTierFunding {
-  /** The auto-reload minimum the vendor keeps; null when auto-reload is not configured or is off. */
+  /** The vendor's reserve: the autopay minimum balance; null when autopay is not configured or is off. */
   minimumBalanceCents: number | null;
   availableBalanceCents: number;
-  /** Credits still settling (an ACH pull in flight). They count for both tiers. */
+  /** Credits still on their way (an ACH pull in flight). They count toward reaching a tier. */
   pendingBalanceCents: number;
 }
 
+/** The last recorded tier decision, as the rule needs it. */
+export interface DropshipListingTierLastDecision {
+  /**
+   * The tiers this rule found on at its last check; null when this rule has
+   * not decided the vendor yet (a row the September rule wrote, which a
+   * reserve alone could have satisfied).
+   */
+  tiersOn: readonly DropshipListingTier[] | null;
+}
+
+/**
+ * The tiers a vendor already has on, from the last recorded decision.
+ * Nothing counts as on for a vendor who is not active (paused, onboarding,
+ * lapsed, suspended, closed), for a vendor never decided, or when this rule
+ * has not decided them yet.
+ */
+export function listingTiersAlreadyOn(input: {
+  vendorStatus: DropshipVendorStatus;
+  lastDecision: DropshipListingTierLastDecision | null;
+}): DropshipListingTier[] {
+  const tiersOn = input.lastDecision?.tiersOn ?? null;
+  if (input.vendorStatus !== "active" || tiersOn === null) return [];
+  return DROPSHIP_LISTING_TIERS.filter((tier) => tiersOn.includes(tier));
+}
+
 export type DropshipListingTierBlockReason =
-  | "pack_tier_minimum_not_kept"
-  | "case_tier_balance_below_minimum";
+  /** Autopay is off, so there is no reserve. */
+  | "autopay_off"
+  /** The reserve is below the tier's amount. */
+  | "reserve_below_tier"
+  /** The reserve covers the tier, but the wallet has not reached its amount. */
+  | "balance_below_tier";
 
 export interface DropshipListingTierStatus {
   tier: DropshipListingTier;
   eligible: boolean;
   reason: DropshipListingTierBlockReason | null;
-  /** The minimum enforced now. */
+  /** The amount vendors are shown and a vendor joining the tier needs (the latest published policy's). */
+  policyMinimumCents: number;
+  /** The amount enforced now for a vendor already in the tier; below the policy amount only while a raise is in grace. */
   minimumCents: number;
-  /** How far the vendor is from the gate as things stand; zero when eligible. */
-  shortfallCents: number;
+  /** Whether the tier was on at the last check, so a balance below its amount does not turn it off. */
+  alreadyOn: boolean;
+  /** How far the reserve is below the policy amount; the whole amount when autopay is off; zero when it covers it. */
+  reserveShortfallCents: number;
+  /** How far the wallet's money (balance plus credits on their way) is below the policy amount; zero when it reaches it. */
+  balanceShortfallCents: number;
   upcoming: (DropshipUpcomingListingTierMinimum & {
-    /** Whether the vendor would fall below the raised minimum as things stand. */
+    /** Whether the raise would turn this tier off as things stand: it is on, and the reserve is below the raised amount. */
     affectsVendor: boolean;
   }) | null;
 }
@@ -210,44 +270,61 @@ export interface DropshipListingTierStatus {
 export type DropshipListingTierEligibility = Record<DropshipListingTier, DropshipListingTierStatus>;
 
 /**
- * Whether each tier is on sale for a vendor, from their funding facts and the
- * minimums enforced now. Money is integer cents throughout.
+ * Which of a vendor's tiers are on, from their funding facts, the tiers they
+ * already have on (`listingTiersAlreadyOn`) and the amounts at this instant.
+ * Money is integer cents throughout.
  */
 export function evaluateDropshipListingTierEligibility(input: {
   funding: DropshipVendorListingTierFunding;
   minimums: DropshipEnforcedListingTierMinimums;
+  tiersAlreadyOn: readonly DropshipListingTier[];
 }): DropshipListingTierEligibility {
   const funding = normalizeFunding(input.funding);
-  const countedBalanceCents = funding.availableBalanceCents + funding.pendingBalanceCents;
-  const keptCents = Math.max(funding.minimumBalanceCents ?? 0, countedBalanceCents);
-
-  const pack = input.minimums.pack;
-  const packShortfall = Math.max(0, pack.minimumCents - keptCents);
-  const casePolicy = input.minimums.case;
-  const caseShortfall = Math.max(0, casePolicy.minimumCents - countedBalanceCents);
-
+  const alreadyOn = normalizeTiersAlreadyOn(input.tiersAlreadyOn);
   return {
-    pack: {
-      tier: "pack",
-      eligible: packShortfall === 0,
-      reason: packShortfall === 0 ? null : "pack_tier_minimum_not_kept",
-      minimumCents: pack.minimumCents,
-      shortfallCents: packShortfall,
-      upcoming: pack.upcoming
-        ? { ...pack.upcoming, affectsVendor: keptCents < pack.upcoming.minimumCents }
-        : null,
-    },
-    case: {
-      tier: "case",
-      eligible: caseShortfall === 0,
-      reason: caseShortfall === 0 ? null : "case_tier_balance_below_minimum",
-      minimumCents: casePolicy.minimumCents,
-      shortfallCents: caseShortfall,
-      upcoming: casePolicy.upcoming
-        ? { ...casePolicy.upcoming, affectsVendor: countedBalanceCents < casePolicy.upcoming.minimumCents }
-        : null,
-    },
+    pack: evaluateTier(input.minimums.pack, funding, alreadyOn.has("pack")),
+    case: evaluateTier(input.minimums.case, funding, alreadyOn.has("case")),
   };
+}
+
+function evaluateTier(
+  amounts: DropshipEnforcedListingTierMinimum,
+  funding: DropshipVendorListingTierFunding,
+  alreadyOn: boolean,
+): DropshipListingTierStatus {
+  const reserveCents = funding.minimumBalanceCents;
+  const countedBalanceCents = funding.availableBalanceCents + funding.pendingBalanceCents;
+  // Already in the tier: the reserve keeps it, measured against the amount in
+  // force now (the previous one while a raise is in grace).
+  const keeps = alreadyOn && reserveCents !== null && reserveCents >= amounts.minimumCents;
+  // Joining the tier: the reserve and the money both reach the published amount.
+  const joins = reserveCents !== null
+    && reserveCents >= amounts.policyMinimumCents
+    && countedBalanceCents >= amounts.policyMinimumCents;
+  const eligible = keeps || joins;
+  return {
+    tier: amounts.tier,
+    eligible,
+    reason: eligible ? null : blockReasonFor(reserveCents, amounts.policyMinimumCents),
+    policyMinimumCents: amounts.policyMinimumCents,
+    minimumCents: amounts.minimumCents,
+    alreadyOn,
+    reserveShortfallCents: Math.max(0, amounts.policyMinimumCents - (reserveCents ?? 0)),
+    balanceShortfallCents: Math.max(0, amounts.policyMinimumCents - countedBalanceCents),
+    upcoming: amounts.upcoming
+      ? { ...amounts.upcoming, affectsVendor: eligible && (reserveCents ?? 0) < amounts.upcoming.minimumCents }
+      : null,
+  };
+}
+
+/**
+ * Why a tier is off. The policy amount is never below the enforced one, so a
+ * vendor already on who lost the tier has a reserve below the policy amount
+ * too: the reason names the reserve, then the money.
+ */
+function blockReasonFor(reserveCents: number | null, policyMinimumCents: number): DropshipListingTierBlockReason {
+  if (reserveCents === null) return "autopay_off";
+  return reserveCents < policyMinimumCents ? "reserve_below_tier" : "balance_below_tier";
 }
 
 function normalizeFunding(funding: DropshipVendorListingTierFunding): DropshipVendorListingTierFunding {
@@ -270,7 +347,20 @@ function normalizeFunding(funding: DropshipVendorListingTierFunding): DropshipVe
   return funding;
 }
 
-/** The tiers a vendor must have taken off sale, from their eligibility. */
+function normalizeTiersAlreadyOn(tiers: readonly DropshipListingTier[]): ReadonlySet<DropshipListingTier> {
+  for (const tier of tiers) {
+    if (!(DROPSHIP_LISTING_TIERS as readonly string[]).includes(tier)) {
+      throw new DropshipError(
+        "DROPSHIP_LISTING_TIER_STANDING_INVALID",
+        "The tiers already on must be listing tiers.",
+        { tier },
+      );
+    }
+  }
+  return new Set(tiers);
+}
+
+/** The tiers whose listings must be paused, from the vendor's eligibility. */
 export function heldListingTiersFor(eligibility: DropshipListingTierEligibility): DropshipListingTier[] {
   return DROPSHIP_LISTING_TIERS.filter((tier) => !eligibility[tier].eligible);
 }
