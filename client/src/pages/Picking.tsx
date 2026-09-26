@@ -385,6 +385,8 @@ function getChannelBadgeStyle(provider: string | null | undefined): { className:
       return { className: "bg-orange-100 text-orange-700 border-orange-300", label: "Amazon" };
     case "ebay":
       return { className: "bg-blue-100 text-blue-700 border-blue-300", label: "eBay" };
+    case "walmart":
+      return { className: "bg-blue-700 text-white border-blue-800 dark:bg-blue-600 dark:border-blue-500", label: "Walmart" };
     case "etsy":
       return { className: "bg-orange-50 text-orange-600 border-orange-200", label: "Etsy" };
     case "manual":
@@ -3515,9 +3517,9 @@ function PickingWorkspace() {
                               </span>
                             </div>
                             <div className="text-xs text-muted-foreground truncate flex items-center gap-2">
-                              <span>{order.customer}</span>
+                              <span className="truncate">{order.customer}</span>
                               {order.channelProvider && (
-                                <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0", getChannelBadgeStyle(order.channelProvider).className)}>
+                                <Badge variant="outline" className={cn("shrink-0 text-[11px] px-2 py-0.5", getChannelBadgeStyle(order.channelProvider).className)}>
                                   {getChannelBadgeStyle(order.channelProvider).label}
                                 </Badge>
                               )}
@@ -3642,7 +3644,7 @@ function PickingWorkspace() {
                       <div className="flex items-center gap-1 shrink-0">
                         {/* Channel pill for combined groups only — singles show it on row 2 */}
                         {order.channelProvider && order.isCombinedGroup && (
-                          <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0.5", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-${order.id}`}>
+                          <Badge variant="outline" className={cn("shrink-0 text-[11px] px-2 py-0.5", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-${order.id}`}>
                             {getChannelBadgeStyle(order.channelProvider).label}
                           </Badge>
                         )}
@@ -3937,7 +3939,7 @@ function PickingWorkspace() {
                           <CardTitle className="text-lg flex items-center gap-2">
                             {order.orderNumber}
                             {order.channelProvider && (
-                              <Badge variant="outline" className={cn("text-[10px] px-1.5 py-0.5", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-exception-${order.id}`}>
+                              <Badge variant="outline" className={cn("shrink-0 text-[11px] px-2 py-0.5", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-exception-${order.id}`}>
                                 {getChannelBadgeStyle(order.channelProvider).label}
                               </Badge>
                             )}
