@@ -529,7 +529,7 @@ describe("applyShopifyRefundCascade", () => {
     }));
   });
 
-  it.each([false,true])("processes financial refunds and projects physical returns only without ambiguous portal claims (portal=%s)", async portalOwned => {
+  it.each([false,true])("opens an expected return only for fulfilled units carrying a return policy and no ambiguous portal claim (portal=%s)", async portalOwned => {
     const originalLine = omsLine({
       id: 12,
       external_line_item_id: "12",

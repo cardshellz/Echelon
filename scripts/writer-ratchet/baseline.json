@@ -1096,6 +1096,9 @@
   "public.scheduler_runs": [
     "server/infrastructure/scheduler-run-registry.ts"
   ],
+  "returns.customer_return_allocation_case_items": [
+    "modules/returns"
+  ],
   "returns.customer_return_authorization_allocations": [
     "modules/returns"
   ],
@@ -1112,6 +1115,33 @@
     "modules/returns"
   ],
   "returns.customer_return_authorizations": [
+    "modules/returns"
+  ],
+  "returns.customer_return_case_links": [
+    "modules/returns"
+  ],
+  "returns.customer_return_intakes": [
+    "modules/returns"
+  ],
+  "returns.customer_return_label_attempts": [
+    "modules/returns"
+  ],
+  "returns.customer_return_label_events": [
+    "modules/returns"
+  ],
+  "returns.customer_return_parcel_items": [
+    "modules/returns"
+  ],
+  "returns.customer_return_parcels": [
+    "modules/returns"
+  ],
+  "returns.customer_return_settings": [
+    "modules/returns"
+  ],
+  "returns.customer_return_settings_events": [
+    "modules/returns"
+  ],
+  "returns.customer_return_submission_commands": [
     "modules/returns"
   ],
   "returns.return_case_commands": [
