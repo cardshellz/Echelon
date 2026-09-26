@@ -139,6 +139,20 @@ describe("exact legacy cutover reconstruction", () => {
       productVariantId: 101, authorizedQty: "4", materializedQty: "0", authorizationStatus: "authorized" });
     expect(planCutoverReconstruction(evidence).blockers.map((row) => row.code)).toContain("OMS_ACCEPTED_DEMAND_NOT_COVERED");
   });
+  it.each(["shipped", "completed", "cancelled"])("keeps accepted demand on a %s owner blocked until recorded fulfillment is complete", (status) => {
+    const evidence = reconstructionEvidence();
+    evidence.orders.push({ ...evidence.orders[0],id:2,status });
+    evidence.items.push({ ...evidence.items[0],id:12,orderId:2,omsOrderLineId:"99",quantity:2,pickedQuantity:0,fulfilledQuantity:0 });
+    evidence.acceptedOmsDemand.push({ lineId:"99",orderId:"9",sku:"P5",productVariantId:101,
+      authorizedQty:"2",materializedQty:"2",authorizationStatus:"authorized" });
+    const before = structuredClone(evidence);
+    const plan = planCutoverReconstruction(evidence);
+    expect(plan.blockers).toEqual([expect.objectContaining({ code:"OMS_ACCEPTED_DEMAND_NOT_COVERED",subject:"oms-line:99" })]);
+    expect(plan.orders.map((order) => order.orderId)).toEqual([1]);
+    expect(evidence).toEqual(before);
+    evidence.items[1].fulfilledQuantity = 2;
+    expect(planCutoverReconstruction(evidence)).toMatchObject({ ready:true,blockers:[] });
+  });
   it.each(["ignored", "review", "requires_review", "pending"])("retains %s shipment receipt as an activation blocker", (status) => {
     const evidence = reconstructionEvidence(); evidence.shipmentReviewEvidence.push({ id: "9",kind: "channel_fulfillment_receipt",status,evidenceHash: "f".repeat(64) });
     expect(planCutoverReconstruction(evidence).blockers.map((row) => row.code)).toContain("SHIPMENT_RECEIPT_REQUIRES_REVIEW");

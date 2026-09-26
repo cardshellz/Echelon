@@ -12,8 +12,9 @@ export async function readWmsCutoverShipmentReviews(client: PoolClient): Promise
   return reviews.map((row) => ({ id: row.id,kind: "outbound_shipment_review",status: row.status,
     evidenceHash: createHash("sha256").update(canonicalJson(row.evidence)).digest("hex") }));
 }
-/** WMS-owned census includes terminal residuals and orphan/review package rows. */
-export async function readWmsCutoverReconstruction(client: PoolClient, residualOrderIds: number[], residualItemIds: number[]): Promise<Pick<CutoverReconstructionEvidence,
+/** WMS-owned census includes accepted OMS links, terminal residuals and orphan/review package rows. */
+export async function readWmsCutoverReconstruction(client: PoolClient, residualOrderIds: number[], residualItemIds: number[],
+  acceptedOmsLineIds: readonly string[]): Promise<Pick<CutoverReconstructionEvidence,
   "orders" | "items" | "sourceItems" | "physicalItems" | "buildDemands">> {
   const read = async (query: string, args: unknown[]) => {
     const result = await client.query(query, [...args, MAX_ROWS + 1]);
@@ -28,14 +29,16 @@ export async function readWmsCutoverReconstruction(client: PoolClient, residualO
     FROM wms.orders WHERE warehouse_status IS NULL OR NOT (warehouse_status = ANY($2::text[]))
       OR id=ANY($1::integer[])
       OR id IN (SELECT order_id FROM wms.order_items WHERE id=ANY($3::integer[]))
-    ORDER BY id LIMIT $4`, [residualOrderIds, TERMINAL_WMS_DEMAND_STATUSES, residualItemIds]);
+      OR id IN (SELECT order_id FROM wms.order_items WHERE oms_order_line_id=ANY($4::bigint[]))
+    ORDER BY id LIMIT $5`, [residualOrderIds, TERMINAL_WMS_DEMAND_STATUSES, residualItemIds, acceptedOmsLineIds]);
   const orderIds = orders.map((row) => row.id);
   const items = await read(`SELECT id, order_id AS "orderId", oms_order_line_id::text AS "omsOrderLineId",
     source_item_id AS "sourceItemId", sku, product_id AS "productId", quantity,
     picked_quantity AS "pickedQuantity", fulfilled_quantity AS "fulfilledQuantity", status,
     on_hold AS "onHold", requires_shipping AS "requiresShipping", location, short_reason AS "shortReason"
     FROM wms.order_items WHERE order_id=ANY($1::integer[]) OR id=ANY($2::integer[])
-    ORDER BY order_id,id LIMIT $3`, [orderIds, residualItemIds]);
+      OR oms_order_line_id=ANY($3::bigint[])
+    ORDER BY order_id,id LIMIT $4`, [orderIds, residualItemIds, acceptedOmsLineIds]);
   const itemIds = items.map((row) => row.id);
   const sourceItems = await read(`SELECT source.id, source.shipment_id AS "shipmentId", shipment.order_id AS "headerOrderId",
     source.order_item_id AS "orderItemId", source.replacement_for_order_item_id AS "replacementForOrderItemId",

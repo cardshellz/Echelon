@@ -351,6 +351,66 @@ dbDescribe.sequential("reviewed reconstruction with real claim DDL and inventory
     expect(plan.blockers.map((row) => row.code)).toContain("TERMINAL_ORDER_RESIDUAL_REQUIRES_REVIEW");
     expect(plan.blockers.map((row) => row.code)).toContain("SHIPMENT_RECEIPT_REQUIRES_REVIEW");
   }));
+  it.each(["shipped", "completed", "cancelled"])("captures exact accepted OMS links on %s orders without recreating terminal demand", async (status) => transaction(async (client) => {
+    // Keep bigint identities as text, including values beyond JavaScript's safe integer range.
+    await client.query(`INSERT INTO oms.oms_orders VALUES(900,'partially_shipped');
+      INSERT INTO oms.oms_order_lines
+        (id,order_id,product_variant_id,sku,requires_shipping,quantity,authority_fulfillable_quantity,wms_materialized_quantity,authorization_status)
+        VALUES(9007199254740993,900,101,'P5',true,2,2,2,'authorized');
+      INSERT INTO wms.orders VALUES(90,1,'completed',0,36,'shopify','linked-90','fo-90','default');
+      INSERT INTO wms.order_items
+        (id,order_id,oms_order_line_id,sku,product_id,quantity,picked_quantity,fulfilled_quantity,status,on_hold,requires_shipping)
+        VALUES(900,90,9007199254740993,'P5',101,2,0,2,'completed',false,1);
+      INSERT INTO wms.outbound_shipments(id,order_id,status) VALUES(901,90,'shipped');
+      INSERT INTO wms.outbound_shipment_items(id,shipment_id,order_item_id,product_variant_id,qty)
+        VALUES(902,901,900,101,2);`);
+    await client.query("UPDATE wms.orders SET warehouse_status=$1 WHERE id=90", [status]);
+    const before = (await client.query("SELECT * FROM wms.order_items ORDER BY id")).rows;
+    const evidence = await repository.capture(client);
+    expect(evidence.orders.map((order) => order.id)).toEqual([1,90]);
+    expect(evidence.items.map((item) => item.id)).toEqual([11,900]);
+    expect(evidence.items[1].omsOrderLineId).toBe("9007199254740993");
+    expect(evidence.sourceItems.map((item) => item.id)).toEqual([902]);
+    const plan = planCutoverReconstruction(evidence);
+    expect(plan.blockers.map((blocker) => blocker.code)).not.toContain("OMS_ACCEPTED_DEMAND_NOT_COVERED");
+    expect(plan.orders.map((order) => order.orderId)).toEqual([1]);
+    expect((await client.query("SELECT * FROM wms.order_items ORDER BY id")).rows).toEqual(before);
+    expect((await client.query("SELECT count(*)::int AS count FROM inventory.availability_claims")).rows[0].count).toBe(0);
+  }));
+  it.each([
+    ["missing direct link", "UPDATE wms.order_items SET oms_order_line_id=NULL WHERE id=900"],
+    ["quantity mismatch", "UPDATE wms.order_items SET quantity=1 WHERE id=900"],
+    ["SKU mismatch", "UPDATE wms.order_items SET sku='OTHER' WHERE id=900"],
+    ["zero authorization", "UPDATE oms.oms_order_lines SET authority_fulfillable_quantity=0 WHERE id=900"],
+  ])("does not hide %s when capturing terminal OMS coverage", async (_name, mutation) => transaction(async (client) => {
+    await client.query(`INSERT INTO oms.oms_orders VALUES(900,'confirmed');
+      INSERT INTO oms.oms_order_lines
+        (id,order_id,product_variant_id,sku,requires_shipping,quantity,authority_fulfillable_quantity,wms_materialized_quantity,authorization_status)
+        VALUES(900,900,101,'P5',true,2,2,2,'authorized');
+      INSERT INTO wms.orders VALUES(90,1,'completed',0,36,'shopify','same-external-id','fo-90','default');
+      INSERT INTO wms.order_items
+        (id,order_id,oms_order_line_id,sku,product_id,quantity,picked_quantity,fulfilled_quantity,status,on_hold,requires_shipping)
+        VALUES(900,90,900,'P5',101,2,0,0,'completed',false,1);`);
+    await client.query(mutation);
+    const evidence = await repository.capture(client);
+    const plan = planCutoverReconstruction(evidence);
+    expect(plan.blockers).toContainEqual(expect.objectContaining({ code:"OMS_ACCEPTED_DEMAND_NOT_COVERED",subject:"oms-line:900" }));
+    expect(plan.orders.map((order) => order.orderId)).toEqual([1]);
+  }));
+  it("keeps an exactly linked OMS item visible when its WMS header is missing", async () => transaction(async (client) => {
+    await client.query(`INSERT INTO oms.oms_orders VALUES(900,'confirmed');
+      INSERT INTO oms.oms_order_lines
+        (id,order_id,product_variant_id,sku,requires_shipping,quantity,authority_fulfillable_quantity,wms_materialized_quantity,authorization_status)
+        VALUES(900,900,101,'P5',true,2,2,2,'authorized');
+      INSERT INTO wms.order_items
+        (id,order_id,oms_order_line_id,sku,product_id,quantity,picked_quantity,fulfilled_quantity,status,on_hold,requires_shipping)
+        VALUES(900,90,900,'P5',101,2,0,0,'pending',false,1);`);
+    const evidence = await repository.capture(client);
+    expect(evidence.items.map((item) => item.id)).toEqual([11,900]);
+    expect(planCutoverReconstruction(evidence).blockers).toContainEqual(expect.objectContaining({
+      code:"DEMAND_OWNER_MISSING", subject:"order-item:900",
+    }));
+  }));
   it("does not recreate completed historical demand, but keeps null and unknown order states visible", async () => transaction(async (client) => {
     await client.query(`INSERT INTO wms.orders VALUES
       (90,NULL,'completed',0,36,'shopify','historical-90','fo-90','default'),

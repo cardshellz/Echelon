@@ -121,6 +121,18 @@ describe("independently verified current inventory opening", () => {
     const evidence=reconstructionEvidence(); evidence.acceptedOmsDemand=[{ lineId:"999",orderId:"1",productVariantId:101,sku:"P5",authorizedQty:"1",materializedQty:"1",authorizationStatus:"authorized" }];
     expect(codes(evidence)).toContain("OMS_ACCEPTED_DEMAND_NOT_COVERED");
   });
+  it.each(["inventory_cutover_opening_v1", "inventory_cutover_opening_v2"] as const)("%s cannot archive accepted but unfulfilled terminal demand", (contractVersion) => {
+    const evidence = reconstructionEvidence();
+    evidence.orders.push({ ...evidence.orders[0],id:2,status:"completed" });
+    evidence.items.push({ ...evidence.items[0],id:12,orderId:2,omsOrderLineId:"99",quantity:2,pickedQuantity:0,fulfilledQuantity:0 });
+    evidence.acceptedOmsDemand.push({ lineId:"99",orderId:"9",sku:"P5",productVariantId:101,
+      authorizedQty:"2",materializedQty:"2",authorizationStatus:"authorized" });
+    const assessment = evaluateCutoverOpening(evidence,{ ...verification(evidence),contractVersion });
+    expect(assessment.ready).toBe(false);
+    expect(assessment.blockers).toContainEqual(expect.objectContaining({ code:"OMS_ACCEPTED_DEMAND_NOT_COVERED",subject:"oms-line:99" }));
+    expect(assessment.historicalExceptions.map((row) => row.code)).not.toContain("OMS_ACCEPTED_DEMAND_NOT_COVERED");
+    expect(assessment.plan.orders).toEqual([]);
+  });
   it("never creates claims for a terminal owner or reallocates their picked stock by omission", () => {
     const evidence=reconstructionEvidence(); evidence.orders[0].status="completed";
     const input=verification(evidence); input.owners=[];
