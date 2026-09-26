@@ -253,7 +253,7 @@ describe("DropshipWalletMaintenanceService", () => {
 
     expect(await run()).toMatchObject({ declinedCount: 1 });
     expect(notificationSender.sent).toHaveLength(1);
-    expect(notificationSender.sent[0]).toMatchObject({ title: "Your wallet is below its minimum: the autopay charge was declined" });
+    expect(notificationSender.sent[0]).toMatchObject({ title: "Your wallet is below its reserve: the autopay charge was declined" });
 
     repository.runs = [];
     repository.due = [10];
@@ -290,7 +290,7 @@ describe("DropshipWalletMaintenanceService", () => {
       eventType: "dropship_wallet_low_balance",
       critical: true,
       channels: ["email", "in_app"],
-      title: "Your wallet is below its minimum: the autopay charge was declined",
+      title: "Your wallet is below its reserve: the autopay charge was declined",
       idempotencyKey: "wallet-maintenance:10:2026-05-01:declined",
       payload: expect.objectContaining({
         source: "wallet_maintenance",

@@ -50,8 +50,8 @@ export function formatListingPreviewIssue(value: string): string {
     pricing_configuration_invalid: "Your .ops price list configuration needs support review.",
     source_read_failed: "The .ops product cost could not be loaded. Refresh the preview; contact support if this continues.",
     product_cost_source_unavailable: "The .ops product cost could not be loaded. Refresh the preview; contact support if this continues.",
-    "listing_tier:pack_tier_minimum_not_kept": "Off sale: your wallet does not keep the pack tier minimum. Raise your auto-reload minimum or add money in Wallet.",
-    "listing_tier:case_tier_balance_below_minimum": "Off sale: case listings need your balance to reach the case minimum. Add money in Wallet and they go back on sale on their own.",
+    "listing_tier:pack_tier_minimum_not_kept": "Pack tier not active: your wallet does not keep the Pack tier reserve. Raise your reserve or add money in Wallet.",
+    "listing_tier:case_tier_balance_below_minimum": "Case tier not active: case listings need your balance to reach the Case tier reserve. Add money in Wallet and they go live automatically.",
   };
   return labels[value] ?? value.split(":").map(formatStatus).join(": ");
 }

@@ -10,6 +10,7 @@ import {
 } from "@/lib/dropship-ops-surface";
 import {
   EbayStoreCategoryAssignmentPanel,
+  describeCatalogListingTier,
   fetchAllSelectedCatalogRows,
   formatIssue,
   shouldOfferEbayStoreReconnect,
@@ -233,5 +234,20 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(markup).toContain("Store authorization verification code");
     expect(markup).toContain("Verify and continue to eBay for marz_cards");
     expect(markup).not.toContain("Settings");
+  });
+});
+
+describe("catalog listing tier", () => {
+  it("explains a tier that is not active in the tier words, with the reserve and the gap", () => {
+    expect(describeCatalogListingTier({ tier: "case", eligible: false, reason: "case_tier_balance_below_minimum", minimumCents: 50_000, shortfallCents: 38_000 }))
+      .toBe("The Case tier is not active: case listings go live once your wallet balance (counting money still settling) reaches the $500 reserve. You are $380 short. Pack tier listings are not affected.");
+    expect(describeCatalogListingTier({ tier: "pack", eligible: false, reason: "pack_tier_minimum_not_kept", minimumCents: 10_000, shortfallCents: 1_050 }))
+      .toBe("The Pack tier is not active: your wallet needs to keep the $100 reserve, either as your autopay reserve or as your balance. You are $10.50 short.");
+  });
+
+  it("labels the badge by tier and never says on sale or off sale", () => {
+    const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipPortalCatalog.tsx"), "utf8");
+    expect(source).toContain('{row.listingTier.tier === "case" ? "Case tier not active" : "Pack tier not active"}');
+    expect(source).not.toMatch(/"(Cases off sale|Off sale|On sale)"/);
   });
 });

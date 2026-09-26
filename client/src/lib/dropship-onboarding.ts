@@ -174,7 +174,7 @@ function describeWallet(
 function describeWalletComplete(wallet: DropshipOnboardingState["wallet"]): string {
   const source = wallet.autoReloadFundingMethodIsCard ? "your card" : "your bank account";
   const balance = wallet.hasSpendableBalance ? `${formatCents(wallet.availableBalanceCents)} available. ` : "";
-  return `${balance}Autopay from ${source} to your minimum; backup card on file. Your first automatic top-up runs on the first daily check after you activate${wallet.autoReloadFundingMethodIsCard ? "" : " (a bank transfer lands in up to 5 business days — our assumption)"}.`;
+  return `${balance}Autopay from ${source} to your reserve; backup card on file. Your first automatic top-up runs on the first daily check after you activate${wallet.autoReloadFundingMethodIsCard ? "" : " (a bank transfer lands in up to 5 business days — our assumption)"}.`;
 }
 
 /**

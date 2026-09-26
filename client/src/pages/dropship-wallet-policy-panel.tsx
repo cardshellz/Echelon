@@ -122,7 +122,7 @@ export function DropshipWalletPolicyPanel({
   const proposedImpactQuery = useQuery<DropshipWalletPolicyOverview>({
     queryKey: [proposedImpactUrl ?? "wallet-policy-no-proposal"],
     queryFn: async ({ signal }) => {
-      if (!proposedImpactUrl) throw new Error("No proposed wallet policy minimums to measure.");
+      if (!proposedImpactUrl) throw new Error("No proposed wallet policy reserves to measure.");
       return parseDropshipWalletPolicyOverview(
         await fetchJson<unknown>(proposedImpactUrl, { signal }),
       );
@@ -206,7 +206,7 @@ export function DropshipWalletPolicyPanel({
               Wallet policy
             </h2>
             <p className="text-sm text-muted-foreground">
-              The limits the vendor wallet enforces: the pack and case tier minimums, the top-up
+              The limits the vendor wallet enforces: the Pack and Case tier reserves, the top-up
               bounds, the payment hold and its warning window, the pending-bank advance fee and
               cap, and the grace after a tier is raised. Saving publishes a new immutable version
               and retires the current one.
@@ -360,7 +360,7 @@ export function DropshipWalletPolicyPanel({
               proposedImpactUrl !== null && proposedImpactQuery.isError
                 ? queryErrorMessage(
                     proposedImpactQuery.error,
-                    "The proposed minimums could not be measured.",
+                    "The proposed reserves could not be measured.",
                   )
                 : null
             }
@@ -507,7 +507,7 @@ export function DropshipWalletPolicyImpactPanel({
       )}
       {isMeasuringProposal && (
         <p role="status" className="mt-3 text-sm text-muted-foreground">
-          Measuring the proposed minimums…
+          Measuring the proposed reserves…
         </p>
       )}
       {proposalError && (

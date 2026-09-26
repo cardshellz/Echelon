@@ -1227,23 +1227,24 @@ describe("PgDropshipOrderAcceptanceRepository rewards at the debit (funding desi
     expect(rows[0].params[2]).toBe(-expectedDebit);
   });
 
-  it("a vendor who has not chosen keeps their rewards, whether the row says NULL or predates the choice", async () => {
+  it("a vendor who has not chosen gets the default, points first, whether the row says NULL or predates the choice", async () => {
     for (const settingsRow of [{ payment_hold_timeout_minutes: 2_880, spend_rewards_first: null }, { payment_hold_timeout_minutes: 2_880 }]) {
       const db = createFakeDb(baseHandlers({
-        ...walletWithRewards(50_000),
+        ...walletWithRewards(300),
         holdTimeout: { match: "FROM dropship.dropship_auto_reload_settings", rows: [settingsRow] },
       }));
       const { repository } = createRepository(db, availableCost());
 
       const result = await repository.acceptOrder(acceptanceInput());
 
-      expect(result).toMatchObject({ outcome: "accepted", rewardsCents: 0 });
+      expect(result).toMatchObject({ outcome: "accepted", rewardsCents: 300 });
       const [walletUpdate] = db.statements("UPDATE dropship.dropship_wallet_accounts");
-      expect(walletUpdate.params[2]).toBe(WALLET_BALANCE_CENTS - expectedDebit);
-      expect(walletUpdate.params[4]).toBe(50_000);
+      expect(walletUpdate.params[2]).toBe(WALLET_BALANCE_CENTS - (expectedDebit - 300));
+      expect(walletUpdate.params[4]).toBe(0);
       const rows = db.statements("INSERT INTO dropship.dropship_wallet_ledger");
-      expect(rows).toHaveLength(1);
+      expect(rows).toHaveLength(2);
       expect(rows[0].sql).toContain("'order_debit'");
+      expect(rows[1].sql).toContain("'rewards_spent'");
     }
   });
 

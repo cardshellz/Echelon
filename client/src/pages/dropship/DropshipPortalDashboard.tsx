@@ -784,7 +784,7 @@ function dashboardNextAction(onboarding: DropshipOnboardingState | undefined): D
   if (isPausedForFunding(onboarding.vendor)) {
     return {
       actionLabel: "Open wallet",
-      message: "Selling is paused because a top-up failed. Add money in Wallet — a card payment counts at once, a bank transfer only once it settles. Selling resumes on its own when your available balance is back to your minimum.",
+      message: "Selling is paused because a top-up failed. Add money in Wallet — a card payment counts at once, a bank transfer only once it settles. Selling resumes on its own when your available balance is back to your reserve.",
       path: "/wallet",
       title: "Add money to resume selling",
     };
@@ -846,7 +846,7 @@ function dashboardNextAction(onboarding: DropshipOnboardingState | undefined): D
   }
   return {
     actionLabel: "Open wallet",
-    message: "Choose your autopay source, set your minimum, add a backup card, then turn on autopay.",
+    message: "Choose your autopay source, set your reserve, add a backup card, then turn on autopay.",
     path: "/wallet",
     title: "Set up your wallet",
   };

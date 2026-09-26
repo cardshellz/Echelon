@@ -107,6 +107,27 @@ function statusForQuantities(paidQuantity: number): OmsLineAuthorizationStatus {
   return "authorized";
 }
 
+function statusAfterNonAuthorizingUpdate(
+  paidQuantity: number,
+  previousStatus: string,
+): OmsLineAuthorizationStatus {
+  // Paid quantity is historical payment evidence, not permission to undo a
+  // refund, cancellation or review. In particular, resetting review here would
+  // let a second readiness update bypass canRefreshOperationalReadiness below.
+  // This observation has no disposition evidence with which to replace those
+  // states; their owning commands must make that decision.
+  switch (previousStatus) {
+    case "partially_cancelled":
+    case "cancelled":
+    case "partially_refunded":
+    case "refunded":
+    case "review":
+      return previousStatus;
+    default:
+      return statusForQuantities(paidQuantity);
+  }
+}
+
 function coerceDate(value: Date | string | null | undefined): Date | null {
   if (!value) return null;
   const date = value instanceof Date ? value : new Date(value);
@@ -206,7 +227,10 @@ export function deriveOmsLineAuthority(
     channelObservedQuantity: observedQuantity,
     paidQuantity,
     authorityFulfillableQuantity,
-    authorizationStatus: statusForQuantities(paidQuantity),
+    authorizationStatus: statusAfterNonAuthorizingUpdate(
+      paidQuantity,
+      previousAuthorizationStatus,
+    ),
     authorizedAt: coerceDate(input.previous?.authorizedAt),
     authorizedByEventId: input.previous?.authorizedByEventId ?? null,
     authoritySourceTopic: input.sourceTopic,

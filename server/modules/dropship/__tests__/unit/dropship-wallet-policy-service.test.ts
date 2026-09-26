@@ -383,7 +383,7 @@ describe("DropshipWalletPolicyService", () => {
           issues: expect.arrayContaining([
             expect.objectContaining({
               path: "caseTierMinimumCents",
-              message: "Case tier minimum must be at least the pack tier minimum.",
+              message: "Case tier reserve must be at least the Pack tier reserve.",
             }),
           ]),
         }),

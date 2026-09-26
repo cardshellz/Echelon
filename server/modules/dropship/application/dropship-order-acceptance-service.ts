@@ -249,7 +249,7 @@ export interface DropshipAcceptanceWalletState {
   pendingBalanceCents: number;
   /** The spend-only rewards balance, read under the same lock (funding design phase 7). */
   rewardsBalanceCents: number;
-  /** The vendor's choice: true auto-applies rewards, false saves them, null means not chosen yet (reads as saved). */
+  /** The vendor's choice: true applies rewards to orders, false saves them, null means not chosen yet (reads as on, the default). */
   spendRewardsFirst: boolean | null;
   currency: string;
   /**
@@ -475,7 +475,7 @@ export class DropshipOrderAcceptanceService {
       message: accepted
         ? `Order intake ${result.intakeId} was accepted into fulfillment for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.${advanceSentenceFor(result)}${chargeSentenceFor(reload)}`
         : result.paymentHoldReason === "vendor_paused"
-          ? `Order intake ${result.intakeId} is waiting because selling is paused. Fund your wallet back to its minimum before ${deadline} and it will be accepted for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.`
+          ? `Order intake ${result.intakeId} is waiting because selling is paused. Fund your wallet back to its reserve before ${deadline} and it will be accepted for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.`
           : `Order intake ${result.intakeId} is on payment hold and requires ${formatNotificationCurrency(result.totalDebitCents, result.currency)} before ${deadline}.${reloadSentenceFor(reload)}`,
       payload: {
         intakeId: result.intakeId,

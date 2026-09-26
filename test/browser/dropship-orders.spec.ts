@@ -107,7 +107,7 @@ test("a vendor paused for funding is told the held orders wait for the wallet mi
   const banner = page.getByTestId("orders-payment-hold-banner");
   await expect(banner.getByTestId("orders-payment-hold-title")).toHaveText("2 orders are waiting on payment");
   await expect(banner.getByTestId("orders-payment-hold-detail")).toHaveText(
-    "They need $190.00 in total; your balance is $300.00. Selling is paused. Fund your wallet back to its minimum and they will be accepted. The first one is cancelled in 1d 3h if it is not paid.",
+    "They need $190.00 in total; your balance is $300.00. Selling is paused. Fund your wallet back to its reserve and they will be accepted. The first one is cancelled in 1d 3h if it is not paid.",
   );
   await expect(page.getByRole("button", { name: "Add funds" })).toBeVisible();
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);

@@ -161,7 +161,7 @@ describe("DropshipOrderAcceptanceService", () => {
       payload: expect.objectContaining({ paymentHoldReason: "vendor_paused" }),
     });
     expect(notificationSender.sent[0].message).toBe(
-      "Order intake 1 is waiting because selling is paused. Fund your wallet back to its minimum before 2026-05-03T12:00:00.000Z and it will be accepted for USD $75.00.",
+      "Order intake 1 is waiting because selling is paused. Fund your wallet back to its reserve before 2026-05-03T12:00:00.000Z and it will be accepted for USD $75.00.",
     );
   });
 

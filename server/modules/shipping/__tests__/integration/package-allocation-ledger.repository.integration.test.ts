@@ -323,15 +323,16 @@ function instrumentedPool(
     connect: async () => {
       const client = await basePool.connect();
       const wrapped = {
-        query: async (text: string, values: readonly unknown[] = []) => {
-          if (text === "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE") {
+        query: async (query: string | { text: string }, values: readonly unknown[] = []) => {
+          const text = typeof query === "string" ? query : query.text;
+          if (/^begin(?: transaction)? isolation level serializable$/i.test(text)) {
             telemetry.beginCount += 1;
           }
           try {
             await beforeQuery({ client, text, values });
             return values.length === 0
-              ? await client.query(text)
-              : await client.query(text, [...values]);
+              ? await client.query(query)
+              : await client.query(query, [...values]);
           } catch (error) {
             const code = postgresErrorCode(error);
             if (code !== null) telemetry.postgresCodes.push(code);
@@ -369,8 +370,8 @@ function firstWaveBarrier(
   label: string,
   matches: (context: QueryContext) => boolean,
   snapshotSql: string,
+  expectedArrivals = 2,
 ): BeforeQuery {
-  const expectedArrivals = 2;
   let claimedSlots = 0;
   let completedSnapshots = 0;
   let releaseBarrier: (() => void) | undefined;
@@ -1334,7 +1335,14 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       for (const sourceId of [source, sibling]) await seedCanonicalRequestForSource(pool, sourceId);
       const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
       const clock = { now: () => new Date('2099-09-21T12:00:00Z') };
-      const workflow = createPackageAllocationLabelCommercialWorkflow({ pool, clock, logger });
+      let concurrentWave = false;
+      const telemetry: RepositoryTelemetry = { beginCount: 0, postgresCodes: [] };
+      const snapshotBarrier = firstWaveBarrier('split relabel first-wave snapshots',
+        ({ text }) => concurrentWave && /SELECT physical_shipment_id\s+FROM wms\.ebay_label_replacement_work/.test(text),
+        'SELECT COUNT(*) FROM wms.ebay_label_replacement_work', 3);
+      const workflow = createPackageAllocationLabelCommercialWorkflow({
+        pool: mode === 'concurrent' ? instrumentedPool(pool, telemetry, snapshotBarrier) : pool, clock, logger,
+      });
       let failBeforeCommit = false;
       const splitReviews = vi.fn();
       const handler = new PackageAllocationLabelCommercialFulfillmentService({ enabled: true, logger,
@@ -1482,8 +1490,16 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         failBeforeCommit = false;
       }
       if (mode === 'concurrent') {
-        const results = await Promise.all([replacements[0].receive(), replacements[1].receive(), replacements[0].receive()]);
-        for (const result of results) expect(result, JSON.stringify(result)).toMatchObject({ outcome: 'replaced' });
+        concurrentWave = true;
+        // Wait for every contender before assertions or fixture teardown; retain
+        // the bounded retry diagnostics if an infrastructure failure escapes.
+        const results = await Promise.allSettled([replacements[0].receive(), replacements[1].receive(), replacements[0].receive()]);
+        const failures = results.filter(result => result.status === 'rejected');
+        expect(failures, JSON.stringify({ failures, transactionWarnings: logger.warn.mock.calls })).toEqual([]);
+        for (const result of results) expect(result).toMatchObject({ status: 'fulfilled', value: { outcome: 'replaced' } });
+        expect(telemetry.postgresCodes).toContain('40001');
+        expect(logger.warn).toHaveBeenCalledWith({ code: 'LABEL_COMMERCIAL_TRANSACTION_FAILED', attempt: 1, retry: true });
+        concurrentWave = false;
       }
       for (const pkg of [...replacements].reverse()) {
         const result = await pkg.receive();

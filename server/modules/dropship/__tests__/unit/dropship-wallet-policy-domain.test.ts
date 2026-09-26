@@ -179,7 +179,7 @@ describe("walletPolicyInvariantViolations", () => {
       caseTierMinimumCents: 9_999,
     })).toEqual([{
       field: "caseTierMinimumCents",
-      message: "Case tier minimum must be at least the pack tier minimum.",
+      message: "Case tier reserve must be at least the Pack tier reserve.",
     }]);
     expect(walletPolicyInvariantViolations({
       ...launchDefaults,

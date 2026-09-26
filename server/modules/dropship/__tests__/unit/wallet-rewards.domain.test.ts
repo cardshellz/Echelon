@@ -87,8 +87,11 @@ describe("decideRewardsSpend", () => {
     expect(decideRewardsSpend({ rewardsBalanceCents: 5_000, totalDebitCents: 1_000, spendRewardsFirst: false })).toEqual({ rewardsCents: 0, cashCents: 1_000 });
   });
 
-  it("a vendor who has not chosen keeps their rewards: auto-apply is never a default", () => {
-    expect(decideRewardsSpend({ rewardsBalanceCents: 5_000, totalDebitCents: 1_000, spendRewardsFirst: null })).toEqual({ rewardsCents: 0, cashCents: 1_000 });
+  it("a vendor who has not chosen gets the default, points first (owner decision 2026-09-26)", () => {
+    expect(decideRewardsSpend({ rewardsBalanceCents: 5_000, totalDebitCents: 1_000, spendRewardsFirst: null })).toEqual({ rewardsCents: 1_000, cashCents: 0 });
+    expect(decideRewardsSpend({ rewardsBalanceCents: 300, totalDebitCents: 1_000, spendRewardsFirst: null })).toEqual({ rewardsCents: 300, cashCents: 700 });
+    // Only an explicit untick saves them.
+    expect(decideRewardsSpend({ rewardsBalanceCents: 5_000, totalDebitCents: 1_000, spendRewardsFirst: false })).toEqual({ rewardsCents: 0, cashCents: 1_000 });
     // Anything that is not an explicit choice is refused, never read as one.
     expect(() => decideRewardsSpend({ rewardsBalanceCents: 5_000, totalDebitCents: 1_000, spendRewardsFirst: undefined as unknown as boolean })).toThrowError(
       expect.objectContaining({ code: "DROPSHIP_WALLET_REWARDS_INVALID" }),

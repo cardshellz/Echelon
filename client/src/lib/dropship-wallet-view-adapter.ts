@@ -78,8 +78,8 @@ export interface WalletAutoReload {
   acknowledgedAt: string | null;
   /**
    * The vendor's choice for their rewards points (funding design phase 7):
-   * true auto-applies them to each order before cash, false saves them, null
-   * means not chosen yet, which the server reads as saved. Never a default.
+   * true applies them to each order before cash, false saves them, null
+   * means not chosen yet, which the server reads as on (the default).
    */
   spendRewardsFirst: boolean | null;
 }
