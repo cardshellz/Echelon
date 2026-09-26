@@ -127,6 +127,17 @@ describeDatabase.sequential("inventory cutover connected preflight PostgreSQL", 
     return result;
   }
 
+  it.each([false, true])("honors the saved tracking policy %s through the real read-only WMS reader", async tracked => {
+    await pool.query("UPDATE wms.order_items SET catalog_product_id=300,inventory_tracking=$1", [tracked]);
+    await pool.query("UPDATE catalog.product_variants SET track_inventory=$1", [!tracked]);
+    const before = await snapshotAllFixtureRows();
+    const { service, trace } = connectedService();
+    const result = await service.preview("reviewer");
+    expect(result.lines[0]).toMatchObject({ orderItemId: 7, disposition: tracked ? "unstarted_demand" : "no_inventory_demand" });
+    expect(trace.some(sql => sql.includes('inventory_tracking AS "inventoryTracking"'))).toBe(true);
+    expect(await snapshotAllFixtureRows()).toEqual(before);
+  });
+
   it("uses actual service/repository/domain/owner readers and does not alter any fixture row", async () => {
     const before = await snapshotAllFixtureRows();
     const { service, trace, releaseCount } = connectedService();

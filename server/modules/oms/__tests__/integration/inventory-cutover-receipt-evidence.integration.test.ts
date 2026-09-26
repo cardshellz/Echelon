@@ -251,6 +251,7 @@ describeDatabase.sequential("cutover receipt acknowledgment PostgreSQL query gua
         (14,500,101,'P5',0,0,'pending',true,0)`);
     expect(await capture()).toEqual({ shipmentReviewEvidence: [], acceptedOmsDemand: [{
       lineId: "9007199254740993", orderId: "500", productVariantId: 101, sku: "P5",
+      catalogProductId: null, inventoryTracking: null,
       authorizedQty: "2", materializedQty: "2", authorizationStatus: "authorized",
     }] });
   });

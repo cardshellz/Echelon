@@ -79,6 +79,7 @@ export const cutoverReconstructionEvidenceSchema = z.object({
   acceptedOmsDemand: z.array(z.object({
     lineId: z.string().regex(/^[1-9][0-9]*$/), orderId: z.string().regex(/^[1-9][0-9]*$/),
     productVariantId: nullableId, sku: z.string().nullable(), authorizedQty: raw,
+    catalogProductId: nullableId.optional(), inventoryTracking: z.boolean().nullable().optional(),
     materializedQty: raw, authorizationStatus: z.string(),
   }).strict()),
   shipmentReviewEvidence: z.array(z.object({ id: z.string(), kind: z.string(), status: z.string(), evidenceHash: hash }).strict()),
