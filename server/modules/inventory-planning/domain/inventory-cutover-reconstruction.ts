@@ -129,11 +129,16 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
   for (const demand of evidence.acceptedOmsDemand) {
     const materialized = itemsByOmsLine.get(demand.lineId) ?? [];
     const actual = materialized.reduce((total,item) => total + BigInt(item.quantity),BigInt(0));
+    // Capturing a closed order proves identity, not fulfillment. Keep accepted
+    // but unfinished terminal demand blocked in strict and verified openings.
+    const hasUnfulfilledTerminalOwner = materialized.some((item) =>
+      isTerminalWmsDemandStatus(orders.get(item.orderId)?.status ?? null) && item.fulfilledQuantity !== item.quantity);
     if (demand.authorizationStatus !== "authorized" || BigInt(demand.authorizedQty) <= BigInt(0)
       || BigInt(demand.materializedQty) !== actual || BigInt(demand.authorizedQty) !== actual
+      || hasUnfulfilledTerminalOwner
       || materialized.some((item) => demand.sku === null || item.sku.toUpperCase() !== demand.sku.toUpperCase()
         || (demand.productVariantId !== null && !evidence.variants.some((variant) => variant.id === demand.productVariantId && variant.sku.toUpperCase() === item.sku.toUpperCase())))) {
-      block("OMS_ACCEPTED_DEMAND_NOT_COVERED", `oms-line:${demand.lineId}`, "Accepted physical OMS demand is not exactly covered by captured WMS demand; missing/external projection needs explicit owner reconciliation.");
+      block("OMS_ACCEPTED_DEMAND_NOT_COVERED", `oms-line:${demand.lineId}`, "Accepted physical OMS demand requires exact WMS coverage and fully fulfilled terminal owners; reconcile missing, conflicting or unfinished lineage before cutover.");
     }
   }
   for (const review of evidence.shipmentReviewEvidence) {
