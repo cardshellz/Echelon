@@ -148,8 +148,14 @@ async function moveLine(
     .getByLabel("Destination box", { exact: true })
     .selectOption(target === "new" ? "new" : { label: `Box ${target}` });
   const row = dialog.getByTestId(`move-line-${lineId}`);
-  await expect(row.getByRole("checkbox")).toBeChecked();
-  await row.getByRole("spinbutton").fill(String(quantity));
+  await expect(row.getByRole("checkbox")).toHaveCount(0);
+  const amount = row.getByRole("spinbutton");
+  if (await amount.count()) {
+    await amount.fill(String(quantity));
+  } else {
+    expect(quantity).toBe(1);
+    await expect(row.getByText("1 available", { exact: true })).toBeVisible();
+  }
   await dialog
     .getByRole("button", {
       name: target === "new" ? "Create box and move" : "Move items",
@@ -305,15 +311,8 @@ test("split shipments move directly from the first box into a new box without li
     .getByLabel("Destination box", { exact: true })
     .selectOption("new");
   const line = dialog.getByTestId("move-line-sample-line-1");
-  await expect(
-    line.getByRole("checkbox", {
-      name: "Select item 1: Sample collector sleeves (100 count · Clear) to move",
-      exact: true,
-    }),
-  ).toBeChecked();
-  await expect(
-    dialog.getByTestId("move-line-sample-line-3").getByRole("checkbox"),
-  ).not.toBeChecked();
+  await expect(dialog.getByRole("checkbox")).toHaveCount(0);
+  await expect(dialog.getByTestId("move-line-sample-line-3")).toHaveCount(0);
   const amount = line.getByRole("spinbutton", {
     name: "Quantity of item 1: Sample collector sleeves (100 count · Clear) to move",
     exact: true,
@@ -444,7 +443,7 @@ test("one selected unit can be set aside and re-added while a real split creates
     }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "Move items from box 1", exact: true }),
+    page.getByRole("button", { name: "Split box 1", exact: true }),
   ).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Add another box", exact: true }),
@@ -476,9 +475,12 @@ test("one selected unit can be set aside and re-added while a real split creates
   await add
     .getByLabel("Destination box", { exact: true })
     .selectOption({ label: "Box 1" });
+  await expect(add.getByRole("spinbutton")).toHaveCount(0);
   await expect(
-    add.getByTestId("move-line-sample-line-1").getByRole("spinbutton"),
-  ).toHaveValue("1");
+    add
+      .getByTestId("move-line-sample-line-1")
+      .getByText("1 available", { exact: true }),
+  ).toBeVisible();
   await add.getByRole("button", { name: "Move items", exact: true }).click();
   await expect(add).toHaveCount(0);
   await expect(
@@ -666,6 +668,9 @@ test("packing reaches the shared parcel cap with real contents and still permits
   await expect(page.getByTestId("packing-summary-total")).toContainText(
     `${MAX_RETURN_FLOW_PARCELS} boxes`,
   );
+  await expect(
+    page.getByRole("button", { name: /^Split box \d+$/ }),
+  ).toHaveCount(0);
   const dialog = await openLineMove(page, 1, "sample-line-1");
   await expectNoNewBoxDestination(page);
   await dialog
@@ -901,23 +906,26 @@ test("bulk splits keep same-name purchased lines distinct and full moves can und
   await expectPackingSummaryFirst(page);
   await enterCustomBoxDimensions(page, 1, "12.125", "8", "4");
   const bulk = page.getByRole("button", {
-    name: "Move items from box 1",
+    name: "Split box 1",
     exact: true,
   });
   await bulk.click();
   const dialog = page.getByRole("dialog", {
-    name: "Move items from Box 1",
+    name: "Split Box 1",
     exact: true,
   });
-  await dialog
-    .getByLabel("Destination box", { exact: true })
-    .selectOption("new");
+  await expect(
+    dialog.getByLabel("Destination box", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    dialog.getByRole("region", { name: "Move preview", exact: true }),
+  ).toHaveCount(0);
   const first = dialog.getByTestId("move-line-sample-line-1");
   const second = dialog.getByTestId("move-line-sample-line-2");
   await expect(first.getByRole("checkbox")).not.toBeChecked();
   await expect(second.getByRole("checkbox")).not.toBeChecked();
   const create = dialog.getByRole("button", {
-    name: "Create box and move",
+    name: "Create box",
     exact: true,
   });
   await expect(create).toBeDisabled();
@@ -954,9 +962,12 @@ test("bulk splits keep same-name purchased lines distinct and full moves can und
     fixture.previewRequests.some((request) => request.path.endsWith("/review")),
   ).toBe(false);
   await bulk.click();
-  await dialog
-    .getByLabel("Destination box", { exact: true })
-    .selectOption("new");
+  await expect(
+    dialog.getByLabel("Destination box", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    dialog.getByRole("region", { name: "Move preview", exact: true }),
+  ).toHaveCount(0);
   await first.getByRole("checkbox").check();
   await first.getByRole("spinbutton").fill("1");
   await second.getByRole("checkbox").check();
@@ -1035,9 +1046,12 @@ test("bulk splits keep same-name purchased lines distinct and full moves can und
   await readd
     .getByLabel("Destination box", { exact: true })
     .selectOption({ label: "Box 2" });
+  await expect(readd.getByRole("spinbutton")).toHaveCount(0);
   await expect(
-    readd.getByTestId("move-line-sample-line-2").getByRole("spinbutton"),
-  ).toHaveValue("1");
+    readd
+      .getByTestId("move-line-sample-line-2")
+      .getByText("1 available", { exact: true }),
+  ).toBeVisible();
   await readd.getByRole("button", { name: "Move items", exact: true }).click();
   await expect(readd).toHaveCount(0);
   await expect(page.getByTestId("unassigned-item-sample-line-2")).toHaveCount(
@@ -1173,7 +1187,7 @@ test("removing a populated box moves its locked contents only after confirmation
   expect(fixture.failures).toEqual([]);
 });
 
-test("desktop dragging only prepares the same move dialog and rejects external or canceled drops", async ({
+test("desktop drops move single units directly with Undo and larger quantities ask only how many", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -1197,10 +1211,13 @@ test("desktop dragging only prepares the same move dialog and rejects external o
     .click();
   await moveLine(page, 1, "sample-line-1", "new", 1);
   const target = page.getByTestId("preview-box-2");
-  const handle = packingRow(page, 1, "sample-line-2").getByRole("button", {
-    name: /^Drag /,
-  });
-  await expect(handle).toBeVisible();
+  const source = packingRow(page, 1, "sample-line-2");
+  const move = source.getByRole("button", { name: /^Move / });
+  await expect(move).toHaveCount(1);
+  await expect(move).toHaveAttribute("draggable", "true");
+  await expect(
+    source.getByRole("button", { name: /^Drag /, includeHidden: true }),
+  ).toHaveCount(0);
   const external = await page.evaluateHandle(() => {
     const data = new DataTransfer();
     data.setData(
@@ -1214,73 +1231,239 @@ test("desktop dragging only prepares the same move dialog and rejects external o
   await external.dispose();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(packingRow(page, 2, "sample-line-2")).toHaveCount(0);
-  await handle.dragTo(page.getByTestId("preview-box-1"));
+  await move.dragTo(page.getByTestId("preview-box-1"));
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await handle.dragTo(page.getByTestId("packing-summary"));
+  await move.dragTo(page.getByTestId("packing-summary"));
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expectBoxQuantity(page, 1, "sample-line-2", 1, 1);
-  await handle.dragTo(target);
+
+  // A plan edit during the drag invalidates the captured source, even when its row survives.
+  const staleTransfer = await page.evaluateHandle(() => new DataTransfer());
+  await move.dispatchEvent("dragstart", { dataTransfer: staleTransfer });
+  await packingRow(page, 1, "sample-line-1")
+    .getByRole("button", { name: /^Remove / })
+    .click();
+  await target.dispatchEvent("dragover", { dataTransfer: staleTransfer });
+  await target.dispatchEvent("drop", { dataTransfer: staleTransfer });
+  await move.dispatchEvent("dragend", { dataTransfer: staleTransfer });
+  await staleTransfer.dispose();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expectBoxQuantity(page, 1, "sample-line-2", 1, 1);
+  await expect(packingRow(page, 2, "sample-line-2")).toHaveCount(0);
+  await expect(page.getByTestId("unassigned-item-sample-line-1")).toBeVisible();
+  await page
+    .getByRole("status")
+    .getByRole("button", { name: "Undo", exact: true })
+    .click();
+  await expectBoxQuantity(page, 1, "sample-line-1", 2, 3);
+
+  await move.dragTo(target);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(source).toHaveCount(0);
+  await expectBoxQuantity(page, 2, "sample-line-2", 1, 1);
+  await expect(
+    page.getByRole("heading", { name: "Box 2", exact: true }),
+  ).toBeFocused();
+  await expectPackingLine(page, "sample-line-2", 1, 1);
+  await page
+    .getByRole("status")
+    .getByRole("button", { name: "Undo", exact: true })
+    .click();
+  await expectBoxQuantity(page, 1, "sample-line-2", 1, 1);
+  await expect(packingRow(page, 2, "sample-line-2")).toHaveCount(0);
+
+  // A one-unit source box is pruned by the same direct drop, and Undo restores it.
+  await packingRow(page, 2, "sample-line-1")
+    .getByRole("button", { name: /^Move / })
+    .dragTo(page.getByTestId("preview-box-1"));
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.locator('[data-testid^="preview-box-"]')).toHaveCount(1);
+  await expect(
+    page.getByRole("heading", { name: "Box 1", exact: true }),
+  ).toBeFocused();
+  await expectBoxQuantity(page, 1, "sample-line-1", 3, 3);
+  await page
+    .getByRole("status")
+    .getByRole("button", { name: "Undo", exact: true })
+    .click();
+  await expect(page.locator('[data-testid^="preview-box-"]')).toHaveCount(2);
+  await expectBoxQuantity(page, 1, "sample-line-1", 2, 3);
+  await expectBoxQuantity(page, 2, "sample-line-1", 1, 3);
+
+  const quantityMove = packingRow(page, 1, "sample-line-1").getByRole(
+    "button",
+    { name: /^Move / },
+  );
+  // Playwright scrolls the target after mouse-down; scroll first so dragstart
+  // cannot hit another row that moves underneath the held pointer.
+  await target.scrollIntoViewIfNeeded();
+  await expect(quantityMove).toBeInViewport();
+  await expect(target).toBeInViewport();
+  await quantityMove.dragTo(target);
   const dialog = page.getByRole("dialog", {
-    name: "Move items from Box 1",
+    name: "Move to Box 2",
     exact: true,
   });
   await expect(dialog).toBeVisible();
   await expect(
     dialog.getByLabel("Destination box", { exact: true }),
-  ).toHaveValue("box-2");
+  ).toHaveCount(0);
+  await expect(dialog.getByRole("checkbox")).toHaveCount(0);
+  await expect(dialog.getByTestId("move-line-sample-line-2")).toHaveCount(0);
   await expect(
-    dialog.getByTestId("move-line-sample-line-2").getByRole("checkbox"),
-  ).toBeChecked();
-  await expect(
-    packingRow(page, 1, "sample-line-2").getByText("1 of 1", { exact: true }),
-  ).toHaveCount(1);
-  await expect(packingRow(page, 2, "sample-line-2")).toHaveCount(0);
-  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
-  await expect(dialog).toHaveCount(0);
-  await expect(handle).toBeFocused();
-  await handle.dragTo(target);
-  await dialog.getByRole("button", { name: "Move items", exact: true }).click();
-  await expect(dialog).toHaveCount(0);
-  await expect(packingRow(page, 1, "sample-line-2")).toHaveCount(0);
-  await expectBoxQuantity(page, 2, "sample-line-2", 1, 1);
-  const splitHandle = packingRow(page, 1, "sample-line-1").getByRole("button", {
-    name: /^Drag /,
-    // A successful drop opens a modal and aria-hides the native drag origin.
-    includeHidden: true,
+    dialog.getByRole("region", { name: "Move preview", exact: true }),
+  ).toHaveCount(0);
+  const amount = dialog.getByRole("spinbutton", {
+    name: "Quantity of item 1: Sample collector sleeves (100 count · Clear) to move",
+    exact: true,
   });
-  await expect(splitHandle).toBeVisible();
-  const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
-  await splitHandle.dispatchEvent("dragstart", { dataTransfer });
-  const newBox = page.getByTestId("packing-new-box-drop");
-  await expect(newBox).toBeVisible();
-  await newBox.dispatchEvent("dragover", { dataTransfer });
-  await newBox.dispatchEvent("drop", { dataTransfer });
-  await splitHandle.dispatchEvent("dragend", { dataTransfer });
-  await dataTransfer.dispose();
-  await expect(dialog).toBeVisible();
-  await expect(
-    dialog.getByLabel("Destination box", { exact: true }),
-  ).toHaveValue("new");
-  await expect(page.getByTestId("preview-box-3")).toHaveCount(0);
-  await page.screenshot({
-    animations: "disabled",
-    path: testInfo.outputPath("packing-drag-new-box-confirmation.png"),
-    fullPage: true,
-  });
-  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog.getByRole("spinbutton")).toHaveCount(1);
+  await expect(amount).toHaveAttribute("max", "2");
+  await amount.fill("1");
+  await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByTestId("preview-box-3")).toHaveCount(0);
-  await expect(page.getByTestId("packing-new-box-drop")).toHaveCount(0);
+  await expect(quantityMove).toBeFocused();
   await expectBoxQuantity(page, 1, "sample-line-1", 2, 3);
   await expectBoxQuantity(page, 2, "sample-line-1", 1, 3);
+  // Playwright scrolls the target after mouse-down; scroll first so dragstart
+  // cannot hit another row that moves underneath the held pointer.
+  await target.scrollIntoViewIfNeeded();
+  await expect(quantityMove).toBeInViewport();
+  await expect(target).toBeInViewport();
+  await quantityMove.dragTo(target);
+  await amount.fill("1");
+  await page.screenshot({
+    animations: "disabled",
+    path: testInfo.outputPath("packing-drop-quantity-only.png"),
+    fullPage: true,
+  });
+  await dialog.getByRole("button", { name: "Move items", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expectBoxQuantity(page, 1, "sample-line-1", 1, 3);
+  await expectBoxQuantity(page, 2, "sample-line-1", 2, 3);
+  await expectBoxQuantity(page, 1, "sample-line-2", 1, 1);
   await expectPackingLine(page, "sample-line-1", 3, 3);
   await expectPackingLine(page, "sample-line-2", 1, 1);
+  await expect(
+    page.getByRole("heading", { name: "Box 2", exact: true }),
+  ).toBeFocused();
   expect(
     fixture.previewRequests.some((request) => request.path.endsWith("/review")),
   ).toBe(false);
   expect(fixture.failures).toEqual([]);
 });
 
+test("dropping onto a new box fixes the target and creates it only when the chosen quantity moves", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "desktop",
+    "Native pointer drag is covered in the desktop project.",
+  );
+  const fixture = await installReturnPreviewFixtures(page);
+  await page.goto(PORTAL_PATH);
+  await useSampleSource(page);
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  await page
+    .getByTestId("preview-line-sample-line-1")
+    .getByRole("spinbutton")
+    .fill("2");
+  await page
+    .getByTestId("preview-line-sample-line-2")
+    .getByRole("spinbutton")
+    .fill("1");
+  await page
+    .getByRole("button", { name: "Continue to packing", exact: true })
+    .click();
+  const move = packingRow(page, 1, "sample-line-1").getByRole("button", {
+    name: /^Move /,
+    includeHidden: true,
+  });
+  async function dropOnNewBox(lineId: string) {
+    const origin = packingRow(page, 1, lineId).getByRole("button", {
+      name: /^Move /,
+      includeHidden: true,
+    });
+    await expect(origin).toBeVisible();
+    const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
+    await origin.dispatchEvent("dragstart", { dataTransfer });
+    const newBox = page.getByTestId("packing-new-box-drop");
+    await expect(newBox).toBeVisible();
+    await newBox.dispatchEvent("dragover", { dataTransfer });
+    await newBox.dispatchEvent("drop", { dataTransfer });
+    // Quantity dialogs aria-hide the original row; direct moves remove that row.
+    if (await origin.count())
+      await origin.dispatchEvent("dragend", { dataTransfer });
+    await dataTransfer.dispose();
+  }
+  await dropOnNewBox("sample-line-1");
+  const dialog = page.getByRole("dialog", {
+    name: "Move to a new box",
+    exact: true,
+  });
+  await expect(dialog).toBeVisible();
+  await expect(
+    dialog.getByLabel("Destination box", { exact: true }),
+  ).toHaveCount(0);
+  await expect(dialog.getByRole("checkbox")).toHaveCount(0);
+  await expect(dialog.getByTestId("move-line-sample-line-2")).toHaveCount(0);
+  await expect(
+    dialog.getByRole("region", { name: "Move preview", exact: true }),
+  ).toHaveCount(0);
+  const amount = dialog.getByRole("spinbutton", {
+    name: "Quantity of item 1: Sample collector sleeves (100 count · Clear) to move",
+    exact: true,
+  });
+  await expect(dialog.getByRole("spinbutton")).toHaveCount(1);
+  await expect(amount).toHaveAttribute("max", "2");
+  await amount.fill("1");
+  await expect(page.getByTestId("preview-box-2")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(move).toBeFocused();
+  await expect(page.getByTestId("preview-box-2")).toHaveCount(0);
+  await expect(page.getByTestId("packing-new-box-drop")).toHaveCount(0);
+  await expectBoxQuantity(page, 1, "sample-line-1", 2, 2);
+  await dropOnNewBox("sample-line-1");
+  await amount.fill("1");
+  await page.screenshot({
+    animations: "disabled",
+    path: testInfo.outputPath("packing-drop-new-box-quantity.png"),
+    fullPage: true,
+  });
+  await dialog.getByRole("button", { name: "Move items", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expectBoxQuantity(page, 1, "sample-line-1", 1, 2);
+  await expectBoxQuantity(page, 2, "sample-line-1", 1, 2);
+  await expect(
+    page.getByRole("heading", { name: "Box 2", exact: true }),
+  ).toBeFocused();
+  await page
+    .getByRole("status")
+    .getByRole("button", { name: "Undo", exact: true })
+    .click();
+  await expect(page.locator('[data-testid^="preview-box-"]')).toHaveCount(1);
+  await expectBoxQuantity(page, 1, "sample-line-1", 2, 2);
+  await dropOnNewBox("sample-line-2");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(packingRow(page, 1, "sample-line-2")).toHaveCount(0);
+  await expectBoxQuantity(page, 2, "sample-line-2", 1, 1);
+  await expect(
+    page.getByRole("heading", { name: "Box 2", exact: true }),
+  ).toBeFocused();
+  await expectPackingLine(page, "sample-line-1", 2, 2);
+  await expectPackingLine(page, "sample-line-2", 1, 1);
+  await page
+    .getByRole("status")
+    .getByRole("button", { name: "Undo", exact: true })
+    .click();
+  await expect(page.locator('[data-testid^="preview-box-"]')).toHaveCount(1);
+  await expectBoxQuantity(page, 1, "sample-line-2", 1, 1);
+  expect(
+    fixture.previewRequests.some((request) => request.path.endsWith("/review")),
+  ).toBe(false);
+  expect(fixture.failures).toEqual([]);
+});
 test.describe("touch packing controls", () => {
   test.use({
     hasTouch: true,
@@ -1310,8 +1493,10 @@ test.describe("touch packing controls", () => {
     const row = packingRow(page, 1, "sample-line-1");
     await expect(
       row.getByRole("button", { name: /^Drag /, includeHidden: true }),
-    ).toBeHidden();
+    ).toHaveCount(0);
     const move = row.getByRole("button", { name: /^Move / });
+    await expect(move).toHaveCount(1);
+    await expect(move).toBeVisible();
     await move.tap();
     const dialog = page.getByRole("dialog", {
       name: "Move items from Box 1",

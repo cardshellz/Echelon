@@ -2,7 +2,7 @@ import { useLayoutEffect, useRef, useState, type DragEvent } from "react";
 import {
   ArrowLeft,
   ArrowRight,
-  ArrowRightLeft,
+  Split,
   Loader2,
   Package,
   Plus,
@@ -67,9 +67,15 @@ export function CustomerReturnPacking({
   const boxesHeading = useRef<HTMLHeadingElement>(null);
 
   const boxHeadings = useRef(new Map<number, HTMLHeadingElement>());
+  const pendingBoxFocus = useRef<number | null>(null);
   const unassignedActions = useRef(new Map<string, HTMLButtonElement>());
   const pendingUnassignedFocus = useRef<string | null>(null);
   useLayoutEffect(() => {
+    const boxKey = pendingBoxFocus.current;
+    if (boxKey !== null) {
+      (boxHeadings.current.get(boxKey) ?? boxesHeading.current)?.focus();
+      pendingBoxFocus.current = null;
+    }
     const lineId = pendingUnassignedFocus.current;
     if (lineId === null) return;
     (unassignedActions.current.get(lineId) ?? boxesHeading.current)?.focus();
@@ -77,6 +83,7 @@ export function CustomerReturnPacking({
   }, [parcels]);
   const focusAfterDialog = useRef<DialogFocus | null>(null);
   const dragSource = useRef<DraggedItem | null>(null);
+  const dragPlan = useRef<PreviewParcelDraft[] | null>(null);
   const dragTrigger = useRef<HTMLElement | null>(null);
   const [dragging, setDragging] = useState<DraggedItem | null>(null);
   const [overBox, setOverBox] = useState<number | "new" | null>(null);
@@ -197,6 +204,7 @@ export function CustomerReturnPacking({
   }
   function clearDrag() {
     dragSource.current = null;
+    dragPlan.current = null;
     dragTrigger.current = null;
     setDragging(null);
     setOverBox(null);
@@ -208,6 +216,7 @@ export function CustomerReturnPacking({
   ) {
     if (
       busy ||
+      !window.matchMedia("(pointer: fine)").matches ||
       !canMove(parcelKey) ||
       !sources.some(
         (source) =>
@@ -221,6 +230,7 @@ export function CustomerReturnPacking({
     // A private in-memory origin is required as well as the MIME marker: external
     // drops cannot invent an allocation or invoke the move action.
     dragSource.current = item;
+    dragPlan.current = parcels;
     dragTrigger.current = event.currentTarget;
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData(RETURN_ITEM_DRAG_TYPE, JSON.stringify(item));
@@ -231,6 +241,7 @@ export function CustomerReturnPacking({
     if (
       busy ||
       !source ||
+      dragPlan.current !== parcels ||
       !event.dataTransfer.types.includes(RETURN_ITEM_DRAG_TYPE)
     )
       return false;
@@ -274,8 +285,43 @@ export function CustomerReturnPacking({
       destination === "new"
         ? { kind: "new" }
         : { kind: "existing", parcelKey: destination };
-    openMove({ ...source, destination: target }, trigger);
+    const allocation = sources.find(
+      (item) =>
+        item.fromParcelKey === source.sourceParcelKey &&
+        item.lineId === source.lineId,
+    );
+    // Consume the drag before applying it: a repeated native drop cannot move
+    // the same unit again, even before React has rendered the new plan.
     clearDrag();
+    if (!allocation) return;
+    if (allocation.quantity === 1) {
+      try {
+        const result = applyMove({
+          items: [
+            {
+              lineId: source.lineId,
+              fromParcelKey: source.sourceParcelKey,
+              quantity: 1,
+            },
+          ],
+          destination: target,
+        });
+        if (result.kind === "updated") {
+          pendingBoxFocus.current = result.destinationParcelKey;
+          focusAfterDialog.current = null;
+          return;
+        }
+      } catch {
+        console.error("RETURN_PACKING_MOVE_FAILED", { interaction: "drop" });
+      }
+      setNotice({
+        text: "This item could not be moved. Check your boxes and try again.",
+        after: parcels,
+      });
+      (trigger.isConnected ? trigger : boxesHeading.current)?.focus();
+      return;
+    }
+    openMove({ ...source, destination: target, intent: "drop" }, trigger);
   }
 
   return (
@@ -379,7 +425,7 @@ export function CustomerReturnPacking({
           <p className="mt-1 text-xs text-muted-foreground">
             {summary.selectedQuantity === 1
               ? "One item, one box. Check the box size, then review your return."
-              : "Use Move to split items into a new box or move them between boxes."}
+              : "Drag or select Move to move an item. Use Split box to pack a new box."}
           </p>
         </div>
         <div role="status" aria-live="polite" aria-atomic="true">
@@ -413,7 +459,7 @@ export function CustomerReturnPacking({
                 setOverBox(null);
             }}
             onDrop={(event) => drop(event, parcel.key)}
-            className={`min-w-0 rounded-xl border p-4 transition-colors sm:p-5 ${overBox === parcel.key ? "border-primary bg-primary/5 ring-2 ring-primary/30" : "bg-background"}`}
+            className={`relative min-w-0 rounded-xl border p-4 transition-colors sm:p-5 ${overBox === parcel.key ? "border-primary bg-primary/5 ring-2 ring-primary/30" : "bg-background"}`}
           >
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <h3
@@ -429,21 +475,24 @@ export function CustomerReturnPacking({
                 Box {index + 1}
               </h3>
               <div className="flex flex-wrap items-center gap-1">
-                {canMove(parcel.key) && (
+                {canSplit(parcel.key) && (
                   <Button
                     variant="ghost"
                     className="min-h-11 px-2"
                     disabled={busy}
-                    aria-label={`Move items from box ${index + 1}`}
+                    aria-label={`Split box ${index + 1}`}
                     onClick={(event) =>
                       openMove(
-                        { sourceParcelKey: parcel.key },
+                        {
+                          sourceParcelKey: parcel.key,
+                          destination: { kind: "new" },
+                          intent: "split",
+                        },
                         event.currentTarget,
                       )
                     }
                   >
-                    <ArrowRightLeft aria-hidden="true" className="h-4 w-4" />{" "}
-                    Move items
+                    <Split aria-hidden="true" className="h-4 w-4" /> Split box
                   </Button>
                 )}
                 {parcels.length > 1 && (
@@ -460,9 +509,16 @@ export function CustomerReturnPacking({
               </div>
             </div>
             {dragging && dragging.sourceParcelKey !== parcel.key && (
-              <p className="mb-3 text-xs font-medium text-primary">
-                Drop here to choose how many to move.
-              </p>
+              // Keep destination geometry fixed and cover native size controls:
+              // inserting a hint can move a select under the pointer and end a drag.
+              <div
+                aria-hidden="true"
+                className="absolute inset-0 z-10 flex items-center justify-center rounded-xl border-2 border-dashed border-primary/50 bg-background/90"
+              >
+                <span className="pointer-events-none rounded-lg bg-background px-4 py-3 text-sm font-medium text-primary shadow-sm">
+                  Drop into Box {index + 1}
+                </span>
+              </div>
             )}
             <CustomerReturnParcelDetails
               order={order}
