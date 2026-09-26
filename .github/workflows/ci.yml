@@ -34,6 +34,10 @@ jobs:
         run: npm run check:tests
       - name: Unit tests
         run: npm run test:unit
+      - name: Inventory cutover maintenance contracts (offline only)
+        run: |
+          node --import tsx --test scripts/inventory-cutover-records-proposal-20260925.test.ts scripts/inventory-cutover-records-execution-20260925.test.ts
+          npx tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --esModuleInterop --skipLibCheck --strict --types node scripts/inventory-cutover-records-*.ts
       - name: Procurement planning client contracts
         run: >-
           npx vitest run
