@@ -1,27 +1,16 @@
-import { useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
   Info,
-  Loader2,
   Package,
-  Plus,
   ShieldCheck,
-  Trash2,
   Truck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { CustomerReturnParcelDetails } from "./CustomerReturnParcelDetails";
-import { CustomerReturnPackingSummary } from "./CustomerReturnPackingSummary";
-import { CustomerReturnBoxContents } from "./CustomerReturnBoxContents";
-import { summarizePreviewPacking } from "@/lib/customer-return-packing";
-import {
-  customPreviewParcelSize,
-  formatPreviewDimensions,
-  previewParcelProductWeight,
-} from "@/lib/customer-return-parcels";
+
+import { formatPreviewDimensions } from "@/lib/customer-return-parcels";
 import {
   type CustomerReturnFlowOrder,
   type CustomerReturnFlowReason,
@@ -30,9 +19,7 @@ import {
 import {
   describePreviewItem,
   readPreviewQuantity,
-  type PreviewParcelDraft,
   type PreviewSelectionDraft,
-  type PreviewSelections,
 } from "@/lib/customer-return-preview";
 
 export const previewSelectClass =
@@ -305,180 +292,8 @@ export function PreviewItems({
   );
 }
 
-export function PreviewPacking({
-  order,
-  selections,
-  parcels,
-  busy,
-  onChange,
-  onContinue,
-  onBack,
-}: {
-  order: CustomerReturnFlowOrder;
-  selections: PreviewSelections;
-  parcels: PreviewParcelDraft[];
-  busy: boolean;
-  onChange: (parcels: PreviewParcelDraft[]) => void;
-  onContinue: () => void;
-  onBack: () => void;
-}) {
-  const boxesHeading = useRef<HTMLHeadingElement>(null);
-  const [newBoxKey, setNewBoxKey] = useState<number | null>(null);
-  const summary = summarizePreviewPacking(selections, parcels);
-  const weightNeedsVerification = parcels.some(
-    (parcel) =>
-      previewParcelProductWeight(order, parcel).status === "unverified",
-  );
-  function addBox() {
-    if (busy || !summary.canAddBox) return;
-    const key = Math.max(0, ...parcels.map((parcel) => parcel.key)) + 1;
-    setNewBoxKey(key);
-    onChange([
-      ...parcels,
-      {
-        key,
-        size: order.boxOptions.length
-          ? { kind: "unselected" }
-          : customPreviewParcelSize(),
-        items: selections.map((item) => ({
-          lineId: item.lineId,
-          quantity: "0",
-        })),
-      },
-    ]);
-  }
-  return (
-    <div className="space-y-6">
-      <CustomerReturnPackingSummary
-        order={order}
-        summary={summary}
-        boxCount={parcels.length}
-        busy={busy}
-        onChangeItems={onBack}
-      />
-      <section
-        aria-labelledby="return-boxes-title"
-        data-testid="packing-boxes"
-        className="space-y-4"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0">
-            <h2
-              ref={boxesHeading}
-              tabIndex={-1}
-              id="return-boxes-title"
-              className="font-semibold"
-            >
-              Your boxes
-            </h2>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Each box shows only the items you put in it.
-            </p>
-          </div>
-          <Button
-            variant="outline"
-            className="min-h-11"
-            disabled={busy || !summary.canAddBox}
-            onClick={addBox}
-          >
-            <Plus aria-hidden="true" className="h-4 w-4" /> Add another box
-          </Button>
-        </div>
-        {!summary.canAddBox && summary.selectedQuantity === 1 && (
-          <p className="text-xs text-muted-foreground">
-            You are returning one item, so one box is enough. Use Change return
-            items above to add more.
-          </p>
-        )}
-        {parcels.map((parcel, index) => (
-          <section
-            key={parcel.key}
-            data-testid={`preview-box-${index + 1}`}
-            aria-labelledby={`preview-box-title-${parcel.key}`}
-            className="min-w-0 rounded-xl border p-4 sm:p-5"
-          >
-            <div className="mb-4 flex items-center justify-between gap-3">
-              <h3
-                id={`preview-box-title-${parcel.key}`}
-                className="flex items-center gap-2 font-semibold"
-              >
-                <Package aria-hidden="true" className="h-5 w-5 text-primary" />{" "}
-                Box {index + 1}
-              </h3>
-              {parcels.length > 1 && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  aria-label={`Remove box ${index + 1}`}
-                  className="min-h-11"
-                  disabled={busy}
-                  onClick={() => {
-                    boxesHeading.current?.focus();
-                    onChange(
-                      parcels.filter(
-                        (candidate) => candidate.key !== parcel.key,
-                      ),
-                    );
-                  }}
-                >
-                  <Trash2 aria-hidden="true" className="h-4 w-4" /> Remove box
-                </Button>
-              )}
-            </div>
-            <CustomerReturnParcelDetails
-              order={order}
-              parcel={parcel}
-              boxNumber={index + 1}
-              busy={busy}
-              onChange={(next) =>
-                onChange(
-                  parcels.map((candidate) =>
-                    candidate.key === parcel.key ? next : candidate,
-                  ),
-                )
-              }
-            />
-            <CustomerReturnBoxContents
-              order={order}
-              selections={selections}
-              parcels={parcels}
-              parcel={parcel}
-              boxNumber={index + 1}
-              busy={busy}
-              summary={summary}
-              autoFocus={newBoxKey === parcel.key}
-              onChange={onChange}
-            />
-          </section>
-        ))}
-      </section>
-      <div className="flex flex-col-reverse gap-3 border-t pt-6 sm:flex-row sm:justify-between">
-        <Button variant="ghost" className="min-h-11" onClick={onBack}>
-          <ArrowLeft className="mr-2 h-4 w-4" /> Back to items
-        </Button>
-        <Button
-          className="min-h-11"
-          onClick={onContinue}
-          disabled={busy || weightNeedsVerification || !summary.ready}
-        >
-          {busy ? (
-            <>
-              <Loader2
-                aria-hidden="true"
-                className="mr-2 h-4 w-4 animate-spin"
-              />{" "}
-              Checking your return…
-            </>
-          ) : (
-            <>
-              Review return <ArrowRight className="ml-2 h-4 w-4" />
-            </>
-          )}
-        </Button>
-      </div>
-    </div>
-  );
-}
+export { CustomerReturnPacking as PreviewPacking } from "./CustomerReturnPacking";
+
 export function PreviewReview({
   order,
   review,
