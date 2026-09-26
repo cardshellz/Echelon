@@ -175,7 +175,7 @@ describe("DropshipPortalWallet contract", () => {
     // Both callers hand the controls the plan's top-up amount.
     const step = between("function DepositStep", "function ManageView");
     expect(step).toContain("topUpCents={terms.topUpCents}");
-    const manage = between("function ManageView", "function ListingTiersSection");
+    const manage = between("function ManageView", "function ReserveAndTiers");
     expect(manage).toContain("const topUpCents = wallet.autoReload ? wallet.autoReload.topUpAmountCents : flow.topUpCents;");
     expect(manage).toContain("topUpCents={topUpCents}");
     // The fixed presets below the minimum are gone from the whole page.
@@ -279,6 +279,30 @@ describe("DropshipPortalWallet contract", () => {
 });
 
 describe("rewards on the wallet page (funding design phase 7)", () => {
+  it("keeps the reserve and the tiers it decides together in the balance card, in the model's words", () => {
+    const manage = between("function ManageView", "function ReserveAndTiers");
+    const balance = manage.slice(manage.indexOf('data-testid="wallet-balance"'), manage.indexOf("<AdvanceSection"));
+    // One card: the tiers render inside the balance section, fed the reserve the server decides from.
+    expect(balance).toContain("<ReserveAndTiers");
+    expect(balance).toContain("reserveCents={wallet.autoReload?.enabled ? wallet.autoReload.minimumBalanceCents : null}");
+    expect(balance).toContain('onChangeReserve={flow.authorized && flow.source && editor !== "floor" ? () => setEditor("floor") : null}');
+    // The separate reserve chip and the separate tiers panel are gone.
+    expect(source).not.toMatch(/>Reserve \{formatWholeDollars/);
+    expect(source).not.toContain("function ListingTiersSection");
+    // The reserve editor opened from the card scrolls into view.
+    expect(manage).toContain('<div ref={floorEditorRef} className="mt-4 border-t border-zinc-200 pt-4" data-testid="wallet-floor-editor">');
+    expect(manage).toContain('if (editor === "floor") floorEditorRef.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });');
+    const card = between("function ReserveAndTiers", "function AdvanceSection");
+    expect(card).toContain("<h3 className=\"font-semibold\">Reserve and listing tiers</h3>");
+    expect(card).toContain("{describeReserveLine(reserveCents)}");
+    expect(card).toContain("{LISTING_TIERS_RULE}");
+    expect(card).toContain("const copy = describeListingTierRow(tier, reserveCents);");
+    expect(card).toContain('{tier.eligible ? "Active" : "Not active"}');
+    // Words live in the model: nothing here restates the rule, and the struck phrases are gone from the page.
+    expect(card).not.toMatch(/turns on|stays on|reserve of|needs to reach/);
+    expect(source).not.toMatch(/settling counts|still settling|on sale|off sale/i);
+  });
+
   it("shows the points as their own element with one checkbox, ticked unless the vendor unticked it, in the model's words", () => {
     const block = between("function RewardsBalance", "function describeBalanceAfterCell");
     expect(block).toContain('data-testid="wallet-rewards"');

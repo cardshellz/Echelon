@@ -545,8 +545,11 @@ function serializeListingTiers(view: DropshipVendorListingTierView) {
     tier: status.tier,
     eligible: status.eligible,
     reason: status.reason,
+    policyMinimumCents: status.policyMinimumCents,
     minimumCents: status.minimumCents,
-    shortfallCents: status.shortfallCents,
+    alreadyOn: status.alreadyOn,
+    reserveShortfallCents: status.reserveShortfallCents,
+    balanceShortfallCents: status.balanceShortfallCents,
     upcoming: status.upcoming
       ? {
           minimumCents: status.upcoming.minimumCents,

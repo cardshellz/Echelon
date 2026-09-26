@@ -280,10 +280,14 @@ describe("dropship wallet routes card fee exposure", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.wallet.listingTiers).toEqual({
-      pack: { tier: "pack", eligible: true, reason: null, minimumCents: 7_500, shortfallCents: 0, upcoming: null },
+      pack: {
+        tier: "pack", eligible: true, reason: null, policyMinimumCents: 7_500, minimumCents: 7_500, alreadyOn: true,
+        reserveShortfallCents: 0, balanceShortfallCents: 7_500, upcoming: null,
+      },
       case: {
-        tier: "case", eligible: false, reason: "case_tier_balance_below_minimum", minimumCents: 55_000, shortfallCents: 55_000,
-        upcoming: { minimumCents: 75_000, policyVersion: 3, enforcesAt: "2026-09-30T12:00:00.000Z", affectsVendor: true },
+        tier: "case", eligible: false, reason: "reserve_below_tier", policyMinimumCents: 75_000, minimumCents: 55_000, alreadyOn: false,
+        reserveShortfallCents: 67_500, balanceShortfallCents: 75_000,
+        upcoming: { minimumCents: 75_000, policyVersion: 3, enforcesAt: "2026-09-30T12:00:00.000Z", affectsVendor: false },
       },
       generatedAt: "2026-09-16T12:00:00.000Z",
     });
@@ -419,14 +423,19 @@ async function fakeListingTierView(vendorId: number) {
   return {
     vendorId,
     minimums: {
-      pack: { tier: "pack" as const, minimumCents: 7_500, version: 2, upcoming: null },
-      case: { tier: "case" as const, minimumCents: 55_000, version: 2, upcoming: { minimumCents: 75_000, version: 3, enforcesAt } },
+      pack: { tier: "pack" as const, minimumCents: 7_500, version: 2, policyMinimumCents: 7_500, upcoming: null },
+      case: { tier: "case" as const, minimumCents: 55_000, version: 2, policyMinimumCents: 75_000, upcoming: { minimumCents: 75_000, version: 3, enforcesAt } },
     },
     eligibility: {
-      pack: { tier: "pack" as const, eligible: true, reason: null, minimumCents: 7_500, shortfallCents: 0, upcoming: null },
+      // Pack on from the last check with the balance at zero; case not joinable on a $75 reserve.
+      pack: {
+        tier: "pack" as const, eligible: true, reason: null, policyMinimumCents: 7_500, minimumCents: 7_500, alreadyOn: true,
+        reserveShortfallCents: 0, balanceShortfallCents: 7_500, upcoming: null,
+      },
       case: {
-        tier: "case" as const, eligible: false, reason: "case_tier_balance_below_minimum" as const, minimumCents: 55_000, shortfallCents: 55_000,
-        upcoming: { minimumCents: 75_000, version: 3, enforcesAt, affectsVendor: true },
+        tier: "case" as const, eligible: false, reason: "reserve_below_tier" as const, policyMinimumCents: 75_000, minimumCents: 55_000, alreadyOn: false,
+        reserveShortfallCents: 67_500, balanceShortfallCents: 75_000,
+        upcoming: { minimumCents: 75_000, version: 3, enforcesAt, affectsVendor: false },
       },
     },
     funding: { minimumBalanceCents: 7_500, availableBalanceCents: 0, pendingBalanceCents: 0, currency: "USD" },

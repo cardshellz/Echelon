@@ -1607,12 +1607,16 @@ export interface DropshipCatalogRow {
   listingTier?: DropshipCatalogListingTier;
 }
 
+/** The server's tier decision for a catalog row (`domain/listing-tiers.ts`); the fields the catalog reads. */
 export interface DropshipCatalogListingTier {
   tier: "pack" | "case";
   eligible: boolean;
-  reason: "pack_tier_minimum_not_kept" | "case_tier_balance_below_minimum" | null;
-  minimumCents: number;
-  shortfallCents: number;
+  reason: "autopay_off" | "reserve_below_tier" | "balance_below_tier" | null;
+  /** The amount the tier needs, as published. */
+  policyMinimumCents: number;
+  reserveShortfallCents: number;
+  /** How far the balance (counting bank transfers on their way) is below the tier's amount. */
+  balanceShortfallCents: number;
 }
 
 export interface DropshipCatalogFacets {

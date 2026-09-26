@@ -27,13 +27,15 @@ describe("product-cost preview issues", () => {
 });
 
 describe("listing tier preview issues", () => {
-  it("names the tier and its reserve, never on sale or off sale", () => {
-    expect(formatListingPreviewIssue("listing_tier:pack_tier_minimum_not_kept"))
-      .toBe("Pack tier not active: your wallet does not keep the Pack tier reserve. Raise your reserve or add money in Wallet.");
-    expect(formatListingPreviewIssue("listing_tier:case_tier_balance_below_minimum"))
-      .toBe("Case tier not active: case listings need your balance to reach the Case tier reserve. Add money in Wallet and they go live automatically.");
-    for (const code of ["listing_tier:pack_tier_minimum_not_kept", "listing_tier:case_tier_balance_below_minimum"]) {
-      expect(formatListingPreviewIssue(code)).not.toMatch(/on sale|off sale|minimum/i);
+  it("says why the listing's tier is not active and what to change, never on sale or off sale", () => {
+    expect(formatListingPreviewIssue("listing_tier:autopay_off"))
+      .toBe("This listing's tier is not active: autopay is off, so your wallet has no reserve. Turn on autopay in Wallet.");
+    expect(formatListingPreviewIssue("listing_tier:reserve_below_tier"))
+      .toBe("This listing's tier is not active: your reserve is below the tier's amount. Raise your reserve in Wallet.");
+    expect(formatListingPreviewIssue("listing_tier:balance_below_tier"))
+      .toBe("This listing's tier is not active: your balance has not reached the tier's amount yet. Add money in Wallet.");
+    for (const code of ["listing_tier:autopay_off", "listing_tier:reserve_below_tier", "listing_tier:balance_below_tier"]) {
+      expect(formatListingPreviewIssue(code)).not.toMatch(/on sale|off sale|minimum|settling/i);
     }
   });
 });

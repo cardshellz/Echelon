@@ -16,8 +16,9 @@ import {
 
 /**
  * Persistence for the listing tier decision: one row per vendor in
- * `dropship.dropship_vendor_listing_tier_holds`, an audit row per change of
- * held tiers in the same transaction, and the reads the reconciler needs.
+ * `dropship.dropship_vendor_listing_tier_holds` (with the tiers the decision
+ * left on, migration 0706), an audit row per change of held tiers in the same
+ * transaction, and the reads the reconciler and the vendor surfaces need.
  * Nothing here talks to a marketplace or to inventory planning's tables.
  */
 
@@ -31,6 +32,7 @@ interface VendorRow {
   held_tiers: string[] | null;
   revision: number | null;
   applied: boolean | null;
+  tiers_on: string[] | null;
   detail: string | null;
   evaluated_at: Date | null;
   applied_at: Date | null;
@@ -41,10 +43,17 @@ interface HoldRow {
   held_tiers: string[];
   revision: number;
   applied: boolean;
+  tiers_on: string[] | null;
   detail: string | null;
   evaluated_at: Date;
   applied_at: Date | null;
 }
+
+const HOLD_COLUMNS = "vendor_id, held_tiers, revision, applied, tiers_on, detail, evaluated_at, applied_at";
+const VENDOR_WITH_HOLD_SELECT = `SELECT v.id AS vendor_id, v.status,
+              h.held_tiers, h.revision, h.applied, h.tiers_on, h.detail, h.evaluated_at, h.applied_at
+       FROM dropship.dropship_vendors v
+       LEFT JOIN dropship.dropship_vendor_listing_tier_holds h ON h.vendor_id = v.id`;
 
 interface ListingVariantRow {
   product_variant_id: number;
@@ -56,16 +65,26 @@ export class PgDropshipListingTierRepository implements DropshipListingTierRepos
 
   async listVendorsForReview(input: { limit: number }): Promise<DropshipListingTierVendorRecord[]> {
     const result = await this.dbPool.query<VendorRow>(
-      `SELECT v.id AS vendor_id, v.status,
-              h.held_tiers, h.revision, h.applied, h.detail, h.evaluated_at, h.applied_at
-       FROM dropship.dropship_vendors v
-       LEFT JOIN dropship.dropship_vendor_listing_tier_holds h ON h.vendor_id = v.id
+      `${VENDOR_WITH_HOLD_SELECT}
        WHERE v.status = ANY($1::text[])
        ORDER BY v.id ASC
        LIMIT $2`,
       [REVIEWABLE_VENDOR_STATUSES, input.limit],
     );
     return result.rows.map(mapVendorRow);
+  }
+
+  async getVendor(vendorId: number): Promise<DropshipListingTierVendorRecord | null> {
+    try {
+      const result = await this.dbPool.query<VendorRow>(
+        `${VENDOR_WITH_HOLD_SELECT}
+       WHERE v.id = $1`,
+        [vendorId],
+      );
+      return result.rows[0] ? mapVendorRow(result.rows[0]) : null;
+    } catch (error) {
+      throw mapListingTierError(error);
+    }
   }
 
   async listStoreConnectionIds(vendorId: number): Promise<number[]> {
@@ -108,11 +127,15 @@ export class PgDropshipListingTierRepository implements DropshipListingTierRepos
     now: Date;
   }): Promise<{ changed: boolean; record: DropshipVendorListingTierHoldRecord }> {
     const heldTiers = normalizeTiers(input.heldTiers);
+    // Written with every decision this code records, and by nothing else: a
+    // September process still running during a deploy writes held_tiers but
+    // never tiers_on, so its decision cannot pass for the current rule's.
+    const tiersOn = DROPSHIP_LISTING_TIERS.filter((tier) => !heldTiers.includes(tier));
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN");
       const existing = await client.query<HoldRow>(
-        `SELECT vendor_id, held_tiers, revision, applied, detail, evaluated_at, applied_at
+        `SELECT ${HOLD_COLUMNS}
          FROM dropship.dropship_vendor_listing_tier_holds
          WHERE vendor_id = $1
          FOR UPDATE`,
@@ -120,30 +143,34 @@ export class PgDropshipListingTierRepository implements DropshipListingTierRepos
       );
       const before = existing.rows[0] ? mapHoldRow(existing.rows[0]) : null;
       if (before && sameTiers(before.heldTiers, heldTiers)) {
+        // The same held tiers is no change to the marketplace: no revision,
+        // no notice. Recording tiers_on is what lets the next check count the
+        // tiers left on as already on (a September row gets it here first).
         const refreshed = await client.query<HoldRow>(
           `UPDATE dropship.dropship_vendor_listing_tier_holds
-           SET evaluated_at = $2, updated_at = $2
+           SET evaluated_at = $2, tiers_on = $3::text[], updated_at = $2
            WHERE vendor_id = $1
-           RETURNING vendor_id, held_tiers, revision, applied, detail, evaluated_at, applied_at`,
-          [input.vendorId, input.now],
+           RETURNING ${HOLD_COLUMNS}`,
+          [input.vendorId, input.now, tiersOn],
         );
         await client.query("COMMIT");
         return { changed: false, record: mapHoldRow(requireRow(refreshed.rows[0], input.vendorId)) };
       }
       const written = await client.query<HoldRow>(
         `INSERT INTO dropship.dropship_vendor_listing_tier_holds
-           (vendor_id, held_tiers, revision, applied, detail, evaluated_at, applied_at, created_at, updated_at)
-         VALUES ($1, $2::text[], 1, false, $3, $4, NULL, $4, $4)
+           (vendor_id, held_tiers, revision, applied, tiers_on, detail, evaluated_at, applied_at, created_at, updated_at)
+         VALUES ($1, $2::text[], 1, false, $5::text[], $3, $4, NULL, $4, $4)
          ON CONFLICT (vendor_id) DO UPDATE
            SET held_tiers = EXCLUDED.held_tiers,
                revision = dropship_vendor_listing_tier_holds.revision + 1,
                applied = false,
+               tiers_on = EXCLUDED.tiers_on,
                detail = EXCLUDED.detail,
                evaluated_at = EXCLUDED.evaluated_at,
                applied_at = NULL,
                updated_at = EXCLUDED.updated_at
-         RETURNING vendor_id, held_tiers, revision, applied, detail, evaluated_at, applied_at`,
-        [input.vendorId, heldTiers, input.detail, input.now],
+         RETURNING ${HOLD_COLUMNS}`,
+        [input.vendorId, heldTiers, input.detail, input.now, tiersOn],
       );
       const record = mapHoldRow(requireRow(written.rows[0], input.vendorId));
       await client.query(
@@ -155,8 +182,8 @@ export class PgDropshipListingTierRepository implements DropshipListingTierRepos
           String(input.vendorId),
           ACTOR_ID,
           JSON.stringify({
-            before: before ? { heldTiers: before.heldTiers, revision: before.revision } : null,
-            after: { heldTiers: record.heldTiers, revision: record.revision },
+            before: before ? { heldTiers: before.heldTiers, tiersOn: before.tiersOn, revision: before.revision } : null,
+            after: { heldTiers: record.heldTiers, tiersOn: record.tiersOn, revision: record.revision },
             detail: input.detail,
           }),
           input.now,
@@ -206,6 +233,7 @@ function mapVendorRow(row: VendorRow): DropshipListingTierVendorRecord {
   return {
     vendorId: row.vendor_id,
     status: row.status as DropshipVendorStatus,
+    // tiers_on can be null on a real row (the September rule's), so it is not a "no row" signal.
     tierHold: row.revision === null || row.held_tiers === null || row.applied === null || row.evaluated_at === null
       ? null
       : mapHoldRow({
@@ -213,6 +241,7 @@ function mapVendorRow(row: VendorRow): DropshipListingTierVendorRecord {
           held_tiers: row.held_tiers,
           revision: row.revision,
           applied: row.applied,
+          tiers_on: row.tiers_on,
           detail: row.detail,
           evaluated_at: row.evaluated_at,
           applied_at: row.applied_at,
@@ -226,6 +255,7 @@ function mapHoldRow(row: HoldRow): DropshipVendorListingTierHoldRecord {
     heldTiers: normalizeTiers(row.held_tiers.map((tier) => parseTier(tier, row.vendor_id))),
     revision: nonNegativeInteger(row.revision, row.vendor_id),
     applied: row.applied,
+    tiersOn: row.tiers_on === null ? null : normalizeTiers(row.tiers_on.map((tier) => parseTier(tier, row.vendor_id))),
     detail: row.detail,
     evaluatedAt: row.evaluated_at,
     appliedAt: row.applied_at,

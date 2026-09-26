@@ -238,11 +238,17 @@ describe("DropshipPortalCatalog workflow", () => {
 });
 
 describe("catalog listing tier", () => {
-  it("explains a tier that is not active in the tier words, with the reserve and the gap", () => {
-    expect(describeCatalogListingTier({ tier: "case", eligible: false, reason: "case_tier_balance_below_minimum", minimumCents: 50_000, shortfallCents: 38_000 }))
-      .toBe("The Case tier is not active: case listings go live once your wallet balance (counting money still settling) reaches the $500 reserve. You are $380 short. Pack tier listings are not affected.");
-    expect(describeCatalogListingTier({ tier: "pack", eligible: false, reason: "pack_tier_minimum_not_kept", minimumCents: 10_000, shortfallCents: 1_050 }))
-      .toBe("The Pack tier is not active: your wallet needs to keep the $100 reserve, either as your autopay reserve or as your balance. You are $10.50 short.");
+  it("explains a tier that is not active from the server's reason, with the published amount and the gap", () => {
+    const tier = { eligible: false, policyMinimumCents: 50_000, reserveShortfallCents: 0, balanceShortfallCents: 38_000 };
+    expect(describeCatalogListingTier({ ...tier, tier: "case", reason: "balance_below_tier" }))
+      .toBe("The Case tier is not active: your balance needs to reach $500. You need $380 more.");
+    expect(describeCatalogListingTier({ ...tier, tier: "case", reason: "reserve_below_tier", reserveShortfallCents: 40_000 }))
+      .toBe("The Case tier is not active: it needs a reserve of $500. Raise your reserve in Wallet.");
+    expect(describeCatalogListingTier({ ...tier, tier: "pack", policyMinimumCents: 10_000, reason: "autopay_off" }))
+      .toBe("The Pack tier is not active: autopay is off, so your wallet has no reserve. Turn on autopay with a reserve of at least $100 in Wallet.");
+    // Cents are shown in full.
+    expect(describeCatalogListingTier({ ...tier, tier: "pack", policyMinimumCents: 10_000, reason: "balance_below_tier", balanceShortfallCents: 1_050 }))
+      .toBe("The Pack tier is not active: your balance needs to reach $100. You need $10.50 more.");
   });
 
   it("labels the badge by tier and never says on sale or off sale", () => {
