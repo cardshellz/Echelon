@@ -30,6 +30,15 @@ export interface CustomerReturnLiveDependencies {
   now: () => Date;
 }
 
+/** Trusted application evidence for the separately authorized private write service. */
+export interface CustomerReturnIntakeInspection {
+  order: CustomerReturnLiveOrder;
+  local: CustomerReturnLocalInspectionSnapshot;
+  provider: CustomerReturnShopifySnapshot;
+  facts: CustomerReturnEligibilityInput;
+  eligibility: CustomerReturnEligibilityOutput;
+}
+
 /** Administrator inspection only. The dependencies deliberately contain no write port. */
 export class CustomerReturnLiveService {
   constructor(private readonly dependencies: CustomerReturnLiveDependencies) {}
@@ -43,13 +52,17 @@ export class CustomerReturnLiveService {
   }
 
   async lookup(raw: unknown): Promise<CustomerReturnLiveOrder> {
+    return this.boundary(async () => (await this.load(parseInput(customerReturnLiveLookupInputSchema, raw))).order);
+  }
+
+  async inspectForIntake(raw: unknown): Promise<CustomerReturnIntakeInspection> {
     return this.boundary(() => this.load(parseInput(customerReturnLiveLookupInputSchema, raw)));
   }
 
   async review(raw: unknown): Promise<CustomerReturnLiveReview> {
     return this.boundary(async () => {
       const input = parseInput(customerReturnLiveReviewInputSchema, raw);
-      const order = await this.load({ channelId: input.channelId, orderReference: input.orderReference });
+      const { order } = await this.load({ channelId: input.channelId, orderReference: input.orderReference });
       if (order.sourceRevision !== input.sourceRevision) throw changed();
       const plan = validateCustomerReturnBoxPlan(order.lines, { selections: input.selections, parcels: input.parcels }, order.boxOptions);
       return customerReturnLiveReviewSchema.parse({ mode: "admin_live", sourceRevision: order.sourceRevision,
@@ -65,7 +78,7 @@ export class CustomerReturnLiveService {
     return shops;
   }
 
-  private async load(input: CustomerReturnLiveLookupInput): Promise<CustomerReturnLiveOrder> {
+  private async load(input: CustomerReturnLiveLookupInput): Promise<CustomerReturnIntakeInspection> {
     const reference = normalizeCustomerReturnOrderReference(input.orderReference);
     const shop = (await this.readShops()).find(candidate => candidate.channelId === input.channelId);
     if (!shop) throw new CustomerReturnLiveError("RETURN_LIVE_SHOP_UNAVAILABLE", "Select a configured returns store.", 409);
@@ -135,9 +148,10 @@ export class CustomerReturnLiveService {
     // dimension service recovers. Claimed original boxes are checked against
     // freshly read IDs and exact dimensions in validateCustomerReturnBoxPlan.
     const sourceRevision = createHash("sha256").update(canonical({ policy, local, provider, lines, message })).digest("hex");
-    return customerReturnLiveOrderSchema.parse({ mode: "admin_live", sourceRevision, orderReference: reference,
+    const order = customerReturnLiveOrderSchema.parse({ mode: "admin_live", sourceRevision, orderReference: reference,
       purchasedAt: provider.order.createdAt, evaluatedAt: eligibility.evaluatedAt,
       returnWindowEndsAt: eligibility.returnWindowEndsAt, message, lines, boxOptions });
+    return { order, local, provider, facts, eligibility };
   }
 
   private async boundary<T>(work: () => Promise<T>): Promise<T> {

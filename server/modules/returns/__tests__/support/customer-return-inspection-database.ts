@@ -47,8 +47,9 @@ export async function createInspectionTestSchema(pool: Pool): Promise<void> {
     .replace('CREATE TABLE "product_variants"', 'CREATE TABLE catalog."product_variants"'));
   await pool.query(statement("migrations/185_dropship_package_data_consolidation.sql",
     "ALTER TABLE catalog.product_variants\n  ALTER COLUMN weight_grams TYPE"));
-  await pool.query(`CREATE TABLE warehouse.warehouses (id INTEGER PRIMARY KEY);
-    CREATE TABLE wms.outbound_shipments (id INTEGER PRIMARY KEY);
+  await pool.query(table("migrations/0001_past_molly_hayes.sql", 'CREATE TABLE "warehouses" (')
+    .replace('CREATE TABLE "warehouses"', 'CREATE TABLE warehouse."warehouses"'));
+  await pool.query(`CREATE TABLE wms.outbound_shipments (id INTEGER PRIMARY KEY);
     CREATE TABLE wms.outbound_shipment_items (id INTEGER PRIMARY KEY, shipment_id INTEGER REFERENCES wms.outbound_shipments(id));
     CREATE TABLE dropship.dropship_vendors (id INTEGER PRIMARY KEY);
     CREATE TABLE dropship.dropship_store_connections (id INTEGER PRIMARY KEY);`);
@@ -61,6 +62,12 @@ export async function createInspectionTestSchema(pool: Pool): Promise<void> {
     await pool.query(statement("migrations/0002_concerned_darwin.sql", `ALTER TABLE "inventory_transactions" DROP COLUMN "${column}"`)
       .replace('ALTER TABLE "inventory_transactions"', 'ALTER TABLE inventory."inventory_transactions"'));
   }
+  for (const column of ["product_variant_id", "to_location_id", "inventory_lot_id"]) {
+    await pool.query(statement("migrations/0002_concerned_darwin.sql", `ALTER TABLE "inventory_transactions" ADD COLUMN "${column}"`)
+      .replace('ALTER TABLE "inventory_transactions"', 'ALTER TABLE inventory."inventory_transactions"'));
+  }
+  await pool.query(statement("migrations/0575_inventory_ledger_immutability.sql",
+    "ALTER TABLE inventory.inventory_transactions"));
   await pool.query(readFileSync("migrations/115_fulfillment_canonical_shadow_tables.sql", "utf8"));
   const foundation = "migrations/0593_fulfillment_authority_cutover_foundation.sql";
   for (const marker of [
@@ -84,6 +91,29 @@ export async function createInspectionTestSchema(pool: Pool): Promise<void> {
   await pool.query(readFileSync("migrations/062_returns.sql", "utf8"));
   await pool.query(readFileSync("migrations/131_refund_line_disposition_authority.sql", "utf8"));
   await pool.query(readFileSync("migrations/0699_customer_return_authorizations.sql", "utf8"));
+  await createIntakeOwnerTables(pool);
+  // Only the evidence relations read by the mirror predicate are needed here;
+  // their definitions are extracted verbatim from the canonical migrations.
+  await pool.query(table("migrations/0001_past_molly_hayes.sql", 'CREATE TABLE "warehouse_locations" (')
+    .replace('CREATE TABLE "warehouse_locations"', 'CREATE TABLE warehouse."warehouse_locations"'));
+  await pool.query(table("migrations/0002_concerned_darwin.sql", 'CREATE TABLE "inventory_lots" (')
+    .replace('CREATE TABLE "inventory_lots"', 'CREATE TABLE inventory."inventory_lots"'));
+  for (const [file, relation] of [
+    ["200_return_case_operations.sql", "return_case_inspections"],
+    ["203_return_case_dispositions.sql", "return_case_dispositions"],
+    ["203_return_case_dispositions.sql", "return_case_disposition_items"],
+    ["204_return_case_inventory_treatments.sql", "return_case_inventory_treatments"],
+    ["204_return_case_inventory_treatments.sql", "return_case_inventory_treatment_items"],
+  ]) await pool.query(table(`migrations/${file}`, `CREATE TABLE returns.${relation} (`));
+  await pool.query(readFileSync("migrations/109_oms_wms_reconciliation_exceptions.sql", "utf8"));
+}
+
+/** Retained owner DDL plus the complete new intake migration; used by real-PG suites. */
+export async function createIntakeOwnerTables(pool: Pool): Promise<void> {
+  await pool.query(readFileSync("migrations/0612_return_policy_engine.sql", "utf8"));
+  await pool.query(readFileSync("migrations/0613_return_cases.sql", "utf8"));
+  await pool.query(table("migrations/207_return_case_financial_actions.sql", "CREATE TABLE returns.return_case_customer_refunds ("));
+  await pool.query(readFileSync("migrations/250_customer_return_private_intake.sql", "utf8"));
 }
 
 export async function seedInspectionTestSchema(pool: Pool): Promise<void> {
@@ -91,7 +121,7 @@ export async function seedInspectionTestSchema(pool: Pool): Promise<void> {
     wms.orders, wms.order_items, inventory.inventory_transactions, dropship.dropship_order_intake,
     wms.returns, wms.return_items, returns.customer_return_authorizations,
     wms.shipping_provider_labels, wms.carrier_tracking_events, wms.physical_shipments,
-    wms.fulfillment_plans RESTART IDENTITY CASCADE;
+    wms.fulfillment_plans, inventory.inventory_lots, warehouse.warehouse_locations RESTART IDENTITY CASCADE;
     INSERT INTO channels.channels (id,name,type,provider,status) OVERRIDING SYSTEM VALUE VALUES
       (36,'Approved test shop','internal','shopify','active'), (37,'Other shop','internal','shopify','active');
     INSERT INTO channels.channel_connections (id,channel_id,shop_domain,access_token) OVERRIDING SYSTEM VALUE VALUES

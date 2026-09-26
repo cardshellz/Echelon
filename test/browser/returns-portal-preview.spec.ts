@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   installReturnPreviewFixtures,
   PREVIEW_API,
@@ -10,6 +10,7 @@ import {
 } from "../../shared/returns/customer-return-portal-paths";
 import { customerReturnLiveReviewInputSchema } from "../../shared/returns/customer-return-live.contract";
 import { MAX_RETURN_FLOW_PARCELS } from "../../shared/returns/customer-return-flow.contract";
+import { installReturnLabelFixtures } from "./returns-label-fixtures";
 
 async function expectStandalone(page: Page) {
   await expect(page).toHaveTitle(/Card Shellz/i);
@@ -107,6 +108,34 @@ function packingRow(page: Page, boxNumber: number, lineId: string) {
   return page
     .getByTestId(`preview-box-${boxNumber}`)
     .locator(`[data-testid^="packing-item-"][data-testid$="-${lineId}"]`);
+}
+
+async function expectLeftMoveControl(row: Locator, title: string) {
+  const move = row.getByRole("button", { name: /^Move / });
+  await expect(move).toHaveCount(1);
+  await expect(move).toBeVisible();
+  await expect(move).toHaveText("");
+  const [moveBounds, titleBounds, removeBounds] = await Promise.all([
+    move.boundingBox(),
+    row.getByText(title, { exact: true }).boundingBox(),
+    row.getByRole("button", { name: /^Remove / }).boundingBox(),
+  ]);
+  expect(moveBounds).not.toBeNull();
+  expect(titleBounds).not.toBeNull();
+  expect(removeBounds).not.toBeNull();
+  expect(moveBounds!.width).toBeGreaterThanOrEqual(44);
+  expect(moveBounds!.height).toBeGreaterThanOrEqual(44);
+  expect(moveBounds!.x + moveBounds!.width).toBeLessThanOrEqual(
+    titleBounds!.x + 1,
+  );
+  expect(moveBounds!.y).toBeLessThan(titleBounds!.y + titleBounds!.height);
+  expect(titleBounds!.y).toBeLessThan(moveBounds!.y + moveBounds!.height);
+  expect(removeBounds!.x).toBeGreaterThanOrEqual(
+    moveBounds!.x + moveBounds!.width,
+  );
+  expect(
+    await row.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
 }
 
 async function expectBoxQuantity(
@@ -301,7 +330,16 @@ test("split shipments move directly from the first box into a new box without li
     exact: true,
   });
   await expect(move).toBeVisible();
-  await move.click();
+  await expectLeftMoveControl(
+    packingRow(page, 1, "sample-line-1"),
+    "Sample collector sleeves",
+  );
+  await packingRow(page, 1, "sample-line-1").screenshot({
+    animations: "disabled",
+    path: testInfo.outputPath("packing-left-move-control.png"),
+  });
+  await move.focus();
+  await page.keyboard.press("Enter");
   const dialog = page.getByRole("dialog", {
     name: "Move items from Box 1",
     exact: true,
@@ -1497,6 +1535,7 @@ test.describe("touch packing controls", () => {
     const move = row.getByRole("button", { name: /^Move / });
     await expect(move).toHaveCount(1);
     await expect(move).toBeVisible();
+    await expectLeftMoveControl(row, "Sample collector sleeves");
     await move.tap();
     const dialog = page.getByRole("dialog", {
       name: "Move items from Box 1",
@@ -1813,6 +1852,180 @@ test("live order lookup is the default and a review carries the selected shop an
         request.path === `${PREVIEW_API}/review`,
     ),
   ).toEqual([]);
+  expect(fixture.failures).toEqual([]);
+});
+
+async function prepareLiveLabels(page: Page, boxes = 1) {
+  await page.goto(PORTAL_PATH);
+  await page.getByLabel("Order number", { exact: true }).fill("LIVE-1001");
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  await page
+    .getByTestId("preview-line-sample-line-1")
+    .getByRole("spinbutton")
+    .fill(String(boxes));
+  await page
+    .getByRole("button", { name: "Continue to packing", exact: true })
+    .click();
+  if (boxes === 2) await moveLine(page, 1, "sample-line-1", "new", 1);
+  await reviewPackedReturn(page);
+  await expect(
+    page.getByRole("button", { name: "Get return labels", exact: true }),
+  ).toBeEnabled();
+}
+
+test("private labels preserve partial success and resume after reload without automatically retrying uncertainty", async ({
+  page,
+}, testInfo) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const labels = await installReturnLabelFixtures(page, { uncertainBox: 2 });
+  await prepareLiveLabels(page, 2);
+  await page
+    .getByRole("button", { name: "Get return labels", exact: true })
+    .click();
+  const ready = page.getByTestId("return-label-box-1");
+  const uncertain = page.getByTestId("return-label-box-2");
+  await expect(
+    ready.getByRole("button", {
+      name: "Download label for box 1",
+      exact: true,
+    }),
+  ).toBeEnabled();
+  await expect(uncertain).toContainText("This label needs verification.");
+  await expect(
+    page.getByRole("heading", { name: "Your return labels", exact: true }),
+  ).toBeFocused();
+  await expect(
+    page.getByRole("heading", { name: "Your return labels", exact: true }),
+  ).toBeInViewport();
+  expect(labels.progressCalls).toBe(2);
+  expect(labels.accepted).toBe(1);
+  await expect(
+    page.getByRole("button", { name: "Back to packing", exact: true }),
+  ).toHaveCount(0);
+  await showTestingControls(page);
+  await expect(page.getByLabel("Order source", { exact: true })).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Save label settings", exact: true }),
+  ).toBeDisabled();
+  const stored = await page.evaluate(() =>
+    Object.keys(sessionStorage)
+      .filter((key) => key.startsWith("return-label-session:"))
+      .map((key) => JSON.parse(sessionStorage.getItem(key)!)),
+  );
+  expect(stored).toHaveLength(1);
+  expect(Object.keys(stored[0]).sort()).toEqual([
+    "authorizationId",
+    "channelId",
+    "idempotencyKey",
+  ]);
+  expect(stored[0]).toMatchObject({ authorizationId: 501, channelId: 36 });
+  const downloaded = page.waitForEvent("download");
+  await ready
+    .getByRole("button", { name: "Download label for box 1", exact: true })
+    .click();
+  expect((await downloaded).suggestedFilename()).toBe("return-501-box-1.pdf");
+  await page.reload();
+  await expect(uncertain).toContainText("This label needs verification.");
+  expect(labels.progressCalls).toBe(2);
+  expect(labels.submissions).toHaveLength(1);
+  await page
+    .getByRole("button", { name: "Check label status", exact: true })
+    .click();
+  await expect(
+    uncertain.getByRole("button", {
+      name: "Download label for box 2",
+      exact: true,
+    }),
+  ).toBeEnabled();
+  expect(labels.progressCalls).toBe(3);
+  await page.screenshot({
+    animations: "disabled",
+    fullPage: true,
+    path: testInfo.outputPath("return-labels-ready.png"),
+  });
+  labels.deny();
+  await page
+    .getByRole("button", { name: "Check label status", exact: true })
+    .click();
+  await expect(
+    page.getByRole("region", { name: "Portal access status", exact: true }),
+  ).toContainText("Admin access is required");
+  await expect(page.getByTestId("return-labels")).toHaveCount(0);
+  await expect(page.getByTestId("preview-canvas")).toHaveCount(0);
+  expect(labels.failures).toEqual([]);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("an uncertain label submission retries the same intent and command key while editing stays locked", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const labels = await installReturnLabelFixtures(page, {
+    failFirstSubmit: true,
+  });
+  await prepareLiveLabels(page);
+  await page
+    .getByRole("button", { name: "Get return labels", exact: true })
+    .click();
+  await expect(
+    page.getByTestId("return-labels").getByRole("alert"),
+  ).toBeVisible();
+  await expect(page.getByTestId("preview-canvas")).toHaveCount(0);
+  expect(labels.submissions).toHaveLength(1);
+  await page
+    .getByRole("button", { name: "Check label status", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Download label for box 1", exact: true }),
+  ).toBeEnabled();
+  expect(labels.submissions).toHaveLength(2);
+  expect(labels.submissions[1]).toEqual(labels.submissions[0]);
+  expect(labels.accepted).toBe(1);
+  expect(labels.progressCalls).toBe(1);
+  expect(labels.failures).toEqual([]);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("private label settings require an explicit versioned enable and samples remain without effects", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const labels = await installReturnLabelFixtures(page, { enabled: false });
+  await page.goto(PORTAL_PATH);
+  await showTestingControls(page);
+  const enabled = page.getByRole("checkbox", {
+    name: "Enable real return labels for this shop",
+    exact: true,
+  });
+  await expect(enabled).not.toBeChecked();
+  await enabled.check();
+  await page
+    .getByRole("button", { name: "Save label settings", exact: true })
+    .click();
+  await expect(
+    page.getByText("Label settings saved.", { exact: true }),
+  ).toBeVisible();
+  expect(labels.settingsWrites).toHaveLength(1);
+  expect(labels.settingsWrites[0]).toMatchObject({
+    enabled: true,
+    expectedVersion: 1,
+  });
+  await useSampleSource(page);
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  await page
+    .getByTestId("preview-line-sample-line-1")
+    .getByRole("spinbutton")
+    .fill("1");
+  await page
+    .getByRole("button", { name: "Continue to packing", exact: true })
+    .click();
+  await reviewPackedReturn(page);
+  await expect(
+    page.getByRole("button", { name: "Get return labels", exact: true }),
+  ).toBeDisabled();
+  expect(labels.submissions).toHaveLength(0);
+  expect(labels.progressCalls).toBe(0);
+  expect(labels.failures).toEqual([]);
   expect(fixture.failures).toEqual([]);
 });
 

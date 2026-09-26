@@ -27,6 +27,9 @@ import {
 } from "@/lib/customer-return-preview";
 
 export interface CustomerReturnFlowGateway {
+  labels?: {
+    create(input: CustomerReturnFlowReviewInput): Promise<void>;
+  };
   lookup(
     reference: string,
     signal: AbortSignal,
@@ -101,8 +104,10 @@ export function createSampleReturnGateway(
 export function createLiveReturnGateway(
   channelId: number,
   request: FetchRequest = fetch,
+  labels?: CustomerReturnFlowGateway["labels"],
 ): CustomerReturnFlowGateway {
   return {
+    ...(labels ? { labels } : {}),
     async lookup(reference, signal) {
       const input = customerReturnLiveLookupInputSchema.parse({
         channelId,

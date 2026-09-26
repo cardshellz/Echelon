@@ -53,6 +53,7 @@ interface CustomerRefundRow {
 }
 interface LockedCaseRow {
   id: unknown;
+  source_provider?: unknown;
   case_number: unknown;
   business_context: unknown;
   channel_id: unknown;
@@ -515,7 +516,7 @@ async function lockCustomerRefund(client: PoolClient, id: number) {
 
 async function lockCase(client: PoolClient, caseId: number): Promise<ReturnType<typeof mapLockedCase>> {
   const result = await client.query<LockedCaseRow>(
-    `SELECT id, case_number, business_context, channel_id, vendor_id, oms_order_id,
+    `SELECT id, case_number, source_provider, business_context, channel_id, vendor_id, oms_order_id,
             case_status, approval_status, inspection_status,
             customer_refund_status, vendor_settlement_status, updated_at
      FROM returns.return_cases
@@ -524,6 +525,9 @@ async function lockCase(client: PoolClient, caseId: number): Promise<ReturnType<
     [caseId],
   );
   if (result.rows.length !== 1) throw financialError("RETURN_CASE_NOT_FOUND", "Return case was not found.", 404, { caseId });
+  if (result.rows[0].source_provider === "customer_portal") {
+    throw financialError("RETURN_CUSTOMER_REFUND_MANUAL_SHOPIFY", "Refund this return manually in Shopify.", 409, { caseId });
+  }
   return mapLockedCase(result.rows[0]);
 }
 

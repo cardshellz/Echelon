@@ -80,12 +80,14 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/returns/__tests__/integration/customer-return-order-access.repository.test.ts",
       "server/modules/returns/__tests__/integration/customer-return-authorization.repository.test.ts",
       "server/modules/returns/__tests__/integration/customer-return-local-inspection.reader.test.ts",
+      "server/modules/returns/__tests__/integration/customer-return-intake.repository.test.ts",
+      "server/modules/returns/__tests__/integration/customer-return-labels.repository.test.ts",
       "server/modules/orders/__tests__/integration/pick-correction.integration.test.ts",
       "server/modules/oms/__tests__/integration/channel-receipt-immutable-replay.integration.test.ts",
       "server/modules/oms/__tests__/integration/oms-disposition-cutover-replay.integration.test.ts",
     ];
-    expect(POSTGRES_TEST_FILES).toHaveLength(97);
-    expect(new Set(POSTGRES_TEST_FILES).size).toBe(97);
+    expect(POSTGRES_TEST_FILES).toHaveLength(99);
+    expect(new Set(POSTGRES_TEST_FILES).size).toBe(99);
     expect(POSTGRES_TEST_FILES).toEqual(expect.arrayContaining(addedSuites));
     // Preserve the original inventory digest as well as the explicit additions;
     // adding hardening coverage must not silently remove an older suite.

@@ -478,6 +478,11 @@ export class ReturnCaseFinancialService {
       );
     }
     const source = knownSource ?? await this.loadCase(input.caseId);
+    // Pending command replay intentionally skips quote/action availability. The
+    // immutable portal ownership fence must still run immediately before money.
+    if (source.actionContext.customerRefundExecutionAuthority === "manual_shopify") {
+      throw new ReturnCaseFinancialError("RETURN_CUSTOMER_REFUND_MANUAL_SHOPIFY", "Refund this return manually in Shopify.", 409, { caseId: input.caseId });
+    }
     try {
       const execution = await this.customerRefundProvider.execute({
         source,
