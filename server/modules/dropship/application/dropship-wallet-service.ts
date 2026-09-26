@@ -429,9 +429,9 @@ export interface DropshipAutoReloadSettingRecord {
   acknowledgedAt: Date | null;
   /**
    * The vendor's choice for their rewards points (funding design phase 7):
-   * true auto-applies them to each order debit before cash, false saves them,
-   * null means they have not chosen yet, which reads as saved. Auto-apply is
-   * never a default (migration 0704).
+   * true applies them to each order debit before cash, false saves them,
+   * null means they have not chosen yet, which reads as on: points apply by
+   * default (owner decision 2026-09-26; migration 0704 stored the choice).
    */
   spendRewardsFirst: boolean | null;
   createdAt: Date;

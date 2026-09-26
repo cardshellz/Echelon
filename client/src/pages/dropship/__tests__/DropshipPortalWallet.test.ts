@@ -29,7 +29,8 @@ describe("DropshipPortalWallet contract", () => {
     }
     expect(source.match(/deriveWalletFlow\(/g)).toHaveLength(1);
     expect(source).not.toContain("from \"@/components/ui/switch\"");
-    expect(source).not.toContain("<Checkbox");
+    // Exactly one checkbox: the points box (owner decision 2026-09-26). Every other money choice is a named option.
+    expect(source.match(/<Checkbox/g)).toHaveLength(1);
     expect(source).toContain("adaptWalletView(await fetchJson<unknown>(WALLET_QUERY_KEY[0]))");
   });
 
@@ -278,7 +279,7 @@ describe("DropshipPortalWallet contract", () => {
 });
 
 describe("rewards on the wallet page (funding design phase 7)", () => {
-  it("shows the points as their own element with the choice as a radio pair that starts unselected, in the model's words", () => {
+  it("shows the points as their own element with one checkbox, ticked unless the vendor unticked it, in the model's words", () => {
     const block = between("function RewardsBalance", "function describeBalanceAfterCell");
     expect(block).toContain('data-testid="wallet-rewards"');
     expect(block).toContain('data-testid="wallet-rewards-balance"');
@@ -287,13 +288,16 @@ describe("rewards on the wallet page (funding design phase 7)", () => {
     expect(block).toContain("{balance.points}");
     expect(block).toContain("worth {balance.value} on your orders");
     expect(block).toContain("{describeRewardsUse(spendFirst)}");
-    // The choice is the page's radio pair, never a switch, and neither option is selected until the vendor chooses:
-    // auto-apply is never a default. A re-click of the chosen option sends nothing; both wait for the settings row.
+    // One checkbox, on by default (owner decision 2026-09-26). What ticked means is the model's, never the page's;
+    // a click that leaves the state as it is sends nothing, and the box waits for the settings row.
     expect(block).toContain("const spendFirst = wallet.autoReload?.spendRewardsFirst ?? null;");
+    expect(block).toContain("const applies = rewardsApplyToOrders(spendFirst);");
     expect(block).toContain("const disabled = feedback.busy || !wallet.autoReload;");
-    expect(block).toContain('<div role="radiogroup" aria-label="Rewards"');
-    expect(block).toContain('<RadioChip label="Auto-apply to orders" selected={spendFirst === true} disabled={disabled} onSelect={() => { if (spendFirst !== true) void onSave(true); }} testId="wallet-rewards-spend" />');
-    expect(block).toContain('<RadioChip label="Save them up" selected={spendFirst === false} disabled={disabled} onSelect={() => { if (spendFirst !== false) void onSave(false); }} testId="wallet-rewards-save" />');
+    expect(block).toContain("checked={applies}");
+    expect(block).toContain("onCheckedChange={(checked) => { const next = checked === true; if (next !== applies) void onSave(next); }}");
+    expect(block).toContain('<Label htmlFor="wallet-rewards-apply"');
+    expect(block).toContain("Use my points on my orders");
+    expect(block).not.toContain("RadioChip");
     expect(block).not.toMatch(/1%|\d+%|"\$|<Switch|\?\? true/);
     expect(block).not.toContain("formatCents(");
     // The balance section renders it once, above the add-money panel.

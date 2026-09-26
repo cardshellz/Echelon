@@ -389,8 +389,8 @@ export const LEDGER_REASON_LABELS: Readonly<Record<WalletLedgerReason, string>> 
 // Rewards (funding design phase 7): points earned on bank and USDC transfers
 // when they land, at the per-rail rates the server serves, 100 points per
 // dollar (one point per cent, so the stored cents are the points). They are
-// used only on .ops orders, and only once the vendor chooses to auto-apply
-// them; until then they are saved. Auto-apply is never a default. Staff may
+// used only on .ops orders, where they pay before cash by default; a vendor
+// who unticks "Use my points on my orders" saves them instead. Staff may
 // set an expiry (migration 0705): points keep the setting they were earned
 // under, and the ones closest to expiring are used first.
 // ---------------------------------------------------------------------------
@@ -466,7 +466,7 @@ export function describeRewardsRule(rates: WalletRewardsRules, usdcOffered: bool
       ? `Bank and USDC transfers earn ${bank} in rewards points when they land`
       : `A bank transfer earns ${bank} in rewards points when it lands, a USDC transfer ${usdc}`;
   const cardClause = rates.rewardsRateCardBps > 0 ? `a card charge earns ${card} at once` : "a card charge earns none";
-  return ` ${earning}; ${cardClause}. ${REWARDS_POINTS_SENTENCE} Points are used only on your orders here, and only once you choose in Wallet to auto-apply them; until you choose, they are saved up. ${expiry} They are not cash: they cannot be paid out, do not count toward your reserve, and a payment your bank takes back takes its points back too.`;
+  return ` ${earning}; ${cardClause}. ${REWARDS_POINTS_SENTENCE} Points are used only on your orders here: they pay before your cash unless you untick "Use my points on my orders" in Wallet, which saves them up. ${expiry} They are not cash: they cannot be paid out, do not count toward your reserve, and a payment your bank takes back takes its points back too.`;
 }
 
 /**
@@ -514,26 +514,29 @@ export function describeRewardsNextExpiry(
 export const REWARDS_POINTS_SENTENCE = "100 points are worth $1 on your orders.";
 
 /**
- * The line under the points figure: what the vendor's choice is doing today,
- * or that no choice has been made yet (auto-apply is never assumed).
+ * The line under the points checkbox: what it does today. Points apply unless
+ * the vendor unticked the box (`false`); no choice yet (`null`) is the
+ * default, on, exactly as the server reads it (`decideRewardsSpend`).
  */
 export function describeRewardsUse(spendRewardsFirst: boolean | null): string {
-  if (spendRewardsFirst === null) {
-    return `Not chosen yet, so your points are saved up. Choose to auto-apply them to your orders, or keep saving them. ${REWARDS_POINTS_SENTENCE}`;
-  }
-  return spendRewardsFirst
-    ? `Auto-applied to your orders before your cash. ${REWARDS_POINTS_SENTENCE}`
-    : `Saved up: your cash pays for orders. Auto-apply them whenever you want to use them. ${REWARDS_POINTS_SENTENCE}`;
+  return rewardsApplyToOrders(spendRewardsFirst)
+    ? `Your points pay for your next orders before your cash. ${REWARDS_POINTS_SENTENCE}`
+    : `Saved up: your cash pays for orders. Tick the box to use your points on your orders. ${REWARDS_POINTS_SENTENCE}`;
 }
 
-/** The request body of the choice: the server's flag is exactly the choice, true to auto-apply, false to save up. */
+/** Whether points pay for orders: on unless the vendor turned it off. The one reading of the setting, shared by the checkbox and its line. */
+export function rewardsApplyToOrders(spendRewardsFirst: boolean | null): boolean {
+  return spendRewardsFirst !== false;
+}
+
+/** The request body of the checkbox: the server's flag is exactly the box, true to use points on orders, false to save them. */
 export function buildRewardsPreferenceInput(spendRewardsFirst: boolean): { spendRewardsFirst: boolean } {
   return { spendRewardsFirst };
 }
 
 export function describeRewardsPreferenceSaved(spendRewardsFirst: boolean): string {
   return spendRewardsFirst
-    ? "Saved. Your points are auto-applied to your orders before your cash."
+    ? "Saved. Your points pay for your orders before your cash."
     : "Saved. Your points are kept; your cash pays for orders.";
 }
 

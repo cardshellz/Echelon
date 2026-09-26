@@ -354,7 +354,7 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await expect(intro).toContainText("you keep selling for 14 days after the notice");
   await expect(intro).toContainText("takes up to 5 business days to land (our estimate)");
   await expect(intro).toContainText("costs 3% on top of the amount");
-  await expect(intro).toContainText("USDC costs nothing. Bank and USDC transfers earn 1% in rewards points when they land; a card charge earns none. 100 points are worth $1 on your orders. Points are used only on your orders here, and only once you choose in Wallet to auto-apply them; until you choose, they are saved up.");
+  await expect(intro).toContainText("USDC costs nothing. Bank and USDC transfers earn 1% in rewards points when they land; a card charge earns none. 100 points are worth $1 on your orders. Points are used only on your orders here: they pay before your cash unless you untick \"Use my points on my orders\" in Wallet, which saves them up.");
   await expect(intro).toContainText("the same gap is never pulled twice");
   await expect(intro).toContainText("Routine top-ups never take more than the larger of your reserve and your top-up amount in one charge.");
   await expect(intro).toContainText("You can also add money yourself at any time.");
@@ -726,7 +726,7 @@ test("manage: a server refusal to remove a method in a role renders the exact se
   finish(state);
 });
 
-test("manage: rewards are points with their value beside, the choice starts unmade and saves either way, and the activity speaks in points (funding design phase 7)", async ({ page }) => {
+test("manage: rewards are points with their value beside, one checkbox that starts ticked and saves either way, and the activity speaks in points (funding design phase 7)", async ({ page }) => {
   const ledger = [
     { ledgerEntryId: 101, type: "rewards_spent", status: "settled", amountCents: -250, currency: "USD", availableBalanceAfterCents: 4_250, pendingBalanceAfterCents: 0, rewardsBalanceAfterCents: 1_250, createdAt: LATER, settledAt: LATER, metadata: {} },
     { ledgerEntryId: 100, type: "rewards_earned", status: "settled", amountCents: 1_500, currency: "USD", availableBalanceAfterCents: 4_250, pendingBalanceAfterCents: 0, rewardsBalanceAfterCents: 1_500, createdAt: STAMP, settledAt: STAMP, metadata: {} },
@@ -737,10 +737,11 @@ test("manage: rewards are points with their value beside, the choice starts unma
   await expect(page.getByTestId("wallet-available")).toHaveText("$42.50");
   await expect(rewards.getByTestId("wallet-rewards-balance")).toHaveText("1,250 points");
   await expect(rewards.getByTestId("wallet-rewards-value")).toHaveText("worth $12.50 on your orders");
-  // No choice yet: neither option is selected, and the line says the points are saved until one is made.
-  await expect(rewards.getByTestId("wallet-rewards-use")).toHaveText("Not chosen yet, so your points are saved up. Choose to auto-apply them to your orders, or keep saving them. 100 points are worth $1 on your orders.");
-  await expect(radio(page, "Rewards", "Auto-apply to orders")).toHaveAttribute("aria-checked", "false");
-  await expect(radio(page, "Rewards", "Save them up")).toHaveAttribute("aria-checked", "false");
+  // No choice yet: the box is ticked, the default (owner decision 2026-09-26), and the line says the points pay first.
+  const box = rewards.getByRole("checkbox", { name: "Use my points on my orders" });
+  await expect(box).toBeChecked();
+  await expect(rewards.getByTestId("wallet-rewards-use")).toHaveText("Your points pay for your next orders before your cash. 100 points are worth $1 on your orders.");
+  await expect(rewards.getByRole("radio")).toHaveCount(0);
   // The points never join the cash figure anywhere on the page.
   await expect(page.getByTestId("wallet-balance")).not.toContainText("$55.00");
   await expectNoHorizontalScroll(page);
@@ -764,20 +765,19 @@ test("manage: rewards are points with their value beside, the choice starts unma
   await expect(page.getByTestId("wallet-usdc-funding").getByTestId("wallet-usdc-rewards")).toHaveText("Earns 1% in rewards points once the transfer settles.");
   await page.getByRole("button", { name: "Close" }).click();
 
-  // Choosing is one click, no code: the request is the choice itself.
-  await radio(page, "Rewards", "Auto-apply to orders").click();
-  await expect(rewards.getByRole("status")).toContainText("Saved. Your points are auto-applied to your orders before your cash.");
-  expect(state.preferenceWrites).toEqual([{ spendRewardsFirst: true }]);
-  expect(state.codesSent).toEqual([]);
-  await expect(radio(page, "Rewards", "Auto-apply to orders")).toHaveAttribute("aria-checked", "true");
-  await expect(rewards.getByTestId("wallet-rewards-use")).toHaveText("Auto-applied to your orders before your cash. 100 points are worth $1 on your orders.");
-  // Clicking the chosen option again sends nothing; choosing the other saves the points up.
-  await radio(page, "Rewards", "Auto-apply to orders").click();
-  expect(state.preferenceWrites).toHaveLength(1);
-  await radio(page, "Rewards", "Save them up").click();
+  // Unticking is one click, no code: the request is the box itself, and the points are saved up.
+  await rewards.getByText("Use my points on my orders").click();
   await expect(rewards.getByRole("status")).toContainText("Saved. Your points are kept; your cash pays for orders.");
-  expect(state.preferenceWrites).toEqual([{ spendRewardsFirst: true }, { spendRewardsFirst: false }]);
-  await expect(rewards.getByTestId("wallet-rewards-use")).toHaveText("Saved up: your cash pays for orders. Auto-apply them whenever you want to use them. 100 points are worth $1 on your orders.");
+  expect(state.preferenceWrites).toEqual([{ spendRewardsFirst: false }]);
+  expect(state.codesSent).toEqual([]);
+  await expect(box).not.toBeChecked();
+  await expect(rewards.getByTestId("wallet-rewards-use")).toHaveText("Saved up: your cash pays for orders. Tick the box to use your points on your orders. 100 points are worth $1 on your orders.");
+  // Ticking it again puts the points back on the orders.
+  await box.click();
+  await expect(rewards.getByRole("status")).toContainText("Saved. Your points pay for your orders before your cash.");
+  expect(state.preferenceWrites).toEqual([{ spendRewardsFirst: false }, { spendRewardsFirst: true }]);
+  await expect(box).toBeChecked();
+  await expect(rewards.getByTestId("wallet-rewards-use")).toHaveText("Your points pay for your next orders before your cash. 100 points are worth $1 on your orders.");
   await shot(page, "manage-rewards-02-chosen");
   finish(state);
 });
@@ -817,7 +817,7 @@ test.describe("points expiry (migration 0705)", () => {
     // The rules say what happens to points earned from now on.
     const rules = page.getByTestId("wallet-how-it-works");
     await rules.getByRole("button", { name: "How your wallet works" }).click();
-    await expect(rules).toContainText("until you choose, they are saved up. New points expire 90 days after they are earned, and the points closest to expiring are used first. They are not cash");
+    await expect(rules).toContainText("which saves them up. New points expire 90 days after they are earned, and the points closest to expiring are used first. They are not cash");
     finish(state);
   });
 
@@ -828,7 +828,7 @@ test.describe("points expiry (migration 0705)", () => {
     await expect(rewards.getByTestId("wallet-rewards-next-expiry")).toHaveCount(0);
     const rules = page.getByTestId("wallet-how-it-works");
     await rules.getByRole("button", { name: "How your wallet works" }).click();
-    await expect(rules).toContainText("until you choose, they are saved up. New points do not expire. They are not cash");
+    await expect(rules).toContainText("which saves them up. New points do not expire. They are not cash");
     finish(state);
   });
 });

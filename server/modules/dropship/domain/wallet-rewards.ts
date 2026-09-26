@@ -115,11 +115,13 @@ export interface DropshipRewardsSpendDecision {
 
 /**
  * How an order debit splits between rewards and cash. Rewards pay first, up
- * to the rewards balance, only when the vendor chose to auto-apply them
- * (`spendRewardsFirst === true`); a vendor who chose to save them, or who has
- * not chosen (`null`), pays from cash alone. The split never depends on the
- * cash balance: auto-applied rewards are spent whether or not cash could
- * have covered the order.
+ * to the rewards balance, unless the vendor turned that off
+ * (`spendRewardsFirst === false`), in which case the order is paid from cash
+ * alone and the points are saved. A vendor who has not chosen (`null`) gets
+ * the default, which is on (owner decision 2026-09-26: orders are the only
+ * place points can be spent at launch, so saving them by default only strands
+ * them). The split never depends on the cash balance: applied rewards are
+ * spent whether or not cash could have covered the order.
  */
 export function decideRewardsSpend(input: {
   rewardsBalanceCents: number;
@@ -134,7 +136,7 @@ export function decideRewardsSpend(input: {
   if (input.spendRewardsFirst !== true && input.spendRewardsFirst !== false && input.spendRewardsFirst !== null) {
     throw invalid("spendRewardsFirst must be true, false or null.", { spendRewardsFirst: input.spendRewardsFirst });
   }
-  const rewardsCents = input.spendRewardsFirst === true ? Math.min(input.rewardsBalanceCents, input.totalDebitCents) : 0;
+  const rewardsCents = input.spendRewardsFirst === false ? 0 : Math.min(input.rewardsBalanceCents, input.totalDebitCents);
   return { rewardsCents, cashCents: input.totalDebitCents - rewardsCents };
 }
 

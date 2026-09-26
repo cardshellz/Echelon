@@ -46,6 +46,7 @@ import {
   describeRewardsPreferenceSaved,
   describeRewardsRule,
   describeRewardsUse,
+  rewardsApplyToOrders,
   ledgerBalanceAfter,
   rewardsOffered,
   describeBackupFollow,
@@ -831,7 +832,7 @@ describe("adding money: the top-up step's picks again", () => {
 });
 
 /** The rewards rule as the rules page states it at the launch rates with USDC on offer. */
-const REWARDS_RULE = " Bank and USDC transfers earn 1% in rewards points when they land; a card charge earns none. 100 points are worth $1 on your orders. Points are used only on your orders here, and only once you choose in Wallet to auto-apply them; until you choose, they are saved up. New points do not expire. They are not cash: they cannot be paid out, do not count toward your reserve, and a payment your bank takes back takes its points back too.";
+const REWARDS_RULE = " Bank and USDC transfers earn 1% in rewards points when they land; a card charge earns none. 100 points are worth $1 on your orders. Points are used only on your orders here: they pay before your cash unless you untick \"Use my points on my orders\" in Wallet, which saves them up. New points do not expire. They are not cash: they cannot be paid out, do not count toward your reserve, and a payment your bank takes back takes its points back too.";
 
 describe("rewards in the wallet's words (funding design phase 7)", () => {
   const rates = { rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, rewardsExpiryDays: null };
@@ -858,7 +859,7 @@ describe("rewards in the wallet's words (funding design phase 7)", () => {
     expect(describeRewardsRule({ rewardsRateBankBps: 100, rewardsRateUsdcBps: 200, rewardsRateCardBps: 50, rewardsExpiryDays: null }, true))
       .toContain(" A bank transfer earns 1% in rewards points when it lands, a USDC transfer 2%; a card charge earns 0.5% at once.");
     // The rule never promises auto-apply: it is the vendor's choice, and saving is what happens until they make it.
-    expect(describeRewardsRule(rates, true)).toContain("only once you choose in Wallet to auto-apply them; until you choose, they are saved up.");
+    expect(describeRewardsRule(rates, true)).toContain("unless you untick \"Use my points on my orders\" in Wallet, which saves them up.");
     expect(describeRewardsRule({ rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0, rewardsExpiryDays: 90 }, true)).toBe("");
   });
 
@@ -868,7 +869,7 @@ describe("rewards in the wallet's words (funding design phase 7)", () => {
     expect(describeRewardsExpiryRule(1)).toBe("New points expire 1 day after they are earned, and the points closest to expiring are used first.");
     expect(describeRewardsExpiryRule(3_650)).toContain("expire 3,650 days after");
     expect(describeRewardsRule({ ...rates, rewardsExpiryDays: 90 }, true))
-      .toContain("until you choose, they are saved up. New points expire 90 days after they are earned, and the points closest to expiring are used first. They are not cash");
+      .toContain("which saves them up. New points expire 90 days after they are earned, and the points closest to expiring are used first. They are not cash");
     // A setting outside the server's bound is refused, never rendered.
     for (const bad of [0, 3_651, 1.5, -1]) {
       expect(() => describeRewardsExpiryRule(bad)).toThrow(RangeError);
@@ -900,14 +901,20 @@ describe("rewards in the wallet's words (funding design phase 7)", () => {
     expect(ledgerBalanceAfter({ reason: "rewards_expired", availableBalanceAfterCents: 40_000, rewardsBalanceAfterCents: 250 })).toEqual({ balance: "rewards", cents: 250 });
   });
 
-  it("words the balance line for each choice, and for no choice yet, which saves", () => {
-    expect(describeRewardsUse(null)).toBe("Not chosen yet, so your points are saved up. Choose to auto-apply them to your orders, or keep saving them. 100 points are worth $1 on your orders.");
-    expect(describeRewardsUse(true)).toBe("Auto-applied to your orders before your cash. 100 points are worth $1 on your orders.");
-    expect(describeRewardsUse(false)).toBe("Saved up: your cash pays for orders. Auto-apply them whenever you want to use them. 100 points are worth $1 on your orders.");
-    // The request is the choice itself: true auto-applies, false saves up; nothing is turned round.
+  it("reads the points box as on unless the vendor unticked it: no choice yet is the default, on", () => {
+    expect(rewardsApplyToOrders(null)).toBe(true);
+    expect(rewardsApplyToOrders(true)).toBe(true);
+    expect(rewardsApplyToOrders(false)).toBe(false);
+  });
+
+  it("words the line under the box for each state, and for no choice yet, which applies", () => {
+    expect(describeRewardsUse(null)).toBe("Your points pay for your next orders before your cash. 100 points are worth $1 on your orders.");
+    expect(describeRewardsUse(true)).toBe("Your points pay for your next orders before your cash. 100 points are worth $1 on your orders.");
+    expect(describeRewardsUse(false)).toBe("Saved up: your cash pays for orders. Tick the box to use your points on your orders. 100 points are worth $1 on your orders.");
+    // The request is the box itself: true uses points on orders, false saves them; nothing is turned round.
     expect(buildRewardsPreferenceInput(true)).toEqual({ spendRewardsFirst: true });
     expect(buildRewardsPreferenceInput(false)).toEqual({ spendRewardsFirst: false });
-    expect(describeRewardsPreferenceSaved(true)).toBe("Saved. Your points are auto-applied to your orders before your cash.");
+    expect(describeRewardsPreferenceSaved(true)).toBe("Saved. Your points pay for your orders before your cash.");
     expect(describeRewardsPreferenceSaved(false)).toBe("Saved. Your points are kept; your cash pays for orders.");
   });
 

@@ -249,7 +249,7 @@ export interface DropshipAcceptanceWalletState {
   pendingBalanceCents: number;
   /** The spend-only rewards balance, read under the same lock (funding design phase 7). */
   rewardsBalanceCents: number;
-  /** The vendor's choice: true auto-applies rewards, false saves them, null means not chosen yet (reads as saved). */
+  /** The vendor's choice: true applies rewards to orders, false saves them, null means not chosen yet (reads as on, the default). */
   spendRewardsFirst: boolean | null;
   currency: string;
   /**

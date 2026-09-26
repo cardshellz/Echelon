@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
@@ -122,6 +123,7 @@ import {
   describeRewardsNextExpiry,
   describeRewardsPreferenceSaved,
   describeRewardsUse,
+  rewardsApplyToOrders,
   describeRoleGap,
   describeSavedCardAlternative,
   describeSourcePreselection,
@@ -2558,15 +2560,16 @@ function SavedMethods({
 
 /**
  * The rewards points (funding design phase 7): their own figure next to the
- * cash balance with the dollar value beside, the line saying what the
- * vendor's choice is doing (or that none is made), and the choice itself as
- * the page's whole-clickable radio pair (the page has no switches: a money
- * choice is always a named option). Neither option is selected until the
- * vendor chooses: auto-apply is never a default. When staff have set an
+ * cash balance with the dollar value beside, and one checkbox, "Use my points
+ * on my orders", ticked unless the vendor unticked it (owner decision
+ * 2026-09-26: orders are the only place points can be spent at launch, so
+ * they apply by default; the box stays for later uses such as the store).
+ * The line under it says what the box does today. When staff have set an
  * expiry, the soonest points to expire are named under the figure.
  */
 function RewardsBalance({ wallet, feedback, onSave }: { wallet: DropshipWalletView; feedback: Feedback; onSave: (spendRewardsFirst: boolean) => Promise<void> }) {
   const spendFirst = wallet.autoReload?.spendRewardsFirst ?? null;
+  const applies = rewardsApplyToOrders(spendFirst);
   const balance = describeRewardsBalance(wallet.account.rewardsBalanceCents);
   const nextExpiry = describeRewardsNextExpiry(wallet.rewardsNextExpiry, { now: new Date() });
   // Without a settings row there is nothing to save the choice on; the server scaffolds one with autopay.
@@ -2578,12 +2581,21 @@ function RewardsBalance({ wallet, feedback, onSave }: { wallet: DropshipWalletVi
           <div className="text-sm text-zinc-500">Rewards points</div>
           <div className="mt-1 text-2xl font-semibold" data-testid="wallet-rewards-balance">{balance.points}</div>
           <div className="text-sm text-zinc-500" data-testid="wallet-rewards-value">worth {balance.value} on your orders</div>
-          <p className="mt-1 text-sm text-zinc-500" data-testid="wallet-rewards-use">{describeRewardsUse(spendFirst)}</p>
           {nextExpiry && <p className="mt-1 text-sm text-amber-700" data-testid="wallet-rewards-next-expiry">{nextExpiry}</p>}
         </div>
-        <div role="radiogroup" aria-label="Rewards" className="flex flex-wrap gap-2">
-          <RadioChip label="Auto-apply to orders" selected={spendFirst === true} disabled={disabled} onSelect={() => { if (spendFirst !== true) void onSave(true); }} testId="wallet-rewards-spend" />
-          <RadioChip label="Save them up" selected={spendFirst === false} disabled={disabled} onSelect={() => { if (spendFirst !== false) void onSave(false); }} testId="wallet-rewards-save" />
+        <div className="sm:max-w-xs">
+          <div className="flex items-start gap-2">
+            <Checkbox
+              id="wallet-rewards-apply"
+              data-testid="wallet-rewards-apply"
+              checked={applies}
+              disabled={disabled}
+              onCheckedChange={(checked) => { const next = checked === true; if (next !== applies) void onSave(next); }}
+              className="mt-0.5"
+            />
+            <Label htmlFor="wallet-rewards-apply" className="cursor-pointer text-sm font-medium leading-5">Use my points on my orders</Label>
+          </div>
+          <p className="mt-1 pl-6 text-sm text-zinc-500" data-testid="wallet-rewards-use">{describeRewardsUse(spendFirst)}</p>
         </div>
       </div>
       <SectionFeedback {...feedback} />

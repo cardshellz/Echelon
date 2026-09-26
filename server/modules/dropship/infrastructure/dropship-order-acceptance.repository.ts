@@ -1885,9 +1885,9 @@ async function getOrCreateWalletForUpdate(
 
 /**
  * The vendor's choice for their rewards points (funding design phase 7), from
- * their wallet settings row: true auto-applies them, false saves them, and
- * null (no choice yet, or no row yet) reads as saved. Auto-apply is never
- * assumed (migration 0704).
+ * their wallet settings row: true applies them to orders, false saves them,
+ * and null (no choice yet, or no row yet) is left for `decideRewardsSpend` to
+ * read as the default, which is on (owner decision 2026-09-26).
  */
 async function loadSpendRewardsFirstWithClient(client: PoolClient, vendorId: number): Promise<boolean | null> {
   const result = await client.query<{ spend_rewards_first: boolean | null }>(

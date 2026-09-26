@@ -282,14 +282,16 @@ describe("decideAcceptanceFunding with rewards (funding design phase 7)", () => 
       advance: null,
       rewards: { balanceCents: 5_000, spendFirst: false },
     })).toEqual({ outcome: "accepted", source: "available", advance: null, rewardsCents: 0 });
-    // Not chosen yet reads the same as saving: nothing is auto-applied until the vendor says so.
+  });
+
+  it("a vendor who has not chosen gets the default: points pay first, cash the rest", () => {
     expect(decideAcceptanceFunding({
       availableBalanceCents: 10_000,
-      totalDebitCents: 5_000,
+      totalDebitCents: 12_000,
       standingHold: false,
       advance: null,
-      rewards: { balanceCents: 5_000, spendFirst: null },
-    })).toEqual({ outcome: "accepted", source: "available", advance: null, rewardsCents: 0 });
+      rewards: { balanceCents: 3_000, spendFirst: null },
+    })).toEqual({ outcome: "accepted", source: "available", advance: null, rewardsCents: 3_000 });
   });
 
   it("the shortfall and the advance are sized on the cash the order still needs", () => {
