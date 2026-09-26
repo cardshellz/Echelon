@@ -1,6 +1,46 @@
 # Shopify customer returns implementation
 
-## First increment: order access, eligibility and authorization persistence
+## Current increment: private return labels
+
+`/return-portal` remains restricted to freshly verified active administrators. The item move control is one left-hand grip with the existing drag, click, keyboard and touch behaviors. Public customer access is still closed.
+
+The private settings card selects an active U.S. warehouse, an applicable retail return policy, a connected ShipStation carrier and a service advertising domestic return support. Contact/address data is staff-only. Configuration is versioned and audited; no migration enables labels or picks a default warehouse/carrier. The policy must retain the existing 365-day window, Card Shellz-paid shipping/inspection, and no vendor settlement. Missing warehouse/address, policy or service data must be configured through the corresponding admin settings before labels can be enabled.
+
+After deploying migrations `250_customer_return_private_intake.sql` and `251_customer_return_label_settings.sql`, verify `CUSTOMER_RETURN_SHOPIFY_DOMAINS` and `SHIPSTATION_V2_API_KEY`, then save and enable the private label settings. A real-order review can then use **Get return labels**. This action purchases postage; sample scenarios remain effect-free. Deployment and live provider acceptance are separate from local test success.
+
+### Submission and receiving
+
+`CustomerReturnSubmissionService` first saves the exact reviewed command with a UUID key and preparation lease. It then refreshes Shopify/local evidence, requires the current enabled settings, and calls `prepareCustomerReturnIntake`. Shipping origins come from the freshly observed Shopify shipping address. Product weights are recomputed from the selected purchased lines; customer input cannot supply weight, warehouse, actor or provider facts.
+
+`PostgresCustomerReturnIntakeStore.persist` rechecks the active lease, pinned configuration, exact source identities and current shared quantity claims under locks. One transaction creates the root RMA, claims, operational return cases for each original WMS order, expected WMS return items, exact allocation-to-child links and immutable parcel manifests, and marks the command accepted. Repacked boxes can span original shipment partitions. Missing physical-to-fulfillment mapping blocks intake instead of assigning a warehouse item by SKU. No stock movement, customer message or refund occurs during label creation.
+
+Root-linked expected items do not consume entitlement a second time. Manual return creation, Shopify refund expected-return creation and direct legacy inventory returns participate in the shared order locking/claim boundaries. Portal merchandise must use canonical receiving. Existing canonical receipt/inspection/disposition commands retain their own quantity and inventory controls. The admin returns search accepts the root RMA or a completed label's tracking number and returns its exact linked receiving cases.
+
+The legacy inventory-return entry point now validates source identities and applies each batch atomically; an item or audit failure rolls back the batch. Unrelated purchased lines retain that entry point. For portal-owned purchased lines, manual Shopify refunds continue through financial ingestion but cannot create another physical expectation without RMA correlation; the existing reconciliation queue records that review requirement. A later partial return can use remaining entitlement after restocking only when the inventory ledger exactly matches the linked canonical treatment evidence.
+
+Portal refunds remain manual in Shopify. Action availability, quote, reservation and resumed provider execution are fenced, with a database guard against direct reservations. Native Shopify Returns are not created by this increment. Ambiguous native-return/refund correlations remain a review condition; they are not guessed or used to post stock twice.
+
+### Per-box labels and recovery
+
+`CustomerReturnLabelsService.progress` processes one pending box per command. `PostgresCustomerReturnLabelStore.begin` commits a durable attempt before the carrier POST, with a locked recheck of enabled destination/service settings. Concurrent commands can acquire a parcel only once. A pause stops subsequent purchases; existing artifacts and read-only recovery remain accessible.
+
+`createShipStationReturnLabelAdapter` uses the documented return-label operation, `POST /v2/labels`, with `is_return_label`, an RMA, reversed origin/destination, and the saved single-parcel manifest. It does not reuse outbound package contents or call the ordinary rate-label endpoints. Provider request dimensions are rounded upward to the editor's three-decimal inch precision and saved in the attempt. Recovery always uses that exact saved request. Amounts are integer USD cents calculated with decimal arithmetic.
+
+Timeouts, malformed success responses and other uncertain outcomes never authorize another purchase. An explicit status check searches the provider's external shipment ID, validates the unique label and shipment against the saved request, and records the result. Zero matches remain uncertain; duplicate or conflicting matches require staff review. A recent executing attempt remains processing until its bounded execution window has passed. Definitively rejected boxes remain failed; this increment does not add automatic retries, mutable manifests, cancellation/release or void commands.
+
+The client stores only the channel, command key and optional RMA ID in administrator-scoped session storage. It freezes the order/box plan once submission begins, recovers accepted commands after reload, and shows each box independently. PDF downloads require fresh administrator and channel authorization. The server accepts only approved provider download paths, does not follow redirects or forward credentials, and validates PDF type, signature and a 10 MiB bound.
+
+Carrier semantics: [ShipStation return labels](https://docs.shipstation.com/return-labels), [label lookup](https://docs.shipstation.com/list-labels), and [shipment creation](https://docs.shipstation.com/shipments/create). Provider measurement serialization precision is not assumed; a differing response fails closed for reconciliation.
+
+### Validation and remaining launch work
+
+Focused tests cover live preparation, strict HTTP/authentication boundaries, settings versions, exact request recovery, duplicate clicks, partial labels, lost carrier/database responses and PDF handling. Disposable PostgreSQL suites apply the complete new migrations and exercise concurrent intake, claims, transaction rollback, immutable evidence, purchase intent and audit. Desktop/mobile browser tests intercept fictional APIs; they do not purchase postage.
+
+Run the two intake/label PostgreSQL files sequentially when using the same local `RETURNS_INTAKE_TEST_DATABASE_URL`; CI allocates a separate database per registered file. Explicit `ECHELON_TEST_DATABASE_DISPOSABLE=true` is required. Existing authorization/access/inspection suites keep their separate database guards.
+
+Before customer launch, verify a real private canary including carrier acceptance, download and warehouse receipt, then finish customer-owned authentication/handoffs, operational cancellation/void/release, notifications/tracking and refund reconciliation. The private implementation does not launch customers or prove production credentials/catalog completeness. The sections below retain the earlier foundation and read-only inspection context; their original write gates are superseded only by the private capabilities described above.
+
+## Foundation and read-only inspection: prior increments
 
 The foundation implements internal application/domain and persistence for one customer return spanning original shipments. A private standalone portal now supports live read-only Shopify order lookup, item selection, box planning and review, with fictional sample orders as an explicit secondary source. No increment registers public customer intake. Verified customer access-token adapters, operational child cases, shared write entitlement and shipping workers remain implementation gates.
 
@@ -125,7 +165,7 @@ A drop fixes both the exact purchased line and destination. If that source box c
 
 Review rereads system product weights and recomputes each box's total on the server. Requests cannot supply weights. An original-size claim must match a freshly verified preset and its dimensions; custom dimensions use the shared bounds. Optional dimension-service availability does not invalidate a custom-box review. These measurements add no submission endpoint, label purchase, RMA, inventory or refund write, and preserve the private administrator gate. Sample weights and box dimensions are fictional fixtures, not live defaults. Local tests cannot establish production catalog completeness or ShipStation package availability.
 
-### Remaining write-integration and customer-launch gates
+### Original pre-write checklist: historical context
 
 1. Complete exact mirrored-return correlation and the write-capable source/mapping contract, verified account/order-bound guest access, and versioned staff warehouse/policy configuration. Reuse the shared customer flow with the appropriate access/gateway adapters; do not expose the private testing controls or trust customer-supplied evidence, destinations or identities.
 2. Connect every existing return writer to one shared entitlement contract before enabling authorization intake. Add exact root-allocation-to-child-item links so materialized Echelon cases do not consume the same quantity twice; create operational children transactionally using pinned policy/destination snapshots. Add audited cancellation/release, native Shopify Return reconciliation and a manual-refund fence covering quotes, reservation, pending provider execution and case-association races.

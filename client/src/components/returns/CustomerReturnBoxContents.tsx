@@ -1,5 +1,5 @@
 import type { DragEvent } from "react";
-import { ArrowRightLeft, GripVertical, X } from "lucide-react";
+import { GripVertical, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { CustomerReturnFlowOrder } from "@shared/returns/customer-return-flow.contract";
 import {
@@ -57,13 +57,31 @@ export function CustomerReturnBoxContents({
         )!;
         const description = describePreviewItem(order, line.id);
         const context = previewPackingItemContext(order, line.id);
+        const showMove = canMove && item.packed !== null;
         return (
           <div
             key={line.id}
             data-testid={`packing-item-${parcel.key}-${line.id}`}
-            className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2 py-3 first:pt-0 last:pb-0"
+            className={`grid min-w-0 items-center gap-x-2 gap-y-2 py-3 first:pt-0 last:pb-0 ${showMove ? "grid-cols-[2.75rem_minmax(0,1fr)] sm:grid-cols-[2.75rem_minmax(0,1fr)_auto]" : "grid-cols-[minmax(0,1fr)] sm:grid-cols-[minmax(0,1fr)_auto]"}`}
           >
-            <div className="min-w-0 flex-1 basis-40">
+            {showMove && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-11 w-11 text-muted-foreground hover:text-foreground [@media(pointer:fine)]:cursor-grab [@media(pointer:fine)]:active:cursor-grabbing"
+                disabled={busy}
+                draggable={!busy}
+                aria-label={`Move ${description.accessibleName} from box ${boxNumber}`}
+                title="Drag to another box, or click to choose a box"
+                onClick={(event) => onMove(line.id, event.currentTarget)}
+                onDragStart={(event) => onDragStart(event, line.id)}
+                onDragEnd={onDragEnd}
+              >
+                <GripVertical aria-hidden="true" className="h-4 w-4" />
+              </Button>
+            )}
+            <div className="min-w-0">
               <p className="break-words text-sm font-medium leading-5">
                 {line.title}
               </p>
@@ -78,7 +96,9 @@ export function CustomerReturnBoxContents({
                 </p>
               )}
             </div>
-            <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1">
+            <div
+              className={`ml-auto flex max-w-full flex-wrap items-center justify-end gap-1 ${showMove ? "col-start-2 sm:col-start-3" : "sm:col-start-2"}`}
+            >
               <div className="min-w-0 px-2 text-right text-xs">
                 <span className="block break-all font-medium tabular-nums">
                   {item.packed === null
@@ -87,29 +107,6 @@ export function CustomerReturnBoxContents({
                 </span>
                 <span className="text-muted-foreground">in this box</span>
               </div>
-              {canMove && item.packed !== null && (
-                <Button
-                  variant="outline"
-                  className="min-h-11 px-3 [@media(pointer:fine)]:cursor-grab [@media(pointer:fine)]:active:cursor-grabbing"
-                  disabled={busy}
-                  draggable={!busy}
-                  aria-label={`Move ${description.accessibleName} from box ${boxNumber}`}
-                  title="Drag to another box, or click to choose a box"
-                  onClick={(event) => onMove(line.id, event.currentTarget)}
-                  onDragStart={(event) => onDragStart(event, line.id)}
-                  onDragEnd={onDragEnd}
-                >
-                  <GripVertical
-                    aria-hidden="true"
-                    className="hidden h-3.5 w-3.5 [@media(pointer:fine)]:block"
-                  />
-                  <ArrowRightLeft
-                    aria-hidden="true"
-                    className="h-3.5 w-3.5 [@media(pointer:fine)]:hidden"
-                  />
-                  Move
-                </Button>
-              )}
               <Button
                 variant="ghost"
                 size="icon"

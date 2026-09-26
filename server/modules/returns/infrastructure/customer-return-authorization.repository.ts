@@ -67,7 +67,7 @@ export class PostgresCustomerReturnAuthorizationStore implements CustomerReturnA
   }
 }
 
-class PostgresCustomerReturnAuthorizationTransaction implements CustomerReturnAuthorizationTransaction {
+export class PostgresCustomerReturnAuthorizationTransaction implements CustomerReturnAuthorizationTransaction {
   private readonly lockedCommands = new Set<string>();
   private source: LockedCustomerReturnAuthorizationSource | null = null;
   private sourceLockAttempted = false;
@@ -158,9 +158,10 @@ class PostgresCustomerReturnAuthorizationTransaction implements CustomerReturnAu
       JOIN wms.orders returned_order ON returned_order.id = r.order_id
       LEFT JOIN wms.order_items wi ON wi.id = ri.order_item_id
       LEFT JOIN wms.orders item_order ON item_order.id = wi.order_id
-      WHERE returned_order.oms_fulfillment_order_id = ${String(input.omsOrderId)}
-        OR item_order.oms_fulfillment_order_id = ${String(input.omsOrderId)}
-        OR ri.oms_order_line_id = ANY(ARRAY[${sql.join(lineIds, sql`, `)}]::bigint[])
+       WHERE (returned_order.oms_fulfillment_order_id = ${String(input.omsOrderId)}
+         OR item_order.oms_fulfillment_order_id = ${String(input.omsOrderId)}
+         OR ri.oms_order_line_id = ANY(ARRAY[${sql.join(lineIds, sql`, `)}]::bigint[]))
+         AND NOT EXISTS (SELECT 1 FROM returns.customer_return_allocation_case_items link WHERE link.wms_return_item_id = ri.id)
     `));
     const claimRows = rows(await this.tx.execute(sql`
       SELECT aa.wms_order_item_id, al.oms_order_line_id, aa.fulfillment_id, aa.fulfillment_line_item_id,

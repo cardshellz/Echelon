@@ -31,6 +31,18 @@ describe("PostgresReturnCaseCustomerRefundStore", () => {
     mocks.persistAuditEvent.mockResolvedValue(undefined);
   });
 
+  it("rejects portal refund reservations while the canonical case row is locked", async () => {
+    const query = vi.fn(async (statement: string) => normalizeSql(statement).startsWith("SELECT id, case_number, source_provider")
+      ? result([{...lockedCase(),source_provider:"customer_portal"}]) : result([]));
+    mocks.connect.mockResolvedValue({query,release:vi.fn()});
+    await expect(new PostgresReturnCaseCustomerRefundStore().reserve({source:source(),idempotencyKey:"portal-refund",
+      requestHash:"a".repeat(64),quoteHash:"b".repeat(64),notifyCustomer:false,notes:null,actor:"admin:test",now:NOW,
+      quote:{provider:"shopify",currency:"USD",amountCents:1,maximumRefundableCents:1,lines:[],transactions:[]}}))
+      .rejects.toMatchObject({code:"RETURN_CUSTOMER_REFUND_MANUAL_SHOPIFY"});
+    expect(query.mock.calls.some(([statement]) => statement.includes("INSERT INTO returns.return_case_customer_refunds"))).toBe(false);
+    expect(query).toHaveBeenCalledWith("ROLLBACK");
+  });
+
   it("rolls back confirmed provider evidence when the canonical refund lifecycle CAS fails", async () => {
     const statements: string[] = [];
     const query = vi.fn(async (text: string) => {
@@ -46,7 +58,7 @@ describe("PostgresReturnCaseCustomerRefundStore", () => {
           request_hash: "a".repeat(64),
         }]);
       }
-      if (sql.startsWith("SELECT id, case_number, business_context")) return result([lockedCase()]);
+      if (sql.startsWith("SELECT id, case_number, source_provider, business_context")) return result([lockedCase()]);
       if (sql.startsWith("UPDATE returns.return_case_customer_refunds")) return result([{ id: 81 }]);
       if (sql.startsWith("UPDATE returns.return_cases")) return result([]);
       return result([]);

@@ -68,7 +68,7 @@ export interface ProcessReturnParams {
  *
  * Design principles:
  * - Delegates low-level bucket mutations to `InventoryCoreService`.
- * - Individual item failures are collected -- they never block other items.
+ * - The source fence and all inventory/audit effects share one transaction.
  * - Every mutation is audited via the inventory transactions ledger.
  */
 class ReturnsService {
@@ -97,6 +97,59 @@ class ReturnsService {
    * @returns Summary of what was processed.
    */
   async processReturn(params: ProcessReturnParams): Promise<ReturnResult> {
+    if (!Number.isSafeInteger(params.orderId) || params.orderId <= 0
+      || !Number.isSafeInteger(params.warehouseLocationId) || params.warehouseLocationId <= 0 || !Array.isArray(params.items)
+      || params.items.length === 0 || params.items.length > 200
+      || new Set(params.items.map(item => item.orderItemId)).size !== params.items.length
+      || params.items.some(item => !Number.isSafeInteger(item.orderItemId) || item.orderItemId <= 0
+        || !Number.isSafeInteger(item.productVariantId) || item.productVariantId <= 0
+        || !Number.isSafeInteger(item.qty) || item.qty <= 0
+        || !["sellable","damaged","defective"].includes(item.condition))) {
+      throw new Error("RETURN_LEGACY_INPUT_INVALID: Return item quantities and identities must be valid.");
+    }
+    if (typeof this.inventoryCore.withTx !== "function") {
+      throw new Error("RETURN_LEGACY_TRANSACTION_REQUIRED: Inventory return processing requires the transaction-bound inventory service.");
+    }
+    return this.db.transaction(async (tx: DrizzleDb) => {
+      const initial = sqlRows(await tx.execute(sql`SELECT id,oms_fulfillment_order_id FROM wms.orders WHERE id=${params.orderId}`))[0];
+      if (!initial) throw new Error("RETURN_LEGACY_SOURCE_MISSING: The source order was not found.");
+      const omsId = typeof initial.oms_fulfillment_order_id === "string" && /^[1-9][0-9]*$/.test(initial.oms_fulfillment_order_id)
+        ? Number(initial.oms_fulfillment_order_id) : null;
+      if (omsId !== null) {
+        if (!Number.isSafeInteger(omsId)) throw new Error("RETURN_LEGACY_SOURCE_INVALID: The source order needs verification.");
+        if (omsId <= 2_147_483_647) await tx.execute(sql`SELECT pg_advisory_xact_lock(918413,${omsId})`);
+        await tx.execute(sql`SELECT id FROM oms.oms_orders WHERE id=${omsId} FOR UPDATE`);
+      }
+      const locked = sqlRows(await tx.execute(sql`SELECT id,oms_fulfillment_order_id FROM wms.orders WHERE id=${params.orderId} FOR UPDATE`))[0];
+      if (!locked || locked.oms_fulfillment_order_id !== initial.oms_fulfillment_order_id) {
+        throw new Error("RETURN_LEGACY_SOURCE_CHANGED: The source order changed. Reload it.");
+      }
+      // A different purchased line remains on its existing receiving path. A
+      // split WMS partition of a portal-owned purchased line cannot bypass its
+      // canonical receipt by choosing the other partition's item id.
+      const roots = sqlRows(await tx.execute(sql`SELECT 1 FROM returns.customer_return_authorizations a
+        JOIN returns.customer_return_authorization_lines al ON al.authorization_id=a.id
+        JOIN wms.order_items requested ON requested.oms_order_line_id=al.oms_order_line_id
+        WHERE requested.order_id=${params.orderId}
+          AND requested.id IN (${sql.join(params.items.map(item=>sql`${item.orderItemId}`),sql`, `)}) LIMIT 1`));
+      if (roots.length > 0) {
+        throw new Error("RETURN_CANONICAL_RECEIVING_REQUIRED: Receive portal returns through their linked Return Case.");
+      }
+      const items = sqlRows(await tx.execute(sql`SELECT wi.id,wi.oms_order_line_id,ol.product_variant_id FROM wms.order_items wi
+        LEFT JOIN oms.oms_order_lines ol ON ol.id=wi.oms_order_line_id
+        WHERE wi.order_id=${params.orderId} FOR UPDATE OF wi`));
+      // WMS items have no variant-id column. An exact OMS line owns that link;
+      // legacy non-OMS items retain the existing caller-supplied variant path.
+      if (params.items.some(item => !items.some(source => Number(source.id) === item.orderItemId
+        && (source.oms_order_line_id == null || Number(source.product_variant_id) === item.productVariantId)))) {
+        throw new Error("RETURN_LEGACY_ITEM_MISMATCH: Return items must belong to the source order and catalog variant.");
+      }
+      return new ReturnsService(tx, this.inventoryCore.withTx(tx)).processItems(params);
+    });
+  }
+
+  /** Called only while the shared source-order lock and inventory transaction are held. */
+  private async processItems(params: ProcessReturnParams): Promise<ReturnResult> {
     const result: ReturnResult = {
       orderId: params.orderId,
       processed: 0,
@@ -173,7 +226,8 @@ class ReturnsService {
             item.productVariantId,
             params.orderId,
           );
-          await this.db.transaction(async (tx: any) => {
+          {
+            const tx = this.db;
             const txCore = this.inventoryCore.withTx
               ? this.inventoryCore.withTx(tx)
               : this.inventoryCore;
@@ -198,7 +252,7 @@ class ReturnsService {
               reason: `${item.condition} return${item.reason ? `: ${item.reason}` : ""}`,
               userId: params.userId,
             });
-          });
+          }
 
           // Log the return-specific transaction
           await this.inventoryCore.logTransaction({
@@ -238,14 +292,9 @@ class ReturnsService {
           `[RETURNS] Error processing return for order item ${item.orderItemId}:`,
           message,
         );
-        // Record partial result even on failure -- don't block other items
-        result.items.push({
-          orderItemId: item.orderItemId,
-          productVariantId: item.productVariantId,
-          qty: item.qty,
-          condition: item.condition,
-          baseUnitsReturned: 0,
-        });
+        // The batch is now transaction-bound to its entitlement fence. Any
+        // inventory/audit failure must roll back the batch, not commit a prefix.
+        throw err;
       }
     }
 
@@ -342,6 +391,12 @@ class ReturnsService {
 
     return results;
   }
+}
+
+function sqlRows(result: unknown): Record<string, unknown>[] {
+  const rows = Array.isArray(result) ? result : (result as { rows?: unknown })?.rows;
+  if (!Array.isArray(rows)) throw new Error("RETURN_LEGACY_DATA_INVALID: Invalid return source rows.");
+  return rows as Record<string, unknown>[];
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { Link, Redirect } from "wouter";
 import { z } from "zod";
 import {
@@ -19,6 +26,15 @@ import {
   createSampleReturnGateway,
 } from "@/lib/customer-return-gateway";
 import { CustomerReturnFlow } from "@/components/returns/CustomerReturnFlow";
+import { CustomerReturnLabelSettings } from "@/components/returns/CustomerReturnLabelSettings";
+import { CustomerReturnLabels } from "@/components/returns/CustomerReturnLabels";
+import { CustomerReturnLabelSession } from "@/lib/customer-return-label-session";
+import {
+  createReturnLabelTransport,
+  downloadReturnLabel,
+  returnLabelsEnabled,
+} from "@/lib/customer-return-labels";
+import type { CustomerReturnLabelSettingsState } from "@shared/returns/customer-return-label.contract";
 import {
   PreviewError,
   previewSelectClass,
@@ -27,7 +43,11 @@ import {
   returnPortalPreviewStateSchema,
   type ReturnPortalPreviewState,
 } from "@shared/returns/customer-return-preview.contract";
-import { customerReturnLiveStateSchema } from "@shared/returns/customer-return-live.contract";
+import {
+  customerReturnLiveReviewInputSchema,
+  customerReturnLiveStateSchema,
+} from "@shared/returns/customer-return-live.contract";
+import type { CustomerReturnFlowReviewInput } from "@shared/returns/customer-return-flow.contract";
 import {
   CUSTOMER_RETURN_PORTAL_ACCESS_PATH,
   CUSTOMER_RETURN_PREVIEW_API_PATH,
@@ -41,10 +61,15 @@ export default function CustomerReturnPortalPreview() {
   if (isLoading) return <PortalLoading />;
   if (!user) return <Redirect to={CUSTOMER_RETURN_PORTAL_ACCESS_PATH} />;
   // Fresh server authority controls access; order drafts never survive an identity switch.
-  return <PortalWorkspace key={`${user.id}:${user.role}`} />;
+  return (
+    <PortalWorkspace
+      key={`${user.id}:${user.role}`}
+      adminId={String(user.id)}
+    />
+  );
 }
 
-function PortalWorkspace() {
+function PortalWorkspace({ adminId }: { adminId: string }) {
   const [state, setState] = useState<ReturnPortalPreviewState | null>(null);
   const [source, setSource] = useState<OrderSource>("live");
   const [scenarioId, setScenarioId] = useState("");
@@ -56,6 +81,16 @@ function PortalWorkspace() {
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogAttempt, setCatalogAttempt] = useState(0);
   const [channelId, setChannelId] = useState("");
+  const [labelSettings, setLabelSettings] =
+    useState<CustomerReturnLabelSettingsState | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const downloads = useRef(new Set<AbortController>());
+  useEffect(
+    () => () => {
+      downloads.current.forEach((controller) => controller.abort());
+    },
+    [],
+  );
 
   const denyAccess = useCallback((message: string) => {
     setState(null);
@@ -64,7 +99,35 @@ function PortalWorkspace() {
     setError(message);
     setLoading(false);
     setCatalogLoading(false);
+    setLabelSettings(null);
+    downloads.current.forEach((controller) => controller.abort());
+    setDownloadError(null);
   }, []);
+
+  const [labels] = useState(() => {
+    let storage: Storage | null = null;
+    try {
+      storage = window.sessionStorage;
+    } catch {
+      /* Creation stays closed without a recoverable command key. */
+    }
+    return new CustomerReturnLabelSession(
+      adminId,
+      storage,
+      createReturnLabelTransport,
+      denyAccess,
+    );
+  });
+  const labelSession = useSyncExternalStore(
+    labels.subscribe,
+    labels.getSnapshot,
+  );
+  const labelLocked = labelSession.record !== null;
+  useEffect(() => {
+    labels.activate();
+    if (state) void labels.restore();
+    return () => labels.dispose();
+  }, [labels, state]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -138,7 +201,13 @@ function PortalWorkspace() {
         }
         if (!controller.signal.aborted) {
           setCatalog(parsed);
-          if (parsed.shops.length === 1)
+          const savedChannel = labels.getSnapshot().record?.channelId;
+          if (
+            savedChannel &&
+            parsed.shops.some((shop) => shop.channelId === savedChannel)
+          )
+            setChannelId(String(savedChannel));
+          else if (parsed.shops.length === 1)
             setChannelId(String(parsed.shops[0].channelId));
         }
       } catch (cause) {
@@ -151,7 +220,7 @@ function PortalWorkspace() {
     }
     void loadCatalog();
     return () => controller.abort();
-  }, [state, source, catalogAttempt, denyAccess]);
+  }, [state, source, catalogAttempt, denyAccess, labels]);
 
   const scenario = state?.scenarios.find(
     (candidate) => candidate.id === scenarioId,
@@ -163,14 +232,71 @@ function PortalWorkspace() {
     if (!state) return null;
     if (source === "sample")
       return scenario ? createSampleReturnGateway(scenario.id) : null;
-    return shop ? createLiveReturnGateway(shop.channelId) : null;
-  }, [state, source, scenario, shop]);
+    if (!shop) return null;
+    const settings =
+      labelSettings?.channelId === shop.channelId ? labelSettings : null;
+    const capability =
+      returnLabelsEnabled(settings) &&
+      !labelSession.storageBlocked &&
+      settings?.settings
+        ? {
+            create: (input: CustomerReturnFlowReviewInput) =>
+              labels.begin({
+                ...customerReturnLiveReviewInputSchema.parse({
+                  ...input,
+                  channelId: shop.channelId,
+                }),
+                settingsVersion: settings.settings!.version,
+              }),
+          }
+        : undefined;
+    return createLiveReturnGateway(shop.channelId, fetch, capability);
+  }, [
+    state,
+    source,
+    scenario,
+    shop,
+    labelSettings,
+    labelSession.storageBlocked,
+    labels,
+  ]);
   function changeSource(next: string) {
+    if (labelLocked) return;
     if (next !== "live" && next !== "sample") return;
     setSource(next);
     setCatalog(null);
     setChannelId("");
     setCatalogError(null);
+    setLabelSettings(null);
+  }
+  async function download(parcelId: number) {
+    if (!labelSession.status) return;
+    const status = labelSession.status;
+    const controller = new AbortController();
+    downloads.current.add(controller);
+    setDownloadError(null);
+    try {
+      const artifact = await downloadReturnLabel(
+        status,
+        parcelId,
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      const url = URL.createObjectURL(artifact);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `return-${status.authorizationId}-box-${status.parcels.find((item) => item.parcelId === parcelId)!.number}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (cause) {
+      if (controller.signal.aborted) return;
+      if (cause instanceof PreviewAccessError) denyAccess(cause.message);
+      else setDownloadError(errorMessage(cause));
+    } finally {
+      downloads.current.delete(controller);
+    }
   }
 
   return (
@@ -205,6 +331,7 @@ function PortalWorkspace() {
                     id="portal-order-source"
                     className={previewSelectClass}
                     value={source}
+                    disabled={labelLocked}
                     onChange={(event) => changeSource(event.target.value)}
                   >
                     <option value="live">Shopify orders</option>
@@ -236,8 +363,11 @@ function PortalWorkspace() {
                       id="portal-shop"
                       className={previewSelectClass}
                       value={channelId}
-                      disabled={catalog.shops.length === 1}
-                      onChange={(event) => setChannelId(event.target.value)}
+                      disabled={labelLocked || catalog.shops.length === 1}
+                      onChange={(event) => {
+                        setLabelSettings(null);
+                        setChannelId(event.target.value);
+                      }}
                     >
                       {catalog.shops.length > 1 && (
                         <option value="">Choose a Shopify shop</option>
@@ -253,18 +383,30 @@ function PortalWorkspace() {
                     </select>
                   </div>
                 )}
+                {source === "live" && shop && (
+                  <CustomerReturnLabelSettings
+                    key={shop.channelId}
+                    channelId={shop.channelId}
+                    locked={labelLocked}
+                    accepted={labelSession.record?.authorizationId != null}
+                    onState={setLabelSettings}
+                    onAccessDenied={denyAccess}
+                  />
+                )}
                 <p className="text-xs leading-relaxed">
-                  This private workspace supports order lookup and return
-                  review. Return creation, shipping labels and warehouse
-                  receiving remain disabled.
+                  Sample orders never create returns or labels. Live labels
+                  require saved, enabled settings for the selected shop.
+                  Customer access remains off and refunds remain manual in
+                  Shopify.
                 </p>
               </div>
             </details>
             <p id="return-testing-status" className="mt-2 text-xs">
               {source === "live"
-                ? "Live order lookup and review only."
-                : "Sample orders only."}{" "}
-              No returns, labels or refunds are created.
+                ? gateway?.labels
+                  ? "Live return creation and label purchases are enabled for this shop. Refunds remain manual."
+                  : "Live order lookup and review only. Configure and enable labels in Testing controls to create a return."
+                : "Sample orders only. No returns, labels or refunds are created."}
             </p>
             {source === "live" && catalogLoading && (
               <p role="status" className="mt-3 text-sm">
@@ -321,9 +463,29 @@ function PortalWorkspace() {
             </div>
           </section>
         )}
-        {state && gateway && (
+        {state && !labelLocked && labelSession.error && (
+          <PreviewError message={labelSession.error} />
+        )}
+        {state && labelLocked && (
+          <CustomerReturnLabels
+            state={{
+              ...labelSession,
+              error: downloadError ?? labelSession.error,
+            }}
+            onCheck={() => {
+              setDownloadError(null);
+              void labels.check();
+            }}
+            onFinish={() => {
+              setDownloadError(null);
+              labels.finish();
+            }}
+            onDownload={(parcelId) => void download(parcelId)}
+          />
+        )}
+        {state && gateway && !labelLocked && (
           <CustomerReturnFlow
-            key={`${attempt}:${source}:${source === "live" ? channelId : scenarioId}`}
+            key={`${attempt}:${source}:${source === "live" ? channelId : scenarioId}:${labelSession.revision}`}
             initialOrderReference={
               source === "sample" ? (scenario?.orderReference ?? "") : ""
             }

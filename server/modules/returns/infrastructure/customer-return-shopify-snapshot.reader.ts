@@ -4,6 +4,7 @@ import {
   CUSTOMER_RETURN_SHOPIFY_API_VERSION, CUSTOMER_RETURN_SHOPIFY_COLLECTION_LIMIT,
   CustomerReturnShopifySnapshotError, customerReturnShopifyDomainSchema, customerReturnShopifyGidSchema,
   customerReturnShopifySnapshotInputSchema, customerReturnShopifySnapshotSchema, customerReturnShopifyOrderSchema,
+  customerReturnShopifyAddressSchema,
   customerReturnShopifyPurchasedLineSchema, customerReturnShopifyFulfillmentSchema,
   customerReturnShopifyFulfillmentEventSchema,
   customerReturnShopifyNativeReturnSchema, customerReturnShopifyNativeReturnLineSchema,
@@ -40,7 +41,7 @@ const returnHeaderSchema = customerReturnShopifyNativeReturnSchema.omit({ lines:
 const returnableHeaderSchema = customerReturnShopifyReturnableFulfillmentSchema.omit({ lines: true, fulfillmentId: true })
   .extend({ fulfillment: identity("Fulfillment").extend({ order: identity("Order") }).strict() }).strict();
 const orderHeaderSchema = customerReturnShopifyOrderSchema.omit({ destinationCountryCode: true }).extend({
-  shippingAddress: z.object({ countryCodeV2: z.string().regex(/^[A-Z]{2}$/).nullable() }).strict().nullable(),
+  shippingAddress: customerReturnShopifyAddressSchema.nullable(),
   fulfillmentsCount: z.object({ count: quantity, precision: z.literal("EXACT") }).strict(),
   fulfillments: z.array(fulfillmentHeaderSchema).max(LIMIT), refunds: z.array(refundHeaderSchema).max(LIMIT),
 }).strict();
@@ -204,7 +205,7 @@ export class ShopifyCustomerReturnSnapshotReader implements CustomerReturnShopif
       returnableFulfillments.push({ id: returnable.id, fulfillmentId: returnable.fulfillment.id, lines: items });
     }
     const { fulfillments: _fulfillments, refunds: _refunds, fulfillmentsCount: _count, shippingAddress, ...order } = header;
-    return { order: { ...order, destinationCountryCode: shippingAddress?.countryCodeV2 ?? null }, lines, fulfillments, returns, refunds, returnableFulfillments };
+    return { order: { ...order, shippingAddress, destinationCountryCode: shippingAddress?.countryCodeV2 ?? null }, lines, fulfillments, returns, refunds, returnableFulfillments };
   }
 }
 

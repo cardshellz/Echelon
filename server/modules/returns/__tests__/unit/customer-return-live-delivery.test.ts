@@ -15,7 +15,7 @@ function sources(): { shopify: CustomerReturnShopifySnapshot; local: CustomerRet
     shop: { ...shop, shopId: gid("Shop", 1), scopes: { readOrders: true, readAllOrders: true, readReturns: true } },
     apiVersion: "2026-07", observedAt,
     order: { id: gid("Order", 1001), name: "#TEST-1001", createdAt: purchasedAt, processedAt: purchasedAt,
-      updatedAt: deliveredAt, cancelledAt: null, destinationCountryCode: "US" },
+      updatedAt: deliveredAt, cancelledAt: null, destinationCountryCode: "US", shippingAddress: null },
     lines: [{ id: gid("LineItem", 101), title: "Fictional product", variantTitle: null, sku: "SAME-SKU", quantity: 4,
       currentQuantity: 4, refundableQuantity: 4, requiresShipping: true }],
     fulfillments: [{ id: gid("Fulfillment", 201), status: "SUCCESS", updatedAt: deliveredAt, deliveredAt: null,

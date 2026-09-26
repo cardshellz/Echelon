@@ -9,6 +9,7 @@ import {
 import { CustomerReturnAuthorizationService, type CustomerReturnTrustedSource } from "../../application/customer-return-authorization.service";
 import { PostgresCustomerReturnAuthorizationStore } from "../../infrastructure/customer-return-authorization.repository";
 import { resolveReturnsTestDatabase } from "../support/disposable-database";
+import { createIntakeOwnerTables } from "../support/customer-return-inspection-database";
 
 const connectionString = resolveReturnsTestDatabase(process.env, "authorization");
 const integration = connectionString ? describe.sequential : describe.skip;
@@ -50,7 +51,7 @@ integration("customer authorization on migration-defined PostgreSQL", () => {
 
   beforeAll(async () => {
     pool = new Pool({ connectionString: connectionString!, max: 8, connectionTimeoutMillis: 5_000, statement_timeout: 10_000 });
-    await pool.query("DROP SCHEMA IF EXISTS returns CASCADE; DROP SCHEMA IF EXISTS wms CASCADE; DROP SCHEMA IF EXISTS oms CASCADE; DROP SCHEMA IF EXISTS channels CASCADE");
+    await pool.query("DROP SCHEMA IF EXISTS returns CASCADE; DROP SCHEMA IF EXISTS wms CASCADE; DROP SCHEMA IF EXISTS oms CASCADE; DROP SCHEMA IF EXISTS channels CASCADE; DROP SCHEMA IF EXISTS dropship CASCADE");
     await pool.query("CREATE SCHEMA returns; CREATE SCHEMA wms; CREATE SCHEMA oms; CREATE SCHEMA channels");
     // Existing owner relations are extracted from their real migrations. The
     // projection column rename below matches the current orders.schema.ts;
@@ -71,6 +72,8 @@ integration("customer authorization on migration-defined PostgreSQL", () => {
     // The complete new migration, including deferred constraints and triggers,
     // executes verbatim. No persistence SQL or PostgreSQL operation is mocked.
     await pool.query(readFileSync("migrations/0699_customer_return_authorizations.sql", "utf8"));
+    await pool.query("CREATE SCHEMA dropship; CREATE TABLE dropship.dropship_vendors(id integer PRIMARY KEY); CREATE TABLE dropship.dropship_store_connections(id integer PRIMARY KEY)");
+    await createIntakeOwnerTables(pool);
     store = new PostgresCustomerReturnAuthorizationStore(drizzle(pool));
   });
 
