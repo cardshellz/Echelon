@@ -45,10 +45,14 @@ export class PostgresInventoryCutoverReconstructionRepository implements Invento
     });
     const inventory = await captureInventoryCutoverStage("inventory_custody", async () =>
       inventoryCaptureSchema.parse(await readInventoryCutoverReconstruction(client)));
+    // An accepted OMS line can point at a terminal WMS order with no residual
+    // journal. Capture that exact lineage before evaluating materialized demand.
+    const oms = await captureInventoryCutoverStage("oms_demand_and_receipts", () => readOmsCutoverReconstruction(client));
     const residual = inventory.journals.filter((row) => BigInt(row.reservedQty) !== BigInt(0) || BigInt(row.pickedQty) !== BigInt(0));
     const wms = await captureInventoryCutoverStage("wms_demand_and_packages", () => readWmsCutoverReconstruction(client,
       [...new Set(residual.flatMap((row) => row.orderId == null ? [] : [row.orderId]))],
-      [...new Set(residual.flatMap((row) => row.orderItemId == null ? [] : [row.orderItemId]))]));
+      [...new Set(residual.flatMap((row) => row.orderItemId == null ? [] : [row.orderItemId]))],
+      oms.acceptedOmsDemand.map((line) => line.lineId)));
     const variants = await captureInventoryCutoverStage("variant_identity", async () => {
       const rows = (await client.query(`SELECT id, product_id AS "productId", sku, is_active AS "isActive",
       requires_shipping AS "requiresShipping", COALESCE(track_inventory,true) AS "trackInventory", sales_eligibility AS "salesEligibility"
@@ -58,7 +62,6 @@ export class PostgresInventoryCutoverReconstructionRepository implements Invento
       return rows;
     });
     const costs = await captureInventoryCutoverStage("original_costs", () => readCutoverOriginalCosts(client, wms.items.map((item) => item.id)));
-    const oms = await captureInventoryCutoverStage("oms_demand_and_receipts", () => readOmsCutoverReconstruction(client));
     const shipmentReviews = await captureInventoryCutoverStage("shipment_reviews", () => readWmsCutoverShipmentReviews(client));
     return captureInventoryCutoverStage("evidence_validation", async () => cutoverReconstructionEvidenceSchema.parse({
       schemaVersion: "inventory_cutover_reconstruction_v1", ...inventory, ...wms, ...oms,

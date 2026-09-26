@@ -1064,6 +1064,9 @@ async function persistReceiptItems(
 ): Promise<void> {
   // A reviewed receipt may precede local engine evidence. Replay may fill a
   // missing binding, never replace its quantity, line identity or existing link.
+  // PostgreSQL fires the immutable-evidence trigger even for an unchanged UPDATE.
+  // Skip unchanged conflicts, then verify all retained rows below. Actual binding
+  // changes still require the production trigger's one-time attachment approval.
   for (const row of lineRows) {
     const line: ResolvedLine = row.line;
     await tx.execute(sql`
@@ -1099,6 +1102,8 @@ async function persistReceiptItems(
           OR retained.legacy_wms_shipment_item_id = EXCLUDED.legacy_wms_shipment_item_id)
         AND (retained.physical_shipment_item_id IS NULL OR EXCLUDED.physical_shipment_item_id IS NULL
           OR retained.physical_shipment_item_id = EXCLUDED.physical_shipment_item_id)
+        AND ((retained.legacy_wms_shipment_item_id IS NULL AND EXCLUDED.legacy_wms_shipment_item_id IS NOT NULL)
+          OR (retained.physical_shipment_item_id IS NULL AND EXCLUDED.physical_shipment_item_id IS NOT NULL))
     `);
   }
   const persisted = rowsOf<any>(await tx.execute(sql`

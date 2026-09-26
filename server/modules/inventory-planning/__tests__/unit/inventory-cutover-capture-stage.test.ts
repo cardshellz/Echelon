@@ -101,8 +101,8 @@ describe("named inventory cutover capture errors", () => {
 });
 
 describe("actual reconstruction repository capture stages", () => {
-  const sequence: InventoryCutoverCaptureStage[] = ["transaction_guard", "inventory_custody", "wms_demand_and_packages",
-    "variant_identity", "original_costs", "oms_demand_and_receipts", "shipment_reviews"];
+  const sequence: InventoryCutoverCaptureStage[] = ["transaction_guard", "inventory_custody", "oms_demand_and_receipts",
+    "wms_demand_and_packages", "variant_identity", "original_costs", "shipment_reviews"];
   let evidence: CutoverReconstructionEvidence;
   let visited: InventoryCutoverCaptureStage[];
   let failingStage: InventoryCutoverCaptureStage | undefined;
@@ -161,7 +161,7 @@ describe("actual reconstruction repository capture stages", () => {
     expect(await repository.capture(client)).toEqual(evidence);
     expect(visited).toEqual(sequence);
     expect(assertInventoryCutoverFenceHeldInsideTransaction).not.toHaveBeenCalled();
-    expect(readWmsCutoverReconstruction).toHaveBeenCalledExactlyOnceWith(client, [1], [11]);
+    expect(readWmsCutoverReconstruction).toHaveBeenCalledExactlyOnceWith(client, [1], [11], []);
     expect(query.mock.calls.every(([sql]) => /^\s*SELECT\b/.test(sql))).toBe(true);
   });
 
@@ -192,7 +192,7 @@ describe("actual reconstruction repository capture stages", () => {
     evidence.journals.push({ ...evidence.journals[0], warehouseLocationId: 200 },
       { ...evidence.journals[0], orderId: 2, orderItemId: 22, reservedQty: "0", pickedQty: "0" });
     await repository.capture(client);
-    expect(readWmsCutoverReconstruction).toHaveBeenCalledExactlyOnceWith(client, [1], [11]);
+    expect(readWmsCutoverReconstruction).toHaveBeenCalledExactlyOnceWith(client, [1], [11], []);
   });
 
   it("rejects invalid complete evidence with the evidence-validation stage rather than returning partial readiness", async () => {
@@ -218,7 +218,7 @@ describe("actual reconstruction repository capture stages", () => {
     variantRows = Array.from({ length: 100_001 }, () => evidence.variants[0]);
     const failure = await repository.capture(client).catch(error => error);
     expect(failure).toMatchObject({ stage: "variant_identity", code: "CUTOVER_EVIDENCE_CAPTURE_LIMIT_EXCEEDED", status: 422 });
-    expect(visited).toEqual(sequence.slice(0, 4));
+    expect(visited).toEqual(sequence.slice(0, 5));
     expect(readCutoverOriginalCosts).not.toHaveBeenCalled();
   });
 
@@ -227,7 +227,7 @@ describe("actual reconstruction repository capture stages", () => {
     failureCause = Object.assign(new Error(SECRET), { code: "OMS_CUTOVER_CENSUS_LIMIT_EXCEEDED" });
     const failure = await repository.capture(client).catch(error => error);
     expect(failure).toMatchObject({ stage: failingStage, code: "CUTOVER_EVIDENCE_CAPTURE_LIMIT_EXCEEDED", status: 422 });
-    expect(visited).toEqual(sequence.slice(0, 6));
+    expect(visited).toEqual(sequence.slice(0, 3));
     expect(readWmsCutoverShipmentReviews).not.toHaveBeenCalled();
   });
 
@@ -239,6 +239,6 @@ describe("actual reconstruction repository capture stages", () => {
     expect(failure.cause).toBe(failureCause);
     expect(JSON.stringify(failure)).not.toContain(SECRET);
     expect(readCutoverOriginalCosts).toHaveBeenCalledOnce();
-    expect(readOmsCutoverReconstruction).not.toHaveBeenCalled();
+    expect(readOmsCutoverReconstruction).toHaveBeenCalledOnce();
   });
 });
