@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { Pool } from "pg";
@@ -20,7 +21,9 @@ import {
 } from "../modules/oms/channel-fulfillment-authority.service";
 import { createChannelFulfillmentProjector } from "../modules/oms/channel-fulfillment-projection.repository";
 
-const MAX_TRANSACTION_ATTEMPTS = 3;
+// Preserve three total attempts, with at most 150ms of backoff. Immediate
+// retries can exhaust the budget while a competing label transaction commits.
+const TRANSACTION_RETRY_DELAYS_MS = [50, 100] as const;
 const MAX_ERROR_CAUSE_DEPTH = 10;
 const STATEMENT_TIMEOUT = "30000ms";
 const LOCK_TIMEOUT = "5000ms";
@@ -43,12 +46,15 @@ export function createPackageAllocationLabelCommercialWorkflow(dependencies: {
   readonly pool: Pick<Pool, "connect">;
   readonly clock: ChannelFulfillmentAuthorityClock;
   readonly logger: ChannelFulfillmentAuthorityLogger;
+  readonly waitForRetry?: (delayMs: number) => Promise<void>;
 }): PackageAllocationLabelCommercialWorkflow {
+  const waitForRetry = dependencies.waitForRetry ?? delay;
   return {
     async run(work) {
       for (let attempt = 1; ; attempt += 1) {
         const client = await dependencies.pool.connect();
         let discardError: Error | undefined;
+        let retryDelayMs: number | undefined;
         try {
           const database = drizzle(client, { schema });
           const committedEvents: Readonly<Record<string, unknown>>[] = [];
@@ -108,12 +114,17 @@ export function createPackageAllocationLabelCommercialWorkflow(dependencies: {
           // Never return a possibly aborted connection to the pool. Owner
           // errors retain their classification for review/webhook retry.
           discardError = error instanceof Error ? error : new Error("Label transaction failed");
-          const retry = retryableSerializationFailure(error) && attempt < MAX_TRANSACTION_ATTEMPTS;
+          retryDelayMs = TRANSACTION_RETRY_DELAYS_MS[attempt - 1];
+          const retry = retryableSerializationFailure(error) && retryDelayMs !== undefined;
           dependencies.logger.warn({ code: "LABEL_COMMERCIAL_TRANSACTION_FAILED", attempt, retry });
           if (!retry) throw error;
         } finally {
           client.release(discardError);
         }
+        // The entire failed transaction has rolled back and its connection is
+        // released before waiting. The next attempt acquires a fresh snapshot;
+        // never retry only the failed statement or a nested savepoint.
+        if (retryDelayMs !== undefined) await waitForRetry(retryDelayMs);
       }
     },
   };
