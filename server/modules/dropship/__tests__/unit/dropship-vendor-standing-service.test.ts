@@ -78,7 +78,7 @@ describe("DropshipVendorStandingService", () => {
         payload: expect.objectContaining({ reason: "card_declined", standingRevision: 1, pausedAt: NOW.toISOString(), stripeDeclineCode: "insufficient_funds" }),
       });
       expect(notificationSender.sent[0].message).toContain("Your saved card was declined (insufficient funds) when we tried to top up your wallet by USD $40.00.");
-      expect(notificationSender.sent[0].message).toContain("selling resumes on its own once your balance is back to the minimum");
+      expect(notificationSender.sent[0].message).toContain("selling resumes on its own once your balance is back to your reserve");
       expect(logs.find((entry) => entry.code === "DROPSHIP_VENDOR_PAUSED")).toMatchObject({ level: "warn", context: expect.objectContaining({ vendorId: 10, standingRevision: 1 }) });
       expect(logs.find((entry) => entry.code === "DROPSHIP_LISTINGS_HELD")).toMatchObject({ level: "info" });
       expect(logs.filter((entry) => entry.level === "error")).toHaveLength(0);
@@ -201,7 +201,7 @@ describe("DropshipVendorStandingService", () => {
       });
       expect(notificationSender.sent[0].message).toContain("A payment of USD $40.00 you added to your wallet was disputed and taken back by your bank.");
       expect(notificationSender.sent[0].message).not.toContain("returned by your bank");
-      expect(notificationSender.sent[0].message).toContain("selling resumes on its own once your balance is back to the minimum");
+      expect(notificationSender.sent[0].message).toContain("selling resumes on its own once your balance is back to your reserve");
     });
 
     it("announces nothing for a vendor who is active or paused by an operator", async () => {

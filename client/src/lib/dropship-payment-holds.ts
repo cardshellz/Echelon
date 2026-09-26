@@ -86,7 +86,7 @@ export function describePaymentHoldSummary(
     title: `${summary.heldCount} order${plural} ${summary.heldCount === 1 ? "is" : "are"} waiting on payment`,
     needs: `${summary.heldCount === 1 ? "It needs" : "They need"} ${formatCents(summary.totalDebitCents)} in total; your balance is ${formatCents(summary.availableBalanceCents)}.`,
     action: standing.pausedForFunding
-      ? `Selling is paused. Fund your wallet back to its minimum and ${summary.heldCount === 1 ? "it" : "they"} will be accepted.`
+      ? `Selling is paused. Fund your wallet back to its reserve and ${summary.heldCount === 1 ? "it" : "they"} will be accepted.`
       : needsFunds
         ? `Add ${formatCents(summary.shortfallCents)} to accept ${summary.heldCount === 1 ? "it" : "them"}.`
         : `Your balance covers ${summary.heldCount === 1 ? "it" : "them"} now. Accept ${summary.heldCount === 1 ? "it" : "them"} from the orders list.`,

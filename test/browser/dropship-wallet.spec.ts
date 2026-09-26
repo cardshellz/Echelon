@@ -344,19 +344,19 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   // Six topics, each scannable from its bold lead alone.
   const topics = intro.getByTestId("wallet-how-it-works-rules").getByRole("listitem");
   await expect(topics).toHaveCount(6);
-  for (const [index, lead] of ["What your wallet is.", "What you can sell, and the minimum it needs.", "Keeping it funded: your minimum and autopay.",
+  for (const [index, lead] of ["What your wallet is.", "What you can sell: your listing tier.", "Keeping it funded: your reserve and autopay.",
     "Ways to pay, and what each costs.", "Orders while a transfer lands, and your backup card.", "If a payment fails or is taken back."].entries()) {
     await expect(topics.nth(index).locator("strong")).toHaveText(lead);
   }
   // The tier minimums, the grace period, the advance terms, the rate and the deadline all come from served values.
   await expect(intro).toContainText("A return fee comes out of it too, and so does a payment your bank takes back after it landed; either can take the balance below zero");
-  await expect(intro).toContainText("Singles, packs and inner packs are on sale while you keep at least $100 in your wallet. Cases are on sale once your balance, counting money on its way, has reached $500.");
+  await expect(intro).toContainText("The Pack tier (singles, packs and inner packs) is active while you keep a reserve of at least $100 in your wallet. The Case tier adds cases once your balance, counting money on its way, has reached $500.");
   await expect(intro).toContainText("you keep selling for 14 days after the notice");
   await expect(intro).toContainText("takes up to 5 business days to land (our estimate)");
   await expect(intro).toContainText("costs 3% on top of the amount");
-  await expect(intro).toContainText("USDC costs nothing. Bank and USDC transfers earn 1% in rewards points when they land; a card charge earns none. 100 points are worth $1 on your orders. Points are used only on your orders here, and only once you choose in Wallet to auto-apply them; until you choose, they are saved up.");
+  await expect(intro).toContainText("USDC costs nothing. Bank and USDC transfers earn 1% in rewards points when they land; a card charge earns none. 100 points are worth $1 on your orders. Points are used only on your orders here: they pay before your cash unless you untick \"Use my points on my orders\" in Wallet, which saves them up.");
   await expect(intro).toContainText("the same gap is never pulled twice");
-  await expect(intro).toContainText("Routine top-ups never take more than the larger of your minimum and your top-up amount in one charge.");
+  await expect(intro).toContainText("Routine top-ups never take more than the larger of your reserve and your top-up amount in one charge.");
   await expect(intro).toContainText("You can also add money yourself at any time.");
   await expect(intro).toContainText("for a 1% fee on the amount used, at most $500 outstanding at a time");
   await expect(intro).toContainText("cancelled after your hold time (24 hours)");
@@ -406,30 +406,30 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
 
   // Step 3: the two tier minimums from the served limits; nothing to guess and no other amount to type.
   const floor = page.getByTestId("wallet-step-floor");
-  await expect(floor.getByRole("heading", { name: "Set your minimum" })).toBeVisible();
-  await expect(radio(page, "Minimum", "$100")).toHaveAttribute("aria-checked", "true");
-  await expect(radio(page, "Minimum", "$100")).toContainText("Singles, packs and inner packs");
-  await expect(radio(page, "Minimum", "$500")).toContainText("Cases too");
-  await expect(page.getByRole("radiogroup", { name: "Minimum" }).getByRole("radio")).toHaveCount(2);
+  await expect(floor.getByRole("heading", { name: "Set your reserve" })).toBeVisible();
+  await expect(radio(page, "Reserve", "$100")).toHaveAttribute("aria-checked", "true");
+  await expect(radio(page, "Reserve", "$100")).toContainText("Pack tier: singles, packs and inner packs");
+  await expect(radio(page, "Reserve", "$500")).toContainText("Case tier: adds cases");
+  await expect(page.getByRole("radiogroup", { name: "Reserve" }).getByRole("radio")).toHaveCount(2);
   await expect(floor.getByTestId("wallet-daily-cost")).toHaveCount(0);
   await expect(floor.getByTestId("wallet-floor-custom")).toHaveCount(0);
-  await expect(floor.getByTestId("wallet-tier-hint")).toContainText("Keep at least the tier you sell.");
+  await expect(floor.getByTestId("wallet-tier-hint")).toContainText("Keep at least the reserve for the tier you sell.");
   // The top-up quick picks follow the minimum: at $100 they are $100, $200, $300 and $500.
   await expect(radio(page, "Top-up amount", "$100")).toHaveAttribute("aria-checked", "true");
-  await expect(radio(page, "Top-up amount", "$100")).toContainText("Your minimum");
-  await expect(radio(page, "Top-up amount", "$200")).toContainText("2× your minimum");
-  await expect(radio(page, "Top-up amount", "$300")).toContainText("3× your minimum");
-  await expect(radio(page, "Top-up amount", "$500")).toContainText("5× your minimum");
+  await expect(radio(page, "Top-up amount", "$100")).toContainText("Your reserve");
+  await expect(radio(page, "Top-up amount", "$200")).toContainText("2× your reserve");
+  await expect(radio(page, "Top-up amount", "$300")).toContainText("3× your reserve");
+  await expect(radio(page, "Top-up amount", "$500")).toContainText("5× your reserve");
   await shot(page, "03-floor-default");
   await radio(page, "Top-up amount", "$200").click();
   await expect(floor.getByTestId("wallet-guidance-parked")).toContainText("Autopay keeps at least $100 in the wallet, topping up by $200 at a time.");
-  await radio(page, "Minimum", "$500").click();
-  await expect(radio(page, "Minimum", "$500")).toHaveAttribute("aria-checked", "true");
+  await radio(page, "Reserve", "$500").click();
+  await expect(radio(page, "Reserve", "$500")).toHaveAttribute("aria-checked", "true");
   // The pick was "2×", so it follows the new minimum: $1,000, still selected.
   await expect(radio(page, "Top-up amount", "$1,000")).toHaveAttribute("aria-checked", "true");
-  await expect(radio(page, "Top-up amount", "$1,000")).toContainText("2× your minimum");
-  await expect(radio(page, "Top-up amount", "$1,500")).toContainText("3× your minimum");
-  await expect(radio(page, "Top-up amount", "$2,500")).toContainText("5× your minimum");
+  await expect(radio(page, "Top-up amount", "$1,000")).toContainText("2× your reserve");
+  await expect(radio(page, "Top-up amount", "$1,500")).toContainText("3× your reserve");
+  await expect(radio(page, "Top-up amount", "$2,500")).toContainText("5× your reserve");
   await expect(floor.getByTestId("wallet-guidance-parked")).toContainText("Autopay keeps at least $500 in the wallet, topping up by $1,000 at a time.");
   await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Routine top-ups never take more than $1,000 in one charge (your top-up amount)");
   await radio(page, "Top-up amount", "$500").click();
@@ -438,7 +438,7 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await expect(floor.getByTestId("wallet-guidance-parked")).toContainText("Autopay keeps at least $500 in the wallet, topping up by $500 at a time.");
   await expect(floor.getByTestId("wallet-guidance-activation")).toContainText("$500 from Chase ending in 1234");
   await expect(floor.getByTestId("wallet-guidance-activation")).toContainText("first daily check after you activate");
-  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Routine top-ups never take more than $500 in one charge (your minimum)");
+  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Routine top-ups never take more than $500 in one charge (your reserve)");
   await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("2 hours");
   // An amount of the vendor's own: it has to clear the policy's smallest top-up, then the bound follows it and no quick pick is selected.
   await page.getByTestId("wallet-top-up-custom").fill("50");
@@ -478,13 +478,13 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await expect(summary).toContainText("$800. Routine top-ups never take more than $800 in one charge.");
   await expect(summary).toContainText("24 hours — set by CardShellz for every wallet.");
   const mandate = review.getByTestId("wallet-mandate");
-  for (const phrase of ["your minimum of $500", "your top-up amount of $800", "shortfall", "whatever its size (up to $5,000)", "24 hours", "2 hours", "before it lands",
+  for (const phrase of ["your reserve of $500", "your top-up amount of $800", "shortfall", "whatever its size (up to $5,000)", "24 hours", "2 hours", "before it lands",
     "If a return fee has taken your balance below zero, the shortfall includes that amount.", "Adding money by card now avoids that", "for automatic top-ups and covers", "first daily check after you activate"]) {
     await expect(mandate).toContainText(phrase);
   }
   // The single-charge bound is explained in full here, beside the numbers themselves; the intro only states the rule.
-  await expect(mandate).toContainText("Routine top-ups never take more than $800 in one charge — the larger of your minimum and your top-up amount. A held order is different: your backup card is charged its whole shortfall, up to $5,000, the most any single payment may be.");
-  await expect(review.getByTestId("wallet-plan-sentence")).toContainText("you keep $500 in your wallet; when an order takes it lower, autopay pulls $800 from your bank for free");
+  await expect(mandate).toContainText("Routine top-ups never take more than $800 in one charge — the larger of your reserve and your top-up amount. A held order is different: your backup card is charged its whole shortfall, up to $5,000, the most any single payment may be.");
+  await expect(review.getByTestId("wallet-plan-sentence")).toContainText("you keep a $500 reserve in your wallet; when an order takes it lower, autopay pulls $800 from your bank for free");
   await expect(review.getByTestId("wallet-activation-quote")).toContainText("$800 bank transfer");
   await expect(review.getByTestId("wallet-fee-acknowledgement-line")).toContainText("records that you agree to the 3% fee");
   await expect(review.getByRole("checkbox")).toHaveCount(0);
@@ -501,7 +501,7 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await expect(deposit.getByTestId("wallet-deposit-pending")).toHaveCount(0);
   await expect(deposit.getByTestId("wallet-rail-notes").getByRole("listitem")).toHaveText([
     "No fee.",
-    "Takes up to 5 business days (our assumption) to land, and counts toward your minimum as soon as it shows as on the way.",
+    "Takes up to 5 business days (our assumption) to land, and counts toward your reserve as soon as it shows as on the way.",
     "Earns 1% in rewards points once it lands.",
     "A business bank account can qualify to pay for orders while a transfer is still on the way; a personal account pays only once the money lands.",
     "While it is on the way, an order it cannot pay for is charged to Visa ending in 4242 for the shortfall plus 3%.",
@@ -514,7 +514,7 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await expect(deposit.getByRole("button", { name: "Back", exact: true })).toHaveCount(0);
   // The amounts are the top-up step's picks again — the $500 minimum, the vendor's own $800 top-up and the multiples — opening on the $800 top-up; nothing below the minimum is offered.
   await expect(page.getByRole("radiogroup", { name: "Amount", exact: true }).getByRole("radio")).toHaveCount(5);
-  for (const [amount, hint] of [["$500", "Your minimum"], ["$800", "Your top-up amount"], ["$1,000", "2× your minimum"], ["$1,500", "3× your minimum"], ["$2,500", "5× your minimum"]]) {
+  for (const [amount, hint] of [["$500", "Your reserve"], ["$800", "Your top-up amount"], ["$1,000", "2× your reserve"], ["$1,500", "3× your reserve"], ["$2,500", "5× your reserve"]]) {
     await expect(radio(page, "Amount", amount)).toContainText(hint);
   }
   await expect(radio(page, "Amount", "$800")).toHaveAttribute("aria-checked", "true");
@@ -557,11 +557,11 @@ test("card vendor: steps 4 and 6 are satisfied rows, the bound is the minimum, a
   await source.getByRole("button", { name: "Continue" }).click();
 
   const floor = page.getByTestId("wallet-step-floor");
-  await expect(radio(page, "Minimum", "$100")).toHaveAttribute("aria-checked", "true");
-  await expect(radio(page, "Minimum", "$100")).toContainText("Singles, packs and inner packs");
+  await expect(radio(page, "Reserve", "$100")).toHaveAttribute("aria-checked", "true");
+  await expect(radio(page, "Reserve", "$100")).toContainText("Pack tier: singles, packs and inner packs");
   await expect(floor).toContainText("$3 at $100, $30 at $1,000");
   await expect(floor.getByTestId("wallet-guidance-activation")).toContainText("$103");
-  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Routine top-ups never take more than $100 in one charge (your minimum)");
+  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Routine top-ups never take more than $100 in one charge (your reserve)");
   await shot(page, "card-03-floor");
   await floor.getByRole("button", { name: "Continue" }).click();
 
@@ -571,7 +571,7 @@ test("card vendor: steps 4 and 6 are satisfied rows, the bound is the minimum, a
   await expect(steps).toContainText("First top-up ·");
   await expect(steps).toContainText("$103");
   const review = page.getByTestId("wallet-step-review");
-  await expect(review.getByTestId("wallet-review-summary")).toContainText("$100 — your minimum. Routine top-ups never take more than $100 in one charge.");
+  await expect(review.getByTestId("wallet-review-summary")).toContainText("$100 — your reserve. Routine top-ups never take more than $100 in one charge.");
   await expect(review.getByTestId("wallet-review-summary")).toContainText("Visa ending in 4242 — also your autopay source");
   await expect(review.getByTestId("wallet-mandate")).toContainText("or a bank transfer you started is returned before it lands");
   await expect(review.getByTestId("wallet-mandate")).toContainText("$100 + $3 = $103");
@@ -616,20 +616,20 @@ test("manage: changing the minimum moves the bound with it, the top-up amount is
   await expect(page.getByTestId("wallet-auto-reload-off")).toHaveCount(0);
   await shot(page, "manage-01-plan");
   // The stored bound ($500) shows until the amounts change; the minimum editor then shows the bound the server will derive.
-  await expect(plan.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $250 (your minimum) · routine top-ups never more than $500 in one charge.");
+  await expect(plan.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $250 (your reserve) · routine top-ups never more than $500 in one charge.");
   await plan.getByTestId("wallet-plan-floor").getByRole("button", { name: "Change" }).click();
-  await expect(radio(page, "Minimum", "$100")).toHaveAttribute("aria-checked", "true");
+  await expect(radio(page, "Reserve", "$100")).toHaveAttribute("aria-checked", "true");
   await expect(radio(page, "Top-up amount", "$100")).toHaveAttribute("aria-checked", "true");
-  await radio(page, "Minimum", "$500").click();
+  await radio(page, "Reserve", "$500").click();
   await expect(radio(page, "Top-up amount", "$500")).toHaveAttribute("aria-checked", "true");
-  await expect(radio(page, "Top-up amount", "$2,500")).toContainText("5× your minimum");
-  await expect(plan.getByTestId("wallet-floor-limit-note")).toContainText("Routine top-ups never take more than $500 in one charge (your minimum)");
+  await expect(radio(page, "Top-up amount", "$2,500")).toContainText("5× your reserve");
+  await expect(plan.getByTestId("wallet-floor-limit-note")).toContainText("Routine top-ups never take more than $500 in one charge (your reserve)");
   await expectNoHorizontalScroll(page);
   await shot(page, "manage-02-floor-editor");
   await plan.getByRole("button", { name: "Save", exact: true }).click();
   expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 50_000, topUpAmountCents: null, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
   await expect(plan.getByTestId("wallet-plan-floor")).toContainText("$500 — autopay tops it up after any order that takes it lower");
-  await expect(plan.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $500 (your minimum) · routine top-ups never more than $500 in one charge.");
+  await expect(plan.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $500 (your reserve) · routine top-ups never more than $500 in one charge.");
 
   // The hold time is CardShellz's setting: shown from the served warning window, never chosen here.
   await expect(plan.getByTestId("wallet-plan-limits")).toContainText("24 hours — set by CardShellz for every wallet.");
@@ -726,7 +726,7 @@ test("manage: a server refusal to remove a method in a role renders the exact se
   finish(state);
 });
 
-test("manage: rewards are points with their value beside, the choice starts unmade and saves either way, and the activity speaks in points (funding design phase 7)", async ({ page }) => {
+test("manage: rewards are points with their value beside, one checkbox that starts ticked and saves either way, and the activity speaks in points (funding design phase 7)", async ({ page }) => {
   const ledger = [
     { ledgerEntryId: 101, type: "rewards_spent", status: "settled", amountCents: -250, currency: "USD", availableBalanceAfterCents: 4_250, pendingBalanceAfterCents: 0, rewardsBalanceAfterCents: 1_250, createdAt: LATER, settledAt: LATER, metadata: {} },
     { ledgerEntryId: 100, type: "rewards_earned", status: "settled", amountCents: 1_500, currency: "USD", availableBalanceAfterCents: 4_250, pendingBalanceAfterCents: 0, rewardsBalanceAfterCents: 1_500, createdAt: STAMP, settledAt: STAMP, metadata: {} },
@@ -737,10 +737,11 @@ test("manage: rewards are points with their value beside, the choice starts unma
   await expect(page.getByTestId("wallet-available")).toHaveText("$42.50");
   await expect(rewards.getByTestId("wallet-rewards-balance")).toHaveText("1,250 points");
   await expect(rewards.getByTestId("wallet-rewards-value")).toHaveText("worth $12.50 on your orders");
-  // No choice yet: neither option is selected, and the line says the points are saved until one is made.
-  await expect(rewards.getByTestId("wallet-rewards-use")).toHaveText("Not chosen yet, so your points are saved up. Choose to auto-apply them to your orders, or keep saving them. 100 points are worth $1 on your orders.");
-  await expect(radio(page, "Rewards", "Auto-apply to orders")).toHaveAttribute("aria-checked", "false");
-  await expect(radio(page, "Rewards", "Save them up")).toHaveAttribute("aria-checked", "false");
+  // No choice yet: the box is ticked, the default (owner decision 2026-09-26), and the line says the points pay first.
+  const box = rewards.getByRole("checkbox", { name: "Use my points on my orders" });
+  await expect(box).toBeChecked();
+  await expect(rewards.getByTestId("wallet-rewards-use")).toHaveText("Your points pay for your next orders before your cash. 100 points are worth $1 on your orders.");
+  await expect(rewards.getByRole("radio")).toHaveCount(0);
   // The points never join the cash figure anywhere on the page.
   await expect(page.getByTestId("wallet-balance")).not.toContainText("$55.00");
   await expectNoHorizontalScroll(page);
@@ -764,20 +765,19 @@ test("manage: rewards are points with their value beside, the choice starts unma
   await expect(page.getByTestId("wallet-usdc-funding").getByTestId("wallet-usdc-rewards")).toHaveText("Earns 1% in rewards points once the transfer settles.");
   await page.getByRole("button", { name: "Close" }).click();
 
-  // Choosing is one click, no code: the request is the choice itself.
-  await radio(page, "Rewards", "Auto-apply to orders").click();
-  await expect(rewards.getByRole("status")).toContainText("Saved. Your points are auto-applied to your orders before your cash.");
-  expect(state.preferenceWrites).toEqual([{ spendRewardsFirst: true }]);
-  expect(state.codesSent).toEqual([]);
-  await expect(radio(page, "Rewards", "Auto-apply to orders")).toHaveAttribute("aria-checked", "true");
-  await expect(rewards.getByTestId("wallet-rewards-use")).toHaveText("Auto-applied to your orders before your cash. 100 points are worth $1 on your orders.");
-  // Clicking the chosen option again sends nothing; choosing the other saves the points up.
-  await radio(page, "Rewards", "Auto-apply to orders").click();
-  expect(state.preferenceWrites).toHaveLength(1);
-  await radio(page, "Rewards", "Save them up").click();
+  // Unticking is one click, no code: the request is the box itself, and the points are saved up.
+  await rewards.getByText("Use my points on my orders").click();
   await expect(rewards.getByRole("status")).toContainText("Saved. Your points are kept; your cash pays for orders.");
-  expect(state.preferenceWrites).toEqual([{ spendRewardsFirst: true }, { spendRewardsFirst: false }]);
-  await expect(rewards.getByTestId("wallet-rewards-use")).toHaveText("Saved up: your cash pays for orders. Auto-apply them whenever you want to use them. 100 points are worth $1 on your orders.");
+  expect(state.preferenceWrites).toEqual([{ spendRewardsFirst: false }]);
+  expect(state.codesSent).toEqual([]);
+  await expect(box).not.toBeChecked();
+  await expect(rewards.getByTestId("wallet-rewards-use")).toHaveText("Saved up: your cash pays for orders. Tick the box to use your points on your orders. 100 points are worth $1 on your orders.");
+  // Ticking it again puts the points back on the orders.
+  await box.click();
+  await expect(rewards.getByRole("status")).toContainText("Saved. Your points pay for your orders before your cash.");
+  expect(state.preferenceWrites).toEqual([{ spendRewardsFirst: false }, { spendRewardsFirst: true }]);
+  await expect(box).toBeChecked();
+  await expect(rewards.getByTestId("wallet-rewards-use")).toHaveText("Your points pay for your next orders before your cash. 100 points are worth $1 on your orders.");
   await shot(page, "manage-rewards-02-chosen");
   finish(state);
 });
@@ -817,7 +817,7 @@ test.describe("points expiry (migration 0705)", () => {
     // The rules say what happens to points earned from now on.
     const rules = page.getByTestId("wallet-how-it-works");
     await rules.getByRole("button", { name: "How your wallet works" }).click();
-    await expect(rules).toContainText("until you choose, they are saved up. New points expire 90 days after they are earned, and the points closest to expiring are used first. They are not cash");
+    await expect(rules).toContainText("which saves them up. New points expire 90 days after they are earned, and the points closest to expiring are used first. They are not cash");
     finish(state);
   });
 
@@ -828,7 +828,7 @@ test.describe("points expiry (migration 0705)", () => {
     await expect(rewards.getByTestId("wallet-rewards-next-expiry")).toHaveCount(0);
     const rules = page.getByTestId("wallet-how-it-works");
     await rules.getByRole("button", { name: "How your wallet works" }).click();
-    await expect(rules).toContainText("until you choose, they are saved up. New points do not expire. They are not cash");
+    await expect(rules).toContainText("which saves them up. New points do not expire. They are not cash");
     finish(state);
   });
 });
@@ -842,8 +842,8 @@ test("manage: adding money by card, bank or USDC quotes the fee honestly and ret
   // The picks are the plan's: the $250 minimum, which autopay would pull next with $42.50 in the wallet, opens selected, then its multiples.
   await expect(page.getByRole("radiogroup", { name: "Amount", exact: true }).getByRole("radio")).toHaveCount(4);
   await expect(radio(page, "Amount", "$250")).toHaveAttribute("aria-checked", "true");
-  await expect(radio(page, "Amount", "$250")).toContainText("Your minimum");
-  await expect(radio(page, "Amount", "$1,250")).toContainText("5× your minimum");
+  await expect(radio(page, "Amount", "$250")).toContainText("Your reserve");
+  await expect(radio(page, "Amount", "$1,250")).toContainText("5× your reserve");
   await expect(panel.getByTestId("wallet-funding-quote")).toHaveText("No fee. $250.00 goes into your wallet once the bank transfer settles — up to 5 business days (our assumption). It cannot pay orders until then.");
   await radio(page, "Pay with", "Card (3% fee)").click();
   await expect(panel.getByTestId("wallet-funding-quote")).toHaveText("Card fee (3%): $7.50. Your card is charged $257.50 and $250.00 goes into your wallet, available at once.");
@@ -879,7 +879,7 @@ test("manage: adding money by card, bank or USDC quotes the fee honestly and ret
   // Back above the minimum, the panel opens on the routine top-up amount — the $250 minimum — and 2× is a click away.
   await expect(radio(page, "Amount", "$250")).toHaveAttribute("aria-checked", "true");
   await radio(page, "Amount", "$500").click();
-  await expect(radio(page, "Amount", "$500")).toContainText("2× your minimum");
+  await expect(radio(page, "Amount", "$500")).toContainText("2× your reserve");
   await panel.getByRole("button", { name: "Continue on Stripe" }).click();
   await expect(page.getByTestId("wallet-funding-return")).toContainText("Transfer started. It shows as on the way once Stripe confirms it");
   expect(state.fundingSessions[1]).toEqual({ fundingMethodId: 30, amountCents: 50_000, returnTo: HARNESS_PATH });
@@ -932,10 +932,12 @@ test("a wrong code is rejected in place and can be retried; a failed code email 
   finish(state);
 });
 
-test("manage: the wallet says which listing tiers are on sale, what each needs, and a raise still in grace", async ({ page }) => {
+test("manage: the wallet names each listing tier, the reserve it needs, whether it is active, and a raise still in grace", async ({ page }) => {
   const state = await setup(page, { vendorStatus: "active", methods: [CARD, BANK], autoReload: doneAutoReload(), balanceCents: 12_000, proofs: ALL_PROOFS, listingTiers: listingTiersJson() });
   const tiers = page.getByTestId("wallet-listing-tiers");
-  await expect(tiers).toContainText("What is on sale");
+  await expect(tiers.getByRole("heading", { name: "Listing tiers" })).toBeVisible();
+  await expect(tiers).toContainText("Each tier requires a reserve: the balance you keep in your wallet to cover orders, set by Card Shellz. Money still settling counts.");
+  await expect(tiers).not.toContainText(/on sale|off sale/i);
   // Between the balance and the plan: the first thing after the number is what it buys.
   const balanceY = await page.getByTestId("wallet-balance").boundingBox().then((box) => box?.y ?? 0);
   const tiersY = await tiers.boundingBox().then((box) => box?.y ?? 0);
@@ -943,16 +945,18 @@ test("manage: the wallet says which listing tiers are on sale, what each needs, 
   expect(tiersY).toBeGreaterThan(balanceY);
   expect(planY).toBeGreaterThan(tiersY);
   const pack = tiers.getByTestId("wallet-listing-tier-pack");
-  await expect(pack).toContainText("Packs and inner packs · minimum $100");
-  await expect(pack).toContainText("On sale");
-  await expect(pack).toContainText("Your wallet keeps this minimum, so these listings are on sale.");
+  await expect(pack).toContainText("Pack tier · $100 reserve");
+  await expect(pack).toContainText("Singles, packs and inner packs.");
+  await expect(pack).toContainText("Active");
+  await expect(pack).toContainText("Your wallet keeps this reserve, so your pack listings are live.");
   await expect(pack.getByTestId("wallet-listing-tier-pack-upcoming")).toHaveCount(0);
   const cases = tiers.getByTestId("wallet-listing-tier-case");
-  await expect(cases).toContainText("Cases · minimum $500");
-  await expect(cases).toContainText("Off sale");
-  await expect(cases).toContainText("Case listings go on sale on their own once your balance reaches the minimum. You are $380 short.");
+  await expect(cases).toContainText("Case tier · $500 reserve");
+  await expect(cases).toContainText("Adds cases.");
+  await expect(cases).toContainText("Not active");
+  await expect(cases).toContainText("Your balance is $380 below this reserve. Case listings go live automatically once it is reached.");
   await expect(cases.getByTestId("wallet-listing-tier-case-upcoming")).toContainText(
-    "The minimum rises to $750 on October 4, 2026. As things stand you would fall below it; bring your wallet up before then to keep these listings on sale.",
+    "The reserve rises to $750 on October 4, 2026. As things stand you would fall below it; bring your wallet up before then to keep these listings live.",
   );
   await expectNoHorizontalScroll(page);
   await shot(page, "manage-13-listing-tiers");
@@ -1081,9 +1085,9 @@ test("the step list walks back and forward without losing a choice, and manage k
   // The plain Back control walks one step at a time, and Continue returns from there too.
   await backup.getByRole("button", { name: "Back", exact: true }).click();
   const floor = page.getByTestId("wallet-step-floor");
-  await expect(floor.getByRole("heading", { name: "Set your minimum" })).toBeVisible();
+  await expect(floor.getByRole("heading", { name: "Set your reserve" })).toBeVisible();
   // The drafted $250 is not one of the two tiers any more: it opens on the tier it falls in, and Continue keeps that.
-  await expect(radio(page, "Minimum", "$100")).toHaveAttribute("aria-checked", "true");
+  await expect(radio(page, "Reserve", "$100")).toHaveAttribute("aria-checked", "true");
   await shot(page, "nav-03-floor-revisited");
   await floor.getByRole("button", { name: "Continue" }).click();
   await expect(backup.getByRole("heading", { name: "Your backup card" })).toBeVisible();

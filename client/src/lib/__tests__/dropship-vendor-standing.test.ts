@@ -12,8 +12,8 @@ describe("describeVendorStanding", () => {
     const notice = describeVendorStanding({ status: "paused", standingReason: "card_declined", pausedAt: "2026-09-17T12:00:00.000Z" });
     expect(notice).toMatchObject({ title: "Selling is paused", needsFunds: true });
     expect(notice?.reason).toBe("Your saved card was declined when we tried to top up your wallet.");
-    expect(notice?.action).toContain("Orders are not being accepted and your listings show nothing for sale.");
-    expect(notice?.action).toContain("selling resumes on its own once your balance is back to the minimum");
+    expect(notice?.action).toContain("Orders are not being accepted and your listings show no stock.");
+    expect(notice?.action).toContain("selling resumes on its own once your balance is back to your reserve");
     expect(notice?.since).toMatch(/^Paused since .+\.$/);
   });
 

@@ -27,9 +27,19 @@ receivable the daily wallet run collects.
 Two admin-set minimums on the versioned policy row (`migrations/0683`):
 pack tier (eaches, inner packs) and case tier. The pack tier is kept when the
 vendor's auto-reload floor or their balance (pending counts) is at the
-minimum; cases are on sale once the balance counting pending reaches the case
-minimum. A raised minimum is enforced after the grace period, by publishing
+minimum; the case tier is active once the balance counting pending reaches the
+case minimum. A raised minimum is enforced after the grace period, by publishing
 zero for that tier's SKUs (`domain/listing-tiers.ts`, the hourly reconciler).
+
+**The words vendors and staff see** (owner decision, 2026-09-25): the balance a
+vendor keeps is their **reserve** (the auto-reload floor is "your reserve"; each
+tier's minimum is its reserve), the tiers are the **Pack tier** (singles, packs
+and inner packs) and the **Case tier** (adds cases), and each is **Active** or
+**Not active**; listings are "live" or "paused", never "on sale" or "off sale".
+Code identifiers keep their names (`minimum_floor_cents`,
+`case_tier_minimum_cents`, `pack_tier_minimum_not_kept`); only the copy
+changed. Other minimums keep the word: the card minimum deposit, the manual
+top-up bounds and the minimum single top-up limit.
 
 ## The shortfall waterfall at acceptance (phase 3)
 
@@ -102,7 +112,7 @@ The minimum step offers exactly those two amounts, as the served policy sets
 them (`minimumOptions` in `client/src/lib/dropship-wallet-flow.ts`): nothing
 else to type and nothing to guess — the earlier daily-cost guesser and
 free-form amount are gone. It opens on the pack minimum, or the case minimum
-while the vendor's cases are on sale; a minimum saved before the step was
+while the vendor's case tier is active; a minimum saved before the step was
 narrowed opens on the tier it falls in. An optional **top-up amount**
 (`top_up_amount_cents`, migration 0690; null pulls the minimum) says how
 much each automatic refill pulls, so a vendor who wants fewer pulls takes
@@ -280,11 +290,14 @@ own ledger lines (earned, spent, reversed, reinstated, and since migration
 **Spending.** Rewards are points, 100 per dollar (one per cent, so the
 stored cents are the points), and their only use is lower product cost on
 .ops orders: an order debit takes points first and cash second, and the
-order shows both parts. That happens only once the vendor chooses to
-auto-apply their points; until they choose, the points are saved up.
-Auto-apply is never a default (owner decision of 2026-09-24, which also
-dropped the earlier idea of redeeming points as store coupon codes: points
-never leave the wallet). Points get an expiry set by staff, with "never" as
+order shows both parts. That is the default: one checkbox, "Use my points
+on my orders", starts ticked, and a vendor who unticks it saves the points
+up (owner decision of 2026-09-26, replacing the 2026-09-24 rule that
+auto-apply is never a default: with orders the only place points can be
+spent at launch, saving them by default only strands them; the box stays so
+later uses such as the store can offer saving on purpose). The 2026-09-24
+decision still stands in dropping the earlier idea of redeeming points as
+store coupon codes: points never leave the wallet. Points get an expiry set by staff, with "never" as
 an option (never at launch; built in migration 0705). They never touch the
 Shellz Club points ledger.
 
@@ -329,17 +342,17 @@ rewards back pro rata: what is still in the balance leaves it
 (`rewards_reversed`), the part already spent comes out of cash through the
 same `funding_reversal` row; a won dispute gives both back
 (`rewards_reinstated`). The vendor surface: the rewards balance is its own
-figure under the cash balance, in points with the dollar value beside, with
-a line saying what the vendor's choice is doing or that none is made; the
-choice is the page's radio pair ("Auto-apply to orders" / "Save them up",
-`PUT /api/dropship/wallet/rewards/preference`, no step-up: a preference,
-not a charge), and neither option is selected until the vendor chooses
-(migration 0704 made `spend_rewards_first` nullable with no default; NULL
-reads as saved everywhere, and rows that carried the old default without a
-recorded choice were reset); the rules page states the rule from the served
+figure under the cash balance, in points with the dollar value beside, and
+the choice is one checkbox, "Use my points on my orders"
+(`PUT /api/dropship/wallet/rewards/preference`, no step-up: a preference,
+not a charge), ticked unless the vendor unticked it, with a line under it
+saying what it does (migration 0704 made `spend_rewards_first` nullable;
+NULL, no choice yet, reads as on in `decideRewardsSpend` and in the wallet's
+`rewardsApplyToOrders`, and only an explicit `false` saves the points); the
+rules page states the rule from the served
 rates ("bank and USDC transfers earn 1% in rewards points when they land; a
 card charge earns none", the 100-points-per-dollar sentence, points used
-only on orders and only once auto-apply is chosen, USDC named only where
+only on orders, before cash unless the box is unticked, USDC named only where
 offered, nothing said while every rate is zero); the add-money bullets and
 the USDC panel say what the picked rail earns and when; an activity row
 that moved points shows its amount and its points balance after in points;

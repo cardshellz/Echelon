@@ -311,7 +311,7 @@ describe("dropship wallet policy form model", () => {
 
   it("states the top-up-clears-the-trigger rule in the server's own words", () => {
     const message =
-      "Minimum single top-up limit must be at least the minimum floor, otherwise a top-up can never clear the trigger.";
+      "Minimum single top-up limit must be at least the Pack tier reserve, otherwise a top-up can never clear the trigger.";
     expect(dropshipWalletPolicyInvariantViolations({
       ...LIMITS,
       autoReloadMinAmountCents: 9_999,
@@ -326,7 +326,7 @@ describe("dropship wallet policy form model", () => {
   });
 
   it("states the case-tier-covers-pack-tier rule in the server's own words", () => {
-    const message = "Case tier minimum must be at least the pack tier minimum.";
+    const message = "Case tier reserve must be at least the Pack tier reserve.";
     expect(dropshipWalletPolicyInvariantViolations({
       ...LIMITS,
       caseTierMinimumCents: 9_999,
@@ -461,7 +461,7 @@ describe("dropship wallet policy form model", () => {
     )).toEqual({ autoReloadMinTriggerCents: 10_000, autoReloadMinAmountCents: 25_000 });
   });
 
-  it("builds the overview URL with only the proposed minimums the server accepts", () => {
+  it("builds the overview URL with only the proposed reserves the server accepts", () => {
     expect(buildDropshipWalletPolicyOverviewUrl()).toBe("/api/dropship/admin/wallet/policy");
     expect(buildDropshipWalletPolicyOverviewUrl(null)).toBe(DROPSHIP_WALLET_POLICY_ADMIN_URL);
     expect(buildDropshipWalletPolicyOverviewUrl({
@@ -526,7 +526,7 @@ describe("dropship wallet policy form model", () => {
       limits: { ...LIMITS, caseTierMinimumCents: 1 },
       changeNote: null,
       idempotencyKey: "dropship-wallet-policy:0d9f",
-    })).toThrow(/at least the pack tier minimum/);
+    })).toThrow(/at least the Pack tier reserve/);
     expect(() => buildDropshipWalletPolicyVersionRequest({
       limits: LIMITS,
       changeNote: null,

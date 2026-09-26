@@ -24,7 +24,7 @@ describe("describeWalletError", () => {
     expect(face("DROPSHIP_FUNDING_METHOD_NOT_ACTIVE", "put")).toEqual({ text: "Your autopay source is no longer available. Choose or add another.", recovery: { step: "source" } });
     expect(face("DROPSHIP_FUNDING_METHOD_NOT_ACTIVE", "checkout")).toEqual({ text: "That method was removed. Pick another.", recovery: "refetch" });
     expect(face("DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_RAIL_UNSUPPORTED", "put")).toMatchObject({ recovery: { step: "source" } });
-    expect(face("DROPSHIP_AUTO_RELOAD_TRIGGER_BELOW_MINIMUM", "put")).toEqual({ text: "Your floor or limit is outside the allowed range: floor at least $50, limit at least $100 and at least your floor.", recovery: { step: "floor" } });
+    expect(face("DROPSHIP_AUTO_RELOAD_TRIGGER_BELOW_MINIMUM", "put")).toEqual({ text: "Your reserve or top-up limit is outside the allowed range: reserve at least $50, top-up limit at least $100 and at least your reserve.", recovery: { step: "floor" } });
     expect(face("DROPSHIP_AUTO_RELOAD_INVALID_LIMITS", "put")).toMatchObject({ recovery: { step: "floor" } });
     expect(face("DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE", "checkout")).toEqual({ text: "Amounts must be between $10 and $5,000.", recovery: "none" });
     expect(face("DROPSHIP_FUNDING_METHOD_PROVIDER_CUSTOMER_REQUIRED", "checkout")).toEqual({ text: "This account cannot be used for a payment right now. Add money later from Wallet.", recovery: "refetch" });

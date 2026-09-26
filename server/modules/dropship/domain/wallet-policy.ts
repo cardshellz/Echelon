@@ -313,13 +313,13 @@ export function walletPolicyInvariantViolations(
     violations.push({
       field: "autoReloadMinAmountCents",
       message:
-        "Minimum single top-up limit must be at least the minimum floor, otherwise a top-up can never clear the trigger.",
+        "Minimum single top-up limit must be at least the Pack tier reserve, otherwise a top-up can never clear the trigger.",
     });
   }
   if (limits.caseTierMinimumCents < limits.autoReloadMinTriggerCents) {
     violations.push({
       field: "caseTierMinimumCents",
-      message: "Case tier minimum must be at least the pack tier minimum.",
+      message: "Case tier reserve must be at least the Pack tier reserve.",
     });
   }
   if (limits.cardFundingMinCents > limits.manualFundingMaxCents) {
