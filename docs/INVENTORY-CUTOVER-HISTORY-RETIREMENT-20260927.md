@@ -50,6 +50,8 @@ The relative module paths in this table are within `server/modules/inventory-pla
 
 Only these **new audit tables** receive immutable/update/delete/truncate protection. Their insert checks require the existing admission owner, same-transaction membership and a complete nonempty batch at commit. Original business tables receive no new triggers.
 
+Install the migration before starting the new processing workers: normal receipt/shipment paths query this registry even while it is empty. A missing table is a database failure, not permission to bypass the lookup.
+
 Lock order in `retire` and `lockHistoryFacts` (`infrastructure/inventory-cutover-history-locks.ts:11`):
 
 1. Existing command-key advisory lock; validated replay may return here.
@@ -86,7 +88,18 @@ The common lookup is `infrastructure/inventory-cutover-retired-work.ts`. It fail
 
 ## Validation, assumptions and unknowns
 
-Validation results are recorded below after the final combined-main checks. Fixtures distinguish actual audit/admission migrations from reduced foreign-owner schemas; a reduced empty lookup table is not migration proof. Disposable local PostgreSQL tests are not production proof.
+Final validation uses the committed lockfile and the merged `origin/main` base `172e68dc8`:
+
+- Full default suite: **18,635 passed, zero failed, 1,857 skipped**. Opt-in database suites are not silently counted as executed; their separate local coverage is below.
+- Connected run: **525 passed, zero failed or skipped, 28 files**, including **406 real PostgreSQL tests in 21 suites**. This covers the new command and audit migration, read-only reader, opening/reconstruction, legacy and canonical posting, publication, HTTP permissions, migration numbering, writer ownership and CI-suite preservation.
+- Application TypeScript and server/client test TypeScript checks passed. Client, server and opening-capture production bundles built successfully; the client build retains its large-bundle warning.
+- The new HTTP harness closes its test-owned connections instead of retaining sockets across ephemeral servers. All 11 route cases also passed in five consecutive fresh runs; no assertion or authorization check was relaxed.
+- Audit/transaction cases include exact simultaneous replay, changed actor/intent, five stale-evidence cases, live lease/current-correction rejection, explicit unknown-origin acceptance, injected partial failure, incomplete membership, tampered audit validation, real ingress replay, unchanged original records and retained current-order planning.
+- Fixtures distinguish actual audit/admission migrations from reduced foreign-owner schemas; the reduced empty lookup table used by other owner tests is not migration proof. Disposable local PostgreSQL tests are not production proof. All 104 PostgreSQL CI files remain registered; only the 21 listed database suites were run locally in this final connected command.
+
+The private connected report is `artifacts/history-pinned-connected-20260927.json` under the local final-cutover evidence directory. SHA-256: `d671599407a79c0d0c89343463472e1fb304119cc62406fec7c3ea5d4321df09`. Raw production captures and local test artifacts are not included in this PR.
+
+The full default report is `artifacts/history-pinned-full-final-20260927.json`, SHA-256 `4aeb04a80b0024bec2b39dc8a5b9da419ce7f41bd0a7e250dddf770eb8ec53dd`. These results supersede intermediate failures while updating test doubles, fixture columns, Windows line endings and the local dependency installation. The owned disposable PostgreSQL cluster was stopped after validation.
 
 Assumptions: the previously agreed bin-on-hand baseline remains the opening policy, not a new physical count. The operator reviews a fresh exact cohort before any production apply. No assumption is made that unknown channels can be inferred or that terminal statuses prove historical delivery/accounting correctness.
 

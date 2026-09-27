@@ -34,10 +34,16 @@ describe("authenticated bulk history review and retirement", () => {
     server = http.createServer(app); await new Promise<void>(resolve => server.listen(0,"127.0.0.1",resolve));
     url=`http://127.0.0.1:${(server.address() as AddressInfo).port}${ROOT}`;
   });
-  afterEach(async () => { await new Promise<void>((resolve,reject) => server.close(error => error ? reject(error) : resolve())); vi.restoreAllMocks(); });
+  afterEach(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve,reject) => server.close(error => error ? reject(error) : resolve()));
+    vi.restoreAllMocks();
+  });
   async function send(action: "review" | "retire", body: unknown = input, query="") {
     const response = await fetch(`${url}/${action}${query}`,{ method: action === "review" ? "GET" : "POST",
-      headers: { "Content-Type":"application/json" }, ...(action === "retire" ? { body: JSON.stringify(body) } : {}) });
+      // Each test owns an ephemeral server; do not pool sockets across tests.
+      headers: { "Content-Type":"application/json", "Connection":"close" },
+      ...(action === "retire" ? { body: JSON.stringify(body) } : {}) });
     return { status: response.status, cache: response.headers.get("cache-control"), body: await response.json() };
   }
   it("uses activate permission/session identity and returns a no-write review", async () => {

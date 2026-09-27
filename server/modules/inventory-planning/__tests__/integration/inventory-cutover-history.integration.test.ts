@@ -204,7 +204,7 @@ dbDescribe.sequential("narrow audited historical-work retirement in real Postgre
     expect(await businessState()).toEqual(before);
   });
 
-  it("refuses a partially populated audit batch at commit and keeps original history writable", async () => {
+  it("rejects missing audit members and rolls back the complete batch", async () => {
     const input = await request();
     await pool.query(`CREATE FUNCTION inventory.test_skip_history_entry() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN IF NEW.kind='shipment' THEN RETURN NULL; END IF; RETURN NEW; END $$;
