@@ -25,6 +25,9 @@
  *     └── returns          (depends on core)
  */
 
+import { createListingPublicationService } from "../listing-publication.composition";
+import { InventoryPublicationMembershipService } from "../modules/inventory-planning/application/inventory-publication-membership.service";
+import { PostgresInventoryPublicationMembershipStore } from "../modules/inventory-planning/infrastructure/inventory-publication-membership.repository";
 import {
   InventoryUseCases,
   createInventoryLotService,
@@ -398,6 +401,8 @@ export function createServices(
     return service;
   } };
   const walmartAdapter = new WalmartAdapter(walmart, new PostgresInventoryPublicationSupplyReader(databasePool));
+  const listingPublication = createListingPublicationService({pool: databasePool, walmart, channelCatalog, quantityAdmission: quantityPublicationAdmission});
+  const inventoryPublicationMembership = new InventoryPublicationMembershipService(new PostgresInventoryPublicationMembershipStore(databasePool));
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(shopifyAdapter);
   adapterRegistry.register(ebayAdapter);
@@ -768,6 +773,8 @@ export function createServices(
     walmart,
     channelCatalog,
     walmartOrderPoll,
+    listingPublication,
+    inventoryPublicationMembership,
   };
 }
 

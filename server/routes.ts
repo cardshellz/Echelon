@@ -21,6 +21,8 @@ import { registerNotificationRoutes } from "./modules/notifications";
 import { registerFinanceAnalyticsRoutes } from "./modules/oms/finance-analytics.routes";
 import { registerWalmartChannelRoutes } from "./modules/channels/adapters/walmart/walmart.routes";
 import { registerChannelCatalogRoutes } from "./modules/channels/channel-catalog.routes";
+import { registerListingPublicationRoutes } from "./modules/marketplace-listings/interfaces/http/listing-publication.routes";
+import { registerInventoryPublicationMembershipRoutes } from "./modules/inventory-planning/interfaces/http/inventory-publication-membership.routes";
 import { registerChannelRoutes } from "./modules/channels/channels.routes";
 import { registerSettingsRoutes } from "./modules/warehouse/settings.routes";
 import { registerPickZoneRoutes } from "./modules/warehouse/pick-zones.routes";
@@ -219,6 +221,8 @@ export async function registerRoutes(
   registerChannelRoutes(app);
   registerWalmartChannelRoutes(app);
   registerChannelCatalogRoutes(app);
+  registerListingPublicationRoutes(app);
+  registerInventoryPublicationMembershipRoutes(app, app.locals.services.inventoryPublicationMembership);
   registerMarketplaceListingRegistrationRoutes(
     app,
     createMarketplaceListingRegistrationResolverFromEnv(),

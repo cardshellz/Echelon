@@ -117,6 +117,9 @@ export class ChannelCatalogService {
       verified.push(...await Promise.all(mappings.slice(offset, offset + verificationConcurrency).map(async mapping => {
         const item = channelCatalogItemSchema.parse(await this.provider.item(account, mapping.sku));
         if (item.sku !== mapping.sku) throw new ChannelIdentityError("CHANNEL_CATALOG_IDENTITY_CHANGED", "The provider returned a different SKU; refresh the listing feed");
+        if (mapping.expectedExternalProductId !== undefined && item.externalProductId !== mapping.expectedExternalProductId) {
+          throw new ChannelIdentityError("CHANNEL_CATALOG_PRODUCT_CHANGED", "The provider product changed after verification; reconcile its identity before linking");
+        }
         return { item, productVariantId: mapping.productVariantId, expectedLocalSku: requireExactSku ? mapping.sku : null };
       })));
     }

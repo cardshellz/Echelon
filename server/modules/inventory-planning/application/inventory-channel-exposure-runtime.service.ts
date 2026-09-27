@@ -72,6 +72,9 @@ export interface ActiveInventoryPublicationTargetSnapshot {
   mappings: readonly ActivePublicationVariantMappingSnapshot[];
   /** SKU-level holds among the product's variants; the target hold above wins when both are set. */
   variantHolds: readonly ActivePublicationVariantHoldSnapshot[];
+  /** Omitted only by legacy callers: preserve their whole-product semantics.
+   * Explicit membership narrows output rows, never the ATP supply graph. */
+  membership?: { mode: "whole_product" } | { mode: "explicit"; includedVariantIds: readonly number[] };
 }
 
 export interface InventoryChannelExposureRuntimeContext {
@@ -193,6 +196,7 @@ export function planInventoryChannelExposureProduct(
 
   const plannedTargets = context.publicationTargets
     .slice()
+    .filter((target) => target.membership?.mode !== "explicit" || target.membership.includedVariantIds.length > 0)
     .sort((left, right) => left.publicationTargetId - right.publicationTargetId)
     .map((target) => planTarget(context.supplySnapshot!, validatedProductId, variants, target));
 
@@ -248,6 +252,16 @@ function planTarget(
   target: ActiveInventoryPublicationTargetSnapshot,
 ): PlannedTarget {
   const targetBlockers: RuntimeIssue[] = [];
+  const includedIds = target.membership?.mode === "explicit"
+    ? new Set(target.membership.includedVariantIds.map(id => positiveInteger(id, "membership.productVariantId")))
+    : null;
+  const selectedVariants = includedIds === null ? variants : variants.filter(variant => includedIds.has(variant.id));
+  if (includedIds && selectedVariants.length !== includedIds.size) {
+    targetBlockers.push(issue("PUBLICATION_MEMBER_VARIANT_UNAVAILABLE",
+      "An included publication SKU is absent or no longer eligible in the active product snapshot.",
+      { publicationTargetId: target.publicationTargetId, productId,
+        productVariantIds: [...includedIds].filter(id => !selectedVariants.some(variant => variant.id === id)) }));
+  }
   const binding = target.sourceBinding;
   const members = binding?.members.slice() ?? [];
   if (!binding || members.length === 0) {
@@ -291,7 +305,7 @@ function planTarget(
       { publicationTargetId: target.publicationTargetId, warehouseIds: unavailableWarehouseIds },
     ));
   }
-  if (variants.length === 0) {
+  if (selectedVariants.length === 0) {
     targetBlockers.push(issue(
       "PUBLICATION_TARGET_HAS_NO_MANAGED_SKUS",
       "The product has no active, physical, inventory-managed sellable SKU to publish.",
@@ -301,7 +315,7 @@ function planTarget(
 
   const mappings = new Map(target.mappings.map((mapping) => [mapping.productVariantId, mapping] as const));
   const variantHolds = new Map(target.variantHolds.map((entry) => [entry.productVariantId, entry.hold] as const));
-  const rows = variants.map((variant): RuntimeRow => {
+  const rows = selectedVariants.map((variant): RuntimeRow => {
     // The hold that zeroes this SKU: the destination-wide hold covers every SKU
     // and wins; otherwise a SKU-level hold covers this one alone.
     const hold = target.hold ?? variantHolds.get(variant.id) ?? null;

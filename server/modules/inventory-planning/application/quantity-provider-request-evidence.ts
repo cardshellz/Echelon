@@ -60,6 +60,7 @@ export class QuantityProviderEvidenceCollector {
   private sealed = false;
   private tail: Promise<void> = Promise.resolve();
   private readonly recorded: Array<{ requestId: string; evidence: QuantityProviderResponseEvidence }> = [];
+  private readonly completedRequestPaths: Array<{ method:string; path:string }> = [];
   private readonly rejectedErrors = new Set<unknown>();
   constructor(private readonly store: QuantityProviderRequestEvidenceStore, private readonly clock: () => Date) {}
 
@@ -77,6 +78,19 @@ export class QuantityProviderEvidenceCollector {
       && !this.uncertain && this.pending === 0 && this.recorded.length > 0
       && this.recorded.every(row => row.evidence.httpStatus !== null && row.evidence.responseHash !== null);
   }
+  provesNoRequestsStarted():boolean {
+    return this.sealed && !this.uncertain && this.ordinal===0 && this.pending===0 && this.recorded.length===0;
+  }
+  /** Initial listing submission cannot use the legacy callback-only completion
+   * contract. It needs one instrumented terminal HTTP receipt for its feed. */
+  assertSingleCompletedRequest(method:string, paths:readonly string[]):void {
+    const request=this.completedRequestPaths[0], response=this.recorded[0]?.evidence;
+    if (this.recorded.length!==1 || this.completedRequestPaths.length!==1 || request.method!==method || !paths.includes(request.path)
+      || response?.outcome!=="completed" || response.httpStatus===null || response.httpStatus<200 || response.httpStatus>=300 || response.responseHash===null) {
+      this.uncertain=true;
+      throw new QuantityProviderEvidenceError();
+    }
+  }
   evidenceHash(): string { return digest(this.recorded); }
 
   observe<T>(request: { method: string; path: string; body?: unknown }, work: () => Promise<T>): Promise<T> {
@@ -92,7 +106,7 @@ export class QuantityProviderEvidenceCollector {
 
   private async perform<T>(request: { method: string; path: string; body?: unknown }, work: () => Promise<T>): Promise<T> {
     if (this.uncertain || this.rejectedErrors.size > 0 || this.ordinal >= MAX_PROVIDER_REQUESTS_PER_OWNER) throw new QuantityProviderEvidenceError();
-    if (!/^(POST|PUT|DELETE)$/.test(request.method) || !/^\/sell\/inventory\/v1\/[^\s?#]{1,1000}$/.test(request.path)) {
+    if (!isQuantityProviderRequestPath(request.method, request.path)) {
       throw new QuantityProviderEvidenceError();
     }
     this.pending += 1;
@@ -116,6 +130,7 @@ export class QuantityProviderEvidenceCollector {
       if (evidence.outcome === "uncertain") this.uncertain = true;
       await this.store.finish(requestId, evidence, this.clock().toISOString());
       this.recorded.push({ requestId, evidence });
+      this.completedRequestPaths.push({method:request.method,path:request.path});
       if (failed) {
         if (evidence.outcome === "rejected") this.rejectedErrors.add(failure);
         throw failure;
@@ -130,6 +145,19 @@ export class QuantityProviderEvidenceCollector {
 
 /** Shared eBay protocol boundary covers routed, maintenance, Dropship and group writes. */
 export function observeEbayQuantityRequest<T>(request: { method: string; path: string; body?: unknown }, work: () => Promise<T>): Promise<T> {
+  return observeQuantityProviderRequest(request,work);
+}
+
+/** Exact supported quantity-bearing endpoints only; price/content endpoints
+ * must not create misleading quantity request evidence. */
+export function observeQuantityProviderRequest<T>(request: { method: string; path: string; body?: unknown }, work: () => Promise<T>): Promise<T> {
   const owner = currentOwner.getStore();
   return owner && request.method !== "GET" ? owner.observe(request, work) : work();
+}
+
+export function isQuantityProviderRequestPath(method: string, path: string): boolean {
+  if (path.length > 1024) return false;
+  if (/^(POST|PUT|DELETE)$/.test(method) && /^\/sell\/inventory\/v1\/[^\s?#]{1,1000}$/.test(path)) return true;
+  if (method === "POST") return /^\/v3\/feeds\?feedType=(MP_ITEM|MP_ITEM_MATCH)$/.test(path);
+  return method === "PUT" && /^\/v3\/inventory\?sku=[^&#\s]+&shipNode=[^&#\s]+$/.test(path);
 }

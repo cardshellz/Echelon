@@ -16,7 +16,9 @@ export const channelCatalogItemSchema = z.object({
   publishedStatus: z.string().min(1).max(100),
 }).strict();
 export const channelCatalogLinkSchema = z.object({
-  mappings: z.array(z.object({ sku: identity, productVariantId: positiveId }).strict()).min(1).max(100),
+  mappings: z.array(z.object({ sku: identity, productVariantId: positiveId,
+    expectedExternalProductId: identity.optional(),
+  }).strict()).min(1).max(100),
 }).strict().superRefine(({ mappings }, ctx) => {
   if (new Set(mappings.map(item => item.sku)).size !== mappings.length
     || new Set(mappings.map(item => item.productVariantId)).size !== mappings.length) {

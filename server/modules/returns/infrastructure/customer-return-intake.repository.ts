@@ -107,7 +107,8 @@ async function verifyConfiguration(tx: Executor, input: PreparedCustomerReturnIn
     || Number(settings.warehouse_id) !== input.warehouseSnapshot.warehouseId
     || input.warehouseSnapshot.version !== input.settingsVersion
     || Number(settings.policy_id) !== input.operationalPolicy.id
-    || input.parcels.some(parcel => parcel.carrierId !== settings.carrier_id || parcel.serviceCode !== settings.service_code
+    || input.parcels.some(parcel => (parcel.selectionMode ?? "fixed_service") !== settings.selection_mode
+      || parcel.carrierId !== settings.carrier_id || parcel.serviceCode !== settings.service_code
       || canonical(parcel.destinationAddress) !== canonical(settings.destination_address))) configurationChanged();
   const warehouse = rows(await tx.execute(sql`SELECT is_active,country FROM warehouse.warehouses WHERE id=${settings.warehouse_id} FOR SHARE`))[0];
   if (!warehouse || warehouse.is_active !== 1 || warehouse.country !== "US") configurationChanged();
@@ -191,9 +192,9 @@ async function materializeCases(tx: Executor, input: PreparedCustomerReturnIntak
 async function persistParcels(tx: Executor, input: PreparedCustomerReturnIntake, authorizationId: number, now: Date): Promise<void> {
   for (const parcel of input.parcels) {
     const saved = rows(await tx.execute(sql`INSERT INTO returns.customer_return_parcels
-      (authorization_id,parcel_key,dimensions,weight_grams,origin_address,destination_address,carrier_id,service_code,created_at)
+      (authorization_id,parcel_key,dimensions,weight_grams,origin_address,destination_address,selection_mode,carrier_id,service_code,created_at)
       VALUES(${authorizationId},${parcel.parcelKey},${JSON.stringify(parcel.dimensions)}::jsonb,${parcel.weightGrams},
-        ${JSON.stringify(parcel.originAddress)}::jsonb,${JSON.stringify(parcel.destinationAddress)}::jsonb,
+        ${JSON.stringify(parcel.originAddress)}::jsonb,${JSON.stringify(parcel.destinationAddress)}::jsonb,${parcel.selectionMode ?? "fixed_service"},
         ${parcel.carrierId},${parcel.serviceCode},${now}) RETURNING id`))[0];
     for (const item of parcel.items) {
       await tx.execute(sql`INSERT INTO returns.customer_return_parcel_items(parcel_id,authorization_line_id,quantity)

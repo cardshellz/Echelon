@@ -4,6 +4,7 @@ import type { FulfillmentProviderCredentialCipher } from "../../../shipping-engi
 import { WalmartApiError, WalmartClient, walmartCredentialsSchema } from "./walmart-client";
 import { WalmartUsApi, type WalmartShipNode, type WalmartUsApiPort } from "./walmart-us-api";
 import { WalmartConnectionRepository, type WalmartConnectionRecord } from "./walmart-connection.repository";
+import { WalmartListingApi } from "./walmart-listing-api";
 
 function isActiveSellerShipNode(node: WalmartShipNode): boolean {
   // Walmart's default seller inventory location is VIRTUAL. Settings also
@@ -15,6 +16,7 @@ function isActiveSellerShipNode(node: WalmartShipNode): boolean {
 
 export class WalmartChannelService {
   private readonly clients = new Map<number, { revision: number; api: WalmartUsApiPort }>();
+  private readonly listingClients = new Map<number, { revision: number; api: WalmartListingApi }>();
   constructor(
     readonly repository: WalmartConnectionRepository,
     private readonly cipher: FulfillmentProviderCredentialCipher | null,
@@ -22,6 +24,8 @@ export class WalmartChannelService {
     private readonly now: () => Date = () => new Date(),
     private readonly createApi: (credentials: z.infer<typeof walmartCredentialsSchema>) => WalmartUsApiPort
       = credentials => new WalmartUsApi(new WalmartClient(credentials)),
+    private readonly createListingApi: (credentials: z.infer<typeof walmartCredentialsSchema>) => WalmartListingApi
+      = credentials => new WalmartListingApi(new WalmartClient(credentials)),
   ) {}
   async status(channelId: number) {
     const status = await this.repository.status(channelId);
@@ -63,6 +67,7 @@ export class WalmartChannelService {
       await this.repository.save(command, channelId, account.partnerName, actor, now,
         connectionId => cipher.seal({ connectionId, provider: "walmart", credential: JSON.stringify(credentials) }));
       this.clients.delete(channelId);
+      this.listingClients.delete(channelId);
       return this.status(channelId);
     });
   }
@@ -97,6 +102,20 @@ export class WalmartChannelService {
   api(row: WalmartConnectionRecord): WalmartUsApiPort {
     const cached = this.clients.get(row.channel_id);
     if (cached?.revision === row.revision) return cached.api;
+    const api = this.createApi(this.credentials(row));
+    if (this.clients.size >= 100) this.clients.clear();
+    this.clients.set(row.channel_id, { revision: row.revision, api });
+    return api;
+  }
+  listingApi(row: WalmartConnectionRecord): WalmartListingApi {
+    const cached = this.listingClients.get(row.channel_id);
+    if (cached?.revision === row.revision) return cached.api;
+    const api = this.createListingApi(this.credentials(row));
+    if (this.listingClients.size >= 100) this.listingClients.clear();
+    this.listingClients.set(row.channel_id, { revision: row.revision, api });
+    return api;
+  }
+  private credentials(row: WalmartConnectionRecord): z.infer<typeof walmartCredentialsSchema> {
     const plaintext = this.requireCipher().open({
       connection: { id: row.connection_id, provider: "walmart", name: row.partner_name, status: "active",
         credentialSource: "vault", credentialRef: null, revision: row.revision },
@@ -104,10 +123,7 @@ export class WalmartChannelService {
     });
     const credentials = walmartCredentialsSchema.parse(JSON.parse(plaintext) as unknown);
     if (credentials.market !== "us" || credentials.environment !== row.environment) throw new WalmartApiError("WALMART_CREDENTIAL_SCOPE_MISMATCH", "Stored credentials do not match the selected Walmart environment", false);
-    const api = this.createApi(credentials);
-    if (this.clients.size >= 100) this.clients.clear();
-    this.clients.set(row.channel_id, { revision: row.revision, api });
-    return api;
+    return credentials;
   }
   private requireCipher(): FulfillmentProviderCredentialCipher {
     if (!this.cipher) throw new WalmartApiError("WALMART_VAULT_UNCONFIGURED", "Configure WALMART_CREDENTIAL_ENCRYPTION_KEY before connecting an account", false);

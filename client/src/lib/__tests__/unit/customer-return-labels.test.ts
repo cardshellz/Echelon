@@ -78,6 +78,8 @@ function settings(): CustomerReturnLabelSettingsState {
       policyId: 20,
       carrierId: "se-123",
       serviceCode: "usps_ground_advantage",
+      selectionMode: "fixed_service",
+      carrierRules: [],
       contactName: "Returns",
       contactPhone: null,
       version: 2,
@@ -89,6 +91,7 @@ function settings(): CustomerReturnLabelSettingsState {
       {
         id: "se-123",
         name: "USPS",
+        code: "usps",
         services: [{ code: "usps_ground_advantage", name: "Ground Advantage" }],
       },
     ],
@@ -104,6 +107,8 @@ function settingsInput(): CustomerReturnLabelSettingsInput {
     policyId: 20,
     carrierId: "se-123",
     serviceCode: "usps_ground_advantage",
+    selectionMode: "fixed_service",
+    carrierRules: [],
     contactName: "Returns",
     contactPhone: null,
   };
@@ -512,6 +517,50 @@ describe("return label transport", () => {
 });
 
 describe("return label settings capability", () => {
+  it("parses the previous fixed-service response without silently enabling automatic selection", async () => {
+    const current = settings();
+    const {
+      selectionMode: _mode,
+      carrierRules: _rules,
+      ...legacy
+    } = current.settings!;
+    const request = vi
+      .fn<FetchRequest>()
+      .mockResolvedValue(response({ ...current, settings: legacy }));
+    const parsed = await loadReturnLabelSettings(
+      channelId,
+      new AbortController().signal,
+      request,
+    );
+    expect(parsed.settings).toMatchObject({
+      selectionMode: "fixed_service",
+      carrierRules: [],
+      carrierId: "se-123",
+      serviceCode: "usps_ground_advantage",
+    });
+    expect(returnLabelsEnabled(parsed)).toBe(true);
+  });
+  it("enables automatic selection only when every explicitly allowed service remains available", () => {
+    const value = settings();
+    value.settings = {
+      ...value.settings!,
+      selectionMode: "cheapest_eligible",
+      carrierId: null,
+      serviceCode: null,
+      carrierRules: [
+        {
+          carrierId: "se-123",
+          serviceCodes: ["usps_ground_advantage"],
+          maxWeightLb: "20",
+        },
+      ],
+    };
+    expect(returnLabelsEnabled(value)).toBe(true);
+    value.settings.carrierRules[0].serviceCodes.push("unavailable_service");
+    expect(returnLabelsEnabled(value)).toBe(false);
+    value.settings.carrierRules = [];
+    expect(returnLabelsEnabled(value)).toBe(false);
+  });
   it("enables only a fully resolved, configured capability", () => {
     expect(returnLabelsEnabled(settings())).toBe(true);
     expect(returnLabelsEnabled(null)).toBe(false);
@@ -636,13 +685,11 @@ describe("return label settings capability", () => {
 describe("return label downloads", () => {
   it("downloads only the verified parcel path with fresh authenticated, uncached access", async () => {
     const signal = new AbortController().signal;
-    const request = vi
-      .fn<FetchRequest>()
-      .mockResolvedValue(
-        new Response("%PDF-1.7\nverified label", {
-          headers: { "Content-Type": "application/pdf; charset=binary" },
-        }),
-      );
+    const request = vi.fn<FetchRequest>().mockResolvedValue(
+      new Response("%PDF-1.7\nverified label", {
+        headers: { "Content-Type": "application/pdf; charset=binary" },
+      }),
+    );
     const value = status();
     const blob = await downloadReturnLabel(value, 31, signal, request);
     expect(await blob.text()).toBe("%PDF-1.7\nverified label");

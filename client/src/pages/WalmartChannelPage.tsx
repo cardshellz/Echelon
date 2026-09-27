@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRoute } from "wouter";
-import { CheckCircle2, ExternalLink, Loader2, ShieldCheck } from "lucide-react";
+import { CheckCircle2, Loader2, ShieldCheck } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { apiRequest } from "@/lib/queryClient";
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +12,7 @@ import { ChannelWorkspaceHeader } from "@/components/channels/ChannelWorkspaceHe
 import { ChannelCatalogFeed } from "@/components/channels/ChannelCatalogFeed";
 import WalmartConnectionPanel from "@/components/WalmartConnectionPanel";
 import { walmartStatusSchema } from "@shared/types/walmart-channel";
+import { ChannelListingPublicationWorkspace } from "@/features/channel-listing-publication/ChannelListingPublicationWorkspace";
 
 export default function WalmartChannelPage() {
   const [, params] = useRoute("/channels/walmart/:channelId");
@@ -21,14 +22,15 @@ export default function WalmartChannelPage() {
 }
 export function WalmartChannelWorkspace({ channelId }: { channelId: number }) {
   const { hasPermission } = useAuth();
-  const canEdit = hasPermission("channels", "edit");
+  const canView = hasPermission("channels", "view");
+  const canEdit = canView && hasPermission("channels", "edit");
   const client = useQueryClient();
   const [connecting, setConnecting] = useState(false);
   const base = `/api/channels/${channelId}/walmart`;
-  const status = useQuery({ queryKey: [base], queryFn: async () => walmartStatusSchema.nullable().parse(await (await apiRequest("GET", base)).json()), refetchInterval: 30_000 });
+  const status = useQuery({ queryKey: [base], enabled: canView, queryFn: async () => walmartStatusSchema.nullable().parse(await (await apiRequest("GET", base)).json()), refetchInterval: 30_000 });
   const warehouses = useQuery<{ id: number; code: string; name: string; isActive?: number; warehouseType?: string }[]>({ queryKey: ["/api/warehouses"],
-    queryFn: async () => (await apiRequest("GET", "/api/warehouses")).json() });
-  const exceptions = useQuery<{ purchaseOrderId: string; errorCode: string; observedAt: string }[]>({ queryKey: [base, "exceptions"], enabled: !!status.data,
+    enabled: canView, queryFn: async () => (await apiRequest("GET", "/api/warehouses")).json() });
+  const exceptions = useQuery<{ purchaseOrderId: string; errorCode: string; observedAt: string }[]>({ queryKey: [base, "exceptions"], enabled: canView && !!status.data,
     queryFn: async () => (await apiRequest("GET", `${base}/exceptions`)).json(), refetchInterval: 30_000 });
   const connected = async () => {
     await client.invalidateQueries({ queryKey: [base] });
@@ -36,9 +38,10 @@ export function WalmartChannelWorkspace({ channelId }: { channelId: number }) {
     await client.invalidateQueries({ queryKey: [`/api/channels/${channelId}/catalog`] });
     setConnecting(false);
   };
+  if (!canView) return <p role="alert" className="p-6">You do not have permission to view this channel.</p>;
   const warehouse = warehouses.data?.find(location => location.id === status.data?.warehouseId);
   return <div className="p-2 sm:p-4 md:p-6 space-y-4 sm:space-y-6 max-w-6xl mx-auto">
-    <ChannelWorkspaceHeader name="Walmart" description="Store setup, listing feed, and SKU mapping" />
+    <ChannelWorkspaceHeader name="Walmart" description="Store setup, listing feed, pricing, and publication activity" />
     <Card><CardHeader className="px-3 sm:px-6"><CardTitle className="flex items-center gap-2"><ShieldCheck className="h-5 w-5" />Store Setup</CardTitle>
       <CardDescription>Walmart US account and seller fulfillment location</CardDescription></CardHeader>
       <CardContent className="space-y-5 px-3 sm:px-6">
@@ -59,13 +62,13 @@ export function WalmartChannelWorkspace({ channelId }: { channelId: number }) {
             </dl>
             {status.data.lastErrorCode && <p role="alert" className="text-sm text-destructive">Order sync needs attention: {status.data.lastErrorCode}</p>}
             {status.data.orderSyncBlockedReason && <p role="alert" className="text-sm text-destructive">{status.data.orderSyncBlockedReason}</p>}
-            <p className="text-sm text-muted-foreground">Inventory quantities use <a className="underline" href="/channels/inventory">Channel Inventory</a>. Listing content and prices are managed in <a className="underline" href="https://seller.walmart.com/" target="_blank" rel="noreferrer">Walmart Seller Center <ExternalLink className="inline h-3 w-3" /></a>.</p>
+            <p className="text-sm text-muted-foreground">Choose products and prepare Walmart listings below. Inventory quantities use <a className="underline" href="/channels/inventory">Channel Inventory</a>; the publish review checks listing and stock readiness.</p>
           </>}
         </>}
       </CardContent>
     </Card>
-    {status.data && <ChannelCatalogFeed channelId={channelId} providerName="Walmart" canEdit={canEdit}
-      onMappingsChanged={() => client.invalidateQueries({ queryKey: [base] })} />}
+    {status.data && <ChannelListingPublicationWorkspace channelId={channelId} connectionId={status.data.connectionId} canEdit={canEdit} existingItems={<ChannelCatalogFeed channelId={channelId} providerName="Walmart" canEdit={canEdit}
+      onMappingsChanged={() => client.invalidateQueries({ queryKey: [base] })} />} />}
     {(exceptions.error || !!exceptions.data?.length) && <Card><CardHeader><CardTitle>Orders needing attention</CardTitle></CardHeader><CardContent>
       {exceptions.error && <p role="alert">{exceptions.error.message}</p>}
       {exceptions.data?.map(issue => <div key={issue.purchaseOrderId} className="flex flex-wrap justify-between gap-2 border-b py-3 text-sm"><span>{issue.purchaseOrderId}</span><span className="text-destructive">{issue.errorCode}</span><time>{new Date(issue.observedAt).toLocaleString()}</time></div>)}

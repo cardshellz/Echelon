@@ -11,6 +11,7 @@ import {
   type CustomerReturnLabelSubmitInput,
 } from "@shared/returns/customer-return-label.contract";
 import { PreviewAccessError } from "./customer-return-preview";
+import { returnLabelConfigurationAvailable } from "./customer-return-label-settings";
 
 type FetchRequest = (
   input: RequestInfo | URL,
@@ -163,19 +164,9 @@ export function returnLabelsEnabled(
 ): boolean {
   const settings = state?.settings;
   return Boolean(
-    state?.providerConfigured &&
+    state &&
       settings?.enabled &&
-      state.warehouses.some(
-        (item) => item.id === settings.warehouseId && item.address !== null,
-      ) &&
-      state.policies.some((item) => item.id === settings.policyId) &&
-      state.carriers.some(
-        (item) =>
-          item.id === settings.carrierId &&
-          item.services.some(
-            (service) => service.code === settings.serviceCode,
-          ),
-      ),
+      returnLabelConfigurationAvailable(settings, state),
   );
 }
 

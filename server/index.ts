@@ -1,4 +1,5 @@
 import { startWalmartOrderPolling } from "./modules/channels/adapters/walmart/walmart-order-poll.service";
+import { startListingPublicationWorker } from "./modules/marketplace-listings/application/listing-publication-worker";
 import { startArchonOrderDelivery } from "./modules/oms/archon-order-delivery.worker";
 import express, { type Request, Response, NextFunction } from "express";
 import session from "express-session";
@@ -486,6 +487,7 @@ function startEchelonSyncScheduler(
   });
   setDropshipFulfillmentSync(services.wmsSync);
   setDropshipInventoryRuntimeAuthorityGate(services.dropshipInventoryRuntimeAuthority);
+  startListingPublicationWorker(services.listingPublication);
 
   if (process.env.WALMART_ORDER_POLLING_ENABLED !== "false" && !schedulersDisabled("WALMART_ORDER_POLLING_DISABLED")) {
     startWalmartOrderPolling(services.walmartOrderPoll, services.walmart);

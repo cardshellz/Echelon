@@ -51,6 +51,58 @@ function harness() {
   };
 }
 describe("CustomerReturnIntakeService", () => {
+  it("accepts automatic manifests without inventing a carrier and defaults historical manifests to fixed", () => {
+    const request = input();
+    request.parcels = request.parcels.map((parcel) => ({
+      ...parcel,
+      selectionMode: "cheapest_eligible",
+      carrierId: null,
+      serviceCode: null,
+    }));
+    expect(validatePreparedCustomerReturnIntake(request).parcels).toEqual(
+      request.parcels,
+    );
+    const historical = input();
+    historical.parcels = historical.parcels.map(
+      ({ selectionMode: _mode, ...parcel }) => parcel,
+    );
+    expect(
+      validatePreparedCustomerReturnIntake(historical).parcels.map(
+        (parcel) => parcel.selectionMode,
+      ),
+    ).toEqual(["fixed_service", "fixed_service"]);
+  });
+  it.each([
+    {
+      selectionMode: "fixed_service",
+      carrierId: null,
+      serviceCode: "ups_ground",
+    },
+    { selectionMode: "fixed_service", carrierId: "se-123", serviceCode: null },
+    {
+      selectionMode: "cheapest_eligible",
+      carrierId: "se-123",
+      serviceCode: null,
+    },
+    {
+      selectionMode: "cheapest_eligible",
+      carrierId: null,
+      serviceCode: "ups_ground",
+    },
+  ] as const)(
+    "rejects inconsistent selection evidence before creating any claim %#",
+    async (fields) => {
+      const h = harness();
+      const request = input();
+      await expect(
+        h.service.submit({
+          ...request,
+          parcels: [{ ...request.parcels[0], ...fields }, request.parcels[1]],
+        }),
+      ).rejects.toMatchObject({ code: "RETURN_INTAKE_INPUT_INVALID" });
+      expect(h.store.persist).not.toHaveBeenCalled();
+    },
+  );
   it("persists validated immutable intent using the injected decision instant", async () => {
     const h = harness();
     const request = input();
