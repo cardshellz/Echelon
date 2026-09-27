@@ -111,13 +111,7 @@ export class CustomerReturnLabelSettingsService {
       const capabilities = await this.dependencies.capabilities();
       if (
         !capabilities.configured ||
-        !capabilities.carriers.some(
-          (carrier) =>
-            carrier.id === input.carrierId &&
-            carrier.services.some(
-              (service) => service.code === input.serviceCode,
-            ),
-        )
+        !supportsConfiguredServices(capabilities, input)
       ) {
         throw new CustomerReturnIntakeError(
           "RETURN_LABEL_SERVICE_UNAVAILABLE",
@@ -164,13 +158,7 @@ export class CustomerReturnLabelSettingsService {
     const capabilities = await this.dependencies.capabilities();
     if (
       !capabilities.configured ||
-      !capabilities.carriers.some(
-        (carrier) =>
-          carrier.id === settings.carrierId &&
-          carrier.services.some(
-            (service) => service.code === settings.serviceCode,
-          ),
-      )
+      !supportsConfiguredServices(capabilities, settings)
     )
       throw new CustomerReturnIntakeError(
         "RETURN_LABEL_SERVICE_UNAVAILABLE",
@@ -185,6 +173,36 @@ export class CustomerReturnLabelSettingsService {
       },
     };
   }
+}
+
+function supportsConfiguredServices(
+  capabilities: ReturnLabelCapabilities,
+  settings: Pick<
+    CustomerReturnLabelSettings,
+    "selectionMode" | "carrierId" | "serviceCode" | "carrierRules"
+  >,
+): boolean {
+  const rules =
+    settings.selectionMode === "fixed_service"
+      ? [
+          {
+            carrierId: settings.carrierId,
+            serviceCodes: [settings.serviceCode],
+          },
+        ]
+      : settings.carrierRules;
+  return (
+    rules.length > 0 &&
+    rules.every((rule) =>
+      capabilities.carriers.some(
+        (carrier) =>
+          carrier.id === rule.carrierId &&
+          rule.serviceCodes.every((code) =>
+            carrier.services.some((service) => service.code === code),
+          ),
+      ),
+    )
+  );
 }
 
 export function isPortalReturnPolicy(

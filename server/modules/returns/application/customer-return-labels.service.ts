@@ -1,6 +1,7 @@
 import {
   customerReturnLabelStatusSchema,
   type CustomerReturnLabelStatus,
+  type CustomerReturnLabelSettings,
 } from "@shared/returns/customer-return-label.contract";
 import { CustomerReturnIntakeError } from "./customer-return-intake.ports";
 import {
@@ -10,6 +11,22 @@ import {
   type ReturnLabelProvider,
   type ReturnLabelRecord,
 } from "../../shipping-engine/application/return-label-provider.port";
+import {
+  ReturnRateProviderError,
+  returnRateResultSchema,
+  type ReturnRateProvider,
+  type ReturnRateInput,
+} from "../../shipping-engine/application/return-rate-provider.port";
+import {
+  CustomerReturnRateSelectionError,
+  selectCustomerReturnRate,
+} from "../domain/customer-return-rate-selection";
+import { returnCarrierRuleAllowsWeight } from "@shared/returns/customer-return-carrier-policy";
+import {
+  customerReturnShipmentHash,
+  RETURN_RATE_QUOTE_MAX_AGE_MS,
+  type CustomerReturnQuoteDecision,
+} from "./customer-return-label-quote";
 
 // A provider call has a bounded 30-second deadline. A crash after its durable
 // intent is indistinguishable from a lost response, so expiry permits GET only.
@@ -27,12 +44,22 @@ export interface StoredReturnLabels {
   parcels: {
     id: number;
     number: number;
-    input: ReturnLabelInput;
+    selectionMode: "fixed_service" | "cheapest_eligible";
+    shipment: ReturnRateInput["shipment"];
+    input: ReturnLabelInput | null;
     attempt: ReturnLabelAttempt | null;
   }[];
 }
 export interface CustomerReturnLabelStore {
   read(channelId: number, authorizationId: number): Promise<StoredReturnLabels>;
+  recordQuote(
+    channelId: number,
+    authorizationId: number,
+    parcelId: number,
+    decision: CustomerReturnQuoteDecision,
+    actor: string,
+    now: Date,
+  ): Promise<number>;
   /** Locks the parcel and settings; commits intent before any carrier request. */
   begin(
     channelId: number,
@@ -40,7 +67,8 @@ export interface CustomerReturnLabelStore {
     parcelId: number,
     actor: string,
     now: Date,
-  ): Promise<number | null>;
+    quoteDecisionId?: number,
+  ): Promise<{ id: number; input: ReturnLabelInput } | null>;
   finish(
     attemptId: number,
     outcome:
@@ -56,8 +84,11 @@ export interface CustomerReturnLabelStore {
 export interface CustomerReturnLabelsDependencies {
   store: CustomerReturnLabelStore;
   provider: ReturnLabelProvider;
+  rates: ReturnRateProvider;
   authorizeChannel: (channelId: number) => Promise<void>;
-  requirePurchaseConfiguration: (channelId: number) => Promise<void>;
+  requirePurchaseConfiguration: (
+    channelId: number,
+  ) => Promise<CustomerReturnLabelSettings>;
   now: () => Date;
 }
 
@@ -99,21 +130,27 @@ export class CustomerReturnLabelsService {
       return this.present(stored);
     const parcel = pending;
     if (!parcel) return this.present(stored);
-    await this.dependencies.requirePurchaseConfiguration(channelId);
-    const attemptId = await this.dependencies.store.begin(
+    const settings =
+      await this.dependencies.requirePurchaseConfiguration(channelId);
+    const quoteDecisionId =
+      parcel.selectionMode === "cheapest_eligible"
+        ? await this.quote(stored, parcel, settings, actor)
+        : undefined;
+    const attempt = await this.dependencies.store.begin(
       channelId,
       authorizationId,
       parcel.id,
       actor,
       this.dependencies.now(),
+      quoteDecisionId,
     );
-    if (attemptId === null) return this.status(channelId, authorizationId);
+    if (attempt === null) return this.status(channelId, authorizationId);
     let outcome: Parameters<CustomerReturnLabelStore["finish"]>[1];
     try {
       const result = returnLabelRecordSchema.parse(
-        await this.dependencies.provider.purchase(parcel.input),
+        await this.dependencies.provider.purchase(attempt.input),
       );
-      assertLabelIdentity(result, parcel.input);
+      assertLabelIdentity(result, attempt.input);
       outcome = { status: "succeeded", result };
     } catch (error) {
       outcome = {
@@ -131,12 +168,82 @@ export class CustomerReturnLabelsService {
     // A database failure here leaves the durable executing intent intact. It must
     // not be translated into a new purchase or a definitive carrier rejection.
     await this.dependencies.store.finish(
-      attemptId,
+      attempt.id,
       outcome,
       actor,
       this.dependencies.now(),
     );
     return this.status(channelId, authorizationId);
+  }
+
+  private async quote(
+    stored: StoredReturnLabels,
+    parcel: StoredReturnLabels["parcels"][number],
+    settings: CustomerReturnLabelSettings,
+    actor: string,
+  ): Promise<number> {
+    const quotedAt = this.dependencies.now();
+    const decision: CustomerReturnQuoteDecision = {
+      settings,
+      shipment: parcel.shipment,
+      shipmentHash: customerReturnShipmentHash(parcel.shipment),
+      result: null,
+      selected: null,
+      errorCode: null,
+      quotedAt: quotedAt.toISOString(),
+      expiresAt: new Date(
+        quotedAt.getTime() + RETURN_RATE_QUOTE_MAX_AGE_MS,
+      ).toISOString(),
+    };
+    try {
+      const carrierIds =
+        settings.selectionMode === "fixed_service"
+          ? [settings.carrierId!]
+          : settings.carrierRules
+              .filter((rule) =>
+                returnCarrierRuleAllowsWeight(
+                  rule,
+                  parcel.shipment.parcel.weightGrams,
+                ),
+              )
+              .map((rule) => rule.carrierId);
+      if (carrierIds.length === 0)
+        throw new CustomerReturnRateSelectionError("RETURN_RATE_NONE_ELIGIBLE");
+      decision.result = returnRateResultSchema.parse(
+        await this.dependencies.rates.quote({
+          shipment: parcel.shipment,
+          carrierIds,
+        }),
+      );
+      decision.selected = selectCustomerReturnRate({
+        policy: settings,
+        weightGrams: parcel.shipment.parcel.weightGrams,
+        result: decision.result,
+      }).selected;
+    } catch (error) {
+      decision.errorCode =
+        error instanceof ReturnRateProviderError ||
+        error instanceof CustomerReturnRateSelectionError
+          ? error.code
+          : "RETURN_RATE_UNAVAILABLE";
+    }
+    const id = await this.dependencies.store.recordQuote(
+      stored.channelId,
+      stored.authorizationId,
+      parcel.id,
+      decision,
+      actor,
+      this.dependencies.now(),
+    );
+    if (decision.errorCode)
+      throw new CustomerReturnIntakeError(
+        decision.errorCode,
+        decision.errorCode === "RETURN_RATE_NONE_ELIGIBLE"
+          ? "No allowed return service is available for this box. Review the carrier rules before continuing."
+          : "Return rates could not be verified. No label was purchased; try again.",
+        decision.errorCode === "RETURN_RATE_NONE_ELIGIBLE" ? 409 : 503,
+      );
+    return id;
   }
 
   async artifact(
@@ -169,6 +276,8 @@ export class CustomerReturnLabelsService {
     const attempt = parcel.attempt!;
     let outcome: Parameters<CustomerReturnLabelStore["finish"]>[1];
     try {
+      if (!parcel.input)
+        throw new Error("Saved return purchase request is missing.");
       const raw = await this.dependencies.provider.recover(parcel.input);
       if (raw === null)
         outcome = { status: "uncertain", code: "RETURN_LABEL_NOT_FOUND_YET" };

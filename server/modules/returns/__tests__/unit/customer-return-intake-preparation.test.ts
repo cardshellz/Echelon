@@ -12,6 +12,52 @@ import {
 import { projectCustomerReturnLiveWmsAllocations } from "../../application/customer-return-live-delivery";
 const policy = { id: 1, version: 1, snapshot: labelPolicy };
 describe("trusted live return intake preparation", () => {
+  it("retains an automatic manifest's physical facts while deferring its carrier to quoting", async () => {
+    const f = await labelPreparationFixture();
+    const settings = {
+      ...labelSettings,
+      selectionMode: "cheapest_eligible" as const,
+      carrierId: null,
+      serviceCode: null,
+      carrierRules: [
+        {
+          carrierId: "se-123",
+          serviceCodes: ["ups_ground"],
+          maxWeightLb: null,
+        },
+      ],
+    };
+    const prepared = prepareCustomerReturnIntake(
+      f.input,
+      f.inspection,
+      settings,
+      policy,
+      "admin",
+      LABEL_LEASE,
+    );
+    expect(
+      prepared.parcels.map((parcel) => ({
+        selectionMode: parcel.selectionMode,
+        carrierId: parcel.carrierId,
+        serviceCode: parcel.serviceCode,
+      })),
+    ).toEqual([
+      {
+        selectionMode: "cheapest_eligible",
+        carrierId: null,
+        serviceCode: null,
+      },
+      {
+        selectionMode: "cheapest_eligible",
+        carrierId: null,
+        serviceCode: null,
+      },
+    ]);
+    expect(prepared.parcels.map((parcel) => parcel.weightGrams)).toEqual([
+      33, 13,
+    ]);
+    expect(prepared.settingsVersion).toBe(settings.version);
+  });
   it("preserves purchased-line identities and exact warehouse allocations across repacked boxes", async () => {
     const f = await labelPreparationFixture();
     const before = structuredClone(f.inspection);

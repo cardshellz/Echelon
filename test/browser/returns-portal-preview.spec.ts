@@ -1906,7 +1906,13 @@ test("private labels preserve partial success and resume after reload without au
   await expect(page.getByLabel("Order source", { exact: true })).toBeDisabled();
   await expect(
     page.getByRole("button", { name: "Save label settings", exact: true }),
-  ).toBeDisabled();
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("link", { name: /Manage label settings/ }),
+  ).toHaveAttribute("target", "_blank");
+  await expect(
+    page.getByRole("button", { name: "Pause labels", exact: true }),
+  ).toBeEnabled();
   const stored = await page.evaluate(() =>
     Object.keys(sessionStorage)
       .filter((key) => key.startsWith("return-label-session:"))
@@ -1986,13 +1992,12 @@ test("an uncertain label submission retries the same intent and command key whil
   expect(fixture.failures).toEqual([]);
 });
 
-test("private label settings require an explicit versioned enable and samples remain without effects", async ({
+test("admin label settings require an explicit versioned enable and samples remain without effects", async ({
   page,
 }) => {
   const fixture = await installReturnPreviewFixtures(page);
   const labels = await installReturnLabelFixtures(page, { enabled: false });
-  await page.goto(PORTAL_PATH);
-  await showTestingControls(page);
+  await page.goto("/returns/label-settings?channelId=36");
   const enabled = page.getByRole("checkbox", {
     name: "Enable real return labels for this shop",
     exact: true,
@@ -2009,7 +2014,9 @@ test("private label settings require an explicit versioned enable and samples re
   expect(labels.settingsWrites[0]).toMatchObject({
     enabled: true,
     expectedVersion: 1,
+    selectionMode: "fixed_service",
   });
+  await page.goto(PORTAL_PATH);
   await useSampleSource(page);
   await page.getByRole("button", { name: "Find order", exact: true }).click();
   await page
@@ -2026,6 +2033,184 @@ test("private label settings require an explicit versioned enable and samples re
   expect(labels.submissions).toHaveLength(0);
   expect(labels.progressCalls).toBe(0);
   expect(labels.failures).toEqual([]);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("admin automatic return labels require explicit services and editable per-account weight limits", async ({
+  page,
+}, testInfo) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const labels = await installReturnLabelFixtures(page, { unconfigured: true });
+  await page.goto("/returns/label-settings?channelId=36");
+  const workspace = page.getByTestId("return-label-admin-settings");
+  await expect(workspace).toBeVisible();
+  await expect(
+    page.getByLabel("Service selection", { exact: true }),
+  ).toHaveValue("cheapest_eligible");
+  await expect(page.getByLabel("Return carrier", { exact: true })).toHaveCount(
+    0,
+  );
+  await page.getByLabel("Return warehouse", { exact: true }).selectOption("1");
+  await page.getByLabel("Return policy", { exact: true }).selectOption("2");
+  await page
+    .getByLabel("Return contact name", { exact: true })
+    .fill("Fixture return desk");
+  const postal = page.getByTestId("return-carrier-rule-se-postal");
+  await postal
+    .getByRole("checkbox", {
+      name: "Allow Fixture USPS (se-postal)",
+      exact: true,
+    })
+    .check();
+  const maximum = postal.getByLabel(
+    "Maximum box weight (lb) for Fixture USPS (se-postal)",
+    { exact: true },
+  );
+  await expect(maximum).toHaveValue("20");
+  const save = page.getByRole("button", {
+    name: "Save label settings",
+    exact: true,
+  });
+  await expect(save).toBeDisabled();
+  await postal
+    .getByRole("checkbox", {
+      name: "Allow USPS Ground from Fixture USPS (se-postal)",
+      exact: true,
+    })
+    .check();
+  await expect(
+    postal.getByRole("checkbox", {
+      name: "Allow USPS Priority from Fixture USPS (se-postal)",
+      exact: true,
+    }),
+  ).not.toBeChecked();
+  await maximum.fill("0");
+  await expect(maximum).toHaveAttribute("aria-invalid", "true");
+  await expect(save).toBeDisabled();
+  await maximum.fill("20.0001");
+  await expect(save).toBeDisabled();
+  await maximum.fill("12.5");
+  await expect(maximum).toHaveAccessibleDescription(
+    "Fixture USPS is excluded above 12.5 lb.",
+  );
+  const other = page.getByTestId("return-carrier-rule-se-fixture");
+  await other
+    .getByRole("checkbox", {
+      name: "Allow Fixture carrier (se-fixture)",
+      exact: true,
+    })
+    .check();
+  await other
+    .getByRole("checkbox", {
+      name: "Allow Fixture tracked return from Fixture carrier (se-fixture)",
+      exact: true,
+    })
+    .check();
+  await expect(
+    other.getByLabel(
+      "Maximum box weight (lb) for Fixture carrier (se-fixture)",
+      { exact: true },
+    ),
+  ).toHaveValue("");
+  await page
+    .getByRole("checkbox", {
+      name: "Enable real return labels for this shop",
+      exact: true,
+    })
+    .check();
+  await save.click();
+  await expect(
+    page.getByText("Label settings saved.", { exact: true }),
+  ).toBeVisible();
+  expect(labels.settingsWrites).toHaveLength(1);
+  expect(labels.settingsWrites[0]).toMatchObject({
+    expectedVersion: 0,
+    enabled: true,
+    selectionMode: "cheapest_eligible",
+    carrierId: null,
+    serviceCode: null,
+    carrierRules: [
+      {
+        carrierId: "se-fixture",
+        serviceCodes: ["ground_return"],
+        maxWeightLb: null,
+      },
+      {
+        carrierId: "se-postal",
+        serviceCodes: ["usps_ground"],
+        maxWeightLb: "12.5",
+      },
+    ],
+  });
+  await expect(workspace).not.toContainText("Selected routing methods");
+  expect(
+    await workspace.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth,
+    ),
+  ).toBe(true);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    animations: "disabled",
+    fullPage: true,
+    path: testInfo.outputPath("return-label-admin-settings.png"),
+  });
+  expect(labels.submissions).toHaveLength(0);
+  expect(labels.failures).toEqual([]);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("admin label settings hide the editor after fresh access denial and never save stale settings", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const labels = await installReturnLabelFixtures(page);
+  await page.goto("/returns/label-settings?channelId=36");
+  await expect(
+    page.getByLabel("Service selection", { exact: true }),
+  ).toHaveValue("fixed_service");
+  await expect(page.getByLabel("Return carrier", { exact: true })).toHaveValue(
+    "se-fixture",
+  );
+  labels.deny();
+  await page
+    .getByRole("button", { name: "Refresh label settings", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Admin access is required",
+  );
+  await expect(
+    page.getByRole("button", { name: "Save label settings", exact: true }),
+  ).toHaveCount(0);
+  await expect(page.getByLabel("Shopify shop", { exact: true })).toHaveCount(0);
+  expect(labels.settingsWrites).toHaveLength(0);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("admin label settings reject unknown query shops without loading another shop's configuration", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const labels = await installReturnLabelFixtures(page);
+  await page.goto("/returns/label-settings?channelId=999");
+  await expect(page.getByRole("alert")).toContainText(
+    "requested Shopify shop is unavailable",
+  );
+  await expect(page.getByLabel("Shopify shop", { exact: true })).toHaveValue(
+    "",
+  );
+  await expect(
+    page.getByLabel("Service selection", { exact: true }),
+  ).toHaveCount(0);
+  await page.getByLabel("Shopify shop", { exact: true }).selectOption("36");
+  await expect(
+    page.getByLabel("Service selection", { exact: true }),
+  ).toHaveValue("fixed_service");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(labels.settingsWrites).toHaveLength(0);
   expect(fixture.failures).toEqual([]);
 });
 

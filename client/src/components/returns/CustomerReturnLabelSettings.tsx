@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,57 +15,48 @@ import {
   type CustomerReturnLabelSettingsInput,
   type CustomerReturnLabelSettingsState,
 } from "@shared/returns/customer-return-label.contract";
+import { ReturnLabelCarrierRules } from "./ReturnLabelCarrierRules";
+import {
+  createReturnLabelSettingsDraft,
+  parseReturnLabelSettingsDraft,
+  returnLabelConfigurationAvailable,
+  RETURN_LABEL_SETTINGS_PATH,
+  type ReturnLabelSettingsDraft,
+} from "@/lib/customer-return-label-settings";
 
-interface SettingsDraft {
-  warehouseId: string;
-  policyId: string;
-  carrierId: string;
-  serviceCode: string;
-  contactName: string;
-  contactPhone: string;
-  enabled: boolean;
-}
-const emptyDraft: SettingsDraft = {
+const emptyDraft: ReturnLabelSettingsDraft = {
   warehouseId: "",
   policyId: "",
   carrierId: "",
   serviceCode: "",
+  selectionMode: "cheapest_eligible",
+  carrierRules: [],
   contactName: "",
   contactPhone: "",
   enabled: false,
 };
-function draftFor(state: CustomerReturnLabelSettingsState): SettingsDraft {
-  const settings = state.settings;
-  return settings
-    ? {
-        warehouseId: String(settings.warehouseId),
-        policyId: String(settings.policyId),
-        carrierId: settings.carrierId,
-        serviceCode: settings.serviceCode,
-        contactName: settings.contactName,
-        contactPhone: settings.contactPhone ?? "",
-        enabled: settings.enabled,
-      }
-    : { ...emptyDraft };
-}
 
 export function CustomerReturnLabelSettings({
   channelId,
   locked,
   accepted = false,
+  compact = false,
   onState,
   onAccessDenied,
 }: {
   channelId: number;
   locked: boolean;
   accepted?: boolean;
+  compact?: boolean;
   onState: (state: CustomerReturnLabelSettingsState | null) => void;
   onAccessDenied: (message: string) => void;
 }) {
   const [state, setState] = useState<CustomerReturnLabelSettingsState | null>(
     null,
   );
-  const [draft, setDraft] = useState<SettingsDraft>({ ...emptyDraft });
+  const [draft, setDraft] = useState<ReturnLabelSettingsDraft>({
+    ...emptyDraft,
+  });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -81,7 +73,7 @@ export function CustomerReturnLabelSettings({
       .then((next) => {
         if (controller.signal.aborted) return;
         setState(next);
-        setDraft(draftFor(next));
+        setDraft(createReturnLabelSettingsDraft(next));
         onState(next);
       })
       .catch((cause) => {
@@ -101,24 +93,14 @@ export function CustomerReturnLabelSettings({
   }, [channelId, attempt, onState, onAccessDenied]);
 
   const carrier = state?.carriers.find((item) => item.id === draft.carrierId);
-  const parsed = customerReturnLabelSettingsInputSchema.safeParse({
-    expectedVersion: state?.settings?.version ?? 0,
-    enabled: draft.enabled,
-    warehouseId: Number(draft.warehouseId),
-    policyId: Number(draft.policyId),
-    carrierId: draft.carrierId,
-    serviceCode: draft.serviceCode,
-    contactName: draft.contactName,
-    contactPhone: draft.contactPhone.trim() || null,
-  });
+  const parsed = parseReturnLabelSettingsDraft(
+    draft,
+    state?.settings?.version ?? 0,
+  );
   const canSave =
     parsed.success &&
-    state?.providerConfigured &&
-    state.warehouses.some(
-      (item) => String(item.id) === draft.warehouseId && item.address !== null,
-    ) &&
-    state.policies.some((item) => String(item.id) === draft.policyId) &&
-    carrier?.services.some((item) => item.code === draft.serviceCode);
+    state &&
+    returnLabelConfigurationAvailable(parsed.data, state);
 
   useEffect(
     () => () => {
@@ -168,7 +150,7 @@ export function CustomerReturnLabelSettings({
       );
       if (controller.signal.aborted) return;
       setState(next);
-      setDraft(draftFor(next));
+      setDraft(createReturnLabelSettingsDraft(next));
       onState(next);
       setSaved(true);
     } catch (cause) {
@@ -183,7 +165,7 @@ export function CustomerReturnLabelSettings({
       if (!controller.signal.aborted) setBusy(false);
     }
   }
-  function update(patch: Partial<SettingsDraft>) {
+  function update(patch: Partial<ReturnLabelSettingsDraft>) {
     setDraft((current) => ({ ...current, ...patch }));
     setSaved(false);
   }
@@ -209,6 +191,18 @@ export function CustomerReturnLabelSettings({
         return creation and shipping-label purchases for private testing.
         Refunds remain manual in Shopify.
       </p>
+      {compact && (
+        <Button variant="outline" asChild>
+          <Link
+            href={`${RETURN_LABEL_SETTINGS_PATH}?channelId=${channelId}`}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Manage label settings
+            <span className="sr-only"> (opens in a new tab)</span>
+          </Link>
+        </Button>
+      )}
       <PreviewError message={error} />
       {busy && (
         <p role="status" className="text-sm">
@@ -243,127 +237,179 @@ export function CustomerReturnLabelSettings({
               Resume labels
             </Button>
           )}
-          <fieldset
-            disabled={busy || locked || !state.providerConfigured}
-            className="space-y-3"
-          >
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1">
-                <Label htmlFor="return-label-warehouse">Return warehouse</Label>
-                <select
-                  id="return-label-warehouse"
-                  className={previewSelectClass}
-                  value={draft.warehouseId}
-                  onChange={(event) =>
-                    update({ warehouseId: event.target.value })
-                  }
-                >
-                  <option value="">Choose a warehouse</option>
-                  {state.warehouses.map((item) => (
-                    <option
-                      key={item.id}
-                      value={item.id}
-                      disabled={!item.address}
+          {!compact && (
+            <fieldset
+              disabled={busy || locked || !state.providerConfigured}
+              className="space-y-3"
+            >
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1">
+                  <Label htmlFor="return-label-warehouse">
+                    Return warehouse
+                  </Label>
+                  <select
+                    id="return-label-warehouse"
+                    className={previewSelectClass}
+                    value={draft.warehouseId}
+                    onChange={(event) =>
+                      update({ warehouseId: event.target.value })
+                    }
+                  >
+                    <option value="">Choose a warehouse</option>
+                    {state.warehouses.map((item) => (
+                      <option
+                        key={item.id}
+                        value={item.id}
+                        disabled={!item.address}
+                      >
+                        {item.name}
+                        {!item.address ? " · address required" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="return-label-policy">Return policy</Label>
+                  <select
+                    id="return-label-policy"
+                    className={previewSelectClass}
+                    value={draft.policyId}
+                    onChange={(event) =>
+                      update({ policyId: event.target.value })
+                    }
+                  >
+                    <option value="">Choose a policy</option>
+                    {state.policies.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name} · version {item.version}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-1 sm:col-span-2">
+                  <Label htmlFor="return-label-selection-mode">
+                    Service selection
+                  </Label>
+                  <select
+                    id="return-label-selection-mode"
+                    className={previewSelectClass}
+                    value={draft.selectionMode}
+                    onChange={(event) => {
+                      const selectionMode = event.target.value;
+                      if (
+                        selectionMode === "fixed_service" ||
+                        selectionMode === "cheapest_eligible"
+                      )
+                        update({ selectionMode });
+                    }}
+                  >
+                    <option value="cheapest_eligible">
+                      Lowest eligible price for each box
+                    </option>
+                    <option value="fixed_service">
+                      One fixed service for all boxes
+                    </option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    {draft.selectionMode === "cheapest_eligible"
+                      ? "Compare live return rates separately for each box. Different boxes may use different carriers."
+                      : "Every box uses the single connected carrier and service selected below."}
+                  </p>
+                </div>
+                {draft.selectionMode === "fixed_service" && (
+                  <div className="space-y-1">
+                    <Label htmlFor="return-label-carrier">Return carrier</Label>
+                    <select
+                      id="return-label-carrier"
+                      className={previewSelectClass}
+                      value={draft.carrierId}
+                      onChange={(event) =>
+                        update({
+                          carrierId: event.target.value,
+                          serviceCode: "",
+                        })
+                      }
                     >
-                      {item.name}
-                      {!item.address ? " · address required" : ""}
-                    </option>
-                  ))}
-                </select>
+                      <option value="">Choose a carrier</option>
+                      {state.carriers.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                {draft.selectionMode === "fixed_service" && (
+                  <div className="space-y-1">
+                    <Label htmlFor="return-label-service">Return service</Label>
+                    <select
+                      id="return-label-service"
+                      className={previewSelectClass}
+                      value={draft.serviceCode}
+                      onChange={(event) =>
+                        update({ serviceCode: event.target.value })
+                      }
+                    >
+                      <option value="">Choose a return service</option>
+                      {carrier?.services.map((item) => (
+                        <option key={item.code} value={item.code}>
+                          {item.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <div className="space-y-1">
+                  <Label htmlFor="return-label-contact">
+                    Return contact name
+                  </Label>
+                  <Input
+                    id="return-label-contact"
+                    maxLength={200}
+                    value={draft.contactName}
+                    onChange={(event) =>
+                      update({ contactName: event.target.value })
+                    }
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="return-label-phone">
+                    Return contact phone (optional)
+                  </Label>
+                  <Input
+                    id="return-label-phone"
+                    type="tel"
+                    maxLength={50}
+                    value={draft.contactPhone}
+                    onChange={(event) =>
+                      update({ contactPhone: event.target.value })
+                    }
+                  />
+                </div>
               </div>
-              <div className="space-y-1">
-                <Label htmlFor="return-label-policy">Return policy</Label>
-                <select
-                  id="return-label-policy"
-                  className={previewSelectClass}
-                  value={draft.policyId}
-                  onChange={(event) => update({ policyId: event.target.value })}
-                >
-                  <option value="">Choose a policy</option>
-                  {state.policies.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name} · version {item.version}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="space-y-1">
-                <Label htmlFor="return-label-carrier">Return carrier</Label>
-                <select
-                  id="return-label-carrier"
-                  className={previewSelectClass}
-                  value={draft.carrierId}
-                  onChange={(event) =>
-                    update({ carrierId: event.target.value, serviceCode: "" })
-                  }
-                >
-                  <option value="">Choose a carrier</option>
-                  {state.carriers.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="space-y-1">
-                <Label htmlFor="return-label-service">Return service</Label>
-                <select
-                  id="return-label-service"
-                  className={previewSelectClass}
-                  value={draft.serviceCode}
-                  onChange={(event) =>
-                    update({ serviceCode: event.target.value })
-                  }
-                >
-                  <option value="">Choose a return service</option>
-                  {carrier?.services.map((item) => (
-                    <option key={item.code} value={item.code}>
-                      {item.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="space-y-1">
-                <Label htmlFor="return-label-contact">
-                  Return contact name
-                </Label>
-                <Input
-                  id="return-label-contact"
-                  maxLength={200}
-                  value={draft.contactName}
-                  onChange={(event) =>
-                    update({ contactName: event.target.value })
-                  }
+              {draft.selectionMode === "cheapest_eligible" && (
+                <ReturnLabelCarrierRules
+                  carriers={state.carriers}
+                  rules={draft.carrierRules}
+                  onChange={(carrierRules) => update({ carrierRules })}
                 />
-              </div>
-              <div className="space-y-1">
-                <Label htmlFor="return-label-phone">
-                  Return contact phone (optional)
-                </Label>
-                <Input
-                  id="return-label-phone"
-                  type="tel"
-                  maxLength={50}
-                  value={draft.contactPhone}
+              )}
+              <label className="flex min-h-11 items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={draft.enabled}
                   onChange={(event) =>
-                    update({ contactPhone: event.target.value })
+                    update({ enabled: event.target.checked })
                   }
+                  className="h-5 w-5"
                 />
-              </div>
-            </div>
-            <label className="flex min-h-11 items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={draft.enabled}
-                onChange={(event) => update({ enabled: event.target.checked })}
-                className="h-5 w-5"
-              />
-              Enable real return labels for this shop
-            </label>
-            <Button disabled={!canSave} onClick={() => void save()}>
-              Save label settings
-            </Button>
-          </fieldset>
+                Enable real return labels for this shop
+              </label>
+              <Button disabled={!canSave} onClick={() => void save()}>
+                Save label settings
+              </Button>
+            </fieldset>
+          )}
         </>
       )}
       {saved && (

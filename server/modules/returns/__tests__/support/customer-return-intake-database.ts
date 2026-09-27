@@ -14,10 +14,13 @@ export const INTAKE_POLICY = {
   customerRefundAuthority: "card_shellz", vendorSettlementTrigger: "none", returnlessRefundAllowed: false
 };
 
-export async function createIntakeTestSchema(pool: Pool): Promise<void> {
+export async function createIntakeTestSchema(pool: Pool, options: { carrierSelection?: boolean } = {}): Promise<void> {
   await createInspectionTestSchema(pool);
   await pool.query(readFileSync("migrations/059_wms_order_items_prices.sql", "utf8"));
   await pool.query(readFileSync("migrations/251_customer_return_label_settings.sql", "utf8"));
+  if (options.carrierSelection !== false) {
+    await pool.query(readFileSync("migrations/252_customer_return_carrier_selection.sql", "utf8"));
+  }
 }
 export async function seedIntakeTestSchema(pool: Pool): Promise<void> {
   await seedInspectionTestSchema(pool);
@@ -48,6 +51,70 @@ export async function seedIntakeSubmission(pool: Pool, key = INTAKE_KEY, lease =
     lease_token,lease_until,created_at,updated_at) VALUES(36,$1,$2,$3,'preparing','admin:test',$4,$5,$6,$6)`,
     [key, hash, JSON.stringify(request), lease, new Date(INTAKE_NOW.getTime() + 120_000), INTAKE_NOW]);
 }
+
+/** A complete historical fixed-service graph using only columns available in
+ * 250/251. Its constraints remain enabled; 252 is applied only after commit. */
+export async function seedPreCarrierSelectionIntake(pool: Pool): Promise<void> {
+  const prepared = preparedIntake();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`INSERT INTO returns.customer_return_authorizations
+      (id,authorization_number,channel_id,oms_order_id,eligibility_revision,policy_snapshot,warehouse_snapshot,actor,created_at)
+      OVERRIDING SYSTEM VALUE VALUES(1,'RMA-LEGACY',36,100,$1,$2,$3,'admin:test',$4)`,
+      [prepared.eligibilityRevision, JSON.stringify(prepared.policySnapshot), JSON.stringify(prepared.warehouseSnapshot), INTAKE_NOW]);
+    await client.query(`INSERT INTO returns.customer_return_authorization_lines
+      (id,authorization_id,oms_order_line_id,external_line_item_id,quantity,reason_code,created_at)
+      OVERRIDING SYSTEM VALUE VALUES(1,1,101,'500',1,NULL,$1)`, [INTAKE_NOW]);
+    await client.query(`INSERT INTO returns.customer_return_authorization_allocations
+      (id,authorization_id,authorization_line_id,wms_order_item_id,fulfillment_id,fulfillment_line_item_id,quantity,eligible_quantity,delivery_evidence,created_at)
+      OVERRIDING SYSTEM VALUE VALUES(1,1,1,301,'gid://shopify/Fulfillment/700','gid://shopify/FulfillmentLineItem/700',1,2,$1,$2)`,
+      [JSON.stringify({ source: "shopify", status: "delivered", wmsOriginalQuantity: 2 }), INTAKE_NOW]);
+    await client.query(`INSERT INTO returns.customer_return_authorization_commands
+      (channel_id,idempotency_key,semantic_hash,authorization_id,response,actor,created_at)
+      VALUES(36,$1,$2,1,$3,'admin:test',$4)`, [INTAKE_KEY, prepared.semanticHash,
+        JSON.stringify({ authorizationId: 1, authorizationNumber: "RMA-LEGACY", replayed: false }), INTAKE_NOW]);
+    await client.query(`INSERT INTO returns.customer_return_authorization_events
+      (authorization_id,event_type,actor,details,occurred_at) VALUES(1,'customer_return_authorized','admin:test','{}',$1)`, [INTAKE_NOW]);
+    await client.query(`INSERT INTO returns.customer_return_authorization_outbox
+      (authorization_id,topic,payload,occurred_at) VALUES(1,'customer_return_authorization.created','{"authorizationId":1,"channelId":36}',$1)`, [INTAKE_NOW]);
+    await client.query(`INSERT INTO returns.customer_return_intakes
+      (authorization_id,settings_version,policy_id,policy_version,operational_policy_snapshot,created_at)
+      VALUES(1,1,1,1,$1,$2)`, [JSON.stringify(INTAKE_POLICY), INTAKE_NOW]);
+    await client.query(`INSERT INTO wms.returns(id,order_id,source,status,source_event_key,created_at,updated_at)
+      OVERRIDING SYSTEM VALUE VALUES(1,201,'customer_portal','expected','customer-return:1:201',$1,$1)`, [INTAKE_NOW]);
+    await client.query(`INSERT INTO wms.return_items
+      (id,return_id,order_item_id,oms_order_line_id,external_line_item_id,sku,expected_qty,restock_policy,created_at,updated_at)
+      OVERRIDING SYSTEM VALUE VALUES(1,1,301,101,'500','SAME',1,'return',$1,$1)`, [INTAKE_NOW]);
+    await client.query(`INSERT INTO returns.return_cases
+      (id,source_provider,source_event_type,source_event_id,business_context,channel_id,oms_order_id,wms_order_id,wms_return_id,
+        policy_id,policy_version,policy_snapshot,case_status,approval_status,logistics_status,inspection_status,
+        customer_refund_status,vendor_settlement_status,opened_at,created_at,updated_at)
+      OVERRIDING SYSTEM VALUE VALUES(1,'customer_portal','private_customer_return','1:201','retail',36,100,201,1,
+        1,1,$1,'open','approved','awaiting_return','pending','pending','not_applicable',$2,$2,$2)`, [JSON.stringify(INTAKE_POLICY), INTAKE_NOW]);
+    await client.query(`INSERT INTO returns.customer_return_case_links
+      (authorization_id,case_id,wms_order_id,wms_return_id,created_at) VALUES(1,1,201,1,$1)`, [INTAKE_NOW]);
+    await client.query(`INSERT INTO returns.return_case_items
+      (id,return_case_id,wms_return_item_id,oms_order_line_id,wms_order_item_id,external_line_item_id,sku,title,quantity,
+        unit_paid_price_cents,source_line_total_cents,created_at)
+      OVERRIDING SYSTEM VALUE VALUES(1,1,1,101,301,'500','SAME','Same title',1,125,125,$1)`, [INTAKE_NOW]);
+    await client.query(`INSERT INTO returns.customer_return_allocation_case_items
+      (authorization_id,authorization_allocation_id,case_item_id,wms_return_item_id,created_at) VALUES(1,1,1,1,$1)`, [INTAKE_NOW]);
+    const parcel = prepared.parcels[0];
+    await client.query(`INSERT INTO returns.customer_return_parcels
+      (id,authorization_id,parcel_key,dimensions,weight_grams,origin_address,destination_address,carrier_id,service_code,created_at)
+      OVERRIDING SYSTEM VALUE VALUES(1,1,'1',$1,$2,$3,$4,$5,$6,$7)`,
+      [JSON.stringify(parcel.dimensions), parcel.weightGrams, JSON.stringify(parcel.originAddress), JSON.stringify(parcel.destinationAddress),
+        parcel.carrierId, parcel.serviceCode, INTAKE_NOW]);
+    await client.query(`INSERT INTO returns.customer_return_parcel_items(parcel_id,authorization_line_id,quantity) VALUES(1,1,1)`);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 export function preparedIntake(): PreparedCustomerReturnIntake & { now: Date } {
   const allocation = (wmsOrderItemId: number, suffix: string, quantity: number) => ({
     wmsOrderItemId, quantity, originalQuantity: quantity,
@@ -64,12 +131,12 @@ export function preparedIntake(): PreparedCustomerReturnIntake & { now: Date } {
       { omsOrderLineId: 102, externalLineItemId: "501", quantity: 1, reasonCode: null, allocations: [allocation(303, "702", 1)] },
     ], expectedClaims: [301, 302, 303].map(wmsOrderItemId => ({ wmsOrderItemId, legacyExpectedQuantity: 0, claimedQuantity: 0 })),
     parcels: [{
-      parcelKey: "1", dimensions: { lengthMm: 100, widthMm: 120, heightMm: 150 }, weightGrams: 25,
+      parcelKey: "1", selectionMode: "fixed_service", dimensions: { lengthMm: 100, widthMm: 120, heightMm: 150 }, weightGrams: 25,
       originAddress: { ...INTAKE_ADDRESS, name: "Test customer" }, destinationAddress: { ...INTAKE_ADDRESS }, carrierId: "se-123", serviceCode: "usps_ground_advantage",
       items: [{ omsOrderLineId: 101, quantity: 2 }]
     },
     {
-      parcelKey: "2", dimensions: { lengthMm: 200, widthMm: 200, heightMm: 200 }, weightGrams: 33,
+      parcelKey: "2", selectionMode: "fixed_service", dimensions: { lengthMm: 200, widthMm: 200, heightMm: 200 }, weightGrams: 33,
       originAddress: { ...INTAKE_ADDRESS, name: "Test customer" }, destinationAddress: { ...INTAKE_ADDRESS }, carrierId: "se-123", serviceCode: "usps_ground_advantage",
       items: [{ omsOrderLineId: 101, quantity: 1 }, { omsOrderLineId: 102, quantity: 1 }]
     }],

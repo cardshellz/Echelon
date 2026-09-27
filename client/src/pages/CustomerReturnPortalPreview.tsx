@@ -387,6 +387,7 @@ function PortalWorkspace({ adminId }: { adminId: string }) {
                   <CustomerReturnLabelSettings
                     key={shop.channelId}
                     channelId={shop.channelId}
+                    compact
                     locked={labelLocked}
                     accepted={labelSession.record?.authorizationId != null}
                     onState={setLabelSettings}

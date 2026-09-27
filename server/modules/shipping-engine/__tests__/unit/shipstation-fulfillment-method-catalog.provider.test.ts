@@ -42,6 +42,7 @@ describe("ShipStationFulfillmentMethodCatalogProvider", () => {
         domestic: true,
         international: false,
         ...DEFAULT_SERVICE_CAPABILITIES,
+        returnSupport: "supported" as const,
       }],
     }));
 
@@ -51,6 +52,9 @@ describe("ShipStationFulfillmentMethodCatalogProvider", () => {
       status: "available",
     });
     if (result.status !== "available") throw new Error("Expected available catalog.");
+    for (const method of result.methods) {
+      expect(method.capabilities).not.toHaveProperty("returnSupport");
+    }
     expect(result.methods.map((method) => ({
       providerConnectionId: method.providerConnectionId,
       providerConnectionName: method.providerConnectionName,
