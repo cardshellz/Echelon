@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearch } from "wouter";
+import { CustomerReturnPolicySetupDialog } from "@/components/returns/CustomerReturnPolicySetupDialog";
+import { resolvePortalPolicySetupChannel, type PortalPolicyChannel } from "@/lib/customer-return-policy-setup";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { FileText, Plus, RefreshCw, Search, ShieldCheck, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -218,6 +221,10 @@ function scopeSummary(policy: ReturnPolicy, overview: Overview): string {
 
 export default function ReturnPolicies() {
   const { toast } = useToast();
+  const search = useSearch();
+  const handledSetupSearch = useRef<string | null>(null);
+  const [portalSetup, setPortalSetup] = useState<PortalPolicyChannel | null>(null);
+  const [setupError, setSetupError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [policyView, setPolicyView] = useState<ReturnPolicyVersionView>("active");
   const [scopeLocked, setScopeLocked] = useState(false);
@@ -227,19 +234,32 @@ export default function ReturnPolicies() {
   const overviewQuery = useQuery<Overview>({ queryKey: ["/api/returns/admin/policies"] });
   const overview = overviewQuery.data;
 
+  useEffect(() => {
+    if (!overview || handledSetupSearch.current === search) return;
+    handledSetupSearch.current = search;
+    setSetupError(null);
+    try {
+      setPortalSetup(resolvePortalPolicySetupChannel(search, overview.channels, overview.dropshipOmsChannelId));
+    } catch (error) {
+      setPortalSetup(null);
+      setSetupError(error instanceof Error ? error.message : "The portal policy setup link is invalid.");
+    }
+  }, [search, overview]);
+
   const createMutation = useMutation({
-    mutationFn: async (input: Draft) => readJson<{ policy: ReturnPolicy }>(await fetch("/api/returns/admin/policies/versions", {
+    mutationFn: async ({ input, idempotencyKey }: { input: Draft; idempotencyKey: string }) => readJson<{ policy: ReturnPolicy }>(await fetch("/api/returns/admin/policies/versions", {
       method: "POST",
       credentials: "include",
-      headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+      headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
       body: JSON.stringify(input),
     })),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["/api/returns/admin/policies"] });
       setDialogOpen(false);
+      setPortalSetup(null);
       toast({ title: "Return policy version created", description: "The previous version for this target was retired atomically." });
     },
-    onError: (error: Error) => toast({ variant: "destructive", title: "Policy not saved", description: error.message }),
+    onError: (error: Error) => toast({ variant: "destructive", title: "Policy save not confirmed", description: error.message }),
   });
 
   const resolutionMutation = useMutation<ResolutionResult, Error, ResolutionInput>({
@@ -310,6 +330,8 @@ export default function ReturnPolicies() {
         </div>
       </div>
 
+      {setupError && <p role="alert" className="rounded-md border border-destructive p-3 text-sm text-destructive">{setupError}</p>}
+
       <Tabs defaultValue="policies">
         <TabsList><TabsTrigger value="policies">Policies</TabsTrigger><TabsTrigger value="preview">Test a policy</TabsTrigger></TabsList>
         <TabsContent value="policies" className="mt-4">
@@ -365,7 +387,15 @@ export default function ReturnPolicies() {
         </TabsContent>
       </Tabs>
 
-      <PolicyDialog open={dialogOpen} onOpenChange={setDialogOpen} overview={overview} draft={draft} onDraft={setDraft} scopeLocked={scopeLocked} saving={createMutation.isPending} onSave={() => createMutation.mutate(draft)} />
+      <PolicyDialog open={dialogOpen} onOpenChange={setDialogOpen} overview={overview} draft={draft} onDraft={setDraft} scopeLocked={scopeLocked} saving={createMutation.isPending} onSave={() => createMutation.mutate({ input: draft, idempotencyKey: crypto.randomUUID() })} />
+      {portalSetup && <CustomerReturnPolicySetupDialog
+        key={portalSetup.id}
+        channel={portalSetup}
+        previousPolicy={overview.policies.find((policy) => policy.status === "active" && policy.scopeKind === "channel_context" && policy.businessContext === "retail" && policy.channelId === portalSetup.id && policy.vendorId === null && policy.storeConnectionId === null) ?? null}
+        saving={createMutation.isPending}
+        onClose={() => setPortalSetup(null)}
+        onSave={(input, idempotencyKey) => createMutation.mutateAsync({ input, idempotencyKey })}
+      />}
     </div>
   );
 }

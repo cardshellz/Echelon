@@ -16,6 +16,7 @@ export async function installReturnLabelFixtures(
     uncertainBox?: number;
     enabled?: boolean;
     unconfigured?: boolean;
+    policies?: CustomerReturnLabelSettingsState["policies"];
   } = {},
 ) {
   const address = {
@@ -45,7 +46,9 @@ export async function installReturnLabelFixtures(
           destinationAddress: address,
         },
     warehouses: [{ id: 1, name: "Fixture warehouse", address }],
-    policies: [{ id: 2, name: "Fixture policy", version: 1 }],
+    policies: options.policies ?? [
+      { id: 2, name: "Fixture policy", version: 1 },
+    ],
     carriers: [
       {
         id: "se-fixture",
@@ -198,6 +201,28 @@ export async function installReturnLabelFixtures(
     submissions,
     settingsWrites,
     failures,
+    updateCatalog(
+      catalog: Partial<
+        Pick<
+          CustomerReturnLabelSettingsState,
+          "policies" | "carriers" | "warehouses"
+        >
+      >,
+    ) {
+      settings = { ...settings, ...structuredClone(catalog) };
+    },
+    changeSavedSettings(patch: { contactName: string; enabled: boolean }) {
+      if (!settings.settings)
+        throw new Error("The fixture has no saved settings to change.");
+      settings = {
+        ...settings,
+        settings: {
+          ...settings.settings,
+          ...patch,
+          version: settings.settings.version + 1,
+        },
+      };
+    },
     get progressCalls() {
       return progressCalls;
     },
@@ -206,6 +231,128 @@ export async function installReturnLabelFixtures(
     },
     deny() {
       denied = true;
+    },
+  };
+}
+
+/** Guided policy setup stays on fictional admin endpoints, including its explicit save. */
+export async function installReturnPolicyFixtures(
+  page: Page,
+  options: { existingPolicy?: boolean; failFirstSave?: boolean } = {},
+) {
+  const savedPolicy = {
+    id: 3,
+    name: "Fixture Shopify shop customer returns",
+    scopeKind: "channel_context",
+    scopeKey: "channel:36:retail",
+    businessContext: "retail",
+    channelId: 36,
+    vendorId: null,
+    storeConnectionId: null,
+    version: 1,
+    status: "active",
+    returnWindowDays: 365,
+    returnDestination: "card_shellz",
+    approvalAuthority: "card_shellz",
+    labelProvider: "shipstation",
+    returnShippingPayer: "card_shellz",
+    inspectionRequirement: "required",
+    inspectionOwner: "card_shellz",
+    customerRefundAuthority: "card_shellz",
+    vendorSettlementTrigger: "none",
+    returnlessRefundAllowed: false,
+    notes: null,
+  };
+  const writes: unknown[] = [];
+  const keys: string[] = [];
+  const failures: string[] = [];
+  let accepted = 0;
+  let policies: (typeof savedPolicy)[] = options.existingPolicy
+    ? [
+        {
+          ...savedPolicy,
+          id: 2,
+          name: "Fixture existing retail policy",
+          version: 4,
+          returnWindowDays: 30,
+        },
+      ]
+    : [];
+  await page.route("**/api/returns/admin/policies**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (request.method() === "GET" && path === "/api/returns/admin/policies") {
+      return route.fulfill({
+        json: {
+          policies,
+          channels: [
+            {
+              id: 36,
+              name: "Fixture Shopify shop",
+              type: "internal",
+              provider: "shopify",
+              status: "active",
+            },
+            {
+              id: 42,
+              name: "Fixture marketplace",
+              type: "internal",
+              provider: "amazon",
+              status: "active",
+            },
+            {
+              id: 100,
+              name: "Fixture dropship",
+              type: "dropship",
+              provider: "echelon",
+              status: "active",
+            },
+          ],
+          referencedVendors: [],
+          referencedStores: [],
+          dropshipOmsChannelId: 100,
+        },
+      });
+    }
+    if (
+      request.method() === "POST" &&
+      path === "/api/returns/admin/policies/versions"
+    ) {
+      writes.push(request.postDataJSON());
+      const key = request.headers()["idempotency-key"] ?? "";
+      if (
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          key,
+        )
+      ) {
+        failures.push("Policy save must include a UUID idempotency key");
+      }
+      if (!keys.includes(key)) accepted++;
+      keys.push(key);
+      policies = [savedPolicy];
+      if (options.failFirstSave && writes.length === 1) {
+        return route.fulfill({
+          status: 503,
+          json: {
+            error: {
+              message: "Fixture response was lost. Retry the same request.",
+            },
+          },
+        });
+      }
+      return route.fulfill({ json: { policy: savedPolicy } });
+    }
+    failures.push(
+      `Unexpected policy fixture request: ${request.method()} ${path}`,
+    );
+    return route.abort();
+  });
+  return {
+    writes,
+    keys,
+    failures,
+    get accepted() {
+      return accepted;
     },
   };
 }

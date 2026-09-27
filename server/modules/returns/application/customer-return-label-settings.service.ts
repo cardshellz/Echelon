@@ -7,7 +7,7 @@ import {
   type CustomerReturnLabelSettingsInput,
   type CustomerReturnLabelSettingsState,
 } from "@shared/returns/customer-return-label.contract";
-import { DEFAULT_CUSTOMER_RETURN_WINDOW_DAYS } from "../domain/customer-return-eligibility";
+import { matchesCustomerReturnPortalPolicy } from "@shared/returns/customer-return-portal-policy";
 import { snapshotReturnPolicy } from "../domain/return-case";
 import { CustomerReturnIntakeError } from "./customer-return-intake.ports";
 
@@ -209,21 +209,7 @@ export function isPortalReturnPolicy(
   policy: ReturnPolicy,
   channelId: number,
 ): boolean {
-  return (
-    policy.status === "active" &&
-    (policy.businessContext === null || policy.businessContext === "retail") &&
-    (policy.channelId === null || policy.channelId === channelId) &&
-    policy.vendorId === null &&
-    policy.storeConnectionId === null &&
-    policy.returnWindowDays === DEFAULT_CUSTOMER_RETURN_WINDOW_DAYS &&
-    policy.returnDestination === "card_shellz" &&
-    policy.approvalAuthority === "card_shellz" &&
-    policy.labelProvider === "shipstation" &&
-    policy.returnShippingPayer === "card_shellz" &&
-    policy.customerRefundAuthority === "card_shellz" &&
-    policy.inspectionOwner === "card_shellz" &&
-    policy.vendorSettlementTrigger === "none"
-  );
+  return matchesCustomerReturnPortalPolicy(policy, channelId);
 }
 
 export function warehouseLabelAddress(

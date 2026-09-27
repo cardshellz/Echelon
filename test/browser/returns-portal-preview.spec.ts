@@ -10,7 +10,10 @@ import {
 } from "../../shared/returns/customer-return-portal-paths";
 import { customerReturnLiveReviewInputSchema } from "../../shared/returns/customer-return-live.contract";
 import { MAX_RETURN_FLOW_PARCELS } from "../../shared/returns/customer-return-flow.contract";
-import { installReturnLabelFixtures } from "./returns-label-fixtures";
+import {
+  installReturnLabelFixtures,
+  installReturnPolicyFixtures,
+} from "./returns-label-fixtures";
 
 async function expectStandalone(page: Page) {
   await expect(page).toHaveTitle(/Card Shellz/i);
@@ -2044,6 +2047,15 @@ test("admin automatic return labels require explicit services and editable per-a
   await page.goto("/returns/label-settings?channelId=36");
   const workspace = page.getByTestId("return-label-admin-settings");
   await expect(workspace).toBeVisible();
+  const managePolicies = page.getByRole("link", {
+    name: "Manage return policies (opens in a new tab)",
+    exact: true,
+  });
+  await expect(managePolicies).toHaveAttribute("href", "/return-policies");
+  await expect(managePolicies).toHaveAttribute("target", "_blank");
+  await expect(
+    page.getByRole("link", { name: /^Review return policy setup/ }),
+  ).toHaveCount(0);
   await expect(
     page.getByLabel("Service selection", { exact: true }),
   ).toHaveValue("cheapest_eligible");
@@ -2162,6 +2174,361 @@ test("admin automatic return labels require explicit services and editable per-a
   expect(labels.failures).toEqual([]);
   expect(fixture.failures).toEqual([]);
 });
+
+test("label setup explains missing policy and contact and preserves unsaved choices while refreshing the catalog", async ({
+  page,
+}, testInfo) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const labels = await installReturnLabelFixtures(page, {
+    unconfigured: true,
+    policies: [],
+  });
+  await page.goto("/returns/label-settings?channelId=36");
+  const blockers = page.getByTestId("return-label-settings-blockers");
+  await expect(
+    blockers.getByText("Complete before saving", { exact: true }),
+  ).toBeVisible();
+  await expect(blockers).toContainText(
+    "No compatible active return policy is available for this shop.",
+  );
+  await expect(blockers).toContainText("Enter the receiving contact name.");
+  const setup = page.getByRole("link", {
+    name: "Review return policy setup (opens in a new tab)",
+    exact: true,
+  });
+  await expect(setup).toHaveAttribute(
+    "href",
+    "/return-policies?portalChannelId=36",
+  );
+  await expect(setup).toHaveAttribute("target", "_blank");
+  await expect(setup).toHaveAttribute("rel", "noopener noreferrer");
+  const save = page.getByRole("button", {
+    name: "Save label settings",
+    exact: true,
+  });
+  await expect(save).toBeDisabled();
+
+  await page.getByLabel("Return warehouse", { exact: true }).selectOption("1");
+  await page
+    .getByLabel("Return contact name", { exact: true })
+    .fill("Fixture receiving desk");
+  await page
+    .getByLabel("Return contact phone (optional)", { exact: true })
+    .fill("2125550100");
+  const postal = page.getByTestId("return-carrier-rule-se-postal");
+  await postal
+    .getByRole("checkbox", {
+      name: "Allow Fixture USPS (se-postal)",
+      exact: true,
+    })
+    .check();
+  await postal
+    .getByRole("checkbox", {
+      name: "Allow USPS Ground from Fixture USPS (se-postal)",
+      exact: true,
+    })
+    .check();
+  await postal
+    .getByLabel("Maximum box weight (lb) for Fixture USPS (se-postal)", {
+      exact: true,
+    })
+    .fill("15.5");
+  const enable = page.getByRole("checkbox", {
+    name: "Enable real return labels for this shop",
+    exact: true,
+  });
+  await enable.check();
+  await expect(blockers).not.toContainText("Enter the receiving contact name.");
+  await expect(save).toBeDisabled();
+  expect(labels.settingsWrites).toEqual([]);
+
+  // Simulate the policy being saved in its separate tab; catalog refresh must not
+  // reset the warehouse, contact, service rules or explicit enable choice here.
+  labels.updateCatalog({
+    policies: [{ id: 3, name: "Fixture portal policy", version: 1 }],
+  });
+  await page
+    .getByRole("button", { name: "Refresh label settings", exact: true })
+    .click();
+  await expect(
+    page.getByLabel("Return policy", { exact: true }).getByRole("option", {
+      name: "Fixture portal policy · version 1",
+      exact: true,
+    }),
+  ).toHaveCount(1);
+  await expect(
+    page.getByLabel("Return warehouse", { exact: true }),
+  ).toHaveValue("1");
+  await expect(
+    page.getByLabel("Return contact name", { exact: true }),
+  ).toHaveValue("Fixture receiving desk");
+  await expect(
+    page.getByLabel("Return contact phone (optional)", { exact: true }),
+  ).toHaveValue("2125550100");
+  await expect(
+    page.getByLabel("Service selection", { exact: true }),
+  ).toHaveValue("cheapest_eligible");
+  await expect(
+    postal.getByRole("checkbox", {
+      name: "Allow Fixture USPS (se-postal)",
+      exact: true,
+    }),
+  ).toBeChecked();
+  await expect(
+    postal.getByRole("checkbox", {
+      name: "Allow USPS Ground from Fixture USPS (se-postal)",
+      exact: true,
+    }),
+  ).toBeChecked();
+  await expect(
+    postal.getByLabel("Maximum box weight (lb) for Fixture USPS (se-postal)", {
+      exact: true,
+    }),
+  ).toHaveValue("15.5");
+  await expect(enable).toBeChecked();
+  await expect(page.getByLabel("Return policy", { exact: true })).toHaveValue(
+    "",
+  );
+  await expect(save).toBeDisabled();
+  await page.getByLabel("Return policy", { exact: true }).selectOption("3");
+  await expect(blockers).toHaveCount(0);
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect(
+    page.getByText("Label settings saved.", { exact: true }),
+  ).toBeVisible();
+  expect(labels.settingsWrites).toEqual([
+    {
+      expectedVersion: 0,
+      enabled: true,
+      warehouseId: 1,
+      policyId: 3,
+      selectionMode: "cheapest_eligible",
+      carrierId: null,
+      serviceCode: null,
+      carrierRules: [
+        {
+          carrierId: "se-postal",
+          serviceCodes: ["usps_ground"],
+          maxWeightLb: "15.5",
+        },
+      ],
+      contactName: "Fixture receiving desk",
+      contactPhone: "2125550100",
+    },
+  ]);
+  await page.screenshot({
+    animations: "disabled",
+    fullPage: true,
+    path: testInfo.outputPath("return-label-settings-complete.png"),
+  });
+  expect(labels.submissions).toEqual([]);
+  expect(labels.progressCalls).toBe(0);
+  expect(labels.failures).toEqual([]);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("guided portal policy setup reviews exact rules and retries only the same explicit creation intent", async ({
+  page,
+}, testInfo) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const policies = await installReturnPolicyFixtures(page, {
+    existingPolicy: true,
+    failFirstSave: true,
+  });
+  await page.goto("/return-policies?portalChannelId=36");
+  const dialog = page.getByRole("dialog", {
+    name: "Review customer return policy",
+    exact: true,
+  });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Fixture Shopify shop customer returns");
+  await expect(dialog).toContainText("Fixture Shopify shop sales channel");
+  await expect(dialog).toContainText("365 days from the order date");
+  await expect(dialog).toContainText(
+    "Paid by Card Shellz, labels through ShipStation",
+  );
+  await expect(dialog).toContainText(
+    "Return to Card Shellz; inspection required",
+  );
+  await expect(dialog).toContainText(
+    "Portal returns: staff confirm and manually refund in Shopify",
+  );
+  await expect(dialog).toContainText(
+    "No returnless refunds or vendor settlement",
+  );
+  await expect(dialog).toContainText(
+    "Fixture existing retail policy · version 4",
+  );
+  await expect(dialog).toContainText("including staff-created returns");
+  await expect(dialog).toContainText(
+    "does not enable labels or open customer access",
+  );
+  await expect(dialog.getByRole("textbox")).toHaveCount(0);
+  await expect(dialog.getByRole("combobox")).toHaveCount(0);
+  expect(policies.writes).toEqual([]);
+  await page.screenshot({
+    animations: "disabled",
+    fullPage: true,
+    path: testInfo.outputPath("return-policy-guided-review.png"),
+  });
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(policies.writes).toEqual([]);
+
+  await page.reload();
+  await expect(dialog).toBeVisible();
+  const create = dialog.getByRole("button", {
+    name: "Create portal policy version",
+    exact: true,
+  });
+  await create.click();
+  await expect(dialog.getByRole("alert")).toContainText(
+    "Fixture response was lost. Retry the same request.",
+  );
+  expect(policies.writes).toHaveLength(1);
+  await expect(create).toBeEnabled();
+  await create.click();
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    page.getByText("Return policy version created", { exact: true }),
+  ).toBeVisible();
+  expect(policies.writes).toHaveLength(2);
+  expect(policies.writes[1]).toEqual(policies.writes[0]);
+  expect(policies.keys[1]).toEqual(policies.keys[0]);
+  expect(policies.accepted).toBe(1);
+  expect(policies.writes[0]).toEqual({
+    name: "Fixture Shopify shop customer returns",
+    appliesTo: "channel",
+    channelId: 36,
+    vendorId: null,
+    storeConnectionId: null,
+    returnWindowDays: 365,
+    returnDestination: "card_shellz",
+    approvalAuthority: "card_shellz",
+    labelProvider: "shipstation",
+    returnShippingPayer: "card_shellz",
+    inspectionRequirement: "required",
+    inspectionOwner: "card_shellz",
+    customerRefundAuthority: "card_shellz",
+    vendorSettlementTrigger: "none",
+    returnlessRefundAllowed: false,
+    notes: null,
+  });
+  expect(policies.failures).toEqual([]);
+  expect(fixture.failures).toEqual([]);
+});
+
+for (const query of [
+  "portalChannelId=42",
+  "portalChannelId=999",
+  "portalChannelId=36&portalChannelId=36",
+]) {
+  test(`guided policy setup rejects an unverified channel query: ${query}`, async ({
+    page,
+  }) => {
+    const fixture = await installReturnPreviewFixtures(page);
+    const policies = await installReturnPolicyFixtures(page);
+    await page.goto(`/return-policies?${query}`);
+    await expect(page.getByRole("alert")).toContainText(
+      "This setup link does not identify an active Shopify sales channel.",
+    );
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(
+      page.getByRole("button", {
+        name: "Create portal policy version",
+        exact: true,
+      }),
+    ).toHaveCount(0);
+    expect(policies.writes).toEqual([]);
+    expect(policies.failures).toEqual([]);
+    expect(fixture.failures).toEqual([]);
+  });
+}
+
+for (const choice of ["Keep my changes", "Use saved settings"] as const) {
+  test(`changed saved settings require an explicit ${choice} choice before saving a dirty draft`, async ({
+    page,
+  }) => {
+    const fixture = await installReturnPreviewFixtures(page);
+    const labels = await installReturnLabelFixtures(page, { enabled: false });
+    await page.goto("/returns/label-settings?channelId=36");
+    const contact = page.getByLabel("Return contact name", { exact: true });
+    const enable = page.getByRole("checkbox", {
+      name: "Enable real return labels for this shop",
+      exact: true,
+    });
+    const save = page.getByRole("button", {
+      name: "Save label settings",
+      exact: true,
+    });
+    await contact.fill("My unsaved receiving desk");
+    await enable.check();
+    await expect(save).toBeEnabled();
+
+    labels.changeSavedSettings({
+      contactName: "Other administrator desk",
+      enabled: false,
+    });
+    await page
+      .getByRole("button", { name: "Refresh label settings", exact: true })
+      .click();
+    const conflict = page.getByTestId("return-label-settings-conflict");
+    await expect(conflict).toContainText(
+      "Saved label settings changed while you were editing.",
+    );
+    await expect(conflict).toContainText(
+      "Keeping your changes will replace the current saved configuration.",
+    );
+    await expect(contact).toHaveValue("My unsaved receiving desk");
+    await expect(enable).toBeChecked();
+    await expect(save).toBeDisabled();
+    expect(labels.settingsWrites).toEqual([]);
+    // Editing again must not acknowledge another administrator's saved version.
+    await contact.fill("My revised receiving desk");
+    await expect(conflict).toBeVisible();
+    await expect(save).toBeDisabled();
+    await page
+      .getByRole("button", { name: "Refresh label settings", exact: true })
+      .click();
+    await expect(conflict).toBeVisible();
+    await expect(contact).toHaveValue("My revised receiving desk");
+    await expect(save).toBeDisabled();
+    expect(labels.settingsWrites).toEqual([]);
+
+    await conflict.getByRole("button", { name: choice, exact: true }).click();
+    await expect(conflict).toHaveCount(0);
+    expect(labels.settingsWrites).toEqual([]);
+    if (choice === "Keep my changes") {
+      await expect(contact).toHaveValue("My revised receiving desk");
+      await expect(enable).toBeChecked();
+      await expect(save).toBeEnabled();
+      await save.click();
+      await expect(
+        page.getByText("Label settings saved.", { exact: true }),
+      ).toBeVisible();
+      expect(labels.settingsWrites).toHaveLength(1);
+      expect(labels.settingsWrites[0]).toMatchObject({
+        expectedVersion: 2,
+        contactName: "My revised receiving desk",
+        enabled: true,
+        selectionMode: "fixed_service",
+        carrierId: "se-fixture",
+        serviceCode: "ground_return",
+      });
+    } else {
+      await expect(contact).toHaveValue("Other administrator desk");
+      await expect(enable).not.toBeChecked();
+      await expect(
+        page.getByLabel("Return carrier", { exact: true }),
+      ).toHaveValue("se-fixture");
+      expect(labels.settingsWrites).toEqual([]);
+    }
+    expect(labels.submissions).toEqual([]);
+    expect(labels.failures).toEqual([]);
+    expect(fixture.failures).toEqual([]);
+  });
+}
 
 test("admin label settings hide the editor after fresh access denial and never save stale settings", async ({
   page,
