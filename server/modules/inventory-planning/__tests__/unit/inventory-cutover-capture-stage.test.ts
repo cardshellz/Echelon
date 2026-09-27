@@ -102,7 +102,7 @@ describe("named inventory cutover capture errors", () => {
 
 describe("actual reconstruction repository capture stages", () => {
   const sequence: InventoryCutoverCaptureStage[] = ["transaction_guard", "inventory_custody", "oms_demand_and_receipts",
-    "wms_demand_and_packages", "variant_identity", "original_costs", "shipment_reviews"];
+    "wms_demand_and_packages", "variant_identity", "original_costs", "shipment_reviews", "evidence_validation"];
   let evidence: CutoverReconstructionEvidence;
   let visited: InventoryCutoverCaptureStage[];
   let failingStage: InventoryCutoverCaptureStage | undefined;
@@ -134,6 +134,10 @@ describe("actual reconstruction repository capture stages", () => {
       if (sql.includes("FROM catalog.product_variants")) {
         enter("variant_identity");
         return { rows: variantRows };
+      }
+      if (sql.includes("FROM inventory.cutover_history_batches")) {
+        enter("evidence_validation");
+        return { rows: [] };
       }
       throw new Error("Unexpected query in read-only capture test");
     });

@@ -111,6 +111,7 @@ import { registerChannelDefinitionRoutes } from "./modules/inventory-planning/in
 import { registerSafetyDefinitionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-safety-definition.routes";
 import { registerInventoryCutoverCompletionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-completion.routes";
 import { registerInventoryCutoverOpeningRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-opening.routes";
+import { registerInventoryCutoverHistoryRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-history.routes";
 import { registerQuantityPublicationRecoveryRoutes } from "./modules/inventory-planning/interfaces/http/quantity-publication-recovery.routes";
 import { registerInventoryChannelExposureRoutes } from "./modules/inventory-planning/interfaces/http/inventory-channel-exposure.routes";
 import { registerInventoryPublicationGlobalControlRoutes } from "./modules/inventory-planning/interfaces/http/inventory-publication-global-control.routes";
@@ -173,6 +174,7 @@ export async function registerRoutes(
   registerSafetyDefinitionRoutes(app);
   registerInventoryCutoverCompletionRoutes(app);
   registerInventoryCutoverOpeningRoutes(app);
+  registerInventoryCutoverHistoryRoutes(app);
   registerQuantityPublicationRecoveryRoutes(app);
   registerInventoryPublicationGlobalControlRoutes(app);
   registerInventoryChannelExposureRoutes(app);

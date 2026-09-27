@@ -21,6 +21,7 @@ import { captureInventoryCutoverStage } from "./inventory-cutover-capture-stage"
 import type { InventoryOpeningReservationPort } from "../application/inventory-opening-reservation.port";
 import { PostgresInventoryOpeningReservationRepository } from "../../inventory/infrastructure/inventory-opening-reservation.repository";
 import { PostgresInventoryQuantityLedger } from "../../inventory/infrastructure/quantity-ledger.repository";
+import { readRetiredCutoverHistory } from "./inventory-cutover-history-audit.reader";
 
 const inventoryCaptureSchema = cutoverReconstructionEvidenceSchema.pick({ levels: true, lots: true,
   journals: true, buildReservations: true, canonicalResources: true, canonicalClaimCount: true, canonicalClaimHash: true });
@@ -63,9 +64,13 @@ export class PostgresInventoryCutoverReconstructionRepository implements Invento
     });
     const costs = await captureInventoryCutoverStage("original_costs", () => readCutoverOriginalCosts(client, wms.items.map((item) => item.id)));
     const shipmentReviews = await captureInventoryCutoverStage("shipment_reviews", () => readWmsCutoverShipmentReviews(client));
-    return captureInventoryCutoverStage("evidence_validation", async () => cutoverReconstructionEvidenceSchema.parse({
+    return captureInventoryCutoverStage("evidence_validation", async () => {
+      const retiredHistory = await readRetiredCutoverHistory(client);
+      return cutoverReconstructionEvidenceSchema.parse({
       schemaVersion: "inventory_cutover_reconstruction_v1", ...inventory, ...wms, ...oms,
-      variants, costs, shipmentReviewEvidence: [...oms.shipmentReviewEvidence, ...shipmentReviews] }));
+      variants, costs, shipmentReviewEvidence: [...oms.shipmentReviewEvidence, ...shipmentReviews],
+      ...(retiredHistory.length ? { retiredHistory } : {}) });
+    });
   }
 
   async preview(client: PoolClient): Promise<CutoverReconstructionPlan> { return this.resolvePlan(client, await this.capture(client)); }

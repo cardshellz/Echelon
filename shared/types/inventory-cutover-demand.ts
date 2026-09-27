@@ -14,6 +14,9 @@ export const wmsCutoverDemandOrderSchema = z.object({
 export const wmsCutoverDemandItemSchema = z.object({
   id, orderId: id, omsOrderLineId: bigintId.nullable(), sourceItemId: text,
   sku: z.string(), productId: id.nullable(), quantity: integer,
+  // Optional only for immutable captures made before the order-policy census.
+  // Null is an unknown legacy snapshot, never an implicit non-stock decision.
+  catalogProductId: id.nullable().optional(), inventoryTracking: z.boolean().nullable().optional(),
   pickedQuantity: integer, fulfilledQuantity: integer, status: text,
   onHold: z.boolean(), requiresShipping: integer, location: text, shortReason: text,
 }).strict();

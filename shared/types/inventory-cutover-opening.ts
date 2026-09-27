@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { isTerminalWmsDemandStatus } from "../enums/order-status";
 import { deriveVerifiedOpeningPositions } from "./inventory-opening-quantity-projection";
+import { cutoverLineIdentityConflicts, cutoverLineTracksInventory } from "../inventory/cutover-line-policy";
 import { cutoverOpeningProvenanceSchema, cutoverReconstructionEvidenceSchema, cutoverReconstructionLevelSchema, cutoverReconstructionLotSchema,
   cutoverReconstructionCostSchema, cutoverLegacyPromiseReleaseSchema, openingReservationRebaseSchema, type CutoverReconstructionEvidence } from "./inventory-cutover-reconstruction";
 
@@ -88,6 +89,7 @@ export function requiredOpeningItems(evidence: CutoverReconstructionEvidence): C
   return evidence.items.filter(item => {
     if (isTerminalWmsDemandStatus(orders.get(item.orderId)?.status ?? null) || item.requiresShipping === 0) return false;
     const matches = variants.get(item.sku.toUpperCase()) ?? [];
-    return matches.length !== 1 || (matches[0].requiresShipping && matches[0].trackInventory);
+    return matches.length !== 1 || cutoverLineIdentityConflicts(item, matches[0])
+      || cutoverLineTracksInventory(item, matches[0]) !== false;
   }).sort((a, b) => a.id - b.id);
 }

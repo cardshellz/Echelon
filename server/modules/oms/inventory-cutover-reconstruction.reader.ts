@@ -45,6 +45,7 @@ export async function readOmsCutoverReconstruction(client: PoolClient): Promise<
   "acceptedOmsDemand" | "shipmentReviewEvidence">> {
   const acceptedOmsDemand = (await client.query(`SELECT line.id::text AS "lineId", line.order_id::text AS "orderId",
     line.product_variant_id AS "productVariantId", line.sku,
+    line.catalog_product_id AS "catalogProductId", line.inventory_tracking AS "inventoryTracking",
     line.authority_fulfillable_quantity::text AS "authorizedQty", line.wms_materialized_quantity::text AS "materializedQty",
     line.authorization_status AS "authorizationStatus"
     FROM oms.oms_order_lines line LEFT JOIN oms.oms_orders parent ON parent.id=line.order_id

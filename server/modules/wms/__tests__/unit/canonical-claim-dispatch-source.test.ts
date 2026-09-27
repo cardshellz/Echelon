@@ -22,10 +22,11 @@ function fixture(physical = false) {
       wms_order_item_id: 71, product_variant_id: 105, quantity_shipped: 3, shipment_item_purpose: "customer_fulfillment",
       replacement_for_order_item_id: null, correction_for_physical_shipment_item_id: null, package_allocation_entry_id: null }],
     adjustments: [],
+    retired: [],
   };
   const calls: { key: string; sql: string; values?: unknown[] }[] = [];
   const query = vi.fn(async (sql: string, values?: unknown[]) => {
-    const key = sql.includes("current_setting") ? "settings"
+    const key = sql.includes("cutover_history_retirements") ? "retired" : sql.includes("current_setting") ? "settings"
       : sql.includes("FROM wms.orders ") ? "order"
         : sql.includes("FROM wms.order_items ") ? "item"
           : sql.includes("FROM wms.outbound_shipments ") ? "header"
@@ -47,18 +48,25 @@ describe("WMS canonical dispatch source owner", () => {
     expect(await f.run()).toEqual({ orderId: 70, orderItemId: 71, warehouseId: 1, warehouseLocationId: 50,
       productVariantId: 105, outboundShipmentId: 90, sourceShipmentItemId: 101, physicalShipmentId: null,
       physicalShipmentItemId: null, physicalShipmentItemQuantity: null, quantity: "3", readiness: "authorized", orderStatus: "ready_to_ship" });
-    expect(f.calls.map((call) => call.key)).toEqual(["settings", "order", "item", "header", "source", "physicalIdentity"]);
-    for (const call of f.calls.slice(1, 5)) expect(call.sql).toContain("FOR UPDATE");
+    expect(f.calls.map((call) => call.key)).toEqual(["settings", "order", "item", "header", "retired", "source", "physicalIdentity"]);
+    for (const call of f.calls.filter(row => ["order","item","header","source"].includes(row.key))) expect(call.sql).toContain("FOR UPDATE");
     for (const call of f.calls) {
       expect(call.sql).toMatch(/^SELECT /);
-      expect(call.sql).not.toMatch(/\b(?:BEGIN|COMMIT|ROLLBACK|INSERT|DELETE|SET|advisory|inventory\.|warehouse\.|catalog\.|oms\.)/i);
+      expect(call.sql).not.toMatch(/\b(?:BEGIN|COMMIT|ROLLBACK|INSERT|DELETE|SET|advisory|warehouse\.|catalog\.|oms\.)/i);
+      if (call.key !== "retired") expect(call.sql).not.toContain("inventory.");
     }
     expect({ command: f.command, rows: f.rows }).toEqual(before);
   });
   it("binds and locks exact immutable physical item identity when it exists", async () => {
     const f = fixture(true); expect(await f.run()).toMatchObject({ physicalShipmentId: "700", physicalShipmentItemId: "701", physicalShipmentItemQuantity: "3" });
-    expect(f.calls.map((call) => call.key)).toEqual(["settings", "order", "item", "header", "source", "physicalIdentity", "physicalHeader", "physicalItem", "adjustments"]);
-    expect(f.calls[6].sql).toContain("FOR UPDATE"); expect(f.calls[7].sql).toContain("FOR UPDATE");
+    expect(f.calls.map((call) => call.key)).toEqual(["settings", "order", "item", "header", "retired", "source", "physicalIdentity", "physicalHeader", "physicalItem", "adjustments"]);
+    expect(f.calls[7].sql).toContain("FOR UPDATE"); expect(f.calls[8].sql).toContain("FOR UPDATE");
+  });
+  it("rejects an exactly retired source before resolving picked custody, without treating other sources as retired", async () => {
+    const f = fixture(); f.rows.retired = [{ batch_id: "7" }];
+    await expect(f.run()).rejects.toMatchObject({ code: "CUTOVER_HISTORY_RETIRED", context: { kind: "shipment", batchId: "7" } });
+    expect(f.calls.at(-1)?.values).toEqual([90,101]);
+    expect(f.calls.some(call => call.key === "source")).toBe(false);
   });
   it.each(["read committed", "repeatable read"])("rejects %s transaction isolation before any owner lock", async (isolation) => {
     const f = fixture(); f.rows.settings[0].isolation = isolation;

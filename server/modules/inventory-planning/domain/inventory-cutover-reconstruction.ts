@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { WMS_WAREHOUSE_STATUS_VALUES, isTerminalWmsDemandStatus } from "@shared/enums/order-status";
+import { cutoverLineIdentityConflicts, cutoverLineTracksInventory } from "@shared/inventory/cutover-line-policy";
+import { acceptedDemandIdentityMatches } from "./inventory-cutover-accepted-demand";
 import { cutoverReconstructionEvidenceSchema, type CutoverReconstructionEvidence,
   type CutoverReconstructionPlan, type CutoverReconstructionLine,
   type CutoverReconstructionAllocation } from "@shared/types/inventory-cutover-reconstruction";
@@ -69,6 +71,7 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
   const items = new Map(evidence.items.map((row) => [row.id, row]));
   const journalsByItem = groupBy(evidence.journals,(row) => row.orderItemId);
   const variantsBySku = groupBy(evidence.variants.filter((row) => row.isActive),(row) => row.sku.toUpperCase());
+  const allVariantsBySku = groupBy(evidence.variants, row => row.sku.toUpperCase());
   const costsByItem = groupBy(evidence.costs,(row) => row.orderItemId);
   const itemsByOmsLine = groupBy(evidence.items,(row) => row.omsOrderLineId);
   const positionKey = (locationId: number | null, variantId: number | null) => `${locationId}:${variantId}`;
@@ -136,8 +139,8 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
     if (demand.authorizationStatus !== "authorized" || BigInt(demand.authorizedQty) <= BigInt(0)
       || BigInt(demand.materializedQty) !== actual || BigInt(demand.authorizedQty) !== actual
       || hasUnfulfilledTerminalOwner
-      || materialized.some((item) => demand.sku === null || item.sku.toUpperCase() !== demand.sku.toUpperCase()
-        || (demand.productVariantId !== null && !evidence.variants.some((variant) => variant.id === demand.productVariantId && variant.sku.toUpperCase() === item.sku.toUpperCase())))) {
+      || materialized.some((item) => !acceptedDemandIdentityMatches(demand, item,
+        allVariantsBySku.get(item.sku.toUpperCase()) ?? []))) {
       block("OMS_ACCEPTED_DEMAND_NOT_COVERED", `oms-line:${demand.lineId}`, "Accepted physical OMS demand requires exact WMS coverage and fully fulfilled terminal owners; reconcile missing, conflicting or unfinished lineage before cutover.");
     }
   }
@@ -179,12 +182,16 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
     }
     if (item.requiresShipping !== 1 || variants.length !== 1) { block("DEMAND_VARIANT_AMBIGUOUS", subject, "Physical SKU must resolve to exactly one active variant."); continue; }
     const variant = variants[0];
-    if (!variant.requiresShipping || !variant.trackInventory) {
+    if (cutoverLineIdentityConflicts(item, variant)) {
+      block("DEMAND_IDENTITY_INVALID", subject, "Saved order identity conflicts with its catalog variant/product."); continue;
+    }
+    if (cutoverLineTracksInventory(item, variant) === false) {
       if (residual) block("NONINVENTORY_ITEM_ENCUMBERED", subject, "Untracked/digital variant retains physical inventory evidence.");
       continue;
     }
-    if (variant.salesEligibility !== "sellable" || (item.productId !== null && item.productId !== variant.id && item.productId !== variant.productId)
-      || order.warehouseId === null) { block("DEMAND_IDENTITY_INVALID", subject, "Demand variant/product or warehouse ownership cannot be established."); continue; }
+    if (variant.salesEligibility !== "sellable" || order.warehouseId === null) {
+      block("DEMAND_IDENTITY_INVALID", subject, "Demand variant/product or warehouse ownership cannot be established."); continue;
+    }
     if (item.fulfilledQuantity !== 0 || journals.some((row) => BigInt(row.shippedQty) !== BigInt(0))) {
       block("PARTIAL_SHIPMENT_CUSTODY_REQUIRES_REVIEW", subject, "Legacy costs survive shipping; mixed shipped/unshipped lot custody requires explicit provenance."); continue;
     }

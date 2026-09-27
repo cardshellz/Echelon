@@ -139,6 +139,17 @@ describe("inventory cutover preflight", () => {
     expect(report.findings).toEqual([]);
   });
 
+  it.each([true, false])("keeps saved non-stock fulfillment policy when current catalog shipping is %s", requiresShipping => {
+    const facts = exactNonInventoryFulfillmentFacts();
+    facts.demand.items[0].inventoryTracking = false;
+    facts.demand.items[0].catalogProductId = facts.variants[0].productId;
+    facts.variants[0].requiresShipping = requiresShipping;
+    facts.variants[0].trackInventory = true;
+    expect(buildInventoryCutoverPreflight(facts).lines[0]).toMatchObject({
+      disposition: "no_inventory_demand", findingCodes: [], candidateDemandQty: "0",
+    });
+  });
+
   it("uses a retired exact variant as historical non-inventory evidence without reactivating it", () => {
     const facts = exactNonInventoryFulfillmentFacts();
     facts.variants[0]!.isActive = false;

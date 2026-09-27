@@ -111,6 +111,7 @@ function repositoryFixture(initial = snapshot(), failUpdate = false) {
   const execute = vi.fn(async (query: SQL) => {
     const { sql: text } = dialect.sqlToQuery(query);
     calls.push(text);
+    if (text.includes("inventory.cutover_history_retirements")) return { rows: [] };
     if (text.includes("SELECT jsonb_build_object")) {
       return { rows: [{ snapshot: structuredClone(current) }] };
     }
@@ -336,7 +337,9 @@ describe("reviewed inbound channel fulfillment receipt retry", () => {
       accessMode: "read only",
     });
     expect(fixture.insert).not.toHaveBeenCalled();
-    expect(fixture.calls).toHaveLength(1);
+    expect(fixture.calls).toHaveLength(2);
+    expect(fixture.calls[0]).toContain("inventory.cutover_history_retirements");
+    expect(fixture.calls.every(query => query.trimStart().startsWith("SELECT"))).toBe(true);
   });
 
   it("atomically audits and requeues only the exact reviewed receipt", async () => {
