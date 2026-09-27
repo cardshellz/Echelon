@@ -104,3 +104,13 @@ The full default report is `artifacts/history-pinned-full-final-20260927.json`, 
 Assumptions: the previously agreed bin-on-hand baseline remains the opening policy, not a new physical count. The operator reviews a fresh exact cohort before any production apply. No assumption is made that unknown channels can be inferred or that terminal statuses prove historical delivery/accounting correctness.
 
 Not proven here: current production readiness, carrier delivery, a fresh warehouse count, provider readbacks, or a completed authority cutover. Those are operational checks, not additional ATP implementation or a UI redesign.
+
+### September 27 CI fixture correction and complete PostgreSQL validation
+
+PR #1569's first CI run exposed two failures in `oms-disposition-cutover-replay.integration.test.ts`. They were reproduced locally before editing: its reduced `fixtureSql` omitted `catalog_product_id` and `inventory_tracking`, which `readOmsCutoverReconstruction` selects at `server/modules/oms/inventory-cutover-reconstruction.reader.ts:48`. Both nullable columns already belong to the application schema and migration `migrations/0694_product_inventory_tracking_policy.sql:25`; the correction does not change the production reader or add a migration.
+
+The fixture now includes both columns, and `withOrders` names its insert columns explicitly. Three additional database cases prove that tracked, non-stock physical and unresolved legacy policy values survive the real reader without dropping accepted demand or modifying either synthetic order line. The original refund/replay assertions remain intact.
+
+After this correction, all eight existing `scripts/ci/postgres-tests.ts` shards ran locally, using their separate disposable databases and the committed lockfile. **All 104 registered suites passed: 1,748 tests, zero failures, errors or skips.** Report names were checked against the complete CI manifest; each shard contains 13 suites. Reports are in the isolated worktree's ignored `test-results/postgres-hardening-{1..8}` directories, timestamped `2026-09-27T19:45:18.533Z` through `2026-09-27T19:52:39.859Z`. This supersedes the earlier 21-suite local PostgreSQL coverage limitation, not the production-proof boundary.
+
+The five repaired/regression database cases and five reader unit cases also passed in a focused run, and the server test TypeScript check passed. The earlier full default suite/build results above were not rerun for this test-only correction. The disposable PostgreSQL cluster was stopped after validation. Production was not connected to or changed; GitHub CI for the follow-up commit remains a separate verification.
