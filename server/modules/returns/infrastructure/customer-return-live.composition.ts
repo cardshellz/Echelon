@@ -4,6 +4,7 @@ import { customerReturnShopifyDomainSchema } from "../application/customer-retur
 import { PostgresCustomerReturnLocalInspectionReader } from "./customer-return-local-inspection.reader";
 import { ShopifyCustomerReturnSnapshotReader } from "./customer-return-shopify-snapshot.reader";
 import { createCustomerReturnShipStationDimensionsReader } from "./customer-return-shipstation-dimensions.reader";
+import { PostgresCustomerReturnPortalPolicyReader } from "./customer-return-policy.reader";
 
 /** Explicit scope: neither the default channel nor a shop name/currency establishes the approved store. */
 export function parseCustomerReturnShopDomains(raw: string | undefined): readonly string[] {
@@ -25,6 +26,7 @@ export async function createCustomerReturnLiveService(): Promise<CustomerReturnL
   const identity = new ChannelIdentityService(db);
   const now = (): Date => new Date();
   return new CustomerReturnLiveService({
+    policies: new PostgresCustomerReturnPortalPolicyReader(db),
     local: new PostgresCustomerReturnLocalInspectionReader(pool, { approvedShopDomains, clock: now }),
     shopify: new ShopifyCustomerReturnSnapshotReader({ resolveConnection: channelId => identity.shopifyConnection(channelId), request: fetch, now }),
     dimensions: createCustomerReturnShipStationDimensionsReader({ apiKey: process.env.SHIPSTATION_API_KEY,

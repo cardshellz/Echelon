@@ -78,7 +78,10 @@ integration(
       );
       commands = new PostgresCustomerReturnSubmissionStore(pool);
       settings = new PostgresCustomerReturnSettingsStore(database);
-      intake = new PostgresCustomerReturnIntakeStore(database);
+      intake = new PostgresCustomerReturnIntakeStore(
+        database,
+        () => new Date(clockInstant),
+      );
     });
     beforeEach(async () => {
       clockInstant = new Date(INTAKE_NOW);
@@ -303,12 +306,10 @@ integration(
         authorizeChannel: async () => {},
         now: () => new Date(clockInstant),
         requirePurchaseConfiguration: async (channelId) =>
-          (
-            await configuration.requireEnabled(
-              channelId,
-              (await settings.read(channelId))!.version,
-            )
-          ).settings,
+          configuration.requireShippingEnabled(
+            channelId,
+            (await settings.read(channelId))!.version,
+          ),
       });
       return { service, quote, purchase, recover };
     }
@@ -354,6 +355,20 @@ integration(
             "utf8",
           ),
         );
+        await pool.query(
+          readFileSync(
+            "migrations/254_customer_return_policy_resolution.sql",
+            "utf8",
+          ),
+        );
+        expect(await settings.read(36)).not.toHaveProperty("policyId");
+        expect(
+          (
+            await pool.query(
+              "SELECT policy_id FROM returns.customer_return_settings",
+            )
+          ).rows[0].policy_id,
+        ).toBe(1);
         expect(await settings.read(36)).toMatchObject({
           selectionMode: "fixed_service",
           carrierRules: [],
@@ -478,6 +493,45 @@ integration(
           )
         ).rows[0].n,
       ).toBe(2);
+    });
+    it("continues accepted labels and shipping-only saves after policy retirement", async () => {
+      const accepted = await authorizeAutomatic();
+      await pool.query("UPDATE returns.return_policies SET status='retired'");
+      const current = await settings.read(36);
+      const saved = await settings.save(
+        36,
+        await config(),
+        "shipping-admin",
+        INTAKE_NOW,
+      );
+      expect(saved.version).toBe(current!.version + 1);
+      expect(saved).not.toHaveProperty("policyId");
+      expect(
+        (
+          await pool.query(
+            "SELECT policy_id FROM returns.customer_return_settings",
+          )
+        ).rows[0].policy_id,
+      ).toBeNull();
+      const continuing = worker();
+      expect(
+        (
+          await continuing.service.progress(
+            36,
+            accepted.authorizationId,
+            "admin",
+          )
+        ).parcels[0].status,
+      ).toBe("ready");
+      expect(continuing.purchase).toHaveBeenCalledTimes(1);
+      expect(
+        (
+          await pool.query(
+            "SELECT operational_policy_snapshot->>'id' AS id FROM returns.customer_return_intakes",
+          )
+        ).rows[0].id,
+      ).toBe("1");
+      expect((await settings.catalog(36)).policies).toEqual([]);
     });
     it.each(["pause", "rules"])(
       "rejects a purchase if %s changes while the service is awaiting provider rates",

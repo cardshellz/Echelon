@@ -157,7 +157,11 @@ export async function installReturnPreviewFixtures(
               providerConfigured: false,
               settings: null,
               warehouses: [],
-              policies: [],
+              resolvedPolicy: null,
+              policyIssue: {
+                code: "RETURN_POLICY_NOT_CONFIGURED",
+                message: "No active return policy applies to this shop.",
+              },
               carriers: [],
               message:
                 "The shipping provider is not configured. Label creation is unavailable.",

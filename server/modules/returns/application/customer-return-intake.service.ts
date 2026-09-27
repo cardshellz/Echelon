@@ -16,6 +16,7 @@ const snapshot = z.record(z.unknown());
 export const preparedCustomerReturnIntakeSchema = z.object({
   channelId: id, omsOrderId: id, idempotencyKey: z.string().uuid(), semanticHash: hash, eligibilityRevision: hash,
   actor: text(255), observedAt: z.string().datetime({ offset: true }), settingsVersion: id, submissionLeaseToken: z.string().uuid(),
+  returnWindowEndsAt: z.string().datetime({ offset: true }),
   policySnapshot: snapshot, warehouseSnapshot: snapshot,
   operationalPolicy: z.object({ id, version: id, snapshot }).strict(),
   lines: z.array(z.object({

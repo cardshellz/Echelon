@@ -1,12 +1,12 @@
 import { eq, sql } from "drizzle-orm";
-import { returnPolicies, warehouses } from "@shared/schema";
+import { warehouses } from "@shared/schema";
+import { PostgresCustomerReturnPortalPolicyReader } from "./customer-return-policy.reader";
 import {
   customerReturnLabelSettingsSchema,
   customerReturnLabelSettingsInputSchema,
   type CustomerReturnLabelSettingsInput,
 } from "@shared/returns/customer-return-label.contract";
 import {
-  isPortalReturnPolicy,
   warehouseLabelAddress,
   type CustomerReturnSettingsStore,
 } from "../application/customer-return-label-settings.service";
@@ -36,7 +36,7 @@ export class PostgresCustomerReturnSettingsStore
 
   async read(channelId: number) {
     const result = await this.database
-      .execute(sql`SELECT version,enabled,warehouse_id AS "warehouseId",policy_id AS "policyId",
+      .execute(sql`SELECT version,enabled,warehouse_id AS "warehouseId",
       selection_mode AS "selectionMode",carrier_rules AS "carrierRules",
       carrier_id AS "carrierId",service_code AS "serviceCode",contact_name AS "contactName",contact_phone AS "contactPhone",
       destination_address AS "destinationAddress" FROM returns.customer_return_settings WHERE channel_id=${channelId}`);
@@ -51,11 +51,9 @@ export class PostgresCustomerReturnSettingsStore
         .from(warehouses)
         .where(eq(warehouses.isActive, 1))
         .limit(201),
-      this.database
-        .select()
-        .from(returnPolicies)
-        .where(eq(returnPolicies.status, "active"))
-        .limit(201),
+      new PostgresCustomerReturnPortalPolicyReader(this.database).read(
+        channelId,
+      ),
     ]);
     if (warehouseRows.length > 200 || policies.length > 200)
       throw new CustomerReturnIntakeError(
@@ -107,7 +105,6 @@ export class PostgresCustomerReturnSettingsStore
         before &&
         !input.enabled &&
         input.warehouseId === before.warehouse_id &&
-        input.policyId === before.policy_id &&
         input.selectionMode === before.selection_mode &&
         JSON.stringify(
           normalizeCustomerReturnCarrierRules(input.carrierRules),
@@ -126,11 +123,6 @@ export class PostgresCustomerReturnSettingsStore
         .from(warehouses)
         .where(eq(warehouses.id, input.warehouseId))
         .for("share");
-      const [policy] = await tx
-        .select()
-        .from(returnPolicies)
-        .where(eq(returnPolicies.id, input.policyId))
-        .for("share");
       const destination = pauseOnly
         ? before.destination_address
         : warehouse && warehouse.isActive === 1
@@ -140,13 +132,10 @@ export class PostgresCustomerReturnSettingsStore
               input.contactPhone,
             )
           : null;
-      if (
-        !destination ||
-        (!pauseOnly && (!policy || !isPortalReturnPolicy(policy, channelId)))
-      )
+      if (!destination)
         throw new CustomerReturnIntakeError(
           "RETURN_LABEL_CONFIGURATION_INVALID",
-          "Choose an active U.S. warehouse with a complete address and an applicable 365-day retail return policy.",
+          "Choose an active U.S. warehouse with a complete address.",
         );
       const { expectedVersion: _expected, ...fields } = input;
       const after = customerReturnLabelSettingsSchema.parse({
@@ -157,7 +146,7 @@ export class PostgresCustomerReturnSettingsStore
       });
       await tx.execute(sql`INSERT INTO returns.customer_return_settings
         (channel_id,version,enabled,warehouse_id,policy_id,selection_mode,carrier_rules,carrier_id,service_code,destination_address,contact_name,contact_phone,updated_by,updated_at)
-        VALUES (${channelId},${after.version},${after.enabled},${after.warehouseId},${after.policyId},${after.selectionMode},${JSON.stringify(normalizeCustomerReturnCarrierRules(after.carrierRules))}::jsonb,${after.carrierId},${after.serviceCode},
+        VALUES (${channelId},${after.version},${after.enabled},${after.warehouseId},NULL,${after.selectionMode},${JSON.stringify(normalizeCustomerReturnCarrierRules(after.carrierRules))}::jsonb,${after.carrierId},${after.serviceCode},
           ${JSON.stringify(after.destinationAddress)}::jsonb,${after.contactName},${after.contactPhone},${actor},${now})
         ON CONFLICT(channel_id) DO UPDATE SET version=EXCLUDED.version,enabled=EXCLUDED.enabled,warehouse_id=EXCLUDED.warehouse_id,
           policy_id=EXCLUDED.policy_id,selection_mode=EXCLUDED.selection_mode,carrier_rules=EXCLUDED.carrier_rules,

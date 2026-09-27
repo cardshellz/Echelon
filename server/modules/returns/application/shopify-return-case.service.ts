@@ -10,6 +10,7 @@ import {
   snapshotReturnPolicy,
 } from "../domain/return-case";
 import { resolveReturnPolicy, type ReturnPolicyCandidate } from "../domain/return-policy";
+import { acquireReturnPolicyCatalogLock } from "../infrastructure/return-policy-lock";
 
 type ResolvableReturnPolicy = ReturnPolicy & ReturnPolicyCandidate;
 
@@ -146,6 +147,7 @@ async function findSourceCase(tx: any, sourceEventId: string): Promise<CaseRow |
 }
 
 async function loadActivePolicies(tx: any): Promise<ResolvableReturnPolicy[]> {
+  await acquireReturnPolicyCatalogLock(tx, "shared");
   const result = await tx.execute(sql`
     SELECT *
     FROM returns.return_policies

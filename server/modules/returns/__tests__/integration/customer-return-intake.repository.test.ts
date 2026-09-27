@@ -1,4 +1,5 @@
 import { drizzle } from "drizzle-orm/node-postgres";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PostgresCustomerReturnIntakeStore } from "../../infrastructure/customer-return-intake.repository";
@@ -23,6 +24,7 @@ const integration = connectionString ? describe.sequential : describe.skip;
 integration("private return intake on migration-defined PostgreSQL", () => {
   let pool: Pool;
   let store: PostgresCustomerReturnIntakeStore;
+  let clockInstant = new Date(INTAKE_NOW);
   beforeAll(async () => {
     pool = new Pool({
       connectionString: connectionString!,
@@ -31,9 +33,15 @@ integration("private return intake on migration-defined PostgreSQL", () => {
       statement_timeout: 15_000,
     });
     await createIntakeTestSchema(pool);
-    store = new PostgresCustomerReturnIntakeStore(drizzle(pool));
+    store = new PostgresCustomerReturnIntakeStore(
+      drizzle(pool),
+      () => new Date(clockInstant),
+    );
   });
-  beforeEach(async () => seedIntakeTestSchema(pool));
+  beforeEach(async () => {
+    clockInstant = new Date(INTAKE_NOW);
+    await seedIntakeTestSchema(pool);
+  });
   afterAll(async () => {
     await pool?.end();
   });
@@ -456,6 +464,7 @@ integration("private return intake on migration-defined PostgreSQL", () => {
     await pool.query(
       "UPDATE returns.customer_return_settings SET enabled=false,version=2",
     );
+    await pool.query("UPDATE returns.return_policies SET status='retired'");
     expect(await store.persist(preparedIntake())).toEqual({
       ...first,
       replayed: true,
@@ -467,6 +476,171 @@ integration("private return intake on migration-defined PostgreSQL", () => {
       store.find({ ...preparedIntake(), omsOrderId: 200 }),
     ).rejects.toMatchObject({ code: "RETURN_LABEL_COMMAND_CONFLICT" });
   });
+
+  it("uses the resolved dynamic policy independently of the deprecated saved selection", async () => {
+    await pool.query(
+      "UPDATE returns.customer_return_settings SET policy_id=NULL",
+    );
+    await pool.query(
+      "UPDATE returns.return_policies SET return_window_days=30",
+    );
+    const input = preparedIntake();
+    input.policySnapshot = { ...input.policySnapshot, returnWindowDays: 30 };
+    input.operationalPolicy.snapshot = {
+      ...input.operationalPolicy.snapshot,
+      returnWindowDays: 30,
+    };
+    const result = await store.persist(input);
+    const snapshots = (
+      await pool.query(
+        `SELECT operational_policy_snapshot FROM returns.customer_return_intakes WHERE authorization_id=$1`,
+        [result.authorizationId],
+      )
+    ).rows;
+    expect(snapshots[0].operational_policy_snapshot.returnWindowDays).toBe(30);
+    expect(
+      (
+        await pool.query(
+          "SELECT policy_snapshot->>'returnWindowDays' AS days FROM returns.return_cases",
+        )
+      ).rows.map((row) => row.days),
+    ).toEqual(["30", "30"]);
+  });
+
+  it("waits for a catalog mutation and rejects a newly inserted more-specific winner atomically", async () => {
+    const catalogWriter = await pool.connect();
+    let pending: Promise<unknown> | undefined;
+    try {
+      await catalogWriter.query("BEGIN");
+      await catalogWriter.query("SELECT pg_advisory_xact_lock(918421,1)");
+      pending = store.persist(preparedIntake()).then(
+        (value) => ({ value }),
+        (error) => ({ error }),
+      );
+      await catalogWriter.query(`INSERT INTO returns.return_policies
+        (id,name,scope_kind,scope_key,business_context,channel_id,version,status,return_window_days,
+          return_destination,approval_authority,label_provider,return_shipping_payer,inspection_requirement,
+          inspection_owner,customer_refund_authority,vendor_settlement_trigger,returnless_refund_allowed,created_by)
+        OVERRIDING SYSTEM VALUE SELECT 2,'New channel policy','channel_context','context:retail:channel:36','retail',36,1,'active',30,
+          return_destination,approval_authority,label_provider,return_shipping_payer,inspection_requirement,
+          inspection_owner,customer_refund_authority,vendor_settlement_trigger,returnless_refund_allowed,'catalog-admin'
+        FROM returns.return_policies WHERE id=1`);
+      await catalogWriter.query("COMMIT");
+      expect(await pending).toMatchObject({
+        error: { code: "RETURN_LABEL_SETTINGS_CHANGED" },
+      });
+      expect(await counts()).toEqual({
+        roots: 0,
+        cases: 0,
+        items: 0,
+        parcels: 0,
+      });
+    } finally {
+      await catalogWriter.query("ROLLBACK");
+      catalogWriter.release();
+      await pending;
+    }
+  });
+
+  it.each(["source_ttl", "lease", "window", "exact_window"])(
+    "rechecks %s using fresh time after real blocking locks",
+    async (kind) => {
+      const locker = await pool.connect();
+      const input = preparedIntake();
+      input.returnWindowEndsAt = new Date(
+        INTAKE_NOW.getTime() + 30_000,
+      ).toISOString();
+      if (kind === "lease")
+        await pool.query(
+          "UPDATE returns.customer_return_submission_commands SET lease_until=$1",
+          [new Date(INTAKE_NOW.getTime() + 60_000)],
+        );
+      let signalStarted!: () => void;
+      const lockRequested = new Promise<void>((resolve) => {
+        signalStarted = resolve;
+      });
+      const database = drizzle(pool);
+      const waitingStore = new PostgresCustomerReturnIntakeStore(
+        {
+          transaction: (work) =>
+            database.transaction((tx) =>
+              work({
+                execute: async (query) => {
+                  const rendered = new PgDialect().sqlToQuery(query);
+                  const expected =
+                    kind === "source_ttl"
+                      ? rendered.params.includes(918421)
+                      : kind === "lease"
+                        ? rendered.sql.includes(
+                            "FROM returns.customer_return_settings",
+                          ) && rendered.sql.includes("FOR SHARE")
+                        : rendered.params.includes(918413);
+                  if (expected) signalStarted();
+                  return tx.execute(query);
+                },
+              }),
+            ),
+        },
+        () => new Date(clockInstant),
+      );
+      let pending: Promise<unknown> | undefined;
+      try {
+        await locker.query("BEGIN");
+        if (kind === "source_ttl")
+          await locker.query("SELECT pg_advisory_xact_lock(918421,1)");
+        else if (kind === "lease")
+          await locker.query(
+            "SELECT * FROM returns.customer_return_settings WHERE channel_id=36 FOR UPDATE",
+          );
+        else await locker.query("SELECT pg_advisory_xact_lock(918413,100)");
+        pending = waitingStore.persist(input).then(
+          (value) => ({ value }),
+          (error) => ({ error }),
+        );
+        await lockRequested;
+        clockInstant = new Date(
+          INTAKE_NOW.getTime() +
+            (kind === "source_ttl"
+              ? 120_001
+              : kind === "lease"
+                ? 60_000
+                : kind === "window"
+                  ? 30_001
+                  : 30_000),
+        );
+        await locker.query("COMMIT");
+        const result = await pending;
+        if (kind === "exact_window") {
+          expect(result).toMatchObject({ value: { replayed: false } });
+          expect(
+            (
+              await pool.query(
+                "SELECT created_at FROM returns.customer_return_authorizations",
+              )
+            ).rows[0].created_at,
+          ).toEqual(clockInstant);
+        } else {
+          const code =
+            kind === "source_ttl"
+              ? "RETURN_INTAKE_SOURCE_CHANGED"
+              : kind === "lease"
+                ? "RETURN_LABEL_SUBMISSION_LEASE_CHANGED"
+                : "RETURN_INTAKE_WINDOW_ELAPSED";
+          expect(result).toMatchObject({ error: { code } });
+          expect(await counts()).toEqual({
+            roots: 0,
+            cases: 0,
+            items: 0,
+            parcels: 0,
+          });
+        }
+      } finally {
+        await locker.query("ROLLBACK");
+        locker.release();
+        await pending;
+      }
+    },
+  );
 
   it.each(["paused", "version", "carrier", "warehouse", "policy"])(
     "rejects changed %s configuration without effects",

@@ -89,13 +89,12 @@ export async function createCustomerReturnLabelServices(): Promise<CustomerRetur
           "RETURN_LABEL_SETTINGS_CHANGED",
           "Enable return labels in the private settings first.",
         );
-      return (await settings.requireEnabled(channelId, current.version))
-        .settings;
+      return settings.requireShippingEnabled(channelId, current.version);
     },
   });
   const submissions = new CustomerReturnSubmissionService({
     commands: new PostgresCustomerReturnSubmissionStore(pool),
-    intake: new PostgresCustomerReturnIntakeStore(db),
+    intake: new PostgresCustomerReturnIntakeStore(db, now),
     live,
     settings,
     labels,

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const DEFAULT_CUSTOMER_RETURN_WINDOW_DAYS = 365;
+export { DEFAULT_CUSTOMER_RETURN_WINDOW_DAYS } from "@shared/returns/customer-return-portal-policy";
 const MAX_RETURN_WINDOW_DAYS = 3_650;
 const MAX_FACTS_PER_COLLECTION = 200;
 const MILLISECONDS_PER_DAY = 86_400_000;

@@ -61,7 +61,8 @@ function settings(): CustomerReturnLabelSettingsState {
     providerConfigured: true,
     settings: structuredClone(labelSettings),
     warehouses: [],
-    policies: [],
+    resolvedPolicy: null,
+    policyIssue: null,
     carriers: [],
     message: null,
   };
