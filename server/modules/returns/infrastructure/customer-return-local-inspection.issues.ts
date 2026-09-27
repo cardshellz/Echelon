@@ -61,8 +61,8 @@ export function deriveLocalInspectionIssues(source: Source): CustomerReturnLocal
     }
     if (claim.receivedQuantity > claim.expectedQuantity) add("local_claim_quantity_conflict", lineId);
     if (claim.expectedQuantity > 0 || claim.receivedQuantity > 0) add("legacy_claim_allocation_unknown", lineId);
-    // There is no root-to-child claim link yet. Do not invent deduplication or a
-    // numeric aggregate by adding these possibly mirrored legacy quantities.
+    // The reader already removes proven portal child mirrors. Unlinked legacy
+    // claims still lack exact provider-allocation evidence; do not invent it.
   }
   for (const [lineId, quantity] of claimedByLine) {
     if (!Number.isSafeInteger(quantity) || quantity > (lines.get(lineId)?.quantity ?? 0)) add("local_claim_quantity_conflict", lineId);

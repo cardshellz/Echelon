@@ -70,6 +70,26 @@ describe("writer-ratchet (P2.1)", () => {
     ).toEqual([]);
   });
 
+  it("keeps private return intake and label writes in their Returns owner", () => {
+    const tables = [
+      "returns.customer_return_allocation_case_items",
+      "returns.customer_return_case_links",
+      "returns.customer_return_intakes",
+      "returns.customer_return_label_attempts",
+      "returns.customer_return_label_events",
+      "returns.customer_return_parcel_items",
+      "returns.customer_return_parcels",
+      "returns.customer_return_settings",
+      "returns.customer_return_settings_events",
+      "returns.customer_return_submission_commands",
+    ];
+    for (const table of tables) {
+      expect(current[table]).toEqual(["modules/returns"]);
+      expect(currentIncludingScripts[table]).toEqual(["modules/returns"]);
+      expect(baseline[table]).toEqual(["modules/returns"]);
+    }
+  });
+
   it("keeps Walmart connection writes in channels and order reconciliation writes in OMS", () => {
     for (const table of ["channels.walmart_connections", "channels.walmart_connection_events", "channels.walmart_order_receipts"]) {
       expect(current[table]).toEqual(["modules/channels"]);

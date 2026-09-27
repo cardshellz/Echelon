@@ -298,10 +298,14 @@ export function PreviewReview({
   order,
   review,
   onBack,
+  onGetLabels,
+  busy = false,
 }: {
   order: CustomerReturnFlowOrder;
   review: CustomerReturnFlowReview;
   onBack: () => void;
+  onGetLabels?: () => void;
+  busy?: boolean;
 }) {
   return (
     <div className="space-y-6">
@@ -360,12 +364,18 @@ export function PreviewReview({
       <div className="space-y-3 border-t pt-6">
         <Button
           className="min-h-11 w-full"
-          disabled
+          disabled={!onGetLabels || busy}
+          onClick={onGetLabels}
           aria-describedby="return-testing-status"
         >
           Get return labels
         </Button>
-        <Button variant="ghost" className="min-h-11 w-full" onClick={onBack}>
+        <Button
+          variant="ghost"
+          className="min-h-11 w-full"
+          onClick={onBack}
+          disabled={busy}
+        >
           <ArrowLeft className="mr-2 h-4 w-4" />
           Back to packing
         </Button>

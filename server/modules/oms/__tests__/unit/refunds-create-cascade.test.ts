@@ -529,7 +529,7 @@ describe("applyShopifyRefundCascade", () => {
     }));
   });
 
-  it("opens an expected return only for fulfilled units carrying a return policy", async () => {
+  it.each([false,true])("opens an expected return only for fulfilled units carrying a return policy and no ambiguous portal claim (portal=%s)", async portalOwned => {
     const originalLine = omsLine({
       id: 12,
       external_line_item_id: "12",
@@ -559,7 +559,9 @@ describe("applyShopifyRefundCascade", () => {
       }
       if (text.includes("FROM wms.outbound_shipment_items si") && text.includes("FOR UPDATE OF si, os")) return { rows: [] };
       if (text.includes("FROM wms.outbound_shipments os") && text.includes("terminal_provider_sibling")) return { rows: [] };
-      if (text.includes("SELECT COALESCE(SUM(ri.expected_qty)")) return { rows: [{ expected_quantity: 0 }] };
+      if (text.includes("FROM returns.customer_return_authorization_lines al")) return { rows: portalOwned ? [{oms_order_line_id:12}] : [] };
+      if (text.includes("FROM returns.customer_return_claimed_quantities")) return { rows: [{ expected_quantity: 0 }] };
+      if (text.includes("INSERT INTO wms.reconciliation_exceptions")) return { rows: [] };
       if (text.includes("JOIN wms.outbound_shipment_items si") && text.includes("ORDER BY COALESCE(os.shipped_at")) return { rows: [{ id: 700 }] };
       if (text.includes("INSERT INTO wms.returns")) return { rows: [{ id: 800 }] };
       if (text.includes("INSERT INTO wms.return_items")) return { rows: [{ id: 900 }] };
@@ -578,14 +580,12 @@ describe("applyShopifyRefundCascade", () => {
       { channelId: 36, now: NOW },
     );
 
-    expect(result).toMatchObject({
-      outcome: "return_expected",
-      returnId: 800,
-      returnExpected: true,
-      restocked: false,
-    });
-    expect(mock.calls.some((text) => text.includes("INSERT INTO wms.returns") && text.includes("source_event_key"))).toBe(true);
-    expect(mock.calls.some((text) => text.includes("INSERT INTO wms.return_items") && text.includes("expected_qty"))).toBe(true);
+    expect(result).toMatchObject({ returnId: portalOwned ? null : 800, returnExpected: !portalOwned, restocked: false });
+    expect(mock.calls.some(text=>text.includes("INSERT INTO oms.order_line_adjustments"))).toBe(true);
+    expect(mock.calls.some((text) => text.includes("INSERT INTO wms.returns") && text.includes("source_event_key"))).toBe(!portalOwned);
+    expect(mock.calls.some((text) => text.includes("INSERT INTO wms.return_items") && text.includes("expected_qty"))).toBe(!portalOwned);
+    expect(mock.calls.some(text=>text.includes("INSERT INTO wms.reconciliation_exceptions"))).toBe(portalOwned);
+    if(portalOwned) expect(result.warnings[0]).toContain("requires correlation to its portal RMA");
     expect(serviceHelpers.reconcileRefundOrderDemand).not.toHaveBeenCalled();
   });
 

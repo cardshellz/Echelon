@@ -1,3 +1,5 @@
+import { portalInventoryReturnMirrorSql } from "./customer-return-inventory-mirror";
+
 /** Fixed SQL only. Every identity, alias and rejection limit is parameterized.
  * Relations are read separately so joins cannot multiply entitlement claims. */
 export const inspectionQueries = Object.freeze({
@@ -66,9 +68,10 @@ export const inspectionQueries = Object.freeze({
     FROM wms.return_items ri JOIN wms.returns r ON r.id = ri.return_id
     JOIN wms.orders wo ON wo.id = r.order_id
     LEFT JOIN oms.oms_order_lines ol ON ol.id = ri.oms_order_line_id
-    WHERE ol.order_id = $1 OR wo.oms_fulfillment_order_id = $2
+    WHERE (ol.order_id = $1 OR wo.oms_fulfillment_order_id = $2
       OR wo.source_table_id = $2
-      OR ri.order_item_id = ANY($3::int[]) OR r.order_id = ANY($4::int[])
+      OR ri.order_item_id = ANY($3::int[]) OR r.order_id = ANY($4::int[]))
+      AND NOT EXISTS (SELECT 1 FROM returns.customer_return_allocation_case_items link WHERE link.wms_return_item_id = ri.id)
     ORDER BY ri.id LIMIT $5`,
 
   unallocatedReturns: `SELECT r.id AS "returnId", r.order_id AS "wmsOrderId", r.status,
@@ -79,13 +82,14 @@ export const inspectionQueries = Object.freeze({
       AND NOT EXISTS (SELECT 1 FROM wms.return_items ri WHERE ri.return_id = r.id)
     ORDER BY r.id LIMIT $3`,
 
-  inventoryReturns: `SELECT tx.id AS "transactionId", tx.order_id AS "wmsOrderId", tx.order_item_id AS "wmsOrderItemId",
-    tx.variant_qty_delta AS "quantityDelta", tx.created_at AT TIME ZONE 'UTC' AS "occurredAt"
-    FROM inventory.inventory_transactions tx LEFT JOIN wms.orders wo ON wo.id = tx.order_id
-    WHERE tx.transaction_type = 'return'
-      AND (tx.order_id = ANY($1::int[]) OR tx.order_item_id = ANY($2::int[])
+  inventoryReturns: `SELECT it.id AS "transactionId", it.order_id AS "wmsOrderId", it.order_item_id AS "wmsOrderItemId",
+    it.variant_qty_delta AS "quantityDelta", it.created_at AT TIME ZONE 'UTC' AS "occurredAt"
+    FROM inventory.inventory_transactions it LEFT JOIN wms.orders wo ON wo.id = it.order_id
+    WHERE it.transaction_type = 'return'
+      AND (it.order_id = ANY($1::int[]) OR it.order_item_id = ANY($2::int[])
         OR wo.oms_fulfillment_order_id = $3 OR wo.source_table_id = $3)
-    ORDER BY tx.id LIMIT $4`,
+      AND NOT (${portalInventoryReturnMirrorSql})
+    ORDER BY it.id LIMIT $4`,
 
   bindings: `SELECT * FROM (
     SELECT 'receipt'::text AS kind, ri.id AS "bindingId", r.id AS "parentId", r.source_provider AS provider,
