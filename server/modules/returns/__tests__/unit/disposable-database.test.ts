@@ -4,11 +4,13 @@ import { resolveReturnsTestDatabase } from "../support/disposable-database";
 const portalUrl = "postgresql://returns_test:secret@127.0.0.1:55473/returns_portal_test";
 const accessUrl = "postgresql://returns_test:secret@127.0.0.1:55473/returns_access_test";
 const inspectionUrl = "postgresql://returns_test:secret@127.0.0.1:55474/returns_inspection_test";
+const intakeUrl = "postgresql://returns_test:secret@127.0.0.1:55474/returns_intake_test";
 const ciUrl = "postgresql://returns_test:secret@127.0.0.1:55473/echelon_ci_s4_00000000000040008000000000000001";
 const localEnv: NodeJS.ProcessEnv = {
   ECHELON_TEST_DATABASE_DISPOSABLE: "true", ECHELON_TEST_DATABASE_URL: portalUrl,
   RETURNS_ACCESS_TEST_DATABASE_URL: accessUrl,
   RETURNS_INSPECTION_TEST_DATABASE_URL: inspectionUrl,
+  RETURNS_INTAKE_TEST_DATABASE_URL: intakeUrl,
 };
 
 describe("returns disposable PostgreSQL boundary", () => {
@@ -16,6 +18,7 @@ describe("returns disposable PostgreSQL boundary", () => {
     expect(resolveReturnsTestDatabase(localEnv, "authorization")).toBe(portalUrl);
     expect(resolveReturnsTestDatabase(localEnv, "access")).toBe(accessUrl);
     expect(resolveReturnsTestDatabase(localEnv, "inspection")).toBe(inspectionUrl);
+    expect(resolveReturnsTestDatabase(localEnv, "intake")).toBe(intakeUrl);
     expect(resolveReturnsTestDatabase({ ECHELON_TEST_DATABASE_URL: portalUrl }, "access")).toBeNull();
     expect(resolveReturnsTestDatabase({ ECHELON_TEST_DATABASE_URL: portalUrl }, "inspection")).toBeNull();
     expect(resolveReturnsTestDatabase({}, "authorization")).toBeNull();
@@ -26,6 +29,7 @@ describe("returns disposable PostgreSQL boundary", () => {
     expect(resolveReturnsTestDatabase(env, "authorization")).toBe(ciUrl);
     expect(resolveReturnsTestDatabase(env, "access")).toBe(ciUrl);
     expect(resolveReturnsTestDatabase(env, "inspection")).toBe(ciUrl);
+    expect(resolveReturnsTestDatabase(env, "intake")).toBe(ciUrl);
   });
 
   it.each([
@@ -52,6 +56,11 @@ describe("returns disposable PostgreSQL boundary", () => {
       DATABASE_URL: portalUrl.replace(":55473", ":5432") };
     expect(() => resolveReturnsTestDatabase(env, "authorization")).toThrow();
   });
+
+  it.each([accessUrl,portalUrl,inspectionUrl,intakeUrl + "?host=remote",intakeUrl.replace("127.0.0.1","remote.example")])(
+    "rejects cross-suite or unsafe intake targets %s", url => {
+      expect(() => resolveReturnsTestDatabase({...localEnv,RETURNS_INTAKE_TEST_DATABASE_URL:url},"intake")).toThrow();
+    });
 
   it("applies the same query-override protection to the access database", () => {
     expect(() => resolveReturnsTestDatabase({ ...localEnv, RETURNS_ACCESS_TEST_DATABASE_URL: accessUrl + "?host=remote" }, "access"))

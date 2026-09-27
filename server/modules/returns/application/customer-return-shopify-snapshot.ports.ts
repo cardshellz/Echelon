@@ -24,11 +24,26 @@ export const customerReturnShopifySnapshotInputSchema = z.object({
   externalOrderId: z.string().max(255).regex(/^(?:gid:\/\/shopify\/Order\/)?[1-9]\d*$/),
 }).strict();
 
+// This provider-only address never enters the read-only customer order DTO.
+// Incomplete addresses remain readable, but cannot be used to buy postage.
+export const customerReturnShopifyAddressSchema = z.object({
+  name: z.string().max(200).nullable().default(null),
+  phone: z.string().max(50).nullable().default(null),
+  company: z.string().max(200).nullable().default(null),
+  address1: z.string().max(300).nullable().default(null),
+  address2: z.string().max(300).nullable().default(null),
+  city: z.string().max(100).nullable().default(null),
+  provinceCode: z.string().max(100).nullable().default(null),
+  zip: z.string().max(20).nullable().default(null),
+  countryCodeV2: z.string().regex(/^[A-Z]{2}$/).nullable(),
+}).strict();
+
 export const customerReturnShopifyOrderSchema = z.object({
   id: customerReturnShopifyGidSchema("Order"), name: z.string().min(1).max(255),
   createdAt: customerReturnShopifyTimestampSchema, processedAt: customerReturnShopifyTimestampSchema,
   updatedAt: customerReturnShopifyTimestampSchema, cancelledAt: customerReturnShopifyTimestampSchema.nullable(),
   destinationCountryCode: z.string().regex(/^[A-Z]{2}$/).nullable(),
+  shippingAddress: customerReturnShopifyAddressSchema.nullable().default(null),
 }).strict();
 
 export const customerReturnShopifyPurchasedLineSchema = z.object({

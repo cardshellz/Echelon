@@ -21,6 +21,7 @@ import {
 } from "@shared/returns/customer-return-live.contract";
 import type { CustomerReturnLiveService } from "../../application/customer-return-live.service";
 import { CustomerReturnLiveError } from "../../application/customer-return-live-error";
+import { registerCustomerReturnLabelRoutes, type CustomerReturnLabelRouteDependencies } from "./customer-return-label.routes";
 
 const API_ROOT = CUSTOMER_RETURN_PREVIEW_API_PATH;
 const PAGE_PREFIXES = [CUSTOMER_RETURN_PORTAL_PATH, CUSTOMER_RETURN_PORTAL_LEGACY_PATH];
@@ -31,9 +32,10 @@ export interface CustomerReturnPreviewRouteDependencies {
   liveService?: Pick<CustomerReturnLiveService, "getState" | "lookup" | "review">;
   identityReader?: CustomerReturnPreviewIdentityReader;
   reportFailure?: (event: { operation: Operation; code: string }) => void;
+  labelDependencies?: CustomerReturnLabelRouteDependencies;
 }
 
-/** Private effect-free inspection and samples. This registration does not expose customer intake. */
+/** Private inspection, samples and separately enabled staff label commands. */
 export function registerCustomerReturnPreviewRoutes(app: Express, dependencies: CustomerReturnPreviewRouteDependencies = {}): void {
   const service = dependencies.service ?? new CustomerReturnPreviewService();
 
@@ -153,6 +155,7 @@ export function registerCustomerReturnPreviewRoutes(app: Express, dependencies: 
     return customerReturnLiveReviewSchema.parse(await (await liveService()).review(request));
   }));
 
+  registerCustomerReturnLabelRoutes(app, dependencies.labelDependencies);
   app.all([API_ROOT, `${API_ROOT}/order`, `${API_ROOT}/review`, `${API_ROOT}/live`, `${API_ROOT}/live/order`, `${API_ROOT}/live/review`], (req, res) => {
     const endpoint = req.path.replace(/\/$/, "").toLowerCase();
     const state = endpoint === API_ROOT || endpoint === `${API_ROOT}/live`;

@@ -129,7 +129,9 @@ export async function installReturnPreviewFixtures(
     }
     if (path === PREVIEW_API || path.startsWith(`${PREVIEW_API}/`)) {
       const body: unknown =
-        request.method() === "POST" ? request.postDataJSON() : null;
+        request.method() === "POST" || request.method() === "PUT"
+          ? request.postDataJSON()
+          : null;
       previewRequests.push({ path, method: request.method(), body });
       if (role !== "admin") {
         return route.fulfill({
@@ -147,6 +149,21 @@ export async function installReturnPreviewFixtures(
           return route.fulfill({ json: service.getState() });
         if (path === `${PREVIEW_API}/live` && request.method() === "GET")
           return route.fulfill({ json: liveState() });
+        const labelSettingsMatch = path.match(/\/live\/label-settings\/(\d+)$/);
+        if (labelSettingsMatch && request.method() === "GET") {
+          return route.fulfill({
+            json: {
+              channelId: Number(labelSettingsMatch[1]),
+              providerConfigured: false,
+              settings: null,
+              warehouses: [],
+              policies: [],
+              carriers: [],
+              message:
+                "The shipping provider is not configured. Label creation is unavailable.",
+            },
+          });
+        }
         if (
           (path === `${PREVIEW_API}/live/order` ||
             path === `${PREVIEW_API}/live/review`) &&

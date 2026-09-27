@@ -773,6 +773,19 @@ async function createExpectedReturn(
   }> = [];
   const warnings: string[] = [];
 
+  // Shopify does not identify the portal RMA represented by a refund. Compare
+  // purchased lines across all partitions: spare capacity in another WMS item
+  // is not proof that this refund requests an additional physical return.
+  const portalClaimResult = args.adjustments.some(adjustment=>returnPolicies.has(adjustment.restockPolicy)) ? await tx.execute(sql`
+    SELECT DISTINCT al.oms_order_line_id FROM returns.customer_return_authorization_lines al
+    JOIN returns.customer_return_authorizations a ON a.id=al.authorization_id
+    WHERE a.oms_order_id=${args.omsOrderId}
+      AND EXISTS (SELECT 1 FROM returns.customer_return_authorization_allocations allocation
+        WHERE allocation.authorization_line_id=al.id)
+  `) : { rows: [] };
+  const portalClaimedLines = new Set(rowsOf<{oms_order_line_id: number | string}>(portalClaimResult)
+    .map(row=>Number(row.oms_order_line_id)));
+
   for (const adjustment of args.adjustments) {
     if (!returnPolicies.has(adjustment.restockPolicy)) continue;
     const item = itemByExternalId.get(adjustment.externalLineItemId);
@@ -783,12 +796,33 @@ async function createExpectedReturn(
       continue;
     }
 
+    if (portalClaimedLines.has(item.omsOrderLineId)) {
+      const warning = `Shopify refund ${args.refundExternalId} for OMS line ${item.omsOrderLineId} requires correlation to its portal RMA; no additional physical return was created. Review the existing Return Case before authorizing another return.`;
+      warnings.push(warning);
+      const reviewKey = `portal-refund-correlation:${args.omsOrderId}:${item.omsOrderLineId}:${args.refundExternalId}`;
+      await tx.execute(sql`INSERT INTO wms.reconciliation_exceptions
+        (source,classification,rule,status,severity,wms_order_id,external_system,external_order_ref,
+          idempotency_key,summary,details,first_seen_at,last_seen_at,created_at,updated_at)
+        SELECT 'shopify_refund','manual_review','portal_refund_rma_correlation','open','review',${args.wmsOrderId},
+          'shopify',${String(args.omsOrderId)},${reviewKey},${warning},
+          ${JSON.stringify({omsOrderId:args.omsOrderId,omsOrderLineId:item.omsOrderLineId,
+            refundExternalId:args.refundExternalId,refundQuantity:adjustment.quantity,
+            physicalReturnProjectionBlocked:true,financialRefundIngestionBlocked:false})}::jsonb,
+          ${args.now},${args.now},${args.now},${args.now}
+        WHERE NOT EXISTS (SELECT 1 FROM wms.reconciliation_exceptions existing
+          WHERE existing.idempotency_key=${reviewKey} AND existing.status IN ('resolved','ignored'))
+        ON CONFLICT (idempotency_key) WHERE status IN ('open','acknowledged') DO NOTHING`);
+      continue;
+    }
+
     const priorResult = await tx.execute(sql`
-      SELECT COALESCE(SUM(ri.expected_qty), 0)::int AS expected_quantity
-      FROM wms.return_items ri
-      JOIN wms.returns r ON r.id = ri.return_id
-      WHERE ri.order_item_id = ${item.id}
-        AND COALESCE(r.source_event_key, '') <> ${eventKey}
+      SELECT (COALESCE((SELECT claimed_quantity FROM returns.customer_return_claimed_quantities
+        WHERE wms_order_item_id = ${item.id}), 0) - COALESCE((
+          SELECT SUM(GREATEST(ri.expected_qty,ri.received_qty)) FROM wms.return_items ri
+          JOIN wms.returns r ON r.id=ri.return_id
+          WHERE ri.order_item_id=${item.id} AND r.source_event_key=${eventKey}
+            AND NOT EXISTS (SELECT 1 FROM returns.customer_return_allocation_case_items link WHERE link.wms_return_item_id=ri.id)
+        ),0))::bigint AS expected_quantity
     `);
     const priorExpected = Number(priorResult?.rows?.[0]?.expected_quantity ?? 0);
     const availableReturnEntitlement = Math.max(item.fulfilledQuantity - priorExpected, 0);

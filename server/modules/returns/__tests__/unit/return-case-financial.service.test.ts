@@ -18,6 +18,27 @@ import type { ReturnCaseActionContext } from "../../domain/return-case-actions";
 const NOW = new Date("2026-08-23T20:00:00.000Z");
 
 describe("ReturnCaseFinancialService", () => {
+  it("blocks portal quotes before touching the provider", async () => {
+    const source = retailSource();
+    source.actionContext.customerRefundExecutionAuthority = "manual_shopify";
+    const harness = financialHarness(source);
+    await expect(harness.service.previewCustomerRefund(42)).rejects.toMatchObject({code:"RETURN_CUSTOMER_REFUND_MANUAL_SHOPIFY"});
+    expect(harness.customerProvider.quote).not.toHaveBeenCalled();
+    expect(harness.customerProvider.execute).not.toHaveBeenCalled();
+  });
+
+  it("blocks an already reserved pending refund from bypassing portal manual authority", async () => {
+    const source = retailSource();
+    const harness = financialHarness(source);
+    const command = {caseId:42,quoteHash:hashQuote(customerQuote()),idempotencyKey:"portal-pending",notifyCustomer:false,notes:null,actor:"admin:test"};
+    vi.mocked(harness.customerProvider.execute).mockRejectedValueOnce(new CustomerRefundProviderError("UNCONFIRMED","Unconfirmed",true));
+    await expect(harness.service.issueCustomerRefund(command)).rejects.toThrow();
+    vi.mocked(harness.customerStore.findByIdempotencyKey).mockResolvedValue(storedRefund(command.idempotencyKey,harness.getReservedRequestHash(),command.quoteHash,customerQuote(),false,null));
+    source.actionContext.customerRefundExecutionAuthority = "manual_shopify";
+    vi.mocked(harness.customerProvider.execute).mockClear();
+    await expect(harness.service.issueCustomerRefund(command)).rejects.toMatchObject({code:"RETURN_CUSTOMER_REFUND_MANUAL_SHOPIFY"});
+    expect(harness.customerProvider.execute).not.toHaveBeenCalled();
+  });
   it("quotes and issues an exact Shopify refund without invoking vendor settlement", async () => {
     const harness = financialHarness(retailSource());
     const preview = await harness.service.previewCustomerRefund(42);
