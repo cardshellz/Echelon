@@ -21,6 +21,7 @@ import {
 import type {
   CustomerReturnFlowOrder,
   CustomerReturnFlowReview,
+  CustomerReturnFlowReviewInput,
 } from "@shared/returns/customer-return-flow.contract";
 import type { CustomerReturnFlowGateway } from "@/lib/customer-return-gateway";
 export type { CustomerReturnFlowGateway } from "@/lib/customer-return-gateway";
@@ -73,6 +74,8 @@ export function CustomerReturnFlow({
   const [drafts, setDrafts] = useState<PreviewSelectionDraft[]>([]);
   const [parcels, setParcels] = useState<PreviewParcelDraft[]>([]);
   const [review, setReview] = useState<CustomerReturnFlowReview | null>(null);
+  const [reviewInput, setReviewInput] =
+    useState<CustomerReturnFlowReviewInput | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const canvas = useRef<HTMLElement>(null);
@@ -188,6 +191,7 @@ export function CustomerReturnFlow({
       assertPreviewReviewMatches(checked, input.value, order);
       if (!current(sequence, controller)) return;
       setReview(checked);
+      setReviewInput(input.value);
       setStep("review");
     } catch (cause) {
       if (current(sequence, controller)) fail(cause);
@@ -198,12 +202,25 @@ export function CustomerReturnFlow({
   function back(to: Step) {
     invalidateRequest();
     setReview(null);
+    setReviewInput(null);
     setError(null);
     setStep(to);
     if (to === "find") {
       setOrder(null);
       setDrafts([]);
       setParcels([]);
+    }
+  }
+  async function createLabels() {
+    if (!gateway.labels || !reviewInput || !review || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await gateway.labels.create(reviewInput);
+    } catch (cause) {
+      fail(cause);
+    } finally {
+      setBusy(false);
     }
   }
   const selected = order ? validatePreviewSelections(order, drafts) : null;
@@ -366,6 +383,12 @@ export function CustomerReturnFlow({
               order={order}
               review={review}
               onBack={() => back("packing")}
+              onGetLabels={
+                gateway.labels && reviewInput
+                  ? () => void createLabels()
+                  : undefined
+              }
+              busy={busy}
             />
           )}
         </div>

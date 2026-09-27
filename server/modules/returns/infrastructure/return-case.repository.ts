@@ -19,6 +19,7 @@ import {
   returns as wmsReturns,
 } from "@shared/schema";
 import { db, pool } from "../../../db";
+import { CUSTOMER_RETURN_LABEL_SEARCH_SQL } from "./customer-return-label-search";
 import type {
   ReturnCaseAdminStore,
   ReturnCaseDetailRow,
@@ -72,7 +73,8 @@ unified_returns AS (
     rc.opened_at, rc.closed_at, COALESCE(items.item_count, 0)::integer AS item_count,
     COALESCE(items.unit_count, 0)::integer AS unit_count,
     CONCAT_WS(' ', rc.case_number, rc.source_event_id, oms.external_order_number, wms.order_number,
-      vendor.business_name, vendor.email, store.external_display_name, store.shop_domain) AS searchable
+      vendor.business_name, vendor.email, store.external_display_name, store.shop_domain,
+      portal.authorization_number, portal.tracking_numbers) AS searchable
   FROM returns.return_cases rc
   LEFT JOIN channels.channels channel ON channel.id = rc.channel_id
   LEFT JOIN dropship.dropship_vendors vendor ON vendor.id = rc.vendor_id
@@ -80,6 +82,7 @@ unified_returns AS (
   LEFT JOIN oms.oms_orders oms ON oms.id = rc.oms_order_id
   LEFT JOIN wms.orders wms ON wms.id = rc.wms_order_id
   LEFT JOIN canonical_item_summary items ON items.return_case_id = rc.id
+  LEFT JOIN LATERAL (${CUSTOMER_RETURN_LABEL_SEARCH_SQL}) portal ON true
 
   UNION ALL
 
@@ -602,6 +605,7 @@ function buildActionContext(input: ActionContextInput): ReturnCaseActionContext 
   }));
   return {
     businessContext: readBusinessContext(input.caseRow.businessContext),
+    ...(input.caseRow.sourceProvider === "customer_portal" ? { customerRefundExecutionAuthority: "manual_shopify" as const } : {}),
     channelProvider: readNullableText(input.caseRow.channelProvider),
     vendorId: readNullablePositiveSafeInteger(input.caseRow.vendorId, "return case vendor id"),
     lifecycle: {

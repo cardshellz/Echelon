@@ -474,10 +474,8 @@ async function loadSourceItems(
 ): Promise<SourceItemRow[]> {
   const result = await executor.execute(sql`
     WITH expected AS (
-      SELECT ri.order_item_id, SUM(ri.expected_qty)::int AS expected_qty
-      FROM wms.return_items ri
-      WHERE ri.order_item_id IS NOT NULL
-      GROUP BY ri.order_item_id
+      SELECT wms_order_item_id AS order_item_id, claimed_quantity AS expected_qty
+      FROM returns.customer_return_claimed_quantities
     )
     SELECT
       wo.id AS wms_order_id,

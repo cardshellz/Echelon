@@ -134,7 +134,7 @@ describe("PostgresReturnCaseVendorSettlementStore", () => {
       statements.push(sql);
       if (sql.includes("FROM returns.return_case_commands")) return result([]);
       if (sql.includes("FROM returns.return_case_vendor_settlements settlement")) return result([]);
-      if (sql.startsWith("SELECT id, case_number, business_context")) return result([lockedCase()]);
+      if (sql.startsWith("SELECT id, case_number, source_provider, business_context")) return result([lockedCase()]);
       if (sql.startsWith("INSERT INTO returns.return_case_vendor_settlements")) return result([{ id: 91 }]);
       if (sql.startsWith("UPDATE returns.return_cases")) return result([{ id: 42 }]);
       return result([]);
@@ -183,7 +183,7 @@ describe("PostgresReturnCaseVendorSettlementStore", () => {
       statements.push(sql);
       if (sql.includes("FROM returns.return_case_commands")) return result([]);
       if (sql.includes("FROM returns.return_case_vendor_settlements settlement")) return result([]);
-      if (sql.startsWith("SELECT id, case_number, business_context")) return result([lockedCase()]);
+      if (sql.startsWith("SELECT id, case_number, source_provider, business_context")) return result([lockedCase()]);
       if (sql.startsWith("INSERT INTO returns.return_case_vendor_settlements")) return result([{ id: 91 }]);
       return result([]);
     });

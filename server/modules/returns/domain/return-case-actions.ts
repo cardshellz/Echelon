@@ -144,6 +144,8 @@ export interface ReturnCaseInventoryTreatmentSummary {
   items: ReturnCaseInventoryTreatmentItemSummary[];
 }
 export interface ReturnCaseActionContext {
+  /** Root-linked portal returns are refunded by staff in Shopify, never here. */
+  customerRefundExecutionAuthority?: "manual_shopify";
   businessContext: ReturnBusinessContext;
   channelProvider: string | null;
   vendorId: number | null;
@@ -409,6 +411,7 @@ function deriveCustomerRefundAction(
     label: "Issue customer refund",
     description: "Refund the Card Shellz customer through the source Shopify order. This does not settle a dropship vendor account.",
   };
+  if (context.customerRefundExecutionAuthority === "manual_shopify") return blocked(base, "RETURN_CUSTOMER_REFUND_MANUAL_SHOPIFY");
   if (context.businessContext !== "retail") {
     return notApplicable(base, "RETURN_CUSTOMER_REFUND_NOT_OWNED");
   }

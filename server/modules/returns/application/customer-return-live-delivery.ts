@@ -22,10 +22,21 @@ export class CustomerReturnLiveDeliveryError extends Error {
 }
 
 /** No SKU joins, tracking-only quantity assignments, staff overrides, or fabricated provider line IDs. */
-export function projectCustomerReturnLiveDelivery(input: {
+type DeliveryInput = {
   shopify: CustomerReturnShopifySnapshot;
   local: CustomerReturnLocalInspectionSnapshot;
-}): ReadonlyMap<string, CustomerReturnLiveDeliveryProjection> {
+};
+export function projectCustomerReturnLiveDelivery(input: DeliveryInput): ReadonlyMap<string, CustomerReturnLiveDeliveryProjection> {
+  return inspectLiveDelivery(input).projections;
+}
+
+/** Writable allocation identities use the same complete physical provenance as
+ * delivery. Shopify delivery alone cannot invent a WMS receiving partition. */
+export function projectCustomerReturnLiveWmsAllocations(input: DeliveryInput) {
+  return inspectLiveDelivery(input).wmsAllocations;
+}
+
+function inspectLiveDelivery(input: DeliveryInput) {
   const providerResult = customerReturnShopifySnapshotSchema.safeParse(input.shopify);
   const localResult = customerReturnLocalInspectionSnapshotSchema.safeParse(input.local);
   if (!providerResult.success || !localResult.success) invalid();
@@ -156,7 +167,20 @@ export function projectCustomerReturnLiveDelivery(input: {
     if (!parsed.success) invalid();
     projections.set(lineId, parsed.data);
   }
-  return projections;
+  const wmsAllocations = new Map<string, { wmsOrderItemId: number; originalQuantity: number }[]>();
+  for (const [lineId, mapped] of allocations) {
+    const provider = providerLines.get(lineId)!;
+    if (provider.fulfillment.status !== "SUCCESS" || projections.get(lineId)!.blocked
+      || [...mapped.values()].reduce((total, value) => total + value.quantity, 0) !== provider.line.quantity) continue;
+    const byItem = new Map<number, number>();
+    for (const { item, quantity } of mapped.values()) {
+      if (item.wmsOrderItemId === null) invalid();
+      byItem.set(item.wmsOrderItemId, (byItem.get(item.wmsOrderItemId) ?? 0) + quantity);
+    }
+    wmsAllocations.set(lineId, [...byItem].sort(([a], [b]) => a - b)
+      .map(([wmsOrderItemId, originalQuantity]) => ({ wmsOrderItemId, originalQuantity })));
+  }
+  return { projections, wmsAllocations };
 }
 
 function bindingCandidates(binding: Binding, fulfillment: Fulfillment): ProviderLine[] {

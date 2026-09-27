@@ -26,7 +26,7 @@ export function liveShopifyFixture(): CustomerReturnShopifySnapshot {
   return { observedAt: LIVE_NOW, apiVersion: "2026-07", shop: { ...liveShop, shopId: liveGid("Shop", 1),
     scopes: { readOrders: true, readAllOrders: true, readReturns: true } },
     order: { id: liveGid("Order", 1001), name: "#0012-A", createdAt: LIVE_PURCHASED, processedAt: LIVE_PURCHASED,
-      updatedAt: "2026-09-20T12:00:00.000Z", cancelledAt: null, destinationCountryCode: "US" },
+      updatedAt: "2026-09-20T12:00:00.000Z", cancelledAt: null, destinationCountryCode: "US", shippingAddress: null },
     lines: [{ id: liveGid("LineItem", 501), title: "First", variantTitle: null, sku: "SAME", quantity: 3, currentQuantity: 3, refundableQuantity: 3, requiresShipping: true },
       { id: liveGid("LineItem", 502), title: "Second", variantTitle: null, sku: "SAME", quantity: 1, currentQuantity: 1, refundableQuantity: 1, requiresShipping: true }],
     fulfillments: [fulfillment(601, 501, 2, true), fulfillment(602, 501, 1, false), fulfillment(603, 502, 1, true)],
