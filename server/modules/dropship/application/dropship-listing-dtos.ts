@@ -49,6 +49,14 @@ export function toDropshipVendorListingPreview(preview: DropshipListingPreviewRe
       storeCategoryNames: [...row.storeCategoryNames], businessPolicySelection: row.businessPolicySelection,
       previewHash: row.previewHash, adminExposureDecision: row.adminExposureDecision, selectionDecision: row.selectionDecision,
       listingTier: row.listingTier,
+      // The vendor client echoes these back when it queues a push, and
+      // createListingPushJob rejects any row whose fresh preview evidence differs
+      // from what the vendor reviewed. Leaving them out rejected every vendor push
+      // with DROPSHIP_CONTENT_VERSION_CONFLICT. Both evidence values are SHA-256
+      // digests, so they disclose no description, cost or rule inputs.
+      ...(row.contentEvidenceHash !== undefined ? { contentEvidenceHash: row.contentEvidenceHash } : {}),
+      ...(row.rulePriceEvidenceHash !== undefined ? { rulePriceEvidenceHash: row.rulePriceEvidenceHash } : {}),
+      ...(row.pricingRuleName !== undefined ? { pricingRuleName: row.pricingRuleName } : {}),
       ...(row.presentation ? { presentation: dropshipListingPresentationSchema.parse(row.presentation) } : {}),
       ...(row.economics ? { economics: dropshipListingEconomicsSchema.parse(row.economics) } : {}),
     })),

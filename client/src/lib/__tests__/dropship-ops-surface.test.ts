@@ -80,6 +80,7 @@ import {
   DropshipApiError,
   legalRmaTransitions,
   isRmaStatusTerminal,
+  isStaleListingPreviewError,
   queryErrorCode,
 } from "../dropship-ops-surface";
 import type {
@@ -151,6 +152,15 @@ describe("dropship ops surface client helpers", () => {
     });
     expect(queryErrorCode(caught)).toBe("DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED");
     expect(queryErrorCode(new Error("Unstructured error"))).toBeNull();
+  });
+
+  it("treats price and content conflicts as a stale listing preview", () => {
+    const apiError = (code: string) => new DropshipApiError({ message: code, status: 409, code });
+    expect(isStaleListingPreviewError(apiError("DROPSHIP_LISTING_PRICE_VERSION_CONFLICT"))).toBe(true);
+    expect(isStaleListingPreviewError(apiError("DROPSHIP_CONTENT_VERSION_CONFLICT"))).toBe(true);
+    expect(isStaleListingPreviewError(apiError("DROPSHIP_IDEMPOTENCY_CONFLICT"))).toBe(false);
+    expect(isStaleListingPreviewError(new Error("DROPSHIP_CONTENT_VERSION_CONFLICT"))).toBe(false);
+    expect(isStaleListingPreviewError(null)).toBe(false);
   });
 
   it("falls back to explicit query error messages", () => {
