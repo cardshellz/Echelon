@@ -2818,6 +2818,21 @@ export function isStaleListingPreviewError(error: unknown): boolean {
   return code !== null && STALE_LISTING_PREVIEW_ERROR_CODES.has(code);
 }
 
+/**
+ * Codes the server returns when the MFA check for an action is missing, expired
+ * or used the wrong method (requireDropshipSensitiveActionProof). The page's
+ * copy of the proof is then out of date and must be reloaded before retrying.
+ */
+const STEP_UP_REQUIRED_ERROR_CODES: ReadonlySet<string> = new Set([
+  "DROPSHIP_STEP_UP_REQUIRED",
+  "DROPSHIP_STEP_UP_METHOD_REQUIRED",
+]);
+
+export function isStepUpRequiredError(error: unknown): boolean {
+  const code = queryErrorCode(error);
+  return code !== null && STEP_UP_REQUIRED_ERROR_CODES.has(code);
+}
+
 export function queryErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim()) {
     return error.message;
@@ -4411,73 +4426,71 @@ export function buildListingPreviewRequest(input: {
   };
 }
 
-export function buildListingPushRequest(input: {
+/** The server's per-request bound (`createListingPushJobInputSchema.productVariantIds`). */
+export const MAX_LISTING_QUEUE_VARIANTS = 500;
+
+/** Mirrors the server's idempotency key bounds. */
+const MIN_LISTING_QUEUE_KEY_LENGTH = 8;
+const MAX_LISTING_QUEUE_KEY_LENGTH = 200;
+
+/**
+ * One-step listing push (`reviewMode: "current_preview"`): the server builds
+ * the preview for the selected items when the request arrives and queues what
+ * it shows. Nothing from an earlier preview is echoed, so a preview is never a
+ * prerequisite and can never be "out of date" for queueing.
+ */
+export function buildListingQueueRequest(input: {
   storeConnectionId: number;
-  preview: DropshipListingPreviewResult;
+  rows: readonly DropshipCatalogRow[];
   idempotencyKey: string;
-  retailPriceByVariantId?: Readonly<Record<string, string>>;
 }): {
   storeConnectionId: number;
   productVariantIds: number[];
   idempotencyKey: string;
-  requestedRetailPricesByVariantId?: Record<string, number>;
-  expectedPriceRevisionIdsByVariantId: Record<string, number | null>;
-  expectedPriceCentsByVariantId: Record<string, number | null>;
-  expectedRuleEvidenceHashesByVariantId?: Record<string, string>;
-  expectedContentEvidenceHashesByVariantId?: Record<string, string>;
+  reviewMode: "current_preview";
 } {
-  const storeConnectionId = assertPositiveInteger(
-    input.storeConnectionId,
-    "storeConnectionId",
-  );
-  if (input.preview.storeConnectionId !== storeConnectionId) {
+  const storeConnectionId = assertPositiveInteger(input.storeConnectionId, "storeConnectionId");
+  const productVariantIds = uniqueSelectedVariantIds(input.rows);
+  if (productVariantIds.length === 0) {
+    throw new Error("Select at least one catalog item before queueing listings.");
+  }
+  if (productVariantIds.length > MAX_LISTING_QUEUE_VARIANTS) {
+    throw new Error(`Queue at most ${MAX_LISTING_QUEUE_VARIANTS} listings at a time.`);
+  }
+  const idempotencyKey = input.idempotencyKey.trim();
+  if (idempotencyKey.length < MIN_LISTING_QUEUE_KEY_LENGTH || idempotencyKey.length > MAX_LISTING_QUEUE_KEY_LENGTH) {
     throw new Error(
-      "Listing preview store connection must match the selected store connection.",
+      `Idempotency key must be between ${MIN_LISTING_QUEUE_KEY_LENGTH} and ${MAX_LISTING_QUEUE_KEY_LENGTH} characters.`,
     );
   }
-  const productVariantIds = input.preview.rows
-    .filter((row) => row.previewStatus !== "blocked")
-    .map((row) => row.productVariantId);
-  const expectedPriceRevisionIdsByVariantId = Object.fromEntries(input.preview.rows
-    .filter((row) => row.previewStatus !== "blocked")
-    .map((row) => [String(row.productVariantId), row.priceSettingRevisionId == null ? null
-      : assertPositiveInteger(row.priceSettingRevisionId, "priceSettingRevisionId")]));
-  const expectedPriceCentsByVariantId = Object.fromEntries(input.preview.rows
-    .filter((row) => row.previewStatus !== "blocked")
-    .map((row) => [String(row.productVariantId), row.priceCents === null ? null
-      : assertPositiveInteger(row.priceCents, "priceCents")]));
-  const expectedRuleEvidenceHashesByVariantId = Object.fromEntries(input.preview.rows
-    .filter((row) => row.previewStatus !== "blocked" && row.rulePriceEvidenceHash)
-    .map((row) => [String(row.productVariantId), row.rulePriceEvidenceHash!]));
-  const expectedContentEvidenceHashesByVariantId = Object.fromEntries(input.preview.rows
-    .filter((row) => row.previewStatus !== "blocked" && row.contentEvidenceHash)
-    .map((row) => [String(row.productVariantId), row.contentEvidenceHash!]));
-  const requestedRetailPricesByVariantId =
-    buildRequestedRetailPricesByVariantId({
-      productVariantIds,
-      retailPriceByVariantId: input.retailPriceByVariantId,
-    });
-
-  return {
-    storeConnectionId,
-    productVariantIds,
-    idempotencyKey: input.idempotencyKey,
-    expectedPriceRevisionIdsByVariantId,
-    expectedPriceCentsByVariantId,
-    ...(Object.keys(expectedRuleEvidenceHashesByVariantId).length ? { expectedRuleEvidenceHashesByVariantId } : {}),
-    ...(Object.keys(expectedContentEvidenceHashesByVariantId).length ? { expectedContentEvidenceHashesByVariantId } : {}),
-    ...(Object.keys(requestedRetailPricesByVariantId).length > 0
-      ? { requestedRetailPricesByVariantId }
-      : {}),
-  };
+  return { storeConnectionId, productVariantIds, idempotencyKey, reviewMode: "current_preview" };
 }
 
-export function listingPreviewPushableCount(
-  preview: DropshipListingPreviewResult | null | undefined,
-): number {
-  return (
-    preview?.rows.filter((row) => row.previewStatus !== "blocked").length ?? 0
-  );
+export interface ListingQueueResultDescription {
+  /** "queued" when at least one listing went into the job, "nothing_queued" otherwise. */
+  outcome: "queued" | "nothing_queued";
+  message: string;
+}
+
+/** What a one-step push did, in the vendor's words. Counts come from the server's own preview. */
+export function describeListingQueueResult(response: DropshipListingPushResponse): ListingQueueResultDescription {
+  const total = response.preview.rows.length;
+  const notQueued = response.preview.rows.filter((row) => row.previewStatus === "blocked").length;
+  const queued = total - notQueued;
+  if (queued === 0) {
+    const reason = total === 1
+      ? "the selected listing is not ready"
+      : `none of the ${plural(total, "selected listing")} are ready`;
+    return { outcome: "nothing_queued", message: `Nothing was queued: ${reason}. The table below shows why.` };
+  }
+  const lead = notQueued === 0
+    ? `Queued ${plural(queued, "listing")} for your store.`
+    : `Queued ${queued} of ${plural(total, "listing")} for your store. ${notQueued} not queued: the table below shows why.`;
+  return { outcome: "queued", message: `${lead} Push job ${response.job.jobId}.` };
+}
+
+function plural(count: number, noun: string): string {
+  return `${count.toLocaleString("en-US")} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 export function buildAutoReloadConfigInput(input: {

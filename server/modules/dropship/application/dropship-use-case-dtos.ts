@@ -35,7 +35,18 @@ export const generateVendorListingPreviewInputSchema = z.object({
   actor: actorSchema,
 }).strict();
 
+/**
+ * How a listing push is checked before it is queued.
+ * - `reviewed_preview` (default): the caller reviewed a preview and echoes its
+ *   evidence; the push is refused if the fresh preview differs from it.
+ * - `current_preview`: one step. The server builds the preview now and queues
+ *   what it shows, so there is nothing to echo and no reviewed evidence may be sent.
+ */
+export const listingPushReviewModes = ["reviewed_preview", "current_preview"] as const;
+export type ListingPushReviewMode = (typeof listingPushReviewModes)[number];
+
 export const createListingPushJobInputSchema = z.object({
+  reviewMode: z.enum(listingPushReviewModes).optional(),
   expectedRuleEvidenceHashesByVariantId: z.record(z.string().regex(/^[1-9]\d*$/), z.string().regex(/^[a-f0-9]{64}$/)).optional(),
   expectedContentEvidenceHashesByVariantId: z.record(z.string().regex(/^[1-9]\d*$/), z.string().regex(/^[a-f0-9]{64}$/)).optional(),
   expectedPriceRevisionIdsByVariantId: z.record(z.string().regex(/^[1-9]\d*$/), z.number().int().positive().max(2_147_483_647).nullable()).optional(),

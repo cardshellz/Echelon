@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import { resolveListingPrice, type SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
+import { decideDropshipListingAccess } from "../../../../shared/dropship/listing-access";
 import type { ListingRulePrice } from "./dropship-rule-price";
 import { z } from "zod";
 import type { DropshipListingPresentation, DropshipListingEconomics } from "../../../../shared/dropship/listing-presentation";
@@ -52,6 +53,7 @@ import type {
 } from "./dropship-ebay-listing-policy-override-service";
 import {
   createListingPushJobInputSchema,
+  type ListingPushReviewMode,
   generateVendorListingPreviewInputSchema,
   type CreateListingPushJobInput,
   type GenerateVendorListingPreviewInput,
@@ -577,6 +579,14 @@ export class DropshipListingPreviewService {
     idempotentReplay: boolean;
   }> {
     const parsed = createListingPushJobInputSchema.parse(input);
+    const reviewMode: ListingPushReviewMode = parsed.reviewMode ?? "reviewed_preview";
+    if (reviewMode === "current_preview" && carriesReviewedPreviewEvidence(parsed)) {
+      // A one-step push queues what the server's own preview shows. Evidence from
+      // an earlier preview would be silently ignored, so it is refused instead.
+      throw new DropshipError("DROPSHIP_LISTING_PUSH_REVIEW_MODE_CONFLICT",
+        "A one-step listing push cannot carry evidence from an earlier preview.",
+        { vendorId: parsed.vendorId, storeConnectionId: parsed.storeConnectionId, classification: "permanent" });
+    }
     const uniqueVariantIds = uniquePositiveIntegers(parsed.productVariantIds);
     const requestedRetailPricesByVariantId = normalizeRequestedRetailPricesByVariantId({
       productVariantIds: uniqueVariantIds,
@@ -599,38 +609,11 @@ export class DropshipListingPreviewService {
       actor: parsed.requestedBy,
     };
     const preview = await this.generatePreviewForContext(previewInput, context);
-    if (preview.rows.some((row) => row.contentEvidenceHash
-      && parsed.expectedContentEvidenceHashesByVariantId?.[String(row.productVariantId)] !== row.contentEvidenceHash)) {
-      throw new DropshipError("DROPSHIP_CONTENT_VERSION_CONFLICT", "Descriptions, catalog facts, or templates changed. Generate and review a new preview before queueing.");
-    }
-    const ruleRows = preview.rows.filter((row) => row.rulePriceEvidenceHash);
-    if (ruleRows.some((row) => parsed.expectedRuleEvidenceHashesByVariantId?.[String(row.productVariantId)] !== row.rulePriceEvidenceHash)) {
-      throw new DropshipError("DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
-        "Review the current pricing rules and costs before queueing these listings.");
-    }
-    if (parsed.expectedPriceRevisionIdsByVariantId !== undefined) {
-      const expected = parsed.expectedPriceRevisionIdsByVariantId;
-      const keys = Object.keys(expected);
-      if (keys.length !== uniqueVariantIds.length || keys.some((key) => !uniqueVariantIds.includes(Number(key)))) {
-        throw new DropshipError("DROPSHIP_LISTING_PRICE_OVERRIDE_INVALID", "Price revision checks must match every requested listing.");
-      }
-      if (preview.rows.some((row) => expected[String(row.productVariantId)] !== (row.priceSettingRevisionId ?? null))) {
-        throw new DropshipError("DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
-          "A listing price changed since your preview. Generate a new preview before queueing.");
-      }
-    }
-    if (parsed.expectedPriceCentsByVariantId !== undefined) {
-      const expected = parsed.expectedPriceCentsByVariantId;
-      const keys = Object.keys(expected);
-      if (keys.length !== uniqueVariantIds.length || keys.some((key) => !uniqueVariantIds.includes(Number(key)))) {
-        throw new DropshipError("DROPSHIP_LISTING_PRICE_OVERRIDE_INVALID", "Reviewed prices must match every requested listing.");
-      }
-      if (preview.rows.some((row) => expected[String(row.productVariantId)] !== row.priceCents)) {
-        throw new DropshipError("DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
-          "A listing's effective price changed since your preview. Generate a new preview before queueing.");
-      }
+    if (reviewMode === "reviewed_preview") {
+      assertPreviewMatchesReviewedEvidence(preview, parsed, uniqueVariantIds);
     }
     const requestHash = hashListingPushJobRequest({
+      reviewMode,
       expectedContentEvidenceHashesByVariantId: parsed.expectedContentEvidenceHashesByVariantId,
       expectedRuleEvidenceHashesByVariantId: parsed.expectedRuleEvidenceHashesByVariantId,
       expectedPriceRevisionIdsByVariantId: parsed.expectedPriceRevisionIdsByVariantId,
@@ -668,6 +651,7 @@ export class DropshipListingPreviewService {
         vendorId: parsed.vendorId,
         storeConnectionId: parsed.storeConnectionId,
         jobId: result.job.jobId,
+        reviewMode,
         itemCount: result.items.length,
         readyCount: preview.summary.ready,
         blockedCount: preview.summary.blocked,
@@ -693,49 +677,36 @@ export class DropshipListingPreviewService {
         { vendorId, storeConnectionId, action },
       );
     }
-    const vendorStatusAllowed = context.vendorStatus === "active"
-      || (action === "preview" && context.vendorStatus === "onboarding");
-    if (!vendorStatusAllowed) {
-      throw new DropshipError(
-        "DROPSHIP_LISTING_VENDOR_BLOCKED",
-        `Dropship vendor status does not allow listing ${action}.`,
-        { vendorId, vendorStatus: context.vendorStatus, action },
-      );
-    }
-    if (context.entitlementStatus !== "active") {
-      throw new DropshipError(
-        "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED",
-        `Dropship vendor entitlement does not allow listing ${action}.`,
-        { vendorId, entitlementStatus: context.entitlementStatus, action },
-      );
-    }
-    if (context.storeStatus !== "connected") {
-      throw new DropshipError(
-        "DROPSHIP_LISTING_STORE_BLOCKED",
-        `Dropship store connection is not healthy enough for listing ${action}.`,
-        { vendorId, storeConnectionId, storeStatus: context.storeStatus, action },
-      );
-    }
-    if (!context.storeLaunchReady) {
-      throw new DropshipError(
-        "DROPSHIP_LISTING_STORE_BLOCKED",
-        `Dropship store connection is not launch-ready for listing ${action}.`,
-        {
-          vendorId,
-          storeConnectionId,
-          storeStatus: context.storeStatus,
-          setupStatus: context.setupStatus,
-          platform: context.platform,
-          storeLaunchReady: false,
-          action,
-        },
-      );
+    // The shared rule is the one the vendor pages use to explain a block before
+    // the vendor clicks, so the server and the page cannot disagree. Codes are
+    // unchanged; the message says what to do and `resolution` names the step the
+    // portal links to.
+    const access = decideDropshipListingAccess({
+      action,
+      vendorStatus: context.vendorStatus,
+      entitlementStatus: context.entitlementStatus,
+      store: { status: context.storeStatus, launchReady: context.storeLaunchReady },
+    });
+    if (!access.allowed) {
+      throw new DropshipError(access.code, access.message, {
+        vendorId,
+        storeConnectionId,
+        vendorStatus: context.vendorStatus,
+        entitlementStatus: context.entitlementStatus,
+        storeStatus: context.storeStatus,
+        setupStatus: context.setupStatus,
+        platform: context.platform,
+        storeLaunchReady: context.storeLaunchReady,
+        action,
+        resolution: access.resolution,
+      });
     }
     return context;
   }
 }
 
 export function hashListingPushJobRequest(input: {
+  reviewMode?: ListingPushReviewMode;
   expectedContentEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
   expectedRuleEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
   expectedPriceRevisionIdsByVariantId?: Readonly<Record<string, number | null>>;
@@ -760,6 +731,14 @@ export function hashListingPushJobRequest(input: {
   if (Object.keys(requestedRetailPricesByVariantId).length > 0) {
     payload.requestedRetailPricesByVariantId = requestedRetailPricesByVariantId;
   }
+  if (input.reviewMode === "current_preview") {
+    // A one-step push is identified by what was asked for, not by what the
+    // preview returned: stock and prices move between a request and its retry,
+    // and a retry of the same request has to replay the job it created. The
+    // reviewed payload below is left exactly as it was so existing keys replay.
+    payload.reviewMode = input.reviewMode;
+    return hashJson(payload);
+  }
   const previewHashesByVariantId = Object.fromEntries(
     Object.entries(input.previewHashesByVariantId ?? {})
       .sort(([left], [right]) => Number(left) - Number(right)),
@@ -768,6 +747,66 @@ export function hashListingPushJobRequest(input: {
     payload.previewHashesByVariantId = previewHashesByVariantId;
   }
   return hashJson(payload);
+}
+
+/** True when the request echoes anything from an earlier preview. */
+function carriesReviewedPreviewEvidence(input: {
+  expectedContentEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
+  expectedRuleEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
+  expectedPriceRevisionIdsByVariantId?: Readonly<Record<string, number | null>>;
+  expectedPriceCentsByVariantId?: Readonly<Record<string, number | null>>;
+}): boolean {
+  return input.expectedContentEvidenceHashesByVariantId !== undefined
+    || input.expectedRuleEvidenceHashesByVariantId !== undefined
+    || input.expectedPriceRevisionIdsByVariantId !== undefined
+    || input.expectedPriceCentsByVariantId !== undefined;
+}
+
+/**
+ * Two-step push: the fresh preview must match what the caller reviewed. Every
+ * refusal names what changed so the caller can preview again.
+ */
+function assertPreviewMatchesReviewedEvidence(
+  preview: DropshipListingPreviewResult,
+  parsed: {
+    expectedContentEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
+    expectedRuleEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
+    expectedPriceRevisionIdsByVariantId?: Readonly<Record<string, number | null>>;
+    expectedPriceCentsByVariantId?: Readonly<Record<string, number | null>>;
+  },
+  uniqueVariantIds: readonly number[],
+): void {
+  if (preview.rows.some((row) => row.contentEvidenceHash
+    && parsed.expectedContentEvidenceHashesByVariantId?.[String(row.productVariantId)] !== row.contentEvidenceHash)) {
+    throw new DropshipError("DROPSHIP_CONTENT_VERSION_CONFLICT", "Descriptions, catalog facts, or templates changed. Generate and review a new preview before queueing.");
+  }
+  const ruleRows = preview.rows.filter((row) => row.rulePriceEvidenceHash);
+  if (ruleRows.some((row) => parsed.expectedRuleEvidenceHashesByVariantId?.[String(row.productVariantId)] !== row.rulePriceEvidenceHash)) {
+    throw new DropshipError("DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
+      "Review the current pricing rules and costs before queueing these listings.");
+  }
+  if (parsed.expectedPriceRevisionIdsByVariantId !== undefined) {
+    const expected = parsed.expectedPriceRevisionIdsByVariantId;
+    const keys = Object.keys(expected);
+    if (keys.length !== uniqueVariantIds.length || keys.some((key) => !uniqueVariantIds.includes(Number(key)))) {
+      throw new DropshipError("DROPSHIP_LISTING_PRICE_OVERRIDE_INVALID", "Price revision checks must match every requested listing.");
+    }
+    if (preview.rows.some((row) => expected[String(row.productVariantId)] !== (row.priceSettingRevisionId ?? null))) {
+      throw new DropshipError("DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
+        "A listing price changed since your preview. Generate a new preview before queueing.");
+    }
+  }
+  if (parsed.expectedPriceCentsByVariantId !== undefined) {
+    const expected = parsed.expectedPriceCentsByVariantId;
+    const keys = Object.keys(expected);
+    if (keys.length !== uniqueVariantIds.length || keys.some((key) => !uniqueVariantIds.includes(Number(key)))) {
+      throw new DropshipError("DROPSHIP_LISTING_PRICE_OVERRIDE_INVALID", "Reviewed prices must match every requested listing.");
+    }
+    if (preview.rows.some((row) => expected[String(row.productVariantId)] !== row.priceCents)) {
+      throw new DropshipError("DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
+        "A listing's effective price changed since your preview. Generate a new preview before queueing.");
+    }
+  }
 }
 
 function normalizeRequestedRetailPricesByVariantId(input: {

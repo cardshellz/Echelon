@@ -54,13 +54,20 @@ export function registerDropshipListingRoutes(
     requireDropshipSensitiveActionProof("bulk_listing_push"),
     async (req, res) => {
       try {
+        // Every field of the push contract is forwarded. The two evidence maps
+        // were once left out here, so each two-step push reached the service
+        // with no evidence and was refused as changed even right after a
+        // preview. The service schema is strict and refuses anything unknown.
         const result = await service.createListingPushJobForMember(req.session.dropship!.memberId, {
           storeConnectionId: req.body?.storeConnectionId,
           productVariantIds: req.body?.productVariantIds,
+          reviewMode: req.body?.reviewMode,
           requestedRetailPriceCents: req.body?.requestedRetailPriceCents,
           requestedRetailPricesByVariantId: req.body?.requestedRetailPricesByVariantId,
           expectedPriceRevisionIdsByVariantId: req.body?.expectedPriceRevisionIdsByVariantId,
           expectedPriceCentsByVariantId: req.body?.expectedPriceCentsByVariantId,
+          expectedRuleEvidenceHashesByVariantId: req.body?.expectedRuleEvidenceHashesByVariantId,
+          expectedContentEvidenceHashesByVariantId: req.body?.expectedContentEvidenceHashesByVariantId,
           idempotencyKey: resolveIdempotencyKey(req),
         });
         return res.status(result.idempotentReplay ? 200 : 201).json({
@@ -123,6 +130,7 @@ function statusForDropshipListingError(code: string): number {
   switch (code) {
     case "DROPSHIP_LISTING_INVALID_INPUT":
     case "DROPSHIP_LISTING_PRICE_OVERRIDE_INVALID":
+    case "DROPSHIP_LISTING_PUSH_REVIEW_MODE_CONFLICT":
     case "DROPSHIP_IDEMPOTENCY_KEY_REQUIRED":
       return 400;
     case "DROPSHIP_AUTH_REQUIRED":

@@ -4,7 +4,9 @@ import {
   allDropshipRmaStatuses,
   buildQueryUrl,
   buildListingPreviewRequest,
-  buildListingPushRequest,
+  buildListingQueueRequest,
+  describeListingQueueResult,
+  MAX_LISTING_QUEUE_VARIANTS,
   buildAutoReloadConfigInput,
   buildStripeFundingSetupSessionInput,
   buildStripeWalletFundingSessionInput,
@@ -62,7 +64,6 @@ import {
   formatCents,
   formatStatus,
   fetchJson,
-  listingPreviewPushableCount,
   listLaunchReadyStoreConnections,
   listingPushJobRetryEligibility,
   notificationRetryEligibility,
@@ -81,6 +82,7 @@ import {
   legalRmaTransitions,
   isRmaStatusTerminal,
   isStaleListingPreviewError,
+  isStepUpRequiredError,
   queryErrorCode,
 } from "../dropship-ops-surface";
 import type {
@@ -161,6 +163,14 @@ describe("dropship ops surface client helpers", () => {
     expect(isStaleListingPreviewError(apiError("DROPSHIP_IDEMPOTENCY_CONFLICT"))).toBe(false);
     expect(isStaleListingPreviewError(new Error("DROPSHIP_CONTENT_VERSION_CONFLICT"))).toBe(false);
     expect(isStaleListingPreviewError(null)).toBe(false);
+  });
+
+  it("recognizes a missing, expired or wrong-method verification", () => {
+    const apiError = (code: string) => new DropshipApiError({ message: code, status: 403, code });
+    expect(isStepUpRequiredError(apiError("DROPSHIP_STEP_UP_REQUIRED"))).toBe(true);
+    expect(isStepUpRequiredError(apiError("DROPSHIP_STEP_UP_METHOD_REQUIRED"))).toBe(true);
+    expect(isStepUpRequiredError(apiError("DROPSHIP_LISTING_VENDOR_BLOCKED"))).toBe(false);
+    expect(isStepUpRequiredError(new Error("DROPSHIP_STEP_UP_REQUIRED"))).toBe(false);
   });
 
   it("falls back to explicit query error messages", () => {
@@ -2230,77 +2240,72 @@ describe("dropship ops surface client helpers", () => {
     });
   });
 
-  it("builds listing push requests from non-blocked preview rows only", () => {
-    const preview = makeListingPreview({
-      rows: [
-        makeListingPreviewRow({ productVariantId: 42, previewStatus: "ready" }),
-        makeListingPreviewRow({
-          productVariantId: 99,
-          previewStatus: "warning",
-        }),
-        makeListingPreviewRow({
-          productVariantId: 100,
-          previewStatus: "blocked",
-        }),
-      ],
-    });
-
-    expect(listingPreviewPushableCount(preview)).toBe(2);
-    expect(
-      buildListingPushRequest({
-        storeConnectionId: 12,
-        preview,
-        idempotencyKey: "push-1",
-        retailPriceByVariantId: {
-          "42": "10.00",
-          "99": "11.50",
-          "100": "9.00",
-        },
-      }),
-    ).toEqual({
+  it("builds a one-step queue request from the selected catalog rows alone", () => {
+    const request = buildListingQueueRequest({
       storeConnectionId: 12,
-      productVariantIds: [42, 99],
-      idempotencyKey: "push-1",
-      expectedPriceRevisionIdsByVariantId: { "42": null, "99": null },
-      expectedPriceCentsByVariantId: { "42": 1299, "99": 1299 },
-      requestedRetailPricesByVariantId: {
-        "42": 1000,
-        "99": 1150,
-      },
+      rows: [
+        makeCatalogRow({ productVariantId: 42, selectionDecision: makeSelectionDecision(true) }),
+        makeCatalogRow({ productVariantId: 42, selectionDecision: makeSelectionDecision(true) }),
+        makeCatalogRow({ productVariantId: 99, selectionDecision: makeSelectionDecision(false) }),
+        makeCatalogRow({ productVariantId: 7, selectionDecision: makeSelectionDecision(true) }),
+      ],
+      idempotencyKey: " listing-push:abc123 ",
+    });
+    // No evidence from any preview travels with it: the server previews now.
+    expect(request).toEqual({
+      storeConnectionId: 12,
+      productVariantIds: [42, 7],
+      idempotencyKey: "listing-push:abc123",
+      reviewMode: "current_preview",
     });
   });
 
-  it("rejects listing push requests when the preview belongs to another store connection", () => {
-    const preview = makeListingPreview({
+  it("refuses a queue request the server would refuse", () => {
+    const selected = makeCatalogRow({ productVariantId: 42, selectionDecision: makeSelectionDecision(true) });
+    expect(() => buildListingQueueRequest({ storeConnectionId: 12, rows: [], idempotencyKey: "listing-push:1" }))
+      .toThrow("Select at least one catalog item");
+    expect(() => buildListingQueueRequest({
       storeConnectionId: 12,
-      rows: [
-        makeListingPreviewRow({ productVariantId: 42, previewStatus: "ready" }),
-      ],
-    });
-
-    expect(() =>
-      buildListingPushRequest({
-        storeConnectionId: 13,
-        preview,
-        idempotencyKey: "push-1",
-      }),
-    ).toThrow(
-      "Listing preview store connection must match the selected store connection.",
-    );
+      rows: [makeCatalogRow({ productVariantId: 42, selectionDecision: makeSelectionDecision(false) })],
+      idempotencyKey: "listing-push:1",
+    })).toThrow("Select at least one catalog item");
+    expect(() => buildListingQueueRequest({ storeConnectionId: 0, rows: [selected], idempotencyKey: "listing-push:1" }))
+      .toThrow("storeConnectionId");
+    expect(() => buildListingQueueRequest({ storeConnectionId: 12, rows: [selected], idempotencyKey: "short" }))
+      .toThrow("Idempotency key");
+    const tooMany = Array.from({ length: MAX_LISTING_QUEUE_VARIANTS + 1 }, (_, index) =>
+      makeCatalogRow({ productVariantId: index + 1, selectionDecision: makeSelectionDecision(true) }));
+    expect(() => buildListingQueueRequest({ storeConnectionId: 12, rows: tooMany, idempotencyKey: "listing-push:1" }))
+      .toThrow(`at most ${MAX_LISTING_QUEUE_VARIANTS}`);
   });
 
-  it("queues only the price revisions and cents displayed on ready preview rows", () => {
-    const preview = makeListingPreview({ storeConnectionId: 12, rows: [
-      makeListingPreviewRow({ productVariantId: 42, priceCents: 999, priceSettingRevisionId: 7 }),
-      makeListingPreviewRow({ productVariantId: 99, priceCents: 899, priceSettingRevisionId: null }),
-      makeListingPreviewRow({ productVariantId: 100, previewStatus: "blocked", priceSettingRevisionId: 9 }),
-    ] });
-    const request = buildListingPushRequest({ storeConnectionId: 12, preview, idempotencyKey: "saved-prices" });
-    expect(request.expectedPriceRevisionIdsByVariantId).toEqual({ "42": 7, "99": null });
-    expect(request.expectedPriceCentsByVariantId).toEqual({ "42": 999, "99": 899 });
-    expect(request).not.toHaveProperty("requestedRetailPricesByVariantId");
-    preview.rows[0].priceSettingRevisionId = -1;
-    expect(() => buildListingPushRequest({ storeConnectionId: 12, preview, idempotencyKey: "invalid" })).toThrow();
+  it("describes what a one-step push queued from the server's own preview", () => {
+    const response = (rows: ReturnType<typeof makeListingPreviewRow>[]) => ({
+      job: { jobId: 77, vendorId: 1, storeConnectionId: 12, status: "queued", idempotencyKey: "k", requestHash: "h",
+        createdAt: "2026-09-27T10:00:00.000Z", updatedAt: "2026-09-27T10:00:00.000Z" },
+      items: [],
+      preview: makeListingPreview({ rows }),
+      idempotentReplay: false,
+    });
+    expect(describeListingQueueResult(response([makeListingPreviewRow({ productVariantId: 1, previewStatus: "ready" })])))
+      .toEqual({ outcome: "queued", message: "Queued 1 listing for your store. Push job 77." });
+    expect(describeListingQueueResult(response([
+      makeListingPreviewRow({ productVariantId: 1, previewStatus: "ready" }),
+      makeListingPreviewRow({ productVariantId: 2, previewStatus: "warning" }),
+      makeListingPreviewRow({ productVariantId: 3, previewStatus: "blocked" }),
+    ]))).toEqual({
+      outcome: "queued",
+      message: "Queued 2 of 3 listings for your store. 1 not queued: the table below shows why. Push job 77.",
+    });
+    expect(describeListingQueueResult(response([makeListingPreviewRow({ productVariantId: 3, previewStatus: "blocked" })])))
+      .toEqual({ outcome: "nothing_queued", message: "Nothing was queued: the selected listing is not ready. The table below shows why." });
+    expect(describeListingQueueResult(response([
+      makeListingPreviewRow({ productVariantId: 3, previewStatus: "blocked" }),
+      makeListingPreviewRow({ productVariantId: 4, previewStatus: "blocked" }),
+    ]))).toEqual({
+      outcome: "nothing_queued",
+      message: "Nothing was queued: none of the 2 selected listings are ready. The table below shows why.",
+    });
   });
 
   it("parses dollar input to integer cents without floating point math", () => {
