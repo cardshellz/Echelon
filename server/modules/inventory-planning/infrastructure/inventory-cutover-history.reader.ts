@@ -2,26 +2,21 @@ import type { PoolClient } from "pg";
 import type { OpeningSource } from "@shared/types/inventory-cutover-opening";
 import type { CutoverReconstructionBlocker } from "@shared/types/inventory-cutover-reconstruction";
 import { cutoverHistoryFactsSchema, type CutoverHistoryFacts } from "../domain/inventory-cutover-history-proposal";
+import { assertInventoryCutoverFenceHeldInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 
-/** Same caller-owned READ ONLY snapshot as the opening census. No defaults to
- * an ambient database, lifecycle writes, provider requests, or inferred links. */
+/** Same caller-owned READ ONLY snapshot, or the existing exclusive admission
+ * fence plus exact owner locks during apply. No ambient DB, writes or provider I/O. */
 export async function readCutoverHistoryFacts(client: Pick<PoolClient, "query">, source: OpeningSource,
   blockers: readonly CutoverReconstructionBlocker[]): Promise<CutoverHistoryFacts> {
   const guard = (await client.query<{ readOnly: string; isolation: string; capturedAt: Date }>(
     `SELECT current_setting('transaction_read_only') AS "readOnly",
       current_setting('transaction_isolation') AS isolation, transaction_timestamp() AS "capturedAt"`)).rows[0];
-  if (!guard || guard.readOnly !== "on" || !["repeatable read", "serializable"].includes(guard.isolation)
-    || guard.capturedAt.toISOString() !== source.capturedAt) throw new Error("HISTORY_READER_SNAPSHOT_REQUIRED");
-  const receipts = blockers.filter(row => row.code === "SHIPMENT_RECEIPT_REQUIRES_REVIEW"
-    && /^channel_fulfillment_receipt:[1-9][0-9]*$/.test(row.subject)).map(row => row.subject.split(":")[1]);
-  const sourceIds = new Set(blockers.filter(row => row.code === "SHIPMENT_SOURCE_REQUIRES_REVIEW"
-    && /^source:[1-9][0-9]*$/.test(row.subject)).map(row => Number(row.subject.split(":")[1])));
-  const shipmentIds = [...new Set([
-    ...blockers.filter(row => row.code === "SHIPMENT_RECEIPT_REQUIRES_REVIEW"
-      && /^outbound_shipment_review:[1-9][0-9]*$/.test(row.subject)).map(row => Number(row.subject.split(":")[1])),
-    ...source.evidence.sourceItems.filter(row => sourceIds.has(row.id)).map(row => row.shipmentId),
-  ])].sort((a, b) => a - b);
-  if (receipts.length > 100_000 || shipmentIds.length > 100_000) throw new Error("HISTORY_READER_CENSUS_LIMIT");
+  if (!guard || guard.capturedAt.toISOString() !== source.capturedAt) throw new Error("HISTORY_READER_SNAPSHOT_REQUIRED");
+  if (!(guard.readOnly === "on" && ["repeatable read", "serializable"].includes(guard.isolation))) {
+    if (guard.readOnly !== "off" || guard.isolation !== "read committed") throw new Error("HISTORY_READER_SNAPSHOT_REQUIRED");
+    await assertInventoryCutoverFenceHeldInsideTransaction(client);
+  }
+  const { receipts, shipmentIds } = historyFactIdentities(source, blockers);
   const receiptRows = (await client.query<{ data: unknown }>(`SELECT jsonb_build_object(
     'id',r.id::text,'rowHash',encode(sha256(convert_to(to_jsonb(r)::text,'UTF8')),'hex'),
     'attemptsHash',encode(sha256(convert_to(COALESCE((SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id)
@@ -90,4 +85,18 @@ export async function readCutoverHistoryFacts(client: Pick<PoolClient, "query">,
     sourceEvidenceHash: source.evidenceHash, capturedAt: source.capturedAt,
     receipts: receiptRows.map(row => row.data), shipments: shipmentRows.map(row => row.data)
   });
+}
+
+export function historyFactIdentities(source: OpeningSource, blockers: readonly CutoverReconstructionBlocker[]) {
+  const receipts = [...new Set(blockers.filter(row => row.code === "SHIPMENT_RECEIPT_REQUIRES_REVIEW"
+    && /^channel_fulfillment_receipt:[1-9][0-9]*$/.test(row.subject)).map(row => row.subject.split(":")[1]))].sort();
+  const sourceIds = new Set(blockers.filter(row => row.code === "SHIPMENT_SOURCE_REQUIRES_REVIEW"
+    && /^source:[1-9][0-9]*$/.test(row.subject)).map(row => Number(row.subject.split(":")[1])));
+  const shipmentIds = [...new Set([
+    ...blockers.filter(row => row.code === "SHIPMENT_RECEIPT_REQUIRES_REVIEW"
+      && /^outbound_shipment_review:[1-9][0-9]*$/.test(row.subject)).map(row => Number(row.subject.split(":")[1])),
+    ...source.evidence.sourceItems.filter(row => sourceIds.has(row.id)).map(row => row.shipmentId),
+  ])].sort((a,b) => a-b);
+  if (receipts.length > 100_000 || shipmentIds.length > 100_000) throw new Error("HISTORY_READER_CENSUS_LIMIT");
+  return { receipts, shipmentIds };
 }

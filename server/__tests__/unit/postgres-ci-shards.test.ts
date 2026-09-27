@@ -57,6 +57,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
   it("preserves all 70 prior files and explicitly adds reviewed hardening suites", () => {
     const addedSuites = [
       "server/modules/inventory-planning/__tests__/integration/inventory-cutover-history-reader.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/inventory-cutover-history.integration.test.ts",
       "server/modules/catalog/__tests__/integration/inventory-tracking-policy.integration.test.ts",
       "server/modules/orders/__tests__/integration/order-list.integration.test.ts",
       "server/modules/orders/__tests__/integration/shipping-progress.integration.test.ts",
@@ -87,8 +88,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/oms/__tests__/integration/channel-receipt-immutable-replay.integration.test.ts",
       "server/modules/oms/__tests__/integration/oms-disposition-cutover-replay.integration.test.ts",
     ];
-    expect(POSTGRES_TEST_FILES).toHaveLength(100);
-    expect(new Set(POSTGRES_TEST_FILES).size).toBe(100);
+    expect(POSTGRES_TEST_FILES).toHaveLength(101);
+    expect(new Set(POSTGRES_TEST_FILES).size).toBe(101);
     expect(POSTGRES_TEST_FILES).toEqual(expect.arrayContaining(addedSuites));
     // Preserve the original inventory digest as well as the explicit additions;
     // adding hardening coverage must not silently remove an older suite.

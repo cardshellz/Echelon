@@ -1,4 +1,5 @@
 import { lockInventoryCostGraph, recordReceiptCostOrigin, recordLotCostContribution } from "../infrastructure/cost-evidence.repository";
+import { assertShipmentNotRetired } from "../../inventory-planning/infrastructure/inventory-cutover-retired-work";
 import { assertNoOpenPickCorrection } from "../../wms/pick-correction.repository";
 import { openOperationalQuantityPosting, type OperationalQuantityPosting } from "../infrastructure/operational-quantity-posting";
 import { assertLegacyQuantityImportAllowed } from "./legacy-quantity-import";
@@ -894,6 +895,7 @@ export class InventoryUseCases {
       }
     }
 
+    await assertShipmentNotRetired(tx, params.shipmentId, params.shipmentItemId);
     if (params.orderItemId) {
       // Serialize missing-pick resolution and shipment inventory on the same order.
       await tx.execute(sql`SELECT id FROM wms.orders WHERE id=${params.orderId} FOR UPDATE`);
@@ -1040,6 +1042,7 @@ export class InventoryUseCases {
         return { warehouseLocationId: locationId, alreadyRecorded: true };
       }
 
+      await assertShipmentNotRetired(tx, params.shipmentId, params.shipmentItemId);
       // Read only current, usable inventory. Historic shipment source bins are
       // deliberately excluded: a reship must never debit the location used by
       // the original package merely because its row still references that bin.
@@ -2549,4 +2552,3 @@ export class InventoryUseCases {
     return scoped;
   }
 }
-

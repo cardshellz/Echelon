@@ -167,6 +167,8 @@ export async function recoverStaleChannelFulfillmentReceipts(
       causation_id
     FROM oms.channel_fulfillment_receipts
     WHERE source_provider IN ('shopify', 'ebay')
+      AND NOT EXISTS (SELECT 1 FROM inventory.cutover_history_retirements retired
+        WHERE retired.receipt_id=oms.channel_fulfillment_receipts.id)
       AND retry_failure_count < ${maxRetryFailures}
       AND (
         (

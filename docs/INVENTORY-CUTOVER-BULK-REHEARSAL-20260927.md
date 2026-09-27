@@ -2,6 +2,8 @@
 
 ## Bottom line
 
+**Implementation follow-up:** the later [audited retirement delivery](INVENTORY-CUTOVER-HISTORY-RETIREMENT-20260927.md) implements the previously missing command and exact-ID processing boundary on this same branch. This document preserves the earlier read-only rehearsal and its dated evidence; its statements about an unimplemented executor describe that earlier batch, not the completed follow-up. Neither report claims a production retirement or activation.
+
 **Production has not been switched.** This batch completes the grouped historical-work review and a conditional rehearsal of every current stock order. It does not implement or execute the historical-work retirement command. It does not introduce another ATP engine, change the UI, or change production inventory/configuration.
 
 The final capture is **September 27, 2026, 13:27:57 UTC (09:27:57 Eastern)**. Runtime authority was **legacy, revision 1**, with no saved opening or configuration freeze. The latest release independently checked was **v3033 / `12a11c4d`**, the returns-label release. This local branch is not that deployment.

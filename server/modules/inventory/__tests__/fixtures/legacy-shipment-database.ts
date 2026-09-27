@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
+import { historyRetirementLookupFixtureSql } from "../../../inventory-planning/__tests__/fixtures/inventory-cutover-retirement-lookup.fixture";
 
 /** Reduced foreign-owner schemas; actual correction migration and shipment inventory owners. */
 export const legacyShipmentFixtureSql = `
   CREATE SCHEMA inventory;
   CREATE SCHEMA warehouse;
   CREATE SCHEMA wms;
+  ${historyRetirementLookupFixtureSql}
   CREATE TABLE wms.orders (id integer PRIMARY KEY);
   CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id));
   CREATE TABLE wms.physical_shipments (id bigint PRIMARY KEY);

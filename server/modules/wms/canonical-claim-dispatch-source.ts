@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { assertShipmentNotRetiredPg } from "../inventory-planning/infrastructure/inventory-cutover-retired-work";
 import { WMS_WAREHOUSE_STATUS_VALUES } from "@shared/enums/order-status";
 import { canonicalClaimDispatchCommandSchema, canonicalClaimDispatchEvidenceSchema, type CanonicalClaimDispatchEvidence } from "@shared/types/inventory-availability-dispatch";
 import type { CanonicalClaimDispatchSourceOwner } from "../inventory-planning/application/inventory-availability-dispatch.port";
@@ -44,7 +45,8 @@ function parse<T>(schema: z.ZodType<T>, value: unknown, entity: string): T {
  * Locked WMS source facts, not caller-supplied dispatch authority. The caller owns
  * one SERIALIZABLE read-write transaction and must retry it in full on 40001.
  * Lock order: order -> item -> source header -> source item -> physical header
- * -> physical item. No inventory, warehouse, catalog or OMS owner tables are read.
+ * -> physical item. The only inventory read is the exact retired-work registry;
+ * no balance, warehouse, catalog or OMS owner facts are inferred here.
  * Persisted source bin identity is mandatory; historical last-pick/primary-bin
  * fallbacks from the legacy ship path are deliberately not authorizing evidence.
  */
@@ -95,6 +97,7 @@ export class WmsCanonicalClaimDispatchSourceOwner implements CanonicalClaimDispa
       FROM wms.outbound_shipments WHERE id=$1 FOR UPDATE`, [command.outboundShipmentId])).rows[0], "shipment");
     requireFact(header.id === command.outboundShipmentId && header.order_id === command.orderId,
       "WMS_DISPATCH_IDENTITY_MISMATCH", "Source shipment belongs to another order");
+    await assertShipmentNotRetiredPg(client, command.outboundShipmentId, command.sourceShipmentItemId);
     requireFact(!header.held, "WMS_DISPATCH_HELD", "The source shipment is held");
     requireFact(header.status === "shipped" && !header.cancelled && !header.voided && !header.requires_review
       && header.shipment_purpose === "customer_fulfillment" && header.replaces_shipment_id === null,

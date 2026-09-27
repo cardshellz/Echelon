@@ -1,4 +1,5 @@
 import type { CanonicalClaimDispatchPlan } from "../../../../../shared/types/inventory-availability-dispatch";
+import { historyRetirementLookupFixtureSql } from "../../../inventory-planning/__tests__/fixtures/inventory-cutover-retirement-lookup.fixture";
 import { canonicalClaimDispatchCommandHash } from "../../../inventory-planning/domain/inventory-availability-dispatch";
 
 export const DISPATCH_TIME = new Date("2026-09-07T18:00:00.000Z");
@@ -43,6 +44,7 @@ export const dispatchOwnerFixtureSql = `
       catalog_product_id integer, inventory_tracking boolean
     );
   CREATE TABLE wms.outbound_shipments(id integer PRIMARY KEY);
+  ${historyRetirementLookupFixtureSql}
   CREATE TABLE wms.outbound_shipment_items(id integer PRIMARY KEY, shipment_id integer NOT NULL REFERENCES wms.outbound_shipments);
   CREATE TABLE inventory.inventory_levels (
     id integer PRIMARY KEY, warehouse_location_id integer NOT NULL, product_variant_id integer NOT NULL,

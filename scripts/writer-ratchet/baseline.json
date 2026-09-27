@@ -519,6 +519,12 @@
   "inventory.cost_reporting_events": [
     "modules/inventory"
   ],
+  "inventory.cutover_history_batches": [
+    "modules/inventory-planning"
+  ],
+  "inventory.cutover_history_retirements": [
+    "modules/inventory-planning"
+  ],
   "inventory.cycle_count_items": [
     "modules/inventory"
   ],
