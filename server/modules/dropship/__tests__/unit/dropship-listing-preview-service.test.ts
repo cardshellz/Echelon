@@ -36,6 +36,11 @@ import type {
   DropshipVendorVariantOverride,
 } from "../../domain/vendor-selection";
 import { ConfigDrivenDropshipMarketplaceListingProvider } from "../../infrastructure/dropship-config-driven-marketplace-listing.provider";
+import { toDropshipVendorListingPreview } from "../../application/dropship-listing-dtos";
+import {
+  buildListingPushRequest,
+  type DropshipListingPreviewResult as ClientListingPreviewResult,
+} from "../../../../../client/src/lib/dropship-ops-surface";
 
 const now = new Date("2026-05-01T17:30:00.000Z");
 
@@ -137,6 +142,27 @@ describe("DropshipListingPreviewService", () => {
     await service.createListingPushJobForMember("member-1", { ...request, expectedContentEvidenceHashesByVariantId: { "101": content.evidenceHash } });
     expect(repository.lastCreatedInput?.preview.rows[0].listingIntent?.description).toBe(content.descriptionHtml);
     expect(repository.candidate.description).not.toBe(content.descriptionHtml);
+  });
+  it("queues a push built by the vendor client from the vendor preview response", async () => {
+    // Regression: the vendor preview DTO dropped the evidence hashes, so the
+    // browser could never echo them and every vendor push failed as a content
+    // conflict. This crosses the real transport boundary and the real client builder.
+    const content = resolveListingContent({ candidate: repository.candidate, profile: noContentProfile, saved: null });
+    repository.loadListingContents = async () => new Map([[101, content]]);
+    repository.rulePrices.set(101, rulePrice());
+    repository.savedPrices = [{ productVariantId: 101, revisionId: 7, overridePriceCents: null, pricingMode: "rules", updatedAt: now.toISOString() }];
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    const received = JSON.parse(JSON.stringify(toDropshipVendorListingPreview(preview))) as ClientListingPreviewResult;
+    expect(received.rows[0]).not.toHaveProperty("listingIntent");
+    expect(received.rows[0]).toMatchObject({ previewStatus: "ready", contentEvidenceHash: content.evidenceHash,
+      rulePriceEvidenceHash: "a".repeat(64), pricingRuleName: "Store default rule", priceSettingRevisionId: 7 });
+
+    const request = buildListingPushRequest({ storeConnectionId: 22, preview: received, idempotencyKey: "vendor-round-trip" });
+    const result = await service.createListingPushJobForMember("member-1", request);
+
+    expect(result.job.status).toBe("queued");
+    expect(repository.jobs).toHaveLength(1);
+    expect(repository.lastCreatedInput?.preview.rows[0].listingIntent?.description).toBe(content.descriptionHtml);
   });
   it("blocks a custom description when its catalog facts changed", async () => {
     const content = resolveListingContent({ candidate: repository.candidate, profile: noContentProfile,

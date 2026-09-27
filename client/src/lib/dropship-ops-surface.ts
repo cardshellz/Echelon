@@ -2802,6 +2802,22 @@ export function queryErrorCode(error: unknown): string | null {
   return error instanceof DropshipApiError ? error.code : null;
 }
 
+/**
+ * Codes meaning the preview the vendor reviewed no longer matches what the
+ * server would queue: a price, pricing rule, cost, description or template
+ * changed. Queueing again from the same preview fails the same way, so the
+ * vendor has to review a fresh one.
+ */
+const STALE_LISTING_PREVIEW_ERROR_CODES: ReadonlySet<string> = new Set([
+  "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
+  "DROPSHIP_CONTENT_VERSION_CONFLICT",
+]);
+
+export function isStaleListingPreviewError(error: unknown): boolean {
+  const code = queryErrorCode(error);
+  return code !== null && STALE_LISTING_PREVIEW_ERROR_CODES.has(code);
+}
+
 export function queryErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim()) {
     return error.message;

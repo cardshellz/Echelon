@@ -248,49 +248,61 @@ export class DropshipSelectionAtpService {
     const facets = buildCatalogFacets(exposedFacetCandidates);
 
     const productVariantIds = uniqueNumbers(candidates.map((candidate) => candidate.productVariantId));
-    const [atp, overrideRows, listingTiers] = await Promise.all([
-      this.deps.atp.getVariantAtp(candidates.map((candidate) => ({
-        productId: candidate.productId,
-        productVariantId: candidate.productVariantId,
-      }))),
+    const [overrideRows, listingTiers] = await Promise.all([
       this.deps.repository.listVariantOverrides({
         vendorId: parsed.vendorId,
         productVariantIds,
       }),
       this.deps.listingTiers.resolveForVendor(parsed.vendorId),
     ]);
-    const atpByVariantId = atp.quantities;
-
     const overridesByVariantId = new Map(
       overrideRows.map((override) => [override.productVariantId, override]),
     );
-    const evaluatedRows = candidates.map((candidate) => {
+
+    // Exposure and selection never read stock: only marketplaceQuantity depends
+    // on rawAtpUnits (domain/vendor-selection.ts). So the filter, total and page
+    // are decided first, and stock is read for the returned page alone. Reading
+    // it for every candidate ran one Channel Allocation preview per product on
+    // each request, past Heroku's 30-second router limit on a full catalog.
+    const decidedRows = candidates.map((candidate) => {
       const adminExposureDecision = evaluateDropshipCatalogExposure(candidate, adminRules, now);
-      const rawAtpUnits = atpByVariantId.get(candidate.productVariantId) ?? 0;
-      const selectionDecision = evaluateDropshipVendorCatalogSelection({
+      const override = overridesByVariantId.get(candidate.productVariantId) ?? null;
+      const selected = evaluateDropshipVendorCatalogSelection({
         candidate,
         adminExposureDecision,
         rules: selectionRules,
-        rawAtpUnits,
-        override: overridesByVariantId.get(candidate.productVariantId) ?? null,
-        applyMarketplaceQuantityCap: atp.authority === "legacy",
-      });
-
-      return {
-        ...candidate,
-        adminExposureDecision,
-        selectionDecision,
-        listingTier: listingTiers.eligibility[listingTierForVariantUomType(candidate.variantUomType)],
-      };
+        rawAtpUnits: 0,
+        override,
+      }).selected;
+      return { candidate, adminExposureDecision, override, selected };
     });
-    const exposedRows = evaluatedRows.filter((row) => row.adminExposureDecision.exposed);
+    const exposedRows = decidedRows.filter((row) => row.adminExposureDecision.exposed);
     const filteredRows = parsed.selectedOnly
-      ? exposedRows.filter((row) => row.selectionDecision.selected)
+      ? exposedRows.filter((row) => row.selected)
       : exposedRows;
     const start = (parsed.page - 1) * parsed.limit;
+    const pageRows = filteredRows.slice(start, start + parsed.limit);
+
+    const atp = await this.deps.atp.getVariantAtp(pageRows.map(({ candidate }) => ({
+      productId: candidate.productId,
+      productVariantId: candidate.productVariantId,
+    })));
+    const rows = pageRows.map(({ candidate, adminExposureDecision, override }) => ({
+      ...candidate,
+      adminExposureDecision,
+      selectionDecision: evaluateDropshipVendorCatalogSelection({
+        candidate,
+        adminExposureDecision,
+        rules: selectionRules,
+        rawAtpUnits: atp.quantities.get(candidate.productVariantId) ?? 0,
+        override,
+        applyMarketplaceQuantityCap: atp.authority === "legacy",
+      }),
+      listingTier: listingTiers.eligibility[listingTierForVariantUomType(candidate.variantUomType)],
+    }));
 
     return {
-      rows: filteredRows.slice(start, start + parsed.limit),
+      rows,
       total: filteredRows.length,
       page: parsed.page,
       limit: parsed.limit,
