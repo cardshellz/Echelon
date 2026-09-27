@@ -81,6 +81,7 @@ import {
   legalRmaTransitions,
   isRmaStatusTerminal,
   isStaleListingPreviewError,
+  isStepUpRequiredError,
   queryErrorCode,
 } from "../dropship-ops-surface";
 import type {
@@ -161,6 +162,14 @@ describe("dropship ops surface client helpers", () => {
     expect(isStaleListingPreviewError(apiError("DROPSHIP_IDEMPOTENCY_CONFLICT"))).toBe(false);
     expect(isStaleListingPreviewError(new Error("DROPSHIP_CONTENT_VERSION_CONFLICT"))).toBe(false);
     expect(isStaleListingPreviewError(null)).toBe(false);
+  });
+
+  it("recognizes a missing, expired or wrong-method verification", () => {
+    const apiError = (code: string) => new DropshipApiError({ message: code, status: 403, code });
+    expect(isStepUpRequiredError(apiError("DROPSHIP_STEP_UP_REQUIRED"))).toBe(true);
+    expect(isStepUpRequiredError(apiError("DROPSHIP_STEP_UP_METHOD_REQUIRED"))).toBe(true);
+    expect(isStepUpRequiredError(apiError("DROPSHIP_LISTING_VENDOR_BLOCKED"))).toBe(false);
+    expect(isStepUpRequiredError(new Error("DROPSHIP_STEP_UP_REQUIRED"))).toBe(false);
   });
 
   it("falls back to explicit query error messages", () => {

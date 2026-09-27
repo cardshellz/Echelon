@@ -10,11 +10,14 @@ import {
 } from "@/lib/dropship-ops-surface";
 import {
   EbayStoreCategoryAssignmentPanel,
+  ListingAccessNoticeView,
   describeCatalogListingTier,
   fetchAllSelectedCatalogRows,
   formatIssue,
   shouldOfferEbayStoreReconnect,
 } from "../DropshipPortalCatalog";
+import { describeListingAccess, listingAccessLink } from "@/lib/dropship-listing-access";
+import { Router } from "wouter";
 import { EbayStoreCategoryAuthorizationRecoveryView } from "../EbayStoreCategoryAuthorizationRecovery";
 
 function row(productVariantId: number): DropshipCatalogRow {
@@ -255,5 +258,59 @@ describe("catalog listing tier", () => {
     const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipPortalCatalog.tsx"), "utf8");
     expect(source).toContain('{row.listingTier.tier === "case" ? "Case tier not active" : "Pack tier not active"}');
     expect(source).not.toMatch(/"(Cases off sale|Off sale|On sale)"/);
+  });
+});
+
+describe("listing access notice", () => {
+  function render(notice: Parameters<typeof ListingAccessNoticeView>[0]["notice"], tone: "notice" | "error" = "notice") {
+    vi.stubGlobal("React", React);
+    // Node has no browser location, so the router renders from a fixed path.
+    return renderToStaticMarkup(React.createElement(Router, {
+      ssrPath: "/dropship-portal/catalog",
+      children: React.createElement(ListingAccessNoticeView, { notice, tone, portalHref: (path: string) => `/dropship-portal${path}` }),
+    }));
+  }
+
+  it("tells an onboarding vendor to activate and links to the Onboarding page", () => {
+    const notice = describeListingAccess({ status: "onboarding", entitlementStatus: "active" }, "push");
+    if (!notice) throw new Error("Expected an onboarding push notice.");
+    const markup = render(notice);
+    expect(markup).toContain('role="status"');
+    expect(markup).toContain("Finish the steps on the Onboarding page and choose Activate .ops.");
+    expect(markup).toContain('href="/dropship-portal/onboarding"');
+    expect(markup).toContain("Go to Onboarding");
+  });
+
+  it("opens the membership page in a new tab, the mail client without one, and marks a refusal as an alert", () => {
+    const lapsed = describeListingAccess({ status: "lapsed", entitlementStatus: "lapsed" }, "push");
+    const suspended = describeListingAccess({ status: "suspended", entitlementStatus: "suspended" }, "push");
+    if (!lapsed || !suspended) throw new Error("Expected blocked notices.");
+    const lapsedMarkup = render(lapsed, "error");
+    expect(lapsedMarkup).toContain('role="alert"');
+    expect(lapsedMarkup).toContain('href="https://www.cardshellz.com/pages/club"');
+    expect(lapsedMarkup).toContain('target="_blank"');
+    const supportMarkup = render(suspended);
+    expect(supportMarkup).toContain('href="mailto:support@cardshellz.com"');
+    expect(supportMarkup).not.toContain("target=");
+  });
+
+  it("shows the message alone when there is no link to offer", () => {
+    const markup = render({ message: "Your .ops membership payment is past due.", resolution: "update_membership_payment",
+      link: listingAccessLink("update_membership_payment") });
+    expect(markup).toContain("Your .ops membership payment is past due.");
+    expect(markup).not.toContain("<a ");
+  });
+
+  it("keeps listing failures inside the listing card and never emails a code for a blocked push", () => {
+    const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipPortalCatalog.tsx"), "utf8");
+    const pushHandler = source.slice(source.indexOf("async function pushListings()"), source.indexOf("async function runListingAction("));
+    expect(pushHandler.indexOf("if (pushAccessNotice) return;")).toBeGreaterThan(-1);
+    expect(pushHandler.indexOf("if (pushAccessNotice) return;")).toBeLessThan(pushHandler.indexOf("startEmailStepUp"));
+    expect(source).toContain("{listingError && (listingError.notice");
+    expect(source).not.toContain("A launch-ready store connection is required before listing preview or push.");
+    // An expired verification reloads the proof so the next click asks again.
+    const errorHandler = source.slice(source.indexOf("function showListingError("), source.indexOf("async function updateEbayStoreCategoryAssignment("));
+    expect(errorHandler).toContain("if (isStepUpRequiredError(caught)) {");
+    expect(errorHandler).toContain("void refetchAuth();");
   });
 });

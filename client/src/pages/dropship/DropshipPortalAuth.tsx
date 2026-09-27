@@ -21,6 +21,7 @@ import {
   type DropshipAuthEmailStatus,
   useDropshipAuth,
 } from "@/lib/dropship-auth";
+import { OPS_MEMBERSHIP_URL } from "@/lib/dropship-listing-access";
 
 type AuthStep = "email" | "returning" | "code" | "password" | "reset-password" | "ineligible";
 type PendingAction =
@@ -32,8 +33,6 @@ type PendingAction =
   | "reset-start"
   | "reset-complete"
   | null;
-
-const OPS_UPSELL_URL = "https://www.cardshellz.com/pages/club";
 
 export default function DropshipPortalAuth() {
   const [, setLocation] = useLocation();
@@ -454,7 +453,7 @@ export default function DropshipPortalAuth() {
                   This email is not currently authorized for `.ops` dropship access.
                 </div>
                 <Button asChild className="h-11 w-full gap-2 bg-[#C060E0] text-white hover:bg-[#a94bc9]">
-                  <a href={OPS_UPSELL_URL} target="_blank" rel="noreferrer">
+                  <a href={OPS_MEMBERSHIP_URL} target="_blank" rel="noreferrer">
                     Sign up for .ops
                     <ExternalLink className="h-4 w-4" />
                   </a>

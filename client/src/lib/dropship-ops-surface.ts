@@ -2818,6 +2818,21 @@ export function isStaleListingPreviewError(error: unknown): boolean {
   return code !== null && STALE_LISTING_PREVIEW_ERROR_CODES.has(code);
 }
 
+/**
+ * Codes the server returns when the MFA check for an action is missing, expired
+ * or used the wrong method (requireDropshipSensitiveActionProof). The page's
+ * copy of the proof is then out of date and must be reloaded before retrying.
+ */
+const STEP_UP_REQUIRED_ERROR_CODES: ReadonlySet<string> = new Set([
+  "DROPSHIP_STEP_UP_REQUIRED",
+  "DROPSHIP_STEP_UP_METHOD_REQUIRED",
+]);
+
+export function isStepUpRequiredError(error: unknown): boolean {
+  const code = queryErrorCode(error);
+  return code !== null && STEP_UP_REQUIRED_ERROR_CODES.has(code);
+}
+
 export function queryErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim()) {
     return error.message;

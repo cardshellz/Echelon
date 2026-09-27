@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "wouter";
 import {
   AlertCircle,
   ArrowRight,
   Boxes,
   CheckCircle2,
+  ExternalLink,
   Fingerprint,
   Mail,
   MinusCircle,
@@ -40,6 +42,7 @@ import {
   fetchJson,
   formatStatus,
   isStaleListingPreviewError,
+  isStepUpRequiredError,
   listingPreviewPushableCount,
   listLaunchReadyStoreConnections,
   postJson,
@@ -54,12 +57,20 @@ import {
   type DropshipListingPreviewResponse,
   type DropshipListingPreviewResult,
   type DropshipListingPushResponse,
+  type DropshipOnboardingState,
   type DropshipSelectionRulesReplaceResponse,
   type DropshipSelectionRulesResponse,
   type DropshipSettingsResponse,
   type DropshipVendorSelectionAction,
 } from "@/lib/dropship-ops-surface";
-import { isDropshipSensitiveProofActive, useDropshipAuth } from "@/lib/dropship-auth";
+import { dropshipPortalPath, isDropshipSensitiveProofActive, useDropshipAuth } from "@/lib/dropship-auth";
+import {
+  describeListingAccess,
+  listingAccessLink,
+  listingAccessNoticeFromError,
+  type ListingAccessLink,
+  type ListingAccessNotice,
+} from "@/lib/dropship-listing-access";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 import { EbayListingSetupPanel } from "./EbayListingSetupPanel";
 import { EbayListingPolicyOverridePanel } from "./EbayListingPolicyOverridePanel";
@@ -71,6 +82,12 @@ export { formatListingPreviewIssue as formatIssue } from "@/lib/dropship-listing
 
 type PendingSelectionAction = string | null;
 type PendingListingAction = "preview" | "send-code" | "verify-code" | "passkey-proof" | "push" | null;
+/** A failed preview, verification or push, and the fix when the account caused it. */
+interface ListingActionError {
+  message: string;
+  notice: ListingAccessNotice | null;
+}
+const ONBOARDING_QUERY_KEY = ["/api/dropship/onboarding/state"] as const;
 type CatalogFilters = {
   search: string;
   selectedOnly: string;
@@ -120,6 +137,7 @@ export default function DropshipPortalCatalog() {
   const queryClient = useQueryClient();
   const {
     principal,
+    refetch: refetchAuth,
     sensitiveProofs,
     startEmailStepUp,
     verifyEmailStepUp,
@@ -145,6 +163,9 @@ export default function DropshipPortalCatalog() {
   const [verificationCode, setVerificationCode] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  // Failures of the listing card's own actions (preview, verification, push)
+  // show inside that card, next to the buttons that caused them.
+  const [listingError, setListingError] = useState<ListingActionError | null>(null);
   const [pendingStoreCategoryVariantIds, setPendingStoreCategoryVariantIds] = useState<Set<number>>(
     () => new Set(),
   );
@@ -173,6 +194,18 @@ export default function DropshipPortalCatalog() {
     queryKey: ["/api/dropship/settings"],
     queryFn: () => fetchJson<DropshipSettingsResponse>("/api/dropship/settings"),
   });
+  // The query the portal shell also runs, so it comes from the cache, and the
+  // Onboarding page replaces it the moment the vendor activates.
+  const onboardingQuery = useQuery<DropshipOnboardingState>({
+    queryKey: [...ONBOARDING_QUERY_KEY],
+    queryFn: () => fetchJson<DropshipOnboardingState>(ONBOARDING_QUERY_KEY[0]),
+  });
+  // vendor.entitlementStatus is the column the server's listing check reads.
+  const listingAccount = onboardingQuery.data
+    ? { status: onboardingQuery.data.vendor.status, entitlementStatus: onboardingQuery.data.vendor.entitlementStatus }
+    : null;
+  const previewAccessNotice = describeListingAccess(listingAccount, "preview");
+  const pushAccessNotice = describeListingAccess(listingAccount, "push");
   const visibleRows = catalogQuery.data?.rows ?? [];
   const visibleSelectableRows = visibleRows.filter(canSelectRow);
   const visibleSelectedRows = visibleRows.filter((row) => row.selectionDecision.selected);
@@ -269,7 +302,7 @@ export default function DropshipPortalCatalog() {
         catalogQuery.refetch(),
         selectedCatalogQuery.refetch(),
         selectionRulesQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
+        queryClient.invalidateQueries({ queryKey: [...ONBOARDING_QUERY_KEY] }),
       ]);
       setMessage(action === "include" ? "Catalog selection added." : "Catalog selection removed.");
       invalidateListingPreview();
@@ -296,7 +329,7 @@ export default function DropshipPortalCatalog() {
     }
     const requestVersion = ++previewRequestVersion.current;
     setPendingListingAction("preview");
-    setError("");
+    setListingError(null);
     setMessage("");
     setListingPreviewStale(true);
     setListingPushResult(null);
@@ -324,11 +357,12 @@ export default function DropshipPortalCatalog() {
   }
 
   async function previewListings() {
-    if (pendingPriceSavesRef.current > 0) return;
+    // The card explains the block and disables the button; this only stops a stray click.
+    if (pendingPriceSavesRef.current > 0 || previewAccessNotice) return;
     try {
       await refreshListingPreview();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Listing preview failed.");
+      showListingError(caught, "Listing preview failed.");
     }
   }
 
@@ -350,8 +384,11 @@ export default function DropshipPortalCatalog() {
   };
 
   async function pushListings() {
+    // Blocked accounts never reach verification, so no code is emailed for a
+    // push the server would refuse. The card already says what to do.
+    if (pushAccessNotice) return;
     if (!listingPreview || listingPreviewStale || pendingPriceSavesRef.current > 0) {
-      setError("Generate a listing preview before queueing a push.");
+      setListingError({ message: "Generate a listing preview before queueing a push.", notice: null });
       return;
     }
     const expectedPreviewVersion = previewRequestVersion.current;
@@ -373,7 +410,7 @@ export default function DropshipPortalCatalog() {
         return;
       } else {
         if (verificationCode.length !== 6) {
-          setError("Enter the 6-digit verification code before queueing a listing push.");
+          setListingError({ message: "Enter the 6-digit verification code before queueing a listing push.", notice: null });
           return;
         }
         const verified = await runListingAction("verify-code", async () => {
@@ -399,7 +436,7 @@ export default function DropshipPortalCatalog() {
         idempotencyKey: createDropshipIdempotencyKey("listing-push"),
       });
       if (request.productVariantIds.length === 0) {
-        setError("No preview rows are ready to push.");
+        setListingError({ message: "No preview rows are ready to push.", notice: null });
         return;
       }
       const response = await postJson<DropshipListingPushResponse>("/api/dropship/listing-push-jobs", request);
@@ -416,7 +453,7 @@ export default function DropshipPortalCatalog() {
 
   async function runListingAction(action: PendingListingAction, task: () => Promise<void>): Promise<boolean> {
     setPendingListingAction(action);
-    setError("");
+    setListingError(null);
     setMessage("");
     try {
       await task();
@@ -425,11 +462,30 @@ export default function DropshipPortalCatalog() {
       if (isStaleListingPreviewError(caught)) {
         invalidateListingPreview(true);
       }
-      setError(caught instanceof Error ? caught.message : "Listing request failed.");
+      showListingError(caught, "Listing request failed.");
       return false;
     } finally {
       setPendingListingAction(null);
     }
+  }
+
+  function showListingError(caught: unknown, fallback: string) {
+    if (isStepUpRequiredError(caught)) {
+      // The server no longer accepts the verification this page believed was
+      // current. Reload it so the next click asks for a new one instead of
+      // repeating the same refusal.
+      void refetchAuth();
+      setListingError({
+        message: "Your verification expired before the push was queued. Choose Queue ready listings again to verify.",
+        notice: null,
+      });
+      return;
+    }
+    const notice = listingAccessNoticeFromError(caught);
+    // The account changed after this page loaded (paused, lapsed, store
+    // disconnected). Reload it so the card's notice and buttons match.
+    if (notice) void queryClient.invalidateQueries({ queryKey: [...ONBOARDING_QUERY_KEY] });
+    setListingError({ message: caught instanceof Error ? caught.message : fallback, notice });
   }
 
   async function updateEbayStoreCategoryAssignment(
@@ -669,6 +725,10 @@ export default function DropshipPortalCatalog() {
           storeName={selectedStoreName} {...priceSaveCallbacks} />}
 
         <ListingPreviewPanel
+          accessNotice={previewAccessNotice ?? pushAccessNotice}
+          previewBlocked={previewAccessNotice !== null}
+          pushBlocked={pushAccessNotice !== null}
+          listingError={listingError}
           launchReadyStoreConnections={launchReadyStoreConnections}
           emailCodeSent={emailCodeSent}
           listingPreview={listingPreview}
@@ -685,6 +745,7 @@ export default function DropshipPortalCatalog() {
           onPush={pushListings}
           onSelectedStoreConnectionIdChange={(value) => {
             setSelectedStoreConnectionId(value);
+            setListingError(null);
             invalidateListingPreview();
           }}
           onVerificationCodeChange={setVerificationCode}
@@ -1061,6 +1122,7 @@ export function EbayStoreCategoryAssignmentPanel({
 }
 
 function ListingPreviewPanel({
+  accessNotice,
   emailCodeSent,
   launchReadyStoreConnections,
   listingPreview,
@@ -1073,11 +1135,16 @@ function ListingPreviewPanel({
   onSelectedStoreConnectionIdChange,
   onVerificationCodeChange,
   pendingListingAction,
+  previewBlocked,
+  pushBlocked,
   pushablePreviewCount,
   selectedRows,
   selectedStoreConnectionId,
   verificationCode,
+  listingError,
 }: {
+  /** Why this account cannot preview or push, when it cannot. */
+  accessNotice: ListingAccessNotice | null;
   emailCodeSent: boolean;
   launchReadyStoreConnections: DropshipSettingsResponse["settings"]["storeConnections"];
   listingPreview: DropshipListingPreviewResult | null;
@@ -1090,23 +1157,28 @@ function ListingPreviewPanel({
   onSelectedStoreConnectionIdChange: (value: string) => void;
   onVerificationCodeChange: (value: string) => void;
   pendingListingAction: PendingListingAction;
+  previewBlocked: boolean;
+  pushBlocked: boolean;
   pushablePreviewCount: number;
   selectedRows: DropshipCatalogRow[];
   selectedStoreConnectionId: string;
   verificationCode: string;
+  listingError: ListingActionError | null;
 }) {
   const selectedRowCount = selectedRows.length;
   const previewDisabled = launchReadyStoreConnections.length === 0
     || !selectedStoreConnectionId
     || selectedRowCount === 0
     || priceSavePending
-    || pendingListingAction !== null;
+    || pendingListingAction !== null
+    || previewBlocked;
   const pushDisabled = !listingPreview
     || listingPreviewStale
     || priceSavePending
     || pushablePreviewCount === 0
     || pendingListingAction !== null
-    || (emailCodeSent && verificationCode.length !== 6);
+    || (emailCodeSent && verificationCode.length !== 6)
+    || pushBlocked;
 
   return (
     <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
@@ -1159,6 +1231,18 @@ function ListingPreviewPanel({
         </div>
       </div>
 
+      {accessNotice && <ListingAccessNoticeView notice={accessNotice} tone="notice" />}
+      {listingError && (listingError.notice
+        // Once the reloaded account explains the same block, the refusal is not repeated.
+        ? listingError.notice.resolution !== accessNotice?.resolution
+          && <ListingAccessNoticeView notice={listingError.notice} tone="error" />
+        : (
+          <Alert variant="destructive" className="mt-4">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{listingError.message}</AlertDescription>
+          </Alert>
+        ))}
+
       <div className="mt-4 grid gap-3 md:grid-cols-4">
         <PreviewMetric label="Selected for listing" value={String(selectedRowCount)} />
         <PreviewMetric label="Ready" value={String(listingPreview?.summary.ready ?? 0)} />
@@ -1167,9 +1251,11 @@ function ListingPreviewPanel({
       </div>
 
       {launchReadyStoreConnections.length === 0 && (
-        <div className="mt-4 rounded-md border border-dashed border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-          A launch-ready store connection is required before listing preview or push.
-        </div>
+        <ListingAccessNoticeView tone="notice" notice={{
+          message: "Connect your store and finish its setup before previewing or pushing listings.",
+          resolution: "finish_store_setup",
+          link: listingAccessLink("finish_store_setup"),
+        }} />
       )}
 
       {!listingPreview && selectedRows.length > 0 && (
@@ -1378,6 +1464,56 @@ function CatalogTable({
         </Table>
       </div>
     </>
+  );
+}
+
+/**
+ * What the account needs before listings can be previewed or pushed, with the
+ * one link that fixes it. `notice` reads as guidance; `error` follows a request
+ * the server refused.
+ */
+export function ListingAccessNoticeView({
+  notice,
+  tone,
+  portalHref = dropshipPortalPath,
+}: {
+  notice: ListingAccessNotice;
+  tone: "notice" | "error";
+  /** Resolves a portal route to its URL; injected in tests, which have no window. */
+  portalHref?: (path: string) => string;
+}) {
+  const palette = tone === "error"
+    ? "border-red-200 bg-red-50 text-red-900"
+    : "border-amber-300 bg-amber-50 text-amber-900";
+  return (
+    <div role={tone === "error" ? "alert" : "status"} data-testid="listing-access-notice"
+      className={`mt-4 rounded-md border p-4 text-sm ${palette}`}>
+      <p>{notice.message}</p>
+      {notice.link && <ListingAccessLinkButton link={notice.link} portalHref={portalHref} />}
+    </div>
+  );
+}
+
+function ListingAccessLinkButton({ link, portalHref }: { link: ListingAccessLink; portalHref: (path: string) => string }) {
+  if (!link.external) {
+    return (
+      <Button asChild size="sm" variant="outline" className="mt-3 h-9 gap-2 bg-white">
+        <Link href={portalHref(link.href)}>
+          {link.label}
+          <ArrowRight className="h-4 w-4" />
+        </Link>
+      </Button>
+    );
+  }
+  // A mail link opens the mail client; only a web page gets a new tab.
+  const opensPage = !link.href.startsWith("mailto:");
+  return (
+    <Button asChild size="sm" variant="outline" className="mt-3 h-9 gap-2 bg-white">
+      <a href={link.href} {...(opensPage ? { target: "_blank", rel: "noreferrer" } : {})}>
+        {link.label}
+        {opensPage && <ExternalLink className="h-4 w-4" />}
+      </a>
+    </Button>
   );
 }
 

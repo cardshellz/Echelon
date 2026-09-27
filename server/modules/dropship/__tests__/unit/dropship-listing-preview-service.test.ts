@@ -587,9 +587,12 @@ describe("DropshipListingPreviewService", () => {
       requestedRetailPriceCents: 1299,
     })).rejects.toMatchObject({
       code: "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED",
+      message: expect.stringContaining("Update your payment at Card Shellz"),
       context: {
         vendorId: 10,
         entitlementStatus: "grace",
+        action: "preview",
+        resolution: "update_membership_payment",
       },
     });
   });
@@ -607,10 +610,12 @@ describe("DropshipListingPreviewService", () => {
       requestedRetailPriceCents: 1299,
     })).rejects.toMatchObject({
       code: "DROPSHIP_LISTING_STORE_BLOCKED",
+      message: expect.stringContaining("Finish it on the Onboarding page"),
       context: {
         storeConnectionId: 22,
         setupStatus: "pending",
         storeLaunchReady: false,
+        resolution: "finish_store_setup",
       },
     });
   });
@@ -640,10 +645,12 @@ describe("DropshipListingPreviewService", () => {
       idempotencyKey: "onboarding-listing-job",
     })).rejects.toMatchObject({
       code: "DROPSHIP_LISTING_VENDOR_BLOCKED",
+      message: expect.stringContaining("Finish the steps on the Onboarding page and choose Activate .ops."),
       context: {
         vendorId: 10,
         vendorStatus: "onboarding",
         action: "push",
+        resolution: "activate_account",
       },
     });
     expect(repository.lastCreatedInput).toBeNull();

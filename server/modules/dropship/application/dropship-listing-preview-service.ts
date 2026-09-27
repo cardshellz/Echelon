@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import { resolveListingPrice, type SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
+import { decideDropshipListingAccess } from "../../../../shared/dropship/listing-access";
 import type { ListingRulePrice } from "./dropship-rule-price";
 import { z } from "zod";
 import type { DropshipListingPresentation, DropshipListingEconomics } from "../../../../shared/dropship/listing-presentation";
@@ -693,43 +694,29 @@ export class DropshipListingPreviewService {
         { vendorId, storeConnectionId, action },
       );
     }
-    const vendorStatusAllowed = context.vendorStatus === "active"
-      || (action === "preview" && context.vendorStatus === "onboarding");
-    if (!vendorStatusAllowed) {
-      throw new DropshipError(
-        "DROPSHIP_LISTING_VENDOR_BLOCKED",
-        `Dropship vendor status does not allow listing ${action}.`,
-        { vendorId, vendorStatus: context.vendorStatus, action },
-      );
-    }
-    if (context.entitlementStatus !== "active") {
-      throw new DropshipError(
-        "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED",
-        `Dropship vendor entitlement does not allow listing ${action}.`,
-        { vendorId, entitlementStatus: context.entitlementStatus, action },
-      );
-    }
-    if (context.storeStatus !== "connected") {
-      throw new DropshipError(
-        "DROPSHIP_LISTING_STORE_BLOCKED",
-        `Dropship store connection is not healthy enough for listing ${action}.`,
-        { vendorId, storeConnectionId, storeStatus: context.storeStatus, action },
-      );
-    }
-    if (!context.storeLaunchReady) {
-      throw new DropshipError(
-        "DROPSHIP_LISTING_STORE_BLOCKED",
-        `Dropship store connection is not launch-ready for listing ${action}.`,
-        {
-          vendorId,
-          storeConnectionId,
-          storeStatus: context.storeStatus,
-          setupStatus: context.setupStatus,
-          platform: context.platform,
-          storeLaunchReady: false,
-          action,
-        },
-      );
+    // The shared rule is the one the vendor pages use to explain a block before
+    // the vendor clicks, so the server and the page cannot disagree. Codes are
+    // unchanged; the message says what to do and `resolution` names the step the
+    // portal links to.
+    const access = decideDropshipListingAccess({
+      action,
+      vendorStatus: context.vendorStatus,
+      entitlementStatus: context.entitlementStatus,
+      store: { status: context.storeStatus, launchReady: context.storeLaunchReady },
+    });
+    if (!access.allowed) {
+      throw new DropshipError(access.code, access.message, {
+        vendorId,
+        storeConnectionId,
+        vendorStatus: context.vendorStatus,
+        entitlementStatus: context.entitlementStatus,
+        storeStatus: context.storeStatus,
+        setupStatus: context.setupStatus,
+        platform: context.platform,
+        storeLaunchReady: context.storeLaunchReady,
+        action,
+        resolution: access.resolution,
+      });
     }
     return context;
   }
