@@ -1,4 +1,7 @@
 import { createHash } from "crypto";
+import { z } from "zod";
+import { returnPolicyArchiveInputSchema, returnPolicyArchiveResultSchema, type ReturnPolicyArchiveInput } from "@shared/returns/return-policy-archive.contract";
+import { buildReturnPolicyArchivePreview, type ReturnPolicyArchiveSnapshot } from "./return-policy-archive";
 import type { ReturnPolicy, ReturnPolicyScopeKind, ReturnBusinessContext } from "@shared/schema";
 import {
   normalizeReturnPolicyScope,
@@ -90,6 +93,8 @@ export interface ReturnPolicyCommandRecord {
 }
 
 export interface ReturnPolicyAdminTransaction {
+  lockCatalog(mode: "shared" | "exclusive"): Promise<void>;
+  readArchiveSnapshot(policyId: number): Promise<ReturnPolicyArchiveSnapshot>;
   lockCommand(idempotencyKey: string): Promise<void>;
   findCommand(idempotencyKey: string): Promise<ReturnPolicyCommandRecord | null>;
   getScopeReferences(scope: PublicReturnPolicyScopeInput): Promise<ScopeReferences>;
@@ -98,7 +103,7 @@ export interface ReturnPolicyAdminTransaction {
   retirePolicy(policy: ReturnPolicy, actor: string, now: Date): Promise<void>;
   insertPolicy(input: Omit<ReturnPolicy, "id" | "createdAt">): Promise<ReturnPolicy>;
   recordCommand(input: { idempotencyKey: string; requestHash: string; response: ReturnPolicy; actor: string; createdAt: Date }): Promise<void>;
-  writeAudit(input: { actor: string; before: ReturnPolicy | null; after: ReturnPolicy; now: Date }): Promise<void>;
+  writeAudit(input: { actor: string; before: ReturnPolicy | null; after: ReturnPolicy; now: Date; archivePreview?: ReturnType<typeof buildReturnPolicyArchivePreview> }): Promise<void>;
 }
 
 export interface ReturnPolicyAdminStore {
@@ -186,6 +191,7 @@ export class ReturnPolicyAdminService {
         return { policy: priorCommand.response, replayed: true };
       }
 
+      await tx.lockCatalog("exclusive");
       const references = await tx.getScopeReferences(normalizedInput);
       validateReferences(normalizedInput, references);
       const normalized = normalizePublicScope(normalizedInput, references.dropshipOmsChannel.id);
@@ -223,6 +229,48 @@ export class ReturnPolicyAdminService {
       await tx.writeAudit({ actor: normalizedInput.actor, before: active, after: policy, now });
       return { policy, replayed: false };
     });
+  }
+
+  async previewArchive(policyId: number) {
+    if (!Number.isSafeInteger(policyId) || policyId <= 0) throw new ReturnPolicyAdminError("RETURN_POLICY_INVALID", "Choose a valid policy.", 400);
+    try {
+      return await this.store.transaction(async tx => {
+        await tx.lockCatalog("shared");
+        return buildReturnPolicyArchivePreview(await tx.readArchiveSnapshot(policyId), policyId);
+      });
+    } catch (error) { throw translateDomainError(error); }
+  }
+
+  async archive(policyId: number, raw: ReturnPolicyArchiveInput, idempotencyKey: string, actor: string) {
+    const parsed = returnPolicyArchiveInputSchema.safeParse(raw);
+    const identity = z.object({ policyId: z.number().int().positive().safe(), idempotencyKey: z.string().trim().min(1).max(160), actor: z.string().trim().min(1).max(255) }).safeParse({ policyId, idempotencyKey, actor });
+    if (!parsed.success || !identity.success) throw new ReturnPolicyAdminError("RETURN_POLICY_INVALID", "The archive request is invalid.", 400);
+    const input = { ...identity.data, ...parsed.data };
+    const requestHash = hashRequest({ operation: "archive", ...input });
+    try {
+      return await this.store.transaction(async tx => {
+        await tx.lockCommand(input.idempotencyKey);
+        const prior = await tx.findCommand(input.idempotencyKey);
+        if (prior) {
+          if (prior.requestHash !== requestHash) throw new ReturnPolicyAdminError("RETURN_POLICY_IDEMPOTENCY_CONFLICT", "This key was already used for a different policy command.", 409);
+          return returnPolicyArchiveResultSchema.parse({ policy: prior.response, replayed: true });
+        }
+        await tx.lockCatalog("exclusive");
+        const snapshot = await tx.readArchiveSnapshot(policyId);
+        const preview = buildReturnPolicyArchivePreview(snapshot, policyId);
+        if (preview.policy.version !== input.expectedVersion || preview.revision !== input.previewRevision) {
+          throw new ReturnPolicyAdminError("RETURN_POLICY_ARCHIVE_CHANGED", "The policy or its impact changed. Review a fresh archive preview before continuing.", 409);
+        }
+        const policy = await tx.getActivePolicyForUpdate(preview.policy.scopeKey);
+        if (!policy || policy.id !== policyId || policy.version !== input.expectedVersion) throw new ReturnPolicyAdminError("RETURN_POLICY_ARCHIVE_CHANGED", "The active policy changed. Review a fresh archive preview.", 409);
+        const now = z.date().parse(this.clock());
+        const retired = { ...policy, status: "retired", retiredBy: input.actor, retiredAt: now };
+        await tx.retirePolicy(policy, input.actor, now);
+        await tx.recordCommand({ idempotencyKey: input.idempotencyKey, requestHash, response: retired, actor: input.actor, createdAt: now });
+        await tx.writeAudit({ actor: input.actor, before: policy, after: retired, now, archivePreview: preview });
+        return returnPolicyArchiveResultSchema.parse({ policy: retired, replayed: false });
+      });
+    } catch (error) { throw translateDomainError(error); }
   }
 }
 
@@ -315,7 +363,8 @@ function hashRequest(input: object): string {
 
 function translateDomainError(error: unknown): Error {
   if (error instanceof ReturnPolicyDomainError) {
-    return new ReturnPolicyAdminError(error.code, error.message, error.code === "RETURN_POLICY_AMBIGUOUS" ? 409 : 400, error.context);
+    return new ReturnPolicyAdminError(error.code, error.message,
+      error.code === "RETURN_POLICY_ARCHIVE_LIMIT" ? 503 : ["RETURN_POLICY_AMBIGUOUS", "RETURN_POLICY_NOT_ACTIVE"].includes(error.code) ? 409 : 400, error.context);
   }
   return error instanceof Error ? error : new Error(String(error));
 }

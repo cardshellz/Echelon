@@ -3,6 +3,7 @@ import type {
   CustomerReturnLabelSubmitInput,
 } from "@shared/returns/customer-return-label.contract";
 import type { ReturnPolicySnapshot } from "../../domain/return-case";
+import type { ReturnPolicy } from "@shared/schema";
 import { CustomerReturnLiveService } from "../../application/customer-return-live.service";
 import {
   LIVE_NOW,
@@ -26,7 +27,6 @@ export const labelSettings: CustomerReturnLabelSettings = {
   version: 1,
   enabled: true,
   warehouseId: 1,
-  policyId: 1,
   selectionMode: "fixed_service",
   carrierRules: [],
   carrierId: "se-123",
@@ -40,7 +40,7 @@ export const labelPolicy: ReturnPolicySnapshot = {
   name: "Domestic returns",
   version: 1,
   scopeKind: "business_context",
-  scopeKey: "retail",
+  scopeKey: "context:retail",
   returnWindowDays: 365,
   returnDestination: "card_shellz",
   approvalAuthority: "card_shellz",
@@ -52,6 +52,26 @@ export const labelPolicy: ReturnPolicySnapshot = {
   vendorSettlementTrigger: "none",
   returnlessRefundAllowed: false,
 };
+
+export function labelActivePolicy(
+  overrides: Partial<ReturnPolicy> = {},
+): ReturnPolicy {
+  return {
+    ...labelPolicy,
+    businessContext: "retail",
+    channelId: null,
+    vendorId: null,
+    storeConnectionId: null,
+    status: "active",
+    notes: null,
+    supersedesPolicyId: null,
+    createdBy: "test",
+    retiredBy: null,
+    retiredAt: null,
+    createdAt: new Date(LIVE_NOW),
+    ...overrides,
+  };
+}
 
 export function labelSources() {
   const local = liveLocalFixture();
@@ -87,6 +107,7 @@ export function labelSources() {
     source: "webhook",
   }));
   const service = new CustomerReturnLiveService({
+    policies: { read: async () => [labelActivePolicy()] },
     local: {
       listShops: async () => [liveShop],
       read: async () => structuredClone(local),

@@ -16,7 +16,8 @@ export async function installReturnLabelFixtures(
     uncertainBox?: number;
     enabled?: boolean;
     unconfigured?: boolean;
-    policies?: CustomerReturnLabelSettingsState["policies"];
+    resolvedPolicy?: CustomerReturnLabelSettingsState["resolvedPolicy"];
+    policyIssue?: CustomerReturnLabelSettingsState["policyIssue"];
   } = {},
 ) {
   const address = {
@@ -35,7 +36,6 @@ export async function installReturnLabelFixtures(
       : {
           enabled: options.enabled ?? true,
           warehouseId: 1,
-          policyId: 2,
           carrierId: "se-fixture",
           serviceCode: "ground_return",
           selectionMode: "fixed_service",
@@ -46,9 +46,17 @@ export async function installReturnLabelFixtures(
           destinationAddress: address,
         },
     warehouses: [{ id: 1, name: "Fixture warehouse", address }],
-    policies: options.policies ?? [
-      { id: 2, name: "Fixture policy", version: 1 },
-    ],
+    resolvedPolicy:
+      options.resolvedPolicy === undefined
+        ? {
+            id: 2,
+            name: "Fixture policy",
+            version: 1,
+            returnWindowDays: 45,
+            scopeKind: "channel_context",
+          }
+        : options.resolvedPolicy,
+    policyIssue: options.policyIssue ?? null,
     carriers: [
       {
         id: "se-fixture",
@@ -205,7 +213,7 @@ export async function installReturnLabelFixtures(
       catalog: Partial<
         Pick<
           CustomerReturnLabelSettingsState,
-          "policies" | "carriers" | "warehouses"
+          "resolvedPolicy" | "policyIssue" | "carriers" | "warehouses"
         >
       >,
     ) {
@@ -235,23 +243,29 @@ export async function installReturnLabelFixtures(
   };
 }
 
-/** Guided policy setup stays on fictional admin endpoints, including its explicit save. */
+/** Fictional policy lifecycle responses; never contacts production. */
 export async function installReturnPolicyFixtures(
   page: Page,
-  options: { existingPolicy?: boolean; failFirstSave?: boolean } = {},
+  options: {
+    fallback?: boolean;
+    failFirstArchive?: boolean;
+    staleFirstArchive?: boolean;
+    invalidPreview?: boolean;
+    deniedArchive?: boolean;
+  } = {},
 ) {
-  const savedPolicy = {
+  const policy = {
     id: 3,
-    name: "Fixture Shopify shop customer returns",
+    name: "Fixture channel returns",
     scopeKind: "channel_context",
-    scopeKey: "channel:36:retail",
+    scopeKey: "context:retail:channel:36",
     businessContext: "retail",
     channelId: 36,
     vendorId: null,
     storeConnectionId: null,
-    version: 1,
+    version: 2,
     status: "active",
-    returnWindowDays: 365,
+    returnWindowDays: 45,
     returnDestination: "card_shellz",
     approvalAuthority: "card_shellz",
     labelProvider: "shipstation",
@@ -263,25 +277,29 @@ export async function installReturnPolicyFixtures(
     returnlessRefundAllowed: false,
     notes: null,
   };
+  const fallback = {
+    ...policy,
+    id: 1,
+    name: "Fixture all-orders returns",
+    scopeKind: "global",
+    scopeKey: "global",
+    channelId: null,
+    businessContext: null,
+    version: 1,
+    returnWindowDays: 90,
+  };
+  let policies = options.fallback ? [policy, fallback] : [policy];
+  let revision = "a".repeat(64);
   const writes: unknown[] = [];
   const keys: string[] = [];
   const failures: string[] = [];
   let accepted = 0;
-  let policies: (typeof savedPolicy)[] = options.existingPolicy
-    ? [
-        {
-          ...savedPolicy,
-          id: 2,
-          name: "Fixture existing retail policy",
-          version: 4,
-          returnWindowDays: 30,
-        },
-      ]
-    : [];
+  let previewReads = 0;
+  const acceptedCommands = new Set<string>();
   await page.route("**/api/returns/admin/policies**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
-    if (request.method() === "GET" && path === "/api/returns/admin/policies") {
+    if (request.method() === "GET" && path === "/api/returns/admin/policies")
       return route.fulfill({
         json: {
           policies,
@@ -293,58 +311,85 @@ export async function installReturnPolicyFixtures(
               provider: "shopify",
               status: "active",
             },
-            {
-              id: 42,
-              name: "Fixture marketplace",
-              type: "internal",
-              provider: "amazon",
-              status: "active",
-            },
-            {
-              id: 100,
-              name: "Fixture dropship",
-              type: "dropship",
-              provider: "echelon",
-              status: "active",
-            },
           ],
           referencedVendors: [],
           referencedStores: [],
           dropshipOmsChannelId: 100,
         },
       });
+    if (
+      request.method() === "GET" &&
+      path === "/api/returns/admin/policies/3/archive-preview"
+    ) {
+      previewReads++;
+      return route.fulfill({
+        json: options.invalidPreview
+          ? { policy }
+          : {
+              policy,
+              revision,
+              effects: [
+                {
+                  contextLabel: "Retail · Channel 36",
+                  before: policy,
+                  after: options.fallback ? fallback : null,
+                },
+              ],
+              unaffectedMoreSpecificPolicies: [],
+              historicalReferences: { returnCases: 7, portalIntakes: 3 },
+            },
+      });
     }
     if (
       request.method() === "POST" &&
-      path === "/api/returns/admin/policies/versions"
+      path === "/api/returns/admin/policies/3/archive"
     ) {
-      writes.push(request.postDataJSON());
+      const input = request.postDataJSON();
+      writes.push(input);
       const key = request.headers()["idempotency-key"] ?? "";
-      if (
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-          key,
-        )
-      ) {
-        failures.push("Policy save must include a UUID idempotency key");
-      }
-      if (!keys.includes(key)) accepted++;
       keys.push(key);
-      policies = [savedPolicy];
-      if (options.failFirstSave && writes.length === 1) {
+      if (!/^[0-9a-f-]{36}$/i.test(key))
+        failures.push("Missing archive idempotency key");
+      if (options.deniedArchive)
         return route.fulfill({
-          status: 503,
-          json: {
-            error: {
-              message: "Fixture response was lost. Retry the same request.",
-            },
-          },
+          status: 403,
+          json: { error: { code: "ADMIN_REQUIRED" } },
+        });
+      if (options.staleFirstArchive && writes.length === 1) {
+        revision = "b".repeat(64);
+        return route.fulfill({
+          status: 409,
+          json: { error: { code: "RETURN_POLICY_ARCHIVE_CHANGED" } },
         });
       }
-      return route.fulfill({ json: { policy: savedPolicy } });
+      if (!acceptedCommands.has(key)) {
+        if (
+          input.expectedVersion !== policy.version ||
+          input.previewRevision !== revision
+        )
+          return route.fulfill({
+            status: 409,
+            json: { error: { code: "RETURN_POLICY_ARCHIVE_CHANGED" } },
+          });
+        acceptedCommands.add(key);
+        accepted++;
+        policies = policies.map((row) =>
+          row.id === policy.id ? { ...row, status: "retired" } : row,
+        );
+      }
+      if (options.failFirstArchive && writes.length === 1)
+        return route.fulfill({
+          status: 503,
+          json: { error: { code: "RESPONSE_LOST" } },
+        });
+      return route.fulfill({
+        json: {
+          policy: { ...policy, status: "retired" },
+          replayed: writes.length > accepted,
+        },
+      });
     }
-    failures.push(
-      `Unexpected policy fixture request: ${request.method()} ${path}`,
-    );
+    failures.push(request.method() + " " + path);
     return route.abort();
   });
   return {
@@ -353,6 +398,9 @@ export async function installReturnPolicyFixtures(
     failures,
     get accepted() {
       return accepted;
+    },
+    get previewReads() {
+      return previewReads;
     },
   };
 }

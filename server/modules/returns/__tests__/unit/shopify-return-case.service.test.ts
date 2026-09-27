@@ -85,6 +85,7 @@ function makeTx(handler: (text: string) => { rows: any[] } | Promise<{ rows: any
     execute: vi.fn(async (query: any) => {
       const text = qtext(query);
       calls.push(text);
+      if (text.includes("pg_advisory_xact_lock_shared")) return { rows: [] };
       return handler(text);
     }),
   };
@@ -109,6 +110,10 @@ describe("recordShopifyRefundReturnCase", () => {
       replayed: false,
     });
     const itemSnapshotQuery = mock.calls.find((text) => text.includes("FROM wms.return_items ri"));
+    const policyLockIndex = mock.calls.findIndex((text) => text.includes("pg_advisory_xact_lock_shared"));
+    const policyReadIndex = mock.calls.findIndex((text) => text.includes("FROM returns.return_policies"));
+    expect(policyLockIndex).toBeGreaterThanOrEqual(0);
+    expect(policyLockIndex).toBeLessThan(policyReadIndex);
     expect(itemSnapshotQuery).toContain("ri.order_item_id IS NULL OR oi.order_id =");
     expect(itemSnapshotQuery).toContain("ri.oms_order_line_id IS NULL OR ol.order_id =");
     expect(mock.calls.filter((text) => text.includes("INSERT INTO returns.return_cases"))).toHaveLength(1);

@@ -25,6 +25,7 @@ import {
   type ReturnSourceOrderSearchRow,
 } from "../application/open-return-case.service";
 import { resolveReturnCaseExternalLineItemId } from "../domain/return-case-line-identity";
+import { acquireReturnPolicyCatalogLock } from "./return-policy-lock";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -265,6 +266,8 @@ class PostgresOpenReturnCaseTransaction implements OpenReturnCaseTransaction {
     wmsOrderId: number;
     wmsOrderItemIds: number[];
   }): Promise<LockedReturnSourceContext | null> {
+    // Hold policy resolution stable until the case's immutable snapshot commits.
+    await acquireReturnPolicyCatalogLock(this.tx, "shared");
     await this.tx.execute(sql`
       SELECT pg_advisory_xact_lock(${RETURN_QUANTITY_LOCK_NAMESPACE}, ${input.omsOrderId})
     `);

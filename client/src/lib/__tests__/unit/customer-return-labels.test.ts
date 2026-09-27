@@ -75,7 +75,6 @@ function settings(): CustomerReturnLabelSettingsState {
     settings: {
       enabled: true,
       warehouseId: 10,
-      policyId: 20,
       carrierId: "se-123",
       serviceCode: "usps_ground_advantage",
       selectionMode: "fixed_service",
@@ -86,7 +85,14 @@ function settings(): CustomerReturnLabelSettingsState {
       destinationAddress: address,
     },
     warehouses: [{ id: 10, name: "Main", address }],
-    policies: [{ id: 20, name: "Standard returns", version: 1 }],
+    resolvedPolicy: {
+      id: 20,
+      name: "Standard returns",
+      version: 1,
+      returnWindowDays: 60,
+      scopeKind: "channel_context",
+    },
+    policyIssue: null,
     carriers: [
       {
         id: "se-123",
@@ -104,7 +110,6 @@ function settingsInput(): CustomerReturnLabelSettingsInput {
     expectedVersion: 2,
     enabled: true,
     warehouseId: 10,
-    policyId: 20,
     carrierId: "se-123",
     serviceCode: "usps_ground_advantage",
     selectionMode: "fixed_service",
@@ -526,7 +531,9 @@ describe("return label settings capability", () => {
     } = current.settings!;
     const request = vi
       .fn<FetchRequest>()
-      .mockResolvedValue(response({ ...current, settings: legacy }));
+      .mockResolvedValue(
+        response({ ...current, settings: { ...legacy, policyId: 999 } }),
+      );
     const parsed = await loadReturnLabelSettings(
       channelId,
       new AbortController().signal,
@@ -538,6 +545,7 @@ describe("return label settings capability", () => {
       carrierId: "se-123",
       serviceCode: "usps_ground_advantage",
     });
+    expect(parsed.settings).not.toHaveProperty("policyId");
     expect(returnLabelsEnabled(parsed)).toBe(true);
   });
   it("enables automatic selection only when every explicitly allowed service remains available", () => {
@@ -600,13 +608,22 @@ describe("return label settings capability", () => {
     [
       "missing policy",
       (value: CustomerReturnLabelSettingsState) => {
-        value.policies = [];
+        value.resolvedPolicy = null;
       },
     ],
     [
       "missing carrier",
       (value: CustomerReturnLabelSettingsState) => {
         value.carriers = [];
+      },
+    ],
+    [
+      "unsupported policy",
+      (value: CustomerReturnLabelSettingsState) => {
+        value.policyIssue = {
+          code: "RETURN_POLICY_UNSUPPORTED",
+          message: "This policy is not supported by the portal.",
+        };
       },
     ],
     [
@@ -632,12 +649,6 @@ describe("return label settings capability", () => {
       "duplicate warehouse",
       (value: CustomerReturnLabelSettingsState) => {
         value.warehouses.push(value.warehouses[0]);
-      },
-    ],
-    [
-      "duplicate policy",
-      (value: CustomerReturnLabelSettingsState) => {
-        value.policies.push(value.policies[0]);
       },
     ],
     [

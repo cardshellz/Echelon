@@ -16,7 +16,6 @@ import {
   type CustomerReturnLabelSettingsState,
 } from "@shared/returns/customer-return-label.contract";
 import { ReturnLabelCarrierRules } from "./ReturnLabelCarrierRules";
-import { DEFAULT_CUSTOMER_RETURN_WINDOW_DAYS } from "@shared/returns/customer-return-portal-policy";
 import {
   createReturnLabelSettingsDraft,
   refreshReturnLabelSettingsDraft,
@@ -28,7 +27,6 @@ import {
 
 const fieldIds: Record<ReturnLabelSettingsField, string> = {
   warehouseId: "return-label-warehouse",
-  policyId: "return-label-policy",
   contactName: "return-label-contact",
   contactPhone: "return-label-phone",
   carrierId: "return-label-carrier",
@@ -36,9 +34,17 @@ const fieldIds: Record<ReturnLabelSettingsField, string> = {
   carrierRules: "return-label-carrier-rules",
 };
 
+const policyScopeLabels = {
+  global: "All orders",
+  business_context: "Business context",
+  channel_context: "Sales channel",
+  vendor_context: "Dropship vendor",
+  vendor_channel_context: "Dropship vendor and channel",
+  store: "Dropship store",
+} as const;
+
 const emptyDraft: ReturnLabelSettingsDraft = {
   warehouseId: "",
-  policyId: "",
   carrierId: "",
   serviceCode: "",
   selectionMode: "cheapest_eligible",
@@ -285,8 +291,62 @@ export function CustomerReturnLabelSettings({
               : (state.message ??
                 (!state.providerConfigured
                   ? "The shipping provider is not configured. Label creation is unavailable."
-                  : "Label creation is off until a complete configuration is saved and enabled."))}
+                  : state.settings?.enabled &&
+                      (state.policyIssue || !state.resolvedPolicy)
+                    ? "Shipping settings are enabled. New returns are blocked by the policy shown below."
+                    : "Label creation is off until a complete configuration is saved and enabled."))}
           </p>
+          <section
+            aria-labelledby="return-applied-policy-title"
+            data-testid="return-applied-policy"
+            className="space-y-2 rounded-md border bg-muted/30 p-3 text-sm"
+          >
+            <h3 id="return-applied-policy-title" className="font-medium">
+              Applied return policy
+            </h3>
+            {state.resolvedPolicy && (
+              <div>
+                <p className="font-medium">
+                  {state.resolvedPolicy.name} · version{" "}
+                  {state.resolvedPolicy.version}
+                </p>
+                <p className="text-muted-foreground">
+                  {policyScopeLabels[state.resolvedPolicy.scopeKind]} ·{" "}
+                  {state.resolvedPolicy.returnWindowDays}-day return window from
+                  purchase
+                </p>
+              </div>
+            )}
+            {(state.policyIssue || !state.resolvedPolicy) && (
+              <div className="space-y-1" role="status">
+                <p className="text-destructive">
+                  {state.policyIssue?.message ??
+                    "No active return policy applies to this shop."}
+                </p>
+                <p>
+                  You can save shipping settings. New returns remain blocked
+                  until an applicable policy is supported by this portal.
+                </p>
+              </div>
+            )}
+            <p className="text-xs text-muted-foreground">
+              The most specific active policy applies automatically. Manage the
+              return window and return rules in Policies.
+            </p>
+            <a
+              href="/return-policies"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-block underline underline-offset-2"
+            >
+              Manage return policies
+              <span className="sr-only"> (opens in a new tab)</span>
+            </a>
+            <p className="text-xs text-muted-foreground">
+              After changing policies, refresh label settings here. Your unsaved
+              shipping choices will stay in place.
+            </p>
+          </section>
           {state.settings?.enabled && (
             <Button
               variant="outline"
@@ -347,70 +407,6 @@ export function CustomerReturnLabelSettings({
                     ))}
                   </select>
                   {fieldErrors("warehouseId")}
-                </div>
-                <div className="space-y-1">
-                  <div className="inline-flex items-baseline gap-1">
-                    <Label htmlFor="return-label-policy">Return policy</Label>
-                    <span
-                      aria-hidden="true"
-                      className="text-xs text-muted-foreground"
-                    >
-                      (required)
-                    </span>
-                  </div>
-                  <select
-                    id="return-label-policy"
-                    className={previewSelectClass}
-                    value={draft.policyId}
-                    aria-required="true"
-                    aria-invalid={hasIssue("policyId")}
-                    aria-describedby={description(
-                      "policyId",
-                      "return-label-policy-help",
-                    )}
-                    onChange={(event) =>
-                      update({ policyId: event.target.value })
-                    }
-                  >
-                    <option value="">Choose a policy</option>
-                    {state.policies.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.name} · version {item.version}
-                      </option>
-                    ))}
-                  </select>
-                  <p
-                    id="return-label-policy-help"
-                    className="text-xs text-muted-foreground"
-                  >
-                    Rules used to authorize and receive returns for this shop.
-                    Labels require an active{" "}
-                    {DEFAULT_CUSTOMER_RETURN_WINDOW_DAYS}-day retail policy
-                    handled by Card Shellz, with Card Shellz paying for
-                    ShipStation return labels and no vendor settlement.
-                  </p>
-                  {fieldErrors("policyId")}
-                  <a
-                    href={
-                      state.policies.length === 0
-                        ? `/return-policies?portalChannelId=${channelId}`
-                        : "/return-policies"
-                    }
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-block text-sm underline underline-offset-2"
-                  >
-                    {state.policies.length === 0
-                      ? "Review return policy setup"
-                      : "Manage return policies"}
-                    <span className="sr-only"> (opens in a new tab)</span>
-                  </a>
-                  <p className="text-xs text-muted-foreground">
-                    {state.policies.length === 0
-                      ? "Review and save the prefilled policy, then return here and refresh label settings."
-                      : "After changing policies, return here and refresh label settings."}{" "}
-                    Your unsaved label settings will stay in place.
-                  </p>
                 </div>
                 <div className="space-y-1 sm:col-span-2">
                   <Label htmlFor="return-label-selection-mode">

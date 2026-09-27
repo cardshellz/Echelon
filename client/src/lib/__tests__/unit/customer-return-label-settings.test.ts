@@ -23,7 +23,14 @@ function state() {
     providerConfigured: true,
     settings: null,
     warehouses: [{ id: 1, name: "Main", address }],
-    policies: [{ id: 2, name: "Retail", version: 1 }],
+    resolvedPolicy: {
+      id: 2,
+      name: "Retail",
+      version: 1,
+      returnWindowDays: 45,
+      scopeKind: "channel_context",
+    },
+    policyIssue: null,
     carriers: [
       {
         id: "se-usps",
@@ -49,7 +56,6 @@ function draft() {
   return {
     ...createReturnLabelSettingsDraft(state()),
     warehouseId: "1",
-    policyId: "2",
     contactName: "Return desk",
     enabled: true,
   };
@@ -132,7 +138,6 @@ describe("return label settings draft", () => {
         version: 8,
         enabled: true,
         warehouseId: 1,
-        policyId: 2,
         carrierId: "se-ups",
         serviceCode: "ground",
         contactName: "Return desk",
@@ -160,7 +165,6 @@ describe("return label settings draft", () => {
         version: 8,
         enabled: true,
         warehouseId: 1,
-        policyId: 2,
         selectionMode: "cheapest_eligible",
         carrierId: null,
         serviceCode: null,
@@ -198,7 +202,6 @@ describe("return label settings draft", () => {
         version: 8,
         enabled: true,
         warehouseId: 1,
-        policyId: 2,
         selectionMode: "cheapest_eligible",
         carrierId: null,
         serviceCode: null,
@@ -231,34 +234,56 @@ describe("return label settings readiness", () => {
     return value;
   }
 
-  it("explains missing policy and contact even after carrier choices are complete", () => {
+  it("keeps shipping validation independent of an unavailable return policy", () => {
     const catalog = state();
-    catalog.policies = [];
-    const value = { ...completeDraft(), policyId: "", contactName: "  " };
+    catalog.resolvedPolicy = null;
+    catalog.policyIssue = {
+      code: "RETURN_POLICY_NOT_CONFIGURED",
+      message: "No active return policy applies to this shop.",
+    };
+    const value = { ...completeDraft(), contactName: "  " };
     const result = returnLabelSettingsReadiness(value, catalog);
     expect(result.canSave).toBe(false);
     expect(result.issues).toEqual([
-      {
-        field: "policyId",
-        message:
-          "No compatible active return policy is available for this shop.",
-      },
       { field: "contactName", message: "Enter the receiving contact name." },
     ]);
+    value.contactName = "Receiving team";
+    expect(returnLabelSettingsReadiness(value, catalog)).toMatchObject({
+      canSave: true,
+      issues: [],
+    });
+  });
+
+  it("allows enabled shipping settings to save when the resolved policy is unsupported", () => {
+    const catalog = state();
+    catalog.policyIssue = {
+      code: "RETURN_POLICY_UNSUPPORTED",
+      message:
+        "This policy uses a return destination that the portal does not support.",
+    };
+    const value = completeDraft();
+    expect(returnLabelSettingsReadiness(value, catalog)).toMatchObject({
+      canSave: true,
+      issues: [],
+      parsed: { success: true, data: { enabled: true } },
+    });
   });
 
   it("clears each blocker only after the administrator makes a valid explicit choice", () => {
-    const value = { ...completeDraft(), policyId: "", contactName: "" };
+    const value = { ...completeDraft(), warehouseId: "", contactName: "" };
     expect(
       returnLabelSettingsReadiness(value, state()).issues.map(
         (issue) => issue.field,
       ),
-    ).toEqual(["policyId", "contactName"]);
+    ).toEqual(["warehouseId", "contactName"]);
     value.contactName = "Returns team";
     expect(returnLabelSettingsReadiness(value, state()).issues).toEqual([
-      { field: "policyId", message: "Choose a return policy." },
+      {
+        field: "warehouseId",
+        message: "Choose a return warehouse with a complete U.S. address.",
+      },
     ]);
-    value.policyId = "2";
+    value.warehouseId = "1";
     expect(returnLabelSettingsReadiness(value, state())).toMatchObject({
       canSave: true,
       issues: [],
@@ -271,11 +296,6 @@ describe("return label settings readiness", () => {
       field: "warehouseId",
       value: "99",
       message: "selected warehouse is unavailable",
-    },
-    {
-      field: "policyId",
-      value: "99",
-      message: "selected return policy is no longer available",
     },
     {
       field: "contactName",
@@ -386,16 +406,21 @@ describe("return label settings readiness", () => {
     });
   });
 
-  it("preserves unsaved intent across catalog refresh without selecting a newly created policy or carrier", () => {
+  it("preserves unsaved shipping choices when the resolved policy and carrier catalog change", () => {
     const value = {
       ...completeDraft(),
-      policyId: "",
       contactPhone: "555-0100",
     };
     value.carrierRules[0].maxWeightLb = "15.5";
     const original = structuredClone(value);
     const catalog = state();
-    catalog.policies = [{ id: 3, name: "New retail policy", version: 1 }];
+    catalog.resolvedPolicy = {
+      id: 3,
+      name: "New retail policy",
+      version: 2,
+      returnWindowDays: 60,
+      scopeKind: "global",
+    };
     catalog.carriers.push({
       id: "se-new",
       code: "usps",
@@ -415,9 +440,13 @@ describe("return label settings readiness", () => {
         },
       ],
     });
-    expect(returnLabelSettingsReadiness(refreshed, catalog).issues).toEqual([
-      { field: "policyId", message: "Choose a return policy." },
-    ]);
+    expect(returnLabelSettingsReadiness(refreshed, catalog)).toMatchObject({
+      canSave: true,
+      issues: [],
+    });
+    expect(
+      returnLabelSettingsReadiness(refreshed, catalog).parsed.data,
+    ).not.toHaveProperty("policyId");
     expect(value).toEqual(original);
     expect(refreshed.carrierRules[0].serviceCodes).not.toBe(
       value.carrierRules[0].serviceCodes,

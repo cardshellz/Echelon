@@ -1,5 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
+import { returnPolicyArchiveInputSchema, returnPolicyArchivePreviewSchema, returnPolicyArchiveResultSchema } from "@shared/returns/return-policy-archive.contract";
 import {
   returnApprovalAuthorities,
   returnDestinations,
@@ -116,7 +117,36 @@ export function registerReturnPolicyAdminRoutes(
       return sendError(res, error, "RETURN_POLICY_CREATE_FAILED", "Return policy version could not be created.");
     }
   });
+
+  app.get("/api/returns/admin/policies/:policyId/archive-preview", requirePermission("settings", "view"), async (req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    const parsed = archivePolicyIdSchema.safeParse(req.params.policyId);
+    if (!parsed.success) return sendValidationError(res, parsed.error);
+    try {
+      return res.json(returnPolicyArchivePreviewSchema.parse(await service.previewArchive(parsed.data)));
+    } catch (error) {
+      return sendError(res, error, "RETURN_POLICY_ARCHIVE_PREVIEW_FAILED", "The archive impact could not be verified.");
+    }
+  });
+  app.post("/api/returns/admin/policies/:policyId/archive", requirePermission("settings", "edit"), async (req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    const policyId = archivePolicyIdSchema.safeParse(req.params.policyId);
+    const parsed = returnPolicyArchiveInputSchema.safeParse(req.body);
+    if (!policyId.success) return sendValidationError(res, policyId.error);
+    if (!parsed.success) return sendValidationError(res, parsed.error);
+    const idempotencyKey = readIdempotencyKey(req);
+    if (!idempotencyKey) return res.status(400).json({ error: { code: "RETURN_POLICY_IDEMPOTENCY_REQUIRED", message: "Idempotency-Key header is required." } });
+    const actor = readAuditActor(req);
+    if (!actor) return res.status(401).json({ error: { code: "RETURN_POLICY_ACTOR_REQUIRED", message: "An authenticated audit actor is required." } });
+    try {
+      return res.json(returnPolicyArchiveResultSchema.parse(await service.archive(policyId.data, parsed.data, idempotencyKey, actor)));
+    } catch (error) {
+      return sendError(res, error, "RETURN_POLICY_ARCHIVE_FAILED", "The policy archive was not confirmed.");
+    }
+  });
 }
+
+const archivePolicyIdSchema = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().positive().safe());
 
 function readIdempotencyKey(req: Request): string | null {
   const value = req.header("Idempotency-Key")?.trim();
@@ -149,7 +179,6 @@ function sendError(res: Response, error: unknown, fallbackCode: string, fallback
   console.error(JSON.stringify({
     code: fallbackCode,
     message: fallbackMessage,
-    context: { error: error instanceof Error ? error.message : String(error) },
   }));
   return res.status(500).json({ error: { code: fallbackCode, message: fallbackMessage } });
 }

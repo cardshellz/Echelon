@@ -16,7 +16,6 @@ export interface ReturnCarrierRuleDraft {
 }
 export interface ReturnLabelSettingsDraft {
   warehouseId: string;
-  policyId: string;
   selectionMode: "fixed_service" | "cheapest_eligible";
   carrierId: string;
   serviceCode: string;
@@ -28,7 +27,6 @@ export interface ReturnLabelSettingsDraft {
 
 export type ReturnLabelSettingsField =
   | "warehouseId"
-  | "policyId"
   | "contactName"
   | "contactPhone"
   | "carrierId"
@@ -51,7 +49,6 @@ export function createReturnLabelSettingsDraft(
   ]);
   return {
     warehouseId: settings ? String(settings.warehouseId) : "",
-    policyId: settings ? String(settings.policyId) : "",
     selectionMode: settings?.selectionMode ?? "cheapest_eligible",
     carrierId: settings?.carrierId ?? "",
     serviceCode: settings?.serviceCode ?? "",
@@ -88,7 +85,6 @@ export function parseReturnLabelSettingsDraft(
     expectedVersion,
     enabled: draft.enabled,
     warehouseId: Number(draft.warehouseId),
-    policyId: Number(draft.policyId),
     selectionMode: draft.selectionMode,
     carrierId: automatic ? null : draft.carrierId,
     serviceCode: automatic ? null : draft.serviceCode,
@@ -168,18 +164,6 @@ export function returnLabelSettingsReadiness(
     add(
       "warehouseId",
       "The selected warehouse is unavailable or needs a complete U.S. address.",
-    );
-
-  if (state.policies.length === 0)
-    add(
-      "policyId",
-      "No compatible active return policy is available for this shop.",
-    );
-  else if (!draft.policyId) add("policyId", "Choose a return policy.");
-  else if (!state.policies.some((item) => item.id === Number(draft.policyId)))
-    add(
-      "policyId",
-      "The selected return policy is no longer available. Choose a current policy.",
     );
 
   const enabledRules = draft.carrierRules.filter((rule) => rule.enabled);
@@ -271,8 +255,7 @@ export function returnLabelConfigurationAvailable(
     !state.warehouses.some(
       (warehouse) =>
         warehouse.id === settings.warehouseId && warehouse.address !== null,
-    ) ||
-    !state.policies.some((policy) => policy.id === settings.policyId)
+    )
   )
     return false;
   if (settings.selectionMode === "fixed_service") {

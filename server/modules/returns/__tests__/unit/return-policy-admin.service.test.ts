@@ -53,11 +53,20 @@ class FakeTransaction implements ReturnPolicyAdminTransaction {
   };
 
   async lockCommand(): Promise<void> {}
+  async lockCatalog(): Promise<void> {}
+  async readArchiveSnapshot() {
+    const policies = [...this.policies];
+    if (this.active && !policies.some(policy => policy.id === this.active!.id)) policies.push(this.active);
+    return { policies, historicalReferences: { returnCases: 2, portalIntakes: 1 } };
+  }
   async findCommand(key: string): Promise<ReturnPolicyCommandRecord | null> { return this.commands.get(key) ?? null; }
   async getScopeReferences(): Promise<ScopeReferences> { return this.references; }
   async getActivePolicyForUpdate(): Promise<ReturnPolicy | null> { return this.active; }
   async getNextVersion(): Promise<number> { return this.active ? this.active.version + 1 : 1; }
-  async retirePolicy(policy: ReturnPolicy): Promise<void> { this.retired.push(policy); this.active = null; }
+  async retirePolicy(policy: ReturnPolicy, actor: string, now: Date): Promise<void> {
+    this.retired.push(policy); this.active = null;
+    this.policies = this.policies.map(row => row.id === policy.id ? { ...row, status: "retired", retiredBy: actor, retiredAt: now } : row);
+  }
   async insertPolicy(value: Omit<ReturnPolicy, "id" | "createdAt">): Promise<ReturnPolicy> {
     const policy = { ...value, id: 100 + this.policies.length, createdAt: NOW } as ReturnPolicy;
     this.policies.push(policy);
@@ -190,6 +199,33 @@ describe("ReturnPolicyAdminService", () => {
     expect(replay).toEqual({ policy: first.policy, replayed: true });
     await expect(service.createVersion(input({ returnWindowDays: 45 }))).rejects.toBeInstanceOf(ReturnPolicyAdminError);
     expect(store.tx.policies).toHaveLength(1);
+  });
+
+  it("archives only a reviewed active version, retains history and replays the same command", async () => {
+    const store = new FakeStore();
+    store.tx.active = policy();
+    const service = new ReturnPolicyAdminService(store, () => NOW);
+    const preview = await service.previewArchive(1);
+    expect(store.tx.retired).toEqual([]);
+    expect(preview.effects[0].after).toBeNull();
+    const input = { expectedVersion: 1, previewRevision: preview.revision };
+    const archived = await service.archive(1, input, "archive-1", "admin-1");
+    expect(archived).toMatchObject({ policy: { id: 1, version: 1, status: "retired" }, replayed: false });
+    expect(await service.archive(1, input, "archive-1", "admin-1")).toEqual({ ...archived, replayed: true });
+    expect(store.tx.retired).toHaveLength(1);
+    expect(store.tx.audits).toHaveLength(1);
+    await expect(service.archive(1, input, "archive-1", "another-admin")).rejects.toMatchObject({ code: "RETURN_POLICY_IDEMPOTENCY_CONFLICT" });
+  });
+
+  it("rejects a stale catalog preview even when the target policy version did not change", async () => {
+    const store = new FakeStore(); store.tx.active = policy();
+    const service = new ReturnPolicyAdminService(store, () => NOW);
+    const preview = await service.previewArchive(1);
+    store.tx.policies.push(policy({ id: 2, scopeKind: "global", scopeKey: "global", businessContext: null, channelId: null }));
+    await expect(service.archive(1, { expectedVersion: 1, previewRevision: preview.revision }, "archive-2", "admin-1"))
+      .rejects.toMatchObject({ code: "RETURN_POLICY_ARCHIVE_CHANGED", status: 409 });
+    expect(store.tx.retired).toEqual([]);
+    expect(store.tx.commands.size).toBe(0);
   });
 });
 

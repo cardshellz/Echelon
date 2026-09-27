@@ -3,6 +3,7 @@ import { CustomerReturnLiveService } from "../../application/customer-return-liv
 import { CustomerReturnLocalInspectionError } from "../../application/customer-return-local-inspection.ports";
 import { CustomerReturnShopifySnapshotError } from "../../application/customer-return-shopify-snapshot.ports";
 import { LIVE_NOW, addLiveOriginalBox, liveGid as gid, liveLocalFixture, liveNativeReturn, liveShop, liveShopifyFixture } from "../support/live-inspection-fixtures";
+import { labelActivePolicy } from "../support/label-fixtures";
 
 const lookup = { channelId: 36, orderReference: " # 0012-A " };
 const boxDimensions = { lengthMm: 300, widthMm: 200, heightMm: 100 };
@@ -13,8 +14,9 @@ function setup() {
   const dimensions = { read: vi.fn(async () => ({ ...boxDimensions })) };
   const reportBoxDiagnostic = vi.fn();
   const now = vi.fn(() => new Date(LIVE_NOW));
-  const service = new CustomerReturnLiveService({ local, shopify, dimensions, reportBoxDiagnostic, now });
-  return { service, local, shopify, dimensions, reportBoxDiagnostic, now, localFacts, shopifyFacts };
+  const policies = { read: vi.fn(async () => [labelActivePolicy()]) };
+  const service = new CustomerReturnLiveService({ local, shopify, dimensions, policies, reportBoxDiagnostic, now });
+  return { service, local, shopify, dimensions, policies, reportBoxDiagnostic, now, localFacts, shopifyFacts };
 }
 async function reviewInput(service: CustomerReturnLiveService) {
   const order = await service.lookup(lookup);
@@ -27,6 +29,29 @@ async function reviewInput(service: CustomerReturnLiveService) {
 }
 
 describe("private live order inspection", () => {
+  it.each(["version", "identity", "inspection"])("uses the winning window and binds same-window policy %s to review", async (change) => {
+    const s = setup();
+    s.policies.read.mockResolvedValue([labelActivePolicy({ returnWindowDays: 30 })]);
+    const initial = await s.service.lookup(lookup);
+    expect(Date.parse(initial.returnWindowEndsAt) - Date.parse(initial.purchasedAt)).toBe(30 * 86_400_000);
+    const input = await reviewInput(s.service);
+    s.policies.read.mockResolvedValue([labelActivePolicy({ returnWindowDays: 30,
+      ...(change === "version" ? { version: 2 } : change === "identity" ? { id: 2 } : { inspectionRequirement: "conditional" }) })]);
+    await expect(s.service.review(input)).rejects.toMatchObject({ code: "RETURN_LIVE_REVIEW_CHANGED" });
+  });
+  it("rejects a policy changed during provider observation", async () => {
+    const s = setup();
+    s.policies.read.mockResolvedValueOnce([labelActivePolicy()]).mockResolvedValueOnce([labelActivePolicy({ returnWindowDays: 30 })]);
+    await expect(s.service.lookup(lookup)).rejects.toMatchObject({ code: "RETURN_LIVE_REVIEW_CHANGED" });
+  });
+  it("never reads Shopify when the current winning policy is unsupported or missing", async () => {
+    const s = setup();
+    s.policies.read.mockResolvedValue([]);
+    await expect(s.service.lookup(lookup)).rejects.toMatchObject({ code: "RETURN_PORTAL_POLICY_MISSING" });
+    s.policies.read.mockResolvedValue([labelActivePolicy({ returnWindowDays: 0 })]);
+    await expect(s.service.lookup(lookup)).rejects.toMatchObject({ code: "RETURN_PORTAL_POLICY_UNSUPPORTED" });
+    expect(s.shopify.read).not.toHaveBeenCalled();
+  });
   it("offers exact delivered quantities across split shipments and same-SKU purchased lines", async () => {
     const { service, local, shopify } = setup();
     const order = await service.lookup(lookup);

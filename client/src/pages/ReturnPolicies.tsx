@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearch } from "wouter";
-import { CustomerReturnPolicySetupDialog } from "@/components/returns/CustomerReturnPolicySetupDialog";
-import { resolvePortalPolicySetupChannel, type PortalPolicyChannel } from "@/lib/customer-return-policy-setup";
+import { ReturnPolicyArchiveDialog } from "@/components/returns/ReturnPolicyArchiveDialog";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { FileText, Plus, RefreshCw, Search, ShieldCheck, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -221,10 +219,7 @@ function scopeSummary(policy: ReturnPolicy, overview: Overview): string {
 
 export default function ReturnPolicies() {
   const { toast } = useToast();
-  const search = useSearch();
-  const handledSetupSearch = useRef<string | null>(null);
-  const [portalSetup, setPortalSetup] = useState<PortalPolicyChannel | null>(null);
-  const [setupError, setSetupError] = useState<string | null>(null);
+  const [archivePolicyId, setArchivePolicyId] = useState<number | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [policyView, setPolicyView] = useState<ReturnPolicyVersionView>("active");
   const [scopeLocked, setScopeLocked] = useState(false);
@@ -233,18 +228,6 @@ export default function ReturnPolicies() {
 
   const overviewQuery = useQuery<Overview>({ queryKey: ["/api/returns/admin/policies"] });
   const overview = overviewQuery.data;
-
-  useEffect(() => {
-    if (!overview || handledSetupSearch.current === search) return;
-    handledSetupSearch.current = search;
-    setSetupError(null);
-    try {
-      setPortalSetup(resolvePortalPolicySetupChannel(search, overview.channels, overview.dropshipOmsChannelId));
-    } catch (error) {
-      setPortalSetup(null);
-      setSetupError(error instanceof Error ? error.message : "The portal policy setup link is invalid.");
-    }
-  }, [search, overview]);
 
   const createMutation = useMutation({
     mutationFn: async ({ input, idempotencyKey }: { input: Draft; idempotencyKey: string }) => readJson<{ policy: ReturnPolicy }>(await fetch("/api/returns/admin/policies/versions", {
@@ -256,7 +239,6 @@ export default function ReturnPolicies() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["/api/returns/admin/policies"] });
       setDialogOpen(false);
-      setPortalSetup(null);
       toast({ title: "Return policy version created", description: "The previous version for this target was retired atomically." });
     },
     onError: (error: Error) => toast({ variant: "destructive", title: "Policy save not confirmed", description: error.message }),
@@ -330,8 +312,6 @@ export default function ReturnPolicies() {
         </div>
       </div>
 
-      {setupError && <p role="alert" className="rounded-md border border-destructive p-3 text-sm text-destructive">{setupError}</p>}
-
       <Tabs defaultValue="policies">
         <TabsList><TabsTrigger value="policies">Policies</TabsTrigger><TabsTrigger value="preview">Test a policy</TabsTrigger></TabsList>
         <TabsContent value="policies" className="mt-4">
@@ -368,7 +348,10 @@ export default function ReturnPolicies() {
                         <TableCell className="text-sm"><div>{policy.returnWindowDays} days / {humanize(policy.returnDestination)}</div><div className="text-muted-foreground">Approval: {humanize(policy.approvalAuthority)} / Label: {humanize(policy.labelProvider)}</div></TableCell>
                         <TableCell className="text-right">
                           {policyView === "active" ? (
-                            <Button variant="outline" size="sm" disabled={!appliesTo} title={appliesTo ? undefined : "Legacy policies must be replaced with a new simplified policy."} onClick={() => openVersion(policy)}><FileText className="mr-2 h-4 w-4" />New version</Button>
+                            <div className="flex flex-wrap justify-end gap-2">
+                              <Button variant="outline" size="sm" disabled={!appliesTo} title={appliesTo ? undefined : "Legacy policies must be replaced with a new simplified policy."} onClick={() => openVersion(policy)}><FileText className="mr-2 h-4 w-4" />New version</Button>
+                              <Button variant="outline" size="sm" onClick={() => setArchivePolicyId(policy.id)} aria-label={`Archive ${policy.name}, version ${policy.version}`}>Archive</Button>
+                            </div>
                           ) : (
                             <Badge variant="secondary">Retired</Badge>
                           )}
@@ -388,13 +371,21 @@ export default function ReturnPolicies() {
       </Tabs>
 
       <PolicyDialog open={dialogOpen} onOpenChange={setDialogOpen} overview={overview} draft={draft} onDraft={setDraft} scopeLocked={scopeLocked} saving={createMutation.isPending} onSave={() => createMutation.mutate({ input: draft, idempotencyKey: crypto.randomUUID() })} />
-      {portalSetup && <CustomerReturnPolicySetupDialog
-        key={portalSetup.id}
-        channel={portalSetup}
-        previousPolicy={overview.policies.find((policy) => policy.status === "active" && policy.scopeKind === "channel_context" && policy.businessContext === "retail" && policy.channelId === portalSetup.id && policy.vendorId === null && policy.storeConnectionId === null) ?? null}
-        saving={createMutation.isPending}
-        onClose={() => setPortalSetup(null)}
-        onSave={(input, idempotencyKey) => createMutation.mutateAsync({ input, idempotencyKey })}
+      {archivePolicyId !== null && <ReturnPolicyArchiveDialog
+        key={archivePolicyId}
+        policyId={archivePolicyId}
+        references={{
+          channels: overview.channels,
+          vendors: overview.referencedVendors.map((vendor) => ({ id: vendor.id, name: vendorLabel(vendor) })),
+          stores: overview.referencedStores.map((store) => ({ id: store.id, name: storeLabel(store) })),
+        }}
+        onClose={() => setArchivePolicyId(null)}
+        onArchived={() => {
+          setArchivePolicyId(null);
+          resolutionMutation.reset();
+          void queryClient.invalidateQueries({ queryKey: ["/api/returns/admin/policies"] });
+          toast({ title: "Return policy archived", description: "Historical returns keep their original policy records." });
+        }}
       />}
     </div>
   );

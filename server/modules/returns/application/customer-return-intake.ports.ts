@@ -18,6 +18,7 @@ export interface PreparedCustomerReturnIntake {
   eligibilityRevision: string;
   actor: string;
   observedAt: string;
+  returnWindowEndsAt: string;
   settingsVersion: number;
   submissionLeaseToken: string;
   policySnapshot: ReturnAuthorizationSnapshot;

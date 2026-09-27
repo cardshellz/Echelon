@@ -5,11 +5,14 @@ import {
   customerReturnLiveReviewSchema, customerReturnLiveStateSchema,
   type CustomerReturnLiveLookupInput, type CustomerReturnLiveOrder, type CustomerReturnLiveReview, type CustomerReturnLiveState,
 } from "../../../../shared/returns/customer-return-live.contract";
-import { DEFAULT_CUSTOMER_RETURN_WINDOW_DAYS, evaluateCustomerReturnEligibility,
+import { evaluateCustomerReturnEligibility,
   type CustomerReturnEligibilityOutput, type CustomerReturnEligibilityInput } from "../domain/customer-return-eligibility";
 import { CustomerReturnOrderReferenceError, normalizeCustomerReturnOrderReference } from "../domain/customer-return-order-reference";
 import { CustomerReturnBoxPlanError, validateCustomerReturnBoxPlan } from "./customer-return-box-plan";
 import { CustomerReturnLiveError } from "./customer-return-live-error";
+import { resolveCustomerReturnPortalPolicy, type CustomerReturnPortalPolicyReader } from "./customer-return-policy";
+import { snapshotReturnPolicy } from "../domain/return-case";
+import type { PreparedCustomerReturnIntake } from "./customer-return-intake.ports";
 import { readCustomerReturnLiveClaims } from "./customer-return-live-claims";
 import { projectCustomerReturnLiveDelivery } from "./customer-return-live-delivery";
 import { customerReturnProviderGid as gid } from "./customer-return-live-identity";
@@ -21,11 +24,11 @@ import { CustomerReturnShopifySnapshotError, customerReturnShopifySnapshotSchema
   type CustomerReturnShopifySnapshotReader, type CustomerReturnShopifySnapshot } from "./customer-return-shopify-snapshot.ports";
 
 const MAX_OBSERVATION_AGE_MS = 120_000;
-const POLICY_VERSION = 1;
 export interface CustomerReturnLiveDependencies {
   local: CustomerReturnLocalInspectionReader;
   shopify: CustomerReturnShopifySnapshotReader;
   dimensions: CustomerReturnPackageDimensionsReader;
+  policies: CustomerReturnPortalPolicyReader;
   reportBoxDiagnostic?: ReturnBoxReporter;
   now: () => Date;
 }
@@ -37,6 +40,7 @@ export interface CustomerReturnIntakeInspection {
   provider: CustomerReturnShopifySnapshot;
   facts: CustomerReturnEligibilityInput;
   eligibility: CustomerReturnEligibilityOutput;
+  operationalPolicy: PreparedCustomerReturnIntake["operationalPolicy"];
 }
 
 /** Administrator inspection only. The dependencies deliberately contain no write port. */
@@ -82,6 +86,7 @@ export class CustomerReturnLiveService {
     const reference = normalizeCustomerReturnOrderReference(input.orderReference);
     const shop = (await this.readShops()).find(candidate => candidate.channelId === input.channelId);
     if (!shop) throw new CustomerReturnLiveError("RETURN_LIVE_SHOP_UNAVAILABLE", "Select a configured returns store.", 409);
+    const firstPolicy = await this.readPolicy(shop.channelId);
     const lookup = { channelId: shop.channelId, connectionId: shop.connectionId, orderReference: input.orderReference };
     const firstRaw = await this.dependencies.local.read(lookup);
     if (firstRaw === null) throw new CustomerReturnLiveError("RETURN_LIVE_ORDER_NOT_FOUND", "We couldn't find that order in the selected store.", 404);
@@ -99,6 +104,8 @@ export class CustomerReturnLiveService {
     if (finalRaw === null) throw changed();
     const local = customerReturnLocalInspectionSnapshotSchema.parse(finalRaw);
     if (canonical(first) !== canonical(local)) throw changed();
+    const operationalPolicy = await this.readPolicy(shop.channelId);
+    if (canonical(firstPolicy) !== canonical(operationalPolicy)) throw changed();
     const now = this.dependencies.now();
     if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw unavailable();
     for (const observedAt of [first.observedAt, local.observedAt, provider.observedAt]) {
@@ -108,7 +115,8 @@ export class CustomerReturnLiveService {
     verifyIdentity(local, provider, reference);
     const claims = readCustomerReturnLiveClaims(local, provider);
     const delivery = projectCustomerReturnLiveDelivery({ shopify: provider, local });
-    const policy = { channelId: shop.channelId, version: POLICY_VERSION, returnWindowDays: DEFAULT_CUSTOMER_RETURN_WINDOW_DAYS };
+    const policy = { channelId: shop.channelId, version: operationalPolicy.version,
+      returnWindowDays: operationalPolicy.snapshot.returnWindowDays };
     const facts: CustomerReturnEligibilityInput = {
       now: now.toISOString(), policy,
       order: { orderId: provider.order.id, channelId: shop.channelId, provider: "shopify",
@@ -139,7 +147,7 @@ export class CustomerReturnLiveService {
         eligibleQuantity: cancelled || verificationNeeded ? 0 : line.eligibleQuantity,
         message: verificationNeeded ? "These quantities need verification before a return can be started."
           : blockedDelivery ? "Some shipments need delivery verification. Only confirmed quantities are available to return."
-          : liveLineMessage(line),
+          : liveLineMessage(line, policy.returnWindowDays),
       };
     });
     const message = cancelled ? "This order has been canceled. Contact us for help with a return."
@@ -147,11 +155,18 @@ export class CustomerReturnLiveService {
     // Optional provider measurements do not invalidate a custom box when a
     // dimension service recovers. Claimed original boxes are checked against
     // freshly read IDs and exact dimensions in validateCustomerReturnBoxPlan.
-    const sourceRevision = createHash("sha256").update(canonical({ policy, local, provider, lines, message })).digest("hex");
+    const sourceRevision = createHash("sha256").update(canonical({ policy, operationalPolicy, local, provider, lines, message })).digest("hex");
     const order = customerReturnLiveOrderSchema.parse({ mode: "admin_live", sourceRevision, orderReference: reference,
       purchasedAt: provider.order.createdAt, evaluatedAt: eligibility.evaluatedAt,
       returnWindowEndsAt: eligibility.returnWindowEndsAt, message, lines, boxOptions });
-    return { order, local, provider, facts, eligibility };
+    return { order, local, provider, facts, eligibility, operationalPolicy };
+  }
+
+  private async readPolicy(channelId: number) {
+    const resolved = resolveCustomerReturnPortalPolicy(await this.dependencies.policies.read(channelId), channelId);
+    if (resolved.policyIssue || !resolved.policy) throw new CustomerReturnLiveError(
+      resolved.policyIssue?.code ?? "RETURN_PORTAL_POLICY_MISSING", resolved.policyIssue?.message ?? "No return policy applies to this shop.", 409);
+    return { id: resolved.policy.id, version: resolved.policy.version, snapshot: snapshotReturnPolicy(resolved.policy) };
   }
 
   private async boundary<T>(work: () => Promise<T>): Promise<T> {
@@ -195,8 +210,8 @@ function verifyIdentity(local: CustomerReturnLocalInspectionSnapshot, provider: 
   }
 }
 
-function liveLineMessage(line: CustomerReturnEligibilityOutput["lines"][number]): string | null {
-  if (line.reasons.includes("return_window_elapsed")) return "The 365-day return window has ended.";
+function liveLineMessage(line: CustomerReturnEligibilityOutput["lines"][number], windowDays: number): string | null {
+  if (line.reasons.includes("return_window_elapsed")) return `The ${windowDays}-day return window has ended.`;
   if (line.reasons.includes("non_physical_item")) return "This item does not require a return shipment.";
   if (line.reasons.some(reason => ["delivery_evidence_conflict", "claim_allocation_unknown", "claim_on_inactive_allocation"].includes(reason))) {
     return "These quantities need verification before a return can be started.";
