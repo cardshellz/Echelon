@@ -106,6 +106,12 @@ const publicationHoldMigrationSql = readFileSync(
 const variantHoldMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0684_inventory_publication_target_variant_holds.sql"), "utf8",
 );
+// Current target inserts include membership_mode from the shared ORM schema.
+// Apply its real migration so this fixture exercises the production defaults
+// and membership guards rather than an older shape of the targets table.
+const publicationMembershipMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0708_inventory_publication_membership.sql"), "utf8",
+);
 const FIXED_TIME = "2026-08-26T12:00:00.000Z";
 
 function sslConfig(connectionString: string) {
@@ -358,6 +364,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(publicationHoldMigrationSql);
       await migrationClient.query(variantHoldMigrationSql);
       await migrationClient.query(readFileSync(resolve(process.cwd(), "migrations/0687_inventory_channel_definition_completion.sql"), "utf8"));
+      await migrationClient.query(publicationMembershipMigrationSql);
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");
@@ -3716,6 +3723,10 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       state: "disabled",
       alreadyApplied: true,
     });
+    expect((await pool.query(
+      "SELECT membership_mode FROM inventory.inventory_publication_targets WHERE id=$1",
+      [created.publicationTargetId],
+    )).rows).toEqual([{ membership_mode: "whole_product" }]);
 
     const previewed = await store.setPublicationTargetPreviewState({
       publicationTargetId: created.publicationTargetId,
