@@ -3,7 +3,8 @@ import type { Pool, PoolClient } from "pg";
 import { openingSourceSchema, type OpeningSource } from "@shared/types/inventory-cutover-opening";
 import { historyRetirementResultSchema, retireHistoryRequestSchema } from "@shared/types/inventory-cutover-history";
 import type { CutoverHistoryStore, RetireHistoryCommand } from "../application/inventory-cutover-history.service";
-import { activeCutoverHistory, assertHistoryRetirementApproved, CutoverHistoryError, historySourceHashes, reviewHistoricalWork } from "../domain/inventory-cutover-history-retirement";
+import { assertHistoryRetirementApproved, CutoverHistoryError, historySourceHashes, reviewHistoricalWork } from "../domain/inventory-cutover-history-retirement";
+import { selectActiveCutoverWork } from "../domain/inventory-cutover-active-work";
 import { planCutoverReconstruction, reconstructionEvidenceHash, reconstructionHash } from "../domain/inventory-cutover-reconstruction";
 import { PostgresInventoryCutoverReconstructionRepository } from "./inventory-cutover-reconstruction.repository";
 import { readCutoverHistoryFacts } from "./inventory-cutover-history.reader";
@@ -94,7 +95,10 @@ export class PostgresInventoryCutoverHistoryRepository implements CutoverHistory
       runtimeAuthority: authority.runtimeAuthority, authorityRevision: authority.authorityRevision,
       configurationRunId: authority.configurationRunId, capturedAt: authority.capturedAt.toISOString(),
       evidenceHash: reconstructionEvidenceHash(evidence), evidence, labels: [], latestVerification: (await loadLatestCutoverOpening(client))?.saved ?? null });
-    const blockers = planCutoverReconstruction(activeCutoverHistory(evidence)).blockers;
+    // Review and admitted recheck use the SAME outstanding-work scope as the
+    // verified opening. Keep the complete original source for hashing, owner
+    // validation and immutable audit; this projection does not adopt inventory.
+    const blockers = planCutoverReconstruction({ ...evidence, ...selectActiveCutoverWork(evidence) }).blockers;
     if (admitted) await lockHistoryFacts(client,source,blockers);
     const facts = await readCutoverHistoryFacts(client,source,blockers);
     return { source, facts };

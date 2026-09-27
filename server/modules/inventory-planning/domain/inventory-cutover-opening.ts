@@ -5,7 +5,7 @@ import { cutoverReconstructionEvidenceSchema, type CutoverReconstructionEvidence
   type CutoverReconstructionAllocation, type CutoverReconstructionBlocker } from "@shared/types/inventory-cutover-reconstruction";
 import { planCutoverReconstruction, reconstructionHash } from "./inventory-cutover-reconstruction";
 import { planOpeningReservationBasis } from "./inventory-opening-reservation-basis";
-import { activeCutoverHistory } from "./inventory-cutover-history-retirement";
+import { selectActiveCutoverWork } from "./inventory-cutover-active-work";
 
 /** Order-independent verification identity. Never mutate an uploaded observation. */
 export function normalizeOpeningVerification(input: OpeningVerification): OpeningVerification {
@@ -216,9 +216,9 @@ export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerif
     block("OPENING_LOT_OWNERSHIP_INCOMPLETE", `lot:${lot.id}`, "Verified customer and independent-build ownership must exhaust every recorded reserved/picked lot unit without excess.");
   }
   if (blockers.length > 0) return finish(strict);
-  // Only a durable, exact retirement audit can exclude old processing work.
-  // The original census/hash and every physical package/cost remain above.
-  const activeHistory = activeCutoverHistory(evidence);
+  // The shared scope excludes explicitly closed lifecycle work and validates
+  // exact retirement audits before removing pending history. The original
+  // census/hash and every physical package/cost remain above.
   const projected: CutoverReconstructionEvidence = { ...evidence,
     // V1 verifies raw counters; V2 already contains only observed physical holds.
     levels: verification.contractVersion === "inventory_cutover_opening_v1"
@@ -234,13 +234,7 @@ export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerif
     // opening projection contains remaining quantities and must not recheck them
     // as if they were the original commercial authorization.
     acceptedOmsDemand: [],
-    // Only records with explicit closed/ignored lifecycle are historical here.
-    // Pending/review/failed work and live physical packages still block normally.
-    sourceItems: activeHistory.sourceItems.filter(source => source.shipmentStatus !== "shipped"),
-    physicalItems: evidence.physicalItems.filter(item => item.packageStatus !== "shipped"),
-    shipmentReviewEvidence: activeHistory.shipmentReviewEvidence.filter(review => !(
-      ((review.kind === "channel_fulfillment_acknowledgment" || review.kind === "channel_fulfillment_receipt") && review.status === "ignored")
-      || (review.kind === "outbound_shipment_review" && review.status === "shipped"))),
+    ...selectActiveCutoverWork(evidence),
   };
   // A fully fulfilled line has no projected claim owner. Existing package
   // checks are owner-dependent, so explicitly retain unfinished work on these
