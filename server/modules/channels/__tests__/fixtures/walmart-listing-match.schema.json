@@ -1,0 +1,444 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "MPItemFeedHeader": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "businessUnit": {
+          "type": "string",
+          "enum": [
+            "SAMSCLUB",
+            "WALMART_CA",
+            "WALMART_US",
+            "ASDA_GM"
+          ]
+        },
+        "locale": {
+          "type": "string",
+          "enum": [
+            "en"
+          ]
+        },
+        "version": {
+          "type": "string",
+          "enum": [
+            "5.0.20260607-22_38_54-api"
+          ]
+        }
+      },
+      "required": [
+        "businessUnit",
+        "locale",
+        "version"
+      ]
+    },
+    "MPItem": {
+      "minItems": 1,
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "array",
+      "items": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "Item": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "allOf": [
+              {
+                "if": {
+                  "anyOf": [
+                    {
+                      "properties": {
+                        "condition": {
+                          "type": "string",
+                          "enum": [
+                            "New with defects",
+                            "Pre-Owned: Fair",
+                            "Pre-Owned: Good",
+                            "Pre-Owned: Like New",
+                            "Remanufactured"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "condition"
+                      ]
+                    }
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "mainImageUrl"
+                  ]
+                }
+              },
+              {
+                "if": {
+                  "anyOf": [
+                    {
+                      "properties": {
+                        "condition": {
+                          "type": "string",
+                          "enum": [
+                            "Restored: Fair",
+                            "Restored: Good",
+                            "Restored: Like New",
+                            "Restored: Premium"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "condition"
+                      ]
+                    }
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "restoredProductIdentifier"
+                  ]
+                }
+              }
+            ],
+            "properties": {
+              "productIdentifiers": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": {
+                  "productId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 14
+                  },
+                  "productIdType": {
+                    "type": "string",
+                    "enum": [
+                      "EAN",
+                      "GTIN",
+                      "ISBN",
+                      "ISSN",
+                      "UPC"
+                    ]
+                  }
+                },
+                "required": [
+                  "productId",
+                  "productIdType"
+                ],
+                "additionalProperties": false
+              },
+              "productName": {
+                "type": "string",
+                "minLength": 10,
+                "maxLength": 199
+              },
+              "sku": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 50
+              },
+              "condition": {
+                "type": "string",
+                "enum": [
+                  "New",
+                  "Open Box",
+                  "New with defects",
+                  "New without box",
+                  "New without tags",
+                  "Pre-Owned: Fair",
+                  "Pre-Owned: Good",
+                  "Pre-Owned: Like New",
+                  "Remanufactured",
+                  "Restored: Fair",
+                  "Restored: Good",
+                  "Restored: Like New",
+                  "Restored: Premium"
+                ],
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "mainImageUrl": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2500,
+                "format": "uri"
+              },
+              "restoredProductIdentifier": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": {
+                  "restoredProductIdType": {
+                    "type": "string",
+                    "enum": [
+                      "GTIN",
+                      "UPC"
+                    ]
+                  },
+                  "restoredProductId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 14
+                  }
+                },
+                "required": [
+                  "restoredProductIdType",
+                  "restoredProductId"
+                ],
+                "additionalProperties": false
+              },
+              "ShippingWeight": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 99999999999999,
+                "multipleOf": 0.001
+              },
+              "price": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 99999999999999,
+                "multipleOf": 0.01
+              },
+              "inventory": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "array",
+                "items": {
+                  "$schema": "http://json-schema.org/draft-07/schema#",
+                  "type": "object",
+                  "properties": {
+                    "quantity": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 99999999999999
+                    },
+                    "fulfillmentCenterID": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 100
+                    }
+                  },
+                  "required": [
+                    "quantity",
+                    "fulfillmentCenterID"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 1
+              },
+              "productSecondaryImageURL": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2500,
+                  "format": "uri"
+                },
+                "minItems": 1
+              },
+              "externalProductIdentifier": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "array",
+                "items": {
+                  "$schema": "http://json-schema.org/draft-07/schema#",
+                  "type": "object",
+                  "properties": {
+                    "externalProductIdType": {
+                      "type": "string",
+                      "enum": [
+                        "ASIN"
+                      ]
+                    },
+                    "externalProductId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 10
+                    }
+                  },
+                  "required": [
+                    "externalProductIdType",
+                    "externalProductId"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 1
+              },
+              "stateRestrictions": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "array",
+                "items": {
+                  "$schema": "http://json-schema.org/draft-07/schema#",
+                  "type": "object",
+                  "properties": {
+                    "stateRestrictionsText": {
+                      "type": "string",
+                      "enum": [
+                        "Commercial",
+                        "Illegal for Sale",
+                        "None"
+                      ]
+                    },
+                    "zipCodes": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 100000
+                    },
+                    "states": {
+                      "type": "string",
+                      "enum": [
+                        "AK - Alaska",
+                        "AL - Alabama",
+                        "Alabama",
+                        "Alaska",
+                        "American Samoa",
+                        "AR - Arkansas",
+                        "Arizona",
+                        "Arkansas",
+                        "AS - American Samoa",
+                        "AZ - Arizona",
+                        "CA - California",
+                        "California",
+                        "CO - Colorado",
+                        "Colorado",
+                        "Commonwealth of the Northern Mariana Islands",
+                        "Connecticut",
+                        "CT - Connecticut",
+                        "DC - District of Columbia",
+                        "DE - Delaware",
+                        "Delaware",
+                        "District of Columbia",
+                        "Federated States of Micronesia",
+                        "FL - Florida",
+                        "Florida",
+                        "FM - Federated States of Micronesia",
+                        "GA - Georgia",
+                        "Georgia",
+                        "GU - Guam",
+                        "Guam",
+                        "Hawaii",
+                        "HI - Hawaii",
+                        "IA - Iowa",
+                        "ID - Idaho",
+                        "Idaho",
+                        "IL - Illinois",
+                        "Illinois",
+                        "IN - Indiana",
+                        "Indiana",
+                        "Iowa",
+                        "Kansas",
+                        "Kentucky",
+                        "KS - Kansas",
+                        "KY - Kentucky",
+                        "LA - Louisiana",
+                        "Louisiana",
+                        "MA - Massachusetts",
+                        "Maine",
+                        "Marshall Islands",
+                        "Maryland",
+                        "Massachusetts",
+                        "MD - Maryland",
+                        "ME - Maine",
+                        "MH - Marshall Islands",
+                        "MI - Michigan",
+                        "Michigan",
+                        "Minnesota",
+                        "Mississippi",
+                        "Missouri",
+                        "MN - Minnesota",
+                        "MO - Missouri",
+                        "Montana",
+                        "MP - Commonwealth of the Northern Mariana Islands",
+                        "MS - Mississippi",
+                        "MT - Montana",
+                        "NC - North Carolina",
+                        "ND - North Dakota",
+                        "NE - Nebraska",
+                        "Nebraska",
+                        "Nevada",
+                        "New Hampshire",
+                        "New Jersey",
+                        "New Mexico",
+                        "New York",
+                        "NH - New Hampshire",
+                        "NJ - New Jersey",
+                        "NM - New Mexico",
+                        "North Carolina",
+                        "North Dakota",
+                        "NV - Nevada",
+                        "NY - New York",
+                        "OH - Ohio",
+                        "Ohio",
+                        "OK - Oklahoma",
+                        "Oklahoma",
+                        "OR - Oregon",
+                        "Oregon",
+                        "PA - Pennsylvania",
+                        "Palau",
+                        "Pennsylvania",
+                        "PR - Puerto Rico",
+                        "Puerto Rico",
+                        "PW - Palau",
+                        "Rhode Island",
+                        "RI - Rhode Island",
+                        "SC - South Carolina",
+                        "SD - South Dakota",
+                        "South Carolina",
+                        "South Dakota",
+                        "Tennessee",
+                        "Texas",
+                        "TN - Tennessee",
+                        "TX - Texas",
+                        "U.S. Minor Outlying Islands",
+                        "U.S. Virgin Islands",
+                        "UM - U.S. Minor Outlying Islands",
+                        "UT - Utah",
+                        "Utah",
+                        "VA - Virginia",
+                        "Vermont",
+                        "VI - U.S. Virgin Islands",
+                        "Virginia",
+                        "VT - Vermont",
+                        "WA - Washington",
+                        "Washington",
+                        "West Virginia",
+                        "WI - Wisconsin",
+                        "Wisconsin",
+                        "WV - West Virginia",
+                        "WY - Wyoming",
+                        "Wyoming"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "stateRestrictionsText"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "productIdentifiers",
+              "sku",
+              "condition",
+              "ShippingWeight",
+              "price"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "Item"
+        ]
+      }
+    }
+  },
+  "required": [
+    "MPItemFeedHeader",
+    "MPItem"
+  ]
+}

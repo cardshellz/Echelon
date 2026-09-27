@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { WalmartApiError, WalmartClient, type WalmartCredentials } from "../../adapters/walmart/walmart-client";
+import { QuantityProviderEvidenceCollector } from "../../../inventory-planning/application/quantity-provider-request-evidence";
 
 const credentials: WalmartCredentials = {
   clientId: "test-client", clientSecret: "test-secret", environment: "production", market: "us",
@@ -82,6 +83,55 @@ describe("WalmartClient", () => {
     await expect(client.request("GET", "/v3/orders")).resolves.toEqual({ success: true });
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(fetchMock.mock.calls[3][1].headers["WM_SEC.ACCESS_TOKEN"]).toBe("new");
+  });
+
+  it("preserves the operation correlation ID across an authentication renewal", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(token()).mockResolvedValueOnce(json({}, 401))
+      .mockResolvedValueOnce(token()).mockResolvedValueOnce(json({ items: [] }));
+    const operationRequestId = "01900000-0000-4000-8000-000000000002";
+    await setup(fetchMock).client.request("GET", "/v3/items", undefined, { correlationId: operationRequestId });
+    expect(fetchMock.mock.calls[1][1].headers["WM_QOS.CORRELATION_ID"]).toBe(operationRequestId);
+    expect(fetchMock.mock.calls[3][1].headers["WM_QOS.CORRELATION_ID"]).toBe(operationRequestId);
+  });
+
+  it("returns only bounded, sanitized rate metadata for scheduler-owned backoff", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(token()).mockResolvedValueOnce(new Response(JSON.stringify({ feedId: "f@US" }), {
+      status: 200, headers: { "Retry-After": "120", "x-current-token-count": "4", "x-next-replenishment-time": "2026-09-21T12:05:00Z", "set-cookie": "private" },
+    }));
+    const result = await setup(fetchMock).client.requestWithMetadata("GET", "/v3/feeds");
+    expect(result.metadata).toEqual({ correlationId: requestId, status: 200, retryAfterMs: 120_000,
+      remainingTokens: 4, nextReplenishmentAt: "2026-09-21T12:05:00.000Z" });
+    expect(JSON.stringify(result)).not.toContain("private");
+  });
+
+  it.each([429, 503])("captures a single physical feed HTTP %i outcome without replaying it", async status => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(token()).mockResolvedValueOnce(new Response(JSON.stringify({ secret: "test-secret" }), { status, headers: { "Retry-After": "120" } }));
+    const store = { start: vi.fn().mockResolvedValue("request-1"), finish: vi.fn().mockResolvedValue(undefined) };
+    const collector = new QuantityProviderEvidenceCollector(store, () => new Date("2026-09-21T12:00:00Z"));
+    await expect(collector.run(() => setup(fetchMock).client.request("POST", "/v3/feeds?feedType=MP_ITEM", { MPItem: [] }))).rejects.toMatchObject({ status });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(store.start).toHaveBeenCalledTimes(1);
+    expect(store.finish.mock.calls[0][1]).toMatchObject({ outcome: status === 429 ? "rejected" : "uncertain", httpStatus: status,
+      providerRequestId: requestId, responseHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(JSON.stringify(store.finish.mock.calls)).not.toContain("test-secret");
+  });
+
+  it("records an ambiguous feed timeout and leaves reconciliation to the owner", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(token()).mockRejectedValueOnce(new Error("timeout after acceptance"));
+    const store = { start: vi.fn().mockResolvedValue("request-1"), finish: vi.fn().mockResolvedValue(undefined) };
+    const collector = new QuantityProviderEvidenceCollector(store, () => new Date("2026-09-21T12:00:00Z"));
+    await expect(collector.run(() => setup(fetchMock).client.request("POST", "/v3/feeds?feedType=MP_ITEM", { MPItem: [] }))).rejects.toMatchObject({ code: "WALMART_NETWORK_ERROR" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(store.finish.mock.calls[0][1]).toMatchObject({ outcome: "uncertain", httpStatus: null, responseHash: null });
+  });
+
+  it("does not record a contradictory feed acknowledgement as completed", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(token()).mockResolvedValueOnce(json({feedId: "f@US", errors: [{code: "FAILURE"}]}));
+    const store = {start: vi.fn().mockResolvedValue("request-1"), finish: vi.fn().mockResolvedValue(undefined)};
+    const collector = new QuantityProviderEvidenceCollector(store, () => new Date("2026-09-21T12:00:00Z"));
+    const response = await collector.run(() => setup(fetchMock).client.requestWithMetadata("POST", "/v3/feeds?feedType=MP_ITEM", {MPItem: []}));
+    expect(response.metadata.quantityOutcome).toBe("uncertain");
+    expect(store.finish.mock.calls[0][1]).toMatchObject({outcome: "uncertain", httpStatus: 200});
   });
 
   it("does not loop indefinitely on unauthorized responses", async () => {

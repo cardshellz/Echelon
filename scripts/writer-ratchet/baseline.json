@@ -73,6 +73,7 @@
     "modules/channels"
   ],
   "channels.channel_pricing_rules": [
+    "modules/channels",
     "server/routes/ebay/ebay-pricing.routes.ts"
   ],
   "channels.channel_product_allocation": [
@@ -633,6 +634,21 @@
   "inventory.promise_safety_policy_versions": [
     "modules/inventory-planning"
   ],
+  "inventory.publication_listing_setup_identities": [
+    "modules/inventory-planning"
+  ],
+  "inventory.publication_listing_setup_scopes": [
+    "modules/inventory-planning"
+  ],
+  "inventory.publication_membership_applications": [
+    "modules/inventory-planning"
+  ],
+  "inventory.publication_membership_heads": [
+    "modules/inventory-planning"
+  ],
+  "inventory.publication_membership_versions": [
+    "modules/inventory-planning"
+  ],
   "inventory.publication_source_binding_heads": [
     "modules/inventory-planning"
   ],
@@ -721,6 +737,21 @@
     "modules/inventory",
     "modules/orders",
     "modules/procurement"
+  ],
+  "marketplace.channel_listing_drafts": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.channel_listing_item_claims": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.channel_listing_operations": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.channel_listing_publication_events": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.channel_listing_reviews": [
+    "modules/marketplace-listings"
   ],
   "marketplace.channel_listing_scopes": [
     "modules/marketplace-listings"

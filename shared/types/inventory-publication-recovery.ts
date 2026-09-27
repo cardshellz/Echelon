@@ -24,9 +24,9 @@ export const pendingQuantityPublicationRecoverySchema = z.object({
   basis: z.literal("recorded_attempt_history"), providerWriteAttempted: z.literal(false),
   pendingCatchupCount: z.number().int().nonnegative().safe(),
   unresolvedAttempts: z.array(z.object({
-    attemptId: bigintId, owner: z.enum(["legacy", "outbox"]), state: z.enum(["running", "uncertain"]),
+    attemptId: bigintId, owner: z.enum(["legacy", "outbox", "listing_setup_zero"]), state: z.enum(["running", "uncertain"]),
     outboxId: bigintId.nullable(), destinationKind: z.enum(["channel_connection", "dropship_store_connection"]),
-    connectionId: z.number().int().positive().max(2147483647), providerKey: z.enum(["shopify", "ebay"]),
+    connectionId: z.number().int().positive().max(2147483647), providerKey: z.enum(["shopify", "ebay", "walmart"]),
     providerScopeType: z.enum(["account", "location"]), externalScopeId: text(240), externalInventoryItemId: text(240),
   }).strict()).max(1000),
 }).strict().superRefine((value, ctx) => {
