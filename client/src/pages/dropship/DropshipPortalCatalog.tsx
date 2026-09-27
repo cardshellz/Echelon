@@ -39,6 +39,7 @@ import {
   createDropshipIdempotencyKey,
   fetchJson,
   formatStatus,
+  isStaleListingPreviewError,
   listingPreviewPushableCount,
   listLaunchReadyStoreConnections,
   postJson,
@@ -421,7 +422,7 @@ export default function DropshipPortalCatalog() {
       await task();
       return true;
     } catch (caught) {
-      if (queryErrorCode(caught) === "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT") {
+      if (isStaleListingPreviewError(caught)) {
         invalidateListingPreview(true);
       }
       setError(caught instanceof Error ? caught.message : "Listing request failed.");
