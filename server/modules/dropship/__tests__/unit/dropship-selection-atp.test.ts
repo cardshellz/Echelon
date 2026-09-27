@@ -284,6 +284,37 @@ describe("DropshipSelectionAtpService", () => {
     ]);
   });
 
+  it("reads stock only for the page it returns, and decides the total and selection without it", async () => {
+    const repository = new FakeDropshipSelectionAtpRepository();
+    repository.catalogRules = [{ id: 1, scopeType: "catalog", action: "include" }];
+    repository.selectionRules = [
+      makeSelectionRuleRecord({ id: 2, scopeType: "variant", action: "include", productVariantId: 22 }),
+      makeSelectionRuleRecord({ id: 3, scopeType: "variant", action: "include", productVariantId: 23 }),
+    ];
+    repository.candidates = [20, 21, 22, 23, 24].map((id) => ({ ...candidate, productVariantId: id, variantSku: `V-${id}` }));
+    const atp = new FakeAtpProvider();
+    for (const id of [20, 21, 22, 23, 24]) atp.variantAtpByVariantId.set(id, id);
+    const service = makeService(repository, atp);
+
+    const secondPage = await service.previewCatalog({ vendorId: 1, page: 2, limit: 2 });
+    expect(secondPage.total).toBe(5);
+    expect(secondPage.rows.map((row) => row.productVariantId)).toEqual([22, 23]);
+    expect(secondPage.rows.map((row) => row.selectionDecision.marketplaceQuantity)).toEqual([22, 23]);
+    expect(atp.requestedVariantIds).toEqual([[22, 23]]);
+
+    // A selected SKU with no stock is still selected and still counted.
+    atp.variantAtpByVariantId.set(22, 0);
+    const selected = await service.previewCatalog({ vendorId: 1, selectedOnly: true, limit: 1 });
+    expect(selected.total).toBe(2);
+    expect(selected.rows.map((row) => [row.productVariantId, row.selectionDecision.selected, row.selectionDecision.marketplaceQuantity]))
+      .toEqual([[22, true, 0]]);
+    expect(atp.requestedVariantIds.at(-1)).toEqual([22]);
+
+    const pastTheEnd = await service.previewCatalog({ vendorId: 1, page: 9, limit: 2 });
+    expect(pastTheEnd).toMatchObject({ rows: [], total: 5 });
+    expect(atp.requestedVariantIds.at(-1)).toEqual([]);
+  });
+
   it("requires a vendor profile before catalog access", async () => {
     const repository = new FakeDropshipSelectionAtpRepository();
     repository.vendor = null;
@@ -349,10 +380,13 @@ class FakeDropshipSelectionAtpRepository implements DropshipSelectionAtpReposito
 class FakeAtpProvider implements DropshipAtpProvider {
   variantAtpByVariantId = new Map<number, number>();
   authority: "legacy" | "canonical" = "legacy";
+  /** The variant ids of every stock read, in call order. */
+  requestedVariantIds: number[][] = [];
 
   async getVariantAtp(
     targets: readonly { productId: number; productVariantId: number }[],
   ) {
+    this.requestedVariantIds.push(targets.map((target) => target.productVariantId));
     return Promise.resolve({
       authority: this.authority,
       quantities: new Map(targets.map((target) => [
