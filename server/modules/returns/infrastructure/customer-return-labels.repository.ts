@@ -2,6 +2,15 @@ import type { Pool, PoolClient } from "pg";
 import Decimal from "decimal.js";
 import { z } from "zod";
 import { customerReturnDimensionsSchema } from "@shared/returns/customer-return-parcel";
+import { customerReturnLabelSettingsSchema } from "@shared/returns/customer-return-label.contract";
+import { isReturnCarrierServiceAllowed } from "@shared/returns/customer-return-carrier-policy";
+import { returnRateShipmentSchema } from "../../shipping-engine/application/return-rate-provider.port";
+import { selectCustomerReturnRate } from "../domain/customer-return-rate-selection";
+import {
+  customerReturnQuoteDecisionSchema,
+  customerReturnShipmentHash,
+  type CustomerReturnQuoteDecision,
+} from "../application/customer-return-label-quote";
 import {
   DIMENSION_INCH_DECIMAL_PLACES,
   MILLIMETERS_PER_INCH,
@@ -9,6 +18,7 @@ import {
 import {
   returnLabelInputSchema,
   returnLabelRecordSchema,
+  type ReturnLabelInput,
 } from "../../shipping-engine/application/return-label-provider.port";
 import type {
   CustomerReturnLabelStore,
@@ -21,7 +31,10 @@ const Exact = Decimal.clone({ precision: 40 });
 export class PostgresCustomerReturnLabelStore
   implements CustomerReturnLabelStore
 {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
 
   async read(
     channelId: number,
@@ -58,11 +71,12 @@ export class PostgresCustomerReturnLabelStore
         .parse(rows[0].authorization_number),
       parcels: rows.map((row) => {
         const dims = customerReturnDimensionsSchema.parse(row.dimensions);
-        const preparedInput = returnLabelInputSchema.parse({
+        const selectionMode = z
+          .enum(["fixed_service", "cheapest_eligible"])
+          .parse(row.selection_mode);
+        const shipment = returnRateShipmentSchema.parse({
           externalShipmentId: row.provider_external_shipment_id,
           rmaNumber: row.authorization_number,
-          carrierId: row.carrier_id,
-          serviceCode: row.service_code,
           shipFrom: row.origin_address,
           shipTo: row.destination_address,
           parcel: {
@@ -74,6 +88,14 @@ export class PostgresCustomerReturnLabelStore
             },
           },
         });
+        const preparedInput =
+          selectionMode === "fixed_service"
+            ? returnLabelInputSchema.parse({
+                ...shipment,
+                carrierId: row.carrier_id,
+                serviceCode: row.service_code,
+              })
+            : null;
         // Recovery must verify the request actually sent, including its original
         // measurement precision, even after a subsequent application deployment.
         const input =
@@ -81,13 +103,15 @@ export class PostgresCustomerReturnLabelStore
             ? preparedInput
             : returnLabelInputSchema.parse(row.request_snapshot);
         if (
-          input.externalShipmentId !== preparedInput.externalShipmentId ||
-          input.rmaNumber !== preparedInput.rmaNumber ||
-          input.carrierId !== preparedInput.carrierId ||
-          input.serviceCode !== preparedInput.serviceCode ||
-          input.parcel.weightGrams !== preparedInput.parcel.weightGrams ||
-          !equalJson(input.shipFrom, preparedInput.shipFrom) ||
-          !equalJson(input.shipTo, preparedInput.shipTo)
+          input &&
+          (input.externalShipmentId !== shipment.externalShipmentId ||
+            input.rmaNumber !== shipment.rmaNumber ||
+            (preparedInput !== null &&
+              (input.carrierId !== preparedInput.carrierId ||
+                input.serviceCode !== preparedInput.serviceCode)) ||
+            input.parcel.weightGrams !== shipment.parcel.weightGrams ||
+            !equalJson(input.shipFrom, shipment.shipFrom) ||
+            !equalJson(input.shipTo, shipment.shipTo))
         )
           throw new CustomerReturnIntakeError(
             "RETURN_LABEL_ATTEMPT_UNVERIFIED",
@@ -97,6 +121,8 @@ export class PostgresCustomerReturnLabelStore
         return {
           id: id.parse(row.id),
           number: id.parse(row.parcel_key),
+          selectionMode,
+          shipment,
           input,
           attempt:
             row.attempt_id === null
@@ -116,13 +142,71 @@ export class PostgresCustomerReturnLabelStore
     };
   }
 
+  async recordQuote(
+    channelId: number,
+    authorizationId: number,
+    parcelId: number,
+    raw: CustomerReturnQuoteDecision,
+    actor: string,
+    now: Date,
+  ): Promise<number> {
+    const decision = customerReturnQuoteDecisionSchema.parse(raw);
+    z.string().trim().min(1).max(255).parse(actor);
+    z.date().parse(now);
+    const parcel = (await this.read(channelId, authorizationId)).parcels.find(
+      (row) => row.id === parcelId,
+    );
+    if (
+      !parcel ||
+      parcel.selectionMode !== "cheapest_eligible" ||
+      customerReturnShipmentHash(parcel.shipment) !== decision.shipmentHash ||
+      Date.parse(decision.quotedAt) > now.getTime()
+    )
+      throw quoteChanged();
+    if (
+      decision.selected &&
+      JSON.stringify(
+        selectCustomerReturnRate({
+          policy: decision.settings,
+          weightGrams: parcel.shipment.parcel.weightGrams,
+          result: decision.result!,
+        }).selected,
+      ) !== JSON.stringify(decision.selected)
+    )
+      throw quoteChanged();
+    const inserted = await this.pool.query(
+      `INSERT INTO returns.customer_return_quote_decisions
+      (parcel_id,settings_version,settings_snapshot,shipment_snapshot,shipment_hash,quote_result,selected_rate,status,error_code,
+        quoted_at,expires_at,actor,created_at) VALUES($1,$2,$3::jsonb,$4::jsonb,$5,$6::jsonb,$7::jsonb,$8,$9,$10,$11,$12,$13) RETURNING id`,
+      [
+        parcelId,
+        decision.settings.version,
+        JSON.stringify(decision.settings),
+        JSON.stringify(decision.shipment),
+        decision.shipmentHash,
+        decision.result === null ? null : JSON.stringify(decision.result),
+        decision.selected === null ? null : JSON.stringify(decision.selected),
+        decision.selected === null ? "failed" : "selected",
+        decision.errorCode,
+        new Date(decision.quotedAt),
+        new Date(decision.expiresAt),
+        actor,
+        now,
+      ],
+    );
+    return id.parse(inserted.rows[0].id);
+  }
+
   async begin(
     channelId: number,
     authorizationId: number,
     parcelId: number,
     actor: string,
     now: Date,
-  ): Promise<number | null> {
+    quoteDecisionId?: number,
+  ): Promise<{ id: number; input: ReturnLabelInput } | null> {
+    z.string().trim().min(1).max(255).parse(actor);
+    z.date().parse(now);
     return this.transaction(async (client) => {
       const { rows: parcels } = await client.query(
         `SELECT p.*,a.warehouse_snapshot FROM returns.customer_return_parcels p
@@ -151,8 +235,6 @@ export class PostgresCustomerReturnLabelStore
       // Serialize the purchase boundary with an administrator pause/configuration change.
       if (
         !settings?.enabled ||
-        settings.carrier_id !== parcel.carrier_id ||
-        settings.service_code !== parcel.service_code ||
         settings.warehouse_id !== parcel.warehouse_snapshot.warehouseId ||
         !equalJson(settings.destination_address, parcel.destination_address)
       )
@@ -161,22 +243,97 @@ export class PostgresCustomerReturnLabelStore
           "Label creation is paused or the return settings changed.",
         );
       const stored = await this.readWith(client, channelId, authorizationId);
-      const input = stored.parcels.find((row) => row.id === parcelId)!.input;
+      const storedParcel = stored.parcels.find((row) => row.id === parcelId)!;
+      const current = settingsFromRow(settings);
+      let input = storedParcel.input;
+      // The execution/recovery window starts after acquiring the purchase locks,
+      // including fixed-service requests that did not need a fresh rate quote.
+      let purchaseNow = z.date().parse(this.clock());
+      if (storedParcel.selectionMode === "fixed_service") {
+        if (
+          quoteDecisionId !== undefined ||
+          !input ||
+          !isReturnCarrierServiceAllowed(
+            current,
+            input.carrierId,
+            input.serviceCode,
+            input.parcel.weightGrams,
+          )
+        )
+          throw quoteChanged();
+      } else {
+        if (quoteDecisionId === undefined) throw quoteChanged();
+        const row = (
+          await client.query(
+            `SELECT * FROM returns.customer_return_quote_decisions WHERE id=$1 AND parcel_id=$2`,
+            [id.parse(quoteDecisionId), parcelId],
+          )
+        ).rows[0];
+        if (
+          !row ||
+          row.status !== "selected" ||
+          Number(row.settings_version) !== current.version
+        )
+          throw quoteChanged();
+        const decision = customerReturnQuoteDecisionSchema.parse({
+          settings: row.settings_snapshot,
+          shipment: row.shipment_snapshot,
+          shipmentHash: row.shipment_hash,
+          result: row.quote_result,
+          selected: row.selected_rate,
+          errorCode: row.error_code,
+          quotedAt: z.coerce.date().parse(row.quoted_at).toISOString(),
+          expiresAt: z.coerce.date().parse(row.expires_at).toISOString(),
+        });
+        // A quote can expire while waiting for another administrator's settings
+        // or parcel lock. Read the injected clock only after those locks exist.
+        purchaseNow = z.date().parse(this.clock());
+        if (
+          JSON.stringify(decision.settings) !== JSON.stringify(current) ||
+          purchaseNow.getTime() < Date.parse(decision.quotedAt) ||
+          purchaseNow.getTime() >= Date.parse(decision.expiresAt) ||
+          decision.shipmentHash !==
+            customerReturnShipmentHash(storedParcel.shipment)
+        )
+          throw quoteChanged();
+        const selected = selectCustomerReturnRate({
+          policy: current,
+          weightGrams: storedParcel.shipment.parcel.weightGrams,
+          result: decision.result!,
+        }).selected;
+        if (JSON.stringify(selected) !== JSON.stringify(decision.selected))
+          throw quoteChanged();
+        input = returnLabelInputSchema.parse({
+          ...decision.shipment,
+          carrierId: selected.carrierId,
+          serviceCode: selected.serviceCode,
+        });
+      }
+      if (!input) throw quoteChanged();
       const inserted = await client.query(
         `INSERT INTO returns.customer_return_label_attempts
-        (parcel_id,attempt_number,idempotency_key,status,request_snapshot,actor,started_at)
-        VALUES($1,1,$2,'executing',$3::jsonb,$4,$5) RETURNING id`,
+        (parcel_id,attempt_number,idempotency_key,status,request_snapshot,actor,started_at,quote_decision_id)
+        VALUES($1,1,$2,'executing',$3::jsonb,$4,$5,$6) RETURNING id`,
         [
           parcelId,
           `return-label:${parcelId}:1`,
           JSON.stringify(input),
           actor,
-          now,
+          purchaseNow,
+          quoteDecisionId ?? null,
         ],
       );
       const attemptId = id.parse(inserted.rows[0].id);
-      await audit(client, attemptId, null, "executing", null, actor, now);
-      return attemptId;
+      await audit(
+        client,
+        attemptId,
+        null,
+        "executing",
+        null,
+        actor,
+        purchaseNow,
+      );
+      return { id: attemptId, input };
     });
   }
   async finish(
@@ -249,6 +406,27 @@ export class PostgresCustomerReturnLabelStore
       client.release();
     }
   }
+}
+function settingsFromRow(row: Record<string, unknown>) {
+  return customerReturnLabelSettingsSchema.parse({
+    version: row.version,
+    enabled: row.enabled,
+    warehouseId: row.warehouse_id,
+    policyId: row.policy_id,
+    selectionMode: row.selection_mode,
+    carrierRules: row.carrier_rules,
+    carrierId: row.carrier_id,
+    serviceCode: row.service_code,
+    contactName: row.contact_name,
+    contactPhone: row.contact_phone,
+    destinationAddress: row.destination_address,
+  });
+}
+function quoteChanged(): CustomerReturnIntakeError {
+  return new CustomerReturnIntakeError(
+    "RETURN_LABEL_QUOTE_CHANGED",
+    "Return carrier rules or rates changed. Check the current settings and try this box again.",
+  );
 }
 async function audit(
   client: PoolClient,

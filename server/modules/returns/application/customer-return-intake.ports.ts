@@ -38,8 +38,9 @@ export interface PreparedCustomerReturnIntake {
     weightGrams: number;
     originAddress: CustomerReturnIntakeAddress;
     destinationAddress: CustomerReturnIntakeAddress;
-    carrierId: string;
-    serviceCode: string;
+    selectionMode?: "fixed_service" | "cheapest_eligible";
+    carrierId: string | null;
+    serviceCode: string | null;
     items: readonly { omsOrderLineId: number; quantity: number }[];
   }[];
 }

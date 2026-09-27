@@ -261,6 +261,7 @@ describe("normalizeCarrierServicesResponse", () => {
       international: false,
       supportsMultiPackage: true,
       supportsReturns: true,
+      returnSupport: "supported",
       supportsPrepaidDutiesTaxes: false,
       sendRates: true,
       displaySchemes: ["label"],
@@ -305,15 +306,39 @@ describe("normalizeCarrierServicesResponse", () => {
         domestic: false,
         international: true,
         supportsReturns: false,
+        returnSupport: "unsupported",
       },
       {
         serviceCode: "ups_worldwide_saver",
         domestic: true,
         international: false,
         supportsReturns: true,
+        returnSupport: "supported",
       },
     ]);
   });
+
+  it("preserves unknown return support when the documented service response omits the flag", () => {
+    const [service] = normalizeCarrierServicesResponse({ services: [{
+      service_code: "usps_ground_advantage", domestic: true, send_rates: true,
+    }] }, { carrierId: "se-111", code: "usps", name: "USPS" });
+    expect(service).toMatchObject({
+      supportsReturns: false, returnSupport: "unknown", sendRates: true,
+    });
+  });
+
+  it.each([false, null, "true", "false", 1, {}, undefined])(
+    "does not promote an explicit invalid or unsupported return flag: %j",
+    (flag) => {
+      const [service] = normalizeCarrierServicesResponse({ services: [{
+        service_code: "usps_ground_advantage", domestic: true, send_rates: true,
+        is_return_supported: flag,
+      }] }, { carrierId: "se-111", code: "usps", name: "USPS" });
+      expect(service).toMatchObject({
+        supportsReturns: false, returnSupport: "unsupported", sendRates: true,
+      });
+    },
+  );
 });
 
 describe("unconfigured adapter (no network)", () => {

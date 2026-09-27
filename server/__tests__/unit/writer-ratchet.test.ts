@@ -79,6 +79,7 @@ describe("writer-ratchet (P2.1)", () => {
       "returns.customer_return_label_events",
       "returns.customer_return_parcel_items",
       "returns.customer_return_parcels",
+      "returns.customer_return_quote_decisions",
       "returns.customer_return_settings",
       "returns.customer_return_settings_events",
       "returns.customer_return_submission_commands",

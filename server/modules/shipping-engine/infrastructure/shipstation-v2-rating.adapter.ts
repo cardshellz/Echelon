@@ -89,6 +89,8 @@ export interface V2CarrierService {
   international: boolean;
   supportsMultiPackage: boolean;
   supportsReturns: boolean;
+  /** Missing provider metadata is unknown, not evidence that returns are unsupported. */
+  returnSupport?: "supported" | "unsupported" | "unknown";
   supportsPrepaidDutiesTaxes: boolean;
   sendRates: boolean;
   displaySchemes: string[];
@@ -277,7 +279,7 @@ export function normalizeCarrierServicesResponse(
       domestic?: boolean;
       international?: boolean;
       is_multi_package_supported?: boolean;
-      is_return_supported?: boolean;
+      is_return_supported?: unknown;
       is_prepaid_duties_taxes_supported?: boolean;
       send_rates?: boolean;
       display_schemes?: unknown;
@@ -303,6 +305,13 @@ export function normalizeCarrierServicesResponse(
       international: service.international === true,
       supportsMultiPackage: service.is_multi_package_supported === true,
       supportsReturns: service.is_return_supported === true,
+      // The documented service response omits this extension. Explicit malformed
+      // values fail closed; keep the legacy boolean and outbound snapshots unchanged.
+      returnSupport: service.is_return_supported === true
+        ? "supported"
+        : Object.prototype.hasOwnProperty.call(service, "is_return_supported")
+          ? "unsupported"
+          : "unknown",
       supportsPrepaidDutiesTaxes: service.is_prepaid_duties_taxes_supported === true,
       sendRates: service.send_rates === true,
       displaySchemes: normalizeStringList(service.display_schemes),

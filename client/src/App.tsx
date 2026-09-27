@@ -75,6 +75,7 @@ import PurchaseOrderDetail from "@/pages/PurchaseOrderDetail";
 import PurchaseOrderEdit from "@/pages/PurchaseOrderEdit";
 import PurchasingDashboard from "@/pages/PurchasingDashboard";
 import Returns from "@/pages/Returns";
+import ReturnLabelSettings from "@/pages/ReturnLabelSettings";
 import ReturnCases from "@/pages/ReturnCases";
 import ReturnPolicies from "@/pages/ReturnPolicies";
 import CustomerReturnPortalPreview from "@/pages/CustomerReturnPortalPreview";
@@ -545,6 +546,9 @@ function Router() {
         </Route>
         <Route path="/returns/receiving">
           <ProtectedRoute component={Returns} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/returns/label-settings">
+          <ProtectedRoute component={ReturnLabelSettings} allowedRoles={["admin"]} />
         </Route>
         <Route path="/returns">
           <Redirect to="/returns/cases" />

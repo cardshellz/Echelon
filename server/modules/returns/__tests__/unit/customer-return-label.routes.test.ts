@@ -405,8 +405,9 @@ describe("private customer return label HTTP boundaries", () => {
         authorizeChannel: deny,
         now: () => new Date(0),
         requirePurchaseConfiguration: downstream,
-        store: { read: downstream, begin: downstream, finish: downstream },
+        store: { read: downstream, begin: downstream, finish: downstream, recordQuote: downstream },
         provider: { purchase: downstream, recover: downstream },
+        rates: { quote: downstream },
       });
       services.submissions = new CustomerReturnSubmissionService({
         authorizeChannel: deny,

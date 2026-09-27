@@ -61,6 +61,8 @@ function settingsInput(
     enabled: true,
     warehouseId: 1,
     policyId: 1,
+    selectionMode: "fixed_service",
+    carrierRules: [],
     carrierId: "se-123",
     serviceCode: "ups_ground",
     contactName: "Test Warehouse",
@@ -101,6 +103,7 @@ describe("private return label settings service", () => {
       carriers: [
         {
           id: "se-123",
+          code: "ups",
           name: "Test carrier",
           services: [{ code: "ups_ground", name: "Ground" }],
         },
@@ -188,6 +191,208 @@ describe("private return label settings service", () => {
     },
   );
 
+  function automaticInput(): CustomerReturnLabelSettingsInput {
+    return settingsInput({
+      selectionMode: "cheapest_eligible",
+      carrierId: null,
+      serviceCode: null,
+      carrierRules: [
+        {
+          carrierId: "se-123",
+          serviceCodes: ["ups_ground", "ups_saver"],
+          maxWeightLb: null,
+        },
+        {
+          carrierId: "se-456",
+          serviceCodes: ["usps_ground_advantage"],
+          maxWeightLb: "20",
+        },
+      ],
+    });
+  }
+  function automaticCapabilities() {
+    return {
+      configured: true,
+      carriers: [
+        {
+          id: "se-123",
+          code: "ups",
+          name: "UPS",
+          services: [
+            { code: "ups_ground", name: "Ground" },
+            { code: "ups_saver", name: "Saver" },
+          ],
+        },
+        {
+          id: "se-456",
+          code: "usps",
+          name: "USPS",
+          services: [
+            { code: "usps_ground_advantage", name: "Ground Advantage" },
+          ],
+        },
+      ],
+    };
+  }
+  it("checks every configured automatic account and service for save and current use", async () => {
+    const input = automaticInput();
+    const { expectedVersion: _version, ...fields } = input;
+    const current = { ...labelSettings, ...fields };
+    capabilities.mockResolvedValue(automaticCapabilities());
+    store.read.mockResolvedValue(current);
+    store.save.mockResolvedValue(current);
+    expect((await service.save(CHANNEL, input, "admin")).settings).toEqual(
+      current,
+    );
+    expect((await service.requireEnabled(CHANNEL, 1)).settings).toEqual(
+      current,
+    );
+    expect(store.save).toHaveBeenCalledWith(CHANNEL, input, "admin", NOW);
+  });
+  it.each([
+    "second_account",
+    "second_service",
+    "other_account_service",
+    "different_account_same_services",
+  ])(
+    "rejects automatic %s omissions even when another service is valid",
+    async (kind) => {
+      const input = automaticInput();
+      const { expectedVersion: _version, ...fields } = input;
+      store.read.mockResolvedValue({ ...labelSettings, ...fields });
+      const catalog = automaticCapabilities();
+      if (kind === "second_account") catalog.carriers.pop();
+      if (kind === "second_service") catalog.carriers[0].services.pop();
+      if (kind === "other_account_service") catalog.carriers[1].services = [];
+      if (kind === "different_account_same_services")
+        catalog.carriers[1].id = "se-789";
+      capabilities.mockResolvedValue(catalog);
+      await expect(service.save(CHANNEL, input, "admin")).rejects.toMatchObject(
+        { code: "RETURN_LABEL_SERVICE_UNAVAILABLE" },
+      );
+      await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({
+        code: "RETURN_LABEL_SERVICE_UNAVAILABLE",
+      });
+      expect(store.save).not.toHaveBeenCalled();
+    },
+  );
+  it("permits pausing unchanged automatic rules during a provider outage", async () => {
+    const input = { ...automaticInput(), enabled: false };
+    const { expectedVersion: _version, ...fields } = input;
+    const paused = { ...labelSettings, ...fields, version: 2 };
+    store.read.mockResolvedValue(paused);
+    store.save.mockResolvedValue(paused);
+    capabilities.mockRejectedValue(new Error("provider unavailable"));
+    const result = await service.save(CHANNEL, input, "pause-admin");
+    expect(store.save).toHaveBeenCalledExactlyOnceWith(
+      CHANNEL,
+      input,
+      "pause-admin",
+      NOW,
+    );
+    expect(result.settings).toEqual(paused);
+    expect(result.providerConfigured).toBe(false);
+    expect(capabilities).toHaveBeenCalledTimes(1);
+    expect(capabilities.mock.invocationCallOrder[0]).toBeGreaterThan(
+      store.save.mock.invocationCallOrder[0],
+    );
+  });
+
+  it.each([
+    { name: "no allowed accounts", overrides: { carrierRules: [] } },
+    {
+      name: "fixed carrier in automatic mode",
+      overrides: { carrierId: "se-123" },
+    },
+    {
+      name: "fixed service in automatic mode",
+      overrides: { serviceCode: "ups_ground" },
+    },
+    {
+      name: "duplicate accounts",
+      overrides: {
+        carrierRules: [
+          automaticInput().carrierRules[0],
+          automaticInput().carrierRules[0],
+        ],
+      },
+    },
+    {
+      name: "duplicate services",
+      overrides: {
+        carrierRules: [
+          {
+            carrierId: "se-123",
+            serviceCodes: ["ups_ground", "ups_ground"],
+            maxWeightLb: null,
+          },
+        ],
+      },
+    },
+    {
+      name: "invalid weight limit",
+      overrides: {
+        carrierRules: [
+          {
+            carrierId: "se-123",
+            serviceCodes: ["ups_ground"],
+            maxWeightLb: "20lb",
+          },
+        ],
+      },
+    },
+    {
+      name: "unexpected rule authority",
+      overrides: {
+        carrierRules: [
+          {
+            carrierId: "se-123",
+            serviceCodes: ["ups_ground"],
+            maxWeightLb: null,
+            allowAnyService: true,
+          },
+        ],
+      },
+    },
+    { name: "unexpected root authority", overrides: { allowAnyCarrier: true } },
+  ])(
+    "rejects automatic input with $name before any provider read or write",
+    async ({ overrides }) => {
+      await expect(
+        service.save(CHANNEL, { ...automaticInput(), ...overrides }, "admin"),
+      ).rejects.toMatchObject({
+        code: "RETURN_LABEL_SETTINGS_INVALID",
+        status: 400,
+      });
+      expect(capabilities).not.toHaveBeenCalled();
+      expect(store.save).not.toHaveBeenCalled();
+      expect(store.read).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retains fixed-service defaults when an older settings payload omits automatic-selection fields", async () => {
+    const {
+      selectionMode: _mode,
+      carrierRules: _rules,
+      ...legacyInput
+    } = settingsInput();
+    const original = structuredClone(legacyInput);
+    const result = await service.save(CHANNEL, legacyInput, "legacy-admin");
+    expect(store.save).toHaveBeenCalledExactlyOnceWith(
+      CHANNEL,
+      { ...legacyInput, selectionMode: "fixed_service", carrierRules: [] },
+      "legacy-admin",
+      NOW,
+    );
+    expect(result.settings).toMatchObject({
+      selectionMode: "fixed_service",
+      carrierRules: [],
+      carrierId: "se-123",
+      serviceCode: "ups_ground",
+    });
+    expect(legacyInput).toEqual(original);
+  });
+
   const invalidPolicies: [string, Partial<ReturnPolicy>][] = [
     ["retired", { status: "retired" }],
     ["wholesale", { businessContext: "wholesale" }],
@@ -273,6 +478,7 @@ describe("private return label settings service", () => {
       carriers: [
         {
           id: "se-other",
+          code: "ups",
           name: "Other",
           services: [{ code: "ups_ground", name: "Ground" }],
         },
@@ -284,6 +490,7 @@ describe("private return label settings service", () => {
         {
           id: "se-123",
           name: "Test",
+          code: "ups",
           services: [{ code: "ups_express", name: "Express" }],
         },
       ],

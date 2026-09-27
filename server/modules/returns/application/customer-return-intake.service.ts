@@ -29,7 +29,8 @@ export const preparedCustomerReturnIntakeSchema = z.object({
   parcels: z.array(z.object({
     parcelKey: text(64), dimensions: customerReturnDimensionsSchema, weightGrams: customerReturnParcelWeightSchema,
     originAddress: customerReturnIntakeAddressSchema, destinationAddress: customerReturnIntakeAddressSchema,
-    carrierId: returnLabelProviderIdSchema, serviceCode: z.string().regex(/^[a-z0-9]+(?:_[a-z0-9]+)*$/).max(100),
+    selectionMode: z.enum(["fixed_service", "cheapest_eligible"]).default("fixed_service"),
+    carrierId: returnLabelProviderIdSchema.nullable(), serviceCode: z.string().regex(/^[a-z0-9]+(?:_[a-z0-9]+)*$/).max(100).nullable(),
     items: z.array(z.object({ omsOrderLineId: id, quantity }).strict()).min(1).max(200),
   }).strict()).min(1).max(20),
 }).strict();
@@ -45,6 +46,8 @@ export function validatePreparedCustomerReturnIntake(raw: unknown): PreparedCust
     || new Set(input.parcels.map(parcel => parcel.parcelKey)).size !== input.parcels.length) invalid();
   const totals = new Map<number, number>();
   for (const [index, parcel] of input.parcels.entries()) {
+    if (parcel.selectionMode === "fixed_service" ? !parcel.carrierId || !parcel.serviceCode
+      : parcel.carrierId !== null || parcel.serviceCode !== null) invalid();
     if (parcel.parcelKey !== String(index + 1)) invalid();
     if (new Set(parcel.items.map(item => item.omsOrderLineId)).size !== parcel.items.length) invalid();
     for (const item of parcel.items) {

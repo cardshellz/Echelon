@@ -241,6 +241,7 @@ export function prepareCustomerReturnIntake(
       weightGrams: parcel.weightGrams,
       originAddress: origin.data,
       destinationAddress: settings.destinationAddress,
+      selectionMode: settings.selectionMode,
       carrierId: settings.carrierId,
       serviceCode: settings.serviceCode,
       items: parcel.items.map((item) => ({

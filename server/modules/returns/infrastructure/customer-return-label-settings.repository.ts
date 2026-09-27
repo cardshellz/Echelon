@@ -2,6 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import { returnPolicies, warehouses } from "@shared/schema";
 import {
   customerReturnLabelSettingsSchema,
+  customerReturnLabelSettingsInputSchema,
   type CustomerReturnLabelSettingsInput,
 } from "@shared/returns/customer-return-label.contract";
 import {
@@ -10,6 +11,10 @@ import {
   type CustomerReturnSettingsStore,
 } from "../application/customer-return-label-settings.service";
 import { CustomerReturnIntakeError } from "../application/customer-return-intake.ports";
+import {
+  customerReturnCarrierRulesSchema,
+  normalizeCustomerReturnCarrierRules,
+} from "@shared/returns/customer-return-carrier-policy";
 import type { db } from "../../../db";
 
 type Database = typeof db;
@@ -32,6 +37,7 @@ export class PostgresCustomerReturnSettingsStore
   async read(channelId: number) {
     const result = await this.database
       .execute(sql`SELECT version,enabled,warehouse_id AS "warehouseId",policy_id AS "policyId",
+      selection_mode AS "selectionMode",carrier_rules AS "carrierRules",
       carrier_id AS "carrierId",service_code AS "serviceCode",contact_name AS "contactName",contact_phone AS "contactPhone",
       destination_address AS "destinationAddress" FROM returns.customer_return_settings WHERE channel_id=${channelId}`);
     return result.rows[0]
@@ -66,10 +72,11 @@ export class PostgresCustomerReturnSettingsStore
   }
   async save(
     channelId: number,
-    input: CustomerReturnLabelSettingsInput,
+    raw: CustomerReturnLabelSettingsInput,
     actor: string,
     now: Date,
   ) {
+    const input = customerReturnLabelSettingsInputSchema.parse(raw);
     if (!actor.trim() || !Number.isFinite(now.getTime()))
       throw new CustomerReturnIntakeError(
         "RETURN_LABEL_ACTOR_INVALID",
@@ -101,6 +108,15 @@ export class PostgresCustomerReturnSettingsStore
         !input.enabled &&
         input.warehouseId === before.warehouse_id &&
         input.policyId === before.policy_id &&
+        input.selectionMode === before.selection_mode &&
+        JSON.stringify(
+          normalizeCustomerReturnCarrierRules(input.carrierRules),
+        ) ===
+          JSON.stringify(
+            normalizeCustomerReturnCarrierRules(
+              customerReturnCarrierRulesSchema.parse(before.carrier_rules),
+            ),
+          ) &&
         input.carrierId === before.carrier_id &&
         input.serviceCode === before.service_code &&
         input.contactName === before.contact_name &&
@@ -135,15 +151,17 @@ export class PostgresCustomerReturnSettingsStore
       const { expectedVersion: _expected, ...fields } = input;
       const after = customerReturnLabelSettingsSchema.parse({
         ...fields,
+        carrierRules: normalizeCustomerReturnCarrierRules(fields.carrierRules),
         version: currentVersion + 1,
         destinationAddress: destination,
       });
       await tx.execute(sql`INSERT INTO returns.customer_return_settings
-        (channel_id,version,enabled,warehouse_id,policy_id,carrier_id,service_code,destination_address,contact_name,contact_phone,updated_by,updated_at)
-        VALUES (${channelId},${after.version},${after.enabled},${after.warehouseId},${after.policyId},${after.carrierId},${after.serviceCode},
+        (channel_id,version,enabled,warehouse_id,policy_id,selection_mode,carrier_rules,carrier_id,service_code,destination_address,contact_name,contact_phone,updated_by,updated_at)
+        VALUES (${channelId},${after.version},${after.enabled},${after.warehouseId},${after.policyId},${after.selectionMode},${JSON.stringify(normalizeCustomerReturnCarrierRules(after.carrierRules))}::jsonb,${after.carrierId},${after.serviceCode},
           ${JSON.stringify(after.destinationAddress)}::jsonb,${after.contactName},${after.contactPhone},${actor},${now})
         ON CONFLICT(channel_id) DO UPDATE SET version=EXCLUDED.version,enabled=EXCLUDED.enabled,warehouse_id=EXCLUDED.warehouse_id,
-          policy_id=EXCLUDED.policy_id,carrier_id=EXCLUDED.carrier_id,service_code=EXCLUDED.service_code,destination_address=EXCLUDED.destination_address,
+          policy_id=EXCLUDED.policy_id,selection_mode=EXCLUDED.selection_mode,carrier_rules=EXCLUDED.carrier_rules,
+          carrier_id=EXCLUDED.carrier_id,service_code=EXCLUDED.service_code,destination_address=EXCLUDED.destination_address,
           contact_name=EXCLUDED.contact_name,contact_phone=EXCLUDED.contact_phone,updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at`);
       await tx.execute(sql`INSERT INTO returns.customer_return_settings_events(channel_id,version,actor,before_snapshot,after_snapshot,occurred_at)
         VALUES(${channelId},${after.version},${actor},${before ? JSON.stringify(before) : null}::jsonb,${JSON.stringify(after)}::jsonb,${now})`);
