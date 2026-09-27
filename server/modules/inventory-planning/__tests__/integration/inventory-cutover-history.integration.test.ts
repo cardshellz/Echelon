@@ -101,6 +101,66 @@ dbDescribe.sequential("narrow audited historical-work retirement in real Postgre
   }
   async function auditCount() { return (await pool.query("SELECT count(*) FROM inventory.cutover_history_batches")).rows[0].count; }
 
+  async function seedAlreadyClosedHistory() {
+    await pool.query(`INSERT INTO wms.outbound_shipments(id,order_id,status,requires_review,shipment_purpose,held)
+      VALUES(92,2,'shipped',true,'customer_fulfillment',false);
+      INSERT INTO wms.outbound_shipment_items(id,shipment_id,order_item_id,product_variant_id,qty,shipment_item_purpose)
+      VALUES(93,92,21,101,1,'customer_fulfillment');
+      INSERT INTO oms.channel_fulfillment_receipts(id,processing_status,source_provider,source_channel_id,
+        source_order_id,source_fulfillment_id,oms_order_id,attempt_count)
+      VALUES(22,'ignored','shopify',36,'history-2','already-ignored',50,1);
+      INSERT INTO oms.channel_fulfillment_receipt_attempts(receipt_id,attempt_number,outcome,metadata)
+      VALUES(22,1,'ignored','{}');`);
+  }
+
+  it("uses the opening history scope for review and admitted retirement without retiring closed history or current work", async () => {
+    await seedAlreadyClosedHistory();
+    const before = await businessState();
+    const original = await opening.capture(new Date());
+    const assessment = await opening.preview(verification(original), new Date());
+    expect(assessment.historicalExceptions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ subject: "channel_fulfillment_receipt:22" }),
+      expect.objectContaining({ subject: "outbound_shipment_review:92" }),
+      expect.objectContaining({ subject: "source:93" }),
+    ]));
+    const review = await service.review("operator");
+    expect(review.blockers).toEqual([]);
+    expect(review.readyForRetirement).toBe(true);
+    expect(review.decisions.map(row => `${row.kind}:${row.id}`)).toEqual(["receipt:20", "shipment:90"]);
+    expect(review.preservedCurrentOrderItemIds).toEqual([11]);
+    const input = await request("mixed-history");
+    const results = await Promise.all([service.retire(input, "operator"), service.retire(input, "operator")]);
+    expect(results.map(row => row.alreadyApplied).sort()).toEqual([false, true]);
+    expect(results.every(row => row.retiredReceipts === 1 && row.retiredShipments === 1
+      && !row.inventoryChanged && !row.authorityChanged)).toBe(true);
+    expect(await businessState()).toEqual(before);
+    expect((await readRetiredCutoverHistory(pool)).map(row => `${row.kind}:${row.id}`).sort())
+      .toEqual(["receipt:20", "shipment:90"]);
+    const source = await opening.capture(new Date());
+    expect(source.evidence.sourceItems).toEqual(original.evidence.sourceItems);
+    expect(source.evidence.shipmentReviewEvidence).toEqual(original.evidence.shipmentReviewEvidence);
+    const ready = await opening.preview(verification(source), new Date());
+    expect(ready.blockers).toEqual([]);
+    expect(ready.plan.orders.map(order => order.orderId)).toEqual([1]);
+  });
+
+  it.each(["receipt-reopened", "shipment-reopened", "retained-source-changed"])(
+    "invalidates approval when %s even though original closed history needed no retirement", async change => {
+      await seedAlreadyClosedHistory();
+      const input = await request(`closed-history-${change}`);
+      const statements: Record<string, string> = {
+        "receipt-reopened": "UPDATE oms.channel_fulfillment_receipts SET processing_status='review' WHERE id=22",
+        "shipment-reopened": "UPDATE wms.outbound_shipments SET status='queued' WHERE id=92",
+        "retained-source-changed": "UPDATE wms.outbound_shipment_items SET qty=2 WHERE id=93",
+      };
+      await pool.query(statements[change]);
+      const before = await businessState();
+      await expect(service.retire(input, "operator")).rejects.toMatchObject({ code: "HISTORY_REVIEW_CHANGED" });
+      expect(await auditCount()).toBe("0");
+      expect(await businessState()).toEqual(before);
+    },
+  );
+
   it("retires only processing, preserves every owner row, and unblocks the verified opening while retaining historical findings", async () => {
     const before = await businessState();
     const original = await opening.capture(new Date());
