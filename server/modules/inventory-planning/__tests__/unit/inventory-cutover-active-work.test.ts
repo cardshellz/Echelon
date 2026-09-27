@@ -31,12 +31,13 @@ describe("shared outstanding cutover work", () => {
       { ...review, id: "8", kind: "outbound_shipment_review", status: "ignored" },
       { ...review, id: "9", kind: "unknown", status: "ignored" },
     ];
-    const before = structuredClone(evidence);
-    const active = selectActiveCutoverWork(cutoverReconstructionEvidenceSchema.parse(evidence));
+    const parsed = cutoverReconstructionEvidenceSchema.parse(evidence);
+    const before = structuredClone(parsed);
+    const active = selectActiveCutoverWork(parsed);
     expect(active.sourceItems.map(row => row.id)).toEqual([101, 102, 103, 104, 105, 106, 107]);
     expect(active.physicalItems.map(row => row.id)).toEqual(["2", "3", "4"]);
     expect(active.shipmentReviewEvidence.map(row => row.id)).toEqual(["4", "5", "6", "7", "8", "9"]);
-    expect(evidence).toEqual(before);
+    expect(parsed).toEqual(before);
     expect(Object.keys(active).sort()).toEqual(["physicalItems", "shipmentReviewEvidence", "sourceItems"]);
   });
 
