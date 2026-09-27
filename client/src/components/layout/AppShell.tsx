@@ -260,6 +260,7 @@ const navStructure: NavEntry[] = [
       { label: "Tracking Pushes", icon: Truck, href: "/dropship?tab=tracking-pushes" },
       { label: "Wallet Ops", icon: CreditCard, href: "/dropship?tab=wallet-ops" },
       { label: "Wallet Policy", icon: DollarSign, href: "/dropship?tab=wallet-policy" },
+      { label: "Cost Changes", icon: TrendingUp, href: "/dropship?tab=cost-changes" },
       { label: "Notifications", icon: Bell, href: "/dropship?tab=notifications" },
       { label: "Audit", icon: History, href: "/dropship?tab=audit" },
     ],

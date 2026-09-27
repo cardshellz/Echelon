@@ -260,6 +260,7 @@ import { ReturnInspectionModal } from "@/components/dropship/ReturnInspectionMod
 import { EbayOAuthBrandingAdminPanel } from "@/components/dropship/EbayOAuthBrandingAdminPanel";
 import { useAuth } from "@/lib/auth";
 import { DropshipWalletPolicyPanel } from "./dropship-wallet-policy-panel";
+import { DropshipCostChangePolicyPanel } from "./dropship-cost-change-policy-panel";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
 type DogfoodReadinessStatusFilter = DropshipDogfoodReadinessStatus | "all";
@@ -287,6 +288,7 @@ type DropshipOpsTabValue =
   | "order-intake"
   | "wallet-ops"
   | "wallet-policy"
+  | "cost-changes"
   | "stores"
   | "listing-pushes"
   | "tracking-pushes"
@@ -369,6 +371,7 @@ const dropshipOpsTabValues = new Set<DropshipOpsTabValue>([
   "order-intake",
   "wallet-ops",
   "wallet-policy",
+  "cost-changes",
   "stores",
   "listing-pushes",
   "tracking-pushes",
@@ -918,6 +921,10 @@ export default function Dropship() {
 
           <TabsContent value="wallet-policy" className="m-0">
             <WalletPolicyTab />
+          </TabsContent>
+
+          <TabsContent value="cost-changes" className="m-0">
+            <CostChangePolicyTab />
           </TabsContent>
 
           <TabsContent value="stores" className="m-0">
@@ -4753,6 +4760,22 @@ function OrderIntakeOpsTab({
         selectedIntakeId={selectedIntakeId}
       />
     </div>
+  );
+}
+
+/**
+ * Cost changes tab: the staff settings for how a .ops cost change reaches
+ * vendors. Gated like the wallet policy tab: `dropship:view` for the GET and
+ * `dropship:manage_operations` for the POST, read here because `/dropship`
+ * itself is gated by role only.
+ */
+function CostChangePolicyTab() {
+  const { hasPermission } = useAuth();
+  return (
+    <DropshipCostChangePolicyPanel
+      canView={hasPermission("dropship", "view")}
+      canEdit={hasPermission("dropship", "manage_operations")}
+    />
   );
 }
 
