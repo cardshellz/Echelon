@@ -7,9 +7,10 @@ import {
   type CustomerReturnLabelSettingsInput,
   type CustomerReturnLabelSettingsState,
 } from "@shared/returns/customer-return-label.contract";
-import { DEFAULT_CUSTOMER_RETURN_WINDOW_DAYS } from "../domain/customer-return-eligibility";
+import { matchesCustomerReturnPortalPolicy } from "@shared/returns/customer-return-portal-policy";
 import { snapshotReturnPolicy } from "../domain/return-case";
 import { CustomerReturnIntakeError } from "./customer-return-intake.ports";
+import { resolveCustomerReturnPortalPolicy } from "./customer-return-policy";
 
 export interface ReturnLabelWarehouse {
   id: number;
@@ -70,6 +71,10 @@ export class CustomerReturnLabelSettingsService {
     if (!capability.configured && !message)
       message =
         "Configure the ShipStation V2 API key before enabling return labels.";
+    const resolved = resolveCustomerReturnPortalPolicy(
+      catalog.policies,
+      channelId,
+    );
     return customerReturnLabelSettingsStateSchema.parse({
       channelId,
       providerConfigured: capability.configured,
@@ -81,13 +86,8 @@ export class CustomerReturnLabelSettingsService {
           name: row.name,
           address: warehouseLabelAddress(row, row.name, null),
         })),
-      policies: catalog.policies
-        .filter((policy) => isPortalReturnPolicy(policy, channelId))
-        .map((policy) => ({
-          id: policy.id,
-          name: policy.name,
-          version: policy.version,
-        })),
+      resolvedPolicy: resolved.resolvedPolicy,
+      policyIssue: resolved.policyIssue,
       carriers: capability.carriers,
       message,
     });
@@ -129,6 +129,42 @@ export class CustomerReturnLabelSettingsService {
   }
 
   async requireEnabled(channelId: number, version: number) {
+    const { settings, catalog } = await this.requireShippingConfiguration(
+      channelId,
+      version,
+    );
+    const resolved = resolveCustomerReturnPortalPolicy(
+      catalog.policies,
+      channelId,
+    );
+    if (resolved.policyIssue || !resolved.policy) {
+      throw new CustomerReturnIntakeError(
+        resolved.policyIssue?.code ?? "RETURN_PORTAL_POLICY_MISSING",
+        resolved.policyIssue?.message ??
+          "No active return policy applies to this shop.",
+      );
+    }
+    return {
+      settings,
+      operationalPolicy: {
+        id: resolved.policy.id,
+        version: resolved.policy.version,
+        snapshot: snapshotReturnPolicy(resolved.policy),
+      },
+    };
+  }
+
+  /** Accepted RMAs retain their own policy snapshot. Label continuation only
+   * rechecks current shipping controls, never a newly resolved return policy. */
+  async requireShippingEnabled(channelId: number, version: number) {
+    return (await this.requireShippingConfiguration(channelId, version))
+      .settings;
+  }
+
+  private async requireShippingConfiguration(
+    channelId: number,
+    version: number,
+  ) {
     await this.dependencies.authorizeChannel(channelId);
     const settings = await this.dependencies.store.read(channelId);
     if (!settings?.enabled || settings.version !== version)
@@ -137,13 +173,7 @@ export class CustomerReturnLabelSettingsService {
         "Return label settings changed. Review the current settings before continuing.",
       );
     const catalog = await this.dependencies.store.catalog(channelId);
-    const policy = catalog.policies.find(
-      (candidate) =>
-        candidate.id === settings.policyId &&
-        isPortalReturnPolicy(candidate, channelId),
-    );
     if (
-      !policy ||
       !catalog.warehouses.some(
         (row) =>
           row.id === settings.warehouseId &&
@@ -153,7 +183,7 @@ export class CustomerReturnLabelSettingsService {
     )
       throw new CustomerReturnIntakeError(
         "RETURN_LABEL_CONFIGURATION_UNAVAILABLE",
-        "The return policy or warehouse needs administrator attention.",
+        "The return warehouse needs administrator attention.",
       );
     const capabilities = await this.dependencies.capabilities();
     if (
@@ -164,14 +194,7 @@ export class CustomerReturnLabelSettingsService {
         "RETURN_LABEL_SERVICE_UNAVAILABLE",
         "The configured return service is unavailable.",
       );
-    return {
-      settings,
-      operationalPolicy: {
-        id: policy.id,
-        version: policy.version,
-        snapshot: snapshotReturnPolicy(policy),
-      },
-    };
+    return { settings, catalog };
   }
 }
 
@@ -209,21 +232,7 @@ export function isPortalReturnPolicy(
   policy: ReturnPolicy,
   channelId: number,
 ): boolean {
-  return (
-    policy.status === "active" &&
-    (policy.businessContext === null || policy.businessContext === "retail") &&
-    (policy.channelId === null || policy.channelId === channelId) &&
-    policy.vendorId === null &&
-    policy.storeConnectionId === null &&
-    policy.returnWindowDays === DEFAULT_CUSTOMER_RETURN_WINDOW_DAYS &&
-    policy.returnDestination === "card_shellz" &&
-    policy.approvalAuthority === "card_shellz" &&
-    policy.labelProvider === "shipstation" &&
-    policy.returnShippingPayer === "card_shellz" &&
-    policy.customerRefundAuthority === "card_shellz" &&
-    policy.inspectionOwner === "card_shellz" &&
-    policy.vendorSettlementTrigger === "none"
-  );
+  return matchesCustomerReturnPortalPolicy(policy, channelId);
 }
 
 export function warehouseLabelAddress(

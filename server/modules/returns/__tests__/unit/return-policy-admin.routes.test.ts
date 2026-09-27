@@ -45,7 +45,7 @@ describe("return policy admin routes", () => {
       body: JSON.stringify(validPolicy()),
     });
 
-    expect(response).toEqual({ status: 201, body: { policy: { id: 42 }, replayed: false } });
+    expect(response).toMatchObject({ status: 201, body: { policy: { id: 42 }, replayed: false } });
     expect(service.createVersion).toHaveBeenCalledWith({ ...validPolicy(), idempotencyKey: "returns-test-2", actor: "operator-1" });
   });
 
@@ -88,7 +88,99 @@ describe("return policy admin routes", () => {
 
     expect(response).toMatchObject({ status: 409, body: { error: { code: "RETURN_POLICY_IDEMPOTENCY_CONFLICT" } } });
   });
+
+  it("returns a validated private archive preview and registers view/edit permission gates", async () => {
+    const preview = archivePreview();
+    service.previewArchive.mockResolvedValue(preview);
+
+    expect(await jsonRequest(`${server.url}/api/returns/admin/policies/42/archive-preview`)).toMatchObject({
+      status: 200, body: preview, cacheControl: "private, no-store",
+    });
+    expect(service.previewArchive).toHaveBeenCalledExactlyOnceWith(42);
+    expect(requirePermissionMock).toHaveBeenCalledWith("settings", "view");
+    expect(requirePermissionMock).toHaveBeenCalledWith("settings", "edit");
+  });
+
+  it("archives only the reviewed version with the authenticated actor and header key", async () => {
+    const input = { expectedVersion: 3, previewRevision: "a".repeat(64) };
+    service.archive.mockResolvedValue({ policy: { ...archivePreview().policy, status: "retired" }, replayed: false });
+    const response = await jsonRequest(`${server.url}/api/returns/admin/policies/42/archive`, {
+      method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": " archive-42 " }, body: JSON.stringify(input),
+    });
+    expect(response).toMatchObject({ status: 200, body: { policy: { id: 42, status: "retired" }, replayed: false }, cacheControl: "private, no-store" });
+    expect(service.archive).toHaveBeenCalledExactlyOnceWith(42, input, "archive-42", "operator-1");
+  });
+
+  it.each(["0", "-1", "1.5", "42suffix", "9007199254740992"])("rejects invalid archive identity %s before reading policy data", async policyId => {
+    const response = await jsonRequest(`${server.url}/api/returns/admin/policies/${policyId}/archive-preview`);
+    expect(response).toMatchObject({ status: 400, body: { error: { code: "RETURN_POLICY_INVALID" } }, cacheControl: "private, no-store" });
+    expect(service.previewArchive).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { expectedVersion: 0, previewRevision: "a".repeat(64) },
+    { expectedVersion: 3, previewRevision: "not-a-reviewed-revision" },
+    { expectedVersion: 3, previewRevision: "a".repeat(64), actor: "spoofed-actor" },
+  ])("rejects malformed or actor-injected archive commands", async input => {
+    const response = await jsonRequest(`${server.url}/api/returns/admin/policies/42/archive`, {
+      method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "archive-42" }, body: JSON.stringify(input),
+    });
+    expect(response).toMatchObject({ status: 400, body: { error: { code: "RETURN_POLICY_INVALID" } } });
+    expect(service.archive).not.toHaveBeenCalled();
+  });
+
+  it("requires an archive idempotency key", async () => {
+    const response = await jsonRequest(`${server.url}/api/returns/admin/policies/42/archive`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 3, previewRevision: "a".repeat(64) }),
+    });
+    expect(response).toMatchObject({ status: 400, body: { error: { code: "RETURN_POLICY_IDEMPOTENCY_REQUIRED" } } });
+    expect(service.archive).not.toHaveBeenCalled();
+  });
+
+  it("does not accept an archive without a session audit actor even if the outer gate allowed it", async () => {
+    const anonymous = await startServer(buildApp(service, false));
+    try {
+      const response = await jsonRequest(`${anonymous.url}/api/returns/admin/policies/42/archive`, {
+        method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "archive-42" },
+        body: JSON.stringify({ expectedVersion: 3, previewRevision: "a".repeat(64) }),
+      });
+      expect(response).toMatchObject({ status: 401, body: { error: { code: "RETURN_POLICY_ACTOR_REQUIRED" } } });
+      expect(service.archive).not.toHaveBeenCalled();
+    } finally { await anonymous.close(); }
+  });
+
+  it("preserves archive stale-preview conflicts", async () => {
+    service.archive.mockRejectedValue(new ReturnPolicyAdminError("RETURN_POLICY_ARCHIVE_CHANGED", "Review the current impact before archiving.", 409));
+    const response = await jsonRequest(`${server.url}/api/returns/admin/policies/42/archive`, {
+      method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "archive-42" },
+      body: JSON.stringify({ expectedVersion: 3, previewRevision: "a".repeat(64) }),
+    });
+    expect(response).toMatchObject({ status: 409, body: { error: { code: "RETURN_POLICY_ARCHIVE_CHANGED" } }, cacheControl: "private, no-store" });
+  });
+
+  it("fails closed on malformed preview output without exposing raw dependency errors", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      service.previewArchive.mockResolvedValue({ ...archivePreview(), revision: "invalid" });
+      expect(await jsonRequest(`${server.url}/api/returns/admin/policies/42/archive-preview`)).toMatchObject({
+        status: 500, body: { error: { code: "RETURN_POLICY_ARCHIVE_PREVIEW_FAILED" } },
+      });
+      service.previewArchive.mockRejectedValue(new Error("sensitive-driver-detail"));
+      const response = await jsonRequest(`${server.url}/api/returns/admin/policies/42/archive-preview`);
+      expect(JSON.stringify(response)).not.toContain("sensitive-driver-detail");
+      expect(JSON.stringify(log.mock.calls)).not.toContain("sensitive-driver-detail");
+    } finally { log.mockRestore(); }
+  });
 });
+
+function archivePreview() {
+  return {
+    policy: { id: 42, name: "Shopify returns", version: 3, scopeKind: "channel_context", scopeKey: "context:retail:channel:36",
+      businessContext: "retail", channelId: 36, vendorId: null, storeConnectionId: null, status: "active", returnWindowDays: 30 },
+    revision: "a".repeat(64), effects: [], unaffectedMoreSpecificPolicies: [], historicalReferences: { returnCases: 4, portalIntakes: 2 },
+  };
+}
 
 function validPolicy() {
   return {
@@ -120,6 +212,8 @@ function fakeService() {
     searchStores: vi.fn(),
     resolve: vi.fn(),
     createVersion: vi.fn(),
+    previewArchive: vi.fn(),
+    archive: vi.fn(),
   };
 }
 
@@ -149,7 +243,7 @@ async function startServer(app: express.Express): Promise<{ url: string; close: 
 async function jsonRequest(
   url: string,
   init?: { method?: string; headers?: Record<string, string>; body?: string },
-): Promise<{ status: number; body: Record<string, unknown> }> {
+): Promise<{ status: number; body: Record<string, unknown>; cacheControl: string | undefined }> {
   const target = new URL(url);
   return new Promise((resolve, reject) => {
     const request = http.request({
@@ -163,7 +257,7 @@ async function jsonRequest(
       response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
       response.on("end", () => {
         const rawBody = Buffer.concat(chunks).toString("utf8");
-        resolve({ status: response.statusCode ?? 0, body: rawBody === "" ? {} : JSON.parse(rawBody) as Record<string, unknown> });
+        resolve({ status: response.statusCode ?? 0, body: rawBody === "" ? {} : JSON.parse(rawBody) as Record<string, unknown>, cacheControl: response.headers["cache-control"] });
       });
     });
     request.on("error", reject);

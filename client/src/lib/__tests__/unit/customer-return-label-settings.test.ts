@@ -3,7 +3,9 @@ import { customerReturnLabelSettingsStateSchema } from "@shared/returns/customer
 import {
   createReturnLabelSettingsDraft,
   parseReturnLabelSettingsDraft,
+  refreshReturnLabelSettingsDraft,
   returnLabelConfigurationAvailable,
+  returnLabelSettingsReadiness,
   selectedReturnSettingsChannel,
 } from "../../customer-return-label-settings";
 
@@ -21,7 +23,14 @@ function state() {
     providerConfigured: true,
     settings: null,
     warehouses: [{ id: 1, name: "Main", address }],
-    policies: [{ id: 2, name: "Retail", version: 1 }],
+    resolvedPolicy: {
+      id: 2,
+      name: "Retail",
+      version: 1,
+      returnWindowDays: 45,
+      scopeKind: "channel_context",
+    },
+    policyIssue: null,
     carriers: [
       {
         id: "se-usps",
@@ -47,7 +56,6 @@ function draft() {
   return {
     ...createReturnLabelSettingsDraft(state()),
     warehouseId: "1",
-    policyId: "2",
     contactName: "Return desk",
     enabled: true,
   };
@@ -130,7 +138,6 @@ describe("return label settings draft", () => {
         version: 8,
         enabled: true,
         warehouseId: 1,
-        policyId: 2,
         carrierId: "se-ups",
         serviceCode: "ground",
         contactName: "Return desk",
@@ -158,7 +165,6 @@ describe("return label settings draft", () => {
         version: 8,
         enabled: true,
         warehouseId: 1,
-        policyId: 2,
         selectionMode: "cheapest_eligible",
         carrierId: null,
         serviceCode: null,
@@ -196,7 +202,6 @@ describe("return label settings draft", () => {
         version: 8,
         enabled: true,
         warehouseId: 1,
-        policyId: 2,
         selectionMode: "cheapest_eligible",
         carrierId: null,
         serviceCode: null,
@@ -218,6 +223,248 @@ describe("return label settings draft", () => {
       serviceCodes: ["ground"],
       maxWeightLb: "12.5",
     });
+  });
+});
+
+describe("return label settings readiness", () => {
+  function completeDraft() {
+    const value = draft();
+    value.carrierRules[0].enabled = true;
+    value.carrierRules[0].serviceCodes = ["ground"];
+    return value;
+  }
+
+  it("keeps shipping validation independent of an unavailable return policy", () => {
+    const catalog = state();
+    catalog.resolvedPolicy = null;
+    catalog.policyIssue = {
+      code: "RETURN_POLICY_NOT_CONFIGURED",
+      message: "No active return policy applies to this shop.",
+    };
+    const value = { ...completeDraft(), contactName: "  " };
+    const result = returnLabelSettingsReadiness(value, catalog);
+    expect(result.canSave).toBe(false);
+    expect(result.issues).toEqual([
+      { field: "contactName", message: "Enter the receiving contact name." },
+    ]);
+    value.contactName = "Receiving team";
+    expect(returnLabelSettingsReadiness(value, catalog)).toMatchObject({
+      canSave: true,
+      issues: [],
+    });
+  });
+
+  it("allows enabled shipping settings to save when the resolved policy is unsupported", () => {
+    const catalog = state();
+    catalog.policyIssue = {
+      code: "RETURN_POLICY_UNSUPPORTED",
+      message:
+        "This policy uses a return destination that the portal does not support.",
+    };
+    const value = completeDraft();
+    expect(returnLabelSettingsReadiness(value, catalog)).toMatchObject({
+      canSave: true,
+      issues: [],
+      parsed: { success: true, data: { enabled: true } },
+    });
+  });
+
+  it("clears each blocker only after the administrator makes a valid explicit choice", () => {
+    const value = { ...completeDraft(), warehouseId: "", contactName: "" };
+    expect(
+      returnLabelSettingsReadiness(value, state()).issues.map(
+        (issue) => issue.field,
+      ),
+    ).toEqual(["warehouseId", "contactName"]);
+    value.contactName = "Returns team";
+    expect(returnLabelSettingsReadiness(value, state()).issues).toEqual([
+      {
+        field: "warehouseId",
+        message: "Choose a return warehouse with a complete U.S. address.",
+      },
+    ]);
+    value.warehouseId = "1";
+    expect(returnLabelSettingsReadiness(value, state())).toMatchObject({
+      canSave: true,
+      issues: [],
+    });
+  });
+
+  it.each([
+    { field: "warehouseId", value: "", message: "Choose a return warehouse" },
+    {
+      field: "warehouseId",
+      value: "99",
+      message: "selected warehouse is unavailable",
+    },
+    {
+      field: "contactName",
+      value: "Return\nteam",
+      message: "without control characters",
+    },
+    { field: "contactPhone", value: "123\n456", message: "phone number" },
+  ] as const)(
+    "identifies an invalid $field without permitting a save",
+    ({ field, value, message }) => {
+      const result = returnLabelSettingsReadiness(
+        { ...completeDraft(), [field]: value },
+        state(),
+      );
+      expect(result.canSave).toBe(false);
+      expect(result.issues).toEqual([
+        { field, message: expect.stringContaining(message) },
+      ]);
+    },
+  );
+
+  it("permits optional phone and an explicitly disabled configuration", () => {
+    const result = returnLabelSettingsReadiness(
+      { ...completeDraft(), enabled: false, contactPhone: " " },
+      state(),
+    );
+    expect(result).toMatchObject({
+      canSave: true,
+      issues: [],
+      parsed: { success: true, data: { enabled: false, contactPhone: null } },
+    });
+  });
+
+  it("explains provider and warehouse availability without changing the draft", () => {
+    const catalog = state();
+    catalog.providerConfigured = false;
+    catalog.message = "Return services could not be verified.";
+    catalog.warehouses[0].address = null;
+    const value = completeDraft();
+    const before = structuredClone(value);
+    const result = returnLabelSettingsReadiness(value, catalog);
+    expect(result.canSave).toBe(false);
+    expect(result.issues).toEqual([
+      { field: null, message: catalog.message },
+      {
+        field: "warehouseId",
+        message: expect.stringContaining("complete U.S. address"),
+      },
+    ]);
+    expect(value).toEqual(before);
+  });
+
+  it("explains enabled carrier rules with missing services, unavailable accounts, and invalid caps", () => {
+    const value = completeDraft();
+    value.carrierRules[0].serviceCodes = [];
+    expect(returnLabelSettingsReadiness(value, state()).issues).toEqual([
+      {
+        field: "carrierRules",
+        message: expect.stringContaining(
+          "Choose at least one return service for USPS account",
+        ),
+      },
+    ]);
+    value.carrierRules[0].serviceCodes = ["unavailable"];
+    expect(returnLabelSettingsReadiness(value, state()).issues).toEqual([
+      {
+        field: "carrierRules",
+        message: expect.stringContaining("Remove unavailable return services"),
+      },
+    ]);
+    value.carrierRules[0].serviceCodes = ["ground"];
+    value.carrierRules[0].maxWeightLb = "20lb";
+    expect(returnLabelSettingsReadiness(value, state()).issues).toEqual([
+      {
+        field: "carrierRules",
+        message: expect.stringContaining("Enter a positive maximum weight"),
+      },
+    ]);
+    value.carrierRules[0].maxWeightLb = "20";
+    const catalog = state();
+    catalog.carriers = catalog.carriers.filter(
+      (carrier) => carrier.id !== "se-usps",
+    );
+    expect(returnLabelSettingsReadiness(value, catalog).issues).toEqual([
+      {
+        field: "carrierRules",
+        message: expect.stringContaining(
+          "allowed account se-usps is unavailable",
+        ),
+      },
+    ]);
+  });
+
+  it("keeps fixed-service availability separate from automatic rules", () => {
+    const value = {
+      ...completeDraft(),
+      selectionMode: "fixed_service" as const,
+      carrierId: "se-ups",
+      serviceCode: "priority",
+    };
+    expect(returnLabelSettingsReadiness(value, state()).issues).toEqual([
+      { field: "serviceCode", message: "Choose an available return service." },
+    ]);
+    value.serviceCode = "ground";
+    expect(returnLabelSettingsReadiness(value, state())).toMatchObject({
+      canSave: true,
+      issues: [],
+    });
+  });
+
+  it("preserves unsaved shipping choices when the resolved policy and carrier catalog change", () => {
+    const value = {
+      ...completeDraft(),
+      contactPhone: "555-0100",
+    };
+    value.carrierRules[0].maxWeightLb = "15.5";
+    const original = structuredClone(value);
+    const catalog = state();
+    catalog.resolvedPolicy = {
+      id: 3,
+      name: "New retail policy",
+      version: 2,
+      returnWindowDays: 60,
+      scopeKind: "global",
+    };
+    catalog.carriers.push({
+      id: "se-new",
+      code: "usps",
+      name: "New account",
+      services: [{ code: "ground", name: "Ground" }],
+    });
+    const refreshed = refreshReturnLabelSettingsDraft(value, catalog);
+    expect(refreshed).toEqual({
+      ...value,
+      carrierRules: [
+        ...value.carrierRules,
+        {
+          carrierId: "se-new",
+          enabled: false,
+          serviceCodes: [],
+          maxWeightLb: "20",
+        },
+      ],
+    });
+    expect(returnLabelSettingsReadiness(refreshed, catalog)).toMatchObject({
+      canSave: true,
+      issues: [],
+    });
+    expect(
+      returnLabelSettingsReadiness(refreshed, catalog).parsed.data,
+    ).not.toHaveProperty("policyId");
+    expect(value).toEqual(original);
+    expect(refreshed.carrierRules[0].serviceCodes).not.toBe(
+      value.carrierRules[0].serviceCodes,
+    );
+  });
+
+  it("retains removed selected services after refresh so the administrator must resolve them", () => {
+    const value = completeDraft();
+    const catalog = state();
+    catalog.carriers[0].services = [];
+    const refreshed = refreshReturnLabelSettingsDraft(value, catalog);
+    expect(refreshed.carrierRules[0].serviceCodes).toEqual(["ground"]);
+    expect(returnLabelSettingsReadiness(refreshed, catalog).canSave).toBe(
+      false,
+    );
+    expect(
+      returnLabelSettingsReadiness(refreshed, catalog).issues[0].message,
+    ).toContain("Remove unavailable return services");
   });
 });
 

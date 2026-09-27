@@ -33,7 +33,6 @@ const customerReturnLabelSettingsFieldsSchema = z
   .object({
     enabled: z.boolean(),
     warehouseId: id,
-    policyId: id,
     ...customerReturnCarrierPolicyFields,
     contactName: text(200),
     contactPhone: text(50).nullable(),
@@ -41,16 +40,47 @@ const customerReturnLabelSettingsFieldsSchema = z
   .strict();
 export const customerReturnLabelSettingsInputSchema =
   customerReturnLabelSettingsFieldsSchema
-    .extend({ expectedVersion: z.number().int().nonnegative().safe() })
-    .superRefine(refineCustomerReturnCarrierPolicy);
+    .extend({
+      expectedVersion: z.number().int().nonnegative().safe(),
+      policyId: id.nullish(),
+    })
+    .superRefine(refineCustomerReturnCarrierPolicy)
+    .transform(({ policyId: _legacyPolicyId, ...shipping }) => shipping);
 export const customerReturnLabelSettingsSchema =
   customerReturnLabelSettingsFieldsSchema
     .extend({
       version: id,
       destinationAddress: customerReturnLabelAddressSchema,
+      policyId: id.nullish(),
     })
     .strict()
-    .superRefine(refineCustomerReturnCarrierPolicy);
+    .superRefine(refineCustomerReturnCarrierPolicy)
+    .transform(({ policyId: _legacyPolicyId, ...shipping }) => shipping);
+export const customerReturnResolvedPolicySchema = z
+  .object({
+    id,
+    name: text(160),
+    version: id,
+    returnWindowDays: z.number().int().min(0).max(3650),
+    scopeKind: z.enum([
+      "global",
+      "business_context",
+      "channel_context",
+      "vendor_context",
+      "vendor_channel_context",
+      "store",
+    ]),
+  })
+  .strict();
+export const customerReturnPolicyIssueSchema = z
+  .object({
+    code: z
+      .string()
+      .regex(/^[A-Z0-9_]+$/)
+      .max(100),
+    message: text(500),
+  })
+  .strict();
 export const customerReturnLabelSettingsStateSchema = z
   .object({
     channelId: id,
@@ -67,9 +97,8 @@ export const customerReturnLabelSettingsStateSchema = z
           .strict(),
       )
       .max(200),
-    policies: z
-      .array(z.object({ id, name: text(160), version: id }).strict())
-      .max(200),
+    resolvedPolicy: customerReturnResolvedPolicySchema.nullable(),
+    policyIssue: customerReturnPolicyIssueSchema.nullable(),
     carriers: z
       .array(
         z

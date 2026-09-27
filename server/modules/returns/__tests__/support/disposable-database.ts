@@ -1,4 +1,4 @@
-type ReturnSuite = "authorization" | "access" | "inspection" | "intake";
+type ReturnSuite = "authorization" | "access" | "inspection" | "intake" | "policy";
 
 const CI_DATABASE_NAME = /^\/echelon_ci_s[1-8]_[0-9a-f]{32}$/;
 const LOCAL_DATABASE_NAMES: Record<ReturnSuite, RegExp> = {
@@ -6,6 +6,7 @@ const LOCAL_DATABASE_NAMES: Record<ReturnSuite, RegExp> = {
   access: /^\/returns_access_test(?:_[a-z0-9]+)?$/,
   inspection: /^\/returns_inspection_test(?:_[a-z0-9]+)?$/,
   intake: /^\/returns_intake_test(?:_[a-z0-9]+)?$/,
+  policy: /^\/returns_policy_test(?:_[a-z0-9]+)?$/,
 };
 const LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "[::1]"];
 
@@ -20,7 +21,8 @@ export function resolveReturnsTestDatabase(env: NodeJS.ProcessEnv, suite: Return
   // never redirect that process to a shared database while CI reports isolation.
   const raw = ciOwned || suite === "authorization" ? shared
     : suite === "inspection" ? env.RETURNS_INSPECTION_TEST_DATABASE_URL
-      : suite === "intake" ? env.RETURNS_INTAKE_TEST_DATABASE_URL : env.RETURNS_ACCESS_TEST_DATABASE_URL;
+      : suite === "intake" ? env.RETURNS_INTAKE_TEST_DATABASE_URL
+        : suite === "policy" ? env.RETURNS_POLICY_TEST_DATABASE_URL : env.RETURNS_ACCESS_TEST_DATABASE_URL;
   if (!raw) return null;
   if (env.ECHELON_TEST_DATABASE_DISPOSABLE !== "true") throw unsafeDatabase();
   let url: URL;

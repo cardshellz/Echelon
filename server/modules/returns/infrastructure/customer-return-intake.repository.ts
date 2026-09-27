@@ -8,6 +8,10 @@ import {
 } from "../application/customer-return-intake.ports";
 import { validatePreparedCustomerReturnIntake } from "../application/customer-return-intake.service";
 import { portalInventoryReturnMirrorSql } from "./customer-return-inventory-mirror";
+import { acquireReturnPolicyCatalogLock } from "./return-policy-lock";
+import { readCustomerReturnPolicyCandidates } from "./customer-return-policy.reader";
+import { resolveCustomerReturnPortalPolicy } from "../application/customer-return-policy";
+import { snapshotReturnPolicy } from "../domain/return-case";
 import {
   PostgresCustomerReturnAuthorizationTransaction, type CustomerReturnAuthorizationDatabase,
   type CustomerReturnAuthorizationSqlExecutor
@@ -19,7 +23,7 @@ const positive = integer.refine(value => value > 0);
 const MAX_INTAKE_SOURCE_AGE_MS = 120_000;
 
 export class PostgresCustomerReturnIntakeStore implements CustomerReturnIntakeStore {
-  constructor(private readonly database: CustomerReturnAuthorizationDatabase) { }
+  constructor(private readonly database: CustomerReturnAuthorizationDatabase, private readonly clock: () => Date = () => new Date()) { }
 
   find(input: Parameters<CustomerReturnIntakeStore["find"]>[0]): Promise<CustomerReturnIntakeResult | null> {
     return this.database.transaction(tx => findIntake(tx, input));
@@ -27,14 +31,15 @@ export class PostgresCustomerReturnIntakeStore implements CustomerReturnIntakeSt
 
   async persist(raw: PreparedCustomerReturnIntake & { now: Date }): Promise<CustomerReturnIntakeResult> {
     const input = validatePreparedCustomerReturnIntake(Object.fromEntries(Object.entries(raw).filter(([key]) => key !== "now")));
-    const now = z.date().parse(raw.now);
-    const age = now.getTime() - Date.parse(input.observedAt);
+    const requestedAt = z.date().parse(raw.now);
+    const age = requestedAt.getTime() - Date.parse(input.observedAt);
     if (!Number.isFinite(age) || age < 0 || age > MAX_INTAKE_SOURCE_AGE_MS) sourceChanged();
     return this.database.transaction(async tx => {
+      await acquireReturnPolicyCatalogLock(tx, "shared");
       // Lock the durable submit lease before entitlement. A superseded preparer
       // cannot create a second root after a retry has rejected/replaced its lease.
-      const submission = rows(await tx.execute(sql`SELECT status,lease_token,request_hash,COALESCE(lease_actor,actor) AS actor,
-        lease_until > ${now} AS live_lease FROM returns.customer_return_submission_commands
+      const submission = rows(await tx.execute(sql`SELECT status,lease_token,request_hash,COALESCE(lease_actor,actor) AS actor,lease_until,
+        lease_until > ${requestedAt} AS live_lease FROM returns.customer_return_submission_commands
         WHERE channel_id=${input.channelId} AND idempotency_key=${input.idempotencyKey}::uuid FOR UPDATE`))[0];
       const replay = await findIntake(tx, input);
       if (replay) return replay;
@@ -68,6 +73,18 @@ export class PostgresCustomerReturnIntakeStore implements CustomerReturnIntakeSt
             AND wi.oms_order_line_id IN (${sql.join(input.lines.map(line => sql`${line.omsOrderLineId}`), sql`, `)})))
         AND NOT (${sql.raw(portalInventoryReturnMirrorSql)}) LIMIT 1`));
       if (inventoryHistory.length > 0) sourceChanged();
+      // Catalog, settings and order locks can all wait. The source TTL, lease,
+      // and purchase-based policy deadline must still hold after the final lock.
+      const now = z.date().parse(this.clock());
+      const currentAge = now.getTime() - Date.parse(input.observedAt);
+      if (currentAge < 0 || currentAge > MAX_INTAKE_SOURCE_AGE_MS) sourceChanged();
+      if (now.getTime() >= z.coerce.date().parse(submission.lease_until).getTime()) {
+        throw new CustomerReturnIntakeError("RETURN_LABEL_SUBMISSION_LEASE_CHANGED", "This return request expired while waiting. Check its saved status before retrying.");
+      }
+      // Equality remains eligible, matching evaluateCustomerReturnEligibility.
+      if (now.getTime() > Date.parse(input.returnWindowEndsAt)) {
+        throw new CustomerReturnIntakeError("RETURN_INTAKE_WINDOW_ELAPSED", "The return window ended while this request was waiting. Reload the order.");
+      }
       const result = await authorization.persist({
         channelId: input.channelId, omsOrderId: input.omsOrderId,
         idempotencyKey: input.idempotencyKey, semanticHash: input.semanticHash, eligibilityRevision: input.eligibilityRevision,
@@ -106,27 +123,19 @@ async function verifyConfiguration(tx: Executor, input: PreparedCustomerReturnIn
   if (!settings || settings.enabled !== true || Number(settings.version) !== input.settingsVersion
     || Number(settings.warehouse_id) !== input.warehouseSnapshot.warehouseId
     || input.warehouseSnapshot.version !== input.settingsVersion
-    || Number(settings.policy_id) !== input.operationalPolicy.id
     || input.parcels.some(parcel => (parcel.selectionMode ?? "fixed_service") !== settings.selection_mode
       || parcel.carrierId !== settings.carrier_id || parcel.serviceCode !== settings.service_code
       || canonical(parcel.destinationAddress) !== canonical(settings.destination_address))) configurationChanged();
   const warehouse = rows(await tx.execute(sql`SELECT is_active,country FROM warehouse.warehouses WHERE id=${settings.warehouse_id} FOR SHARE`))[0];
   if (!warehouse || warehouse.is_active !== 1 || warehouse.country !== "US") configurationChanged();
-  const policy = rows(await tx.execute(sql`SELECT * FROM returns.return_policies WHERE id=${input.operationalPolicy.id} FOR SHARE`))[0];
-  if (!policy || policy.status !== "active" || Number(policy.version) !== input.operationalPolicy.version
-    || (policy.business_context !== null && policy.business_context !== "retail")
-    || (policy.channel_id !== null && Number(policy.channel_id) !== input.channelId)
-    || policy.vendor_id !== null || policy.store_connection_id !== null) configurationChanged();
-  const snapshot = parseReturnPolicySnapshot({
-    id: Number(policy.id), name: policy.name, version: Number(policy.version),
-    scopeKind: policy.scope_kind, scopeKey: policy.scope_key, returnWindowDays: policy.return_window_days,
-    returnDestination: policy.return_destination, approvalAuthority: policy.approval_authority,
-    labelProvider: policy.label_provider, returnShippingPayer: policy.return_shipping_payer,
-    inspectionRequirement: policy.inspection_requirement, inspectionOwner: policy.inspection_owner,
-    customerRefundAuthority: policy.customer_refund_authority, vendorSettlementTrigger: policy.vendor_settlement_trigger,
-    returnlessRefundAllowed: policy.returnless_refund_allowed
-  });
-  if (canonical(snapshot) !== canonical(input.operationalPolicy.snapshot)) configurationChanged();
+  const resolved = resolveCustomerReturnPortalPolicy(await readCustomerReturnPolicyCandidates(tx, input.channelId), input.channelId);
+  const policy = resolved.policy;
+  if (resolved.policyIssue || !policy || policy.id !== input.operationalPolicy.id
+    || policy.version !== input.operationalPolicy.version) configurationChanged();
+  const snapshot = parseReturnPolicySnapshot(snapshotReturnPolicy(policy));
+  if (canonical(snapshot) !== canonical(input.operationalPolicy.snapshot)
+    || input.policySnapshot.version !== snapshot.version
+    || input.policySnapshot.returnWindowDays !== snapshot.returnWindowDays) configurationChanged();
 }
 
 async function materializeCases(tx: Executor, input: PreparedCustomerReturnIntake, authorizationId: number, now: Date): Promise<void> {

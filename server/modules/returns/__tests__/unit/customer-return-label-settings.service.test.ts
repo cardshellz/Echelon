@@ -23,7 +23,7 @@ function policy(overrides: Partial<ReturnPolicy> = {}): ReturnPolicy {
   return {
     ...labelPolicy,
     businessContext: "retail",
-    channelId: CHANNEL,
+    channelId: null,
     vendorId: null,
     storeConnectionId: null,
     status: "active",
@@ -60,7 +60,6 @@ function settingsInput(
     expectedVersion: 1,
     enabled: true,
     warehouseId: 1,
-    policyId: 1,
     selectionMode: "fixed_service",
     carrierRules: [],
     carrierId: "se-123",
@@ -148,13 +147,60 @@ describe("private return label settings service", () => {
     expect(state.warehouses).toEqual([
       { id: 1, name: "Test Warehouse", address: labelAddress },
     ]);
-    expect(state.policies).toEqual([
-      { id: 1, name: labelPolicy.name, version: 1 },
-    ]);
+    expect(state.resolvedPolicy).toEqual({
+      id: 1,
+      name: labelPolicy.name,
+      version: 1,
+      returnWindowDays: 365,
+      scopeKind: "business_context",
+    });
+    expect(state.policyIssue).toBeNull();
     await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({
       code: "RETURN_LABEL_SETTINGS_CHANGED",
     });
     expect(store.save).not.toHaveBeenCalled();
+  });
+
+  it("saves shipping independently of policy availability and discards a legacy selection", async () => {
+    store.catalog.mockResolvedValue({
+      warehouses: [warehouse()],
+      policies: [],
+    });
+    const result = await service.save(
+      CHANNEL,
+      { ...settingsInput(), policyId: 999 },
+      "admin",
+    );
+    expect(store.save).toHaveBeenCalledWith(
+      CHANNEL,
+      settingsInput(),
+      "admin",
+      NOW,
+    );
+    expect(result.policyIssue?.code).toBe("RETURN_PORTAL_POLICY_MISSING");
+    expect(result).not.toHaveProperty("policies");
+    expect(result.settings).not.toHaveProperty("policyId");
+    await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({
+      code: "RETURN_PORTAL_POLICY_MISSING",
+    });
+    expect(await service.requireShippingEnabled(CHANNEL, 1)).toEqual(
+      labelSettings,
+    );
+  });
+
+  it("accepts a canonical 30-day policy and exposes its read-only scope", async () => {
+    store.catalog.mockResolvedValue({
+      warehouses: [warehouse()],
+      policies: [policy({ returnWindowDays: 30 })],
+    });
+    expect((await service.get(CHANNEL)).resolvedPolicy).toMatchObject({
+      returnWindowDays: 30,
+      scopeKind: "business_context",
+    });
+    expect(
+      (await service.requireEnabled(CHANNEL, 1)).operationalPolicy.snapshot
+        .returnWindowDays,
+    ).toBe(30);
   });
 
   it("presents inactive warehouses as unavailable and incomplete or foreign addresses as null", async () => {
@@ -179,14 +225,27 @@ describe("private return label settings service", () => {
     async (businessContext) => {
       store.catalog.mockResolvedValue({
         warehouses: [warehouse()],
-        policies: [policy({ businessContext, channelId: null })],
+        policies: [
+          policy({
+            businessContext,
+            channelId: null,
+            ...(businessContext === null
+              ? { scopeKind: "global", scopeKey: "global" }
+              : {}),
+          }),
+        ],
       });
       const result = await service.requireEnabled(CHANNEL, 1);
       expect(result.settings).toEqual(labelSettings);
       expect(result.operationalPolicy).toEqual({
         id: 1,
         version: 1,
-        snapshot: labelPolicy,
+        snapshot: {
+          ...labelPolicy,
+          ...(businessContext === null
+            ? { scopeKind: "global", scopeKey: "global" }
+            : {}),
+        },
       });
     },
   );
@@ -399,7 +458,6 @@ describe("private return label settings service", () => {
     ["another shop", { channelId: 104 }],
     ["vendor scoped", { vendorId: 2 }],
     ["store scoped", { storeConnectionId: 2 }],
-    ["30-day window", { returnWindowDays: 30 }],
     ["zero-day window", { returnWindowDays: 0 }],
     ["vendor destination", { returnDestination: "vendor" }],
     ["vendor approval", { approvalAuthority: "vendor" }],
@@ -418,9 +476,9 @@ describe("private return label settings service", () => {
         warehouses: [warehouse()],
         policies: [invalidPolicy],
       });
-      expect((await service.get(CHANNEL)).policies).toEqual([]);
+      expect((await service.get(CHANNEL)).policyIssue).not.toBeNull();
       await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({
-        code: "RETURN_LABEL_CONFIGURATION_UNAVAILABLE",
+        code: expect.stringMatching(/^RETURN_PORTAL_POLICY_/),
       });
     },
   );
@@ -513,7 +571,6 @@ describe("private return label settings service", () => {
     {},
     { ...settingsInput(), expectedVersion: -1 },
     { ...settingsInput(), warehouseId: 0 },
-    { ...settingsInput(), policyId: null },
     { ...settingsInput(), carrierId: "not-a-provider-id" },
     { ...settingsInput(), serviceCode: "arbitrary URL" },
     { ...settingsInput(), contactName: "\n" },

@@ -5,12 +5,14 @@ const portalUrl = "postgresql://returns_test:secret@127.0.0.1:55473/returns_port
 const accessUrl = "postgresql://returns_test:secret@127.0.0.1:55473/returns_access_test";
 const inspectionUrl = "postgresql://returns_test:secret@127.0.0.1:55474/returns_inspection_test";
 const intakeUrl = "postgresql://returns_test:secret@127.0.0.1:55474/returns_intake_test";
+const policyUrl = "postgresql://returns_test:secret@127.0.0.1:55474/returns_policy_test";
 const ciUrl = "postgresql://returns_test:secret@127.0.0.1:55473/echelon_ci_s4_00000000000040008000000000000001";
 const localEnv: NodeJS.ProcessEnv = {
   ECHELON_TEST_DATABASE_DISPOSABLE: "true", ECHELON_TEST_DATABASE_URL: portalUrl,
   RETURNS_ACCESS_TEST_DATABASE_URL: accessUrl,
   RETURNS_INSPECTION_TEST_DATABASE_URL: inspectionUrl,
   RETURNS_INTAKE_TEST_DATABASE_URL: intakeUrl,
+  RETURNS_POLICY_TEST_DATABASE_URL: policyUrl,
 };
 
 describe("returns disposable PostgreSQL boundary", () => {
@@ -19,6 +21,7 @@ describe("returns disposable PostgreSQL boundary", () => {
     expect(resolveReturnsTestDatabase(localEnv, "access")).toBe(accessUrl);
     expect(resolveReturnsTestDatabase(localEnv, "inspection")).toBe(inspectionUrl);
     expect(resolveReturnsTestDatabase(localEnv, "intake")).toBe(intakeUrl);
+    expect(resolveReturnsTestDatabase(localEnv, "policy")).toBe(policyUrl);
     expect(resolveReturnsTestDatabase({ ECHELON_TEST_DATABASE_URL: portalUrl }, "access")).toBeNull();
     expect(resolveReturnsTestDatabase({ ECHELON_TEST_DATABASE_URL: portalUrl }, "inspection")).toBeNull();
     expect(resolveReturnsTestDatabase({}, "authorization")).toBeNull();
@@ -30,6 +33,7 @@ describe("returns disposable PostgreSQL boundary", () => {
     expect(resolveReturnsTestDatabase(env, "access")).toBe(ciUrl);
     expect(resolveReturnsTestDatabase(env, "inspection")).toBe(ciUrl);
     expect(resolveReturnsTestDatabase(env, "intake")).toBe(ciUrl);
+    expect(resolveReturnsTestDatabase(env, "policy")).toBe(ciUrl);
   });
 
   it.each([
@@ -66,6 +70,11 @@ describe("returns disposable PostgreSQL boundary", () => {
     expect(() => resolveReturnsTestDatabase({ ...localEnv, RETURNS_ACCESS_TEST_DATABASE_URL: accessUrl + "?host=remote" }, "access"))
       .toThrow();
   });
+
+  it.each([accessUrl, portalUrl, inspectionUrl, intakeUrl, policyUrl + "?host=remote", policyUrl.replace("127.0.0.1", "remote.example")])(
+    "rejects cross-suite or unsafe policy targets %s", url => {
+      expect(() => resolveReturnsTestDatabase({ ...localEnv, RETURNS_POLICY_TEST_DATABASE_URL: url }, "policy")).toThrow();
+    });
 
   it.each([accessUrl, portalUrl, inspectionUrl + "?host=remote", inspectionUrl.replace("127.0.0.1", "remote.example")])(
     "rejects cross-suite and remote inspection targets %s", url => {

@@ -18,15 +18,33 @@ import {
 import { ReturnLabelCarrierRules } from "./ReturnLabelCarrierRules";
 import {
   createReturnLabelSettingsDraft,
-  parseReturnLabelSettingsDraft,
-  returnLabelConfigurationAvailable,
+  refreshReturnLabelSettingsDraft,
+  returnLabelSettingsReadiness,
   RETURN_LABEL_SETTINGS_PATH,
   type ReturnLabelSettingsDraft,
+  type ReturnLabelSettingsField,
 } from "@/lib/customer-return-label-settings";
+
+const fieldIds: Record<ReturnLabelSettingsField, string> = {
+  warehouseId: "return-label-warehouse",
+  contactName: "return-label-contact",
+  contactPhone: "return-label-phone",
+  carrierId: "return-label-carrier",
+  serviceCode: "return-label-service",
+  carrierRules: "return-label-carrier-rules",
+};
+
+const policyScopeLabels = {
+  global: "All orders",
+  business_context: "Business context",
+  channel_context: "Sales channel",
+  vendor_context: "Dropship vendor",
+  vendor_channel_context: "Dropship vendor and channel",
+  store: "Dropship store",
+} as const;
 
 const emptyDraft: ReturnLabelSettingsDraft = {
   warehouseId: "",
-  policyId: "",
   carrierId: "",
   serviceCode: "",
   selectionMode: "cheapest_eligible",
@@ -61,9 +79,20 @@ export function CustomerReturnLabelSettings({
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [saved, setSaved] = useState(false);
+  const [versionConflict, setVersionConflict] = useState(false);
   const saveController = useRef<AbortController | null>(null);
+  const loadedChannel = useRef<number | null>(null);
+  const draftDirty = useRef(false);
+  const draftVersion = useRef<number | null>(null);
   useEffect(() => {
     const controller = new AbortController();
+    const sameChannel = loadedChannel.current === channelId;
+    if (!sameChannel) {
+      setDraft({ ...emptyDraft });
+      draftDirty.current = false;
+      draftVersion.current = null;
+      setVersionConflict(false);
+    }
     setBusy(true);
     setError(null);
     setSaved(false);
@@ -73,7 +102,17 @@ export function CustomerReturnLabelSettings({
       .then((next) => {
         if (controller.signal.aborted) return;
         setState(next);
-        setDraft(createReturnLabelSettingsDraft(next));
+        const keepDraft = sameChannel && draftDirty.current;
+        const nextVersion = next.settings?.version ?? 0;
+        const conflict = keepDraft && draftVersion.current !== nextVersion;
+        setVersionConflict(conflict);
+        if (!conflict) draftVersion.current = nextVersion;
+        setDraft((current) =>
+          keepDraft
+            ? refreshReturnLabelSettingsDraft(current, next)
+            : createReturnLabelSettingsDraft(next),
+        );
+        loadedChannel.current = channelId;
         onState(next);
       })
       .catch((cause) => {
@@ -93,14 +132,33 @@ export function CustomerReturnLabelSettings({
   }, [channelId, attempt, onState, onAccessDenied]);
 
   const carrier = state?.carriers.find((item) => item.id === draft.carrierId);
-  const parsed = parseReturnLabelSettingsDraft(
-    draft,
-    state?.settings?.version ?? 0,
-  );
-  const canSave =
-    parsed.success &&
-    state &&
-    returnLabelConfigurationAvailable(parsed.data, state);
+  const readiness = state ? returnLabelSettingsReadiness(draft, state) : null;
+  const parsed = readiness?.parsed;
+  const canSave = (readiness?.canSave ?? false) && !versionConflict;
+  function hasIssue(field: ReturnLabelSettingsField) {
+    return readiness?.issues.some((issue) => issue.field === field) ?? false;
+  }
+  function description(field: ReturnLabelSettingsField, helperId?: string) {
+    return (
+      [helperId, hasIssue(field) ? `${fieldIds[field]}-error` : undefined]
+        .filter(Boolean)
+        .join(" ") || undefined
+    );
+  }
+  function fieldErrors(field: ReturnLabelSettingsField) {
+    const issues =
+      readiness?.issues.filter((issue) => issue.field === field) ?? [];
+    return issues.length > 0 ? (
+      <div
+        id={`${fieldIds[field]}-error`}
+        className="space-y-1 text-xs text-destructive"
+      >
+        {issues.map((issue) => (
+          <p key={issue.message}>{issue.message}</p>
+        ))}
+      </div>
+    ) : null;
+  }
 
   useEffect(
     () => () => {
@@ -109,7 +167,7 @@ export function CustomerReturnLabelSettings({
     [],
   );
   async function save() {
-    if (!parsed.success || !canSave || busy || locked) return;
+    if (!parsed?.success || !canSave || busy || locked) return;
     await persist(parsed.data);
   }
   async function setEnabled(enabled: boolean) {
@@ -151,6 +209,9 @@ export function CustomerReturnLabelSettings({
       if (controller.signal.aborted) return;
       setState(next);
       setDraft(createReturnLabelSettingsDraft(next));
+      draftDirty.current = false;
+      draftVersion.current = next.settings?.version ?? 0;
+      setVersionConflict(false);
       onState(next);
       setSaved(true);
     } catch (cause) {
@@ -166,7 +227,20 @@ export function CustomerReturnLabelSettings({
     }
   }
   function update(patch: Partial<ReturnLabelSettingsDraft>) {
+    draftDirty.current = true;
     setDraft((current) => ({ ...current, ...patch }));
+    setSaved(false);
+  }
+  function resolveVersionConflict(keepChanges: boolean) {
+    if (!state || busy || locked) return;
+    if (!keepChanges) {
+      setDraft(createReturnLabelSettingsDraft(state));
+      draftDirty.current = false;
+    }
+    // An explicit acknowledgement is required before rebasing unsaved choices
+    // onto another administrator's newer version. The server still enforces CAS.
+    draftVersion.current = state.settings?.version ?? 0;
+    setVersionConflict(false);
     setSaved(false);
   }
   return (
@@ -217,8 +291,62 @@ export function CustomerReturnLabelSettings({
               : (state.message ??
                 (!state.providerConfigured
                   ? "The shipping provider is not configured. Label creation is unavailable."
-                  : "Label creation is off until a complete configuration is saved and enabled."))}
+                  : state.settings?.enabled &&
+                      (state.policyIssue || !state.resolvedPolicy)
+                    ? "Shipping settings are enabled. New returns are blocked by the policy shown below."
+                    : "Label creation is off until a complete configuration is saved and enabled."))}
           </p>
+          <section
+            aria-labelledby="return-applied-policy-title"
+            data-testid="return-applied-policy"
+            className="space-y-2 rounded-md border bg-muted/30 p-3 text-sm"
+          >
+            <h3 id="return-applied-policy-title" className="font-medium">
+              Applied return policy
+            </h3>
+            {state.resolvedPolicy && (
+              <div>
+                <p className="font-medium">
+                  {state.resolvedPolicy.name} · version{" "}
+                  {state.resolvedPolicy.version}
+                </p>
+                <p className="text-muted-foreground">
+                  {policyScopeLabels[state.resolvedPolicy.scopeKind]} ·{" "}
+                  {state.resolvedPolicy.returnWindowDays}-day return window from
+                  purchase
+                </p>
+              </div>
+            )}
+            {(state.policyIssue || !state.resolvedPolicy) && (
+              <div className="space-y-1" role="status">
+                <p className="text-destructive">
+                  {state.policyIssue?.message ??
+                    "No active return policy applies to this shop."}
+                </p>
+                <p>
+                  You can save shipping settings. New returns remain blocked
+                  until an applicable policy is supported by this portal.
+                </p>
+              </div>
+            )}
+            <p className="text-xs text-muted-foreground">
+              The most specific active policy applies automatically. Manage the
+              return window and return rules in Policies.
+            </p>
+            <a
+              href="/return-policies"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-block underline underline-offset-2"
+            >
+              Manage return policies
+              <span className="sr-only"> (opens in a new tab)</span>
+            </a>
+            <p className="text-xs text-muted-foreground">
+              After changing policies, refresh label settings here. Your unsaved
+              shipping choices will stay in place.
+            </p>
+          </section>
           {state.settings?.enabled && (
             <Button
               variant="outline"
@@ -244,13 +372,24 @@ export function CustomerReturnLabelSettings({
             >
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1">
-                  <Label htmlFor="return-label-warehouse">
-                    Return warehouse
-                  </Label>
+                  <div className="inline-flex items-baseline gap-1">
+                    <Label htmlFor="return-label-warehouse">
+                      Return warehouse
+                    </Label>
+                    <span
+                      aria-hidden="true"
+                      className="text-xs text-muted-foreground"
+                    >
+                      (required)
+                    </span>
+                  </div>
                   <select
                     id="return-label-warehouse"
                     className={previewSelectClass}
                     value={draft.warehouseId}
+                    aria-required="true"
+                    aria-invalid={hasIssue("warehouseId")}
+                    aria-describedby={description("warehouseId")}
                     onChange={(event) =>
                       update({ warehouseId: event.target.value })
                     }
@@ -267,24 +406,7 @@ export function CustomerReturnLabelSettings({
                       </option>
                     ))}
                   </select>
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="return-label-policy">Return policy</Label>
-                  <select
-                    id="return-label-policy"
-                    className={previewSelectClass}
-                    value={draft.policyId}
-                    onChange={(event) =>
-                      update({ policyId: event.target.value })
-                    }
-                  >
-                    <option value="">Choose a policy</option>
-                    {state.policies.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.name} · version {item.version}
-                      </option>
-                    ))}
-                  </select>
+                  {fieldErrors("warehouseId")}
                 </div>
                 <div className="space-y-1 sm:col-span-2">
                   <Label htmlFor="return-label-selection-mode">
@@ -323,6 +445,9 @@ export function CustomerReturnLabelSettings({
                       id="return-label-carrier"
                       className={previewSelectClass}
                       value={draft.carrierId}
+                      aria-required="true"
+                      aria-invalid={hasIssue("carrierId")}
+                      aria-describedby={description("carrierId")}
                       onChange={(event) =>
                         update({
                           carrierId: event.target.value,
@@ -337,6 +462,7 @@ export function CustomerReturnLabelSettings({
                         </option>
                       ))}
                     </select>
+                    {fieldErrors("carrierId")}
                   </div>
                 )}
                 {draft.selectionMode === "fixed_service" && (
@@ -346,6 +472,9 @@ export function CustomerReturnLabelSettings({
                       id="return-label-service"
                       className={previewSelectClass}
                       value={draft.serviceCode}
+                      aria-required="true"
+                      aria-invalid={hasIssue("serviceCode")}
+                      aria-describedby={description("serviceCode")}
                       onChange={(event) =>
                         update({ serviceCode: event.target.value })
                       }
@@ -357,20 +486,43 @@ export function CustomerReturnLabelSettings({
                         </option>
                       ))}
                     </select>
+                    {fieldErrors("serviceCode")}
                   </div>
                 )}
                 <div className="space-y-1">
-                  <Label htmlFor="return-label-contact">
-                    Return contact name
-                  </Label>
+                  <div className="inline-flex items-baseline gap-1">
+                    <Label htmlFor="return-label-contact">
+                      Return contact name
+                    </Label>
+                    <span
+                      aria-hidden="true"
+                      className="text-xs text-muted-foreground"
+                    >
+                      (required)
+                    </span>
+                  </div>
                   <Input
                     id="return-label-contact"
                     maxLength={200}
                     value={draft.contactName}
+                    aria-required="true"
+                    aria-invalid={hasIssue("contactName")}
+                    aria-describedby={description(
+                      "contactName",
+                      "return-label-contact-help",
+                    )}
                     onChange={(event) =>
                       update({ contactName: event.target.value })
                     }
                   />
+                  <p
+                    id="return-label-contact-help"
+                    className="text-xs text-muted-foreground"
+                  >
+                    Name of the person or team receiving returns, printed on the
+                    return shipping label.
+                  </p>
+                  {fieldErrors("contactName")}
                 </div>
                 <div className="space-y-1">
                   <Label htmlFor="return-label-phone">
@@ -381,18 +533,29 @@ export function CustomerReturnLabelSettings({
                     type="tel"
                     maxLength={50}
                     value={draft.contactPhone}
+                    aria-invalid={hasIssue("contactPhone")}
+                    aria-describedby={description("contactPhone")}
                     onChange={(event) =>
                       update({ contactPhone: event.target.value })
                     }
                   />
+                  {fieldErrors("contactPhone")}
                 </div>
               </div>
               {draft.selectionMode === "cheapest_eligible" && (
-                <ReturnLabelCarrierRules
-                  carriers={state.carriers}
-                  rules={draft.carrierRules}
-                  onChange={(carrierRules) => update({ carrierRules })}
-                />
+                <div
+                  id={fieldIds.carrierRules}
+                  tabIndex={-1}
+                  className="space-y-2"
+                  aria-describedby={description("carrierRules")}
+                >
+                  <ReturnLabelCarrierRules
+                    carriers={state.carriers}
+                    rules={draft.carrierRules}
+                    onChange={(carrierRules) => update({ carrierRules })}
+                  />
+                  {fieldErrors("carrierRules")}
+                </div>
               )}
               <label className="flex min-h-11 items-center gap-2 text-sm">
                 <input
@@ -405,7 +568,83 @@ export function CustomerReturnLabelSettings({
                 />
                 Enable real return labels for this shop
               </label>
-              <Button disabled={!canSave} onClick={() => void save()}>
+              {versionConflict && (
+                <div
+                  id="return-label-settings-conflict"
+                  data-testid="return-label-settings-conflict"
+                  role="alert"
+                  className="space-y-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"
+                >
+                  <p>
+                    Saved label settings changed while you were editing. Your
+                    unsaved choices are still here. Keeping your changes will
+                    replace the current saved configuration.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => resolveVersionConflict(false)}
+                    >
+                      Use saved settings
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => resolveVersionConflict(true)}
+                    >
+                      Keep my changes
+                    </Button>
+                  </div>
+                </div>
+              )}
+              {readiness && readiness.issues.length > 0 && (
+                <div
+                  id="return-label-settings-blockers"
+                  data-testid="return-label-settings-blockers"
+                  className="space-y-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"
+                >
+                  <p className="font-medium">Complete before saving</p>
+                  <ul className="list-disc space-y-1 pl-5">
+                    {readiness.issues.map((issue) => (
+                      <li key={`${issue.field}:${issue.message}`}>
+                        {issue.field ? (
+                          <button
+                            type="button"
+                            className="text-left underline underline-offset-2"
+                            onClick={() => {
+                              if (issue.field)
+                                document
+                                  .getElementById(fieldIds[issue.field])
+                                  ?.focus();
+                            }}
+                          >
+                            {issue.message}
+                          </button>
+                        ) : (
+                          issue.message
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <Button
+                disabled={!canSave}
+                aria-describedby={
+                  [
+                    versionConflict
+                      ? "return-label-settings-conflict"
+                      : undefined,
+                    readiness?.issues.length
+                      ? "return-label-settings-blockers"
+                      : undefined,
+                  ]
+                    .filter(Boolean)
+                    .join(" ") || undefined
+                }
+                onClick={() => void save()}
+              >
                 Save label settings
               </Button>
             </fieldset>

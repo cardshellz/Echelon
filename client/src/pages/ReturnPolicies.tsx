@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ReturnPolicyArchiveDialog } from "@/components/returns/ReturnPolicyArchiveDialog";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { FileText, Plus, RefreshCw, Search, ShieldCheck, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -218,6 +219,7 @@ function scopeSummary(policy: ReturnPolicy, overview: Overview): string {
 
 export default function ReturnPolicies() {
   const { toast } = useToast();
+  const [archivePolicyId, setArchivePolicyId] = useState<number | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [policyView, setPolicyView] = useState<ReturnPolicyVersionView>("active");
   const [scopeLocked, setScopeLocked] = useState(false);
@@ -228,10 +230,10 @@ export default function ReturnPolicies() {
   const overview = overviewQuery.data;
 
   const createMutation = useMutation({
-    mutationFn: async (input: Draft) => readJson<{ policy: ReturnPolicy }>(await fetch("/api/returns/admin/policies/versions", {
+    mutationFn: async ({ input, idempotencyKey }: { input: Draft; idempotencyKey: string }) => readJson<{ policy: ReturnPolicy }>(await fetch("/api/returns/admin/policies/versions", {
       method: "POST",
       credentials: "include",
-      headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+      headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
       body: JSON.stringify(input),
     })),
     onSuccess: async () => {
@@ -239,7 +241,7 @@ export default function ReturnPolicies() {
       setDialogOpen(false);
       toast({ title: "Return policy version created", description: "The previous version for this target was retired atomically." });
     },
-    onError: (error: Error) => toast({ variant: "destructive", title: "Policy not saved", description: error.message }),
+    onError: (error: Error) => toast({ variant: "destructive", title: "Policy save not confirmed", description: error.message }),
   });
 
   const resolutionMutation = useMutation<ResolutionResult, Error, ResolutionInput>({
@@ -346,7 +348,10 @@ export default function ReturnPolicies() {
                         <TableCell className="text-sm"><div>{policy.returnWindowDays} days / {humanize(policy.returnDestination)}</div><div className="text-muted-foreground">Approval: {humanize(policy.approvalAuthority)} / Label: {humanize(policy.labelProvider)}</div></TableCell>
                         <TableCell className="text-right">
                           {policyView === "active" ? (
-                            <Button variant="outline" size="sm" disabled={!appliesTo} title={appliesTo ? undefined : "Legacy policies must be replaced with a new simplified policy."} onClick={() => openVersion(policy)}><FileText className="mr-2 h-4 w-4" />New version</Button>
+                            <div className="flex flex-wrap justify-end gap-2">
+                              <Button variant="outline" size="sm" disabled={!appliesTo} title={appliesTo ? undefined : "Legacy policies must be replaced with a new simplified policy."} onClick={() => openVersion(policy)}><FileText className="mr-2 h-4 w-4" />New version</Button>
+                              <Button variant="outline" size="sm" onClick={() => setArchivePolicyId(policy.id)} aria-label={`Archive ${policy.name}, version ${policy.version}`}>Archive</Button>
+                            </div>
                           ) : (
                             <Badge variant="secondary">Retired</Badge>
                           )}
@@ -365,7 +370,23 @@ export default function ReturnPolicies() {
         </TabsContent>
       </Tabs>
 
-      <PolicyDialog open={dialogOpen} onOpenChange={setDialogOpen} overview={overview} draft={draft} onDraft={setDraft} scopeLocked={scopeLocked} saving={createMutation.isPending} onSave={() => createMutation.mutate(draft)} />
+      <PolicyDialog open={dialogOpen} onOpenChange={setDialogOpen} overview={overview} draft={draft} onDraft={setDraft} scopeLocked={scopeLocked} saving={createMutation.isPending} onSave={() => createMutation.mutate({ input: draft, idempotencyKey: crypto.randomUUID() })} />
+      {archivePolicyId !== null && <ReturnPolicyArchiveDialog
+        key={archivePolicyId}
+        policyId={archivePolicyId}
+        references={{
+          channels: overview.channels,
+          vendors: overview.referencedVendors.map((vendor) => ({ id: vendor.id, name: vendorLabel(vendor) })),
+          stores: overview.referencedStores.map((store) => ({ id: store.id, name: storeLabel(store) })),
+        }}
+        onClose={() => setArchivePolicyId(null)}
+        onArchived={() => {
+          setArchivePolicyId(null);
+          resolutionMutation.reset();
+          void queryClient.invalidateQueries({ queryKey: ["/api/returns/admin/policies"] });
+          toast({ title: "Return policy archived", description: "Historical returns keep their original policy records." });
+        }}
+      />}
     </div>
   );
 }

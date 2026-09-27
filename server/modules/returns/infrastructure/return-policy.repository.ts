@@ -9,6 +9,8 @@ import {
 } from "@shared/schema";
 import { db } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
+import { acquireReturnPolicyCatalogLock } from "./return-policy-lock";
+import type { ReturnPolicyArchiveSnapshot } from "../application/return-policy-archive";
 import {
   ReturnPolicyAdminError,
   type PublicReturnPolicyScopeInput,
@@ -26,21 +28,22 @@ type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type QueryExecutor = typeof db | Transaction;
 
 export class PostgresReturnPolicyAdminStore implements ReturnPolicyAdminStore {
+  constructor(private readonly database: typeof db = db) {}
   async listOverview(): Promise<ReturnPolicyOverview> {
     const [policies, channelRows, dropshipOmsChannel] = await Promise.all([
-      db.select().from(returnPolicies).orderBy(asc(returnPolicies.scopeKey), desc(returnPolicies.version)),
-      db.select(channelSelection).from(channels).orderBy(asc(channels.name)),
-      loadDropshipOmsChannel(db),
+      this.database.select().from(returnPolicies).orderBy(asc(returnPolicies.scopeKey), desc(returnPolicies.version)),
+      this.database.select(channelSelection).from(channels).orderBy(asc(channels.name)),
+      loadDropshipOmsChannel(this.database),
     ]);
     const vendorIds = uniqueIds(policies.map((policy) => policy.vendorId));
     const storeIds = uniqueIds(policies.map((policy) => policy.storeConnectionId));
     const [referencedVendors, referencedStores] = await Promise.all([
       vendorIds.length === 0
         ? Promise.resolve([])
-        : db.select(vendorSelection).from(dropshipVendors).where(inArray(dropshipVendors.id, vendorIds)).orderBy(asc(dropshipVendors.businessName), asc(dropshipVendors.email)),
+        : this.database.select(vendorSelection).from(dropshipVendors).where(inArray(dropshipVendors.id, vendorIds)).orderBy(asc(dropshipVendors.businessName), asc(dropshipVendors.email)),
       storeIds.length === 0
         ? Promise.resolve([])
-        : db.select(storeSelection).from(dropshipStoreConnections).where(inArray(dropshipStoreConnections.id, storeIds)).orderBy(asc(dropshipStoreConnections.externalDisplayName), asc(dropshipStoreConnections.id)),
+        : this.database.select(storeSelection).from(dropshipStoreConnections).where(inArray(dropshipStoreConnections.id, storeIds)).orderBy(asc(dropshipStoreConnections.externalDisplayName), asc(dropshipStoreConnections.id)),
     ]);
     return {
       policies,
@@ -52,16 +55,16 @@ export class PostgresReturnPolicyAdminStore implements ReturnPolicyAdminStore {
   }
 
   listActivePolicies(): Promise<ReturnPolicy[]> {
-    return db.select().from(returnPolicies).where(eq(returnPolicies.status, "active"));
+    return this.database.select().from(returnPolicies).where(eq(returnPolicies.status, "active"));
   }
 
   getDropshipOmsChannel(): Promise<ReturnPolicyChannelReference> {
-    return loadDropshipOmsChannel(db);
+    return loadDropshipOmsChannel(this.database);
   }
 
   searchVendors(search: string, limit: number): Promise<ReturnPolicyVendorReference[]> {
     const pattern = `%${search}%`;
-    return db.select(vendorSelection)
+    return this.database.select(vendorSelection)
       .from(dropshipVendors)
       .where(search ? or(
         ilike(dropshipVendors.businessName, pattern),
@@ -74,7 +77,7 @@ export class PostgresReturnPolicyAdminStore implements ReturnPolicyAdminStore {
 
   searchStores(vendorId: number, search: string, limit: number): Promise<ReturnPolicyStoreReference[]> {
     const pattern = `%${search}%`;
-    return db.select(storeSelection)
+    return this.database.select(storeSelection)
       .from(dropshipStoreConnections)
       .where(and(
         eq(dropshipStoreConnections.vendorId, vendorId),
@@ -89,12 +92,28 @@ export class PostgresReturnPolicyAdminStore implements ReturnPolicyAdminStore {
   }
 
   transaction<T>(work: (tx: ReturnPolicyAdminTransaction) => Promise<T>): Promise<T> {
-    return db.transaction((tx) => work(new PostgresReturnPolicyAdminTransaction(tx)));
+    return this.database.transaction((tx) => work(new PostgresReturnPolicyAdminTransaction(tx)));
   }
 }
 
 class PostgresReturnPolicyAdminTransaction implements ReturnPolicyAdminTransaction {
   constructor(private readonly tx: Transaction) {}
+
+  lockCatalog(mode: "shared" | "exclusive"): Promise<void> {
+    return acquireReturnPolicyCatalogLock(this.tx, mode);
+  }
+
+  async readArchiveSnapshot(policyId: number): Promise<ReturnPolicyArchiveSnapshot> {
+    const policies = await this.tx.select().from(returnPolicies)
+      .where(or(eq(returnPolicies.status, "active"), eq(returnPolicies.id, policyId))).orderBy(asc(returnPolicies.id)).limit(2_001);
+    const counts = await this.tx.execute(sql`SELECT
+      (SELECT COUNT(*)::bigint FROM returns.return_cases WHERE policy_id=${policyId}) AS return_cases,
+      (SELECT COUNT(*)::bigint FROM returns.customer_return_intakes WHERE policy_id=${policyId}) AS portal_intakes`);
+    return { policies, historicalReferences: {
+      returnCases: Number(counts.rows[0]?.return_cases ?? 0),
+      portalIntakes: Number(counts.rows[0]?.portal_intakes ?? 0),
+    } };
+  }
 
   async lockCommand(idempotencyKey: string): Promise<void> {
     await this.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`return-policy-command:${idempotencyKey}`}))`);
@@ -157,10 +176,10 @@ class PostgresReturnPolicyAdminTransaction implements ReturnPolicyAdminTransacti
     await this.tx.insert(returnPolicyCommands).values(input);
   }
 
-  async writeAudit(input: { actor: string; before: ReturnPolicy | null; after: ReturnPolicy; now: Date }): Promise<void> {
+  async writeAudit(input: Parameters<ReturnPolicyAdminTransaction["writeAudit"]>[0]): Promise<void> {
     await persistAuditEvent(this.tx, {
       actor: input.actor,
-      action: "RETURN_POLICY_VERSION_CREATED",
+      action: input.archivePreview ? "RETURN_POLICY_ARCHIVED" : "RETURN_POLICY_VERSION_CREATED",
       target: `returns.return_policies:${input.after.id}`,
       changes: {
         before: input.before ? auditRecord(input.before) : null,
@@ -170,6 +189,7 @@ class PostgresReturnPolicyAdminTransaction implements ReturnPolicyAdminTransacti
         scopeKey: input.after.scopeKey,
         version: input.after.version,
         supersedesPolicyId: input.after.supersedesPolicyId,
+        ...(input.archivePreview ? { archivePreview: input.archivePreview } : {}),
       },
     }, { timestamp: input.now });
   }

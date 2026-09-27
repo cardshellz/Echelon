@@ -57,6 +57,10 @@ export function prepareCustomerReturnIntake(
     normalizeCustomerReturnOrderReference(input.orderReference) !==
       order.orderReference ||
     input.settingsVersion !== settings.version ||
+    canonical(inspection.operationalPolicy) !== canonical(operationalPolicy) ||
+    facts.policy.version !== operationalPolicy.version ||
+    facts.policy.returnWindowDays !==
+      operationalPolicy.snapshot.returnWindowDays ||
     !settings.enabled
   ) {
     throw new CustomerReturnIntakeError(
@@ -200,9 +204,13 @@ export function prepareCustomerReturnIntake(
     eligibilityRevision: order.sourceRevision,
     actor,
     observedAt: provider.observedAt,
+    returnWindowEndsAt: eligibility.returnWindowEndsAt,
     settingsVersion: settings.version,
     policySnapshot: {
       ...facts.policy,
+      policyId: operationalPolicy.id,
+      returnWindowEndsAt: eligibility.returnWindowEndsAt,
+      operationalPolicy: { ...operationalPolicy.snapshot },
       refundAuthority: "manual_shopify",
       windowBasis: "purchase",
     },
@@ -260,4 +268,12 @@ function mappingMissing(): never {
 }
 function compare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+function canonical(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  return `{${Object.entries(value)
+    .sort(([left], [right]) => compare(left, right))
+    .map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`)
+    .join(",")}}`;
 }

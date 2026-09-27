@@ -12,6 +12,21 @@ import {
 import { projectCustomerReturnLiveWmsAllocations } from "../../application/customer-return-live-delivery";
 const policy = { id: 1, version: 1, snapshot: labelPolicy };
 describe("trusted live return intake preparation", () => {
+  it("rejects a different canonical policy resolved between settings verification and live inspection", async () => {
+    const f = await labelPreparationFixture();
+    expect(() =>
+      prepareCustomerReturnIntake(
+        f.input,
+        f.inspection,
+        labelSettings,
+        { ...policy, version: 2, snapshot: { ...labelPolicy, version: 2 } },
+        "admin",
+        LABEL_LEASE,
+      ),
+    ).toThrowError(
+      expect.objectContaining({ code: "RETURN_LIVE_REVIEW_CHANGED" }),
+    );
+  });
   it("retains an automatic manifest's physical facts while deferring its carrier to quoting", async () => {
     const f = await labelPreparationFixture();
     const settings = {

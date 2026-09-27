@@ -104,8 +104,6 @@ function assertSettingsScope(
     state.channelId !== channelId ||
     new Set(state.warehouses.map((item) => item.id)).size !==
       state.warehouses.length ||
-    new Set(state.policies.map((item) => item.id)).size !==
-      state.policies.length ||
     new Set(state.carriers.map((item) => item.id)).size !==
       state.carriers.length ||
     state.carriers.some(
@@ -166,6 +164,8 @@ export function returnLabelsEnabled(
   return Boolean(
     state &&
       settings?.enabled &&
+      state.resolvedPolicy &&
+      state.policyIssue === null &&
       returnLabelConfigurationAvailable(settings, state),
   );
 }

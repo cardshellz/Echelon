@@ -20,6 +20,7 @@ export async function createIntakeTestSchema(pool: Pool, options: { carrierSelec
   await pool.query(readFileSync("migrations/251_customer_return_label_settings.sql", "utf8"));
   if (options.carrierSelection !== false) {
     await pool.query(readFileSync("migrations/252_customer_return_carrier_selection.sql", "utf8"));
+    await pool.query(readFileSync("migrations/254_customer_return_policy_resolution.sql", "utf8"));
   }
 }
 export async function seedIntakeTestSchema(pool: Pool): Promise<void> {
@@ -124,6 +125,7 @@ export function preparedIntake(): PreparedCustomerReturnIntake & { now: Date } {
   return {
     channelId: 36, omsOrderId: 100, idempotencyKey: INTAKE_KEY, submissionLeaseToken: INTAKE_LEASE,
     semanticHash: "a".repeat(64), eligibilityRevision: "b".repeat(64), actor: "admin:test", observedAt: INTAKE_NOW.toISOString(), now: new Date(INTAKE_NOW), settingsVersion: 1,
+    returnWindowEndsAt: "2027-09-26T12:00:00.000Z",
     policySnapshot: { version: 1, returnWindowDays: 365, refundAuthority: "manual_shopify", windowBasis: "purchase" },
     warehouseSnapshot: { warehouseId: 1, version: 1, address: INTAKE_ADDRESS }, operationalPolicy: { id: 1, version: 1, snapshot: { ...INTAKE_POLICY } },
     lines: [
