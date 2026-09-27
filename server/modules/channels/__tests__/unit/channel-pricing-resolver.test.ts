@@ -110,4 +110,19 @@ describe("channel pricing resolver", () => {
     expect(applyPricingRule(1000, "fixed", "2.50")).toBe(1250);
     expect(applyPricingRule(1000, "override", "9.99")).toBe(999);
   });
+  it("rounds a half cent upward using exact integer arithmetic", () => {
+    expect(applyPricingRule(1, "percentage", "50")).toBe(2);
+    const base = 8_000_000_000_001;
+    const expected = Number((BigInt(base) * BigInt(10_001) + BigInt(5_000)) / BigInt(10_000));
+    expect(applyPricingRule(base, "percentage", "0.01")).toBe(expected);
+  });
+  it("rejects invalid and overflowing cents rather than rounding an unsafe price", () => {
+    for (const base of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => applyPricingRule(base, "fixed", "1")).toThrow();
+    }
+    expect(() => applyPricingRule(Number.MAX_SAFE_INTEGER, "fixed", "0.01")).toThrow(/safe integer/);
+    expect(() => applyPricingRule(Number.MAX_SAFE_INTEGER, "percentage", "0.01")).toThrow(/safe integer/);
+    expect(applyPricingRule(0, "percentage", "50")).toBe(0);
+    expect(applyPricingRule(Number.MAX_SAFE_INTEGER, "percentage", "0")).toBe(Number.MAX_SAFE_INTEGER);
+  });
 });

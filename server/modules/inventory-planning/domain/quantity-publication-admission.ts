@@ -7,7 +7,7 @@ const nonnegativeBigInt = z.string().regex(/^(0|[1-9][0-9]{0,18})$/).refine(valu
 export const quantityPublicationScopeSchema = z.object({
   destinationKind: z.enum(["channel_connection", "dropship_store_connection"]),
   connectionId: databaseInt,
-  providerKey: z.enum(["shopify", "ebay"]),
+  providerKey: z.enum(["shopify", "ebay", "walmart"]),
   providerScopeType: z.enum(["account", "location"]),
   externalScopeId: identifier,
   externalInventoryItemId: identifier,
@@ -35,7 +35,7 @@ export interface QuantityPublicationDrainProof {
   latestAttemptId: string;
   unresolvedAttempts: Array<{
     attemptId: string;
-    owner: "legacy" | "outbox";
+    owner: "legacy" | "outbox" | "listing_setup_zero";
     state: "running" | "uncertain";
     scope: QuantityPublicationScope;
     outboxId: string | null;
@@ -45,9 +45,9 @@ export interface QuantityPublicationDrainProof {
     attemptId: string;
     outboxId: string | null;
     gateEpoch: string;
-    owner: "legacy" | "outbox";
+    owner: "legacy" | "outbox" | "listing_setup_zero";
     completedAt: string | null;
-    resolutionBasis: "owner_completion" | "operator_attestation" | "provider_rejection" | null;
+    resolutionBasis: "owner_completion" | "operator_attestation" | "provider_rejection" | "owner_preflight_no_request" | null;
   }>;
   pendingCatchupCount: number;
 }
@@ -55,11 +55,11 @@ export interface QuantityPublicationDrainProof {
 export const quantityPublicationDrainProofSchema: z.ZodType<QuantityPublicationDrainProof> = z.object({
   contractVersion: z.literal(1), activationRunId: databaseBigInt, gateEpoch: nonnegativeBigInt,
   suppressed: z.boolean(), latestAttemptId: nonnegativeBigInt,
-  unresolvedAttempts: z.array(z.object({ attemptId: databaseBigInt, owner: z.enum(["legacy","outbox"]),
+  unresolvedAttempts: z.array(z.object({ attemptId: databaseBigInt, owner: z.enum(["legacy","outbox","listing_setup_zero"]),
     state: z.enum(["running","uncertain"]), scope: quantityPublicationScopeSchema, outboxId: databaseBigInt.nullable() }).strict()).max(1000),
   latestAttemptsByScope: z.array(z.object({ scope: quantityPublicationScopeSchema, attemptId: databaseBigInt,
     outboxId: databaseBigInt.nullable(), gateEpoch: nonnegativeBigInt,
-    owner: z.enum(["legacy","outbox"]), completedAt: z.string().datetime().nullable(),
-    resolutionBasis: z.enum(["owner_completion","operator_attestation","provider_rejection"]).nullable() }).strict()).max(10000),
+    owner: z.enum(["legacy","outbox","listing_setup_zero"]), completedAt: z.string().datetime().nullable(),
+    resolutionBasis: z.enum(["owner_completion","operator_attestation","provider_rejection","owner_preflight_no_request"]).nullable() }).strict()).max(10000),
   pendingCatchupCount: z.number().int().nonnegative().safe(),
 }).strict();

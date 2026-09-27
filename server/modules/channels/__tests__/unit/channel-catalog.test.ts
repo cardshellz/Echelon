@@ -48,6 +48,13 @@ describe("shared channel catalog identity", () => {
     await expect(s.service.link(7, { mappings: [{ sku: "SKU-1", productVariantId: 11 }] }, "operator")).rejects.toThrow();
     expect(s.repository.saveMappings).not.toHaveBeenCalled();
   });
+  it("rejects a changed provider product between publication readback and mapping", async () => {
+    const s = setup();
+    s.provider.item.mockResolvedValue({...item(), externalProductId: "REPLACED-WPID"});
+    await expect(s.service.link(7, {mappings:[{sku:"SKU-1", productVariantId:11, expectedExternalProductId:"APPROVED-WPID"}]}, "publisher"))
+      .rejects.toMatchObject({code:"CHANNEL_CATALOG_PRODUCT_CHANGED"});
+    expect(s.repository.saveMappings).not.toHaveBeenCalled();
+  });
   it.each([
     [{ sku: "SKU-1", productVariantId: 11 }, { sku: "SKU-1", productVariantId: 12 }],
     [{ sku: "SKU-1", productVariantId: 11 }, { sku: "SKU-2", productVariantId: 11 }],

@@ -258,6 +258,13 @@ export async function loadPublicationTargetScopes(
      ORDER BY 1`,
     [target.id],
   )).rows;
+  if (target.provider_key === "walmart") {
+    // Initial zero feeds hold exact SKU admission before channel mappings exist.
+    // Lifecycle changes must fence those durable scopes too.
+    inventoryItems.push(...(await client.query<{ external_inventory_item_id: string }>(
+      "SELECT external_inventory_item_id FROM inventory.publication_listing_setup_scopes WHERE publication_target_id=$1 ORDER BY external_inventory_item_id",
+      [target.id])).rows);
+  }
   const scopes = inventoryItems.map((item) => quantityPublicationScopeSchema.parse({
     destinationKind: target.destination_kind,
     connectionId,
