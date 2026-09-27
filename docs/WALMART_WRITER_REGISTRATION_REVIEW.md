@@ -1,8 +1,8 @@
-# Proposed writer-ratchet registrations
+# Approved writer-ratchet registrations
 
-The baseline file has not been changed. Automatic approval review rejected its regeneration because this expands the database-writer allowlist. The feature requires the following explicit owner registrations; approval is needed before applying this exact baseline update.
+The user explicitly approved these 11 owner registrations on 2026-09-27. The regenerated baseline adds exactly these pairs and removes none. The writer-ratchet suite passes all nine tests, including a regression that checks these owners across runtime code and operational scripts.
 
-| Table | Owner to register | Purpose |
+| Table | Registered owner | Purpose |
 | --- | --- | --- |
 | `channels.channel_pricing_rules` | `modules/channels` | Persist the existing shared channel pricing rule through the Channels owner |
 | `marketplace.channel_listing_drafts` | `modules/marketplace-listings` | Revisioned explicit selections |
@@ -16,6 +16,6 @@ The baseline file has not been changed. Automatic approval review rejected its r
 | `inventory.publication_listing_setup_identities` | `modules/inventory-planning` | Permanent exact target/SKU/variant binding |
 | `inventory.publication_listing_setup_scopes` | `modules/inventory-planning` | Immutable per-batch zero setup evidence |
 
-These registrations change the architecture test's expected topology. They do not execute migrations, alter live data, activate stock publication, or grant runtime users permissions. Existing registrations remain intact. The proposed new runtime writers belong to the owners of these records; controllers do not become database writers.
+These registrations change the architecture test's expected topology. They do not execute migrations, alter live data, activate stock publication, or grant runtime users permissions. Existing registrations remain intact. The new runtime writers belong to the owners of these records; controllers do not become database writers.
 
 The existing pricing table already has historical writer registrations. Adding its Channels owner does not remove those older paths; consolidating all prior pricing routes is outside this feature. The other ten tables are created by migrations 0707–0709 for this implementation.
