@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
+import express, { type NextFunction, type Request, type Response } from "express";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DropshipListingTierEligibility } from "../../domain/listing-tiers";
 import { resolveListingContent, listingCatalogHash } from "../../application/dropship-listing-content-resolver";
 import { noContentProfile } from "../fixtures/listing-content.fixture";
@@ -38,9 +41,27 @@ import type {
 import { ConfigDrivenDropshipMarketplaceListingProvider } from "../../infrastructure/dropship-config-driven-marketplace-listing.provider";
 import { toDropshipVendorListingPreview } from "../../application/dropship-listing-dtos";
 import {
-  buildListingPushRequest,
+  buildListingQueueRequest,
+  type DropshipCatalogRow as ClientCatalogRow,
   type DropshipListingPreviewResult as ClientListingPreviewResult,
 } from "../../../../../client/src/lib/dropship-ops-surface";
+import { registerDropshipListingRoutes } from "../../interfaces/http/dropship-listing.routes";
+
+vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
+// The HTTP tests below exercise the real listing route and the real service.
+// Portal sign-in and step-up have their own tests; here they only attach the member.
+vi.mock("../../interfaces/http/dropship-auth.routes", () => ({
+  requireDropshipAuth: (req: Request, res: Response, next: NextFunction) => {
+    const memberId = req.header("X-Test-Member");
+    if (!memberId) {
+      res.status(401).json({ error: { code: "DROPSHIP_AUTH_REQUIRED", message: "Dropship authentication is required." } });
+      return;
+    }
+    req.session = { dropship: { memberId } } as unknown as Request["session"];
+    next();
+  },
+  requireDropshipSensitiveActionProof: () => (_req: Request, _res: Response, next: NextFunction) => next(),
+}));
 
 const now = new Date("2026-05-01T17:30:00.000Z");
 
@@ -143,27 +164,139 @@ describe("DropshipListingPreviewService", () => {
     expect(repository.lastCreatedInput?.preview.rows[0].listingIntent?.description).toBe(content.descriptionHtml);
     expect(repository.candidate.description).not.toBe(content.descriptionHtml);
   });
-  it("queues a push built by the vendor client from the vendor preview response", async () => {
-    // Regression: the vendor preview DTO dropped the evidence hashes, so the
-    // browser could never echo them and every vendor push failed as a content
-    // conflict. This crosses the real transport boundary and the real client builder.
+  it("queues in one step what the server's own preview shows, with no evidence from an earlier preview", async () => {
+    // A rule-priced row with resolved content and a saved price revision: every
+    // kind of evidence the two-step push would have had to echo.
     const content = resolveListingContent({ candidate: repository.candidate, profile: noContentProfile, saved: null });
     repository.loadListingContents = async () => new Map([[101, content]]);
     repository.rulePrices.set(101, rulePrice());
     repository.savedPrices = [{ productVariantId: 101, revisionId: 7, overridePriceCents: null, pricingMode: "rules", updatedAt: now.toISOString() }];
-    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
-    const received = JSON.parse(JSON.stringify(toDropshipVendorListingPreview(preview))) as ClientListingPreviewResult;
-    expect(received.rows[0]).not.toHaveProperty("listingIntent");
-    expect(received.rows[0]).toMatchObject({ previewStatus: "ready", contentEvidenceHash: content.evidenceHash,
-      rulePriceEvidenceHash: "a".repeat(64), pricingRuleName: "Store default rule", priceSettingRevisionId: 7 });
 
-    const request = buildListingPushRequest({ storeConnectionId: 22, preview: received, idempotencyKey: "vendor-round-trip" });
-    const result = await service.createListingPushJobForMember("member-1", request);
+    const result = await service.createListingPushJobForMember("member-1", {
+      storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "one-step-001", reviewMode: "current_preview",
+    });
 
     expect(result.job.status).toBe("queued");
+    expect(result.idempotentReplay).toBe(false);
     expect(repository.jobs).toHaveLength(1);
+    expect(repository.lastCreatedInput?.preview.rows[0]).toMatchObject({
+      contentEvidenceHash: content.evidenceHash,
+      rulePriceEvidenceHash: "a".repeat(64),
+      priceSettingRevisionId: 7,
+    });
     expect(repository.lastCreatedInput?.preview.rows[0].listingIntent?.description).toBe(content.descriptionHtml);
   });
+
+  it("replays a one-step push by its key even when stock moved in between", async () => {
+    const request = { storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "one-step-replay", reviewMode: "current_preview" as const };
+    const first = await service.createListingPushJobForMember("member-1", request);
+    // The preview hash covers quantity; a one-step push is identified by what was asked.
+    repository.candidate = { ...repository.candidate, title: `${repository.candidate.title} (restocked)` };
+    const retry = await service.createListingPushJobForMember("member-1", request);
+
+    expect(retry.idempotentReplay).toBe(true);
+    expect(retry.job.jobId).toBe(first.job.jobId);
+    expect(repository.jobs).toHaveLength(1);
+  });
+
+  it("refuses a one-step push that also carries evidence from an earlier preview", async () => {
+    await expect(service.createListingPushJobForMember("member-1", {
+      storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "one-step-mixed", reviewMode: "current_preview",
+      expectedPriceCentsByVariantId: { "101": 1299 },
+    })).rejects.toMatchObject({ code: "DROPSHIP_LISTING_PUSH_REVIEW_MODE_CONFLICT" });
+    expect(repository.jobs).toHaveLength(0);
+  });
+
+  it("keeps the two-step push strict: missing evidence is still refused", async () => {
+    const content = resolveListingContent({ candidate: repository.candidate, profile: noContentProfile, saved: null });
+    repository.loadListingContents = async () => new Map([[101, content]]);
+    await expect(service.createListingPushJobForMember("member-1", {
+      storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "two-step-missing",
+    })).rejects.toMatchObject({ code: "DROPSHIP_CONTENT_VERSION_CONFLICT" });
+    await expect(service.createListingPushJobForMember("member-1", {
+      storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "two-step-explicit", reviewMode: "reviewed_preview",
+    })).rejects.toMatchObject({ code: "DROPSHIP_CONTENT_VERSION_CONFLICT" });
+    expect(repository.jobs).toHaveLength(0);
+  });
+
+  describe("over HTTP, through the real listing route", () => {
+    let server: http.Server;
+    let baseUrl: string;
+
+    beforeEach(async () => {
+      const app = express();
+      app.use(express.json());
+      registerDropshipListingRoutes(app, service);
+      server = http.createServer(app);
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    });
+    afterEach(async () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+
+    function post(path: string, body: unknown) {
+      return fetch(`${baseUrl}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Test-Member": "member-1" },
+        body: JSON.stringify(body),
+      });
+    }
+
+    function withEvidenceOnEveryKind() {
+      const content = resolveListingContent({ candidate: repository.candidate, profile: noContentProfile, saved: null });
+      repository.loadListingContents = async () => new Map([[101, content]]);
+      repository.rulePrices.set(101, rulePrice());
+      repository.savedPrices = [{ productVariantId: 101, revisionId: 7, overridePriceCents: null, pricingMode: "rules", updatedAt: now.toISOString() }];
+      return content;
+    }
+
+    it("queues the vendor page's one-click request", async () => {
+      const content = withEvidenceOnEveryKind();
+      const selected = { productVariantId: 101, selectionDecision: { selected: true } } as unknown as ClientCatalogRow;
+      const body = buildListingQueueRequest({ storeConnectionId: 22, rows: [selected], idempotencyKey: "http-one-step" });
+
+      const response = await post("/api/dropship/listing-push-jobs", body);
+
+      expect(response.status).toBe(201);
+      const json = await response.json();
+      expect(json.job.status).toBe("queued");
+      expect(json.preview.rows[0]).not.toHaveProperty("listingIntent");
+      expect(repository.lastCreatedInput?.preview.rows[0].listingIntent?.description).toBe(content.descriptionHtml);
+    });
+
+    it("forwards the reviewed evidence of a two-step push, so a fresh preview queues", async () => {
+      // Regression: the route once dropped the content and rule evidence, so
+      // every two-step push was refused as changed right after its preview.
+      const content = withEvidenceOnEveryKind();
+      const previewResponse = await post("/api/dropship/listings/preview", { storeConnectionId: 22, productVariantIds: [101] });
+      expect(previewResponse.status).toBe(200);
+      const { preview } = await previewResponse.json() as { preview: ClientListingPreviewResult };
+      const row = preview.rows[0]!;
+      expect(row).toMatchObject({ contentEvidenceHash: content.evidenceHash, rulePriceEvidenceHash: "a".repeat(64), priceSettingRevisionId: 7 });
+
+      const response = await post("/api/dropship/listing-push-jobs", {
+        storeConnectionId: 22,
+        productVariantIds: [101],
+        idempotencyKey: "http-two-step",
+        expectedPriceRevisionIdsByVariantId: { "101": row.priceSettingRevisionId },
+        expectedPriceCentsByVariantId: { "101": row.priceCents },
+        expectedRuleEvidenceHashesByVariantId: { "101": row.rulePriceEvidenceHash },
+        expectedContentEvidenceHashesByVariantId: { "101": row.contentEvidenceHash },
+      });
+
+      expect(response.status).toBe(201);
+      expect((await response.json()).job.status).toBe("queued");
+    });
+
+    it("answers a mixed request with a 400 that names the conflict", async () => {
+      const response = await post("/api/dropship/listing-push-jobs", {
+        storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "http-mixed", reviewMode: "current_preview",
+        expectedPriceCentsByVariantId: { "101": 1299 },
+      });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toMatchObject({ code: "DROPSHIP_LISTING_PUSH_REVIEW_MODE_CONFLICT" });
+    });
+  });
+
   it("blocks a custom description when its catalog facts changed", async () => {
     const content = resolveListingContent({ candidate: repository.candidate, profile: noContentProfile,
       saved: { revisionId: 1, customText: "Preserved copy", catalogHash: "a".repeat(64), updatedAt: now.toISOString() } });

@@ -38,6 +38,7 @@ interface StubState {
   storeReady: boolean;
   proofs: Record<string, typeof LIVE_PROOF>;
   pushReplies: PushReply[];
+  pushBodies: Array<Record<string, unknown>>;
   codesSent: string[];
   pushCalls: number;
   previewCalls: number;
@@ -86,7 +87,7 @@ function settingsJson(state: StubState) {
 }
 
 async function setup(page: Page, initial: Partial<StubState> = {}) {
-  const state: StubState = { vendorStatus: "active", storeReady: true, proofs: {}, pushReplies: [], codesSent: [], pushCalls: 0,
+  const state: StubState = { vendorStatus: "active", storeReady: true, proofs: {}, pushReplies: [], pushBodies: [], codesSent: [], pushCalls: 0,
     previewCalls: 0, onboardingReads: 0, authReads: 0, unexpected: [], errors: [], ...initial };
   page.on("pageerror", (error) => state.errors.push(error.message));
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
@@ -120,6 +121,7 @@ async function setup(page: Page, initial: Partial<StubState> = {}) {
     }
     if (path === "/api/dropship/listing-push-jobs" && method === "POST") {
       state.pushCalls += 1;
+      state.pushBodies.push(route.request().postDataJSON() as Record<string, unknown>);
       const reply = state.pushReplies.shift();
       if (!reply) { state.unexpected.push("POST listing-push-jobs without a scripted reply"); return route.fulfill({ status: 500, json: {} }); }
       reply.after?.(state);
@@ -138,6 +140,20 @@ async function setup(page: Page, initial: Partial<StubState> = {}) {
     <script type="module" src="/@fs/${resolve(process.cwd(), "test/browser/fixtures/dropship-catalog-harness.tsx").replaceAll("\\", "/")}"></script></body></html>` }));
   await page.goto(HARNESS_PATH);
   return state;
+}
+
+/** What the server answers for a push: the job, its items and the preview it queued from. */
+function pushResponse(rows: Array<typeof PREVIEW_ROW>, jobStatus: "queued" | "failed" = "queued") {
+  const blocked = rows.filter((row) => row.previewStatus === "blocked").length;
+  return {
+    job: { jobId: 31, vendorId: 1, storeConnectionId: STORE_ID, status: jobStatus, idempotencyKey: "k", requestHash: "h",
+      createdAt: STAMP, updatedAt: STAMP },
+    items: rows.map((row, index) => ({ itemId: index + 1, jobId: 31, listingId: null, productVariantId: row.productVariantId,
+      status: row.previewStatus === "blocked" ? "blocked" : "queued", previewHash: row.previewHash, errorCode: null, errorMessage: null })),
+    preview: { vendorId: 1, storeConnectionId: STORE_ID, platform: "shopify", generatedAt: STAMP, rows,
+      summary: { total: rows.length, ready: rows.length - blocked, blocked, warning: 0 } },
+    idempotentReplay: false,
+  };
 }
 
 function listingCard(page: Page): Locator {
@@ -240,5 +256,60 @@ test("a vendor with no ready store is sent to the store connection panel", async
   await expect(notice).toHaveText(/Connect your store and finish its setup before previewing or pushing listings\./);
   await expect(notice.getByRole("link", { name: "Go to store connection" })).toHaveAttribute("href", "/dropship-portal/onboarding");
   await expect(listingCard(page).getByRole("button", { name: "Preview selected" })).toBeDisabled();
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("queues in one click without a preview and shows what was queued", async ({ page }, testInfo) => {
+  const state = await setup(page, { vendorStatus: "active", proofs: { bulk_listing_push: LIVE_PROOF },
+    pushReplies: [{ status: 201, json: pushResponse([PREVIEW_ROW]) }] });
+  const card = listingCard(page);
+
+  await card.getByRole("button", { name: "Queue ready listings" }).click();
+
+  await expect(card.getByTestId("listing-queue-result")).toHaveText("Queued 1 listing for your store. Push job 31.");
+  await expect(card.getByText("This preview is out of date", { exact: false })).toHaveCount(0);
+  await expect(card.getByText("ENV-SGL-P50").first()).toBeVisible();
+  await shot(page, testInfo, card, "catalog-one-step-queued");
+  // One request, built from the selection alone: nothing is echoed from a preview.
+  expect(state.previewCalls).toBe(0);
+  expect(state.pushCalls).toBe(1);
+  expect(state.pushBodies[0]).toEqual({
+    storeConnectionId: STORE_ID,
+    productVariantIds: [101],
+    idempotencyKey: expect.stringMatching(/^listing-push:/),
+    reviewMode: "current_preview",
+  });
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("sends the same request once more when a listing changed while it was being queued", async ({ page }) => {
+  const state = await setup(page, { vendorStatus: "active", proofs: { bulk_listing_push: LIVE_PROOF }, pushReplies: [
+    { status: 409, json: { error: { code: "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
+      message: "Pricing rules or their cost basis changed while queueing. Generate a new preview." } } },
+    { status: 201, json: pushResponse([PREVIEW_ROW]) },
+  ] });
+  const card = listingCard(page);
+
+  await card.getByRole("button", { name: "Queue ready listings" }).click();
+
+  await expect(card.getByTestId("listing-queue-result")).toHaveText("Queued 1 listing for your store. Push job 31.");
+  await expect(card.getByRole("alert")).toHaveCount(0);
+  expect(state.pushCalls).toBe(2);
+  // The refused attempt wrote nothing, so the retry reuses its key.
+  expect(state.pushBodies[1]).toEqual(state.pushBodies[0]);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("says plainly when nothing selected was ready to queue", async ({ page }) => {
+  const blockedRow = { ...PREVIEW_ROW, previewStatus: "blocked", blockers: ["catalog_package_data_required"] };
+  const state = await setup(page, { vendorStatus: "active", proofs: { bulk_listing_push: LIVE_PROOF },
+    pushReplies: [{ status: 201, json: pushResponse([blockedRow], "failed") }] });
+  const card = listingCard(page);
+
+  await card.getByRole("button", { name: "Queue ready listings" }).click();
+
+  await expect(card.getByTestId("listing-queue-result"))
+    .toHaveText("Nothing was queued: the selected listing is not ready. The table below shows why.");
+  expect(state.pushCalls).toBe(1);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });

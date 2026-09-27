@@ -35,7 +35,7 @@ import {
 } from "@/components/ui/table";
 import {
   buildListingPreviewRequest,
-  buildListingPushRequest,
+  buildListingQueueRequest,
   buildVariantSelectionReplacement,
   buildQueryUrl,
   createDropshipIdempotencyKey,
@@ -43,7 +43,7 @@ import {
   formatStatus,
   isStaleListingPreviewError,
   isStepUpRequiredError,
-  listingPreviewPushableCount,
+  describeListingQueueResult,
   listLaunchReadyStoreConnections,
   postJson,
   putJson,
@@ -259,7 +259,6 @@ export default function DropshipPortalCatalog() {
       proof: sensitiveProofs.bulk_listing_push,
     });
   }, [principal, sensitiveProofs.bulk_listing_push]);
-  const pushablePreviewCount = listingPreviewPushableCount(listingPreview);
 
   useEffect(() => {
     if (selectedStoreConnectionId || launchReadyStoreConnections.length === 0) {
@@ -387,11 +386,14 @@ export default function DropshipPortalCatalog() {
     // Blocked accounts never reach verification, so no code is emailed for a
     // push the server would refuse. The card already says what to do.
     if (pushAccessNotice) return;
-    if (!listingPreview || listingPreviewStale || pendingPriceSavesRef.current > 0) {
-      setListingError({ message: "Generate a listing preview before queueing a push.", notice: null });
+    if (pendingPriceSavesRef.current > 0) {
+      setListingError({ message: "Wait for your listing price to finish saving, then queue again.", notice: null });
       return;
     }
-    const expectedPreviewVersion = previewRequestVersion.current;
+    if (selectedCatalogRows.length === 0) {
+      setListingError({ message: "Select at least one catalog item before queueing listings.", notice: null });
+      return;
+    }
     const expectedContext = previewContextKey;
 
     if (!activeBulkPushProof) {
@@ -426,29 +428,46 @@ export default function DropshipPortalCatalog() {
     }
 
     await runListingAction("push", async () => {
-      if (previewRequestVersion.current !== expectedPreviewVersion
-        || currentPreviewContext.current !== expectedContext || pendingPriceSavesRef.current > 0) {
-        throw new Error("Listing settings changed. Generate a fresh preview before queueing.");
+      if (currentPreviewContext.current !== expectedContext || pendingPriceSavesRef.current > 0) {
+        throw new Error("Your store or selection changed while you were verifying. Choose Queue ready listings again.");
       }
-      const request = buildListingPushRequest({
+      // One step: the server previews the selected items itself and queues the
+      // ready ones, so no earlier preview is needed or echoed.
+      const request = buildListingQueueRequest({
         storeConnectionId: selectedStoreConnectionIdNumber,
-        preview: listingPreview,
+        rows: selectedCatalogRows,
         idempotencyKey: createDropshipIdempotencyKey("listing-push"),
       });
-      if (request.productVariantIds.length === 0) {
-        setListingError({ message: "No preview rows are ready to push.", notice: null });
-        return;
-      }
-      const response = await postJson<DropshipListingPushResponse>("/api/dropship/listing-push-jobs", request);
+      const response = await queueListingsOnce(request);
+      // The returned preview is exactly what was queued: show it as current and
+      // drop any preview response still in flight. The card's notice says what
+      // was queued, so the page banner stays quiet.
+      previewRequestVersion.current += 1;
+      setListingPreview(response.preview);
+      setListingPreviewStale(false);
       setListingPushResult(response);
       setEmailCodeSent(false);
       setVerificationCode("");
-      setMessage(`Listing push job ${response.job.jobId} queued with ${response.items.length} item(s).`);
       await Promise.all([
         catalogQuery.refetch(),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/settings"] }),
       ]);
     });
+  }
+
+  /**
+   * The server refuses a push if a description, price or rule changed between
+   * its own preview and the moment the job row is written. That refusal writes
+   * nothing, so the same request (same key) is sent once more; a second refusal
+   * is shown to the vendor.
+   */
+  async function queueListingsOnce(request: ReturnType<typeof buildListingQueueRequest>): Promise<DropshipListingPushResponse> {
+    try {
+      return await postJson<DropshipListingPushResponse>("/api/dropship/listing-push-jobs", request);
+    } catch (caught) {
+      if (!isStaleListingPreviewError(caught)) throw caught;
+      return postJson<DropshipListingPushResponse>("/api/dropship/listing-push-jobs", request);
+    }
   }
 
   async function runListingAction(action: PendingListingAction, task: () => Promise<void>): Promise<boolean> {
@@ -737,7 +756,6 @@ export default function DropshipPortalCatalog() {
           priceSaveCallbacks={priceSaveCallbacks}
           listingPushResult={listingPushResult}
           pendingListingAction={pendingListingAction}
-          pushablePreviewCount={pushablePreviewCount}
           selectedRows={selectedCatalogRows}
           selectedStoreConnectionId={selectedStoreConnectionId}
           verificationCode={verificationCode}
@@ -1137,7 +1155,6 @@ function ListingPreviewPanel({
   pendingListingAction,
   previewBlocked,
   pushBlocked,
-  pushablePreviewCount,
   selectedRows,
   selectedStoreConnectionId,
   verificationCode,
@@ -1159,7 +1176,6 @@ function ListingPreviewPanel({
   pendingListingAction: PendingListingAction;
   previewBlocked: boolean;
   pushBlocked: boolean;
-  pushablePreviewCount: number;
   selectedRows: DropshipCatalogRow[];
   selectedStoreConnectionId: string;
   verificationCode: string;
@@ -1172,10 +1188,11 @@ function ListingPreviewPanel({
     || priceSavePending
     || pendingListingAction !== null
     || previewBlocked;
-  const pushDisabled = !listingPreview
-    || listingPreviewStale
+  // Queueing needs no preview: the server previews the selection itself.
+  const pushDisabled = launchReadyStoreConnections.length === 0
+    || !selectedStoreConnectionId
+    || selectedRowCount === 0
     || priceSavePending
-    || pushablePreviewCount === 0
     || pendingListingAction !== null
     || (emailCodeSent && verificationCode.length !== 6)
     || pushBlocked;
@@ -1186,7 +1203,8 @@ function ListingPreviewPanel({
         <div>
           <h2 className="text-lg font-semibold">Listing preview and push</h2>
           <p className="mt-1 text-sm text-zinc-500">
-            Review listing content, your product costs, and shipping estimates before pushing to your store.
+            Queue ready listings sends every selected item that is ready to your store. Preview first if you want to
+            check content, product costs and shipping estimates.
           </p>
           <p className="mt-1 text-xs font-medium text-violet-700">
             Preview does not require verification. MFA is requested only when you queue ready listings.
@@ -1262,7 +1280,7 @@ function ListingPreviewPanel({
         <div className="mt-4 overflow-hidden rounded-md border border-zinc-200">
           <div className="border-b border-zinc-200 bg-zinc-50 px-4 py-3">
             <h3 className="text-sm font-semibold">Selected items</h3>
-            <p className="mt-1 text-xs text-zinc-500">These items will be evaluated when you preview the listing push.</p>
+            <p className="mt-1 text-xs text-zinc-500">These items are checked when you preview or queue them.</p>
           </div>
           <div className="max-h-72 overflow-auto">
             <Table>
@@ -1315,17 +1333,25 @@ function ListingPreviewPanel({
       )}
 
       {listingPreview && listingPreviewStale && <div role="status" className="mt-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-        {priceSavePending ? "Saving your listing price and refreshing the preview…" : "This preview is out of date. Generate a fresh preview before queueing listings."}
+        {priceSavePending ? "Saving your listing price and refreshing the preview…" : "This preview is out of date. Preview again to see current details."}
       </div>}
       {listingPreview && <DropshipListingPreview key={listingPreview.storeConnectionId} preview={listingPreview}
         stale={listingPreviewStale} priceSaveCallbacks={priceSaveCallbacks} />}
 
-      {listingPushResult && (
-        <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
-          Push job {listingPushResult.job.jobId} is {formatStatus(listingPushResult.job.status)} with {listingPushResult.items.length} item(s).
-        </div>
-      )}
+      {listingPushResult && <ListingQueueResultNotice response={listingPushResult} />}
     </section>
+  );
+}
+
+function ListingQueueResultNotice({ response }: { response: DropshipListingPushResponse }) {
+  const result = describeListingQueueResult(response);
+  const tone = result.outcome === "queued"
+    ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+    : "border-amber-300 bg-amber-50 text-amber-900";
+  return (
+    <div role="status" data-testid="listing-queue-result" className={`mt-4 rounded-md border p-4 text-sm ${tone}`}>
+      {result.message}
+    </div>
   );
 }
 
