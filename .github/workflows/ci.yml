@@ -53,6 +53,11 @@ jobs:
           npx vitest run
           client/src/lib/__tests__/inventory-transaction-quantity.test.ts
           client/src/pages/__tests__/inventory-history-shipment-quantity.test.ts
+      - name: Channel listing publication UI contracts
+        run: >-
+          npx vitest run
+          client/src/features/channel-listing-publication/__tests__/api.test.ts
+          client/src/features/channel-listing-publication/__tests__/model.test.ts
       - name: Dropship listing policy UI contracts
         run: >-
           npx vitest run

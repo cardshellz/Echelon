@@ -1846,6 +1846,7 @@ export const inventoryPublicationTargets = inventoryPlanningSchema.table(
     providerScopeType: varchar("provider_scope_type", { length: 30 }).notNull(),
     externalScopeId: varchar("external_scope_id", { length: 240 }).notNull(),
     publicationAuthority: varchar("publication_authority", { length: 30 }).notNull(),
+    membershipMode: varchar("membership_mode", { length: 20 }).notNull().default("whole_product"),
     state: varchar("state", { length: 20 }).notNull().default("disabled"),
     changeReason: varchar("change_reason", { length: 1000 }),
     createdBy: varchar("created_by", { length: 100 }).notNull(),
@@ -1891,6 +1892,8 @@ export const inventoryPublicationTargets = inventoryPlanningSchema.table(
       "inventory_publication_targets_state_chk",
       sql`${table.state} IN ('disabled', 'preview', 'live')`,
     ),
+    membershipModeValid: check("inventory_publication_targets_membership_mode_chk",
+      sql`${table.membershipMode} IN ('whole_product','explicit')`),
     holdValid: check(
       "inventory_publication_targets_hold_chk",
       sql`(${table.holdReason} IS NULL AND ${table.heldAt} IS NULL AND ${table.heldBy} IS NULL)

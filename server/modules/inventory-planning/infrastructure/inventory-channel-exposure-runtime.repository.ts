@@ -34,6 +34,7 @@ type SupplySnapshotCapture = (
 ) => Promise<SupplySnapshotDto>;
 
 interface PublicationTargetRow {
+  membership_mode?: unknown;
   publication_target_id: unknown;
   publication_target_revision: unknown;
   destination_kind: unknown;
@@ -287,6 +288,7 @@ async function loadSelectedPublicationTargets(
     : `AND target.id = $${targetValues.length}`;
   const targetResult = await client.query<PublicationTargetRow>(
     `SELECT target.id AS publication_target_id,
+            COALESCE(to_jsonb(target)->>'membership_mode','whole_product') AS membership_mode,
             target.revision::text AS publication_target_revision,
             target.destination_kind,
             target.channel_id,
@@ -412,6 +414,19 @@ async function loadSelectedPublicationTargets(
   }>("SELECT id,warehouse_id,lifecycle_status FROM warehouse.fulfillment_nodes WHERE id=ANY($1::integer[]) ORDER BY id", [overrideNodeIds])).rows;
   const mappings = groupMappingsByTarget(mappingResult.rows);
   const variantHolds = groupVariantHoldsByTarget(variantHoldResult.rows);
+  // Old destinations need no membership lookup. Keeping the product filter on
+  // catalog identity (not active/sellable flags) makes an invalid included SKU
+  // visible to the planner instead of silently dropping its publication duty.
+  const explicitTargetIds = targetResult.rows.filter(row => row.membership_mode === "explicit")
+    .map(row => positiveInteger(row.publication_target_id, "membership.targetId"));
+  const membershipRows = explicitTargetIds.length === 0 ? [] : (await client.query<{
+    publication_target_id: number; product_variant_id: number;
+  }>(`SELECT h.publication_target_id,h.product_variant_id
+      FROM inventory.publication_membership_heads h
+      JOIN inventory.publication_membership_versions v ON v.id=h.active_version_id
+      JOIN catalog.product_variants variant ON variant.id=h.product_variant_id
+      WHERE h.publication_target_id=ANY($1::integer[]) AND v.included=true AND variant.product_id=$2
+      ORDER BY h.publication_target_id,h.product_variant_id`, [explicitTargetIds, productId])).rows;
   return targetResult.rows.map((row): ActiveInventoryPublicationTargetSnapshot => {
     const publicationTargetId = positiveInteger(row.publication_target_id, "publicationTarget.id");
     const channelId = positiveInteger(row.channel_id, "publicationTarget.channelId");
@@ -461,6 +476,10 @@ async function loadSelectedPublicationTargets(
       policies: policies.get(channelId) ?? [],
       mappings: mappings.get(publicationTargetId) ?? [],
       variantHolds: variantHolds.get(publicationTargetId) ?? [],
+      membership: row.membership_mode === "explicit"
+        ? { mode: "explicit", includedVariantIds: membershipRows.filter(member => member.publication_target_id === publicationTargetId)
+          .map(member => positiveInteger(member.product_variant_id, "membership.productVariantId")) }
+        : { mode: "whole_product" },
     };
   });
 }

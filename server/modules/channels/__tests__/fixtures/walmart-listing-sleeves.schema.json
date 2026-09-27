@@ -1,0 +1,2053 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "MPItemFeedHeader": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "businessUnit": {
+          "type": "string",
+          "enum": [
+            "SAMSCLUB",
+            "WALMART_CA",
+            "WALMART_US",
+            "ASDA_GM"
+          ]
+        },
+        "locale": {
+          "type": "string",
+          "enum": [
+            "en"
+          ]
+        },
+        "version": {
+          "type": "string",
+          "enum": [
+            "5.0.20260803-17_50_56-api"
+          ]
+        }
+      },
+      "required": [
+        "businessUnit",
+        "locale",
+        "version"
+      ]
+    },
+    "MPItem": {
+      "minItems": 1,
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "array",
+      "items": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "Visible": {
+            "oneOf": [
+              {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "required": [
+                  "Trading Card Sleeves & Holders"
+                ]
+              }
+            ],
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "Trading Card Sleeves & Holders": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "isProp65WarningRequired": {
+                          "type": "string",
+                          "enum": [
+                            "Yes"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "isProp65WarningRequired"
+                      ]
+                    },
+                    "then": {
+                      "required": [
+                        "prop65WarningText"
+                      ]
+                    }
+                  },
+                  {
+                    "if": {
+                      "properties": {
+                        "certification_type": {
+                          "type": "string",
+                          "enum": [
+                            "Children's Product Certificate"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "certification_type"
+                      ]
+                    },
+                    "then": {
+                      "required": [
+                        "children_product_certificate_document_reference_id"
+                      ]
+                    }
+                  },
+                  {
+                    "if": {
+                      "properties": {
+                        "certification_type": {
+                          "type": "string",
+                          "enum": [
+                            "Children's Product Certificate"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "certification_type"
+                      ]
+                    },
+                    "then": {
+                      "required": [
+                        "children_product_test_report_document_reference_id"
+                      ]
+                    }
+                  },
+                  {
+                    "if": {
+                      "properties": {
+                        "certification_type": {
+                          "type": "string",
+                          "enum": [
+                            "General Certificate of Conformity"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "certification_type"
+                      ]
+                    },
+                    "then": {
+                      "required": [
+                        "general_certificate_of_conformity_document_reference_id"
+                      ]
+                    }
+                  },
+                  {
+                    "if": {
+                      "properties": {
+                        "has_written_warranty": {
+                          "type": "string",
+                          "enum": [
+                            "Yes - Warranty Text"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "has_written_warranty"
+                      ]
+                    },
+                    "then": {
+                      "required": [
+                        "warrantyText"
+                      ]
+                    }
+                  },
+                  {
+                    "if": {
+                      "properties": {
+                        "has_written_warranty": {
+                          "type": "string",
+                          "enum": [
+                            "Yes - Warranty URL"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "has_written_warranty"
+                      ]
+                    },
+                    "then": {
+                      "required": [
+                        "warrantyURL"
+                      ]
+                    }
+                  }
+                ],
+                "properties": {
+                  "productName": {
+                    "type": "string",
+                    "minLength": 10,
+                    "maxLength": 199
+                  },
+                  "brand": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 60
+                  },
+                  "condition": {
+                    "type": "string",
+                    "enum": [
+                      "New",
+                      "New with defects",
+                      "New without box",
+                      "New without tags",
+                      "Open Box",
+                      "Pre-Owned: Fair",
+                      "Pre-Owned: Good",
+                      "Pre-Owned: Like New"
+                    ]
+                  },
+                  "shortDescription": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100000
+                  },
+                  "keyFeatures": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 10000
+                    },
+                    "minItems": 3
+                  },
+                  "mainImageUrl": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2500,
+                    "format": "uri"
+                  },
+                  "countPerPack": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9999999999
+                  },
+                  "multipackQuantity": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9999
+                  },
+                  "isProp65WarningRequired": {
+                    "type": "string",
+                    "enum": [
+                      "No",
+                      "Yes"
+                    ]
+                  },
+                  "has_written_warranty": {
+                    "type": "string",
+                    "enum": [
+                      "No",
+                      "Yes - Warranty Text",
+                      "Yes - Warranty URL"
+                    ]
+                  },
+                  "netContent": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "object",
+                    "properties": {
+                      "productNetContentUnit": {
+                        "type": "string",
+                        "enum": [
+                          "Case",
+                          "Centiliter",
+                          "Centimeter",
+                          "Count",
+                          "Cubic Foot",
+                          "Each",
+                          "Fluid Ounces",
+                          "Foot",
+                          "Gallon",
+                          "Gram",
+                          "Inch",
+                          "Kilogram",
+                          "Liter",
+                          "Meter",
+                          "Milliliter",
+                          "Ounce",
+                          "Pallet/Unit Load",
+                          "Pint",
+                          "Pound",
+                          "Quart",
+                          "Quart Dry",
+                          "Square Foot",
+                          "Yard"
+                        ]
+                      },
+                      "productNetContentMeasure": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 99999999999999,
+                        "multipleOf": 0.001
+                      }
+                    },
+                    "required": [
+                      "productNetContentUnit",
+                      "productNetContentMeasure"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "pieceCount": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 99999999999999
+                  },
+                  "academicInstitution": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "features": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "Hard"
+                      ]
+                    },
+                    "minItems": 1
+                  },
+                  "productSecondaryImageURL": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2500,
+                      "format": "uri"
+                    },
+                    "minItems": 3
+                  },
+                  "assembledProductLength": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "object",
+                    "properties": {
+                      "unit": {
+                        "type": "string",
+                        "enum": [
+                          "mm",
+                          "in",
+                          "cm",
+                          "m",
+                          "ft"
+                        ]
+                      },
+                      "measure": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 99999999999999,
+                        "multipleOf": 0.01
+                      }
+                    },
+                    "required": [
+                      "unit",
+                      "measure"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "assembledProductHeight": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "object",
+                    "properties": {
+                      "unit": {
+                        "type": "string",
+                        "enum": [
+                          "mm",
+                          "in",
+                          "cm",
+                          "m",
+                          "ft"
+                        ]
+                      },
+                      "measure": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 99999999999999,
+                        "multipleOf": 0.01
+                      }
+                    },
+                    "required": [
+                      "unit",
+                      "measure"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "assembledProductWidth": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "object",
+                    "properties": {
+                      "unit": {
+                        "type": "string",
+                        "enum": [
+                          "mm",
+                          "in",
+                          "cm",
+                          "m",
+                          "ft"
+                        ]
+                      },
+                      "measure": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 99999999999999,
+                        "multipleOf": 0.01
+                      }
+                    },
+                    "required": [
+                      "unit",
+                      "measure"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "prop65WarningText": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 5000
+                  },
+                  "certification_type": {
+                    "type": "string",
+                    "enum": [
+                      "Children's Product Certificate",
+                      "General Certificate of Conformity",
+                      "Neither of these applies",
+                      "Skip for now"
+                    ]
+                  },
+                  "certifyingAgent": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  },
+                  "children_product_certificate_document_reference_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 36
+                  },
+                  "children_product_test_report_document_reference_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 36
+                  },
+                  "collection": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "color": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 600
+                  },
+                  "colorCategory": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "Beige",
+                        "Black",
+                        "Blue",
+                        "Bronze",
+                        "Brown",
+                        "Clear",
+                        "Gold",
+                        "Gray",
+                        "Green",
+                        "Multicolor",
+                        "Off-White",
+                        "Orange",
+                        "Pink",
+                        "Purple",
+                        "Red",
+                        "Silver",
+                        "White",
+                        "Yellow"
+                      ]
+                    },
+                    "minItems": 1
+                  },
+                  "edition_year": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9999
+                  },
+                  "general_certificate_of_conformity_document_reference_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 36
+                  },
+                  "manufacturer": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 60
+                  },
+                  "manufacturerPartNumber": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 60
+                  },
+                  "material": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1000
+                    },
+                    "minItems": 1
+                  },
+                  "modelNumber": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 60
+                  },
+                  "netContentStatement": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "number_of_card_slots": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 99999999999999
+                  },
+                  "occasion": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "minItems": 1
+                  },
+                  "ib_retail_packaging": {
+                    "type": "string",
+                    "enum": [
+                      "Bonus Pack",
+                      "Gift Set",
+                      "Single Piece",
+                      "Variety Pack"
+                    ]
+                  },
+                  "sportsLeague": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 100
+                    },
+                    "minItems": 1
+                  },
+                  "sportsTeam": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1
+                  },
+                  "thirdPartyAccreditationSymbolOnProductPackageCode": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "100 Percent Canadian Milk",
+                        "100% Veganskt",
+                        "Absence of Eggs and Milk is a Certified Allergen Control (CAC)",
+                        "Absence of Eggs, Milk and Peanuts is a Certified Allergen Control (CAC)",
+                        "Absence of Peanuts & Almonds is a Certified Allergen Control (CAC)",
+                        "ACMI",
+                        "ADCCPA",
+                        "AFIA Pet Food Facility",
+                        "Agence Bio",
+                        "AGRI Confiance",
+                        "Agri Natura",
+                        "Agriculture Biologique",
+                        "Air cleaner performance standard e.g., humidifiers",
+                        "Aise",
+                        "Aise 2005",
+                        "Aise 2010",
+                        "Aliments BIO Prepares au Quebec",
+                        "Aliments du Quebec",
+                        "Aliments du Quebec BIO",
+                        "Aliments Prepares au Quebec",
+                        "Alpinavera",
+                        "Aluminium Gesamtverband der Aluminiumindustrie",
+                        "AMA Organic Seal",
+                        "Ama Organic Seal Black",
+                        "Ama Seal of Approval",
+                        "American Dental Association",
+                        "American Heart Association Certified",
+                        "Animal Welfare Approved Grassfed",
+                        "Appellation Origine Controlee",
+                        "Approved by the Asthma and Allergy Association",
+                        "Aqua GAP",
+                        "Aquaculture Stewardship Council",
+                        "Arla Farmer Owned",
+                        "Asmi",
+                        "Asthma and Allergy Foundation of America",
+                        "ATG",
+                        "Atlanta Kashrus Commission Certification",
+                        "Bais Din of Crown Heights Vaad HaKashrus Certification",
+                        "BC SPCA",
+                        "BDIH Logo",
+                        "Bebat",
+                        "Belgaqua",
+                        "Benor",
+                        "Berchtesgadener Land",
+                        "Best Aquaculture Practices",
+                        "Best Aquaculture Practices 2 Stars",
+                        "Best Aquaculture Practices 3 Stars",
+                        "Best Aquaculture Practices 4 Stars",
+                        "Beter Leven 1 Ster",
+                        "Beter Leven 2 Ster",
+                        "Beter Leven 3 Ster",
+                        "Better Business Bureau Accredited",
+                        "Better Cotton Initiative",
+                        "Biko Tirol",
+                        "Bio Fisch",
+                        "Bio Gourmet Knospe",
+                        "Bio Knospe",
+                        "Bio Knospe Umstellung",
+                        "Bio Partenaire",
+                        "Bio Ring Allgaeu",
+                        "Bio Solidaire",
+                        "Bio Suisse Knospe",
+                        "Bio Suisse Knospe Umstellung",
+                        "Bio-Bayern with Certificate of Provenance",
+                        "Bio-Bayern without Certificate of Provenance",
+                        "Bio-LABEL Baden-Württemberg",
+                        "Bio-LABEL Hessen",
+                        "Biodegradable",
+                        "Biodegradable Ingredients",
+                        "Biodegradable Products Institute",
+                        "Biodynamic Certification",
+                        "Biogarantie",
+                        "Biokreis",
+                        "Bioland",
+                        "Bioland Ennstal",
+                        "Biopark",
+                        "Bios Kontrolle",
+                        "Bird Friendly Coffee Smithsonian Certification",
+                        "Bk Check Vaad Hakashrus Of Buffalo",
+                        "Blue Angel",
+                        "Blue Ribbon Kosher",
+                        "Bluesign Technologies AG Approved e.g., footwear insoles",
+                        "BonSucro",
+                        "Bord Bia Approved",
+                        "Bord Bia Approved Meat",
+                        "BRC Global Standards",
+                        "BreatheWay",
+                        "Brewers Association Certified Independent Craft",
+                        "British Retail Consortium Certification",
+                        "BSCI",
+                        "Bullfrog Power",
+                        "CAC Absence of Almond",
+                        "CAC Absence of Egg",
+                        "CAC Absence of Milk",
+                        "CAC Absence of Peanut",
+                        "CAN/ BNQ Certified",
+                        "Canada Organic Canadian Organic Logo",
+                        "CanadaGAP program certification mark of conformity",
+                        "Canadian Agricultural Products",
+                        "Canadian Association of Fire Chiefs Approved",
+                        "Canadian Certified Compostable",
+                        "Canadian Eco Logo",
+                        "Canadian Federal Government – CFIA Grade Stamps Canada A e.g. poultry & eggs",
+                        "Canadian Federal Government – CFIA Grade Stamps Canada C e.g. poultry & eggs",
+                        "Canadian Federal Government – CFIA Grade Stamps Canada Utility e.g. poultry & eggs",
+                        "Canadian Federal Government – Dairy Product Grade",
+                        "Canadian Federal Government – Processed Egg Products",
+                        "Canadian Food Inspection Agency (CFIA) as Federally Registered & Inspected Facility - Fish",
+                        "Canadian Food Inspection Agency (CFIA) as Federally Registered & Inspected Facility e.g., meat",
+                        "Canned in Canada to describe green beans",
+                        "Carbon Footprint Standard",
+                        "Carbon Neutral",
+                        "Carbon Neutral NCOS Certified",
+                        "Carbon Neutral packaging",
+                        "Caribbean Kosher",
+                        "Caring Consumer PETA",
+                        "CCA Gluten Free",
+                        "CCF Rabbit Certification",
+                        "CCOF",
+                        "CEBEC",
+                        "Celiac Sprue Association",
+                        "Central Rabbinical Congress Kosher",
+                        "Certified Angus Beef",
+                        "Certified B Corporation",
+                        "Certified California Sustainable Vineyard and Winery (CCSW)",
+                        "Certified Carbon Free",
+                        "Certified Humane",
+                        "Certified Humane Organisation",
+                        "Certified Naturally Grown",
+                        "Certified Naturally Grown (CNG)",
+                        "Certified OE 100",
+                        "Certified Organic Baystate Organic Certifiers",
+                        "Certified Organic By Organic Certifiers",
+                        "Certified Paleo",
+                        "Certified Paleo Friendly",
+                        "Certified Sustainable Wine of Chile",
+                        "Certified WBENC",
+                        "Certified Wildlife Friendly",
+                        "Cheese – World Champion Cheese Contest",
+                        "Ches K",
+                        "Chicago Rabbinical Council",
+                        "Cincinnati Kosher",
+                        "Claro Fair Trade",
+                        "Climate Neutral",
+                        "CO2 Neutral Certified",
+                        "CO2 Reduceret Emballage",
+                        "Cocoa Life",
+                        "Consumer Choice Award",
+                        "Corrugated Recycles",
+                        "Cosmebio",
+                        "Cotton made in Africa",
+                        "Council of Orthodox Rabbis of Greater Detroit Certification",
+                        "CPE Scharrel Eieren",
+                        "CPE Vrije Uitloop Eieren",
+                        "Cradle To Cradle",
+                        "Crossed Grain Symbol",
+                        "CSA International",
+                        "CSA/NCA - Gluten Free",
+                        "Culinarium",
+                        "Dallas Kosher Certification",
+                        "Dansk IP Kvalitet",
+                        "Dansk Maelk",
+                        "Deer Protection Program",
+                        "Delinat",
+                        "Demeter Label",
+                        "Dermatology Review Panel (\"DRP\") independent dermatologists review",
+                        "Design for the Environment (DfE)",
+                        "Diamond K - Massachusetts Certification",
+                        "Direct Trade",
+                        "Distilled in Canada to describe bottled water",
+                        "DLG Award",
+                        "Dolphin Safe",
+                        "Donau Soya Standard",
+                        "DZG Gluten Free",
+                        "EarthKosher Kosher Certification",
+                        "Earthsure",
+                        "ECARF Seal",
+                        "Eco Kreis",
+                        "Eco Label Ladybug",
+                        "Eco Logo",
+                        "EcoCert Certificate",
+                        "ECOCert Cosmos Natural",
+                        "ECOCert Cosmos Organic",
+                        "Ecogarantie",
+                        "ECOLAND",
+                        "Ecovin",
+                        "Eczema Society of Canada- Accepted",
+                        "Eesti Okomark",
+                        "Eesti Parim Toiduaine",
+                        "Eko",
+                        "Enec",
+                        "Energy Star",
+                        "Epeat Bronze",
+                        "Epeat Gold",
+                        "Epeat Silver",
+                        "Equal Exchange Fairly Traded",
+                        "Equalitas Sustainable Wine",
+                        "Erde Saat",
+                        "Erkend Streek Product",
+                        "Ethical Tea Partnership",
+                        "Fair 'n Green",
+                        "Fair Flowers Fair Plants",
+                        "Fair Food Program Label",
+                        "Fair for Life",
+                        "Fair trade mark",
+                        "Fair Trade USA",
+                        "Fair Trade USA Ingredients",
+                        "FairTrade Cotton",
+                        "Fairtrade Sourced Ingredient Cashew Nuts",
+                        "Fairtrade Sourced Ingredient Cocoa",
+                        "Fairtrade Sourced Ingredient Coconut",
+                        "Fairtrade Sourced Ingredient Dried Apricots",
+                        "Fairtrade Sourced Ingredient Green Tea",
+                        "Fairtrade Sourced Ingredient Honey",
+                        "Fairtrade Sourced Ingredient Lime Juice",
+                        "Fairtrade Sourced Ingredient Mango Juice",
+                        "Fairtrade Sourced Ingredient Olive Oil",
+                        "Fairtrade Sourced Ingredient Pepper",
+                        "Fairtrade Sourced Ingredient Quinoa",
+                        "Fairtrade Sourced Ingredient Rice",
+                        "Fairtrade Sourced Ingredient Roses",
+                        "Fairtrade Sourced Ingredient Tea",
+                        "Fairtrade Sourced Ingredient Vanilla",
+                        "FairTrade Sugar",
+                        "FairTSA",
+                        "Falken",
+                        "Farmers & Growers (Organic Certification UK2)",
+                        "Federal Communications Commission (U.S.)",
+                        "Federally Registered Inspected Canada",
+                        "Fidelio",
+                        "Finnish Heart Symbol",
+                        "Finnish Pork Meat Certification System",
+                        "Fish Wise Certification",
+                        "Flamme Verte",
+                        "Flandria",
+                        "Food Alliance Certified",
+                        "Food Federation",
+                        "Food Justice Certified",
+                        "Food Safety System Certification 22000",
+                        "Foodland Ontario",
+                        "For Life (Social Responsibility)",
+                        "Forest Products - Product Lines From a Certified Forest",
+                        "Forest Stewardship Council 100 Percent",
+                        "Forest Stewardship Council Label",
+                        "Forest Stewardship Council Mix",
+                        "Forest Stewardship Council Recycled",
+                        "Foundation Art",
+                        "Freiland",
+                        "Freshcare",
+                        "Friend of the Sea",
+                        "GAA",
+                        "Gaskeur",
+                        "Gastec",
+                        "GCP – Global Coffee Platform",
+                        "Gebana",
+                        "Gepruefte Sicherheit",
+                        "Gezondere Keuze",
+                        "GFCO",
+                        "GFCP",
+                        "GIG - Gluten Free Foodservice",
+                        "Global Care",
+                        "Global Gap",
+                        "Global Organic Latex Standard",
+                        "Global Organic Textile Standard",
+                        "Gluten-free Certified: Allergen Control Group/ National Foundation for Celiac Awareness (NFCA)",
+                        "Glycaemic Index Foundation",
+                        "Glycaemic Research Institute",
+                        "GMO Guard from Natural Food Certifiers",
+                        "GMO Marked",
+                        "GMP Certified",
+                        "GMP ISO 22716",
+                        "Good Housekeeping",
+                        "GoodWeave",
+                        "GRASKEURMERK",
+                        "GRASP – Risk Assessment on Social Practise",
+                        "Green America Certified Business",
+                        "Green Dot",
+                        "Green Restaurant Association Endorsed",
+                        "Green Seal",
+                        "Green Seal Certified",
+                        "Green Shield Certified",
+                        "Green Star Certified",
+                        "Green-e Energy",
+                        "Green-e Energy Certified",
+                        "GreenChoice",
+                        "Groen Label Kas",
+                        "Guaranteed Irish",
+                        "Halal Certification Services",
+                        "Halal Certification Services, CH",
+                        "Halal Correct",
+                        "Halal Islamic Food and Nutrition Council of Canada (IFANCC)",
+                        "Halal Islamic Society of North America (ISNA)",
+                        "Halal Plus",
+                        "Haute Valeur Environnementale",
+                        "Hazard Analysis Critical Control Point",
+                        "Health Check",
+                        "Heumilch",
+                        "Hochstamm Suisse",
+                        "Humane Heartland",
+                        "Hypertension Canada Medical Device",
+                        "ICADA",
+                        "ICEA",
+                        "IFANCA Halal",
+                        "IFOAM",
+                        "IFS HPC",
+                        "IGP",
+                        "IHTK Seal",
+                        "IKB EIEREN",
+                        "IKB KIP",
+                        "IKB VARKEN",
+                        "Imported in bulk and packaged in Canada",
+                        "Indeklima Maerket",
+                        "INSTITUT FRESENIUS",
+                        "INT Protection",
+                        "Integrity and Sustainability Certified",
+                        "International Aloe Science Council Certificate",
+                        "International Taste & Quality (iTQi) Superior Taste Award",
+                        "Intertek Certificate",
+                        "Intertek Electrical Testing Laboratories (ETL) Mark",
+                        "IP Suisse",
+                        "ISEAL Alliance",
+                        "ISO Quality",
+                        "IVN Natural Leather",
+                        "IVN Natural Textiles Best",
+                        "IVO Seal – International Verified Omega-3 e.g., Fish oil",
+                        "Jay Kosher Pareve",
+                        "Kashruth Council of Canada Kosher Certification",
+                        "KAT",
+                        "Kehilla Kosher California K",
+                        "Kehilla Kosher Heart K",
+                        "KEMA KEUR",
+                        "KIWA",
+                        "Klasa",
+                        "KOF K Kosher",
+                        "KOMO",
+                        "Kosher - Chicago Rabbinical Council (CRC) Dairy",
+                        "Kosher Certification Service",
+                        "Kosher Check",
+                        "Kosher Chicago Rabbinical Council (CRC) Pareve",
+                        "Kosher COR Dairy",
+                        "Kosher COR Dairy Equipment",
+                        "Kosher COR Fish",
+                        "Kosher Grand Rabbinate of Quebec Parve",
+                        "Kosher Inspection Service India",
+                        "Kosher Kosher Greece",
+                        "Kosher Kosher Madrid Spain",
+                        "Kosher KW Young Israel Of West Hempstead",
+                        "Kosher OK Dairy",
+                        "Kosher Oregon Kosher",
+                        "Kosher Organics",
+                        "Kosher Orthodox Jewish Congregation Parve",
+                        "Kosher Ottawa Vaad HaKashrut Canada",
+                        "Kosher Parve Natural Food Certifier",
+                        "Kosher Peru Certification",
+                        "Kosher Star-K -Parve and Passover",
+                        "Kosher Star-K-Parve",
+                        "Kosher Supervisors of Wisconsin Certification",
+                        "Kosher Western Kosher (WK)",
+                        "KosherMex",
+                        "Krav Mark",
+                        "KSA - Kosher",
+                        "KSA D - Kosher Dairy",
+                        "KVBG Approved",
+                        "KVH Kosher",
+                        "Label of the Allergy and Asthma Federation",
+                        "Label Rouge",
+                        "LACON",
+                        "Laendle Qualitaet",
+                        "Leaping Bunny",
+                        "LGA",
+                        "Lodi Rules \"Certified Green\"",
+                        "London Beth Din Kosher",
+                        "LVA",
+                        "Made Green in Italy",
+                        "Made in Canada",
+                        "Made in Canada (a)",
+                        "Made in Canada from Domestic and Imported Ingredients",
+                        "Made with 100% Canadian Oats",
+                        "Made with Canadian (ingredient)",
+                        "Made with Canadian Beef",
+                        "Made with Canadian Mustard Seeds",
+                        "Made with Ontario Pork",
+                        "Marine Stewardship Council label",
+                        "Max Havelaar",
+                        "MCIA Organic",
+                        "MEHR WEG",
+                        "Midwest Kosher",
+                        "Minnesota Kosher Council",
+                        "Mom's Choice Award",
+                        "Montreal Vaad Hair Mk Pareve",
+                        "Mortadella Bologna",
+                        "MPS A",
+                        "Mundusvini Gold",
+                        "Mundusvini Silver",
+                        "My Climate",
+                        "NAOOA Certified Quality",
+                        "National Eczema Association Seal of Acceptance",
+                        "Natrue Label",
+                        "Natura- Beef",
+                        "Natura-Veal",
+                        "Nature Care Product",
+                        "Nature Et Progres",
+                        "Natureplus",
+                        "Naturland",
+                        "Naturland Fair Trade",
+                        "Naturland Wildfish",
+                        "NDOA",
+                        "Neuland",
+                        "NF Marque",
+                        "NMX",
+                        "No Product Package Certifications Apply",
+                        "NOM",
+                        "Non GMO Project",
+                        "Non-GMO By Earthkosher",
+                        "NPA",
+                        "NSF",
+                        "NSF Certified For Sport",
+                        "NSF Gluten Free",
+                        "NSF Non GMO True North",
+                        "NSF Sustainability Certified",
+                        "Nyckelhalet",
+                        "Ocean Wise Recommended Sourced Responsibly",
+                        "OCIA",
+                        "OEKO Control",
+                        "OEKO Kreislauf",
+                        "OEKO Quality Guarantee Bavaria",
+                        "Oeko Tex Label",
+                        "OEKO-Tex Made in Green",
+                        "Official Eco label Sun",
+                        "OK Compost Home",
+                        "OK Compost Industrial",
+                        "OK Compost label by Vincotte",
+                        "OK Kosher Certification",
+                        "OKOTEST",
+                        "On the way to planetproof",
+                        "Ontario - Localize",
+                        "Ontario approved legend - Inspected meat products, provincially licensed plants",
+                        "ORBI",
+                        "Oregon LIVE (Low Input Viticulture and Enology)",
+                        "Oregon Tilth",
+                        "Organic 100 Content Standard",
+                        "Organic Certifying Body - Centre for Systems Integration,",
+                        "Organic Certifying Body - International Certification Services, Inc. (ICS), North Dakota, USA",
+                        "Organic Certifying Body - JAS (Japanese Agricultural Standards)",
+                        "Organic Certifying Body - OTCO (OREGON TILTH CERTIFIED ORGANIC), Oregon, U.S.A.",
+                        "Organic Certifying Body – Agricultural Services Certified Organic (ASCO)",
+                        "Organic Certifying Body – Debio",
+                        "Organic Certifying Body – EcoCert, Quebec, Canada",
+                        "Organic Certifying Body – Global Organic Alliance (GOA), Ohio, U.S.A.",
+                        "Organic Certifying Body – Letis S.A.",
+                        "Organic Certifying Body – Organisme de Certification Québec Vrai (OCQV)",
+                        "Organic Certifying Body – Pro-Cert Organic Systems, Saskatchewan, Canada",
+                        "Organic Certifying Body – Province of British Columbia Certified Organic, British Columbia Association for Regenerative Agriculture (BCARA), Canada",
+                        "Organic Certifying Body – Quality Certification Services (QCS), Florida, U.S.A.",
+                        "Organic Certifying Body – Trans Canada Organic Certification Services (TCO), Saskatchewan, Canada",
+                        "Organic Certifying Body –Pacific Agricultural Certification Society (PACS), British Columbia, Canada",
+                        "Organic Cotton",
+                        "Orthodox Rabbinical Board",
+                        "Orthodox Union Kosher",
+                        "OU Kosher Dairy",
+                        "OU Kosher Fish",
+                        "OU Kosher Meat",
+                        "OU Kosher Passover",
+                        "Ozone Friendly General Claim",
+                        "Paleo Approved",
+                        "Paleo By Earthkosher",
+                        "Parent Tested Parent Approved (PTPA) Winner's Seal of Approval",
+                        "PCO",
+                        "PEFC",
+                        "PEFC Certified",
+                        "PEFC Recycled",
+                        "Pet to Pet",
+                        "Plastic Free Trust Mark",
+                        "Prepared in Canada",
+                        "Pro Specie Rara",
+                        "Pro-Terra Non-GMO Certification",
+                        "Processed in Canada",
+                        "Proderm",
+                        "Product of Canada",
+                        "Product of the Vinho Verde Region",
+                        "Product of the Year, Consumer Survey",
+                        "Produit en Bretagne",
+                        "Protected Designation of Origin",
+                        "Protected Geographical Indication",
+                        "Protected Harvest Certified",
+                        "Proudly Canadian",
+                        "Proven Quality Bavaria",
+                        "Puhtaasti Kotimainen",
+                        "QAI",
+                        "QS",
+                        "Qualenvi",
+                        "Qualitaet Tirol",
+                        "Quality Rhoen",
+                        "Rabbinical Council Of British Columbia BCK",
+                        "Rabbinical Council Of California",
+                        "Rabbinical Council Of New England",
+                        "Rainforest Alliance",
+                        "RAL Quality Candles",
+                        "Real California Cheese",
+                        "Real California Milk",
+                        "Real Food Seal",
+                        "Recognized Canadian Dermatology Association Skin Health",
+                        "Recognized Canadian Dermatology Association Sun Protection",
+                        "Recupel",
+                        "Recyclable General Claim",
+                        "Refined in Canada",
+                        "REGIONALFENSTER",
+                        "RHP",
+                        "Roasted and blended in Canada to describe coffee",
+                        "Round Table on Responsible Soy",
+                        "RSB – Roundtable on Sustainable Biomaterials",
+                        "RT-QuIC",
+                        "RT-QuIC Tested",
+                        "Safe Feed Safe Food",
+                        "Safe Quality Food",
+                        "Salmon Safe Certification",
+                        "Schweizer Allergie Gütesiegel",
+                        "Schweizer Alpprodukt",
+                        "Schweizer Bergprodukt",
+                        "SCS Sustainably Grown",
+                        "SeaChoice",
+                        "Seedling",
+                        "SGS Organic",
+                        "Shopper Army",
+                        "SKG 1 star",
+                        "SKG 2 star",
+                        "SKG 3 star",
+                        "SKG Certificate",
+                        "SLG Child Safety",
+                        "SLG Type Tested",
+                        "SLK Bio",
+                        "Society of the Plastics Industry (SPI)",
+                        "Soil Association Organic Symbol",
+                        "SOIL Organic Cosmos",
+                        "SOSTain",
+                        "Star D Kosher",
+                        "STAR K Kosher",
+                        "Steel Recycling",
+                        "Stellar Certification Services",
+                        "Stiftung Warentest",
+                        "Stop Climate Change",
+                        "Streekproduct.be",
+                        "Suisse Garantie",
+                        "Sunshine State Kosher",
+                        "SUS",
+                        "Sustainable Forestry Initiative",
+                        "Sustainable In Practice (SIP)",
+                        "Sustainable Palm Oil RSPO Certified",
+                        "Sustainable Palm Oil RSPO Credits",
+                        "Sustainable Palm Oil RSPO Mixed",
+                        "Tarnopol Kashrus Kosher",
+                        "TCO Development",
+                        "Terra Vitis",
+                        "The EcoLogo Certification",
+                        "The Fair Rubber Association",
+                        "The Natural and Organic Awards",
+                        "Three Line Kosher",
+                        "TNO Approved",
+                        "TOOTHFRIENDLY",
+                        "Traditional Specialty Guaranteed",
+                        "Transport Canada National Safety Mark (NSM)",
+                        "Triangle K Certification",
+                        "Triman",
+                        "True Foods Canada Trustmark",
+                        "True Source Certified",
+                        "U.S. Department of Agriculture (USDA) – Grade A e.g., eggs",
+                        "Underwriters laboratory",
+                        "Underwriters' Laboratory Certified, Canada \"C\" and U.S. US",
+                        "Uniquely Finnish",
+                        "United Egg Producers Certified",
+                        "UNSER Land",
+                        "USDA",
+                        "USDA Grade - AA",
+                        "USDA Inspection",
+                        "USDA Organic",
+                        "UTZ Certified",
+                        "UTZ Certified Cocoa",
+                        "V Label Vegan",
+                        "V Label Vegetarian",
+                        "V.I.V.A.",
+                        "Vaad Hakashrus of Denver Scroll K Certification",
+                        "Vaad Hoeir Kosher",
+                        "Vaelg Fuldkorn Forst",
+                        "VDE",
+                        "VDS Certificate",
+                        "Vegan - VegeCert",
+                        "Vegan Awareness Foundation",
+                        "Vegan By Earthkosher",
+                        "Vegan Natural Food Certifiers",
+                        "Vegan Society Vegan Logo",
+                        "Vegaplan",
+                        "Vegetarian Society - Vegetarian",
+                        "VEILIG WONEN POLITIE KEURMERK",
+                        "Vignerons en Développement Durable (VDD)",
+                        "Water Quality Association (WQA's)- Tested and Certified",
+                        "WEIDEMELK",
+                        "Weight Watchers Endorsed",
+                        "Whole Grain 100 Percent Stamp",
+                        "Whole Grain Basic Stamp",
+                        "Whole Grain Council Stamp",
+                        "Whole grains 50 percent Stamp",
+                        "WINERIES for Climate Protection (WfCP)",
+                        "WSDA",
+                        "WWF Panda Label",
+                        "Zero Waste Business Council Certified"
+                      ]
+                    },
+                    "minItems": 1
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 99999999999999
+                  },
+                  "trading_card_size": {
+                    "type": "string",
+                    "enum": [
+                      "Tall Boy",
+                      "Oversized",
+                      "Mini",
+                      "Standard",
+                      "Jumbo",
+                      "Japanese",
+                      "Die-Cut"
+                    ]
+                  },
+                  "trading_card_sleeve_and_holder_type": {
+                    "type": "string",
+                    "enum": [
+                      "Trading Card Binder Sets",
+                      "Trading Card Binders",
+                      "Trading Card Deck Protectors",
+                      "Trading Card Protector Sheets",
+                      "Trading Card Sleeves"
+                    ]
+                  },
+                  "warrantyText": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 20000
+                  },
+                  "warrantyURL": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2500,
+                    "format": "uri"
+                  },
+                  "variantGroupId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  },
+                  "variantAttributeNames": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "color",
+                        "count",
+                        "material",
+                        "multipackQuantity",
+                        "trading_card_size"
+                      ]
+                    },
+                    "minItems": 1
+                  },
+                  "isPrimaryVariant": {
+                    "type": "string",
+                    "enum": [
+                      "No",
+                      "Yes"
+                    ]
+                  },
+                  "swatchImages": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "array",
+                    "items": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "type": "object",
+                      "properties": {
+                        "swatchVariantAttribute": {
+                          "type": "string",
+                          "enum": [
+                            "color",
+                            "material",
+                            "multipackQuantity"
+                          ]
+                        },
+                        "swatchImageUrl": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 2500,
+                          "format": "uri"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "minItems": 1
+                  }
+                },
+                "required": [
+                  "productName",
+                  "brand",
+                  "condition",
+                  "shortDescription",
+                  "keyFeatures",
+                  "mainImageUrl",
+                  "countPerPack",
+                  "multipackQuantity",
+                  "isProp65WarningRequired",
+                  "has_written_warranty",
+                  "netContent",
+                  "pieceCount"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "Orderable": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "inventory": {
+                      "type": "array",
+                      "contains": {
+                        "type": "object",
+                        "required": [
+                          "quantity"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "inventory"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "inventory": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "fulfillmentCenterID"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "inventory"
+                  ]
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "inventory": {
+                      "type": "array",
+                      "contains": {
+                        "type": "object",
+                        "required": [
+                          "fulfillmentCenterID"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "inventory"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "inventory": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "quantity"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "inventory"
+                  ]
+                }
+              },
+              {
+                "if": {
+                  "allOf": [
+                    {
+                      "properties": {
+                        "inventory": {
+                          "type": "array",
+                          "contains": {
+                            "type": "object",
+                            "required": [
+                              "quantity"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "inventory"
+                      ]
+                    },
+                    {
+                      "properties": {
+                        "IsPreorder": {
+                          "type": "string",
+                          "enum": [
+                            "Yes"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "IsPreorder"
+                      ]
+                    }
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "inventory": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "inventoryAvailabilityDate"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "inventory"
+                  ]
+                }
+              },
+              {
+                "if": {
+                  "anyOf": [
+                    {
+                      "properties": {
+                        "IsPreorder": {
+                          "type": "string",
+                          "enum": [
+                            "Yes"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "IsPreorder"
+                      ]
+                    }
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "releaseDate"
+                  ]
+                }
+              }
+            ],
+            "properties": {
+              "sku": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 50
+              },
+              "productIdentifiers": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": {
+                  "productId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 14
+                  },
+                  "productIdType": {
+                    "type": "string",
+                    "enum": [
+                      "EAN",
+                      "GTIN",
+                      "ISBN",
+                      "UPC"
+                    ]
+                  }
+                },
+                "required": [
+                  "productId",
+                  "productIdType"
+                ],
+                "additionalProperties": false
+              },
+              "price": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 99999999999999,
+                "multipleOf": 0.01
+              },
+              "ShippingWeight": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 99999999999999,
+                "multipleOf": 0.001
+              },
+              "country_of_origin_substantial_transformation": {
+                "type": "string",
+                "enum": [
+                  "Afghanistan",
+                  "Aland Islands",
+                  "Albania",
+                  "Algeria",
+                  "American Samoa",
+                  "Andorra",
+                  "Angola",
+                  "Anguilla",
+                  "Antarctica",
+                  "Antigua and Barbuda",
+                  "Argentina",
+                  "Armenia",
+                  "Aruba",
+                  "Australia",
+                  "Austria",
+                  "Azerbaijan",
+                  "Bahamas",
+                  "Bahrain",
+                  "Bangladesh",
+                  "Barbados",
+                  "Belarus",
+                  "Belgium",
+                  "Belize",
+                  "Benin",
+                  "Bermuda",
+                  "Bhutan",
+                  "Bolivia",
+                  "Bonaire",
+                  "Bosnia and Herzegovina",
+                  "Botswana",
+                  "Bouvet Island",
+                  "Brazil",
+                  "British Indian Ocean Territory",
+                  "Brunei Darussalam",
+                  "Bulgaria",
+                  "Burkina Faso",
+                  "Burundi",
+                  "Cambodia",
+                  "Cameroon",
+                  "Canada",
+                  "Cape Verde",
+                  "Cayman Islands",
+                  "Central African Republic",
+                  "Chad",
+                  "Chile",
+                  "China",
+                  "Christmas Island",
+                  "Cocos (Keeling) Islands",
+                  "Colombia",
+                  "Comoros",
+                  "Cook Islands",
+                  "Costa Rica",
+                  "Cote d Ivoire",
+                  "Croatia",
+                  "Cuba",
+                  "Curacao",
+                  "Cyprus",
+                  "Czech Republic",
+                  "Democratic Republic of the Congo",
+                  "Denmark",
+                  "Djibouti",
+                  "Dominica",
+                  "Dominican Republic",
+                  "Ecuador",
+                  "Egypt",
+                  "El Salvador",
+                  "Equatorial Guinea",
+                  "Eritrea",
+                  "Estonia",
+                  "Eswatini",
+                  "Ethiopia",
+                  "Falkland Islands (Malvinas)",
+                  "Faroe Islands",
+                  "Fiji",
+                  "Finland",
+                  "France",
+                  "French Guiana",
+                  "French Polynesia",
+                  "French Southern Territories",
+                  "Gabon",
+                  "Gambia",
+                  "Georgia",
+                  "Germany",
+                  "Ghana",
+                  "Gibraltar",
+                  "Greece",
+                  "Greenland",
+                  "Grenada",
+                  "Guadeloupe",
+                  "Guam",
+                  "Guatemala",
+                  "Guernsey",
+                  "Guinea",
+                  "Guinea-Bissau",
+                  "Guyana",
+                  "Haiti",
+                  "Heard Island & McDonald Isl",
+                  "Honduras",
+                  "Hong Kong",
+                  "Hungary",
+                  "Iceland",
+                  "India",
+                  "Indonesia",
+                  "Iran",
+                  "Iraq",
+                  "Ireland",
+                  "Isle of Man",
+                  "Israel",
+                  "Italy",
+                  "Jamaica",
+                  "Japan",
+                  "Jersey",
+                  "Jordan",
+                  "Kazakhstan",
+                  "Kenya",
+                  "Kiribati",
+                  "Korea, North",
+                  "Korea, South",
+                  "Kosovo",
+                  "Kuwait",
+                  "Kyrgyzstan",
+                  "Laos",
+                  "Latvia",
+                  "Lebanon",
+                  "Lesotho",
+                  "Liberia",
+                  "Libyan Arab Jamahiriya",
+                  "Liechtenstein",
+                  "Lithuania",
+                  "Luxembourg",
+                  "Macau",
+                  "Macedonia",
+                  "Madagascar",
+                  "Malawi",
+                  "Malaysia",
+                  "Maldives",
+                  "Mali",
+                  "Malta",
+                  "Marshall Islands",
+                  "Martinique",
+                  "Mauritania",
+                  "Mauritius",
+                  "Mayotte",
+                  "Mexico",
+                  "Micronesia",
+                  "Moldova",
+                  "Monaco",
+                  "Mongolia",
+                  "Montenegro",
+                  "Montserrat",
+                  "Morocco",
+                  "Mozambique",
+                  "Myanmar",
+                  "Namibia",
+                  "Nauru",
+                  "Nepal",
+                  "Netherlands",
+                  "New Caledonia",
+                  "New Zealand",
+                  "Nicaragua",
+                  "Niger",
+                  "Nigeria",
+                  "Niue",
+                  "Norfolk Island",
+                  "Northern Mariana Islands",
+                  "Norway",
+                  "Oman",
+                  "Pakistan",
+                  "Palau",
+                  "Palestine",
+                  "Panama",
+                  "Papua New Guinea",
+                  "Paraguay",
+                  "Peru",
+                  "Philippines",
+                  "Pitcairn",
+                  "Poland",
+                  "Portugal",
+                  "Puerto Rico",
+                  "Qatar",
+                  "Republic of the Congo",
+                  "Reunion",
+                  "Romania",
+                  "Russian Federation",
+                  "Rwanda",
+                  "Saint Barthelemy",
+                  "Saint Helena",
+                  "Saint Kitts And Nevis",
+                  "Saint Lucia",
+                  "Saint Maarten",
+                  "Saint Martin",
+                  "Saint Pierre And Miquelon",
+                  "Saint Vincent & the Grenadines",
+                  "Samoa",
+                  "San Marino",
+                  "Sao Tome and Principe",
+                  "Saudi Arabia",
+                  "Senegal",
+                  "Serbia",
+                  "Seychelles",
+                  "Sierra Leone",
+                  "Singapore",
+                  "Slovakia",
+                  "Slovenia",
+                  "Solomon Islands",
+                  "Somalia",
+                  "South Africa",
+                  "South Georgia/So Sandwich Isl",
+                  "South Sudan",
+                  "Spain",
+                  "Sri Lanka",
+                  "Sudan",
+                  "Suriname",
+                  "Svalbard and Jan Mayen",
+                  "Sweden",
+                  "Switzerland",
+                  "Syrian Arab Republic",
+                  "Taiwan",
+                  "Tajikistan",
+                  "Tanzania",
+                  "Thailand",
+                  "Timor-Leste",
+                  "Togo",
+                  "Tokelau",
+                  "Tonga",
+                  "Trinidad and Tobago",
+                  "Tunisia",
+                  "Turkey",
+                  "Turkmenistan",
+                  "Turks and Caicos Islands",
+                  "Tuvalu",
+                  "Uganda",
+                  "Ukraine",
+                  "United Arab Emirates",
+                  "United Kingdom",
+                  "United States",
+                  "Uruguay",
+                  "US Minor Outlying Islands",
+                  "Uzbekistan",
+                  "Vanuatu",
+                  "Vatican City State",
+                  "Venezuela",
+                  "Viet Nam",
+                  "Virgin Islands (British)",
+                  "Virgin Islands (U.S.)",
+                  "Wallis and Futuna Islands",
+                  "Western Sahara",
+                  "Yemen",
+                  "Zambia",
+                  "Zimbabwe"
+                ]
+              },
+              "inventory": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "array",
+                "items": {
+                  "$schema": "http://json-schema.org/draft-07/schema#",
+                  "type": "object",
+                  "properties": {
+                    "quantity": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 99999999999999
+                    },
+                    "fulfillmentCenterID": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 100
+                    },
+                    "inventoryAvailabilityDate": {
+                      "type": "string",
+                      "format": "date"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "minItems": 1
+              },
+              "stateRestrictions": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "array",
+                "items": {
+                  "$schema": "http://json-schema.org/draft-07/schema#",
+                  "type": "object",
+                  "properties": {
+                    "stateRestrictionsText": {
+                      "type": "string",
+                      "enum": [
+                        "Commercial",
+                        "Illegal for Sale",
+                        "None"
+                      ]
+                    },
+                    "zipCodes": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 100000
+                    },
+                    "states": {
+                      "type": "string",
+                      "enum": [
+                        "AK - Alaska",
+                        "AL - Alabama",
+                        "AR - Arkansas",
+                        "AS - American Samoa",
+                        "AZ - Arizona",
+                        "CA - California",
+                        "CO - Colorado",
+                        "CT - Connecticut",
+                        "DC - District of Columbia",
+                        "DE - Delaware",
+                        "FL - Florida",
+                        "FM - Federated States of Micronesia",
+                        "GA - Georgia",
+                        "GU - Guam",
+                        "HI - Hawaii",
+                        "IA - Iowa",
+                        "ID - Idaho",
+                        "IL - Illinois",
+                        "IN - Indiana",
+                        "KS - Kansas",
+                        "KY - Kentucky",
+                        "LA - Louisiana",
+                        "MA - Massachusetts",
+                        "MD - Maryland",
+                        "ME - Maine",
+                        "MH - Marshall Islands",
+                        "MI - Michigan",
+                        "MN - Minnesota",
+                        "MO - Missouri",
+                        "MP - Commonwealth of the Northern Mariana Islands",
+                        "MS - Mississippi",
+                        "MT - Montana",
+                        "NC - North Carolina",
+                        "ND - North Dakota",
+                        "NE - Nebraska",
+                        "NH - New Hampshire",
+                        "NJ - New Jersey",
+                        "NM - New Mexico",
+                        "NV - Nevada",
+                        "NY - New York",
+                        "OH - Ohio",
+                        "OK - Oklahoma",
+                        "OR - Oregon",
+                        "PA - Pennsylvania",
+                        "PR - Puerto Rico",
+                        "PW - Palau",
+                        "RI - Rhode Island",
+                        "SC - South Carolina",
+                        "SD - South Dakota",
+                        "TN - Tennessee",
+                        "TX - Texas",
+                        "UM - U.S. Minor Outlying Islands",
+                        "UT - Utah",
+                        "VA - Virginia",
+                        "VI - U.S. Virgin Islands",
+                        "VT - Vermont",
+                        "WA - Washington",
+                        "WI - Wisconsin",
+                        "WV - West Virginia",
+                        "WY - Wyoming"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "minItems": 1
+              },
+              "electronicsIndicator": {
+                "type": "string",
+                "enum": [
+                  "No",
+                  "Yes"
+                ]
+              },
+              "chemicalAerosolPesticide": {
+                "type": "string",
+                "enum": [
+                  "No",
+                  "Yes"
+                ]
+              },
+              "batteryTechnologyType": {
+                "type": "string",
+                "enum": [
+                  "Alkaline",
+                  "Carbon Zinc",
+                  "Does Not Contain a Battery",
+                  "Lead Acid",
+                  "Lead Acid (Non-Spillable)",
+                  "Lithium Ion",
+                  "Lithium Primary (Lithium Metal)",
+                  "Magnesium",
+                  "Mercury",
+                  "Nickel Cadmium",
+                  "Nickel Metal Hydride",
+                  "Silver"
+                ]
+              },
+              "fulfillmentLagTime": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 99
+              },
+              "shipsInOriginalPackaging": {
+                "type": "string",
+                "enum": [
+                  "No",
+                  "Yes"
+                ]
+              },
+              "MustShipAlone": {
+                "type": "string",
+                "enum": [
+                  "No",
+                  "Yes"
+                ]
+              },
+              "IsPreorder": {
+                "type": "string",
+                "enum": [
+                  "No",
+                  "Yes"
+                ]
+              },
+              "releaseDate": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "startDate": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "endDate": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "externalProductIdentifier": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "array",
+                "items": {
+                  "$schema": "http://json-schema.org/draft-07/schema#",
+                  "type": "object",
+                  "properties": {
+                    "externalProductIdType": {
+                      "type": "string",
+                      "enum": [
+                        "ASIN",
+                        "MLID"
+                      ]
+                    },
+                    "externalProductId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 20
+                    }
+                  },
+                  "required": [
+                    "externalProductIdType",
+                    "externalProductId"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 1
+              },
+              "ProductIdUpdate": {
+                "type": "string",
+                "enum": [
+                  "No",
+                  "Yes"
+                ]
+              },
+              "SkuUpdate": {
+                "type": "string",
+                "enum": [
+                  "No",
+                  "Yes"
+                ]
+              },
+              "msrp": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 99999999,
+                "multipleOf": 0.01
+              },
+              "automate_pricing": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": {
+                  "minimumSellerAllowedPrice": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 99999999999999,
+                    "multipleOf": 0.01
+                  },
+                  "maximumSellerAllowedPrice": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 99999999999999,
+                    "multipleOf": 0.01
+                  },
+                  "repricerStrategy": {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 75
+                  }
+                },
+                "additionalProperties": false
+              },
+              "product_package_dimensions_and_weight": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": {
+                  "product_package_dimensions_depth": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 999999999,
+                    "multipleOf": 0.0001
+                  },
+                  "product_package_weight": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 999999999,
+                    "multipleOf": 0.0001
+                  },
+                  "product_package_dimensions_height": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 999999999,
+                    "multipleOf": 0.0001
+                  },
+                  "product_package_dimensions_width": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 999999999,
+                    "multipleOf": 0.0001
+                  }
+                },
+                "required": [
+                  "product_package_dimensions_depth",
+                  "product_package_weight",
+                  "product_package_dimensions_height",
+                  "product_package_dimensions_width"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "sku",
+              "productIdentifiers",
+              "price",
+              "ShippingWeight",
+              "country_of_origin_substantial_transformation"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "Visible",
+          "Orderable"
+        ]
+      }
+    }
+  },
+  "required": [
+    "MPItemFeedHeader",
+    "MPItem"
+  ]
+}

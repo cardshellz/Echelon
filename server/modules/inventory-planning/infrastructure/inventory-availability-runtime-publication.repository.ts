@@ -32,6 +32,7 @@ import { InventoryChannelQuantityRuntimeService } from "../application/inventory
 type ClientPool = Pick<Pool, "connect"> & { options?: { max?: number } };
 
 interface TargetRow extends Record<string, unknown> {
+  membership_mode?: string;
   publication_target_id: number;
   publication_target_revision: string;
   destination_kind: string;
@@ -369,6 +370,7 @@ async function loadZeroPublicationTargets(
   if (input.channelId != null) values.push(positiveInteger(input.channelId, "channelId"));
   const targetRows = (await client.query<TargetRow>(
     `SELECT target.id AS publication_target_id,
+            COALESCE(to_jsonb(target)->>'membership_mode','whole_product') AS membership_mode,
             target.revision::text AS publication_target_revision,
             target.destination_kind,
             target.channel_id, channel_row.name AS channel_name,
@@ -456,7 +458,15 @@ async function loadZeroPublicationTargets(
     policiesByChannel.set(positiveInteger(row.channel_id, "policy.channelId"), rows);
   }
   const mappingsByTarget = new Map<number, ActivePublicationVariantMapping[]>();
+  const explicitTargetIds = [...new Set(targetRows.filter(row=>row.membership_mode==="explicit").map(row=>row.publication_target_id))];
+  const members = explicitTargetIds.length===0 ? [] : (await client.query<{ publication_target_id:number;product_variant_id:number }>(
+    `SELECT h.publication_target_id,h.product_variant_id FROM inventory.publication_membership_heads h
+     JOIN inventory.publication_membership_versions v ON v.id=h.active_version_id
+     WHERE h.publication_target_id=ANY($1::integer[]) AND h.product_variant_id=ANY($2::integer[]) AND v.included=true`,
+    [explicitTargetIds,variantIds])).rows;
   for (const row of mappingRows) {
+    if (explicitTargetIds.includes(row.publication_target_id)
+      && !members.some(member=>member.publication_target_id===row.publication_target_id && member.product_variant_id===row.product_variant_id)) continue;
     if (row.lifecycle_status !== "sealed") {
       throw runtimeError(
         "INVENTORY_PUBLICATION_ACTIVE_MAPPING_INVALID",
@@ -477,6 +487,7 @@ async function loadZeroPublicationTargets(
   const rowsByTarget = new Map<number, TargetRow[]>();
   for (const row of targetRows) {
     const targetId = positiveInteger(row.publication_target_id, "publicationTargetId");
+    if (row.membership_mode==="explicit" && !mappingsByTarget.has(targetId)) continue;
     const rows = rowsByTarget.get(targetId) ?? [];
     rows.push(row);
     rowsByTarget.set(targetId, rows);

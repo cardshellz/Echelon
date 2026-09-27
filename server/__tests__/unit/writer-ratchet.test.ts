@@ -101,6 +101,36 @@ describe("writer-ratchet (P2.1)", () => {
     }
   });
 
+  it("keeps selective listing publication and inventory membership with their owning modules", () => {
+    const publicationOwners: Record<string, string[]> = {
+      "modules/marketplace-listings": [
+        "marketplace.channel_listing_drafts",
+        "marketplace.channel_listing_item_claims",
+        "marketplace.channel_listing_operations",
+        "marketplace.channel_listing_publication_events",
+        "marketplace.channel_listing_reviews",
+      ],
+      "modules/inventory-planning": [
+        "inventory.publication_listing_setup_identities",
+        "inventory.publication_listing_setup_scopes",
+        "inventory.publication_membership_applications",
+        "inventory.publication_membership_heads",
+        "inventory.publication_membership_versions",
+      ],
+    };
+    for (const topology of [current, currentIncludingScripts, baseline]) {
+      for (const [owner, tables] of Object.entries(publicationOwners)) {
+        for (const table of tables) expect(topology[table]).toEqual([owner]);
+      }
+      // The existing eBay pricing route is retained for compatibility. New
+      // publication routes delegate pricing writes to the Channels owner.
+      expect(topology["channels.channel_pricing_rules"]).toEqual([
+        "modules/channels",
+        "server/routes/ebay/ebay-pricing.routes.ts",
+      ]);
+    }
+  });
+
   it("eliminated writers are removed from the baseline (no rot)", () => {
     const stale: string[] = [];
     for (const [table, buckets] of Object.entries(baseline)) {

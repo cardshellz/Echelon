@@ -11,6 +11,58 @@ import { sealSupplySnapshot } from "../../domain/inventory-availability-planner"
 
 const HASH = "a".repeat(64);
 
+describe("explicit publication membership", () => {
+  it("does not require mappings for deliberately excluded variants", async () => {
+    const selected = target();
+    selected.membership = { mode:"explicit",includedVariantIds:[101] };
+    selected.mappings = selected.mappings.filter(row=>row.productVariantId===101);
+    const plan = await new InventoryChannelExposureRuntimeService(executor(canonicalContext([selected]))).planProduct(10);
+    expect(plan.targets[0].publishable).toBe(true);
+    expect(plan.targets[0].rows.map(row=>row.productVariantId)).toEqual([101]);
+  });
+  it("still blocks an included SKU without its exact provider mapping", async () => {
+    const selected = target();
+    selected.membership = { mode:"explicit",includedVariantIds:[102] };
+    selected.mappings = selected.mappings.filter(row=>row.productVariantId===101);
+    const plan = await new InventoryChannelExposureRuntimeService(executor(canonicalContext([selected]))).planProduct(10);
+    expect(plan.targets[0].publishable).toBe(false);
+    expect(plan.targets[0].rows[0].blockers.map(row=>row.code)).toContain("PUBLICATION_TARGET_VARIANT_MAPPING_MISSING");
+  });
+  it("starts empty without widening or blocking a legacy whole-product destination", async () => {
+    const selected = target(); selected.membership = { mode:"explicit",includedVariantIds:[] }; selected.mappings=[];
+    const legacy = target({publicationTargetId:92});
+    const plan = await new InventoryChannelExposureRuntimeService(executor(canonicalContext([selected,legacy]))).planProduct(10);
+    expect(plan.targets.map(row=>row.publicationTargetId)).toEqual([92]);
+    expect(plan.targets[0].rows.map(row=>row.productVariantId)).toEqual([101,102]);
+  });
+  it("does not adopt new catalog variants added after the explicit selection", async () => {
+    const selected = target(); selected.membership = { mode:"explicit",includedVariantIds:[101] };
+    const context = canonicalContext([selected]); context.managedSellableVariantIds=[...context.managedSellableVariantIds,103];
+    const plan = await new InventoryChannelExposureRuntimeService(executor(context)).planProduct(10);
+    expect(plan.targets[0].publishable).toBe(true);
+    expect(plan.targets[0].rows.map(row=>row.productVariantId)).toEqual([101]);
+  });
+  it("keeps the full supply graph for an opted-in pack when eaches are excluded from selling", async () => {
+    const selected = target(); selected.membership = { mode:"explicit",includedVariantIds:[102] };
+    const plan = await new InventoryChannelExposureRuntimeService(executor(canonicalContext([selected]))).planProduct(10);
+    expect(plan.targets[0].rows).toMatchObject([{productVariantId:102,canonicalAtpUnits:"7",publishedUnits:"7"}]);
+  });
+  it("fails closed when an included variant is no longer eligible", async () => {
+    const selected = target(); selected.membership = { mode:"explicit",includedVariantIds:[103] };
+    const plan = await new InventoryChannelExposureRuntimeService(executor(canonicalContext([selected]))).planProduct(10);
+    expect(plan.targets[0].publishable).toBe(false);
+    expect(plan.targets[0].blockers.map(row=>row.code)).toContain("PUBLICATION_MEMBER_VARIANT_UNAVAILABLE");
+  });
+  it("does not count an excluded SKU toward overlapping partitioned channel shares", async () => {
+    const selected = target({policy:policyValue({allocationSemantics:"partitioned",shareBps:8000})});
+    selected.membership={mode:"explicit",includedVariantIds:[101]};
+    const other=target({publicationTargetId:92,channelId:8,policy:policyValue({allocationSemantics:"partitioned",shareBps:8000})});
+    other.membership={mode:"explicit",includedVariantIds:[102]};
+    const plan = await new InventoryChannelExposureRuntimeService(executor(canonicalContext([selected,other]))).planProduct(10);
+    expect(plan.targets.map(row=>row.publishable)).toEqual([true,true]);
+  });
+});
+
 describe("product and SKU warehouse overrides", () => {
   const inherited = { allocationSemantics: null, eligible: null, shareBps: null,
     holdbackSellableUnits: null, maxPublish: null, minPublishSellableUnits: null };

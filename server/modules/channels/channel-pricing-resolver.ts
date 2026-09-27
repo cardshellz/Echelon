@@ -8,7 +8,7 @@ import {
   shopifyVariants,
 } from "@shared/schema";
 
-type EchelonDb = typeof db;
+type EchelonDb = Pick<typeof db, "select">;
 
 export type ChannelPriceSource =
   | "channel_pricing"
@@ -248,20 +248,24 @@ async function resolvePricingRule(
 }
 
 export function applyPricingRule(basePriceCents: number, ruleType: string, value: string | number): number {
+  if (normalizeIntegerCents(basePriceCents) === null) throw new Error("Channel base price must be nonnegative safe integer cents");
   switch (ruleType) {
     case "percentage": {
       const basisPoints = parsePercentageToBasisPoints(value);
       if (basisPoints === null) {
         throw new Error(`Invalid channel pricing percentage value: ${value}`);
       }
-      return Math.round((basePriceCents * (10_000 + basisPoints)) / 10_000);
+      // Integer half-up rounding preserves cents even when the intermediate
+      // product exceeds JavaScript's exact Number range.
+      const numerator = BigInt(basePriceCents) * (BigInt(10_000) + BigInt(basisPoints));
+      return checkedCents((numerator + BigInt(5_000)) / BigInt(10_000));
     }
     case "fixed": {
       const fixedDeltaCents = parseDollarPriceToCents(value);
       if (fixedDeltaCents === null) {
         throw new Error(`Invalid channel pricing fixed value: ${value}`);
       }
-      return basePriceCents + fixedDeltaCents;
+      return checkedCents(BigInt(basePriceCents) + BigInt(fixedDeltaCents));
     }
     case "override": {
       const overrideCents = parseDollarPriceToCents(value);
@@ -273,6 +277,11 @@ export function applyPricingRule(basePriceCents: number, ruleType: string, value
     default:
       return basePriceCents;
   }
+}
+
+function checkedCents(value: bigint): number {
+  if (value < BigInt(0) || value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("Channel selling price exceeds safe integer cents");
+  return Number(value);
 }
 
 function parsePercentageToBasisPoints(value: unknown): number | null {
