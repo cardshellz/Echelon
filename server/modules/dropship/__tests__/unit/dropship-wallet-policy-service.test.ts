@@ -155,17 +155,18 @@ describe("DropshipWalletPolicyService", () => {
 
       const minimums = await service.resolveListingTierMinimums(now);
 
+      // The published amount (what vendors see and joiners need) is the raised one from the start.
       expect(minimums.pack).toEqual({
-        tier: "pack", minimumCents: fallbackLimits.autoReloadMinTriggerCents, version: 1,
+        tier: "pack", minimumCents: fallbackLimits.autoReloadMinTriggerCents, version: 1, policyMinimumCents: 15_000,
         upcoming: { minimumCents: 15_000, version: 2, enforcesAt: new Date(now.getTime() + 12 * day) },
       });
       expect(minimums.case).toEqual({
-        tier: "case", minimumCents: fallbackLimits.caseTierMinimumCents, version: 1,
+        tier: "case", minimumCents: fallbackLimits.caseTierMinimumCents, version: 1, policyMinimumCents: 75_000,
         upcoming: { minimumCents: 75_000, version: 2, enforcesAt: new Date(now.getTime() + 12 * day) },
       });
       const later = await service.resolveListingTierMinimums(new Date(now.getTime() + 12 * day));
-      expect(later.pack).toEqual({ tier: "pack", minimumCents: 15_000, version: 2, upcoming: null });
-      expect(later.case).toEqual({ tier: "case", minimumCents: 75_000, version: 2, upcoming: null });
+      expect(later.pack).toEqual({ tier: "pack", minimumCents: 15_000, version: 2, policyMinimumCents: 15_000, upcoming: null });
+      expect(later.case).toEqual({ tier: "case", minimumCents: 75_000, version: 2, policyMinimumCents: 75_000, upcoming: null });
     });
 
     it("uses the clock when none is given and the published values with nothing in grace", async () => {
@@ -173,8 +174,12 @@ describe("DropshipWalletPolicyService", () => {
 
       const minimums = await service.resolveListingTierMinimums();
 
-      expect(minimums.pack).toEqual({ tier: "pack", minimumCents: publishedLimits.autoReloadMinTriggerCents, version: 3, upcoming: null });
-      expect(minimums.case).toEqual({ tier: "case", minimumCents: publishedLimits.caseTierMinimumCents, version: 3, upcoming: null });
+      expect(minimums.pack).toEqual({
+        tier: "pack", minimumCents: publishedLimits.autoReloadMinTriggerCents, version: 3, policyMinimumCents: publishedLimits.autoReloadMinTriggerCents, upcoming: null,
+      });
+      expect(minimums.case).toEqual({
+        tier: "case", minimumCents: publishedLimits.caseTierMinimumCents, version: 3, policyMinimumCents: publishedLimits.caseTierMinimumCents, upcoming: null,
+      });
     });
 
     it("treats the environment fallback as a version enforced from the start, at WARN when the table is missing", async () => {
@@ -186,8 +191,12 @@ describe("DropshipWalletPolicyService", () => {
 
       const minimums = await service.resolveListingTierMinimums(now);
 
-      expect(minimums.pack).toEqual({ tier: "pack", minimumCents: fallbackLimits.autoReloadMinTriggerCents, version: 1, upcoming: null });
-      expect(minimums.case).toEqual({ tier: "case", minimumCents: fallbackLimits.caseTierMinimumCents, version: 1, upcoming: null });
+      expect(minimums.pack).toEqual({
+        tier: "pack", minimumCents: fallbackLimits.autoReloadMinTriggerCents, version: 1, policyMinimumCents: fallbackLimits.autoReloadMinTriggerCents, upcoming: null,
+      });
+      expect(minimums.case).toEqual({
+        tier: "case", minimumCents: fallbackLimits.caseTierMinimumCents, version: 1, policyMinimumCents: fallbackLimits.caseTierMinimumCents, upcoming: null,
+      });
       expect(logs).toEqual([expect.objectContaining({ level: "warn", code: "DROPSHIP_WALLET_POLICY_ENV_FALLBACK" })]);
 
       repository.getActiveError = null;
@@ -241,8 +250,8 @@ describe("DropshipWalletPolicyService", () => {
       });
       // The staff screen sees what the tiers enforce today; a lone version has nothing in grace.
       expect(overview.listingTierEnforcement).toEqual({
-        pack: { tier: "pack", minimumCents: publishedLimits.autoReloadMinTriggerCents, version: 3, upcoming: null },
-        case: { tier: "case", minimumCents: publishedLimits.caseTierMinimumCents, version: 3, upcoming: null },
+        pack: { tier: "pack", minimumCents: publishedLimits.autoReloadMinTriggerCents, version: 3, policyMinimumCents: publishedLimits.autoReloadMinTriggerCents, upcoming: null },
+        case: { tier: "case", minimumCents: publishedLimits.caseTierMinimumCents, version: 3, policyMinimumCents: publishedLimits.caseTierMinimumCents, upcoming: null },
       });
       expect(overview.generatedAt).toEqual(now);
     });

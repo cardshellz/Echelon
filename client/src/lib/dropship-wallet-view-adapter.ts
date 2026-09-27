@@ -155,16 +155,28 @@ export interface WalletRewardsNextExpiry {
 }
 
 export type WalletListingTier = "pack" | "case";
-export type WalletListingTierBlockReason = "pack_tier_minimum_not_kept" | "case_tier_balance_below_minimum";
+/** Why a tier is not active: autopay is off (no reserve), the reserve is below the tier, or the balance has not reached it. */
+export type WalletListingTierBlockReason = "autopay_off" | "reserve_below_tier" | "balance_below_tier";
 
-/** One tier as the server decided it: on sale or not, the minimum enforced now, and a raise still in grace. */
+/**
+ * One tier as the server decided it (`domain/listing-tiers.ts`): active or
+ * not, the amount it needs, how far the reserve and the balance are from it,
+ * and a raise still in grace. The page shows these; it never decides them.
+ */
 export interface WalletListingTierStatus {
   tier: WalletListingTier;
   eligible: boolean;
   reason: WalletListingTierBlockReason | null;
+  /** The amount the tier needs, as published: the one the page shows and the reserve options offer. */
+  policyMinimumCents: number;
+  /** The amount enforced now for a vendor already in the tier; lower than the published one only while a raise is in grace. */
   minimumCents: number;
-  /** How far the vendor is from the gate as things stand; zero when on sale. */
-  shortfallCents: number;
+  /** The tier was active at the last check, so a balance below its amount does not turn it off. */
+  alreadyOn: boolean;
+  /** How far the reserve is below the tier's amount; the whole amount with autopay off; zero when it covers it. */
+  reserveShortfallCents: number;
+  /** How far the balance (counting bank transfers on their way) is below the tier's amount; zero when it reaches it. */
+  balanceShortfallCents: number;
   upcoming: {
     minimumCents: number;
     policyVersion: number;
@@ -411,9 +423,12 @@ const rawRewardsNextExpirySchema = z.object({
 const rawListingTierStatusSchema = z.object({
   tier: z.enum(["pack", "case"]),
   eligible: z.boolean(),
-  reason: z.enum(["pack_tier_minimum_not_kept", "case_tier_balance_below_minimum"]).nullable(),
+  reason: z.enum(["autopay_off", "reserve_below_tier", "balance_below_tier"]).nullable(),
+  policyMinimumCents: cents,
   minimumCents: cents,
-  shortfallCents: cents,
+  alreadyOn: z.boolean(),
+  reserveShortfallCents: cents,
+  balanceShortfallCents: cents,
   upcoming: z.object({
     minimumCents: cents,
     policyVersion: z.number().int().positive(),

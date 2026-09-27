@@ -377,10 +377,13 @@ function makeService(
 }
 
 const catalogListingTiers = {
-  pack: { tier: "pack" as const, eligible: true, reason: null, minimumCents: 10_000, shortfallCents: 0, upcoming: null },
+  pack: {
+    tier: "pack" as const, eligible: true, reason: null, policyMinimumCents: 10_000, minimumCents: 10_000, alreadyOn: true,
+    reserveShortfallCents: 0, balanceShortfallCents: 0, upcoming: null,
+  },
   case: {
-    tier: "case" as const, eligible: false, reason: "case_tier_balance_below_minimum" as const,
-    minimumCents: 50_000, shortfallCents: 38_000, upcoming: null,
+    tier: "case" as const, eligible: false, reason: "reserve_below_tier" as const, policyMinimumCents: 50_000, minimumCents: 50_000,
+    alreadyOn: false, reserveShortfallCents: 40_000, balanceShortfallCents: 38_000, upcoming: null,
   },
 };
 

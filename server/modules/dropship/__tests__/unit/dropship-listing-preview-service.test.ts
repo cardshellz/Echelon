@@ -99,9 +99,9 @@ describe("DropshipListingPreviewService", () => {
     const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
 
     expect(preview.rows[0].previewStatus).toBe("blocked");
-    expect(preview.rows[0].blockers).toContain("listing_tier:case_tier_balance_below_minimum");
+    expect(preview.rows[0].blockers).toContain("listing_tier:balance_below_tier");
     expect(preview.rows[0].marketplaceQuantity).toBe(0);
-    expect(preview.rows[0].listingTier).toMatchObject({ tier: "case", eligible: false, shortfallCents: 38_000 });
+    expect(preview.rows[0].listingTier).toMatchObject({ tier: "case", eligible: false, balanceShortfallCents: 38_000 });
     expect(preview.summary).toMatchObject({ blocked: 1, ready: 0 });
   });
 
@@ -113,7 +113,7 @@ describe("DropshipListingPreviewService", () => {
 
     const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
 
-    expect(preview.rows[0].blockers).toEqual(["listing_tier:case_tier_balance_below_minimum", "marketplace_quantity_unavailable"]);
+    expect(preview.rows[0].blockers).toEqual(["listing_tier:balance_below_tier", "marketplace_quantity_unavailable"]);
     expect(preview.rows[0].previewStatus).toBe("blocked");
     expect(preview.rows[0].marketplaceQuantity).toBe(0);
     expect(preview.rows[0].currentListingStatus).toBe("active");
@@ -905,11 +905,21 @@ function makeVendor(input: { memberId: string }): DropshipProvisionedVendorProfi
 
 function allTiersOnSale(): DropshipListingTierEligibility {
   return {
-    pack: { tier: "pack", eligible: true, reason: null, minimumCents: 10_000, shortfallCents: 0, upcoming: null },
-    case: { tier: "case", eligible: true, reason: null, minimumCents: 50_000, shortfallCents: 0, upcoming: null },
+    pack: {
+      tier: "pack", eligible: true, reason: null, policyMinimumCents: 10_000, minimumCents: 10_000, alreadyOn: true,
+      reserveShortfallCents: 0, balanceShortfallCents: 0, upcoming: null,
+    },
+    case: {
+      tier: "case", eligible: true, reason: null, policyMinimumCents: 50_000, minimumCents: 50_000, alreadyOn: true,
+      reserveShortfallCents: 0, balanceShortfallCents: 0, upcoming: null,
+    },
   };
 }
 
+/** A $500 reserve with $120 in the wallet, never on: the case tier waits for the balance. */
 function caseTierOffSale(): DropshipListingTierEligibility["case"] {
-  return { tier: "case", eligible: false, reason: "case_tier_balance_below_minimum", minimumCents: 50_000, shortfallCents: 38_000, upcoming: null };
+  return {
+    tier: "case", eligible: false, reason: "balance_below_tier", policyMinimumCents: 50_000, minimumCents: 50_000, alreadyOn: false,
+    reserveShortfallCents: 0, balanceShortfallCents: 38_000, upcoming: null,
+  };
 }

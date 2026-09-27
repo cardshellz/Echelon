@@ -298,7 +298,7 @@ export const DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS: readonly DropshipWalletPo
     label: "Pack tier reserve",
     unit: "cents",
     allowZero: false,
-    help: "The lowest reserve any vendor may keep; the Pack tier (singles, packs and inner packs) needs it. Autopay tops a wallet up when it falls below the vendor's reserve.",
+    help: "The lowest reserve any vendor may keep. The Pack tier (singles, packs and inner packs) turns on once a vendor's reserve and balance both reach it. Autopay tops a wallet up when it falls below the vendor's reserve.",
   },
   {
     limitField: "caseTierMinimumCents",
@@ -306,7 +306,7 @@ export const DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS: readonly DropshipWalletPo
     label: "Case tier reserve",
     unit: "cents",
     allowZero: false,
-    help: "The balance a vendor needs for the Case tier, which adds case listings. Never below the Pack tier reserve.",
+    help: "The reserve and balance a vendor needs for the Case tier, which adds case listings. Never below the Pack tier reserve.",
   },
   {
     limitField: "autoReloadMinAmountCents",

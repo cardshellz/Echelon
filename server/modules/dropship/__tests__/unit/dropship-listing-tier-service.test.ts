@@ -11,6 +11,7 @@ import {
   type DropshipVendorListingTierHoldRecord,
 } from "../../application/dropship-listing-tier-service";
 import {
+  DROPSHIP_LISTING_TIERS,
   resolveEnforcedListingTierMinimums,
   type DropshipEnforcedListingTierMinimums,
   type DropshipListingTier,
@@ -64,7 +65,7 @@ describe("DropshipListingTierService", () => {
   }
 
   describe("resolveForVendor", () => {
-    it("answers with the enforced minimums, the vendor's funding and what each tier needs", async () => {
+    it("answers with the amounts, the vendor's funding and what each tier needs", async () => {
       funding.set(10, { minimumBalanceCents: 10_000, availableBalanceCents: 12_000, pendingBalanceCents: 30_000 });
 
       const view = await service.resolveForVendor(10);
@@ -75,10 +76,31 @@ describe("DropshipListingTierService", () => {
         funding: { minimumBalanceCents: 10_000, availableBalanceCents: 12_000, pendingBalanceCents: 30_000, currency: "USD" },
         generatedAt: NOW,
       });
-      expect(view.eligibility.pack).toMatchObject({ eligible: true, shortfallCents: 0 });
-      expect(view.eligibility.case).toMatchObject({ eligible: false, reason: "case_tier_balance_below_minimum", shortfallCents: 8_000 });
+      expect(view.eligibility.pack).toMatchObject({ eligible: true, reserveShortfallCents: 0, balanceShortfallCents: 0 });
+      // A $100 reserve never opens the case tier, whatever the wallet holds.
+      expect(view.eligibility.case).toMatchObject({
+        eligible: false, reason: "reserve_below_tier", reserveShortfallCents: 40_000, balanceShortfallCents: 8_000,
+      });
       expect(repository.recorded).toHaveLength(0);
       expect(gate.calls).toHaveLength(0);
+    });
+
+    it("keeps a tier the last check left on while the reserve covers it, and only for an active vendor decided under this rule", async () => {
+      funding.set(10, { minimumBalanceCents: 50_000, availableBalanceCents: 1_000, pendingBalanceCents: 0 });
+
+      repository.seedVendor(10, "active", hold({ heldTiers: [], revision: 2, applied: true }), {});
+      const kept = await service.resolveForVendor(10);
+      expect(kept.eligibility.pack).toMatchObject({ eligible: true, alreadyOn: true });
+      expect(kept.eligibility.case).toMatchObject({ eligible: true, alreadyOn: true, balanceShortfallCents: 49_000 });
+
+      repository.seedVendor(10, "active", hold({ heldTiers: [], revision: 2, applied: true, tiersOn: null }), {});
+      const september = await service.resolveForVendor(10);
+      expect(september.eligibility.pack).toMatchObject({ eligible: false, reason: "balance_below_tier", alreadyOn: false });
+
+      repository.seedVendor(10, "paused", hold({ heldTiers: [], revision: 2, applied: true }), {});
+      const paused = await service.resolveForVendor(10);
+      expect(paused.eligibility.case).toMatchObject({ eligible: false, reason: "balance_below_tier", alreadyOn: false });
+      expect(repository.recorded).toHaveLength(0);
     });
 
     it("refuses a vendor id that is not a positive integer", async () => {
@@ -98,7 +120,9 @@ describe("DropshipListingTierService", () => {
       expect(result).toEqual({
         scannedCount: 1, changedCount: 1, appliedCount: 1, deferredCount: 0, unavailableCount: 0, failedCount: 0, graceNoticeCount: 0,
       });
-      expect(repository.get(10)).toMatchObject({ heldTiers: ["case"], revision: 1, applied: true, evaluatedAt: NOW, appliedAt: NOW });
+      expect(repository.get(10)).toMatchObject({
+        heldTiers: ["case"], revision: 1, applied: true, tiersOn: ["pack"], evaluatedAt: NOW, appliedAt: NOW,
+      });
       expect(repository.get(10)?.detail).toBe("held case; planner blocked products 9");
       expect(gate.calls).toEqual([
         { kind: "release", storeConnectionId: 77, productVariantIds: [101, 102], reason: "Dropship vendor 10: pack tier meets minimum (rev 1)", idempotencyKey: expect.stringMatching(/^dropship-listing-tier:10:1:pack:release:77:[0-9a-f]{16}$/) },
@@ -111,18 +135,23 @@ describe("DropshipListingTierService", () => {
         eventType: "dropship_listing_tier_held",
         critical: true,
         channels: ["email", "in_app"],
-        title: "Your Case tier is not active: your balance is below the USD $500.00 reserve",
+        title: "Your Case tier is not active",
         idempotencyKey: "dropship-listing-tier:10:case:held:1",
-        payload: expect.objectContaining({ tier: "case", revision: 1, minimumCents: 50_000, shortfallCents: 38_000, availableBalanceCents: 12_000 }),
+        payload: expect.objectContaining({
+          tier: "case", revision: 1, reason: "reserve_below_tier", policyMinimumCents: 50_000, minimumCents: 50_000,
+          reserveShortfallCents: 40_000, balanceShortfallCents: 38_000, availableBalanceCents: 12_000,
+        }),
       });
-      expect(notificationSender.sent[0].message).toContain("Your wallet has USD $120.00. The Case tier needs a USD $500.00 reserve; add USD $380.00");
-      expect(notificationSender.sent[0].message).toContain("Pack tier listings are not affected.");
+      expect(notificationSender.sent[0].message).toBe(
+        "The Case tier needs a reserve of USD $500.00. Your reserve is USD $100.00, so your case listings are paused. "
+        + "Raise your reserve to USD $500.00; they go live again once your balance also reaches USD $500.00. Your pack listings are not affected.",
+      );
       expect(logs.find((entry) => entry.code === "DROPSHIP_LISTING_TIER_HOLD_CHANGED")).toMatchObject({ level: "info", context: expect.objectContaining({ before: [], after: ["case"], revision: 1 }) });
       expect(logs.find((entry) => entry.code === "DROPSHIP_LISTING_TIER_HOLDS_APPLIED")).toMatchObject({ level: "info" });
       expect(logs.filter((entry) => entry.level === "error")).toHaveLength(0);
     });
 
-    it("mentions pending credits in the notice and counts them for the case gate", async () => {
+    it("counts credits still on their way toward the case tier", async () => {
       repository.seedVendor(10, "active", null, { 77: { pack: [], case: [201] } });
       funding.set(10, { minimumBalanceCents: 50_000, availableBalanceCents: 12_000, pendingBalanceCents: 38_000 });
 
@@ -146,7 +175,80 @@ describe("DropshipListingTierService", () => {
       expect(notificationSender.sent).toHaveLength(0);
     });
 
-    it("puts case listings back on sale once the balance reaches the minimum, and says so without alarm", async () => {
+    it("keeps a vendor's tiers on through a dip once they are on under this rule: no change, no command, no notice", async () => {
+      // Owner's question of 2026-09-26: a $500 reserve, the case tier on, an order takes the balance under $500.
+      repository.seedVendor(10, "active", hold({ heldTiers: [], revision: 2, applied: true }), { 77: { pack: [101], case: [201] } });
+      funding.set(10, { minimumBalanceCents: 50_000, availableBalanceCents: 42_000, pendingBalanceCents: 0 });
+
+      const result = await service.reconcileListingTiers({ workerId: "worker-1" });
+
+      expect(result).toMatchObject({ changedCount: 0, appliedCount: 0 });
+      expect(repository.get(10)).toMatchObject({ heldTiers: [], revision: 2 });
+      expect(gate.calls).toHaveLength(0);
+      expect(notificationSender.sent).toHaveLength(0);
+    });
+
+    it("decides a vendor's first check under this rule from money, not from a September decision", async () => {
+      // The September rule left both tiers on for a $100 reserve with nothing in the wallet.
+      repository.seedVendor(10, "active", hold({ heldTiers: [], revision: 5, applied: true, tiersOn: null }), { 77: { pack: [101], case: [] } });
+      funding.set(10, { minimumBalanceCents: 10_000, availableBalanceCents: 0, pendingBalanceCents: 0 });
+
+      await service.reconcileListingTiers({ workerId: "worker-1" });
+
+      expect(repository.get(10)).toMatchObject({ heldTiers: ["pack", "case"], revision: 6, tiersOn: [], applied: true });
+      expect(gate.calls.map((call) => [call.kind, call.productVariantIds])).toEqual([["hold", [101]]]);
+      expect(notificationSender.sent.map((notice) => notice.idempotencyKey)).toEqual([
+        "dropship-listing-tier:10:pack:held:6",
+        "dropship-listing-tier:10:case:held:6",
+      ]);
+      expect(notificationSender.sent[0].message).toBe(
+        "The Pack tier needs USD $100.00 in your wallet. Your wallet has USD $0.00, so your pack listings are paused. "
+        + "They go live again once your balance reaches USD $100.00.",
+      );
+    });
+
+    it("records the tiers this rule left on for an unchanged September decision, without a revision, a command or a notice", async () => {
+      repository.seedVendor(10, "active", hold({ heldTiers: ["case"], revision: 3, applied: true, tiersOn: null }), { 77: { pack: [101], case: [201] } });
+      funding.set(10, { minimumBalanceCents: 10_000, availableBalanceCents: 12_000, pendingBalanceCents: 0 });
+
+      const result = await service.reconcileListingTiers({ workerId: "worker-1" });
+
+      expect(result.changedCount).toBe(0);
+      expect(repository.get(10)).toMatchObject({ heldTiers: ["case"], revision: 3, tiersOn: ["pack"] });
+      expect(gate.calls).toHaveLength(0);
+      expect(notificationSender.sent).toHaveLength(0);
+    });
+
+    it("makes a paused vendor reach each tier again with money", async () => {
+      repository.seedVendor(10, "paused", hold({ heldTiers: [], revision: 2, applied: true }), { 77: { pack: [101], case: [201] } });
+      funding.set(10, { minimumBalanceCents: 50_000, availableBalanceCents: 20_000, pendingBalanceCents: 0 });
+
+      await service.reconcileListingTiers({ workerId: "worker-1" });
+
+      expect(repository.get(10)).toMatchObject({ heldTiers: ["case"], revision: 3 });
+    });
+
+    it("names credits on their way in a balance notice, and says autopay is off when it is", async () => {
+      repository.seedVendor(10, "active", null, { 77: { pack: [101], case: [] } });
+      repository.seedVendor(11, "active", null, { 78: { pack: [102], case: [] } });
+      funding.set(10, { minimumBalanceCents: 10_000, availableBalanceCents: 3_000, pendingBalanceCents: 2_000 });
+      funding.set(11, { minimumBalanceCents: null, availableBalanceCents: 90_000, pendingBalanceCents: 0 });
+
+      await service.reconcileListingTiers({ workerId: "worker-1" });
+
+      const pack10 = notificationSender.sent.find((notice) => notice.idempotencyKey === "dropship-listing-tier:10:pack:held:1");
+      expect(pack10?.message).toBe(
+        "The Pack tier needs USD $100.00 in your wallet. Your wallet has USD $50.00, including USD $20.00 on its way, so your pack listings are paused. "
+        + "They go live again once your balance reaches USD $100.00.",
+      );
+      const pack11 = notificationSender.sent.find((notice) => notice.idempotencyKey === "dropship-listing-tier:11:pack:held:1");
+      expect(pack11?.message).toBe(
+        "Autopay is off, so your wallet has no reserve and your pack listings are paused. "
+        + "Turn on autopay with a reserve of at least USD $100.00; they go live again once your balance reaches USD $100.00.",
+      );
+    });
+
+    it("puts case listings back live once the reserve and the balance reach the case amount, and says so without alarm", async () => {
       repository.seedVendor(10, "active", hold({ heldTiers: ["case"], revision: 3, applied: true }), { 77: { pack: [101], case: [201] } });
       funding.set(10, { minimumBalanceCents: 50_000, availableBalanceCents: 50_000, pendingBalanceCents: 0 });
 
@@ -159,11 +261,12 @@ describe("DropshipListingTierService", () => {
         eventType: "dropship_listing_tier_released",
         critical: false,
         title: "Your Case tier is active again",
+        message: "Your reserve and your balance have both reached USD $500.00, so your case listings are live again.",
         idempotencyKey: "dropship-listing-tier:10:case:released:4",
       });
     });
 
-    it("takes everything off sale for a vendor who keeps neither the floor nor the balance, one notice per tier", async () => {
+    it("pauses both tiers for a reserve below the pack amount, one notice per tier", async () => {
       repository.seedVendor(10, "active", null, { 77: { pack: [101], case: [201] } });
       funding.set(10, { minimumBalanceCents: 5_000, availableBalanceCents: 9_000, pendingBalanceCents: 0 });
 
@@ -175,9 +278,11 @@ describe("DropshipListingTierService", () => {
         ["dropship_listing_tier_held", "dropship-listing-tier:10:pack:held:1"],
         ["dropship_listing_tier_held", "dropship-listing-tier:10:case:held:1"],
       ]);
-      expect(notificationSender.sent[0].title).toBe("Your Pack tier is not active: your wallet does not keep the USD $100.00 reserve");
-      expect(notificationSender.sent[0].message).toContain("your reserve is USD $50.00 and your wallet has USD $90.00");
-      expect(notificationSender.sent[0].message).toContain("Raise your reserve to USD $100.00, or add USD $10.00");
+      expect(notificationSender.sent[0].title).toBe("Your Pack tier is not active");
+      expect(notificationSender.sent[0].message).toBe(
+        "The Pack tier needs a reserve of USD $100.00. Your reserve is USD $50.00, so your pack listings are paused. "
+        + "Raise your reserve to USD $100.00; they go live again once your balance also reaches USD $100.00.",
+      );
     });
 
     it("keeps a deferred hold unapplied and retries the same revision under the same keys next tick", async () => {
@@ -260,7 +365,7 @@ describe("DropshipListingTierService", () => {
         level: "error", context: expect.objectContaining({ vendorId: 10, error: "no wallet for vendor 10" }),
       });
       // A paused vendor is still evaluated: standing holds the whole store, the tiers stay right for the resume.
-      expect(repository.get(11)).toMatchObject({ heldTiers: ["case"], applied: true });
+      expect(repository.get(11)).toMatchObject({ heldTiers: ["pack", "case"], applied: true });
     });
 
     it("announces a raise in grace once per vendor, tier and policy version, only to vendors it would catch", async () => {
@@ -268,10 +373,11 @@ describe("DropshipListingTierService", () => {
         policyVersion({ version: 1, createdAt: T0, packTierMinimumCents: 5_000, caseTierMinimumCents: 5_000 }),
         policyVersion({ version: 2, createdAt: at(10), packTierMinimumCents: 10_000, caseTierMinimumCents: 50_000 }),
       ], NOW);
-      repository.seedVendor(10, "active", null, { 77: { pack: [101], case: [201] } });
+      // Vendor 10 is in both tiers on a $50 reserve saved before the raise; vendor 11's reserve already covers it.
+      repository.seedVendor(10, "active", hold({ heldTiers: [], revision: 1, applied: true }), { 77: { pack: [101], case: [201] } });
       repository.seedVendor(11, "active", null, { 78: { pack: [102], case: [] } });
       funding.set(10, { minimumBalanceCents: 5_000, availableBalanceCents: 5_000, pendingBalanceCents: 0 });
-      funding.set(11, { minimumBalanceCents: 10_000, availableBalanceCents: 60_000, pendingBalanceCents: 0 });
+      funding.set(11, { minimumBalanceCents: 50_000, availableBalanceCents: 60_000, pendingBalanceCents: 0 });
 
       const first = await service.reconcileListingTiers({ workerId: "worker-1" });
 
@@ -283,11 +389,14 @@ describe("DropshipListingTierService", () => {
       ]);
       expect(notificationSender.sent[0]).toMatchObject({
         critical: true,
-        title: "The Pack tier reserve rises to USD $100.00 on September 25, 2026",
+        title: "The Pack tier rises to USD $100.00 on September 25, 2026",
         payload: expect.objectContaining({ policyVersion: 2, currentMinimumCents: 5_000, upcomingMinimumCents: 10_000, enforcesAt: at(24).toISOString() }),
       });
-      expect(notificationSender.sent[0].message).toContain("raise your reserve to USD $100.00 before September 25, 2026");
-      expect(notificationSender.sent[1].title).toBe("The Case tier reserve rises to USD $500.00 on September 25, 2026");
+      expect(notificationSender.sent[0].message).toBe(
+        "Card Shellz is raising the Pack tier from USD $50.00 to USD $100.00 on September 25, 2026. Your reserve is USD $50.00. "
+        + "Raise it to USD $100.00 before then to keep your pack listings live.",
+      );
+      expect(notificationSender.sent[1].title).toBe("The Case tier rises to USD $500.00 on September 25, 2026");
 
       // The next tick repeats the send under the same keys; the notification service deduplicates by key.
       const second = await service.reconcileListingTiers({ workerId: "worker-1" });
@@ -307,14 +416,20 @@ describe("DropshipListingTierService", () => {
   });
 });
 
+/** A recorded decision; by default one this rule made, so the tiers it did not hold are the tiers on. */
 function hold(input: Partial<DropshipVendorListingTierHoldRecord> & { heldTiers: DropshipListingTier[]; revision: number; applied: boolean }): DropshipVendorListingTierHoldRecord {
   return {
     vendorId: 10,
+    tiersOn: tiersLeftOn(input.heldTiers),
     detail: null,
     evaluatedAt: new Date("2026-09-17T11:00:00.000Z"),
     appliedAt: input.applied ? new Date("2026-09-17T11:00:00.000Z") : null,
     ...input,
   };
+}
+
+function tiersLeftOn(heldTiers: readonly DropshipListingTier[]): DropshipListingTier[] {
+  return DROPSHIP_LISTING_TIERS.filter((tier) => !heldTiers.includes(tier));
 }
 
 class FakeTierRepository implements DropshipListingTierRepository {
@@ -345,6 +460,11 @@ class FakeTierRepository implements DropshipListingTierRepository {
       .map(([vendorId, vendor]) => ({ vendorId, status: vendor.status, tierHold: this.holds.get(vendorId) ?? null }));
   }
 
+  async getVendor(vendorId: number): Promise<DropshipListingTierVendorRecord | null> {
+    const vendor = this.vendors.get(vendorId);
+    return vendor ? { vendorId, status: vendor.status, tierHold: this.holds.get(vendorId) ?? null } : null;
+  }
+
   async listStoreConnectionIds(vendorId: number): Promise<number[]> {
     return Object.keys(this.vendors.get(vendorId)?.stores ?? {}).map(Number).sort((a, b) => a - b);
   }
@@ -357,7 +477,7 @@ class FakeTierRepository implements DropshipListingTierRepository {
     this.recorded.push({ vendorId: input.vendorId, heldTiers: input.heldTiers });
     const existing = this.holds.get(input.vendorId);
     if (existing && existing.heldTiers.join(",") === input.heldTiers.join(",")) {
-      const record = { ...existing, evaluatedAt: input.now };
+      const record = { ...existing, tiersOn: tiersLeftOn(input.heldTiers), evaluatedAt: input.now };
       this.holds.set(input.vendorId, record);
       return { changed: false, record };
     }
@@ -366,6 +486,7 @@ class FakeTierRepository implements DropshipListingTierRepository {
       heldTiers: [...input.heldTiers],
       revision: (existing?.revision ?? 0) + 1,
       applied: false,
+      tiersOn: tiersLeftOn(input.heldTiers),
       detail: input.detail,
       evaluatedAt: input.now,
       appliedAt: null,
