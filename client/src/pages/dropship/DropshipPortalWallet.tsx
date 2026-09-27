@@ -46,7 +46,6 @@ import {
   type WalletFundingMethod,
   type WalletLimits,
   type WalletAdvance,
-  type WalletListingTierStatus,
   type WalletListingTiers,
 } from "@/lib/dropship-wallet-view-adapter";
 import {
@@ -102,6 +101,9 @@ import {
   describeFundingMethodDetailed,
   describeHoldTimeLine,
   describeIntro,
+  describeListingTierRow,
+  describeReserveLine,
+  LISTING_TIERS_RULE,
   describeUsdcDeposit,
   describeUsdcSourceNote,
   usdcOfferedFor,
@@ -1988,6 +1990,12 @@ function ManageView({
   const topUpShown = plan?.topUpCents ?? flow.topUpCents;
   const boundShown = plan?.limitCents ?? flow.limitCents;
   const belowFloor = stillOnboarding && wallet.account.availableBalanceCents + wallet.account.pendingBalanceCents < floorCents;
+  // The reserve can be changed from the balance card, above the plan where its
+  // editor opens; bring the editor into view whichever button opened it.
+  const floorEditorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (editor === "floor") floorEditorRef.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+  }, [editor]);
 
   const saveNote = (
     <div className="mt-4 space-y-2 text-sm text-zinc-600">
@@ -2080,7 +2088,6 @@ function ManageView({
                 {describeNegativeBalance({ availableCents: wallet.account.availableBalanceCents, advance: wallet.advance, limitCents: flow.limitCents, cardFundingFeeBps: wallet.cardFundingFeeBps })}
               </p>
             )}
-            {flow.authorized && <Badge variant="outline" className="mt-2">Reserve {formatWholeDollars(floorCents)}</Badge>}
           </div>
           <Button type="button" variant={addMoneyOpen ? "outline" : "default"} className={addMoneyOpen ? "h-10 w-full sm:w-auto" : BRAND_BUTTON} onClick={() => setAddMoneyOpen(!addMoneyOpen)}>
             {addMoneyOpen ? "Close" : "Add money"}
@@ -2109,9 +2116,15 @@ function ManageView({
           </div>
         )}
         <SectionFeedback {...feedback("money")} />
+        {wallet.listingTiers && (
+          <ReserveAndTiers
+            tiers={wallet.listingTiers}
+            reserveCents={wallet.autoReload?.enabled ? wallet.autoReload.minimumBalanceCents : null}
+            onChangeReserve={flow.authorized && flow.source && editor !== "floor" ? () => setEditor("floor") : null}
+          />
+        )}
       </section>
 
-      {wallet.listingTiers && <ListingTiersSection tiers={wallet.listingTiers} />}
       {wallet.advance && <AdvanceSection advance={wallet.advance} wallet={wallet} />}
 
       <section className={SECTION} data-testid="wallet-plan">
@@ -2173,7 +2186,7 @@ function ManageView({
           </div>
         )}
         {editor === "floor" && flow.source && (
-          <div className="mt-4 border-t border-zinc-200 pt-4">
+          <div ref={floorEditorRef} className="mt-4 border-t border-zinc-200 pt-4" data-testid="wallet-floor-editor">
             <FloorStep wallet={wallet} flow={flow} sourceRail={flow.source.rail} sourceLabel={describeFundingMethod(flow.source.method)}
               initialFloorCents={floorCents} initialTopUpCents={topUpShown} feedback={planFeedback} submitLabel={ack.saveLabel}
               saveNote={saveNote} onCancel={() => setEditor(null)}
@@ -2210,43 +2223,53 @@ function ManageView({
   );
 }
 
-/** The step-1 rules, collapsed, for a vendor past setup: the same copy, never a second wording of it. */
 /**
- * The listing tiers, as the server decided them: the reserve each tier needs,
- * whether this wallet meets it (Active / Not active), and a raise still in its
- * grace period. The Pack tier covers singles, packs and inner packs; the Case
- * tier adds cases.
+ * The reserve and what it decides, in one place: the vendor's reserve, the
+ * rule, and each tier as the server decided it (Active / Not active, the
+ * published amount, what turns it on, a raise that would turn it off). The
+ * page renders the decision; it never makes it.
  */
-function ListingTiersSection({ tiers }: { tiers: WalletListingTiers }) {
+function ReserveAndTiers({ tiers, reserveCents, onChangeReserve }: {
+  tiers: WalletListingTiers;
+  /** The saved reserve while autopay is on, the one the server decides from; null with autopay off. */
+  reserveCents: number | null;
+  /** Opens the reserve editor; null where it cannot open (no autopay source yet, or already open). */
+  onChangeReserve: (() => void) | null;
+}) {
   return (
-    <section className={SECTION} data-testid="wallet-listing-tiers">
-      <h2 className="text-lg font-semibold">Listing tiers</h2>
-      <p className="mt-1 text-sm text-zinc-600">
-        Each tier requires a reserve: the balance you keep in your wallet to cover orders, set by Card Shellz. Money still settling counts.
-      </p>
+    <div className="mt-5 border-t border-zinc-200 pt-4" data-testid="wallet-listing-tiers">
+      <h3 className="font-semibold">Reserve and listing tiers</h3>
+      <div className="mt-2 flex items-center justify-between gap-3">
+        <div className="font-medium" data-testid="wallet-reserve">{describeReserveLine(reserveCents)}</div>
+        {onChangeReserve && (
+          <Button type="button" variant="outline" size="sm" className="h-8" onClick={onChangeReserve} data-testid="wallet-reserve-change">Change</Button>
+        )}
+      </div>
+      <p className="mt-1 text-sm text-zinc-600">{LISTING_TIERS_RULE}</p>
       <ul className="mt-3 space-y-3">
-        {[tiers.pack, tiers.case].map((tier) => (
-          <li key={tier.tier} className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between" data-testid={`wallet-listing-tier-${tier.tier}`}>
-            <div>
-              <div className="font-medium">{listingTierName(tier.tier)} · {formatWholeDollars(tier.minimumCents)} reserve</div>
-              <p className="text-sm text-zinc-600">{tier.tier === "case" ? "Adds cases." : "Singles, packs and inner packs."}</p>
-              <p className="text-sm text-zinc-600">{describeListingTier(tier)}</p>
-              {tier.upcoming && (
-                <p className="text-sm text-amber-800" data-testid={`wallet-listing-tier-${tier.tier}-upcoming`}>
-                  {describeUpcomingListingTier(tier)}
-                </p>
-              )}
-            </div>
-            <Badge
-              variant="outline"
-              className={tier.eligible ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900"}
-            >
-              {tier.eligible ? "Active" : "Not active"}
-            </Badge>
-          </li>
-        ))}
+        {[tiers.pack, tiers.case].map((tier) => {
+          const copy = describeListingTierRow(tier, reserveCents);
+          return (
+            <li key={tier.tier} className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between" data-testid={`wallet-listing-tier-${tier.tier}`}>
+              <div>
+                <div className="font-medium">{copy.title}</div>
+                <p className="text-sm text-zinc-600">{copy.covers}</p>
+                <p className="text-sm text-zinc-600">{copy.status}</p>
+                {copy.warning && (
+                  <p className="text-sm text-amber-800" data-testid={`wallet-listing-tier-${tier.tier}-upcoming`}>{copy.warning}</p>
+                )}
+              </div>
+              <Badge
+                variant="outline"
+                className={tier.eligible ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900"}
+              >
+                {tier.eligible ? "Active" : "Not active"}
+              </Badge>
+            </li>
+          );
+        })}
       </ul>
-    </section>
+    </div>
   );
 }
 
@@ -2298,31 +2321,7 @@ function AdvanceSection({ advance, wallet }: { advance: WalletAdvance; wallet: D
   );
 }
 
-function listingTierName(tier: WalletListingTierStatus["tier"]): string {
-  return tier === "case" ? "Case tier" : "Pack tier";
-}
-
-function describeListingTier(tier: WalletListingTierStatus): string {
-  if (tier.eligible) {
-    return tier.tier === "case"
-      ? "Your balance meets this reserve, so your case listings are live."
-      : "Your wallet keeps this reserve, so your pack listings are live.";
-  }
-  const shortfall = formatWholeDollars(tier.shortfallCents);
-  return tier.tier === "case"
-    ? `Your balance is ${shortfall} below this reserve. Case listings go live automatically once it is reached.`
-    : `Your pack listings are paused until your wallet keeps this reserve: raise your reserve to it, or add ${shortfall}.`;
-}
-
-function describeUpcomingListingTier(tier: WalletListingTierStatus): string {
-  const upcoming = tier.upcoming!;
-  const date = new Date(upcoming.enforcesAt).toLocaleDateString("en-US", { timeZone: "UTC", year: "numeric", month: "long", day: "numeric" });
-  const rises = `The reserve rises to ${formatWholeDollars(upcoming.minimumCents)} on ${date}.`;
-  return upcoming.affectsVendor
-    ? `${rises} As things stand you would fall below it; bring your wallet up before then to keep these listings live.`
-    : `${rises} Your wallet already meets it.`;
-}
-
+/** The step-1 rules, collapsed, for a vendor past setup: the same copy, never a second wording of it. */
 function HowItWorksSection({ wallet, flow }: { wallet: DropshipWalletView; flow: WalletFlowState }) {
   const [open, setOpen] = useState(false);
   return (

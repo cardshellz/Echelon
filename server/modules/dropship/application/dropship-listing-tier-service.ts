@@ -8,6 +8,7 @@ import {
   heldListingTiersFor,
   listingTierHoldIdempotencyKeyFor,
   listingTierNotificationKeyFor,
+  listingTiersAlreadyOn,
   type DropshipEnforcedListingTierMinimums,
   type DropshipListingTier,
   type DropshipListingTierEligibility,
@@ -28,19 +29,22 @@ import type {
 } from "./dropship-ports";
 
 /**
- * Listing tiers: which of a vendor's tiers are on sale, and keeping the
+ * Listing tiers: which of a vendor's tiers are on, and keeping the
  * marketplace in step with that.
  *
  * The rules are pure (`domain/listing-tiers.ts`); this service supplies the
- * clock, the policy history, the wallet facts and the side effects:
- * - `resolveForVendor` answers the vendor-facing and preview surfaces.
+ * clock, the policy history, the wallet facts, the last recorded decision and
+ * the side effects:
+ * - `resolveForVendor` answers the vendor-facing and preview surfaces. It
+ *   reads the last decision (a tier on at the last check stays on while the
+ *   reserve covers it) and never writes.
  * - `reconcileListingTiers` runs on the hourly maintenance tick. Per vendor it
- *   decides the held tiers, records the decision with a bumped revision when
- *   it changed, tells the vendor once per change, and asks inventory planning
- *   to hold or release the listed SKUs of each tier per store connection. A
- *   deferral (a provider quantity request in flight) leaves the decision
- *   recorded but not applied, and the next tick retries the same revision
- *   under the same idempotency keys.
+ *   decides the held tiers, records the decision (and the tiers it left on)
+ *   with a bumped revision when the held tiers changed, tells the vendor once
+ *   per change, and asks inventory planning to hold or release the listed SKUs of
+ *   each tier per store connection. A deferral (a provider quantity request
+ *   in flight) leaves the decision recorded but not applied, and the next
+ *   tick retries the same revision under the same idempotency keys.
  * - A raise still in its grace period is announced once per vendor, tier and
  *   policy version to the vendors it would catch.
  *
@@ -67,6 +71,11 @@ export interface DropshipVendorListingTierHoldRecord {
   revision: number;
   /** True once every store connection carries the holds and releases this revision asks for. */
   applied: boolean;
+  /**
+   * The tiers the current rule found on at this decision; null on a row the
+   * September rule wrote (migration 0706), which this rule does not trust.
+   */
+  tiersOn: DropshipListingTier[] | null;
   detail: string | null;
   evaluatedAt: Date;
   appliedAt: Date | null;
@@ -81,14 +90,17 @@ export interface DropshipListingTierVendorRecord {
 export interface DropshipListingTierRepository {
   /** Vendors whose listings can be on a marketplace (active or paused), oldest first. */
   listVendorsForReview(input: { limit: number }): Promise<DropshipListingTierVendorRecord[]>;
+  /** One vendor's status and last decision, whatever the status; null when the vendor does not exist. */
+  getVendor(vendorId: number): Promise<DropshipListingTierVendorRecord | null>;
   /** Store connections that can carry listings (anything not disconnected). */
   listStoreConnectionIds(vendorId: number): Promise<number[]>;
   /** Every listing row of the store, whatever its status, grouped by the tier its SKU sells in. */
   listListingVariantIdsByTier(input: { vendorId: number; storeConnectionId: number }): Promise<Record<DropshipListingTier, number[]>>;
   /**
-   * Records the held tiers. An unchanged set only refreshes `evaluatedAt`; a
-   * changed set bumps the revision, clears `applied`, and commits an audit row
-   * with it.
+   * Records the held tiers and, as `tiersOn`, the tiers this decision left
+   * on. An unchanged set only refreshes `evaluatedAt` and `tiersOn`; a
+   * changed set bumps the revision, clears `applied`, and commits an audit
+   * row with it.
    */
   recordHeldTiers(input: {
     vendorId: number;
@@ -199,15 +211,16 @@ export class DropshipListingTierService {
     },
   ) {}
 
-  /** The tier standing one vendor sees: what is on sale, what it takes, what is coming. */
+  /** The tier standing one vendor sees: which tiers are on, what each takes, what is coming. */
   async resolveForVendor(vendorId: number): Promise<DropshipVendorListingTierView> {
     const id = requireVendorId(vendorId);
     const generatedAt = this.deps.clock.now();
-    const [minimums, funding] = await Promise.all([
+    const [minimums, funding, vendor] = await Promise.all([
       this.deps.policy.resolveListingTierMinimums(generatedAt),
       this.deps.funding.readTierFunding(id),
+      this.deps.repository.getVendor(id),
     ]);
-    const eligibility = evaluateDropshipListingTierEligibility({ funding, minimums });
+    const eligibility = evaluateDropshipListingTierEligibility({ funding, minimums, tiersAlreadyOn: tiersAlreadyOnFor(vendor) });
     return { vendorId: id, minimums, eligibility, funding, generatedAt };
   }
 
@@ -261,7 +274,7 @@ export class DropshipListingTierService {
     now: Date,
   ): Promise<DropshipListingTierVendorChange> {
     const funding = await this.deps.funding.readTierFunding(vendor.vendorId);
-    const eligibility = evaluateDropshipListingTierEligibility({ funding, minimums });
+    const eligibility = evaluateDropshipListingTierEligibility({ funding, minimums, tiersAlreadyOn: tiersAlreadyOnFor(vendor) });
     const heldTiers = heldListingTiersFor(eligibility);
     const recorded = await this.deps.repository.recordHeldTiers({
       vendorId: vendor.vendorId,
@@ -412,14 +425,17 @@ export class DropshipListingTierService {
         eventType: held ? DROPSHIP_NOTIFICATION_EVENTS.LISTING_TIER_HELD : DROPSHIP_NOTIFICATION_EVENTS.LISTING_TIER_RELEASED,
         critical: held,
         channels: ["email", "in_app"],
-        title: held ? heldTitle(status, funding.currency) : releasedTitle(tier),
+        title: held ? heldTitle(status) : releasedTitle(tier),
         message: held ? heldMessage(status, funding) : releasedMessage(tier, status, funding),
         payload: {
           vendorId: vendor.vendorId,
           tier,
           revision: record.revision,
+          reason: status.reason,
+          policyMinimumCents: status.policyMinimumCents,
           minimumCents: status.minimumCents,
-          shortfallCents: status.shortfallCents,
+          reserveShortfallCents: status.reserveShortfallCents,
+          balanceShortfallCents: status.balanceShortfallCents,
           availableBalanceCents: funding.availableBalanceCents,
           pendingBalanceCents: funding.pendingBalanceCents,
           minimumBalanceCents: funding.minimumBalanceCents,
@@ -455,7 +471,7 @@ export class DropshipListingTierService {
         eventType: DROPSHIP_NOTIFICATION_EVENTS.LISTING_TIER_GRACE_NOTICE,
         critical: true,
         channels: ["email", "in_app"],
-        title: `The ${tierLabel(tier)} reserve rises to ${formatNotificationCurrency(upcoming.minimumCents, funding.currency)} on ${formatNotificationDate(upcoming.enforcesAt)}`,
+        title: `The ${tierLabel(tier)} rises to ${formatNotificationCurrency(upcoming.minimumCents, funding.currency)} on ${formatNotificationDate(upcoming.enforcesAt)}`,
         message: graceMessage(tier, status, funding, upcoming.minimumCents, upcoming.enforcesAt),
         payload: {
           vendorId,
@@ -486,31 +502,36 @@ function tierLabel(tier: DropshipListingTier): string {
   return tier === "case" ? "Case tier" : "Pack tier";
 }
 
-function heldTitle(status: DropshipListingTierStatus, currency: string): string {
-  const minimum = formatNotificationCurrency(status.minimumCents, currency);
-  return status.tier === "case"
-    ? `Your Case tier is not active: your balance is below the ${minimum} reserve`
-    : `Your Pack tier is not active: your wallet does not keep the ${minimum} reserve`;
+/** Which listings a tier covers, in the words vendors see. */
+function tierListings(tier: DropshipListingTier): string {
+  return tier === "case" ? "case listings" : "pack listings";
 }
 
+function heldTitle(status: DropshipListingTierStatus): string {
+  return `Your ${tierLabel(status.tier)} is not active`;
+}
+
+/**
+ * Why the tier went off and what turns it back on, from the decision's
+ * reason. Every amount is the policy amount: the one the vendor is shown and
+ * the one that turns the tier back on.
+ */
 function heldMessage(status: DropshipListingTierStatus, funding: DropshipVendorListingTierFundingSnapshot): string {
-  const minimum = formatNotificationCurrency(status.minimumCents, funding.currency);
-  const counted = formatNotificationCurrency(funding.availableBalanceCents + funding.pendingBalanceCents, funding.currency);
-  const shortfall = formatNotificationCurrency(status.shortfallCents, funding.currency);
-  const pending = funding.pendingBalanceCents > 0
-    ? ` (including ${formatNotificationCurrency(funding.pendingBalanceCents, funding.currency)} still settling)`
-    : "";
-  if (status.tier === "case") {
-    return `Your wallet has ${counted}${pending}. The Case tier needs a ${minimum} reserve; add ${shortfall} and your case listings go live again automatically. Pack tier listings are not affected.`;
+  const amount = formatNotificationCurrency(status.policyMinimumCents, funding.currency);
+  const listings = tierListings(status.tier);
+  const other = status.tier === "case" ? " Your pack listings are not affected." : "";
+  if (status.reason === "autopay_off") {
+    return `Autopay is off, so your wallet has no reserve and your ${listings} are paused. Turn on autopay with a reserve of at least ${amount}; they go live again once your balance reaches ${amount}.${other}`;
   }
-  const kept = funding.minimumBalanceCents === null
-    ? "no reserve is set"
-    : `your reserve is ${formatNotificationCurrency(funding.minimumBalanceCents, funding.currency)}`;
-  return `Card Shellz requires every wallet to keep a reserve of at least ${minimum} for the Pack tier (singles, packs and inner packs). Right now ${kept} and your wallet has ${counted}${pending}. Raise your reserve to ${minimum}, or add ${shortfall}, and your listings go live again automatically.`;
+  if (status.reason === "reserve_below_tier") {
+    const reserve = formatNotificationCurrency(funding.minimumBalanceCents ?? 0, funding.currency);
+    return `The ${tierLabel(status.tier)} needs a reserve of ${amount}. Your reserve is ${reserve}, so your ${listings} are paused. Raise your reserve to ${amount}; they go live again once your balance also reaches ${amount}.${other}`;
+  }
+  return `The ${tierLabel(status.tier)} needs ${amount} in your wallet. ${describeCountedBalance(funding)}, so your ${listings} are paused. They go live again once your balance reaches ${amount}.${other}`;
 }
 
 function releasedTitle(tier: DropshipListingTier): string {
-  return tier === "case" ? "Your Case tier is active again" : "Your Pack tier is active again";
+  return `Your ${tierLabel(tier)} is active again`;
 }
 
 function releasedMessage(
@@ -518,13 +539,16 @@ function releasedMessage(
   status: DropshipListingTierStatus,
   funding: DropshipVendorListingTierFundingSnapshot,
 ): string {
-  const counted = formatNotificationCurrency(funding.availableBalanceCents + funding.pendingBalanceCents, funding.currency);
-  const minimum = formatNotificationCurrency(status.minimumCents, funding.currency);
-  return tier === "case"
-    ? `Your wallet has ${counted}, at or above the ${minimum} Case tier reserve, so your case listings are live again.`
-    : `Your wallet keeps the ${minimum} reserve again, so your Pack tier listings are live again.`;
+  const amount = formatNotificationCurrency(status.policyMinimumCents, funding.currency);
+  const listings = tierListings(tier);
+  return `Your reserve and your balance have both reached ${amount}, so your ${listings} are live again.`;
 }
 
+/**
+ * Sent only to a vendor the raise would turn off: the tier is on and the
+ * reserve is below the raised amount. The balance follows the reserve
+ * (autopay tops up to it), so the reserve is the one thing to change.
+ */
 function graceMessage(
   tier: DropshipListingTier,
   status: DropshipListingTierStatus,
@@ -534,15 +558,19 @@ function graceMessage(
 ): string {
   const current = formatNotificationCurrency(status.minimumCents, funding.currency);
   const upcoming = formatNotificationCurrency(upcomingMinimumCents, funding.currency);
-  const counted = formatNotificationCurrency(funding.availableBalanceCents + funding.pendingBalanceCents, funding.currency);
+  const reserve = funding.minimumBalanceCents === null
+    ? "Autopay is off, so you have no reserve"
+    : `Your reserve is ${formatNotificationCurrency(funding.minimumBalanceCents, funding.currency)}`;
   const date = formatNotificationDate(enforcesAt);
-  if (tier === "case") {
-    return `Card Shellz is raising the Case tier reserve from ${current} to ${upcoming}. Your wallet has ${counted} today; bring it to ${upcoming} before ${date} to keep your case listings live.`;
-  }
-  const kept = funding.minimumBalanceCents === null
-    ? "no reserve is set"
-    : `your reserve is ${formatNotificationCurrency(funding.minimumBalanceCents, funding.currency)}`;
-  return `Card Shellz is raising the Pack tier reserve from ${current} to ${upcoming}. Today ${kept} and your wallet has ${counted}; raise your reserve to ${upcoming} before ${date} to keep those listings live.`;
+  return `Card Shellz is raising the ${tierLabel(tier)} from ${current} to ${upcoming} on ${date}. ${reserve}. Raise it to ${upcoming} before then to keep your ${tierListings(tier)} live.`;
+}
+
+/** The wallet's money in one clause, naming credits still on their way. */
+function describeCountedBalance(funding: DropshipVendorListingTierFundingSnapshot): string {
+  const counted = formatNotificationCurrency(funding.availableBalanceCents + funding.pendingBalanceCents, funding.currency);
+  return funding.pendingBalanceCents > 0
+    ? `Your wallet has ${counted}, including ${formatNotificationCurrency(funding.pendingBalanceCents, funding.currency)} on its way`
+    : `Your wallet has ${counted}`;
 }
 
 function holdReason(vendorId: number, tier: DropshipListingTier, held: boolean, revision: number): string {
@@ -553,9 +581,19 @@ function describeDecision(eligibility: DropshipListingTierEligibility): string {
   return DROPSHIP_LISTING_TIERS
     .map((tier) => {
       const status = eligibility[tier];
-      return status.eligible ? `${tier}: on sale` : `${tier}: off sale (${status.reason}, short ${status.shortfallCents} cents)`;
+      if (status.eligible) return `${tier}: on${status.alreadyOn ? " (already on)" : ""}`;
+      return `${tier}: off (${status.reason}; reserve short ${status.reserveShortfallCents} cents, balance short ${status.balanceShortfallCents} cents)`;
     })
     .join("; ");
+}
+
+/** The tiers the last decision left on, for a vendor the rule lets keep them. */
+function tiersAlreadyOnFor(vendor: DropshipListingTierVendorRecord | null): DropshipListingTier[] {
+  if (!vendor) return [];
+  return listingTiersAlreadyOn({
+    vendorStatus: vendor.status,
+    lastDecision: vendor.tierHold ? { tiersOn: vendor.tierHold.tiersOn } : null,
+  });
 }
 
 function describeApplied(heldTiers: readonly DropshipListingTier[], blockedProductIds: readonly number[]): string {

@@ -129,15 +129,25 @@ function advanceJson() {
   };
 }
 
-/** Pack tier on sale; case tier $380 short of $500 with a raise to $750 landing in grace. */
-function listingTiersJson() {
+/** One tier as the server decides it (`domain/listing-tiers.ts`); each journey states the facts it needs. */
+function tierJson(overrides: Record<string, unknown>) {
+  return { eligible: true, reason: null, alreadyOn: true, reserveShortfallCents: 0, balanceShortfallCents: 0, upcoming: null, ...overrides };
+}
+
+/** By default a $250 reserve with $120 in the wallet: the Pack tier on, the Case tier needing a $500 reserve. */
+function listingTiersJson(overrides: { pack?: Record<string, unknown>; case?: Record<string, unknown> } = {}) {
   return {
-    pack: { tier: "pack", eligible: true, reason: null, minimumCents: 10_000, shortfallCents: 0, upcoming: null },
-    case: { tier: "case", eligible: false, reason: "case_tier_balance_below_minimum", minimumCents: 50_000, shortfallCents: 38_000,
-      upcoming: { minimumCents: 75_000, policyVersion: 3, enforcesAt: "2026-10-04T15:00:00.000Z", affectsVendor: true } },
+    pack: tierJson({ tier: "pack", policyMinimumCents: 10_000, minimumCents: 10_000, ...overrides.pack }),
+    case: tierJson({
+      tier: "case", policyMinimumCents: 50_000, minimumCents: 50_000, eligible: false, reason: "reserve_below_tier", alreadyOn: false,
+      reserveShortfallCents: 25_000, balanceShortfallCents: 38_000, ...overrides.case,
+    }),
     generatedAt: STAMP,
   };
 }
+
+const LISTING_TIERS_RULE_TEXT = "Your reserve is the balance autopay keeps in your wallet. A tier turns on when your reserve and your balance both reach its amount, "
+  + "and stays on while your reserve covers it, even if an order briefly takes your balance lower. Bank transfers on their way count toward your balance.";
 
 async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNESS_PATH) {
   const state: StubState = { methods: [], holdSetupConfirmation: false, usdcDepositAddress: null, usdcDeposit: null, autoReload: null, balanceCents: 0, pendingCents: 0, rewardsCents: 0, rewardsNextExpiry: null, ledger: [], cardFundingFeeBps: 300, limits: null, listingTiers: null, advance: null,
@@ -350,8 +360,8 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   }
   // The tier minimums, the grace period, the advance terms, the rate and the deadline all come from served values.
   await expect(intro).toContainText("A return fee comes out of it too, and so does a payment your bank takes back after it landed; either can take the balance below zero");
-  await expect(intro).toContainText("The Pack tier (singles, packs and inner packs) is active while you keep a reserve of at least $100 in your wallet. The Case tier adds cases once your balance, counting money on its way, has reached $500.");
-  await expect(intro).toContainText("you keep selling for 14 days after the notice");
+  await expect(intro).toContainText("Your reserve decides your tier: $100 for the Pack tier (singles, packs and inner packs), or $500 for the Case tier, which adds cases. A tier turns on once your balance also reaches its amount; bank transfers on their way count.");
+  await expect(intro).toContainText("vendors already in the tier keep it for 14 days after the notice");
   await expect(intro).toContainText("takes up to 5 business days to land (our estimate)");
   await expect(intro).toContainText("costs 3% on top of the amount");
   await expect(intro).toContainText("USDC costs nothing. Bank and USDC transfers earn 1% in rewards points when they land; a card charge earns none. 100 points are worth $1 on your orders. Points are used only on your orders here: they pay before your cash unless you untick \"Use my points on my orders\" in Wallet, which saves them up.");
@@ -932,34 +942,88 @@ test("a wrong code is rejected in place and can be retried; a failed code email 
   finish(state);
 });
 
-test("manage: the wallet names each listing tier, the reserve it needs, whether it is active, and a raise still in grace", async ({ page }) => {
+test("manage: the balance card holds the reserve and the tiers it decides, each Active or Not active in plain words", async ({ page }) => {
   const state = await setup(page, { vendorStatus: "active", methods: [CARD, BANK], autoReload: doneAutoReload(), balanceCents: 12_000, proofs: ALL_PROOFS, listingTiers: listingTiersJson() });
-  const tiers = page.getByTestId("wallet-listing-tiers");
-  await expect(tiers.getByRole("heading", { name: "Listing tiers" })).toBeVisible();
-  await expect(tiers).toContainText("Each tier requires a reserve: the balance you keep in your wallet to cover orders, set by Card Shellz. Money still settling counts.");
-  await expect(tiers).not.toContainText(/on sale|off sale/i);
-  // Between the balance and the plan: the first thing after the number is what it buys.
-  const balanceY = await page.getByTestId("wallet-balance").boundingBox().then((box) => box?.y ?? 0);
-  const tiersY = await tiers.boundingBox().then((box) => box?.y ?? 0);
-  const planY = await page.getByTestId("wallet-plan").boundingBox().then((box) => box?.y ?? 0);
-  expect(tiersY).toBeGreaterThan(balanceY);
-  expect(planY).toBeGreaterThan(tiersY);
+  const balance = page.getByTestId("wallet-balance");
+  // One card: the tiers sit inside the balance section, with the reserve that decides them.
+  const tiers = balance.getByTestId("wallet-listing-tiers");
+  await expect(tiers.getByRole("heading", { name: "Reserve and listing tiers" })).toBeVisible();
+  await expect(tiers.getByTestId("wallet-reserve")).toHaveText("Your reserve: $250");
+  await expect(tiers).toContainText(LISTING_TIERS_RULE_TEXT);
+  await expect(balance).not.toContainText(/settling|on sale|off sale/i);
+  // No second reserve figure beside the balance.
+  await expect(balance.getByText("Reserve $250", { exact: true })).toHaveCount(0);
   const pack = tiers.getByTestId("wallet-listing-tier-pack");
-  await expect(pack).toContainText("Pack tier · $100 reserve");
+  await expect(pack).toContainText("Pack tier · $100");
   await expect(pack).toContainText("Singles, packs and inner packs.");
   await expect(pack).toContainText("Active");
-  await expect(pack).toContainText("Your wallet keeps this reserve, so your pack listings are live.");
+  await expect(pack).not.toContainText("Not active");
+  await expect(pack).toContainText("Your pack listings are live.");
   await expect(pack.getByTestId("wallet-listing-tier-pack-upcoming")).toHaveCount(0);
   const cases = tiers.getByTestId("wallet-listing-tier-case");
-  await expect(cases).toContainText("Case tier · $500 reserve");
+  await expect(cases).toContainText("Case tier · $500");
   await expect(cases).toContainText("Adds cases.");
   await expect(cases).toContainText("Not active");
-  await expect(cases).toContainText("Your balance is $380 below this reserve. Case listings go live automatically once it is reached.");
-  await expect(cases.getByTestId("wallet-listing-tier-case-upcoming")).toContainText(
-    "The reserve rises to $750 on October 4, 2026. As things stand you would fall below it; bring your wallet up before then to keep these listings live.",
-  );
+  await expect(cases).toContainText("This tier needs a reserve of $500. Your reserve is $250.");
+  expect(await page.getByTestId("wallet-plan").boundingBox().then((box) => box?.y ?? 0))
+    .toBeGreaterThan(await tiers.boundingBox().then((box) => box?.y ?? 0));
   await expectNoHorizontalScroll(page);
   await shot(page, "manage-13-listing-tiers");
+  // Change opens the one reserve editor, in the plan, and brings it into view.
+  await tiers.getByTestId("wallet-reserve-change").click();
+  await expect(page.getByTestId("wallet-floor-editor").getByTestId("wallet-step-floor")).toBeVisible();
+  await expect(page.getByTestId("wallet-floor-editor")).toBeInViewport();
+  await expect(tiers.getByTestId("wallet-reserve-change")).toHaveCount(0);
+  finish(state);
+});
+
+test("manage: a reserve with no money behind it turns no tier on", async ({ page }) => {
+  // The owner's dogfood wallet of 2026-09-26: a $100 reserve, $0 in the wallet, nothing on its way.
+  const state = await setup(page, {
+    vendorStatus: "active", methods: [CARD, BANK], autoReload: doneAutoReload({ minimumBalanceCents: 10_000, maxSingleReloadCents: 10_000 }), balanceCents: 0, proofs: ALL_PROOFS,
+    listingTiers: listingTiersJson({
+      pack: { eligible: false, reason: "balance_below_tier", alreadyOn: false, balanceShortfallCents: 10_000 },
+      case: { reserveShortfallCents: 40_000, balanceShortfallCents: 50_000 },
+    }),
+  });
+  const tiers = page.getByTestId("wallet-balance").getByTestId("wallet-listing-tiers");
+  await expect(tiers.getByTestId("wallet-reserve")).toHaveText("Your reserve: $100");
+  const pack = tiers.getByTestId("wallet-listing-tier-pack");
+  await expect(pack).toContainText("Not active");
+  await expect(pack).toContainText("Your balance needs to reach $100. You need $100 more.");
+  const cases = tiers.getByTestId("wallet-listing-tier-case");
+  await expect(cases).toContainText("Not active");
+  await expect(cases).toContainText("This tier needs a reserve of $500. Your reserve is $100.");
+  await expectNoHorizontalScroll(page);
+  await shot(page, "manage-13b-listing-tiers-no-money");
+  finish(state);
+});
+
+test("manage: a tier already on stays Active through a dip, and a raise in grace names the date and the one fix", async ({ page }) => {
+  // A $50 reserve saved before the pack amount rose to $100, $30 left after an order.
+  const state = await setup(page, {
+    vendorStatus: "active", methods: [CARD, BANK], autoReload: doneAutoReload({ minimumBalanceCents: 5_000, maxSingleReloadCents: 5_000 }), balanceCents: 3_000, proofs: ALL_PROOFS,
+    listingTiers: listingTiersJson({
+      pack: {
+        minimumCents: 5_000, reserveShortfallCents: 5_000, balanceShortfallCents: 7_000,
+        upcoming: { minimumCents: 10_000, policyVersion: 2, enforcesAt: "2026-10-04T15:00:00.000Z", affectsVendor: true },
+      },
+      case: { reserveShortfallCents: 45_000, balanceShortfallCents: 47_000 },
+    }),
+  });
+  const pack = page.getByTestId("wallet-balance").getByTestId("wallet-listing-tier-pack");
+  // The published amount, never the $50 still enforced in grace.
+  await expect(pack).toContainText("Pack tier · $100");
+  await expect(pack).not.toContainText("$50 ");
+  await expect(pack).not.toContainText("Not active");
+  // Autopay refills only to the $50 reserve, so the row promises no refill; the warning names the one fix.
+  await expect(pack).toContainText("Your pack listings are live.");
+  await expect(pack).not.toContainText("stay live while autopay");
+  await expect(pack.getByTestId("wallet-listing-tier-pack-upcoming")).toHaveText(
+    "Card Shellz is raising this tier to $100 on October 4, 2026. Raise your reserve to $100 before then to keep your pack listings live.",
+  );
+  await expectNoHorizontalScroll(page);
+  await shot(page, "manage-13c-listing-tiers-grace");
   finish(state);
 });
 

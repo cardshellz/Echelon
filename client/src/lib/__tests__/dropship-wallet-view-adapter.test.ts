@@ -119,8 +119,14 @@ describe("adaptWalletView", () => {
     const tiers = servedListingTiers();
     expect(adaptWalletView(rawWallet({ listingTiers: tiers })).listingTiers).toEqual(tiers);
     // A malformed tier (money that is not integer cents) is a contract break, not something to paper over.
-    expect(() => adaptWalletView(rawWallet({ listingTiers: { ...tiers, case: { ...tiers.case, shortfallCents: 12.5 } } }))).toThrow();
+    expect(() => adaptWalletView(rawWallet({ listingTiers: { ...tiers, case: { ...tiers.case, balanceShortfallCents: 12.5 } } }))).toThrow();
+    expect(() => adaptWalletView(rawWallet({ listingTiers: { ...tiers, case: { ...tiers.case, reserveShortfallCents: -1 } } }))).toThrow();
     expect(() => adaptWalletView(rawWallet({ listingTiers: { ...tiers, pack: { ...tiers.pack, reason: "vibes" } } }))).toThrow();
+    // The September reasons are gone from the contract.
+    expect(() => adaptWalletView(rawWallet({ listingTiers: { ...tiers, pack: { ...tiers.pack, reason: "pack_tier_minimum_not_kept" } } }))).toThrow();
+    // So is the single shortfall: a tier without the reserve and balance shortfalls is not the served shape.
+    const { balanceShortfallCents: _dropped, ...withoutBalance } = tiers.case;
+    expect(() => adaptWalletView(rawWallet({ listingTiers: { ...tiers, case: withoutBalance } }))).toThrow();
   });
 
   it("fills a limit an older server did not serve from the documented default, and names the fallback", () => {
@@ -245,10 +251,14 @@ describe("derivations", () => {
 
 function servedListingTiers() {
   return {
-    pack: { tier: "pack" as const, eligible: true, reason: null, minimumCents: 10_000, shortfallCents: 0, upcoming: null },
+    pack: {
+      tier: "pack" as const, eligible: true, reason: null, policyMinimumCents: 10_000, minimumCents: 10_000, alreadyOn: true,
+      reserveShortfallCents: 0, balanceShortfallCents: 0, upcoming: null,
+    },
     case: {
-      tier: "case" as const, eligible: false, reason: "case_tier_balance_below_minimum" as const, minimumCents: 50_000, shortfallCents: 38_000,
-      upcoming: { minimumCents: 75_000, policyVersion: 3, enforcesAt: "2026-10-01T00:00:00.000Z", affectsVendor: true },
+      tier: "case" as const, eligible: false, reason: "reserve_below_tier" as const, policyMinimumCents: 75_000, minimumCents: 50_000,
+      alreadyOn: false, reserveShortfallCents: 65_000, balanceShortfallCents: 63_000,
+      upcoming: { minimumCents: 75_000, policyVersion: 3, enforcesAt: "2026-10-01T00:00:00.000Z", affectsVendor: false },
     },
     generatedAt: STAMP,
   };
