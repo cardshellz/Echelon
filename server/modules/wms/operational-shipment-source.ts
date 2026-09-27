@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { assertShipmentNotRetiredPg } from "../inventory-planning/infrastructure/inventory-cutover-retired-work";
 import type { OperationalShipmentSourceOwner } from "../inventory/application/operational-shipment-dispatch.port";
 import { OperationalShipmentError, operationalShipmentRequestSchema, type OperationalShipmentSource } from "../inventory/domain/operational-shipment-dispatch";
 
@@ -37,6 +38,7 @@ export class WmsOperationalShipmentSourceOwner implements OperationalShipmentSou
       FROM wms.outbound_shipment_items WHERE id=$1 FOR UPDATE`, [request.sourceShipmentItemId])).rows[0]);
     ensure(parsed.success, "Operational source has invalid purpose or source lineage.");
     const source = parsed.data;
+    await assertShipmentNotRetiredPg(client, request.outboundShipmentId, request.sourceShipmentItemId);
     ensure(source.shipment_id === request.outboundShipmentId && source.product_variant_id === request.productVariantId
       && source.qty === request.quantity && source.order_item_id === null && source.correction_for_shipment_item_id === null,
       "Operational source must match the complete immutable source quantity and variant.");

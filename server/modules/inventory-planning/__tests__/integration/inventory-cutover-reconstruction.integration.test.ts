@@ -23,6 +23,34 @@ const dbDescribe = databaseUrl && disposable ? describe : describe.skip;
 dbDescribe.sequential("reviewed reconstruction with real claim DDL and inventory owner", () => {
   let database: InventoryCutoverTestDatabase;
   const repository = new PostgresInventoryCutoverReconstructionRepository();
+  it.each([false, true])("captures saved OMS/WMS policy and covers a blank provider SKU (tracked %s)", async tracked => transaction(async client => {
+    await client.query("INSERT INTO oms.oms_orders VALUES(9,'open')");
+    await client.query(`INSERT INTO oms.oms_order_lines(id,order_id,product_variant_id,sku,requires_shipping,quantity,
+        authority_fulfillable_quantity,wms_materialized_quantity,authorization_status,catalog_product_id,inventory_tracking)
+        VALUES(11,9,101,NULL,true,6,6,6,'authorized',20,$1)`, [tracked]);
+    await client.query("UPDATE wms.order_items SET catalog_product_id=20, inventory_tracking=$1, picked_quantity=0", [tracked]);
+    await client.query("UPDATE catalog.product_variants SET track_inventory=$1", [!tracked]);
+    await client.query(`DELETE FROM inventory.inventory_transactions; DELETE FROM oms.order_item_costs;
+      UPDATE inventory.inventory_levels SET reserved_qty=0,picked_qty=0;
+      UPDATE inventory.inventory_lots SET qty_reserved=0,qty_picked=0`);
+    const snapshot = async () => (await client.query(`SELECT jsonb_build_object(
+      'oms',(SELECT jsonb_agg(to_jsonb(x)) FROM oms.oms_order_lines x),
+      'wms',(SELECT jsonb_agg(to_jsonb(x)) FROM wms.order_items x),
+      'levels',(SELECT jsonb_agg(to_jsonb(x)) FROM inventory.inventory_levels x),
+      'lots',(SELECT jsonb_agg(to_jsonb(x)) FROM inventory.inventory_lots x)) AS state`)).rows[0];
+    const before = await snapshot();
+    const evidence = await repository.capture(client);
+    expect(evidence.acceptedOmsDemand[0]).toMatchObject({ sku: null, productVariantId: 101, catalogProductId: 20, inventoryTracking: tracked });
+    expect(evidence.items[0]).toMatchObject({ sku: "P5", productId: 101, catalogProductId: 20, inventoryTracking: tracked });
+    const plan = planCutoverReconstruction(evidence);
+    expect(plan.blockers).toEqual([]);
+    expect(plan.orders).toHaveLength(tracked ? 1 : 0);
+    expect(await snapshot()).toEqual(before);
+    await client.query("UPDATE wms.order_items SET inventory_tracking=$1", [!tracked]);
+    const changed = planCutoverReconstruction(await repository.capture(client));
+    expect(changed.evidenceHash).not.toBe(plan.evidenceHash);
+    expect(changed.blockers).toContainEqual(expect.objectContaining({ code: "OMS_ACCEPTED_DEMAND_NOT_COVERED" }));
+  }));
   it("completes a NULL journal order from its exact item FK and leaves the journal unchanged", async () => transaction(async (client) => {
     await client.query("UPDATE inventory.inventory_transactions SET order_id=NULL WHERE transaction_type='pick'");
     const evidence = await repository.capture(client);

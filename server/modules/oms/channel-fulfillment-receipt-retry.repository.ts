@@ -1,4 +1,5 @@
 import { sql, type SQL } from "drizzle-orm";
+import { assertReceiptNotRetired, CutoverRetiredWorkError } from "../inventory-planning/infrastructure/inventory-cutover-retired-work";
 import { z } from "zod";
 import { db } from "../../db";
 import { persistAuditEvent } from "../../infrastructure/auditLogger";
@@ -175,6 +176,8 @@ async function loadSnapshot(
 
 function classifyError(error: unknown): ChannelFulfillmentReceiptRetryError {
   if (error instanceof ChannelFulfillmentReceiptRetryError) return error;
+  if (error instanceof CutoverRetiredWorkError) return new ChannelFulfillmentReceiptRetryError(
+    error.code, error.message, 409, error.context);
   const postgresCode = typeof (error as { code?: unknown } | null)?.code === "string"
     ? String((error as { code: string }).code)
     : null;
@@ -219,7 +222,10 @@ export function createChannelFulfillmentReceiptRetryRepository(
       }
       try {
         return await database.transaction(
-          (transaction) => loadSnapshot(transaction, parsed.data, false),
+          async (transaction) => {
+            await assertReceiptNotRetired(transaction, parsed.data.receiptId);
+            return loadSnapshot(transaction, parsed.data, false);
+          },
           { isolationLevel: "repeatable read", accessMode: "read only" },
         );
       } catch (error) {
@@ -278,6 +284,8 @@ export function createChannelFulfillmentReceiptRetryRepository(
               { receiptId: input.receiptId, blockers: current.blockers },
             );
           }
+
+          await assertReceiptNotRetired(transaction, input.receiptId);
 
           await persistAuditEvent(transaction, {
             actor: input.actor,

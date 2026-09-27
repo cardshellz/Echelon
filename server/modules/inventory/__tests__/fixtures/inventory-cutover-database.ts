@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { historyRetirementLookupFixtureSql } from "../../../inventory-planning/__tests__/fixtures/inventory-cutover-retirement-lookup.fixture";
 
 /** Reduced named-schema query fixture, not production migration/trigger proof. */
 export const inventoryCutoverOwnerFixtureSql = `
   CREATE SCHEMA inventory;
+  ${historyRetirementLookupFixtureSql}
   CREATE TABLE inventory.inventory_levels (
     id integer PRIMARY KEY, warehouse_location_id integer NOT NULL,
     product_variant_id integer NOT NULL, variant_qty integer NOT NULL,

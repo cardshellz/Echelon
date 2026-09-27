@@ -34,6 +34,7 @@ export async function readWmsCutoverReconstruction(client: PoolClient, residualO
   const orderIds = orders.map((row) => row.id);
   const items = await read(`SELECT id, order_id AS "orderId", oms_order_line_id::text AS "omsOrderLineId",
     source_item_id AS "sourceItemId", sku, product_id AS "productId", quantity,
+    catalog_product_id AS "catalogProductId", inventory_tracking AS "inventoryTracking",
     picked_quantity AS "pickedQuantity", fulfilled_quantity AS "fulfilledQuantity", status,
     on_hold AS "onHold", requires_shipping AS "requiresShipping", location, short_reason AS "shortReason"
     FROM wms.order_items WHERE order_id=ANY($1::integer[]) OR id=ANY($2::integer[])

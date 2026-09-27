@@ -48,6 +48,8 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/inventory-planning/__tests__/integration/inventory-cutover-reconstruction.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-cutover-capture-stage.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-cutover-opening.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/inventory-cutover-history-reader.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/inventory-cutover-history.integration.test.ts",
   "server/modules/oms/__tests__/integration/inventory-cutover-receipt-evidence.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-cutover-admission-fence.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-cutover-composition.integration.test.ts",
