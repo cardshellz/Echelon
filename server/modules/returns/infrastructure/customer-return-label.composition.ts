@@ -13,6 +13,9 @@ import { CustomerReturnLabelsService } from "../application/customer-return-labe
 import { CustomerReturnSubmissionService } from "../application/customer-return-submission.service";
 import { CustomerReturnIntakeError } from "../application/customer-return-intake.ports";
 import { createShipStationReturnLabelAdapter } from "../../shipping-engine/infrastructure/shipstation-return-label.adapter";
+import { createShipStationReturnRateAdapter } from "../../shipping-engine/infrastructure/shipstation-return-rate.adapter";
+import { ReturnRateProviderError } from "../../shipping-engine/application/return-rate-provider.port";
+import { isReturnRateCatalogServiceEligible } from "../../shipping-engine/application/return-rate-catalog";
 import { createShipStationV2RatingAdapter } from "../../shipping-engine/infrastructure/shipstation-v2-rating.adapter";
 import {
   ReturnLabelProviderError,
@@ -63,10 +66,20 @@ export async function createCustomerReturnLabelServices(): Promise<CustomerRetur
     },
   };
   const labels = new CustomerReturnLabelsService({
-    store: new PostgresCustomerReturnLabelStore(pool),
+    store: new PostgresCustomerReturnLabelStore(pool, now),
     provider: apiKey
       ? createShipStationReturnLabelAdapter({ apiKey })
       : unavailable,
+    rates: apiKey
+      ? createShipStationReturnRateAdapter({ apiKey })
+      : {
+          quote: async () => {
+            throw new ReturnRateProviderError(
+              "RETURN_RATE_CONFIGURATION_INVALID",
+              "configuration",
+            );
+          },
+        },
     authorizeChannel,
     now,
     requirePurchaseConfiguration: async (channelId) => {
@@ -76,7 +89,8 @@ export async function createCustomerReturnLabelServices(): Promise<CustomerRetur
           "RETURN_LABEL_SETTINGS_CHANGED",
           "Enable return labels in the private settings first.",
         );
-      await settings.requireEnabled(channelId, current.version);
+      return (await settings.requireEnabled(channelId, current.version))
+        .settings;
     },
   });
   const submissions = new CustomerReturnSubmissionService({
@@ -123,9 +137,10 @@ async function readCapabilities(
           );
         return {
           id: carrier.carrierId,
+          code: carrier.code,
           name: carrier.name,
           services: services.services
-            .filter((service) => service.domestic && service.supportsReturns)
+            .filter(isReturnRateCatalogServiceEligible)
             .map((service) => ({
               code: service.serviceCode,
               name: service.serviceName,

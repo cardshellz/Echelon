@@ -27,6 +27,8 @@ export const labelSettings: CustomerReturnLabelSettings = {
   enabled: true,
   warehouseId: 1,
   policyId: 1,
+  selectionMode: "fixed_service",
+  carrierRules: [],
   carrierId: "se-123",
   serviceCode: "ups_ground",
   contactName: "Test Warehouse",

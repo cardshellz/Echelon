@@ -1166,6 +1166,9 @@
   "returns.customer_return_parcels": [
     "modules/returns"
   ],
+  "returns.customer_return_quote_decisions": [
+    "modules/returns"
+  ],
   "returns.customer_return_settings": [
     "modules/returns"
   ],

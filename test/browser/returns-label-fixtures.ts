@@ -15,6 +15,7 @@ export async function installReturnLabelFixtures(
     failFirstSubmit?: boolean;
     uncertainBox?: number;
     enabled?: boolean;
+    unconfigured?: boolean;
   } = {},
 ) {
   const address = {
@@ -28,24 +29,38 @@ export async function installReturnLabelFixtures(
   let settings: CustomerReturnLabelSettingsState = {
     channelId: 36,
     providerConfigured: true,
-    settings: {
-      enabled: options.enabled ?? true,
-      warehouseId: 1,
-      policyId: 2,
-      carrierId: "se-fixture",
-      serviceCode: "ground_return",
-      contactName: "Fixture returns",
-      contactPhone: null,
-      version: 1,
-      destinationAddress: address,
-    },
+    settings: options.unconfigured
+      ? null
+      : {
+          enabled: options.enabled ?? true,
+          warehouseId: 1,
+          policyId: 2,
+          carrierId: "se-fixture",
+          serviceCode: "ground_return",
+          selectionMode: "fixed_service",
+          carrierRules: [],
+          contactName: "Fixture returns",
+          contactPhone: null,
+          version: 1,
+          destinationAddress: address,
+        },
     warehouses: [{ id: 1, name: "Fixture warehouse", address }],
     policies: [{ id: 2, name: "Fixture policy", version: 1 }],
     carriers: [
       {
         id: "se-fixture",
         name: "Fixture carrier",
+        code: "ups",
         services: [{ code: "ground_return", name: "Fixture tracked return" }],
+      },
+      {
+        id: "se-postal",
+        code: "stamps_com",
+        name: "Fixture USPS",
+        services: [
+          { code: "usps_ground", name: "USPS Ground" },
+          { code: "usps_priority", name: "USPS Priority" },
+        ],
       },
     ],
     message: null,
@@ -85,7 +100,7 @@ export async function installReturnLabelFixtures(
         request.postDataJSON(),
       );
       settingsWrites.push(input);
-      if (input.expectedVersion !== settings.settings!.version)
+      if (input.expectedVersion !== (settings.settings?.version ?? 0))
         return route.fulfill({
           status: 409,
           json: { error: { code: "SETTINGS_CHANGED" } },

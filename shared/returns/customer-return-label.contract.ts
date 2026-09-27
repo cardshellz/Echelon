@@ -1,5 +1,9 @@
 import { z } from "zod";
 import { customerReturnLiveReviewInputSchema } from "./customer-return-live.contract";
+import {
+  customerReturnCarrierPolicyFields,
+  refineCustomerReturnCarrierPolicy,
+} from "./customer-return-carrier-policy";
 
 export const CUSTOMER_RETURN_LABEL_API =
   "/api/returns/admin/portal-preview/live";
@@ -25,32 +29,28 @@ export const customerReturnLabelAddressSchema = z
     countryCode: z.literal("US"),
   })
   .strict();
-export const customerReturnLabelSettingsInputSchema = z
+const customerReturnLabelSettingsFieldsSchema = z
   .object({
-    expectedVersion: z.number().int().nonnegative().safe(),
     enabled: z.boolean(),
     warehouseId: id,
     policyId: id,
-    carrierId: z
-      .string()
-      .regex(/^se(?:-[a-z0-9]+)+$/)
-      .max(80),
-    serviceCode: z
-      .string()
-      .regex(/^[a-z0-9]+(?:_[a-z0-9]+)*$/)
-      .max(100),
+    ...customerReturnCarrierPolicyFields,
     contactName: text(200),
     contactPhone: text(50).nullable(),
   })
   .strict();
+export const customerReturnLabelSettingsInputSchema =
+  customerReturnLabelSettingsFieldsSchema
+    .extend({ expectedVersion: z.number().int().nonnegative().safe() })
+    .superRefine(refineCustomerReturnCarrierPolicy);
 export const customerReturnLabelSettingsSchema =
-  customerReturnLabelSettingsInputSchema
-    .omit({ expectedVersion: true })
+  customerReturnLabelSettingsFieldsSchema
     .extend({
       version: id,
       destinationAddress: customerReturnLabelAddressSchema,
     })
-    .strict();
+    .strict()
+    .superRefine(refineCustomerReturnCarrierPolicy);
 export const customerReturnLabelSettingsStateSchema = z
   .object({
     channelId: id,
@@ -75,6 +75,7 @@ export const customerReturnLabelSettingsStateSchema = z
         z
           .object({
             id: text(80),
+            code: text(100),
             name: text(200),
             services: z
               .array(z.object({ code: text(100), name: text(200) }).strict())
