@@ -81,6 +81,7 @@ export async function readWmsCutoverDemand(
   });
   const itemRows = await client.query(`SELECT id, order_id AS "orderId", oms_order_line_id::text AS "omsOrderLineId",
     source_item_id AS "sourceItemId", sku, product_id AS "productId", quantity,
+    catalog_product_id AS "catalogProductId", inventory_tracking AS "inventoryTracking",
     picked_quantity AS "pickedQuantity", fulfilled_quantity AS "fulfilledQuantity", status,
     on_hold AS "onHold", requires_shipping AS "requiresShipping", location, short_reason AS "shortReason"
     FROM wms.order_items WHERE order_id=ANY($1::integer[]) ORDER BY order_id,id LIMIT $2`, [orderIds, limits.items + 1]);

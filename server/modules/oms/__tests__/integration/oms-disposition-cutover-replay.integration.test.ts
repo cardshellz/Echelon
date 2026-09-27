@@ -20,6 +20,7 @@ const fixtureSql = `
   CREATE TABLE oms.oms_order_lines(
     id bigint PRIMARY KEY, order_id bigint REFERENCES oms.oms_orders(id),
     product_variant_id integer, sku text, requires_shipping boolean,
+    catalog_product_id integer, inventory_tracking boolean,
     quantity integer NOT NULL, paid_quantity integer NOT NULL,
     cancelled_quantity integer NOT NULL, refunded_quantity integer NOT NULL,
     authority_fulfillable_quantity integer NOT NULL,
@@ -41,7 +42,10 @@ dbDescribe.sequential("non-authorizing replay and real cutover demand query", ()
     try {
       await client.query("BEGIN");
       await client.query(`INSERT INTO oms.oms_orders VALUES(1,'refunded'),(2,'confirmed');
-        INSERT INTO oms.oms_order_lines VALUES
+        INSERT INTO oms.oms_order_lines
+          (id,order_id,product_variant_id,sku,requires_shipping,quantity,paid_quantity,
+           cancelled_quantity,refunded_quantity,authority_fulfillable_quantity,
+           wms_materialized_quantity,authorization_status) VALUES
           (11,1,101,'REFUNDED',true,1,1,0,1,0,0,'refunded'),
           (22,2,102,'LIVE',true,1,1,0,0,1,0,'authorized')`);
       await work(client);
@@ -96,6 +100,29 @@ dbDescribe.sequential("non-authorizing replay and real cutover demand query", ()
       await client.query("UPDATE oms.oms_order_lines SET authorization_status='authorized' WHERE id=11");
       const evidence = await readOmsCutoverReconstruction(client);
       expect(evidence.acceptedOmsDemand.map(line => line.lineId)).toEqual(["11", "22"]);
+    });
+  });
+
+  it.each([
+    { description: "tracked", catalogProductId: 202, inventoryTracking: true },
+    { description: "non-stock physical", catalogProductId: 202, inventoryTracking: false },
+    { description: "unresolved legacy", catalogProductId: null, inventoryTracking: null },
+  ])("preserves $description policy evidence without dropping accepted demand", async ({ catalogProductId, inventoryTracking }) => {
+    await withOrders(async (client) => {
+      await client.query(`UPDATE oms.oms_order_lines
+        SET catalog_product_id=$1,inventory_tracking=$2 WHERE id=22`, [catalogProductId, inventoryTracking]);
+      const before = (await client.query("SELECT to_jsonb(line) AS row FROM oms.oms_order_lines line ORDER BY id")).rows;
+
+      const evidence = await readOmsCutoverReconstruction(client);
+
+      expect(evidence.acceptedOmsDemand).toEqual([{
+        lineId: "22", orderId: "2", productVariantId: 102, sku: "LIVE",
+        catalogProductId, inventoryTracking,
+        authorizedQty: "1", materializedQty: "0", authorizationStatus: "authorized",
+      }]);
+      expect(evidence.shipmentReviewEvidence).toEqual([]);
+      expect((await client.query("SELECT to_jsonb(line) AS row FROM oms.oms_order_lines line ORDER BY id")).rows)
+        .toEqual(before);
     });
   });
 });

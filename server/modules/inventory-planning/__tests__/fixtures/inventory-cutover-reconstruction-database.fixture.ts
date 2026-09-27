@@ -1,5 +1,6 @@
 import { cutoverShipmentSchemaFixtureSql } from "./inventory-cutover-shipment-schema.fixture";
 import { cutoverReceiptSchemaFixtureSql } from "./inventory-cutover-receipt-schema.fixture";
+import { readFileSync } from "node:fs";
 
 /** Reduced owner-query fixture. Actual 0640/0642/0647/0649/233 DDL is applied by the suite. */
 export const reconstructionDatabaseFixtureSql = `
@@ -48,6 +49,7 @@ CREATE TABLE inventory.build_component_reservations(id integer PRIMARY KEY,build
 -- covered by the admission owner suite, not represented by this query fixture.
 CREATE FUNCTION inventory.assert_cutover_admission_fence_owner() RETURNS bigint LANGUAGE plpgsql AS $$
 BEGIN IF current_setting('test.cutover_admitted',true) IS DISTINCT FROM 'yes' THEN RAISE EXCEPTION 'exclusive fence required'; END IF; RETURN 1; END $$;
+${readFileSync("migrations/253_inventory_cutover_history_retirement.sql", "utf8")}
 `;
 export const reconstructionDatabaseSeedSql = `
 INSERT INTO warehouse.warehouses VALUES(1); INSERT INTO warehouse.warehouse_locations(id,warehouse_id) VALUES(100,1);

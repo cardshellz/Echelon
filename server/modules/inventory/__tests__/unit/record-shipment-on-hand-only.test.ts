@@ -95,6 +95,21 @@ describe("InventoryUseCases.recordShipment — deductFromOnHandOnly", () => {
     expect(storage.createInventoryTransaction).toHaveBeenCalledWith(expect.objectContaining({ reservedQtyDelta: -2 }), tx);
   });
 
+  it("rejects exact retired shipment work before selecting or changing stock", async () => {
+    const { rootDb, storage, lotService, tx } = harness();
+    tx.execute.mockImplementation(async query => new PgDialect().sqlToQuery(query).sql.includes("cutover_history_retirements")
+      ? { rows: [{ batch_id: "1" }] } : emptyLegacyQuery(query));
+    const { InventoryUseCases } = await import("../../application/inventory.use-cases");
+    const inventory = new InventoryUseCases(rootDb as any, storage, lotService as any, null as any);
+    await expect(inventory.recordShipment({ productVariantId:30, warehouseLocationId:20,
+      qty:2, orderId:40, orderItemId:50, shipmentId:"60", shipmentItemId:70 }))
+      .rejects.toMatchObject({ code:"CUTOVER_HISTORY_RETIRED", context:{ kind:"shipment", batchId:"1" } });
+    expect(storage.lockInventoryLevel).not.toHaveBeenCalled();
+    expect(storage.adjustInventoryLevel).not.toHaveBeenCalled();
+    expect(storage.createInventoryTransaction).not.toHaveBeenCalled();
+    expect(lotService.withTx).not.toHaveBeenCalled();
+  });
+
   it("by default (flag unset) still draws from the picked pool first", async () => {
     const { rootDb, storage, lotService, tx } = harness();
     const { InventoryUseCases } = await import("../../application/inventory.use-cases");
@@ -244,7 +259,7 @@ describe("InventoryUseCases.recordShipment — deductFromOnHandOnly", () => {
 });
 
 describe("InventoryUseCases.recordReplacementShipmentFromAvailableInventory", () => {
-  function replacementHarness(existingLocationId?: number) {
+  function replacementHarness(existingLocationId?: number, retired = false) {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
     const tx = {
       execute: vi.fn(async () => ({ rows: [] as Record<string, unknown>[] })),
@@ -262,7 +277,9 @@ describe("InventoryUseCases.recordReplacementShipmentFromAvailableInventory", ()
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce(existingLocationId ? { rows: [{ from_location_id: existingLocationId }] } : { rows: [] });
     if (!existingLocationId) {
-      tx.execute.mockResolvedValueOnce({ rows: [{ warehouse_location_id: 21 }] });
+      tx.execute
+        .mockResolvedValueOnce({ rows: retired ? [{ batch_id:"1" }] : [] })
+        .mockResolvedValueOnce({ rows: [{ warehouse_location_id: 21 }] });
     }
 
     const rootDb = {
@@ -310,6 +327,20 @@ describe("InventoryUseCases.recordReplacementShipmentFromAvailableInventory", ()
       code: "REPLACEMENT_INVENTORY_UNAVAILABLE",
       context: { productVariantId: 30, qty: 2, warehouseId: 1 },
     });
+  });
+
+  it("rejects a retired replacement before allocating or posting another shipment", async () => {
+    const { rootDb, storage, lotService, pickFromLots, shipFromLots } = replacementHarness(undefined,true);
+    const { InventoryUseCases } = await import("../../application/inventory.use-cases");
+    const inventory = new InventoryUseCases(rootDb as any, storage, lotService as any, null as any);
+    await expect(inventory.recordReplacementShipmentFromAvailableInventory({ productVariantId:30,
+      qty:2, warehouseId:1, orderId:40, shipmentId:60, shipmentItemId:70 }))
+      .rejects.toMatchObject({ code:"CUTOVER_HISTORY_RETIRED" });
+    expect(storage.lockInventoryLevel).not.toHaveBeenCalled();
+    expect(storage.adjustInventoryLevel).not.toHaveBeenCalled();
+    expect(storage.createInventoryTransaction).not.toHaveBeenCalled();
+    expect(pickFromLots).not.toHaveBeenCalled();
+    expect(shipFromLots).not.toHaveBeenCalled();
   });
   it("allocates current unreserved stock, records a system pick, then ships it", async () => {
     const { rootDb, storage, lotService, pickFromLots, shipFromLots } = replacementHarness();

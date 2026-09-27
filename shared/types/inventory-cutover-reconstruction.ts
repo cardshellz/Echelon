@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { retiredHistoryEvidenceSchema } from "./inventory-cutover-history";
 import { wmsCutoverDemandOrderSchema, wmsCutoverDemandItemSchema,
   wmsCutoverSourceItemSchema, wmsCutoverPhysicalItemSchema } from "./inventory-cutover-demand";
 import { inventoryCutoverBuildReservationSchema, inventoryCutoverCanonicalResourceSchema } from "./inventory-cutover-encumbrance";
@@ -79,9 +80,12 @@ export const cutoverReconstructionEvidenceSchema = z.object({
   acceptedOmsDemand: z.array(z.object({
     lineId: z.string().regex(/^[1-9][0-9]*$/), orderId: z.string().regex(/^[1-9][0-9]*$/),
     productVariantId: nullableId, sku: z.string().nullable(), authorizedQty: raw,
+    catalogProductId: nullableId.optional(), inventoryTracking: z.boolean().nullable().optional(),
     materializedQty: raw, authorizationStatus: z.string(),
   }).strict()),
   shipmentReviewEvidence: z.array(z.object({ id: z.string(), kind: z.string(), status: z.string(), evidenceHash: hash }).strict()),
+  // Absent on older immutable captures; do not default to [] and change hashes.
+  retiredHistory: z.array(retiredHistoryEvidenceSchema).max(100_000).optional(),
 }).strict();
 export type CutoverReconstructionEvidence = z.infer<typeof cutoverReconstructionEvidenceSchema>;
 export type CutoverReconstructionLot = z.infer<typeof cutoverReconstructionLotSchema>;

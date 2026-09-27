@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { WMS_WAREHOUSE_STATUS_VALUES, isTerminalWmsDemandStatus } from "@shared/enums/order-status";
+import { cutoverLineIdentityConflicts, cutoverLineTracksInventory } from "@shared/inventory/cutover-line-policy";
 import { wmsCutoverDemandCaptureSchema, type WmsCutoverDemandCapture } from "@shared/types/inventory-cutover-demand";
 import { inventoryCutoverEncumbranceSchema, type InventoryCutoverEncumbranceDto } from "@shared/types/inventory-cutover-encumbrance";
 import {
@@ -161,11 +162,12 @@ function isExactNonInventoryFulfillmentEvidence(
   item: WmsCutoverDemandCapture["items"][number],
   variant: InventoryCutoverVariant | null,
 ): boolean {
-  if (!variant || item.requiresShipping !== 0 || variant.requiresShipping
-    || variant.trackInventory || item.status !== "completed" || item.onHold
+  if (!variant || item.requiresShipping !== 0
+    || (item.inventoryTracking ?? (variant.requiresShipping || variant.trackInventory))
+    || item.status !== "completed" || item.onHold
     || item.quantity <= 0 || item.pickedQuantity !== item.quantity
     || item.fulfilledQuantity !== item.quantity
-    || (item.productId !== null && item.productId !== variant.id && item.productId !== variant.productId)) {
+    || cutoverLineIdentityConflicts(item, variant)) {
     return false;
   }
 
@@ -257,11 +259,15 @@ function classifyDemandLines(
     if (ordered < BigInt(0) || picked < BigInt(0) || fulfilled < BigInt(0) || picked > ordered || fulfilled > ordered) {
       issue("INVALID_ORDER_QUANTITIES", "Order, picked and fulfilled counters must be reconciled before deriving demand.");
     }
+    if (variant && cutoverLineIdentityConflicts(item, variant)) {
+      issue("VARIANT_IDENTITY_CONFLICT", "The saved product/variant identity disagrees with the exact SKU mapping.");
+    }
+    // A non-stock policy does not supply a missing physical catalog identity.
     const notInventoryTracked = item.requiresShipping === 0
-      || (variant !== null && (!variant.requiresShipping || !variant.trackInventory));
+      || (variant !== null && cutoverLineTracksInventory(item, variant) === false);
     if (notInventoryTracked) {
       const packageEvidenceConflictsWithShippingConfiguration = hasPackageEvidence
-        && (item.requiresShipping === 0 || variant?.requiresShipping === false)
+        && (item.requiresShipping === 0 || (item.inventoryTracking == null && variant?.requiresShipping === false))
         && !hasExactNonInventoryFulfillment;
       if (packageEvidenceConflictsWithShippingConfiguration || hasCanonicalInventoryEvidence) {
         issue(
@@ -278,9 +284,6 @@ function classifyDemandLines(
       if (![0, 1].includes(order.onHold)) issue("ORDER_HOLD_STATE_INVALID", "The order's hold flag is not a recognized value.");
       if (item.requiresShipping !== 1) issue("INVALID_SHIPPING_REQUIREMENT", "The order item's shipping requirement is not a recognized value.");
       if (matches.length !== 1) issue("VARIANT_IDENTITY_UNRESOLVED", "The physical item SKU must identify exactly one active catalog variant.");
-      if (variant && item.productId !== null && item.productId !== variant.id && item.productId !== variant.productId) {
-        issue("VARIANT_IDENTITY_CONFLICT", "The stored product identity disagrees with the exact SKU mapping.");
-      }
       if (variant?.salesEligibility === "internal_only") issue("INTERNAL_TARGET_REVIEW", "An existing customer line targets an internal-only variant; review it without inferring a replacement SKU.");
       if (order.warehouseId === null) issue("WAREHOUSE_SCOPE_MISSING", "The physical order has no assigned warehouse; network scope is not inferred.");
       if (order.status === "awaiting_3pl") issue("EXTERNAL_FULFILLMENT_REVIEW", "This order is externally fulfilled; local picker counters cannot establish 3PL custody or claims.");

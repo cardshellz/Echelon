@@ -189,8 +189,14 @@ test("publication retries reuse command identity and later batches preserve subm
   expect(submissions).toHaveLength(2); expect(submissions[0].body).toEqual(submissions[1].body);
   await expect(page.getByText("Walmart processing", { exact: true })).toBeVisible();
   await expect(page.getByText("Live", { exact: true })).toHaveCount(0);
-  await page.getByRole("button", { name: "Check Walmart status", exact: true }).click();
-  await expect(page.getByRole("link", { name: "Channel Inventory", exact: true })).toBeVisible();
+  // Store Setup always has this link; only Activity proves reconciliation completed.
+  const activity = page.getByRole("tabpanel", { name: "Activity", exact: true });
+  const inventoryLink = activity.getByRole("link", { name: "Channel Inventory", exact: true });
+  await expect(inventoryLink).toHaveCount(0);
+  await activity.getByRole("button", { name: "Check Walmart status", exact: true }).click();
+  await expect(activity.getByText("Item verified", { exact: true })).toBeVisible();
+  await expect(inventoryLink).toBeVisible();
+  await expect(inventoryLink).toHaveAttribute("href", "/channels/inventory");
   await page.getByRole("tab", { name: "Listing Feed", exact: true }).click();
   await expect(page.getByText("No products selected yet", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Add products", exact: true }).click();

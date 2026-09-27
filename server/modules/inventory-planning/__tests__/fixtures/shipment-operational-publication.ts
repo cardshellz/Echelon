@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { historyRetirementLookupFixtureSql } from "./inventory-cutover-retirement-lookup.fixture";
 
 /** Reduced prerequisites inside the foundation suite's explicitly disposable DB.
  * The suite has no WMS shipping schema or lot ledger; actual234 is applied next.
@@ -9,6 +10,7 @@ export async function installOperationalPublicationPrerequisites(pool: Pool): Pr
     DROP SCHEMA IF EXISTS wms CASCADE;
     DROP SCHEMA IF EXISTS oms CASCADE;
     CREATE SCHEMA wms; CREATE SCHEMA oms;
+    ${historyRetirementLookupFixtureSql}
     ALTER TABLE warehouse.warehouse_locations ADD COLUMN pick_sequence integer;
     CREATE TABLE wms.orders(id integer PRIMARY KEY,warehouse_id integer NOT NULL REFERENCES warehouse.warehouses,
       warehouse_status text NOT NULL DEFAULT 'ready_to_ship',on_hold integer NOT NULL DEFAULT 0,cancelled_at timestamp);

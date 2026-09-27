@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { retiredReceiptBatch } from "../inventory-planning/infrastructure/inventory-cutover-retired-work";
 import { loadAndLockShipmentRuntimeAuthority } from "../inventory/application/inventory.use-cases";
 
 import {
@@ -74,7 +75,7 @@ export interface ClaimedChannelFulfillmentReceipt {
   readonly receiptId: number;
   readonly terminalReplay: boolean;
   readonly terminalProcessingStatus: "processed" | "ignored" | "review" | null;
-  readonly terminalReason: "lease_retry_exhausted" | null;
+  readonly terminalReason: "lease_retry_exhausted" | "cutover_history_retired" | null;
   readonly sourceEcho: boolean;
   readonly physicalShipmentId: number | null;
   readonly leaseToken: string | null;
@@ -1266,6 +1267,14 @@ export function createChannelFulfillmentIngressRepository(
       }
 
       const currentStatus = String(receipt.processing_status);
+      // Check after the exact receipt lock, before lease expiry/reclaim or any
+      // new processing. Retirement preserves the original receipt/status.
+      if (await retiredReceiptBatch(tx, claim.receiptId)) return Object.freeze({
+        receiptId: claim.receiptId, terminalReplay: true, terminalProcessingStatus: "review" as const,
+        terminalReason: "cutover_history_retired" as const, sourceEcho: false,
+        physicalShipmentId: positiveInteger(receipt.physical_shipment_id), leaseToken: null,
+        attemptNumber: Number(receipt.attempt_count ?? 0),
+      });
       const currentAttempt = Number(receipt.attempt_count ?? 0);
       if (
         currentStatus === "processed"

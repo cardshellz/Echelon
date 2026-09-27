@@ -86,6 +86,7 @@ export async function installCutoverCompositionMigrations(pool: Pool): Promise<v
     "0677_inventory_publication_target_hold.sql",
     "0684_inventory_publication_target_variant_holds.sql",
     "0687_inventory_channel_definition_completion.sql",
+    "253_inventory_cutover_history_retirement.sql",
   ]) await pool.query(readFileSync(resolve(process.cwd(), "migrations", file), "utf8"));
 }
 
