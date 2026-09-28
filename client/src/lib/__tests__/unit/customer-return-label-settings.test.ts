@@ -6,7 +6,6 @@ import {
   refreshReturnLabelSettingsDraft,
   returnLabelConfigurationAvailable,
   returnLabelSettingsReadiness,
-  selectedReturnSettingsChannel,
 } from "../../customer-return-label-settings";
 
 function state() {
@@ -21,6 +20,7 @@ function state() {
   return customerReturnLabelSettingsStateSchema.parse({
     channelId: 36,
     providerConfigured: true,
+    control: { paused: false, version: 0 },
     settings: null,
     warehouses: [{ id: 1, name: "Main", address }],
     resolvedPolicy: {
@@ -465,26 +465,5 @@ describe("return label settings readiness", () => {
     expect(
       returnLabelSettingsReadiness(refreshed, catalog).issues[0].message,
     ).toContain("Remove unavailable return services");
-  });
-});
-
-describe("return settings shop link", () => {
-  const shops = [{ channelId: 36 }, { channelId: 37 }];
-  it("requires an explicit choice with multiple shops, and auto-selects a single known shop", () => {
-    expect(selectedReturnSettingsChannel("", shops)).toBe("");
-    expect(selectedReturnSettingsChannel("", [shops[0]])).toBe("36");
-    expect(selectedReturnSettingsChannel("channelId=37", shops)).toBe("37");
-  });
-  it.each([
-    "channelId=0",
-    "channelId=999",
-    "channelId=-1",
-    "channelId=36&channelId=37",
-    "channelId=https://evil.test",
-    "channelId=9007199254740992",
-  ])("rejects an invalid or unavailable shop selection %s", (search) => {
-    expect(() => selectedReturnSettingsChannel(search, shops)).toThrow(
-      "unavailable",
-    );
   });
 });

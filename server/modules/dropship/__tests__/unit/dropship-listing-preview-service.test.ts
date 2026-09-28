@@ -7,6 +7,7 @@ import { resolveListingContent, listingCatalogHash } from "../../application/dro
 import { noContentProfile } from "../fixtures/listing-content.fixture";
 import type { SavedListingPriceRevision } from "../../../../../shared/dropship/listing-price";
 import type { ListingRulePrice } from "../../application/dropship-rule-price";
+import type { DropshipProductCost, DropshipProductCostReader } from "../../application/dropship-product-cost";
 import { DropshipError } from "../../domain/errors";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
 import {
@@ -77,11 +78,20 @@ describe("DropshipListingPreviewService", () => {
   };
   let evaluatedFulfillmentPolicyIds: string[];
   let listingTierEligibility: DropshipListingTierEligibility;
+  let productCosts: Map<number, DropshipProductCost>;
+  let productCostReader: DropshipProductCostReader;
 
   beforeEach(() => {
     repository = new FakeListingPreviewRepository();
     logs = [];
     listingTierEligibility = allTiersOnSale();
+    productCosts = new Map();
+    productCostReader = {
+      loadProductCosts: async ({ productVariantIds }) => new Map(productVariantIds.flatMap((id) => {
+        const cost = productCosts.get(id);
+        return cost ? [[id, cost] as const] : [];
+      })),
+    };
     ebayPolicyPreflight = {
       compatible: true,
       fulfillmentPolicyId: "fulfillment-policy",
@@ -92,6 +102,7 @@ describe("DropshipListingPreviewService", () => {
     service = new DropshipListingPreviewService({
       vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
       repository,
+      productCosts: { loadProductCosts: (input) => productCostReader.loadProductCosts(input) },
       atp: new FakeAtpProvider(),
       marketplaceListing: new ConfigDrivenDropshipMarketplaceListingProvider(),
       ebayFulfillmentPolicyGuard: {
@@ -368,6 +379,50 @@ describe("DropshipListingPreviewService", () => {
     const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
     expect(repository.ruleCandidateIds).toEqual([]);
     expect(preview.rows[0].rulePriceEvidenceHash).toBeUndefined();
+  });
+
+  it("lets the store's rules price a listing whose only price was saved by an earlier push", async () => {
+    repository.existingListings = [{ productVariantId: 101, listingId: 1, status: "live", vendorRetailPriceCents: 2799,
+      quantityCap: null, externalListingId: null }];
+    repository.rulePrices.set(101, rulePrice());
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1 });
+    expect(preview.rows[0]).toMatchObject({ priceCents: 1152, rulePriceEvidenceHash: "a".repeat(64), pricingRuleName: "Store default rule" });
+    expect(preview.rows[0].listingIntent).toMatchObject({ priceCents: 1152 });
+  });
+
+  it("warns about a price below the .ops cost without blocking the row, and still queues it", async () => {
+    productCosts.set(101, availableCost(1299));
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(preview.rows[0]).toMatchObject({ priceCents: 1199, previewStatus: "warning", blockers: [], warnings: ["price_below_product_cost"] });
+    expect(preview.summary).toMatchObject({ ready: 0, warning: 1, blocked: 0 });
+    const result = await service.createListingPushJobForMember("member-1", { storeConnectionId: 22, productVariantIds: [101],
+      expectedPriceRevisionIdsByVariantId: { "101": null }, expectedPriceCentsByVariantId: { "101": 1199 }, idempotencyKey: "below-cost-job" });
+    expect(result.job.status).toBe("queued");
+    expect(repository.lastCreatedInput!.preview.rows[0]).toMatchObject({ previewStatus: "warning", warnings: ["price_below_product_cost"] });
+  });
+
+  it("does not warn at or above the .ops cost", async () => {
+    productCosts.set(101, availableCost(1199));
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(preview.rows[0]).toMatchObject({ priceCents: 1199, previewStatus: "ready", warnings: [] });
+  });
+
+  it("takes the cost of a rule-priced listing from its rule price without a second read", async () => {
+    repository.rulePrices.set(101, { ...rulePrice(), priceCents: 700 });
+    const reads: number[][] = [];
+    productCostReader = { loadProductCosts: async ({ productVariantIds }) => { reads.push([...productVariantIds]); return new Map(); } };
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(preview.rows[0]).toMatchObject({ priceCents: 700, previewStatus: "warning", warnings: ["price_below_product_cost"] });
+    expect(reads).toEqual([]);
+  });
+
+  it("skips the below-cost check and logs it when the cost source is down", async () => {
+    productCostReader = { loadProductCosts: async () => { throw new DropshipError("DROPSHIP_PRODUCT_COST_SOURCE_UNAVAILABLE", "Cost source down."); } };
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(preview.rows[0]).toMatchObject({ priceCents: 1199, previewStatus: "ready", warnings: [] });
+    expect(logs.find((event) => event.code === "DROPSHIP_PRODUCT_COST_SOURCE_UNAVAILABLE")).toMatchObject({
+      context: { vendorId: 10, storeConnectionId: 22, productVariantIds: [101], errorCode: "DROPSHIP_PRODUCT_COST_SOURCE_UNAVAILABLE" },
+    });
   });
 
   it("uses saved draft prices in both preview and the immutable queued listing intent", async () => {
@@ -1002,6 +1057,9 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
   }
 }
 
+function availableCost(unitCostCents: number): DropshipProductCost {
+  return { status: "available", unitCostCents, planId: "ops", source: "variant_fixed_price", overrideId: "fixed", issue: null, retailPriceCents: null, discountBps: null };
+}
 function rulePrice(): ListingRulePrice {
   return { priceCents: 1152, ruleName: "Store default rule", ruleId: null, issue: null, profileRevisionId: 1,
     evidenceHash: "a".repeat(64), productCost: { status: "available", unitCostCents: 809, planId: "ops", source: "variant_fixed_price", overrideId: "fixed", issue: null, retailPriceCents: null, discountBps: null } };

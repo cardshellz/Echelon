@@ -566,6 +566,14 @@ interface PickItem {
   picked: number;
   status: "pending" | "in_progress" | "completed" | "short";
   orderId: string;
+  /** True when this line is held: not pickable, ships on its own once released. */
+  onHold: boolean;
+  /**
+   * Numeric WMS order id this line belongs to. `orderId` above is the display
+   * order number, and a combined group's id is not a real order, so line-level
+   * actions (hold) must address the owning order through this field.
+   */
+  wmsOrderId: number;
   image: string;
   barcode?: string;
   replenPrediction?: ReplenPrediction | null;
@@ -608,6 +616,14 @@ interface SingleOrder {
   shippingServiceLevel?: "standard" | "expedited" | "overnight" | null;
   memberPlanName?: string | null;
   memberPlanColor?: string | null;
+}
+
+/**
+ * True when any line on this order/batch is held. A held line is not pickable,
+ * so the order belongs under Hold rather than Ready.
+ */
+function hasHeldLine(work: { items?: PickItem[] } | null | undefined): boolean {
+  return (work?.items ?? []).some((item) => item.onHold === true);
 }
 
 function getOrderPickProgress(items: PickItem[]) {
@@ -894,6 +910,8 @@ function PickingWorkspace() {
           picked: progress.pickedQuantity,
           status: progress.status,
           orderId: order.orderNumber,
+          wmsOrderId: order.id,
+          onHold: item.onHold === true,
           image: item.imageUrl || "",
           barcode: item.barcode || undefined,
           replenPrediction: item.replenPrediction ?? null,
@@ -1340,6 +1358,40 @@ function PickingWorkspace() {
       });
       playSound("error");
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+    },
+  });
+
+  // Hold a single line so the rest of the order can ship now. The server
+  // splits the held line onto its own shipment, re-pushes the main shipment
+  // without it, and the pick queue stops showing the order for this line.
+  const holdLineItemMutation = useMutation({
+    mutationFn: async ({ wmsOrderId, itemId }: { wmsOrderId: number; itemId: number }) => {
+      const res = await fetch(`/api/orders/${wmsOrderId}/items/${itemId}/hold`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || "Failed to hold line");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+      playSound("success");
+      toast({
+        title: "Line held",
+        description: "It ships separately once released. The rest of the order can go now.",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Couldn't hold line",
+        description: error.message || "Failed to hold line. Try again.",
+        variant: "destructive",
+      });
+      playSound("error");
     },
   });
 
@@ -2162,6 +2214,14 @@ function PickingWorkspace() {
     }
   };
 
+  // Hold a line from the pick floor. Works from the scan card and the list's
+  // overflow menu; a line with picked units cannot be held (the server rejects
+  // it), so those entry points are disabled.
+  const openHoldLine = (item: PickItem | null | undefined) => {
+    if (!item || item.picked > 0 || holdLineItemMutation.isPending) return;
+    holdLineItemMutation.mutate({ wmsOrderId: item.wmsOrderId, itemId: item.id });
+  };
+
   // Short pick - works for both card view (currentItem) and list view (shortPickListIndex)
   const handleShortPick = () => {
     if (!activeWork) return;
@@ -2959,8 +3019,11 @@ function PickingWorkspace() {
       ? queue.filter(b => b.status === "completed")
       : singleQueue.filter(o => o.status === "completed")
     ).filter(channelMatch);
+    // An order counts as held when the whole order is held OR any line is
+    // held. A line hold does not set the order flag, and without this such an
+    // order shows in neither Ready (nothing pickable) nor Hold — it vanishes.
     const holdItems = pickingMode === "single"
-      ? singleQueue.filter(o => o.onHold)
+      ? singleQueue.filter(o => o.onHold || hasHeldLine(o))
       : [];
     const combinedItems = pickingMode === "single"
       ? singleQueue.filter(o => o.isCombinedGroup && o.status !== "completed")
@@ -2972,8 +3035,9 @@ function PickingWorkspace() {
       // History renders its own server-paged read model, never action cards.
       if (activeFilter === "done" || item.status === "completed") return false;
       
-      // By default, hide held items unless filtering for "hold"
-      const itemOnHold = "onHold" in item && item.onHold;
+      // By default, hide held items unless filtering for "hold". Line-level
+      // holds count too: the order has no pickable work left.
+      const itemOnHold = ("onHold" in item && item.onHold) || hasHeldLine(item);
       if (activeFilter !== "hold" && itemOnHold) return false;
       
       // Apply status filter
@@ -3882,6 +3946,8 @@ function PickingWorkspace() {
           picked: item.pickedQuantity,
           status,
           orderId: order.orderNumber,
+          wmsOrderId: order.id,
+          onHold: (item as { onHold?: boolean }).onHold === true,
           image: item.imageUrl || "",
           barcode: item.barcode || undefined,
           replenPrediction: item.replenPrediction ?? null,
@@ -4413,6 +4479,17 @@ function PickingWorkspace() {
                       Short Pick
                     </Button>
                   </div>
+                  {/* Hold this line and keep picking the rest of the order. */}
+                  <Button
+                    variant="outline"
+                    className="w-full mt-3 h-12 min-h-[44px] text-base font-medium text-slate-700 border-slate-300 hover:bg-slate-50"
+                    onClick={() => openHoldLine(currentItem)}
+                    disabled={holdLineItemMutation.isPending || currentItem.picked > 0}
+                    data-testid="button-hold-line"
+                  >
+                    <Pause className="h-5 w-5 mr-2" />
+                    Hold line
+                  </Button>
                 </div>
               </CardContent>
             </Card>
@@ -4587,6 +4664,14 @@ function PickingWorkspace() {
                                 >
                                   <AlertTriangle className="h-4 w-4 mr-2" />
                                   Short pick
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  disabled={item.picked > 0 || holdLineItemMutation.isPending}
+                                  onClick={() => openHoldLine(item)}
+                                  data-testid={`menu-hold-${item.id}`}
+                                >
+                                  <Pause className="h-4 w-4 mr-2" />
+                                  Hold line
                                 </DropdownMenuItem>
                                 <DropdownMenuItem
                                   disabled={item.picked <= 0}

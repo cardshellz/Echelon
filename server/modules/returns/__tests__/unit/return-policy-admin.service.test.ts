@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ReturnPolicy } from "@shared/schema";
+import type { CustomerReturnLabelSettings } from "@shared/returns/customer-return-label.contract";
+import { labelSettings } from "../support/label-fixtures";
 import {
   ReturnPolicyAdminError,
   ReturnPolicyAdminService,
@@ -18,6 +20,8 @@ const DROPSHIP_OMS: ReturnPolicyChannelReference = { id: 103, name: "Dropship OM
 function input(overrides: Partial<CreateReturnPolicyInput> = {}): CreateReturnPolicyInput {
   return {
     idempotencyKey: "command-1",
+    expectedPolicyId: null,
+    shipping: null,
     actor: "admin-1",
     name: "Shopify returns",
     appliesTo: "channel",
@@ -40,6 +44,8 @@ function input(overrides: Partial<CreateReturnPolicyInput> = {}): CreateReturnPo
 }
 
 class FakeTransaction implements ReturnPolicyAdminTransaction {
+  shipping = new Map<number, CustomerReturnLabelSettings | null>();
+  warehouse = { id: 1, name: "Test Warehouse", address: "1 Test Street", city: "Austin", state: "TX", postalCode: "78701", country: "US", isActive: 1 };
   commands = new Map<string, ReturnPolicyCommandRecord>();
   active: ReturnPolicy | null = null;
   policies: ReturnPolicy[] = [];
@@ -54,6 +60,8 @@ class FakeTransaction implements ReturnPolicyAdminTransaction {
 
   async lockCommand(): Promise<void> {}
   async lockCatalog(): Promise<void> {}
+  async getShippingWarehouseForShare() { return this.warehouse; }
+  async insertPolicyShipping(policyId: number, configuration: CustomerReturnLabelSettings | null) { this.shipping.set(policyId, configuration); }
   async readArchiveSnapshot() {
     const policies = [...this.policies];
     if (this.active && !policies.some(policy => policy.id === this.active!.id)) policies.push(this.active);
@@ -86,6 +94,7 @@ class FakeStore implements ReturnPolicyAdminStore {
     return { policies: this.overviewPolicies, channels: [SHOPIFY, DROPSHIP_OMS], referencedVendors: [], referencedStores: [], dropshipOmsChannelId: DROPSHIP_OMS.id };
   }
   async listActivePolicies() { return this.tx.active ? [this.tx.active] : []; }
+  async listShippingWarehouses() { return [this.tx.warehouse]; }
   async getDropshipOmsChannel() { return DROPSHIP_OMS; }
   async searchVendors() { return []; }
   async searchStores() { return []; }
@@ -93,6 +102,76 @@ class FakeStore implements ReturnPolicyAdminStore {
 }
 
 describe("ReturnPolicyAdminService", () => {
+  function shipping() {
+    const { version: _version, policyId: _policyId, destinationAddress: _address, ...configuration } = labelSettings;
+    return configuration;
+  }
+  function capability() {
+    return { configured: true, carriers: [{ id: "se-123", code: "ups", name: "UPS", services: [{ code: "ups_ground", name: "Ground" }] }] };
+  }
+
+  it("atomically associates shipping with the newly created policy identity and freezes its destination", async () => {
+    const store = new FakeStore();
+    const raw = input({ shipping: shipping() });
+    const before = structuredClone(raw);
+    const result = await new ReturnPolicyAdminService(store, () => NOW, async () => capability()).createVersion(raw);
+    const configuration = store.tx.shipping.get(result.policy.id);
+    expect(configuration).toEqual({ ...labelSettings, policyId: result.policy.id, version: result.policy.id });
+    expect(store.tx.commands.get(raw.idempotencyKey)?.response).toMatchObject({ shipping: configuration });
+    expect(store.tx.audits[0].after).toMatchObject({ shipping: configuration });
+    expect(raw).toEqual(before);
+  });
+
+  it("records an explicit unconfigured shipping binding instead of borrowing channel defaults", async () => {
+    const store = new FakeStore();
+    const result = await new ReturnPolicyAdminService(store, () => NOW).createVersion(input());
+    expect(store.tx.shipping.has(result.policy.id)).toBe(true);
+    expect(store.tx.shipping.get(result.policy.id)).toBeNull();
+  });
+
+  it.each([null, 99])("rejects stale policy identity %s before retiring or inserting anything", async expectedPolicyId => {
+    const store = new FakeStore(); store.tx.active = policy({ id: 41 });
+    await expect(new ReturnPolicyAdminService(store, () => NOW).createVersion(input({ expectedPolicyId }))).rejects.toMatchObject({ code: "RETURN_POLICY_CHANGED", status: 409 });
+    expect(store.tx.retired).toEqual([]); expect(store.tx.policies).toEqual([]); expect(store.tx.shipping.size).toBe(0);
+  });
+
+  it.each(["vendor", "marketplace"] as const)("rejects incompatible %s physical destination before retirement", async returnDestination => {
+    const store = new FakeStore();
+    await expect(new ReturnPolicyAdminService(store, () => NOW).createVersion(input({ returnDestination, shipping: { ...shipping(), enabled: false } }))).rejects.toMatchObject({ code: "RETURN_POLICY_SHIPPING_INCOMPATIBLE" });
+    expect(store.tx.policies).toEqual([]);
+  });
+
+  it.each([{ country: "CA" }, { isActive: 0 }, { address: "" }])("rejects unavailable/incomplete warehouses %#", async override => {
+    const store = new FakeStore(); Object.assign(store.tx.warehouse, override);
+    await expect(new ReturnPolicyAdminService(store, () => NOW).createVersion(input({ shipping: { ...shipping(), enabled: false } }))).rejects.toMatchObject({ code: "RETURN_POLICY_WAREHOUSE_INVALID" });
+    expect(store.tx.policies).toEqual([]);
+  });
+
+  it("validates allowed carrier services before enabling and replays success during later outages", async () => {
+    const store = new FakeStore();
+    const read = vi.fn(async () => capability());
+    const service = new ReturnPolicyAdminService(store, () => NOW, read);
+    const command = input({ shipping: shipping() });
+    const result = await service.createVersion(command);
+    read.mockRejectedValueOnce(new Error("provider unavailable"));
+    expect(await service.createVersion(command)).toEqual({ ...result, replayed: true });
+    expect(read).toHaveBeenCalledTimes(1);
+    await expect(service.createVersion({ ...command, idempotencyKey: "different", expectedPolicyId: result.policy.id })).rejects.toMatchObject({ code: "RETURN_POLICY_CARRIER_UNAVAILABLE", status: 503 });
+    expect(store.tx.policies).toHaveLength(1);
+  });
+
+  it("rejects enabled shipping when a service is no longer available", async () => {
+    const store = new FakeStore();
+    await expect(new ReturnPolicyAdminService(store, () => NOW, async () => ({ configured: true, carriers: [] })).createVersion(input({ shipping: shipping() }))).rejects.toMatchObject({ code: "RETURN_POLICY_CARRIER_UNAVAILABLE" });
+    expect(store.tx.policies).toEqual([]);
+  });
+
+  it("returns warehouse choices and a safe diagnostic when the carrier catalog is unavailable", async () => {
+    const store = new FakeStore();
+    const result = await new ReturnPolicyAdminService(store, () => NOW, async () => { throw new Error("secret credential"); }).shippingCatalog();
+    expect(result).toMatchObject({ providerConfigured: false, carriers: [], warehouses: [{ id: 1 }], message: expect.stringMatching(/could not be verified/) });
+    expect(JSON.stringify(result)).not.toContain("secret");
+  });
   it("returns active and retired versions in the policy overview", async () => {
     const store = new FakeStore();
     store.overviewPolicies.push(
@@ -108,7 +187,7 @@ describe("ReturnPolicyAdminService", () => {
     const store = new FakeStore();
     store.tx.active = policy({ id: 41, version: 1, supersedesPolicyId: null });
 
-    const result = await new ReturnPolicyAdminService(store, () => NOW).createVersion(input());
+    const result = await new ReturnPolicyAdminService(store, () => NOW).createVersion(input({ expectedPolicyId: 41 }));
 
     expect(result.replayed).toBe(false);
     expect(result.policy).toMatchObject({

@@ -1,10 +1,11 @@
 import type { ReturnPolicy } from "@shared/schema";
+import { z } from "zod";
 import {
   customerReturnLabelAddressSchema,
-  customerReturnLabelSettingsInputSchema,
   customerReturnLabelSettingsStateSchema,
+  customerReturnLabelControlSchema,
+  customerReturnLabelControlInputSchema,
   type CustomerReturnLabelSettings,
-  type CustomerReturnLabelSettingsInput,
   type CustomerReturnLabelSettingsState,
 } from "@shared/returns/customer-return-label.contract";
 import { matchesCustomerReturnPortalPolicy } from "@shared/returns/customer-return-portal-policy";
@@ -24,15 +25,14 @@ export interface ReturnLabelWarehouse {
 }
 export interface CustomerReturnSettingsStore {
   read(channelId: number): Promise<CustomerReturnLabelSettings | null>;
+  readAccepted(channelId: number, authorizationId: number): Promise<CustomerReturnLabelSettings | null>;
+  readControl(channelId: number): Promise<z.infer<typeof customerReturnLabelControlSchema>>;
+  saveControl(channelId: number, input: z.infer<typeof customerReturnLabelControlInputSchema>, actor: string, now: Date): Promise<void>;
   catalog(
     channelId: number,
+    includePolicies?: boolean,
   ): Promise<{ warehouses: ReturnLabelWarehouse[]; policies: ReturnPolicy[] }>;
-  save(
-    channelId: number,
-    input: CustomerReturnLabelSettingsInput,
-    actor: string,
-    now: Date,
-  ): Promise<CustomerReturnLabelSettings>;
+
 }
 export interface ReturnLabelCapabilities {
   configured: boolean;
@@ -45,7 +45,8 @@ export interface CustomerReturnLabelSettingsDependencies {
   now: () => Date;
 }
 
-/** Separate return policy: no outbound default warehouse or service is inferred. */
+/** Policy-owned shipping and independent purchase controls. Outbound defaults
+ * never authorize a return warehouse or carrier. */
 export class CustomerReturnLabelSettingsService {
   constructor(
     private readonly dependencies: CustomerReturnLabelSettingsDependencies,
@@ -53,9 +54,10 @@ export class CustomerReturnLabelSettingsService {
 
   async get(channelId: number): Promise<CustomerReturnLabelSettingsState> {
     await this.dependencies.authorizeChannel(channelId);
-    const [settings, catalog] = await Promise.all([
+    const [settings, catalog, control] = await Promise.all([
       this.dependencies.store.read(channelId),
       this.dependencies.store.catalog(channelId),
+      this.dependencies.store.readControl(channelId),
     ]);
     let capability: ReturnLabelCapabilities = {
       configured: false,
@@ -78,7 +80,8 @@ export class CustomerReturnLabelSettingsService {
     return customerReturnLabelSettingsStateSchema.parse({
       channelId,
       providerConfigured: capability.configured,
-      settings,
+      settings: settings?.policyId === resolved.policy?.id ? settings : null,
+      control,
       warehouses: catalog.warehouses
         .filter((row) => row.isActive === 1)
         .map((row) => ({
@@ -95,36 +98,18 @@ export class CustomerReturnLabelSettingsService {
 
   async save(
     channelId: number,
-    raw: unknown,
-    actor: string,
+    _raw: unknown,
+    _actor: string,
   ): Promise<CustomerReturnLabelSettingsState> {
     await this.dependencies.authorizeChannel(channelId);
-    const result = customerReturnLabelSettingsInputSchema.safeParse(raw);
-    if (!result.success)
-      throw new CustomerReturnIntakeError(
-        "RETURN_LABEL_SETTINGS_INVALID",
-        "Choose valid return label settings.",
-        400,
-      );
-    const input = result.data;
-    if (input.enabled) {
-      const capabilities = await this.dependencies.capabilities();
-      if (
-        !capabilities.configured ||
-        !supportsConfiguredServices(capabilities, input)
-      ) {
-        throw new CustomerReturnIntakeError(
-          "RETURN_LABEL_SERVICE_UNAVAILABLE",
-          "Choose a connected carrier service that supports domestic returns.",
-        );
-      }
-    }
-    await this.dependencies.store.save(
-      channelId,
-      input,
-      actor,
-      this.dependencies.now(),
-    );
+    throw new CustomerReturnIntakeError("RETURN_LABEL_EDIT_POLICY", "Return shipping is configured in Policies. Open the applied policy and save a new version to change its return shipping.", 409);
+  }
+
+  async control(channelId: number, raw: unknown, actor: string): Promise<CustomerReturnLabelSettingsState> {
+    await this.dependencies.authorizeChannel(channelId);
+    const parsed = customerReturnLabelControlInputSchema.safeParse(raw);
+    if (!parsed.success) throw new CustomerReturnIntakeError("RETURN_LABEL_CONTROL_INVALID", "Reload the current label controls before trying again.", 400);
+    await this.dependencies.store.saveControl(channelId, parsed.data, actor, this.dependencies.now());
     return this.get(channelId);
   }
 
@@ -144,6 +129,7 @@ export class CustomerReturnLabelSettingsService {
           "No active return policy applies to this shop.",
       );
     }
+    if (settings.policyId !== resolved.policy.id) throw new CustomerReturnIntakeError("RETURN_LABEL_SETTINGS_CHANGED", "The applied return policy changed. Refresh it before creating a return.");
     return {
       settings,
       operationalPolicy: {
@@ -154,25 +140,28 @@ export class CustomerReturnLabelSettingsService {
     };
   }
 
-  /** Accepted RMAs retain their own policy snapshot. Label continuation only
-   * rechecks current shipping controls, never a newly resolved return policy. */
-  async requireShippingEnabled(channelId: number, version: number) {
-    return (await this.requireShippingConfiguration(channelId, version))
-      .settings;
+  /** An accepted return is bound to its original policy's immutable shipping
+   * configuration. Replacing or archiving that policy never reroutes its boxes. */
+  async requireAcceptedShippingEnabled(channelId: number, authorizationId: number) {
+    await this.dependencies.authorizeChannel(channelId);
+    const settings = await this.dependencies.store.readAccepted(channelId, authorizationId);
+    return (await this.requireShippingConfiguration(channelId, settings?.version ?? 0, settings)).settings;
   }
 
   private async requireShippingConfiguration(
     channelId: number,
     version: number,
+    acceptedSettings?: CustomerReturnLabelSettings | null,
   ) {
     await this.dependencies.authorizeChannel(channelId);
-    const settings = await this.dependencies.store.read(channelId);
-    if (!settings?.enabled || settings.version !== version)
+    const settings = acceptedSettings === undefined ? await this.dependencies.store.read(channelId) : acceptedSettings;
+    const control = await this.dependencies.store.readControl(channelId);
+    if (control.paused || !settings?.enabled || settings.version !== version)
       throw new CustomerReturnIntakeError(
         "RETURN_LABEL_SETTINGS_CHANGED",
         "Return label settings changed. Review the current settings before continuing.",
       );
-    const catalog = await this.dependencies.store.catalog(channelId);
+    const catalog = await this.dependencies.store.catalog(channelId, acceptedSettings === undefined);
     if (
       !catalog.warehouses.some(
         (row) =>
@@ -198,7 +187,7 @@ export class CustomerReturnLabelSettingsService {
   }
 }
 
-function supportsConfiguredServices(
+export function supportsConfiguredServices(
   capabilities: ReturnLabelCapabilities,
   settings: Pick<
     CustomerReturnLabelSettings,

@@ -31,6 +31,38 @@ describe("Zombie order prevention", () => {
     it("requires items to need shipping", () => {
       expect(existsSection).toContain("COALESCE(oi.requires_shipping, 1) <> 0");
     });
+
+    // LINE-ITEM-HOLD-DESIGN.md P2: holding a line splits it onto its own held
+    // shipment and pickItem rejects it ('line_on_hold'). Before this, the held
+    // line still satisfied the guard, so the order stayed in the pick queue and
+    // holding a line could not get it off the floor.
+    it("excludes held lines so a held line cannot keep an order in the pick queue", () => {
+      expect(existsSection).toContain("COALESCE(oi.on_hold, false) = false");
+    });
+  });
+
+  // A held line is still owed: it ships when released. The terminal-transition
+  // paths must keep counting it as outstanding work, or an order whose only
+  // remaining line is held would be completed and the held line lost.
+  describe("held lines still block terminal transitions", () => {
+    it("the pick-queue self-heal counts held lines as pending shippable", () => {
+      const selfHeal = STORAGE_SRC.slice(
+        STORAGE_SRC.indexOf("Self-heal: auto-complete orders with zero shippable items remaining"),
+        STORAGE_SRC.indexOf("Shipping transitions belong to shipment processing"),
+      );
+      expect(selfHeal).toContain("const pendingShippable");
+      expect(selfHeal).not.toMatch(/onHold|on_hold/);
+    });
+
+    it("the startup zombie repair counts held lines as pending shippable", () => {
+      const indexSrc = readFileSync(resolve(__dirname, "../../../../index.ts"), "utf-8");
+      const repair = indexSrc.slice(
+        indexSrc.indexOf("Zombie orders: active warehouse_status"),
+        indexSrc.indexOf("Shipped-order cleanup error"),
+      );
+      expect(repair).toContain("oi.status NOT IN ('cancelled', 'completed', 'short')");
+      expect(repair).not.toMatch(/on_hold/);
+    });
   });
 
   describe("updateOrderProgress handles edge cases", () => {

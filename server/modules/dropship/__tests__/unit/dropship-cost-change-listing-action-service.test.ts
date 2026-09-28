@@ -157,17 +157,23 @@ describe("DropshipCostChangeListingActionService", () => {
   });
 
   function vendorFacts(patch: Partial<CostActionVendorFacts> = {}): CostActionVendorFacts {
+    const listings = patch.listings ?? [
+      listing(1, 61),
+      listing(2, 62, { vendorRetailPriceCents: 899 }),
+      listing(3, 63, { vendorRetailPriceCents: 1500 }),
+      listing(4, 64, { status: "ended" }),
+    ];
     return {
-      listings: [
-        listing(1, 61),
-        listing(2, 62, { vendorRetailPriceCents: 899 }),
-        listing(3, 63, { vendorRetailPriceCents: 1500 }),
-        listing(4, 64, { status: "ended" }),
+      listings,
+      // Listing 61 follows the store's rules. Every other listing carries a
+      // typed price at its listed amount, the only price the rules leave alone.
+      savedPrices: patch.savedPrices ?? [
+        { storeConnectionId: 9, productVariantId: 61, overridePriceCents: null, pricingMode: "rules" },
+        ...listings.filter((row) => row.productVariantId !== 61 && row.vendorRetailPriceCents !== null)
+          .map((row) => ({ storeConnectionId: 9, productVariantId: row.productVariantId, overridePriceCents: row.vendorRetailPriceCents, pricingMode: "fixed" as const })),
       ],
-      savedPrices: [{ storeConnectionId: 9, productVariantId: 61, overridePriceCents: null, pricingMode: "rules" }],
-      profiles: new Map([[9, costRules]]),
-      candidates: new Map([61, 62, 63, 64].map((id) => [id, candidate(id)])),
-      ...patch,
+      profiles: patch.profiles ?? new Map([[9, costRules]]),
+      candidates: patch.candidates ?? new Map([61, 62, 63, 64].map((id) => [id, candidate(id)])),
     };
   }
 
@@ -197,9 +203,9 @@ describe("DropshipCostChangeListingActionService", () => {
     ]);
     expect(recorded.listingActions.map((action) => [action.listingId, action.priceSource, action.listingPriceCents, action.action, action.pushJobId, action.detail])).toEqual([
       [1, "rules_cost", 1399, "reprice_queued", 100, null],
-      [2, "saved_listing", 899, "below_cost_warned", null, null],
-      [3, "saved_listing", 1500, "price_covers_cost", null, null],
-      [4, "saved_listing", 1099, "skipped_inactive_listing", null, null],
+      [2, "fixed", 899, "below_cost_warned", null, null],
+      [3, "fixed", 1500, "price_covers_cost", null, null],
+      [4, "fixed", 1099, "skipped_inactive_listing", null, null],
     ]);
     expect(recorded.listingActions[0]).toMatchObject({ entryId: 11, unitCostCents: 999, policyId: 3, decidedAt: NOW, holdKey: null });
     expect(recorded.holds).toEqual([]);

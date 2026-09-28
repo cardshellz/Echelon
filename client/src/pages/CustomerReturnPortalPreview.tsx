@@ -387,7 +387,6 @@ function PortalWorkspace({ adminId }: { adminId: string }) {
                   <CustomerReturnLabelSettings
                     key={shop.channelId}
                     channelId={shop.channelId}
-                    compact
                     locked={labelLocked}
                     accepted={labelSession.record?.authorizationId != null}
                     onState={setLabelSettings}
@@ -395,8 +394,8 @@ function PortalWorkspace({ adminId }: { adminId: string }) {
                   />
                 )}
                 <p className="text-xs leading-relaxed">
-                  Sample orders never create returns or labels. Live labels
-                  require saved, enabled settings for the selected shop.
+                   Sample orders never create returns or labels. Live labels
+                   require enabled return shipping in the applied policy.
                   Customer access remains off and refunds remain manual in
                   Shopify.
                 </p>
@@ -406,7 +405,7 @@ function PortalWorkspace({ adminId }: { adminId: string }) {
               {source === "live"
                 ? gateway?.labels
                   ? "Live return creation and label purchases are enabled for this shop. Refunds remain manual."
-                  : "Live order lookup and review only. Configure and enable labels in Testing controls to create a return."
+                  : "Live order lookup and review only. Configure and enable return shipping in the applied policy to create a return."
                 : "Sample orders only. No returns, labels or refunds are created."}
             </p>
             {source === "live" && catalogLoading && (

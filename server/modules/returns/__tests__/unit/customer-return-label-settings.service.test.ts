@@ -1,673 +1,119 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReturnPolicy } from "@shared/schema";
-import type { CustomerReturnLabelSettingsInput } from "@shared/returns/customer-return-label.contract";
 import { CustomerReturnIntakeError } from "../../application/customer-return-intake.ports";
-import {
-  CustomerReturnLabelSettingsService,
-  isPortalReturnPolicy,
-  warehouseLabelAddress,
-  type CustomerReturnLabelSettingsDependencies,
-  type CustomerReturnSettingsStore,
-  type ReturnLabelWarehouse,
-} from "../../application/customer-return-label-settings.service";
-import {
-  labelAddress,
-  labelPolicy,
-  labelSettings,
-} from "../support/label-fixtures";
+import { CustomerReturnLabelSettingsService, warehouseLabelAddress, type CustomerReturnSettingsStore, type ReturnLabelWarehouse } from "../../application/customer-return-label-settings.service";
+import { labelAddress, labelActivePolicy, labelSettings } from "../support/label-fixtures";
 
 const CHANNEL = 36;
 const NOW = new Date("2026-09-26T12:00:00Z");
-
-function policy(overrides: Partial<ReturnPolicy> = {}): ReturnPolicy {
-  return {
-    ...labelPolicy,
-    businessContext: "retail",
-    channelId: null,
-    vendorId: null,
-    storeConnectionId: null,
-    status: "active",
-    notes: null,
-    supersedesPolicyId: null,
-    createdBy: "admin-1",
-    retiredBy: null,
-    retiredAt: null,
-    createdAt: NOW,
-    ...overrides,
-  };
+function warehouse(overrides: Partial<ReturnLabelWarehouse> = {}): ReturnLabelWarehouse {
+  return { id: 1, name: "Test Warehouse", address: "1 Test Street", city: "Austin", state: "TX", postalCode: "78701", country: "US", isActive: 1, ...overrides };
 }
-
-function warehouse(
-  overrides: Partial<ReturnLabelWarehouse> = {},
-): ReturnLabelWarehouse {
-  return {
-    id: 1,
-    name: "Test Warehouse",
-    address: "1 Test Street",
-    city: "Austin",
-    state: "TX",
-    postalCode: "78701",
-    country: "US",
-    isActive: 1,
-    ...overrides,
+describe("policy-owned return label settings", () => {
+  const store = {
+    read: vi.fn<CustomerReturnSettingsStore["read"]>(), readAccepted: vi.fn<CustomerReturnSettingsStore["readAccepted"]>(),
+    readControl: vi.fn<CustomerReturnSettingsStore["readControl"]>(), saveControl: vi.fn<CustomerReturnSettingsStore["saveControl"]>(),
+    catalog: vi.fn<CustomerReturnSettingsStore["catalog"]>(),
   };
-}
-
-function settingsInput(
-  overrides: Partial<CustomerReturnLabelSettingsInput> = {},
-): CustomerReturnLabelSettingsInput {
-  return {
-    expectedVersion: 1,
-    enabled: true,
-    warehouseId: 1,
-    selectionMode: "fixed_service",
-    carrierRules: [],
-    carrierId: "se-123",
-    serviceCode: "ups_ground",
-    contactName: "Test Warehouse",
-    contactPhone: null,
-    ...overrides,
-  };
-}
-
-describe("private return label settings service", () => {
-  let store: {
-    read: ReturnType<typeof vi.fn<CustomerReturnSettingsStore["read"]>>;
-    catalog: ReturnType<typeof vi.fn<CustomerReturnSettingsStore["catalog"]>>;
-    save: ReturnType<typeof vi.fn<CustomerReturnSettingsStore["save"]>>;
-  };
-  let authorizeChannel: ReturnType<
-    typeof vi.fn<CustomerReturnLabelSettingsDependencies["authorizeChannel"]>
-  >;
-  let capabilities: ReturnType<
-    typeof vi.fn<CustomerReturnLabelSettingsDependencies["capabilities"]>
-  >;
-  let service: CustomerReturnLabelSettingsService;
-
+  const authorizeChannel = vi.fn(async (_channelId: number) => undefined);
+  const capabilities = vi.fn(async () => ({ configured: true, carriers: [{ id: "se-123", code: "ups", name: "UPS", services: [{ code: "ups_ground", name: "Ground" }] }] }));
+  const service = new CustomerReturnLabelSettingsService({ store, authorizeChannel, capabilities, now: () => NOW });
   beforeEach(() => {
-    store = {
-      read: vi.fn(async () => structuredClone(labelSettings)),
-      catalog: vi.fn(async () => ({
-        warehouses: [warehouse()],
-        policies: [policy()],
-      })),
-      save: vi.fn(async () => ({
-        ...structuredClone(labelSettings),
-        version: 2,
-      })),
-    };
-    authorizeChannel = vi.fn(async () => undefined);
-    capabilities = vi.fn(async () => ({
-      configured: true,
-      carriers: [
-        {
-          id: "se-123",
-          code: "ups",
-          name: "Test carrier",
-          services: [{ code: "ups_ground", name: "Ground" }],
-        },
-      ],
-    }));
-    service = new CustomerReturnLabelSettingsService({
-      store,
-      authorizeChannel,
-      capabilities,
-      now: () => NOW,
-    });
+    vi.clearAllMocks();
+    authorizeChannel.mockResolvedValue(undefined);
+    store.read.mockResolvedValue({ ...labelSettings, policyId: 1 });
+    store.readAccepted.mockResolvedValue({ ...labelSettings, policyId: 1 });
+    store.readControl.mockResolvedValue({ paused: false, version: 0 });
+    store.saveControl.mockResolvedValue(undefined);
+    store.catalog.mockResolvedValue({ warehouses: [warehouse()], policies: [labelActivePolicy()] });
+    capabilities.mockResolvedValue({ configured: true, carriers: [{ id: "se-123", code: "ups", name: "UPS", services: [{ code: "ups_ground", name: "Ground" }] }] });
   });
-
-  it.each(["get", "save", "requireEnabled"] as const)(
-    "authorizes the requested shop before %s reads or writes",
-    async (operation) => {
-      const denied = new CustomerReturnIntakeError(
-        "RETURN_LIVE_SHOP_UNAVAILABLE",
-        "This shop is unavailable.",
-        403,
-      );
-      authorizeChannel.mockRejectedValue(denied);
-      const result =
-        operation === "get"
-          ? service.get(104)
-          : operation === "save"
-            ? service.save(104, settingsInput(), "admin-1")
-            : service.requireEnabled(104, 1);
-      await expect(result).rejects.toBe(denied);
-      expect(authorizeChannel).toHaveBeenCalledWith(104);
-      expect(store.read).not.toHaveBeenCalled();
-      expect(store.catalog).not.toHaveBeenCalled();
-      expect(store.save).not.toHaveBeenCalled();
-      expect(capabilities).not.toHaveBeenCalled();
-    },
-  );
-
-  it("does not infer a warehouse or policy when settings have not been explicitly saved", async () => {
-    store.read.mockResolvedValue(null);
-    const state = await service.get(CHANNEL);
-    expect(state.settings).toBeNull();
-    expect(state.warehouses).toEqual([
-      { id: 1, name: "Test Warehouse", address: labelAddress },
-    ]);
-    expect(state.resolvedPolicy).toEqual({
-      id: 1,
-      name: labelPolicy.name,
-      version: 1,
-      returnWindowDays: 365,
-      scopeKind: "business_context",
-    });
-    expect(state.policyIssue).toBeNull();
-    await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({
-      code: "RETURN_LABEL_SETTINGS_CHANGED",
-    });
-    expect(store.save).not.toHaveBeenCalled();
-  });
-
-  it("saves shipping independently of policy availability and discards a legacy selection", async () => {
-    store.catalog.mockResolvedValue({
-      warehouses: [warehouse()],
-      policies: [],
-    });
-    const result = await service.save(
-      CHANNEL,
-      { ...settingsInput(), policyId: 999 },
-      "admin",
-    );
-    expect(store.save).toHaveBeenCalledWith(
-      CHANNEL,
-      settingsInput(),
-      "admin",
-      NOW,
-    );
-    expect(result.policyIssue?.code).toBe("RETURN_PORTAL_POLICY_MISSING");
-    expect(result).not.toHaveProperty("policies");
-    expect(result.settings).not.toHaveProperty("policyId");
-    await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({
-      code: "RETURN_PORTAL_POLICY_MISSING",
-    });
-    expect(await service.requireShippingEnabled(CHANNEL, 1)).toEqual(
-      labelSettings,
-    );
-  });
-
-  it("accepts a canonical 30-day policy and exposes its read-only scope", async () => {
-    store.catalog.mockResolvedValue({
-      warehouses: [warehouse()],
-      policies: [policy({ returnWindowDays: 30 })],
-    });
-    expect((await service.get(CHANNEL)).resolvedPolicy).toMatchObject({
-      returnWindowDays: 30,
-      scopeKind: "business_context",
-    });
-    expect(
-      (await service.requireEnabled(CHANNEL, 1)).operationalPolicy.snapshot
-        .returnWindowDays,
-    ).toBe(30);
-  });
-
-  it("presents inactive warehouses as unavailable and incomplete or foreign addresses as null", async () => {
-    store.catalog.mockResolvedValue({
-      warehouses: [
-        warehouse(),
-        warehouse({ id: 2, isActive: 0 }),
-        warehouse({ id: 3, address: null }),
-        warehouse({ id: 4, country: "CA" }),
-      ],
-      policies: [policy()],
-    });
-    expect((await service.get(CHANNEL)).warehouses).toEqual([
-      { id: 1, name: "Test Warehouse", address: labelAddress },
-      { id: 3, name: "Test Warehouse", address: null },
-      { id: 4, name: "Test Warehouse", address: null },
-    ]);
-  });
-
-  it.each([null, "retail"])(
-    "accepts applicable 365-day policies with %s business context",
-    async (businessContext) => {
-      store.catalog.mockResolvedValue({
-        warehouses: [warehouse()],
-        policies: [
-          policy({
-            businessContext,
-            channelId: null,
-            ...(businessContext === null
-              ? { scopeKind: "global", scopeKey: "global" }
-              : {}),
-          }),
-        ],
-      });
-      const result = await service.requireEnabled(CHANNEL, 1);
-      expect(result.settings).toEqual(labelSettings);
-      expect(result.operationalPolicy).toEqual({
-        id: 1,
-        version: 1,
-        snapshot: {
-          ...labelPolicy,
-          ...(businessContext === null
-            ? { scopeKind: "global", scopeKey: "global" }
-            : {}),
-        },
-      });
-    },
-  );
-
-  function automaticInput(): CustomerReturnLabelSettingsInput {
-    return settingsInput({
-      selectionMode: "cheapest_eligible",
-      carrierId: null,
-      serviceCode: null,
-      carrierRules: [
-        {
-          carrierId: "se-123",
-          serviceCodes: ["ups_ground", "ups_saver"],
-          maxWeightLb: null,
-        },
-        {
-          carrierId: "se-456",
-          serviceCodes: ["usps_ground_advantage"],
-          maxWeightLb: "20",
-        },
-      ],
-    });
-  }
-  function automaticCapabilities() {
-    return {
-      configured: true,
-      carriers: [
-        {
-          id: "se-123",
-          code: "ups",
-          name: "UPS",
-          services: [
-            { code: "ups_ground", name: "Ground" },
-            { code: "ups_saver", name: "Saver" },
-          ],
-        },
-        {
-          id: "se-456",
-          code: "usps",
-          name: "USPS",
-          services: [
-            { code: "usps_ground_advantage", name: "Ground Advantage" },
-          ],
-        },
-      ],
-    };
-  }
-  it("checks every configured automatic account and service for save and current use", async () => {
-    const input = automaticInput();
-    const { expectedVersion: _version, ...fields } = input;
-    const current = { ...labelSettings, ...fields };
-    capabilities.mockResolvedValue(automaticCapabilities());
-    store.read.mockResolvedValue(current);
-    store.save.mockResolvedValue(current);
-    expect((await service.save(CHANNEL, input, "admin")).settings).toEqual(
-      current,
-    );
-    expect((await service.requireEnabled(CHANNEL, 1)).settings).toEqual(
-      current,
-    );
-    expect(store.save).toHaveBeenCalledWith(CHANNEL, input, "admin", NOW);
-  });
-  it.each([
-    "second_account",
-    "second_service",
-    "other_account_service",
-    "different_account_same_services",
-  ])(
-    "rejects automatic %s omissions even when another service is valid",
-    async (kind) => {
-      const input = automaticInput();
-      const { expectedVersion: _version, ...fields } = input;
-      store.read.mockResolvedValue({ ...labelSettings, ...fields });
-      const catalog = automaticCapabilities();
-      if (kind === "second_account") catalog.carriers.pop();
-      if (kind === "second_service") catalog.carriers[0].services.pop();
-      if (kind === "other_account_service") catalog.carriers[1].services = [];
-      if (kind === "different_account_same_services")
-        catalog.carriers[1].id = "se-789";
-      capabilities.mockResolvedValue(catalog);
-      await expect(service.save(CHANNEL, input, "admin")).rejects.toMatchObject(
-        { code: "RETURN_LABEL_SERVICE_UNAVAILABLE" },
-      );
-      await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({
-        code: "RETURN_LABEL_SERVICE_UNAVAILABLE",
-      });
-      expect(store.save).not.toHaveBeenCalled();
-    },
-  );
-  it("permits pausing unchanged automatic rules during a provider outage", async () => {
-    const input = { ...automaticInput(), enabled: false };
-    const { expectedVersion: _version, ...fields } = input;
-    const paused = { ...labelSettings, ...fields, version: 2 };
-    store.read.mockResolvedValue(paused);
-    store.save.mockResolvedValue(paused);
-    capabilities.mockRejectedValue(new Error("provider unavailable"));
-    const result = await service.save(CHANNEL, input, "pause-admin");
-    expect(store.save).toHaveBeenCalledExactlyOnceWith(
-      CHANNEL,
-      input,
-      "pause-admin",
-      NOW,
-    );
-    expect(result.settings).toEqual(paused);
-    expect(result.providerConfigured).toBe(false);
-    expect(capabilities).toHaveBeenCalledTimes(1);
-    expect(capabilities.mock.invocationCallOrder[0]).toBeGreaterThan(
-      store.save.mock.invocationCallOrder[0],
-    );
-  });
-
-  it.each([
-    { name: "no allowed accounts", overrides: { carrierRules: [] } },
-    {
-      name: "fixed carrier in automatic mode",
-      overrides: { carrierId: "se-123" },
-    },
-    {
-      name: "fixed service in automatic mode",
-      overrides: { serviceCode: "ups_ground" },
-    },
-    {
-      name: "duplicate accounts",
-      overrides: {
-        carrierRules: [
-          automaticInput().carrierRules[0],
-          automaticInput().carrierRules[0],
-        ],
-      },
-    },
-    {
-      name: "duplicate services",
-      overrides: {
-        carrierRules: [
-          {
-            carrierId: "se-123",
-            serviceCodes: ["ups_ground", "ups_ground"],
-            maxWeightLb: null,
-          },
-        ],
-      },
-    },
-    {
-      name: "invalid weight limit",
-      overrides: {
-        carrierRules: [
-          {
-            carrierId: "se-123",
-            serviceCodes: ["ups_ground"],
-            maxWeightLb: "20lb",
-          },
-        ],
-      },
-    },
-    {
-      name: "unexpected rule authority",
-      overrides: {
-        carrierRules: [
-          {
-            carrierId: "se-123",
-            serviceCodes: ["ups_ground"],
-            maxWeightLb: null,
-            allowAnyService: true,
-          },
-        ],
-      },
-    },
-    { name: "unexpected root authority", overrides: { allowAnyCarrier: true } },
-  ])(
-    "rejects automatic input with $name before any provider read or write",
-    async ({ overrides }) => {
-      await expect(
-        service.save(CHANNEL, { ...automaticInput(), ...overrides }, "admin"),
-      ).rejects.toMatchObject({
-        code: "RETURN_LABEL_SETTINGS_INVALID",
-        status: 400,
-      });
-      expect(capabilities).not.toHaveBeenCalled();
-      expect(store.save).not.toHaveBeenCalled();
-      expect(store.read).not.toHaveBeenCalled();
-    },
-  );
-
-  it("retains fixed-service defaults when an older settings payload omits automatic-selection fields", async () => {
-    const {
-      selectionMode: _mode,
-      carrierRules: _rules,
-      ...legacyInput
-    } = settingsInput();
-    const original = structuredClone(legacyInput);
-    const result = await service.save(CHANNEL, legacyInput, "legacy-admin");
-    expect(store.save).toHaveBeenCalledExactlyOnceWith(
-      CHANNEL,
-      { ...legacyInput, selectionMode: "fixed_service", carrierRules: [] },
-      "legacy-admin",
-      NOW,
-    );
-    expect(result.settings).toMatchObject({
-      selectionMode: "fixed_service",
-      carrierRules: [],
-      carrierId: "se-123",
-      serviceCode: "ups_ground",
-    });
-    expect(legacyInput).toEqual(original);
-  });
-
-  const invalidPolicies: [string, Partial<ReturnPolicy>][] = [
-    ["retired", { status: "retired" }],
-    ["wholesale", { businessContext: "wholesale" }],
-    ["another shop", { channelId: 104 }],
-    ["vendor scoped", { vendorId: 2 }],
-    ["store scoped", { storeConnectionId: 2 }],
-    ["zero-day window", { returnWindowDays: 0 }],
-    ["vendor destination", { returnDestination: "vendor" }],
-    ["vendor approval", { approvalAuthority: "vendor" }],
-    ["vendor labels", { labelProvider: "vendor" }],
-    ["customer postage", { returnShippingPayer: "customer" }],
-    ["marketplace refund", { customerRefundAuthority: "marketplace" }],
-    ["vendor inspection", { inspectionOwner: "vendor" }],
-    ["vendor settlement", { vendorSettlementTrigger: "inspection_approved" }],
-  ];
-  it.each(invalidPolicies)(
-    "excludes %s policy from both configuration choices and current enablement",
-    async (_name, overrides) => {
-      const invalidPolicy = policy(overrides);
-      expect(isPortalReturnPolicy(invalidPolicy, CHANNEL)).toBe(false);
-      store.catalog.mockResolvedValue({
-        warehouses: [warehouse()],
-        policies: [invalidPolicy],
-      });
-      expect((await service.get(CHANNEL)).policyIssue).not.toBeNull();
-      await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({
-        code: expect.stringMatching(/^RETURN_PORTAL_POLICY_/),
-      });
-    },
-  );
-
-  it.each([
-    { warehouses: [] },
-    { warehouses: [warehouse({ id: 2 })] },
-    { warehouses: [warehouse({ isActive: 0 })] },
-    { warehouses: [warehouse({ country: "CA" })] },
-  ])(
-    "requires the explicitly configured active U.S. warehouse %#",
-    async ({ warehouses }) => {
-      store.catalog.mockResolvedValue({ warehouses, policies: [policy()] });
-      await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({
-        code: "RETURN_LABEL_CONFIGURATION_UNAVAILABLE",
-      });
-      expect(capabilities).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each(["disabled", "version"])(
-    "rejects %s settings before catalog/provider inspection",
-    async (kind) => {
-      store.read.mockResolvedValue({
-        ...labelSettings,
-        ...(kind === "disabled" ? { enabled: false } : { version: 2 }),
-      });
-      await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({
-        code: "RETURN_LABEL_SETTINGS_CHANGED",
-      });
-      expect(store.catalog).not.toHaveBeenCalled();
-      expect(capabilities).not.toHaveBeenCalled();
-    },
-  );
-
-  it("rereads enablement and exact version rather than caching a previously allowed configuration", async () => {
-    await service.requireEnabled(CHANNEL, 1);
-    store.read.mockResolvedValue({
-      ...labelSettings,
-      version: 2,
-      enabled: false,
-    });
-    await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({
-      code: "RETURN_LABEL_SETTINGS_CHANGED",
-    });
-    expect(authorizeChannel.mock.calls).toEqual([[CHANNEL], [CHANNEL]]);
-    expect(store.read.mock.calls).toEqual([[CHANNEL], [CHANNEL]]);
-  });
-
-  it.each([
-    { configured: false, carriers: [] },
-    { configured: true, carriers: [] },
-    {
-      configured: true,
-      carriers: [
-        {
-          id: "se-other",
-          code: "ups",
-          name: "Other",
-          services: [{ code: "ups_ground", name: "Ground" }],
-        },
-      ],
-    },
-    {
-      configured: true,
-      carriers: [
-        {
-          id: "se-123",
-          name: "Test",
-          code: "ups",
-          services: [{ code: "ups_express", name: "Express" }],
-        },
-      ],
-    },
-  ])(
-    "rejects unavailable or mismatched carrier/service for enabling and current use %#",
-    async (value) => {
-      capabilities.mockResolvedValue(value);
-      await expect(
-        service.save(CHANNEL, settingsInput(), "admin-1"),
-      ).rejects.toMatchObject({ code: "RETURN_LABEL_SERVICE_UNAVAILABLE" });
-      await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({
-        code: "RETURN_LABEL_SERVICE_UNAVAILABLE",
-      });
-      expect(store.save).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each([
-    {},
-    { ...settingsInput(), expectedVersion: -1 },
-    { ...settingsInput(), warehouseId: 0 },
-    { ...settingsInput(), carrierId: "not-a-provider-id" },
-    { ...settingsInput(), serviceCode: "arbitrary URL" },
-    { ...settingsInput(), contactName: "\n" },
-    { ...settingsInput(), destinationAddress: labelAddress },
-  ])("rejects malformed settings without persistence %#", async (value) => {
-    await expect(service.save(CHANNEL, value, "admin-1")).rejects.toMatchObject(
-      { code: "RETURN_LABEL_SETTINGS_INVALID", status: 400 },
-    );
-    expect(store.save).not.toHaveBeenCalled();
+  it.each(["get", "save", "control", "requireEnabled", "accepted"])("authorizes before %s reads or writes", async operation => {
+    const denied = new CustomerReturnIntakeError("DENIED", "Denied", 403);
+    authorizeChannel.mockRejectedValue(denied);
+    const result = operation === "get" ? service.get(CHANNEL) : operation === "save" ? service.save(CHANNEL, {}, "admin")
+      : operation === "control" ? service.control(CHANNEL, { paused: true, expectedVersion: 0 }, "admin")
+      : operation === "accepted" ? service.requireAcceptedShippingEnabled(CHANNEL, 51) : service.requireEnabled(CHANNEL, 1);
+    await expect(result).rejects.toBe(denied);
+    for (const method of Object.values(store)) expect(method).not.toHaveBeenCalled();
     expect(capabilities).not.toHaveBeenCalled();
   });
-
-  it("passes version CAS, actor, and injected time to persistence, then returns the persisted state", async () => {
-    const input = settingsInput({ expectedVersion: 7 });
-    const before = structuredClone(input);
-    const persisted = { ...labelSettings, version: 8 };
-    store.save.mockResolvedValue(persisted);
-    store.read.mockResolvedValue(persisted);
-    expect((await service.save(CHANNEL, input, "admin-7")).settings).toEqual(
-      persisted,
-    );
-    expect(store.save).toHaveBeenCalledExactlyOnceWith(
-      CHANNEL,
-      input,
-      "admin-7",
-      NOW,
-    );
-    expect(store.read).toHaveBeenCalledExactlyOnceWith(CHANNEL);
-    expect(input).toEqual(before);
+  it("publishes matching policy shipping, applied policy and independent pause control", async () => {
+    expect(await service.get(CHANNEL)).toMatchObject({ settings: { ...labelSettings, policyId: 1 }, control: { paused: false, version: 0 }, resolvedPolicy: { id: 1, version: 1 } });
   });
-
-  it.each([
-    "RETURN_LABEL_SETTINGS_CHANGED",
-    "RETURN_LABEL_CONFIGURATION_INVALID",
-  ])(
-    "preserves persistence %s without a second write or success read",
-    async (code) => {
-      const failure = new CustomerReturnIntakeError(
-        code,
-        "Reload the saved configuration.",
-        409,
-      );
-      store.save.mockRejectedValue(failure);
-      await expect(
-        service.save(CHANNEL, settingsInput(), "admin-1"),
-      ).rejects.toBe(failure);
-      expect(store.save).toHaveBeenCalledTimes(1);
-      expect(store.read).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each(["missing", "outage"])(
-    "allows an unchanged pause when the provider is %s",
-    async (kind) => {
-      if (kind === "outage")
-        capabilities.mockRejectedValue(new Error("secret carrier credentials"));
-      else capabilities.mockResolvedValue({ configured: false, carriers: [] });
-      const paused = { ...labelSettings, enabled: false, version: 2 };
-      store.save.mockResolvedValue(paused);
-      store.read.mockResolvedValue(paused);
-      const input = settingsInput({ enabled: false });
-      const result = await service.save(CHANNEL, input, "admin-1");
-      expect(store.save).toHaveBeenCalledExactlyOnceWith(
-        CHANNEL,
-        input,
-        "admin-1",
-        NOW,
-      );
-      expect(result.settings).toEqual(paused);
-      expect(result.providerConfigured).toBe(false);
-      expect(result.message).toMatch(
-        kind === "outage"
-          ? /could not be verified/
-          : /Configure the ShipStation/,
-      );
-      expect(JSON.stringify(result)).not.toContain("secret");
-      // The sole capability read is the post-save presentation; pause requires no provider operation.
-      expect(capabilities).toHaveBeenCalledTimes(1);
-    },
-  );
-
-  it.each(["address", "city", "state", "postalCode"] as const)(
-    "does not synthesize a missing warehouse %s",
-    (key) => {
-      expect(
-        warehouseLabelAddress(warehouse({ [key]: null }), "Return desk", null),
-      ).toBeNull();
-    },
-  );
-
-  it("uses explicit return contact fields in a complete U.S. warehouse address", () => {
-    expect(
-      warehouseLabelAddress(warehouse(), "Return desk", "512-555-0100"),
-    ).toEqual({
-      ...labelAddress,
-      name: "Return desk",
-      phone: "512-555-0100",
-    });
+  it.each([null, { ...labelSettings, policyId: 99 }])("suppresses missing or mismatched shipping %#", async settings => {
+    store.read.mockResolvedValue(settings);
+    expect((await service.get(CHANNEL)).settings).toBeNull();
+    await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({ code: "RETURN_LABEL_SETTINGS_CHANGED" });
+  });
+  it.each([{}, { enabled: true }, labelSettings])("rejects the old configuration write path %#", async raw => {
+    await expect(service.save(CHANNEL, raw, "admin")).rejects.toMatchObject({ code: "RETURN_LABEL_EDIT_POLICY", status: 409 });
+    expect(store.saveControl).not.toHaveBeenCalled(); expect(capabilities).not.toHaveBeenCalled();
+  });
+  it("new intake uses the exact resolved policy identity", async () => {
+    expect(await service.requireEnabled(CHANNEL, 1)).toMatchObject({ settings: { policyId: 1 }, operationalPolicy: { id: 1, version: 1 } });
+    store.catalog.mockResolvedValue({ warehouses: [warehouse()], policies: [labelActivePolicy({ id: 2 })] });
+    await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({ code: "RETURN_LABEL_SETTINGS_CHANGED" });
+  });
+  it("accepted returns retain original shipping after policy replacement or archive", async () => {
+    store.read.mockResolvedValue({ ...labelSettings, policyId: 2, version: 2, warehouseId: 2 });
+    store.catalog.mockResolvedValue({ warehouses: [warehouse()], policies: [] });
+    expect(await service.requireAcceptedShippingEnabled(CHANNEL, 51)).toEqual({ ...labelSettings, policyId: 1 });
+    expect(store.readAccepted).toHaveBeenCalledWith(CHANNEL, 51); expect(store.read).not.toHaveBeenCalled();
+  });
+  it.each([null, { ...labelSettings, enabled: false }])("blocks missing or disabled accepted shipping %#", async settings => {
+    store.readAccepted.mockResolvedValue(settings);
+    await expect(service.requireAcceptedShippingEnabled(CHANNEL, 51)).rejects.toMatchObject({ code: "RETURN_LABEL_SETTINGS_CHANGED" });
+  });
+  it("a channel pause stops new intake and accepted-return purchases", async () => {
+    store.readControl.mockResolvedValue({ paused: true, version: 4 });
+    await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({ code: "RETURN_LABEL_SETTINGS_CHANGED" });
+    await expect(service.requireAcceptedShippingEnabled(CHANNEL, 51)).rejects.toMatchObject({ code: "RETURN_LABEL_SETTINGS_CHANGED" });
+    expect(capabilities).not.toHaveBeenCalled();
+  });
+  it("passes pause CAS, actor and clock before any provider read, including outages", async () => {
+    capabilities.mockRejectedValue(new Error("secret provider credential"));
+    store.readControl.mockResolvedValue({ paused: true, version: 1 });
+    const result = await service.control(CHANNEL, { paused: true, expectedVersion: 0 }, "pause-admin");
+    expect(store.saveControl).toHaveBeenCalledExactlyOnceWith(CHANNEL, { paused: true, expectedVersion: 0 }, "pause-admin", NOW);
+    expect(result.control).toEqual({ paused: true, version: 1 }); expect(JSON.stringify(result)).not.toContain("secret");
+    expect(capabilities.mock.invocationCallOrder[0]).toBeGreaterThan(store.saveControl.mock.invocationCallOrder[0]);
+  });
+  it.each([{}, { paused: "yes", expectedVersion: 1 }, { paused: true, expectedVersion: -1 }, { paused: true, expectedVersion: 0, enabled: true }])("rejects malformed control requests %#", async value => {
+    await expect(service.control(CHANNEL, value, "admin")).rejects.toMatchObject({ code: "RETURN_LABEL_CONTROL_INVALID", status: 400 });
+    expect(store.saveControl).not.toHaveBeenCalled();
+  });
+  it("preserves control conflicts without a second write or success read", async () => {
+    const error = new CustomerReturnIntakeError("RETURN_LABEL_CONTROL_CHANGED", "Changed"); store.saveControl.mockRejectedValueOnce(error);
+    await expect(service.control(CHANNEL, { paused: true, expectedVersion: 1 }, "admin")).rejects.toBe(error);
+    expect(store.saveControl).toHaveBeenCalledTimes(1); expect(store.read).not.toHaveBeenCalled();
+  });
+  const invalidPolicies: Partial<ReturnPolicy>[] = [{ status: "retired" }, { businessContext: "wholesale" }, { channelId: 104 }, { vendorId: 2 }, { storeConnectionId: 2 }, { returnWindowDays: 0 }, { returnDestination: "vendor" }, { approvalAuthority: "vendor" }, { labelProvider: "vendor" }, { returnShippingPayer: "customer" }];
+  it.each(invalidPolicies)("blocks incompatible resolved policy %#", async overrides => {
+    store.catalog.mockResolvedValue({ warehouses: [warehouse()], policies: [labelActivePolicy(overrides)] });
+    await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({ code: expect.stringMatching(/^RETURN_PORTAL_POLICY_/) });
+  });
+  it.each([{ warehouses: [] }, { warehouses: [warehouse({ id: 2 })] }, { warehouses: [warehouse({ isActive: 0 })] }, { warehouses: [warehouse({ country: "CA" })] }])("requires an active domestic warehouse %#", async ({ warehouses }) => {
+    store.catalog.mockResolvedValue({ warehouses, policies: [labelActivePolicy()] });
+    await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({ code: "RETURN_LABEL_CONFIGURATION_UNAVAILABLE" }); expect(capabilities).not.toHaveBeenCalled();
+  });
+  it.each([{ ...labelSettings, enabled: false }, { ...labelSettings, version: 2 }])("rejects disabled or stale shipping %#", async settings => {
+    store.read.mockResolvedValue(settings);
+    await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({ code: "RETURN_LABEL_SETTINGS_CHANGED" }); expect(capabilities).not.toHaveBeenCalled();
+  });
+  it.each([{ configured: false, carriers: [] }, { configured: true, carriers: [] }, { configured: true, carriers: [{ id: "se-123", code: "ups", name: "UPS", services: [{ code: "ups_air", name: "Air" }] }] }])("rechecks connected carriers and services %#", async value => {
+    capabilities.mockResolvedValue(value); await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({ code: "RETURN_LABEL_SERVICE_UNAVAILABLE" });
+  });
+  it("checks every allowed automatic carrier and service", async () => {
+    store.read.mockResolvedValue({ ...labelSettings, policyId: 1, selectionMode: "cheapest_eligible", carrierId: null, serviceCode: null, carrierRules: [{ carrierId: "se-123", serviceCodes: ["ups_ground"], maxWeightLb: null }, { carrierId: "se-456", serviceCodes: ["usps_ground_advantage"], maxWeightLb: "20" }] });
+    await expect(service.requireEnabled(CHANNEL, 1)).rejects.toMatchObject({ code: "RETURN_LABEL_SERVICE_UNAVAILABLE" });
+    capabilities.mockResolvedValue({ configured: true, carriers: [{ id: "se-123", code: "ups", name: "UPS", services: [{ code: "ups_ground", name: "Ground" }] }, { id: "se-456", code: "usps", name: "USPS", services: [{ code: "usps_ground_advantage", name: "Ground Advantage" }] }] });
+    expect((await service.requireEnabled(CHANNEL, 1)).settings.selectionMode).toBe("cheapest_eligible");
+  });
+  it.each(["address", "city", "state", "postalCode"] as const)("never synthesizes missing warehouse %s", key => {
+    expect(warehouseLabelAddress(warehouse({ [key]: null }), "Return desk", null)).toBeNull();
+  });
+  it("uses explicit return contact fields", () => {
+    expect(warehouseLabelAddress(warehouse(), "Return desk", "512-555-0100")).toEqual({ ...labelAddress, name: "Return desk", phone: "512-555-0100" });
   });
 });

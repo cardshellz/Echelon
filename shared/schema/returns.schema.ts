@@ -5,7 +5,7 @@ import { dropshipStoreConnections, dropshipVendors, dropshipWalletLedger } from 
 import { inventoryLots, inventoryTransactions } from "./inventory.schema";
 import { omsOrderLines, omsOrders } from "./oms.schema";
 import { orderItems, orders, returnItems, returns } from "./orders.schema";
-import { warehouseLocations } from "./warehouse.schema";
+import { warehouseLocations, warehouses } from "./warehouse.schema";
 
 export const returnsSchema = pgSchema("returns");
 export const returnPolicyScopeKinds = ["global", "business_context", "channel_context", "vendor_context", "vendor_channel_context", "store"] as const;
@@ -104,6 +104,43 @@ export const returnPolicyCommands = returnsSchema.table("return_policy_commands"
 }, (table) => [uniqueIndex("return_policy_commands_idempotency_uq").on(table.idempotencyKey)]);
 
 export type ReturnPolicy = typeof returnPolicies.$inferSelect;
+
+export const returnPolicyShipping = returnsSchema.table("return_policy_shipping", {
+  policyId: integer("policy_id").primaryKey().references(() => returnPolicies.id),
+  configuration: jsonb("configuration"),
+  warehouseId: integer("warehouse_id").generatedAlwaysAs(sql`(configuration->>'warehouseId')::integer`).references(() => warehouses.id),
+  createdBy: varchar("created_by", { length: 255 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+});
+
+export const customerReturnLabelControls = returnsSchema.table("customer_return_label_controls", {
+  channelId: integer("channel_id").primaryKey().references(() => channels.id),
+  version: integer("version").notNull(),
+  paused: boolean("paused").notNull(),
+  updatedBy: varchar("updated_by", { length: 255 }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+}, (table) => [check("customer_return_label_controls_version_chk", sql`${table.version} > 0`)]);
+
+export const customerReturnLabelControlEvents = returnsSchema.table("customer_return_label_control_events", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id),
+  version: integer("version").notNull(),
+  actor: varchar("actor", { length: 255 }).notNull(),
+  beforeSnapshot: jsonb("before_snapshot"),
+  afterSnapshot: jsonb("after_snapshot").notNull(),
+  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+}, (table) => [uniqueIndex("customer_return_label_control_events_version_uq").on(table.channelId, table.version)]);
+
+export const returnPolicyShippingMigrations = returnsSchema.table("return_policy_shipping_migrations", {
+  channelId: integer("channel_id").primaryKey().references(() => channels.id),
+  sourceSettingsVersion: integer("source_settings_version").notNull(),
+  sourceSettingsSnapshot: jsonb("source_settings_snapshot").notNull(),
+  resolvedPolicyId: integer("resolved_policy_id").references(() => returnPolicies.id),
+  newPolicyId: integer("new_policy_id").references(() => returnPolicies.id),
+  outcome: varchar("outcome", { length: 30 }).notNull(),
+  actor: varchar("actor", { length: 255 }).notNull(),
+  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+}, (table) => [uniqueIndex("return_policy_shipping_migrations_policy_uq").on(table.newPolicyId)]);
 
 export const returnCases = returnsSchema.table("return_cases", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),

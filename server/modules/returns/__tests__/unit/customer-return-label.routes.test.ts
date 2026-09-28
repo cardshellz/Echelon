@@ -59,6 +59,7 @@ function settings(): CustomerReturnLabelSettingsState {
   return {
     channelId: 36,
     providerConfigured: true,
+    control: { paused: false, version: 0 },
     settings: structuredClone(labelSettings),
     warehouses: [],
     resolvedPolicy: null,
@@ -69,7 +70,7 @@ function settings(): CustomerReturnLabelSettingsState {
 }
 
 function settingsInput() {
-  const { version, destinationAddress: _address, ...fields } = labelSettings;
+  const { version, destinationAddress: _address, policyId: _policyId, ...fields } = labelSettings;
   return { ...fields, expectedVersion: version };
 }
 
@@ -114,6 +115,7 @@ describe("private customer return label HTTP boundaries", () => {
       settings: {
         get: vi.fn(async () => settings()),
         save: vi.fn(async () => settings()),
+        control: vi.fn(async () => settings()),
       },
       labels: {
         status: vi.fn(async () => status()),
@@ -224,6 +226,7 @@ describe("private customer return label HTTP boundaries", () => {
   const endpoints = [
     { path: SETTINGS, method: "GET" },
     { path: SETTINGS, method: "PUT", body: settingsInput() },
+    { path: `${SETTINGS}/control`, method: "POST", body: { paused: true, expectedVersion: 0 } },
     { path: SUBMIT, method: "POST", body: submission() },
     { path: STATUS, method: "GET" },
     { path: `${STATUS}/progress`, method: "POST", body: {} },
@@ -383,6 +386,19 @@ describe("private customer return label HTTP boundaries", () => {
     );
   });
 
+  it("forwards only the explicit channel-pause CAS command and authenticated actor", async () => {
+    const input = { paused: true, expectedVersion: 0 };
+    expect((await request(`${SETTINGS}/control`, "POST", input, commandHeaders())).status).toBe(200);
+    expect(services.settings.control).toHaveBeenCalledExactlyOnceWith(36, input, "admin-1");
+    expect((await request(`${SETTINGS}/control`, "POST", { ...input, warehouseId: 99 }, commandHeaders())).status).toBe(400);
+    expect(services.settings.control).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns an actionable policy-edit error from the retired configuration endpoint", async () => {
+    vi.mocked(services.settings.save).mockRejectedValueOnce(new CustomerReturnIntakeError("RETURN_LABEL_EDIT_POLICY", "Edit return shipping in Policies.", 409));
+    expect(await request(SETTINGS, "PUT", settingsInput(), commandHeaders())).toMatchObject({ status: 409, body: { error: { code: "RETURN_LABEL_EDIT_POLICY" } } });
+  });
+
   it.each(endpoints)(
     "preserves shop denial for $method $path with no downstream read/write",
     async (endpoint) => {
@@ -400,7 +416,7 @@ describe("private customer return label HTTP boundaries", () => {
         authorizeChannel: deny,
         now: () => new Date(0),
         capabilities: downstream,
-        store: { read: downstream, catalog: downstream, save: downstream },
+        store: { read: downstream, readAccepted: downstream, readControl: downstream, saveControl: downstream, catalog: downstream },
       });
       services.labels = new CustomerReturnLabelsService({
         authorizeChannel: deny,

@@ -234,6 +234,8 @@ integration("return policy archive on disposable PostgreSQL", () => {
 });
 function createInput(idempotencyKey: string): CreateReturnPolicyInput {
   return {
+    shipping: null,
+    expectedPolicyId: null,
     idempotencyKey,
     actor: "admin",
     name: "Global fallback",

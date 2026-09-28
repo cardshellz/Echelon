@@ -106,6 +106,8 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/returns/__tests__/integration/customer-return-intake.repository.test.ts",
   "server/modules/returns/__tests__/integration/customer-return-labels.repository.test.ts",
   "server/modules/returns/__tests__/integration/return-policy-archive.repository.test.ts",
+  "server/modules/returns/__tests__/integration/return-policy-shipping.repository.test.ts",
+  "server/modules/returns/__tests__/integration/return-policy-shipping-migration.test.ts",
   "server/modules/orders/__tests__/integration/pick-correction.integration.test.ts",
   "server/modules/oms/__tests__/integration/channel-receipt-immutable-replay.integration.test.ts",
   "server/modules/oms/__tests__/integration/oms-disposition-cutover-replay.integration.test.ts",

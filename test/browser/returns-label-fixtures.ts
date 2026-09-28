@@ -30,6 +30,7 @@ export async function installReturnLabelFixtures(
   };
   let settings: CustomerReturnLabelSettingsState = {
     channelId: 36,
+    control: { paused: false, version: 0 },
     providerConfigured: true,
     settings: options.unconfigured
       ? null
@@ -42,7 +43,8 @@ export async function installReturnLabelFixtures(
           carrierRules: [],
           contactName: "Fixture returns",
           contactPhone: null,
-          version: 1,
+          version: 2,
+          policyId: 2,
           destinationAddress: address,
         },
     warehouses: [{ id: 1, name: "Fixture warehouse", address }],
@@ -89,8 +91,9 @@ export async function installReturnLabelFixtures(
     const path = new URL(request.url()).pathname;
     const settingRoute =
       path === `${CUSTOMER_RETURN_LABEL_API}/label-settings/36`;
+    const controlRoute = path === `${CUSTOMER_RETURN_LABEL_API}/label-settings/36/control`;
     const labelsRoute = path.startsWith(`${CUSTOMER_RETURN_LABEL_API}/labels`);
-    if (!settingRoute && !labelsRoute) return route.fallback();
+    if (!settingRoute && !controlRoute && !labelsRoute) return route.fallback();
     if (settingRoute && request.method() === "GET") settingsReads++;
     if (denied)
       return route.fulfill({
@@ -108,6 +111,19 @@ export async function installReturnLabelFixtures(
     }
     if (settingRoute && request.method() === "GET")
       return route.fulfill({ json: settings });
+    if (controlRoute && request.method() === "POST") {
+      const input = request.postDataJSON();
+      if (input.expectedVersion !== settings.control.version) return route.fulfill({
+        status: 409, json: { error: { code: "RETURN_LABEL_CONTROL_CHANGED", message: "Label controls changed. Refresh before continuing." } },
+      });
+      settingsWrites.push(input);
+      settings = {
+        ...settings,
+        control: { paused: input.paused, version: settings.control.version + 1 },
+        settings: settings.settings ? { ...settings.settings, enabled: !input.paused } : null,
+      };
+      return route.fulfill({ json: settings });
+    }
     if (settingRoute && request.method() === "PUT") {
       const input = customerReturnLabelSettingsInputSchema.parse(
         request.postDataJSON(),
