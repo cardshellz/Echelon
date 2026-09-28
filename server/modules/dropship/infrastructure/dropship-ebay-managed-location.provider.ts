@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { ebaySellRequestHeaders } from "./ebay-sell-headers";
 import { pool as defaultPool } from "../../../db";
 import type {
   DropshipEbayManagedLocation,
@@ -361,11 +362,7 @@ implements DropshipEbayManagedLocationProvider {
     try {
       response = await (this.deps.fetchFn ?? fetch)(`${input.baseUrl}${input.path}`, {
         method: input.method,
-        headers: {
-          Accept: "application/json",
-          Authorization: `Bearer ${input.accessToken}`,
-          ...(input.body ? { "Content-Type": "application/json" } : {}),
-        },
+        headers: ebaySellRequestHeaders({ accessToken: input.accessToken, method: input.method }),
         body: input.body ? JSON.stringify(input.body) : undefined,
       });
     } catch (error) {

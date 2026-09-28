@@ -188,6 +188,17 @@ describe("dropship marketplace listing push providers", () => {
     expect(fetcher.calls[3]?.init.method).toBe("GET");
     expect(fetcher.calls[4]?.url).toContain("/sell/inventory/v1/offer/offer-101/publish");
     expect(quantityAdmission.item.mock.calls.map(([sku]) => sku)).toEqual(["SKU-101", "SKU-101", "SKU-101"]);
+
+    // eBay refuses a Sell API call without its locale headers (25709 "Invalid
+    // value for header Accept-Language"); every call carries them like the
+    // channel client's, the content locale on writes only.
+    for (const call of fetcher.calls) {
+      const headers = new Headers(call.init.headers);
+      expect(headers.get("Accept-Language")).toBe("en-US");
+      expect(headers.get("X-EBAY-C-MARKETPLACE-ID")).toBe("EBAY_US");
+      expect(headers.get("Content-Language")).toBe(call.init.method === "GET" ? null : "en-US");
+    }
+    expect(fetcher.calls.map((call) => call.init.method)).toEqual(["GET", "PUT", "PUT", "GET", "POST"]);
   });
 
   it("creates an authenticated eBay replacement lifecycle client for a Dropship store", async () => {
@@ -328,7 +339,10 @@ describe("dropship marketplace listing push providers", () => {
     }))).rejects.toMatchObject({
       code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
       message: "eBay listing push failed with HTTP 400: Invalid package details",
-      context: { status: 400, retryable: false, providerErrors: [{ errorId: null, message: "Invalid package details" }] },
+      context: {
+        status: 400, retryable: false, providerErrors: [{ errorId: null, message: "Invalid package details" }],
+        endpoint: "GET /sell/inventory/v1/offer?sku=SKU-101&marketplace_id=EBAY_US",
+      },
     });
 
     expect(credentials.authFailures).toHaveLength(0);

@@ -1,5 +1,6 @@
 import { DropshipError } from "../domain/errors";
 import { describeEbayErrors, parseEbayErrorBody } from "./ebay-error-body";
+import { ebaySellRequestHeaders } from "./ebay-sell-headers";
 import { createProviderRequestDeadline } from "../../channels/provider-request-limits";
 import { executeEbayQuantityHttp } from "../../channels/adapters/ebay/ebay-quantity-http";
 import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../channels/quantity-publication-request";
@@ -513,23 +514,16 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
   }): Promise<T> {
     if (ebayQuantityMutationIdentity(input.method,input.path,input.body)) {
       return executeEbayQuantityHttp<T>({ url: `${input.baseUrl}${input.path}`,method: input.method,path: input.path,body: input.body,
-        headers: { Authorization: `Bearer ${input.credential.accessToken}`,"Content-Type": "application/json",Accept: "application/json",
-          "Content-Language": "en-US","X-EBAY-C-MARKETPLACE-ID": input.config.marketplaceId },
+        headers: ebaySellRequestHeaders({ accessToken: input.credential.accessToken, method: input.method, marketplaceId: input.config.marketplaceId }),
         request: this.fetchImpl,now: () => this.clock.now(),
-        onFailure: (status,text) => this.throwListingHttpError(input.credential,status,text) });
+        onFailure: (status,text) => this.throwListingHttpError(input.credential,status,text,`${input.method} ${input.path}`) });
     }
     const deadline = createProviderRequestDeadline();
     try {
     const response = await this.fetchImpl(`${input.baseUrl}${input.path}`, {
       method: input.method,
       signal: deadline.signal,
-      headers: {
-        Authorization: `Bearer ${input.credential.accessToken}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "Content-Language": "en-US",
-        "X-EBAY-C-MARKETPLACE-ID": input.config.marketplaceId,
-      },
+      headers: ebaySellRequestHeaders({ accessToken: input.credential.accessToken, method: input.method, marketplaceId: input.config.marketplaceId }),
       body: input.body ? JSON.stringify(input.body) : undefined,
     });
     const text = await response.text();
@@ -537,7 +531,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       if (response.ok) return undefined as T;
     }
     if (!response.ok) {
-      await this.throwListingHttpError(input.credential,response.status,text);
+      await this.throwListingHttpError(input.credential,response.status,text,`${input.method} ${input.path}`);
     }
     return parseEbayJson<T>({
       text,
@@ -547,7 +541,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     } finally { deadline.dispose(); }
   }
 
-  private async throwListingHttpError(credential: DropshipMarketplaceStoreCredentials,status: number,text: string): Promise<never> {
+  private async throwListingHttpError(credential: DropshipMarketplaceStoreCredentials,status: number,text: string,endpoint: string): Promise<never> {
       const accessTokenRejected = isEbayResourceAuthFailureStatus(status);
       // eBay's own reason travels with the failure: it is the only thing that
       // tells an operator or vendor what to change before trying again.
@@ -572,6 +566,8 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         {
           retryable: accessTokenRejected || status === 429 || status >= 500,
           status,
+          // Which eBay call refused: the reason alone does not say.
+          endpoint,
           body: text.slice(0, 1000),
           providerErrors,
         },

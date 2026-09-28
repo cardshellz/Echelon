@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { ebaySellRequestHeaders } from "./ebay-sell-headers";
 import { executeEbayQuantityHttpResponse } from "../../channels/adapters/ebay/ebay-quantity-http";
 import { PROVIDER_REQUEST_TIMEOUT_MS } from "../../channels/provider-request-limits";
 import {
@@ -257,8 +258,7 @@ export class EbayDropshipInventoryPublicationTransportAdapter
       try {
         return await executeEbayQuantityHttpResponse({
           url: `${input.baseUrl}${input.path}`,method: input.method,path: input.path,body: input.body,
-          headers: { Authorization: `Bearer ${input.credential.accessToken}`,"Content-Type": "application/json",
-            Accept: "application/json","Content-Language": "en-US", "X-EBAY-C-MARKETPLACE-ID": input.marketplaceId },
+          headers: ebaySellRequestHeaders({ accessToken: input.credential.accessToken, method: input.method, marketplaceId: input.marketplaceId }),
           request: this.fetchFn,now: () => this.clock.now(),
           onFailure: (status,text) => this.throwInventoryHttpError(input.destination,status,text),
         });
@@ -285,13 +285,11 @@ export class EbayDropshipInventoryPublicationTransportAdapter
         method: input.method,
         redirect: "error",
         signal: AbortSignal.timeout(PROVIDER_REQUEST_TIMEOUT_MS),
-        headers: {
-          Authorization: `Bearer ${input.credential.accessToken}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          "Content-Language": "en-US",
-          "X-EBAY-C-MARKETPLACE-ID": ebayInventoryMarketplace(input.credential.config.marketplaceId),
-        },
+        headers: ebaySellRequestHeaders({
+          accessToken: input.credential.accessToken,
+          method: input.method,
+          marketplaceId: ebayInventoryMarketplace(input.credential.config.marketplaceId),
+        }),
       });
     } catch (error) {
       throw new InventoryPublicationTransportError(
