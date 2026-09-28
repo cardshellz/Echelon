@@ -77,17 +77,66 @@ export function CustomerReturnLabelSettings({
   });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [backgroundRefreshing, setBackgroundRefreshing] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [returnRefresh, setReturnRefresh] = useState(0);
   const [saved, setSaved] = useState(false);
   const [versionConflict, setVersionConflict] = useState(false);
   const saveController = useRef<AbortController | null>(null);
   const loadedChannel = useRef<number | null>(null);
   const draftDirty = useRef(false);
   const draftVersion = useRef<number | null>(null);
+  const operationInProgress = useRef(false);
+  const handledReturnRefresh = useRef(0);
+
+  useEffect(() => {
+    let away = document.visibilityState !== "visible" || !document.hasFocus();
+    function returned() {
+      if (!away || document.visibilityState !== "visible") return;
+      away = false;
+      setReturnRefresh((value) => value + 1);
+    }
+    function left() {
+      away = true;
+    }
+    function visibilityChanged() {
+      if (document.visibilityState === "visible") returned();
+      else left();
+    }
+    // One return can emit both visibility and focus. Treat them as one refresh,
+    // and retain it while a configuration write or return operation is active.
+    window.addEventListener("blur", left);
+    window.addEventListener("focus", returned);
+    document.addEventListener("visibilitychange", visibilityChanged);
+    return () => {
+      window.removeEventListener("blur", left);
+      window.removeEventListener("focus", returned);
+      document.removeEventListener("visibilitychange", visibilityChanged);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      returnRefresh === handledReturnRefresh.current ||
+      busy ||
+      locked ||
+      operationInProgress.current ||
+      document.visibilityState !== "visible"
+    )
+      return;
+    handledReturnRefresh.current = returnRefresh;
+    operationInProgress.current = true;
+    setBackgroundRefreshing(true);
+    setBusy(true);
+    setAttempt((value) => value + 1);
+  }, [returnRefresh, busy, locked]);
+
   useEffect(() => {
     const controller = new AbortController();
+    operationInProgress.current = true;
     const sameChannel = loadedChannel.current === channelId;
     if (!sameChannel) {
+      setBackgroundRefreshing(false);
       setDraft({ ...emptyDraft });
       draftDirty.current = false;
       draftVersion.current = null;
@@ -96,7 +145,7 @@ export function CustomerReturnLabelSettings({
     setBusy(true);
     setError(null);
     setSaved(false);
-    setState(null);
+    if (!sameChannel) setState(null);
     onState(null);
     void loadReturnLabelSettings(channelId, controller.signal)
       .then((next) => {
@@ -117,6 +166,7 @@ export function CustomerReturnLabelSettings({
       })
       .catch((cause) => {
         if (controller.signal.aborted) return;
+        setState(null);
         if (cause instanceof PreviewAccessError) onAccessDenied(cause.message);
         else
           setError(
@@ -126,7 +176,11 @@ export function CustomerReturnLabelSettings({
           );
       })
       .finally(() => {
-        if (!controller.signal.aborted) setBusy(false);
+        if (!controller.signal.aborted) {
+          operationInProgress.current = false;
+          setBackgroundRefreshing(false);
+          setBusy(false);
+        }
       });
     return () => controller.abort();
   }, [channelId, attempt, onState, onAccessDenied]);
@@ -167,13 +221,21 @@ export function CustomerReturnLabelSettings({
     [],
   );
   async function save() {
-    if (!parsed?.success || !canSave || busy || locked) return;
+    if (
+      !parsed?.success ||
+      !canSave ||
+      busy ||
+      locked ||
+      operationInProgress.current
+    )
+      return;
     await persist(parsed.data);
   }
   async function setEnabled(enabled: boolean) {
     if (
       !state?.settings ||
       busy ||
+      operationInProgress.current ||
       (locked && !accepted) ||
       (enabled && !state.providerConfigured)
     )
@@ -193,6 +255,8 @@ export function CustomerReturnLabelSettings({
   }
   async function persist(input: CustomerReturnLabelSettingsInput) {
     const controller = new AbortController();
+    operationInProgress.current = true;
+    setBackgroundRefreshing(false);
     saveController.current = controller;
     setBusy(true);
     setError(null);
@@ -223,7 +287,10 @@ export function CustomerReturnLabelSettings({
         );
       setState(null);
     } finally {
-      if (!controller.signal.aborted) setBusy(false);
+      if (!controller.signal.aborted) {
+        operationInProgress.current = false;
+        setBusy(false);
+      }
     }
   }
   function update(patch: Partial<ReturnLabelSettingsDraft>) {
@@ -255,7 +322,13 @@ export function CustomerReturnLabelSettings({
         <Button
           variant="ghost"
           disabled={busy}
-          onClick={() => setAttempt((value) => value + 1)}
+          onClick={() => {
+            if (operationInProgress.current) return;
+            operationInProgress.current = true;
+            setBackgroundRefreshing(false);
+            setBusy(true);
+            setAttempt((value) => value + 1);
+          }}
         >
           Refresh label settings
         </Button>
@@ -343,8 +416,8 @@ export function CustomerReturnLabelSettings({
               <span className="sr-only"> (opens in a new tab)</span>
             </a>
             <p className="text-xs text-muted-foreground">
-              After changing policies, refresh label settings here. Your unsaved
-              shipping choices will stay in place.
+              Policy settings refresh when you return to this tab. You can also
+              refresh them above. Your unsaved shipping choices stay in place.
             </p>
           </section>
           {state.settings?.enabled && (
@@ -367,7 +440,11 @@ export function CustomerReturnLabelSettings({
           )}
           {!compact && (
             <fieldset
-              disabled={busy || locked || !state.providerConfigured}
+              disabled={
+                (busy && !backgroundRefreshing) ||
+                locked ||
+                !state.providerConfigured
+              }
               className="space-y-3"
             >
               <div className="grid gap-3 sm:grid-cols-2">
@@ -584,6 +661,7 @@ export function CustomerReturnLabelSettings({
                     <Button
                       type="button"
                       variant="outline"
+                      disabled={busy}
                       onClick={() => resolveVersionConflict(false)}
                     >
                       Use saved settings
@@ -591,6 +669,7 @@ export function CustomerReturnLabelSettings({
                     <Button
                       type="button"
                       variant="outline"
+                      disabled={busy}
                       onClick={() => resolveVersionConflict(true)}
                     >
                       Keep my changes
@@ -630,7 +709,7 @@ export function CustomerReturnLabelSettings({
                 </div>
               )}
               <Button
-                disabled={!canSave}
+                disabled={busy || !canSave}
                 aria-describedby={
                   [
                     versionConflict
