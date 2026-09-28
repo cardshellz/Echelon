@@ -39,6 +39,48 @@ async function showTestingControls(page: Page) {
   await expect(selector).toBeVisible();
 }
 
+/** Exercise the browser lifecycle signals without opening an external page. */
+async function returnToSettingsTab(page: Page, signal: "focus" | "visibility") {
+  await page.evaluate((kind) => {
+    if (kind === "focus") {
+      window.dispatchEvent(new Event("blur"));
+      window.dispatchEvent(new Event("focus"));
+      return;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(
+      document,
+      "visibilityState",
+    );
+    try {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "hidden",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "visible",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+      // Browsers may emit both events for one return; only one read is needed.
+      window.dispatchEvent(new Event("focus"));
+    } finally {
+      if (descriptor)
+        Object.defineProperty(document, "visibilityState", descriptor);
+      else delete (document as Partial<Document>).visibilityState;
+    }
+  }, signal);
+}
+
+async function finishBrowserUpdates(page: Page) {
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+}
+
 async function useSampleSource(page: Page) {
   await showTestingControls(page);
   await page.getByLabel("Order source", { exact: true }).selectOption("sample");
@@ -2189,7 +2231,7 @@ test("admin automatic return labels require explicit services and editable per-a
   expect(fixture.failures).toEqual([]);
 });
 
-test("shipping settings save independently of policy availability and preserve edits when the applied policy changes", async ({
+test("shipping settings save independently of policy availability and preserve edits on automatic policy refresh", async ({
   page,
 }, testInfo) => {
   const fixture = await installReturnPreviewFixtures(page);
@@ -2288,10 +2330,11 @@ test("shipping settings save independently of policy availability and preserve e
     },
     policyIssue: null,
   });
-  await page
-    .getByRole("button", { name: "Refresh label settings", exact: true })
-    .click();
+  const readsBeforeReturn = labels.settingsReads;
+  await returnToSettingsTab(page, "focus");
   await expect(policy).toContainText("Fixture current policy · version 2");
+  await finishBrowserUpdates(page);
+  expect(labels.settingsReads).toBe(readsBeforeReturn + 1);
   await expect(policy).toContainText("60-day return window");
   await expect(
     page.getByLabel("Return contact name", { exact: true }),
@@ -2324,6 +2367,279 @@ test("shipping settings save independently of policy availability and preserve e
   });
   expect(labels.submissions).toEqual([]);
   expect(labels.progressCalls).toBe(0);
+  expect(labels.failures).toEqual([]);
+  expect(fixture.failures).toEqual([]);
+});
+
+for (const signal of ["focus", "visibility"] as const) {
+  test(`${signal} policy refresh preserves a reviewed return and its packed boxes`, async ({
+    page,
+  }) => {
+    const fixture = await installReturnPreviewFixtures(page);
+    const labels = await installReturnLabelFixtures(page);
+    await prepareLiveLabels(page, 2);
+    await showTestingControls(page);
+    const canvas = page.getByTestId("preview-canvas");
+    const reviewedText = await canvas.textContent();
+    const readsBefore = labels.settingsReads;
+    const reviewRequestsBefore = fixture.previewRequests.filter((request) =>
+      request.path.endsWith("/live/review"),
+    ).length;
+    await returnToSettingsTab(page, signal);
+    await expect.poll(() => labels.settingsReads).toBe(readsBefore + 1);
+    await expect(
+      page.getByRole("button", { name: "Get return labels", exact: true }),
+    ).toBeEnabled();
+    await expect(canvas).toHaveText(reviewedText!);
+    expect(
+      fixture.previewRequests.filter((request) =>
+        request.path.endsWith("/live/review"),
+      ),
+    ).toHaveLength(reviewRequestsBefore);
+
+    await page
+      .getByRole("button", { name: "Back to packing", exact: true })
+      .click();
+    labels.updateCatalog({
+      resolvedPolicy: {
+        id: 3,
+        name: "Updated fixture policy",
+        version: 3,
+        returnWindowDays: 365,
+        scopeKind: "channel_context",
+      },
+    });
+    await returnToSettingsTab(page, signal);
+    await expect(page.getByTestId("return-applied-policy")).toContainText(
+      "Updated fixture policy · version 3",
+    );
+    await expect(page.getByTestId("return-applied-policy")).toContainText(
+      "365-day return window",
+    );
+    await expect(
+      page.getByRole("heading", {
+        name: "How will you pack your return?",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(page.locator('[data-testid^="preview-box-"]')).toHaveCount(2);
+    await expectBoxQuantity(page, 1, "sample-line-1", 1, 2);
+    await expectBoxQuantity(page, 2, "sample-line-1", 1, 2);
+    await expectPackingLine(page, "sample-line-1", 2, 2);
+    await finishBrowserUpdates(page);
+    expect(labels.settingsReads).toBe(readsBefore + 2);
+    expect(labels.settingsWrites).toEqual([]);
+    expect(labels.submissions).toEqual([]);
+    expect(fixture.failures).toEqual([]);
+    expect(labels.failures).toEqual([]);
+  });
+}
+
+test("automatic policy refresh waits for an in-flight shipping settings save", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const labels = await installReturnLabelFixtures(page);
+  await page.goto("/returns/label-settings?channelId=36");
+  await page
+    .getByLabel("Return contact name", { exact: true })
+    .fill("Saved receiving desk");
+  const readsBefore = labels.settingsReads;
+  let releaseSave!: () => void;
+  const heldSave = new Promise<void>((resolve) => {
+    releaseSave = resolve;
+  });
+  let observeSave!: () => void;
+  const saveObserved = new Promise<void>((resolve) => {
+    observeSave = resolve;
+  });
+  let holding = false;
+  const readsDuringSave: string[] = [];
+  await page.route(`**${PREVIEW_API}/live/label-settings/36`, async (route) => {
+    if (route.request().method() === "PUT") {
+      holding = true;
+      observeSave();
+      await heldSave;
+      holding = false;
+    } else if (holding) readsDuringSave.push(route.request().method());
+    return route.fallback();
+  });
+  await page
+    .getByRole("button", { name: "Save label settings", exact: true })
+    .click();
+  await saveObserved;
+  await returnToSettingsTab(page, "visibility");
+  await returnToSettingsTab(page, "focus");
+  await finishBrowserUpdates(page);
+  expect(labels.settingsReads).toBe(readsBefore);
+  expect(readsDuringSave).toEqual([]);
+  labels.updateCatalog({
+    resolvedPolicy: {
+      id: 3,
+      name: "Saved-time policy",
+      version: 3,
+      returnWindowDays: 365,
+      scopeKind: "channel_context",
+    },
+  });
+  releaseSave();
+  await expect.poll(() => labels.settingsReads).toBe(readsBefore + 1);
+  await expect(page.getByTestId("return-applied-policy")).toContainText(
+    "Saved-time policy · version 3",
+  );
+  await expect(
+    page.getByLabel("Return contact name", { exact: true }),
+  ).toHaveValue("Saved receiving desk");
+  await expect(
+    page.getByRole("button", { name: "Save label settings", exact: true }),
+  ).toBeEnabled();
+  await finishBrowserUpdates(page);
+  expect(labels.settingsReads).toBe(readsBefore + 1);
+  expect(labels.settingsWrites).toHaveLength(1);
+  expect(labels.settingsWrites[0]).toMatchObject({
+    expectedVersion: 1,
+    contactName: "Saved receiving desk",
+  });
+  expect(readsDuringSave).toEqual([]);
+  expect(labels.failures).toEqual([]);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("background policy refresh preserves focused draft editing and blocks saves until the read finishes", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const labels = await installReturnLabelFixtures(page);
+  await page.goto("/returns/label-settings?channelId=36");
+  const contact = page.getByLabel("Return contact name", { exact: true });
+  const save = page.getByRole("button", {
+    name: "Save label settings",
+    exact: true,
+  });
+  await contact.fill("My receiving desk");
+  await contact.evaluate((element: HTMLInputElement) =>
+    element.setSelectionRange(3, 12),
+  );
+  const readsBefore = labels.settingsReads;
+  let releaseRead!: () => void;
+  const heldRead = new Promise<void>((resolve) => {
+    releaseRead = resolve;
+  });
+  let observeRead!: () => void;
+  const readObserved = new Promise<void>((resolve) => {
+    observeRead = resolve;
+  });
+  let holding = false;
+  const writesDuringRead: string[] = [];
+  await page.route(`**${PREVIEW_API}/live/label-settings/36`, async (route) => {
+    if (route.request().method() === "GET") {
+      holding = true;
+      observeRead();
+      await heldRead;
+      holding = false;
+    } else if (holding) writesDuringRead.push(route.request().method());
+    return route.fallback();
+  });
+  await returnToSettingsTab(page, "focus");
+  await readObserved;
+  await expect(contact).toBeFocused();
+  await expect(contact).toBeEnabled();
+  expect(
+    await contact.evaluate((element: HTMLInputElement) => [
+      element.selectionStart,
+      element.selectionEnd,
+    ]),
+  ).toEqual([3, 12]);
+  await expect(save).toBeDisabled();
+  await contact.pressSequentially("updated");
+  await expect(contact).toHaveValue("My updated desk");
+  labels.updateCatalog({
+    resolvedPolicy: {
+      id: 3,
+      name: "Updated while typing",
+      version: 3,
+      returnWindowDays: 365,
+      scopeKind: "channel_context",
+    },
+  });
+  releaseRead();
+  await expect(page.getByTestId("return-applied-policy")).toContainText(
+    "Updated while typing · version 3",
+  );
+  await expect(contact).toBeFocused();
+  await expect(contact).toHaveValue("My updated desk");
+  expect(
+    await contact.evaluate((element: HTMLInputElement) => [
+      element.selectionStart,
+      element.selectionEnd,
+    ]),
+  ).toEqual([10, 10]);
+  await expect(save).toBeEnabled();
+  await finishBrowserUpdates(page);
+  expect(labels.settingsReads).toBe(readsBefore + 1);
+  expect(writesDuringRead).toEqual([]);
+  expect(labels.settingsWrites).toEqual([]);
+  expect(labels.failures).toEqual([]);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("automatic policy refresh defers while an accepted return is locked and resumes after finishing", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const labels = await installReturnLabelFixtures(page);
+  await prepareLiveLabels(page);
+  await page
+    .getByRole("button", { name: "Get return labels", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Download label for box 1", exact: true }),
+  ).toBeEnabled();
+  const readsBefore = labels.settingsReads;
+  labels.updateCatalog({
+    resolvedPolicy: null,
+    policyIssue: {
+      code: "RETURN_POLICY_MISSING",
+      message: "No active return policy applies to this shop.",
+    },
+  });
+  await returnToSettingsTab(page, "focus");
+  await finishBrowserUpdates(page);
+  expect(labels.settingsReads).toBe(readsBefore);
+  await expect(
+    page.getByRole("button", { name: "Check label status", exact: true }),
+  ).toBeEnabled();
+  await page
+    .getByRole("button", { name: "Start another return", exact: true })
+    .click();
+  await showTestingControls(page);
+  await expect(page.getByTestId("return-applied-policy")).toContainText(
+    "No active return policy applies",
+  );
+  await finishBrowserUpdates(page);
+  expect(labels.settingsReads).toBe(readsBefore + 1);
+  expect(labels.accepted).toBe(1);
+  expect(labels.submissions).toHaveLength(1);
+  expect(labels.progressCalls).toBe(1);
+  expect(labels.failures).toEqual([]);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("denied automatic settings refresh removes the existing return canvas and label capability", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const labels = await installReturnLabelFixtures(page);
+  await prepareLiveLabels(page);
+  labels.deny();
+  await returnToSettingsTab(page, "focus");
+  await expect(
+    page.getByRole("region", { name: "Portal access status", exact: true }),
+  ).toContainText("Admin access is required");
+  await expect(page.getByTestId("preview-canvas")).toHaveCount(0);
+  await expect(page.getByTestId("return-applied-policy")).toHaveCount(0);
+  expect(labels.submissions).toEqual([]);
+  expect(labels.settingsWrites).toEqual([]);
   expect(labels.failures).toEqual([]);
   expect(fixture.failures).toEqual([]);
 });

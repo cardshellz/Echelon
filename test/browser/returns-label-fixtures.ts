@@ -80,6 +80,7 @@ export async function installReturnLabelFixtures(
   let denied = false;
   let progressCalls = 0;
   let accepted = 0;
+  let settingsReads = 0;
   const submissions: CustomerReturnLabelSubmitInput[] = [];
   const settingsWrites: unknown[] = [];
   const failures: string[] = [];
@@ -90,6 +91,7 @@ export async function installReturnLabelFixtures(
       path === `${CUSTOMER_RETURN_LABEL_API}/label-settings/36`;
     const labelsRoute = path.startsWith(`${CUSTOMER_RETURN_LABEL_API}/labels`);
     if (!settingRoute && !labelsRoute) return route.fallback();
+    if (settingRoute && request.method() === "GET") settingsReads++;
     if (denied)
       return route.fulfill({
         status: 403,
@@ -236,6 +238,9 @@ export async function installReturnLabelFixtures(
     },
     get accepted() {
       return accepted;
+    },
+    get settingsReads() {
+      return settingsReads;
     },
     deny() {
       denied = true;
