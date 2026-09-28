@@ -9,6 +9,18 @@ const exclusions = z.array(z.object({
   reason: z.literal("unsupported_bundle"),
 }).strict()).max(1_000).refine(values => new Set(values.map(value => value.productVariantId)).size === values.length,
   "Duplicate excluded variant identity");
+// Only unsupported bundles are an operator choice. The other reasons are
+// derived from the existing publisher's saved eligibility/skip evidence.
+export const initialScopeExclusionSchema = z.object({
+  productVariantId: id,
+  reason: z.enum(["unsupported_bundle", "legacy_inactive_catalog", "legacy_quarantined", "legacy_missing_inventory_identity"]),
+}).strict();
+export const initialScopeMappingImportSchema = z.object({
+  productVariantId: id,
+  externalInventoryItemId: z.string().trim().min(1).max(240),
+  externalSku: z.string().trim().min(1).max(100).nullable(),
+  sourceKeys: z.array(z.string().min(1)).min(1),
+}).strict();
 export const reviewInitialPublicationScopeSchema = z.object({
   publicationTargetId: id, expectedTargetRevision: revision,
   excludedVariants: exclusions.optional(),
@@ -20,14 +32,16 @@ export const initialPublicationScopeReviewSchema = z.object({
   publicationTargetId: id, targetRevision: revision, authorityRevision: revision,
   reviewHash: hash, ready: z.boolean(), includedVariantIds: ids,
   excludedNonStockVariantIds: ids,
-  excludedVariants: exclusions.optional(),
+  excludedVariants: z.array(initialScopeExclusionSchema).optional(),
+  mappingImports: z.array(initialScopeMappingImportSchema).optional(),
   blockers: z.array(z.object({ code: z.string().min(1), message: z.string().min(1), productVariantId: id.nullable() }).strict()),
   runtimeAuthorityChanged: z.literal(false), providerWriteAttempted: z.literal(false), outboxEnqueued: z.literal(false),
 }).strict();
 export const initialPublicationScopeReceiptSchema = z.object({
   publicationTargetId: id, previousRevision: revision, revision, reviewHash: hash,
   includedVariantIds: ids, preparedBy: z.string().trim().min(1).max(100), preparedAt: z.string().datetime(),
-  excludedVariants: exclusions.optional(),
+  excludedVariants: z.array(initialScopeExclusionSchema).optional(),
+  importedVariantIds: ids.optional(),
   alreadyApplied: z.boolean(), runtimeAuthorityChanged: z.literal(false),
   providerWriteAttempted: z.literal(false), outboxEnqueued: z.literal(false),
 }).strict();

@@ -9,7 +9,7 @@ import { inventoryCutoverEvidenceHash } from "../domain/inventory-cutover-manife
 // waiting in the opposite order to a catalog/listing writer's row locks.
 export const INITIAL_SCOPE_SOURCE_TABLES = [
   "catalog.products", "catalog.product_variants", "channels.channels", "channels.channel_connections",
-  "channels.channel_feeds", "dropship.dropship_store_connections", "dropship.dropship_vendor_listings",
+  "channels.channel_feeds", "channels.channel_listings", "dropship.dropship_store_connections", "dropship.dropship_vendor_listings",
   "inventory.publication_variant_mapping_heads", "inventory.publication_variant_mapping_versions",
   "inventory.publication_membership_heads", "inventory.publication_membership_versions",
   "marketplace.listing_scopes", "marketplace.channel_listing_scopes", "marketplace.dropship_listing_scopes",
@@ -66,10 +66,30 @@ export async function readInitialPublicationScopeFacts(
   if (target.destinationKind === "channel_connection") {
     const feeds = (await client.query(`SELECT id::text,product_variant_id,channel_sku,channel_inventory_item_id,is_active,quarantined_at
       FROM channels.channel_feeds WHERE channel_id=$1 ORDER BY id`, [target.channelId])).rows;
+    const channelListings = target.provider === "ebay" ? (await client.query(`SELECT id::text,product_variant_id,external_sku,external_variant_id
+      FROM channels.channel_listings WHERE channel_id=$1 ORDER BY id`, [target.channelId])).rows : [];
+    // Use the same listing-SKU precedence as getNonShopifyInventorySyncStates /
+    // executeInventorySync. Retain the owner rows in the review fingerprint.
+    for (const row of channelListings) ownerEvidenceHashes.push(inventoryCutoverEvidenceHash({ channelListing: row }));
+    const channelListingByVariant = new Map(channelListings.map(row => [row.product_variant_id, row]));
+    if (channelListingByVariant.size !== channelListings.length) ownerIssues.push("DUPLICATE_CHANNEL_LISTING_IDENTITY");
     for (const row of feeds) listings.push({
       sourceKey: `feed:${row.id}`, productVariantId: row.product_variant_id, active: row.is_active === 1, uncertain: false,
-      quarantined: row.quarantined_at !== null, externalInventoryItemId: row.channel_inventory_item_id, externalSku: row.channel_sku,
+      quarantined: row.quarantined_at !== null,
+      // Existing eBay quantity publication addresses the seller SKU, whereas
+      // Shopify addresses an InventoryItem. A null Shopify-only feed column
+      // must not invalidate an eBay identity the existing publisher already uses.
+      externalInventoryItemId: target.provider === "ebay"
+        ? channelListingByVariant.get(row.product_variant_id)?.external_sku ?? row.channel_sku : row.channel_inventory_item_id,
+      externalSku: target.provider === "ebay"
+        ? channelListingByVariant.get(row.product_variant_id)?.external_sku ?? row.channel_sku : row.channel_sku,
     });
+    const feedVariantIds = new Set(feeds.map(row => row.product_variant_id));
+    for (const row of channelListings) {
+      if (feedVariantIds.has(row.product_variant_id)) continue;
+      listings.push({ sourceKey: `channel-listing:${row.id}`, productVariantId: row.product_variant_id,
+        active: true, uncertain: false, quarantined: false, externalInventoryItemId: row.external_sku, externalSku: row.external_sku });
+    }
   } else {
     const legacy = (await client.query(`SELECT id::text,product_variant_id,status,external_listing_id,external_offer_id
       FROM dropship.dropship_vendor_listings WHERE store_connection_id=$1 ORDER BY id`, [target.dropshipStoreConnectionId])).rows;
@@ -91,6 +111,9 @@ export async function readInitialPublicationScopeFacts(
   const variants = (await client.query(`SELECT v.id,v.product_id AS "productId",p.is_active AS "productActive",
     v.is_active AS "variantActive",v.requires_shipping AS "requiresShipping",p.inventory_tracking_default AS "inventoryTrackingDefault",
     v.inventory_tracking_override AS "inventoryTrackingOverride",v.sales_eligibility AS "salesEligibility",
+    (SELECT count(*)::integer FROM inventory.publication_variant_mapping_versions history
+      WHERE history.publication_target_id=$1 AND history.product_variant_id=v.id) AS "mappingHistoryCount",
+    h.publication_target_id IS NOT NULL AS "mappingHeadExists",
     CASE WHEN m.id IS NULL THEN NULL ELSE jsonb_build_object('id',m.id,'version',m.version,'definitionHash',m.definition_hash,
       'externalInventoryItemId',m.external_inventory_item_id,'externalSku',m.external_sku) END AS mapping
     FROM catalog.product_variants v JOIN catalog.products p ON p.id=v.product_id
@@ -100,7 +123,12 @@ export async function readInitialPublicationScopeFacts(
   const count = (await client.query(`SELECT
     (SELECT count(*) FROM inventory.publication_membership_heads WHERE publication_target_id=$1)
     + (SELECT count(*) FROM inventory.publication_membership_versions WHERE publication_target_id=$1) AS count`, [targetId])).rows[0];
-  return initialPublicationScopeFactsSchema.parse({ ...authority, target, existingMemberCount: Number(count.count), listings, ownerIssues, ownerEvidenceHashes, variants });
+  const mappingOwners = (await client.query(`SELECT head.product_variant_id AS "productVariantId",
+    mapping.external_inventory_item_id AS "externalInventoryItemId"
+    FROM inventory.publication_variant_mapping_heads head
+    JOIN inventory.publication_variant_mapping_versions mapping ON mapping.id=COALESCE(head.draft_mapping_id,head.active_mapping_id)
+    WHERE head.publication_target_id=$1 ORDER BY head.product_variant_id`, [targetId])).rows;
+  return initialPublicationScopeFactsSchema.parse({ ...authority, target, existingMemberCount: Number(count.count), listings, ownerIssues, ownerEvidenceHashes, variants, mappingOwners });
 }
 
 async function readRegisteredMembers(client: PoolClient, target: InitialPublicationScopeFacts["target"], issues: string[], evidenceHashes: string[]): Promise<RegisteredMember[]> {
