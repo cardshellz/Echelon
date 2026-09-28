@@ -114,5 +114,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/marketplace-listings/__tests__/integration/pg-listing-publication.integration.test.ts",
   "server/modules/marketplace-listings/__tests__/integration/channel-listing-catalog.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/walmart-publication-membership.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/inventory-publication-scope.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/inventory-publication-initial-scope.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-cost-schedule.integration.test.ts",
 ]);

@@ -1,4 +1,5 @@
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
+import { selectPublicationVariants } from "../domain/inventory-publication-scope";
 import {
   type InventoryPublicationTargetHold,
   inventoryChannelExposureRuntimePlanSchema,
@@ -252,15 +253,14 @@ function planTarget(
   target: ActiveInventoryPublicationTargetSnapshot,
 ): PlannedTarget {
   const targetBlockers: RuntimeIssue[] = [];
-  const includedIds = target.membership?.mode === "explicit"
-    ? new Set(target.membership.includedVariantIds.map(id => positiveInteger(id, "membership.productVariantId")))
-    : null;
-  const selectedVariants = includedIds === null ? variants : variants.filter(variant => includedIds.has(variant.id));
-  if (includedIds && selectedVariants.length !== includedIds.size) {
+  const { selected: selectedVariants, unavailableVariantIds } = selectPublicationVariants(
+    variants, target.membership ?? { mode: "whole_product" },
+  );
+  if (unavailableVariantIds.length > 0) {
     targetBlockers.push(issue("PUBLICATION_MEMBER_VARIANT_UNAVAILABLE",
       "An included publication SKU is absent or no longer eligible in the active product snapshot.",
       { publicationTargetId: target.publicationTargetId, productId,
-        productVariantIds: [...includedIds].filter(id => !selectedVariants.some(variant => variant.id === id)) }));
+        productVariantIds: unavailableVariantIds }));
   }
   const binding = target.sourceBinding;
   const members = binding?.members.slice() ?? [];

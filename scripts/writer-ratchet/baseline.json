@@ -664,6 +664,9 @@
   "inventory.promise_safety_policy_versions": [
     "modules/inventory-planning"
   ],
+  "inventory.publication_initial_scope_receipts": [
+    "modules/inventory-planning"
+  ],
   "inventory.publication_listing_setup_identities": [
     "modules/inventory-planning"
   ],

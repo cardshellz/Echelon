@@ -1,4 +1,6 @@
 import { eq, sql } from "drizzle-orm";
+import { inventoryPublicationScopeSchema } from "@shared/types/inventory-publication-scope";
+import { selectPublicationVariants } from "../domain/inventory-publication-scope";
 
 import {
   channelExposurePolicyHeads,
@@ -1084,7 +1086,7 @@ implements InventoryChannelExposureAdminStore {
         SELECT id, destination_kind, channel_id, channel_connection_id,
                dropship_store_connection_id, provider_scope_type,
                external_scope_id, publication_authority, state, revision,
-               hold_reason, held_at, held_by
+               hold_reason, held_at, held_by, membership_mode
         FROM inventory.inventory_publication_targets
         WHERE id = ${publicationTargetId}
       `));
@@ -1115,8 +1117,66 @@ implements InventoryChannelExposureAdminStore {
           AND sales_eligibility = 'sellable'
         ORDER BY id
       `));
-      const sellableVariantIds = new Set(sellableVariantRows.map((row) =>
-        positiveInteger(row.id, "variant.id")));
+      const membershipRows = target.membership_mode === "explicit" ? rows(await tx.execute(sql`
+        SELECT head.product_variant_id, version.included
+        FROM inventory.publication_membership_heads head
+        JOIN inventory.publication_membership_versions version ON version.id = head.active_version_id
+        JOIN catalog.product_variants variant ON variant.id = head.product_variant_id
+        WHERE head.publication_target_id = ${publicationTargetId}
+          AND variant.product_id = ${productId}
+        ORDER BY head.product_variant_id
+      `)) : [];
+      const membership = inventoryPublicationScopeSchema.parse(target.membership_mode === "explicit"
+        ? { mode: "explicit",
+          includedVariantIds: membershipRows.filter(row => row.included === true).map(row => positiveInteger(row.product_variant_id, "membership.variantId")),
+          ...(membershipRows.some(row => row.included === false) ? {
+            excludedVariantIds: membershipRows.filter(row => row.included === false).map(row => positiveInteger(row.product_variant_id, "membership.variantId")),
+          } : {}),
+        }
+        : { mode: "whole_product" });
+      const selection = selectPublicationVariants(sellableVariantRows.map(row => ({ id: positiveInteger(row.id, "variant.id") })), membership);
+      const sellableVariantIds = new Set(selection.selected.map(row => row.id));
+      const previewIdentity = {
+        membership,
+        publicationTargetId,
+        destinationKind: String(target.destination_kind),
+        channelId,
+        channelConnectionId,
+        dropshipStoreConnectionId,
+        providerScopeType: String(target.provider_scope_type),
+        externalScopeId: String(target.external_scope_id),
+        publicationAuthority: String(target.publication_authority),
+        publicationTargetState: String(target.state),
+        publicationTargetRevision: String(target.revision),
+        hold: publicationHold(target),
+        productId,
+        shadowRunId: run.runId,
+        snapshotFingerprint: run.snapshotFingerprint,
+        shadowCapturedAt: run.capturedAt,
+        modelId: run.modelId,
+        modelVersion: run.modelVersion,
+        modelDefinitionHash: run.modelDefinitionHash,
+        runtimeAuthorityChanged: false,
+        providerWriteAttempted: false,
+        outboxEnqueued: false,
+      };
+      // Retain the destination's ownership in the reviewed census, without
+      // inventing an Echelon promise or requiring configuration we will not use.
+      // External custody and inbound stock freshness are separate concerns.
+      if (target.publication_authority !== "echelon") {
+        return inventoryChannelExposurePreviewSchema.parse({
+          ...previewIdentity,
+          sourceBindingId: null,
+          sourceBindingVersion: null,
+          sourceBindingDefinitionHash: null,
+          sourceBindingAuthority: "missing",
+          fulfillmentNodeIds: [],
+          warehouseIds: [],
+          selectedPolicies: [],
+          rows: [],
+          blockers: [],
+        });
+      }
       const bindingRows = rows(await tx.execute(sql`
         SELECT head.draft_binding_id, head.active_binding_id,
                COALESCE(head.draft_binding_id, head.active_binding_id) AS selected_binding_id,
@@ -1213,6 +1273,11 @@ implements InventoryChannelExposureAdminStore {
         message: "The canonical ATP shadow contains a configuration blocker.",
         context: { shadowRunId: run.runId },
       }));
+      if (selection.unavailableVariantIds.length > 0) blockers.push({
+        code: "PUBLICATION_MEMBER_VARIANT_UNAVAILABLE",
+        message: "An included publication SKU is absent or no longer eligible in the product.",
+        context: { publicationTargetId, productId, productVariantIds: selection.unavailableVariantIds },
+      });
       if (String(target.state) === "disabled") {
         blockers.push({
           code: "PUBLICATION_TARGET_NOT_IN_PREVIEW",
@@ -1357,24 +1422,7 @@ implements InventoryChannelExposureAdminStore {
           }];
         });
       return inventoryChannelExposurePreviewSchema.parse({
-        publicationTargetId,
-        destinationKind: String(target.destination_kind),
-        channelId,
-        channelConnectionId,
-        dropshipStoreConnectionId,
-        providerScopeType: String(target.provider_scope_type),
-        externalScopeId: String(target.external_scope_id),
-        publicationAuthority: String(target.publication_authority),
-        publicationTargetState: String(target.state),
-        publicationTargetRevision: String(target.revision),
-        hold: publicationHold(target),
-        productId,
-        shadowRunId: run.runId,
-        snapshotFingerprint: run.snapshotFingerprint,
-        shadowCapturedAt: run.capturedAt,
-        modelId: run.modelId,
-        modelVersion: run.modelVersion,
-        modelDefinitionHash: run.modelDefinitionHash,
+        ...previewIdentity,
         sourceBindingId,
         sourceBindingVersion,
         sourceBindingDefinitionHash,
@@ -1384,9 +1432,6 @@ implements InventoryChannelExposureAdminStore {
         selectedPolicies,
         rows: previewRows,
         blockers: uniqueBlockers(blockers),
-        runtimeAuthorityChanged: false,
-        providerWriteAttempted: false,
-        outboxEnqueued: false,
       });
     });
   }

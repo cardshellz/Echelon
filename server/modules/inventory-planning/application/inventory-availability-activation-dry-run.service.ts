@@ -30,8 +30,7 @@ import {
 } from "../domain/inventory-channel-exposure";
 
 const actorSchema = z.string().trim().min(1).max(100);
-const ACTIVATION_DRY_RUN_CONTRACT_VERSION = "authority_scoped_publication_readiness_v4";
-const MAX_PROVIDER_READBACK_AGE_MS = 15 * 60 * 1000;
+const ACTIVATION_DRY_RUN_CONTRACT_VERSION = "atp_authoritative_publication_readiness_v7";
 
 export interface PublicationEvidenceKey {
   channelId: number;
@@ -198,6 +197,15 @@ export class InventoryAvailabilityActivationDryRunService {
                     capturedRevision: preview.publicationTargetRevision },
                 ));
               }
+              if (preview.publicationAuthority !== "echelon") {
+                blockers.push(blocker("EXTERNALLY_MANAGED_PUBLICATION_OBSERVE_ONLY", "review",
+                  "This destination is outside Echelon publication: its ownership is retained, but no quantity, "
+                    + "mapping, source binding or exposure policy is commissioned. External custody is not evaluated.",
+                  product.productId, { publicationTargetId: preview.publicationTargetId,
+                    publicationAuthority: preview.publicationAuthority,
+                    providerWriteVerificationRequired: false, externalInventoryCustodyEvaluated: false }));
+                return preview;
+              }
               blockers.push(...preview.blockers.map((entry) => blocker(
                 entry.code,
                 "blocking",
@@ -240,7 +248,8 @@ export class InventoryAvailabilityActivationDryRunService {
         const resolvedTargetPreviews = targetPreviews.filter(
           (preview): preview is InventoryChannelExposurePreview => preview !== null,
         );
-        const partitionOverages = findPartitionedShareOverages(resolvedTargetPreviews.flatMap((preview) =>
+        const controlledPreviews = resolvedTargetPreviews.filter(preview => preview.publicationAuthority === "echelon");
+        const partitionOverages = findPartitionedShareOverages(controlledPreviews.flatMap((preview) =>
           preview.rows.flatMap((row) => row.policy ? [{
             productVariantId: row.productVariantId,
             sourceWarehouseIds: row.sourceWarehouseBreakdown.map(source => source.warehouseId),
@@ -259,7 +268,7 @@ export class InventoryAvailabilityActivationDryRunService {
           publicationTargetId: number;
           providerScopeType: "account" | "location";
         }>>();
-        for (const preview of resolvedTargetPreviews) {
+        for (const preview of controlledPreviews) {
           for (const row of preview.rows) {
             if (!row.policy?.eligible) continue;
             const key = `${publicationDestinationKey(preview)}:${row.productVariantId}`;
@@ -314,6 +323,13 @@ export class InventoryAvailabilityActivationDryRunService {
         .filter((entry) => productByVariant.get(entry.productVariantId) === product.productId)
         .sort((left, right) => left.channelId - right.channelId
           || left.productVariantId - right.productVariantId);
+      // Even a destination with no planned writes must retain its reviewed
+      // identity. An ownership change is not permission to silently take it over.
+      for (const preview of targetPreviews) {
+        for (const current of productEvidence.filter(entry => entry.channelId === preview.channelId)) {
+          blockers.push(...targetIdentityBlockers(product.productId, current, preview));
+        }
+      }
       for (const row of legacyPreview?.rows ?? []) {
         const evidence = evidenceByKey.get(publicationKey(row));
         if (!evidence) {
@@ -326,10 +342,33 @@ export class InventoryAvailabilityActivationDryRunService {
           ));
           continue;
         }
-        blockers.push(...legacyPublicationCoverageBlockers(product.productId, evidence, startedAt));
+        const remainingTargets = evidence.configuredTargets.filter(target => {
+          const preview = targetPreviews.find(candidate => candidate.publicationTargetId === target.publicationTargetId);
+          return !(preview?.membership?.mode === "explicit"
+            && preview.membership.excludedVariantIds?.includes(evidence.productVariantId));
+        });
+        const deliberatelyExcluded = evidence.configuredTargets.length > 0 && remainingTargets.length === 0;
+        if (!deliberatelyExcluded && !isProvenUnlistedPair(evidence, targetPreviews)) {
+          blockers.push(...legacyPublicationCoverageBlockers(product.productId,
+            { ...evidence, configuredTargets: remainingTargets }));
+        }
+        if (evidence.mappingState === "active") {
+          for (const target of evidence.configuredTargets) {
+            const selected = targetPreviews.find(preview => preview.publicationTargetId === target.publicationTargetId);
+            if (target.publicationAuthority === "echelon" && target.state !== "disabled"
+              && selected?.membership?.mode === "explicit"
+              && !selected.membership.includedVariantIds.includes(row.productVariantId)
+              && !selected.membership.excludedVariantIds?.includes(row.productVariantId)) {
+              blockers.push(blocker("ACTIVE_LEGACY_PUBLICATION_EXCLUDED", "blocking",
+                "An active legacy publication is absent from the selected destination membership.", product.productId,
+                { publicationTargetId: target.publicationTargetId, productVariantId: row.productVariantId, feedId: evidence.feedId }));
+            }
+          }
+        }
       }
       const legacyRows = new Map((legacyPreview?.rows ?? []).map((row) => [publicationKey(row), row] as const));
-      const proposedPublications = targetPreviews.flatMap((preview) => preview.rows.map((row) => {
+      const proposedPublications = targetPreviews.filter(preview => preview.publicationAuthority === "echelon")
+        .flatMap((preview) => preview.rows.map((row) => {
         const current = evidenceByKey.get(publicationKey({
           channelId: preview.channelId,
           productVariantId: row.productVariantId,
@@ -344,7 +383,7 @@ export class InventoryAvailabilityActivationDryRunService {
               channelId: preview.channelId, productVariantId: row.productVariantId },
           ));
         } else {
-          blockers.push(...targetPublicationBlockers(product.productId, current, preview, row, startedAt));
+          blockers.push(...targetPublicationBlockers(product.productId, current, preview, row));
         }
         const legacy = legacyRows.get(publicationKey({
           channelId: preview.channelId,
@@ -357,9 +396,7 @@ export class InventoryAvailabilityActivationDryRunService {
             ? "skip_ineligible" as const
             : preview.sourceBindingId === null || mapping === null
               ? "blocked" as const
-              : preview.publicationAuthority === "echelon"
-                ? "publish" as const
-                : "observe_only" as const;
+              : "publish" as const;
         return {
           publicationTargetId: preview.publicationTargetId,
           channelId: preview.channelId,
@@ -398,6 +435,23 @@ export class InventoryAvailabilityActivationDryRunService {
       const resolvedBlockers = uniqueBlockers(blockers);
       const firstPreview = targetPreviews[0] ?? null;
       const evidence: ActivationDryRunProduct = {
+        publicationTargetSelections: targetPreviews.map(preview => ({
+          publicationTargetId: preview.publicationTargetId,
+          revision: preview.publicationTargetRevision,
+          membership: preview.membership?.mode === "explicit"
+            ? { ...preview.membership, excludedVariantIds: preview.membership.excludedVariantIds ?? [] }
+            : { mode: "whole_product" as const },
+          targetIdentity: {
+            channelId: preview.channelId,
+            destinationKind: preview.destinationKind,
+            channelConnectionId: preview.channelConnectionId,
+            dropshipStoreConnectionId: preview.dropshipStoreConnectionId,
+            providerScopeType: preview.providerScopeType,
+            externalScopeId: preview.externalScopeId,
+            publicationAuthority: preview.publicationAuthority,
+            state: preview.publicationTargetState,
+          },
+        })),
         productId: product.productId,
         queueState: product.queueState,
         status: resolvedBlockers.some((entry) => entry.severity === "blocking") ? "blocked" : "ready",
@@ -495,10 +549,22 @@ function queueBlockers(product: InventoryAvailabilityBackfillQueueRow): Activati
   return blockers;
 }
 
+/** Allocation theory is not listing membership. Keep the historical gate unless
+ * there is no feed AND every configured target explicitly excludes this SKU.
+ * Active, inactive, quarantined, whole-product and unknown evidence still goes
+ * through the existing validation; an included SKU never takes this branch. */
+function isProvenUnlistedPair(evidence: CurrentPublicationEvidence, previews: InventoryChannelExposurePreview[]): boolean {
+  if (evidence.feedId !== null || evidence.mappingState !== "missing" || evidence.configuredTargets.length === 0) return false;
+  return evidence.configuredTargets.every(target => {
+    const preview = previews.find(candidate => candidate.publicationTargetId === target.publicationTargetId);
+    return preview?.membership?.mode === "explicit"
+      && !preview.membership.includedVariantIds.includes(evidence.productVariantId);
+  });
+}
+
 function legacyPublicationCoverageBlockers(
   productId: number,
   evidence: CurrentPublicationEvidence,
-  capturedAt: Date,
 ): ActivationDryRunBlocker[] {
   const context = {
     channelId: evidence.channelId,
@@ -506,6 +572,11 @@ function legacyPublicationCoverageBlockers(
     feedId: evidence.feedId,
   };
   const blockers: ActivationDryRunBlocker[] = [];
+  // Absence of an Echelon feed/mapping is not a defect for a channel whose
+  // configured destinations are all externally controlled. Unknown ownership
+  // and mixed ownership still take the full controlled-publication checks.
+  if (evidence.configuredTargets.length > 0
+    && evidence.configuredTargets.every(target => target.publicationAuthority !== "echelon")) return blockers;
   if (evidence.mappingState === "missing" || evidence.mappingState === "inactive") {
     blockers.push(blocker(
       "ACTIVE_LEGACY_FEED_MAPPING_MISSING",
@@ -535,19 +606,10 @@ function legacyPublicationCoverageBlockers(
     ));
   }
   const enabledTargets = evidence.configuredTargets.filter((target) => target.state !== "disabled");
-  // These quantities fence Echelon provider writes, not externally managed custody.
-  // External/manual targets still require exact coverage, mapping and source evidence.
+  // Only Echelon-controlled destinations require Echelon mappings. Historical
+  // acknowledgements/readbacks are comparison evidence, not ATP inputs or
+  // prerequisites for the initial absolute send. That send is verified afterward.
   const echelonTargets = enabledTargets.filter((target) => target.publicationAuthority === "echelon");
-  if (echelonTargets.length > 0
-    && (evidence.lastAcknowledgedUnits === null || evidence.lastAcknowledgedAt === null)) {
-    blockers.push(blocker(
-      "CURRENT_ACKNOWLEDGED_QUANTITY_MISSING",
-      "blocking",
-      "The legacy feed has no complete last-acknowledged quantity evidence for Echelon publication.",
-      productId,
-      context,
-    ));
-  }
   if (evidence.configuredTargets.length > 0 && enabledTargets.length === 0) {
     blockers.push(blocker(
       "PUBLICATION_TARGET_NOT_IN_PREVIEW",
@@ -567,7 +629,7 @@ function legacyPublicationCoverageBlockers(
       { ...context, publicationTargetIds: enabledTargets.map((target) => target.publicationTargetId) },
     ));
   }
-  const targetsMissingMapping = enabledTargets
+  const targetsMissingMapping = echelonTargets
     .filter((target) => target.mapping === null)
     .map((target) => target.publicationTargetId);
   if (targetsMissingMapping.length > 0) {
@@ -579,47 +641,6 @@ function legacyPublicationCoverageBlockers(
       { ...context, publicationTargetIds: targetsMissingMapping },
     ));
   }
-  const targetsMissingReadback = echelonTargets
-    .filter((target) => target.latestReadbackUnits === null || target.latestReadbackAt === null)
-    .map((target) => target.publicationTargetId);
-  if (targetsMissingReadback.length > 0) {
-    blockers.push(blocker(
-      "PROVIDER_READBACK_MISSING",
-      "blocking",
-      "Provider acknowledgement is not provider quantity readback; no verified readback is available.",
-      productId,
-      { ...context, publicationTargetIds: targetsMissingReadback },
-    ));
-  }
-  const targetsWithStaleReadback = echelonTargets
-    .filter((target) => target.latestReadbackAt !== null
-      && readbackIsStale(target.latestReadbackAt, capturedAt))
-    .map((target) => target.publicationTargetId);
-  if (targetsWithStaleReadback.length > 0) {
-    blockers.push(blocker(
-      "PROVIDER_READBACK_STALE",
-      "blocking",
-      "Provider quantity readback is older than the activation freshness window.",
-      productId,
-      { ...context, publicationTargetIds: targetsWithStaleReadback,
-        maxAgeMilliseconds: MAX_PROVIDER_READBACK_AGE_MS },
-    ));
-  }
-  const targetsWithStaleReadbackIdentity = echelonTargets
-    .filter((target) => target.mapping !== null
-      && target.latestReadbackUnits !== null
-      && target.latestReadbackAt !== null
-      && !readbackMatchesTarget(target))
-    .map((target) => target.publicationTargetId);
-  if (targetsWithStaleReadbackIdentity.length > 0) {
-    blockers.push(blocker(
-      "PROVIDER_READBACK_IDENTITY_MISMATCH",
-      "blocking",
-      "Provider readback evidence does not identify the selected exact target/SKU mapping.",
-      productId,
-      { ...context, publicationTargetIds: targetsWithStaleReadbackIdentity },
-    ));
-  }
   return blockers;
 }
 
@@ -628,41 +649,15 @@ function targetPublicationBlockers(
   evidence: CurrentPublicationEvidence,
   preview: InventoryChannelExposurePreview,
   row: InventoryChannelExposurePreview["rows"][number],
-  capturedAt: Date,
 ): ActivationDryRunBlocker[] {
+  const blockers = targetIdentityBlockers(productId, evidence, preview);
+  const target = evidence.configuredTargets.find(candidate => candidate.publicationTargetId === preview.publicationTargetId);
+  if (!target) return blockers;
   const context = {
     publicationTargetId: preview.publicationTargetId,
     channelId: preview.channelId,
     productVariantId: row.productVariantId,
   };
-  const target = evidence.configuredTargets.find((candidate) =>
-    candidate.publicationTargetId === preview.publicationTargetId);
-  if (!target) {
-    return [blocker(
-      "EXACT_PUBLICATION_TARGET_EVIDENCE_MISSING",
-      "blocking",
-      "The exact publication target disappeared while readiness evidence was being captured.",
-      productId,
-      context,
-    )];
-  }
-  const blockers: ActivationDryRunBlocker[] = [];
-  if (target.revision !== preview.publicationTargetRevision
-    || target.state !== preview.publicationTargetState
-    || target.destinationKind !== preview.destinationKind
-    || target.channelConnectionId !== preview.channelConnectionId
-    || target.dropshipStoreConnectionId !== preview.dropshipStoreConnectionId
-    || target.providerScopeType !== preview.providerScopeType
-    || target.externalScopeId !== preview.externalScopeId
-    || target.publicationAuthority !== preview.publicationAuthority) {
-    blockers.push(blocker(
-      "PUBLICATION_TARGET_CHANGED_DURING_DRY_RUN",
-      "blocking",
-      "The exact publication target or its authority changed while publication evidence was captured.",
-      productId,
-      { ...context, previewRevision: preview.publicationTargetRevision, evidenceRevision: target.revision },
-    ));
-  }
   if (target.state === "disabled") {
     blockers.push(blocker(
       "PUBLICATION_TARGET_NOT_IN_PREVIEW",
@@ -698,66 +693,32 @@ function targetPublicationBlockers(
         evidenceMappingId: target.mapping?.mappingId ?? null },
     ));
   }
-  const requiresProviderReadback = row.policy?.eligible && preview.publicationAuthority === "echelon";
-  if (preview.publicationAuthority !== "echelon") {
-    blockers.push(blocker(
-      "EXTERNALLY_MANAGED_PUBLICATION_OBSERVE_ONLY",
-      "review",
-      "This target remains observation-only: Echelon will not publish or verify a provider write. "
-        + "This publication dry run does not certify external inventory custody or data freshness; "
-        + "provider available quantity is not physical on-hand.",
-      productId,
-      { ...context, publicationAuthority: preview.publicationAuthority,
-        providerWriteVerificationRequired: false, externalInventoryCustodyEvaluated: false },
-    ));
-  }
-  if (requiresProviderReadback
-    && (target.latestReadbackUnits === null || target.latestReadbackAt === null)) {
-    blockers.push(blocker(
-      "PROVIDER_READBACK_MISSING",
-      "blocking",
-      "No authoritative provider quantity readback exists for this exact target/SKU identity.",
-      productId,
-      context,
-    ));
-  }
-  if (requiresProviderReadback && target.latestReadbackAt !== null
-    && readbackIsStale(target.latestReadbackAt, capturedAt)) {
-    blockers.push(blocker(
-      "PROVIDER_READBACK_STALE",
-      "blocking",
-      "Provider quantity readback is older than the activation freshness window.",
-      productId,
-      { ...context, latestReadbackAt: target.latestReadbackAt,
-        maxAgeMilliseconds: MAX_PROVIDER_READBACK_AGE_MS },
-    ));
-  }
-  if (requiresProviderReadback && row.mapping
-    && target.latestReadbackUnits !== null && target.latestReadbackAt !== null
-    && (!readbackMatchesTarget(target)
-      || target.latestReadbackExternalInventoryItemId !== row.mapping.externalInventoryItemId)) {
-    blockers.push(blocker(
-      "PROVIDER_READBACK_IDENTITY_MISMATCH",
-      "blocking",
-      "Provider readback evidence does not identify the selected exact target/SKU mapping.",
-      productId,
-      { ...context, expectedExternalInventoryItemId: row.mapping.externalInventoryItemId,
-        observedExternalInventoryItemId: target.latestReadbackExternalInventoryItemId },
-    ));
-  }
   return blockers;
 }
 
-function readbackMatchesTarget(
-  target: CurrentPublicationEvidence["configuredTargets"][number],
-): boolean {
-  return target.latestReadbackExternalInventoryItemId === target.mapping?.externalInventoryItemId
-    && target.latestReadbackDestinationKind === target.destinationKind
-    && target.latestReadbackChannelConnectionId === target.channelConnectionId
-    && target.latestReadbackDropshipStoreConnectionId === target.dropshipStoreConnectionId
-    && target.latestReadbackProviderScopeType === target.providerScopeType
-    && target.latestReadbackExternalScopeId === target.externalScopeId
-    && target.latestReadbackPublicationTargetRevision === target.revision;
+function targetIdentityBlockers(
+  productId: number,
+  evidence: CurrentPublicationEvidence,
+  preview: InventoryChannelExposurePreview,
+): ActivationDryRunBlocker[] {
+  const target = evidence.configuredTargets.find(candidate => candidate.publicationTargetId === preview.publicationTargetId);
+  const context = { publicationTargetId: preview.publicationTargetId, channelId: preview.channelId,
+    productVariantId: evidence.productVariantId };
+  if (!target) return [blocker("EXACT_PUBLICATION_TARGET_EVIDENCE_MISSING", "blocking",
+    "The exact publication target disappeared while readiness evidence was being captured.", productId, context)];
+  if (target.revision !== preview.publicationTargetRevision
+    || target.state !== preview.publicationTargetState
+    || target.destinationKind !== preview.destinationKind
+    || target.channelConnectionId !== preview.channelConnectionId
+    || target.dropshipStoreConnectionId !== preview.dropshipStoreConnectionId
+    || target.providerScopeType !== preview.providerScopeType
+    || target.externalScopeId !== preview.externalScopeId
+    || target.publicationAuthority !== preview.publicationAuthority) {
+    return [blocker("PUBLICATION_TARGET_CHANGED_DURING_DRY_RUN", "blocking",
+      "The exact publication target or its authority changed while publication evidence was captured.", productId,
+      { ...context, previewRevision: preview.publicationTargetRevision, evidenceRevision: target.revision })];
+  }
+  return [];
 }
 
 function publicationDestinationKey(input: {
@@ -768,13 +729,6 @@ function publicationDestinationKey(input: {
   return input.destinationKind === "channel_connection"
     ? `channel-connection:${input.channelConnectionId}`
     : `dropship-store:${input.dropshipStoreConnectionId}`;
-}
-
-function readbackIsStale(observedAt: string, reference: Date): boolean {
-  const observed = Date.parse(observedAt);
-  return !Number.isFinite(observed)
-    || observed > reference.getTime()
-    || reference.getTime() - observed > MAX_PROVIDER_READBACK_AGE_MS;
 }
 
 function blocker(
