@@ -124,8 +124,8 @@ new channel-owned Walmart tables; the existing architecture guards remain active
    owner's own Walmart US account. Verify returned partner and fulfillment center.
    Save the explicit warehouse and import boundary. Orders then sync automatically
    while the channel is active. Use the existing Channels Active/Paused control.
-4. Browse Existing listings. Link exact matches in bulk or choose the correct variant for
-   different remote SKUs. Unique exact matches can also resolve during intake.
+4. Browse Listing Feed, which includes listings created before connection.
+   Link exact matches in bulk or choose the correct variant for different remote SKUs. Unique exact matches can also resolve during intake.
    Unsupported, conflicting or quarantined identities require review.
 5. Reconcile a real multi-unit order's charges and taxes against Seller Center.
    Complete sandbox/provider contract acceptance for profile, nodes, pagination,

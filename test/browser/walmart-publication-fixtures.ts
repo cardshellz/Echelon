@@ -8,6 +8,7 @@ import {
   type ListingDraftItem,
   type ListingOperation,
   type ListingPriceRule,
+  type ListingReview,
 } from "../../shared/types/channel-listing-publication";
 
 export const PUBLICATION_BASE = "/api/channels/77/listing-publications";
@@ -45,6 +46,7 @@ export interface PublicationMock {
   loseSubmissionResponse: boolean;
   submittedItems: ListingDraftItem[];
   writes: { path: string; body: unknown }[];
+  reviews: ListingReview[];
 }
 export function createPublicationMock(): PublicationMock {
   return {
@@ -61,6 +63,7 @@ export function createPublicationMock(): PublicationMock {
     staleDraft: false,
     loseSubmissionResponse: false,
     writes: [],
+    reviews: [],
   };
 }
 
@@ -172,8 +175,7 @@ export async function handlePublicationRequest(
     return reply(input);
   }
   if (method === "POST" && path.endsWith("/review")) {
-    return reply(
-      listingReviewSchema.parse({
+    const review = listingReviewSchema.parse({
         id: "11111111-1111-4111-8111-111111111111",
         draftRevision: state.draft.revision,
         reviewHash: "c".repeat(64),
@@ -223,8 +225,9 @@ export async function handlePublicationRequest(
             "Inventory setup required. Items will remain at zero stock until inventory is ready.",
           targetId: null,
         },
-      }),
-    );
+      });
+    state.reviews.push(review);
+    return reply(review);
   }
   if (method === "POST" && path.endsWith("/operations")) {
     if (state.draft.items.length === 0 && state.operations.length)
