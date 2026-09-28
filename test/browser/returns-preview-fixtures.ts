@@ -156,6 +156,7 @@ export async function installReturnPreviewFixtures(
               channelId: Number(labelSettingsMatch[1]),
               providerConfigured: false,
               settings: null,
+              control: { paused: false, version: 0 },
               warehouses: [],
               resolvedPolicy: null,
               policyIssue: {

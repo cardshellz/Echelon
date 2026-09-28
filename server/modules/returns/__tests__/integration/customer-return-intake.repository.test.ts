@@ -462,7 +462,7 @@ integration("private return intake on migration-defined PostgreSQL", () => {
   it("replays saved results after intake is paused without creating another case", async () => {
     const first = await store.persist(preparedIntake());
     await pool.query(
-      "UPDATE returns.customer_return_settings SET enabled=false,version=2",
+      "UPDATE returns.customer_return_label_controls SET paused=true,version=2",
     );
     await pool.query("UPDATE returns.return_policies SET status='retired'");
     expect(await store.persist(preparedIntake())).toEqual({
@@ -477,10 +477,8 @@ integration("private return intake on migration-defined PostgreSQL", () => {
     ).rejects.toMatchObject({ code: "RETURN_LABEL_COMMAND_CONFLICT" });
   });
 
-  it("uses the resolved dynamic policy independently of the deprecated saved selection", async () => {
-    await pool.query(
-      "UPDATE returns.customer_return_settings SET policy_id=NULL",
-    );
+  it("uses the resolved dynamic policy without legacy channel settings", async () => {
+    expect((await pool.query("SELECT channel_id FROM returns.customer_return_settings")).rowCount).toBe(0);
     await pool.query(
       "UPDATE returns.return_policies SET return_window_days=30",
     );
@@ -572,7 +570,7 @@ integration("private return intake on migration-defined PostgreSQL", () => {
                       ? rendered.params.includes(918421)
                       : kind === "lease"
                         ? rendered.sql.includes(
-                            "FROM returns.customer_return_settings",
+                            "FROM returns.customer_return_label_controls",
                           ) && rendered.sql.includes("FOR SHARE")
                         : rendered.params.includes(918413);
                   if (expected) signalStarted();
@@ -590,7 +588,7 @@ integration("private return intake on migration-defined PostgreSQL", () => {
           await locker.query("SELECT pg_advisory_xact_lock(918421,1)");
         else if (kind === "lease")
           await locker.query(
-            "SELECT * FROM returns.customer_return_settings WHERE channel_id=36 FOR UPDATE",
+            "SELECT * FROM returns.customer_return_label_controls WHERE channel_id=36 FOR UPDATE",
           );
         else await locker.query("SELECT pg_advisory_xact_lock(918413,100)");
         pending = waitingStore.persist(input).then(
@@ -645,23 +643,21 @@ integration("private return intake on migration-defined PostgreSQL", () => {
   it.each(["paused", "version", "carrier", "warehouse", "policy"])(
     "rejects changed %s configuration without effects",
     async (kind) => {
+      const request = preparedIntake();
       if (kind === "paused")
         await pool.query(
-          "UPDATE returns.customer_return_settings SET enabled=false",
+          "UPDATE returns.customer_return_label_controls SET paused=true",
         );
-      if (kind === "version")
-        await pool.query(
-          "UPDATE returns.customer_return_settings SET version=2",
-        );
-      if (kind === "carrier")
-        await pool.query(
-          "UPDATE returns.customer_return_settings SET carrier_id='se-456'",
-        );
+      if (kind === "version") {
+        request.settingsVersion = 2;
+        request.warehouseSnapshot = { ...request.warehouseSnapshot, version: 2 };
+      }
+      if (kind === "carrier") request.parcels[0].carrierId = "se-456";
       if (kind === "warehouse")
         await pool.query("UPDATE warehouse.warehouses SET is_active=0");
       if (kind === "policy")
         await pool.query("UPDATE returns.return_policies SET status='retired'");
-      await expect(store.persist(preparedIntake())).rejects.toMatchObject({
+      await expect(store.persist(request)).rejects.toMatchObject({
         code: "RETURN_LABEL_SETTINGS_CHANGED",
       });
       expect(await counts()).toEqual({

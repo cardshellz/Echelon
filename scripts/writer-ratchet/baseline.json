@@ -1187,6 +1187,12 @@
   "returns.customer_return_label_attempts": [
     "modules/returns"
   ],
+  "returns.customer_return_label_control_events": [
+    "modules/returns"
+  ],
+  "returns.customer_return_label_controls": [
+    "modules/returns"
+  ],
   "returns.customer_return_label_events": [
     "modules/returns"
   ],
@@ -1197,12 +1203,6 @@
     "modules/returns"
   ],
   "returns.customer_return_quote_decisions": [
-    "modules/returns"
-  ],
-  "returns.customer_return_settings": [
-    "modules/returns"
-  ],
-  "returns.customer_return_settings_events": [
     "modules/returns"
   ],
   "returns.customer_return_submission_commands": [
@@ -1254,6 +1254,9 @@
     "modules/returns"
   ],
   "returns.return_policy_commands": [
+    "modules/returns"
+  ],
+  "returns.return_policy_shipping": [
     "modules/returns"
   ],
   "shipping.box_catalog": [

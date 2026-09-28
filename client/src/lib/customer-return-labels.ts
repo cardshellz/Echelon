@@ -1,11 +1,10 @@
 import { z } from "zod";
 import {
   CUSTOMER_RETURN_LABEL_API,
-  customerReturnLabelSettingsInputSchema,
+  customerReturnLabelControlInputSchema,
   customerReturnLabelSettingsStateSchema,
   customerReturnLabelStatusSchema,
   customerReturnLabelSubmitInputSchema,
-  type CustomerReturnLabelSettingsInput,
   type CustomerReturnLabelSettingsState,
   type CustomerReturnLabelStatus,
   type CustomerReturnLabelSubmitInput,
@@ -76,10 +75,9 @@ async function requestLabel<T extends z.ZodTypeAny>(
   signal: AbortSignal,
   schema: T,
   body?: unknown,
-  method = "POST",
 ): Promise<z.output<T>> {
   const response = await request(`${CUSTOMER_RETURN_LABEL_API}${path}`, {
-    method: body === undefined ? "GET" : method,
+    method: body === undefined ? "GET" : "POST",
     credentials: "include",
     cache: "no-store",
     signal,
@@ -136,22 +134,21 @@ export async function loadReturnLabelSettings(
   );
 }
 
-export async function saveReturnLabelSettings(
+export async function saveReturnLabelControl(
   channelId: number,
-  raw: CustomerReturnLabelSettingsInput,
+  raw: z.input<typeof customerReturnLabelControlInputSchema>,
   signal: AbortSignal,
   request: FetchRequest = fetch,
 ) {
   positiveId.parse(channelId);
-  const input = customerReturnLabelSettingsInputSchema.parse(raw);
+  const input = customerReturnLabelControlInputSchema.parse(raw);
   return assertSettingsScope(
     await requestLabel(
       request,
-      `/label-settings/${channelId}`,
+      `/label-settings/${channelId}/control`,
       signal,
       customerReturnLabelSettingsStateSchema,
       input,
-      "PUT",
     ),
     channelId,
   );
@@ -164,7 +161,10 @@ export function returnLabelsEnabled(
   return Boolean(
     state &&
       settings?.enabled &&
+      !state.control.paused &&
       state.resolvedPolicy &&
+      settings.policyId === state.resolvedPolicy.id &&
+      settings.version === state.resolvedPolicy.id &&
       state.policyIssue === null &&
       returnLabelConfigurationAvailable(settings, state),
   );

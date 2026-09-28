@@ -47,7 +47,7 @@ export async function createCustomerReturnLabelServices(): Promise<CustomerRetur
   const settings = new CustomerReturnLabelSettingsService({
     store: settingsStore,
     authorizeChannel,
-    capabilities: () => readCapabilities(apiKey),
+    capabilities: () => readReturnLabelCapabilities(apiKey),
     now,
   });
   // A missing credential must not prevent read/replay/download of saved returns.
@@ -82,15 +82,7 @@ export async function createCustomerReturnLabelServices(): Promise<CustomerRetur
         },
     authorizeChannel,
     now,
-    requirePurchaseConfiguration: async (channelId) => {
-      const current = await settingsStore.read(channelId);
-      if (!current)
-        throw new CustomerReturnIntakeError(
-          "RETURN_LABEL_SETTINGS_CHANGED",
-          "Enable return labels in the private settings first.",
-        );
-      return settings.requireShippingEnabled(channelId, current.version);
-    },
+    requirePurchaseConfiguration: (channelId, authorizationId) => settings.requireAcceptedShippingEnabled(channelId, authorizationId),
   });
   const submissions = new CustomerReturnSubmissionService({
     commands: new PostgresCustomerReturnSubmissionStore(pool),
@@ -110,7 +102,7 @@ export async function createCustomerReturnLabelServices(): Promise<CustomerRetur
   };
 }
 
-async function readCapabilities(
+export async function readReturnLabelCapabilities(
   apiKey: string,
 ): Promise<ReturnLabelCapabilities> {
   if (!apiKey) return { configured: false, carriers: [] };

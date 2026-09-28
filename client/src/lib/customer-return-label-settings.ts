@@ -4,7 +4,12 @@ import {
   type CustomerReturnLabelSettingsState,
 } from "@shared/returns/customer-return-label.contract";
 
-export const RETURN_LABEL_SETTINGS_PATH = "/returns/label-settings";
+export type ReturnShippingCatalog = Pick<
+  CustomerReturnLabelSettingsState,
+  "providerConfigured" | "warehouses" | "carriers" | "message"
+>;
+export type ReturnShippingDraftSource = ReturnShippingCatalog &
+  Pick<CustomerReturnLabelSettingsState, "settings">;
 // Initial merchant preference only; the saved per-account rule is authoritative.
 const DEFAULT_USPS_RETURN_MAX_WEIGHT_LB = "20";
 
@@ -39,7 +44,7 @@ export interface ReturnLabelSettingsIssue {
 }
 
 export function createReturnLabelSettingsDraft(
-  state: CustomerReturnLabelSettingsState,
+  state: ReturnShippingDraftSource,
 ): ReturnLabelSettingsDraft {
   const settings = state.settings;
   const rules = settings?.carrierRules ?? [];
@@ -105,7 +110,7 @@ export function parseReturnLabelSettingsDraft(
 /** A catalog refresh updates authority, not an administrator's unsaved choices. */
 export function refreshReturnLabelSettingsDraft(
   draft: ReturnLabelSettingsDraft,
-  state: CustomerReturnLabelSettingsState,
+  state: ReturnShippingDraftSource,
 ): ReturnLabelSettingsDraft {
   const discovered = createReturnLabelSettingsDraft({
     ...state,
@@ -129,7 +134,7 @@ export function refreshReturnLabelSettingsDraft(
 /** Keep the Save gate and its explanation derived from the same fresh state. */
 export function returnLabelSettingsReadiness(
   draft: ReturnLabelSettingsDraft,
-  state: CustomerReturnLabelSettingsState,
+  state: ReturnShippingDraftSource,
 ) {
   const parsed = parseReturnLabelSettingsDraft(
     draft,
@@ -145,11 +150,11 @@ export function returnLabelSettingsReadiness(
       issues.push({ field, message });
   }
 
-  if (!state.providerConfigured)
+  if (draft.enabled && !state.providerConfigured)
     add(
       null,
       state.message ??
-        "The shipping provider is unavailable. Refresh label settings before saving.",
+        "The shipping provider is unavailable. Refresh shipping choices before saving.",
     );
 
   const warehouse = state.warehouses.find(
@@ -167,23 +172,24 @@ export function returnLabelSettingsReadiness(
     );
 
   const enabledRules = draft.carrierRules.filter((rule) => rule.enabled);
-  if (draft.selectionMode === "fixed_service") {
+  if (draft.selectionMode === "fixed_service" && draft.enabled) {
     const carrier = state.carriers.find((item) => item.id === draft.carrierId);
     if (!carrier) add("carrierId", "Choose an available return carrier.");
     if (!carrier?.services.some((item) => item.code === draft.serviceCode))
       add("serviceCode", "Choose an available return service.");
-  } else {
+  } else if (draft.selectionMode === "cheapest_eligible") {
     if (enabledRules.length === 0)
       add(
         "carrierRules",
         "Allow at least one carrier and choose its return services.",
       );
     for (const rule of enabledRules) {
+      if (!draft.enabled) continue;
       const carrier = state.carriers.find((item) => item.id === rule.carrierId);
       if (!carrier)
         add(
           "carrierRules",
-          `The allowed account ${rule.carrierId} is unavailable. Disable it or refresh label settings.`,
+          `The allowed account ${rule.carrierId} is unavailable. Disable it or refresh shipping choices.`,
         );
       else if (rule.serviceCodes.length === 0)
         add(
@@ -236,19 +242,24 @@ export function returnLabelSettingsReadiness(
     }
   }
 
+  // Disabled policy terms can be preserved during a carrier outage. Only
+  // enabling purchases requires current provider/account/service availability.
+  // Warehouse and structural validation remain mandatory in either state.
   const canSave =
-    parsed.success && returnLabelConfigurationAvailable(parsed.data, state);
+    parsed.success &&
+    Boolean(warehouse?.address) &&
+    (!draft.enabled || returnLabelConfigurationAvailable(parsed.data, state));
   if (!canSave && issues.length === 0)
     add(
       null,
-      "The configuration could not be verified. Refresh label settings before saving.",
+      "The configuration could not be verified. Refresh shipping choices before saving.",
     );
   return { parsed, canSave, issues };
 }
 
 export function returnLabelConfigurationAvailable(
   settings: Omit<CustomerReturnLabelSettingsInput, "expectedVersion">,
-  state: CustomerReturnLabelSettingsState,
+  state: ReturnShippingCatalog,
 ): boolean {
   if (
     !state.providerConfigured ||
@@ -282,26 +293,4 @@ export function returnLabelConfigurationAvailable(
       );
     })
   );
-}
-
-/** Query state selects a known shop; it never creates authority or a redirect URL. */
-export function selectedReturnSettingsChannel(
-  search: string,
-  shops: readonly { channelId: number }[],
-): string {
-  const parameters = new URLSearchParams(search);
-  const values = parameters.getAll("channelId");
-  if (values.length === 0)
-    return shops.length === 1 ? String(shops[0].channelId) : "";
-  if (
-    values.length !== 1 ||
-    !/^[1-9]\d*$/.test(values[0]) ||
-    !Number.isSafeInteger(Number(values[0])) ||
-    !shops.some((shop) => shop.channelId === Number(values[0]))
-  ) {
-    throw new Error(
-      "The requested Shopify shop is unavailable. Choose a configured shop below.",
-    );
-  }
-  return values[0];
 }

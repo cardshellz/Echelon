@@ -25,6 +25,7 @@ import type {
   StoredReturnLabels,
 } from "../application/customer-return-labels.service";
 import { CustomerReturnIntakeError } from "../application/customer-return-intake.ports";
+import { RETURN_LABEL_CONTROL_LOCK_NAMESPACE } from "./customer-return-label-settings.repository";
 
 const id = z.coerce.number().int().positive().safe();
 const Exact = Decimal.clone({ precision: 40 });
@@ -226,17 +227,22 @@ export class PostgresCustomerReturnLabelStore
         [parcelId],
       );
       if (existing.rowCount) return null;
-      const settings = (
-        await client.query(
-          `SELECT * FROM returns.customer_return_settings WHERE channel_id=$1 FOR SHARE`,
-          [channelId],
-        )
-      ).rows[0];
-      // Serialize the purchase boundary with an administrator pause/configuration change.
+      // Shared advisory lock also protects against the first control-row insert.
+      // Keep it until durable intent commits, before contacting the carrier.
+      await client.query(`SELECT pg_advisory_xact_lock_shared($1,$2)`, [RETURN_LABEL_CONTROL_LOCK_NAMESPACE, channelId]);
+      const control = (await client.query(`SELECT paused FROM returns.customer_return_label_controls WHERE channel_id=$1 FOR SHARE`, [channelId])).rows[0];
+      const binding = (await client.query(`SELECT s.policy_id,s.configuration FROM returns.customer_return_intakes i
+        LEFT JOIN returns.return_policy_shipping s ON s.policy_id=i.policy_id WHERE i.authorization_id=$1`, [authorizationId])).rows[0];
+      if (!binding) throw new CustomerReturnIntakeError("RETURN_LABEL_NOT_FOUND", "This return could not be found.", 404);
+      const current = binding.policy_id != null
+        ? (binding.configuration === null ? null : customerReturnLabelSettingsSchema.parse(binding.configuration))
+        : await readLegacySettingsForShare(client, channelId);
+      // New policies never reinterpret an accepted return's destination or rates.
+      // The independent channel pause still gates every fresh label purchase.
       if (
-        !settings?.enabled ||
-        settings.warehouse_id !== parcel.warehouse_snapshot.warehouseId ||
-        !equalJson(settings.destination_address, parcel.destination_address)
+        control?.paused === true || !current?.enabled ||
+        current.warehouseId !== parcel.warehouse_snapshot.warehouseId ||
+        !equalJson(current.destinationAddress, parcel.destination_address)
       )
         throw new CustomerReturnIntakeError(
           "RETURN_LABEL_SETTINGS_CHANGED",
@@ -244,7 +250,8 @@ export class PostgresCustomerReturnLabelStore
         );
       const stored = await this.readWith(client, channelId, authorizationId);
       const storedParcel = stored.parcels.find((row) => row.id === parcelId)!;
-      const current = settingsFromRow(settings);
+      const warehouse = (await client.query(`SELECT is_active,country FROM warehouse.warehouses WHERE id=$1 FOR SHARE`, [current.warehouseId])).rows[0];
+      if (!warehouse || warehouse.is_active !== 1 || warehouse.country !== "US") throw new CustomerReturnIntakeError("RETURN_LABEL_CONFIGURATION_UNAVAILABLE", "The return warehouse needs administrator attention.");
       let input = storedParcel.input;
       // The execution/recovery window starts after acquiring the purchase locks,
       // including fixed-service requests that did not need a fresh rate quote.
@@ -407,12 +414,13 @@ export class PostgresCustomerReturnLabelStore
     }
   }
 }
-function settingsFromRow(row: Record<string, unknown>) {
+function legacyAcceptedSettingsFromRow(row: Record<string, unknown>) {
   return customerReturnLabelSettingsSchema.parse({
     version: row.version,
-    enabled: row.enabled,
+    // The migrated channel control owns pause/resume for historical intakes.
+    // This path is reached only when their original policy has no shipping row.
+    enabled: true,
     warehouseId: row.warehouse_id,
-    policyId: row.policy_id,
     selectionMode: row.selection_mode,
     carrierRules: row.carrier_rules,
     carrierId: row.carrier_id,
@@ -421,6 +429,10 @@ function settingsFromRow(row: Record<string, unknown>) {
     contactPhone: row.contact_phone,
     destinationAddress: row.destination_address,
   });
+}
+async function readLegacySettingsForShare(client: PoolClient, channelId: number) {
+  const row = (await client.query(`SELECT * FROM returns.customer_return_settings WHERE channel_id=$1 FOR SHARE`, [channelId])).rows[0];
+  return row ? legacyAcceptedSettingsFromRow(row) : null;
 }
 function quoteChanged(): CustomerReturnIntakeError {
   return new CustomerReturnIntakeError(
