@@ -645,7 +645,7 @@ describe("buildDropshipOrderAcceptancePlan", () => {
     })), "DROPSHIP_ORDER_PRICING_POLICY_BLOCKED");
   });
 
-  it("freezes the .ops cost authority, provenance, and evidence hash in pricing snapshot v2", () => {
+  it("freezes the .ops cost authority, provenance, the schedule entry charged and the evidence hash in pricing snapshot v3", () => {
     const plan = buildDropshipOrderAcceptancePlan(makePlanningInput());
 
     expect(plan.wholesaleSubtotalCents).toBe(1600);
@@ -665,9 +665,14 @@ describe("buildDropshipOrderAcceptancePlan", () => {
           costSource: "variant_fixed_price",
           costPlanId: "ops",
           costOverrideId: "override-1",
+          liveUnitCostCents: 850,
+          costScheduleEntryId: 11,
+          costPolicyId: 1,
+          priceProtected: true,
         }],
       },
     });
+    expect(DROPSHIP_PRICING_SNAPSHOT_VERSION).toBe(3);
     expect(JSON.stringify(plan.pricingSnapshot)).not.toContain("channelDiscountPercent");
   });
 
@@ -685,7 +690,10 @@ describe("buildDropshipOrderAcceptancePlan", () => {
       catalogRetailPriceCents: 500,
       observedRetailUnitPriceCents: 500,
       wholesaleUnitCostCents: 400,
-      productCostEvidence: { source: "plan_percent" as const, planId: "ops", overrideId: null },
+      productCostEvidence: {
+        source: "plan_percent" as const, planId: "ops", overrideId: null,
+        liveUnitCostCents: 400, scheduleEntryId: 12, costPolicyId: 1, priceProtected: true,
+      },
       externalLineItemId: "line-2",
     };
     const quote = baseQuote();
@@ -1003,7 +1011,10 @@ function makePlanningInput(
       catalogRetailPriceCents: 1000,
       observedRetailUnitPriceCents: 1000,
       wholesaleUnitCostCents: 800,
-      productCostEvidence: { source: "variant_fixed_price", planId: "ops", overrideId: "override-1" },
+      productCostEvidence: {
+        source: "variant_fixed_price", planId: "ops", overrideId: "override-1",
+        liveUnitCostCents: 850, scheduleEntryId: 11, costPolicyId: 1, priceProtected: true,
+      },
       externalLineItemId: "line-1",
     }],
     pricingPolicies: [],

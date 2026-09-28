@@ -180,6 +180,9 @@
   "dropship.dropship_cost_change_log": [
     "modules/dropship"
   ],
+  "dropship.dropship_cost_change_notices": [
+    "modules/dropship"
+  ],
   "dropship.dropship_cost_change_policies": [
     "modules/dropship"
   ],

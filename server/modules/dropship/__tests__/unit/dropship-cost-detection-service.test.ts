@@ -113,9 +113,11 @@ class FakeRepository implements DropshipCostScheduleRepository {
       async writeReconciliation(input) {
         if (repository.failWriteFor === vendorId) throw new Error("write failed");
         repository.writes.push(input);
+        const entryIdsByVariant = new Map<number, number>();
         const counts: CostScheduleEventCounts = emptyEventCounts();
         for (const variant of input.variants) {
           for (const operation of variant.operations) {
+            if (operation.kind === "baseline" || operation.kind === "add") entryIdsByVariant.set(variant.productVariantId, 1000 + variant.productVariantId);
             if (operation.kind === "baseline") counts.baseline += 1;
             else if (operation.kind === "withdraw") counts.change_withdrawn += 1;
             else if (operation.kind === "reduce") counts.increase_reduced += 1;
@@ -123,7 +125,7 @@ class FakeRepository implements DropshipCostScheduleRepository {
             else counts[`${operation.direction}_announced`] += 1;
           }
         }
-        return counts;
+        return { counts, entryIdsByVariant };
       },
       async advanceCursor(input) {
         repository.cursorMoves.push(input);
@@ -439,6 +441,6 @@ function logView(logId: number): DropshipCostChangeLogView {
     logId, entryId: logId, vendorId: 5, vendorBusinessName: "Shellz Vendor", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
     variantName: "Single pack", productName: "Armor Envelope", eventType: "increase_announced", fromCents: 809, toCents: 999,
     effectiveAt: IN_TWO_WEEKS, retailDriven: false, observedAt: NOW, policyId: 3, costSource: "plan_percent", recordedBy: "detection",
-    createdAt: NOW,
+    noticeDecision: null, createdAt: NOW,
   };
 }

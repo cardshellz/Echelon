@@ -10,6 +10,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import type { Pool, PoolClient } from "pg";
+import { DEFAULT_DROPSHIP_COST_CHANGE_POLICY } from "../../../../../shared/dropship/cost-change-policy";
 
 import type { DropshipProductCost, DropshipProductCostReader } from "../../application/dropship-product-cost";
 import type { DropshipOrderAcceptanceInput } from "../../application/dropship-order-acceptance-service";
@@ -166,6 +167,16 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
       }],
     },
     policies: { match: "FROM dropship.dropship_pricing_policies", rows: [] },
+    // The vendor's cost schedule (migration 0711), empty by default so the first
+    // acceptance starts it; the price protection tests seed an entry.
+    scheduleLock: { match: "pg_advisory_xact_lock(hashtext($1)", rows: [] },
+    scheduleEntries: { match: "FROM dropship.dropship_cost_schedule_entries", rows: [] },
+    scheduleInsert: {
+      match: "INSERT INTO dropship.dropship_cost_schedule_entries",
+      rows: (params) => (params[3] as number[]).map((productVariantId, index) => ({ id: String(500 + index), product_variant_id: productVariantId })),
+    },
+    // One row per operation, as the real statement reports.
+    scheduleLog: { match: "INSERT INTO dropship.dropship_cost_change_log", rows: (params) => (params[3] as unknown[]).map(() => ({})) },
     inventory: {
       match: "FROM inventory.inventory_levels il",
       rows: [{ id: 1, warehouse_location_id: 5, product_variant_id: VARIANT_ID, variant_qty: 10, reserved_qty: 0, picked_qty: 0, packed_qty: 0 }],
@@ -278,12 +289,42 @@ function costReader(cost: DropshipProductCost | undefined) {
   return { reader, loadProductCosts };
 }
 
-function createRepository(db: ReturnType<typeof createFakeDb>, cost: DropshipProductCost | undefined) {
+/** The cost change policy in force: the defaults (two weeks' notice, protection on) unless a test says otherwise. */
+function costChangePolicy(options: { priceProtection?: boolean } = {}) {
+  return {
+    resolvePolicy: async () => ({
+      policyId: 3,
+      settings: { ...DEFAULT_DROPSHIP_COST_CHANGE_POLICY, priceProtection: options.priceProtection ?? true },
+    }),
+  };
+}
+
+function createRepository(
+  db: ReturnType<typeof createFakeDb>,
+  cost: DropshipProductCost | undefined,
+  options: { priceProtection?: boolean } = {},
+) {
   const { reader, loadProductCosts } = costReader(cost);
   const productCostReaderForTransaction = vi.fn(() => reader);
-  const repository = new PgDropshipOrderAcceptanceRepository(db.pool, { productCostReaderForTransaction });
+  const repository = new PgDropshipOrderAcceptanceRepository(db.pool, {
+    productCostReaderForTransaction,
+    costChangePolicy: costChangePolicy(options),
+  });
   return { repository, loadProductCosts, productCostReaderForTransaction };
 }
+
+/** A schedule already started by detection at the current cost, so a higher live cost is an increase to announce. */
+function baselineEntryRow() {
+  return {
+    id: "41", product_variant_id: VARIANT_ID, kind: "baseline", from_cents: null, unit_cost_cents: String(UNIT_COST_CENTS),
+    effective_at: new Date("2026-09-01T00:00:00.000Z"), observed_at: new Date("2026-09-01T00:00:00.000Z"), policy_id: 3,
+    cost_source: "plan_percent", plan_id: "plan-ops", override_id: null, retail_price_cents: "899", discount_bps: 1000,
+    recorded_by: "detection",
+  };
+}
+
+/** Fourteen full days after ACCEPTED_AT, rounded up to midnight UTC: the default notice. */
+const ANNOUNCED_FOR = new Date("2026-09-27T00:00:00.000Z");
 
 describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
   it("debits the wallet by the .ops cost times quantity plus shipping and freezes the provenance", async () => {
@@ -318,7 +359,7 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     expect(ledgerMetadata).toMatchObject({
       wholesaleSubtotalCents: UNIT_COST_CENTS * 2,
       shippingCents: SHIPPING_CENTS,
-      pricingSnapshotVersion: 2,
+      pricingSnapshotVersion: 3,
       costAuthority: "shellz_club_ops_product_cost",
     });
     expect(ledgerMetadata.costEvidenceHash).toMatch(/^[0-9a-f]{64}$/);
@@ -328,7 +369,7 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     expect(snapshot.params[14]).toBe(expectedDebit);
     const pricingSnapshot = JSON.parse(String(snapshot.params[15]));
     expect(pricingSnapshot).toMatchObject({
-      version: 2,
+      version: 3,
       requestHash: "a".repeat(64),
       wholesale: {
         authority: "shellz_club_ops_product_cost",
@@ -343,6 +384,10 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
           costSource: "variant_fixed_price",
           costPlanId: "plan-ops",
           costOverrideId: "override-1",
+          liveUnitCostCents: UNIT_COST_CENTS,
+          costScheduleEntryId: 500,
+          costPolicyId: 3,
+          priceProtected: true,
         }],
       },
     });
@@ -365,6 +410,129 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     expect(omsLine.params[8]).toBe(UNIT_COST_CENTS * 2);
 
     expect(db.calls.at(-1)?.sql).toBe("COMMIT");
+  });
+
+  it("starts the vendor's cost schedule under its lock before reading the cost, and records the baseline as taken at acceptance", async () => {
+    const db = createFakeDb(baseHandlers());
+    const { repository } = createRepository(db, availableCost());
+
+    await repository.acceptOrder(acceptanceInput());
+
+    const lockIndex = db.calls.findIndex((call) => call.sql.includes("pg_advisory_xact_lock(hashtext($1)"));
+    const entriesIndex = db.calls.findIndex((call) => call.sql.includes("FROM dropship.dropship_cost_schedule_entries"));
+    expect(lockIndex).toBeGreaterThan(0);
+    expect(entriesIndex).toBeGreaterThan(lockIndex);
+    expect(db.calls[lockIndex]!.params).toEqual(["dropship_cost_schedule", 10]);
+    const [scheduleInsert] = db.statements("INSERT INTO dropship.dropship_cost_schedule_entries");
+    expect(scheduleInsert.params).toEqual([
+      10, ACCEPTED_AT, 3, [VARIANT_ID], ["baseline"], [null], [UNIT_COST_CENTS], [ACCEPTED_AT],
+      ["variant_fixed_price"], ["plan-ops"], ["override-1"], [null], [null], "acceptance",
+    ]);
+    const [log] = db.statements("INSERT INTO dropship.dropship_cost_change_log");
+    expect(log.params.slice(3, 8)).toEqual([[VARIANT_ID], [500], ["baseline"], [null], [UNIT_COST_CENTS]]);
+    expect(log.params[15]).toBe("acceptance");
+    expect(db.calls.at(-1)?.sql).toBe("COMMIT");
+  });
+
+  it("charges the cost in force when the policy protects prices, and announces the higher live cost on the schedule", async () => {
+    const db = createFakeDb(baseHandlers({
+      scheduleEntries: { match: "FROM dropship.dropship_cost_schedule_entries", rows: [baselineEntryRow()] },
+    }));
+    // The plan's percentage changed (not a retail move), so the increase gets the policy's notice.
+    const live = availableCost({ unitCostCents: 999, source: "plan_percent", overrideId: null, retailPriceCents: 899, discountBps: 500 });
+    const { repository } = createRepository(db, live);
+
+    const result = await repository.acceptOrder(acceptanceInput());
+
+    const expectedDebit = UNIT_COST_CENTS * 2 + SHIPPING_CENTS;
+    expect(result).toMatchObject({ outcome: "accepted", totalDebitCents: expectedDebit });
+    const [ledger] = db.statements("INSERT INTO dropship.dropship_wallet_ledger");
+    expect(ledger.params[2]).toBe(-expectedDebit);
+    const [scheduleInsert] = db.statements("INSERT INTO dropship.dropship_cost_schedule_entries");
+    expect(scheduleInsert.params).toEqual([
+      10, ACCEPTED_AT, 3, [VARIANT_ID], ["increase"], [UNIT_COST_CENTS], [999], [ANNOUNCED_FOR],
+      ["plan_percent"], ["plan-ops"], [null], [899], [500], "acceptance",
+    ]);
+    const [log] = db.statements("INSERT INTO dropship.dropship_cost_change_log");
+    expect(log.params[5]).toEqual(["increase_announced"]);
+    const [snapshot] = db.statements("INSERT INTO dropship.dropship_order_economics_snapshots");
+    expect(JSON.parse(String(snapshot.params[15])).wholesale.lines[0]).toMatchObject({
+      wholesaleUnitCostCents: UNIT_COST_CENTS,
+      wholesaleLineTotalCents: UNIT_COST_CENTS * 2,
+      liveUnitCostCents: 999,
+      costScheduleEntryId: 41,
+      costPolicyId: 3,
+      priceProtected: true,
+    });
+    expect(db.calls.at(-1)?.sql).toBe("COMMIT");
+  });
+
+  it("charges the live cost when the policy does not protect prices, and still records the change", async () => {
+    const db = createFakeDb(baseHandlers({
+      scheduleEntries: { match: "FROM dropship.dropship_cost_schedule_entries", rows: [baselineEntryRow()] },
+    }));
+    const live = availableCost({ unitCostCents: 999, source: "plan_percent", overrideId: null, retailPriceCents: 899, discountBps: 500 });
+    const { repository } = createRepository(db, live, { priceProtection: false });
+
+    const result = await repository.acceptOrder(acceptanceInput());
+
+    const expectedDebit = 999 * 2 + SHIPPING_CENTS;
+    expect(result).toMatchObject({ outcome: "accepted", totalDebitCents: expectedDebit });
+    expect(db.statements("INSERT INTO dropship.dropship_cost_schedule_entries")).toHaveLength(1);
+    const [snapshot] = db.statements("INSERT INTO dropship.dropship_order_economics_snapshots");
+    expect(JSON.parse(String(snapshot.params[15])).wholesale.lines[0]).toMatchObject({
+      wholesaleUnitCostCents: 999, liveUnitCostCents: 999, costScheduleEntryId: 41, costPolicyId: 3, priceProtected: false,
+    });
+  });
+
+  it("writes nothing to the schedule when it already matches the live cost, and charges that cost", async () => {
+    const db = createFakeDb(baseHandlers({
+      scheduleEntries: { match: "FROM dropship.dropship_cost_schedule_entries", rows: [baselineEntryRow()] },
+    }));
+    const { repository } = createRepository(db, availableCost({ source: "plan_percent", overrideId: null, retailPriceCents: 899, discountBps: 1000 }));
+
+    const result = await repository.acceptOrder(acceptanceInput());
+
+    expect(result).toMatchObject({ outcome: "accepted", totalDebitCents: UNIT_COST_CENTS * 2 + SHIPPING_CENTS });
+    expect(db.statements("INSERT INTO dropship.dropship_cost_schedule_entries")).toHaveLength(0);
+    expect(db.statements("INSERT INTO dropship.dropship_cost_change_log")).toHaveLength(0);
+    const [snapshot] = db.statements("INSERT INTO dropship.dropship_order_economics_snapshots");
+    expect(JSON.parse(String(snapshot.params[15])).wholesale.lines[0]).toMatchObject({ costScheduleEntryId: 41, priceProtected: true });
+  });
+
+  it("rolls the whole acceptance back when the schedule cannot be written, classified for the retry decision", async () => {
+    const db = createFakeDb(baseHandlers({
+      scheduleLog: {
+        match: "INSERT INTO dropship.dropship_cost_change_log",
+        rows: () => { throw Object.assign(new Error("dropship_cost_change_log is append-only"), { code: "P0001" }); },
+      },
+    }));
+    const { repository } = createRepository(db, availableCost());
+
+    await expect(repository.acceptOrder(acceptanceInput())).rejects.toMatchObject({
+      code: "DROPSHIP_COST_SCHEDULE_IMMUTABLE",
+      context: { classification: "permanent", retryable: false },
+    });
+    expect(db.calls.some((call) => call.sql === "ROLLBACK")).toBe(true);
+    expect(db.calls.some((call) => call.sql === "COMMIT")).toBe(false);
+    for (const fragment of ["UPDATE dropship.dropship_wallet_accounts", "INSERT INTO dropship.dropship_wallet_ledger", "INSERT INTO oms.oms_orders"]) {
+      expect(db.statements(fragment), fragment).toHaveLength(0);
+    }
+  });
+
+  it("marks a missing schedule table as retryable so the processing pass tries again after the migration", async () => {
+    const db = createFakeDb(baseHandlers({
+      scheduleEntries: {
+        match: "FROM dropship.dropship_cost_schedule_entries",
+        rows: () => { throw Object.assign(new Error("relation does not exist"), { code: "42P01" }); },
+      },
+    }));
+    const { repository } = createRepository(db, availableCost());
+    await expect(repository.acceptOrder(acceptanceInput())).rejects.toMatchObject({
+      code: "DROPSHIP_COST_SCHEDULE_TABLE_MISSING",
+      context: { classification: "transient", retryable: true },
+    });
+    expect(db.calls.some((call) => call.sql === "ROLLBACK")).toBe(true);
   });
 
   it("accepts against pending ACH when the balance is short, posting the debit and the fee in one transaction", async () => {
@@ -462,6 +630,7 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     const db = createFakeDb(baseHandlers());
     const { repository } = createRepository(db, {
       status: "unavailable", unitCostCents: null, planId: "plan-ops", source: null, overrideId: null, issue: "plan_unavailable",
+      retailPriceCents: null, discountBps: null,
     });
 
     await expect(repository.acceptOrder(acceptanceInput())).rejects.toMatchObject({
@@ -529,6 +698,7 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
   it("marks a failed cost source read as retryable and refuses a zero cost outright", async () => {
     const readFailed = createRepository(createFakeDb(baseHandlers()), {
       status: "unavailable", unitCostCents: null, planId: null, source: null, overrideId: null, issue: "source_read_failed",
+      retailPriceCents: null, discountBps: null,
     });
     await expect(readFailed.repository.acceptOrder(acceptanceInput())).rejects.toMatchObject({
       code: "DROPSHIP_ORDER_PRODUCT_COST_UNAVAILABLE",
@@ -582,6 +752,8 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     expect(db.statements("INSERT INTO dropship.dropship_wallet_ledger")).toHaveLength(0);
     expect(db.statements("INSERT INTO dropship.dropship_order_economics_snapshots")).toHaveLength(0);
     expect(db.statements("INSERT INTO dropship.dropship_order_acceptance_stages")).toHaveLength(1);
+    // The canonical path prices its lines the same way: the schedule is consulted and started.
+    expect(db.statements("INSERT INTO dropship.dropship_cost_schedule_entries")).toHaveLength(1);
     const [omsOrder] = db.statements("INSERT INTO oms.oms_orders");
     expect(omsOrder.sql).toContain("'pending', 'pending'");
     expect(JSON.parse(String(omsOrder.params[18])).dropship.acceptanceState)

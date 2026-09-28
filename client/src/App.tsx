@@ -24,6 +24,7 @@ import DropshipPortalDashboard from "@/pages/dropship/DropshipPortalDashboard";
 import DropshipPortalHome from "@/pages/dropship/DropshipPortalHome";
 import DropshipPortalCatalog from "@/pages/dropship/DropshipPortalCatalog";
 import DropshipPortalNotifications from "@/pages/dropship/DropshipPortalNotifications";
+import DropshipPortalCostChanges from "@/pages/dropship/DropshipPortalCostChanges";
 import DropshipPortalOnboarding from "@/pages/dropship/DropshipPortalOnboarding";
 import DropshipPortalOrders from "@/pages/dropship/DropshipPortalOrders";
 import DropshipPortalReturns from "@/pages/dropship/DropshipPortalReturns";
@@ -280,6 +281,9 @@ function DropshipPortalRouter() {
         </Route>
         <Route path={`${portalRoot}/notifications`}>
           <DropshipPortalProtectedRoute component={DropshipPortalNotifications} />
+        </Route>
+        <Route path={`${portalRoot}/cost-changes`}>
+          <DropshipPortalProtectedRoute component={DropshipPortalCostChanges} />
         </Route>
         <Route path={portalRoot || "/"}>
           <Redirect to={dropshipPortalPath("/home")} />

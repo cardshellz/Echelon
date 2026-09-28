@@ -9,6 +9,7 @@ import {
   type CostScheduleOperation,
 } from "../domain/cost-schedule";
 import { DropshipError } from "../domain/errors";
+import { costChangeNoticeDecisions, type CostChangeNoticeDecision } from "../domain/cost-change-notice";
 import type { DropshipProductCost } from "../application/dropship-product-cost";
 import {
   COST_TRACKED_LISTING_STATUSES,
@@ -20,6 +21,7 @@ import {
   type CostScheduleRecorder,
   type CostScheduleVendorTransaction,
   type CostScheduleWriteInput,
+  type CostScheduleWriteResult,
   type DropshipCostChangeLogView,
   type DropshipCostDetectionState,
   type DropshipCostScheduleChangeView,
@@ -43,6 +45,12 @@ import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapt
 
 /** Advisory lock namespace shared with acceptance (C3): one writer per vendor schedule. */
 export const COST_SCHEDULE_VENDOR_LOCK_NAMESPACE = "dropship_cost_schedule";
+
+/** Takes the vendor's schedule lock for the rest of the caller's transaction. Detection and acceptance both take it before reading costs. */
+export async function lockVendorSchedule(client: Pick<PoolClient, "query">, vendorId: number): Promise<void> {
+  assertPositiveInteger(vendorId, "vendorId");
+  await client.query("SELECT pg_advisory_xact_lock(hashtext($1), $2::integer)", [COST_SCHEDULE_VENDOR_LOCK_NAMESPACE, vendorId]);
+}
 
 const STATE_ROW_ID = 1;
 
@@ -102,11 +110,22 @@ interface LogRow {
   policy_id: number | null;
   cost_source: string;
   recorded_by: string;
+  notice_decision: string | null;
   created_at: Date;
 }
 
 export class PgDropshipCostScheduleRepository implements DropshipCostScheduleRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
+
+  /**
+   * The vendor's schedule inside a transaction the caller owns (order
+   * acceptance): the caller has taken the vendor's lock with
+   * lockVendorSchedule and commits or rolls back itself.
+   */
+  static transactionFor(client: Pick<PoolClient, "query">, vendorId: number): CostScheduleVendorTransaction {
+    assertPositiveInteger(vendorId, "vendorId");
+    return new VendorScheduleTransaction(client, vendorId);
+  }
 
   async readDetectionState(): Promise<DropshipCostDetectionState> {
     try {
@@ -186,7 +205,7 @@ export class PgDropshipCostScheduleRepository implements DropshipCostScheduleRep
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtext($1), $2::integer)", [COST_SCHEDULE_VENDOR_LOCK_NAMESPACE, vendorId]);
+      await lockVendorSchedule(client, vendorId);
       const result = await work(new VendorScheduleTransaction(client, vendorId));
       await client.query("COMMIT");
       return result;
@@ -227,11 +246,13 @@ export class PgDropshipCostScheduleRepository implements DropshipCostScheduleRep
       const result = await this.dbPool.query<LogRow>(
         `SELECT l.id, l.entry_id, l.vendor_id, v.business_name, l.product_variant_id, pv.sku AS variant_sku,
                 pv.name AS variant_name, p.name AS product_name, l.event_type, l.from_cents, l.to_cents, l.effective_at,
-                l.retail_driven, l.observed_at, l.policy_id, l.cost_source, l.recorded_by, l.created_at
+                l.retail_driven, l.observed_at, l.policy_id, l.cost_source, l.recorded_by, l.created_at,
+                n.decision AS notice_decision
          FROM dropship.dropship_cost_change_log l
          JOIN dropship.dropship_vendors v ON v.id = l.vendor_id
          JOIN catalog.product_variants pv ON pv.id = l.product_variant_id
          JOIN catalog.products p ON p.id = pv.product_id
+         LEFT JOIN dropship.dropship_cost_change_notices n ON n.log_id = l.id
          WHERE ($1::bigint IS NULL OR l.id < $1)
          ORDER BY l.id DESC
          LIMIT $2`,
@@ -245,7 +266,7 @@ export class PgDropshipCostScheduleRepository implements DropshipCostScheduleRep
 }
 
 class VendorScheduleTransaction implements CostScheduleVendorTransaction {
-  constructor(private readonly client: PoolClient, private readonly vendorId: number) {}
+  constructor(private readonly client: Pick<PoolClient, "query">, private readonly vendorId: number) {}
 
   async listTrackedVariantIds(): Promise<number[]> {
     const result = await this.client.query<{ product_variant_id: number }>(
@@ -283,7 +304,7 @@ class VendorScheduleTransaction implements CostScheduleVendorTransaction {
       .loadProductCosts({ vendorId: this.vendorId, productVariantIds });
   }
 
-  async writeReconciliation(input: CostScheduleWriteInput): Promise<CostScheduleEventCounts> {
+  async writeReconciliation(input: CostScheduleWriteInput): Promise<CostScheduleWriteResult> {
     if (input.vendorId !== this.vendorId) {
       throw new DropshipError("DROPSHIP_COST_SCHEDULE_VENDOR_MISMATCH", "A cost schedule write named a different vendor than its transaction.",
         { classification: "permanent", vendorId: input.vendorId, transactionVendorId: this.vendorId });
@@ -313,7 +334,7 @@ class VendorScheduleTransaction implements CostScheduleVendorTransaction {
       }
     }
     await this.insertLogRows(input, logRows);
-    return counts;
+    return { counts, entryIdsByVariant: newEntryIds };
   }
 
   async advanceCursor(input: { vendorId: number; counts: CostDetectionVendorCounts; now: Date }): Promise<void> {
@@ -579,6 +600,7 @@ function mapLogRow(row: LogRow): DropshipCostChangeLogView {
     policyId: row.policy_id,
     costSource: row.cost_source,
     recordedBy: toRecorder(row.recorded_by),
+    noticeDecision: row.notice_decision === null || row.notice_decision === undefined ? null : toNoticeDecision(row.notice_decision),
     createdAt: row.created_at,
   };
 }
@@ -586,6 +608,11 @@ function mapLogRow(row: LogRow): DropshipCostChangeLogView {
 function toKind(value: string): "baseline" | "increase" | "decrease" {
   if (value === "baseline" || value === "increase" || value === "decrease") return value;
   throw invalidStoredValue("kind", value);
+}
+
+function toNoticeDecision(value: string): CostChangeNoticeDecision {
+  if ((costChangeNoticeDecisions as readonly string[]).includes(value)) return value as CostChangeNoticeDecision;
+  throw invalidStoredValue("notice_decision", value);
 }
 
 function toRecorder(value: string): CostScheduleRecorder {

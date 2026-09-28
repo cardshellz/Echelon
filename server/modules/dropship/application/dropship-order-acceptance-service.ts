@@ -308,7 +308,8 @@ export interface DropshipOrderAcceptancePlan {
 }
 
 /** Bumped when the shape of pricingSnapshot changes; readers branch on it. */
-export const DROPSHIP_PRICING_SNAPSHOT_VERSION = 2;
+/** 3: each wholesale line records the live cost, the schedule entry charged and the policy (C3 price protection). */
+export const DROPSHIP_PRICING_SNAPSHOT_VERSION = 3;
 
 export class DropshipOrderAcceptanceService {
   constructor(
@@ -684,6 +685,10 @@ export function buildDropshipOrderAcceptancePlan(
           costSource: line.productCostEvidence.source,
           costPlanId: line.productCostEvidence.planId,
           costOverrideId: line.productCostEvidence.overrideId,
+          liveUnitCostCents: line.productCostEvidence.liveUnitCostCents,
+          costScheduleEntryId: line.productCostEvidence.scheduleEntryId,
+          costPolicyId: line.productCostEvidence.costPolicyId,
+          priceProtected: line.productCostEvidence.priceProtected,
         })),
       },
       shipping: {

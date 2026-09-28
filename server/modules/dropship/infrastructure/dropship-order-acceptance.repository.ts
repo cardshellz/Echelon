@@ -12,7 +12,11 @@ import {
 } from "../domain/acceptance-funding";
 import { loadAdvancePolicyWithClient, loadAdvanceSourcesWithClient } from "./dropship-advance.reader";
 import { reconcileRewardsLotsWithClient, takeRewardsFromLotsWithClient } from "./dropship-wallet-rewards-lots";
-import { resolveAcceptanceUnitCost } from "../domain/order-acceptance-cost";
+import { decideChargedUnitCost, resolveAcceptanceUnitCost } from "../domain/order-acceptance-cost";
+import type { DropshipCostChangePolicyReader, CostScheduleVendorTransaction } from "../application/dropship-cost-detection-service";
+import { costScheduleTimingFromPolicy, planCostScheduleReconciliation } from "../application/dropship-cost-schedule-reconciliation";
+import { createDropshipCostChangePolicyServiceFromEnv } from "./dropship-cost-change-policy.factory";
+import { PgDropshipCostScheduleRepository, lockVendorSchedule, mapCostScheduleError } from "./dropship-cost-schedule.repository";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 import type { NormalizedDropshipOrderPayload } from "../application/dropship-order-intake-service";
 import type { DropshipProductCostReader } from "../application/dropship-product-cost";
@@ -253,10 +257,35 @@ export interface PgDropshipOrderAcceptanceRepositoryDependencies {
    * Defaults to the Shellz Club adapter's SAVEPOINT variant.
    */
   productCostReaderForTransaction?: (client: Pick<PoolClient, "query">) => DropshipProductCostReader;
+  /** The cost change policy in force (C1). Defaults to the versioned policy service. */
+  costChangePolicy?: DropshipCostChangePolicyReader;
+  /**
+   * The vendor's cost schedule inside the acceptance transaction (migration
+   * 0711). Defaults to the PG schedule repository bound to the same client.
+   */
+  costScheduleForTransaction?: (client: Pick<PoolClient, "query">, vendorId: number) => CostScheduleVendorTransaction;
+  /** Takes the vendor's schedule lock in the acceptance transaction. Defaults to lockVendorSchedule. */
+  lockCostScheduleForTransaction?: (client: Pick<PoolClient, "query">, vendorId: number) => Promise<void>;
+}
+
+/**
+ * Everything the acceptance transaction reads to price a line: the live `.ops`
+ * cost, the policy that says whether a scheduled cost protects the vendor, and
+ * the vendor's schedule, all bound to the transaction's own client.
+ */
+interface AcceptanceCostReaders {
+  productCosts: DropshipProductCostReader;
+  costChangePolicy: DropshipCostChangePolicyReader;
+  costSchedule: (vendorId: number) => CostScheduleVendorTransaction;
+  lockSchedule: (vendorId: number) => Promise<void>;
 }
 
 export class PgDropshipOrderAcceptanceRepository implements DropshipOrderAcceptanceRepository {
   private readonly productCostReaderForTransaction: (client: Pick<PoolClient, "query">) => DropshipProductCostReader;
+  private readonly costScheduleForTransaction: (client: Pick<PoolClient, "query">, vendorId: number) => CostScheduleVendorTransaction;
+  private readonly lockCostScheduleForTransaction: (client: Pick<PoolClient, "query">, vendorId: number) => Promise<void>;
+  private readonly costChangePolicyDependency: DropshipCostChangePolicyReader | undefined;
+  private costChangePolicyDefault: DropshipCostChangePolicyReader | undefined;
 
   constructor(
     private readonly dbPool: Pool = defaultPool,
@@ -264,13 +293,33 @@ export class PgDropshipOrderAcceptanceRepository implements DropshipOrderAccepta
   ) {
     this.productCostReaderForTransaction = deps.productCostReaderForTransaction
       ?? ((client) => PgShellzClubProductCostAdapter.forTransaction(client));
+    this.costScheduleForTransaction = deps.costScheduleForTransaction
+      ?? ((client, vendorId) => PgDropshipCostScheduleRepository.transactionFor(client, vendorId));
+    this.lockCostScheduleForTransaction = deps.lockCostScheduleForTransaction ?? lockVendorSchedule;
+    this.costChangePolicyDependency = deps.costChangePolicy;
+  }
+
+  /** The policy service is built on first use, so constructing the repository needs no environment. */
+  private costChangePolicy(): DropshipCostChangePolicyReader {
+    if (this.costChangePolicyDependency) return this.costChangePolicyDependency;
+    this.costChangePolicyDefault ??= createDropshipCostChangePolicyServiceFromEnv();
+    return this.costChangePolicyDefault;
+  }
+
+  private costReadersFor(client: PoolClient): AcceptanceCostReaders {
+    return {
+      productCosts: this.productCostReaderForTransaction(client),
+      costChangePolicy: this.costChangePolicy(),
+      costSchedule: (vendorId) => this.costScheduleForTransaction(client, vendorId),
+      lockSchedule: (vendorId) => this.lockCostScheduleForTransaction(client, vendorId),
+    };
   }
 
   async acceptOrder(input: DropshipOrderAcceptanceInput): Promise<DropshipOrderAcceptanceResult> {
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN");
-      const result = await acceptOrderWithClient(client, input, this.productCostReaderForTransaction(client));
+      const result = await acceptOrderWithClient(client, input, this.costReadersFor(client));
       await client.query("COMMIT");
       return result;
     } catch (error) {
@@ -287,7 +336,7 @@ export class PgDropshipOrderAcceptanceRepository implements DropshipOrderAccepta
     return this.inTransaction((client) => prepareCanonicalOrderWithClient(
       client,
       input,
-      this.productCostReaderForTransaction(client),
+      this.costReadersFor(client),
     ));
   }
 
@@ -335,7 +384,7 @@ export class PgDropshipOrderAcceptanceRepository implements DropshipOrderAccepta
 async function acceptOrderWithClient(
   client: PoolClient,
   input: DropshipOrderAcceptanceInput,
-  productCosts: DropshipProductCostReader,
+  costReaders: AcceptanceCostReaders,
 ): Promise<DropshipOrderAcceptanceResult> {
   const intake = await loadIntakeForUpdate(client, input);
   if (!intake) {
@@ -358,7 +407,7 @@ async function acceptOrderWithClient(
     client,
     input,
     intake,
-    productCosts,
+    costReaders,
     "legacy_exact_sku",
   );
 
@@ -444,7 +493,7 @@ async function acceptOrderWithClient(
 async function prepareCanonicalOrderWithClient(
   client: PoolClient,
   input: DropshipOrderAcceptanceInput,
-  productCosts: DropshipProductCostReader,
+  costReaders: AcceptanceCostReaders,
 ): Promise<DropshipCanonicalOrderAcceptancePreparation> {
   const intake = await loadIntakeForUpdate(client, input);
   if (!intake) {
@@ -571,7 +620,7 @@ async function prepareCanonicalOrderWithClient(
     client,
     input,
     intake,
-    productCosts,
+    costReaders,
     "canonical_claim",
   );
   if (plan.outcome === "payment_hold") {
@@ -1400,7 +1449,7 @@ async function planAcceptanceWithClient(
   client: PoolClient,
   input: DropshipOrderAcceptanceInput,
   intake: DropshipAcceptanceIntakeRecord,
-  productCosts: DropshipProductCostReader,
+  costReaders: AcceptanceCostReaders,
   inventoryValidation: "legacy_exact_sku" | "canonical_claim",
 ): Promise<{
   plan: DropshipOrderAcceptancePlan;
@@ -1444,7 +1493,8 @@ async function planAcceptanceWithClient(
     vendor,
     storeConnectionId: input.storeConnectionId,
     rawLines: intake.normalizedPayload.lines,
-    productCosts,
+    costReaders,
+    observedAt: input.acceptedAt,
   });
   const productVariantIds = uniquePositiveIntegers(lines.map((line) => line.productVariantId));
   const [pricingPolicies, inventoryLevels, wallet, paymentHoldTimeoutMinutes] = await Promise.all([
@@ -1658,7 +1708,9 @@ async function resolveAcceptanceLinesWithClient(
     vendor: DropshipAcceptanceVendorContext;
     storeConnectionId: number;
     rawLines: NormalizedDropshipOrderPayload["lines"];
-    productCosts: DropshipProductCostReader;
+    costReaders: AcceptanceCostReaders;
+    /** The acceptance time: the reading time of the live costs and of every schedule entry this transaction writes. */
+    observedAt: Date;
   },
 ): Promise<DropshipAcceptanceLineContext[]> {
   if (input.rawLines.length === 0) {
@@ -1756,12 +1808,33 @@ async function resolveAcceptanceLinesWithClient(
   // The wholesale basis is the vendor's `.ops` plan cost, read inside this
   // transaction so the debit and its evidence share one snapshot. It is the same
   // authority the vendor saw in preview; nothing else may price a live order.
-  const costs = await input.productCosts.loadProductCosts({
-    vendorId: input.vendor.vendorId,
-    productVariantIds: uniquePositiveIntegers(matchedLines.map(({ candidate }) => candidate.productVariantId)),
+  //
+  // Price protection (docs/DROPSHIP-COST-CHANGE-CONTROLS.md, C3): the read
+  // happens under the vendor's cost schedule lock, the live reading is
+  // reconciled with the schedule exactly as the detection worker does, and
+  // when the policy protects prices the line is charged the cost in force
+  // (an announced increase is not charged before its date). The schedule is
+  // updated either way, so the vendor's notice does not depend on which
+  // writer saw the change first.
+  const { costReaders, observedAt } = input;
+  const vendorId = input.vendor.vendorId;
+  const costedVariantIds = uniquePositiveIntegers(matchedLines.map(({ candidate }) => candidate.productVariantId));
+  const policy = await costReaders.costChangePolicy.resolvePolicy();
+  await costReaders.lockSchedule(vendorId);
+  const costs = await costReaders.productCosts.loadProductCosts({ vendorId, productVariantIds: costedVariantIds });
+  const schedule = costReaders.costSchedule(vendorId);
+  const entriesByVariant = await schedule.loadEntries(costedVariantIds).catch((error: unknown) => { throw costScheduleFailure(error); });
+  const reconciliation = planCostScheduleReconciliation({
+    productVariantIds: costedVariantIds,
+    entriesByVariant,
+    costs,
+    timing: costScheduleTimingFromPolicy(policy.settings),
+    observedAt,
   });
 
-  return matchedLines.map(({ line, index, candidate }) => {
+  // Every line must resolve before anything is written: an unavailable or
+  // zero cost fails the whole acceptance, with nothing recorded for it.
+  const resolved = matchedLines.map(({ line, index, candidate }) => {
     const resolution = resolveAcceptanceUnitCost(costs.get(candidate.productVariantId));
     if (!resolution.ok) {
       throw new DropshipError(resolution.code, resolution.message, {
@@ -1774,6 +1847,32 @@ async function resolveAcceptanceLinesWithClient(
         retryable: resolution.retryable,
       });
     }
+    return { line, index, candidate, resolution };
+  });
+
+  const written = reconciliation.writes.length > 0
+    ? await schedule.writeReconciliation({
+      vendorId, observedAt, policyId: policy.policyId, recordedBy: "acceptance", variants: reconciliation.writes,
+    }).catch((error: unknown) => { throw costScheduleFailure(error); })
+    : null;
+
+  return resolved.map(({ line, index, candidate, resolution }) => {
+    const outcome = reconciliation.outcomes.get(candidate.productVariantId);
+    const scheduleEntryId = outcome?.inForceEntry.kind === "existing"
+      ? outcome.inForceEntry.entryId
+      : written?.entryIdsByVariant.get(candidate.productVariantId);
+    if (!outcome || scheduleEntryId === undefined) {
+      // An available cost always yields an outcome and an entry in force; anything else is an invariant failure.
+      throw new DropshipError("DROPSHIP_ORDER_COST_SCHEDULE_UNRESOLVED",
+        "Dropship order acceptance could not resolve the cost schedule entry in force for a line.", {
+          lineIndex: index, productVariantId: candidate.productVariantId, classification: "fatal", retryable: false,
+        });
+    }
+    const charged = decideChargedUnitCost({
+      liveUnitCostCents: resolution.unitCostCents,
+      inForceUnitCostCents: outcome.inForceAfterCents,
+      priceProtection: policy.settings.priceProtection,
+    });
     const observedRetailUnitPriceCents = line.unitRetailPriceCents
       ?? candidate.observedRetailUnitPriceCents;
     return {
@@ -1784,12 +1883,34 @@ async function resolveAcceptanceLinesWithClient(
         observedRetailUnitPriceCents,
         "observed_retail_unit_price_cents",
       ),
-      wholesaleUnitCostCents: resolution.unitCostCents,
-      productCostEvidence: resolution.evidence,
+      wholesaleUnitCostCents: charged.unitCostCents,
+      productCostEvidence: {
+        ...resolution.evidence,
+        liveUnitCostCents: resolution.unitCostCents,
+        scheduleEntryId,
+        costPolicyId: policy.policyId,
+        priceProtected: charged.priceProtected,
+      },
       externalLineItemId: line.externalLineItemId ?? null,
       title: line.title?.trim() || candidate.title,
     };
   });
+}
+
+/**
+ * A schedule read or write that failed inside the acceptance transaction, as
+ * the classified error the processing pass decides retries by: a transient
+ * failure (the tables not there yet) is retried, anything else needs a human.
+ */
+function costScheduleFailure(error: unknown): unknown {
+  const mapped = mapCostScheduleError(error);
+  if (mapped instanceof DropshipError) {
+    return new DropshipError(mapped.code, mapped.message, {
+      ...mapped.context,
+      retryable: mapped.context?.classification === "transient",
+    });
+  }
+  return mapped;
 }
 
 async function loadPricingPoliciesWithClient(

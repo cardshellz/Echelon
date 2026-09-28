@@ -35,6 +35,12 @@ export const DROPSHIP_NOTIFICATION_EVENTS = {
   USDC_DEPOSIT_LANDED: "dropship_usdc_deposit_landed",
   /** A pending USDC deposit was removed by the network before it settled (funding design phase 6). */
   USDC_DEPOSIT_VOIDED: "dropship_usdc_deposit_voided",
+  /** .ops costs on the vendor's listings change on a later date (cost change controls, C4). */
+  COST_CHANGE_ANNOUNCED: "dropship_cost_change_announced",
+  /** .ops costs on the vendor's listings changed at once (cost change controls, C4). */
+  COST_CHANGE_APPLIED: "dropship_cost_change_applied",
+  /** A change announced earlier was lowered or withdrawn (cost change controls, C4). */
+  COST_CHANGE_UPDATED: "dropship_cost_change_updated",
 } as const;
 
 export type DropshipNotificationEventType =

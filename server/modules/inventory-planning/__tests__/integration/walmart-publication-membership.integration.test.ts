@@ -61,6 +61,20 @@ dbDescribe.sequential(
       shipNodeId: "test-location",
       items: intent().items,
     });
+    // The runtime enqueues outbox rows with the database clock
+    // (`available_at = transaction_timestamp()`), so the worker clock that
+    // claims them must be a reading of that same clock taken after the enqueue.
+    // JS dates carry milliseconds while Postgres keeps microseconds, so the
+    // reading rounds up to the next whole millisecond; truncated to the same
+    // millisecond as the enqueue it would sort before the row and miss it.
+    // A fixed calendar date is wrong here: it stops matching once real time
+    // passes it.
+    const databaseClockAfterEnqueue = async (): Promise<Date> => {
+      const { rows } = await database.pool.query<{ claim_at: Date }>(
+        "SELECT date_trunc('milliseconds', now()) + interval '1 millisecond' AS claim_at",
+      );
+      return new Date(rows[0]!.claim_at);
+    };
     beforeAll(async () => {
       database = await createInventoryCutoverTestDatabase(
         url,
@@ -606,35 +620,17 @@ dbDescribe.sequential(
       ).rejects.toMatchObject({ code: "MEMBERSHIP_REVIEW_STALE" });
     });
     it("holds stock at zero, suppresses a leased positive, verifies exact readback, then removes membership", async () => {
-      let providerTime = WALMART_INVENTORY_NOW;
-      async function advanceProviderClockToQueuedPublication(): Promise<void> {
-        const queued = await database.pool.query<{ availableAt: Date }>(
-          `SELECT available_at AS "availableAt"
-           FROM inventory.inventory_publication_outbox
-           WHERE publication_target_id=2 AND product_variant_id=101
-             AND publication_phase='full' AND state='queued'`,
-        );
-        expect(queued.rows).toHaveLength(1);
-        // Enqueue uses PostgreSQL transaction time, independently of the fixture
-        // clock. Date truncates PostgreSQL microseconds, so advance to the next
-        // millisecond without moving this worker clock backwards.
-        const timestampPrecisionMarginMs = 1;
-        providerTime = new Date(
-          Math.max(
-            providerTime.getTime(),
-            queued.rows[0].availableAt.getTime() + timestampPrecisionMarginMs,
-          ),
-        );
-      }
       const outbox = new PostgresInventoryPublicationOutboxRepository(
         database.pool,
       );
-      await advanceProviderClockToQueuedPublication();
+      // The positive row was enqueued by the previous test, so a clock reading
+      // taken now is after it.
+      const positiveClaimTime = await databaseClockAfterEnqueue();
       const positiveClaims = await outbox.claimDue({
         batchSize: 10,
         leaseSeconds: 120,
         leaseToken: "positive-lease",
-        now: providerTime,
+        now: positiveClaimTime,
       });
       expect(positiveClaims).toHaveLength(1);
       const [positive] = positiveClaims;
@@ -667,7 +663,7 @@ dbDescribe.sequential(
       await expect(
         new PostgresQuantityPublicationAdmission(
           database.pool,
-          () => providerTime,
+          () => positiveClaimTime,
         ).runOutbox(positive, provider),
       ).rejects.toThrow();
       expect(provider).not.toHaveBeenCalled();
@@ -677,19 +673,21 @@ dbDescribe.sequential(
         changes: [{ productVariantId: 101, included: false }],
       });
       expect(before.ready).toBe(false);
-      await advanceProviderClockToQueuedPublication();
+      // The hold enqueued the zero row after the positive claim time, so the
+      // zero claim needs a fresh reading of the database clock.
+      const zeroClaimTime = await databaseClockAfterEnqueue();
       const zeroClaims = await outbox.claimDue({
         batchSize: 10,
         leaseSeconds: 120,
         leaseToken: "zero-lease",
-        now: providerTime,
+        now: zeroClaimTime,
       });
       expect(zeroClaims).toHaveLength(1);
       const [zero] = zeroClaims;
       expect(zero.desiredQuantity).toBe("0");
       await new PostgresQuantityPublicationAdmission(
         database.pool,
-        () => providerTime,
+        () => zeroClaimTime,
       ).runOutbox(zero, () =>
         observeQuantityProviderRequest(
           {
@@ -714,7 +712,7 @@ dbDescribe.sequential(
         await outbox.recordVerified(zero, {
           observedQuantity: 0,
           providerResponse: { sku: "P5", quantity: 0 },
-          completedAt: providerTime,
+          completedAt: zeroClaimTime,
         }),
       ).toBe("verified");
       const input = {

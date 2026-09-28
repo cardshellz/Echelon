@@ -81,6 +81,7 @@ import { registerDropshipListingConfigRoutes } from "./modules/dropship/interfac
 import { registerDropshipWalletRoutes } from "./modules/dropship/interfaces/http/dropship-wallet.routes";
 import { registerDropshipOrderRoutes } from "./modules/dropship/interfaces/http/dropship-order.routes";
 import { registerDropshipNotificationRoutes } from "./modules/dropship/interfaces/http/dropship-notification.routes";
+import { registerDropshipCostChangeRoutes } from "./modules/dropship/interfaces/http/dropship-cost-change.routes";
 import { registerDropshipReturnRoutes } from "./modules/dropship/interfaces/http/dropship-return.routes";
 import { registerReturnPolicyAdminRoutes } from "./modules/returns/interfaces/http/return-policy-admin.routes";
 import { registerReturnCaseAdminRoutes } from "./modules/returns/interfaces/http/return-case-admin.routes";
@@ -196,6 +197,7 @@ export async function registerRoutes(
   registerDropshipWalletRoutes(app);
   registerDropshipOrderRoutes(app);
   registerDropshipNotificationRoutes(app);
+  registerDropshipCostChangeRoutes(app);
   registerDropshipReturnRoutes(app);
   registerReturnPolicyAdminRoutes(app);
   registerReturnCaseAdminRoutes(app);

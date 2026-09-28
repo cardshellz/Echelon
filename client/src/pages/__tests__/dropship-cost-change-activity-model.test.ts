@@ -4,7 +4,10 @@ import {
   DROPSHIP_COST_CHANGE_LOG_PAGE_SIZE,
   DROPSHIP_COST_CHANGE_TODAY_SUMMARY,
   DROPSHIP_COST_CHANGE_TODAY_WITH_DETECTION_SUMMARY,
+  DROPSHIP_COST_CHANGE_TODAY_WITH_NOTICES_SUMMARY,
+  DROPSHIP_COST_CHANGE_TODAY_WITH_PROTECTION_SUMMARY,
   describeDropshipCostChangeToday,
+  formatDropshipCostChangeNoticeDecision,
   describeDropshipCostDetection,
   dropshipCostChangeLogPageUrl,
   formatDropshipCostChangeAmounts,
@@ -100,6 +103,16 @@ describe("cost change words", () => {
     expect(describeDropshipCostChangeToday(none)).toBe(DROPSHIP_COST_CHANGE_TODAY_SUMMARY);
     expect(describeDropshipCostChangeToday({ ...none, detection: true })).toBe(DROPSHIP_COST_CHANGE_TODAY_WITH_DETECTION_SUMMARY);
     expect(DROPSHIP_COST_CHANGE_TODAY_WITH_DETECTION_SUMMARY).toContain("still charged on the next order accepted");
+    expect(describeDropshipCostChangeToday({ ...none, detection: true, priceProtection: true })).toBe(DROPSHIP_COST_CHANGE_TODAY_WITH_PROTECTION_SUMMARY);
+    // Protection without detection has nothing to charge from: the detection wording still applies.
+    expect(describeDropshipCostChangeToday({ ...none, priceProtection: true })).toBe(DROPSHIP_COST_CHANGE_TODAY_SUMMARY);
+    expect(DROPSHIP_COST_CHANGE_TODAY_WITH_PROTECTION_SUMMARY).toContain("charged the cost in force");
+    expect(describeDropshipCostChangeToday({ ...none, detection: true, priceProtection: true, vendorNotices: true }))
+      .toBe(DROPSHIP_COST_CHANGE_TODAY_WITH_NOTICES_SUMMARY);
+    expect(DROPSHIP_COST_CHANGE_TODAY_WITH_NOTICES_SUMMARY).toContain("vendors are told as the policy says");
+    expect(formatDropshipCostChangeNoticeDecision(null)).toBe("Notice pending");
+    expect(formatDropshipCostChangeNoticeDecision("sent")).toBe("Vendor notified");
+    expect(formatDropshipCostChangeNoticeDecision("skipped_below_minimum")).toBe("No notice: below the minimum");
   });
 });
 
@@ -113,7 +126,15 @@ describe("change log paging", () => {
     expect(() => parseDropshipCostChangeDetectionOverview({ workerEnabled: true, state: state(), pending: [], pendingLimit: 0, generatedAt: "x" }))
       .toThrow();
     expect(() => parseDropshipCostChangeLogPage({ items: [{ logId: 1 }], nextBeforeId: null, generatedAt: "x" })).toThrow();
+    expect(() => parseDropshipCostChangeLogPage({ items: [{ ...logRowFixture, noticeDecision: "maybe" }], nextBeforeId: null, generatedAt: "x" })).toThrow();
     expect(parseDropshipCostChangeLogPage({ items: [], nextBeforeId: null, generatedAt: "2026-09-28T10:00:00.000Z" }))
       .toEqual({ items: [], nextBeforeId: null, generatedAt: "2026-09-28T10:00:00.000Z" });
   });
 });
+
+const logRowFixture = {
+  logId: 31, entryId: 11, recordedBy: "detection", vendorId: 5, vendorBusinessName: null, productVariantId: 66, variantSku: null,
+  variantName: "Single pack", productName: "Armor Envelope", policyId: null, costSource: "retail", effectiveAt: "2026-10-13T00:00:00.000Z",
+  observedAt: "2026-09-28T16:05:00.000Z", eventType: "change_withdrawn", fromCents: 1099, toCents: null, retailDriven: true,
+  noticeDecision: null, createdAt: "2026-09-28T16:05:00.000Z",
+};
