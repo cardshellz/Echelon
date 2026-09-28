@@ -3,11 +3,12 @@ import { z } from "zod";
 import { pool as defaultPool } from "../../../db";
 import {
   prepareInitialPublicationScopeSchema, initialPublicationScopeReceiptSchema,
-  type ReviewInitialPublicationScope, type PrepareInitialPublicationScope, type InitialPublicationScopeReceipt,
+  type ReviewInitialPublicationScope, type PrepareInitialPublicationScope, type InitialPublicationScopeReceipt, type InitialPublicationScopeReview,
 } from "@shared/types/inventory-publication-initial-scope";
 import { InitialPublicationScopeError, initialScopeCommandHash, type InitialPublicationScopeStore } from "../application/inventory-publication-initial-scope.service";
 import { reviewInitialPublicationScope } from "../domain/inventory-publication-initial-scope";
 import { inventoryCutoverEvidenceHash } from "../domain/inventory-cutover-manifest";
+import { calculatePublicationVariantMappingDefinitionHash } from "../domain/inventory-channel-exposure";
 import { inInventoryCutoverTransaction } from "./inventory-cutover-commit.repository";
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { INITIAL_SCOPE_SOURCE_TABLES, readInitialPublicationScopeFacts } from "./inventory-publication-initial-scope.reader";
@@ -39,6 +40,7 @@ export class PostgresInitialPublicationScopeStore implements InitialPublicationS
         revision: (BigInt(review.targetRevision) + BigInt(1)).toString(), reviewHash: review.reviewHash,
         includedVariantIds: review.includedVariantIds, preparedBy: actor, preparedAt: now.toISOString(), alreadyApplied: false,
         excludedVariants: review.excludedVariants ?? [],
+        importedVariantIds: (review.mappingImports ?? []).map(row => row.productVariantId),
         runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false,
       });
       await client.query(`INSERT INTO inventory.publication_initial_scope_receipts
@@ -47,6 +49,7 @@ export class PostgresInitialPublicationScopeStore implements InitialPublicationS
       [input.publicationTargetId, review.targetRevision, review.authorityRevision, input.idempotencyKey, requestHash, review.reviewHash,
         actor, now, review.includedVariantIds, JSON.stringify({ facts, review }), JSON.stringify(receipt),
         (review.excludedVariants ?? []).map(row => row.productVariantId)]);
+      await importExistingListingMappings(client, input.publicationTargetId, review, actor, requestHash, now);
       const updated = await client.query(`UPDATE inventory.inventory_publication_targets SET membership_mode='explicit',revision=revision+1
         WHERE id=$1 AND revision=$2 AND state='preview' AND membership_mode='whole_product' AND publication_authority='echelon'`,
       [input.publicationTargetId, review.targetRevision]);
@@ -67,10 +70,34 @@ export class PostgresInitialPublicationScopeStore implements InitialPublicationS
       [now, actor, `inventory.inventory_publication_target:${input.publicationTargetId}`,
         JSON.stringify({ before: { mode: "whole_product", revision: review.targetRevision },
           after: { mode: "explicit", revision: receipt.revision, includedVariantIds: receipt.includedVariantIds,
-            excludedVariants: receipt.excludedVariants } }),
+            excludedVariants: receipt.excludedVariants, mappingImports: review.mappingImports ?? [] } }),
         JSON.stringify({ idempotencyKey: input.idempotencyKey, requestHash, reviewHash: review.reviewHash, receipt })]);
       return receipt;
     });
+  }
+}
+
+/** A retry snapshot of existing channel identities, not a second manual setup.
+ * The caller holds the authority fence and every source predicate through commit.
+ * Existing heads are never overwritten; conflicting or changed sources require
+ * a fresh review. All inserts share the scope receipt's atomic transaction. */
+async function importExistingListingMappings(client: PoolClient, targetId: number, review: InitialPublicationScopeReview,
+  actor: string, requestHash: string, now: Date): Promise<void> {
+  for (const mapping of review.mappingImports ?? []) {
+    const definitionHash = calculatePublicationVariantMappingDefinitionHash({ publicationTargetId: targetId,
+      productVariantId: mapping.productVariantId, externalInventoryItemId: mapping.externalInventoryItemId, externalSku: mapping.externalSku });
+    const reason = "Imported the existing channel listing identity during reviewed cutover preparation.";
+    const inserted = await client.query(`INSERT INTO inventory.publication_variant_mapping_versions
+      (publication_target_id,product_variant_id,version,external_inventory_item_id,external_sku,definition_hash,
+       change_reason,idempotency_key,request_hash,created_by,created_at,updated_at)
+      VALUES($1,$2,1,$3,$4,$5,$6,$7,$8,$9,$10,$10) RETURNING id`,
+    [targetId, mapping.productVariantId, mapping.externalInventoryItemId, mapping.externalSku, definitionHash,
+      reason, `initial-scope-map:${requestHash}:${mapping.productVariantId}`, requestHash, actor, now]);
+    if (inserted.rowCount !== 1) throw new InitialPublicationScopeError("INITIAL_SCOPE_MAPPING_IMPORT_FAILED", "The existing listing identity was not snapshotted.");
+    const head = await client.query(`INSERT INTO inventory.publication_variant_mapping_heads
+      (publication_target_id,product_variant_id,draft_mapping_id,revision,updated_by,update_reason,updated_at)
+      VALUES($1,$2,$3,1,$4,$5,$6)`, [targetId, mapping.productVariantId, inserted.rows[0].id, actor, reason, now]);
+    if (head.rowCount !== 1) throw new InitialPublicationScopeError("INITIAL_SCOPE_MAPPING_IMPORT_FAILED", "The imported identity has no matching draft head.");
   }
 }
 
