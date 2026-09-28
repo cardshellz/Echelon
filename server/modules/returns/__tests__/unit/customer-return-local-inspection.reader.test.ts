@@ -41,6 +41,23 @@ function harness(override?: (text: string, values: unknown[]) => Promise<unknown
 }
 
 describe("private local order inspection boundary", () => {
+  it("uses all canonical owner identities in the read-only snapshot and never searches display aliases", async () => {
+    const { reader, query } = harness(async text => text === inspectionQueries.canonicalOrder
+      ? [{ ...order, externalCustomerId: "customer-1", isDropship: false }] : undefined);
+    const canonical = { channelId: 36, connectionId: 4, canonicalOrder: { omsOrderId: 100,
+      externalOrderId: "1000", externalCustomerId: "customer-1" } };
+    expect((await reader.read(canonical))?.order.externalCustomerId).toBe("customer-1");
+    expect(query).toHaveBeenCalledWith(inspectionQueries.canonicalOrder, [36, 100, "1000", "customer-1"]);
+    expect(query.mock.calls.some(([text]) => text === inspectionQueries.order)).toBe(false);
+  });
+  it("rejects mixed reference/canonical input and unowned output", async () => {
+    const { reader, connect } = harness(async text => text === inspectionQueries.canonicalOrder
+      ? [{ ...order, externalCustomerId: "other", isDropship: false }] : undefined);
+    const canonicalOrder = { omsOrderId: 100, externalOrderId: "1000", externalCustomerId: "customer-1" };
+    await expect(reader.read({ ...request, canonicalOrder } as never)).rejects.toMatchObject({ code: "RETURN_INSPECTION_INPUT_INVALID" });
+    expect(connect).not.toHaveBeenCalled();
+    await expect(reader.read({ channelId: 36, connectionId: 4, canonicalOrder })).rejects.toMatchObject({ code: "RETURN_INSPECTION_DATA_INVALID" });
+  });
   it("keeps empty configuration disconnected and does not infer a shop", async () => {
     const { connect } = harness();
     const reader = new PostgresCustomerReturnLocalInspectionReader({ connect } as unknown as Pick<Pool, "connect">,

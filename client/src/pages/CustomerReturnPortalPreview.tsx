@@ -318,6 +318,7 @@ function PortalWorkspace({ adminId }: { adminId: string }) {
                 {source === "live" ? "Live orders" : "Sample data"}
               </span>
               <span>Customer access is off</span>
+              <a href="/customer-returns/start" className="underline underline-offset-4">Test customer sign-in</a>
             </div>
             <details className="mt-3">
               <summary className="flex min-h-8 cursor-pointer items-center gap-2 text-sm font-medium">

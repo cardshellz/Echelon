@@ -29,6 +29,7 @@ export class PostgresCustomerReturnSubmissionStore
   async acquire(
     input: Parameters<CustomerReturnSubmissionStore["acquire"]>[0],
   ): Promise<ReturnSubmissionCommand> {
+    if (input.omsOrderId !== undefined) z.number().int().positive().safe().parse(input.omsOrderId);
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -36,8 +37,8 @@ export class PostgresCustomerReturnSubmissionStore
       if (input.request) {
         const result = await client.query(
           `INSERT INTO returns.customer_return_submission_commands
-          (channel_id,idempotency_key,request_hash,request_snapshot,status,actor,lease_actor,lease_token,lease_until,created_at,updated_at)
-          VALUES($1,$2,$3,$4::jsonb,'preparing',$5,$5,$6,$7,$8,$8) ON CONFLICT(channel_id,idempotency_key) DO NOTHING RETURNING channel_id`,
+          (channel_id,idempotency_key,request_hash,request_snapshot,status,actor,lease_actor,lease_token,lease_until,created_at,updated_at,oms_order_id)
+          VALUES($1,$2,$3,$4::jsonb,'preparing',$5,$5,$6,$7,$8,$8,$9) ON CONFLICT(channel_id,idempotency_key) DO NOTHING RETURNING channel_id`,
           [
             input.channelId,
             input.key,
@@ -47,6 +48,7 @@ export class PostgresCustomerReturnSubmissionStore
             input.token,
             new Date(input.now.getTime() + RETURN_SUBMISSION_LEASE_MS),
             input.now,
+            input.omsOrderId ?? null,
           ],
         );
         inserted = result.rowCount === 1;
@@ -58,6 +60,10 @@ export class PostgresCustomerReturnSubmissionStore
         )
       ).rows[0];
       if (!row) throw submissionNotFound();
+      // Validate immutable canonical identity before even leasing a retry. A UUID
+      // shared with another request does not grant ownership of that command.
+      if (input.omsOrderId !== undefined && (row.oms_order_id == null || Number(row.oms_order_id) !== input.omsOrderId))
+        throw new CustomerReturnIntakeError("RETURN_LABEL_COMMAND_CONFLICT", "This request belongs to different return details.", 409);
       if (input.hash && row.request_hash !== input.hash)
         throw new CustomerReturnIntakeError(
           "RETURN_LABEL_COMMAND_CONFLICT",
@@ -108,6 +114,7 @@ export class PostgresCustomerReturnSubmissionStore
 function parse(row: Record<string, unknown>): ReturnSubmissionCommand {
   return {
     request: customerReturnLabelSubmitInputSchema.parse(row.request_snapshot),
+    omsOrderId: row.oms_order_id == null ? null : z.coerce.number().int().positive().safe().parse(row.oms_order_id),
     actor: z
       .string()
       .min(1)

@@ -1163,6 +1163,9 @@
   "returns.customer_return_allocation_case_items": [
     "modules/returns"
   ],
+  "returns.customer_login_challenges": [
+    "modules/returns"
+  ],
   "returns.customer_return_authorization_allocations": [
     "modules/returns"
   ],

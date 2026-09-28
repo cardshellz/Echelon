@@ -53,6 +53,30 @@ export const customerReturnOrderCandidateSchema = z.object({
 
 export type CustomerReturnOrderCandidate = z.infer<typeof customerReturnOrderCandidateSchema>;
 
+export const customerReturnCanonicalOrderScopeSchema = z.object({
+  channelId: canonicalIdSchema,
+  omsOrderId: canonicalIdSchema,
+  externalOrderId: externalIdSchema,
+  externalCustomerId: externalIdSchema,
+}).strict();
+/** Trusted request-scoped identity, never an unchecked public request body. */
+export type CustomerReturnCanonicalOrderScope = z.infer<typeof customerReturnCanonicalOrderScopeSchema>;
+
+export const customerReturnOwnedOrderInputSchema = z.object({
+  omsOrderId: canonicalIdSchema,
+  externalOrderId: externalIdSchema.optional(),
+}).strict();
+export const customerReturnOrderListInputSchema = z.object({
+  beforeOmsOrderId: canonicalIdSchema.optional(),
+  pageSize: z.number().int().min(1).max(50).default(10),
+}).strict();
+export type CustomerReturnOrderListQuery = z.infer<typeof customerReturnOrderListInputSchema> & {
+  channelId: number; externalCustomerId: string;
+};
+export type CustomerReturnOwnedOrderQuery = z.infer<typeof customerReturnOwnedOrderInputSchema> & {
+  channelId: number; scope: CustomerReturnOrderAccessScope;
+};
+
 export interface CustomerReturnOrderCandidateQuery {
   channelId: number;
   scope: CustomerReturnOrderAccessScope;
@@ -66,12 +90,20 @@ export interface CustomerReturnOrderAccessRepository {
    * Do not search global orders, match email, use substrings, or choose a shipment.
    */
   findExactOrderCandidates(input: CustomerReturnOrderCandidateQuery): Promise<readonly CustomerReturnOrderCandidate[]>;
+  findOwnedOrder(input: CustomerReturnOwnedOrderQuery): Promise<readonly CustomerReturnOrderCandidate[]>;
+  /** Read pageSize + 1 rows in descending canonical ID order; no eligibility assumptions. */
+  listOwnedOrders(input: CustomerReturnOrderListQuery): Promise<readonly CustomerReturnOrderCandidate[]>;
 }
 
 export const customerReturnOrderAccessResultSchema = customerReturnOrderCandidateSchema.omit({
   externalCustomerId: true,
 });
 export type CustomerReturnOrderAccessResult = z.infer<typeof customerReturnOrderAccessResultSchema>;
+export const customerReturnOrderListResultSchema = z.object({
+  orders: z.array(customerReturnOrderAccessResultSchema).max(50),
+  nextBeforeOmsOrderId: canonicalIdSchema.nullable(),
+}).strict();
+export type CustomerReturnOrderListResult = z.infer<typeof customerReturnOrderListResultSchema>;
 
 export type CustomerReturnOrderAccessErrorCode =
   | "CUSTOMER_RETURN_ORDER_REFERENCE_INVALID"
@@ -164,6 +196,50 @@ export class CustomerReturnOrderAccessService {
       externalOrderId: candidate.externalOrderId,
       externalOrderNumber: candidate.externalOrderNumber,
     });
+  }
+
+  async resolveOwned(raw: unknown): Promise<CustomerReturnOrderAccessResult> {
+    const input = customerReturnOwnedOrderInputSchema.safeParse(raw);
+    if (!input.success) throw invalidReference();
+    const principal = await this.readPrincipal();
+    if (!principal || principal.channelId !== this.channelId) throw orderUnavailable();
+    const scope: CustomerReturnOrderAccessScope = principal.kind === "customer"
+      ? { kind: "customer", externalCustomerId: principal.externalCustomerId }
+      : { kind: "order", omsOrderId: principal.omsOrderId, externalOrderId: principal.externalOrderId };
+    let rows: unknown;
+    try { rows = await this.dependencies.repository.findOwnedOrder({ ...input.data, channelId: this.channelId, scope }); }
+    catch { throw accessUnavailable(); }
+    const parsed = z.array(customerReturnOrderCandidateSchema).max(2).safeParse(rows);
+    if (!parsed.success) throw accessUnavailable();
+    if (parsed.data.length !== 1) throw orderUnavailable();
+    const candidate = parsed.data[0];
+    if (candidate.channelId !== this.channelId || candidate.omsOrderId !== input.data.omsOrderId
+      || (input.data.externalOrderId !== undefined && candidate.externalOrderId !== input.data.externalOrderId)
+      || !matchesPrincipal(candidate, principal)) throw orderUnavailable();
+    const { externalCustomerId: _customer, ...result } = candidate;
+    return customerReturnOrderAccessResultSchema.parse(result);
+  }
+
+  async list(raw: unknown): Promise<CustomerReturnOrderListResult> {
+    const input = customerReturnOrderListInputSchema.safeParse(raw);
+    if (!input.success) throw invalidReference();
+    const principal = await this.readPrincipal();
+    if (!principal || principal.kind !== "customer" || principal.channelId !== this.channelId) throw orderUnavailable();
+    let rows: unknown;
+    try { rows = await this.dependencies.repository.listOwnedOrders({ ...input.data, channelId: this.channelId,
+      externalCustomerId: principal.externalCustomerId }); }
+    catch { throw accessUnavailable(); }
+    const parsed = z.array(customerReturnOrderCandidateSchema).max(input.data.pageSize + 1).safeParse(rows);
+    if (!parsed.success) throw accessUnavailable();
+    let previous = input.data.beforeOmsOrderId ?? Number.POSITIVE_INFINITY;
+    for (const candidate of parsed.data) {
+      if (candidate.channelId !== this.channelId || !matchesPrincipal(candidate, principal)
+        || candidate.omsOrderId >= previous) throw accessUnavailable();
+      previous = candidate.omsOrderId;
+    }
+    const orders = parsed.data.slice(0, input.data.pageSize).map(({ externalCustomerId: _customer, ...row }) => row);
+    return customerReturnOrderListResultSchema.parse({ orders,
+      nextBeforeOmsOrderId: parsed.data.length > input.data.pageSize ? orders[orders.length - 1].omsOrderId : null });
   }
 
   private async readPrincipal(): Promise<CustomerReturnVerifiedPrincipal | null> {

@@ -72,6 +72,7 @@ describe("writer-ratchet (P2.1)", () => {
 
   it("keeps private return intake and label writes in their Returns owner", () => {
     const tables = [
+      "returns.customer_login_challenges",
       "returns.return_policy_shipping",
       "returns.customer_return_label_controls",
       "returns.customer_return_label_control_events",

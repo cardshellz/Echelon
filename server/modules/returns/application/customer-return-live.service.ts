@@ -22,6 +22,7 @@ import { CustomerReturnLocalInspectionError, customerReturnInspectionShopSchema,
   type CustomerReturnLocalInspectionReader, type CustomerReturnLocalInspectionSnapshot } from "./customer-return-local-inspection.ports";
 import { CustomerReturnShopifySnapshotError, customerReturnShopifySnapshotSchema,
   type CustomerReturnShopifySnapshotReader, type CustomerReturnShopifySnapshot } from "./customer-return-shopify-snapshot.ports";
+import { customerReturnCanonicalOrderScopeSchema, type CustomerReturnCanonicalOrderScope } from "./customer-return-order-access.service";
 
 const MAX_OBSERVATION_AGE_MS = 120_000;
 export interface CustomerReturnLiveDependencies {
@@ -43,7 +44,8 @@ export interface CustomerReturnIntakeInspection {
   operationalPolicy: PreparedCustomerReturnIntake["operationalPolicy"];
 }
 
-/** Administrator inspection only. The dependencies deliberately contain no write port. */
+/** Read-only evidence inspection. Customer entry points require trusted canonical
+ * ownership; staff reference-based entry points remain separately gated. */
 export class CustomerReturnLiveService {
   constructor(private readonly dependencies: CustomerReturnLiveDependencies) {}
 
@@ -61,6 +63,28 @@ export class CustomerReturnLiveService {
 
   async inspectForIntake(raw: unknown): Promise<CustomerReturnIntakeInspection> {
     return this.boundary(() => this.load(parseInput(customerReturnLiveLookupInputSchema, raw)));
+  }
+
+  async lookupCanonical(scope: CustomerReturnCanonicalOrderScope): Promise<CustomerReturnLiveOrder> {
+    return this.boundary(async () => (await this.load(parseInput(customerReturnCanonicalOrderScopeSchema, scope))).order);
+  }
+
+  async inspectCanonicalForIntake(scope: CustomerReturnCanonicalOrderScope): Promise<CustomerReturnIntakeInspection> {
+    return this.boundary(() => this.load(parseInput(customerReturnCanonicalOrderScopeSchema, scope)));
+  }
+
+  async reviewCanonical(raw: unknown, scope: CustomerReturnCanonicalOrderScope): Promise<CustomerReturnLiveReview> {
+    return this.boundary(async () => {
+      const input = parseInput(customerReturnLiveReviewInputSchema, raw);
+      const owned = parseInput(customerReturnCanonicalOrderScopeSchema, scope);
+      if (input.channelId !== owned.channelId) throw changed();
+      const { order } = await this.load(owned);
+      if (order.sourceRevision !== input.sourceRevision
+        || normalizeCustomerReturnOrderReference(input.orderReference) !== order.orderReference) throw changed();
+      const plan = validateCustomerReturnBoxPlan(order.lines, { selections: input.selections, parcels: input.parcels }, order.boxOptions);
+      return customerReturnLiveReviewSchema.parse({ mode: "admin_live", sourceRevision: order.sourceRevision,
+        effects: "none", orderReference: order.orderReference, ...plan, refundMethod: "manual_shopify" });
+    });
   }
 
   async review(raw: unknown): Promise<CustomerReturnLiveReview> {
@@ -82,15 +106,22 @@ export class CustomerReturnLiveService {
     return shops;
   }
 
-  private async load(input: CustomerReturnLiveLookupInput): Promise<CustomerReturnIntakeInspection> {
-    const reference = normalizeCustomerReturnOrderReference(input.orderReference);
+  private async load(input: CustomerReturnLiveLookupInput | CustomerReturnCanonicalOrderScope): Promise<CustomerReturnIntakeInspection> {
+    const canonicalScope = "omsOrderId" in input ? input : null;
+    const requestedReference = "orderReference" in input ? normalizeCustomerReturnOrderReference(input.orderReference) : null;
     const shop = (await this.readShops()).find(candidate => candidate.channelId === input.channelId);
     if (!shop) throw new CustomerReturnLiveError("RETURN_LIVE_SHOP_UNAVAILABLE", "Select a configured returns store.", 409);
     const firstPolicy = await this.readPolicy(shop.channelId);
-    const lookup = { channelId: shop.channelId, connectionId: shop.connectionId, orderReference: input.orderReference };
+    const lookup = canonicalScope
+      ? { channelId: shop.channelId, connectionId: shop.connectionId, canonicalOrder: {
+        omsOrderId: canonicalScope.omsOrderId, externalOrderId: canonicalScope.externalOrderId,
+        externalCustomerId: canonicalScope.externalCustomerId } }
+      : { channelId: shop.channelId, connectionId: shop.connectionId, orderReference: "orderReference" in input ? input.orderReference : "" };
     const firstRaw = await this.dependencies.local.read(lookup);
     if (firstRaw === null) throw new CustomerReturnLiveError("RETURN_LIVE_ORDER_NOT_FOUND", "We couldn't find that order in the selected store.", 404);
     const first = customerReturnLocalInspectionSnapshotSchema.parse(firstRaw);
+    if (canonicalScope) verifyCanonicalOwnership(first, canonicalScope);
+    const reference = requestedReference ?? sourceOrderReference(first.order.externalOrderNumber);
     if (canonical(first.shop) !== canonical(shop) || first.order.channelId !== shop.channelId
       || sourceOrderReference(first.order.externalOrderNumber) !== reference) throw unavailable();
     // Release the local read transaction before provider I/O. A second local
@@ -98,11 +129,13 @@ export class CustomerReturnLiveService {
     const provider = customerReturnShopifySnapshotSchema.parse(await this.dependencies.shopify.read({
       shop, externalOrderId: first.order.externalOrderId,
     }));
+    if (canonicalScope) verifyProviderOwnership(provider, canonicalScope);
     verifyIdentity(first, provider, reference);
     const boxOptions = await readCustomerReturnOriginalBoxes(first, this.dependencies.dimensions, this.dependencies.reportBoxDiagnostic);
     const finalRaw = await this.dependencies.local.read(lookup);
     if (finalRaw === null) throw changed();
     const local = customerReturnLocalInspectionSnapshotSchema.parse(finalRaw);
+    if (canonicalScope) verifyCanonicalOwnership(local, canonicalScope);
     if (canonical(first) !== canonical(local)) throw changed();
     const operationalPolicy = await this.readPolicy(shop.channelId);
     if (canonical(firstPolicy) !== canonical(operationalPolicy)) throw changed();
@@ -187,6 +220,21 @@ export class CustomerReturnLiveService {
       }
       throw unavailable();
     }
+  }
+}
+
+function verifyCanonicalOwnership(local: CustomerReturnLocalInspectionSnapshot, scope: CustomerReturnCanonicalOrderScope): void {
+  if (local.order.channelId !== scope.channelId || local.order.omsOrderId !== scope.omsOrderId
+    || local.order.externalOrderId !== scope.externalOrderId || local.order.externalCustomerId !== scope.externalCustomerId) {
+    throw new CustomerReturnLiveError("RETURN_LIVE_ORDER_NOT_FOUND", "This order is unavailable for returns.", 404);
+  }
+}
+
+function verifyProviderOwnership(provider: CustomerReturnShopifySnapshot, scope: CustomerReturnCanonicalOrderScope): void {
+  // Normalize trusted numeric/GID customer identities as strings: Number would
+  // make distinct Shopify IDs above the safe integer limit compare as equal.
+  if (!provider.order.customerId || provider.order.customerId !== gid("Customer", scope.externalCustomerId)) {
+    throw new CustomerReturnLiveError("RETURN_LIVE_ORDER_NOT_FOUND", "This order is unavailable for returns.", 404);
   }
 }
 

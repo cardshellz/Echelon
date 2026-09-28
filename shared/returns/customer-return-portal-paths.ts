@@ -8,6 +8,6 @@ export const CUSTOMER_RETURN_PREVIEW_API_PATH = "/api/returns/admin/portal-previ
 export function isCustomerReturnPortalPath(pathname: string): boolean {
   // Match Express and Wouter's case-insensitive paths before selecting a shell.
   const path = pathname.toLowerCase();
-  return [CUSTOMER_RETURN_PORTAL_PATH, CUSTOMER_RETURN_PORTAL_LEGACY_PATH]
+  return [CUSTOMER_RETURN_PORTAL_PATH, CUSTOMER_RETURN_PORTAL_LEGACY_PATH, "/customer-returns"]
     .some(prefix => path === prefix || path.startsWith(`${prefix}/`));
 }

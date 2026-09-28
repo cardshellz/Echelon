@@ -18,6 +18,13 @@ function setup() {
   const service = new CustomerReturnLiveService({ local, shopify, dimensions, policies, reportBoxDiagnostic, now });
   return { service, local, shopify, dimensions, policies, reportBoxDiagnostic, now, localFacts, shopifyFacts };
 }
+function setupCanonical(externalCustomerId = "901") {
+  const s = setup();
+  s.localFacts.order.externalCustomerId = externalCustomerId;
+  s.shopifyFacts.order.customerId = externalCustomerId.startsWith("gid://") ? externalCustomerId : gid("Customer", externalCustomerId);
+  const scope = { channelId: 36, omsOrderId: 100, externalOrderId: "1001", externalCustomerId };
+  return { ...s, scope };
+}
 async function reviewInput(service: CustomerReturnLiveService) {
   const order = await service.lookup(lookup);
   return { ...lookup, sourceRevision: order.sourceRevision,
@@ -29,6 +36,79 @@ async function reviewInput(service: CustomerReturnLiveService) {
 }
 
 describe("private live order inspection", () => {
+  it.each(["901", gid("Customer", 901), "900719925474099312345", gid("Customer", "900719925474099312345")])(
+    "matches the provider owner and repeats exact canonical local scope without loss for %s", async externalCustomerId => {
+    const s = setupCanonical(externalCustomerId);
+    const order = await s.service.lookupCanonical(s.scope);
+    expect(order.lines[0].eligibleQuantity).toBe(2);
+    expect(s.local.read).toHaveBeenCalledTimes(2);
+    for (const call of s.local.read.mock.calls) expect(call).toEqual([{ channelId: 36, connectionId: 4,
+      canonicalOrder: { omsOrderId: 100, externalOrderId: "1001", externalCustomerId } }]);
+    expect(JSON.stringify(order)).not.toContain("customerId");
+  });
+  it.each(["customer", "canonical", "channel"])("rejects changed %s ownership during provider reads", async change => {
+    const s = setupCanonical();
+    s.shopify.read.mockImplementation(async () => {
+      if (change === "customer") s.localFacts.order.externalCustomerId = "other-customer";
+      if (change === "canonical") s.localFacts.order.omsOrderId = 101;
+      if (change === "channel") s.localFacts.order.channelId = 37;
+      return structuredClone(s.shopifyFacts);
+    });
+    await expect(s.service.inspectCanonicalForIntake(s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_ORDER_NOT_FOUND" });
+    expect(s.local.read).toHaveBeenCalledTimes(2);
+  });
+  it("rejects an unowned first observation before provider I/O even with the same display number", async () => {
+    const s = setupCanonical();
+    s.localFacts.order.externalCustomerId = "other-customer";
+    await expect(s.service.lookupCanonical(s.scope))
+      .rejects.toMatchObject({ code: "RETURN_LIVE_ORDER_NOT_FOUND" });
+    expect(s.shopify.read).not.toHaveBeenCalled();
+  });
+  it("rechecks canonical ownership for review, including absence from the second scoped read", async () => {
+    const s = setupCanonical();
+    const input = await reviewInput(s.service);
+    expect((await s.service.reviewCanonical(input, s.scope)).effects).toBe("none");
+    s.local.read.mockResolvedValueOnce(structuredClone(s.localFacts)).mockResolvedValueOnce(null as never);
+    await expect(s.service.reviewCanonical(input, s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_REVIEW_CHANGED" });
+  });
+  it.each([null, undefined, gid("Customer", 902)])("denies canonical access without the matching provider owner: %s", async customerId => {
+    const s = setupCanonical();
+    s.shopifyFacts.order.customerId = customerId;
+    addLiveOriginalBox(s.localFacts);
+    await expect(s.service.lookupCanonical(s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_ORDER_NOT_FOUND", status: 404 });
+    await expect(s.service.inspectCanonicalForIntake(s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_ORDER_NOT_FOUND", status: 404 });
+    expect(s.dimensions.read).not.toHaveBeenCalled();
+  });
+  it.each(["901", gid("Order", 901), gid("Customer", "0901"), gid("Customer", "901/subpath")])(
+    "rejects malformed snapshot customer identity %s", async customerId => {
+      const s = setupCanonical();
+      s.shopifyFacts.order.customerId = customerId;
+      await expect(s.service.lookupCanonical(s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_DATA_UNVERIFIED", status: 503 });
+    },
+  );
+  it.each(["customer-901", "0901", "9.01e2", gid("Order", 901), gid("Customer", "901/subpath")])(
+    "rejects malformed trusted customer identity %s", async externalCustomerId => {
+      const s = setupCanonical(externalCustomerId);
+      s.shopifyFacts.order.customerId = gid("Customer", 901);
+      await expect(s.service.lookupCanonical(s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_IDENTITY_INVALID", status: 503 });
+    },
+  );
+  it("does not conflate neighboring customer IDs above the safe integer limit", async () => {
+    const s = setupCanonical("900719925474099312344");
+    s.shopifyFacts.order.customerId = gid("Customer", "900719925474099312345");
+    await expect(s.service.lookupCanonical(s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_ORDER_NOT_FOUND", status: 404 });
+  });
+  it.each([null, undefined, gid("Customer", 902)])("freshly denies review when the provider owner changes: %s", async customerId => {
+    const s = setupCanonical();
+    const input = await reviewInput(s.service);
+    s.shopifyFacts.order.customerId = customerId;
+    await expect(s.service.reviewCanonical(input, s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_ORDER_NOT_FOUND", status: 404 });
+  });
+  it("keeps staff-only snapshots without provider customer evidence backward compatible", async () => {
+    const s = setup();
+    expect(s.shopifyFacts.order.customerId).toBeUndefined();
+    await expect(s.service.lookup(lookup)).resolves.toMatchObject({ orderReference: "0012-A" });
+  });
   it.each(["version", "identity", "inspection"])("uses the winning window and binds same-window policy %s to review", async (change) => {
     const s = setup();
     s.policies.read.mockResolvedValue([labelActivePolicy({ returnWindowDays: 30 })]);
