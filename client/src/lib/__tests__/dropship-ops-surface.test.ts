@@ -2288,14 +2288,14 @@ describe("dropship ops surface client helpers", () => {
       idempotentReplay: false,
     });
     expect(describeListingQueueResult(response([makeListingPreviewRow({ productVariantId: 1, previewStatus: "ready" })])))
-      .toEqual({ outcome: "queued", message: "Queued 1 listing for your store. Push job 77." });
+      .toEqual({ outcome: "queued", message: "Sending 1 listing to your store now. This usually takes under a minute; the result shows here." });
     expect(describeListingQueueResult(response([
       makeListingPreviewRow({ productVariantId: 1, previewStatus: "ready" }),
       makeListingPreviewRow({ productVariantId: 2, previewStatus: "warning" }),
       makeListingPreviewRow({ productVariantId: 3, previewStatus: "blocked" }),
     ]))).toEqual({
       outcome: "queued",
-      message: "Queued 2 of 3 listings for your store. 1 not queued: the table below shows why. Push job 77.",
+      message: "Sending 2 of 3 listings to your store now. 1 not queued: the table below shows why.",
     });
     expect(describeListingQueueResult(response([makeListingPreviewRow({ productVariantId: 3, previewStatus: "blocked" })])))
       .toEqual({ outcome: "nothing_queued", message: "Nothing was queued: the selected listing is not ready. The table below shows why." });

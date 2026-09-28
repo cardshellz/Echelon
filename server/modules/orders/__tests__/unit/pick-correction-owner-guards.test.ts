@@ -35,8 +35,11 @@ describe("existing inventory owner corrective-pick fences", () => {
     expect(inventoryCore.pickItem).not.toHaveBeenCalled();
     expect(audit).toHaveBeenCalledWith(expect.objectContaining({ action: "wms.non_inventory_pick_confirmed" }));
   });
-  it.each([{ quantity: 3, unproven: 0 }, { quantity: 0, unproven: 1 }])(
-    "does not debit stock already shipped or with unproven shipment quantity: %j", async posted => {
+  it.each([-3, null])(
+    "does not debit on-hand stock already shipped or with unproven quantity: %j", async delta => {
+      const posted = { id: 20, order_id: 70, product_variant_id: 5, from_location_id: 10,
+        variant_qty_delta: delta, variant_qty_before: 3, variant_qty_after: 0,
+        source_state: "on_hand", target_state: "shipped", voided: false };
       const tx = { execute: vi.fn(async statement => {
         const query = new PgDialect().sqlToQuery(statement).sql;
         if (query.includes('AS "orderNumber"')) return { rows: [correction] };
@@ -48,7 +51,8 @@ describe("existing inventory owner corrective-pick fences", () => {
       const inventoryCore = { pickItem: vi.fn() };
       const service = new PickingUseCases({} as any, inventoryCore as any, {} as any, {} as any);
       await expect((service as any).applyLegacyPickProgressTransaction(tx, {
-        itemId: 71, beforeItem: { orderId: 70 }, status: "completed", effectivePickedQuantity: 3,
+        itemId: 71, beforeItem: { orderId: 70, productId: 5 }, status: "completed", effectivePickedQuantity: 3,
+        pickMethod: "missed_pick_confirmation", warehouseLocationId: 10,
         inventoryCore, pickCorrectionId: 1, pickCorrectionRevision: 2, userId: "picker",
       })).rejects.toMatchObject({ code: "POSTED_INVENTORY_REVIEW_REQUIRED" });
       expect(inventoryCore.pickItem).not.toHaveBeenCalled();

@@ -242,6 +242,41 @@ describe("DropshipListingPushWorkerService", () => {
     });
   });
 
+  it("keeps the marketplace's own reason on a failed item, logs it, and names it in the vendor's notice", async () => {
+    marketplacePush.error = new DropshipError(
+      "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
+      "eBay listing push failed with HTTP 400: 25002 Invalid value for aspect (aspect: Brand)",
+      { retryable: false, status: 400, providerErrors: [
+        { errorId: 25002, message: "Invalid value for aspect", parameters: [{ name: "aspect", value: "Brand" }] },
+        "not an entry",
+      ] },
+    );
+
+    const result = await service.processJob({
+      jobId: 30,
+      workerId: "worker-1",
+      idempotencyKey: "process-004",
+    });
+
+    expect(result.items[0]).toMatchObject({
+      status: "failed",
+      errorCode: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
+      errorMessage: "eBay listing push failed with HTTP 400: 25002 Invalid value for aspect (aspect: Brand)",
+    });
+    expect(repository.failInputs[0]?.providerErrors).toEqual([
+      { errorId: 25002, message: "Invalid value for aspect", parameters: [{ name: "aspect", value: "Brand" }] },
+    ]);
+    expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_FAILED")).toMatchObject({
+      context: {
+        jobId: 30, itemId: 1, vendorId: 10, storeConnectionId: 22, listingId: 100, productVariantId: 101, platform: "shopify",
+        errorCode: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR", retryable: false, providerErrors: [{ errorId: 25002 }],
+      },
+    });
+    expect(notificationSender.sent[0]?.message).toBe(
+      "1 of 1 listing could not be sent to your store (job 30). First reason: eBay listing push failed with HTTP 400: 25002 Invalid value for aspect (aspect: Brand)",
+    );
+  });
+
   it("does not fail the push worker when listing failure notification delivery fails", async () => {
     marketplacePush.error = new Error("marketplace unavailable");
     notificationSender.error = new Error("email unavailable");
@@ -377,7 +412,10 @@ class FakeListingPushWorkerRepository implements DropshipListingPushWorkerReposi
     return this.items[0];
   }
 
+  failInputs: Array<Parameters<DropshipListingPushWorkerRepository["failItem"]>[0]> = [];
+
   async failItem(input: Parameters<DropshipListingPushWorkerRepository["failItem"]>[0]): Promise<DropshipListingPushWorkerItemRecord> {
+    this.failInputs.push(input);
     this.items[0] = {
       ...this.items[0],
       status: "failed",
