@@ -13,9 +13,11 @@ import type { DropshipProductCost } from "../application/dropship-product-cost";
 import {
   COST_TRACKED_LISTING_STATUSES,
   COST_TRACKED_VENDOR_STATUSES,
+  costScheduleRecorders,
   emptyEventCounts,
   type CostDetectionVendorCounts,
   type CostScheduleEventCounts,
+  type CostScheduleRecorder,
   type CostScheduleVendorTransaction,
   type CostScheduleWriteInput,
   type DropshipCostChangeLogView,
@@ -71,6 +73,7 @@ interface EntryRow {
   override_id: string | null;
   retail_price_cents: string | number | null;
   discount_bps: number | null;
+  recorded_by: string;
 }
 
 interface PendingRow extends EntryRow {
@@ -98,10 +101,9 @@ interface LogRow {
   observed_at: Date;
   policy_id: number | null;
   cost_source: string;
+  recorded_by: string;
   created_at: Date;
 }
-
-type Queryable = Pick<PoolClient, "query">;
 
 export class PgDropshipCostScheduleRepository implements DropshipCostScheduleRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
@@ -202,7 +204,7 @@ export class PgDropshipCostScheduleRepository implements DropshipCostScheduleRep
       const result = await this.dbPool.query<PendingRow>(
         `SELECT e.id, e.vendor_id, v.business_name, e.product_variant_id, pv.sku AS variant_sku, pv.name AS variant_name,
                 p.name AS product_name, e.kind, e.from_cents, e.unit_cost_cents, e.effective_at, e.observed_at,
-                e.policy_id, e.cost_source, e.plan_id, e.override_id, e.retail_price_cents, e.discount_bps
+                e.policy_id, e.cost_source, e.plan_id, e.override_id, e.retail_price_cents, e.discount_bps, e.recorded_by
          FROM dropship.dropship_cost_schedule_entries e
          JOIN dropship.dropship_vendors v ON v.id = e.vendor_id
          JOIN catalog.product_variants pv ON pv.id = e.product_variant_id
@@ -225,7 +227,7 @@ export class PgDropshipCostScheduleRepository implements DropshipCostScheduleRep
       const result = await this.dbPool.query<LogRow>(
         `SELECT l.id, l.entry_id, l.vendor_id, v.business_name, l.product_variant_id, pv.sku AS variant_sku,
                 pv.name AS variant_name, p.name AS product_name, l.event_type, l.from_cents, l.to_cents, l.effective_at,
-                l.retail_driven, l.observed_at, l.policy_id, l.cost_source, l.created_at
+                l.retail_driven, l.observed_at, l.policy_id, l.cost_source, l.recorded_by, l.created_at
          FROM dropship.dropship_cost_change_log l
          JOIN dropship.dropship_vendors v ON v.id = l.vendor_id
          JOIN catalog.product_variants pv ON pv.id = l.product_variant_id
@@ -261,7 +263,7 @@ class VendorScheduleTransaction implements CostScheduleVendorTransaction {
     if (productVariantIds.length === 0) return entries;
     const result = await this.client.query<EntryRow>(
       `SELECT id, product_variant_id, kind, from_cents, unit_cost_cents, effective_at, observed_at, policy_id,
-              cost_source, plan_id, override_id, retail_price_cents, discount_bps
+              cost_source, plan_id, override_id, retail_price_cents, discount_bps, recorded_by
        FROM dropship.dropship_cost_schedule_entries
        WHERE vendor_id = $1 AND withdrawn_at IS NULL AND product_variant_id = ANY($2::int[])
        ORDER BY effective_at ASC, id ASC`,
@@ -366,9 +368,9 @@ class VendorScheduleTransaction implements CostScheduleVendorTransaction {
     const result = await this.client.query<{ id: string | number; product_variant_id: number }>(
       `INSERT INTO dropship.dropship_cost_schedule_entries
          (vendor_id, product_variant_id, kind, from_cents, unit_cost_cents, effective_at, observed_at, policy_id,
-          cost_source, plan_id, override_id, retail_price_cents, discount_bps, created_at)
+          cost_source, plan_id, override_id, retail_price_cents, discount_bps, recorded_by, created_at)
        SELECT $1::integer, r.product_variant_id, r.kind, r.from_cents, r.unit_cost_cents, r.effective_at, $2::timestamptz, $3::integer,
-              r.cost_source, r.plan_id, r.override_id, r.retail_price_cents, r.discount_bps, $2::timestamptz
+              r.cost_source, r.plan_id, r.override_id, r.retail_price_cents, r.discount_bps, $14::text, $2::timestamptz
        FROM unnest($4::int[], $5::text[], $6::bigint[], $7::bigint[], $8::timestamptz[], $9::text[], $10::text[],
                    $11::text[], $12::bigint[], $13::int[])
          AS r(product_variant_id, kind, from_cents, unit_cost_cents, effective_at, cost_source, plan_id, override_id,
@@ -388,6 +390,7 @@ class VendorScheduleTransaction implements CostScheduleVendorTransaction {
         rows.map((row) => row.evidence.overrideId),
         rows.map((row) => row.evidence.retailPriceCents),
         rows.map((row) => row.evidence.discountBps),
+        input.recordedBy,
       ],
     );
     for (const row of result.rows) ids.set(row.product_variant_id, toId(row.id, "entry id"));
@@ -424,9 +427,10 @@ class VendorScheduleTransaction implements CostScheduleVendorTransaction {
     const result = await this.client.query(
       `INSERT INTO dropship.dropship_cost_change_log
          (vendor_id, product_variant_id, entry_id, event_type, from_cents, to_cents, effective_at, retail_driven,
-          observed_at, policy_id, cost_source, plan_id, override_id, retail_price_cents, discount_bps, created_at)
+          observed_at, policy_id, cost_source, plan_id, override_id, retail_price_cents, discount_bps, recorded_by, created_at)
        SELECT $1::integer, r.product_variant_id, r.entry_id, r.event_type, r.from_cents, r.to_cents, r.effective_at, r.retail_driven,
-              $2::timestamptz, $3::integer, r.cost_source, r.plan_id, r.override_id, r.retail_price_cents, r.discount_bps, $2::timestamptz
+              $2::timestamptz, $3::integer, r.cost_source, r.plan_id, r.override_id, r.retail_price_cents, r.discount_bps, $16::text,
+              $2::timestamptz
        FROM unnest($4::int[], $5::bigint[], $6::text[], $7::bigint[], $8::bigint[], $9::timestamptz[], $10::boolean[],
                    $11::text[], $12::text[], $13::text[], $14::bigint[], $15::int[])
          AS r(product_variant_id, entry_id, event_type, from_cents, to_cents, effective_at, retail_driven,
@@ -447,6 +451,7 @@ class VendorScheduleTransaction implements CostScheduleVendorTransaction {
         rows.map((row) => row.evidence.overrideId),
         rows.map((row) => row.evidence.retailPriceCents),
         rows.map((row) => row.evidence.discountBps),
+        input.recordedBy,
       ],
     );
     if (result.rowCount !== rows.length) {
@@ -523,6 +528,7 @@ export function mapEntryRow(row: EntryRow): StoredCostScheduleEntry {
     effectiveAt: row.effective_at,
     observedAt: row.observed_at,
     policyId: row.policy_id,
+    recordedBy: toRecorder(row.recorded_by),
     evidence: {
       source: row.cost_source,
       planId: row.plan_id,
@@ -550,6 +556,7 @@ function mapPendingRow(row: PendingRow): DropshipCostScheduleChangeView {
     observedAt: entry.observedAt,
     policyId: entry.policyId,
     costSource: entry.evidence.source,
+    recordedBy: entry.recordedBy,
   };
 }
 
@@ -571,6 +578,7 @@ function mapLogRow(row: LogRow): DropshipCostChangeLogView {
     observedAt: row.observed_at,
     policyId: row.policy_id,
     costSource: row.cost_source,
+    recordedBy: toRecorder(row.recorded_by),
     createdAt: row.created_at,
   };
 }
@@ -578,6 +586,11 @@ function mapLogRow(row: LogRow): DropshipCostChangeLogView {
 function toKind(value: string): "baseline" | "increase" | "decrease" {
   if (value === "baseline" || value === "increase" || value === "decrease") return value;
   throw invalidStoredValue("kind", value);
+}
+
+function toRecorder(value: string): CostScheduleRecorder {
+  if ((costScheduleRecorders as readonly string[]).includes(value)) return value as CostScheduleRecorder;
+  throw invalidStoredValue("recorded_by", value);
 }
 
 function toEventType(value: string): CostScheduleEventType {

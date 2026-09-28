@@ -30,13 +30,13 @@ beforeEach(() => {
 });
 
 const pending: DropshipCostPendingChangeView = {
-  entryId: 11, vendorId: 5, vendorBusinessName: "Shellz Vendor", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+  entryId: 11, recordedBy: "detection", vendorId: 5, vendorBusinessName: "Shellz Vendor", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
   variantName: "Single pack", productName: "Armor Envelope", policyId: 2, costSource: "plan_percent",
   effectiveAt: "2026-10-13T00:00:00.000Z", observedAt: "2026-09-28T16:05:00.000Z", kind: "increase", fromCents: 809, unitCostCents: 999,
 };
 
 const logRow: DropshipCostChangeLogRowView = {
-  logId: 31, entryId: 11, vendorId: 5, vendorBusinessName: null, productVariantId: 66, variantSku: null, variantName: "Single pack",
+  logId: 31, entryId: 11, recordedBy: "acceptance", vendorId: 5, vendorBusinessName: null, productVariantId: 66, variantSku: null, variantName: "Single pack",
   productName: "Armor Envelope", policyId: null, costSource: "retail", effectiveAt: "2026-10-13T00:00:00.000Z",
   observedAt: "2026-09-28T16:05:00.000Z", eventType: "change_withdrawn", fromCents: 1099, toCents: null, retailDriven: true,
   createdAt: "2026-09-28T16:05:00.000Z",
@@ -94,6 +94,7 @@ describe("dropship cost change activity panel", () => {
     expect(detectionSection).toContain("$8.09 → $9.99");
     expect(detectionSection).toContain("Plan percentage of retail");
     expect(detectionSection).toContain("Increase");
+    expect(detectionSection).toContain("by detection");
     expect(detectionSection).not.toContain("Only the first");
   });
 
@@ -125,6 +126,7 @@ describe("dropship cost change activity panel", () => {
     expect(logSection).toContain("Retail price move");
     expect(logSection).toContain("Vendor 5 · Single pack · Armor Envelope · Retail price");
     expect(logSection).toContain("Default policy");
+    expect(logSection).toContain("at order acceptance");
     expect(logSection).toContain("Schedule started");
     expect(logSection).toContain("$8.09");
     expect(logSection).toContain("Policy version id 2");

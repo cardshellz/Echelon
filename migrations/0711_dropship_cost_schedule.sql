@@ -33,11 +33,16 @@ CREATE TABLE IF NOT EXISTS dropship.dropship_cost_schedule_entries (
   override_id varchar(255),
   retail_price_cents bigint,
   discount_bps integer,
+  -- Which writer took the reading: the detection worker, or an order
+  -- acceptance reconciling the schedule under the same vendor lock (C3).
+  recorded_by varchar(20) NOT NULL,
   withdrawn_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
 
   CONSTRAINT dropship_cost_schedule_entries_kind_chk
     CHECK (kind IN ('baseline', 'increase', 'decrease')),
+  CONSTRAINT dropship_cost_schedule_entries_recorded_by_chk
+    CHECK (recorded_by IN ('detection', 'acceptance')),
   CONSTRAINT dropship_cost_schedule_entries_cost_chk
     CHECK (unit_cost_cents > 0),
   -- A change says what it changes from, in its direction; a baseline changes
@@ -94,6 +99,7 @@ BEGIN
      OR NEW.override_id IS DISTINCT FROM OLD.override_id
      OR NEW.retail_price_cents IS DISTINCT FROM OLD.retail_price_cents
      OR NEW.discount_bps IS DISTINCT FROM OLD.discount_bps
+     OR NEW.recorded_by IS DISTINCT FROM OLD.recorded_by
      OR NEW.created_at IS DISTINCT FROM OLD.created_at
   THEN
     RAISE EXCEPTION 'dropship_cost_schedule_entries is immutable: only withdrawn_at and a lowered unit_cost_cents may change';
@@ -142,8 +148,11 @@ CREATE TABLE IF NOT EXISTS dropship.dropship_cost_change_log (
   override_id varchar(255),
   retail_price_cents bigint,
   discount_bps integer,
+  recorded_by varchar(20) NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
 
+  CONSTRAINT dropship_cost_change_log_recorded_by_chk
+    CHECK (recorded_by IN ('detection', 'acceptance')),
   CONSTRAINT dropship_cost_change_log_event_chk
     CHECK (event_type IN ('baseline', 'increase_announced', 'increase_applied', 'decrease_announced', 'decrease_applied', 'increase_reduced', 'change_withdrawn')),
   -- NULL is named explicitly: a NULL comparison would pass a CHECK.

@@ -52,12 +52,17 @@ export const COST_TRACKED_LISTING_STATUSES: readonly string[] = Object.freeze([
 /** Vendors whose costs are watched; the same set the listing tier reconcile reviews. */
 export const COST_TRACKED_VENDOR_STATUSES: readonly string[] = Object.freeze(["active", "paused"]);
 
+/** Which writer took the reading behind a row: the detection worker, or an order acceptance (C3). */
+export const costScheduleRecorders = ["detection", "acceptance"] as const;
+export type CostScheduleRecorder = (typeof costScheduleRecorders)[number];
+
 export interface StoredCostScheduleEntry extends CostScheduleEntry {
   kind: "baseline" | "increase" | "decrease";
   fromCents: number | null;
   evidence: CostReadingEvidence;
   observedAt: Date;
   policyId: number | null;
+  recordedBy: CostScheduleRecorder;
 }
 
 export interface DropshipCostDetectionState {
@@ -84,6 +89,7 @@ export interface CostScheduleWriteInput {
   vendorId: number;
   observedAt: Date;
   policyId: number | null;
+  recordedBy: CostScheduleRecorder;
   variants: readonly CostScheduleVariantReconciliation[];
 }
 
@@ -140,6 +146,7 @@ export interface DropshipCostScheduleChangeView {
   observedAt: Date;
   policyId: number | null;
   costSource: string;
+  recordedBy: CostScheduleRecorder;
 }
 
 export interface DropshipCostChangeLogView {
@@ -159,6 +166,7 @@ export interface DropshipCostChangeLogView {
   observedAt: Date;
   policyId: number | null;
   costSource: string;
+  recordedBy: CostScheduleRecorder;
   createdAt: Date;
 }
 
@@ -341,7 +349,9 @@ export class DropshipCostDetectionService {
       }
 
       const events = reconciliations.length > 0
-        ? await transaction.writeReconciliation({ vendorId, observedAt, policyId: policy.policyId, variants: reconciliations })
+        ? await transaction.writeReconciliation({
+          vendorId, observedAt, policyId: policy.policyId, recordedBy: "detection", variants: reconciliations,
+        })
         : emptyEventCounts();
       const unavailableReadings = [...unavailableByIssue.values()].reduce((sum, count) => sum + count, 0);
       const changesRecorded = Object.values(events).reduce((sum, count) => sum + count, 0);

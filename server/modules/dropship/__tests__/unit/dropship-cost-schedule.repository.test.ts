@@ -67,7 +67,7 @@ function entryRow(patch: Record<string, unknown> = {}) {
   return {
     id: "11", product_variant_id: 66, kind: "increase", from_cents: "809", unit_cost_cents: "999", effective_at: IN_TWO_WEEKS,
     observed_at: NOW, policy_id: 3, cost_source: "plan_percent", plan_id: "ops", override_id: null,
-    retail_price_cents: "899", discount_bps: 1000, ...patch,
+    retail_price_cents: "899", discount_bps: 1000, recorded_by: "detection", ...patch,
   };
 }
 
@@ -208,6 +208,7 @@ describe("PgDropshipCostScheduleRepository", () => {
         vendorId: 5,
         observedAt: NOW,
         policyId: 3,
+        recordedBy: "acceptance",
         variants: [
           { productVariantId: 66, evidence, retailDriven: false, operations: [
             { kind: "add", direction: "increase", fromCents: 809, unitCostCents: 999, effectiveAt: IN_TWO_WEEKS },
@@ -229,6 +230,7 @@ describe("PgDropshipCostScheduleRepository", () => {
         5, NOW, 3,
         [66, 68], ["increase", "baseline"], [809, null], [999, 709], [IN_TWO_WEEKS, NOW],
         ["plan_percent", "variant_fixed_price"], ["ops", "ops"], [null, "o-9"], [899, null], [1000, null],
+        "acceptance",
       ]);
       expect(lower?.sql).toContain("SET unit_cost_cents = $5");
       expect(lower?.sql).toContain("AND kind = 'increase' AND unit_cost_cents = $4");
@@ -251,6 +253,7 @@ describe("PgDropshipCostScheduleRepository", () => {
         [null, null, null, "o-9"],
         [899, 999, 999, null],
         [1000, 1000, 1000, null],
+        "acceptance",
       ]);
       expect(calls.at(-1)?.sql).toBe("COMMIT");
     });
@@ -258,7 +261,7 @@ describe("PgDropshipCostScheduleRepository", () => {
     it("rolls back when an entry to lower or withdraw no longer matches the domain's view", async () => {
       const { pool, calls } = fakePool([result([]), result([], 0)]);
       await expect(new PgDropshipCostScheduleRepository(pool).withVendorSchedule(5, (transaction) => transaction.writeReconciliation({
-        vendorId: 5, observedAt: NOW, policyId: 3,
+        vendorId: 5, observedAt: NOW, policyId: 3, recordedBy: "detection",
         variants: [{ productVariantId: 67, evidence, retailDriven: false, operations: [
           { kind: "withdraw", entryId: 12, unitCostCents: 1099, effectiveAt: IN_TWO_WEEKS },
         ] }],
@@ -270,12 +273,12 @@ describe("PgDropshipCostScheduleRepository", () => {
     it("refuses a write for another vendor, two new entries for one variant, or an insert that returned too few ids", async () => {
       const otherVendor = new PgDropshipCostScheduleRepository(fakePool().pool);
       await expect(otherVendor.withVendorSchedule(5, (transaction) => transaction.writeReconciliation({
-        vendorId: 6, observedAt: NOW, policyId: 3, variants: [],
+        vendorId: 6, observedAt: NOW, policyId: 3, recordedBy: "detection", variants: [],
       }))).rejects.toMatchObject({ code: "DROPSHIP_COST_SCHEDULE_VENDOR_MISMATCH" });
 
       const twoAdds = new PgDropshipCostScheduleRepository(fakePool().pool);
       await expect(twoAdds.withVendorSchedule(5, (transaction) => transaction.writeReconciliation({
-        vendorId: 5, observedAt: NOW, policyId: 3,
+        vendorId: 5, observedAt: NOW, policyId: 3, recordedBy: "detection",
         variants: [{ productVariantId: 66, evidence, retailDriven: false, operations: [
           { kind: "baseline", unitCostCents: 809, effectiveAt: NOW },
           { kind: "add", direction: "increase", fromCents: 809, unitCostCents: 999, effectiveAt: IN_TWO_WEEKS },
@@ -284,7 +287,7 @@ describe("PgDropshipCostScheduleRepository", () => {
 
       const shortInsert = new PgDropshipCostScheduleRepository(fakePool([result([])]).pool);
       await expect(shortInsert.withVendorSchedule(5, (transaction) => transaction.writeReconciliation({
-        vendorId: 5, observedAt: NOW, policyId: 3,
+        vendorId: 5, observedAt: NOW, policyId: 3, recordedBy: "detection",
         variants: [{ productVariantId: 66, evidence, retailDriven: false, operations: [{ kind: "baseline", unitCostCents: 809, effectiveAt: NOW }] }],
       }))).rejects.toMatchObject({ code: "DROPSHIP_COST_SCHEDULE_WRITE_INVALID" });
     });
@@ -322,7 +325,7 @@ describe("PgDropshipCostScheduleRepository", () => {
       expect(pending).toEqual([{
         entryId: 11, vendorId: 5, vendorBusinessName: "Shellz Vendor", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
         variantName: "Single pack", productName: "Armor Envelope", kind: "increase", fromCents: 809, unitCostCents: 999,
-        effectiveAt: IN_TWO_WEEKS, observedAt: NOW, policyId: 3, costSource: "plan_percent",
+        effectiveAt: IN_TWO_WEEKS, observedAt: NOW, policyId: 3, costSource: "plan_percent", recordedBy: "detection",
       }]);
     });
 
@@ -330,7 +333,7 @@ describe("PgDropshipCostScheduleRepository", () => {
       const { pool, calls } = fakePool([result([{
         id: "31", entry_id: "11", vendor_id: 5, business_name: null, product_variant_id: 66, variant_sku: null, variant_name: "Single pack",
         product_name: "Armor Envelope", event_type: "change_withdrawn", from_cents: "1099", to_cents: null, effective_at: IN_TWO_WEEKS,
-        retail_driven: true, observed_at: NOW, policy_id: null, cost_source: "retail", created_at: NOW,
+        retail_driven: true, observed_at: NOW, policy_id: null, cost_source: "retail", recorded_by: "acceptance", created_at: NOW,
       }])]);
       const rows = await new PgDropshipCostScheduleRepository(pool).listChangeLog({ limit: 51, beforeId: 40 });
       expect(calls[0]?.sql).toContain("WHERE ($1::bigint IS NULL OR l.id < $1) ORDER BY l.id DESC LIMIT $2");
@@ -338,7 +341,7 @@ describe("PgDropshipCostScheduleRepository", () => {
       expect(rows).toEqual([{
         logId: 31, entryId: 11, vendorId: 5, vendorBusinessName: null, productVariantId: 66, variantSku: null, variantName: "Single pack",
         productName: "Armor Envelope", eventType: "change_withdrawn", fromCents: 1099, toCents: null, effectiveAt: IN_TWO_WEEKS,
-        retailDriven: true, observedAt: NOW, policyId: null, costSource: "retail", createdAt: NOW,
+        retailDriven: true, observedAt: NOW, policyId: null, costSource: "retail", recordedBy: "acceptance", createdAt: NOW,
       }]);
     });
 
@@ -347,6 +350,7 @@ describe("PgDropshipCostScheduleRepository", () => {
       expect(() => mapEntryRow(entryRow({ unit_cost_cents: "-1" }) as never)).toThrow(expect.objectContaining({ code: "DROPSHIP_COST_SCHEDULE_INVALID_STORED_VALUE" }));
       expect(() => mapEntryRow(entryRow({ kind: "surprise" }) as never)).toThrow(expect.objectContaining({ code: "DROPSHIP_COST_SCHEDULE_INVALID_STORED_VALUE" }));
       expect(() => mapEntryRow(entryRow({ id: "0" }) as never)).toThrow(expect.objectContaining({ code: "DROPSHIP_COST_SCHEDULE_INVALID_STORED_VALUE" }));
+      expect(() => mapEntryRow(entryRow({ recorded_by: "someone" }) as never)).toThrow(expect.objectContaining({ code: "DROPSHIP_COST_SCHEDULE_INVALID_STORED_VALUE" }));
       expect(mapEntryRow(entryRow({ unit_cost_cents: 999 }) as never).unitCostCents).toBe(999);
     });
   });

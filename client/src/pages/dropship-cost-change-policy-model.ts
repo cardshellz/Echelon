@@ -750,7 +750,12 @@ const detectionStateSchema = z.object({
   lastTickAt: z.string().nullable(),
 });
 
+/** Which writer took the reading: the detection worker, or an order acceptance. */
+const costScheduleRecorderSchema = z.enum(["detection", "acceptance"]);
+export type DropshipCostScheduleRecorder = z.infer<typeof costScheduleRecorderSchema>;
+
 const changeSubjectSchema = z.object({
+  recordedBy: costScheduleRecorderSchema,
   vendorId: z.number().int().positive(),
   vendorBusinessName: z.string().nullable(),
   productVariantId: z.number().int().positive(),
@@ -879,6 +884,10 @@ export function formatDropshipCostChangeEvent(eventType: CostChangeEventType): s
     case "change_withdrawn":
       return "Announced change withdrawn";
   }
+}
+
+export function formatDropshipCostScheduleRecorder(recordedBy: DropshipCostScheduleRecorder): string {
+  return recordedBy === "acceptance" ? "at order acceptance" : "by detection";
 }
 
 export function formatDropshipCostSource(source: CostSource): string {

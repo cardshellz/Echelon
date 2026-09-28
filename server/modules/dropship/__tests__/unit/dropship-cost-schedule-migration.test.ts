@@ -51,9 +51,12 @@ describe("0711 dropship cost schedule migration", () => {
       "CHECK ((retail_price_cents IS NULL) = (discount_bps IS NULL))",
       `CHECK (discount_bps IS NULL OR discount_bps BETWEEN 0 AND ${BASIS_POINTS_PER_WHOLE})`,
       "CHECK (withdrawn_at IS NULL OR withdrawn_at >= observed_at)",
+      "CHECK (recorded_by IN ('detection', 'acceptance'))",
     ]) {
       expect(tableBody(ENTRIES)).toContain(check);
     }
+    expect(tableBody(LOG)).toContain("CHECK (recorded_by IN ('detection', 'acceptance'))");
+    expect(tableBody(LOG)).toContain("recorded_by varchar(20) NOT NULL");
   });
 
   it("indexes the live schedule per vendor and variant, and everything due by a date", () => {

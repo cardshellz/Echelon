@@ -110,7 +110,7 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
     const first = await repository.withVendorSchedule(1, async (transaction) => {
       expect(await transaction.loadEntries([1, 2])).toEqual(new Map());
       const counts = await transaction.writeReconciliation({
-        vendorId: 1, observedAt: NOW, policyId: 1,
+        vendorId: 1, observedAt: NOW, policyId: 1, recordedBy: "detection",
         variants: [
           { productVariantId: 1, evidence: planPercent, retailDriven: false, operations: [{ kind: "baseline", unitCostCents: 809, effectiveAt: NOW }] },
           { productVariantId: 2, evidence: { ...planPercent, source: "variant_fixed_price", overrideId: "o-1", retailPriceCents: null, discountBps: null },
@@ -125,12 +125,12 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
 
     const entriesAfterFirst = await repository.withVendorSchedule(1, (transaction) => transaction.loadEntries([1, 2]));
     const baseline = entriesAfterFirst.get(1)![0]!;
-    expect(baseline).toMatchObject({ kind: "baseline", fromCents: null, unitCostCents: 809, effectiveAt: NOW, observedAt: NOW, policyId: 1, evidence: planPercent });
+    expect(baseline).toMatchObject({ kind: "baseline", fromCents: null, unitCostCents: 809, effectiveAt: NOW, observedAt: NOW, policyId: 1, evidence: planPercent, recordedBy: "detection" });
     expect(entriesAfterFirst.get(2)![0]).toMatchObject({ unitCostCents: 7_999, evidence: { source: "variant_fixed_price", overrideId: "o-1", retailPriceCents: null, discountBps: null } });
 
     // Second reading: an increase announced for two weeks out.
     const second = await repository.withVendorSchedule(1, (transaction) => transaction.writeReconciliation({
-      vendorId: 1, observedAt: LATER, policyId: 1,
+      vendorId: 1, observedAt: LATER, policyId: 1, recordedBy: "acceptance",
       variants: [{ productVariantId: 1, evidence: { ...planPercent, discountBps: 500 }, retailDriven: false, operations: [
         { kind: "add", direction: "increase", fromCents: 809, unitCostCents: 999, effectiveAt: IN_TWO_WEEKS },
       ] }],
@@ -138,20 +138,20 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
     expect(second).toEqual({ ...emptyEventCounts(), increase_announced: 1 });
     const announced = (await repository.withVendorSchedule(1, (transaction) => transaction.loadEntries([1]))).get(1)!
       .find((entry) => entry.kind === "increase")!;
-    expect(announced).toMatchObject({ fromCents: 809, unitCostCents: 999, effectiveAt: IN_TWO_WEEKS, observedAt: LATER });
+    expect(announced).toMatchObject({ fromCents: 809, unitCostCents: 999, effectiveAt: IN_TWO_WEEKS, observedAt: LATER, recordedBy: "acceptance" });
 
     const pending = await repository.listPendingChanges({ now: LATER, limit: 10 });
     expect(pending).toEqual([{
       entryId: announced.entryId, vendorId: 1, vendorBusinessName: "Shellz Vendor", productVariantId: 1, variantSku: "ARM-ENV-SGL-P50",
       variantName: "Single pack", productName: "Armor Envelope", kind: "increase", fromCents: 809, unitCostCents: 999,
-      effectiveAt: IN_TWO_WEEKS, observedAt: LATER, policyId: 1, costSource: "plan_percent",
+      effectiveAt: IN_TWO_WEEKS, observedAt: LATER, policyId: 1, costSource: "plan_percent", recordedBy: "acceptance",
     }]);
     // Once its date has passed it is no longer pending.
     expect(await repository.listPendingChanges({ now: IN_TWO_WEEKS, limit: 10 })).toEqual([]);
 
     // Third reading: the increase is lowered on its date; fourth: withdrawn.
     const third = await repository.withVendorSchedule(1, (transaction) => transaction.writeReconciliation({
-      vendorId: 1, observedAt: LATER, policyId: 1,
+      vendorId: 1, observedAt: LATER, policyId: 1, recordedBy: "detection",
       variants: [{ productVariantId: 1, evidence: planPercent, retailDriven: true, operations: [
         { kind: "reduce", entryId: announced.entryId, fromCents: 999, unitCostCents: 899, effectiveAt: IN_TWO_WEEKS },
       ] }],
@@ -160,7 +160,7 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
     expect((await repository.listPendingChanges({ now: LATER, limit: 10 }))[0]).toMatchObject({ unitCostCents: 899 });
 
     const fourth = await repository.withVendorSchedule(1, (transaction) => transaction.writeReconciliation({
-      vendorId: 1, observedAt: LATER, policyId: 1,
+      vendorId: 1, observedAt: LATER, policyId: 1, recordedBy: "detection",
       variants: [{ productVariantId: 1, evidence: planPercent, retailDriven: false, operations: [
         { kind: "withdraw", entryId: announced.entryId, unitCostCents: 899, effectiveAt: IN_TWO_WEEKS },
       ] }],
@@ -171,10 +171,10 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
 
     // The log holds every operation, newest first, and pages by id.
     const page = await repository.listChangeLog({ limit: 3, beforeId: null });
-    expect(page.map((row) => [row.eventType, row.fromCents, row.toCents, row.retailDriven])).toEqual([
-      ["change_withdrawn", 899, null, false],
-      ["increase_reduced", 999, 899, true],
-      ["increase_announced", 809, 999, false],
+    expect(page.map((row) => [row.eventType, row.fromCents, row.toCents, row.retailDriven, row.recordedBy])).toEqual([
+      ["change_withdrawn", 899, null, false, "detection"],
+      ["increase_reduced", 999, 899, true, "detection"],
+      ["increase_announced", 809, 999, false, "acceptance"],
     ]);
     expect(page[0]).toMatchObject({ vendorBusinessName: "Shellz Vendor", variantSku: "ARM-ENV-SGL-P50", productName: "Armor Envelope", entryId: announced.entryId, policyId: 1 });
     const older = await repository.listChangeLog({ limit: 3, beforeId: page[2]!.logId });
@@ -192,7 +192,7 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
     const before = await pool.query(qualify(`SELECT count(*)::int AS n FROM dropship.dropship_cost_schedule_entries WHERE vendor_id = 1`));
     await expect(repository.withVendorSchedule(1, async (transaction) => {
       await transaction.writeReconciliation({
-        vendorId: 1, observedAt: LATER, policyId: 1,
+        vendorId: 1, observedAt: LATER, policyId: 1, recordedBy: "detection",
         variants: [{ productVariantId: 2, evidence: planPercent, retailDriven: false, operations: [
           { kind: "add", direction: "decrease", fromCents: 7_999, unitCostCents: 6_999, effectiveAt: LATER },
         ] }],
@@ -239,18 +239,18 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
       await expect(pool.query(sql, values), sql).rejects.toThrow(message);
     }
     // The CHECKs mirror the domain: an increase must rise, a decrease must fall, a baseline changes nothing.
-    const insert = `INSERT INTO ${entries} (vendor_id, product_variant_id, kind, from_cents, unit_cost_cents, effective_at, observed_at, cost_source, plan_id)
-      VALUES (1, 1, $1, $2, $3, now(), now(), 'retail', 'ops')`;
+    const insert = `INSERT INTO ${entries} (vendor_id, product_variant_id, kind, from_cents, unit_cost_cents, effective_at, observed_at, cost_source, plan_id, recorded_by)
+      VALUES (1, 1, $1, $2, $3, now(), now(), 'retail', 'ops', 'detection')`;
     for (const [kind, from, unit] of [["increase", 900, 900], ["increase", 900, 800], ["decrease", 800, 900], ["baseline", 800, 900], ["increase", null, 900], ["decrease", null, 900]]) {
       await expect(pool.query(insert, [kind, from, unit]), `${kind} ${from} -> ${unit}`).rejects.toMatchObject({ code: "23514" });
     }
-    const logInsert = `INSERT INTO ${log} (vendor_id, product_variant_id, entry_id, event_type, from_cents, to_cents, effective_at, retail_driven, observed_at, cost_source, plan_id)
-      VALUES (1, 1, $1, $2, $3, $4, now(), false, now(), 'retail', 'ops')`;
+    const logInsert = `INSERT INTO ${log} (vendor_id, product_variant_id, entry_id, event_type, from_cents, to_cents, effective_at, retail_driven, observed_at, cost_source, plan_id, recorded_by)
+      VALUES (1, 1, $1, $2, $3, $4, now(), false, now(), 'retail', 'ops', 'detection')`;
     for (const [event, from, to] of [["increase_announced", null, 900], ["increase_announced", 800, null], ["increase_announced", 900, 900], ["change_withdrawn", null, null], ["change_withdrawn", 900, 900], ["baseline", null, null], ["baseline", 800, 900]]) {
       await expect(pool.query(logInsert, [baseline.id, event, from, to]), `${event} ${from} -> ${to}`).rejects.toMatchObject({ code: "23514" });
     }
     await expect(repository.withVendorSchedule(1, (transaction) => transaction.writeReconciliation({
-      vendorId: 1, observedAt: LATER, policyId: 1,
+      vendorId: 1, observedAt: LATER, policyId: 1, recordedBy: "detection",
       variants: [{ productVariantId: 404, evidence: planPercent, retailDriven: false, operations: [{ kind: "baseline", unitCostCents: 809, effectiveAt: LATER }] }],
     }))).rejects.toMatchObject({ code: "DROPSHIP_COST_SCHEDULE_WRITE_INVALID", context: { sqlState: "23503" } });
   });

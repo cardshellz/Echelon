@@ -140,7 +140,8 @@ A `POST` inside one transaction:
   vendor and variant: kind (`baseline`, `increase`, `decrease`), the cost it
   changes from, the cost, the effective date, and the reading that created it
   (time, policy version, cost source, plan, override, retail price and
-  discount). A trigger permits only two changes to a row: stamping
+  discount) and which writer took it (`recorded_by`: `detection`, or
+  `acceptance` once C3 reconciles at order acceptance). A trigger permits only two changes to a row: stamping
   `withdrawn_at` once, and lowering the cost of an announced increase. Rows
   are never deleted.
 - `dropship.dropship_cost_change_log`: one append-only row per operation

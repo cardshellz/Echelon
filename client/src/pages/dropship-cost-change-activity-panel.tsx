@@ -29,6 +29,7 @@ import {
   formatDropshipCostChangeEvent,
   formatDropshipCostChangeVariant,
   formatDropshipCostChangeVendor,
+  formatDropshipCostScheduleRecorder,
   formatDropshipCostSource,
   parseDropshipCostChangeDetectionOverview,
   parseDropshipCostChangeLogPage,
@@ -113,7 +114,9 @@ function DetectionSection({ query }: { query: ReturnType<typeof useQuery<Dropshi
                         {formatDropshipCostChangeAmounts({ fromCents: change.fromCents, toCents: change.unitCostCents })}
                       </TableCell>
                       <TableCell>{formatDropshipCostSource(change.costSource)}</TableCell>
-                      <TableCell className="whitespace-nowrap">{formatDateTime(change.observedAt)}</TableCell>
+                      <TableCell className="whitespace-nowrap">
+                        {formatDateTime(change.observedAt)} {formatDropshipCostScheduleRecorder(change.recordedBy)}
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -212,7 +215,7 @@ function ChangeLogRow({ row }: { row: DropshipCostChangeLogRowView }) {
         {formatDropshipCostChangeVendor(row)} · {formatDropshipCostChangeVariant(row)} · {formatDropshipCostSource(row.costSource)}
       </p>
       <p className="text-xs text-muted-foreground">
-        Takes effect {formatDateTime(row.effectiveAt)} · Found {formatDateTime(row.observedAt)}
+        Takes effect {formatDateTime(row.effectiveAt)} · Found {formatDateTime(row.observedAt)} {formatDropshipCostScheduleRecorder(row.recordedBy)}
         {row.policyId !== null ? ` · Policy version id ${row.policyId}` : " · Default policy"}
       </p>
     </li>

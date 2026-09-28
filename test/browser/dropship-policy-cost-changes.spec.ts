@@ -23,6 +23,7 @@ interface DetectionState {
 
 interface PendingChange {
   entryId: number;
+  recordedBy: "detection" | "acceptance";
   vendorId: number;
   vendorBusinessName: string | null;
   productVariantId: number;
@@ -345,7 +346,7 @@ test("a viewer without manage-operations sees the policy but can change nothing"
 
 test("shows what detection found: the last pass, the announced changes, and the log a page at a time", async ({ page }, testInfo) => {
   const subject = {
-    vendorId: 5, vendorBusinessName: "Shellz Vendor", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+    recordedBy: "detection" as const, vendorId: 5, vendorBusinessName: "Shellz Vendor", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
     variantName: "Single pack", productName: "Armor Envelope", policyId: 1, costSource: "plan_percent" as const,
     effectiveAt: "2026-10-13T00:00:00.000Z", observedAt: "2026-09-28T08:05:00.000Z",
   };
@@ -387,6 +388,7 @@ test("shows what detection found: the last pass, the announced changes, and the 
   await expect(announced).toContainText("Increase");
   await expect(announced).toContainText("$8.09 → $9.99");
   await expect(announced).toContainText("Plan percentage of retail");
+  await expect(announced).toContainText("by detection");
 
   // The first page holds the newest 50 rows; "Show older" fetches the 3 before the last one shown.
   const log = page.getByTestId("cost-change-log");

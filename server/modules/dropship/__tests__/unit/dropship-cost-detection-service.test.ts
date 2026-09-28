@@ -43,7 +43,7 @@ const unavailable = (issue: DropshipProductCost["issue"]): DropshipProductCost =
 function storedEntry(entryId: number, unitCostCents: number, effectiveAt: Date, patch: Partial<StoredCostScheduleEntry> = {}): StoredCostScheduleEntry {
   return {
     entryId, unitCostCents, effectiveAt, kind: "baseline", fromCents: null, evidence: planPercent,
-    observedAt: new Date("2026-09-01T00:00:00.000Z"), policyId: 1, ...patch,
+    observedAt: new Date("2026-09-01T00:00:00.000Z"), policyId: 1, recordedBy: "detection", ...patch,
   };
 }
 
@@ -182,7 +182,8 @@ describe("DropshipCostDetectionService", () => {
         outcome: "completed", passNumber: 1, vendorsProcessed: 2, variantsRead: 3, unavailableReadings: 0, changesRecorded: 3,
         events: { ...emptyEventCounts(), baseline: 3 }, sourceReadFailures: 0,
       });
-      expect(repository.writes.map((write) => [write.vendorId, write.policyId, write.observedAt])).toEqual([[5, 3, NOW], [9, 3, NOW]]);
+      expect(repository.writes.map((write) => [write.vendorId, write.policyId, write.observedAt, write.recordedBy]))
+        .toEqual([[5, 3, NOW, "detection"], [9, 3, NOW, "detection"]]);
       expect(repository.writes[0]?.variants.map((variant) => [variant.productVariantId, variant.retailDriven, variant.operations]))
         .toEqual([
           [66, false, [{ kind: "baseline", unitCostCents: 809, effectiveAt: NOW }]],
@@ -429,7 +430,7 @@ function pendingView(entryId: number): DropshipCostScheduleChangeView {
   return {
     entryId, vendorId: 5, vendorBusinessName: "Shellz Vendor", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
     variantName: "Single pack", productName: "Armor Envelope", kind: "increase", fromCents: 809, unitCostCents: 999,
-    effectiveAt: IN_TWO_WEEKS, observedAt: NOW, policyId: 3, costSource: "plan_percent",
+    effectiveAt: IN_TWO_WEEKS, observedAt: NOW, policyId: 3, costSource: "plan_percent", recordedBy: "detection",
   };
 }
 
@@ -437,6 +438,7 @@ function logView(logId: number): DropshipCostChangeLogView {
   return {
     logId, entryId: logId, vendorId: 5, vendorBusinessName: "Shellz Vendor", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
     variantName: "Single pack", productName: "Armor Envelope", eventType: "increase_announced", fromCents: 809, toCents: 999,
-    effectiveAt: IN_TWO_WEEKS, retailDriven: false, observedAt: NOW, policyId: 3, costSource: "plan_percent", createdAt: NOW,
+    effectiveAt: IN_TWO_WEEKS, retailDriven: false, observedAt: NOW, policyId: 3, costSource: "plan_percent", recordedBy: "detection",
+    createdAt: NOW,
   };
 }

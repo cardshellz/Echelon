@@ -11,6 +11,7 @@ import {
   formatDropshipCostChangeEvent,
   formatDropshipCostChangeVariant,
   formatDropshipCostChangeVendor,
+  formatDropshipCostScheduleRecorder,
   formatDropshipCostSource,
   parseDropshipCostChangeDetectionOverview,
   parseDropshipCostChangeLogPage,
@@ -73,6 +74,8 @@ describe("cost change words", () => {
     expect(formatDropshipCostChangeEvent("decrease_applied")).toBe("Decrease applied");
     expect(formatDropshipCostChangeEvent("increase_reduced")).toBe("Announced increase lowered");
     expect(formatDropshipCostChangeEvent("change_withdrawn")).toBe("Announced change withdrawn");
+    expect(formatDropshipCostScheduleRecorder("detection")).toBe("by detection");
+    expect(formatDropshipCostScheduleRecorder("acceptance")).toBe("at order acceptance");
     expect(formatDropshipCostSource("variant_fixed_price")).toBe("Fixed .ops price");
     expect(formatDropshipCostSource("plan_percent")).toBe("Plan percentage of retail");
     expect(formatDropshipCostChangeAmounts({ fromCents: 809, toCents: 999 })).toBe("$8.09 → $9.99");
