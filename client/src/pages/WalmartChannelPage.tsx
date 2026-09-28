@@ -9,7 +9,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ChannelWorkspaceHeader } from "@/components/channels/ChannelWorkspaceHeader";
-import { ChannelCatalogFeed } from "@/components/channels/ChannelCatalogFeed";
 import WalmartConnectionPanel from "@/components/WalmartConnectionPanel";
 import { walmartStatusSchema } from "@shared/types/walmart-channel";
 import { ChannelListingPublicationWorkspace } from "@/features/channel-listing-publication/ChannelListingPublicationWorkspace";
@@ -67,8 +66,8 @@ export function WalmartChannelWorkspace({ channelId }: { channelId: number }) {
         </>}
       </CardContent>
     </Card>
-    {status.data && <ChannelListingPublicationWorkspace channelId={channelId} connectionId={status.data.connectionId} canEdit={canEdit} existingItems={<ChannelCatalogFeed channelId={channelId} providerName="Walmart" canEdit={canEdit}
-      onMappingsChanged={() => client.invalidateQueries({ queryKey: [base] })} />} />}
+    {status.data && <ChannelListingPublicationWorkspace channelId={channelId} connectionId={status.data.connectionId} canEdit={canEdit} providerName="Walmart"
+      onMappingsChanged={() => client.invalidateQueries({ queryKey: [base] })} />}
     {(exceptions.error || !!exceptions.data?.length) && <Card><CardHeader><CardTitle>Orders needing attention</CardTitle></CardHeader><CardContent>
       {exceptions.error && <p role="alert">{exceptions.error.message}</p>}
       {exceptions.data?.map(issue => <div key={issue.purchaseOrderId} className="flex flex-wrap justify-between gap-2 border-b py-3 text-sm"><span>{issue.purchaseOrderId}</span><span className="text-destructive">{issue.errorCode}</span><time>{new Date(issue.observedAt).toLocaleString()}</time></div>)}
