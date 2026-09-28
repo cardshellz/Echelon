@@ -373,6 +373,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
     code: string;
     message: string;
     retryable: boolean;
+    providerErrors?: ReadonlyArray<Record<string, unknown>>;
     workerId: string;
     eventType: string;
     now: Date;
@@ -392,6 +393,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
             errorCode: input.code,
             errorMessage: input.message,
             retryable: input.retryable,
+            ...(input.providerErrors ? { providerErrors: input.providerErrors } : {}),
             workerId: input.workerId,
             processedAt: input.now.toISOString(),
           },

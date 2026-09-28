@@ -16,6 +16,13 @@ import {
   Send,
 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  describeListingPushOutcome,
+  LISTING_PUSH_POLL_INTERVAL_MS,
+  listingPushJobUrl,
+  listingPushPollingContinues,
+  parseDropshipListingPushJob,
+} from "@/lib/dropship-listing-push-status";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
@@ -755,6 +762,7 @@ export default function DropshipPortalCatalog() {
           priceSavePending={pendingPriceSaves > 0}
           priceSaveCallbacks={priceSaveCallbacks}
           listingPushResult={listingPushResult}
+          selectedStoreName={selectedStoreName}
           pendingListingAction={pendingListingAction}
           selectedRows={selectedCatalogRows}
           selectedStoreConnectionId={selectedStoreConnectionId}
@@ -1148,6 +1156,7 @@ function ListingPreviewPanel({
   priceSavePending,
   priceSaveCallbacks,
   listingPushResult,
+  selectedStoreName,
   onPreview,
   onPush,
   onSelectedStoreConnectionIdChange,
@@ -1169,6 +1178,8 @@ function ListingPreviewPanel({
   priceSavePending: boolean;
   priceSaveCallbacks: ListingPriceSaveCallbacks;
   listingPushResult: DropshipListingPushResponse | null;
+  /** The store's name as the vendor knows it, for the push outcome. */
+  selectedStoreName: string;
   onPreview: () => void;
   onPush: () => void;
   onSelectedStoreConnectionIdChange: (value: string) => void;
@@ -1338,19 +1349,73 @@ function ListingPreviewPanel({
       {listingPreview && <DropshipListingPreview key={listingPreview.storeConnectionId} preview={listingPreview}
         stale={listingPreviewStale} priceSaveCallbacks={priceSaveCallbacks} />}
 
-      {listingPushResult && <ListingQueueResultNotice response={listingPushResult} />}
+      {listingPushResult && <ListingQueueResultNotice key={listingPushResult.job.jobId} response={listingPushResult} storeName={selectedStoreName} />}
     </section>
   );
 }
 
-function ListingQueueResultNotice({ response }: { response: DropshipListingPushResponse }) {
+const PUSH_NOTICE_TONES = {
+  pending: "border-sky-200 bg-sky-50 text-sky-900",
+  success: "border-emerald-200 bg-emerald-50 text-emerald-900",
+  partial: "border-amber-300 bg-amber-50 text-amber-900",
+  failed: "border-rose-200 bg-rose-50 text-rose-900",
+} as const;
+
+function ListingQueueResultNotice({ response, storeName }: { response: DropshipListingPushResponse; storeName: string }) {
   const result = describeListingQueueResult(response);
-  const tone = result.outcome === "queued"
-    ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-    : "border-amber-300 bg-amber-50 text-amber-900";
+  if (result.outcome !== "queued") {
+    return (
+      <div role="status" data-testid="listing-queue-result" className={`mt-4 rounded-md border p-4 text-sm ${PUSH_NOTICE_TONES.partial}`}>
+        {result.message}
+      </div>
+    );
+  }
+  return <ListingPushOutcomeNotice jobId={response.job.jobId} queuedMessage={result.message} storeName={storeName} />;
+}
+
+/**
+ * Follows the queued job until the worker is done and shows what became of
+ * each listing. Polling stops after LISTING_PUSH_MAX_POLLS so a stuck job
+ * cannot keep the page asking forever; the vendor is then told where to look.
+ */
+function ListingPushOutcomeNotice({ jobId, queuedMessage, storeName }: { jobId: number; queuedMessage: string; storeName: string }) {
+  const url = listingPushJobUrl(jobId);
+  const queryKey = [url];
+  const queryClient = useQueryClient();
+  const statusQuery = useQuery({
+    queryKey,
+    queryFn: async () => parseDropshipListingPushJob(await fetchJson<unknown>(url)),
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: (query) =>
+      listingPushPollingContinues(query.state.data, query.state.dataUpdateCount) ? LISTING_PUSH_POLL_INTERVAL_MS : false,
+  });
+  // The hook's result carries no answer count; the cache state does, and the
+  // hook re-renders this notice on every answer, so the read is current.
+  const answers = queryClient.getQueryState(queryKey)?.dataUpdateCount ?? 0;
+  const gaveUp = statusQuery.data !== undefined && !listingPushPollingContinues(statusQuery.data, answers);
+  if (!statusQuery.data) {
+    return (
+      <div role="status" data-testid="listing-queue-result" className={`mt-4 rounded-md border p-4 text-sm ${PUSH_NOTICE_TONES.pending}`}>
+        <p>{queuedMessage}</p>
+        {statusQuery.isError && <p className="mt-1 text-xs">The result could not be loaded yet. Refresh this page in a minute, or check Notifications.</p>}
+      </div>
+    );
+  }
+  const outcome = describeListingPushOutcome(statusQuery.data, storeName);
   return (
-    <div role="status" data-testid="listing-queue-result" className={`mt-4 rounded-md border p-4 text-sm ${tone}`}>
-      {result.message}
+    <div role="status" data-testid="listing-queue-result" className={`mt-4 rounded-md border p-4 text-sm ${PUSH_NOTICE_TONES[outcome.tone]}`}>
+      <p className="font-medium">{outcome.title}</p>
+      {gaveUp && <p className="mt-1 text-xs">Still not finished after a few minutes. Refresh this page later, or check Notifications.</p>}
+      <ul className="mt-2 space-y-1" data-testid="listing-push-outcome">
+        {outcome.items.map((item) => (
+          <li key={item.itemId} data-testid={`listing-push-outcome-${item.itemId}`}>
+            <span className="font-medium">{item.name}</span>: {item.line}
+            {item.listingUrl && <>{" "}<a className="underline" href={item.listingUrl} target="_blank" rel="noreferrer">View on eBay</a></>}
+            {item.nextStep && <span className="block text-xs">{item.nextStep}</span>}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

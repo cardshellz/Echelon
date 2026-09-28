@@ -325,9 +325,32 @@ describe("dropship marketplace listing push providers", () => {
       platform: "ebay",
       listingMode: "live",
       marketplaceConfig: ebayMarketplaceConfig(),
-    }))).rejects.toMatchObject({ code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR" });
+    }))).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
+      message: "eBay listing push failed with HTTP 400: Invalid package details",
+      context: { status: 400, retryable: false, providerErrors: [{ errorId: null, message: "Invalid package details" }] },
+    });
 
     expect(credentials.authFailures).toHaveLength(0);
+  });
+
+  it("names eBay's error id and message in the failure when the body carries them", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([
+      jsonResponse({ errors: [{ errorId: 25002, domain: "API_INVENTORY", message: "A user error has occurred.",
+        longMessage: "A user error has occurred. Invalid value for aspect Brand.", parameters: [{ name: "aspect", value: "Brand" }] }] }, 400),
+    ]);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
+
+    await expect(provider.pushListing(makeRequest({
+      platform: "ebay",
+      listingMode: "live",
+      marketplaceConfig: ebayMarketplaceConfig(),
+    }))).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
+      message: "eBay listing push failed with HTTP 400: 25002 A user error has occurred. Invalid value for aspect Brand. (aspect: Brand)",
+      context: { providerErrors: [{ errorId: 25002, domain: "API_INVENTORY", parameters: [{ name: "aspect", value: "Brand" }] }] },
+    });
   });
 
   it("fails before calling eBay when the persisted listing intent lacks catalog weight", async () => {
