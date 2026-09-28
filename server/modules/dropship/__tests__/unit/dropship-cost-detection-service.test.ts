@@ -441,6 +441,6 @@ function logView(logId: number): DropshipCostChangeLogView {
     logId, entryId: logId, vendorId: 5, vendorBusinessName: "Shellz Vendor", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
     variantName: "Single pack", productName: "Armor Envelope", eventType: "increase_announced", fromCents: 809, toCents: 999,
     effectiveAt: IN_TWO_WEEKS, retailDriven: false, observedAt: NOW, policyId: 3, costSource: "plan_percent", recordedBy: "detection",
-    createdAt: NOW,
+    noticeDecision: null, createdAt: NOW,
   };
 }

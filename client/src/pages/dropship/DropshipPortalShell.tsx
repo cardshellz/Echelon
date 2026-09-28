@@ -11,6 +11,7 @@ import {
   RotateCcw,
   Settings,
   ShieldCheck,
+  TrendingUp,
   Wallet,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,7 @@ const navItems = [
   { label: "Onboarding", href: ONBOARDING_NAV_HREF, icon: <ListChecks className="h-4 w-4" /> },
   { label: "Dashboard", href: "/dashboard", icon: <LayoutDashboard className="h-4 w-4" /> },
   { label: "Catalog", href: "/catalog", icon: <Boxes className="h-4 w-4" /> },
+  { label: "Cost changes", href: "/cost-changes", icon: <TrendingUp className="h-4 w-4" /> },
   { label: "Orders", href: "/orders", icon: <ClipboardList className="h-4 w-4" /> },
   { label: "Wallet", href: "/wallet", icon: <Wallet className="h-4 w-4" /> },
   { label: "Returns", href: "/returns", icon: <RotateCcw className="h-4 w-4" /> },

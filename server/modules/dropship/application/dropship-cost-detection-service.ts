@@ -11,6 +11,7 @@ import type {
   CostScheduleOperation,
 } from "../domain/cost-schedule";
 import { DropshipError } from "../domain/errors";
+import type { CostChangeNoticeDecision } from "../domain/cost-change-notice";
 import { costScheduleTimingFromPolicy, planCostScheduleReconciliation } from "./dropship-cost-schedule-reconciliation";
 import type { DropshipProductCost } from "./dropship-product-cost";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
@@ -171,6 +172,8 @@ export interface DropshipCostChangeLogView {
   policyId: number | null;
   costSource: string;
   recordedBy: CostScheduleRecorder;
+  /** What the notice pass decided for this row (C4); null until it has run. */
+  noticeDecision: CostChangeNoticeDecision | null;
   createdAt: Date;
 }
 

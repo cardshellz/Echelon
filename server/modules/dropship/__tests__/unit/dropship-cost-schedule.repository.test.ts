@@ -347,15 +347,29 @@ describe("PgDropshipCostScheduleRepository", () => {
         id: "31", entry_id: "11", vendor_id: 5, business_name: null, product_variant_id: 66, variant_sku: null, variant_name: "Single pack",
         product_name: "Armor Envelope", event_type: "change_withdrawn", from_cents: "1099", to_cents: null, effective_at: IN_TWO_WEEKS,
         retail_driven: true, observed_at: NOW, policy_id: null, cost_source: "retail", recorded_by: "acceptance", created_at: NOW,
+        notice_decision: "skipped_unannounced",
       }])]);
       const rows = await new PgDropshipCostScheduleRepository(pool).listChangeLog({ limit: 51, beforeId: 40 });
+      expect(calls[0]?.sql).toContain("LEFT JOIN dropship.dropship_cost_change_notices n ON n.log_id = l.id");
       expect(calls[0]?.sql).toContain("WHERE ($1::bigint IS NULL OR l.id < $1) ORDER BY l.id DESC LIMIT $2");
       expect(calls[0]?.values).toEqual([40, 51]);
       expect(rows).toEqual([{
         logId: 31, entryId: 11, vendorId: 5, vendorBusinessName: null, productVariantId: 66, variantSku: null, variantName: "Single pack",
         productName: "Armor Envelope", eventType: "change_withdrawn", fromCents: 1099, toCents: null, effectiveAt: IN_TWO_WEEKS,
-        retailDriven: true, observedAt: NOW, policyId: null, costSource: "retail", recordedBy: "acceptance", createdAt: NOW,
+        retailDriven: true, observedAt: NOW, policyId: null, costSource: "retail", recordedBy: "acceptance", noticeDecision: "skipped_unannounced",
+        createdAt: NOW,
       }]);
+    });
+
+    it("refuses a stored notice decision it cannot trust", async () => {
+      const { pool } = fakePool([result([{
+        id: "31", entry_id: "11", vendor_id: 5, business_name: null, product_variant_id: 66, variant_sku: null, variant_name: "Single pack",
+        product_name: "Armor Envelope", event_type: "change_withdrawn", from_cents: "1099", to_cents: null, effective_at: IN_TWO_WEEKS,
+        retail_driven: true, observed_at: NOW, policy_id: null, cost_source: "retail", recorded_by: "acceptance", created_at: NOW,
+        notice_decision: "mailed",
+      }])]);
+      await expect(new PgDropshipCostScheduleRepository(pool).listChangeLog({ limit: 51, beforeId: null }))
+        .rejects.toMatchObject({ code: "DROPSHIP_COST_SCHEDULE_INVALID_STORED_VALUE", context: { column: "notice_decision" } });
     });
 
     it("refuses a stored amount, kind or event it cannot trust", () => {
