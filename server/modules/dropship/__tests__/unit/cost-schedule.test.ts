@@ -3,7 +3,11 @@ import {
   CostScheduleError,
   announcedEffectiveAt,
   costInForce,
+  costScheduleEventType,
+  entryInForce,
+  isRetailDrivenReading,
   reconcileCostSchedule,
+  type CostReadingEvidence,
   type CostScheduleEntry,
   type CostScheduleTiming,
 } from "../../domain/cost-schedule";
@@ -39,6 +43,66 @@ describe("costInForce", () => {
 
   it("uses the first entry for a reading a moment before the schedule began", () => {
     expect(costInForce([BASELINE], new Date("2026-08-31T23:59:59.999Z"))).toBe(809);
+  });
+
+  it("returns the entry itself, with whatever the caller stored on it", () => {
+    const stored = [{ ...BASELINE, note: "first" }, { ...entry(2, 899, "2026-09-20T00:00:00.000Z"), note: "second" }];
+    expect(entryInForce(stored, NOW)?.note).toBe("second");
+    expect(entryInForce([], NOW)).toBeNull();
+    expect(() => entryInForce(stored, new Date(Number.NaN))).toThrow(CostScheduleError);
+  });
+});
+
+describe("isRetailDrivenReading", () => {
+  const planPercent: CostReadingEvidence = {
+    source: "plan_percent", planId: "ops", overrideId: null, retailPriceCents: 899, discountBps: 1000,
+  };
+
+  it("is true only when the same retail-based cost moved with the retail price alone", () => {
+    expect(isRetailDrivenReading(planPercent, { ...planPercent, retailPriceCents: 999 })).toBe(true);
+    expect(isRetailDrivenReading(
+      { ...planPercent, source: "variant_percent", overrideId: "o-1" },
+      { ...planPercent, source: "variant_percent", overrideId: "o-1", retailPriceCents: 999 },
+    )).toBe(true);
+    expect(isRetailDrivenReading(
+      { ...planPercent, source: "retail", discountBps: 0 },
+      { ...planPercent, source: "retail", discountBps: 0, retailPriceCents: 999 },
+    )).toBe(true);
+  });
+
+  it("is false for a plan switch, a changed discount, a new or changed override, a fixed price, or no retail move", () => {
+    expect(isRetailDrivenReading(planPercent, { ...planPercent, retailPriceCents: 999, planId: "ops-plus" })).toBe(false);
+    expect(isRetailDrivenReading(planPercent, { ...planPercent, retailPriceCents: 999, discountBps: 1500 })).toBe(false);
+    expect(isRetailDrivenReading(planPercent, { ...planPercent, source: "variant_percent", overrideId: "o-1", retailPriceCents: 999 })).toBe(false);
+    expect(isRetailDrivenReading(
+      { ...planPercent, source: "variant_percent", overrideId: "o-1" },
+      { ...planPercent, source: "variant_percent", overrideId: "o-2", retailPriceCents: 999 },
+    )).toBe(false);
+    const fixed: CostReadingEvidence = { source: "variant_fixed_price", planId: "ops", overrideId: "o-1", retailPriceCents: null, discountBps: null };
+    expect(isRetailDrivenReading(fixed, { ...fixed })).toBe(false);
+    expect(isRetailDrivenReading(fixed, planPercent)).toBe(false);
+    expect(isRetailDrivenReading(planPercent, fixed)).toBe(false);
+    expect(isRetailDrivenReading(planPercent, { ...planPercent })).toBe(false);
+  });
+});
+
+describe("costScheduleEventType", () => {
+  it("names each operation for the change log, announced or applied by its date", () => {
+    expect(costScheduleEventType({ kind: "baseline", unitCostCents: 809, effectiveAt: NOW }, NOW)).toBe("baseline");
+    expect(costScheduleEventType({ kind: "add", direction: "increase", fromCents: 809, unitCostCents: 999, effectiveAt: IN_TWO_WEEKS }, NOW))
+      .toBe("increase_announced");
+    expect(costScheduleEventType({ kind: "add", direction: "increase", fromCents: 809, unitCostCents: 999, effectiveAt: NOW }, NOW))
+      .toBe("increase_applied");
+    expect(costScheduleEventType({ kind: "add", direction: "decrease", fromCents: 809, unitCostCents: 699, effectiveAt: IN_TWO_WEEKS }, NOW))
+      .toBe("decrease_announced");
+    expect(costScheduleEventType({ kind: "add", direction: "decrease", fromCents: 809, unitCostCents: 699, effectiveAt: NOW }, NOW))
+      .toBe("decrease_applied");
+    expect(costScheduleEventType({ kind: "reduce", entryId: 2, fromCents: 999, unitCostCents: 899, effectiveAt: IN_TWO_WEEKS }, NOW))
+      .toBe("increase_reduced");
+    expect(costScheduleEventType({ kind: "withdraw", entryId: 2, unitCostCents: 999, effectiveAt: IN_TWO_WEEKS }, NOW))
+      .toBe("change_withdrawn");
+    expect(() => costScheduleEventType({ kind: "baseline", unitCostCents: 809, effectiveAt: NOW }, new Date(Number.NaN)))
+      .toThrow(CostScheduleError);
   });
 });
 
@@ -161,6 +225,14 @@ describe("reconcileCostSchedule", () => {
   it("treats an announced increase whose date has passed as the cost in force", () => {
     const passed = [BASELINE, entry(2, 999, "2026-09-20T00:00:00.000Z")];
     expect(reconcile(passed, 999)).toEqual({ operations: [], inForceBeforeCents: 999, inForceAfterCents: 999 });
+  });
+
+  it("never withdraws the first entry when the reading is a moment before the schedule began", () => {
+    const justAhead = new Date("2026-08-31T23:59:59.999Z");
+    expect(reconcile([BASELINE], 809, { at: justAhead })).toEqual({ operations: [], inForceBeforeCents: 809, inForceAfterCents: 809 });
+    expect(reconcile([BASELINE], 999, { at: justAhead }).operations).toEqual([
+      { kind: "add", direction: "increase", fromCents: 809, unitCostCents: 999, effectiveAt: announcedEffectiveAt(justAhead, 14) },
+    ]);
   });
 
   it("orders unsorted entries by date before deciding", () => {

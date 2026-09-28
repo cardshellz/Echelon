@@ -20,8 +20,26 @@ describe("exact Shellz Club product-cost resolution", () => {
     const input = snapshot({ legacyFlatDiscountBp: 2500 });
     const before = structuredClone(input);
     expect(resolveDropshipProductCost(input)).toEqual({ status: "available", unitCostCents: 809,
-      source: "variant_fixed_price", overrideId: "override-1", planId: "plan-ops", issue: null });
+      source: "variant_fixed_price", overrideId: "override-1", planId: "plan-ops", issue: null,
+      retailPriceCents: null, discountBps: null });
     expect(input).toEqual(before);
+  });
+
+  it("records the retail basis and discount of every retail-based cost, and none for a fixed price", () => {
+    expect(resolveDropshipProductCost(snapshot({ overrides: [], excludedCollectionIds: ["9"], productCollectionIds: ["9"] })))
+      .toMatchObject({ source: "retail", unitCostCents: 899, retailPriceCents: 899, discountBps: 0 });
+    expect(resolveDropshipProductCost(snapshot({ overrides: [{ ...snapshot().overrides[0], overrideType: "exclude" }] })))
+      .toMatchObject({ source: "retail", unitCostCents: 899, retailPriceCents: 899, discountBps: 0 });
+    expect(resolveDropshipProductCost(snapshot({ overrides: [{ ...snapshot().overrides[0], overrideType: "flat_percent", fixedPrice: null, discountPercent: "10.00" }] })))
+      .toMatchObject({ source: "variant_percent", unitCostCents: 809, retailPriceCents: 899, discountBps: 1000 });
+    expect(resolveDropshipProductCost(snapshot({ overrides: [], legacyFlatDiscountBp: 1000 })))
+      .toMatchObject({ source: "plan_percent", unitCostCents: 809, retailPriceCents: 899, discountBps: 1000 });
+    expect(resolveDropshipProductCost(snapshot({ overrides: [], legacyFlatDiscountBp: 0 })))
+      .toMatchObject({ source: "retail", unitCostCents: 899, retailPriceCents: 899, discountBps: 0 });
+    expect(resolveDropshipProductCost(snapshot()))
+      .toMatchObject({ source: "variant_fixed_price", retailPriceCents: null, discountBps: null });
+    expect(resolveDropshipProductCost(snapshot({ variants: [] })))
+      .toMatchObject({ status: "unavailable", retailPriceCents: null, discountBps: null });
   });
 
   it("allows zero and above-retail exact fixed prices without clamping or multiplying pack contents", () => {

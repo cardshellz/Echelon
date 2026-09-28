@@ -50,10 +50,10 @@ import {
   DROPSHIP_COST_CHANGE_POLICY_MAX_CHANGE_NOTE_LENGTH,
   DROPSHIP_COST_CHANGE_SETTING_DESCRIPTORS,
   DROPSHIP_COST_CHANGE_SETTING_GROUPS,
-  DROPSHIP_COST_CHANGE_TODAY_SUMMARY,
   DROPSHIP_COST_DECREASE_TIMING_CHOICES,
   DROPSHIP_RULE_PRICED_LISTING_CHOICES,
   buildDropshipCostChangePolicyVersionRequest,
+  describeDropshipCostChangeToday,
   dropshipCostChangePolicyFormFromSettings,
   dropshipCostChangePolicyNeedsStaffConfirmation,
   dropshipCostChangePolicyRequestFingerprint,
@@ -76,6 +76,7 @@ import {
   type DropshipCostChangeSettingDescriptor,
   type DropshipCostChangeSettingGroup,
 } from "./dropship-cost-change-policy-model";
+import { DropshipCostChangeActivityPanel } from "./dropship-cost-change-activity-panel";
 
 export function DropshipCostChangePolicyPanel({
   canView,
@@ -250,6 +251,7 @@ export function DropshipCostChangePolicyPanel({
       {overview && form && parsed && (
         <>
           <DropshipCostChangeEnforcementPanel enforcement={overview.enforcement} />
+          <DropshipCostChangeActivityPanel />
           <SettingsInForceTable overview={overview} />
 
           <section className="rounded-md border bg-card p-4" data-testid="cost-change-policy-form">
@@ -341,7 +343,7 @@ export function DropshipCostChangeEnforcementPanel({ enforcement }: { enforcemen
       <h3 className="font-semibold">What acts today</h3>
       {partly && (
         <p className="mt-1 text-sm text-muted-foreground" data-testid="cost-change-policy-today">
-          {DROPSHIP_COST_CHANGE_TODAY_SUMMARY}
+          {describeDropshipCostChangeToday(enforcement)}
         </p>
       )}
       <ul className="mt-3 space-y-2 text-sm">

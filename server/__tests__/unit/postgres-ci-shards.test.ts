@@ -91,9 +91,10 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/marketplace-listings/__tests__/integration/pg-listing-publication.integration.test.ts",
       "server/modules/marketplace-listings/__tests__/integration/channel-listing-catalog.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/walmart-publication-membership.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-cost-schedule.integration.test.ts",
     ];
-    expect(POSTGRES_TEST_FILES).toHaveLength(105);
-    expect(new Set(POSTGRES_TEST_FILES).size).toBe(105);
+    expect(POSTGRES_TEST_FILES).toHaveLength(106);
+    expect(new Set(POSTGRES_TEST_FILES).size).toBe(106);
     expect(POSTGRES_TEST_FILES).toEqual(expect.arrayContaining(addedSuites));
     // Preserve the original inventory digest as well as the explicit additions;
     // adding hardening coverage must not silently remove an older suite.

@@ -22,6 +22,8 @@
  * Money is integer cents. Pure: the reading carries its time; no clock, no I/O.
  */
 
+import { costChangeEventTypeValues, type CostChangeEventType } from "../../../../shared/dropship/cost-change-policy";
+
 export const MILLISECONDS_PER_DAY = 86_400_000;
 
 export interface CostScheduleEntry {
@@ -75,17 +77,17 @@ export class CostScheduleError extends Error {
 }
 
 /** Entries in effect order: by date, then by identity, so equal dates are stable. */
-export function sortCostSchedule(entries: readonly CostScheduleEntry[]): CostScheduleEntry[] {
+export function sortCostSchedule<T extends CostScheduleEntry>(entries: readonly T[]): T[] {
   return [...entries].sort((left, right) =>
     left.effectiveAt.getTime() - right.effectiveAt.getTime() || left.entryId - right.entryId);
 }
 
 /**
- * The cost in force at `at`, or null for an empty schedule. Before the first
+ * The entry in force at `at`, or null for an empty schedule. Before the first
  * entry's date (a reading a few milliseconds ahead of another dyno's clock),
  * the first entry applies: it is the cost observed when the schedule began.
  */
-export function costInForce(entries: readonly CostScheduleEntry[], at: Date): number | null {
+export function entryInForce<T extends CostScheduleEntry>(entries: readonly T[], at: Date): T | null {
   assertTime(at, "at");
   const sorted = sortCostSchedule(entries);
   if (sorted.length === 0) return null;
@@ -93,7 +95,12 @@ export function costInForce(entries: readonly CostScheduleEntry[], at: Date): nu
   for (const entry of sorted) {
     if (entry.effectiveAt.getTime() <= at.getTime()) inForce = entry;
   }
-  return inForce.unitCostCents;
+  return inForce;
+}
+
+/** The cost in force at `at`, or null for an empty schedule. */
+export function costInForce(entries: readonly CostScheduleEntry[], at: Date): number | null {
+  return entryInForce(entries, at)?.unitCostCents ?? null;
 }
 
 /**
@@ -136,8 +143,12 @@ export function reconcileCostSchedule(input: {
     };
   }
 
-  const inForce = costInForce(sorted, now) as number;
-  const future = sorted.filter((entry) => entry.effectiveAt.getTime() > now.getTime());
+  const inForceEntry = entryInForce(sorted, now) as CostScheduleEntry;
+  const inForce = inForceEntry.unitCostCents;
+  // The entry in force is never an announced change, even when a reading a
+  // moment before the schedule began (another dyno's clock) puts the first
+  // entry's date just ahead of the reading.
+  const future = sorted.filter((entry) => entry !== inForceEntry && entry.effectiveAt.getTime() > now.getTime());
   const operations: CostScheduleOperation[] = [];
   const withdrawAll = () => {
     for (const entry of future) operations.push(withdraw(entry));
@@ -208,5 +219,84 @@ function assertCost(value: number, name: string): void {
 function assertTime(value: Date, name: string): void {
   if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
     throw new CostScheduleError("COST_SCHEDULE_INVALID_TIME", `${name} must be a valid date.`);
+  }
+}
+
+// --- Where a reading came from -------------------------------------------------
+
+/**
+ * How a live cost was arrived at (application/dropship-product-cost.ts). The
+ * retail basis and the discount are recorded so a later reading can tell a
+ * Shopify retail move apart from a change to the plan or an override.
+ */
+export interface CostReadingEvidence {
+  source: string;
+  planId: string;
+  overrideId: string | null;
+  /** The Shopify retail price the cost was computed from; null when the source ignores retail. */
+  retailPriceCents: number | null;
+  /** The discount applied to that retail price, in basis points; null when the source ignores retail. */
+  discountBps: number | null;
+}
+
+/** Cost sources computed from the Shopify retail price. A fixed-price override is not one. */
+export const RETAIL_BASED_COST_SOURCES: readonly string[] = Object.freeze(["retail", "variant_percent", "plan_percent"]);
+
+/**
+ * Whether the only thing that moved between the reading behind the cost in
+ * force and the live reading is the Shopify retail price: the same
+ * retail-based source, plan, override and discount, and a different retail
+ * price. Anything else (a plan switch, a new or changed override, a changed
+ * plan percentage) is not a retail move, so it always gets the policy's notice.
+ */
+export function isRetailDrivenReading(inForce: CostReadingEvidence, live: CostReadingEvidence): boolean {
+  return RETAIL_BASED_COST_SOURCES.includes(live.source)
+    && live.source === inForce.source
+    && live.planId === inForce.planId
+    && live.overrideId === inForce.overrideId
+    && live.discountBps !== null
+    && live.discountBps === inForce.discountBps
+    && live.retailPriceCents !== null
+    && inForce.retailPriceCents !== null
+    && live.retailPriceCents !== inForce.retailPriceCents;
+}
+
+// --- What an operation means in the change log ---------------------------------
+
+export const costScheduleEventTypes = costChangeEventTypeValues;
+
+export type CostScheduleEventType = CostChangeEventType;
+
+/** The change log's name for an operation applied at `now`: announced when its date is still ahead, applied otherwise. */
+export function costScheduleEventType(operation: CostScheduleOperation, now: Date): CostScheduleEventType {
+  assertTime(now, "now");
+  switch (operation.kind) {
+    case "baseline":
+      return "baseline";
+    case "add": {
+      const applied = operation.effectiveAt.getTime() <= now.getTime();
+      if (operation.direction === "increase") return applied ? "increase_applied" : "increase_announced";
+      return applied ? "decrease_applied" : "decrease_announced";
+    }
+    case "reduce":
+      return "increase_reduced";
+    case "withdraw":
+      return "change_withdrawn";
+  }
+}
+
+/**
+ * What the change log records an operation as changing from and to. A
+ * withdrawal has no "to": the announced amount is simply gone.
+ */
+export function costScheduleLogAmounts(operation: CostScheduleOperation): { fromCents: number | null; toCents: number | null } {
+  switch (operation.kind) {
+    case "baseline":
+      return { fromCents: null, toCents: operation.unitCostCents };
+    case "add":
+    case "reduce":
+      return { fromCents: operation.fromCents, toCents: operation.unitCostCents };
+    case "withdraw":
+      return { fromCents: operation.unitCostCents, toCents: null };
   }
 }

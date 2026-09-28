@@ -128,26 +128,86 @@ A `POST` inside one transaction:
 | Part | Scope | Switches on |
 |---|---|---|
 | C1 | This policy and its admin module | none |
-| C2 | Cost schedule and detection | `detection` |
+| C2 | Cost schedule and detection | `detection` (where the worker is switched on) |
 | C3 | Price protection at acceptance | `priceProtection` |
 | C4 | Vendor notices | `vendorNotices` |
 | C5 | Listing actions on the effective date | `listingActions` |
 
-**C2, cost schedule and detection.**
-- **Storage.** Persist the schedule per vendor and variant, plus a change log.
-- **Detection worker.** Runs on its own schedule (`startDropshipWorkerSchedule`,
-  a new `DropshipWorkerScheduleName`) under `withAdvisoryLock`, at the policy's
-  interval.
-- **Reading costs.** Costs are read per vendor through `loadProductCosts`
-  (at most 10,000 variants per call; there is no multi-vendor read).
-- **Identifying a change.** The `.ops` tables have no revision column, so a
-  change is identified by value (see the comment on
-  `buildAcceptanceCostEvidenceHash`).
-- **Covering every vendor.** Vendors are walked with a cursor, so each one is
-  reached. The listing tier reconcile reads the same first batch every tick,
-  `ORDER BY v.id LIMIT` in `listVendorsForReview`; a separate task was raised
-  for it.
-- **Admin views.** Pending changes and the change log.
+## Cost schedule and detection (part C2)
+
+**Storage (migration 0711).**
+- `dropship.dropship_cost_schedule_entries`: one row per schedule entry, per
+  vendor and variant: kind (`baseline`, `increase`, `decrease`), the cost it
+  changes from, the cost, the effective date, and the reading that created it
+  (time, policy version, cost source, plan, override, retail price and
+  discount). A trigger permits only two changes to a row: stamping
+  `withdrawn_at` once, and lowering the cost of an announced increase. Rows
+  are never deleted.
+- `dropship.dropship_cost_change_log`: one append-only row per operation
+  applied (`baseline`, `increase_announced`, `increase_applied`,
+  `decrease_announced`, `decrease_applied`, `increase_reduced`,
+  `change_withdrawn`), with the amounts, the date, whether only the retail
+  price moved, and the reading. A trigger refuses updates and deletes. The
+  event names live once in `shared/dropship/cost-change-policy.ts`.
+- `dropship.dropship_cost_detection_state`: the worker's one row: pass
+  number, when the pass started and completed, the vendor cursor, the policy
+  version, and the pass's counts.
+
+**Which costs are watched.** Vendors with status `active` or `paused` (the
+set the listing tier reconcile reviews), and for each, the distinct variants
+in `dropship.dropship_vendor_listings` whose status is not `not_listed` or
+`ended` (`COST_TRACKED_LISTING_STATUSES` in
+`application/dropship-cost-detection-service.ts`). A variant not yet tracked
+gets a baseline at its first reading; a relisted variant starts again from
+the live cost.
+
+**Telling a retail move from a plan change.** The cost reader now returns the
+retail price and discount a retail-based cost came from
+(`retailPriceCents`, `discountBps` on `DropshipProductCost`; null for a fixed
+price). A reading is retail-driven only when, compared with the reading behind
+the entry in force, the source, plan, override and discount are the same and
+the retail price differs (`isRetailDrivenReading` in `domain/cost-schedule.ts`).
+It is compared with the entry in force, not an announced one, so a plan change
+bundled with a retail move still gets the notice.
+
+**The worker** (`infrastructure/dropship-cost-detection-runner.ts`, schedule
+`costDetection`, advisory lock 736215) is opt-in:
+`DROPSHIP_COST_DETECTION_WORKER_ENABLED=true`. It ticks every minute
+(`DROPSHIP_COST_DETECTION_TICK_INTERVAL_MS`) and each tick:
+1. records the tick, reads the policy in force, and starts a pass when none is
+   under way and the policy's detection interval has elapsed since the last
+   one began (otherwise the tick is `not_due` and does nothing);
+2. takes the next vendors after the cursor
+   (`DROPSHIP_COST_DETECTION_VENDORS_PER_TICK`, default 25, at most 1,000);
+3. for each vendor, in one transaction under
+   `pg_advisory_xact_lock(hashtext('dropship_cost_schedule'), vendor_id)`:
+   lists the tracked variants, loads their live entries, reads their costs
+   through `PgShellzClubProductCostAdapter.forTransaction` (10,000 per call),
+   reconciles each variant with `reconcileCostSchedule`, writes every entry
+   and log row, and moves the cursor past the vendor. The cursor only moves
+   forward; a stale worker's transaction rolls back whole;
+4. completes the pass when fewer vendors than the batch remained.
+
+An unavailable or zero reading records nothing and is counted; a
+`source_read_failed` reading is a WARN. Every vendor with a change or an
+unavailable reading is logged with its counts, and every pass start and
+completion is logged.
+
+**Admin views** (`interfaces/http/dropship-admin-cost-change-activity.routes.ts`,
+`dropship:view`): `GET /api/dropship/admin/cost-changes/detection` (whether
+this process runs the worker, the state row, and up to 200 announced changes,
+soonest first) and `GET /api/dropship/admin/cost-changes/log?limit=&beforeId=`
+(newest first, at most 50 per page, cursor by id). The Cost Changes tab shows
+them under "Announced changes" and "Change log"
+(`client/src/pages/dropship-cost-change-activity-panel.tsx`).
+
+**What "live" means.** `DROPSHIP_COST_CHANGE_ENFORCEMENT.detection` is now
+true (the code shipped), but the overview reports detection live only where
+the worker is switched on (`resolveDropshipCostChangeEnforcement`), and the
+tab shows the last pass, so the page never claims a check that is not running.
+Nothing charges, tells or reprices from the schedule until C3 to C5.
+
+## Delivery plan for the remaining parts
 
 **C3, price protection.**
 - Acceptance already reads the live cost inside its transaction. Protection
@@ -174,6 +234,29 @@ vendor reviewed. `DropshipListingPushWorkerService` refreshes the listing intent
 (`refreshListingIntent`) and pushes it, and its drift check compares only the
 stored preview hashes. So under "wait for review", C5 must stop a queued push
 from publishing a changed rule price.
+
+## Failure modes (C2)
+
+- **Before migration 0711 runs.** The worker's tick fails with
+  `DROPSHIP_COST_SCHEDULE_TABLE_MISSING` (transient) and is retried next tick;
+  the admin views answer 503.
+- **Two workers at once.** The scheduler lock serializes ticks; per vendor, the
+  schedule lock serializes writers; the cursor refuses to move backwards
+  (`DROPSHIP_COST_DETECTION_CURSOR_CONFLICT`), rolling the stale
+  transaction back so nothing is recorded twice.
+- **A vendor's write fails.** The vendor's transaction rolls back, the tick
+  fails and is logged, and the next tick resumes at the same cursor.
+- **The cost source cannot be read.** Nothing is recorded for the vendor, the
+  pass moves on, and the next pass retries; a WARN names the vendor.
+- **An entry changed under the reconciliation.** Refused as
+  `DROPSHIP_COST_SCHEDULE_ENTRY_STALE`; the transaction rolls back and the
+  next pass re-reads.
+- **A stored amount that is not whole cents, or an unknown kind or event.**
+  Refused as `fatal` and never served.
+- **The policy's interval is outside its range.** The tick aborts as `fatal`
+  before touching the state.
+- **The worker is not switched on.** The tab says so ("Worker off here") and
+  reports detection as not live in that environment.
 
 ## Failure modes (C1)
 

@@ -9,7 +9,8 @@ export type DropshipWorkerScheduleName =
   | "ebayOrderIntake"
   | "returnIntake"
   | "returnsMaintenance"
-  | "usdcWatcher";
+  | "usdcWatcher"
+  | "costDetection";
 
 interface DropshipWorkerScheduleDefinition {
   initialDelayEnvironmentVariable: string;
@@ -48,6 +49,13 @@ const SCHEDULE_DEFINITIONS: Record<
   usdcWatcher: {
     initialDelayEnvironmentVariable: "DROPSHIP_USDC_WATCHER_INITIAL_DELAY_MS",
     defaultInitialDelayMs: 45_000,
+  },
+  // The .ops cost detection worker ticks every minute and starts a pass only
+  // when the policy's interval has elapsed; it boots between the return
+  // intake and the maintenance sweep.
+  costDetection: {
+    initialDelayEnvironmentVariable: "DROPSHIP_COST_DETECTION_WORKER_INITIAL_DELAY_MS",
+    defaultInitialDelayMs: 120_000,
   },
 };
 

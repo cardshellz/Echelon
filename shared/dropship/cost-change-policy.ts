@@ -21,6 +21,26 @@ export const BASIS_POINTS_PER_WHOLE = 10_000;
 export const MIN_DETECTION_INTERVAL_MINUTES = 15;
 export const MAX_DETECTION_INTERVAL_MINUTES = 1_440;
 
+/**
+ * What the cost change log can record for one vendor and variant, named once
+ * for the server (domain/cost-schedule.ts) and the admin module. "Announced"
+ * events take effect on a later date; "applied" ones took effect at once.
+ */
+export const costChangeEventTypeValues = [
+  "baseline",
+  "increase_announced",
+  "increase_applied",
+  "decrease_announced",
+  "decrease_applied",
+  "increase_reduced",
+  "change_withdrawn",
+] as const;
+export type CostChangeEventType = (typeof costChangeEventTypeValues)[number];
+
+/** Where a .ops cost comes from (server/modules/dropship/application/dropship-product-cost.ts). */
+export const costSourceValues = ["variant_fixed_price", "variant_percent", "plan_percent", "retail"] as const;
+export type CostSource = (typeof costSourceValues)[number];
+
 export const costDecreaseTimingValues = ["immediate", "after_notice"] as const;
 export const rulePricedListingActionValues = ["reprice_automatically", "wait_for_review"] as const;
 export const belowCostListingActionValues = ["no_action", "warn", "pause_listing"] as const;

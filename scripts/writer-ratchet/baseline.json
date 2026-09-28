@@ -177,7 +177,16 @@
   "dropship.dropship_content_profiles": [
     "modules/dropship"
   ],
+  "dropship.dropship_cost_change_log": [
+    "modules/dropship"
+  ],
   "dropship.dropship_cost_change_policies": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_cost_detection_state": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_cost_schedule_entries": [
     "modules/dropship"
   ],
   "dropship.dropship_ebay_listing_policy_override_revisions": [

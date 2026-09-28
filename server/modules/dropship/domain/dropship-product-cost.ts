@@ -51,7 +51,7 @@ export function normalizeShopifyCostIdentity(value: unknown, kind: "Product" | "
 export function unavailableDropshipProductCost(
   issue: DropshipProductCostIssue, planId: string | null = null, overrideId: string | null = null,
 ): DropshipProductCost {
-  return { status: "unavailable", unitCostCents: null, planId, source: null, overrideId, issue };
+  return { status: "unavailable", unitCostCents: null, planId, source: null, overrideId, issue, retailPriceCents: null, discountBps: null };
 }
 
 function parseBasisPoints(value: unknown): number | null {
@@ -100,8 +100,15 @@ function discountedCents(retailCents: number, bp: number): number {
 export function resolveDropshipProductCost(input: DropshipProductCostSnapshot): DropshipProductCost {
   const unavailable = (issue: DropshipProductCostIssue, overrideId: string | null = null) =>
     unavailableDropshipProductCost(issue, input.planId, overrideId);
-  const available = (unitCostCents: number, source: DropshipProductCostSource, overrideId: string | null = null): DropshipProductCost =>
-    ({ status: "available", unitCostCents, planId: input.planId, source, overrideId, issue: null });
+  // A retail-based cost records the retail price and discount it came from;
+  // a fixed-price override records neither, since retail plays no part in it.
+  const available = (
+    unitCostCents: number, source: DropshipProductCostSource, overrideId: string | null,
+    basis: { retailPriceCents: number; discountBps: number } | null,
+  ): DropshipProductCost => ({
+    status: "available", unitCostCents, planId: input.planId, source, overrideId, issue: null,
+    retailPriceCents: basis?.retailPriceCents ?? null, discountBps: basis?.discountBps ?? null,
+  });
   const variantId = normalizeShopifyCostIdentity(input.shopifyVariantId, "ProductVariant");
   const productId = normalizeShopifyCostIdentity(input.shopifyProductId, "Product");
   if (!variantId || !productId || input.variants.length === 0) return unavailable("variant_unmapped");
@@ -114,7 +121,8 @@ export function resolveDropshipProductCost(input: DropshipProductCostSnapshot): 
   const exclusions = input.excludedCollectionIds.map((id) => normalizeShopifyCostIdentity(id, "Collection"));
   if (collections.includes(null) || exclusions.includes(null)) return unavailable("pricing_configuration_invalid");
   if (collections.some((id) => exclusions.includes(id))) {
-    return retailCents === null ? unavailable("retail_unavailable") : available(retailCents, "retail");
+    return retailCents === null ? unavailable("retail_unavailable")
+      : available(retailCents, "retail", null, { retailPriceCents: retailCents, discountBps: 0 });
   }
   if (input.overrides.length > 1) return unavailable("override_ambiguous");
   const override = input.overrides[0];
@@ -124,21 +132,24 @@ export function resolveDropshipProductCost(input: DropshipProductCostSnapshot): 
       || normalizeShopifyCostIdentity(override.productId, "Product") !== productId) return unavailable("variant_identity_mismatch", overrideId);
     if (override.overrideType === "fixed_price") {
       const cents = parseShellzClubDecimalCents(override.fixedPrice);
-      return cents === null ? unavailable("override_invalid", overrideId) : available(cents, "variant_fixed_price", overrideId);
+      return cents === null ? unavailable("override_invalid", overrideId) : available(cents, "variant_fixed_price", overrideId, null);
     }
     if (override.overrideType === "exclude") {
-      return retailCents === null ? unavailable("retail_unavailable", overrideId) : available(retailCents, "retail", overrideId);
+      return retailCents === null ? unavailable("retail_unavailable", overrideId)
+        : available(retailCents, "retail", overrideId, { retailPriceCents: retailCents, discountBps: 0 });
     }
     if (override.overrideType === "flat_percent") {
       const bp = parseShellzClubDecimalCents(override.discountPercent);
       if (bp === null || bp > 10_000) return unavailable("override_invalid", overrideId);
       return retailCents === null ? unavailable("retail_unavailable", overrideId)
-        : available(discountedCents(retailCents, bp), "variant_percent", overrideId);
+        : available(discountedCents(retailCents, bp), "variant_percent", overrideId, { retailPriceCents: retailCents, discountBps: bp });
     }
     return unavailable("override_invalid", overrideId);
   }
   const bp = resolveFallbackBasisPoints(input);
   if (bp === null) return unavailable("pricing_configuration_invalid");
   if (retailCents === null) return unavailable("retail_unavailable");
-  return bp > 0 ? available(discountedCents(retailCents, bp), "plan_percent") : available(retailCents, "retail");
+  return bp > 0
+    ? available(discountedCents(retailCents, bp), "plan_percent", null, { retailPriceCents: retailCents, discountBps: bp })
+    : available(retailCents, "retail", null, { retailPriceCents: retailCents, discountBps: 0 });
 }

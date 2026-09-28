@@ -267,7 +267,7 @@ function availableCost(overrides: Partial<DropshipProductCost> = {}): DropshipPr
     planId: "plan-ops",
     source: "variant_fixed_price",
     overrideId: "override-1",
-    issue: null,
+    issue: null, retailPriceCents: null, discountBps: null,
     ...overrides,
   };
 }
