@@ -20,6 +20,7 @@ import { errorMessage, MAX_DRAFT_ITEMS, money } from "./model";
 
 interface Props {
   base: string;
+  providerName: string;
   selectedIds: ReadonlySet<number>;
   onClose(): void;
   onAdd(items: ListingCatalogItem[]): void;
@@ -28,6 +29,7 @@ const PAGE_SIZE = 25;
 
 export function ListingCatalogPicker({
   base,
+  providerName,
   selectedIds,
   onClose,
   onAdd,
@@ -57,7 +59,7 @@ export function ListingCatalogPicker({
     >
       <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Add products to Walmart</DialogTitle>
+          <DialogTitle>Add products to {providerName}</DialogTitle>
           <DialogDescription>
             Select exact packs and variants. Future products and variants remain
             unselected.

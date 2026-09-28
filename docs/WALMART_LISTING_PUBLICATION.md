@@ -2,7 +2,11 @@
 
 ## Operator flow
 
-Open the connected Walmart channel. Listing Feed selects exact catalog variants; no catalog-wide selection is implied. Save a draft, set the shared channel markup or an item price override, complete Walmart's product-type fields, and review the resulting USD prices. Existing Walmart items retain the shared remote catalog mapping flow.
+Open the connected channel's single **Listing Feed**. The same table shows products already on the account, selected draft variants, and recent submission outcomes. Listings created before connection use the same feed and can be linked to Echelon there. There is no separate inbound listing workflow or provider-specific navigation label.
+
+Use **Add products** to select exact catalog variants, set the shared channel markup or an item price override, complete Walmart's product-type fields, and review the resulting USD prices. Only the explicit draft is submitted. Reading or linking an account listing does not add it to that draft, reprice it, or enable stock publication.
+
+The account catalog uses provider cursor pages. Drafts and recent submissions stay visible as those pages change, subject to the exact SKU search. Matching is case-sensitive; a suggested variant is not a saved mapping. Rows with the same exact seller SKU combine account and submission evidence, while conflicting draft identities stay visible for correction. Counts distinguish draft items and the current account page; they are not a global filtered inventory total. Draft and submitted prices are labeled as such because the account catalog contract does not return a current provider price.
 
 Publication consumes the reviewed draft atomically and shows a separate Activity record. The review expires after 15 minutes and is invalidated by changes to the selected catalog, price, account, or inventory destination. MP_ITEM and MP_ITEM_MATCH use separate persisted feed commands. Existing listings are not repriced by this initial-publication action.
 
@@ -56,3 +60,15 @@ New PostgreSQL coverage is included in the CI manifest: listing persistence/conc
 - Before the registration approval, CI passed 15,999 unit tests with only the writer-ratchet registration failing. The user then explicitly approved the exact 11 registrations in `WALMART_WRITER_REGISTRATION_REVIEW.md`; the regenerated baseline and strengthened ownership regression pass all nine writer-ratchet tests locally.
 
 The approved baseline adds exactly 11 module-to-table pairs and removes none. Local checks do not establish the subsequent CI result, production schema state, account eligibility, or live listing/stock acceptance.
+
+
+## Unified listing feed validation (2026-09-28)
+
+The shared workspace now renders one listing table and three generic tabs: Listing Feed, Pricing Rules, and Activity. Exact seller SKU joins preserve draft edits and flag conflicting identities. Linking remains an explicit Channels command, bound to the observed provider product identity; only draft items enter publication review and submission.
+
+- Publication UI unit suites: 29 tests pass, including 17 feed projection cases.
+- Walmart workspace browser suite: 38 desktop/mobile checks pass. Coverage includes combined rows, draft-only submission, exact-SKU deduplication, search/page changes without losing edits, mapping identity, read-only permissions, catalog outages, and existing pricing/retry/stock review controls.
+- Production source and client test TypeScript checks pass. Desktop and mobile screenshots were inspected.
+- A later CI run exposed a fixed-date claim clock in the membership integration test. The original failure was reproduced on PostgreSQL 17; deriving each claim clock from its persisted schedule fixes all 13 tests, with added before-due and exact-row assertions. Server test TypeScript checks also pass.
+
+These checks use mocked provider requests and establish local UI behavior only. No schema migration, production account change, listing publication, or stock activation is part of this UI change.
