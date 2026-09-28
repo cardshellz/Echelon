@@ -606,16 +606,38 @@ dbDescribe.sequential(
       ).rejects.toMatchObject({ code: "MEMBERSHIP_REVIEW_STALE" });
     });
     it("holds stock at zero, suppresses a leased positive, verifies exact readback, then removes membership", async () => {
-      const providerTime = new Date("2026-09-28T12:00:00.000Z");
+      let providerTime = WALMART_INVENTORY_NOW;
+      async function advanceProviderClockToQueuedPublication(): Promise<void> {
+        const queued = await database.pool.query<{ availableAt: Date }>(
+          `SELECT available_at AS "availableAt"
+           FROM inventory.inventory_publication_outbox
+           WHERE publication_target_id=2 AND product_variant_id=101
+             AND publication_phase='full' AND state='queued'`,
+        );
+        expect(queued.rows).toHaveLength(1);
+        // Enqueue uses PostgreSQL transaction time, independently of the fixture
+        // clock. Date truncates PostgreSQL microseconds, so advance to the next
+        // millisecond without moving this worker clock backwards.
+        const timestampPrecisionMarginMs = 1;
+        providerTime = new Date(
+          Math.max(
+            providerTime.getTime(),
+            queued.rows[0].availableAt.getTime() + timestampPrecisionMarginMs,
+          ),
+        );
+      }
       const outbox = new PostgresInventoryPublicationOutboxRepository(
         database.pool,
       );
-      const [positive] = await outbox.claimDue({
+      await advanceProviderClockToQueuedPublication();
+      const positiveClaims = await outbox.claimDue({
         batchSize: 10,
         leaseSeconds: 120,
         leaseToken: "positive-lease",
         now: providerTime,
       });
+      expect(positiveClaims).toHaveLength(1);
+      const [positive] = positiveClaims;
       expect(positive.desiredQuantity).not.toBe("0");
       const holds = new InventoryPublicationTargetVariantHoldService(
         new PostgresInventoryPublicationTargetVariantHoldStore(database.pool),
@@ -655,12 +677,15 @@ dbDescribe.sequential(
         changes: [{ productVariantId: 101, included: false }],
       });
       expect(before.ready).toBe(false);
-      const [zero] = await outbox.claimDue({
+      await advanceProviderClockToQueuedPublication();
+      const zeroClaims = await outbox.claimDue({
         batchSize: 10,
         leaseSeconds: 120,
         leaseToken: "zero-lease",
         now: providerTime,
       });
+      expect(zeroClaims).toHaveLength(1);
+      const [zero] = zeroClaims;
       expect(zero.desiredQuantity).toBe("0");
       await new PostgresQuantityPublicationAdmission(
         database.pool,
