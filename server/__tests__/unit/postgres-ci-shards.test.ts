@@ -95,13 +95,18 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/inventory-planning/__tests__/integration/walmart-publication-membership.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-cost-schedule.integration.test.ts",
     ];
-    expect(POSTGRES_TEST_FILES).toHaveLength(108);
-    expect(new Set(POSTGRES_TEST_FILES).size).toBe(108);
+    const priorSuiteCount = 70;
+    // Derive the total from the protected baseline and this independent review list,
+    // so concurrent reviewed additions cannot leave a stale hardcoded total.
+    const expectedSuiteCount = priorSuiteCount + addedSuites.length;
+    expect(new Set(addedSuites).size).toBe(addedSuites.length);
+    expect(POSTGRES_TEST_FILES).toHaveLength(expectedSuiteCount);
+    expect(new Set(POSTGRES_TEST_FILES).size).toBe(expectedSuiteCount);
     expect(POSTGRES_TEST_FILES).toEqual(expect.arrayContaining(addedSuites));
     // Preserve the original inventory digest as well as the explicit additions;
     // adding hardening coverage must not silently remove an older suite.
     const priorFiles = POSTGRES_TEST_FILES.filter((file) => !addedSuites.includes(file));
-    expect(priorFiles).toHaveLength(70);
+    expect(priorFiles).toHaveLength(priorSuiteCount);
     const digest = createHash("sha256").update([...priorFiles].sort().join("\n")).digest("hex");
     expect(digest).toBe("8d6c96c5651ea0352e914985eb98ce15267503b535b50d63dec5a0780a80868a");
     expect(() => validatePostgresManifest(POSTGRES_REPOSITORY_ROOT, POSTGRES_TEST_FILES)).not.toThrow();
