@@ -606,20 +606,60 @@ dbDescribe.sequential(
       ).rejects.toMatchObject({ code: "MEMBERSHIP_REVIEW_STALE" });
     });
     it("holds stock at zero, suppresses a leased positive, verifies exact readback, then removes membership", async () => {
-      const providerTime = new Date("2026-09-28T12:00:00.000Z");
+      let providerTime = WALMART_INVENTORY_NOW;
       const outbox = new PostgresInventoryPublicationOutboxRepository(
         database.pool,
       );
-      const [positive] = await outbox.claimDue({
-        batchSize: 10,
-        leaseSeconds: 120,
-        leaseToken: "positive-lease",
-        now: providerTime,
-      });
+      const membership = new InventoryPublicationMembershipService(
+        new PostgresInventoryPublicationMembershipStore(database.pool),
+        { now: () => providerTime },
+      );
+      const claimScheduled = async (leaseToken: string) => {
+        // Runtime publication schedules with PostgreSQL transaction time, not
+        // the injected audit clock. Read each new row's actual due boundary.
+        // PostgreSQL retains microseconds; JavaScript Date retains milliseconds,
+        // so round forward one millisecond after truncation before claiming.
+        const queued = await database.pool.query<{
+          id: string;
+          desired_quantity: string;
+          before_due: Date;
+          claim_at: Date;
+        }>(
+          `SELECT id::text, desired_quantity::text,
+             date_trunc('milliseconds', available_at) - interval '1 millisecond' AS before_due,
+             GREATEST(date_trunc('milliseconds', available_at) + interval '1 millisecond', $1::timestamptz) AS claim_at
+           FROM inventory.inventory_publication_outbox
+           WHERE publication_target_id=2 AND product_variant_id=101
+             AND publication_phase='full' AND state='queued'`,
+          [providerTime],
+        );
+        expect(queued.rows).toHaveLength(1);
+        const scheduled = queued.rows[0];
+        const claimInput = { batchSize: 10, leaseSeconds: 120, leaseToken };
+        expect(
+          await outbox.claimDue({ ...claimInput, now: scheduled.before_due }),
+        ).toEqual([]);
+        // Keep hold, admission, review and readback clocks monotonic, including
+        // when the fixture's audit clock is ahead of the database clock.
+        providerTime = scheduled.claim_at;
+        const claimed = await outbox.claimDue({
+          ...claimInput,
+          now: providerTime,
+        });
+        expect(claimed).toHaveLength(1);
+        expect(claimed[0]).toMatchObject({
+          outboxId: scheduled.id,
+          publicationTargetId: 2,
+          productVariantId: 101,
+          desiredQuantity: scheduled.desired_quantity,
+        });
+        return claimed[0];
+      };
+      const positive = await claimScheduled("positive-lease");
       expect(positive.desiredQuantity).not.toBe("0");
       const holds = new InventoryPublicationTargetVariantHoldService(
         new PostgresInventoryPublicationTargetVariantHoldStore(database.pool),
-        { now: () => WALMART_INVENTORY_NOW },
+        { now: () => providerTime },
       );
       await holds.holdVariants(
         {
@@ -649,18 +689,13 @@ dbDescribe.sequential(
         ).runOutbox(positive, provider),
       ).rejects.toThrow();
       expect(provider).not.toHaveBeenCalled();
-      const before = await service.review({
+      const before = await membership.review({
         publicationTargetId: 2,
         expectedTargetRevision: "5",
         changes: [{ productVariantId: 101, included: false }],
       });
       expect(before.ready).toBe(false);
-      const [zero] = await outbox.claimDue({
-        batchSize: 10,
-        leaseSeconds: 120,
-        leaseToken: "zero-lease",
-        now: providerTime,
-      });
+      const zero = await claimScheduled("zero-lease");
       expect(zero.desiredQuantity).toBe("0");
       await new PostgresQuantityPublicationAdmission(
         database.pool,
@@ -697,9 +732,9 @@ dbDescribe.sequential(
         expectedTargetRevision: "5",
         changes: [{ productVariantId: 101, included: false }],
       };
-      const review = await service.review(input);
+      const review = await membership.review(input);
       expect(review.ready).toBe(true);
-      const receipt = await service.apply(
+      const receipt = await membership.apply(
         {
           ...input,
           expectedReviewHash: review.reviewHash,

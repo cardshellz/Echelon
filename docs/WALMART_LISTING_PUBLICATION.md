@@ -69,5 +69,6 @@ The shared workspace now renders one listing table and three generic tabs: Listi
 - Publication UI unit suites: 29 tests pass, including 17 feed projection cases.
 - Walmart workspace browser suite: 38 desktop/mobile checks pass. Coverage includes combined rows, draft-only submission, exact-SKU deduplication, search/page changes without losing edits, mapping identity, read-only permissions, catalog outages, and existing pricing/retry/stock review controls.
 - Production source and client test TypeScript checks pass. Desktop and mobile screenshots were inspected.
+- A later CI run exposed a fixed-date claim clock in the membership integration test. The original failure was reproduced on PostgreSQL 17; deriving each claim clock from its persisted schedule fixes all 13 tests, with added before-due and exact-row assertions. Server test TypeScript checks also pass.
 
 These checks use mocked provider requests and establish local UI behavior only. No schema migration, production account change, listing publication, or stock activation is part of this UI change.
