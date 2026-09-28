@@ -15,6 +15,16 @@ estimate profit, debit a wallet, or change marketplace listings when saved.
 - Fixed overrides and explicit catalog-default choices remain distinct from rule
   inheritance. A bulk review explicitly adopts rules for existing listings and
   preserves fixed overrides unless the vendor deliberately releases them.
+- Only a price the vendor typed is a fixed override. The price an earlier push
+  saved on a listing was derived at push time, not chosen, so where the store
+  has rules they price that listing like any other without a setting
+  (`listingPriceFollowsRules` in `shared/dropship/listing-price.ts`; owner
+  decision 2026-09-28). Without rules the saved price is kept, as before.
+- The preview warns when the price a push would publish is under the .ops cost
+  of one sellable pack (`price_below_product_cost`). It never blocks: the row
+  still queues, and the loss is the vendor's to take (owner decision
+  2026-09-28). After a later cost increase the cost change policy decides what
+  happens to such a listing.
 - Preview and approval are separate. Approval checks the exact profile revision,
   selected population, current listing settings, and cost evidence again. It is
   atomic and idempotent, and writes an audit event. No marketplace call is made.

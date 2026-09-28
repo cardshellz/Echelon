@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DropshipListingPriceService, type ListingPriceTransaction } from "../../application/dropship-listing-price-service";
 import { listingPriceTargetSchema, saveListingPriceInputSchema, resolveListingPrice, MAX_LISTING_PRICE_CENTS } from "../../../../../shared/dropship/listing-price";
 import type { DropshipListingCatalogCandidate, DropshipListingStoreContext } from "../../application/dropship-listing-preview-service";
+import type { ListingRulePrice } from "../../application/dropship-rule-price";
 
 const now = new Date("2026-09-06T15:00:00.000Z");
 const target = { storeConnectionId: 22, productVariantId: 101 };
@@ -75,6 +76,16 @@ describe("listing price local draft authority", () => {
     expect((await service.getForMember("member-1", target)).source).toBe("saved_listing");
     const saved = await service.saveForMember("member-1", target, { ...input, priceCents: null });
     expect(saved.price).toMatchObject({ revisionId: 1, overridePriceCents: null, effectivePriceCents: 899, source: "catalog_default" });
+  });
+  it("hands a listing whose only price an earlier push saved to the store's rules", async () => {
+    vi.mocked(tx.catalog.listExistingListings).mockResolvedValue([{ productVariantId: 101, listingId: 1,
+      vendorRetailPriceCents: 999, status: "live", quantityCap: null, externalListingId: null }]);
+    const rule: ListingRulePrice = { priceCents: 1152, ruleName: "Store default rule", ruleId: null, issue: null, basis: "product_cost",
+      profileRevisionId: 1, evidenceHash: "a".repeat(64), productCost: null };
+    tx.loadRulePrice = vi.fn(async () => rule);
+    expect(await service.getForMember("member-1", target)).toMatchObject({
+      effectivePriceCents: 1152, source: "rules", pricingMode: "rules", ruleName: "Store default rule", rulePriceCents: 1152, rulesConfigured: true,
+    });
   });
   it("returns unavailable when reset has no valid catalog price, without resurrecting old listing", async () => {
     expect(resolveListingPrice({ saved: { overridePriceCents: null }, existingListingPriceCents: 999, defaultPriceCents: null }))

@@ -65,6 +65,17 @@ describe("store pricing review and approval", () => {
     expect(result.rows[1]).toMatchObject({ preserved: false, priceCents: 1152 });
     expect(result.summary.preserved).toBe(1);
   });
+  it("replaces a price an earlier push saved on the listing; only a typed price is preserved", async () => {
+    vi.mocked(tx.catalog.listExistingListings).mockResolvedValue([
+      { productVariantId: 1, listingId: 1, vendorRetailPriceCents: 999, status: "live", quantityCap: null, externalListingId: null },
+      { productVariantId: 2, listingId: 2, vendorRetailPriceCents: 999, status: "live", quantityCap: null, externalListingId: null },
+    ]);
+    settings = [{ productVariantId: 2, revisionId: 7, overridePriceCents: 1299, updatedAt: now.toISOString() }];
+    const result = await review();
+    expect(result.rows[0]).toMatchObject({ preserved: false, previousPriceCents: 999, priceCents: 1152, ruleName: "Store default rule" });
+    expect(result.rows[1]).toMatchObject({ preserved: true, previousPriceCents: 1299, priceCents: 1299, ruleName: "Fixed override preserved" });
+    expect(result.summary.preserved).toBe(1);
+  });
   it("can explicitly release fixed overrides in the reviewed request", async () => {
     settings = [{ productVariantId: 1, revisionId: 7, overridePriceCents: 999, updatedAt: now.toISOString() }];
     const result = await service.reviewForMember("member-1", 22, { ...input, releaseFixedOverrides: true });

@@ -21,15 +21,17 @@ import { createDropshipListingTierServiceFromEnv } from "./dropship-listing-tier
 export function createDropshipListingPreviewServiceFromEnv(): DropshipListingPreviewService {
   const repository = new PgDropshipListingPreviewRepository();
   const logger = makeDropshipListingPreviewLogger();
+  const productCosts = new PgShellzClubProductCostAdapter(pool, (context) => logger.warn({
+    code: "DROPSHIP_PRODUCT_COST_SOURCE_UNAVAILABLE",
+    message: "Shellz Club product pricing could not be read.", context,
+  }));
   return new DropshipListingPreviewService({
     vendorProvisioning: createDropshipVendorProvisioningServiceFromEnv(),
     repository,
+    productCosts,
     presentation: {
       media: new PgCatalogVariantMediaReader(pool),
-      productCosts: new PgShellzClubProductCostAdapter(pool, (context) => logger.warn({
-        code: "DROPSHIP_PRODUCT_COST_SOURCE_UNAVAILABLE",
-        message: "Shellz Club product pricing could not be read.", context,
-      })),
+      productCosts,
       resolvePublication: resolveDropshipPublicationPreview,
       logger,
     },

@@ -328,6 +328,22 @@ and named by what the cost does to it (`domain/cost-change-listing-action.ts`):
 | `rules_retail`, `fixed`, `catalog_default`, `saved_listing` | no | `price_covers_cost` when price ≥ cost per unit; else `below_cost_recorded` (nothing), `below_cost_warned` (warn) or `below_cost_paused` (pause) |
 | `unavailable` | — | `skipped_price_unavailable` |
 
+`saved_listing` (the price an earlier push saved on the listing) arises only
+when the store has no pricing rules: that price was derived at push time, not
+chosen by the vendor, so where rules exist they price the listing
+(`listingPriceFollowsRules`; owner decision 2026-09-28). Only a typed price
+(`fixed`) is left alone.
+
+**At preview time.** Before any cost change, the listing preview already warns
+when the price a push would publish is under the .ops cost of one sellable
+pack (`price_below_product_cost`, `domain/listing-price-cost.ts`). The warning
+never blocks: the row's status is `warning`, it still queues, and the loss is
+the vendor's to take (owner decision 2026-09-28: warn, do not block). The
+preview reads costs once (rule prices already carry the cost of the listings
+they priced; the cost reader supplies the rest); when the cost source is down
+the check is skipped and logged (`DROPSHIP_PRODUCT_COST_SOURCE_UNAVAILABLE`),
+and the row's economics say the cost is unavailable.
+
 **Reprice.** One system push job per store connection and chunk of
 increases, queued through the ordinary one-step push
 (`reviewMode: "current_preview"`, actor `dropship-cost-changes`, key

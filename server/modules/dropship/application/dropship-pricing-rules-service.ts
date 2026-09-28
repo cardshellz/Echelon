@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { loadSelectedCandidates, selectedCatalogTargets } from "./dropship-selected-catalog";
-import { resolveListingPrice, type SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
+import { isTypedListingPrice, resolveListingPrice } from "../../../../shared/dropship/listing-price";
 import { applyPricingRulesInputSchema, reviewPricingRulesInputSchema, pricingImpactRowSchema,
   PRICING_REVIEW_PAGE_SIZE, MAX_PRICING_REVIEW_ITEMS, type PricingProfileState, type ReviewPricingRulesInput,
   type PricingImpactRow, type PricingReviewResponse, type ApplyPricingRulesInput } from "../../../../shared/dropship/pricing-rules";
@@ -117,7 +117,9 @@ export class DropshipPricingRulesService {
       const oldRule = current.profile ? resolveListingRulePrice({ state: current, candidate, cost }) : null;
       const old = resolveListingPrice({ saved: setting, existingListingPriceCents: existing,
         defaultPriceCents: candidate.defaultRetailPriceCents, rulePrice: oldRule });
-      const preserved = !input.releaseFixedOverrides && isFixedPrice(setting, existing);
+      // Only a typed price is preserved. A price an earlier push saved on the
+      // listing was derived, not chosen, so the rules replace it.
+      const preserved = !input.releaseFixedOverrides && isTypedListingPrice(setting);
       const rule = resolveListingRulePrice({ state: proposed, candidate, cost });
       const priceCents = preserved ? old.effectivePriceCents : rule.priceCents;
       const issues = preserved ? [] : [rule.issue, ...evaluateListingPricingPolicy(candidate, guardrails, priceCents).blockers]
@@ -133,9 +135,6 @@ export class DropshipPricingRulesService {
 }
 
 
-function isFixedPrice(saved: SavedListingPriceRevision | null, existing: number | null): boolean {
-  return saved ? saved.overridePriceCents !== null : existing !== null;
-}
 async function requireReview(tx: PricingRulesTransaction, id: string): Promise<StoredPricingReview> {
   const review = await tx.loadReview(id);
   if (!review) throw new DropshipError("DROPSHIP_PRICING_REVIEW_NOT_FOUND", "Pricing review was not found for this store.");

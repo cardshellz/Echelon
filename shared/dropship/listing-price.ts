@@ -43,13 +43,41 @@ export interface SavedListingPriceRevision {
   updatedAt: string;
 }
 
+/**
+ * Whether the store's pricing rules own this listing's price.
+ *
+ * A saved setting is the vendor's choice and decides on its own: rules, a
+ * typed price, or the catalog default. Without one, the rules apply whenever
+ * the store has them. The price an earlier push saved on the listing record
+ * was derived at push time, not chosen by the vendor, so it does not shield
+ * the listing from the rules; only a typed price does (owner decision,
+ * 2026-09-28).
+ */
+export function listingPriceFollowsRules(input: {
+  saved: Pick<SavedListingPriceRevision, "pricingMode"> | null;
+  rulePrice?: { priceCents: number | null } | null;
+}): boolean {
+  if (input.saved) return input.saved.pricingMode === "rules";
+  return input.rulePrice != null;
+}
+
+/** Only a price the vendor typed is fixed; see `listingPriceFollowsRules`. */
+export function isTypedListingPrice(saved: Pick<SavedListingPriceRevision, "overridePriceCents"> | null): boolean {
+  return saved?.overridePriceCents != null;
+}
+
+/**
+ * Precedence: the saved setting (rules, typed price or catalog default), then
+ * the store's rules, then the price an earlier push saved on the listing,
+ * then the catalog default.
+ */
 export function resolveListingPrice(input: {
   saved: Pick<SavedListingPriceRevision, "overridePriceCents" | "pricingMode"> | null;
   existingListingPriceCents: number | null;
   defaultPriceCents: number | null;
   rulePrice?: { priceCents: number | null } | null;
 }): Pick<ListingPriceSetting, "effectivePriceCents" | "source"> {
-  if (input.saved?.pricingMode === "rules" || (!input.saved && input.existingListingPriceCents === null && input.rulePrice)) {
+  if (listingPriceFollowsRules(input)) {
     const parsed = listingPriceCentsSchema.safeParse(input.rulePrice?.priceCents);
     return parsed.success ? { effectivePriceCents: parsed.data, source: "rules" }
       : { effectivePriceCents: null, source: "unavailable" };
