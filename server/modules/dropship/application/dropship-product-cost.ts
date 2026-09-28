@@ -14,6 +14,14 @@ export type DropshipProductCost = Readonly<{
   source: DropshipProductCostSource | null;
   overrideId: string | null;
   issue: DropshipProductCostIssue | null;
+  /**
+   * The Shopify retail price a retail-based cost (retail, variant_percent,
+   * plan_percent) was computed from, and the discount applied to it in basis
+   * points. Null for a fixed-price override and for an unavailable cost. The
+   * cost schedule uses them to tell a retail move from a plan change.
+   */
+  retailPriceCents: number | null;
+  discountBps: number | null;
 }>;
 
 export interface DropshipProductCostReader {

@@ -14,7 +14,7 @@ function available(overrides: Partial<DropshipProductCost> = {}): DropshipProduc
     planId: "plan-ops",
     source: "variant_fixed_price",
     overrideId: "override-1",
-    issue: null,
+    issue: null, retailPriceCents: null, discountBps: null,
     ...overrides,
   };
 }
@@ -48,10 +48,12 @@ describe("resolveAcceptanceUnitCost", () => {
     for (const issue of permanentIssues) {
       expect(resolveAcceptanceUnitCost({
         status: "unavailable", unitCostCents: null, planId: "plan-ops", source: null, overrideId: null, issue,
+        retailPriceCents: null, discountBps: null,
       })).toMatchObject({ ok: false, code: "DROPSHIP_ORDER_PRODUCT_COST_UNAVAILABLE", retryable: false, issue });
     }
     expect(resolveAcceptanceUnitCost({
       status: "unavailable", unitCostCents: null, planId: null, source: null, overrideId: null, issue: "source_read_failed",
+      retailPriceCents: null, discountBps: null,
     })).toMatchObject({ ok: false, code: "DROPSHIP_ORDER_PRODUCT_COST_UNAVAILABLE", retryable: true });
   });
 

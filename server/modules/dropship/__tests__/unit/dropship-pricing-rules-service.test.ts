@@ -9,7 +9,7 @@ const now = new Date("2026-09-07T12:00:00.000Z");
 const reviewId = "02892196-a1f2-4e72-823a-32188b9cb234";
 const profile = { defaultRecipe: { basis: "product_cost" as const, markupBps: 3000, flatCents: 100, rounding: "cent" as const }, groups: [] };
 const input = { profile, expectedRevisionId: null, releaseFixedOverrides: false };
-const cost: DropshipProductCost = { status: "available", unitCostCents: 809, planId: "ops-plan", source: "variant_fixed_price", overrideId: "cost-1", issue: null };
+const cost: DropshipProductCost = { status: "available", unitCostCents: 809, planId: "ops-plan", source: "variant_fixed_price", overrideId: "cost-1", issue: null, retailPriceCents: null, discountBps: null };
 
 describe("store pricing review and approval", () => {
   let tx: PricingRulesTransaction;

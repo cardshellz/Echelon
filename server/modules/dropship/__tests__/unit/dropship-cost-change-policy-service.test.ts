@@ -10,6 +10,7 @@ import {
   DROPSHIP_COST_CHANGE_ENFORCEMENT,
   DropshipCostChangePolicyService,
   hashCostChangePolicyRequest,
+  resolveDropshipCostChangeEnforcement,
   type CreateDropshipCostChangePolicyVersionRepositoryInput,
   type DropshipCostChangePolicyMutationResult,
   type DropshipCostChangePolicyRecord,
@@ -62,6 +63,27 @@ describe("DropshipCostChangePolicyService", () => {
         warn: (event) => logs.push({ ...event, level: "warn" }),
         error: (event) => logs.push({ ...event, level: "error" }),
       },
+      enforcement: resolveDropshipCostChangeEnforcement({ detectionWorkerEnabled: true }),
+    });
+  });
+
+  describe("resolvePolicy", () => {
+    it("serves the active version's id and settings", async () => {
+      repository.activePolicy = makePolicy(publishedSettings);
+      await expect(service.resolvePolicy()).resolves.toEqual({ policyId: repository.activePolicy.policyId, settings: publishedSettings });
+    });
+
+    it("has no policy id when the defaults apply", async () => {
+      await expect(service.resolvePolicy()).resolves.toEqual({ policyId: null, settings: DEFAULT_DROPSHIP_COST_CHANGE_POLICY });
+    });
+  });
+
+  describe("resolveDropshipCostChangeEnforcement", () => {
+    it("calls detection live only where its worker is switched on; the later parts stay off", () => {
+      expect(resolveDropshipCostChangeEnforcement({ detectionWorkerEnabled: true }))
+        .toEqual({ detection: true, priceProtection: false, vendorNotices: false, listingActions: false });
+      expect(resolveDropshipCostChangeEnforcement({ detectionWorkerEnabled: false }))
+        .toEqual({ detection: false, priceProtection: false, vendorNotices: false, listingActions: false });
     });
   });
 
@@ -125,7 +147,7 @@ describe("DropshipCostChangePolicyService", () => {
         settingsSource: "policy",
         defaults: { ...DEFAULT_DROPSHIP_COST_CHANGE_POLICY },
         versions: [repository.activePolicy, retired],
-        enforcement: { detection: false, priceProtection: false, vendorNotices: false, listingActions: false },
+        enforcement: { detection: true, priceProtection: false, vendorNotices: false, listingActions: false },
         generatedAt: now,
       });
       expect(repository.historyLimits).toEqual([COST_CHANGE_POLICY_HISTORY_LIMIT]);
@@ -154,11 +176,22 @@ describe("DropshipCostChangePolicyService", () => {
     it("hands out copies, so a caller cannot change the shared defaults or enforcement flags", async () => {
       const overview = await service.getOverview();
       overview.defaults.increaseNoticeDays = 0;
-      overview.enforcement.detection = true;
+      overview.enforcement.detection = false;
 
       expect(DEFAULT_DROPSHIP_COST_CHANGE_POLICY.increaseNoticeDays).toBe(14);
-      expect(DROPSHIP_COST_CHANGE_ENFORCEMENT.detection).toBe(false);
+      expect((await service.getOverview()).enforcement.detection).toBe(true);
+      expect(DROPSHIP_COST_CHANGE_ENFORCEMENT.detection).toBe(true);
       expect(Object.isFrozen(DROPSHIP_COST_CHANGE_ENFORCEMENT)).toBe(true);
+    });
+
+    it("reports the enforcement it was given, not the shipped constant", async () => {
+      const offline = new DropshipCostChangePolicyService({
+        repository,
+        clock: { now: () => now },
+        logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+        enforcement: resolveDropshipCostChangeEnforcement({ detectionWorkerEnabled: false }),
+      });
+      expect((await offline.getOverview()).enforcement.detection).toBe(false);
     });
   });
 

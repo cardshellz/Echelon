@@ -14,7 +14,7 @@ import type { DropshipProductCost } from "../../application/dropship-product-cos
 import { resolveListingContent, listingCatalogHash } from "../../application/dropship-listing-content-resolver";
 
 const productCost: DropshipProductCost = { status: "available", unitCostCents: 809,
-  planId: "ops-plan", source: "variant_fixed_price", overrideId: "override-1", issue: null };
+  planId: "ops-plan", source: "variant_fixed_price", overrideId: "override-1", issue: null, retailPriceCents: null, discountBps: null };
 
 const candidate: DropshipListingCatalogCandidate = {
   productId: 5, productVariantId: 7, productLineIds: [], productIsActive: true, variantIsActive: true, variantUomType: "pack",

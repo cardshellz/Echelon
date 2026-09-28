@@ -1004,7 +1004,7 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
 
 function rulePrice(): ListingRulePrice {
   return { priceCents: 1152, ruleName: "Store default rule", ruleId: null, issue: null, profileRevisionId: 1,
-    evidenceHash: "a".repeat(64), productCost: { status: "available", unitCostCents: 809, planId: "ops", source: "variant_fixed_price", overrideId: "fixed", issue: null } };
+    evidenceHash: "a".repeat(64), productCost: { status: "available", unitCostCents: 809, planId: "ops", source: "variant_fixed_price", overrideId: "fixed", issue: null, retailPriceCents: null, discountBps: null } };
 }
 function makeCandidate(): DropshipListingCatalogCandidate {
   return {

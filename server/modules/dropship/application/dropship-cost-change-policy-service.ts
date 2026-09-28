@@ -71,12 +71,25 @@ export interface DropshipCostChangeEnforcement {
   listingActions: boolean;
 }
 
+/** The parts whose code has shipped. Detection shipped in C2 (migration 0711, dropship-cost-detection-service.ts). */
 export const DROPSHIP_COST_CHANGE_ENFORCEMENT: Readonly<DropshipCostChangeEnforcement> = Object.freeze({
-  detection: false,
+  detection: true,
   priceProtection: false,
   vendorNotices: false,
   listingActions: false,
 });
+
+/**
+ * What acts in THIS process: shipped code that is also switched on. Detection
+ * is a worker that runs only where DROPSHIP_COST_DETECTION_WORKER_ENABLED is
+ * set, so the admin module must not call it live where it is not running.
+ */
+export function resolveDropshipCostChangeEnforcement(input: { detectionWorkerEnabled: boolean }): DropshipCostChangeEnforcement {
+  return {
+    ...DROPSHIP_COST_CHANGE_ENFORCEMENT,
+    detection: DROPSHIP_COST_CHANGE_ENFORCEMENT.detection && input.detectionWorkerEnabled,
+  };
+}
 
 export interface DropshipCostChangePolicyOverview {
   /** The active version, or null when none exists and the defaults apply. */
@@ -113,8 +126,15 @@ export interface DropshipCostChangePolicyRepository {
   createPolicyVersion(input: CreateDropshipCostChangePolicyVersionRepositoryInput): Promise<DropshipCostChangePolicyMutationResult>;
 }
 
+/** The policy in force: the active version's id (null when the defaults apply) and its settings. */
+export interface DropshipCostChangePolicyInForce {
+  policyId: number | null;
+  settings: DropshipCostChangePolicySettings;
+}
+
 /** The single read every cost change component uses for the settings in force. */
 export interface DropshipCostChangePolicyResolver {
+  resolvePolicy(): Promise<DropshipCostChangePolicyInForce>;
   resolvePolicySettings(): Promise<DropshipCostChangePolicySettings>;
 }
 
@@ -124,11 +144,20 @@ export class DropshipCostChangePolicyService implements DropshipCostChangePolicy
       repository: DropshipCostChangePolicyRepository;
       clock: DropshipClock;
       logger: DropshipLogger;
+      /** What acts in this process; see resolveDropshipCostChangeEnforcement. */
+      enforcement: DropshipCostChangeEnforcement;
     },
   ) {}
 
+  async resolvePolicy(): Promise<DropshipCostChangePolicyInForce> {
+    const policy = await this.readActivePolicy();
+    return policy
+      ? { policyId: policy.policyId, settings: policy.settings }
+      : { policyId: null, settings: { ...DEFAULT_DROPSHIP_COST_CHANGE_POLICY } };
+  }
+
   async resolvePolicySettings(): Promise<DropshipCostChangePolicySettings> {
-    return (await this.readActivePolicy())?.settings ?? { ...DEFAULT_DROPSHIP_COST_CHANGE_POLICY };
+    return (await this.resolvePolicy()).settings;
   }
 
   async getOverview(): Promise<DropshipCostChangePolicyOverview> {
@@ -139,7 +168,7 @@ export class DropshipCostChangePolicyService implements DropshipCostChangePolicy
       settingsSource: policy ? "policy" : "defaults",
       defaults: { ...DEFAULT_DROPSHIP_COST_CHANGE_POLICY },
       versions,
-      enforcement: { ...DROPSHIP_COST_CHANGE_ENFORCEMENT },
+      enforcement: { ...this.deps.enforcement },
       generatedAt: this.deps.clock.now(),
     };
   }

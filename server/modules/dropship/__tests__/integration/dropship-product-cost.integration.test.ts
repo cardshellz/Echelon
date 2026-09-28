@@ -136,7 +136,7 @@ describeDatabase.sequential("Shellz Club product cost PostgreSQL source guarante
     const reader = instrument();
     expect((await reader.adapter.loadProductCosts({ vendorId: 10, productVariantIds: [66] })).get(66))
       .toEqual({ status: "available", unitCostCents: 809, planId: "ops",
-        source: "variant_fixed_price", overrideId: "ops-fixed", issue: null });
+        source: "variant_fixed_price", overrideId: "ops-fixed", issue: null, retailPriceCents: null, discountBps: null });
     expect(reader.queries[0]).toBe("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
     expect(reader.queries.at(-1)).toBe("COMMIT");
     expect(reader.queries.join("\n")).not.toMatch(/partner_profiles|\b(?:INSERT|UPDATE|DELETE)\b/i);

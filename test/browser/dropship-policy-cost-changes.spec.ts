@@ -3,8 +3,55 @@ import { resolve } from "node:path";
 import { DEFAULT_DROPSHIP_COST_CHANGE_POLICY } from "../../shared/dropship/cost-change-policy";
 
 const POLICY_URL = "/api/dropship/admin/cost-changes/policy";
+const DETECTION_URL = "/api/dropship/admin/cost-changes/detection";
+const LOG_URL = "/api/dropship/admin/cost-changes/log";
 const defaults = { ...DEFAULT_DROPSHIP_COST_CHANGE_POLICY };
 const noneLive = { detection: false, priceProtection: false, vendorNotices: false, listingActions: false };
+
+interface DetectionState {
+  passNumber: number;
+  passStartedAt: string | null;
+  passCompletedAt: string | null;
+  cursorVendorId: number | null;
+  policyId: number | null;
+  passVendorsProcessed: number;
+  passVariantsRead: number;
+  passUnavailableReadings: number;
+  passChangesRecorded: number;
+  lastTickAt: string | null;
+}
+
+interface PendingChange {
+  entryId: number;
+  recordedBy: "detection" | "acceptance";
+  vendorId: number;
+  vendorBusinessName: string | null;
+  productVariantId: number;
+  variantSku: string | null;
+  variantName: string;
+  productName: string;
+  policyId: number | null;
+  costSource: "variant_fixed_price" | "variant_percent" | "plan_percent" | "retail";
+  effectiveAt: string;
+  observedAt: string;
+  kind: "baseline" | "increase" | "decrease";
+  fromCents: number | null;
+  unitCostCents: number;
+}
+
+interface LogRow extends Omit<PendingChange, "kind" | "fromCents" | "unitCostCents"> {
+  logId: number;
+  eventType: "baseline" | "increase_announced" | "increase_applied" | "decrease_announced" | "decrease_applied" | "increase_reduced" | "change_withdrawn";
+  fromCents: number | null;
+  toCents: number | null;
+  retailDriven: boolean;
+  createdAt: string;
+}
+
+const idleDetection: DetectionState = {
+  passNumber: 0, passStartedAt: null, passCompletedAt: null, cursorVendorId: null, policyId: null,
+  passVendorsProcessed: 0, passVariantsRead: 0, passUnavailableReadings: 0, passChangesRecorded: 0, lastTickAt: null,
+};
 
 interface VersionRecord {
   policyId: number;
@@ -39,11 +86,18 @@ interface PostedBody {
  * with the same body answers the stored version (200, idempotentReplay), and
  * a new key publishes the next version (201). `respond` can override one POST.
  */
-async function mount(page: Page, options: { canEdit?: boolean; versions?: VersionRecord[] } = {}) {
+async function mount(page: Page, options: {
+  canEdit?: boolean;
+  versions?: VersionRecord[];
+  enforcement?: typeof noneLive;
+  detection?: { workerEnabled: boolean; state: DetectionState; pending: PendingChange[] };
+  log?: LogRow[];
+} = {}) {
   const state = {
     versions: [...(options.versions ?? [seed])],
     posts: [] as PostedBody[],
     reads: 0,
+    logReads: [] as string[],
     respond: [] as Array<"lost" | "conflict">,
     /** Holds each POST open this long, so a second click lands while the first is in flight. */
     postDelayMs: 0,
@@ -51,12 +105,31 @@ async function mount(page: Page, options: { canEdit?: boolean; versions?: Versio
     unexpected: [] as string[],
     pageErrors: [] as string[],
   };
+  const detection = options.detection ?? { workerEnabled: true, state: idleDetection, pending: [] };
+  const log = [...(options.log ?? [])].sort((a, b) => b.logId - a.logId);
   page.on("pageerror", (error) => state.pageErrors.push(error.message));
   await page.route("**/*", (route) =>
     new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
   await page.route("**/api/**", async (route) => {
     const request = route.request();
-    const path = new URL(request.url()).pathname;
+    const url = new URL(request.url());
+    const path = url.pathname;
+    if (request.method() === "GET" && path === DETECTION_URL) {
+      return route.fulfill({ json: { ...detection, pendingLimit: 200, generatedAt: "2026-09-28T09:00:00.000Z" } });
+    }
+    if (request.method() === "GET" && path === LOG_URL) {
+      // The server's paging rule: `limit` rows before `beforeId`, and a cursor when more remain.
+      state.logReads.push(url.search);
+      const limit = Number(url.searchParams.get("limit"));
+      const beforeId = url.searchParams.get("beforeId");
+      const rows = log.filter((row) => beforeId === null || row.logId < Number(beforeId));
+      const items = rows.slice(0, limit);
+      return route.fulfill({ json: {
+        items,
+        nextBeforeId: rows.length > limit ? items[items.length - 1]!.logId : null,
+        generatedAt: "2026-09-28T09:00:00.000Z",
+      } });
+    }
     if (path !== POLICY_URL) {
       state.unexpected.push(`${request.method()} ${path}`);
       return route.fulfill({ status: 500, json: {} });
@@ -71,7 +144,7 @@ async function mount(page: Page, options: { canEdit?: boolean; versions?: Versio
           settingsSource: active ? "policy" : "defaults",
           defaults,
           versions: [...state.versions].sort((a, b) => b.version - a.version),
-          enforcement: noneLive,
+          enforcement: options.enforcement ?? noneLive,
           generatedAt: "2026-09-28T09:00:00.000Z",
         },
       });
@@ -131,6 +204,9 @@ test("confirms the migration's seed as a staff version, and a lost answer is ret
   await expect(page.getByTestId("cost-change-policy-today")).toContainText("charged on the next order accepted");
   await expect(page.getByTestId("cost-change-policy-enforcement").getByText("Not live yet")).toHaveCount(4);
   await expect(page.getByTestId("cost-change-policy-in-force")).toContainText("System (migration:0710)");
+  await expect(page.getByTestId("cost-change-detection")).toContainText("No detection pass has run yet.");
+  await expect(page.getByTestId("cost-change-pending-empty")).toHaveText("No cost change is announced.");
+  await expect(page.getByTestId("cost-change-log-empty")).toHaveText("Nothing has been recorded yet.");
 
   // The seed may be confirmed as is, but only with a note saying why.
   await expect(publishButton(page)).toHaveText("Confirm these settings");
@@ -265,5 +341,69 @@ test("a viewer without manage-operations sees the policy but can change nothing"
   }
   await expect(page.getByTestId("cost-change-policy-publish-hint")).toHaveCount(0);
   expect(state.posts).toEqual([]);
+  expect(state.pageErrors).toEqual([]);
+});
+
+test("shows what detection found: the last pass, the announced changes, and the log a page at a time", async ({ page }, testInfo) => {
+  const subject = {
+    recordedBy: "detection" as const, vendorId: 5, vendorBusinessName: "Shellz Vendor", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+    variantName: "Single pack", productName: "Armor Envelope", policyId: 1, costSource: "plan_percent" as const,
+    effectiveAt: "2026-10-13T00:00:00.000Z", observedAt: "2026-09-28T08:05:00.000Z",
+  };
+  const rows: LogRow[] = Array.from({ length: 53 }, (_, index) => ({
+    ...subject,
+    logId: index + 1,
+    entryId: index + 1,
+    eventType: index === 52 ? "increase_announced" : index === 51 ? "change_withdrawn" : "baseline",
+    fromCents: index === 52 ? 809 : index === 51 ? 1099 : null,
+    toCents: index === 52 ? 999 : index === 51 ? null : 809,
+    retailDriven: index === 51,
+    createdAt: "2026-09-28T08:05:00.000Z",
+  }));
+  const state = await mount(page, {
+    enforcement: { ...noneLive, detection: true },
+    detection: {
+      workerEnabled: true,
+      state: {
+        ...idleDetection, passNumber: 3, passStartedAt: "2026-09-28T08:00:00.000Z", passCompletedAt: "2026-09-28T08:06:00.000Z",
+        policyId: 1, passVendorsProcessed: 4, passVariantsRead: 120, passUnavailableReadings: 1, passChangesRecorded: 2,
+        lastTickAt: "2026-09-28T08:59:00.000Z",
+      },
+      pending: [{ ...subject, entryId: 53, kind: "increase", fromCents: 809, unitCostCents: 999 }],
+    },
+    log: rows,
+  });
+
+  // Detection is live, so the today summary says changes are recorded but still charged at once.
+  await expect(page.getByTestId("cost-change-policy-today")).toContainText("found and recorded on the schedule below");
+  await expect(page.getByTestId("cost-change-policy-part-detection")).toContainText("Live");
+  await expect(page.getByTestId("cost-change-policy-in-force-detectionIntervalMinutes")).not.toContainText("Not yet");
+
+  const detection = page.getByTestId("cost-change-detection");
+  await expect(detection).toContainText("Last detection pass completed");
+  await expect(detection).toContainText("Pass 3: 4 vendors, 120 variant readings, 2 changes recorded, 1 reading unavailable.");
+  const announced = page.getByTestId("cost-change-pending-53");
+  await expect(announced).toContainText("Shellz Vendor");
+  await expect(announced).toContainText("ARM-ENV-SGL-P50 · Armor Envelope");
+  await expect(announced).toContainText("Increase");
+  await expect(announced).toContainText("$8.09 → $9.99");
+  await expect(announced).toContainText("Plan percentage of retail");
+  await expect(announced).toContainText("by detection");
+
+  // The first page holds the newest 50 rows; "Show older" fetches the 3 before the last one shown.
+  const log = page.getByTestId("cost-change-log");
+  await expect(log.locator("li")).toHaveCount(50);
+  await expect(page.getByTestId("cost-change-log-53")).toContainText("Increase announced");
+  await expect(page.getByTestId("cost-change-log-53")).toContainText("$8.09 → $9.99");
+  await expect(page.getByTestId("cost-change-log-52")).toContainText("Announced change withdrawn");
+  await expect(page.getByTestId("cost-change-log-52")).toContainText("$10.99 withdrawn");
+  await expect(page.getByTestId("cost-change-log-52")).toContainText("Retail price move");
+  await page.screenshot({ path: testInfo.outputPath(`cost-changes-activity-${testInfo.project.name}.png`), fullPage: true });
+  await page.getByTestId("cost-change-log-older").click();
+  await expect(log.locator("li")).toHaveCount(53);
+  await expect(page.getByTestId("cost-change-log-1")).toContainText("Schedule started");
+  await expect(page.getByTestId("cost-change-log-older")).toHaveCount(0);
+  expect(state.logReads).toEqual(["?limit=50", "?limit=50&beforeId=4"]);
+  expect(state.unexpected).toEqual([]);
   expect(state.pageErrors).toEqual([]);
 });

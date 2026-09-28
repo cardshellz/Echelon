@@ -24,11 +24,15 @@ import {
   MAX_NOTICE_MINIMUM_CHANGE_CENTS,
   MIN_DETECTION_INTERVAL_MINUTES,
   belowCostListingActionValues,
+  costChangeEventTypeValues,
   costDecreaseTimingValues,
+  costSourceValues,
   dropshipCostChangePolicySettingsSchema,
   rulePricedListingActionValues,
   type BelowCostListingAction,
+  type CostChangeEventType,
   type CostDecreaseTiming,
+  type CostSource,
   type DropshipCostChangePolicySettings,
   type RulePricedListingAction,
 } from "@shared/dropship/cost-change-policy";
@@ -42,8 +46,14 @@ import {
   parseWholeMinutes,
 } from "./dropship-wallet-policy-model";
 
-/** The one admin route this surface talks to (GET overview, POST new version). */
+/** The policy route (GET overview, POST new version). */
 export const DROPSHIP_COST_CHANGE_POLICY_ADMIN_URL = "/api/dropship/admin/cost-changes/policy";
+/** What detection has found: the worker's state and the announced changes (GET). */
+export const DROPSHIP_COST_CHANGE_DETECTION_ADMIN_URL = "/api/dropship/admin/cost-changes/detection";
+/** The change log, newest first, a page at a time (GET ?limit=&beforeId=). */
+export const DROPSHIP_COST_CHANGE_LOG_ADMIN_URL = "/api/dropship/admin/cost-changes/log";
+/** Rows per change log page; the server's ceiling is the same. */
+export const DROPSHIP_COST_CHANGE_LOG_PAGE_SIZE = 50;
 
 /** Prefix for the save idempotency key, so the audit trail names the surface. */
 export const DROPSHIP_COST_CHANGE_POLICY_IDEMPOTENCY_PREFIX = "dropship-cost-change-policy";
@@ -385,6 +395,21 @@ export const DROPSHIP_COST_CHANGE_TODAY_SUMMARY =
   + "vendor, and listings priced by pricing rules use the new cost the next time they are previewed or pushed. "
   + "Settings saved here are kept and apply as each part goes live.";
 
+/**
+ * With detection live (migration 0711, the detection worker), changes are
+ * found and dated, but nothing charges, tells or reprices from the schedule
+ * until the later parts ship: acceptance still reads the live cost.
+ */
+export const DROPSHIP_COST_CHANGE_TODAY_WITH_DETECTION_SUMMARY =
+  "Cost changes are found and recorded on the schedule below with the date the policy gives them. Until the remaining "
+  + "parts are live, a change is still charged on the next order accepted, with no notice to the vendor, and listings "
+  + "priced by pricing rules use the new cost the next time they are previewed or pushed.";
+
+/** What happens to a cost change today, given which parts are live. */
+export function describeDropshipCostChangeToday(enforcement: DropshipCostChangeEnforcementView): string {
+  return enforcement.detection ? DROPSHIP_COST_CHANGE_TODAY_WITH_DETECTION_SUMMARY : DROPSHIP_COST_CHANGE_TODAY_SUMMARY;
+}
+
 // --- Form -----------------------------------------------------------------------
 
 /** Text boxes hold what staff typed; switches and choices hold their values. */
@@ -708,4 +733,195 @@ function formatDollarsFromCents(cents: number): string {
   const whole = Math.trunc(cents / 100);
   const fraction = String(cents % 100).padStart(2, "0");
   return `$${whole.toLocaleString("en-US")}.${fraction}`;
+}
+
+// --- What detection has found --------------------------------------------------
+
+const detectionStateSchema = z.object({
+  passNumber: z.number().int().nonnegative(),
+  passStartedAt: z.string().nullable(),
+  passCompletedAt: z.string().nullable(),
+  cursorVendorId: z.number().int().positive().nullable(),
+  policyId: z.number().int().positive().nullable(),
+  passVendorsProcessed: z.number().int().nonnegative(),
+  passVariantsRead: z.number().int().nonnegative(),
+  passUnavailableReadings: z.number().int().nonnegative(),
+  passChangesRecorded: z.number().int().nonnegative(),
+  lastTickAt: z.string().nullable(),
+});
+
+/** Which writer took the reading: the detection worker, or an order acceptance. */
+const costScheduleRecorderSchema = z.enum(["detection", "acceptance"]);
+export type DropshipCostScheduleRecorder = z.infer<typeof costScheduleRecorderSchema>;
+
+const changeSubjectSchema = z.object({
+  recordedBy: costScheduleRecorderSchema,
+  vendorId: z.number().int().positive(),
+  vendorBusinessName: z.string().nullable(),
+  productVariantId: z.number().int().positive(),
+  variantSku: z.string().nullable(),
+  variantName: z.string(),
+  productName: z.string(),
+  policyId: z.number().int().positive().nullable(),
+  costSource: z.enum(costSourceValues),
+  effectiveAt: z.string(),
+  observedAt: z.string(),
+});
+
+const pendingChangeSchema = changeSubjectSchema.extend({
+  entryId: z.number().int().positive(),
+  kind: z.enum(["baseline", "increase", "decrease"]),
+  fromCents: z.number().int().nonnegative().nullable(),
+  unitCostCents: z.number().int().positive(),
+});
+
+const changeLogRowSchema = changeSubjectSchema.extend({
+  logId: z.number().int().positive(),
+  entryId: z.number().int().positive(),
+  eventType: z.enum(costChangeEventTypeValues),
+  fromCents: z.number().int().nonnegative().nullable(),
+  toCents: z.number().int().nonnegative().nullable(),
+  retailDriven: z.boolean(),
+  createdAt: z.string(),
+});
+
+export const dropshipCostChangeDetectionOverviewSchema = z.object({
+  workerEnabled: z.boolean(),
+  state: detectionStateSchema,
+  pending: z.array(pendingChangeSchema),
+  pendingLimit: z.number().int().positive(),
+  generatedAt: z.string(),
+});
+
+export const dropshipCostChangeLogPageSchema = z.object({
+  items: z.array(changeLogRowSchema),
+  nextBeforeId: z.number().int().positive().nullable(),
+  generatedAt: z.string(),
+});
+
+export type DropshipCostDetectionStateView = z.infer<typeof detectionStateSchema>;
+export type DropshipCostPendingChangeView = z.infer<typeof pendingChangeSchema>;
+export type DropshipCostChangeLogRowView = z.infer<typeof changeLogRowSchema>;
+export type DropshipCostChangeDetectionOverview = z.infer<typeof dropshipCostChangeDetectionOverviewSchema>;
+export type DropshipCostChangeLogPage = z.infer<typeof dropshipCostChangeLogPageSchema>;
+
+export function parseDropshipCostChangeDetectionOverview(value: unknown): DropshipCostChangeDetectionOverview {
+  return parseResponse(dropshipCostChangeDetectionOverviewSchema, value, "cost change detection");
+}
+
+export function parseDropshipCostChangeLogPage(value: unknown): DropshipCostChangeLogPage {
+  return parseResponse(dropshipCostChangeLogPageSchema, value, "cost change log");
+}
+
+/** The change log URL for a page: the first page, or the rows before a cursor. */
+export function dropshipCostChangeLogPageUrl(beforeId: number | null): string {
+  const query = new URLSearchParams({ limit: String(DROPSHIP_COST_CHANGE_LOG_PAGE_SIZE) });
+  if (beforeId !== null) query.set("beforeId", String(beforeId));
+  return `${DROPSHIP_COST_CHANGE_LOG_ADMIN_URL}?${query.toString()}`;
+}
+
+export type DropshipCostDetectionStatus = "worker_off" | "never_ran" | "in_progress" | "completed";
+
+export interface DropshipCostDetectionDescription {
+  status: DropshipCostDetectionStatus;
+  headline: string;
+  /** The last or current pass in numbers; empty before the first pass. */
+  detail: string;
+}
+
+/**
+ * The detection worker's state in words. The worker is a switch per
+ * environment, so a page that shows detection as live must also say whether
+ * a pass has actually run here, and when.
+ */
+export function describeDropshipCostDetection(
+  overview: Pick<DropshipCostChangeDetectionOverview, "workerEnabled" | "state">,
+  formatTime: (value: string | null) => string,
+): DropshipCostDetectionDescription {
+  const { state } = overview;
+  const passDetail = `Pass ${state.passNumber.toLocaleString("en-US")}: ${count(state.passVendorsProcessed, "vendor")}, `
+    + `${count(state.passVariantsRead, "variant reading")}, ${count(state.passChangesRecorded, "change")} recorded, `
+    + `${count(state.passUnavailableReadings, "reading")} unavailable.`;
+  if (!overview.workerEnabled) {
+    return {
+      status: "worker_off",
+      headline: "The detection worker is switched off in this environment, so no cost is being checked here.",
+      detail: state.passStartedAt ? `Last activity ${formatTime(state.passStartedAt)}. ${passDetail}` : "",
+    };
+  }
+  if (!state.passStartedAt) {
+    return { status: "never_ran", headline: "No detection pass has run yet.", detail: "" };
+  }
+  const inProgress = !state.passCompletedAt || new Date(state.passCompletedAt).getTime() < new Date(state.passStartedAt).getTime();
+  if (inProgress) {
+    return {
+      status: "in_progress",
+      headline: `A detection pass is under way, started ${formatTime(state.passStartedAt)}.`,
+      detail: passDetail,
+    };
+  }
+  return {
+    status: "completed",
+    headline: `Last detection pass completed ${formatTime(state.passCompletedAt)}.`,
+    detail: passDetail,
+  };
+}
+
+export function formatDropshipCostChangeEvent(eventType: CostChangeEventType): string {
+  switch (eventType) {
+    case "baseline":
+      return "Schedule started";
+    case "increase_announced":
+      return "Increase announced";
+    case "increase_applied":
+      return "Increase applied";
+    case "decrease_announced":
+      return "Decrease announced";
+    case "decrease_applied":
+      return "Decrease applied";
+    case "increase_reduced":
+      return "Announced increase lowered";
+    case "change_withdrawn":
+      return "Announced change withdrawn";
+  }
+}
+
+export function formatDropshipCostScheduleRecorder(recordedBy: DropshipCostScheduleRecorder): string {
+  return recordedBy === "acceptance" ? "at order acceptance" : "by detection";
+}
+
+export function formatDropshipCostSource(source: CostSource): string {
+  switch (source) {
+    case "variant_fixed_price":
+      return "Fixed .ops price";
+    case "variant_percent":
+      return "Variant percentage of retail";
+    case "plan_percent":
+      return "Plan percentage of retail";
+    case "retail":
+      return "Retail price";
+  }
+}
+
+/** "$8.09 → $9.99", "$8.09" for a schedule start, "$10.99 withdrawn" for a withdrawal. */
+export function formatDropshipCostChangeAmounts(row: { fromCents: number | null; toCents: number | null }): string {
+  if (row.fromCents !== null && row.toCents !== null) return `${formatDollarsFromCents(row.fromCents)} → ${formatDollarsFromCents(row.toCents)}`;
+  if (row.toCents !== null) return formatDollarsFromCents(row.toCents);
+  if (row.fromCents !== null) return `${formatDollarsFromCents(row.fromCents)} withdrawn`;
+  return "";
+}
+
+export function formatDropshipCostChangeVendor(row: { vendorId: number; vendorBusinessName: string | null }): string {
+  const name = row.vendorBusinessName?.trim();
+  return name ? name : `Vendor ${row.vendorId}`;
+}
+
+/** The SKU when there is one, else the variant name, with the product for context. */
+export function formatDropshipCostChangeVariant(row: { variantSku: string | null; variantName: string; productName: string }): string {
+  const sku = row.variantSku?.trim();
+  return `${sku ? sku : row.variantName} · ${row.productName}`;
+}
+
+function count(value: number, noun: string): string {
+  return `${value.toLocaleString("en-US")} ${noun}${value === 1 ? "" : "s"}`;
 }
