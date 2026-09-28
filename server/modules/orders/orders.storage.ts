@@ -462,6 +462,8 @@ export const orderMethods: IOrderStorage = {
                 AND COALESCE(open_items.requires_shipping, 1) <> 0
                 AND COALESCE(open_items.quantity, 0) > COALESCE(open_items.fulfilled_quantity, 0)
                 AND open_items.status NOT IN ('cancelled', 'completed', 'short')
+                -- held lines are not pickable (see the pick-queue guard below)
+                AND COALESCE(open_items.on_hold, false) = false
                 -- physically picked = not pickable, whatever the label says
                 AND COALESCE(open_items.picked_quantity, 0) < COALESCE(open_items.quantity, 0)
             )
@@ -482,6 +484,11 @@ export const orderMethods: IOrderStorage = {
                 AND COALESCE(oi.requires_shipping, 1) <> 0
                 AND COALESCE(oi.quantity, 0) > 0
                 AND oi.status NOT IN ('cancelled', 'completed', 'short')
+                -- a held line is not pickable: pickItem rejects it
+                -- (reason 'line_on_hold') and it ships from its own held
+                -- shipment once released, so it must not hold the order in
+                -- the pick queue (LINE-ITEM-HOLD-DESIGN.md P2)
+                AND COALESCE(oi.on_hold, false) = false
                 -- physically picked = not pickable, whatever the label says
                 AND COALESCE(oi.picked_quantity, 0) < COALESCE(oi.quantity, 0)
             )
