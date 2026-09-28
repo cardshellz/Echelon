@@ -11,7 +11,10 @@ describe("pick-floor line hold", () => {
   it("offers hold from both the scan card and the list overflow menu", () => {
     expect(PICKING).toContain('data-testid="button-hold-line"');
     expect(PICKING).toContain("data-testid={`menu-hold-${item.id}`}");
-    expect(PICKING).toContain("Hold line — ship rest");
+    // Plain label: the confirm dialog already explains what holding does, and
+    // the gun is read at arm's length.
+    expect(PICKING).toContain("Hold line");
+    expect(PICKING).not.toContain("ship rest");
   });
 
   it("addresses the owning order by its numeric id, not the display order number", () => {
