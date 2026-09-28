@@ -6,21 +6,30 @@ import {
   type DropshipCostNoticePassResult,
 } from "../application/dropship-cost-change-notice-service";
 import {
+  DEFAULT_COST_LISTING_ACTION_ENTRIES_PER_PASS,
+  DEFAULT_COST_LISTING_HOLDS_PER_PASS,
+  MAX_COST_LISTING_ACTION_ENTRIES_PER_PASS,
+  MAX_COST_LISTING_HOLDS_PER_PASS,
+  type DropshipCostListingActionPassResult,
+} from "../application/dropship-cost-change-listing-action-service";
+import {
   DEFAULT_COST_DETECTION_VENDORS_PER_TICK,
   type DropshipCostDetectionTickResult,
 } from "../application/dropship-cost-detection-service";
+import { createDropshipCostChangeListingActionServiceFromEnv } from "./dropship-cost-change-listing-action.factory";
 import { createDropshipCostChangeNoticeServiceFromEnv } from "./dropship-cost-change-notice.factory";
 import { isDropshipCostDetectionWorkerEnabled } from "./dropship-cost-detection-config";
 import { createDropshipCostDetectionServiceFromEnv } from "./dropship-cost-detection.factory";
 import { startDropshipWorkerSchedule } from "./dropship-worker-schedule";
 
 /**
- * .ops cost detection worker (docs/DROPSHIP-COST-CHANGE-CONTROLS.md, C2 and
- * C4). Ticks every minute; each tick continues the detection pass under way
- * or starts one when the policy's detection interval has elapsed, processes a
- * bounded number of vendors, and then runs the notice pass over change log
- * rows not yet decided, whichever writer recorded them. Opt-in by
- * environment, advisory-locked so one process runs at a time, scheduled
+ * .ops cost detection worker (docs/DROPSHIP-COST-CHANGE-CONTROLS.md, C2, C4
+ * and C5). Ticks every minute; each tick continues the detection pass under
+ * way or starts one when the policy's detection interval has elapsed,
+ * processes a bounded number of vendors, then runs the notice pass over
+ * change log rows not yet decided, whichever writer recorded them, and then
+ * the listing action pass over increases in force not yet acted on. Opt-in
+ * by environment, advisory-locked so one process runs at a time, scheduled
  * without overlap like every other dropship worker.
  */
 
@@ -30,6 +39,10 @@ interface CostDetectionRunnerService {
 
 interface CostNoticeRunnerService {
   runNoticePass(input: { workerId: string; groupsPerPass: number }): Promise<DropshipCostNoticePassResult>;
+}
+
+interface CostListingActionRunnerService {
+  runListingActionPass(input: { workerId: string; entriesPerPass: number; holdsPerPass: number }): Promise<DropshipCostListingActionPassResult>;
 }
 
 const DROPSHIP_COST_DETECTION_LOCK_ID = 736215;
@@ -58,6 +71,21 @@ export async function runDropshipCostNoticePass(input: {
   return service.runNoticePass({ workerId, groupsPerPass: input.groupsPerPass ?? DEFAULT_COST_NOTICE_GROUPS_PER_PASS });
 }
 
+export async function runDropshipCostListingActionPass(input: {
+  service?: CostListingActionRunnerService;
+  workerId?: string;
+  entriesPerPass?: number;
+  holdsPerPass?: number;
+} = {}): Promise<DropshipCostListingActionPassResult> {
+  const workerId = input.workerId ?? defaultWorkerId();
+  const service = input.service ?? createDropshipCostChangeListingActionServiceFromEnv();
+  return service.runListingActionPass({
+    workerId,
+    entriesPerPass: input.entriesPerPass ?? DEFAULT_COST_LISTING_ACTION_ENTRIES_PER_PASS,
+    holdsPerPass: input.holdsPerPass ?? DEFAULT_COST_LISTING_HOLDS_PER_PASS,
+  });
+}
+
 export function startDropshipCostDetectionWorker(): void {
   if (!isDropshipCostDetectionWorkerEnabled()) return;
 
@@ -66,6 +94,10 @@ export function startDropshipCostDetectionWorker(): void {
     DEFAULT_COST_DETECTION_VENDORS_PER_TICK, MAX_VENDORS_PER_TICK);
   const groupsPerPass = envBoundedInteger("DROPSHIP_COST_NOTICE_GROUPS_PER_TICK",
     DEFAULT_COST_NOTICE_GROUPS_PER_PASS, MAX_COST_NOTICE_GROUPS_PER_PASS);
+  const entriesPerPass = envBoundedInteger("DROPSHIP_COST_LISTING_ACTIONS_ENTRIES_PER_TICK",
+    DEFAULT_COST_LISTING_ACTION_ENTRIES_PER_PASS, MAX_COST_LISTING_ACTION_ENTRIES_PER_PASS);
+  const holdsPerPass = envBoundedInteger("DROPSHIP_COST_LISTING_HOLDS_PER_TICK",
+    DEFAULT_COST_LISTING_HOLDS_PER_PASS, MAX_COST_LISTING_HOLDS_PER_PASS);
   const runLockedSweep = async () => {
     try {
       await withAdvisoryLock(DROPSHIP_COST_DETECTION_LOCK_ID, async () => {
@@ -87,6 +119,15 @@ export function startDropshipCostDetectionWorker(): void {
             context: notices,
           }));
         }
+        // Listing actions last: they act on increases already in force, whoever recorded them.
+        const actions = await runDropshipCostListingActionPass({ entriesPerPass, holdsPerPass });
+        if (actions.vendorsProcessed > 0 || actions.vendorsFailed > 0 || actions.holds.reviewed > 0 || actions.holds.vendorsFailed > 0) {
+          console.info(JSON.stringify({
+            code: "DROPSHIP_COST_LISTING_ACTION_PASS_COMPLETED",
+            message: "Dropship cost change listing action pass completed.",
+            context: actions,
+          }));
+        }
       });
     } catch (error) {
       console.error(JSON.stringify({
@@ -105,7 +146,7 @@ export function startDropshipCostDetectionWorker(): void {
   console.info(JSON.stringify({
     code: "DROPSHIP_COST_DETECTION_STARTED",
     message: "Dropship cost detection worker started.",
-    context: { intervalMs, initialDelayMs, vendorsPerTick, groupsPerPass, schedulingMode: "completion_delayed_non_overlapping" },
+    context: { intervalMs, initialDelayMs, vendorsPerTick, groupsPerPass, entriesPerPass, holdsPerPass, schedulingMode: "completion_delayed_non_overlapping" },
   }));
 }
 

@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import {
   inventoryPublicationTargetVariantHoldResultSchema,
   type InventoryPublicationTargetVariantHoldResult,
+  type InventoryPublicationTargetHoldDestination,
 } from "@shared/types/inventory-channel-exposure";
 
 import { pool } from "../../../db";
@@ -271,6 +272,43 @@ implements InventoryPublicationTargetVariantHoldStore {
         "The publication-target SKU hold transaction returned no result.");
     }
     return result;
+  }
+
+  /**
+   * Who holds which of the named SKUs on the destination's live targets.
+   * Read-only and unlocked: a caller that owns some holds (Dropship cost
+   * change pauses next to listing tier holds) uses it to release only its own,
+   * since a SKU hold has one holder and any release deletes it.
+   */
+  async listHeldVariants(
+    destination: InventoryPublicationTargetHoldDestination,
+    productVariantIds: readonly number[],
+  ): Promise<Map<number, { heldBy: string; reason: string }>> {
+    const ids = [...new Set(productVariantIds)];
+    if (ids.length === 0) return new Map();
+    const client = await this.connectionPool.connect();
+    try {
+      const rows = (await client.query<{ product_variant_id: number; held_by: string; hold_reason: string }>(
+        `SELECT hold.product_variant_id, hold.held_by, hold.hold_reason
+         FROM inventory.inventory_publication_target_variant_holds AS hold
+         JOIN inventory.inventory_publication_targets AS target ON target.id = hold.publication_target_id
+         WHERE target.state = 'live'
+           AND target.publication_authority = 'echelon'
+           AND target.destination_kind = $1
+           AND COALESCE(target.channel_connection_id, target.dropship_store_connection_id) = $2
+           AND hold.product_variant_id = ANY($3::integer[])
+         ORDER BY target.id, hold.product_variant_id`,
+        [destination.destinationKind, destination.connectionId, ids],
+      )).rows;
+      const held = new Map<number, { heldBy: string; reason: string }>();
+      for (const row of rows) {
+        const productVariantId = Number(row.product_variant_id);
+        if (!held.has(productVariantId)) held.set(productVariantId, { heldBy: row.held_by, reason: row.hold_reason });
+      }
+      return held;
+    } finally {
+      client.release();
+    }
   }
 }
 

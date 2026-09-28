@@ -15,12 +15,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { fetchJson, formatDateTime, queryErrorMessage } from "@/lib/dropship-ops-surface";
 import {
   DROPSHIP_COST_CHANGES_URL,
+  describeVendorListingAction,
+  describeVendorListingActionAmounts,
+  describeVendorListingActionDetail,
   describeVendorNoticeDecision,
   describeVendorNoticeTerms,
   describeVendorRecentChange,
   formatVendorCostCents,
   formatVendorCostChangeVariant,
   isVendorCostIncrease,
+  isVendorListingActionAttention,
   parseDropshipVendorCostChanges,
   type DropshipVendorCostChanges,
 } from "@/lib/dropship-cost-changes";
@@ -105,6 +109,32 @@ export default function DropshipPortalCostChanges() {
                     </TableBody>
                   </Table>
                 </div>
+              )}
+            </section>
+
+            <section className="mt-5 rounded-md border bg-white p-4" data-testid="cost-changes-actions">
+              <h2 className="font-semibold">What happened to your listings</h2>
+              <p className="mt-1 text-sm text-zinc-500">When a higher cost took effect in the last 30 days, this is what your policy did to each live listing.</p>
+              {data.listingActions.length === 0 ? (
+                <p className="mt-2 text-sm text-zinc-500" data-testid="cost-changes-actions-empty">No increase has taken effect on a live listing in the last 30 days.</p>
+              ) : (
+                <ol className="mt-3 divide-y rounded-md border">
+                  {data.listingActions.map((action) => {
+                    const detail = describeVendorListingActionDetail(action, formatDateTime);
+                    return (
+                      <li key={action.actionId} className="space-y-1 p-3 text-sm" data-testid={`cost-changes-action-${action.actionId}`}>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium">{formatVendorCostChangeVariant(action)}</span>
+                          <Badge variant={isVendorListingActionAttention(action.action) ? "destructive" : "secondary"}>
+                            {describeVendorListingAction(action.action)}
+                          </Badge>
+                        </div>
+                        <p>{describeVendorListingActionAmounts(action)} · Decided {formatDateTime(action.decidedAt)}</p>
+                        {detail && <p className="text-xs text-zinc-500">{detail}</p>}
+                      </li>
+                    );
+                  })}
+                </ol>
               )}
             </section>
 

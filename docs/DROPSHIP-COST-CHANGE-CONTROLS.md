@@ -305,19 +305,94 @@ currency and .ops costs are the Shopify store's prices.
 - Before migration 0712: the pass fails transient and retries; the vendor
   page answers 503.
 
-## Delivery plan for the remaining parts
+## Listing actions (part C5)
 
-**C5, listing actions.** On the effective date:
-- rule-priced listings are repriced through system push jobs, or wait for the
-  vendor's review;
-- below-cost fixed prices are flagged, or paused through the variant
-  publication hold (at most 500 variants per command).
+**When.** An increase is acted on once it is in force: the entry is an
+`increase`, not withdrawn, its `effective_at` has passed, and it has no row in
+`dropship.dropship_cost_change_entry_actions` (migration 0713). The listing
+action pass rides the cost detection worker's tick after the notice pass
+(`DROPSHIP_COST_LISTING_ACTIONS_ENTRIES_PER_TICK`, default 50). An increase a
+later one overtook before the pass reached it is marked superseded
+(`superseded_by_entry_id`) and judges no listing. Decreases trigger no listing
+action (ASSUMPTION: the policy's two listing settings are worded for increases).
 
-A queued push publishes the price computed when it runs, not the price the
-vendor reviewed. `DropshipListingPushWorkerService` refreshes the listing intent
-(`refreshListingIntent`) and pushes it, and its drift check compares only the
-stored preview hashes. So under "wait for review", C5 must stop a queued push
-from publishing a changed rule price.
+**Which listings.** Every listing of the vendor and variant with status
+`active`; anything else is recorded as `skipped_inactive_listing`. A listing's
+price is resolved exactly as the preview resolves it
+(`resolveListingPrice`), with the rule price computed at the increase's cost,
+and named by what the cost does to it (`domain/cost-change-listing-action.ts`):
+
+| Price source | Follows the cost | Action under the policy |
+|---|---|---|
+| `rules_cost` (pricing rules priced from the .ops cost) | yes | `reprice_queued`, or `awaiting_review` under "wait for review" |
+| `rules_retail`, `fixed`, `catalog_default`, `saved_listing` | no | `price_covers_cost` when price ≥ cost per unit; else `below_cost_recorded` (nothing), `below_cost_warned` (warn) or `below_cost_paused` (pause) |
+| `unavailable` | — | `skipped_price_unavailable` |
+
+**Reprice.** One system push job per store connection and chunk of
+increases, queued through the ordinary one-step push
+(`reviewMode: "current_preview"`, actor `dropship-cost-changes`, key
+`dropship-cost-change-reprice:{vendorId}:{storeConnectionId}:{entry set}`), so
+the same gates apply and a replayed pass replays the job. The push publishes
+the rule price at the live cost. A store that cannot take a push now (the
+listing access rule: account, membership or store state) is recorded as
+`reprice_refused` with the code as `detail`, not retried forever.
+
+**Wait for review.** A queued push publishes the price computed when it runs,
+not the price the vendor saw. The push worker's refresh now receives the queued
+price; under "wait for review" a rule-priced listing whose rule price moved
+since it was queued fails for good (`DROPSHIP_LISTING_PRICE_AWAITING_REVIEW`,
+not retryable) instead of publishing, and the vendor queues it again after the
+review. Under "reprice automatically" the current price publishes as before.
+
+**Pause.** An under-water listing is paused through the inventory-planning
+SKU hold, the same command the listing tiers use, chunked to its command size,
+actor `dropship-cost-changes`. Its row in
+`dropship.dropship_cost_change_listing_holds` lives until the second phase of
+the pass releases it: the listing's price covers the cost in force again, or
+the listing is no longer live. The SKU hold at inventory planning has ONE
+holder and any release deletes it, so before releasing the pass reads who
+holds the SKU (`listHeldVariants`): a hold the tier reconciler owns is left in
+place (`release_detail = held_by_other`), one already gone needs no command
+(`not_held`), and a hold of ours that a tier release deleted is re-asserted
+with a pass-stamped key. A refusal for now from inventory planning leaves the
+vendor for the next pass with nothing recorded.
+
+**Notices.** One notification per vendor and kind per pass, sent before the
+record under `dropship-cost-change-listings:{vendorId}:{kind}:{entry set}`:
+`dropship_cost_change_listings_repriced`, `..._review_needed`,
+`..._below_cost`, `..._paused`, and `..._resumed` when a pause is released
+because the price covers the cost. All go on the policy's channels; none when
+the policy sends on no channel. No sender wired: the vendor's pass fails
+rather than record actions the vendor was never told about.
+
+**Record.** One transaction per vendor: the hold rows, the listing rows naming
+them (`dropship_cost_change_listing_actions`, one per increase and listing,
+append-only) and the entry rows that mark the increases done. A crash before
+the commit leaves the increases for the next pass; the push job and holds
+replay under their keys.
+
+**Surfaces.** Vendors: the portal's Cost changes page lists what happened to
+each listing in the last 30 days, with the step to take. Staff: the Cost
+Changes tab gains a Listing actions section, a page at a time
+(`GET /api/dropship/admin/cost-changes/listing-actions`).
+
+**Enforcement.** `DROPSHIP_COST_CHANGE_ENFORCEMENT.listingActions` is true; the
+tab's summary says the policy is applied in full.
+
+**Failure modes (C5).**
+- Before migration 0713: the pass fails transient and retries each tick; the
+  vendor page and the admin section answer 503.
+- A vendor's pass fails (provider outage, hold deferred): WARN with the
+  vendor and entry ids; nothing recorded; retried next pass. Other vendors are
+  unaffected.
+- Reprice refused by the access rule: recorded as `reprice_refused` with the
+  code; the vendor's other listings proceed.
+- Hold gate or notification sender not wired: fatal for the vendor's pass,
+  logged, nothing recorded.
+- A stored action, price source or release value outside the contract: refused
+  as `fatal`, never served.
+- The undecided scan is an anti-join over increase entries; like the notice
+  pass it grows with the schedule and gets a watermark if that ever matters.
 
 ## Failure modes (C2)
 

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  describeVendorListingAction,
+  describeVendorListingActionAmounts,
+  describeVendorListingActionDetail,
+  isVendorListingActionAttention,
   describeVendorNoticeDecision,
   describeVendorNoticeTerms,
   describeVendorRecentChange,
@@ -7,6 +11,7 @@ import {
   formatVendorCostChangeVariant,
   isVendorCostIncrease,
   parseDropshipVendorCostChanges,
+  type DropshipVendorListingAction,
   type DropshipVendorRecentChange,
 } from "../dropship-cost-changes";
 
@@ -74,6 +79,7 @@ describe("vendor cost changes words", () => {
   it("refuses a response outside the contract and accepts a whole one", () => {
     expect(() => parseDropshipVendorCostChanges({ announced: [], recent: [], policy: { increaseNoticeDays: 14 }, generatedAt: "x" })).toThrow(/contract/);
     const parsed = parseDropshipVendorCostChanges({
+      listingActions: [],
       announced: [{ entryId: 11, productVariantId: 66, variantSku: null, variantName: "Pack", productName: "Armor", kind: "increase",
         fromCents: 809, unitCostCents: 999, effectiveAt: "2026-10-13T00:00:00.000Z", announcedAt: "2026-09-28T16:00:00.000Z" }],
       recent: [recent()],
@@ -82,5 +88,28 @@ describe("vendor cost changes words", () => {
     });
     expect(parsed.announced).toHaveLength(1);
     expect(parsed.recent[0]?.noticeDecision).toBe("sent");
+  });
+});
+
+describe("vendor listing action words", () => {
+  const action = (patch: Partial<DropshipVendorListingAction> = {}): DropshipVendorListingAction => ({
+    actionId: 71, entryId: 11, listingId: 2, storeConnectionId: 9, platform: "shopify", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+    variantName: "Single pack", productName: "Armor Envelope", action: "below_cost_paused", detail: null, listingPriceCents: 899, unitCostCents: 999,
+    pushJobId: null, decidedAt: "2026-10-13T00:05:00.000Z", holdReleasedAt: null, holdReleaseReason: null, ...patch,
+  });
+
+  it("says what happened and what to do, in the vendor's words", () => {
+    expect(describeVendorListingAction("reprice_queued")).toBe("Repriced by your pricing rules");
+    expect(describeVendorListingAction("awaiting_review")).toBe("Waiting for your price review");
+    expect(describeVendorListingAction("below_cost_paused")).toBe("Paused: priced under the cost");
+    expect(describeVendorListingActionAmounts(action())).toBe("listed at $8.99, cost now $9.99");
+    expect(describeVendorListingActionAmounts(action({ listingPriceCents: null }))).toBe("cost now $9.99");
+    expect(describeVendorListingActionDetail(action(), formatDate)).toContain("publishes zero quantity");
+    expect(describeVendorListingActionDetail(action({ holdReleasedAt: "2026-10-14T00:05:00.000Z", holdReleaseReason: "price_covers_cost" }), formatDate))
+      .toBe("Selling again since on 2026-10-14.");
+    expect(describeVendorListingActionDetail(action({ action: "reprice_queued", pushJobId: 100 }), formatDate)).toContain("push job 100");
+    expect(describeVendorListingActionDetail(action({ action: "price_covers_cost" }), formatDate)).toBeNull();
+    expect(isVendorListingActionAttention("awaiting_review")).toBe(true);
+    expect(isVendorListingActionAttention("price_covers_cost")).toBe(false);
   });
 });

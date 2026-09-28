@@ -2,6 +2,7 @@ import { INVENTORY_PUBLICATION_TARGET_VARIANT_HOLD_MAX_VARIANTS } from "../../..
 import { InventoryPublicationTargetVariantHoldService } from "../../inventory-planning/application/inventory-publication-target-variant-hold.service";
 import { InventoryAvailabilityMasterDataError } from "../../inventory-planning/domain/inventory-availability-master-data.contracts";
 import { PostgresInventoryPublicationTargetVariantHoldStore } from "../../inventory-planning/infrastructure/inventory-publication-target-variant-hold.repository";
+import type { DropshipCostChangeHoldGate } from "../application/dropship-cost-change-listing-action-service";
 import type {
   DropshipListingVariantHoldGate,
   DropshipListingVariantHoldGateOutcome,
@@ -22,15 +23,28 @@ import type {
 const DEFAULT_ACTOR_ID = "dropship-listing-tiers";
 const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([409, 503]);
 
-export class InventoryPlanningDropshipListingVariantHoldGate implements DropshipListingVariantHoldGate {
+export class InventoryPlanningDropshipListingVariantHoldGate implements DropshipListingVariantHoldGate, DropshipCostChangeHoldGate {
   readonly maxVariantsPerCommand = INVENTORY_PUBLICATION_TARGET_VARIANT_HOLD_MAX_VARIANTS;
 
   constructor(
     private readonly deps: {
       holdService: Pick<InventoryPublicationTargetVariantHoldService, "holdVariants" | "releaseVariants">;
+      /** Who holds which SKU; a caller that shares SKUs with another holder needs it before releasing. */
+      holdReader?: Pick<PostgresInventoryPublicationTargetVariantHoldStore, "listHeldVariants">;
       actorId?: string;
     },
   ) {}
+
+  async listHeldVariants(input: { storeConnectionId: number; productVariantIds: readonly number[] }): Promise<Map<number, { heldBy: string }>> {
+    if (!this.deps.holdReader) {
+      throw new Error("The publication hold gate has no hold reader; cost change pauses need one to release only their own holds.");
+    }
+    const held = await this.deps.holdReader.listHeldVariants(
+      { destinationKind: "dropship_store_connection", connectionId: input.storeConnectionId },
+      input.productVariantIds,
+    );
+    return new Map([...held].map(([productVariantId, hold]) => [productVariantId, { heldBy: hold.heldBy }]));
+  }
 
   holdVariants(input: {
     storeConnectionId: number;
@@ -91,5 +105,15 @@ export class InventoryPlanningDropshipListingVariantHoldGate implements Dropship
 export function createDropshipListingVariantHoldGateFromEnv(): DropshipListingVariantHoldGate {
   return new InventoryPlanningDropshipListingVariantHoldGate({
     holdService: new InventoryPublicationTargetVariantHoldService(new PostgresInventoryPublicationTargetVariantHoldStore()),
+  });
+}
+
+/** The same gate acting as the cost change pauser: its own actor id, and the hold reader a safe release needs. */
+export function createDropshipCostChangeHoldGateFromEnv(actorId: string): DropshipCostChangeHoldGate {
+  const store = new PostgresInventoryPublicationTargetVariantHoldStore();
+  return new InventoryPlanningDropshipListingVariantHoldGate({
+    holdService: new InventoryPublicationTargetVariantHoldService(store),
+    holdReader: store,
+    actorId,
   });
 }

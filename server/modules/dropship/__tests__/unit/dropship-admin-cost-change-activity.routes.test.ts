@@ -2,6 +2,7 @@ import http from "http";
 import { AddressInfo } from "net";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DropshipCostChangeListingActionService } from "../../application/dropship-cost-change-listing-action-service";
 import type { DropshipCostDetectionService } from "../../application/dropship-cost-detection-service";
 import { DropshipError } from "../../domain/errors";
 import {
@@ -21,6 +22,15 @@ vi.mock("../../../../routes/middleware", () => ({
 }));
 
 const DETECTION_URL = "/api/dropship/admin/cost-changes/detection";
+const LISTING_ACTIONS_URL = "/api/dropship/admin/cost-changes/listing-actions";
+const listingActionCalls: unknown[] = [];
+const listingActionsService = {
+  listListingActions: async (input: unknown) => {
+    listingActionCalls.push(input);
+    if ((input as { limit?: unknown }).limit === 0) throw new DropshipError("DROPSHIP_COST_CHANGE_INVALID_INPUT", "bad", { classification: "permanent" });
+    return { items: [{ actionId: 71, action: "reprice_queued" }], nextBeforeId: null, generatedAt: new Date("2026-10-13T00:05:00.000Z") };
+  },
+};
 const LOG_URL = "/api/dropship/admin/cost-changes/log";
 
 describe("dropship admin cost change activity routes", () => {
@@ -31,7 +41,9 @@ describe("dropship admin cost change activity routes", () => {
     permissionChecks.length = 0;
     service = new FakeService();
     const app = express();
-    registerDropshipAdminCostChangeActivityRoutes(app, service as unknown as DropshipCostDetectionService);
+    listingActionCalls.length = 0;
+    registerDropshipAdminCostChangeActivityRoutes(app, service as unknown as DropshipCostDetectionService,
+      listingActionsService as unknown as DropshipCostChangeListingActionService);
     server = await startServer(app);
   });
 
@@ -129,3 +141,33 @@ async function jsonRequest(url: string): Promise<{ status: number; body: Record<
   const text = await response.text();
   return { status: response.status, body: text ? (JSON.parse(text) as Record<string, unknown>) : {} };
 }
+
+describe("dropship admin cost change listing actions route", () => {
+  let server: { url: string; close: () => Promise<void> };
+
+  beforeEach(async () => {
+    permissionChecks.length = 0;
+    listingActionCalls.length = 0;
+    const app = express();
+    registerDropshipAdminCostChangeActivityRoutes(app, new FakeService() as unknown as DropshipCostDetectionService,
+      listingActionsService as unknown as DropshipCostChangeListingActionService);
+    server = await startServer(app);
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it("serves a page of listing actions behind the dropship view permission, forwarding the cursor as numbers", async () => {
+    const response = await jsonRequest(`${server.url}${LISTING_ACTIONS_URL}?limit=2&beforeId=40`);
+    expect(response.status).toBe(200);
+    expect(permissionChecks).toContainEqual(["dropship", "view"]);
+    expect(listingActionCalls).toEqual([{ limit: 2, beforeId: 40 }]);
+    expect((response.body as { items: unknown[] }).items).toEqual([{ actionId: 71, action: "reprice_queued" }]);
+  });
+
+  it("answers 400 to input the service refuses", async () => {
+    const response = await jsonRequest(`${server.url}${LISTING_ACTIONS_URL}?limit=0`);
+    expect(response.status).toBe(400);
+  });
+});

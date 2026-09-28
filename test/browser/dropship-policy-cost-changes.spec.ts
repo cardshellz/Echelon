@@ -5,6 +5,7 @@ import { DEFAULT_DROPSHIP_COST_CHANGE_POLICY } from "../../shared/dropship/cost-
 const POLICY_URL = "/api/dropship/admin/cost-changes/policy";
 const DETECTION_URL = "/api/dropship/admin/cost-changes/detection";
 const LOG_URL = "/api/dropship/admin/cost-changes/log";
+const LISTING_ACTIONS_URL = "/api/dropship/admin/cost-changes/listing-actions";
 const defaults = { ...DEFAULT_DROPSHIP_COST_CHANGE_POLICY };
 const noneLive = { detection: false, priceProtection: false, vendorNotices: false, listingActions: false };
 
@@ -129,6 +130,18 @@ async function mount(page: Page, options: {
         items,
         nextBeforeId: rows.length > limit ? items[items.length - 1]!.logId : null,
         generatedAt: "2026-09-28T09:00:00.000Z",
+      } });
+    }
+    if (request.method() === "GET" && path === LISTING_ACTIONS_URL) {
+      return route.fulfill({ json: {
+        items: [{
+          actionId: 71, entryId: 11, listingId: 2, storeConnectionId: 9, platform: "shopify", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+          variantName: "Single pack", productName: "Armor Envelope", action: "below_cost_paused", detail: null, listingPriceCents: 899, unitCostCents: 999,
+          pushJobId: null, decidedAt: "2026-10-13T00:05:00.000Z", holdReleasedAt: null, holdReleaseReason: null,
+          vendorId: 5, vendorBusinessName: "Shellz Vendor", listingStatus: "active", priceSource: "saved_listing", policyId: 2,
+        }],
+        nextBeforeId: null,
+        generatedAt: "2026-10-13T00:05:00.000Z",
       } });
     }
     if (path !== POLICY_URL) {
@@ -401,6 +414,14 @@ test("shows what detection found: the last pass, the announced changes, and the 
   await expect(page.getByTestId("cost-change-log-52")).toContainText("$10.99 withdrawn");
   await expect(page.getByTestId("cost-change-log-52")).toContainText("Retail price move");
   await expect(page.getByTestId("cost-change-log-53")).toContainText("Vendor notified");
+
+  // Listing actions: what the increase did to a live listing, with the hold still in place.
+  const action = page.getByTestId("cost-change-action-71");
+  await expect(action).toContainText("Under cost, paused");
+  await expect(action).toContainText("listed at $8.99, cost $9.99");
+  await expect(action).toContainText("Published price");
+  await expect(action).toContainText("Shellz Vendor · ARM-ENV-SGL-P50 · Armor Envelope · Store 9 (shopify)");
+  await expect(action).toContainText("Still paused");
   await expect(page.getByTestId("cost-change-log-52")).toContainText("No notice: original change not announced");
   await page.screenshot({ path: testInfo.outputPath(`cost-changes-activity-${testInfo.project.name}.png`), fullPage: true });
   await page.getByTestId("cost-change-log-older").click();

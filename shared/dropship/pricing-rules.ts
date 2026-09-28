@@ -61,33 +61,35 @@ export const pricingTargetsResponseSchema = catalogTargetsResponseSchema;
 export interface PricingRuleCandidate {
   productVariantId: number; productId: number; category: string | null; productLineIds: readonly number[];
 }
-export interface RulePriceResult { priceCents: number | null; ruleName: string | null; ruleId: string | null; issue: string | null }
+export type RulePriceBasis = PricingRecipe["basis"];
+/** `basis` names what the winning recipe prices from; null when no recipe was chosen. */
+export interface RulePriceResult { priceCents: number | null; ruleName: string | null; ruleId: string | null; issue: string | null; basis: RulePriceBasis | null }
 
 /** Pure, integer-only recipe evaluation. No clock, remote reads, or input mutation. */
 export function calculateRulePrice(recipeInput: PricingRecipe, basisCents: number | null): RulePriceResult {
   const recipe = pricingRecipeSchema.parse(recipeInput);
   if (basisCents === null || !Number.isSafeInteger(basisCents) || basisCents < 0 || basisCents > MAX_LISTING_PRICE_CENTS) {
-    return { priceCents: null, ruleName: null, ruleId: null, issue: "pricing_basis_unavailable" };
+    return { priceCents: null, ruleName: null, ruleId: null, issue: "pricing_basis_unavailable", basis: recipe.basis };
   }
   const denominator = BigInt(10_000);
   const numerator = BigInt(basisCents) * (denominator + BigInt(recipe.markupBps)) + BigInt(recipe.flatCents) * denominator;
   let cents = (numerator + denominator / BigInt(2)) / denominator;
   if (recipe.rounding === "up_99") cents = (cents / BigInt(100)) * BigInt(100) + BigInt(99);
   if (cents <= BigInt(0) || cents > BigInt(MAX_LISTING_PRICE_CENTS)) {
-    return { priceCents: null, ruleName: null, ruleId: null, issue: "pricing_result_out_of_range" };
+    return { priceCents: null, ruleName: null, ruleId: null, issue: "pricing_result_out_of_range", basis: recipe.basis };
   }
-  return { priceCents: Number(cents), ruleName: null, ruleId: null, issue: null };
+  return { priceCents: Number(cents), ruleName: null, ruleId: null, issue: null, basis: recipe.basis };
 }
 
 export function resolvePricingRule(input: {
   profile: PricingProfile | null; candidate: PricingRuleCandidate;
   productCostCents: number | null; catalogRetailCents: number | null;
 }): RulePriceResult {
-  if (!input.profile) return { priceCents: null, ruleName: null, ruleId: null, issue: "pricing_rules_not_configured" };
+  if (!input.profile) return { priceCents: null, ruleName: null, ruleId: null, issue: "pricing_rules_not_configured", basis: null };
   const matches = input.profile.groups.filter(({ scope }) => matchesCatalogScope(scope, input.candidate))
     .sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
   if (matches.length > 1 && matches[0].priority === matches[1].priority) {
-    return { priceCents: null, ruleName: null, ruleId: null, issue: "pricing_rule_priority_conflict" };
+    return { priceCents: null, ruleName: null, ruleId: null, issue: "pricing_rule_priority_conflict", basis: null };
   }
   const winner = matches[0];
   const recipe = winner?.recipe ?? input.profile.defaultRecipe;

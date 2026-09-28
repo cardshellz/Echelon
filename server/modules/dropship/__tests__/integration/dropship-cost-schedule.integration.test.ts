@@ -4,6 +4,7 @@ import { config } from "dotenv";
 import pg, { type Pool, type PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PgDropshipCostScheduleRepository } from "../../infrastructure/dropship-cost-schedule.repository";
+import { PgDropshipCostChangeListingActionRepository } from "../../infrastructure/dropship-cost-change-listing-action.repository";
 import { PgDropshipCostChangeNoticeRepository } from "../../infrastructure/dropship-cost-change-notice.repository";
 import { emptyEventCounts, type CostScheduleVendorTransaction } from "../../application/dropship-cost-detection-service";
 
@@ -28,6 +29,7 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
   let pool: pg.Pool;
   let repository: PgDropshipCostScheduleRepository;
   let notices: PgDropshipCostChangeNoticeRepository;
+  let actions: PgDropshipCostChangeListingActionRepository;
 
   function qualify(sql: string): string {
     return sql.replace(/\b(dropship|catalog)\.([a-z_]+)/g, (_table, _namespace, name) => `"${schema}"."${name}"`);
@@ -61,24 +63,44 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
       CREATE TABLE catalog.product_variants (
         id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, product_id integer NOT NULL REFERENCES catalog.products(id),
         sku varchar(100), name text NOT NULL);
+      CREATE TABLE dropship.dropship_store_connections (id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, vendor_id integer NOT NULL);
+      INSERT INTO dropship.dropship_store_connections (vendor_id) VALUES (1), (1), (2), (3);
+      CREATE TABLE dropship.dropship_listing_push_jobs (id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, vendor_id integer NOT NULL);
+      INSERT INTO dropship.dropship_listing_push_jobs (vendor_id) VALUES (1);
+      CREATE TABLE dropship.dropship_listing_price_settings (
+        vendor_id integer NOT NULL, store_connection_id integer NOT NULL, product_variant_id integer NOT NULL,
+        override_price_cents integer, pricing_mode text, PRIMARY KEY (store_connection_id, product_variant_id));
+      CREATE TABLE dropship.dropship_pricing_profile_revisions (
+        id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, vendor_id integer NOT NULL, store_connection_id integer NOT NULL,
+        profile jsonb NOT NULL, created_at timestamptz NOT NULL);
+      CREATE TABLE dropship.dropship_pricing_profiles (store_connection_id integer PRIMARY KEY, vendor_id integer NOT NULL, revision_id integer NOT NULL);
       CREATE TABLE dropship.dropship_vendor_listings (
         id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, vendor_id integer NOT NULL REFERENCES dropship.dropship_vendors(id),
         store_connection_id integer NOT NULL, product_variant_id integer NOT NULL REFERENCES catalog.product_variants(id),
-        status varchar(40) NOT NULL DEFAULT 'not_listed');
+        status varchar(40) NOT NULL DEFAULT 'not_listed', vendor_retail_price_cents bigint, platform varchar(30) NOT NULL DEFAULT 'shopify');
       INSERT INTO dropship.dropship_vendors (business_name, status)
         VALUES ('Shellz Vendor', 'active'), ('Paused Vendor', 'paused'), ('Closed Vendor', 'closed');
       INSERT INTO catalog.products (name) VALUES ('Armor Envelope');
       INSERT INTO catalog.product_variants (product_id, sku, name)
         VALUES (1, 'ARM-ENV-SGL-P50', 'Single pack'), (1, NULL, 'Case of 10'), (1, 'ARM-ENV-XL', 'XL pack');
-      INSERT INTO dropship.dropship_vendor_listings (vendor_id, store_connection_id, product_variant_id, status) VALUES
-        (1, 1, 1, 'active'), (1, 1, 2, 'preview_ready'), (1, 2, 1, 'queued'), (1, 1, 3, 'ended'), (1, 1, 3, 'not_listed'),
-        (2, 3, 1, 'paused'), (3, 4, 1, 'active');
+      INSERT INTO dropship.dropship_vendor_listings (vendor_id, store_connection_id, product_variant_id, status, vendor_retail_price_cents) VALUES
+        (1, 1, 1, 'active', 899), (1, 1, 2, 'preview_ready', NULL), (1, 2, 1, 'queued', NULL), (1, 1, 3, 'ended', NULL), (1, 1, 3, 'not_listed', NULL),
+        (2, 3, 1, 'paused', NULL), (3, 4, 1, 'active', 1_299);
+      INSERT INTO dropship.dropship_listing_price_settings (vendor_id, store_connection_id, product_variant_id, override_price_cents, pricing_mode)
+        VALUES (1, 2, 1, NULL, 'rules');
+      INSERT INTO dropship.dropship_pricing_profile_revisions (vendor_id, store_connection_id, profile, created_at) VALUES
+        (1, 2, '{"defaultRecipe":{"basis":"product_cost","markupBps":4000,"flatCents":0,"rounding":"cent"},"groups":[]}', '2026-09-01T00:00:00Z');
+      INSERT INTO dropship.dropship_pricing_profiles (store_connection_id, vendor_id, revision_id) VALUES (2, 1, 1);
     `));
-    for (const file of ["0710_dropship_cost_change_policy.sql", "0711_dropship_cost_schedule.sql", "0712_dropship_cost_change_notices.sql"]) {
+    for (const file of ["0710_dropship_cost_change_policy.sql", "0711_dropship_cost_schedule.sql", "0712_dropship_cost_change_notices.sql",
+      "0713_dropship_cost_change_listing_actions.sql"]) {
       await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations", file), "utf8")));
     }
     repository = new PgDropshipCostScheduleRepository(qualifiedPool());
     notices = new PgDropshipCostChangeNoticeRepository(qualifiedPool());
+    actions = new PgDropshipCostChangeListingActionRepository(qualifiedPool(), {
+      listCatalogCandidates: async (ids) => ids.map((id) => ({ productVariantId: id, productId: 1, category: null, productLineIds: [], defaultRetailPriceCents: 899 })),
+    });
   });
 
   afterAll(async () => {
@@ -87,7 +109,7 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
   });
 
   it("applies the migrations twice without error, and seeds one state row", async () => {
-    for (const file of ["0711_dropship_cost_schedule.sql", "0712_dropship_cost_change_notices.sql"]) {
+    for (const file of ["0711_dropship_cost_schedule.sql", "0712_dropship_cost_change_notices.sql", "0713_dropship_cost_change_listing_actions.sql"]) {
       await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations", file), "utf8")));
     }
     const state = await repository.readDetectionState();
@@ -313,5 +335,72 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
       ["increase_announced", "sent"],
     ]);
     expect(recent[2]).toMatchObject({ variantSku: "ARM-ENV-SGL-P50", productName: "Armor Envelope", fromCents: 809, toCents: 999 });
+  });
+  it("acts on an increase in force once: holds, actions and the entry row commit together, replay writes nothing, views and guards hold", async () => {
+    // An increase that took effect an hour after it was read, now in force for vendor 1, variant 1.
+    const READ_AT = new Date("2026-10-12T22:00:00.000Z");
+    const IN_FORCE_AT = new Date("2026-10-12T23:00:00.000Z");
+    const AFTER = new Date("2026-10-13T00:05:00.000Z");
+    const written = await repository.withVendorSchedule(1, (transaction) => transaction.writeReconciliation({
+      vendorId: 1, observedAt: READ_AT, policyId: 1, recordedBy: "detection",
+      variants: [{ productVariantId: 1, evidence: planPercent, retailDriven: false, operations: [{ kind: "add", direction: "increase", fromCents: 809, unitCostCents: 999, effectiveAt: IN_FORCE_AT }] }],
+    }));
+    const entryId = written.entryIdsByVariant.get(1)!;
+    expect(entryId).toBeGreaterThan(0);
+
+    const increases = await actions.listEffectiveIncreasesWithoutAction({ now: AFTER, limit: 10 });
+    expect(increases).toEqual([{ entryId, vendorId: 1, productVariantId: 1, fromCents: 809, unitCostCents: 999, effectiveAt: IN_FORCE_AT, policyId: 1, inForceEntryId: entryId }]);
+    expect(await actions.listEffectiveIncreasesWithoutAction({ now: READ_AT, limit: 10 })).toEqual([]);
+    expect(await actions.costInForce({ vendorId: 1, productVariantIds: [1, 2, 3], now: AFTER })).toEqual(new Map([[1, 999], [2, 7_999]]));
+
+    const facts = await actions.loadVendorFacts({ vendorId: 1, productVariantIds: [1] });
+    expect(facts.listings.map((listing) => [listing.listingId, listing.storeConnectionId, listing.status, listing.vendorRetailPriceCents, listing.variantSku])).toEqual([
+      [1, 1, "active", 899, "ARM-ENV-SGL-P50"], [3, 2, "queued", null, "ARM-ENV-SGL-P50"],
+    ]);
+    expect(facts.savedPrices).toEqual([{ storeConnectionId: 2, productVariantId: 1, overridePriceCents: null, pricingMode: "rules" }]);
+    expect(facts.profiles.get(2)?.profile?.defaultRecipe.basis).toBe("product_cost");
+    expect(facts.candidates.get(1)?.defaultRetailPriceCents).toBe(899);
+
+    const decidedAt = AFTER;
+    const record = {
+      vendorId: 1,
+      entries: [{ entryId, productVariantId: 1, listingCount: 2, actionCounts: { below_cost_paused: 1, skipped_inactive_listing: 1 }, supersededByEntryId: null, policyId: 1, decidedAt }],
+      listingActions: [
+        { entryId, storeConnectionId: 1, productVariantId: 1, listingId: 1, listingStatus: "active", priceSource: "saved_listing" as const, listingPriceCents: 899,
+          unitCostCents: 999, action: "below_cost_paused" as const, detail: null, pushJobId: null, holdKey: { storeConnectionId: 1, productVariantId: 1 }, policyId: 1, decidedAt },
+        { entryId, storeConnectionId: 2, productVariantId: 1, listingId: 3, listingStatus: "queued", priceSource: "rules_cost" as const, listingPriceCents: 1_399,
+          unitCostCents: 999, action: "skipped_inactive_listing" as const, detail: null, pushJobId: null, holdKey: null, policyId: 1, decidedAt },
+      ],
+      holds: [{ storeConnectionId: 1, productVariantId: 1, listingId: 1, entryId, listingPriceCents: 899, unitCostCents: 999, holdIdempotencyKey: "dropship-cost-change-hold:1:a:b", heldAt: decidedAt }],
+    };
+    expect(await actions.recordEntryActions(record)).toEqual({ entriesRecorded: 1, listingActionsRecorded: 2, holdsRecorded: 1 });
+    // A replayed pass finds the hold it placed and writes nothing new.
+    expect(await actions.recordEntryActions(record)).toEqual({ entriesRecorded: 0, listingActionsRecorded: 0, holdsRecorded: 0 });
+    expect(await actions.listEffectiveIncreasesWithoutAction({ now: AFTER, limit: 10 })).toEqual([]);
+
+    const holds = await actions.listActiveHolds({ limit: 10 });
+    expect(holds).toHaveLength(1);
+    expect(holds[0]).toMatchObject({ vendorId: 1, storeConnectionId: 1, productVariantId: 1, listingId: 1, entryId, listingPriceCents: 899, unitCostCents: 999, heldAt: decidedAt });
+
+    const vendorRows = await actions.listVendorListingActions({ vendorId: 1, since: READ_AT, limit: 10 });
+    expect(vendorRows.map((row) => [row.listingId, row.action, row.holdReleasedAt])).toEqual([[3, "skipped_inactive_listing", null], [1, "below_cost_paused", null]]);
+    const staffRows = await actions.listListingActions({ limit: 1, beforeId: null });
+    expect(staffRows).toHaveLength(1);
+    expect(staffRows[0]).toMatchObject({ listingId: 3, vendorBusinessName: "Shellz Vendor", priceSource: "rules_cost", listingStatus: "queued", policyId: 1 });
+
+    // Release once; a second release is a no-op, and the engine refuses any other edit or a delete.
+    expect(await actions.releaseHolds({ holdIds: [holds[0]!.holdId], reason: "price_covers_cost", detail: "released", releasedAt: AFTER, releaseIdempotencyKey: "dropship-cost-change-release:1:x" })).toBe(1);
+    expect(await actions.releaseHolds({ holdIds: [holds[0]!.holdId], reason: "price_covers_cost", detail: "released", releasedAt: AFTER, releaseIdempotencyKey: "dropship-cost-change-release:1:x" })).toBe(0);
+    expect(await actions.listActiveHolds({ limit: 10 })).toEqual([]);
+    expect((await actions.listVendorListingActions({ vendorId: 1, since: READ_AT, limit: 10 }))[1]).toMatchObject({ holdReleasedAt: AFTER, holdReleaseReason: "price_covers_cost" });
+    const holdsTable = qualify("dropship.dropship_cost_change_listing_holds");
+    await expect(pool.query(`UPDATE ${holdsTable} SET listing_price_cents = 1 WHERE id = $1`, [holds[0]!.holdId])).rejects.toThrow(/released hold cannot change/);
+    await expect(pool.query(`DELETE FROM ${holdsTable} WHERE id = $1`, [holds[0]!.holdId])).rejects.toThrow(/cannot be deleted/);
+    const actionsTable = qualify("dropship.dropship_cost_change_listing_actions");
+    await expect(pool.query(`UPDATE ${actionsTable} SET action = 'reprice_queued'`)).rejects.toThrow(/append-only/);
+    await expect(pool.query(`INSERT INTO ${actionsTable} (entry_id, vendor_id, store_connection_id, product_variant_id, listing_id, listing_status, price_source, unit_cost_cents, action, decided_at)
+      VALUES ($1, 1, 1, 1, 2, 'active', 'rules_cost', 999, 'reprice_queued', now())`, [entryId])).rejects.toMatchObject({ code: "23514" });
+    const entriesTable = qualify("dropship.dropship_cost_change_entry_actions");
+    await expect(pool.query(`DELETE FROM ${entriesTable} WHERE entry_id = $1`, [entryId])).rejects.toThrow(/append-only/);
   });
 });

@@ -177,6 +177,15 @@
   "dropship.dropship_content_profiles": [
     "modules/dropship"
   ],
+  "dropship.dropship_cost_change_entry_actions": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_cost_change_listing_actions": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_cost_change_listing_holds": [
+    "modules/dropship"
+  ],
   "dropship.dropship_cost_change_log": [
     "modules/dropship"
   ],
