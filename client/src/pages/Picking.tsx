@@ -557,15 +557,6 @@ import {
 } from "@/components/ui/select";
 
 // Types
-// Quick reasons for a line hold, chosen on the gun with gloves on. The reason
-// is stored on the line and shown in ops, so keep them short and concrete.
-const HOLD_LINE_REASONS = [
-  "Out of stock",
-  "Damaged",
-  "Not received yet",
-  "Can't locate",
-] as const;
-
 interface PickItem {
   id: number;
   sku: string;
@@ -575,6 +566,8 @@ interface PickItem {
   picked: number;
   status: "pending" | "in_progress" | "completed" | "short";
   orderId: string;
+  /** True when this line is held: not pickable, ships on its own once released. */
+  onHold: boolean;
   /**
    * Numeric WMS order id this line belongs to. `orderId` above is the display
    * order number, and a combined group's id is not a real order, so line-level
@@ -623,6 +616,14 @@ interface SingleOrder {
   shippingServiceLevel?: "standard" | "expedited" | "overnight" | null;
   memberPlanName?: string | null;
   memberPlanColor?: string | null;
+}
+
+/**
+ * True when any line on this order/batch is held. A held line is not pickable,
+ * so the order belongs under Hold rather than Ready.
+ */
+function hasHeldLine(work: { items?: PickItem[] } | null | undefined): boolean {
+  return (work?.items ?? []).some((item) => item.onHold === true);
 }
 
 function getOrderPickProgress(items: PickItem[]) {
@@ -910,6 +911,7 @@ function PickingWorkspace() {
           status: progress.status,
           orderId: order.orderNumber,
           wmsOrderId: order.id,
+          onHold: item.onHold === true,
           image: item.imageUrl || "",
           barcode: item.barcode || undefined,
           replenPrediction: item.replenPrediction ?? null,
@@ -1363,11 +1365,11 @@ function PickingWorkspace() {
   // splits the held line onto its own shipment, re-pushes the main shipment
   // without it, and the pick queue stops showing the order for this line.
   const holdLineItemMutation = useMutation({
-    mutationFn: async ({ wmsOrderId, itemId, reason }: { wmsOrderId: number; itemId: number; reason: string }) => {
+    mutationFn: async ({ wmsOrderId, itemId }: { wmsOrderId: number; itemId: number }) => {
       const res = await fetch(`/api/orders/${wmsOrderId}/items/${itemId}/hold`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reason }),
+        body: JSON.stringify({}),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -1376,9 +1378,6 @@ function PickingWorkspace() {
       return res.json();
     },
     onSuccess: () => {
-      setHoldLineOpen(false);
-      setHoldLineTarget(null);
-      setHoldLineReason("");
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
       playSound("success");
       toast({
@@ -1554,9 +1553,6 @@ function PickingWorkspace() {
   // UI state
   const [scanInput, setScanInput] = useState("");
   const [scanStatus, setScanStatus] = useState<"idle" | "success" | "error">("idle");
-  const [holdLineOpen, setHoldLineOpen] = useState(false);
-  const [holdLineTarget, setHoldLineTarget] = useState<PickItem | null>(null);
-  const [holdLineReason, setHoldLineReason] = useState("");
   const [shortPickOpen, setShortPickOpen] = useState(false);
   const [shortPickReason, setShortPickReason] = useState("");
   const [shortPickQty, setShortPickQty] = useState("0");
@@ -2222,10 +2218,8 @@ function PickingWorkspace() {
   // overflow menu; a line with picked units cannot be held (the server rejects
   // it), so those entry points are disabled.
   const openHoldLine = (item: PickItem | null | undefined) => {
-    if (!item || item.picked > 0) return;
-    setHoldLineTarget(item);
-    setHoldLineReason("");
-    setHoldLineOpen(true);
+    if (!item || item.picked > 0 || holdLineItemMutation.isPending) return;
+    holdLineItemMutation.mutate({ wmsOrderId: item.wmsOrderId, itemId: item.id });
   };
 
   // Short pick - works for both card view (currentItem) and list view (shortPickListIndex)
@@ -3025,8 +3019,11 @@ function PickingWorkspace() {
       ? queue.filter(b => b.status === "completed")
       : singleQueue.filter(o => o.status === "completed")
     ).filter(channelMatch);
+    // An order counts as held when the whole order is held OR any line is
+    // held. A line hold does not set the order flag, and without this such an
+    // order shows in neither Ready (nothing pickable) nor Hold — it vanishes.
     const holdItems = pickingMode === "single"
-      ? singleQueue.filter(o => o.onHold)
+      ? singleQueue.filter(o => o.onHold || hasHeldLine(o))
       : [];
     const combinedItems = pickingMode === "single"
       ? singleQueue.filter(o => o.isCombinedGroup && o.status !== "completed")
@@ -3038,8 +3035,9 @@ function PickingWorkspace() {
       // History renders its own server-paged read model, never action cards.
       if (activeFilter === "done" || item.status === "completed") return false;
       
-      // By default, hide held items unless filtering for "hold"
-      const itemOnHold = "onHold" in item && item.onHold;
+      // By default, hide held items unless filtering for "hold". Line-level
+      // holds count too: the order has no pickable work left.
+      const itemOnHold = ("onHold" in item && item.onHold) || hasHeldLine(item);
       if (activeFilter !== "hold" && itemOnHold) return false;
       
       // Apply status filter
@@ -3949,6 +3947,7 @@ function PickingWorkspace() {
           status,
           orderId: order.orderNumber,
           wmsOrderId: order.id,
+          onHold: (item as { onHold?: boolean }).onHold === true,
           image: item.imageUrl || "",
           barcode: item.barcode || undefined,
           replenPrediction: item.replenPrediction ?? null,
@@ -4973,87 +4972,6 @@ function PickingWorkspace() {
         </DialogContent>
       </Dialog>
       
-      {/* Hold Line Dialog — hold one line so the rest of the order ships now */}
-      <Dialog
-        open={holdLineOpen}
-        onOpenChange={(open) => {
-          if (!open) {
-            setHoldLineOpen(false);
-            setHoldLineTarget(null);
-            setHoldLineReason("");
-          }
-        }}
-      >
-        <DialogContent className="w-[95vw] max-w-md p-4">
-          <DialogHeader>
-            <DialogTitle className="flex items-center justify-center gap-2 text-slate-700">
-              <Pause className="h-5 w-5" />
-              Hold this line?
-            </DialogTitle>
-            <DialogDescription className="text-center space-y-2">
-              <div className="text-sm">
-                <span className="font-mono font-semibold">{holdLineTarget?.sku}</span>
-                {" x"}{holdLineTarget?.qty}
-                {holdLineTarget?.location ? (
-                  <> at <span className="font-mono font-semibold">{holdLineTarget.location}</span></>
-                ) : null}
-              </div>
-              <div className="text-xs text-muted-foreground">
-                This line leaves the pick queue and ships on its own once released.
-                The rest of the order ships now.
-              </div>
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="grid grid-cols-1 gap-2 pt-2">
-            {HOLD_LINE_REASONS.map((reason) => (
-              <Button
-                key={reason}
-                variant={holdLineReason === reason ? "default" : "outline"}
-                size="lg"
-                className="h-12 text-base"
-                onClick={() => setHoldLineReason(reason)}
-                data-testid={`hold-reason-${reason.toLowerCase().replace(/[^a-z]+/g, "-")}`}
-              >
-                {reason}
-              </Button>
-            ))}
-          </div>
-
-          <DialogFooter className="grid grid-cols-2 gap-3 pt-4">
-            <Button
-              variant="outline"
-              size="lg"
-              className="h-14 text-base"
-              onClick={() => {
-                setHoldLineOpen(false);
-                setHoldLineTarget(null);
-                setHoldLineReason("");
-              }}
-              data-testid="button-cancel-hold-line"
-            >
-              Cancel
-            </Button>
-            <Button
-              size="lg"
-              className="h-14 text-base"
-              disabled={!holdLineReason || !holdLineTarget || holdLineItemMutation.isPending}
-              onClick={() =>
-                holdLineTarget &&
-                holdLineItemMutation.mutate({
-                  wmsOrderId: holdLineTarget.wmsOrderId,
-                  itemId: holdLineTarget.id,
-                  reason: holdLineReason,
-                })
-              }
-              data-testid="button-confirm-hold-line"
-            >
-              {holdLineItemMutation.isPending ? "Holding..." : "Hold line"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       {/* Short Pick Dialog */}
       {/* Replen Guidance Dialog — shown BEFORE short pick when pickable source has stock */}
       <Dialog open={replenGuidanceOpen} onOpenChange={(open) => { if (!open) { setReplenGuidanceOpen(false); setReplenGuidanceData(null); } }}>
