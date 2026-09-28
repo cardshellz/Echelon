@@ -12,12 +12,12 @@ export const WALMART_INVENTORY_NOW = new Date("2026-09-27T12:00:00.000Z");
  * uniquely created disposable test database. This does not test global cutover. */
 export async function installWalmartPublicationInventoryFixture(
   pool: Pool,
+  options: { targetState?: "preview" | "live" } = {},
 ): Promise<void> {
   await installCutoverCompositionMigrations(pool);
   await pool.query(cutoverCompositionSeedSql);
   await pool.query(cutoverCompositionChannelSeedSql);
   for (const file of [
-    "0708_inventory_publication_membership.sql",
     "0709_walmart_quantity_admission.sql",
   ])
     await pool.query(
@@ -50,8 +50,10 @@ export async function installWalmartPublicationInventoryFixture(
       VALUES(2,101,2,1,'operator','Reviewed item');
     INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(36,101,'P5','P5');
     UPDATE inventory.inventory_publication_targets SET state='preview',revision=revision+1,activated_by='operator',activated_at=transaction_timestamp() WHERE id=2;
-    UPDATE inventory.inventory_publication_targets SET state='live',revision=revision+1 WHERE id=2;
   `);
+  if ((options.targetState ?? "live") === "live") {
+    await pool.query("UPDATE inventory.inventory_publication_targets SET state='live',revision=revision+1 WHERE id=2");
+  }
   const client = await pool.connect();
   try {
     await client.query("BEGIN");

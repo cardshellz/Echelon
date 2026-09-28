@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { inventoryPublicationScopeSchema } from "./inventory-publication-scope";
 import {
   inventoryRuntimeAuthorityRevisionSchema,
   inventoryRuntimeAuthoritySchema,
@@ -612,6 +613,7 @@ export const resolvedChannelExposurePolicySchema = z.object({
 }).strict();
 
 export const inventoryChannelExposurePreviewSchema = z.object({
+  membership: inventoryPublicationScopeSchema.optional(),
   publicationTargetId: positiveInteger,
   destinationKind: z.enum(["channel_connection", "dropship_store_connection"]),
   channelId: positiveInteger,

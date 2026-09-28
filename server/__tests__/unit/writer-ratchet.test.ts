@@ -117,6 +117,7 @@ describe("writer-ratchet (P2.1)", () => {
         "marketplace.channel_listing_reviews",
       ],
       "modules/inventory-planning": [
+        "inventory.publication_initial_scope_receipts",
         "inventory.publication_listing_setup_identities",
         "inventory.publication_listing_setup_scopes",
         "inventory.publication_membership_applications",

@@ -18,9 +18,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check-and-unit:
-    name: Typecheck + unit tests
+  preflight:
+    name: Fast CI guards
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -28,12 +29,83 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - name: Typecheck (tsc)
+      # Catch manifest drift and migration collisions before the long checks.
+      # These are also retained in the full unit suite.
+      - name: Validate CI coverage and migration numbering
+        run: >-
+          npx vitest run
+          server/__tests__/unit/postgres-ci-shards.test.ts
+          server/__tests__/unit/migration-prefix-collision.test.ts
+          server/__tests__/unit/browser-ci-selection.test.ts
+          server/__tests__/unit/ci-fast-feedback.test.ts
+          --allowOnly=false --passWithNoTests=false
+
+  typecheck:
+    name: Typecheck (${{ matrix.project }})
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [application, server-tests, client-tests]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # Separate runners keep TypeScript heaps and incremental caches isolated.
+      - name: Application types
+        if: matrix.project == 'application'
         run: npm run check
-      - name: Typecheck test files (ratchet)
-        run: npm run check:tests
-      - name: Unit tests
-        run: npm run test:unit
+      - name: Server test types
+        if: matrix.project == 'server-tests'
+        run: npx tsc -p tsconfig.tests.server.json
+      - name: Client test types
+        if: matrix.project == 'client-tests'
+        run: npx tsc -p tsconfig.tests.client.json
+
+  unit-tests:
+    name: Unit tests (${{ matrix.shard }}/4)
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # The original unit selection is unchanged; Vitest partitions it by file.
+      - run: npm run test:unit -- --shard=${{ matrix.shard }}/4 --maxWorkers=2 --allowOnly=false --passWithNoTests=false --reporter=default --reporter=junit --outputFile=test-results/unit-${{ matrix.shard }}.xml
+      - name: Upload unit test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-tests-${{ matrix.shard }}
+          path: test-results/unit-${{ matrix.shard }}.xml
+          if-no-files-found: warn
+          retention-days: 7
+
+  contracts:
+    name: Offline maintenance and UI contracts
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
       - name: Inventory cutover maintenance contracts (offline only)
         run: |
           node --import tsx --test scripts/inventory-cutover-records-proposal-20260925.test.ts scripts/inventory-cutover-records-execution-20260925.test.ts
@@ -71,8 +143,23 @@ jobs:
           client/src/pages/dropship/__tests__/DropshipListingPreview.test.ts
           client/src/pages/dropship/__tests__/DropshipListingPriceEditor.test.ts
 
+  check-and-unit:
+    # Preserve the existing required check name; skipped/cancelled jobs are failures.
+    name: Typecheck + unit tests
+    needs: [preflight, typecheck, unit-tests, contracts]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require every core check
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/ci/require-success.mjs preflight typecheck unit-tests contracts
+
   postgres-hardening-shard:
     name: PostgreSQL hardening (shard ${{ matrix.shard }}/8)
+    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:

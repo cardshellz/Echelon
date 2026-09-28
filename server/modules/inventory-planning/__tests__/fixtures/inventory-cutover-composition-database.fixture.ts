@@ -87,6 +87,7 @@ export async function installCutoverCompositionMigrations(pool: Pool): Promise<v
     "0684_inventory_publication_target_variant_holds.sql",
     "0687_inventory_channel_definition_completion.sql",
     "253_inventory_cutover_history_retirement.sql",
+    "0708_inventory_publication_membership.sql",
   ]) await pool.query(readFileSync(resolve(process.cwd(), "migrations", file), "utf8"));
 }
 
@@ -126,7 +127,7 @@ INSERT INTO channels.channel_connections(id,channel_id) VALUES(1,1);
  * owner still has to validate every persisted selection against current state.
  * This fixture does not claim to exercise the preceding admin approval workflow.
  */
-export async function seedCompositionReviewedDryRun(pool: Pool) {
+export async function seedCompositionReviewedDryRun(pool: Pool, historicalProviderQuantity: number | null = 20) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
@@ -179,14 +180,15 @@ export async function seedCompositionReviewedDryRun(pool: Pool) {
     })));
     summary.publicationRows=product.proposedPublications.length;
     for (const row of product.proposedPublications) {
-      if (row.disposition!=="publish") continue;
+      if (row.disposition!=="publish" || historicalProviderQuantity === null) continue;
       // Mock external observation persisted through the actual readback schema.
       await pool.query(`INSERT INTO inventory.inventory_publication_readbacks(publication_target_id,product_variant_id,
         observed_quantity,matches_desired,evidence_hash,external_inventory_item_id_snapshot,destination_kind_snapshot,
         channel_connection_id_snapshot,provider_scope_type_snapshot,external_scope_id_snapshot,publication_target_revision_snapshot,observed_at)
-        VALUES($1,$2,20,NULL,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        VALUES($1,$2,$11,NULL,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [row.publicationTargetId,row.productVariantId,inventoryCutoverEvidenceHash(row),row.externalInventoryItemId,row.destinationKind,
-        row.channelConnectionId,row.providerScopeType,row.externalScopeId,row.publicationTargetRevision,snapshot.capturedAt]);
+        row.channelConnectionId,row.providerScopeType,row.externalScopeId,row.publicationTargetRevision,snapshot.capturedAt,
+        historicalProviderQuantity]);
     }
     const evidenceHash = inventoryCutoverEvidenceHash({ summary,products:[product],blockers:[] });
     return await new PostgresInventoryAvailabilityActivationDryRunRepository(pool).persistActivationDryRun({

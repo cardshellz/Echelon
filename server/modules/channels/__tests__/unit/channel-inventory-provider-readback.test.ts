@@ -45,6 +45,20 @@ describe("actual provider adapters through the canonical transport", () => {
     expect(client.getOffers).not.toHaveBeenCalled();
     expect(client.updateOffer).not.toHaveBeenCalled();
   });
+  it("replaces a published eBay offer's old zero with ATP instead of capping the update", async () => {
+    const { client, transport } = ebayFixture();
+    client.getInventoryOffersPage.mockResolvedValue({ total: 1, offers: [{ ...offer, availableQuantity: 0 }] });
+    client.getInventoryItem.mockResolvedValue({ sku: "SKU-101", availability: { shipToLocationAvailability: { quantity: 0 } } });
+    await expect(transport.publishAbsolute({ ...ebayRequest, desiredQuantity: 14 })).resolves.toMatchObject({ publishedQuantity: 14 });
+    expect(client.bulkUpdatePriceQuantity).toHaveBeenCalledExactlyOnceWith({ requests: [{
+      sku: "SKU-101", shipToLocationAvailability: { quantity: 14 }, offers: [{ offerId: "offer-1", availableQuantity: 14 }],
+    }] }, "EBAY_US");
+    client.getInventoryOffersPage.mockResolvedValue({ total: 1, offers: [{ ...offer, availableQuantity: 14 }] });
+    client.getInventoryItem.mockResolvedValue({ sku: "SKU-101", availability: { shipToLocationAvailability: { quantity: 14 } } });
+    await expect(transport.readAbsolute(ebayRequest)).resolves.toMatchObject({ observedQuantity: 14 });
+    expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
+    expect(client.updateOffer).not.toHaveBeenCalled();
+  });
   it("preserves nonretryable ambiguity through both publication and readback transports", async () => {
     const { client, transport } = ebayFixture();
     client.getInventoryOffersPage.mockResolvedValue({ total: 2, offers: [offer, { ...offer, offerId: "other" }] });
@@ -67,6 +81,22 @@ describe("actual provider adapters through the canonical transport", () => {
     const get = vi.spyOn(adapter as unknown as { shopifyGet(): Promise<unknown> }, "shopifyGet").mockResolvedValue({ inventory_levels: levels });
     return { adapter, get, transport: new ChannelInventoryPublicationTransportAdapter(adapter) };
   }
+  it.each([0, 14])("sets Shopify ATP %i without requiring its old negative stock to be readable", async (desiredQuantity) => {
+    const { adapter, get, transport } = shopifyFixture([{ inventory_item_id: 5, location_id: 20, available: -18 }]);
+    vi.spyOn(adapter as unknown as { delay(milliseconds: number): Promise<void> }, "delay").mockResolvedValue(undefined);
+    const post = vi.spyOn(adapter as unknown as {
+      shopifyPost(credentials: unknown, path: string, body: { location_id: number; inventory_item_id: number; available: number }): Promise<unknown>;
+    }, "shopifyPost").mockImplementation(async (_credentials, _path, body) => {
+      get.mockResolvedValue({ inventory_levels: [{ inventory_item_id: body.inventory_item_id, location_id: body.location_id, available: body.available }] });
+      return { inventory_level: { available: body.available } };
+    });
+    await expect(transport.publishAbsolute({ ...shopifyRequest, desiredQuantity })).resolves.toMatchObject({ publishedQuantity: desiredQuantity });
+    expect(post).toHaveBeenCalledExactlyOnceWith({}, "/inventory_levels/set.json", {
+      location_id: 20, inventory_item_id: 5, available: desiredQuantity,
+    });
+    expect(get).not.toHaveBeenCalled();
+    await expect(transport.readAbsolute(shopifyRequest)).resolves.toMatchObject({ observedQuantity: desiredQuantity });
+  });
   it.each([null, undefined, "", "7", false, true, -1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
     "rejects Shopify quantity %s without coercion", async (available) => {
       const { transport } = shopifyFixture([{ inventory_item_id: 5, location_id: 20, available }]);

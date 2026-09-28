@@ -1,4 +1,5 @@
 import { DropshipError } from "../domain/errors";
+import { describeEbayErrors, parseEbayErrorBody } from "./ebay-error-body";
 import { createProviderRequestDeadline } from "../../channels/provider-request-limits";
 import { executeEbayQuantityHttp } from "../../channels/adapters/ebay/ebay-quantity-http";
 import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../channels/quantity-publication-request";
@@ -548,23 +549,31 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
 
   private async throwListingHttpError(credential: DropshipMarketplaceStoreCredentials,status: number,text: string): Promise<never> {
       const accessTokenRejected = isEbayResourceAuthFailureStatus(status);
+      // eBay's own reason travels with the failure: it is the only thing that
+      // tells an operator or vendor what to change before trying again.
+      const providerErrors = parseEbayErrorBody(text);
+      const reason = describeEbayErrors(providerErrors);
+      const message = reason
+        ? `eBay listing push failed with HTTP ${status}: ${reason}`
+        : `eBay listing push failed with HTTP ${status}.`;
       if (accessTokenRejected) {
         await recordEbayAccessTokenRejection({
           credentials: this.credentials,
           credential,
           status,
           failureCode: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
-          message: `eBay listing push failed with HTTP ${status}.`,
+          message,
           now: this.clock.now(),
         });
       }
       throw new DropshipError(
         "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
-        `eBay listing push failed with HTTP ${status}.`,
+        message,
         {
           retryable: accessTokenRejected || status === 429 || status >= 500,
           status,
           body: text.slice(0, 1000),
+          providerErrors,
         },
       );
   }

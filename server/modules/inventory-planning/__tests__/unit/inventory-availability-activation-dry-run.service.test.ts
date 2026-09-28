@@ -20,6 +20,82 @@ const STARTED_AT = new Date("2026-08-28T17:00:00.000Z");
 const COMPLETED_AT = new Date("2026-08-28T17:00:01.000Z");
 
 describe("inventory availability activation dry-run service", () => {
+  it("does not require an unlisted SKU when sealed explicit membership excludes it", async () => {
+    const fixture = readinessFixture("echelon");
+    fixture.preview.membership = { mode: "explicit", includedVariantIds: [] };
+    fixture.preview.rows = [];
+    fixture.publication.feedId = null;
+    fixture.publication.mappingState = "missing";
+    fixture.publication.channelInventoryItemId = null;
+    fixture.publication.lastAcknowledgedUnits = null;
+    fixture.publication.lastAcknowledgedAt = null;
+    fixture.publication.configuredTargets[0]!.mapping = null;
+    fixture.publication.configuredTargets[0]!.latestReadbackUnits = null;
+    fixture.publication.configuredTargets[0]!.latestReadbackAt = null;
+    const result = await runReadinessFixture(fixture);
+    expect(result.state).toBe("ready_for_publication");
+    expect(result.products[0]!.proposedPublications).toEqual([]);
+    expect(result.products[0]!.publicationTargetSelections).toMatchObject([{
+      publicationTargetId: 1, revision: "1", membership: { mode: "explicit", includedVariantIds: [] },
+    }]);
+    expect(result.providerWriteAttempted).toBe(false);
+  });
+
+  it("does not let empty membership hide a real active legacy publication", async () => {
+    const fixture = readinessFixture("echelon");
+    fixture.preview.membership = { mode: "explicit", includedVariantIds: [] };
+    fixture.preview.rows = [];
+    const result = await runReadinessFixture(fixture);
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]!.blockers.map(row => row.code)).toContain("ACTIVE_LEGACY_PUBLICATION_EXCLUDED");
+  });
+  it("honors an explicitly reviewed bundle exclusion without inventing a zero-stock publication", async () => {
+    const fixture = readinessFixture("echelon");
+    fixture.preview.membership = { mode: "explicit", includedVariantIds: [], excludedVariantIds: [101] };
+    fixture.preview.rows = [];
+    fixture.publication.configuredTargets[0]!.mapping = null;
+    fixture.publication.configuredTargets[0]!.latestReadbackUnits = null;
+    const result = await runReadinessFixture(fixture);
+    expect(result.state).toBe("ready_for_publication");
+    expect(result.products[0]!.proposedPublications).toEqual([]);
+    expect(result.products[0]!.publicationTargetSelections![0]!.membership).toEqual(fixture.preview.membership);
+  });
+
+  it("keeps an included explicit SKU blocked when its provider mapping is missing", async () => {
+    const fixture = readinessFixture("echelon");
+    fixture.preview.membership = { mode: "explicit", includedVariantIds: [101] };
+    fixture.preview.rows[0]!.mapping = null;
+    fixture.publication.feedId = null;
+    fixture.publication.mappingState = "missing";
+    fixture.publication.configuredTargets[0]!.mapping = null;
+    const result = await runReadinessFixture(fixture);
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]!.blockers.map(row => row.code)).toContain("EXACT_TARGET_VARIANT_MAPPING_MISSING");
+  });
+
+  it("does not infer an explicitly excluded scope from missing destination evidence", async () => {
+    const fixture = readinessFixture("echelon");
+    fixture.preview.membership = { mode: "explicit", includedVariantIds: [] };
+    fixture.preview.rows = [];
+    fixture.publication.feedId = null;
+    fixture.publication.mappingState = "missing";
+    fixture.publication.configuredTargets = [];
+    const result = await runReadinessFixture(fixture);
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]!.blockers.map(row => row.code)).toContain("ACTIVE_LEGACY_FEED_MAPPING_MISSING");
+  });
+
+  it.each(["inactive", "quarantined"] as const)("preserves the %s legacy feed blocker even when explicit membership is empty", async mappingState => {
+    const fixture = readinessFixture("echelon");
+    fixture.preview.membership = { mode: "explicit", includedVariantIds: [] };
+    fixture.preview.rows = [];
+    fixture.publication.mappingState = mappingState;
+    const result = await runReadinessFixture(fixture);
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]!.blockers.map(row => row.code)).toContain(
+      mappingState === "inactive" ? "ACTIVE_LEGACY_FEED_MAPPING_MISSING" : "PUBLICATION_MAPPING_QUARANTINED",
+    );
+  });
   it("records a ready full-catalog comparison without runtime, provider, or outbox writes", async () => {
     const queue = catalogQueue();
     const preview = channelPreview();
@@ -71,7 +147,7 @@ describe("inventory availability activation dry-run service", () => {
     }));
   });
 
-  it("blocks an active legacy feed without exact target and provider readback evidence", async () => {
+  it("blocks an active legacy feed without exact target identity", async () => {
     const store = fakeStore([{
       ...publicationEvidence(),
       configuredTargets: [],
@@ -127,7 +203,7 @@ describe("inventory availability activation dry-run service", () => {
     expect(store.persistActivationDryRun).not.toHaveBeenCalled();
   });
 
-  it("fails closed when provider readback belongs to an older target/SKU identity", async () => {
+  it("uses the current mapping even when historical readback belongs to an older identity", async () => {
     const publication = publicationEvidence();
     publication.configuredTargets[0]!.latestReadbackExternalInventoryItemId =
       "gid://shopify/InventoryItem/obsolete";
@@ -146,12 +222,14 @@ describe("inventory availability activation dry-run service", () => {
       expectedCatalogInputHash: HASH_A,
       expectedCatalogResultHash: HASH_B,
       idempotencyKey: "activation-dry-run-identity-mismatch",
-      reason: "Reject readback from obsolete provider identity",
+      reason: "Publish current ATP to the reviewed current identity",
     }, "operator-1");
 
-    expect(result.state).toBe("blocked");
-    expect(result.products[0]?.blockers.map((entry) => entry.code))
-      .toContain("PROVIDER_READBACK_IDENTITY_MISMATCH");
+    expect(result.state).toBe("ready_for_publication");
+    expect(result.products[0]?.proposedPublications[0]).toMatchObject({
+      disposition: "publish", desiredUnits: "8",
+      externalInventoryItemId: publication.configuredTargets[0]!.mapping!.externalInventoryItemId,
+    });
   });
 
   it("classifies externally authoritative targets as observation-only", async () => {
@@ -182,7 +260,8 @@ describe("inventory availability activation dry-run service", () => {
     }, "operator-1");
 
     expect(result.state).toBe("ready_for_publication");
-    expect(result.products[0]?.proposedPublications[0]?.disposition).toBe("observe_only");
+    expect(result.products[0]?.proposedPublications).toEqual([]);
+    expect(result.products[0]?.publicationTargetSelections?.[0]?.targetIdentity?.publicationAuthority).toBe("external_provider");
   });
 
   it("blocks overlapping partitioned target shares above one hundred percent", async () => {
@@ -272,33 +351,26 @@ describe("inventory availability activation dry-run service", () => {
             externalInventoryCustodyEvaluated: false,
           }),
         })]);
-        expect(result.products[0]!.proposedPublications[0]).toMatchObject({
-          disposition: "observe_only",
-          canonicalAtpUnits: "10",
-          desiredUnits: "8",
-          differenceFromLastAcknowledgedUnits: null,
-        });
+        expect(result.products[0]!.proposedPublications).toEqual([]);
         expect(result).toMatchObject({
           runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false,
         });
       },
     );
 
-    it("still requires exact target/SKU mapping", async () => {
+    it("does not require unused Echelon target/SKU mapping", async () => {
       const fixture = readinessFixture(authority);
       fixture.preview.rows[0]!.mapping = null;
       fixture.publication.configuredTargets[0]!.mapping = null;
 
       const result = await runReadinessFixture(fixture);
 
-      expect(result.state).toBe("blocked");
-      expect(result.products[0]!.blockers.map((entry) => entry.code))
-        .toContain("EXACT_TARGET_VARIANT_MAPPING_MISSING");
-      expect(result.products[0]!.proposedPublications[0]!.disposition).toBe("blocked");
+      expect(result.state).toBe("ready_for_publication");
+      expect(result.products[0]!.proposedPublications).toEqual([]);
     });
 
     it.each(["CHANNEL_SOURCE_BINDING_MISSING", "CHANNEL_SOURCE_WAREHOUSE_MISSING_FROM_SHADOW"])(
-      "retains the %s source evidence blocker",
+      "does not commission external inventory because of %s",
       async (code) => {
         const fixture = readinessFixture(authority);
         fixture.preview.blockers.push({ code, message: "Source evidence requires review.", context: {} });
@@ -311,19 +383,18 @@ describe("inventory availability activation dry-run service", () => {
 
         const result = await runReadinessFixture(fixture);
 
-        expect(result.state).toBe("blocked");
-        expect(result.products[0]!.blockers).toContainEqual(expect.objectContaining({ code, severity: "blocking" }));
+        expect(result.state).toBe("ready_for_publication");
+        expect(result.products[0]!.blockers).not.toContainEqual(expect.objectContaining({ code, severity: "blocking" }));
+        expect(result.products[0]!.proposedPublications).toEqual([]);
       },
     );
   });
 
   it.each(["missing", "stale", "future", "wrong_identity"] as const)(
-    "still blocks Echelon publication when provider readback is %s",
+    "does not make initial ATP publication depend on %s historical readback",
     async (readbackState) => {
       const fixture = readinessFixture("echelon");
       const target = fixture.publication.configuredTargets[0]!;
-      const expectedCode = readbackState === "missing" ? "PROVIDER_READBACK_MISSING"
-        : readbackState === "wrong_identity" ? "PROVIDER_READBACK_IDENTITY_MISMATCH" : "PROVIDER_READBACK_STALE";
       if (readbackState === "missing") target.latestReadbackUnits = null;
       if (readbackState === "stale") target.latestReadbackAt = "2026-08-27T16:00:00.000Z";
       if (readbackState === "future") target.latestReadbackAt = "2026-08-28T17:01:00.000Z";
@@ -331,25 +402,37 @@ describe("inventory availability activation dry-run service", () => {
 
       const result = await runReadinessFixture(fixture);
 
-      expect(result.state).toBe("blocked");
-      expect(result.products[0]!.blockers.map((entry) => entry.code)).toContain(expectedCode);
+      expect(result.state).toBe("ready_for_publication");
+      expect(result.products[0]!.blockers).toEqual([]);
+      expect(result.products[0]!.proposedPublications[0]).toMatchObject({
+        disposition: "publish", canonicalAtpUnits: "10", desiredUnits: "8",
+      });
+      expect(result.providerWriteAttempted).toBe(false);
     },
   );
 
-  it("still requires legacy acknowledgement when any enabled target is Echelon-owned", async () => {
-    const fixture = readinessFixture("external_provider");
+  it("allows an absolute ATP publication without any legacy acknowledgement", async () => {
+    const fixture = readinessFixture("echelon");
     fixture.publication.lastAcknowledgedUnits = null;
-    fixture.publication.configuredTargets.push({
-      ...fixture.publication.configuredTargets[0]!, publicationTargetId: 2,
-      publicationAuthority: "echelon", externalScopeId: "second-location",
-      latestReadbackExternalScopeId: "second-location",
-    });
+    fixture.publication.lastAcknowledgedAt = null;
 
     const result = await runReadinessFixture(fixture);
 
-    expect(result.state).toBe("blocked");
-    expect(result.products[0]!.blockers.map((entry) => entry.code))
-      .toContain("CURRENT_ACKNOWLEDGED_QUANTITY_MISSING");
+    expect(result.state).toBe("ready_for_publication");
+    expect(result.products[0]!.proposedPublications[0]).toMatchObject({
+      disposition: "publish", desiredUnits: "8", differenceFromLastAcknowledgedUnits: null,
+    });
+  });
+
+  it.each(["0", "3", "20"])("does not cap ATP at historical provider quantity %s", async (oldQuantity) => {
+    const fixture = readinessFixture("echelon");
+    fixture.publication.lastAcknowledgedUnits = oldQuantity;
+    fixture.publication.configuredTargets[0]!.latestReadbackUnits = oldQuantity;
+    const result = await runReadinessFixture(fixture);
+    expect(result.state).toBe("ready_for_publication");
+    expect(result.products[0]!.proposedPublications[0]).toMatchObject({
+      disposition: "publish", canonicalAtpUnits: "10", desiredUnits: "8",
+    });
   });
 
   it.each([
@@ -390,15 +473,14 @@ describe("inventory availability activation dry-run service", () => {
   it.each([
     { mappingId: 71 }, { version: 2 }, { definitionHash: HASH_B },
     { authority: "active" as const }, { externalInventoryItemId: "another-item" }, { externalSku: "ANOTHER-SKU" },
-  ])("blocks exact mapping drift without relying on an external readback: %j", async (change) => {
+  ])("does not depend on unused external mapping evidence: %j", async (change) => {
     const fixture = readinessFixture("external_provider");
     Object.assign(fixture.publication.configuredTargets[0]!.mapping!, change);
 
     const result = await runReadinessFixture(fixture);
 
-    expect(result.state).toBe("blocked");
-    expect(result.products[0]!.blockers.map((entry) => entry.code))
-      .toContain("PUBLICATION_VARIANT_MAPPING_CHANGED_DURING_DRY_RUN");
+    expect(result.state).toBe("ready_for_publication");
+    expect(result.products[0]!.proposedPublications).toEqual([]);
   });
 });
 

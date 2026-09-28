@@ -3,7 +3,8 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "./test/browser",
   testMatch: "procurement-*.spec.ts",
-  fullyParallel: false,
+  // Page-local fixtures allow test-level sharding instead of uneven file groups.
+  fullyParallel: true,
   workers: 1,
   timeout: 45_000,
   expect: { timeout: 15_000 },
