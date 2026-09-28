@@ -36,7 +36,8 @@ import type {
   InventoryAvailabilityRuntimeClaimExecutor,
 } from "../inventory-planning/application/inventory-availability-runtime-claim.service";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { requireCorrectivePick, PickCorrectionError } from "../wms/pick-correction.repository";
+import { requireCorrectivePick, PickCorrectionError, recordCorrectionEvent, correctionHash } from "../wms/pick-correction.repository";
+import { planConfirmedPickShipment, type ConfirmedPickShipmentPlan } from "./confirmed-pick-shipment";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -1163,20 +1164,28 @@ export class PickingUseCases {
     if (!locked.rows?.length) throw new IntegrityError(`Item ${input.itemId} not found`);
     const lockedStatus = locked.rows[0].status as ItemStatus;
     const lockedPickedQuantity = Number(locked.rows[0].picked_quantity ?? 0);
+    let shipmentPlan: ConfirmedPickShipmentPlan = { kind: "ordinary_pick" };
+    let correctionActor: string | undefined;
     if (!input.pickCorrectionId && Number(locked.rows[0].fulfilled_quantity ?? 0) > lockedPickedQuantity)
       throw new PickCorrectionError("PICK_CORRECTION_REQUIRED", "Answer the missing-pick confirmation before recording this pick.");
     if (input.pickCorrectionId) {
       await tx.execute(sql`SELECT id FROM wms.pick_corrections WHERE id=${input.pickCorrectionId} FOR UPDATE`);
-      await requireCorrectivePick(tx, { correctionId: input.pickCorrectionId, orderItemId: input.itemId,
+      const correction = await requireCorrectivePick(tx, { correctionId: input.pickCorrectionId, orderItemId: input.itemId,
         targetPickedQuantity: input.effectivePickedQuantity, actor: input.userId,
         expectedRevision: input.pickCorrectionRevision });
-      const posted = await tx.execute(sql`SELECT COALESCE(SUM(-variant_qty_delta),0)::integer AS quantity,
-        COUNT(*) FILTER (WHERE variant_qty_delta IS NULL OR variant_qty_delta >= 0)::integer AS unproven
-        FROM inventory.inventory_transactions WHERE order_item_id=${input.itemId} AND transaction_type='ship'`);
-      if (Number(posted.rows[0]?.quantity ?? 0) > lockedPickedQuantity || Number(posted.rows[0]?.unproven ?? 0) > 0) {
-        throw new PickCorrectionError("POSTED_INVENTORY_REVIEW_REQUIRED",
-          "Shipping already deducted units without matching pick evidence. Inventory review is required; this correction did not deduct them again.");
-      }
+      if (!correction.assignedPickerId) throw new PickCorrectionError("INVALID_ACTOR", "A signed-in picker is required.");
+      correctionActor = correction.assignedPickerId;
+      const posted = await tx.execute(sql`SELECT id, order_id, product_variant_id, from_location_id,
+        variant_qty_delta, variant_qty_before, variant_qty_after, source_state, target_state,
+        voided_at IS NOT NULL AS voided
+        FROM inventory.inventory_transactions WHERE order_item_id=${input.itemId} AND transaction_type='ship'
+        ORDER BY id`);
+      shipmentPlan = planConfirmedPickShipment({ shipments: posted.rows, orderId: input.beforeItem.orderId,
+        productVariantId: input.beforeItem.productId, sourceLocationId: input.warehouseLocationId,
+        pickedQuantity: lockedPickedQuantity, targetPickedQuantity: input.effectivePickedQuantity,
+        confirmedPreviouslyPicked: correction.answer === "yes" && input.pickMethod === "missed_pick_confirmation" });
+      if (shipmentPlan.kind === "review")
+        throw new PickCorrectionError("POSTED_INVENTORY_REVIEW_REQUIRED", shipmentPlan.message);
     }
     const lockedQuantity = Number(locked.rows[0].quantity ?? 0);
     const targetShortReason = input.status === "short"
@@ -1239,6 +1248,11 @@ export class PickingUseCases {
       pickMethod: input.pickMethod,
     });
 
+    if (shipmentPlan.kind === "restore_picked_balance" && deductResult.success && deductResult.noVariant) {
+      throw new PickCorrectionError("POSTED_INVENTORY_REVIEW_REQUIRED",
+        "The recorded shipment used tracked stock, but this confirmation has no inventory movement. Review the item inventory policy.");
+    }
+
     if (deductResult.success && !deductResult.noVariant) {
       await this.backfillPlannedShipmentItemPickLocation(tx, {
         orderItemId: input.itemId,
@@ -1255,6 +1269,16 @@ export class PickingUseCases {
     });
     if (!updatedItem) throw new IntegrityError(`Item ${input.itemId} not found`);
     await this.recordConfirmationOnlyPick(tx, input.beforeItem, updatedItem as OrderItem, input.userId);
+    if (deductResult.success && shipmentPlan.kind === "restore_picked_balance" && input.pickCorrectionId && correctionActor) {
+      const evidence = { orderItemId: input.itemId, sourceLocationId: input.warehouseLocationId,
+        pickedQuantityBefore: lockedPickedQuantity, pickedQuantityAfter: input.effectivePickedQuantity,
+        movementQuantity, shipmentTransactionIds: shipmentPlan.shipmentTransactionIds,
+        shippedQuantity: shipmentPlan.shippedQuantity, stockEffect: "on_hand_to_picked" };
+      await recordCorrectionEvent(tx, { correctionId: input.pickCorrectionId,
+        commandId: `inventory-reconciled:${input.pickCorrectionId}:${input.pickCorrectionRevision}`,
+        requestHash: correctionHash(evidence), actor: correctionActor, action: "confirmed_pick_inventory_reconciled",
+        before: { pickedQuantity: lockedPickedQuantity }, after: evidence, occurredAt: new Date() });
+    }
     return { item: updatedItem as OrderItem, deductResult, idempotentReplay: false };
   }
 
