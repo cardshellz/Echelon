@@ -129,7 +129,7 @@ A `POST` inside one transaction:
 |---|---|---|
 | C1 | This policy and its admin module | none |
 | C2 | Cost schedule and detection | `detection` (where the worker is switched on) |
-| C3 | Price protection at acceptance | `priceProtection` |
+| C3 | Price protection at acceptance | `priceProtection` (the policy setting decides whether it applies) |
 | C4 | Vendor notices | `vendorNotices` |
 | C5 | Listing actions on the effective date | `listingActions` |
 
@@ -208,13 +208,46 @@ the worker is switched on (`resolveDropshipCostChangeEnforcement`), and the
 tab shows the last pass, so the page never claims a check that is not running.
 Nothing charges, tells or reprices from the schedule until C3 to C5.
 
-## Delivery plan for the remaining parts
+## Price protection at acceptance (part C3)
 
-**C3, price protection.**
-- Acceptance already reads the live cost inside its transaction. Protection
-  locks the vendor and variant schedule rows there, reconciles, and charges
-  `costInForce`.
-- The cost evidence records which schedule entry was charged.
+Order acceptance prices its lines inside its own transaction
+(`resolveAcceptanceLinesWithClient` in
+`infrastructure/dropship-order-acceptance.repository.ts`, on both the legacy
+and the canonical path). It now:
+
+1. reads the policy in force (`resolvePolicy`);
+2. takes the vendor's schedule lock (`lockVendorSchedule`, the lock detection
+   takes), then reads the live `.ops` costs as before;
+3. loads the vendor's schedule for the order's variants and reconciles it with
+   the live reading through the same planner detection uses
+   (`application/dropship-cost-schedule-reconciliation.ts`), writing every
+   entry and log row with `recorded_by = 'acceptance'`;
+4. refuses an unavailable or zero cost exactly as before, before anything is
+   written;
+5. charges each line the cost in force when the policy's `priceProtection` is
+   on, else the live cost (`decideChargedUnitCost` in
+   `domain/order-acceptance-cost.ts`). An announced increase is not charged
+   before its date; a decrease given notice stays at the old cost until its
+   date, by the policy's own choice.
+
+**Evidence.** Each line's provenance now carries the live cost, the schedule
+entry charged, the policy version and whether protection applied
+(`DropshipAcceptanceProductCostEvidence`); the pricing snapshot is version 3
+with the same fields per wholesale line, and the cost evidence hash includes
+the live cost and the entry id, so a protected debit is explained by both.
+
+**Failure modes (C3).**
+- The schedule tables are not there yet: the acceptance fails
+  `DROPSHIP_COST_SCHEDULE_TABLE_MISSING` with `retryable: true`, and the
+  processing pass retries after migration 0711 lands.
+- A schedule write is refused (guard or CHECK): the whole acceptance rolls
+  back with no wallet write, classified permanent (`retryable: false`).
+- Detection and an acceptance see the same change at once: the vendor lock
+  serializes them; the second sees the first's entries and writes nothing new.
+- No entry in force can be resolved for an available cost: refused as
+  `DROPSHIP_ORDER_COST_SCHEDULE_UNRESOLVED` (fatal), never charged a guess.
+
+## Delivery plan for the remaining parts
 
 **C4, vendor notices.**
 - New events in both `DROPSHIP_NOTIFICATION_EVENTS` and

@@ -4,16 +4,14 @@ import {
   MIN_DETECTION_INTERVAL_MINUTES,
   type DropshipCostChangePolicySettings,
 } from "../../../../shared/dropship/cost-change-policy";
-import {
-  entryInForce,
-  isRetailDrivenReading,
-  reconcileCostSchedule,
-  type CostReadingEvidence,
-  type CostScheduleEntry,
-  type CostScheduleEventType,
-  type CostScheduleOperation,
+import type {
+  CostReadingEvidence,
+  CostScheduleEntry,
+  CostScheduleEventType,
+  CostScheduleOperation,
 } from "../domain/cost-schedule";
 import { DropshipError } from "../domain/errors";
+import { costScheduleTimingFromPolicy, planCostScheduleReconciliation } from "./dropship-cost-schedule-reconciliation";
 import type { DropshipProductCost } from "./dropship-product-cost";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
 
@@ -95,6 +93,12 @@ export interface CostScheduleWriteInput {
 
 export type CostScheduleEventCounts = Record<CostScheduleEventType, number>;
 
+export interface CostScheduleWriteResult {
+  counts: CostScheduleEventCounts;
+  /** The id of the entry inserted for each variant that got one (a baseline or an added change). */
+  entryIdsByVariant: ReadonlyMap<number, number>;
+}
+
 export interface CostDetectionVendorCounts {
   variantsRead: number;
   unavailableReadings: number;
@@ -109,7 +113,7 @@ export interface CostScheduleVendorTransaction {
   loadEntries(productVariantIds: readonly number[]): Promise<ReadonlyMap<number, StoredCostScheduleEntry[]>>;
   /** Live costs through the shared cost reader, at most COST_READER_BATCH_SIZE at a time. */
   readLiveCosts(productVariantIds: readonly number[]): Promise<ReadonlyMap<number, DropshipProductCost>>;
-  writeReconciliation(input: CostScheduleWriteInput): Promise<CostScheduleEventCounts>;
+  writeReconciliation(input: CostScheduleWriteInput): Promise<CostScheduleWriteResult>;
   /** Moves the pass cursor past this vendor and adds its counts, in the same transaction as its writes. */
   advanceCursor(input: { vendorId: number; counts: CostDetectionVendorCounts; now: Date }): Promise<void>;
 }
@@ -302,11 +306,7 @@ export class DropshipCostDetectionService {
     workerId: string;
   }): Promise<CostDetectionVendorCounts & { events: CostScheduleEventCounts; sourceReadFailed: boolean }> {
     const { vendorId, policy } = input;
-    const timing = {
-      increaseNoticeDays: policy.settings.increaseNoticeDays,
-      decreaseTiming: policy.settings.decreaseTiming,
-      retailChangesGetNotice: policy.settings.retailChangesGetNotice,
-    };
+    const timing = costScheduleTimingFromPolicy(policy.settings);
     return this.deps.repository.withVendorSchedule(vendorId, async (transaction) => {
       // One reading time per vendor, taken inside the lock, so every entry
       // this transaction writes agrees on when the live costs were seen.
@@ -320,38 +320,18 @@ export class DropshipCostDetectionService {
       for (let offset = 0; offset < variantIds.length; offset += COST_READER_BATCH_SIZE) {
         const batch = variantIds.slice(offset, offset + COST_READER_BATCH_SIZE);
         const costs = await transaction.readLiveCosts(batch);
-        for (const productVariantId of batch) {
-          const cost = costs.get(productVariantId);
-          if (!cost || cost.status !== "available") {
-            const issue = cost?.issue ?? "missing";
-            unavailableByIssue.set(issue, (unavailableByIssue.get(issue) ?? 0) + 1);
-            if (issue === "source_read_failed") sourceReadFailed = true;
-            continue;
-          }
-          const { unitCostCents, evidence } = readingEvidence(cost, productVariantId);
-          if (unitCostCents <= 0) {
-            // A zero .ops cost is refused at acceptance (resolveAcceptanceUnitCost); the schedule never records it.
-            unavailableByIssue.set("zero_cost", (unavailableByIssue.get("zero_cost") ?? 0) + 1);
-            continue;
-          }
-          const entries = entriesByVariant.get(productVariantId) ?? [];
-          const inForce = entryInForce(entries, observedAt);
-          const retailDriven = inForce ? isRetailDrivenReading(inForce.evidence, evidence) : false;
-          const reconciliation = reconcileCostSchedule({
-            entries,
-            reading: { unitCostCents, observedAt, retailDriven },
-            timing,
-          });
-          if (reconciliation.operations.length > 0) {
-            reconciliations.push({ productVariantId, evidence, retailDriven, operations: reconciliation.operations });
-          }
+        const plan = planCostScheduleReconciliation({ productVariantIds: batch, entriesByVariant, costs, timing, observedAt });
+        reconciliations.push(...plan.writes);
+        for (const [issue, count] of plan.unavailableByIssue) {
+          unavailableByIssue.set(issue, (unavailableByIssue.get(issue) ?? 0) + count);
+          if (issue === "source_read_failed") sourceReadFailed = true;
         }
       }
 
       const events = reconciliations.length > 0
-        ? await transaction.writeReconciliation({
+        ? (await transaction.writeReconciliation({
           vendorId, observedAt, policyId: policy.policyId, recordedBy: "detection", variants: reconciliations,
-        })
+        })).counts
         : emptyEventCounts();
       const unavailableReadings = [...unavailableByIssue.values()].reduce((sum, count) => sum + count, 0);
       const changesRecorded = Object.values(events).reduce((sum, count) => sum + count, 0);
@@ -409,23 +389,6 @@ export function isPassDue(
   assertDetectionInterval(detectionIntervalMinutes);
   if (!state.passStartedAt) return true;
   return now.getTime() - state.passStartedAt.getTime() >= detectionIntervalMinutes * MILLISECONDS_PER_MINUTE;
-}
-
-function readingEvidence(cost: DropshipProductCost, productVariantId: number): { unitCostCents: number; evidence: CostReadingEvidence } {
-  if (cost.unitCostCents === null || cost.source === null || cost.planId === null) {
-    throw new DropshipError("DROPSHIP_COST_DETECTION_READING_INVALID", "An available cost reading lacked its cost, source or plan.",
-      { classification: "permanent", productVariantId });
-  }
-  return {
-    unitCostCents: cost.unitCostCents,
-    evidence: {
-      source: cost.source,
-      planId: cost.planId,
-      overrideId: cost.overrideId,
-      retailPriceCents: cost.retailPriceCents,
-      discountBps: cost.discountBps,
-    },
-  };
 }
 
 function emptyTickResult(outcome: DropshipCostDetectionTickOutcome, passNumber: number): DropshipCostDetectionTickResult {

@@ -109,7 +109,7 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
     // First reading: two baselines in one statement.
     const first = await repository.withVendorSchedule(1, async (transaction) => {
       expect(await transaction.loadEntries([1, 2])).toEqual(new Map());
-      const counts = await transaction.writeReconciliation({
+      const written = await transaction.writeReconciliation({
         vendorId: 1, observedAt: NOW, policyId: 1, recordedBy: "detection",
         variants: [
           { productVariantId: 1, evidence: planPercent, retailDriven: false, operations: [{ kind: "baseline", unitCostCents: 809, effectiveAt: NOW }] },
@@ -118,9 +118,10 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
         ],
       });
       await transaction.advanceCursor({ vendorId: 1, counts: { variantsRead: 2, unavailableReadings: 0, changesRecorded: 2 }, now: NOW });
-      return counts;
+      return written;
     });
-    expect(first).toEqual({ ...emptyEventCounts(), baseline: 2 });
+    expect(first.counts).toEqual({ ...emptyEventCounts(), baseline: 2 });
+    expect([...first.entryIdsByVariant.keys()]).toEqual([1, 2]);
     expect(await repository.readDetectionState()).toMatchObject({ cursorVendorId: 1, passVendorsProcessed: 1, passVariantsRead: 2, passChangesRecorded: 2 });
 
     const entriesAfterFirst = await repository.withVendorSchedule(1, (transaction) => transaction.loadEntries([1, 2]));
@@ -135,7 +136,7 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
         { kind: "add", direction: "increase", fromCents: 809, unitCostCents: 999, effectiveAt: IN_TWO_WEEKS },
       ] }],
     }));
-    expect(second).toEqual({ ...emptyEventCounts(), increase_announced: 1 });
+    expect(second.counts).toEqual({ ...emptyEventCounts(), increase_announced: 1 });
     const announced = (await repository.withVendorSchedule(1, (transaction) => transaction.loadEntries([1]))).get(1)!
       .find((entry) => entry.kind === "increase")!;
     expect(announced).toMatchObject({ fromCents: 809, unitCostCents: 999, effectiveAt: IN_TWO_WEEKS, observedAt: LATER, recordedBy: "acceptance" });
@@ -156,7 +157,7 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
         { kind: "reduce", entryId: announced.entryId, fromCents: 999, unitCostCents: 899, effectiveAt: IN_TWO_WEEKS },
       ] }],
     }));
-    expect(third).toEqual({ ...emptyEventCounts(), increase_reduced: 1 });
+    expect(third.counts).toEqual({ ...emptyEventCounts(), increase_reduced: 1 });
     expect((await repository.listPendingChanges({ now: LATER, limit: 10 }))[0]).toMatchObject({ unitCostCents: 899 });
 
     const fourth = await repository.withVendorSchedule(1, (transaction) => transaction.writeReconciliation({
@@ -165,7 +166,7 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
         { kind: "withdraw", entryId: announced.entryId, unitCostCents: 899, effectiveAt: IN_TWO_WEEKS },
       ] }],
     }));
-    expect(fourth).toEqual({ ...emptyEventCounts(), change_withdrawn: 1 });
+    expect(fourth.counts).toEqual({ ...emptyEventCounts(), change_withdrawn: 1 });
     expect(await repository.listPendingChanges({ now: LATER, limit: 10 })).toEqual([]);
     expect((await repository.withVendorSchedule(1, (transaction) => transaction.loadEntries([1]))).get(1)!.map((entry) => entry.kind)).toEqual(["baseline"]);
 

@@ -20,6 +20,7 @@ import {
   type CostScheduleRecorder,
   type CostScheduleVendorTransaction,
   type CostScheduleWriteInput,
+  type CostScheduleWriteResult,
   type DropshipCostChangeLogView,
   type DropshipCostDetectionState,
   type DropshipCostScheduleChangeView,
@@ -43,6 +44,12 @@ import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapt
 
 /** Advisory lock namespace shared with acceptance (C3): one writer per vendor schedule. */
 export const COST_SCHEDULE_VENDOR_LOCK_NAMESPACE = "dropship_cost_schedule";
+
+/** Takes the vendor's schedule lock for the rest of the caller's transaction. Detection and acceptance both take it before reading costs. */
+export async function lockVendorSchedule(client: Pick<PoolClient, "query">, vendorId: number): Promise<void> {
+  assertPositiveInteger(vendorId, "vendorId");
+  await client.query("SELECT pg_advisory_xact_lock(hashtext($1), $2::integer)", [COST_SCHEDULE_VENDOR_LOCK_NAMESPACE, vendorId]);
+}
 
 const STATE_ROW_ID = 1;
 
@@ -107,6 +114,16 @@ interface LogRow {
 
 export class PgDropshipCostScheduleRepository implements DropshipCostScheduleRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
+
+  /**
+   * The vendor's schedule inside a transaction the caller owns (order
+   * acceptance): the caller has taken the vendor's lock with
+   * lockVendorSchedule and commits or rolls back itself.
+   */
+  static transactionFor(client: Pick<PoolClient, "query">, vendorId: number): CostScheduleVendorTransaction {
+    assertPositiveInteger(vendorId, "vendorId");
+    return new VendorScheduleTransaction(client, vendorId);
+  }
 
   async readDetectionState(): Promise<DropshipCostDetectionState> {
     try {
@@ -186,7 +203,7 @@ export class PgDropshipCostScheduleRepository implements DropshipCostScheduleRep
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtext($1), $2::integer)", [COST_SCHEDULE_VENDOR_LOCK_NAMESPACE, vendorId]);
+      await lockVendorSchedule(client, vendorId);
       const result = await work(new VendorScheduleTransaction(client, vendorId));
       await client.query("COMMIT");
       return result;
@@ -245,7 +262,7 @@ export class PgDropshipCostScheduleRepository implements DropshipCostScheduleRep
 }
 
 class VendorScheduleTransaction implements CostScheduleVendorTransaction {
-  constructor(private readonly client: PoolClient, private readonly vendorId: number) {}
+  constructor(private readonly client: Pick<PoolClient, "query">, private readonly vendorId: number) {}
 
   async listTrackedVariantIds(): Promise<number[]> {
     const result = await this.client.query<{ product_variant_id: number }>(
@@ -283,7 +300,7 @@ class VendorScheduleTransaction implements CostScheduleVendorTransaction {
       .loadProductCosts({ vendorId: this.vendorId, productVariantIds });
   }
 
-  async writeReconciliation(input: CostScheduleWriteInput): Promise<CostScheduleEventCounts> {
+  async writeReconciliation(input: CostScheduleWriteInput): Promise<CostScheduleWriteResult> {
     if (input.vendorId !== this.vendorId) {
       throw new DropshipError("DROPSHIP_COST_SCHEDULE_VENDOR_MISMATCH", "A cost schedule write named a different vendor than its transaction.",
         { classification: "permanent", vendorId: input.vendorId, transactionVendorId: this.vendorId });
@@ -313,7 +330,7 @@ class VendorScheduleTransaction implements CostScheduleVendorTransaction {
       }
     }
     await this.insertLogRows(input, logRows);
-    return counts;
+    return { counts, entryIdsByVariant: newEntryIds };
   }
 
   async advanceCursor(input: { vendorId: number; counts: CostDetectionVendorCounts; now: Date }): Promise<void> {
