@@ -214,6 +214,12 @@ async function loadTargets(client: PoolClient): Promise<PublicationReadbackTarge
        END
      WHERE target.publication_authority = 'echelon'
        AND target.state IN ('preview', 'live')
+       AND (target.membership_mode = 'whole_product' OR EXISTS (
+         SELECT 1 FROM inventory.publication_membership_heads member
+         JOIN inventory.publication_membership_versions decision ON decision.id = member.active_version_id
+         WHERE member.publication_target_id = target.id
+           AND member.product_variant_id = head.product_variant_id AND decision.included = true
+       ))
      ORDER BY target.id, head.product_variant_id`,
   )).rows;
   return rows.map((row) => {

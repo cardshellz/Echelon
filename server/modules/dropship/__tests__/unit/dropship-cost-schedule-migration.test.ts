@@ -5,7 +5,8 @@ import { BASIS_POINTS_PER_WHOLE } from "../../../../../shared/dropship/cost-chan
 import { costScheduleEventTypes } from "../../domain/cost-schedule";
 
 const MIGRATION_FILE = "0711_dropship_cost_schedule.sql";
-const migrationSql = readFileSync(resolve(process.cwd(), "migrations", MIGRATION_FILE), "utf8");
+// Git may check SQL out as CRLF on Windows; SQL assertions are platform-neutral.
+const migrationSql = readFileSync(resolve(process.cwd(), "migrations", MIGRATION_FILE), "utf8").replace(/\r\n/g, "\n");
 
 const ENTRIES = "dropship.dropship_cost_schedule_entries";
 const LOG = "dropship.dropship_cost_change_log";

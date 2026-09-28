@@ -75,7 +75,10 @@ export function buildInventoryCutoverManifest(
   return inventoryCutoverManifestSchema.parse({
     contractVersion: "inventory_cutover_selection_manifest_v1",
     productIds: dryRun.products.map((product) => product.productId).sort((left, right) => left - right),
-    publicationTargetIds: [...new Set(dryRun.products.flatMap((product) => product.proposedPublications.map((row) => row.publicationTargetId)))].sort((left, right) => left - right),
+    publicationTargetIds: [...new Set(dryRun.products.flatMap((product) => [
+      ...product.proposedPublications.map(row => row.publicationTargetId),
+      ...(product.publicationTargetSelections ?? []).map(selection => selection.publicationTargetId),
+    ]))].sort((left, right) => left - right),
     selections: [...selections.values()].sort((left, right) => {
       const leftKey = `${left.kind}:${left.key}`;
       const rightKey = `${right.kind}:${right.key}`;

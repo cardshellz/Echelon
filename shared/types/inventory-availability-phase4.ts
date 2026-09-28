@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { inventoryPublicationTargetSelectionSchema } from "./inventory-publication-scope";
 
 import { inventoryAvailabilityBackfillQueueStateSchema } from "./inventory-availability-backfill";
 import {
@@ -103,6 +104,9 @@ export const currentPublicationEvidenceSchema = z.object({
 }).strict();
 
 export const activationDryRunProductSchema = z.object({
+  // Optional only for reading historical sealed audits. New dry runs record every
+  // target, including explicitly empty destinations with no publication rows.
+  publicationTargetSelections: z.array(inventoryPublicationTargetSelectionSchema).optional(),
   productId: positiveInteger,
   queueState: inventoryAvailabilityBackfillQueueStateSchema,
   status: z.enum(["ready", "blocked"]),
