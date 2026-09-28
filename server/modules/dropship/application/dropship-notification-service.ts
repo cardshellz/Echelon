@@ -25,6 +25,12 @@ export interface DropshipLaunchNotificationPreferenceDefinition {
 
 export const DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES: DropshipLaunchNotificationPreferenceDefinition[] = [
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.AUTO_RELOAD_FAILED, critical: true },
+  // Cost change notices are not critical here: the staff policy chooses their
+  // channels (a critical event is forced onto both), and the policy alone
+  // decides whether they go at all.
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.COST_CHANGE_ANNOUNCED, critical: false },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.COST_CHANGE_APPLIED, critical: false },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.COST_CHANGE_UPDATED, critical: false },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.ENTITLEMENT_BLOCKED, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.LISTING_PUSH_FAILED, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.LISTING_TIER_GRACE_NOTICE, critical: true },

@@ -79,7 +79,7 @@ export interface DropshipCostChangeEnforcement {
 export const DROPSHIP_COST_CHANGE_ENFORCEMENT: Readonly<DropshipCostChangeEnforcement> = Object.freeze({
   detection: true,
   priceProtection: true,
-  vendorNotices: false,
+  vendorNotices: true,
   listingActions: false,
 });
 

@@ -27,6 +27,7 @@ import {
   dropshipCostChangeLogPageUrl,
   formatDropshipCostChangeAmounts,
   formatDropshipCostChangeEvent,
+  formatDropshipCostChangeNoticeDecision,
   formatDropshipCostChangeVariant,
   formatDropshipCostChangeVendor,
   formatDropshipCostScheduleRecorder,
@@ -217,6 +218,7 @@ function ChangeLogRow({ row }: { row: DropshipCostChangeLogRowView }) {
       <p className="text-xs text-muted-foreground">
         Takes effect {formatDateTime(row.effectiveAt)} · Found {formatDateTime(row.observedAt)} {formatDropshipCostScheduleRecorder(row.recordedBy)}
         {row.policyId !== null ? ` · Policy version id ${row.policyId}` : " · Default policy"}
+        {` · ${formatDropshipCostChangeNoticeDecision(row.noticeDecision)}`}
       </p>
     </li>
   );

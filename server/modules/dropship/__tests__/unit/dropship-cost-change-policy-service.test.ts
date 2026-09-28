@@ -81,9 +81,9 @@ describe("DropshipCostChangePolicyService", () => {
   describe("resolveDropshipCostChangeEnforcement", () => {
     it("calls detection live only where its worker is switched on; the later parts stay off", () => {
       expect(resolveDropshipCostChangeEnforcement({ detectionWorkerEnabled: true }))
-        .toEqual({ detection: true, priceProtection: true, vendorNotices: false, listingActions: false });
+        .toEqual({ detection: true, priceProtection: true, vendorNotices: true, listingActions: false });
       expect(resolveDropshipCostChangeEnforcement({ detectionWorkerEnabled: false }))
-        .toEqual({ detection: false, priceProtection: true, vendorNotices: false, listingActions: false });
+        .toEqual({ detection: false, priceProtection: true, vendorNotices: true, listingActions: false });
     });
   });
 
@@ -147,7 +147,7 @@ describe("DropshipCostChangePolicyService", () => {
         settingsSource: "policy",
         defaults: { ...DEFAULT_DROPSHIP_COST_CHANGE_POLICY },
         versions: [repository.activePolicy, retired],
-        enforcement: { detection: true, priceProtection: true, vendorNotices: false, listingActions: false },
+        enforcement: { detection: true, priceProtection: true, vendorNotices: true, listingActions: false },
         generatedAt: now,
       });
       expect(repository.historyLimits).toEqual([COST_CHANGE_POLICY_HISTORY_LIMIT]);

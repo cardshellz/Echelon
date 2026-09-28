@@ -4,6 +4,7 @@ import { config } from "dotenv";
 import pg, { type Pool, type PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PgDropshipCostScheduleRepository } from "../../infrastructure/dropship-cost-schedule.repository";
+import { PgDropshipCostChangeNoticeRepository } from "../../infrastructure/dropship-cost-change-notice.repository";
 import { emptyEventCounts, type CostScheduleVendorTransaction } from "../../application/dropship-cost-detection-service";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
@@ -26,6 +27,7 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
   const schema = `dropship_cost_schedule_${process.pid}`;
   let pool: pg.Pool;
   let repository: PgDropshipCostScheduleRepository;
+  let notices: PgDropshipCostChangeNoticeRepository;
 
   function qualify(sql: string): string {
     return sql.replace(/\b(dropship|catalog)\.([a-z_]+)/g, (_table, _namespace, name) => `"${schema}"."${name}"`);
@@ -72,10 +74,11 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
         (1, 1, 1, 'active'), (1, 1, 2, 'preview_ready'), (1, 2, 1, 'queued'), (1, 1, 3, 'ended'), (1, 1, 3, 'not_listed'),
         (2, 3, 1, 'paused'), (3, 4, 1, 'active');
     `));
-    for (const file of ["0710_dropship_cost_change_policy.sql", "0711_dropship_cost_schedule.sql"]) {
+    for (const file of ["0710_dropship_cost_change_policy.sql", "0711_dropship_cost_schedule.sql", "0712_dropship_cost_change_notices.sql"]) {
       await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations", file), "utf8")));
     }
     repository = new PgDropshipCostScheduleRepository(qualifiedPool());
+    notices = new PgDropshipCostChangeNoticeRepository(qualifiedPool());
   });
 
   afterAll(async () => {
@@ -83,8 +86,10 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
     await pool?.end();
   });
 
-  it("applies both migrations twice without error, and seeds one state row", async () => {
-    await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations", "0711_dropship_cost_schedule.sql"), "utf8")));
+  it("applies the migrations twice without error, and seeds one state row", async () => {
+    for (const file of ["0711_dropship_cost_schedule.sql", "0712_dropship_cost_change_notices.sql"]) {
+      await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations", file), "utf8")));
+    }
     const state = await repository.readDetectionState();
     expect(state).toEqual({
       passNumber: 0, passStartedAt: null, passCompletedAt: null, cursorVendorId: null, policyId: null,
@@ -254,5 +259,59 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
       vendorId: 1, observedAt: LATER, policyId: 1, recordedBy: "detection",
       variants: [{ productVariantId: 404, evidence: planPercent, retailDriven: false, operations: [{ kind: "baseline", unitCostCents: 809, effectiveAt: LATER }] }],
     }))).rejects.toMatchObject({ code: "DROPSHIP_COST_SCHEDULE_WRITE_INVALID", context: { sqlState: "23503" } });
+  });
+
+  it("walks undecided readings, records one decision per row exactly once, and serves the vendor's view", async () => {
+    // Everything recorded above is still undecided: the earliest reading comes first.
+    const groups = await notices.listUnnoticedGroups({ limit: 10 });
+    expect(groups.map((group) => [group.vendorId, group.recordedBy, group.rowCount])).toEqual([[1, "detection", 2], [1, "acceptance", 1], [1, "detection", 2]]);
+    const first = groups[0]!;
+    const rows = await notices.loadGroupRows(first);
+    expect(rows.map((row) => [row.eventType, row.productVariantId, row.variantSku, row.productName])).toEqual([
+      ["baseline", 1, "ARM-ENV-SGL-P50", "Armor Envelope"],
+      ["baseline", 2, null, "Armor Envelope"],
+    ]);
+    expect(await notices.listSentEntryIds(rows.map((row) => row.entryId))).toEqual(new Set());
+
+    const announced = (await notices.loadGroupRows(groups[1]!))[0]!;
+    expect(announced.eventType).toBe("increase_announced");
+    const decidedAt = new Date("2026-09-28T18:00:00.000Z");
+    const written = await notices.recordDecisions([
+      ...rows.map((row) => ({
+        logId: row.logId, vendorId: row.vendorId, productVariantId: row.productVariantId, entryId: row.entryId, eventType: row.eventType,
+        decision: "skipped_baseline" as const, noticeKind: null, noticeEventType: null, idempotencyKey: null, policyId: 1, decidedAt,
+      })),
+      {
+        logId: announced.logId, vendorId: 1, productVariantId: announced.productVariantId, entryId: announced.entryId, eventType: announced.eventType,
+        decision: "sent" as const, noticeKind: "announced" as const, noticeEventType: "dropship_cost_change_announced",
+        idempotencyKey: "dropship-cost-change:1:announced:acceptance:x", policyId: 1, decidedAt,
+      },
+    ]);
+    expect(written).toBe(3);
+    // A replay writes nothing new and does not fail.
+    expect(await notices.recordDecisions([{
+      logId: announced.logId, vendorId: 1, productVariantId: announced.productVariantId, entryId: announced.entryId, eventType: announced.eventType,
+      decision: "skipped_channels_off", noticeKind: null, noticeEventType: null, idempotencyKey: null, policyId: 1, decidedAt,
+    }])).toBe(0);
+    expect(await notices.listSentEntryIds([announced.entryId, rows[0]!.entryId])).toEqual(new Set([announced.entryId]));
+    expect((await notices.listUnnoticedGroups({ limit: 10 })).map((group) => [group.recordedBy, group.rowCount])).toEqual([["detection", 2]]);
+
+    // The engine refuses a sent decision without its key, and any edit or delete.
+    const table = qualify("dropship.dropship_cost_change_notices");
+    await expect(pool.query(`INSERT INTO ${table} (log_id, vendor_id, product_variant_id, entry_id, event_type, decision, notice_kind, notice_event_type, idempotency_key, decided_at)
+      VALUES ($1, 1, 1, $2, 'increase_announced', 'sent', 'announced', 'dropship_cost_change_announced', NULL, now())`, [rows[0]!.logId + 1000, announced.entryId]))
+      .rejects.toMatchObject({ code: "23514" });
+    await expect(pool.query(`UPDATE ${table} SET decision = 'sent' WHERE vendor_id = 1`)).rejects.toThrow(/append-only/);
+    await expect(pool.query(`DELETE FROM ${table} WHERE vendor_id = 1`)).rejects.toThrow(/append-only/);
+
+    // The vendor's view: nothing announced any more (withdrawn), and the recent log with each row's decision.
+    expect(await notices.listVendorAnnouncedChanges({ vendorId: 1, now: LATER, limit: 10 })).toEqual([]);
+    const recent = await notices.listVendorRecentChanges({ vendorId: 1, since: new Date("2026-09-01T00:00:00.000Z"), limit: 10 });
+    expect(recent.map((row) => [row.eventType, row.noticeDecision])).toEqual([
+      ["change_withdrawn", null],
+      ["increase_reduced", null],
+      ["increase_announced", "sent"],
+    ]);
+    expect(recent[2]).toMatchObject({ variantSku: "ARM-ENV-SGL-P50", productName: "Armor Envelope", fromCents: 809, toCents: 999 });
   });
 });

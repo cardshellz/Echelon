@@ -23,6 +23,7 @@ export const BROWSER_SUITES = {
     // These modules are injected by mocked HTML, not imported by the specs.
     roots: [
       "dropship-pricing", "dropship-content", "dropship-policy", "dropship-catalog", "dropship-cost-change-policy",
+      "dropship-cost-changes",
       "dropship-shipping-estimate", "dropship-wallet", "dropship-orders", "dropship-onboarding",
       "shared-shipping-configuration", "bounded-page-loading",
     ].map((harness) => `test/browser/fixtures/${harness}-harness.tsx`),

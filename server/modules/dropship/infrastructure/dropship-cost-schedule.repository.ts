@@ -9,6 +9,7 @@ import {
   type CostScheduleOperation,
 } from "../domain/cost-schedule";
 import { DropshipError } from "../domain/errors";
+import { costChangeNoticeDecisions, type CostChangeNoticeDecision } from "../domain/cost-change-notice";
 import type { DropshipProductCost } from "../application/dropship-product-cost";
 import {
   COST_TRACKED_LISTING_STATUSES,
@@ -109,6 +110,7 @@ interface LogRow {
   policy_id: number | null;
   cost_source: string;
   recorded_by: string;
+  notice_decision: string | null;
   created_at: Date;
 }
 
@@ -244,11 +246,13 @@ export class PgDropshipCostScheduleRepository implements DropshipCostScheduleRep
       const result = await this.dbPool.query<LogRow>(
         `SELECT l.id, l.entry_id, l.vendor_id, v.business_name, l.product_variant_id, pv.sku AS variant_sku,
                 pv.name AS variant_name, p.name AS product_name, l.event_type, l.from_cents, l.to_cents, l.effective_at,
-                l.retail_driven, l.observed_at, l.policy_id, l.cost_source, l.recorded_by, l.created_at
+                l.retail_driven, l.observed_at, l.policy_id, l.cost_source, l.recorded_by, l.created_at,
+                n.decision AS notice_decision
          FROM dropship.dropship_cost_change_log l
          JOIN dropship.dropship_vendors v ON v.id = l.vendor_id
          JOIN catalog.product_variants pv ON pv.id = l.product_variant_id
          JOIN catalog.products p ON p.id = pv.product_id
+         LEFT JOIN dropship.dropship_cost_change_notices n ON n.log_id = l.id
          WHERE ($1::bigint IS NULL OR l.id < $1)
          ORDER BY l.id DESC
          LIMIT $2`,
@@ -596,6 +600,7 @@ function mapLogRow(row: LogRow): DropshipCostChangeLogView {
     policyId: row.policy_id,
     costSource: row.cost_source,
     recordedBy: toRecorder(row.recorded_by),
+    noticeDecision: row.notice_decision === null || row.notice_decision === undefined ? null : toNoticeDecision(row.notice_decision),
     createdAt: row.created_at,
   };
 }
@@ -603,6 +608,11 @@ function mapLogRow(row: LogRow): DropshipCostChangeLogView {
 function toKind(value: string): "baseline" | "increase" | "decrease" {
   if (value === "baseline" || value === "increase" || value === "decrease") return value;
   throw invalidStoredValue("kind", value);
+}
+
+function toNoticeDecision(value: string): CostChangeNoticeDecision {
+  if ((costChangeNoticeDecisions as readonly string[]).includes(value)) return value as CostChangeNoticeDecision;
+  throw invalidStoredValue("notice_decision", value);
 }
 
 function toRecorder(value: string): CostScheduleRecorder {

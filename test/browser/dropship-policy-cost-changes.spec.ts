@@ -45,6 +45,7 @@ interface LogRow extends Omit<PendingChange, "kind" | "fromCents" | "unitCostCen
   fromCents: number | null;
   toCents: number | null;
   retailDriven: boolean;
+  noticeDecision: "sent" | "skipped_baseline" | "skipped_decrease" | "skipped_below_minimum" | "skipped_channels_off" | "skipped_unannounced" | null;
   createdAt: string;
 }
 
@@ -358,6 +359,7 @@ test("shows what detection found: the last pass, the announced changes, and the 
     fromCents: index === 52 ? 809 : index === 51 ? 1099 : null,
     toCents: index === 52 ? 999 : index === 51 ? null : 809,
     retailDriven: index === 51,
+    noticeDecision: index === 52 ? "sent" : index === 51 ? "skipped_unannounced" : "skipped_baseline",
     createdAt: "2026-09-28T08:05:00.000Z",
   }));
   const state = await mount(page, {
@@ -398,6 +400,8 @@ test("shows what detection found: the last pass, the announced changes, and the 
   await expect(page.getByTestId("cost-change-log-52")).toContainText("Announced change withdrawn");
   await expect(page.getByTestId("cost-change-log-52")).toContainText("$10.99 withdrawn");
   await expect(page.getByTestId("cost-change-log-52")).toContainText("Retail price move");
+  await expect(page.getByTestId("cost-change-log-53")).toContainText("Vendor notified");
+  await expect(page.getByTestId("cost-change-log-52")).toContainText("No notice: original change not announced");
   await page.screenshot({ path: testInfo.outputPath(`cost-changes-activity-${testInfo.project.name}.png`), fullPage: true });
   await page.getByTestId("cost-change-log-older").click();
   await expect(log.locator("li")).toHaveCount(53);
