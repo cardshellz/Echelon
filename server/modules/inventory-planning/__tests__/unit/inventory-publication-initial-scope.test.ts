@@ -9,13 +9,20 @@ function facts(): InitialPublicationScopeFacts {
     target: { id: 1, revision: "2", state: "preview", mode: "whole_product", authority: "echelon",
       destinationKind: "channel_connection", channelId: 36, channelConnectionId: 4, dropshipStoreConnectionId: null,
       provider: "shopify", providerScopeType: "location", externalScopeId: "location-one" },
-    existingMemberCount: 0, ownerIssues: [], ownerEvidenceHashes: [],
+    existingMemberCount: 0, ownerIssues: [], ownerEvidenceHashes: [], mappingOwners: [],
     listings: [{ sourceKey: "feed:1", productVariantId: 101, active: true, uncertain: false, quarantined: false,
       externalInventoryItemId: "item-one", externalSku: "P5" }],
     variants: [{ id: 101, productId: 20, productActive: true, variantActive: true, requiresShipping: true,
       inventoryTrackingDefault: true, inventoryTrackingOverride: null, salesEligibility: "sellable",
+      mappingHistoryCount: 1, mappingHeadExists: true,
       mapping: { id: 1, version: 1, definitionHash: hash, externalInventoryItemId: "item-one", externalSku: "P5" } }],
   };
+}
+function removeMapping(source: InitialPublicationScopeFacts): void {
+  const variant = source.variants[0]!;
+  variant.mapping = null;
+  variant.mappingHistoryCount = 0;
+  variant.mappingHeadExists = false;
 }
 describe("initial publication scope policy", () => {
   it("seals an explicitly reviewed bundle exclusion without commissioning or changing its inventory", () => {
@@ -72,13 +79,10 @@ describe("initial publication scope policy", () => {
     ["unimplemented provider census", value => { value.target.provider = "walmart"; }, "INITIAL_SCOPE_PROVIDER_UNSUPPORTED"],
     ["changed revision", value => { value.target.revision = "3"; }, "INITIAL_SCOPE_TARGET_CHANGED"],
     ["changed target", value => { value.target.id = 2; }, "INITIAL_SCOPE_TARGET_CHANGED"],
-    ["quarantine", value => { value.listings[0]!.quarantined = true; }, "INITIAL_SCOPE_LISTING_QUARANTINED"],
     ["ambiguous outcome", value => { value.listings[0]!.uncertain = true; }, "INITIAL_SCOPE_LISTING_UNCERTAIN"],
     ["missing variant", value => { value.variants = []; }, "INITIAL_SCOPE_CATALOG_IDENTITY_MISSING"],
-    ["inactive variant", value => { value.variants[0]!.variantActive = false; }, "INITIAL_SCOPE_LISTED_SKU_INELIGIBLE"],
-    ["inactive product", value => { value.variants[0]!.productActive = false; }, "INITIAL_SCOPE_LISTED_SKU_INELIGIBLE"],
-    ["internal-only SKU", value => { value.variants[0]!.salesEligibility = "internal_only"; }, "INITIAL_SCOPE_LISTED_SKU_INELIGIBLE"],
-    ["missing mapping", value => { value.variants[0]!.mapping = null; }, "INITIAL_SCOPE_MAPPING_UNVERIFIED"],
+    ["unselected mapping history", value => { value.variants[0]!.mapping = null; value.variants[0]!.mappingHistoryCount = 1; }, "INITIAL_SCOPE_MAPPING_UNVERIFIED"],
+    ["existing empty mapping head", value => { value.variants[0]!.mapping = null; value.variants[0]!.mappingHeadExists = true; }, "INITIAL_SCOPE_MAPPING_UNVERIFIED"],
     ["different item", value => { value.listings[0]!.externalInventoryItemId = "wrong"; }, "INITIAL_SCOPE_MAPPING_UNVERIFIED"],
     ["different SKU", value => { value.listings[0]!.externalSku = "wrong"; }, "INITIAL_SCOPE_MAPPING_UNVERIFIED"],
     ["duplicate evidence", value => { value.listings.push({ ...value.listings[0]! }); }, "INITIAL_SCOPE_DUPLICATE_EVIDENCE"],
@@ -99,6 +103,70 @@ describe("initial publication scope policy", () => {
     const changed = reviewInitialPublicationScope(input, source);
     expect(changed.ready).toBe(false); expect(changed.reviewHash).not.toBe(review.reviewHash);
   });
+  it("imports an existing listing identity automatically instead of requiring a second mapping", () => {
+    const source = facts(); removeMapping(source);
+    const before = structuredClone(source);
+    expect(reviewInitialPublicationScope(input, source)).toMatchObject({ ready: true, includedVariantIds: [101],
+      mappingImports: [{ productVariantId: 101, externalInventoryItemId: "item-one", externalSku: "P5", sourceKeys: ["feed:1"] }] });
+    expect(source).toEqual(before);
+  });
+  it.each([
+    ["inactive product", (source: InitialPublicationScopeFacts) => { source.variants[0]!.productActive = false; }, "legacy_inactive_catalog"],
+    ["inactive variant", (source: InitialPublicationScopeFacts) => { source.variants[0]!.variantActive = false; }, "legacy_inactive_catalog"],
+    ["internal-only", (source: InitialPublicationScopeFacts) => { source.variants[0]!.salesEligibility = "internal_only"; }, "legacy_inactive_catalog"],
+    ["quarantined feed", (source: InitialPublicationScopeFacts) => { source.listings[0]!.quarantined = true; }, "legacy_quarantined"],
+    ["unaddressable Shopify feed", (source: InitialPublicationScopeFacts) => { source.listings[0]!.externalInventoryItemId = null; }, "legacy_missing_inventory_identity"],
+  ] as const)("preserves the existing %s skip as an explicit reviewed exclusion", (_name, change, reason) => {
+    const source = facts(); change(source);
+    expect(reviewInitialPublicationScope(input, source)).toMatchObject({ ready: true, includedVariantIds: [], mappingImports: [],
+      excludedVariants: [{ productVariantId: 101, reason }] });
+  });
+  it("does not turn an uncertain provider operation into an automatic exclusion", () => {
+    const source = facts(); source.listings[0]!.uncertain = true; source.listings[0]!.quarantined = true;
+    expect(reviewInitialPublicationScope(input, source).blockers.map(row => row.code)).toContain("INITIAL_SCOPE_LISTING_UNCERTAIN");
+  });
+  it("does not ignore a quarantined feed that contradicts a current registered identity", () => {
+    const source = facts(); source.listings.push({ ...source.listings[0]!, sourceKey: "registered:1" }); source.listings[0]!.quarantined = true;
+    expect(reviewInitialPublicationScope(input, source).blockers.map(row => row.code)).toContain("INITIAL_SCOPE_LISTING_QUARANTINED");
+  });
+  it("blocks conflicting source identities even when no new-system mapping exists", () => {
+    const source = facts(); removeMapping(source);
+    source.listings.push({ ...source.listings[0]!, sourceKey: "registered:1", externalInventoryItemId: "different-item" });
+    expect(reviewInitialPublicationScope(input, source)).toMatchObject({ ready: false, mappingImports: [] });
+  });
+  it.each([false, true])("rejects a provider identity already owned by another SKU (listed=%s)", listed => {
+    const source = facts(); removeMapping(source);
+    if (listed) {
+      source.variants.push({ ...source.variants[0]!, id: 102 });
+      source.listings.push({ ...source.listings[0]!, sourceKey: "feed:2", productVariantId: 102 });
+    } else source.mappingOwners = [{ productVariantId: 999, externalInventoryItemId: "item-one" }];
+    expect(reviewInitialPublicationScope(input, source).blockers.map(row => row.code)).toContain("INITIAL_SCOPE_MAPPING_IDENTITY_CONFLICT");
+  });
+  it("seals automatic imports and exclusions deterministically across source order", () => {
+    const source = facts(); removeMapping(source);
+    source.listings.push({ ...source.listings[0]!, sourceKey: "registered:1" });
+    const first = reviewInitialPublicationScope(input, source);
+    expect(reviewInitialPublicationScope(input, { ...source, listings: [...source.listings].reverse() })).toEqual(first);
+    source.listings[1]!.externalSku = "changed";
+    expect(reviewInitialPublicationScope(input, source).reviewHash).not.toBe(first.reviewHash);
+  });
+  it("does not require a duplicate optional SKU when the exact inventory identity already agrees", () => {
+    const source = facts(); source.variants[0]!.mapping!.externalSku = null;
+    expect(reviewInitialPublicationScope(input, source)).toMatchObject({ ready:true,mappingImports:[] });
+    removeMapping(source);
+    source.listings.push({ ...source.listings[0]!,sourceKey:"registered:1",externalSku:null });
+    expect(reviewInitialPublicationScope(input, source)).toMatchObject({ ready:true,mappingImports:[{ externalSku:"P5" }] });
+  });
+  it("rejects missing ownership/history evidence instead of assuming a mapping can be imported", () => {
+    const source = facts(); removeMapping(source);
+    for (const key of ["mappingHistoryCount", "mappingHeadExists"] as const) {
+      const incomplete = structuredClone(source);
+      Reflect.deleteProperty(incomplete.variants[0]!, key);
+      expect(() => reviewInitialPublicationScope(input, incomplete)).toThrow();
+    }
+    Reflect.deleteProperty(source, "mappingOwners");
+    expect(() => reviewInitialPublicationScope(input, source)).toThrow();
+  });
 });
 
 describe("initial publication scope service boundaries", () => {
@@ -112,7 +180,7 @@ describe("initial publication scope service boundaries", () => {
     expect(await new InventoryPublicationInitialScopeService(store, { now: () => now }).prepare(command, "operator")).toEqual(receipt);
     expect(store.prepare).toHaveBeenCalledWith(command, "operator", initialScopeCommandHash(command, "operator"), now);
   });
-  it.each([{ publicationTargetId: 0 }, { includedVariantIds: [] }, { expectedReviewHash: "invalid" }, { actor: "spoofed" }, { idempotencyKey: "" }])(
+  it.each([{ publicationTargetId: 0 }, { includedVariantIds: [] }, { mappingImports: [] }, { expectedReviewHash: "invalid" }, { actor: "spoofed" }, { idempotencyKey: "" }])(
     "rejects invalid or unreviewed caller overrides %j", async patch => {
       const store = { review: vi.fn(), prepare: vi.fn() };
       await expect(new InventoryPublicationInitialScopeService(store).prepare({ ...command, ...patch }, "operator")).rejects.toThrow();
@@ -121,6 +189,7 @@ describe("initial publication scope service boundaries", () => {
   );
   it.each([
     [{ productVariantId: 101, reason: "api_failed" }],
+    [{ productVariantId: 101, reason: "legacy_quarantined" }],
     [{ productVariantId: 101, reason: "unsupported_bundle" }, { productVariantId: 101, reason: "unsupported_bundle" }],
   ].map(excludedVariants => ({ excludedVariants })))("rejects an invalid exclusion $excludedVariants", async ({ excludedVariants }) => {
     const store = { review: vi.fn(), prepare: vi.fn() };
