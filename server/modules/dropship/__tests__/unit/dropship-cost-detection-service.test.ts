@@ -113,9 +113,11 @@ class FakeRepository implements DropshipCostScheduleRepository {
       async writeReconciliation(input) {
         if (repository.failWriteFor === vendorId) throw new Error("write failed");
         repository.writes.push(input);
+        const entryIdsByVariant = new Map<number, number>();
         const counts: CostScheduleEventCounts = emptyEventCounts();
         for (const variant of input.variants) {
           for (const operation of variant.operations) {
+            if (operation.kind === "baseline" || operation.kind === "add") entryIdsByVariant.set(variant.productVariantId, 1000 + variant.productVariantId);
             if (operation.kind === "baseline") counts.baseline += 1;
             else if (operation.kind === "withdraw") counts.change_withdrawn += 1;
             else if (operation.kind === "reduce") counts.increase_reduced += 1;
@@ -123,7 +125,7 @@ class FakeRepository implements DropshipCostScheduleRepository {
             else counts[`${operation.direction}_announced`] += 1;
           }
         }
-        return counts;
+        return { counts, entryIdsByVariant };
       },
       async advanceCursor(input) {
         repository.cursorMoves.push(input);

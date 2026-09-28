@@ -71,10 +71,14 @@ export interface DropshipCostChangeEnforcement {
   listingActions: boolean;
 }
 
-/** The parts whose code has shipped. Detection shipped in C2 (migration 0711, dropship-cost-detection-service.ts). */
+/**
+ * The parts whose code has shipped. Detection shipped in C2 (migration 0711,
+ * dropship-cost-detection-service.ts); price protection in C3 (order
+ * acceptance reconciles the schedule and charges the cost in force).
+ */
 export const DROPSHIP_COST_CHANGE_ENFORCEMENT: Readonly<DropshipCostChangeEnforcement> = Object.freeze({
   detection: true,
-  priceProtection: false,
+  priceProtection: true,
   vendorNotices: false,
   listingActions: false,
 });

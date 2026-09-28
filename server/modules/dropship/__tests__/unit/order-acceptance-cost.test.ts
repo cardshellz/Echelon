@@ -5,6 +5,7 @@ import {
   ACCEPTANCE_COST_AUTHORITY,
   buildAcceptanceCostEvidenceHash,
   resolveAcceptanceUnitCost,
+  decideChargedUnitCost,
 } from "../../domain/order-acceptance-cost";
 
 function available(overrides: Partial<DropshipProductCost> = {}): DropshipProductCost {
@@ -24,7 +25,11 @@ describe("resolveAcceptanceUnitCost", () => {
     expect(resolveAcceptanceUnitCost(available())).toEqual({
       ok: true,
       unitCostCents: 809,
-      evidence: { source: "variant_fixed_price", planId: "plan-ops", overrideId: "override-1" },
+      // The schedule fields are settled once the line is charged; until then the live cost is the only cost.
+      evidence: {
+        source: "variant_fixed_price", planId: "plan-ops", overrideId: "override-1",
+        liveUnitCostCents: 809, scheduleEntryId: null, costPolicyId: null, priceProtected: false,
+      },
     });
     expect(resolveAcceptanceUnitCost(available({ source: "retail", overrideId: null, unitCostCents: 899 })))
       .toMatchObject({ ok: true, unitCostCents: 899, evidence: { source: "retail", overrideId: null } });
@@ -85,7 +90,10 @@ describe("buildAcceptanceCostEvidenceHash", () => {
     quantity: 2,
     catalogRetailPriceCents: 899,
     wholesaleUnitCostCents: unitCostCents,
-    productCostEvidence: { source: "variant_fixed_price" as const, planId: "plan-ops", overrideId: "override-1" },
+    productCostEvidence: {
+      source: "variant_fixed_price" as const, planId: "plan-ops", overrideId: "override-1",
+      liveUnitCostCents: 809, scheduleEntryId: 11, costPolicyId: 1, priceProtected: true,
+    },
   });
 
   it("is deterministic, order independent, and names the authority", () => {
@@ -102,7 +110,43 @@ describe("buildAcceptanceCostEvidenceHash", () => {
     expect(buildAcceptanceCostEvidenceHash({ vendorId: 11, lines: [line(101, 809)] })).not.toBe(base);
     expect(buildAcceptanceCostEvidenceHash({
       vendorId: 10,
-      lines: [{ ...line(101, 809), productCostEvidence: { source: "plan_percent", planId: "plan-ops", overrideId: null } }],
+      lines: [{ ...line(101, 809), productCostEvidence: {
+        source: "plan_percent", planId: "plan-ops", overrideId: null,
+        liveUnitCostCents: 809, scheduleEntryId: 11, costPolicyId: 1, priceProtected: true,
+      } }],
     })).not.toBe(base);
+    // A protected debit is explained by the live cost and the entry charged: each changes the hash alone.
+    const evidence = line(101, 809).productCostEvidence;
+    expect(buildAcceptanceCostEvidenceHash({
+      vendorId: 10, lines: [{ ...line(101, 809), productCostEvidence: { ...evidence, liveUnitCostCents: 999 } }],
+    })).not.toBe(base);
+    expect(buildAcceptanceCostEvidenceHash({
+      vendorId: 10, lines: [{ ...line(101, 809), productCostEvidence: { ...evidence, scheduleEntryId: 12 } }],
+    })).not.toBe(base);
+    // The policy id and the protection flag are context, not cost inputs.
+    expect(buildAcceptanceCostEvidenceHash({
+      vendorId: 10, lines: [{ ...line(101, 809), productCostEvidence: { ...evidence, costPolicyId: 2, priceProtected: false } }],
+    })).toBe(base);
+  });
+});
+
+describe("decideChargedUnitCost", () => {
+  it("charges the cost in force under price protection and the live cost without it", () => {
+    expect(decideChargedUnitCost({ liveUnitCostCents: 999, inForceUnitCostCents: 809, priceProtection: true }))
+      .toEqual({ unitCostCents: 809, priceProtected: true });
+    expect(decideChargedUnitCost({ liveUnitCostCents: 999, inForceUnitCostCents: 809, priceProtection: false }))
+      .toEqual({ unitCostCents: 999, priceProtected: false });
+    // A decrease given notice keeps the higher cost in force until its date.
+    expect(decideChargedUnitCost({ liveUnitCostCents: 699, inForceUnitCostCents: 809, priceProtection: true }))
+      .toEqual({ unitCostCents: 809, priceProtected: true });
+    expect(decideChargedUnitCost({ liveUnitCostCents: 809, inForceUnitCostCents: 809, priceProtection: true }))
+      .toEqual({ unitCostCents: 809, priceProtected: true });
+  });
+
+  it("refuses a zero, negative or fractional cost on either side", () => {
+    for (const bad of [0, -1, 8.09, Number.NaN]) {
+      expect(() => decideChargedUnitCost({ liveUnitCostCents: bad, inForceUnitCostCents: 809, priceProtection: true })).toThrow(RangeError);
+      expect(() => decideChargedUnitCost({ liveUnitCostCents: 809, inForceUnitCostCents: bad, priceProtection: false })).toThrow(RangeError);
+    }
   });
 });

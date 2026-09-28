@@ -405,8 +405,19 @@ export const DROPSHIP_COST_CHANGE_TODAY_WITH_DETECTION_SUMMARY =
   + "parts are live, a change is still charged on the next order accepted, with no notice to the vendor, and listings "
   + "priced by pricing rules use the new cost the next time they are previewed or pushed.";
 
+/**
+ * With detection and price protection live (C3), an order is charged the cost
+ * in force on the schedule, but vendors are not yet told and listings are not
+ * yet updated.
+ */
+export const DROPSHIP_COST_CHANGE_TODAY_WITH_PROTECTION_SUMMARY =
+  "Cost changes are found and recorded on the schedule below with the date the policy gives them, and an order is "
+  + "charged the cost in force on that schedule. Until the remaining parts are live, no notice reaches the vendor, and "
+  + "listings priced by pricing rules use the new cost the next time they are previewed or pushed.";
+
 /** What happens to a cost change today, given which parts are live. */
 export function describeDropshipCostChangeToday(enforcement: DropshipCostChangeEnforcementView): string {
+  if (enforcement.detection && enforcement.priceProtection) return DROPSHIP_COST_CHANGE_TODAY_WITH_PROTECTION_SUMMARY;
   return enforcement.detection ? DROPSHIP_COST_CHANGE_TODAY_WITH_DETECTION_SUMMARY : DROPSHIP_COST_CHANGE_TODAY_SUMMARY;
 }
 

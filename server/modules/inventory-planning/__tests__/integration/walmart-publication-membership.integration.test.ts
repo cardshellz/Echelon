@@ -61,6 +61,20 @@ dbDescribe.sequential(
       shipNodeId: "test-location",
       items: intent().items,
     });
+    // The runtime enqueues outbox rows with the database clock
+    // (`available_at = transaction_timestamp()`), so the worker clock that
+    // claims them must be a reading of that same clock taken after the enqueue.
+    // JS dates carry milliseconds while Postgres keeps microseconds, so the
+    // reading rounds up to the next whole millisecond; truncated to the same
+    // millisecond as the enqueue it would sort before the row and miss it.
+    // A fixed calendar date is wrong here: it stops matching once real time
+    // passes it.
+    const databaseClockAfterEnqueue = async (): Promise<Date> => {
+      const { rows } = await database.pool.query<{ claim_at: Date }>(
+        "SELECT date_trunc('milliseconds', now()) + interval '1 millisecond' AS claim_at",
+      );
+      return new Date(rows[0]!.claim_at);
+    };
     beforeAll(async () => {
       database = await createInventoryCutoverTestDatabase(
         url,
@@ -606,15 +620,17 @@ dbDescribe.sequential(
       ).rejects.toMatchObject({ code: "MEMBERSHIP_REVIEW_STALE" });
     });
     it("holds stock at zero, suppresses a leased positive, verifies exact readback, then removes membership", async () => {
-      const providerTime = new Date("2026-09-28T12:00:00.000Z");
       const outbox = new PostgresInventoryPublicationOutboxRepository(
         database.pool,
       );
+      // The positive row was enqueued by the previous test, so a clock reading
+      // taken now is after it.
+      const positiveClaimTime = await databaseClockAfterEnqueue();
       const [positive] = await outbox.claimDue({
         batchSize: 10,
         leaseSeconds: 120,
         leaseToken: "positive-lease",
-        now: providerTime,
+        now: positiveClaimTime,
       });
       expect(positive.desiredQuantity).not.toBe("0");
       const holds = new InventoryPublicationTargetVariantHoldService(
@@ -645,7 +661,7 @@ dbDescribe.sequential(
       await expect(
         new PostgresQuantityPublicationAdmission(
           database.pool,
-          () => providerTime,
+          () => positiveClaimTime,
         ).runOutbox(positive, provider),
       ).rejects.toThrow();
       expect(provider).not.toHaveBeenCalled();
@@ -655,16 +671,19 @@ dbDescribe.sequential(
         changes: [{ productVariantId: 101, included: false }],
       });
       expect(before.ready).toBe(false);
+      // The hold enqueued the zero row after the positive claim time, so the
+      // zero claim needs a fresh reading of the database clock.
+      const zeroClaimTime = await databaseClockAfterEnqueue();
       const [zero] = await outbox.claimDue({
         batchSize: 10,
         leaseSeconds: 120,
         leaseToken: "zero-lease",
-        now: providerTime,
+        now: zeroClaimTime,
       });
       expect(zero.desiredQuantity).toBe("0");
       await new PostgresQuantityPublicationAdmission(
         database.pool,
-        () => providerTime,
+        () => zeroClaimTime,
       ).runOutbox(zero, () =>
         observeQuantityProviderRequest(
           {
@@ -689,7 +708,7 @@ dbDescribe.sequential(
         await outbox.recordVerified(zero, {
           observedQuantity: 0,
           providerResponse: { sku: "P5", quantity: 0 },
-          completedAt: providerTime,
+          completedAt: zeroClaimTime,
         }),
       ).toBe("verified");
       const input = {

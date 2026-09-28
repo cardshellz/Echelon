@@ -4,6 +4,7 @@ import {
   DROPSHIP_COST_CHANGE_LOG_PAGE_SIZE,
   DROPSHIP_COST_CHANGE_TODAY_SUMMARY,
   DROPSHIP_COST_CHANGE_TODAY_WITH_DETECTION_SUMMARY,
+  DROPSHIP_COST_CHANGE_TODAY_WITH_PROTECTION_SUMMARY,
   describeDropshipCostChangeToday,
   describeDropshipCostDetection,
   dropshipCostChangeLogPageUrl,
@@ -100,6 +101,10 @@ describe("cost change words", () => {
     expect(describeDropshipCostChangeToday(none)).toBe(DROPSHIP_COST_CHANGE_TODAY_SUMMARY);
     expect(describeDropshipCostChangeToday({ ...none, detection: true })).toBe(DROPSHIP_COST_CHANGE_TODAY_WITH_DETECTION_SUMMARY);
     expect(DROPSHIP_COST_CHANGE_TODAY_WITH_DETECTION_SUMMARY).toContain("still charged on the next order accepted");
+    expect(describeDropshipCostChangeToday({ ...none, detection: true, priceProtection: true })).toBe(DROPSHIP_COST_CHANGE_TODAY_WITH_PROTECTION_SUMMARY);
+    // Protection without detection has nothing to charge from: the detection wording still applies.
+    expect(describeDropshipCostChangeToday({ ...none, priceProtection: true })).toBe(DROPSHIP_COST_CHANGE_TODAY_SUMMARY);
+    expect(DROPSHIP_COST_CHANGE_TODAY_WITH_PROTECTION_SUMMARY).toContain("charged the cost in force");
   });
 });
 
