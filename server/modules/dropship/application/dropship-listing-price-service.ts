@@ -111,7 +111,7 @@ function projectSetting(target: ListingPriceTarget, sources: PriceSources, saved
     ...target, revisionId: saved?.revisionId ?? null, overridePriceCents: saved?.overridePriceCents ?? null,
     defaultPriceCents: defaultPrice.success ? defaultPrice.data : null,
     pricingMode: saved?.pricingMode ?? (saved ? (saved.overridePriceCents === null ? "catalog_default" : "fixed")
-      : sources.existingListingPriceCents !== null ? "fixed" : sources.rulePrice ? "rules" : "catalog_default"),
+      : sources.rulePrice ? "rules" : sources.existingListingPriceCents !== null ? "fixed" : "catalog_default"),
     ruleName: sources.rulePrice?.ruleName ?? null, pricingIssue: sources.rulePrice?.issue ?? null,
     rulePriceCents: sources.rulePrice?.priceCents ?? null, rulesConfigured: sources.rulePrice !== null,
     ...resolveListingPrice({ ...sources, saved }), updatedAt: saved?.updatedAt ?? null,

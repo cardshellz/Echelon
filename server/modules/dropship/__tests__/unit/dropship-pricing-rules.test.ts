@@ -50,9 +50,11 @@ describe("deterministic vendor pricing rules", () => {
     expect(resolvePricingRule({ profile: { ...profile, defaultRecipe: { ...recipe, basis: "catalog_retail" } },
       candidate, productCostCents: null, catalogRetailCents: 899 }).priceCents).toBe(1269);
   });
-  it("preserves legacy fixed and catalog choices, and uses rules only on adoption or new listings", () => {
+  it("keeps typed and catalog choices, and lets the rules price everything else, including a price an earlier push saved", () => {
     const sources = { existingListingPriceCents: 999, defaultPriceCents: 899, rulePrice: { priceCents: 1152 } };
-    expect(resolveListingPrice({ ...sources, saved: null }).effectivePriceCents).toBe(999);
+    expect(resolveListingPrice({ ...sources, saved: null })).toEqual({ effectivePriceCents: 1152, source: "rules" });
+    expect(resolveListingPrice({ ...sources, saved: null, rulePrice: null })).toEqual({ effectivePriceCents: 999, source: "saved_listing" });
+    expect(resolveListingPrice({ ...sources, saved: null, rulePrice: { priceCents: null } })).toEqual({ effectivePriceCents: null, source: "unavailable" });
     expect(resolveListingPrice({ ...sources, saved: { overridePriceCents: null } }).effectivePriceCents).toBe(899);
     expect(resolveListingPrice({ ...sources, saved: { overridePriceCents: 1399, pricingMode: "fixed" } }).effectivePriceCents).toBe(1399);
     expect(resolveListingPrice({ ...sources, saved: { overridePriceCents: null, pricingMode: "rules" } }).effectivePriceCents).toBe(1152);

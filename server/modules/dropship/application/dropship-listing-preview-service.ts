@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { resolveListingPrice, type SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
+import { listingPriceFollowsRules, resolveListingPrice, type SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
 import { decideDropshipListingAccess } from "../../../../shared/dropship/listing-access";
 import type { ListingRulePrice } from "./dropship-rule-price";
 import { z } from "zod";
@@ -18,6 +18,7 @@ import {
   type DropshipCatalogVariantCandidate,
 } from "../domain/catalog-exposure";
 import { DropshipError } from "../domain/errors";
+import { evaluateListingPriceAgainstCost } from "../domain/listing-price-cost";
 import {
   listingTierForVariantUomType,
   type DropshipListingTierEligibility,
@@ -36,6 +37,7 @@ import type {
   DropshipStoreListingConfig,
 } from "./dropship-marketplace-listing-provider";
 import type { DropshipAtpProvider } from "./dropship-selection-atp-service";
+import type { DropshipProductCost, DropshipProductCostReader } from "./dropship-product-cost";
 import {
   createListingPushJobForMemberInputSchema,
   generateVendorListingPreviewForMemberInputSchema,
@@ -242,6 +244,11 @@ export interface DropshipListingPreviewRepository {
 
 export interface DropshipListingPreviewServiceDependencies {
   presentation?: DropshipListingPresentationDependencies;
+  /**
+   * Cost of one sellable pack, for the below-cost warning. Falls back to the
+   * presentation reader; with neither, the preview never warns about cost.
+   */
+  productCosts?: DropshipProductCostReader;
   vendorProvisioning: DropshipVendorProvisioningService;
   repository: DropshipListingPreviewRepository;
   atp: DropshipAtpProvider;
@@ -380,6 +387,12 @@ export class DropshipListingPreviewService {
       storeConnectionId: parsed.storeConnectionId, candidates: ruleEligibleCandidates }) ?? new Map<number, ListingRulePrice>();
     const contents = await this.deps.repository.loadListingContents?.({ vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId, candidates: ruleEligibleCandidates });
+    const productCosts = await this.loadProductCosts({
+      vendorId: parsed.vendorId,
+      storeConnectionId: parsed.storeConnectionId,
+      candidates: candidates.filter((candidate) => evaluateDropshipCatalogExposure(candidate, adminRules, generatedAt).exposed),
+      rulePrices,
+    });
     if (contents && ruleEligibleCandidates.some((candidate) => !contents.has(candidate.productVariantId))) {
       throw new Error("Listing content resolution returned an incomplete catalog result.");
     }
@@ -452,6 +465,7 @@ export class DropshipListingPreviewService {
         existingListing,
         savedListingPrice: savedPricesByVariantId.get(productVariantId) ?? null,
         rulePrice: rulePrices.get(productVariantId) ?? null,
+        productCost: productCosts.get(productVariantId) ?? null,
         requestedRetailPriceCents: requestedRetailPriceByVariantId.get(productVariantId)
           ?? parsed.requestedRetailPriceCents
           ?? null,
@@ -469,12 +483,11 @@ export class DropshipListingPreviewService {
     const enrichedRows = presentation
       ? await enrichDropshipListingRows({ rows, candidates, vendorId: parsed.vendorId,
           storeConnectionId: parsed.storeConnectionId, deps: { ...presentation,
-            productCosts: { loadProductCosts: async (input) => {
-              const remainingIds = input.productVariantIds.filter((id) => !rulePrices.has(id));
-              const costs = new Map(remainingIds.length ? await presentation.productCosts.loadProductCosts({ ...input, productVariantIds: remainingIds }) : []);
-              for (const id of input.productVariantIds) { const cost = rulePrices.get(id)?.productCost; if (cost) costs.set(id, cost); }
-              return costs;
-            } },
+            // The costs were read once above for the warning; the economics reuse them.
+            productCosts: { loadProductCosts: async (input) => new Map(input.productVariantIds.flatMap((id) => {
+              const cost = productCosts.get(id);
+              return cost ? [[id, cost] as const] : [];
+            })) },
           } })
       : rows;
     return {
@@ -485,6 +498,42 @@ export class DropshipListingPreviewService {
       rows: enrichedRows,
       summary: summarizeRows(rows),
     };
+  }
+
+  /**
+   * One cost read per preview: the rule prices already carry the cost of the
+   * listings they priced, the reader supplies the rest. The cost only feeds an
+   * advisory warning and the economics panel, so a source outage is logged
+   * and the preview goes on without it; the economics then say the cost is
+   * unavailable.
+   */
+  private async loadProductCosts(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    candidates: readonly DropshipListingCatalogCandidate[];
+    rulePrices: ReadonlyMap<number, ListingRulePrice>;
+  }): Promise<ReadonlyMap<number, DropshipProductCost>> {
+    const costs = new Map<number, DropshipProductCost>();
+    for (const candidate of input.candidates) {
+      const cost = input.rulePrices.get(candidate.productVariantId)?.productCost;
+      if (cost) costs.set(candidate.productVariantId, cost);
+    }
+    const reader = this.deps.productCosts ?? this.deps.presentation?.productCosts;
+    const remainingIds = input.candidates.map((candidate) => candidate.productVariantId).filter((id) => !costs.has(id));
+    if (!reader || remainingIds.length === 0) return costs;
+    try {
+      for (const [id, cost] of await reader.loadProductCosts({ vendorId: input.vendorId, productVariantIds: remainingIds })) {
+        costs.set(id, cost);
+      }
+    } catch (error) {
+      this.deps.logger.warn({
+        code: "DROPSHIP_PRODUCT_COST_SOURCE_UNAVAILABLE",
+        message: "Product costs could not be read for the listing preview; the below-cost check was skipped.",
+        context: { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, productVariantIds: remainingIds,
+          errorCode: error instanceof DropshipError ? error.code : "UNEXPECTED_ERROR" },
+      });
+    }
+    return costs;
   }
 
   private async loadEbayFulfillmentPreflights(input: {
@@ -886,6 +935,8 @@ function buildListingPreviewRow(input: {
   existingListing: DropshipExistingVendorListing | null;
   savedListingPrice: SavedListingPriceRevision | null;
   rulePrice: ListingRulePrice | null;
+  /** Cost of one sellable pack, when the source could supply it. */
+  productCost: DropshipProductCost | null;
   requestedRetailPriceCents: number | null;
   marketplaceListing: DropshipMarketplaceListingProvider;
   generatedAt: Date;
@@ -925,8 +976,7 @@ function buildListingPreviewRow(input: {
     blockers.push("active_rate_table_required");
   }
 
-  const ruleOwned = input.savedListingPrice?.pricingMode === "rules" || (!input.savedListingPrice
-    && input.existingListing?.vendorRetailPriceCents == null && input.rulePrice !== null);
+  const ruleOwned = listingPriceFollowsRules({ saved: input.savedListingPrice, rulePrice: input.rulePrice });
   const resolvedPrice = resolveListingPrice({
     saved: input.savedListingPrice,
     existingListingPriceCents: input.existingListing?.vendorRetailPriceCents ?? null,
@@ -941,6 +991,10 @@ function buildListingPreviewRow(input: {
   const pricingDecision = evaluateListingPricingPolicy(input.candidate, input.pricingPolicies, priceCents);
   blockers.push(...pricingDecision.blockers);
   warnings.push(...pricingDecision.warnings);
+  warnings.push(...evaluateListingPriceAgainstCost({
+    priceCents,
+    unitCostCents: input.productCost?.status === "available" ? input.productCost.unitCostCents : null,
+  }).warnings);
 
   const marketplaceValidation = input.config
     ? input.marketplaceListing.buildListingIntent({

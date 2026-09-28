@@ -33,11 +33,17 @@ describe("classifyCostChangeListingPrice", () => {
       saved: { overridePriceCents: 799, pricingMode: "fixed" }, existingListingPriceCents: 999, defaultPriceCents: 899, rulePrice: null,
     })).toEqual({ source: "fixed", priceCents: 799, followsCost: false });
     expect(classifyCostChangeListingPrice({
-      saved: null, existingListingPriceCents: 999, defaultPriceCents: 899, rulePrice: { priceCents: 1152, basis: "product_cost" },
+      saved: null, existingListingPriceCents: 999, defaultPriceCents: 899, rulePrice: null,
     })).toEqual({ source: "saved_listing", priceCents: 999, followsCost: false });
     expect(classifyCostChangeListingPrice({
       saved: { overridePriceCents: null, pricingMode: "catalog_default" }, existingListingPriceCents: 999, defaultPriceCents: 899, rulePrice: null,
     })).toEqual({ source: "catalog_default", priceCents: 899, followsCost: false });
+  });
+
+  it("lets the rules price a listing whose only price was saved by an earlier push", () => {
+    expect(classifyCostChangeListingPrice({
+      saved: null, existingListingPriceCents: 999, defaultPriceCents: 899, rulePrice: { priceCents: 1152, basis: "product_cost" },
+    })).toEqual({ source: "rules_cost", priceCents: 1152, followsCost: true });
   });
 
   it("reports an unavailable price rather than inventing one", () => {

@@ -20,6 +20,10 @@ describe("product-cost preview issues", () => {
     expect(formatListingPreviewIssue(code)).toBe(label);
     expect(formatListingPreviewIssue(code)).not.toMatch(/reauth|eBay|channel discount/i);
   });
+  it("tells the vendor a price under the .ops cost loses money, and leaves the choice to them", () => {
+    expect(formatListingPreviewIssue("price_below_product_cost"))
+      .toBe("Priced below your .ops product cost: you lose money on every sale at this price. Raise the price, or list anyway and take the loss.");
+  });
   it("retains existing setup labels and readable fallback for unrelated issues", () => {
     expect(formatListingPreviewIssue("missing_config:businessPolicies.paymentPolicyId")).toBe("eBay setup: Payment policy");
     expect(formatListingPreviewIssue("unrecognized_issue")).toBe("Unrecognized Issue");

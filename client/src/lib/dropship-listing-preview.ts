@@ -32,6 +32,7 @@ export function formatListingPreviewIssue(value: string): string {
     pricing_result_out_of_range: "The pricing rule must produce a positive price within the supported range.",
     pricing_rule_priority_conflict: "Two matching groups share the winning priority. Give them different priorities.",
     pricing_rules_not_configured: "Configure store pricing rules or save a fixed listing price.",
+    price_below_product_cost: "Priced below your .ops product cost: you lose money on every sale at this price. Raise the price, or list anyway and take the loss.",
     "missing_config:marketplaceId": "eBay setup: Marketplace",
     "missing_config:merchantLocationKey": "eBay setup: Inventory location",
     "missing_config:businessPolicies.paymentPolicyId": "eBay setup: Payment policy",
