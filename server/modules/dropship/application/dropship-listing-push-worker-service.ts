@@ -113,6 +113,8 @@ export interface DropshipListingPushWorkerRepository {
     code: string;
     message: string;
     retryable: boolean;
+    /** The marketplace's own error entries, bounded by the provider; kept on the item for support. */
+    providerErrors?: ReadonlyArray<Record<string, unknown>>;
     workerId: string;
     now: Date;
   }): Promise<DropshipListingPushWorkerItemRecord>;
@@ -271,12 +273,32 @@ export class DropshipListingPushWorkerService {
       });
     } catch (error) {
       const classified = classifyListingPushError(error);
+      // The vendor is told by notification; this line is for the operator
+      // reading the log for one job, with the marketplace's reason attached.
+      this.deps.logger.warn({
+        code: "DROPSHIP_LISTING_PUSH_ITEM_FAILED",
+        message: "A listing push item failed at the marketplace.",
+        context: {
+          jobId: claim.job.jobId,
+          itemId: item.itemId,
+          vendorId: claim.job.vendorId,
+          storeConnectionId: claim.job.storeConnectionId,
+          listingId: item.listingId,
+          productVariantId: item.productVariantId,
+          platform: claim.job.platform,
+          errorCode: classified.code,
+          errorMessage: classified.message,
+          retryable: classified.retryable,
+          providerErrors: classified.providerErrors,
+        },
+      });
       await this.deps.repository.failItem({
         job: claim.job,
         item,
         code: classified.code,
         message: classified.message,
         retryable: classified.retryable,
+        providerErrors: classified.providerErrors,
         workerId: parsed.workerId,
         now: this.deps.clock.now(),
       });
@@ -307,7 +329,7 @@ export class DropshipListingPushWorkerService {
       critical: true,
       channels: ["email", "in_app"],
       title: "Dropship listing push failed",
-      message: `Listing push job ${result.job.jobId} finished with ${result.summary.failed} failed item(s) and ${result.summary.blocked} blocked item(s).`,
+      message: describeFailedListingPushJob(result),
       payload: {
         jobId: result.job.jobId,
         vendorId: result.job.vendorId,
@@ -445,16 +467,29 @@ function assertValidPushResult(result: DropshipMarketplaceListingPushResult): vo
   }
 }
 
+/**
+ * The notice names the first marketplace reason so the vendor can act on the
+ * email alone; the portal shows every item.
+ */
+export function describeFailedListingPushJob(result: DropshipListingPushWorkerResult): string {
+  const failed = result.summary.failed + result.summary.blocked;
+  const lead = `${failed} of ${result.summary.total} listing${result.summary.total === 1 ? "" : "s"} could not be sent to your store (job ${result.job.jobId}).`;
+  const firstReason = result.items.find((item) => (item.status === "failed" || item.status === "blocked") && item.errorMessage)?.errorMessage;
+  return firstReason ? `${lead} First reason: ${firstReason}` : lead;
+}
+
 function classifyListingPushError(error: unknown): {
   code: string;
   message: string;
   retryable: boolean;
+  providerErrors?: ReadonlyArray<Record<string, unknown>>;
 } {
   if (error instanceof DropshipError) {
     return {
       code: error.code,
       message: error.message,
       retryable: Boolean(error.context?.retryable),
+      providerErrors: providerErrorEntries(error.context?.providerErrors),
     };
   }
   if (error instanceof Error) {
@@ -469,6 +504,14 @@ function classifyListingPushError(error: unknown): {
     message: "Dropship listing push failed.",
     retryable: true,
   };
+}
+
+/** Only plain objects from the provider are kept; anything else is not stored. */
+function providerErrorEntries(value: unknown): ReadonlyArray<Record<string, unknown>> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const entries = value.filter((entry): entry is Record<string, unknown> =>
+    typeof entry === "object" && entry !== null && !Array.isArray(entry));
+  return entries.length > 0 ? entries : undefined;
 }
 
 function logDropshipListingPushWorkerEvent(

@@ -72,6 +72,7 @@ import { registerDropshipStoreConnectionRoutes } from "./modules/dropship/interf
 import { registerDropshipShippingRoutes } from "./modules/dropship/interfaces/http/dropship-shipping.routes";
 import { registerDropshipListingShippingEstimateRoutes } from "./modules/dropship/interfaces/http/dropship-listing-shipping-estimate.routes";
 import { registerDropshipListingRoutes } from "./modules/dropship/interfaces/http/dropship-listing.routes";
+import { registerDropshipListingPushStatusRoutes } from "./modules/dropship/interfaces/http/dropship-listing-push-status.routes";
 import { registerDropshipListingPriceRoutes } from "./modules/dropship/interfaces/http/dropship-listing-price.routes";
 import { registerDropshipListingContentRoutes } from "./modules/dropship/interfaces/http/dropship-listing-content.routes";
 import { registerDropshipPricingRulesRoutes } from "./modules/dropship/interfaces/http/dropship-pricing-rules.routes";
@@ -205,6 +206,7 @@ export async function registerRoutes(
   registerCustomerReturnPreviewRoutes(app);
   registerDropshipOpsSurfaceRoutes(app);
   registerDropshipListingRoutes(app);
+  registerDropshipListingPushStatusRoutes(app);
   registerDropshipListingPriceRoutes(app);
   registerDropshipListingContentRoutes(app);
   registerDropshipPricingRulesRoutes(app);

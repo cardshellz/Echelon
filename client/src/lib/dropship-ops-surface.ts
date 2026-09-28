@@ -4483,10 +4483,11 @@ export function describeListingQueueResult(response: DropshipListingPushResponse
       : `none of the ${plural(total, "selected listing")} are ready`;
     return { outcome: "nothing_queued", message: `Nothing was queued: ${reason}. The table below shows why.` };
   }
-  const lead = notQueued === 0
-    ? `Queued ${plural(queued, "listing")} for your store.`
-    : `Queued ${queued} of ${plural(total, "listing")} for your store. ${notQueued} not queued: the table below shows why.`;
-  return { outcome: "queued", message: `${lead} Push job ${response.job.jobId}.` };
+  // The page then follows the job and replaces this line with the outcome.
+  const message = notQueued === 0
+    ? `Sending ${plural(queued, "listing")} to your store now. This usually takes under a minute; the result shows here.`
+    : `Sending ${queued} of ${plural(total, "listing")} to your store now. ${notQueued} not queued: the table below shows why.`;
+  return { outcome: "queued", message };
 }
 
 function plural(count: number, noun: string): string {

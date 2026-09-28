@@ -41,6 +41,7 @@ interface StubState {
   pushBodies: Array<Record<string, unknown>>;
   codesSent: string[];
   pushCalls: number;
+  statusCalls: number;
   previewCalls: number;
   onboardingReads: number;
   authReads: number;
@@ -87,7 +88,7 @@ function settingsJson(state: StubState) {
 }
 
 async function setup(page: Page, initial: Partial<StubState> = {}) {
-  const state: StubState = { vendorStatus: "active", storeReady: true, proofs: {}, pushReplies: [], pushBodies: [], codesSent: [], pushCalls: 0,
+  const state: StubState = { vendorStatus: "active", storeReady: true, proofs: {}, pushReplies: [], pushBodies: [], codesSent: [], pushCalls: 0, statusCalls: 0,
     previewCalls: 0, onboardingReads: 0, authReads: 0, unexpected: [], errors: [], ...initial };
   page.on("pageerror", (error) => state.errors.push(error.message));
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
@@ -127,6 +128,10 @@ async function setup(page: Page, initial: Partial<StubState> = {}) {
       reply.after?.(state);
       return route.fulfill({ status: reply.status, json: reply.json });
     }
+    if (/^\/api\/dropship\/listing-push-jobs\/\d+$/.test(path) && method === "GET") {
+      state.statusCalls += 1;
+      return route.fulfill({ json: pushJobStatus(Number(path.split("/").pop())) });
+    }
     if (path === "/api/dropship/auth/sensitive-actions/challenge/start" && method === "POST") {
       state.codesSent.push((route.request().postDataJSON() as { action: string }).action);
       return route.fulfill({ status: 202, json: { method: "email_mfa", challengeId: "c-1", expiresAt: "2999-01-01T00:10:00.000Z" } });
@@ -143,6 +148,15 @@ async function setup(page: Page, initial: Partial<StubState> = {}) {
 }
 
 /** What the server answers for a push: the job, its items and the preview it queued from. */
+/** The worker's finished verdict for the job the page follows after queueing. */
+function pushJobStatus(jobId: number) {
+  return { job: { jobId, storeConnectionId: STORE_ID, platform: "shopify", status: "completed", finished: true,
+    createdAt: STAMP, updatedAt: STAMP, completedAt: STAMP,
+    items: [{ itemId: 1, listingId: 100, productVariantId: 101, sku: "ENV-SGL-P50", productName: "Envelope Single Pocket",
+      variantName: "Pack of 50", status: "completed", errorCode: null, errorMessage: null, retryable: null,
+      externalListingId: "gid://shopify/Product/900", listingUrl: null }] } };
+}
+
 function pushResponse(rows: Array<typeof PREVIEW_ROW>, jobStatus: "queued" | "failed" = "queued") {
   const blocked = rows.filter((row) => row.previewStatus === "blocked").length;
   return {
@@ -266,7 +280,10 @@ test("queues in one click without a preview and shows what was queued", async ({
 
   await card.getByRole("button", { name: "Queue ready listings" }).click();
 
-  await expect(card.getByTestId("listing-queue-result")).toHaveText("Queued 1 listing for your store. Push job 31.");
+  // The page follows job 31 and shows what became of the listing, in the vendor's words.
+  await expect(card.getByTestId("listing-queue-result")).toContainText("Live on Test Shop: 1 listing.");
+  await expect(card.getByTestId("listing-push-outcome-1")).toHaveText("Envelope Single Pocket · Pack of 50 · ENV-SGL-P50: Live on Test Shop.");
+  expect(state.statusCalls).toBeGreaterThanOrEqual(1);
   await expect(card.getByText("This preview is out of date", { exact: false })).toHaveCount(0);
   await expect(card.getByText("ENV-SGL-P50").first()).toBeVisible();
   await shot(page, testInfo, card, "catalog-one-step-queued");
@@ -292,7 +309,7 @@ test("sends the same request once more when a listing changed while it was being
 
   await card.getByRole("button", { name: "Queue ready listings" }).click();
 
-  await expect(card.getByTestId("listing-queue-result")).toHaveText("Queued 1 listing for your store. Push job 31.");
+  await expect(card.getByTestId("listing-queue-result")).toContainText("Live on Test Shop: 1 listing.");
   await expect(card.getByRole("alert")).toHaveCount(0);
   expect(state.pushCalls).toBe(2);
   // The refused attempt wrote nothing, so the retry reuses its key.
