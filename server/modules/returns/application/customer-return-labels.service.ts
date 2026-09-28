@@ -88,6 +88,7 @@ export interface CustomerReturnLabelsDependencies {
   authorizeChannel: (channelId: number) => Promise<void>;
   requirePurchaseConfiguration: (
     channelId: number,
+    authorizationId: number,
   ) => Promise<CustomerReturnLabelSettings>;
   now: () => Date;
 }
@@ -131,7 +132,7 @@ export class CustomerReturnLabelsService {
     const parcel = pending;
     if (!parcel) return this.present(stored);
     const settings =
-      await this.dependencies.requirePurchaseConfiguration(channelId);
+      await this.dependencies.requirePurchaseConfiguration(channelId, authorizationId);
     const quoteDecisionId =
       parcel.selectionMode === "cheapest_eligible"
         ? await this.quote(stored, parcel, settings, actor)

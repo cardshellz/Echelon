@@ -5,8 +5,11 @@ import {
   dropshipVendors,
   returnPolicies,
   returnPolicyCommands,
+  warehouses,
   type ReturnPolicy,
 } from "@shared/schema";
+import { customerReturnLabelSettingsSchema, type CustomerReturnLabelSettings } from "@shared/returns/customer-return-label.contract";
+import type { ReturnLabelWarehouse } from "../application/customer-return-label-settings.service";
 import { db } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
 import { acquireReturnPolicyCatalogLock } from "./return-policy-lock";
@@ -45,8 +48,10 @@ export class PostgresReturnPolicyAdminStore implements ReturnPolicyAdminStore {
         ? Promise.resolve([])
         : this.database.select(storeSelection).from(dropshipStoreConnections).where(inArray(dropshipStoreConnections.id, storeIds)).orderBy(asc(dropshipStoreConnections.externalDisplayName), asc(dropshipStoreConnections.id)),
     ]);
+    const shippingRows = await this.database.execute(sql`SELECT policy_id, configuration FROM returns.return_policy_shipping`);
+    const shipping = new Map(shippingRows.rows.map(row => [Number(row.policy_id), row.configuration === null ? null : customerReturnLabelSettingsSchema.parse(row.configuration)]));
     return {
-      policies,
+      policies: policies.map(policy => ({ ...policy, shipping: shipping.get(policy.id) ?? null })),
       channels: channelRows,
       referencedVendors,
       referencedStores,
@@ -93,6 +98,12 @@ export class PostgresReturnPolicyAdminStore implements ReturnPolicyAdminStore {
 
   transaction<T>(work: (tx: ReturnPolicyAdminTransaction) => Promise<T>): Promise<T> {
     return this.database.transaction((tx) => work(new PostgresReturnPolicyAdminTransaction(tx)));
+  }
+
+  async listShippingWarehouses(): Promise<ReturnLabelWarehouse[]> {
+    const result = await this.database.select(warehouseSelection).from(warehouses).where(eq(warehouses.isActive, 1)).limit(201);
+    if (result.length > 200) throw new ReturnPolicyAdminError("RETURN_POLICY_WAREHOUSE_CATALOG_LIMIT", "The return warehouse catalog needs administrator attention.", 503);
+    return result;
   }
 }
 
@@ -172,18 +183,33 @@ class PostgresReturnPolicyAdminTransaction implements ReturnPolicyAdminTransacti
     return created;
   }
 
+  async getShippingWarehouseForShare(warehouseId: number): Promise<ReturnLabelWarehouse | null> {
+    const [warehouse] = await this.tx.select(warehouseSelection).from(warehouses).where(eq(warehouses.id, warehouseId)).for("share");
+    return warehouse ?? null;
+  }
+
+  async insertPolicyShipping(policyId: number, configuration: CustomerReturnLabelSettings | null, actor: string, now: Date): Promise<void> {
+    await this.tx.execute(sql`INSERT INTO returns.return_policy_shipping(policy_id,configuration,created_by,created_at)
+      VALUES(${policyId},${configuration === null ? null : JSON.stringify(configuration)}::jsonb,${actor},${now})`);
+  }
+
   async recordCommand(input: { idempotencyKey: string; requestHash: string; response: ReturnPolicy; actor: string; createdAt: Date }): Promise<void> {
     await this.tx.insert(returnPolicyCommands).values(input);
   }
 
   async writeAudit(input: Parameters<ReturnPolicyAdminTransaction["writeAudit"]>[0]): Promise<void> {
+    const shippingRows = await this.tx.execute(sql`SELECT policy_id,configuration FROM returns.return_policy_shipping
+      WHERE policy_id=${input.after.id} OR policy_id=${input.before?.id ?? null}`);
+    const shipping = new Map(shippingRows.rows.map(row => [Number(row.policy_id), row.configuration === null ? null : customerReturnLabelSettingsSchema.parse(row.configuration)]));
+    const before = input.before ? { ...input.before, shipping: shipping.get(input.before.id) ?? null } : null;
+    const after = { ...input.after, shipping: shipping.get(input.after.id) ?? null };
     await persistAuditEvent(this.tx, {
       actor: input.actor,
       action: input.archivePreview ? "RETURN_POLICY_ARCHIVED" : "RETURN_POLICY_VERSION_CREATED",
       target: `returns.return_policies:${input.after.id}`,
       changes: {
-        before: input.before ? auditRecord(input.before) : null,
-        after: auditRecord(input.after),
+        before: before ? auditRecord(before) : null,
+        after: auditRecord(after),
       },
       context: {
         scopeKey: input.after.scopeKey,
@@ -268,8 +294,15 @@ function auditRecord(policy: ReturnPolicy): Record<string, unknown> {
     customerRefundAuthority: policy.customerRefundAuthority,
     vendorSettlementTrigger: policy.vendorSettlementTrigger,
     returnlessRefundAllowed: policy.returnlessRefundAllowed,
+    ...("shipping" in policy ? { shipping: policy.shipping } : {}),
   };
 }
+
+const warehouseSelection = {
+  id: warehouses.id, name: warehouses.name, address: warehouses.address,
+  city: warehouses.city, state: warehouses.state, postalCode: warehouses.postalCode,
+  country: warehouses.country, isActive: warehouses.isActive,
+};
 
 function hydratePolicy(value: unknown): ReturnPolicy {
   if (!value || typeof value !== "object") throw new Error("Stored return policy command response is invalid.");

@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   CUSTOMER_RETURN_LABEL_API,
-  type CustomerReturnLabelSettingsInput,
   type CustomerReturnLabelSettingsState,
   type CustomerReturnLabelStatus,
   type CustomerReturnLabelSubmitInput,
@@ -13,7 +12,7 @@ import {
   loadReturnLabelSettings,
   returnLabelsEnabled,
   ReturnLabelRequestError,
-  saveReturnLabelSettings,
+  saveReturnLabelControl,
 } from "../../customer-return-labels";
 import { PreviewAccessError } from "../../customer-return-preview";
 
@@ -72,6 +71,7 @@ function settings(): CustomerReturnLabelSettingsState {
   return {
     channelId,
     providerConfigured: true,
+    control: { paused: false, version: 0 },
     settings: {
       enabled: true,
       warehouseId: 10,
@@ -81,7 +81,8 @@ function settings(): CustomerReturnLabelSettingsState {
       carrierRules: [],
       contactName: "Returns",
       contactPhone: null,
-      version: 2,
+      version: 20,
+      policyId: 20,
       destinationAddress: address,
     },
     warehouses: [{ id: 10, name: "Main", address }],
@@ -105,19 +106,7 @@ function settings(): CustomerReturnLabelSettingsState {
   };
 }
 
-function settingsInput(): CustomerReturnLabelSettingsInput {
-  return {
-    expectedVersion: 2,
-    enabled: true,
-    warehouseId: 10,
-    carrierId: "se-123",
-    serviceCode: "usps_ground_advantage",
-    selectionMode: "fixed_service",
-    carrierRules: [],
-    contactName: "Returns",
-    contactPhone: null,
-  };
-}
+function settingsInput() { return { paused: true, expectedVersion: 0 }; }
 
 function response(body: unknown, code = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -127,6 +116,19 @@ function response(body: unknown, code = 200): Response {
 }
 
 describe("return label transport", () => {
+  it("pauses labels with an independent version and rejects cross-channel control responses", async () => {
+    const signal = new AbortController().signal;
+    const saved = { ...settings(), control: { paused: true, version: 1 } };
+    const request = vi.fn<FetchRequest>().mockResolvedValue(response(saved));
+    await expect(saveReturnLabelControl(channelId, { paused: true, expectedVersion: 0 }, signal, request)).resolves.toEqual(saved);
+    expect(request.mock.calls[0][0]).toBe(`${CUSTOMER_RETURN_LABEL_API}/label-settings/${channelId}/control`);
+    expect(request.mock.calls[0][1]).toMatchObject({ method: "POST", credentials: "include", body: JSON.stringify({ paused: true, expectedVersion: 0 }) });
+    request.mockResolvedValue(response({ ...saved, channelId: 999 }));
+    await expect(saveReturnLabelControl(channelId, { paused: true, expectedVersion: 0 }, signal, request)).rejects.toThrow();
+    request.mockClear();
+    await expect(saveReturnLabelControl(channelId, { paused: true, expectedVersion: -1 }, signal, request)).rejects.toThrow();
+    expect(request).not.toHaveBeenCalled();
+  });
   it("uses authenticated noncached GETs for settings, status, and command recovery", async () => {
     const request = vi
       .fn<FetchRequest>()
@@ -171,7 +173,7 @@ describe("return label transport", () => {
     await api.submit(input, signal);
     await api.resume(commandKey, signal);
     await api.progress(authorizationId, signal);
-    await saveReturnLabelSettings(channelId, config, signal, request);
+    await saveReturnLabelControl(channelId, config, signal, request);
 
     const commandOptions = {
       credentials: "include",
@@ -201,8 +203,8 @@ describe("return label transport", () => {
         { ...commandOptions, method: "POST", body: {} },
       ],
       [
-        `${CUSTOMER_RETURN_LABEL_API}/label-settings/7`,
-        { ...commandOptions, method: "PUT", body: config },
+        `${CUSTOMER_RETURN_LABEL_API}/label-settings/7/control`,
+        { ...commandOptions, method: "POST", body: config },
       ],
     ]);
   });
@@ -229,7 +231,7 @@ describe("return label transport", () => {
     ).rejects.toThrow("Shopify shop changed");
     await expect(loadReturnLabelSettings(0, signal, request)).rejects.toThrow();
     await expect(
-      saveReturnLabelSettings(0, settingsInput(), signal, request),
+      saveReturnLabelControl(0, settingsInput(), signal, request),
     ).rejects.toThrow();
     expect(request).not.toHaveBeenCalled();
   });
@@ -278,7 +280,7 @@ describe("return label transport", () => {
     const request = vi.fn<FetchRequest>();
     const input = { ...settingsInput(), apiKey: "must-not-send" };
     await expect(
-      saveReturnLabelSettings(
+      saveReturnLabelControl(
         channelId,
         input,
         new AbortController().signal,
@@ -545,8 +547,8 @@ describe("return label settings capability", () => {
       carrierId: "se-123",
       serviceCode: "usps_ground_advantage",
     });
-    expect(parsed.settings).not.toHaveProperty("policyId");
-    expect(returnLabelsEnabled(parsed)).toBe(true);
+    expect(parsed.settings).toHaveProperty("policyId", 999);
+    expect(returnLabelsEnabled(parsed)).toBe(false);
   });
   it("enables automatic selection only when every explicitly allowed service remains available", () => {
     const value = settings();
@@ -676,7 +678,7 @@ describe("return label settings capability", () => {
         loadReturnLabelSettings(channelId, signal, request),
       ).rejects.toThrow("configuration could not be verified");
       await expect(
-        saveReturnLabelSettings(channelId, settingsInput(), signal, request),
+        saveReturnLabelControl(channelId, settingsInput(), signal, request),
       ).rejects.toThrow("configuration could not be verified");
     },
   );

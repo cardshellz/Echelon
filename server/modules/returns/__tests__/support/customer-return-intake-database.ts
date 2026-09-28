@@ -1,5 +1,11 @@
 import { readFileSync } from "node:fs";
 import type { Pool } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { eq, sql } from "drizzle-orm";
+import * as schema from "@shared/schema";
+import { customerReturnLabelSettingsSchema, type CustomerReturnLabelSettings } from "@shared/returns/customer-return-label.contract";
+import { normalizeCustomerReturnCarrierRules } from "@shared/returns/customer-return-carrier-policy";
+import { snapshotReturnPolicy } from "../../domain/return-case";
 import type { PreparedCustomerReturnIntake } from "../../application/customer-return-intake.ports";
 import { createInspectionTestSchema, seedInspectionTestSchema } from "./customer-return-inspection-database";
 
@@ -14,13 +20,14 @@ export const INTAKE_POLICY = {
   customerRefundAuthority: "card_shellz", vendorSettlementTrigger: "none", returnlessRefundAllowed: false
 };
 
-export async function createIntakeTestSchema(pool: Pool, options: { carrierSelection?: boolean } = {}): Promise<void> {
+export async function createIntakeTestSchema(pool: Pool, options: { carrierSelection?: boolean; policyShipping?: boolean } = {}): Promise<void> {
   await createInspectionTestSchema(pool);
   await pool.query(readFileSync("migrations/059_wms_order_items_prices.sql", "utf8"));
   await pool.query(readFileSync("migrations/251_customer_return_label_settings.sql", "utf8"));
   if (options.carrierSelection !== false) {
     await pool.query(readFileSync("migrations/252_customer_return_carrier_selection.sql", "utf8"));
     await pool.query(readFileSync("migrations/254_customer_return_policy_resolution.sql", "utf8"));
+    if (options.policyShipping !== false) await pool.query(readFileSync("migrations/255_return_policy_shipping.sql", "utf8"));
   }
 }
 export async function seedIntakeTestSchema(pool: Pool): Promise<void> {
@@ -33,11 +40,55 @@ export async function seedIntakeTestSchema(pool: Pool): Promise<void> {
       customer_refund_authority,vendor_settlement_trigger,returnless_refund_allowed,created_by) OVERRIDING SYSTEM VALUE
       VALUES(1,'Test portal policy','business_context','context:retail','retail',1,'active',365,'card_shellz','card_shellz',
         'shipstation','card_shellz','required','card_shellz','card_shellz','none',false,'test');
+    SELECT setval(pg_get_serial_sequence('returns.return_policies','id'),1,true);
     UPDATE wms.order_items SET paid_price_cents=125;`);
-  await pool.query(`INSERT INTO returns.customer_return_settings(channel_id,version,enabled,warehouse_id,policy_id,carrier_id,service_code,
-    destination_address,contact_name,contact_phone,updated_by,updated_at) VALUES(36,1,true,1,1,'se-123','usps_ground_advantage',$1,'Returns test warehouse',NULL,'admin:test',$2)`,
-    [JSON.stringify(INTAKE_ADDRESS), INTAKE_NOW]);
+  // Historical migration tests deliberately stop at an earlier DDL version.
+  const hasPolicyShipping = (await pool.query("SELECT to_regclass('returns.return_policy_shipping') IS NOT NULL AS present")).rows[0].present;
+  if (hasPolicyShipping) {
+    // New configurations never write the fenced legacy table, even in fixtures.
+    const configuration = customerReturnLabelSettingsSchema.parse({ version: 1, policyId: 1, enabled: true, warehouseId: 1,
+      selectionMode: "fixed_service", carrierRules: [], carrierId: "se-123", serviceCode: "usps_ground_advantage",
+      destinationAddress: INTAKE_ADDRESS, contactName: INTAKE_ADDRESS.name, contactPhone: null });
+    await pool.query(`INSERT INTO returns.return_policy_shipping(policy_id,configuration,created_by,created_at)
+      VALUES(1,$1,'test',$2)`, [JSON.stringify(configuration), INTAKE_NOW]);
+    await pool.query("INSERT INTO returns.customer_return_label_controls(channel_id,version,paused,updated_by,updated_at) VALUES(36,1,false,'test',$1)", [INTAKE_NOW]);
+  } else {
+    await pool.query(`INSERT INTO returns.customer_return_settings(channel_id,version,enabled,warehouse_id,policy_id,carrier_id,service_code,
+      destination_address,contact_name,contact_phone,updated_by,updated_at) VALUES(36,1,true,1,1,'se-123','usps_ground_advantage',$1,'Returns test warehouse',NULL,'admin:test',$2)`,
+      [JSON.stringify(INTAKE_ADDRESS), INTAKE_NOW]);
+  }
   await seedIntakeSubmission(pool);
+}
+
+/** Fixture-only policy publication. Production admin command validation/audit is
+ * covered separately; these tests exercise intake and accepted-label consumers. */
+export async function publishIntakeTestPolicyShipping(pool: Pool, overrides: Partial<CustomerReturnLabelSettings> = {}): Promise<CustomerReturnLabelSettings> {
+  const database = drizzle(pool, { schema });
+  return database.transaction(async tx => {
+    const [before] = await tx.select().from(schema.returnPolicies).where(eq(schema.returnPolicies.status, "active"));
+    if (!before) throw new Error("Fixture requires one active policy.");
+    const shipping = (await tx.execute(sql`SELECT configuration FROM returns.return_policy_shipping WHERE policy_id=${before.id}`)).rows[0]?.configuration;
+    const current = customerReturnLabelSettingsSchema.parse(shipping);
+    await tx.update(schema.returnPolicies).set({ status: "retired", retiredBy: "test", retiredAt: INTAKE_NOW }).where(eq(schema.returnPolicies.id, before.id));
+    const { id: _id, createdAt: _created, ...fields } = before;
+    const [policy] = await tx.insert(schema.returnPolicies).values({ ...fields, status: "active", version: before.version + 1,
+      supersedesPolicyId: before.id, retiredBy: null, retiredAt: null, createdBy: "test", createdAt: INTAKE_NOW }).returning();
+    const configuration = customerReturnLabelSettingsSchema.parse({ ...current, ...overrides, policyId: policy.id, version: policy.id,
+      carrierRules: normalizeCustomerReturnCarrierRules(overrides.carrierRules ?? current.carrierRules) });
+    await tx.execute(sql`INSERT INTO returns.return_policy_shipping(policy_id,configuration,created_by,created_at)
+      VALUES(${policy.id},${JSON.stringify(configuration)}::jsonb,'test',${INTAKE_NOW})`);
+    return configuration;
+  });
+}
+
+export async function bindIntakeTestPolicy(pool: Pool, prepared: PreparedCustomerReturnIntake & { now: Date }, settings: CustomerReturnLabelSettings): Promise<void> {
+  const database = drizzle(pool, { schema });
+  const [policy] = await database.select().from(schema.returnPolicies).where(eq(schema.returnPolicies.id, settings.policyId!));
+  if (!policy) throw new Error("Fixture policy was not found.");
+  prepared.settingsVersion = settings.version;
+  prepared.warehouseSnapshot = { ...prepared.warehouseSnapshot, version: settings.version };
+  prepared.operationalPolicy = { id: policy.id, version: policy.version, snapshot: { ...snapshotReturnPolicy(policy) } };
+  prepared.policySnapshot = { ...prepared.policySnapshot, version: policy.version, returnWindowDays: policy.returnWindowDays };
 }
 export async function seedIntakeSubmission(pool: Pool, key = INTAKE_KEY, lease = INTAKE_LEASE, hash = "a".repeat(64)): Promise<void> {
   const request = {
