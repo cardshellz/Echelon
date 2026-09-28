@@ -1,5 +1,9 @@
 import { createHash } from "crypto";
 import { z } from "zod";
+import { customerReturnPolicyShippingInputSchema, returnPolicyShippingCatalogSchema, type CustomerReturnPolicyShippingInput } from "@shared/returns/return-policy-shipping.contract";
+import { customerReturnLabelSettingsSchema, type CustomerReturnLabelSettings } from "@shared/returns/customer-return-label.contract";
+import { normalizeCustomerReturnCarrierRules } from "@shared/returns/customer-return-carrier-policy";
+import { supportsConfiguredServices, warehouseLabelAddress, type ReturnLabelCapabilities, type ReturnLabelWarehouse } from "./customer-return-label-settings.service";
 import { returnPolicyArchiveInputSchema, returnPolicyArchiveResultSchema, type ReturnPolicyArchiveInput } from "@shared/returns/return-policy-archive.contract";
 import { buildReturnPolicyArchivePreview, type ReturnPolicyArchiveSnapshot } from "./return-policy-archive";
 import type { ReturnPolicy, ReturnPolicyScopeKind, ReturnBusinessContext } from "@shared/schema";
@@ -45,7 +49,11 @@ export interface ReturnPolicyDecisionInput {
 export interface CreateReturnPolicyInput extends PublicReturnPolicyScopeInput, ReturnPolicyDecisionInput {
   idempotencyKey: string;
   actor: string;
+  expectedPolicyId: number | null;
+  shipping: CustomerReturnPolicyShippingInput | null;
 }
+
+export type ReturnPolicyWithShipping = ReturnPolicy & { shipping?: CustomerReturnLabelSettings | null };
 
 export interface ReturnPolicyChannelReference {
   id: number;
@@ -80,7 +88,7 @@ export interface ScopeReferences {
 }
 
 export interface ReturnPolicyOverview {
-  policies: ReturnPolicy[];
+  policies: ReturnPolicyWithShipping[];
   channels: ReturnPolicyChannelReference[];
   referencedVendors: ReturnPolicyVendorReference[];
   referencedStores: ReturnPolicyStoreReference[];
@@ -102,12 +110,15 @@ export interface ReturnPolicyAdminTransaction {
   getNextVersion(scopeKey: string): Promise<number>;
   retirePolicy(policy: ReturnPolicy, actor: string, now: Date): Promise<void>;
   insertPolicy(input: Omit<ReturnPolicy, "id" | "createdAt">): Promise<ReturnPolicy>;
+  getShippingWarehouseForShare(warehouseId: number): Promise<ReturnLabelWarehouse | null>;
+  insertPolicyShipping(policyId: number, configuration: CustomerReturnLabelSettings | null, actor: string, now: Date): Promise<void>;
   recordCommand(input: { idempotencyKey: string; requestHash: string; response: ReturnPolicy; actor: string; createdAt: Date }): Promise<void>;
   writeAudit(input: { actor: string; before: ReturnPolicy | null; after: ReturnPolicy; now: Date; archivePreview?: ReturnType<typeof buildReturnPolicyArchivePreview> }): Promise<void>;
 }
 
 export interface ReturnPolicyAdminStore {
   listOverview(): Promise<ReturnPolicyOverview>;
+  listShippingWarehouses(): Promise<ReturnLabelWarehouse[]>;
   listActivePolicies(): Promise<ReturnPolicy[]>;
   getDropshipOmsChannel(): Promise<ReturnPolicyChannelReference>;
   searchVendors(search: string, limit: number): Promise<ReturnPolicyVendorReference[]>;
@@ -131,7 +142,23 @@ export class ReturnPolicyAdminService {
   constructor(
     private readonly store: ReturnPolicyAdminStore,
     private readonly clock: () => Date = () => new Date(),
+    private readonly shippingCapabilities: () => Promise<ReturnLabelCapabilities> = async () => ({ configured: false, carriers: [] }),
   ) {}
+
+  async shippingCatalog() {
+    const warehouses = await this.store.listShippingWarehouses();
+    let capabilities: ReturnLabelCapabilities = { configured: false, carriers: [] };
+    let message: string | null = null;
+    try { capabilities = await this.shippingCapabilities(); }
+    catch { message = "Return carrier services could not be verified. Try again before enabling labels."; }
+    if (!capabilities.configured && !message) message = "Configure the ShipStation V2 API key before enabling return labels.";
+    return returnPolicyShippingCatalogSchema.parse({
+      providerConfigured: capabilities.configured,
+      warehouses: warehouses.filter(row => row.isActive === 1).map(row => ({ id: row.id, name: row.name, address: warehouseLabelAddress(row, row.name, null) })),
+      carriers: capabilities.carriers,
+      message,
+    });
+  }
 
   listOverview(): Promise<ReturnPolicyOverview> {
     return this.store.listOverview();
@@ -177,9 +204,10 @@ export class ReturnPolicyAdminService {
       notes: input.notes?.trim() || null,
       actor: input.actor.trim(),
       idempotencyKey: input.idempotencyKey.trim(),
+      shipping: input.shipping === null ? null : customerReturnPolicyShippingInputSchema.parse(input.shipping),
     };
     const requestHash = hashRequest(normalizedInput);
-    const now = this.clock();
+    const now = z.date().parse(this.clock());
 
     return this.store.transaction(async (tx) => {
       await tx.lockCommand(normalizedInput.idempotencyKey);
@@ -191,11 +219,35 @@ export class ReturnPolicyAdminService {
         return { policy: priorCommand.response, replayed: true };
       }
 
+      // Idempotent replay stays available during provider outages. Resolve the
+      // external catalog before taking the shared policy-catalog write lock.
+      if (normalizedInput.shipping?.enabled) {
+        let capabilities: ReturnLabelCapabilities;
+        try { capabilities = await this.shippingCapabilities(); }
+        catch { throw new ReturnPolicyAdminError("RETURN_POLICY_CARRIER_UNAVAILABLE", "Return carrier services could not be verified. Try again before enabling labels.", 503); }
+        if (!capabilities.configured || !supportsConfiguredServices(capabilities, normalizedInput.shipping)) {
+          throw new ReturnPolicyAdminError("RETURN_POLICY_CARRIER_UNAVAILABLE", "Choose connected carrier services that support domestic returns before enabling labels.", 409);
+        }
+      }
+
       await tx.lockCatalog("exclusive");
       const references = await tx.getScopeReferences(normalizedInput);
       validateReferences(normalizedInput, references);
       const normalized = normalizePublicScope(normalizedInput, references.dropshipOmsChannel.id);
       const active = await tx.getActivePolicyForUpdate(normalized.scopeKey);
+      if ((active?.id ?? null) !== normalizedInput.expectedPolicyId) {
+        throw new ReturnPolicyAdminError("RETURN_POLICY_CHANGED", "This policy changed. Reload the latest version before saving.", 409);
+      }
+      const shipping = normalizedInput.shipping;
+      let destinationAddress: CustomerReturnLabelSettings["destinationAddress"] | null = null;
+      if (shipping !== null) {
+        if (normalizedInput.returnDestination !== "card_shellz" || normalizedInput.labelProvider !== "shipstation") {
+          throw new ReturnPolicyAdminError("RETURN_POLICY_SHIPPING_INCOMPATIBLE", "Card Shellz return shipping requires Card Shellz as the return destination and ShipStation as the label provider.", 400);
+        }
+        const warehouse = await tx.getShippingWarehouseForShare(shipping.warehouseId);
+        destinationAddress = warehouse?.isActive === 1 ? warehouseLabelAddress(warehouse, shipping.contactName, shipping.contactPhone) : null;
+        if (!destinationAddress) throw new ReturnPolicyAdminError("RETURN_POLICY_WAREHOUSE_INVALID", "Choose an active U.S. return warehouse with a complete address.", 400);
+      }
       const version = await tx.getNextVersion(normalized.scopeKey);
       if (active) await tx.retirePolicy(active, normalizedInput.actor, now);
 
@@ -225,9 +277,15 @@ export class ReturnPolicyAdminService {
         retiredBy: null,
         retiredAt: null,
       });
-      await tx.recordCommand({ idempotencyKey: normalizedInput.idempotencyKey, requestHash, response: policy, actor: normalizedInput.actor, createdAt: now });
-      await tx.writeAudit({ actor: normalizedInput.actor, before: active, after: policy, now });
-      return { policy, replayed: false };
+      const configuration = shipping === null ? null : customerReturnLabelSettingsSchema.parse({
+        ...shipping, carrierRules: normalizeCustomerReturnCarrierRules(shipping.carrierRules),
+        version: policy.id, policyId: policy.id, destinationAddress,
+      });
+      await tx.insertPolicyShipping(policy.id, configuration, normalizedInput.actor, now);
+      const result = { ...policy, shipping: configuration };
+      await tx.recordCommand({ idempotencyKey: normalizedInput.idempotencyKey, requestHash, response: result, actor: normalizedInput.actor, createdAt: now });
+      await tx.writeAudit({ actor: normalizedInput.actor, before: active, after: result, now });
+      return { policy: result, replayed: false };
     });
   }
 
@@ -275,6 +333,8 @@ export class ReturnPolicyAdminService {
 }
 
 function validateCreateInput(input: CreateReturnPolicyInput): void {
+  if (input.expectedPolicyId !== null && (!Number.isSafeInteger(input.expectedPolicyId) || input.expectedPolicyId <= 0)) throw new ReturnPolicyAdminError("RETURN_POLICY_INVALID", "The policy version being edited must be provided.", 400);
+  if (input.shipping !== null && !customerReturnPolicyShippingInputSchema.safeParse(input.shipping).success) throw new ReturnPolicyAdminError("RETURN_POLICY_INVALID", "Return shipping settings are invalid.", 400);
   if (!input.name.trim()) throw new ReturnPolicyAdminError("RETURN_POLICY_INVALID", "Policy name is required.", 400);
   if (!input.actor.trim()) throw new ReturnPolicyAdminError("RETURN_POLICY_INVALID", "Audit actor is required.", 400);
   if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 160) throw new ReturnPolicyAdminError("RETURN_POLICY_INVALID", "A valid idempotency key is required.", 400);

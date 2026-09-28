@@ -2,7 +2,7 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./test/browser",
-  testMatch: "returns-portal-preview.spec.ts",
+  testMatch: ["returns-portal-preview.spec.ts", "returns-policy-shipping.spec.ts"],
   fullyParallel: false,
   workers: 1,
   timeout: 45_000,

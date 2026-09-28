@@ -8,10 +8,12 @@ export function ReturnLabelCarrierRules({
   carriers,
   rules,
   onChange,
+  requireAvailable = true,
 }: {
   carriers: CustomerReturnLabelSettingsState["carriers"];
   rules: ReturnCarrierRuleDraft[];
   onChange: (rules: ReturnCarrierRuleDraft[]) => void;
+  requireAvailable?: boolean;
 }) {
   function update(carrierId: string, patch: Partial<ReturnCarrierRuleDraft>) {
     onChange(
@@ -34,8 +36,8 @@ export function ReturnLabelCarrierRules({
       </div>
       {rules.length === 0 && (
         <p className="text-sm">
-          No connected return services are available. Refresh label settings to
-          try again.
+          No connected return services are available. Refresh shipping choices
+          to try again.
         </p>
       )}
       {rules.map((rule) => {
@@ -76,8 +78,9 @@ export function ReturnLabelCarrierRules({
             </label>
             {!carrier && (
               <p className="text-sm text-destructive">
-                This connected account is unavailable. Disable it or refresh
-                before saving.
+                {requireAvailable
+                  ? "This connected account is unavailable. Disable it or refresh before saving."
+                  : "This connected account is currently unavailable. Its saved rules can be kept while labels are disabled; verify it before enabling labels."}
               </p>
             )}
             {rule.enabled && (

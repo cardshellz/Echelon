@@ -25,6 +25,7 @@ export const labelAddress = {
 };
 export const labelSettings: CustomerReturnLabelSettings = {
   version: 1,
+  policyId: 1,
   enabled: true,
   warehouseId: 1,
   selectionMode: "fixed_service",

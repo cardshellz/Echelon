@@ -29,6 +29,9 @@ import {
   INTAKE_LEASE,
   INTAKE_NOW,
   seedPreCarrierSelectionIntake,
+  publishIntakeTestPolicyShipping,
+  bindIntakeTestPolicy,
+  seedIntakeSubmission,
 } from "../support/customer-return-intake-database";
 import type { ReturnLabelRecord } from "../../../shipping-engine/application/return-label-provider.port";
 import { CUSTOMER_RETURN_LABEL_SEARCH_SQL } from "../../infrastructure/customer-return-label-search";
@@ -94,26 +97,29 @@ integration(
       return intake.persist(preparedIntake());
     }
     async function enableAutomatic() {
-      return settings.save(
+      return publishIntakeTestPolicyShipping(pool, {
+        selectionMode: "cheapest_eligible",
+        carrierId: null,
+        serviceCode: null,
+        carrierRules: [
+          {
+            carrierId: "se-123",
+            serviceCodes: ["usps_ground_advantage"],
+            maxWeightLb: "20",
+          },
+          {
+            carrierId: "se-999",
+            serviceCodes: ["ups_ground"],
+            maxWeightLb: null,
+          },
+        ],
+      });
+    }
+    async function pause(paused: boolean) {
+      const current = await settings.readControl(36);
+      await settings.saveControl(
         36,
-        {
-          ...(await config()),
-          selectionMode: "cheapest_eligible",
-          carrierId: null,
-          serviceCode: null,
-          carrierRules: [
-            {
-              carrierId: "se-123",
-              serviceCodes: ["usps_ground_advantage"],
-              maxWeightLb: "20",
-            },
-            {
-              carrierId: "se-999",
-              serviceCodes: ["ups_ground"],
-              maxWeightLb: null,
-            },
-          ],
-        },
+        { paused, expectedVersion: current.version },
         "admin",
         INTAKE_NOW,
       );
@@ -121,11 +127,7 @@ integration(
     async function authorizeAutomatic(secondWeightGrams = 33) {
       const current = await enableAutomatic();
       const prepared = preparedIntake();
-      prepared.settingsVersion = current.version;
-      prepared.warehouseSnapshot = {
-        ...prepared.warehouseSnapshot,
-        version: current.version,
-      };
+      await bindIntakeTestPolicy(pool, prepared, current);
       prepared.parcels = prepared.parcels.map((parcel) => ({
         ...parcel,
         selectionMode: "cheapest_eligible",
@@ -161,7 +163,7 @@ integration(
           otherCents: 0,
         },
       };
-      const current = (await settings.read(36))!;
+      const current = (await settings.readAccepted(36, authorizationId))!;
       const result = {
         status: "completed" as const,
         rates: [
@@ -203,14 +205,6 @@ integration(
           )
         ).rows[0].request_snapshot,
       );
-    }
-    async function config() {
-      const {
-        version,
-        destinationAddress: _address,
-        ...input
-      } = (await settings.read(36))!;
-      return { ...input, expectedVersion: version };
     }
     function record(externalShipmentId: string): ReturnLabelRecord {
       return {
@@ -305,10 +299,10 @@ integration(
         provider: { purchase, recover },
         authorizeChannel: async () => {},
         now: () => new Date(clockInstant),
-        requirePurchaseConfiguration: async (channelId) =>
-          configuration.requireShippingEnabled(
+        requirePurchaseConfiguration: async (channelId, authorizationId) =>
+          configuration.requireAcceptedShippingEnabled(
             channelId,
-            (await settings.read(channelId))!.version,
+            authorizationId,
           ),
       });
       return { service, quote, purchase, recover };
@@ -361,7 +355,16 @@ integration(
             "utf8",
           ),
         );
-        expect(await settings.read(36)).not.toHaveProperty("policyId");
+        await pool.query(
+          readFileSync("migrations/255_return_policy_shipping.sql", "utf8"),
+        );
+        expect(await settings.read(36)).toMatchObject({
+          policyId: 2,
+          version: 2,
+        });
+        expect(await settings.readAccepted(36, 1)).not.toHaveProperty(
+          "policyId",
+        );
         expect(
           (
             await pool.query(
@@ -449,12 +452,7 @@ integration(
           )
         ).rows.map((row) => row.request_snapshot),
       ).toEqual(firstWorker.purchase.mock.calls.map(([input]) => input));
-      await settings.save(
-        36,
-        { ...(await config()), enabled: false },
-        "pause-admin",
-        INTAKE_NOW,
-      );
+      await pause(true);
       const restarted = worker(
         new PostgresCustomerReturnLabelStore(
           pool,
@@ -494,25 +492,113 @@ integration(
         ).rows[0].n,
       ).toBe(2);
     });
-    it("continues accepted labels and shipping-only saves after policy retirement", async () => {
+    it("resumes a migrated paused historical return without enabling new intake or changing its legacy settings", async () => {
+      await createIntakeTestSchema(pool, { policyShipping: false });
+      await seedIntakeTestSchema(pool);
+      try {
+        await seedPreCarrierSelectionIntake(pool);
+        await pool.query(
+          "UPDATE returns.customer_return_settings SET enabled=false WHERE channel_id=36",
+        );
+        await pool.query(
+          readFileSync("migrations/255_return_policy_shipping.sql", "utf8"),
+        );
+        expect(await settings.readControl(36)).toEqual({
+          paused: true,
+          version: 1,
+        });
+        await expect(
+          labels.begin(36, 1, 1, "admin", INTAKE_NOW),
+        ).rejects.toMatchObject({ code: "RETURN_LABEL_SETTINGS_CHANGED" });
+        await pause(false);
+        const current = (await settings.read(36))!;
+        expect(current).toMatchObject({ enabled: false, policyId: 2 });
+        expect(await settings.readAccepted(36, 1)).toMatchObject({
+          enabled: true,
+          version: 1,
+        });
+        const continuing = worker();
+        expect(
+          (await continuing.service.progress(36, 1, "admin")).parcels[0].status,
+        ).toBe("ready");
+        expect(continuing.purchase).toHaveBeenCalledTimes(1);
+        expect(continuing.purchase.mock.calls[0][0]).toMatchObject({
+          externalShipmentId: "ecr-1-1",
+          carrierId: "se-123",
+          serviceCode: "usps_ground_advantage",
+        });
+        expect(
+          (
+            await pool.query(
+              "SELECT enabled FROM returns.customer_return_settings WHERE channel_id=36",
+            )
+          ).rows[0].enabled,
+        ).toBe(false);
+        await seedIntakeSubmission(pool, secondKey, secondLease);
+        const next = preparedIntake();
+        next.idempotencyKey = secondKey;
+        next.submissionLeaseToken = secondLease;
+        await bindIntakeTestPolicy(pool, next, current);
+        await expect(intake.persist(next)).rejects.toMatchObject({
+          code: "RETURN_LABEL_SETTINGS_CHANGED",
+        });
+        expect(
+          (
+            await pool.query(
+              "SELECT count(*)::int AS n FROM returns.customer_return_authorizations",
+            )
+          ).rows[0].n,
+        ).toBe(1);
+      } finally {
+        await createIntakeTestSchema(pool);
+      }
+    });
+    it("uses legacy shipping only for an accepted policy without a binding and never for explicit unconfigured shipping", async () => {
+      await createIntakeTestSchema(pool, { policyShipping: false });
+      await seedIntakeTestSchema(pool);
+      try {
+        await seedPreCarrierSelectionIntake(pool);
+        await pool.query(
+          readFileSync("migrations/255_return_policy_shipping.sql", "utf8"),
+        );
+        expect(await settings.readAccepted(36, 1)).toMatchObject({
+          version: 1,
+          carrierId: "se-123",
+        });
+        expect(await settings.read(36)).toMatchObject({
+          policyId: 2,
+          version: 2,
+        });
+        await pool.query(
+          "INSERT INTO returns.return_policy_shipping(policy_id,configuration,created_by,created_at) VALUES(1,NULL,'test',$1)",
+          [INTAKE_NOW],
+        );
+        expect(await settings.readAccepted(36, 1)).toBeNull();
+        await expect(
+          labels.begin(36, 1, 1, "admin", INTAKE_NOW),
+        ).rejects.toMatchObject({ code: "RETURN_LABEL_SETTINGS_CHANGED" });
+        expect(
+          (
+            await pool.query(
+              "SELECT count(*)::int AS n FROM returns.customer_return_label_attempts",
+            )
+          ).rows[0].n,
+        ).toBe(0);
+      } finally {
+        await createIntakeTestSchema(pool);
+      }
+    });
+    it("continues accepted labels against their immutable original configuration after policy retirement", async () => {
       const accepted = await authorizeAutomatic();
-      await pool.query("UPDATE returns.return_policies SET status='retired'");
-      const current = await settings.read(36);
-      const saved = await settings.save(
+      const original = await settings.readAccepted(
         36,
-        await config(),
-        "shipping-admin",
-        INTAKE_NOW,
+        accepted.authorizationId,
       );
-      expect(saved.version).toBe(current!.version + 1);
-      expect(saved).not.toHaveProperty("policyId");
-      expect(
-        (
-          await pool.query(
-            "SELECT policy_id FROM returns.customer_return_settings",
-          )
-        ).rows[0].policy_id,
-      ).toBeNull();
+      await pool.query("UPDATE returns.return_policies SET status='retired'");
+      expect(await settings.read(36)).toBeNull();
+      expect(await settings.readAccepted(36, accepted.authorizationId)).toEqual(
+        original,
+      );
       const continuing = worker();
       expect(
         (
@@ -524,17 +610,10 @@ integration(
         ).parcels[0].status,
       ).toBe("ready");
       expect(continuing.purchase).toHaveBeenCalledTimes(1);
-      expect(
-        (
-          await pool.query(
-            "SELECT operational_policy_snapshot->>'id' AS id FROM returns.customer_return_intakes",
-          )
-        ).rows[0].id,
-      ).toBe("1");
       expect((await settings.catalog(36)).policies).toEqual([]);
     });
     it.each(["pause", "rules"])(
-      "rejects a purchase if %s changes while the service is awaiting provider rates",
+      "enforces pause but preserves accepted shipping if %s changes while awaiting rates",
       async (change) => {
         const saved = await authorizeAutomatic();
         const currentWorker = worker();
@@ -561,34 +640,34 @@ integration(
           );
         await observing;
         try {
-          const input = await config();
-          await settings.save(
-            36,
-            change === "pause"
-              ? { ...input, enabled: false }
-              : { ...input, carrierRules: input.carrierRules.slice(1) },
-            "another-admin",
-            INTAKE_NOW,
-          );
+          if (change === "pause") await pause(true);
+          else
+            await publishIntakeTestPolicyShipping(pool, {
+              carrierRules: [
+                {
+                  carrierId: "se-999",
+                  serviceCodes: ["ups_ground"],
+                  maxWeightLb: null,
+                },
+              ],
+            });
         } finally {
           release(rateResult);
         }
-        expect(await progress).toMatchObject({
-          error: {
-            code:
-              change === "pause"
-                ? "RETURN_LABEL_SETTINGS_CHANGED"
-                : "RETURN_LABEL_QUOTE_CHANGED",
-          },
-        });
-        expect(currentWorker.purchase).not.toHaveBeenCalled();
-        expect(
-          (
-            await pool.query(
-              `SELECT COUNT(*)::int AS n FROM returns.customer_return_label_attempts`,
-            )
-          ).rows[0].n,
-        ).toBe(0);
+        if (change === "pause") {
+          expect(await progress).toMatchObject({
+            error: { code: "RETURN_LABEL_SETTINGS_CHANGED" },
+          });
+          expect(currentWorker.purchase).not.toHaveBeenCalled();
+        } else {
+          expect(await progress).toMatchObject({
+            value: { parcels: [{ status: "ready" }, { status: "pending" }] },
+          });
+          expect(currentWorker.purchase).toHaveBeenCalledTimes(1);
+          expect(currentWorker.purchase.mock.calls[0][0].carrierId).toBe(
+            "se-123",
+          );
+        }
         expect(
           (
             await pool.query(
@@ -598,62 +677,6 @@ integration(
         ).toEqual([{ settings_version: 2, status: "selected" }]);
       },
     );
-    it("stores normalized automatic rules identically in the settings row, returned state and audit, including an unchanged pause", async () => {
-      const unordered = [
-        {
-          carrierId: "se-999",
-          serviceCodes: ["ups_saver", "ups_ground"],
-          maxWeightLb: null,
-        },
-        {
-          carrierId: "se-123",
-          serviceCodes: ["usps_ground_advantage"],
-          maxWeightLb: "20",
-        },
-      ];
-      const input = {
-        ...(await config()),
-        selectionMode: "cheapest_eligible" as const,
-        carrierId: null,
-        serviceCode: null,
-        carrierRules: unordered,
-      };
-      const saved = await settings.save(36, input, "admin", INTAKE_NOW);
-      const normalized = [
-        { ...unordered[1] },
-        { ...unordered[0], serviceCodes: ["ups_ground", "ups_saver"] },
-      ];
-      expect(saved.carrierRules).toEqual(normalized);
-      expect((await settings.read(36))!.carrierRules).toEqual(normalized);
-      expect(
-        (
-          await pool.query(
-            `SELECT after_snapshot FROM returns.customer_return_settings_events WHERE version=2`,
-          )
-        ).rows[0].after_snapshot,
-      ).toEqual(saved);
-      await pool.query(
-        `UPDATE returns.return_policies SET status='retired' WHERE id=1`,
-      );
-      const paused = await settings.save(
-        36,
-        { ...input, expectedVersion: 2, enabled: false },
-        "pause-admin",
-        INTAKE_NOW,
-      );
-      expect(paused).toMatchObject({
-        enabled: false,
-        carrierRules: normalized,
-        destinationAddress: saved.destinationAddress,
-      });
-      expect(
-        (
-          await pool.query(
-            `SELECT after_snapshot FROM returns.customer_return_settings_events WHERE version=3`,
-          )
-        ).rows[0].after_snapshot,
-      ).toEqual(paused);
-    });
     it("uses the fresh post-lock clock for fixed purchase start and audit instead of the request time", async () => {
       const saved = await authorize();
       clockInstant = new Date(INTAKE_NOW.getTime() + 5000);
@@ -773,7 +796,7 @@ integration(
         pool.query(`DELETE FROM returns.customer_return_quote_decisions`),
       ).rejects.toThrow(/append-only/);
     });
-    it.each(["pause", "version", "other_parcel", "expired"])(
+    it.each(["pause", "other_parcel", "expired"])(
       "rejects a %s quote at the atomic purchase boundary",
       async (kind) => {
         const saved = await authorizeAutomatic();
@@ -786,15 +809,7 @@ integration(
           "admin",
           INTAKE_NOW,
         );
-        if (kind === "pause")
-          await settings.save(
-            36,
-            { ...(await config()), enabled: false },
-            "admin",
-            INTAKE_NOW,
-          );
-        if (kind === "version")
-          await settings.save(36, { ...(await config()) }, "admin", INTAKE_NOW);
+        if (kind === "pause") await pause(true);
         if (kind === "expired")
           clockInstant = new Date(
             INTAKE_NOW.getTime() + RETURN_RATE_QUOTE_MAX_AGE_MS,
@@ -818,7 +833,7 @@ integration(
         ).toBe(0);
       },
     );
-    it("checks quote expiry after a real settings lock wait using the fresh injected clock", async () => {
+    it("checks quote expiry after a real control lock wait using the fresh injected clock", async () => {
       const saved = await authorizeAutomatic();
       const parcelId = saved.parcels[0].parcelId;
       const quoteId = await labels.recordQuote(
@@ -832,7 +847,7 @@ integration(
       const blocker = await pool.connect();
       await blocker.query("BEGIN");
       await blocker.query(
-        "SELECT 1 FROM returns.customer_return_settings WHERE channel_id=36 FOR UPDATE",
+        "SELECT 1 FROM returns.customer_return_label_controls WHERE channel_id=36 FOR UPDATE",
       );
       let pending:
         | Promise<{ error: unknown } | { result: unknown }>
@@ -855,7 +870,7 @@ integration(
         for (let attempt = 0; attempt < 100; attempt++) {
           const row = (
             await pool.query(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'
-            AND query LIKE '%customer_return_settings%') AS waiting`)
+            AND query LIKE '%customer_return_label_controls%') AS waiting`)
           ).rows[0];
           if (row.waiting) {
             waiting = true;
@@ -882,7 +897,7 @@ integration(
         ).rows[0].n,
       ).toBe(0);
     });
-    it("keeps a legacy fixed parcel pinned when automatic rules still admit its service", async () => {
+    it("keeps a fixed parcel on its accepted policy when a new policy switches to automatic selection", async () => {
       const saved = await authorize();
       await enableAutomatic();
       const attempt = await labels.begin(
@@ -1033,14 +1048,23 @@ integration(
         pool.query(`DELETE FROM returns.customer_return_label_events`),
       ).rejects.toThrow(/append-only/);
     });
-    it("paused or changed destination settings prevent a new purchase, with read access retained", async () => {
+    it("independent pause fences old and new policy returns while later destinations never reinterpret an accepted box", async () => {
       const saved = await authorize();
-      await settings.save(
-        36,
-        { ...(await config()), enabled: false },
-        "admin",
-        INTAKE_NOW,
+      const original = await settings.readAccepted(36, saved.authorizationId);
+      await publishIntakeTestPolicyShipping(pool, {
+        contactName: "New contact",
+        destinationAddress: {
+          ...original!.destinationAddress,
+          name: "New contact",
+        },
+      });
+      expect(await settings.readAccepted(36, saved.authorizationId)).toEqual(
+        original,
       );
+      expect((await settings.read(36))!.destinationAddress.name).toBe(
+        "New contact",
+      );
+      await pause(true);
       await expect(
         labels.begin(
           36,
@@ -1053,39 +1077,15 @@ integration(
       expect(
         (await labels.read(36, saved.authorizationId)).parcels,
       ).toHaveLength(2);
-      await settings.save(
+      await pause(false);
+      const attempt = await labels.begin(
         36,
-        { ...(await config()), enabled: true },
+        saved.authorizationId,
+        saved.parcels[0].parcelId,
         "admin",
         INTAKE_NOW,
       );
-      expect(
-        await labels.begin(
-          36,
-          saved.authorizationId,
-          saved.parcels[0].parcelId,
-          "admin",
-          INTAKE_NOW,
-        ),
-      ).toMatchObject({
-        id: expect.any(Number),
-        input: { carrierId: "se-123", serviceCode: "usps_ground_advantage" },
-      });
-      await settings.save(
-        36,
-        { ...(await config()), contactName: "Another destination contact" },
-        "admin",
-        INTAKE_NOW,
-      );
-      await expect(
-        labels.begin(
-          36,
-          saved.authorizationId,
-          saved.parcels[1].parcelId,
-          "admin",
-          INTAKE_NOW,
-        ),
-      ).rejects.toMatchObject({ code: "RETURN_LABEL_SETTINGS_CHANGED" });
+      expect(attempt?.input.shipTo).toEqual(original!.destinationAddress);
     });
     it("enforces shop/return/parcel ownership at read and write boundaries", async () => {
       const saved = await authorize();
@@ -1105,28 +1105,86 @@ integration(
         labels.begin(36, saved.authorizationId, 99999, "admin", INTAKE_NOW),
       ).rejects.toMatchObject({ status: 404 });
     });
-    it("settings saves use optimistic versions and append before/after audit", async () => {
-      const input = await config();
+    it("control saves use optimistic versions with atomic before/after audit and preserve policy configuration", async () => {
+      const original = await settings.read(36);
       const results = await Promise.allSettled([
-        settings.save(36, { ...input, enabled: false }, "admin:a", INTAKE_NOW),
-        settings.save(36, { ...input, enabled: false }, "admin:b", INTAKE_NOW),
+        settings.saveControl(
+          36,
+          { paused: true, expectedVersion: 1 },
+          "admin:a",
+          INTAKE_NOW,
+        ),
+        settings.saveControl(
+          36,
+          { paused: true, expectedVersion: 1 },
+          "admin:b",
+          INTAKE_NOW,
+        ),
       ]);
       expect(
         results.filter((result) => result.status === "fulfilled"),
       ).toHaveLength(1);
-      expect((await settings.read(36))!.version).toBe(2);
-      const event = (
-        await pool.query(
-          `SELECT before_snapshot,after_snapshot FROM returns.customer_return_settings_events`,
-        )
-      ).rows[0];
-      expect(event.before_snapshot.enabled).toBe(true);
-      expect(event.after_snapshot.enabled).toBe(false);
+      expect(await settings.readControl(36)).toEqual({
+        paused: true,
+        version: 2,
+      });
+      expect(await settings.read(36)).toEqual(original);
+      expect(
+        (
+          await pool.query(
+            "SELECT before_snapshot,after_snapshot FROM returns.customer_return_label_control_events",
+          )
+        ).rows,
+      ).toEqual([
+        {
+          before_snapshot: { paused: false, version: 1 },
+          after_snapshot: { paused: true, version: 2 },
+        },
+      ]);
       await expect(
         pool.query(
-          `UPDATE returns.customer_return_settings_events SET actor='changed'`,
+          "UPDATE returns.customer_return_label_control_events SET actor='changed'",
         ),
       ).rejects.toThrow(/append-only/);
+    });
+    it("serializes the first control insert and leaves one durable audit after a stale concurrent save", async () => {
+      expect(await settings.readControl(37)).toEqual({
+        paused: false,
+        version: 0,
+      });
+      const outcomes = await Promise.allSettled([
+        settings.saveControl(
+          37,
+          { paused: true, expectedVersion: 0 },
+          "one",
+          INTAKE_NOW,
+        ),
+        settings.saveControl(
+          37,
+          { paused: true, expectedVersion: 0 },
+          "two",
+          INTAKE_NOW,
+        ),
+      ]);
+      expect(
+        outcomes.filter((outcome) => outcome.status === "fulfilled"),
+      ).toHaveLength(1);
+      expect(await settings.readControl(37)).toEqual({
+        paused: true,
+        version: 1,
+      });
+      expect(
+        (
+          await pool.query(
+            "SELECT before_snapshot,after_snapshot FROM returns.customer_return_label_control_events WHERE channel_id=37",
+          )
+        ).rows,
+      ).toEqual([
+        {
+          before_snapshot: { paused: false, version: 0 },
+          after_snapshot: { paused: true, version: 1 },
+        },
+      ]);
     });
     it("new command acquisition persists exact input, and live lease prevents concurrent preparation", async () => {
       const input = { ...(await request()), idempotencyKey: secondKey };

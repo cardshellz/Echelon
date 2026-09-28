@@ -6,6 +6,7 @@ import {
   customerReturnLabelSettingsStateSchema,
   customerReturnLabelStatusSchema,
   customerReturnLabelSubmitInputSchema,
+  customerReturnLabelControlInputSchema,
 } from "@shared/returns/customer-return-label.contract";
 import { CustomerReturnIntakeError } from "../../application/customer-return-intake.ports";
 import { CustomerReturnLiveError } from "../../application/customer-return-live-error";
@@ -14,7 +15,7 @@ import type { CustomerReturnLabelsService } from "../../application/customer-ret
 import type { CustomerReturnSubmissionService } from "../../application/customer-return-submission.service";
 
 export interface CustomerReturnLabelRouteServices {
-  settings: Pick<CustomerReturnLabelSettingsService, "get" | "save">;
+  settings: Pick<CustomerReturnLabelSettingsService, "get" | "save" | "control">;
   labels: Pick<CustomerReturnLabelsService, "status" | "progress" | "artifact">;
   submissions: Pick<
     CustomerReturnSubmissionService,
@@ -118,6 +119,14 @@ export function registerCustomerReturnLabelRoutes(
           actor,
         ),
       ),
+    ),
+  );
+  app.post(
+    `${settingsPath}/control`,
+    handle("return_label_control", true, async (req, service, actor) =>
+      customerReturnLabelSettingsStateSchema.parse(await service.settings.control(
+        number(req.params.channelId), input(customerReturnLabelControlInputSchema, req.body), actor,
+      )),
     ),
   );
   app.post(

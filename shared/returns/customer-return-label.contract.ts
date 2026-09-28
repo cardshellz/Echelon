@@ -29,7 +29,7 @@ export const customerReturnLabelAddressSchema = z
     countryCode: z.literal("US"),
   })
   .strict();
-const customerReturnLabelSettingsFieldsSchema = z
+export const customerReturnLabelSettingsFieldsSchema = z
   .object({
     enabled: z.boolean(),
     warehouseId: id,
@@ -54,8 +54,19 @@ export const customerReturnLabelSettingsSchema =
       policyId: id.nullish(),
     })
     .strict()
-    .superRefine(refineCustomerReturnCarrierPolicy)
-    .transform(({ policyId: _legacyPolicyId, ...shipping }) => shipping);
+    .superRefine(refineCustomerReturnCarrierPolicy);
+export const customerReturnLabelControlSchema = z
+  .object({
+    paused: z.boolean(),
+    version: z.number().int().nonnegative().safe(),
+  })
+  .strict();
+export const customerReturnLabelControlInputSchema = z
+  .object({
+    paused: z.boolean(),
+    expectedVersion: z.number().int().nonnegative().safe(),
+  })
+  .strict();
 export const customerReturnResolvedPolicySchema = z
   .object({
     id,
@@ -86,6 +97,7 @@ export const customerReturnLabelSettingsStateSchema = z
     channelId: id,
     providerConfigured: z.boolean(),
     settings: customerReturnLabelSettingsSchema.nullable(),
+    control: customerReturnLabelControlSchema,
     warehouses: z
       .array(
         z

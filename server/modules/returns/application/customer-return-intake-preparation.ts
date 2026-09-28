@@ -57,6 +57,7 @@ export function prepareCustomerReturnIntake(
     normalizeCustomerReturnOrderReference(input.orderReference) !==
       order.orderReference ||
     input.settingsVersion !== settings.version ||
+    settings.policyId !== operationalPolicy.id ||
     canonical(inspection.operationalPolicy) !== canonical(operationalPolicy) ||
     facts.policy.version !== operationalPolicy.version ||
     facts.policy.returnWindowDays !==

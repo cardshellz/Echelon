@@ -1,5 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
+import { customerReturnPolicyShippingInputSchema, returnPolicyShippingCatalogSchema } from "@shared/returns/return-policy-shipping.contract";
+import { readReturnLabelCapabilities } from "../../infrastructure/customer-return-label.composition";
 import { returnPolicyArchiveInputSchema, returnPolicyArchivePreviewSchema, returnPolicyArchiveResultSchema } from "@shared/returns/return-policy-archive.contract";
 import {
   returnApprovalAuthorities,
@@ -27,6 +29,8 @@ const publicScopeSchema = z.object({
   storeConnectionId: nullablePositiveInteger,
 });
 const createPolicySchema = publicScopeSchema.extend({
+  expectedPolicyId: z.number().int().positive().safe().nullable(),
+  shipping: customerReturnPolicyShippingInputSchema.nullable(),
   name: z.string().trim().min(1).max(160),
   returnWindowDays: z.number().int().min(0).max(3650),
   returnDestination: z.enum(returnDestinations),
@@ -55,7 +59,7 @@ const storeSearchSchema = searchSchema.extend({
 
 export function registerReturnPolicyAdminRoutes(
   app: Express,
-  service: ReturnPolicyAdminService = new ReturnPolicyAdminService(new PostgresReturnPolicyAdminStore()),
+  service: ReturnPolicyAdminService = new ReturnPolicyAdminService(new PostgresReturnPolicyAdminStore(), () => new Date(), () => readReturnLabelCapabilities(process.env.SHIPSTATION_V2_API_KEY?.trim() ?? "")),
 ): void {
   app.get("/api/returns/admin/policies", requirePermission("settings", "view"), async (_req, res) => {
     try {
@@ -116,6 +120,12 @@ export function registerReturnPolicyAdminRoutes(
     } catch (error) {
       return sendError(res, error, "RETURN_POLICY_CREATE_FAILED", "Return policy version could not be created.");
     }
+  });
+
+  app.get("/api/returns/admin/policies/shipping-catalog", requirePermission("settings", "view"), async (_req, res) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    try { return res.json(returnPolicyShippingCatalogSchema.parse(await service.shippingCatalog())); }
+    catch (error) { return sendError(res, error, "RETURN_POLICY_SHIPPING_CATALOG_FAILED", "Return shipping options could not be loaded."); }
   });
 
   app.get("/api/returns/admin/policies/:policyId/archive-preview", requirePermission("settings", "view"), async (req, res) => {

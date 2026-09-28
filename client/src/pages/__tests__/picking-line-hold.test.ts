@@ -23,7 +23,7 @@ describe("pick-floor line hold", () => {
     expect(PICKING).toContain("wmsOrderId: number;");
     expect(PICKING).toContain("wmsOrderId: order.id,");
     expect(PICKING).toContain("`/api/orders/${wmsOrderId}/items/${itemId}/hold`");
-    expect(PICKING).toContain("wmsOrderId: holdLineTarget.wmsOrderId");
+    expect(PICKING).toContain("wmsOrderId: item.wmsOrderId");
   });
 
   it("never offers hold for a line that already has picked units", () => {
@@ -31,17 +31,37 @@ describe("pick-floor line hold", () => {
     // invite the picker into a guaranteed 409.
     expect(PICKING).toContain("disabled={holdLineItemMutation.isPending || currentItem.picked > 0}");
     expect(PICKING).toContain("disabled={item.picked > 0 || holdLineItemMutation.isPending}");
-    expect(PICKING).toContain("if (!item || item.picked > 0) return;");
+    expect(PICKING).toContain("if (!item || item.picked > 0 || holdLineItemMutation.isPending) return;");
   });
 
-  it("requires a reason before holding and refreshes the queue afterwards", () => {
-    expect(PICKING).toContain("const HOLD_LINE_REASONS");
-    expect(PICKING).toContain("disabled={!holdLineReason || !holdLineTarget || holdLineItemMutation.isPending}");
+  it("holds in one tap and refreshes the queue, with no reason prompt", () => {
+    // Holds only happen for out of stock / not received / delayed, and the
+    // reason was never read by anything downstream. One tap on the gun.
+    expect(PICKING).toContain("holdLineItemMutation.mutate({ wmsOrderId: item.wmsOrderId, itemId: item.id })");
+    expect(PICKING).not.toContain("HOLD_LINE_REASONS");
+    expect(PICKING).not.toContain("holdLineReason");
     const holdMutation = PICKING.slice(
       PICKING.indexOf("const holdLineItemMutation"),
       PICKING.indexOf("const resolveAllocationMutation"),
     );
     expect(holdMutation).toContain('queryClient.invalidateQueries({ queryKey: ["picking-queue"] })');
     expect(holdMutation).toContain('title: "Line held"');
+  });
+
+  it("files an order with a held line under Hold instead of losing it", () => {
+    // A line hold does not set the order-level flag, so without this an order
+    // whose only outstanding line is held shows in neither Ready nor Hold.
+    expect(PICKING).toContain("function hasHeldLine");
+    expect(PICKING).toContain("singleQueue.filter(o => o.onHold || hasHeldLine(o))");
+    expect(PICKING).toContain('const itemOnHold = ("onHold" in item && item.onHold) || hasHeldLine(item);');
+
+    const storage = readFileSync("server/modules/orders/orders.storage.ts", "utf8");
+    const queueGuard = storage.slice(
+      storage.indexOf("Exclude orders with zero shippable items"),
+      storage.indexOf("Historical orders are read separately"),
+    );
+    // Not pickable, but still readable so the Hold tab can show it.
+    expect(queueGuard).toContain("COALESCE(oi.on_hold, false) = false");
+    expect(queueGuard).toContain("COALESCE(oi.on_hold, false) = true");
   });
 });

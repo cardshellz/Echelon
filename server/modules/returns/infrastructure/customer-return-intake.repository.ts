@@ -12,6 +12,8 @@ import { acquireReturnPolicyCatalogLock } from "./return-policy-lock";
 import { readCustomerReturnPolicyCandidates } from "./customer-return-policy.reader";
 import { resolveCustomerReturnPortalPolicy } from "../application/customer-return-policy";
 import { snapshotReturnPolicy } from "../domain/return-case";
+import { customerReturnLabelSettingsSchema } from "@shared/returns/customer-return-label.contract";
+import { RETURN_LABEL_CONTROL_LOCK_NAMESPACE } from "./customer-return-label-settings.repository";
 import {
   PostgresCustomerReturnAuthorizationTransaction, type CustomerReturnAuthorizationDatabase,
   type CustomerReturnAuthorizationSqlExecutor
@@ -119,14 +121,18 @@ async function findIntake(tx: Executor, input: Parameters<CustomerReturnIntakeSt
 }
 
 async function verifyConfiguration(tx: Executor, input: PreparedCustomerReturnIntake): Promise<void> {
-  const settings = rows(await tx.execute(sql`SELECT * FROM returns.customer_return_settings WHERE channel_id=${input.channelId} FOR SHARE`))[0];
-  if (!settings || settings.enabled !== true || Number(settings.version) !== input.settingsVersion
-    || Number(settings.warehouse_id) !== input.warehouseSnapshot.warehouseId
+  await tx.execute(sql`SELECT pg_advisory_xact_lock_shared(${RETURN_LABEL_CONTROL_LOCK_NAMESPACE},${input.channelId})`);
+  const control = rows(await tx.execute(sql`SELECT paused FROM returns.customer_return_label_controls WHERE channel_id=${input.channelId} FOR SHARE`))[0];
+  if (control?.paused === true) configurationChanged();
+  const row = rows(await tx.execute(sql`SELECT configuration FROM returns.return_policy_shipping WHERE policy_id=${input.operationalPolicy.id}`))[0];
+  const settings = row?.configuration == null ? null : customerReturnLabelSettingsSchema.parse(row.configuration);
+  if (!settings || settings.enabled !== true || settings.policyId !== input.operationalPolicy.id || settings.version !== input.settingsVersion
+    || settings.warehouseId !== input.warehouseSnapshot.warehouseId
     || input.warehouseSnapshot.version !== input.settingsVersion
-    || input.parcels.some(parcel => (parcel.selectionMode ?? "fixed_service") !== settings.selection_mode
-      || parcel.carrierId !== settings.carrier_id || parcel.serviceCode !== settings.service_code
-      || canonical(parcel.destinationAddress) !== canonical(settings.destination_address))) configurationChanged();
-  const warehouse = rows(await tx.execute(sql`SELECT is_active,country FROM warehouse.warehouses WHERE id=${settings.warehouse_id} FOR SHARE`))[0];
+    || input.parcels.some(parcel => (parcel.selectionMode ?? "fixed_service") !== settings.selectionMode
+      || parcel.carrierId !== settings.carrierId || parcel.serviceCode !== settings.serviceCode
+      || canonical(parcel.destinationAddress) !== canonical(settings.destinationAddress))) configurationChanged();
+  const warehouse = rows(await tx.execute(sql`SELECT is_active,country FROM warehouse.warehouses WHERE id=${settings.warehouseId} FOR SHARE`))[0];
   if (!warehouse || warehouse.is_active !== 1 || warehouse.country !== "US") configurationChanged();
   const resolved = resolveCustomerReturnPortalPolicy(await readCustomerReturnPolicyCandidates(tx, input.channelId), input.channelId);
   const policy = resolved.policy;

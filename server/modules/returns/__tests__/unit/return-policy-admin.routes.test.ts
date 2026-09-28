@@ -25,6 +25,20 @@ describe("return policy admin routes", () => {
 
   afterEach(async () => server.close());
 
+  it("serves a validated shipping catalog under the settings-view permission", async () => {
+    const catalog = { providerConfigured: true, warehouses: [], carriers: [], message: null };
+    service.shippingCatalog.mockResolvedValue(catalog);
+    expect(await jsonRequest(`${server.url}/api/returns/admin/policies/shipping-catalog`)).toMatchObject({ status: 200, body: catalog, cacheControl: "private, no-store" });
+    expect(requirePermissionMock).toHaveBeenCalledWith("settings", "view");
+  });
+
+  it.each([{ expectedPolicyId: undefined }, { shipping: undefined }, { shipping: { warehouseId: 1 } }])("requires an explicit prior policy identity and validated shipping input %#", async changes => {
+    expect(await jsonRequest(`${server.url}/api/returns/admin/policies/versions`, {
+      method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "shipping-invalid" }, body: JSON.stringify({ ...validPolicy(), ...changes }),
+    })).toMatchObject({ status: 400, body: { error: { code: "RETURN_POLICY_INVALID" } } });
+    expect(service.createVersion).not.toHaveBeenCalled();
+  });
+
   it("requires an idempotency key for version creation", async () => {
     const response = await jsonRequest(`${server.url}/api/returns/admin/policies/versions`, {
       method: "POST",
@@ -184,6 +198,8 @@ function archivePreview() {
 
 function validPolicy() {
   return {
+    expectedPolicyId: null,
+    shipping: null,
     name: "Shopify returns",
     appliesTo: "channel",
     channelId: 36,
@@ -205,6 +221,7 @@ function validPolicy() {
 
 function fakeService() {
   return {
+    shippingCatalog: vi.fn(),
     listOverview: vi.fn(),
     listActivePolicies: vi.fn(),
     getDropshipOmsChannel: vi.fn(),
