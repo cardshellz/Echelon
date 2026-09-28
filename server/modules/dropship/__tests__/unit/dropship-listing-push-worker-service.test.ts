@@ -246,7 +246,7 @@ describe("DropshipListingPushWorkerService", () => {
     marketplacePush.error = new DropshipError(
       "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
       "eBay listing push failed with HTTP 400: 25002 Invalid value for aspect (aspect: Brand)",
-      { retryable: false, status: 400, providerErrors: [
+      { retryable: false, status: 400, endpoint: "PUT /sell/inventory/v1/inventory_item/SKU-101", providerErrors: [
         { errorId: 25002, message: "Invalid value for aspect", parameters: [{ name: "aspect", value: "Brand" }] },
         "not an entry",
       ] },
@@ -266,10 +266,12 @@ describe("DropshipListingPushWorkerService", () => {
     expect(repository.failInputs[0]?.providerErrors).toEqual([
       { errorId: 25002, message: "Invalid value for aspect", parameters: [{ name: "aspect", value: "Brand" }] },
     ]);
+    expect(repository.failInputs[0]?.endpoint).toBe("PUT /sell/inventory/v1/inventory_item/SKU-101");
     expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_FAILED")).toMatchObject({
       context: {
         jobId: 30, itemId: 1, vendorId: 10, storeConnectionId: 22, listingId: 100, productVariantId: 101, platform: "shopify",
         errorCode: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR", retryable: false, providerErrors: [{ errorId: 25002 }],
+        endpoint: "PUT /sell/inventory/v1/inventory_item/SKU-101",
       },
     });
     expect(notificationSender.sent[0]?.message).toBe(

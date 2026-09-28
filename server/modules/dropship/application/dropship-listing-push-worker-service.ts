@@ -115,6 +115,8 @@ export interface DropshipListingPushWorkerRepository {
     retryable: boolean;
     /** The marketplace's own error entries, bounded by the provider; kept on the item for support. */
     providerErrors?: ReadonlyArray<Record<string, unknown>>;
+    /** The marketplace call that refused ("PUT /sell/inventory/v1/inventory_item/SKU"), when the provider names it. */
+    endpoint?: string | null;
     workerId: string;
     now: Date;
   }): Promise<DropshipListingPushWorkerItemRecord>;
@@ -289,6 +291,7 @@ export class DropshipListingPushWorkerService {
           errorCode: classified.code,
           errorMessage: classified.message,
           retryable: classified.retryable,
+          endpoint: classified.endpoint,
           providerErrors: classified.providerErrors,
         },
       });
@@ -299,6 +302,7 @@ export class DropshipListingPushWorkerService {
         message: classified.message,
         retryable: classified.retryable,
         providerErrors: classified.providerErrors,
+        endpoint: classified.endpoint,
         workerId: parsed.workerId,
         now: this.deps.clock.now(),
       });
@@ -483,13 +487,16 @@ function classifyListingPushError(error: unknown): {
   message: string;
   retryable: boolean;
   providerErrors?: ReadonlyArray<Record<string, unknown>>;
+  endpoint?: string | null;
 } {
   if (error instanceof DropshipError) {
+    const endpoint = error.context?.endpoint;
     return {
       code: error.code,
       message: error.message,
       retryable: Boolean(error.context?.retryable),
       providerErrors: providerErrorEntries(error.context?.providerErrors),
+      endpoint: typeof endpoint === "string" && endpoint.length > 0 ? endpoint : null,
     };
   }
   if (error instanceof Error) {

@@ -64,6 +64,11 @@ describe("PgDropshipEbayManagedLocationProvider", () => {
     expect(new Headers(requests[1]?.init?.headers).get("Authorization")).toBe(
       "Bearer access-token",
     );
+    // eBay refuses Sell API calls without the locale headers (25709).
+    expect(new Headers(requests[0]?.init?.headers).get("Accept-Language")).toBe("en-US");
+    expect(new Headers(requests[0]?.init?.headers).get("Content-Language")).toBeNull();
+    expect(new Headers(requests[1]?.init?.headers).get("Accept-Language")).toBe("en-US");
+    expect(new Headers(requests[1]?.init?.headers).get("Content-Language")).toBe("en-US");
   });
 
   it("repairs and enables a stale managed location", async () => {
