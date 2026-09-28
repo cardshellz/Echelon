@@ -61,20 +61,6 @@ dbDescribe.sequential(
       shipNodeId: "test-location",
       items: intent().items,
     });
-    // The runtime enqueues outbox rows with the database clock
-    // (`available_at = transaction_timestamp()`), so the worker clock that
-    // claims them must be a reading of that same clock taken after the enqueue.
-    // JS dates carry milliseconds while Postgres keeps microseconds, so the
-    // reading rounds up to the next whole millisecond; truncated to the same
-    // millisecond as the enqueue it would sort before the row and miss it.
-    // A fixed calendar date is wrong here: it stops matching once real time
-    // passes it.
-    const databaseClockAfterEnqueue = async (): Promise<Date> => {
-      const { rows } = await database.pool.query<{ claim_at: Date }>(
-        "SELECT date_trunc('milliseconds', now()) + interval '1 millisecond' AS claim_at",
-      );
-      return new Date(rows[0]!.claim_at);
-    };
     beforeAll(async () => {
       database = await createInventoryCutoverTestDatabase(
         url,
@@ -620,22 +606,60 @@ dbDescribe.sequential(
       ).rejects.toMatchObject({ code: "MEMBERSHIP_REVIEW_STALE" });
     });
     it("holds stock at zero, suppresses a leased positive, verifies exact readback, then removes membership", async () => {
+      let providerTime = WALMART_INVENTORY_NOW;
       const outbox = new PostgresInventoryPublicationOutboxRepository(
         database.pool,
       );
-      // The positive row was enqueued by the previous test, so a clock reading
-      // taken now is after it.
-      const positiveClaimTime = await databaseClockAfterEnqueue();
-      const [positive] = await outbox.claimDue({
-        batchSize: 10,
-        leaseSeconds: 120,
-        leaseToken: "positive-lease",
-        now: positiveClaimTime,
-      });
+      const membership = new InventoryPublicationMembershipService(
+        new PostgresInventoryPublicationMembershipStore(database.pool),
+        { now: () => providerTime },
+      );
+      const claimScheduled = async (leaseToken: string) => {
+        // Runtime publication schedules with PostgreSQL transaction time, not
+        // the injected audit clock. Read each new row's actual due boundary.
+        // PostgreSQL retains microseconds; JavaScript Date retains milliseconds,
+        // so round forward one millisecond after truncation before claiming.
+        const queued = await database.pool.query<{
+          id: string;
+          desired_quantity: string;
+          before_due: Date;
+          claim_at: Date;
+        }>(
+          `SELECT id::text, desired_quantity::text,
+             date_trunc('milliseconds', available_at) - interval '1 millisecond' AS before_due,
+             GREATEST(date_trunc('milliseconds', available_at) + interval '1 millisecond', $1::timestamptz) AS claim_at
+           FROM inventory.inventory_publication_outbox
+           WHERE publication_target_id=2 AND product_variant_id=101
+             AND publication_phase='full' AND state='queued'`,
+          [providerTime],
+        );
+        expect(queued.rows).toHaveLength(1);
+        const scheduled = queued.rows[0];
+        const claimInput = { batchSize: 10, leaseSeconds: 120, leaseToken };
+        expect(
+          await outbox.claimDue({ ...claimInput, now: scheduled.before_due }),
+        ).toEqual([]);
+        // Keep hold, admission, review and readback clocks monotonic, including
+        // when the fixture's audit clock is ahead of the database clock.
+        providerTime = scheduled.claim_at;
+        const claimed = await outbox.claimDue({
+          ...claimInput,
+          now: providerTime,
+        });
+        expect(claimed).toHaveLength(1);
+        expect(claimed[0]).toMatchObject({
+          outboxId: scheduled.id,
+          publicationTargetId: 2,
+          productVariantId: 101,
+          desiredQuantity: scheduled.desired_quantity,
+        });
+        return claimed[0];
+      };
+      const positive = await claimScheduled("positive-lease");
       expect(positive.desiredQuantity).not.toBe("0");
       const holds = new InventoryPublicationTargetVariantHoldService(
         new PostgresInventoryPublicationTargetVariantHoldStore(database.pool),
-        { now: () => WALMART_INVENTORY_NOW },
+        { now: () => providerTime },
       );
       await holds.holdVariants(
         {
@@ -661,29 +685,21 @@ dbDescribe.sequential(
       await expect(
         new PostgresQuantityPublicationAdmission(
           database.pool,
-          () => positiveClaimTime,
+          () => providerTime,
         ).runOutbox(positive, provider),
       ).rejects.toThrow();
       expect(provider).not.toHaveBeenCalled();
-      const before = await service.review({
+      const before = await membership.review({
         publicationTargetId: 2,
         expectedTargetRevision: "5",
         changes: [{ productVariantId: 101, included: false }],
       });
       expect(before.ready).toBe(false);
-      // The hold enqueued the zero row after the positive claim time, so the
-      // zero claim needs a fresh reading of the database clock.
-      const zeroClaimTime = await databaseClockAfterEnqueue();
-      const [zero] = await outbox.claimDue({
-        batchSize: 10,
-        leaseSeconds: 120,
-        leaseToken: "zero-lease",
-        now: zeroClaimTime,
-      });
+      const zero = await claimScheduled("zero-lease");
       expect(zero.desiredQuantity).toBe("0");
       await new PostgresQuantityPublicationAdmission(
         database.pool,
-        () => zeroClaimTime,
+        () => providerTime,
       ).runOutbox(zero, () =>
         observeQuantityProviderRequest(
           {
@@ -708,7 +724,7 @@ dbDescribe.sequential(
         await outbox.recordVerified(zero, {
           observedQuantity: 0,
           providerResponse: { sku: "P5", quantity: 0 },
-          completedAt: zeroClaimTime,
+          completedAt: providerTime,
         }),
       ).toBe("verified");
       const input = {
@@ -716,9 +732,9 @@ dbDescribe.sequential(
         expectedTargetRevision: "5",
         changes: [{ productVariantId: 101, included: false }],
       };
-      const review = await service.review(input);
+      const review = await membership.review(input);
       expect(review.ready).toBe(true);
-      const receipt = await service.apply(
+      const receipt = await membership.apply(
         {
           ...input,
           expectedReviewHash: review.reviewHash,

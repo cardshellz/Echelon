@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import {
@@ -18,14 +18,7 @@ import {
   type ListingReview,
 } from "@shared/types/channel-listing-publication";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { publicationRequest } from "./api";
 import {
@@ -33,9 +26,8 @@ import {
   errorMessage,
   MAX_DRAFT_ITEMS,
   mergeRetryDraftItems,
-  money,
-  priceSourceLabel,
 } from "./model";
+import { ChannelListingFeed } from "./ChannelListingFeed";
 import { ListingActivity } from "./ListingActivity";
 import { ListingCatalogPicker } from "./ListingCatalogPicker";
 import { ListingItemEditor } from "./ListingItemEditor";
@@ -47,14 +39,16 @@ interface Props {
   channelId: number;
   connectionId: number;
   canEdit: boolean;
-  existingItems: ReactNode;
+  providerName: string;
+  onMappingsChanged?(): Promise<void>;
 }
 
 export function ChannelListingPublicationWorkspace({
   channelId,
   connectionId,
   canEdit,
-  existingItems,
+  providerName,
+  onMappingsChanged,
 }: Props) {
   const base = `/api/channels/${channelId}/listing-publications`;
   const client = useQueryClient();
@@ -214,7 +208,7 @@ export function ChannelListingPublicationWorkspace({
       setPickedMetadata(new Map());
       setTab("activity");
       setNotice(
-        "Submission queued. Follow Walmart’s per-item response in Activity.",
+        "Submission queued. Follow each item's status in the listing feed or Activity.",
       );
       await client.invalidateQueries({ queryKey: [base] });
     } catch (failure) {
@@ -245,6 +239,9 @@ export function ChannelListingPublicationWorkspace({
       {},
     );
     await client.invalidateQueries({ queryKey: [base] });
+    await client.invalidateQueries({
+      queryKey: [`/api/channels/${channelId}/catalog`],
+    });
   }
   async function editFailed(id: string) {
     setBusy("retry");
@@ -260,7 +257,7 @@ export function ChannelListingPublicationWorkspace({
       if (!latest) throw new Error("The draft is still loading.");
       if (response.items.length === 0)
         throw new Error(
-          "There are no confirmed failed items available to edit. Refresh Walmart status.",
+          "There are no confirmed failed items available to edit. Refresh the submission status.",
         );
       changeItems(mergeRetryDraftItems(latest.items, response.items));
       setTab("listings");
@@ -335,159 +332,37 @@ export function ChannelListingPublicationWorkspace({
           if (!busy) setTab(value);
         }}
       >
-        <TabsList className="grid h-auto w-full grid-cols-2 gap-1 sm:grid-cols-4">
+        <TabsList className="grid h-auto w-full grid-cols-3 gap-1">
           <TabsTrigger value="listings">Listing Feed</TabsTrigger>
           <TabsTrigger value="pricing">Pricing Rules</TabsTrigger>
           <TabsTrigger value="activity">Activity</TabsTrigger>
-          <TabsTrigger value="existing">Existing Walmart items</TabsTrigger>
         </TabsList>
         <TabsContent value="listings">
-          <Card>
-            <CardHeader>
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <CardTitle>Listing Feed</CardTitle>
-                  <CardDescription>
-                    Choose exact products and selling units to publish on
-                    Walmart.
-                  </CardDescription>
-                </div>
-                {canEdit && (
-                  <Button
-                    disabled={
-                      busy !== null || draft.items.length >= MAX_DRAFT_ITEMS
-                    }
-                    onClick={() => setPicking(true)}
-                  >
-                    Add products
-                  </Button>
-                )}
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <p className="text-sm text-muted-foreground">
-                {draft.items.length} selected · future variants stay unselected.
-                {dirty ? " Unsaved changes." : ""}{" "}
-                <a href="/channels/inventory" className="underline">
-                  Stock policy is managed in Channel Inventory.
-                </a>
-              </p>
-              {catalog.error && (
-                <p role="alert" className="text-sm text-destructive">
-                  Selected catalog details could not load:{" "}
-                  {errorMessage(catalog.error)}
-                </p>
-              )}
-              {draft.items.length === 0 ? (
-                <div className="py-10 text-center">
-                  <h3 className="font-medium">No products selected yet</h3>
-                  <p className="mt-2 text-sm text-muted-foreground">
-                    Add only the packs and variants you want to sell on Walmart.
-                  </p>
-                </div>
-              ) : (
-                <div className="divide-y">
-                  {draft.items.map((item) => {
-                    const info = metadata.get(item.variantId);
-                    return (
-                      <div
-                        key={item.variantId}
-                        className="flex flex-wrap items-start gap-3 py-4"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <p className="font-medium">
-                            {item.title ??
-                              info?.name ??
-                              `Variant ${item.variantId}`}
-                          </p>
-                          <p className="text-sm text-muted-foreground">
-                            {info?.variantName}{" "}
-                            {info
-                              ? `· ${info.unitLabel}`
-                              : "Catalog details unavailable"}
-                          </p>
-                          <p className="break-all font-mono text-xs text-muted-foreground">
-                            {info?.sku}
-                          </p>
-                          <p className="mt-2 text-xs">
-                            {item.productType || "Choose Walmart product type"}{" "}
-                            ·{" "}
-                            {item.method === "match"
-                              ? "Catalog match"
-                              : "Create product"}
-                          </p>
-                        </div>
-                        <div className="text-right">
-                          <p className="font-medium">
-                            {money(
-                              item.priceOverrideCents ??
-                                info?.priceCents ??
-                                null,
-                            )}
-                          </p>
-                          <p className="text-xs text-muted-foreground">
-                            {item.priceOverrideCents !== null
-                              ? "Fixed item price"
-                              : priceSourceLabel(info?.priceSource)}
-                          </p>
-                          <Badge variant="secondary" className="mt-2">
-                            Draft · review required
-                          </Badge>
-                        </div>
-                        <div className="flex gap-2">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={busy !== null}
-                            onClick={() => setEditing(item.variantId)}
-                          >
-                            {canEdit ? "Edit details" : "View details"}
-                          </Button>
-                          {canEdit && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              disabled={busy !== null}
-                              onClick={() =>
-                                changeItems(
-                                  draft.items.filter(
-                                    (current) =>
-                                      current.variantId !== item.variantId,
-                                  ),
-                                )
-                              }
-                              aria-label={`Remove ${info?.sku ?? `variant ${item.variantId}`} from draft`}
-                            >
-                              Remove
-                            </Button>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-              {canEdit && (
-                <div className="flex flex-wrap justify-end gap-2 border-t pt-4">
-                  <Button
-                    variant="outline"
-                    disabled={busy !== null || !dirty}
-                    onClick={() => void saveDraft()}
-                  >
-                    {busy === "save" ? "Saving…" : "Save draft"}
-                  </Button>
-                  <Button
-                    disabled={busy !== null || draft.items.length === 0}
-                    onClick={() => void reviewDraft()}
-                  >
-                    {busy === "review"
-                      ? "Checking readiness…"
-                      : `Review ${draft.items.length} items`}
-                  </Button>
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          <ChannelListingFeed
+            channelId={channelId}
+            providerName={providerName}
+            canEdit={canEdit}
+            draftItems={draft.items}
+            metadata={metadata}
+            operations={workspace.data.operations}
+            busy={busy !== null}
+            dirty={dirty}
+            catalogError={catalog.error ? errorMessage(catalog.error) : undefined}
+            onAdd={() => setPicking(true)}
+            onEdit={setEditing}
+            onRemove={(variantId) =>
+              changeItems(
+                draft.items.filter((item) => item.variantId !== variantId),
+              )
+            }
+            onSave={() => void saveDraft()}
+            onReview={() => void reviewDraft()}
+            onActivity={() => setTab("activity")}
+            onMappingsChanged={async () => {
+              await client.invalidateQueries({ queryKey: [base] });
+              await onMappingsChanged?.();
+            }}
+          />
         </TabsContent>
         <TabsContent value="pricing">
           <ListingPricingRules
@@ -509,11 +384,11 @@ export function ChannelListingPublicationWorkspace({
             onEditFailed={editFailed}
           />
         </TabsContent>
-        <TabsContent value="existing">{existingItems}</TabsContent>
       </Tabs>
       {picking && canEdit && (
         <ListingCatalogPicker
           base={base}
+          providerName={providerName}
           selectedIds={selectedIds}
           onClose={() => setPicking(false)}
           onAdd={(items) => {
