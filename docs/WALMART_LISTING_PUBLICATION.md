@@ -2,7 +2,7 @@
 
 ## Operator flow
 
-Open the connected Walmart channel. Listing Feed selects exact catalog variants; no catalog-wide selection is implied. Save a draft, set the shared channel markup or an item price override, complete Walmart's product-type fields, and review the resulting USD prices. Existing Walmart items retain the shared remote catalog mapping flow.
+Open the connected Walmart channel. Listing Feed selects exact catalog variants; no catalog-wide selection is implied. Save a draft, set the shared channel markup or an item price override, complete Walmart's product-type fields, and review the resulting USD prices. Existing listings browses the seller's remote catalog and links those listings to Echelon variants; linking does not publish new products.
 
 Publication consumes the reviewed draft atomically and shows a separate Activity record. The review expires after 15 minutes and is invalidated by changes to the selected catalog, price, account, or inventory destination. MP_ITEM and MP_ITEM_MATCH use separate persisted feed commands. Existing listings are not repriced by this initial-publication action.
 

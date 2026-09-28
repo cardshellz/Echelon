@@ -49,12 +49,18 @@ async function setup(page: Page, options: { readOnly?: boolean; connected?: bool
     </head><body><main id="root"></main><script type="module" src="/@fs/${resolve("test/browser/fixtures/walmart-channel-harness.tsx").replaceAll("\\", "/")}"></script></body></html>` }));
   await page.goto("/__walmart-test");
   await expect(page.getByText("Store Setup", { exact: true })).toBeVisible();
-  if (state.connected && !options.publication) await page.getByRole("tab", { name: "Existing Walmart items" }).click();
+  if (state.connected && !options.publication) await page.getByRole("tab", { name: "Existing listings", exact: true }).click();
   return state;
 }
 test("connected workspace uses normal sections, bulk matching and pagination", async ({ page }, info) => {
   const state = await setup(page);
   await expect(page.getByRole("tab", { name: "Listing Feed", exact: true })).toBeVisible();
+  await expect(page.getByRole("tabpanel").getByText("Existing listings", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Linking does not publish new products\./)).toBeVisible();
+  await page.getByRole("tab", { name: "Listing Feed", exact: true }).click();
+  await expect(page.getByRole("tabpanel").getByText("Listing Feed", { exact: true })).toBeVisible();
+  await expect(page.getByText("Select Echelon products, set prices, and review new listings before publishing to this channel.")).toBeVisible();
+  await page.getByRole("tab", { name: "Existing listings", exact: true }).click();
   await expect(page.getByText("Automatic while this channel is active")).toBeVisible();
   await expect(page.getByRole("button", { name: "Enable order intake" })).toHaveCount(0);
   await expect(page.getByLabel("Client Secret")).toHaveCount(0);

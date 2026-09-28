@@ -339,7 +339,7 @@ export function ChannelListingPublicationWorkspace({
           <TabsTrigger value="listings">Listing Feed</TabsTrigger>
           <TabsTrigger value="pricing">Pricing Rules</TabsTrigger>
           <TabsTrigger value="activity">Activity</TabsTrigger>
-          <TabsTrigger value="existing">Existing Walmart items</TabsTrigger>
+          <TabsTrigger value="existing">Existing listings</TabsTrigger>
         </TabsList>
         <TabsContent value="listings">
           <Card>
@@ -348,8 +348,8 @@ export function ChannelListingPublicationWorkspace({
                 <div>
                   <CardTitle>Listing Feed</CardTitle>
                   <CardDescription>
-                    Choose exact products and selling units to publish on
-                    Walmart.
+                    Select Echelon products, set prices, and review new listings
+                    before publishing to this channel.
                   </CardDescription>
                 </div>
                 {canEdit && (

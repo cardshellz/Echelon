@@ -47,8 +47,8 @@ export function ChannelCatalogFeed({ channelId, providerName, canEdit, onMapping
   const chosen = matches.filter(item => selected.has(item.sku));
   const changePage = (next: (string | null)[]) => { setCursors(next); setSelected(new Set()); setMessage(""); };
   return <Card>
-    <CardHeader className="px-3 sm:px-6"><CardTitle className="flex items-center gap-2"><Package className="h-5 w-5" />Listing Feed</CardTitle>
-      <CardDescription>Browse {providerName} listings and their Echelon variants. Unique exact SKU matches are linked automatically when orders arrive.</CardDescription>
+    <CardHeader className="px-3 sm:px-6"><CardTitle className="flex items-center gap-2"><Package className="h-5 w-5" />Existing listings</CardTitle>
+      <CardDescription>Browse listings already on {providerName} and link them to Echelon variants. Linking does not publish new products. Unique exact SKU matches are linked automatically when orders arrive.</CardDescription>
     </CardHeader>
     <CardContent className="space-y-4 px-3 sm:px-6">
       <div className="flex flex-wrap items-center gap-2">
