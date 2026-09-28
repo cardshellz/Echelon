@@ -13,10 +13,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  browser:
-    name: Returns preview browser journeys
+  browser-shard:
+    name: Returns preview browser journeys (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,12 +31,25 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: npx playwright test --config playwright.returns-preview.config.ts
+      - run: npx playwright test --config playwright.returns-preview.config.ts --shard=${{ matrix.shard }}/4
       - name: Upload browser traces and screenshots
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: returns-preview-browser-results
+          name: returns-preview-browser-results-${{ matrix.shard }}
           path: test-results/
           if-no-files-found: warn
           retention-days: 7
+
+  browser:
+    name: Returns preview browser journeys
+    needs: [browser-shard]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require every Returns shard
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/ci/require-success.mjs browser-shard
