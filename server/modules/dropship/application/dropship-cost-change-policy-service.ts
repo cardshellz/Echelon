@@ -80,7 +80,7 @@ export const DROPSHIP_COST_CHANGE_ENFORCEMENT: Readonly<DropshipCostChangeEnforc
   detection: true,
   priceProtection: true,
   vendorNotices: true,
-  listingActions: false,
+  listingActions: true,
 });
 
 /**

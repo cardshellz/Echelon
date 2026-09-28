@@ -1,8 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_COST_DETECTION_VENDORS_PER_TICK, emptyEventCounts, type DropshipCostDetectionTickResult } from "../../application/dropship-cost-detection-service";
 import { DEFAULT_COST_NOTICE_GROUPS_PER_PASS, emptyDecisionCounts, type DropshipCostNoticePassResult } from "../../application/dropship-cost-change-notice-service";
+import {
+  DEFAULT_COST_LISTING_ACTION_ENTRIES_PER_PASS,
+  DEFAULT_COST_LISTING_HOLDS_PER_PASS,
+  emptyActionCounts,
+  type DropshipCostListingActionPassResult,
+} from "../../application/dropship-cost-change-listing-action-service";
 import { isDropshipCostDetectionWorkerEnabled } from "../../infrastructure/dropship-cost-detection-config";
-import { runDropshipCostDetectionTick, runDropshipCostNoticePass } from "../../infrastructure/dropship-cost-detection-runner";
+import {
+  runDropshipCostDetectionTick,
+  runDropshipCostListingActionPass,
+  runDropshipCostNoticePass,
+} from "../../infrastructure/dropship-cost-detection-runner";
 
 const tick: DropshipCostDetectionTickResult = {
   outcome: "completed", passNumber: 1, vendorsProcessed: 2, variantsRead: 3, unavailableReadings: 0, changesRecorded: 3,
@@ -63,5 +73,30 @@ describe("runDropshipCostNoticePass", () => {
     await runDropshipCostNoticePass({ service: { runNoticePass: async (input) => { inputs.push(input); return pass; } } });
     expect(inputs[0]?.workerId).toMatch(/^dropship-cost-detection-\d+$/);
     expect(inputs[0]?.groupsPerPass).toBe(DEFAULT_COST_NOTICE_GROUPS_PER_PASS);
+  });
+});
+
+describe("runDropshipCostListingActionPass", () => {
+  const pass: DropshipCostListingActionPassResult = {
+    vendorsProcessed: 1, vendorsFailed: 0, entriesDecided: 2, entriesSuperseded: 0, listingsDecided: 3, actions: { ...emptyActionCounts(), reprice_queued: 3 },
+    repriceJobsQueued: 1, holdsPlaced: 0, noticesSent: 1, holds: { reviewed: 0, released: 0, reasserted: 0, deferred: 0, vendorsFailed: 0, noticesSent: 0 },
+  };
+
+  it("runs one listing action pass with the worker id and batches it was given", async () => {
+    const inputs: unknown[] = [];
+    const result = await runDropshipCostListingActionPass({
+      workerId: "worker-test", entriesPerPass: 7, holdsPerPass: 9,
+      service: { runListingActionPass: async (input) => { inputs.push(input); return pass; } },
+    });
+    expect(inputs).toEqual([{ workerId: "worker-test", entriesPerPass: 7, holdsPerPass: 9 }]);
+    expect(result).toEqual(pass);
+  });
+
+  it("derives the worker id and the default batches when none are given", async () => {
+    const inputs: { workerId: string; entriesPerPass: number; holdsPerPass: number }[] = [];
+    await runDropshipCostListingActionPass({ service: { runListingActionPass: async (input) => { inputs.push(input); return pass; } } });
+    expect(inputs[0]?.workerId).toMatch(/^dropship-cost-detection-\d+$/);
+    expect(inputs[0]?.entriesPerPass).toBe(DEFAULT_COST_LISTING_ACTION_ENTRIES_PER_PASS);
+    expect(inputs[0]?.holdsPerPass).toBe(DEFAULT_COST_LISTING_HOLDS_PER_PASS);
   });
 });

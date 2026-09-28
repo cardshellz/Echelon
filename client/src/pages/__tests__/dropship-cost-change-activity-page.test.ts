@@ -5,6 +5,8 @@ import { useQuery } from "@tanstack/react-query";
 import { DropshipCostChangeActivityPanel } from "../dropship-cost-change-activity-panel";
 import type {
   DropshipCostChangeDetectionOverview,
+  DropshipCostChangeListingActionRowView,
+  DropshipCostChangeListingActionsPage,
   DropshipCostChangeLogPage,
   DropshipCostChangeLogRowView,
   DropshipCostPendingChangeView,
@@ -73,13 +75,40 @@ function section(html: string, testId: string): string {
 const log = (items: DropshipCostChangeLogRowView[], nextBeforeId: number | null = null): DropshipCostChangeLogPage =>
   ({ items, nextBeforeId, generatedAt: "2026-09-28T10:00:00.000Z" });
 
+const actionRow: DropshipCostChangeListingActionRowView = {
+  actionId: 71, entryId: 11, listingId: 2, storeConnectionId: 9, platform: "shopify", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+  variantName: "Single pack", productName: "Armor Envelope", action: "below_cost_paused", detail: null, listingPriceCents: 899, unitCostCents: 999,
+  pushJobId: null, decidedAt: "2026-10-13T00:05:00.000Z", holdReleasedAt: "2026-10-14T00:05:00.000Z", holdReleaseReason: "price_covers_cost",
+  vendorId: 5, vendorBusinessName: "Shellz Vendor", listingStatus: "active", priceSource: "saved_listing", policyId: 3,
+};
+const actions = (items: DropshipCostChangeListingActionRowView[], nextBeforeId: number | null = null): DropshipCostChangeListingActionsPage =>
+  ({ items, nextBeforeId, generatedAt: "2026-09-28T10:00:00.000Z" });
+
 describe("dropship cost change activity panel", () => {
-  it("reads the detection view and the first log page, and nothing else", () => {
-    render([{ data: detection() }, { data: log([]) }]);
+  it("reads the detection view, the first log page and the first listing actions page, and nothing else", () => {
+    render([{ data: detection() }, { data: log([]) }, { data: actions([]) }]);
     const calls = vi.mocked(useQuery).mock.calls.map((call) => call[0]);
     expect(calls[0]).toMatchObject({ queryKey: ["/api/dropship/admin/cost-changes/detection"] });
     expect(calls[1]).toMatchObject({ queryKey: ["/api/dropship/admin/cost-changes/log?limit=50"] });
-    expect(calls).toHaveLength(2);
+    expect(calls[2]).toMatchObject({ queryKey: ["/api/dropship/admin/cost-changes/listing-actions?limit=50"] });
+    expect(calls).toHaveLength(3);
+  });
+
+  it("lists listing actions newest first with the action, amounts, price source, vendor, listing and hold state", () => {
+    const html = render([{ data: detection() }, { data: log([]) }, { data: actions([actionRow, { ...actionRow, actionId: 70, action: "reprice_queued", priceSource: "rules_cost", pushJobId: 100, holdReleasedAt: null, holdReleaseReason: null }], 69) }]);
+    const part = section(html, "cost-change-actions");
+    expect(part).toContain('data-testid="cost-change-action-71"');
+    expect(part).toContain("Under cost, paused");
+    expect(part).toContain("listed at $8.99, cost $9.99");
+    expect(part).toContain("Published price");
+    expect(part).toContain("Shellz Vendor · ARM-ENV-SGL-P50 · Armor Envelope · Store 9 (shopify)");
+    expect(part).toContain("Released");
+    expect(part).toContain("price covers the cost");
+    expect(part).toContain("Reprice queued");
+    expect(part).toContain("Push job 100");
+    expect(part).toContain('data-testid="cost-change-actions-older"');
+    const quiet = section(render([{ data: detection() }, { data: log([]) }, { data: actions([]) }]), "cost-change-actions");
+    expect(quiet).toContain("No increase has taken effect on a live listing yet.");
   });
 
   it("shows the last pass and every announced change with its vendor, variant, amounts and date", () => {

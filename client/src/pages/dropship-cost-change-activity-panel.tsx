@@ -37,6 +37,14 @@ import {
   type DropshipCostChangeDetectionOverview,
   type DropshipCostChangeLogPage,
   type DropshipCostChangeLogRowView,
+  dropshipCostChangeListingActionsPageUrl,
+  formatDropshipCostChangeHoldRelease,
+  formatDropshipCostChangeListingAction,
+  formatDropshipCostChangeListingAmounts,
+  formatDropshipCostChangeListingPriceSource,
+  parseDropshipCostChangeListingActionsPage,
+  type DropshipCostChangeListingActionRowView,
+  type DropshipCostChangeListingActionsPage,
 } from "./dropship-cost-change-policy-model";
 
 export function DropshipCostChangeActivityPanel() {
@@ -52,6 +60,7 @@ export function DropshipCostChangeActivityPanel() {
     <>
       <DetectionSection query={detectionQuery} />
       <ChangeLogSection />
+      <ListingActionsSection />
     </>
   );
 }
@@ -219,6 +228,97 @@ function ChangeLogRow({ row }: { row: DropshipCostChangeLogRowView }) {
         Takes effect {formatDateTime(row.effectiveAt)} · Found {formatDateTime(row.observedAt)} {formatDropshipCostScheduleRecorder(row.recordedBy)}
         {row.policyId !== null ? ` · Policy version id ${row.policyId}` : " · Default policy"}
         {` · ${formatDropshipCostChangeNoticeDecision(row.noticeDecision)}`}
+      </p>
+    </li>
+  );
+}
+
+function ListingActionsSection() {
+  // Same paging as the change log: shown pages stay, "Show older" appends.
+  const [olderPages, setOlderPages] = useState<DropshipCostChangeListingActionsPage[]>([]);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [olderError, setOlderError] = useState("");
+  const firstPageQuery = useQuery<DropshipCostChangeListingActionsPage>({
+    queryKey: [dropshipCostChangeListingActionsPageUrl(null)],
+    queryFn: async ({ signal }) =>
+      parseDropshipCostChangeListingActionsPage(await fetchJson<unknown>(dropshipCostChangeListingActionsPageUrl(null), { signal })),
+  });
+  const pages = firstPageQuery.data ? [firstPageQuery.data, ...olderPages] : [];
+  const rows = pages.flatMap((page) => page.items);
+  const nextBeforeId = pages.length > 0 ? pages[pages.length - 1]!.nextBeforeId : null;
+
+  async function showOlder() {
+    if (nextBeforeId === null || loadingOlder) return;
+    setLoadingOlder(true);
+    setOlderError("");
+    try {
+      const page = parseDropshipCostChangeListingActionsPage(await fetchJson<unknown>(dropshipCostChangeListingActionsPageUrl(nextBeforeId)));
+      setOlderPages((current) => [...current, page]);
+    } catch (caught) {
+      setOlderError(queryErrorMessage(caught, "Older listing actions could not be read."));
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
+
+  return (
+    <section className="rounded-md border bg-card p-4" data-testid="cost-change-actions">
+      <h3 className="font-semibold">Listing actions</h3>
+      <p className="mt-1 text-sm text-muted-foreground">
+        What each increase did to the vendor's live listings when it took effect, newest first: rule-priced listings
+        repriced or held for the vendor's review, and other prices judged against the new cost. Rows are never edited.
+      </p>
+      {firstPageQuery.isError && (
+        <Alert variant="destructive" className="mt-3">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{queryErrorMessage(firstPageQuery.error, "The listing actions could not be read.")}</AlertDescription>
+        </Alert>
+      )}
+      {!firstPageQuery.data && firstPageQuery.isLoading && (
+        <p role="status" className="mt-3 text-sm text-muted-foreground">Loading the listing actions…</p>
+      )}
+      {firstPageQuery.data && rows.length === 0 && (
+        <p className="mt-3 text-sm text-muted-foreground" data-testid="cost-change-actions-empty">
+          No increase has taken effect on a live listing yet.
+        </p>
+      )}
+      {rows.length > 0 && (
+        <ol className="mt-3 divide-y rounded-md border">
+          {rows.map((row) => <ListingActionRow key={row.actionId} row={row} />)}
+        </ol>
+      )}
+      {nextBeforeId !== null && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button type="button" variant="outline" size="sm" disabled={loadingOlder} onClick={() => void showOlder()} data-testid="cost-change-actions-older">
+            {loadingOlder ? "Loading…" : "Show older"}
+          </Button>
+          {olderError && (
+            <span role="alert" className="text-sm text-destructive">{olderError}</span>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ListingActionRow({ row }: { row: DropshipCostChangeListingActionRowView }) {
+  const release = formatDropshipCostChangeHoldRelease(row, formatDateTime);
+  return (
+    <li className="space-y-1 p-3 text-sm" data-testid={`cost-change-action-${row.actionId}`}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">{formatDropshipCostChangeListingAction(row.action)}</span>
+        <span>{formatDropshipCostChangeListingAmounts(row)}</span>
+        <Badge variant="outline">{formatDropshipCostChangeListingPriceSource(row.priceSource)}</Badge>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {formatDropshipCostChangeVendor(row)} · {formatDropshipCostChangeVariant(row)} · Store {row.storeConnectionId} ({row.platform})
+      </p>
+      <p className="text-xs text-muted-foreground">
+        Decided {formatDateTime(row.decidedAt)}
+        {row.pushJobId !== null ? ` · Push job ${row.pushJobId}` : ""}
+        {row.detail !== null ? ` · ${row.detail}` : ""}
+        {release !== null ? ` · ${release}` : ""}
+        {row.policyId !== null ? ` · Policy version id ${row.policyId}` : " · Default policy"}
       </p>
     </li>
   );

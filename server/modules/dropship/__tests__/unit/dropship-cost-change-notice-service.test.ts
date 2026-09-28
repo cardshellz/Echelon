@@ -12,6 +12,7 @@ import {
   type VendorCostChangeLogView,
   type VendorCostChangeView,
 } from "../../application/dropship-cost-change-notice-service";
+import type { VendorCostChangeListingActionView } from "../../application/dropship-cost-change-listing-action-service";
 import type { DropshipLogEvent, DropshipNotificationSenderInput } from "../../application/dropship-ports";
 
 const NOW = new Date("2026-09-28T16:05:00.000Z");
@@ -34,6 +35,7 @@ class FakeRepository implements DropshipCostChangeNoticeRepository {
   failRecording = false;
   announced: VendorCostChangeView[] = [];
   recent: VendorCostChangeLogView[] = [];
+  listingActions: VendorCostChangeListingActionView[] = [];
   reads: unknown[] = [];
 
   group(vendorId: number, observedAt: Date, recordedBy: "detection" | "acceptance", rows: CostChangeNoticeLogRow[]) {
@@ -53,6 +55,7 @@ class FakeRepository implements DropshipCostChangeNoticeRepository {
   }
   async listVendorAnnouncedChanges(input: unknown) { this.reads.push(input); return this.announced; }
   async listVendorRecentChanges(input: unknown) { this.reads.push(input); return this.recent; }
+  async listVendorListingActions(input: unknown) { this.reads.push(input); return this.listingActions; }
 }
 
 class FakeSender {
@@ -78,6 +81,7 @@ describe("DropshipCostChangeNoticeService", () => {
     logs = [];
     service = new DropshipCostChangeNoticeService({
       repository,
+      listingActions: repository,
       policy: { resolvePolicy: async () => ({ policyId: 3, settings }) },
       notificationSender: sender,
       vendorProvisioning: { provisionForMember: async (memberId) => ({ vendor: { vendorId: memberId === "member-5" ? 5 : 9 } }) },
@@ -224,6 +228,7 @@ describe("DropshipCostChangeNoticeService", () => {
   it("refuses to record a sent decision when no sender is wired", async () => {
     const silent = new DropshipCostChangeNoticeService({
       repository,
+      listingActions: repository,
       policy: { resolvePolicy: async () => ({ policyId: 3, settings }) },
       vendorProvisioning: { provisionForMember: async () => ({ vendor: { vendorId: 5 } }) },
       clock: { now: () => NOW },
@@ -254,15 +259,22 @@ describe("DropshipCostChangeNoticeService", () => {
       entryId: 11, productVariantId: 66, variantSku: "SKU", variantName: "Pack", productName: "Armor", kind: "increase",
       fromCents: 809, unitCostCents: 999, effectiveAt: IN_TWO_WEEKS, announcedAt: READING,
     }];
+    repository.listingActions = [{
+      actionId: 71, entryId: 11, listingId: 1, storeConnectionId: 9, platform: "shopify", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+      variantName: "Single pack", productName: "Armor Envelope", action: "reprice_queued", detail: null, listingPriceCents: 1399, unitCostCents: 999,
+      pushJobId: 100, decidedAt: NOW, holdReleasedAt: null, holdReleaseReason: null,
+    }];
     const view = await service.getVendorViewForMember("member-5");
     expect(view).toEqual({
       announced: repository.announced,
       recent: [],
+      listingActions: repository.listingActions,
       policy: { increaseNoticeDays: 14, decreaseTiming: "immediate", priceProtection: true, notifyByEmail: true, notifyInPortal: true, notifyOnDecrease: true },
       generatedAt: NOW,
     });
     expect(repository.reads).toEqual([
       { vendorId: 5, now: NOW, limit: 200 },
+      { vendorId: 5, since: new Date("2026-08-29T16:05:00.000Z"), limit: 200 },
       { vendorId: 5, since: new Date("2026-08-29T16:05:00.000Z"), limit: 200 },
     ]);
     await expect(service.getVendorViewForMember("")).rejects.toMatchObject({ code: "DROPSHIP_COST_CHANGE_INVALID_INPUT" });

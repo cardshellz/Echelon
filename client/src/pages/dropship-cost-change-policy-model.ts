@@ -52,6 +52,7 @@ export const DROPSHIP_COST_CHANGE_POLICY_ADMIN_URL = "/api/dropship/admin/cost-c
 export const DROPSHIP_COST_CHANGE_DETECTION_ADMIN_URL = "/api/dropship/admin/cost-changes/detection";
 /** The change log, newest first, a page at a time (GET ?limit=&beforeId=). */
 export const DROPSHIP_COST_CHANGE_LOG_ADMIN_URL = "/api/dropship/admin/cost-changes/log";
+export const DROPSHIP_COST_CHANGE_LISTING_ACTIONS_ADMIN_URL = "/api/dropship/admin/cost-changes/listing-actions";
 /** Rows per change log page; the server's ceiling is the same. */
 export const DROPSHIP_COST_CHANGE_LOG_PAGE_SIZE = 50;
 
@@ -421,8 +422,17 @@ export const DROPSHIP_COST_CHANGE_TODAY_WITH_NOTICES_SUMMARY =
   + "the cost in force on that schedule, and vendors are told as the policy says. Until listing actions are live, "
   + "listings priced by pricing rules use the new cost the next time they are previewed or pushed.";
 
+/** With every part live (C5), the policy is applied in full. */
+export const DROPSHIP_COST_CHANGE_TODAY_ALL_LIVE_SUMMARY =
+  "Cost changes are found and recorded on the schedule below with the date the policy gives them, an order is charged "
+  + "the cost in force on that schedule, vendors are told as the policy says, and when an increase takes effect "
+  + "rule-priced listings are repriced or held for review and under-water fixed prices are flagged or paused, as set below.";
+
 /** What happens to a cost change today, given which parts are live. */
 export function describeDropshipCostChangeToday(enforcement: DropshipCostChangeEnforcementView): string {
+  if (enforcement.detection && enforcement.priceProtection && enforcement.vendorNotices && enforcement.listingActions) {
+    return DROPSHIP_COST_CHANGE_TODAY_ALL_LIVE_SUMMARY;
+  }
   if (enforcement.detection && enforcement.priceProtection && enforcement.vendorNotices) return DROPSHIP_COST_CHANGE_TODAY_WITH_NOTICES_SUMMARY;
   if (enforcement.detection && enforcement.priceProtection) return DROPSHIP_COST_CHANGE_TODAY_WITH_PROTECTION_SUMMARY;
   return enforcement.detection ? DROPSHIP_COST_CHANGE_TODAY_WITH_DETECTION_SUMMARY : DROPSHIP_COST_CHANGE_TODAY_SUMMARY;
@@ -824,6 +834,49 @@ export const dropshipCostChangeLogPageSchema = z.object({
   generatedAt: z.string(),
 });
 
+/** What an increase that took effect did to one listing (C5). */
+export const costChangeListingActionValues = [
+  "reprice_queued", "reprice_refused", "awaiting_review", "price_covers_cost", "below_cost_recorded", "below_cost_warned", "below_cost_paused",
+  "skipped_inactive_listing", "skipped_price_unavailable",
+] as const;
+export type DropshipCostChangeListingAction = (typeof costChangeListingActionValues)[number];
+export const costChangeListingPriceSourceValues = ["rules_cost", "rules_retail", "fixed", "catalog_default", "saved_listing", "unavailable"] as const;
+export type DropshipCostChangeListingPriceSource = (typeof costChangeListingPriceSourceValues)[number];
+const holdReleaseReasonSchema = z.enum(["price_covers_cost", "listing_inactive"]);
+
+const listingActionRowSchema = z.object({
+  actionId: z.number().int().positive(),
+  entryId: z.number().int().positive(),
+  listingId: z.number().int().positive(),
+  storeConnectionId: z.number().int().positive(),
+  platform: z.string(),
+  productVariantId: z.number().int().positive(),
+  variantSku: z.string().nullable(),
+  variantName: z.string(),
+  productName: z.string(),
+  action: z.enum(costChangeListingActionValues),
+  detail: z.string().nullable(),
+  listingPriceCents: z.number().int().positive().nullable(),
+  unitCostCents: z.number().int().positive(),
+  pushJobId: z.number().int().positive().nullable(),
+  decidedAt: z.string(),
+  holdReleasedAt: z.string().nullable(),
+  holdReleaseReason: holdReleaseReasonSchema.nullable(),
+  vendorId: z.number().int().positive(),
+  vendorBusinessName: z.string().nullable(),
+  listingStatus: z.string(),
+  priceSource: z.enum(costChangeListingPriceSourceValues),
+  policyId: z.number().int().positive().nullable(),
+});
+
+export const dropshipCostChangeListingActionsPageSchema = z.object({
+  items: z.array(listingActionRowSchema),
+  nextBeforeId: z.number().int().positive().nullable(),
+  generatedAt: z.string(),
+});
+export type DropshipCostChangeListingActionRowView = z.infer<typeof listingActionRowSchema>;
+export type DropshipCostChangeListingActionsPage = z.infer<typeof dropshipCostChangeListingActionsPageSchema>;
+
 export type DropshipCostDetectionStateView = z.infer<typeof detectionStateSchema>;
 export type DropshipCostPendingChangeView = z.infer<typeof pendingChangeSchema>;
 export type DropshipCostChangeLogRowView = z.infer<typeof changeLogRowSchema>;
@@ -836,6 +889,17 @@ export function parseDropshipCostChangeDetectionOverview(value: unknown): Dropsh
 
 export function parseDropshipCostChangeLogPage(value: unknown): DropshipCostChangeLogPage {
   return parseResponse(dropshipCostChangeLogPageSchema, value, "cost change log");
+}
+
+export function parseDropshipCostChangeListingActionsPage(value: unknown): DropshipCostChangeListingActionsPage {
+  return parseResponse(dropshipCostChangeListingActionsPageSchema, value, "cost change listing actions");
+}
+
+/** The listing actions URL for a page: the first page, or the rows before a cursor. */
+export function dropshipCostChangeListingActionsPageUrl(beforeId: number | null): string {
+  const query = new URLSearchParams({ limit: String(DROPSHIP_COST_CHANGE_LOG_PAGE_SIZE) });
+  if (beforeId !== null) query.set("beforeId", String(beforeId));
+  return `${DROPSHIP_COST_CHANGE_LISTING_ACTIONS_ADMIN_URL}?${query.toString()}`;
 }
 
 /** The change log URL for a page: the first page, or the rows before a cursor. */
@@ -929,6 +993,64 @@ export function formatDropshipCostChangeNoticeDecision(decision: DropshipCostCha
     case "skipped_unannounced":
       return "No notice: original change not announced";
   }
+}
+
+/** What the listing action pass did to a listing (C5), as staff read it. */
+export function formatDropshipCostChangeListingAction(action: DropshipCostChangeListingAction): string {
+  switch (action) {
+    case "reprice_queued":
+      return "Reprice queued";
+    case "reprice_refused":
+      return "Reprice refused";
+    case "awaiting_review":
+      return "Awaiting vendor review";
+    case "price_covers_cost":
+      return "Price covers the cost";
+    case "below_cost_recorded":
+      return "Under cost, recorded";
+    case "below_cost_warned":
+      return "Under cost, vendor warned";
+    case "below_cost_paused":
+      return "Under cost, paused";
+    case "skipped_inactive_listing":
+      return "Skipped: listing not live";
+    case "skipped_price_unavailable":
+      return "Skipped: price unknown";
+  }
+}
+
+export function formatDropshipCostChangeListingPriceSource(source: DropshipCostChangeListingPriceSource): string {
+  switch (source) {
+    case "rules_cost":
+      return "Rules on cost";
+    case "rules_retail":
+      return "Rules on retail";
+    case "fixed":
+      return "Typed price";
+    case "catalog_default":
+      return "Catalog default";
+    case "saved_listing":
+      return "Published price";
+    case "unavailable":
+      return "Price unknown";
+  }
+}
+
+/** "listed at $8.99, cost $9.99", or "cost $9.99" when the price is unknown. */
+export function formatDropshipCostChangeListingAmounts(row: { listingPriceCents: number | null; unitCostCents: number }): string {
+  const cost = `cost ${formatDollarsFromCents(row.unitCostCents)}`;
+  return row.listingPriceCents === null ? cost : `listed at ${formatDollarsFromCents(row.listingPriceCents)}, ${cost}`;
+}
+
+/** For a pause: whether it still holds, or when and why it was released; null for anything else. */
+export function formatDropshipCostChangeHoldRelease(
+  row: { action: DropshipCostChangeListingAction; holdReleasedAt: string | null; holdReleaseReason: "price_covers_cost" | "listing_inactive" | null },
+  formatDate: (iso: string) => string,
+): string | null {
+  if (row.action !== "below_cost_paused") return null;
+  if (row.holdReleasedAt === null) return "Still paused";
+  const why = row.holdReleaseReason === "listing_inactive" ? "listing no longer live" : "price covers the cost";
+  return `Released ${formatDate(row.holdReleasedAt)}: ${why}`;
 }
 
 export function formatDropshipCostScheduleRecorder(recordedBy: DropshipCostScheduleRecorder): string {

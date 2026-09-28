@@ -112,7 +112,7 @@ describe("Dropship current-quantity catch-up owner", () => {
     context.query.mockReset().mockResolvedValueOnce({ rows: [listing] }).mockResolvedValueOnce({ rows: [{
       id: 9, vendor_id: 5, store_connection_id: 7, status: "failed", item_count: 1, exact_item_count: 1,
     }] });
-    const oldIntent = { platform: "ebay", listingMode: "live", sku: "P5", quantity: 99 } as DropshipMarketplaceListingIntent;
+    const oldIntent = { platform: "ebay", listingMode: "live", sku: "P5", quantity: 99, priceCents: 1299 } as DropshipMarketplaceListingIntent;
     const freshIntent = { ...oldIntent, quantity: 14 };
     const storedItem = { ...item, itemId: 1, jobId: 9, status: "queued", previewHash: "original-preview",
       result: { listingIntent: oldIntent }, listing: { listingId: 4, productVariantId: 101, status: "queued",
@@ -139,7 +139,7 @@ describe("Dropship current-quantity catch-up owner", () => {
     });
     await new DropshipQuantityPublicationCatchupProvider({ ...context.dependencies, worker }).refresh(scope, claim);
     expect(context.retryJob).toHaveBeenCalledOnce();
-    expect(refreshListingIntent).toHaveBeenCalledWith({ vendorId: 5, storeConnectionId: 7, productVariantId: 101 });
+    expect(refreshListingIntent).toHaveBeenCalledWith({ vendorId: 5, storeConnectionId: 7, productVariantId: 101, queuedPriceCents: 1299 });
     expect(pushListing).toHaveBeenCalledWith(expect.objectContaining({ listingIntent: expect.objectContaining({ quantity: 14 }) }));
     expect(oldIntent.quantity).toBe(99);
     expect(completeItem).toHaveBeenCalledOnce();

@@ -132,7 +132,15 @@ export interface DropshipListingPushWorkerRepository {
 }
 
 export interface DropshipListingPushWorkerServiceDependencies {
-  refreshListingIntent?: (input: { vendorId: number; storeConnectionId: number; productVariantId: number }) => Promise<DropshipMarketplaceListingIntent>;
+  /**
+   * Rebuilds the listing intent at push time. `queuedPriceCents` is the price
+   * the queued intent carried, so the refresh can refuse to publish a rule
+   * price that changed since the vendor queued it when the cost change policy
+   * waits for the vendor's review (C5).
+   */
+  refreshListingIntent?: (input: {
+    vendorId: number; storeConnectionId: number; productVariantId: number; queuedPriceCents: number;
+  }) => Promise<DropshipMarketplaceListingIntent>;
   repository: DropshipListingPushWorkerRepository;
   marketplacePush: DropshipMarketplaceListingPushProvider;
   notificationSender?: DropshipNotificationSender;
@@ -237,6 +245,7 @@ export class DropshipListingPushWorkerService {
       // Persisted job intent identifies work, not a quantity snapshot to replay later.
       const currentIntent = this.deps.refreshListingIntent ? await this.deps.refreshListingIntent({
         vendorId: claim.job.vendorId, storeConnectionId: claim.job.storeConnectionId, productVariantId: item.productVariantId,
+        queuedPriceCents: intent!.priceCents,
       }) : intent!;
       const pushResult = await this.deps.marketplacePush.pushListing({
         vendorId: claim.job.vendorId,

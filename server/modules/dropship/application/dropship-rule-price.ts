@@ -10,13 +10,16 @@ export function resolveListingRulePrice(input: {
   const price = resolvePricingRule({ profile: input.state.profile, candidate: input.candidate,
     productCostCents: input.cost?.status === "available" ? input.cost.unitCostCents : null,
     catalogRetailCents: input.candidate.defaultRetailPriceCents });
+  // The recipe basis is part of the hashed profile already; leaving it out of
+  // the price keeps every stored evidence hash valid across the deploy that added it.
+  const { basis: _basis, ...hashedPrice } = price;
   return { ...price, profileRevisionId: input.state.revisionId, productCost: input.cost,
     // Content evidence, not a fabricated upstream timestamp. It covers the actual
     // basis, source identity, matching inputs and immutable profile revision.
     evidenceHash: pricingHash({ profile: input.state, productVariantId: input.candidate.productVariantId,
       productId: input.candidate.productId, category: input.candidate.category,
       productLineIds: [...input.candidate.productLineIds].sort((a, b) => a - b),
-      catalogRetailCents: input.candidate.defaultRetailPriceCents, cost: input.cost, price }) };
+      catalogRetailCents: input.candidate.defaultRetailPriceCents, cost: input.cost, price: hashedPrice }) };
 }
 export function pricingHash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");

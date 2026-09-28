@@ -70,3 +70,28 @@ describe("InventoryPlanningDropshipListingVariantHoldGate", () => {
     await expect(crash.holdVariants(COMMAND)).rejects.toThrow("boom");
   });
 });
+
+describe("InventoryPlanningDropshipListingVariantHoldGate as the cost change pauser", () => {
+  it("reads who holds which SKU on the store's live targets, keyed by the store connection", async () => {
+    const listHeldVariants = vi.fn(async () => new Map([[102, { heldBy: "dropship-listing-tiers", reason: "tier" }], [105, { heldBy: "dropship-cost-changes", reason: "cost" }]]));
+    const gate = new InventoryPlanningDropshipListingVariantHoldGate({
+      holdService: { holdVariants: vi.fn(), releaseVariants: vi.fn() }, holdReader: { listHeldVariants }, actorId: "dropship-cost-changes",
+    });
+    await expect(gate.listHeldVariants({ storeConnectionId: 77, productVariantIds: [105, 102] })).resolves.toEqual(new Map([
+      [102, { heldBy: "dropship-listing-tiers" }], [105, { heldBy: "dropship-cost-changes" }],
+    ]));
+    expect(listHeldVariants).toHaveBeenCalledWith({ destinationKind: "dropship_store_connection", connectionId: 77 }, [105, 102]);
+  });
+
+  it("commands under its own actor id, so inventory planning records who holds the SKU", async () => {
+    const holdVariants = vi.fn(async () => holdResult("hold"));
+    const gate = new InventoryPlanningDropshipListingVariantHoldGate({ holdService: { holdVariants, releaseVariants: vi.fn() }, actorId: "dropship-cost-changes" });
+    await gate.holdVariants(COMMAND);
+    expect(holdVariants).toHaveBeenCalledWith(expect.objectContaining({ productVariantIds: [105, 102] }), "dropship-cost-changes");
+  });
+
+  it("refuses to answer who holds a SKU without a reader rather than guess", async () => {
+    const gate = new InventoryPlanningDropshipListingVariantHoldGate({ holdService: { holdVariants: vi.fn(), releaseVariants: vi.fn() } });
+    await expect(gate.listHeldVariants({ storeConnectionId: 77, productVariantIds: [105] })).rejects.toThrow("no hold reader");
+  });
+});
