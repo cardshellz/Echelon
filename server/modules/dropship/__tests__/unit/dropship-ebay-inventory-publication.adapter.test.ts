@@ -59,6 +59,11 @@ describe("EbayDropshipInventoryPublicationTransportAdapter", () => {
     expect(fetchFn.mock.calls[1]![0]).toBe("https://api.ebay.com/sell/inventory/v1/bulk_update_price_quantity");
     expect(post.method).toBe("POST");
     expect(post.headers).toMatchObject({ Authorization: "Bearer secret-token" });
+    // eBay refuses Sell API calls without the locale headers (25709).
+    expect(post.headers).toMatchObject({ "Accept-Language": "en-US", "Content-Language": "en-US", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US" });
+    const read = fetchFn.mock.calls[0]![1] as RequestInit;
+    expect(read.headers).toMatchObject({ "Accept-Language": "en-US", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US" });
+    expect(read.headers).not.toHaveProperty("Content-Language");
     expect(JSON.parse(String(post.body))).toEqual({
       requests: [{ sku: "SKU-101", shipToLocationAvailability: { quantity: 7 }, offers: [{ offerId: "offer-1", availableQuantity: 7 }] }],
     });

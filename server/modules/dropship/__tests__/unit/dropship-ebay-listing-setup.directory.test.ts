@@ -10,6 +10,8 @@ describe("EbayDropshipListingSetupDirectory", () => {
       const value = String(url);
       urls.push(value);
       expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer access-token");
+      // eBay refuses Sell API calls without the locale header (25709).
+      expect(new Headers(init?.headers).get("Accept-Language")).toBe("en-US");
       if (value.includes("/sell/inventory/v1/location") && !value.includes("offset=2")) {
         return jsonResponse({
           locations: [

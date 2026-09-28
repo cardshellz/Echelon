@@ -1,3 +1,4 @@
+import { ebaySellRequestHeaders } from "./ebay-sell-headers";
 import type {
   DropshipEbayListingSetupDirectory,
   DropshipEbayListingSetupDiscovery,
@@ -240,10 +241,7 @@ export class EbayDropshipListingSetupDirectory implements DropshipEbayListingSet
         method: "GET",
         signal: AbortSignal.timeout(EBAY_SETUP_READ_TIMEOUT_MS),
         redirect: "error",
-        headers: {
-          Accept: "application/json",
-          Authorization: `Bearer ${input.accessToken}`,
-        },
+        headers: ebaySellRequestHeaders({ accessToken: input.accessToken, method: "GET" }),
       });
       text = await readBoundedSetupResponse(response, input.storeConnectionId, input.resource.key);
     } catch (error) {
