@@ -52,6 +52,18 @@ function publication(targetId = 3, variantId = 4): ActivationDryRunProduct["prop
 }
 
 describe("reviewed cutover selection manifest", () => {
+  it("retains a reviewed destination with no included SKUs in the target census", () => {
+    const supply = snapshot();
+    const row = product(supply);
+    row.publicationTargetSelections = [{
+      publicationTargetId: 9, revision: "2", membership: { mode: "explicit", includedVariantIds: [] },
+    }];
+    const result = buildInventoryCutoverManifest(dryRun([row]), [supply]);
+    expect(result.publicationTargetIds).toEqual([9]);
+    expect(result.selections).toEqual([{ kind: "model", key: "1", definitionId: 10, definitionHash: HASH }]);
+    expect(row.proposedPublications).toEqual([]);
+  });
+
   it("collects all six definition kinds plus non-sellable graph component models", () => {
     let supply = snapshot();
     supply.transformationModels.push(model(99, 99));

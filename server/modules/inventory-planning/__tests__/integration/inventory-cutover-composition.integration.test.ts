@@ -459,7 +459,14 @@ dbDescribe.sequential("cutover abort, concurrent provider and external-owned des
   });
 });
 
-dbDescribe.sequential("cutover composition with one actual publication target", () => {
+dbDescribe.sequential.each([
+  { scenario: "old provider quantity above ATP", historicalProviderQuantity: 20, initialProviderQuantity: 20 },
+  { scenario: "old provider quantity below ATP", historicalProviderQuantity: 3, initialProviderQuantity: 3 },
+  { scenario: "old provider quantity zero", historicalProviderQuantity: 0, initialProviderQuantity: 0 },
+  // Negative Shopify availability cannot be stored as a verified nonnegative
+  // observation. It must not be a prerequisite for replacing it with our ATP.
+  { scenario: "no usable readback with negative provider stock", historicalProviderQuantity: null, initialProviderQuantity: -18 },
+])("cutover composition with $scenario", ({ historicalProviderQuantity, initialProviderQuantity }) => {
   let database: InventoryCutoverTestDatabase;
   let dryRun: InventoryActivationDryRun;
   let prepared: InventoryActivationCommandResult;
@@ -479,12 +486,12 @@ dbDescribe.sequential("cutover composition with one actual publication target", 
     await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/236_inventory_cutover_admission.sql"),"utf8"));
     await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/240_inventory_cutover_verified_opening.sql"),"utf8"));
     await installQuantityCutoverFixture(database.pool);
-    dryRun = await seedCompositionReviewedDryRun(database.pool);
+    dryRun = await seedCompositionReviewedDryRun(database.pool, historicalProviderQuantity);
     now = new Date(Date.parse(dryRun.completedAt)+10);
   },30_000);
   afterAll(async () => { await database?.close(); });
 
-  it("prepares conservative quantity using actual post-reconstruction ATP instead of pre-demand stock", async () => {
+  it("prepares actual post-reconstruction ATP without a historical provider cap", async () => {
     // Accepted physical demand arrives after the historical dry-run. Preparation
     // must allocate it along with existing custody, not publish the old17 units.
     await database.pool.query(`INSERT INTO oms.oms_orders(id,status) VALUES(2,'pending');
@@ -504,24 +511,44 @@ dbDescribe.sequential("cutover composition with one actual publication target", 
     expect((await database.pool.query("SELECT reserved_qty FROM inventory.inventory_levels")).rows).toEqual([{ reserved_qty:3 }]);
   });
 
-  it("uses actual outbox lease and verification owners for conservative provider evidence", async () => {
+  it("blocks commit after a mismatched send and verifies a retry using actual outbox owners", async () => {
     const outbox = new PostgresInventoryPublicationOutboxRepository(database.pool);
     const adapters = new InventoryPublicationTransportRegistry();
-    let observed=20;
+    let observed = initialProviderQuantity;
+    let returnMismatchedReadback = true;
+    let attemptToken = 1;
+    const callOrder: string[] = [];
     const publishAbsolute = vi.fn(async (request:AbsoluteInventoryPublicationRequest) => {
+      callOrder.push("publish");
       observed=request.desiredQuantity; return { publishedQuantity:observed,providerResponse:{ testOnly:true } };
     });
     adapters.register({ destinationKind:"channel_connection",providerKey:"shopify",supportedScopeTypes:["location"],publishAbsolute,
-      readAbsolute:async () => ({ observedQuantity:observed,providerResponse:{ testOnly:true } }) });
+      readAbsolute:async () => {
+        callOrder.push("read");
+        return { observedQuantity: returnMismatchedReadback ? observed - 1 : observed, providerResponse:{ testOnly:true } };
+      } });
     const service = new InventoryPublicationOutboxService(outbox,adapters,{ now:() => now },() => "composition-lease",
-      new PostgresQuantityPublicationAdmission(database.pool,() => now,() => "00000000-0000-4000-8000-000000000001"));
+      new PostgresQuantityPublicationAdmission(database.pool,() => now,() => `00000000-0000-4000-8000-${String(attemptToken++).padStart(12,"0")}`));
+    expect(await service.processDue({ batchSize:1,leaseSeconds:60 })).toEqual({ claimed:1,verified:0,failed:1,superseded:0 });
+    const cutover = new InventoryCutoverCommitService(new PostgresInventoryCutoverCommitRepository(database.pool), { now:() => now });
+    const blocked = await cutover.preview({ activationRunId:prepared.activationRunId }, "operator");
+    expect(blocked.ready).toBe(false);
+    expect(blocked.blockers).toContainEqual(expect.objectContaining({ code:"CUTOVER_CONSERVATIVE_PUBLICATION_PENDING" }));
+    await expect(cutover.commit({ activationRunId:prepared.activationRunId, expectedAuthorityRevision:blocked.authorityRevision,
+      expectedReviewHash:blocked.reviewHash, idempotencyKey:"composition-mismatched-send", reason:"Do not switch without exact verification" }, "operator"))
+      .rejects.toMatchObject({ code:"CUTOVER_REVIEW_BLOCKED" });
+    expect((await database.pool.query("SELECT authority FROM inventory.availability_runtime_authority")).rows).toEqual([{ authority:"legacy" }]);
+    returnMismatchedReadback = false;
     expect(await service.processDue({ batchSize:1,leaseSeconds:60 })).toEqual({ claimed:1,verified:1,failed:0,superseded:0 });
-    expect(publishAbsolute).toHaveBeenCalledOnce();
+    expect(publishAbsolute).toHaveBeenCalledTimes(2);
+    expect(publishAbsolute.mock.calls.map(([request]) => request.desiredQuantity)).toEqual([14, 14]);
+    expect(callOrder).toEqual(["publish", "read", "publish", "read"]);
+    expect(observed).toBe(14);
     expect((await database.pool.query("SELECT state FROM inventory.inventory_publication_outbox")).rows).toEqual([{ state:"verified" }]);
     expect((await database.pool.query("SELECT state FROM inventory.availability_activation_runs WHERE id=$1",[prepared.activationRunId])).rows)
       .toEqual([{ state:"publication_verified" }]);
-    expect((await database.pool.query("SELECT owner_kind,state,resolution_basis FROM inventory.quantity_publication_attempts")).rows)
-      .toEqual([{ owner_kind:"outbox",state:"succeeded",resolution_basis:"owner_completion" }]);
+    expect((await database.pool.query("SELECT owner_kind,state,resolution_basis FROM inventory.quantity_publication_attempts ORDER BY id")).rows)
+      .toEqual(Array.from({ length:2 }, () => ({ owner_kind:"outbox",state:"succeeded",resolution_basis:"owner_completion" })));
   });
 
   it("compares the exact conservative readback with real cumulative-demand projection", async () => {
@@ -580,7 +607,7 @@ dbDescribe.sequential("cutover composition with one actual publication target", 
     now = new Date((await database.pool.query<{ due: Date }>("SELECT MAX(available_at) AS due FROM inventory.inventory_publication_outbox WHERE publication_phase='full'")).rows[0].due.getTime()+10);
     const publish=vi.fn(async (input:AbsoluteInventoryPublicationRequest) => ({ publishedQuantity:input.desiredQuantity,providerResponse:{ testOnly:true } }));
     let observedQuantity=14;
-    let attemptToken=2;
+    let attemptToken=3;
     transport.register({ destinationKind:"channel_connection",providerKey:"shopify",supportedScopeTypes:["location"],publishAbsolute:publish,
       readAbsolute:async () => ({ observedQuantity,providerResponse:{ testOnly:true } }) });
     const publisher=new InventoryPublicationOutboxService(new PostgresInventoryPublicationOutboxRepository(database.pool),transport,clock,() => "composition-full-lease",

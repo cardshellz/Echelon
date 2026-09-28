@@ -24,7 +24,6 @@ import type {
 } from "../application/inventory-availability-activation.service";
 
 type ClientPool = Pick<Pool, "connect">;
-const MAX_PROVIDER_READBACK_AGE_MS = 15 * 60 * 1000;
 
 type PublicationIntent = {
   publicationTargetId: number;
@@ -100,7 +99,7 @@ implements InventoryAvailabilityActivationStore {
         throw invalidEvidence("ACTIVATION_RECONSTRUCTION_BLOCKED", "Resolve current demand, custody and publication findings before conservative preparation.", { blockers: proposed.blockers });
       }
       const quantities = new Map(proposed.publicationRows.map((row) => [`${row.publicationTargetId}:${row.productVariantId}`, row.desiredQuantity]));
-      const intents = await publicationIntents(client, dryRun, "conservative", command.occurredAt, quantities);
+      const intents = publicationIntents(dryRun, quantities);
       if (intents.length !== quantities.size) {
         throw invalidEvidence("ACTIVATION_PUBLICATION_COVERAGE_CHANGED", "Current post-reconstruction quantities do not exactly match reviewed publication coverage.");
       }
@@ -455,6 +454,7 @@ function configurationDigest(dryRun: InventoryActivationDryRun): string {
   return hash(dryRun.products.map((product) => ({
     productId: product.productId,
     model: [product.draftModelId, product.draftModelVersion, product.draftDefinitionHash],
+    ...(product.publicationTargetSelections ? { publicationTargetSelections: product.publicationTargetSelections } : {}),
     publications: product.proposedPublications.map((publication) => ({
       target: [publication.publicationTargetId, publication.publicationTargetRevision,
         publication.channelId, publication.destinationKind, publication.channelConnectionId,
@@ -471,15 +471,64 @@ function configurationDigest(dryRun: InventoryActivationDryRun): string {
 
 export async function assertDryRunSelectionsCurrent(client: PoolClient, dryRun: InventoryActivationDryRun, lockRows = true): Promise<void> {
   const publications = dryRun.products.flatMap((product) => product.proposedPublications);
-  const targetIds = unique(publications.map((row) => row.publicationTargetId));
+  const selections = dryRun.products.flatMap(product => (product.publicationTargetSelections ?? [])
+    .map(selection => ({ ...selection, productId: product.productId })));
+  const targetIds = unique([...publications.map(row => row.publicationTargetId), ...selections.map(row => row.publicationTargetId)]);
   const targets = targetIds.length === 0 ? [] : (await client.query<Record<string, unknown>>(
     `SELECT id, destination_kind, channel_id, channel_connection_id,
             dropship_store_connection_id, provider_scope_type, external_scope_id,
-            publication_authority, state, revision
+            publication_authority, state, revision, membership_mode
      FROM inventory.inventory_publication_targets WHERE id = ANY($1::integer[]) ${lockRows ? "FOR SHARE" : ""}`,
     [targetIds],
   )).rows;
   const targetById = new Map(targets.map((row) => [Number(row.id), row]));
+  const explicitSelections = selections.filter(selection => selection.membership.mode === "explicit");
+  // Target locks precede membership-head locks, matching the membership writer.
+  // Compare exact members as well as the revision, including empty destinations.
+  const members = explicitSelections.length === 0 ? [] : (await client.query<{
+    publication_target_id: number; product_id: number; product_variant_id: number; included: boolean;
+  }>(`SELECT head.publication_target_id, variant.product_id, head.product_variant_id, version.included
+      FROM inventory.publication_membership_heads head
+      JOIN inventory.publication_membership_versions version ON version.id = head.active_version_id
+      JOIN catalog.product_variants variant ON variant.id = head.product_variant_id
+      WHERE head.publication_target_id = ANY($1::integer[])
+         AND variant.product_id = ANY($2::integer[])
+      ORDER BY head.publication_target_id, variant.product_id, head.product_variant_id
+      ${lockRows ? "FOR SHARE OF head" : ""}`,
+    [unique(explicitSelections.map(selection => selection.publicationTargetId)),
+      unique(explicitSelections.map(selection => selection.productId))],
+  )).rows;
+  for (const selection of selections) {
+    const current = targetById.get(selection.publicationTargetId);
+    const identity = selection.targetIdentity;
+    const includedIds = members.filter(member => member.publication_target_id === selection.publicationTargetId
+      && member.product_id === selection.productId && member.included).map(member => member.product_variant_id);
+    const excludedIds = members.filter(member => member.publication_target_id === selection.publicationTargetId
+      && member.product_id === selection.productId && !member.included).map(member => member.product_variant_id);
+    const expectedIds = selection.membership.mode === "explicit"
+      ? [...selection.membership.includedVariantIds].sort((left, right) => left - right) : [];
+    const expectedExcludedIds = selection.membership.mode === "explicit"
+      ? [...(selection.membership.excludedVariantIds ?? [])].sort((left, right) => left - right) : [];
+    if (!current || String(current.revision) !== selection.revision
+      || (identity && (Number(current.channel_id) !== identity.channelId
+        || String(current.destination_kind) !== identity.destinationKind
+        || nullableNumber(current.channel_connection_id) !== identity.channelConnectionId
+        || nullableNumber(current.dropship_store_connection_id) !== identity.dropshipStoreConnectionId
+        || String(current.provider_scope_type) !== identity.providerScopeType
+        || String(current.external_scope_id) !== identity.externalScopeId
+        || String(current.publication_authority) !== identity.publicationAuthority
+        || String(current.state) !== identity.state))
+      || String(current.membership_mode) !== selection.membership.mode
+      || (selection.membership.mode === "explicit" && JSON.stringify(includedIds) !== JSON.stringify(expectedIds))
+      || (selection.membership.mode === "explicit" && selection.membership.excludedVariantIds !== undefined
+        && JSON.stringify(excludedIds) !== JSON.stringify(expectedExcludedIds))
+      || (current.publication_authority === "echelon"
+        ? current.state !== "preview" : !["preview", "live"].includes(String(current.state)))) {
+      throw invalidEvidence("ACTIVATION_PUBLICATION_MEMBERSHIP_CHANGED", "Publication membership changed after dry-run capture.", {
+        publicationTargetId: selection.publicationTargetId, productId: selection.productId,
+      });
+    }
+  }
   for (const publication of publications) {
     const current = targetById.get(publication.publicationTargetId);
     if (!current
@@ -641,53 +690,15 @@ function assertRefs(
   }
 }
 
-async function publicationIntents(
-  client: PoolClient,
+function publicationIntents(
   dryRun: InventoryActivationDryRun,
-  phase: "conservative" | "full",
-  occurredAt: Date,
-  currentQuantities?: ReadonlyMap<string, string>,
-): Promise<PublicationIntent[]> {
+  currentQuantities: ReadonlyMap<string, string>,
+): PublicationIntent[] {
   const publishRows = dryRun.products.flatMap((product) => product.proposedPublications)
     .filter((row) => row.disposition === "publish" || (row.disposition === "skip_ineligible"
       && row.publicationAuthority === "echelon" && row.mappingId !== null && row.sourceBindingId !== null))
     .sort((left, right) => left.publicationTargetId - right.publicationTargetId
       || left.productVariantId - right.productVariantId);
-  if (publishRows.length === 0) return [];
-  const targetIds = unique(publishRows.map((row) => row.publicationTargetId));
-  const variantIds = unique(publishRows.map((row) => row.productVariantId));
-  const readbacks = (await client.query<Record<string, unknown>>(
-    `SELECT DISTINCT ON (readback.publication_target_id, readback.product_variant_id)
-            readback.publication_target_id, readback.product_variant_id,
-            readback.observed_quantity,
-            readback.observed_at,
-            COALESCE(readback.destination_kind_snapshot,
-              publication.destination_kind_snapshot,
-              CASE WHEN COALESCE(readback.channel_connection_id_snapshot,
-                publication.channel_connection_id_snapshot) IS NOT NULL
-                THEN 'channel_connection'
-              END) AS destination_kind_snapshot,
-            COALESCE(readback.channel_connection_id_snapshot,
-                     publication.channel_connection_id_snapshot) AS channel_connection_id_snapshot,
-            COALESCE(readback.dropship_store_connection_id_snapshot,
-                     publication.dropship_store_connection_id_snapshot)
-              AS dropship_store_connection_id_snapshot,
-            readback.provider_scope_type_snapshot,
-            readback.external_scope_id_snapshot,
-            readback.publication_target_revision_snapshot,
-            COALESCE(readback.external_inventory_item_id_snapshot,
-                     publication.external_inventory_item_id_snapshot) AS external_inventory_item_id_snapshot
-     FROM inventory.inventory_publication_readbacks readback
-     LEFT JOIN inventory.inventory_publication_outbox publication ON publication.id = readback.outbox_id
-     WHERE readback.publication_target_id = ANY($1::integer[])
-       AND readback.product_variant_id = ANY($2::integer[])
-     ORDER BY readback.publication_target_id, readback.product_variant_id,
-              readback.observed_at DESC, readback.id DESC`,
-    [targetIds, variantIds],
-  )).rows;
-  const readbackByKey = new Map(readbacks.map((row) => [
-    `${row.publication_target_id}:${row.product_variant_id}`, row,
-  ]));
   return publishRows.map((row) => {
     if ((row.destinationKind === "channel_connection"
       && (row.channelConnectionId === null || row.dropshipStoreConnectionId !== null))
@@ -703,43 +714,19 @@ async function publicationIntents(
       throw invalidEvidence("ACTIVATION_PUBLICATION_IDENTITY_MISSING", "A publish row has no provider inventory identity.");
     }
     const key = `${row.publicationTargetId}:${row.productVariantId}`;
-    const currentQuantity = currentQuantities?.get(key);
-    if (currentQuantities && currentQuantity === undefined) {
+    const currentQuantity = currentQuantities.get(key);
+    if (currentQuantity === undefined) {
       throw invalidEvidence("ACTIVATION_PUBLICATION_COVERAGE_CHANGED", "A reviewed target/SKU is absent from current planning.", { key });
     }
-    let desired = BigInt(currentQuantity ?? row.desiredUnits);
-    if (phase === "conservative") {
-      const readback = readbackByKey.get(`${row.publicationTargetId}:${row.productVariantId}`);
-      if (!readback
-        || String(readback.external_inventory_item_id_snapshot ?? "") !== row.externalInventoryItemId
-        || String(readback.destination_kind_snapshot ?? "") !== row.destinationKind
-        || nullableNumber(readback.channel_connection_id_snapshot) !== row.channelConnectionId
-        || nullableNumber(readback.dropship_store_connection_id_snapshot)
-          !== row.dropshipStoreConnectionId
-        || String(readback.provider_scope_type_snapshot ?? "") !== row.providerScopeType
-        || String(readback.external_scope_id_snapshot ?? "") !== row.externalScopeId
-        || String(readback.publication_target_revision_snapshot ?? "") !== row.publicationTargetRevision) {
-        throw invalidEvidence(
-          "ACTIVATION_PROVIDER_READBACK_STALE",
-          "Conservative publication requires a current readback for the exact selected provider identity.",
-          { publicationTargetId: row.publicationTargetId, productVariantId: row.productVariantId },
-        );
-      }
-      const observedAt = new Date(String(readback.observed_at));
-      if (Number.isNaN(observedAt.getTime())
-        || observedAt.getTime() > occurredAt.getTime()
-        || occurredAt.getTime() - observedAt.getTime() > MAX_PROVIDER_READBACK_AGE_MS) {
-        throw invalidEvidence(
-          "ACTIVATION_PROVIDER_READBACK_STALE",
-          "Conservative publication requires a fresh readback for the exact selected provider identity.",
-          { publicationTargetId: row.publicationTargetId, productVariantId: row.productVariantId,
-            observedAt: readback.observed_at ?? null,
-            maxAgeMilliseconds: MAX_PROVIDER_READBACK_AGE_MS },
-        );
-      }
-      const observed = BigInt(String(readback.observed_quantity));
-      if (observed < desired) desired = observed;
+    if (!/^\d+$/.test(currentQuantity)) {
+      throw invalidEvidence("ACTIVATION_PROVIDER_QUANTITY_INVALID",
+        "Current planning must supply a nonnegative whole-unit provider quantity.", { key, currentQuantity });
     }
+    // The persisted first-send phase remains named "conservative" for wire
+    // compatibility. Its quantity is current reconstructed ATP after channel
+    // policy, never capped by the provider's old stock. Dispatch still requires
+    // exact after-send verification before the authority switch can commit.
+    const desired = BigInt(currentQuantity);
     if (desired > BigInt(Number.MAX_SAFE_INTEGER)) {
       throw invalidEvidence(
         "ACTIVATION_PROVIDER_QUANTITY_OUT_OF_RANGE",
