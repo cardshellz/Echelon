@@ -129,8 +129,8 @@ A `POST` inside one transaction:
 |---|---|---|
 | C1 | This policy and its admin module | none |
 | C2 | Cost schedule and detection | `detection` (where the worker is switched on) |
-| C3 | Price protection at acceptance | `priceProtection` |
-| C4 | Vendor notices | `vendorNotices` |
+| C3 | Price protection at acceptance | `priceProtection` (the policy setting decides whether it applies) |
+| C4 | Vendor notices | `vendorNotices` (the policy's channels and minimums decide what is sent) |
 | C5 | Listing actions on the effective date | `listingActions` |
 
 ## Cost schedule and detection (part C2)
@@ -208,21 +208,104 @@ the worker is switched on (`resolveDropshipCostChangeEnforcement`), and the
 tab shows the last pass, so the page never claims a check that is not running.
 Nothing charges, tells or reprices from the schedule until C3 to C5.
 
+## Price protection at acceptance (part C3)
+
+Order acceptance prices its lines inside its own transaction
+(`resolveAcceptanceLinesWithClient` in
+`infrastructure/dropship-order-acceptance.repository.ts`, on both the legacy
+and the canonical path). It now:
+
+1. reads the policy in force (`resolvePolicy`);
+2. takes the vendor's schedule lock (`lockVendorSchedule`, the lock detection
+   takes), then reads the live `.ops` costs as before;
+3. loads the vendor's schedule for the order's variants and reconciles it with
+   the live reading through the same planner detection uses
+   (`application/dropship-cost-schedule-reconciliation.ts`), writing every
+   entry and log row with `recorded_by = 'acceptance'`;
+4. refuses an unavailable or zero cost exactly as before, before anything is
+   written;
+5. charges each line the cost in force when the policy's `priceProtection` is
+   on, else the live cost (`decideChargedUnitCost` in
+   `domain/order-acceptance-cost.ts`). An announced increase is not charged
+   before its date; a decrease given notice stays at the old cost until its
+   date, by the policy's own choice.
+
+**Evidence.** Each line's provenance now carries the live cost, the schedule
+entry charged, the policy version and whether protection applied
+(`DropshipAcceptanceProductCostEvidence`); the pricing snapshot is version 3
+with the same fields per wholesale line, and the cost evidence hash includes
+the live cost and the entry id, so a protected debit is explained by both.
+
+**Failure modes (C3).**
+- The schedule tables are not there yet: the acceptance fails
+  `DROPSHIP_COST_SCHEDULE_TABLE_MISSING` with `retryable: true`, and the
+  processing pass retries after migration 0711 lands.
+- A schedule write is refused (guard or CHECK): the whole acceptance rolls
+  back with no wallet write, classified permanent (`retryable: false`).
+- Detection and an acceptance see the same change at once: the vendor lock
+  serializes them; the second sees the first's entries and writes nothing new.
+- No entry in force can be resolved for an available cost: refused as
+  `DROPSHIP_ORDER_COST_SCHEDULE_UNRESOLVED` (fatal), never charged a guess.
+
+## Vendor notices (part C4)
+
+**Decision per change** (`domain/cost-change-notice.ts`, applied by
+`application/dropship-cost-change-notice-service.ts`): every change log row
+gets exactly one decision, recorded in `dropship.dropship_cost_change_notices`
+(migration 0712, append-only):
+
+| Row | Decision |
+|---|---|
+| Schedule start (`baseline`) | `skipped_baseline` |
+| Decrease, and the policy does not announce decreases | `skipped_decrease` |
+| Change under the policy's cents or percent minimum | `skipped_below_minimum` |
+| Policy sends on no channel | `skipped_channels_off` |
+| Lowered or withdrawn change whose announcement was never sent | `skipped_unannounced` |
+| Otherwise | `sent`, as `announced` (a date ahead), `applied` (took effect at once) or `updated` (lowered or withdrawn) |
+
+**One notification per reading and kind.** Rows are grouped by vendor, reading
+time and writer (the reconciliation that recorded them), then by kind, and
+each group is one notification: a plan switch that moves hundreds of costs is
+one message listing the first ten and counting the rest. The idempotency key
+is `dropship-cost-change:{vendorId}:{kind}:{recordedBy}:{observedAt}`; the
+notification store replays it, so a crash between sending and recording never
+tells a vendor twice. The send happens before the decisions are recorded, and
+a group whose send fails stays undecided and is retried on the next pass. A
+vendor's readings are decided in order: once one of them fails in a pass, the
+vendor's later readings are deferred to a later pass (`groupsDeferred`), so a
+lowered or withdrawn change is never judged `skipped_unannounced` while its
+announcement is still waiting to go out. The pass finds undecided rows by an
+anti-join of the change log against the notices table over their indexes; its
+cost grows with the log, and a decision watermark is the next step if the log
+ever reaches millions of rows.
+Events: `dropship_cost_change_announced`, `dropship_cost_change_applied`,
+`dropship_cost_change_updated`, registered as not critical so the policy's
+channels (`notifyByEmail`, `notifyInPortal`) are honoured.
+
+**Where it runs.** The notice pass rides the cost detection worker's tick,
+after detection, so it covers changes recorded by acceptance too
+(`DROPSHIP_COST_NOTICE_GROUPS_PER_TICK`, default 20).
+
+**Surfaces.** Vendors: `GET /api/dropship/cost-changes` and the portal's
+"Cost changes" page (coming changes, the last 30 days with each change's
+notice status, and the policy's notice terms in their words). Staff: the
+change log on the Cost Changes tab shows each row's notice decision.
+
+**ASSUMPTION.** Notices state amounts in USD; the schedule carries no
+currency and .ops costs are the Shopify store's prices.
+
+**Failure modes (C4).**
+- Notification store down: the group's decisions are not recorded and the
+  pass retries it next tick; a WARN names the vendor and reading.
+- No notification sender wired: the pass refuses to record a `sent` decision
+  (`DROPSHIP_COST_CHANGE_NOTICE_SENDER_MISSING`, fatal) rather than claim a
+  notice went out.
+- A pass replayed after a crash: the same key replays the notification, and
+  `ON CONFLICT (log_id) DO NOTHING` keeps one decision per row.
+- Before migration 0712: the pass fails transient and retries; the vendor
+  page answers 503.
+
 ## Delivery plan for the remaining parts
-
-**C3, price protection.**
-- Acceptance already reads the live cost inside its transaction. Protection
-  locks the vendor and variant schedule rows there, reconciles, and charges
-  `costInForce`.
-- The cost evidence records which schedule entry was charged.
-
-**C4, vendor notices.**
-- New events in both `DROPSHIP_NOTIFICATION_EVENTS` and
-  `DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES`.
-- The notification idempotency index is unique on `(idempotency_key, channel)`
-  across all vendors, so every key carries the vendor id.
-- Notices honour the minimums and the decrease setting.
-- A portal view lists upcoming changes.
 
 **C5, listing actions.** On the effective date:
 - rule-priced listings are repriced through system push jobs, or wait for the

@@ -17,6 +17,37 @@ export interface DropshipAcceptanceProductCostEvidence {
   source: DropshipProductCostSource;
   planId: string;
   overrideId: string | null;
+  /** The live .ops cost read in the acceptance transaction; equals the charged cost unless price protection applied a scheduled cost. */
+  liveUnitCostCents: number;
+  /** The cost schedule entry in force that the charged cost came from (migration 0711); null when the schedule was not consulted. */
+  scheduleEntryId: number | null;
+  /** The cost change policy version the schedule was reconciled under; null when the defaults applied. */
+  costPolicyId: number | null;
+  /** True when the policy's price protection decided the charged cost. */
+  priceProtected: boolean;
+}
+
+export type ChargedUnitCostDecision = { unitCostCents: number; priceProtected: boolean };
+
+/**
+ * Which cost an accepted line is charged: the cost in force on the vendor's
+ * schedule when the policy protects prices, else the live cost. Both are
+ * positive whole cents; a protected cost may be higher than the live one only
+ * when the policy gives decreases notice, so neither bound is assumed.
+ */
+export function decideChargedUnitCost(input: {
+  liveUnitCostCents: number;
+  inForceUnitCostCents: number;
+  priceProtection: boolean;
+}): ChargedUnitCostDecision {
+  for (const [name, value] of [["liveUnitCostCents", input.liveUnitCostCents], ["inForceUnitCostCents", input.inForceUnitCostCents]] as const) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new RangeError(`${name} must be a positive whole number of cents.`);
+    }
+  }
+  return input.priceProtection
+    ? { unitCostCents: input.inForceUnitCostCents, priceProtected: true }
+    : { unitCostCents: input.liveUnitCostCents, priceProtected: false };
 }
 
 export type AcceptanceUnitCostResolution =
@@ -81,7 +112,11 @@ export function resolveAcceptanceUnitCost(
   return {
     ok: true,
     unitCostCents,
-    evidence: { source, planId, overrideId: overrideId ?? null },
+    // The schedule fields are settled once the line is charged (see decideChargedUnitCost).
+    evidence: {
+      source, planId, overrideId: overrideId ?? null,
+      liveUnitCostCents: unitCostCents, scheduleEntryId: null, costPolicyId: null, priceProtected: false,
+    },
   };
 }
 
@@ -96,8 +131,9 @@ export interface AcceptanceCostEvidenceLine {
 /**
  * Content hash of every cost input that produced the debit. The `.ops` source
  * tables carry no revision column, so this hash is the freezable "revision" of
- * the cost decision (same pattern as listing rule pricing). Line order does not
- * affect the hash.
+ * the cost decision (same pattern as listing rule pricing). The live cost and
+ * the schedule entry charged are inputs too: a protected debit is only
+ * explained by both. Line order does not affect the hash.
  */
 export function buildAcceptanceCostEvidenceHash(input: {
   vendorId: number;
@@ -115,6 +151,8 @@ export function buildAcceptanceCostEvidenceHash(input: {
         source: line.productCostEvidence.source,
         planId: line.productCostEvidence.planId,
         overrideId: line.productCostEvidence.overrideId,
+        liveUnitCostCents: line.productCostEvidence.liveUnitCostCents,
+        scheduleEntryId: line.productCostEvidence.scheduleEntryId,
       }))
       .sort((left, right) => left.productVariantId - right.productVariantId || left.quantity - right.quantity),
   };

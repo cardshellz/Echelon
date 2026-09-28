@@ -39,7 +39,7 @@ const logRow: DropshipCostChangeLogRowView = {
   logId: 31, entryId: 11, recordedBy: "acceptance", vendorId: 5, vendorBusinessName: null, productVariantId: 66, variantSku: null, variantName: "Single pack",
   productName: "Armor Envelope", policyId: null, costSource: "retail", effectiveAt: "2026-10-13T00:00:00.000Z",
   observedAt: "2026-09-28T16:05:00.000Z", eventType: "change_withdrawn", fromCents: 1099, toCents: null, retailDriven: true,
-  createdAt: "2026-09-28T16:05:00.000Z",
+  noticeDecision: "skipped_unannounced", createdAt: "2026-09-28T16:05:00.000Z",
 };
 
 function detection(patch: Partial<DropshipCostChangeDetectionOverview> = {}): DropshipCostChangeDetectionOverview {
@@ -118,7 +118,7 @@ describe("dropship cost change activity panel", () => {
   });
 
   it("lists log rows newest first with the event, amounts, retail badge and policy, and offers older rows", () => {
-    const html = render([{ data: detection() }, { data: log([logRow, { ...logRow, logId: 30, eventType: "baseline", fromCents: null, toCents: 809, retailDriven: false, policyId: 2 }], 30) }]);
+    const html = render([{ data: detection() }, { data: log([logRow, { ...logRow, logId: 30, eventType: "baseline", fromCents: null, toCents: 809, retailDriven: false, policyId: 2, noticeDecision: null }], 30) }]);
     const logSection = section(html, "cost-change-log");
     expect(logSection.indexOf('data-testid="cost-change-log-31"')).toBeLessThan(logSection.indexOf('data-testid="cost-change-log-30"'));
     expect(logSection).toContain("Announced change withdrawn");
@@ -127,6 +127,8 @@ describe("dropship cost change activity panel", () => {
     expect(logSection).toContain("Vendor 5 · Single pack · Armor Envelope · Retail price");
     expect(logSection).toContain("Default policy");
     expect(logSection).toContain("at order acceptance");
+    expect(logSection).toContain("No notice: original change not announced");
+    expect(logSection).toContain("Notice pending");
     expect(logSection).toContain("Schedule started");
     expect(logSection).toContain("$8.09");
     expect(logSection).toContain("Policy version id 2");

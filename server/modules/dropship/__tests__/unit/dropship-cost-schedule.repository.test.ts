@@ -4,6 +4,7 @@ import { COST_TRACKED_LISTING_STATUSES, COST_TRACKED_VENDOR_STATUSES, emptyEvent
 import {
   COST_SCHEDULE_VENDOR_LOCK_NAMESPACE,
   PgDropshipCostScheduleRepository,
+  lockVendorSchedule,
   mapCostScheduleError,
   mapEntryRow,
   mapStateRow,
@@ -186,6 +187,17 @@ describe("PgDropshipCostScheduleRepository", () => {
       expect(released).toEqual([false]);
     });
 
+    it("serves a vendor's schedule inside a transaction the caller owns, without beginning or committing one", async () => {
+      const { pool, calls, client } = fakePool([result([{ product_variant_id: 66 }])]);
+      await lockVendorSchedule(client as unknown as PoolClient, 5);
+      const transaction = PgDropshipCostScheduleRepository.transactionFor(client as unknown as PoolClient, 5);
+      expect(await transaction.listTrackedVariantIds()).toEqual([66]);
+      expect(calls.map((call) => call.sql.slice(0, 30))).toEqual(["SELECT pg_advisory_xact_lock(h", "SELECT DISTINCT product_varian"]);
+      expect(calls[0]?.values).toEqual([COST_SCHEDULE_VENDOR_LOCK_NAMESPACE, 5]);
+      expect((pool as unknown as { connect: ReturnType<typeof vi.fn> }).connect).not.toHaveBeenCalled();
+      expect(() => PgDropshipCostScheduleRepository.transactionFor(client as unknown as PoolClient, 0)).toThrow();
+    });
+
     it("refuses an invalid vendor id before touching the pool", async () => {
       const { pool, calls } = fakePool();
       await expect(new PgDropshipCostScheduleRepository(pool).withVendorSchedule(0, async () => undefined))
@@ -204,7 +216,7 @@ describe("PgDropshipCostScheduleRepository", () => {
       ]);
       const repository = new PgDropshipCostScheduleRepository(pool);
 
-      const counts = await repository.withVendorSchedule(5, (transaction) => transaction.writeReconciliation({
+      const written = await repository.withVendorSchedule(5, (transaction) => transaction.writeReconciliation({
         vendorId: 5,
         observedAt: NOW,
         policyId: 3,
@@ -222,7 +234,8 @@ describe("PgDropshipCostScheduleRepository", () => {
         ],
       }));
 
-      expect(counts).toEqual({ ...emptyEventCounts(), increase_announced: 1, increase_reduced: 1, change_withdrawn: 1, baseline: 1 });
+      expect(written.counts).toEqual({ ...emptyEventCounts(), increase_announced: 1, increase_reduced: 1, change_withdrawn: 1, baseline: 1 });
+      expect(written.entryIdsByVariant).toEqual(new Map([[66, 21], [68, 22]]));
       const [, , insertEntries, lower, withdraw, insertLog] = calls;
       expect(insertEntries?.sql).toContain("INSERT INTO dropship.dropship_cost_schedule_entries");
       expect(insertEntries?.sql).toContain("RETURNING id, product_variant_id");
@@ -334,15 +347,29 @@ describe("PgDropshipCostScheduleRepository", () => {
         id: "31", entry_id: "11", vendor_id: 5, business_name: null, product_variant_id: 66, variant_sku: null, variant_name: "Single pack",
         product_name: "Armor Envelope", event_type: "change_withdrawn", from_cents: "1099", to_cents: null, effective_at: IN_TWO_WEEKS,
         retail_driven: true, observed_at: NOW, policy_id: null, cost_source: "retail", recorded_by: "acceptance", created_at: NOW,
+        notice_decision: "skipped_unannounced",
       }])]);
       const rows = await new PgDropshipCostScheduleRepository(pool).listChangeLog({ limit: 51, beforeId: 40 });
+      expect(calls[0]?.sql).toContain("LEFT JOIN dropship.dropship_cost_change_notices n ON n.log_id = l.id");
       expect(calls[0]?.sql).toContain("WHERE ($1::bigint IS NULL OR l.id < $1) ORDER BY l.id DESC LIMIT $2");
       expect(calls[0]?.values).toEqual([40, 51]);
       expect(rows).toEqual([{
         logId: 31, entryId: 11, vendorId: 5, vendorBusinessName: null, productVariantId: 66, variantSku: null, variantName: "Single pack",
         productName: "Armor Envelope", eventType: "change_withdrawn", fromCents: 1099, toCents: null, effectiveAt: IN_TWO_WEEKS,
-        retailDriven: true, observedAt: NOW, policyId: null, costSource: "retail", recordedBy: "acceptance", createdAt: NOW,
+        retailDriven: true, observedAt: NOW, policyId: null, costSource: "retail", recordedBy: "acceptance", noticeDecision: "skipped_unannounced",
+        createdAt: NOW,
       }]);
+    });
+
+    it("refuses a stored notice decision it cannot trust", async () => {
+      const { pool } = fakePool([result([{
+        id: "31", entry_id: "11", vendor_id: 5, business_name: null, product_variant_id: 66, variant_sku: null, variant_name: "Single pack",
+        product_name: "Armor Envelope", event_type: "change_withdrawn", from_cents: "1099", to_cents: null, effective_at: IN_TWO_WEEKS,
+        retail_driven: true, observed_at: NOW, policy_id: null, cost_source: "retail", recorded_by: "acceptance", created_at: NOW,
+        notice_decision: "mailed",
+      }])]);
+      await expect(new PgDropshipCostScheduleRepository(pool).listChangeLog({ limit: 51, beforeId: null }))
+        .rejects.toMatchObject({ code: "DROPSHIP_COST_SCHEDULE_INVALID_STORED_VALUE", context: { column: "notice_decision" } });
     });
 
     it("refuses a stored amount, kind or event it cannot trust", () => {
