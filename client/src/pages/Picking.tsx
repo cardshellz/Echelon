@@ -4489,7 +4489,7 @@ function PickingWorkspace() {
                     data-testid="button-hold-line"
                   >
                     <Pause className="h-5 w-5 mr-2" />
-                    Hold line — ship rest
+                    Hold line
                   </Button>
                 </div>
               </CardContent>
@@ -4672,7 +4672,7 @@ function PickingWorkspace() {
                                   data-testid={`menu-hold-${item.id}`}
                                 >
                                   <Pause className="h-4 w-4 mr-2" />
-                                  Hold line — ship rest
+                                  Hold line
                                 </DropdownMenuItem>
                                 <DropdownMenuItem
                                   disabled={item.picked <= 0}
