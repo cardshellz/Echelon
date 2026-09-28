@@ -33,6 +33,8 @@ function setup(
   const principalReader = { getVerifiedPrincipal: vi.fn(async () => principal) };
   const repository = {
     findExactOrderCandidates: vi.fn(async (_query: CustomerReturnOrderCandidateQuery) => candidates),
+    findOwnedOrder: vi.fn(async (_query: unknown) => candidates),
+    listOwnedOrders: vi.fn(async (_query: unknown) => candidates),
   };
   const dependencies = { channelId: CHANNEL_ID, principalReader, repository };
   return { service: new CustomerReturnOrderAccessService(dependencies), dependencies, principalReader, repository };
@@ -46,6 +48,49 @@ const unavailable = {
 };
 
 describe("CustomerReturnOrderAccessService", () => {
+  it("resolves only canonical owned IDs and never re-resolves their shared display number", async () => {
+    const { service, repository } = setup();
+    expect(await service.resolveOwned({ omsOrderId: 321 })).toMatchObject({ omsOrderId: 321 });
+    expect(repository.findOwnedOrder).toHaveBeenCalledExactlyOnceWith({ channelId: 36, omsOrderId: 321,
+      scope: { kind: "customer", externalCustomerId: "customer-123" } });
+    expect(repository.findExactOrderCandidates).not.toHaveBeenCalled();
+    await expect(service.resolveOwned({ omsOrderId: 322 })).rejects.toMatchObject(unavailable);
+    await expect(service.resolveOwned({ omsOrderId: 321, externalOrderId: "changed" })).rejects.toMatchObject(unavailable);
+  });
+  it.each([{ externalCustomerId: "other" }, { channelId: 37 }, { externalCustomerId: null }])(
+    "rechecks repository ownership for canonical resolution %j", async override => {
+      const { service } = setup(CUSTOMER, [order(override)]);
+      await expect(service.resolveOwned({ omsOrderId: 321 })).rejects.toMatchObject(unavailable);
+    });
+  it("paginates canonical candidates without treating order numbers or eligibility as identity", async () => {
+    const { service, repository } = setup(CUSTOMER, [order({ omsOrderId: 5 }), order({ omsOrderId: 4 }), order({ omsOrderId: 2 })]);
+    const result = await service.list({ pageSize: 2, beforeOmsOrderId: 6 });
+    expect(result.orders.map(row => row.omsOrderId)).toEqual([5, 4]);
+    expect(result.nextBeforeOmsOrderId).toBe(4);
+    expect(result.orders[0]).not.toHaveProperty("externalCustomerId");
+    expect(repository.listOwnedOrders).toHaveBeenCalledExactlyOnceWith({ channelId: 36, externalCustomerId: "customer-123", pageSize: 2, beforeOmsOrderId: 6 });
+    repository.listOwnedOrders.mockResolvedValue([order({ omsOrderId: 2 })]);
+    expect(await service.list({ pageSize: 2, beforeOmsOrderId: 4 })).toMatchObject({ nextBeforeOmsOrderId: null });
+  });
+  it.each([
+    [order({ omsOrderId: 4 }), order({ omsOrderId: 4 })],
+    [order({ omsOrderId: 3 }), order({ omsOrderId: 4 })],
+    [order({ externalCustomerId: "other" })], [order({ channelId: 37 })],
+  ])("fails closed on incorrectly scoped or unordered candidate pages %j", async (...rows) => {
+    const { service } = setup(CUSTOMER, rows);
+    await expect(service.list({})).rejects.toMatchObject({ code: "CUSTOMER_RETURN_ORDER_ACCESS_UNAVAILABLE" });
+  });
+  it.each([null, ORDER_GRANT, { ...CUSTOMER, channelId: 37 }])("does not list candidates outside customer scope %j", async principal => {
+    const { service, repository } = setup(principal);
+    await expect(service.list({})).rejects.toMatchObject(unavailable);
+    expect(repository.listOwnedOrders).not.toHaveBeenCalled();
+  });
+  it.each([{ pageSize: 0 }, { pageSize: 51 }, { beforeOmsOrderId: 0 }, { channelId: 36 }, { externalCustomerId: "other" }])(
+    "rejects invalid pagination and forged authority %j", async input => {
+      const { service, repository } = setup();
+      await expect(service.list(input)).rejects.toMatchObject({ status: 400 });
+      expect(repository.listOwnedOrders).not.toHaveBeenCalled();
+    });
   it("queries exact aliases inside the verified customer/channel and returns canonical order identity", async () => {
     const { service, repository } = setup();
     const result = await service.resolve({ orderReference: " # 63210 " });

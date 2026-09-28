@@ -47,6 +47,22 @@ integration("customer return order lookup against migration-defined PostgreSQL",
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ omsOrderId: 1, channelId: 36, externalOrderId: "gid://shopify/Order/1" });
   });
+  it("resolves owned canonical identity independently of reused order numbers", async () => {
+    const input = { channelId: 36, scope: { kind: "customer" as const, externalCustomerId: "customer-a" }, omsOrderId: 1 };
+    expect((await repository.findOwnedOrder(input)).map(row => row.omsOrderId)).toEqual([1]);
+    expect(await repository.findOwnedOrder({ ...input, omsOrderId: 4 })).toEqual([]);
+    expect(await repository.findOwnedOrder({ ...input, channelId: 37 })).toEqual([]);
+    expect(await repository.findOwnedOrder({ ...input, externalOrderId: "gid://shopify/Order/4" })).toEqual([]);
+    await pool.query("UPDATE oms.oms_orders SET external_customer_id='customer-b' WHERE id=1");
+    expect(await repository.findOwnedOrder(input)).toEqual([]);
+  });
+  it("uses stable keyset pagination within the canonical customer and channel", async () => {
+    const input = { channelId: 36, externalCustomerId: "customer-a", pageSize: 2 };
+    const first = await repository.listOwnedOrders(input);
+    expect(first.map(row => row.omsOrderId)).toEqual([5, 2, 1]);
+    expect((await repository.listOwnedOrders({ ...input, beforeOmsOrderId: 2 })).map(row => row.omsOrderId)).toEqual([1]);
+    expect(await repository.listOwnedOrders({ ...input, externalCustomerId: "unknown" })).toEqual([]);
+  });
   it("preserves leading zero identity", async () => {
     const result = await repository.findExactOrderCandidates({ ...customerInput, orderNumberAliases: ["063210", "#063210"] });
     expect(result.map(row => row.externalOrderId)).toEqual(["gid://shopify/Order/5"]);

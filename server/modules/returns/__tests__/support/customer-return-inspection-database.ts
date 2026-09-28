@@ -31,6 +31,7 @@ export async function createInspectionTestSchema(pool: Pool): Promise<void> {
     'CREATE TABLE "wms"."orders" (', 'CREATE TABLE "wms"."order_items" (']) {
     await pool.query(table("migrations/0002_concerned_darwin.sql", marker));
   }
+  await pool.query(readFileSync("migrations/104_oms_orders_external_customer_id.sql", "utf8"));
   await pool.query(`ALTER TABLE wms.order_items RENAME COLUMN wms_order_id TO order_id;
     ALTER TABLE wms.order_items ALTER COLUMN oms_order_line_id TYPE BIGINT;
     ALTER TABLE wms.order_items ADD CONSTRAINT inspection_item_order_fk FOREIGN KEY (order_id) REFERENCES wms.orders(id);

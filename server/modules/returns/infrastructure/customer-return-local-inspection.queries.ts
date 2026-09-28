@@ -23,12 +23,23 @@ export const inspectionQueries = Object.freeze({
   // reinterpret them in the Node host's local time zone. Carrier tables below
   // already use timestamptz and must retain their stored instants unchanged.
   order: `SELECT oo.id AS "omsOrderId", oo.channel_id AS "channelId",
+    oo.external_customer_id AS "externalCustomerId",
     oo.external_order_id AS "externalOrderId", oo.external_order_number AS "externalOrderNumber",
     oo.ordered_at AT TIME ZONE 'UTC' AS "purchasedAt", oo.ship_to_country AS "shipToCountry",
     oo.cancelled_at AT TIME ZONE 'UTC' AS "cancelledAt",
     EXISTS (SELECT 1 FROM dropship.dropship_order_intake doi WHERE doi.oms_order_id = oo.id) AS "isDropship"
     FROM oms.oms_orders oo WHERE oo.channel_id = $1 AND oo.external_order_number = ANY($2::text[])
     ORDER BY oo.id LIMIT 2`,
+
+  canonicalOrder: `SELECT oo.id AS "omsOrderId", oo.channel_id AS "channelId",
+    oo.external_order_id AS "externalOrderId", oo.external_customer_id AS "externalCustomerId",
+    oo.external_order_number AS "externalOrderNumber",
+    oo.ordered_at AT TIME ZONE 'UTC' AS "purchasedAt", oo.ship_to_country AS "shipToCountry",
+    oo.cancelled_at AT TIME ZONE 'UTC' AS "cancelledAt",
+    EXISTS (SELECT 1 FROM dropship.dropship_order_intake doi WHERE doi.oms_order_id = oo.id) AS "isDropship"
+    FROM oms.oms_orders oo WHERE oo.channel_id = $1 AND oo.id = $2
+      AND oo.external_order_id = $3 AND oo.external_customer_id = $4
+    LIMIT 2`,
 
   lines: `SELECT line.id AS "omsOrderLineId", line.external_line_item_id AS "externalLineItemId",
     line.title, line.variant_title AS "variantTitle", line.sku, line.quantity, line.requires_shipping AS "requiresShipping",

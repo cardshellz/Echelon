@@ -40,13 +40,14 @@ export class PostgresCustomerReturnIntakeStore implements CustomerReturnIntakeSt
       await acquireReturnPolicyCatalogLock(tx, "shared");
       // Lock the durable submit lease before entitlement. A superseded preparer
       // cannot create a second root after a retry has rejected/replaced its lease.
-      const submission = rows(await tx.execute(sql`SELECT status,lease_token,request_hash,COALESCE(lease_actor,actor) AS actor,lease_until,
+      const submission = rows(await tx.execute(sql`SELECT status,lease_token,request_hash,oms_order_id,COALESCE(lease_actor,actor) AS actor,lease_until,
         lease_until > ${requestedAt} AS live_lease FROM returns.customer_return_submission_commands
         WHERE channel_id=${input.channelId} AND idempotency_key=${input.idempotencyKey}::uuid FOR UPDATE`))[0];
       const replay = await findIntake(tx, input);
       if (replay) return replay;
       if (!submission || submission.status !== "preparing" || submission.lease_token !== input.submissionLeaseToken
-        || submission.live_lease !== true || submission.request_hash !== input.semanticHash || submission.actor !== input.actor) {
+        || submission.live_lease !== true || submission.request_hash !== input.semanticHash || submission.actor !== input.actor
+        || (submission.oms_order_id != null && Number(submission.oms_order_id) !== input.omsOrderId)) {
         throw new CustomerReturnIntakeError("RETURN_LABEL_SUBMISSION_LEASE_CHANGED", "This return request is being handled by another attempt. Check its saved status.");
       }
       await verifyConfiguration(tx, input);
