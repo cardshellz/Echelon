@@ -4,6 +4,7 @@ import {
   DROPSHIP_COST_CHANGE_LOG_PAGE_SIZE,
   DROPSHIP_COST_CHANGE_TODAY_SUMMARY,
   DROPSHIP_COST_CHANGE_TODAY_WITH_DETECTION_SUMMARY,
+  DROPSHIP_COST_CHANGE_TODAY_ALL_LIVE_SUMMARY,
   DROPSHIP_COST_CHANGE_TODAY_WITH_NOTICES_SUMMARY,
   DROPSHIP_COST_CHANGE_TODAY_WITH_PROTECTION_SUMMARY,
   describeDropshipCostChangeToday,
@@ -19,6 +20,15 @@ import {
   parseDropshipCostChangeDetectionOverview,
   parseDropshipCostChangeLogPage,
   type DropshipCostDetectionStateView,
+  DROPSHIP_COST_CHANGE_LISTING_ACTIONS_ADMIN_URL,
+  dropshipCostChangeListingActionsPageUrl,
+  formatDropshipCostChangeHoldRelease,
+  formatDropshipCostChangeListingAction,
+  formatDropshipCostChangeListingAmounts,
+  formatDropshipCostChangeListingPriceSource,
+  parseDropshipCostChangeListingActionsPage,
+  costChangeListingActionValues,
+  costChangeListingPriceSourceValues,
 } from "../dropship-cost-change-policy-model";
 
 const formatTime = (value: string | null) => (value ? `at ${value}` : "never");
@@ -110,9 +120,36 @@ describe("cost change words", () => {
     expect(describeDropshipCostChangeToday({ ...none, detection: true, priceProtection: true, vendorNotices: true }))
       .toBe(DROPSHIP_COST_CHANGE_TODAY_WITH_NOTICES_SUMMARY);
     expect(DROPSHIP_COST_CHANGE_TODAY_WITH_NOTICES_SUMMARY).toContain("vendors are told as the policy says");
+    expect(describeDropshipCostChangeToday({ ...none, detection: true, priceProtection: true, vendorNotices: true, listingActions: true }))
+      .toBe(DROPSHIP_COST_CHANGE_TODAY_ALL_LIVE_SUMMARY);
+    expect(DROPSHIP_COST_CHANGE_TODAY_ALL_LIVE_SUMMARY).toContain("rule-priced listings are repriced or held for review");
     expect(formatDropshipCostChangeNoticeDecision(null)).toBe("Notice pending");
     expect(formatDropshipCostChangeNoticeDecision("sent")).toBe("Vendor notified");
     expect(formatDropshipCostChangeNoticeDecision("skipped_below_minimum")).toBe("No notice: below the minimum");
+  });
+});
+
+describe("listing action words and paging", () => {
+  it("names every action and price source, and the amounts without floating point", () => {
+    for (const action of costChangeListingActionValues) expect(formatDropshipCostChangeListingAction(action).length).toBeGreaterThan(0);
+    for (const source of costChangeListingPriceSourceValues) expect(formatDropshipCostChangeListingPriceSource(source).length).toBeGreaterThan(0);
+    expect(formatDropshipCostChangeListingAction("below_cost_paused")).toBe("Under cost, paused");
+    expect(formatDropshipCostChangeListingPriceSource("rules_cost")).toBe("Rules on cost");
+    expect(formatDropshipCostChangeListingAmounts({ listingPriceCents: 899, unitCostCents: 999 })).toBe("listed at $8.99, cost $9.99");
+    expect(formatDropshipCostChangeListingAmounts({ listingPriceCents: null, unitCostCents: 999 })).toBe("cost $9.99");
+    const formatDate = (iso: string) => `on ${iso.slice(0, 10)}`;
+    expect(formatDropshipCostChangeHoldRelease({ action: "below_cost_paused", holdReleasedAt: null, holdReleaseReason: null }, formatDate)).toBe("Still paused");
+    expect(formatDropshipCostChangeHoldRelease({ action: "below_cost_paused", holdReleasedAt: "2026-10-14T00:05:00.000Z", holdReleaseReason: "listing_inactive" }, formatDate))
+      .toBe("Released on 2026-10-14: listing no longer live");
+    expect(formatDropshipCostChangeHoldRelease({ action: "reprice_queued", holdReleasedAt: null, holdReleaseReason: null }, formatDate)).toBeNull();
+  });
+
+  it("builds the first page and a cursor page, and refuses an answer that breaks the contract", () => {
+    expect(dropshipCostChangeListingActionsPageUrl(null)).toBe(`${DROPSHIP_COST_CHANGE_LISTING_ACTIONS_ADMIN_URL}?limit=${DROPSHIP_COST_CHANGE_LOG_PAGE_SIZE}`);
+    expect(dropshipCostChangeListingActionsPageUrl(70)).toBe(`${DROPSHIP_COST_CHANGE_LISTING_ACTIONS_ADMIN_URL}?limit=${DROPSHIP_COST_CHANGE_LOG_PAGE_SIZE}&beforeId=70`);
+    expect(() => parseDropshipCostChangeListingActionsPage({ items: [{ actionId: 1 }], nextBeforeId: null, generatedAt: "x" })).toThrow();
+    expect(parseDropshipCostChangeListingActionsPage({ items: [], nextBeforeId: null, generatedAt: "2026-10-13T00:05:00.000Z" }))
+      .toEqual({ items: [], nextBeforeId: null, generatedAt: "2026-10-13T00:05:00.000Z" });
   });
 });
 

@@ -44,6 +44,11 @@ function view(patch: Partial<DropshipVendorCostChanges> = {}): DropshipVendorCos
       eventType: "increase_announced", fromCents: 809, toCents: 999, effectiveAt: "2026-10-13T00:00:00.000Z",
       observedAt: "2026-09-28T16:00:00.000Z", noticeDecision: "sent",
     }],
+    listingActions: [{
+      actionId: 71, entryId: 11, listingId: 2, storeConnectionId: 9, platform: "shopify", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+      variantName: "Single pack", productName: "Armor Envelope", action: "below_cost_paused", detail: null, listingPriceCents: 899, unitCostCents: 999,
+      pushJobId: null, decidedAt: "2026-10-13T00:05:00.000Z", holdReleasedAt: null, holdReleaseReason: null,
+    }],
     policy: { increaseNoticeDays: 14, decreaseTiming: "immediate", priceProtection: true, notifyByEmail: true, notifyInPortal: true, notifyOnDecrease: true },
     generatedAt: "2026-09-28T16:05:00.000Z",
     ...patch,
@@ -71,12 +76,17 @@ describe("vendor portal cost changes page", () => {
     expect(html).toContain("Increase");
     expect(html).toContain('data-testid="cost-changes-recent-31"');
     expect(html).toContain("You were notified");
+    expect(html).toContain('data-testid="cost-changes-action-71"');
+    expect(html).toContain("Paused: priced under the cost");
+    expect(html).toContain("listed at $8.99, cost now $9.99");
+    expect(html).toContain("publishes zero quantity");
   });
 
   it("says when nothing is coming and nothing changed", () => {
-    const html = render({ data: view({ announced: [], recent: [] }) });
+    const html = render({ data: view({ announced: [], recent: [], listingActions: [] }) });
     expect(html).toContain("No cost change is announced for your listings.");
     expect(html).toContain("Nothing changed in the last 30 days.");
+    expect(html).toContain("No increase has taken effect on a live listing in the last 30 days.");
   });
 
   it("says a failed read failed, and shows a loading state before the read answers", () => {

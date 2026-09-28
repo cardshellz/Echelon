@@ -1,18 +1,22 @@
 import type { Express, Request, Response } from "express";
 import { requirePermission } from "../../../../routes/middleware";
+import type { DropshipCostChangeListingActionService } from "../../application/dropship-cost-change-listing-action-service";
 import type { DropshipCostDetectionService } from "../../application/dropship-cost-detection-service";
 import { DropshipError } from "../../domain/errors";
+import { createDropshipCostChangeListingActionServiceFromEnv } from "../../infrastructure/dropship-cost-change-listing-action.factory";
 import { createDropshipCostDetectionServiceFromEnv } from "../../infrastructure/dropship-cost-detection.factory";
 
 /**
  * Admin read surface for what cost detection has found (migration 0711,
  * docs/DROPSHIP-COST-CHANGE-CONTROLS.md, C2): the worker's state and the
- * announced changes, and the change log a page at a time. Read-only: the
- * schedule is written only by the detection worker.
+ * announced changes, the change log a page at a time, and (C5, migration
+ * 0713) what increases that took effect did to listings. Read-only: the
+ * schedule and the actions are written only by the worker passes.
  */
 export function registerDropshipAdminCostChangeActivityRoutes(
   app: Express,
   service: DropshipCostDetectionService = createDropshipCostDetectionServiceFromEnv(),
+  listingActions: Pick<DropshipCostChangeListingActionService, "listListingActions"> = createDropshipCostChangeListingActionServiceFromEnv(),
 ): void {
   app.get(
     "/api/dropship/admin/cost-changes/detection",
@@ -34,6 +38,21 @@ export function registerDropshipAdminCostChangeActivityRoutes(
         // Query strings arrive as text; the service's strict contract decides
         // whether the numbers are acceptable.
         return res.json(await service.listChangeLog({
+          ...(req.query.limit !== undefined ? { limit: numberFromQuery(req.query.limit) } : {}),
+          ...(req.query.beforeId !== undefined ? { beforeId: numberFromQuery(req.query.beforeId) } : {}),
+        }));
+      } catch (error) {
+        return sendCostChangeActivityError(res, error);
+      }
+    },
+  );
+
+  app.get(
+    "/api/dropship/admin/cost-changes/listing-actions",
+    requirePermission("dropship", "view"),
+    async (req, res) => {
+      try {
+        return res.json(await listingActions.listListingActions({
           ...(req.query.limit !== undefined ? { limit: numberFromQuery(req.query.limit) } : {}),
           ...(req.query.beforeId !== undefined ? { beforeId: numberFromQuery(req.query.beforeId) } : {}),
         }));
@@ -69,6 +88,7 @@ export function statusForCostChangeActivityError(code: string): number {
   switch (code) {
     case "DROPSHIP_COST_DETECTION_INVALID_INPUT":
     case "DROPSHIP_COST_SCHEDULE_INVALID_INPUT":
+    case "DROPSHIP_COST_CHANGE_INVALID_INPUT":
       return 400;
     // The tables are not there yet: the caller retries after migration 0711 lands.
     case "DROPSHIP_COST_SCHEDULE_TABLE_MISSING":

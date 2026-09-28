@@ -8,6 +8,12 @@ import {
   type CostChangeNoticeKind,
 } from "../domain/cost-change-notice";
 import { DropshipError } from "../domain/errors";
+import {
+  VENDOR_COST_LISTING_ACTION_RECENT_DAYS,
+  VENDOR_COST_LISTING_ACTION_VIEW_LIMIT,
+  type DropshipCostChangeListingActionRepository,
+  type VendorCostChangeListingActionView,
+} from "./dropship-cost-change-listing-action-service";
 import type { CostScheduleRecorder, DropshipCostChangePolicyReader } from "./dropship-cost-detection-service";
 import { formatNotificationCurrency, formatNotificationDate } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
@@ -137,6 +143,8 @@ export interface DropshipCostNoticePassResult {
 export interface DropshipVendorCostChangeOverview {
   announced: VendorCostChangeView[];
   recent: VendorCostChangeLogView[];
+  /** What increases that took effect did to the vendor's listings (C5), last month. */
+  listingActions: VendorCostChangeListingActionView[];
   policy: Pick<DropshipCostChangePolicySettings, "increaseNoticeDays" | "decreaseTiming" | "priceProtection" | "notifyByEmail" | "notifyInPortal" | "notifyOnDecrease">;
   generatedAt: Date;
 }
@@ -150,6 +158,7 @@ export class DropshipCostChangeNoticeService {
   constructor(
     private readonly deps: {
       repository: DropshipCostChangeNoticeRepository;
+      listingActions: Pick<DropshipCostChangeListingActionRepository, "listVendorListingActions">;
       policy: DropshipCostChangePolicyReader;
       notificationSender?: DropshipNotificationSender;
       vendorProvisioning: DropshipCostChangeVendorResolver;
@@ -220,15 +229,19 @@ export class DropshipCostChangeNoticeService {
     }
     const now = this.deps.clock.now();
     const since = new Date(now.getTime() - VENDOR_COST_CHANGE_RECENT_DAYS * MILLISECONDS_PER_DAY);
-    const [policy, announced, recent] = await Promise.all([
+    const [policy, announced, recent, listingActions] = await Promise.all([
       this.deps.policy.resolvePolicy(),
       this.deps.repository.listVendorAnnouncedChanges({ vendorId, now, limit: VENDOR_COST_CHANGE_VIEW_LIMIT }),
       this.deps.repository.listVendorRecentChanges({ vendorId, since, limit: VENDOR_COST_CHANGE_VIEW_LIMIT }),
+      this.deps.listingActions.listVendorListingActions({
+        vendorId, since: new Date(now.getTime() - VENDOR_COST_LISTING_ACTION_RECENT_DAYS * MILLISECONDS_PER_DAY), limit: VENDOR_COST_LISTING_ACTION_VIEW_LIMIT,
+      }),
     ]);
     const { increaseNoticeDays, decreaseTiming, priceProtection, notifyByEmail, notifyInPortal, notifyOnDecrease } = policy.settings;
     return {
       announced,
       recent,
+      listingActions,
       policy: { increaseNoticeDays, decreaseTiming, priceProtection, notifyByEmail, notifyInPortal, notifyOnDecrease },
       generatedAt: now,
     };

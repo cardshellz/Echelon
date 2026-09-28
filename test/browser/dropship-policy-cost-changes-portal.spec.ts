@@ -18,7 +18,15 @@ interface RecentChange {
 const policy = { increaseNoticeDays: 14, decreaseTiming: "immediate", priceProtection: true, notifyByEmail: true, notifyInPortal: true, notifyOnDecrease: true };
 
 /** The vendor's session and onboarding, stubbed the way the wallet journey does; the cost changes view is the subject. */
-async function mount(page: Page, view: { announced: AnnouncedChange[]; recent: RecentChange[]; policy?: typeof policy; fail?: boolean }) {
+interface ListingAction {
+  actionId: number; entryId: number; listingId: number; storeConnectionId: number; platform: string; productVariantId: number;
+  variantSku: string | null; variantName: string; productName: string;
+  action: "reprice_queued" | "reprice_refused" | "awaiting_review" | "price_covers_cost" | "below_cost_recorded" | "below_cost_warned" | "below_cost_paused" | "skipped_inactive_listing" | "skipped_price_unavailable";
+  detail: string | null; listingPriceCents: number | null; unitCostCents: number; pushJobId: number | null; decidedAt: string;
+  holdReleasedAt: string | null; holdReleaseReason: "price_covers_cost" | "listing_inactive" | null;
+}
+
+async function mount(page: Page, view: { announced: AnnouncedChange[]; recent: RecentChange[]; listingActions?: ListingAction[]; policy?: typeof policy; fail?: boolean }) {
   const state = { unexpected: [] as string[], pageErrors: [] as string[], reads: 0 };
   page.on("pageerror", (error) => state.pageErrors.push(error.message));
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
@@ -43,7 +51,9 @@ async function mount(page: Page, view: { announced: AnnouncedChange[]; recent: R
     if (url.pathname === "/api/dropship/cost-changes") {
       state.reads += 1;
       if (view.fail) return route.fulfill({ status: 503, json: { error: { code: "DROPSHIP_COST_SCHEDULE_TABLE_MISSING", message: "Dropship cost schedule tables do not exist yet." } } });
-      return route.fulfill({ json: { announced: view.announced, recent: view.recent, policy: view.policy ?? policy, generatedAt: STAMP } });
+      return route.fulfill({ json: {
+        announced: view.announced, recent: view.recent, listingActions: view.listingActions ?? [], policy: view.policy ?? policy, generatedAt: STAMP,
+      } });
     }
     state.unexpected.push(`${route.request().method()} ${url.pathname}`);
     return route.fulfill({ status: 500, json: {} });
@@ -59,6 +69,11 @@ const subject = { productVariantId: 66, variantSku: "ARM-ENV-SGL-P50", variantNa
 
 test("shows the notice terms, the coming changes and the recent changes with their notice status", async ({ page }, testInfo) => {
   const state = await mount(page, {
+    listingActions: [{
+      actionId: 71, entryId: 11, listingId: 2, storeConnectionId: 9, platform: "shopify", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+      variantName: "Single pack", productName: "Armor Envelope", action: "awaiting_review", detail: null, listingPriceCents: 1152, unitCostCents: 999,
+      pushJobId: null, decidedAt: "2026-10-13T00:05:00.000Z", holdReleasedAt: null, holdReleaseReason: null,
+    }],
     announced: [{ ...subject, entryId: 11, kind: "increase", fromCents: 809, unitCostCents: 999, effectiveAt: "2026-10-13T00:00:00.000Z", announcedAt: STAMP }],
     recent: [
       { ...subject, logId: 31, eventType: "increase_announced", fromCents: 809, toCents: 999, effectiveAt: "2026-10-13T00:00:00.000Z", observedAt: STAMP, noticeDecision: "sent" },
@@ -67,6 +82,8 @@ test("shows the notice terms, the coming changes and the recent changes with the
   });
 
   await expect(page.getByTestId("cost-changes-terms")).toContainText("You get 14 days' notice before a higher .ops cost is charged.");
+  await expect(page.getByTestId("cost-changes-action-71")).toContainText("Waiting for your price review");
+  await expect(page.getByTestId("cost-changes-action-71")).toContainText("listed at $11.52, cost now $9.99");
   await expect(page.getByTestId("cost-changes-terms")).toContainText("Orders accepted before a change takes effect are charged the cost in force at the time.");
   const announced = page.getByTestId("cost-changes-announced-11");
   await expect(announced).toContainText("ARM-ENV-SGL-P50 · Armor Envelope");

@@ -41,6 +41,16 @@ export const DROPSHIP_NOTIFICATION_EVENTS = {
   COST_CHANGE_APPLIED: "dropship_cost_change_applied",
   /** A change announced earlier was lowered or withdrawn (cost change controls, C4). */
   COST_CHANGE_UPDATED: "dropship_cost_change_updated",
+  /** Rule-priced listings were queued for a new price when an increase took effect (cost change controls, C5). */
+  COST_CHANGE_LISTINGS_REPRICED: "dropship_cost_change_listings_repriced",
+  /** Rule-priced listings wait for the vendor's price review under the policy (cost change controls, C5). */
+  COST_CHANGE_LISTINGS_REVIEW_NEEDED: "dropship_cost_change_listings_review_needed",
+  /** Listings whose price no longer covers the .ops cost (cost change controls, C5). */
+  COST_CHANGE_LISTINGS_BELOW_COST: "dropship_cost_change_listings_below_cost",
+  /** Listings paused for being priced under the .ops cost (cost change controls, C5). */
+  COST_CHANGE_LISTINGS_PAUSED: "dropship_cost_change_listings_paused",
+  /** Paused listings selling again because their price covers the cost (cost change controls, C5). */
+  COST_CHANGE_LISTINGS_RESUMED: "dropship_cost_change_listings_resumed",
 } as const;
 
 export type DropshipNotificationEventType =
