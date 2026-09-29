@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { WMS_WAREHOUSE_STATUS_VALUES, isTerminalWmsDemandStatus } from "@shared/enums/order-status";
-import { cutoverLineIdentityConflicts, cutoverLineTracksInventory } from "@shared/inventory/cutover-line-policy";
-import { acceptedDemandIdentityMatches } from "./inventory-cutover-accepted-demand";
+import { cutoverLineIdentityConflicts, cutoverLineTracksInventory, isProductOnlyNonInventoryLine } from "@shared/inventory/cutover-line-policy";
+import { acceptedDemandIdentityMatches, acceptedDemandQuantitiesMatch } from "./inventory-cutover-accepted-demand";
 import { cutoverReconstructionEvidenceSchema, type CutoverReconstructionEvidence,
   type CutoverReconstructionPlan, type CutoverReconstructionLine,
   type CutoverReconstructionAllocation } from "@shared/types/inventory-cutover-reconstruction";
@@ -131,13 +131,11 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
   }
   for (const demand of evidence.acceptedOmsDemand) {
     const materialized = itemsByOmsLine.get(demand.lineId) ?? [];
-    const actual = materialized.reduce((total,item) => total + BigInt(item.quantity),BigInt(0));
     // Capturing a closed order proves identity, not fulfillment. Keep accepted
     // but unfinished terminal demand blocked in strict and verified openings.
     const hasUnfulfilledTerminalOwner = materialized.some((item) =>
       isTerminalWmsDemandStatus(orders.get(item.orderId)?.status ?? null) && item.fulfilledQuantity !== item.quantity);
-    if (demand.authorizationStatus !== "authorized" || BigInt(demand.authorizedQty) <= BigInt(0)
-      || BigInt(demand.materializedQty) !== actual || BigInt(demand.authorizedQty) !== actual
+    if (demand.authorizationStatus !== "authorized" || !acceptedDemandQuantitiesMatch(demand, materialized)
       || hasUnfulfilledTerminalOwner
       || materialized.some((item) => !acceptedDemandIdentityMatches(demand, item,
         allVariantsBySku.get(item.sku.toUpperCase()) ?? []))) {
@@ -176,8 +174,8 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
       block("DEMAND_QUANTITY_INVALID", subject, "Order progress quantities are inconsistent."); continue;
     }
     const variants = variantsBySku.get(item.sku.toUpperCase()) ?? [];
-    if (item.requiresShipping === 0) {
-      if (residual) block("NONINVENTORY_ITEM_ENCUMBERED", subject, "Non-shipping line retains physical inventory evidence.");
+    if (item.requiresShipping === 0 || isProductOnlyNonInventoryLine(item)) {
+      if (residual) block("NONINVENTORY_ITEM_ENCUMBERED", subject, "Non-inventory line retains physical inventory evidence.");
       continue;
     }
     if (item.requiresShipping !== 1 || variants.length !== 1) { block("DEMAND_VARIANT_AMBIGUOUS", subject, "Physical SKU must resolve to exactly one active variant."); continue; }

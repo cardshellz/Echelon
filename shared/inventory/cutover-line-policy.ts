@@ -4,6 +4,13 @@ type VariantPolicy = {
   id: number; productId: number; requiresShipping: boolean; trackInventory: boolean;
 };
 
+/** Product-only physical goods use the same saved non-stock policy as picking
+ * and shipping. They require a catalog product, not an invented stock variant. */
+export function isProductOnlyNonInventoryLine(item: WmsCutoverDemandItem): boolean {
+  return item.requiresShipping === 1 && item.inventoryTracking === false
+    && item.catalogProductId != null && item.productId === null;
+}
+
 /** Inputs are validated census DTOs. Saved order policy wins over today's catalog
  * defaults. Older captures/unsnapshotted orders retain the explicit catalog
  * fallback; absent catalog evidence is unknown, not permission to omit demand. */
