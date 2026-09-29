@@ -50,12 +50,22 @@ export interface CanonicalInventoryPublicationEnqueueResult {
   coalescedPublicationKeys: string[];
 }
 
+/** A read result for a deferred Dropship listing is not a provider-write intent. */
+export type CanonicalInventoryChannelQuantity = Omit<CanonicalInventoryPublicationIntent,
+  "externalInventoryItemId" | "externalSku">;
+export type InventoryChannelQuantityRouteResult<T> =
+  | { authority: "legacy"; legacyResult: T }
+  | { authority: "canonical"; publication: Omit<CanonicalInventoryPublicationResult, "rows"> & {
+      rows: CanonicalInventoryChannelQuantity[];
+    } };
+
 export interface InventoryAvailabilityRuntimePublicationContext {
   authority: InventoryAvailabilityRuntimeAuthority;
   authorityRevision: string;
   activationRunId: string | null;
   listActivePublicationProductIds(channelId?: number): Promise<number[]>;
-  planProduct(productId: number, channelId?: number): Promise<InventoryChannelExposureRuntimePlan>;
+  planProduct(productId: number, channelId?: number,
+    purpose?: "publication" | "deferred_dropship_quantity_read"): Promise<InventoryChannelExposureRuntimePlan>;
   loadActivePublicationTargets(input: {
     productId: number;
     productVariantIds: readonly number[];
@@ -134,6 +144,47 @@ export class AuthorityAwareInventoryPublicationService {
 
   async readAuthority(): Promise<InventoryAvailabilityRuntimeAuthority> {
     return this.executor.execute(async (context) => context.authority);
+  }
+
+  /** Retains canonical ATP for failed Dropship listings in the audited initial
+   * deferral receipt. Other memberships and all provider-write gates are unchanged.
+   * The read shares the existing authority lock, supply snapshot and planner. */
+  async readDropshipProductQuantities<T>(input: {
+    productId: number; dryRun: true; triggeredBy: string;
+  }, legacyReader: () => Promise<T>): Promise<InventoryChannelQuantityRouteResult<T>> {
+    const productId = positiveInteger(input.productId, "productId");
+    nonblank(input.triggeredBy, "triggeredBy", 200);
+    if (input.dryRun !== true) throw new InventoryAvailabilityRuntimePublicationError(
+      "CHANNEL_QUANTITY_READ_ONLY_REQUIRED", "A channel quantity read cannot publish.");
+    return this.executor.execute(async context => {
+      if (context.authority === "legacy") return { authority: "legacy", legacyResult: await legacyReader() };
+      const activationRunId = canonicalActivationRunId(context);
+      const plan = await context.planProduct(productId, this.channelId, "deferred_dropship_quantity_read");
+      if (plan.authority !== "canonical" || plan.productId !== productId
+        || plan.authorityRevision !== context.authorityRevision || plan.activationRunId !== activationRunId) {
+        throw publicationError("CANONICAL_CHANNEL_QUANTITY_PLAN_MISMATCH",
+          "The channel quantity plan does not match its pinned authority and product.", context, { productId });
+      }
+      const rows: CanonicalInventoryChannelQuantity[] = plan.targets
+        .filter(target => target.destinationKind === "dropship_store_connection")
+        .flatMap(target => target.rows.map(row => ({
+          publicationTargetId: target.publicationTargetId,
+          publicationTargetRevision: target.publicationTargetRevision,
+          productVariantId: row.productVariantId, sku: row.sku, desiredQuantity: row.publishedUnits,
+          channelId: target.channelId, channelName: target.channelName,
+          destinationKind: target.destinationKind, channelConnectionId: target.channelConnectionId,
+          dropshipStoreConnectionId: target.dropshipStoreConnectionId,
+          providerKey: target.channelProvider.toLowerCase(), providerScopeType: target.providerScopeType,
+          externalScopeId: target.externalScopeId,
+          sourceWarehouseIds: row.sourceWarehouseBreakdown.map(source => source.warehouseId),
+          blockerCodes: uniqueStrings([...target.blockers, ...row.blockers].map(blocker => blocker.code)),
+        })));
+      return { authority: "canonical", publication: {
+        authority: "canonical", authorityRevision: context.authorityRevision, activationRunId,
+        dryRun: true, productId, rows, enqueuedRows: 0, coalescedRows: 0,
+        enqueuedPublicationKeys: [], coalescedPublicationKeys: [],
+      } };
+    });
   }
 
   async listProductIds(

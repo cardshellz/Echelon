@@ -11,6 +11,36 @@ import {
 const HASH = "a".repeat(64);
 
 describe("AuthorityAwareInventoryPublicationService", () => {
+  it("reads a deferred Dropship quantity under canonical authority without fabricating a provider identity or enqueuing", async () => {
+    const context = runtimeContext("canonical");
+    const plan = runtimePlan([{ ...target(), destinationKind: "dropship_store_connection",
+      channelConnectionId: null, dropshipStoreConnectionId: 1, mappings: [] }]);
+    plan.targets[0]!.rows[0]!.blockers = [];
+    context.planProduct = vi.fn(async () => plan);
+    const service = new AuthorityAwareInventoryPublicationService(executor(context), 3);
+    const legacy = vi.fn();
+    const result = await service.readDropshipProductQuantities({ productId: 10, dryRun: true, triggeredBy: "listing_preview" }, legacy);
+    expect(result).toMatchObject({ authority: "canonical", publication: { dryRun: true, enqueuedRows: 0,
+      rows: [{ desiredQuantity: "4", dropshipStoreConnectionId: 1, blockerCodes: [] }] } });
+    if (result.authority !== "canonical") throw new Error("Expected canonical quantity");
+    expect(result.publication.rows[0]).not.toHaveProperty("externalInventoryItemId");
+    expect(context.planProduct).toHaveBeenCalledWith(10, 3, "deferred_dropship_quantity_read");
+    expect(context.enqueueFullPublications).not.toHaveBeenCalled();
+    expect(legacy).not.toHaveBeenCalled();
+    await expect(service.publishProduct({ productId: 10, dryRun: false }, legacy)).rejects.toMatchObject({ code: "CANONICAL_PUBLICATION_TARGET_BLOCKED" });
+    expect(context.enqueueFullPublications).not.toHaveBeenCalled();
+  });
+  it("keeps legacy Dropship reads pinned and rejects stale canonical read lineage", async () => {
+    const legacyContext = runtimeContext("legacy"); const legacy = vi.fn(async () => ["legacy"]);
+    const input = { productId: 10, dryRun: true as const, triggeredBy: "preview" };
+    await expect(new AuthorityAwareInventoryPublicationService(executor(legacyContext)).readDropshipProductQuantities(input, legacy))
+      .resolves.toEqual({ authority: "legacy", legacyResult: ["legacy"] });
+    expect(legacyContext.planProduct).not.toHaveBeenCalled();
+    const context = runtimeContext("canonical"); context.planProduct = vi.fn(async () => ({ ...runtimePlan([target()]), authorityRevision: "8" }));
+    await expect(new AuthorityAwareInventoryPublicationService(executor(context)).readDropshipProductQuantities(input, legacy))
+      .rejects.toMatchObject({ code: "CANONICAL_CHANNEL_QUANTITY_PLAN_MISMATCH" });
+    expect(context.enqueueFullPublications).not.toHaveBeenCalled();
+  });
   it("pins legacy authority around the existing publisher", async () => {
     const context = runtimeContext("legacy");
     const legacyPublisher = vi.fn(async () => ["legacy-result"]);

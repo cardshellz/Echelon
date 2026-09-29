@@ -614,6 +614,7 @@ export const resolvedChannelExposurePolicySchema = z.object({
 
 export const inventoryChannelExposurePreviewSchema = z.object({
   membership: inventoryPublicationScopeSchema.optional(),
+  deferredDropshipQuantityVariantIds: z.array(positiveInteger).optional(),
   publicationTargetId: positiveInteger,
   destinationKind: z.enum(["channel_connection", "dropship_store_connection"]),
   channelId: positiveInteger,

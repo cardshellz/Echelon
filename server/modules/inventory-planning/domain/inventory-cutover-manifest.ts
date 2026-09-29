@@ -62,6 +62,12 @@ export function buildInventoryCutoverManifest(
       if (location.promisePolicy) add("location_policy", String(location.id), location.promisePolicy.policyId, location.promisePolicy.definitionHash);
     }
     for (const safety of snapshot.safetyPolicies) add("safety_policy", safety.scopeKey, safety.policyId, safety.definitionHash);
+    for (const target of product.publicationTargetSelections ?? []) {
+      const configuration = target.quantityReadConfiguration;
+      if (!configuration) continue;
+      add("source_binding", String(target.publicationTargetId), configuration.sourceBindingId, configuration.sourceBindingDefinitionHash);
+      for (const policy of configuration.policySelections) add("channel_policy", policy.scopeKey, policy.policyId, policy.definitionHash);
+    }
     for (const publication of product.proposedPublications) {
       if (publication.sourceBindingId !== null || publication.sourceBindingDefinitionHash !== null) {
         add("source_binding", String(publication.publicationTargetId), publication.sourceBindingId, publication.sourceBindingDefinitionHash);

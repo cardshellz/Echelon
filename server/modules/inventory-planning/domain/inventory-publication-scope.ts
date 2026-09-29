@@ -1,5 +1,14 @@
 import { inventoryPublicationScopeSchema } from "@shared/types/inventory-publication-scope";
 
+/** An initial deferral is not a lasting opt-in: any later membership decision
+ * replaces it. Restrict reads to the requested product's managed sellable SKUs. */
+export function selectDeferredPublicationQuantityVariants(deferredIds: readonly number[],
+  managedIds: readonly number[], decidedIds: readonly number[]): number[] {
+  const managed = new Set(managedIds);
+  const decided = new Set(decidedIds);
+  return deferredIds.filter(id => managed.has(id) && !decided.has(id)).sort((a, b) => a - b);
+}
+
 /** One outbound selector for preview and runtime; caller retains the full supply snapshot. */
 export function selectPublicationVariants<T extends { id: number }>(
   variants: readonly T[], scope: { mode: "whole_product" } | { mode: "explicit"; includedVariantIds: readonly number[] },

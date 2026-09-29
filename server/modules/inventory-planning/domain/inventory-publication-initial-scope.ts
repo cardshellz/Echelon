@@ -20,6 +20,7 @@ export const initialPublicationScopeFactsSchema = z.object({
   existingMemberCount: z.number().int().nonnegative(),
   listings: z.array(z.object({
     sourceKey: text, productVariantId: id, active: z.boolean(), uncertain: z.boolean(), quarantined: z.boolean(),
+    listingStatus: text.optional(),
     externalInventoryItemId: text.nullable(), externalSku: text.nullable(),
   }).strict()),
   ownerIssues: z.array(text),
@@ -73,6 +74,7 @@ export function reviewInitialPublicationScope(
     }
   }
   const included = new Set<number>();
+  const deferred = new Set<number>();
   const nonStock = new Set<number>();
   const mappingImports: NonNullable<InitialPublicationScopeReview["mappingImports"]> = [];
   const identityOwners = new Map<string, number>();
@@ -89,6 +91,16 @@ export function reviewInitialPublicationScope(
     const variant = variants.get(variantId);
     if (!variant) { add("INITIAL_SCOPE_CATALOG_IDENTITY_MISSING", "A listed SKU has no current catalog identity.", variantId); continue; }
     if (!resolveInventoryTrackingPolicy(variant)) { nonStock.add(variant.id); continue; }
+    // A failed listing is not an initial stock-publication obligation. Retain it
+    // in the evidence hash, but do not invent an inventory identity or persist
+    // an explicit exclusion that would prevent later membership enrollment.
+    // A registered/active owner, quarantine or in-flight operation still wins.
+    if (facts.target.destinationKind === "dropship_store_connection"
+      && listings.every(row => row.sourceKey.startsWith("dropship-listing:")
+        && row.listingStatus === "failed" && !row.active && !row.quarantined)) {
+      deferred.add(variant.id);
+      continue;
+    }
     if (listings.some(row => row.uncertain)) add("INITIAL_SCOPE_LISTING_UNCERTAIN", "A listing operation has an unresolved outcome.", variant.id);
     if (excludedIds.has(variant.id)) {
       if (listings.some(row => row.quarantined)) add("INITIAL_SCOPE_LISTING_QUARANTINED", "A listed inventory mapping is quarantined.", variant.id);
@@ -134,9 +146,10 @@ export function reviewInitialPublicationScope(
   };
   return initialPublicationScopeReviewSchema.parse({
     publicationTargetId: facts.target.id, targetRevision: facts.target.revision, authorityRevision: facts.authorityRevision,
-    reviewHash: inventoryCutoverEvidenceHash({ contractVersion: "initial_publication_scope_v3", facts: stableFacts, exclusions, mappingImports }),
+    reviewHash: inventoryCutoverEvidenceHash({ contractVersion: "initial_publication_scope_v4", facts: stableFacts, exclusions, mappingImports }),
     ready: blockers.length === 0, includedVariantIds: [...included].sort((a, b) => a - b),
     excludedNonStockVariantIds: [...nonStock].sort((a, b) => a - b),
+    deferredUnpublishedVariantIds: [...deferred].sort((a, b) => a - b),
     excludedVariants: exclusions,
     mappingImports,
     blockers: blockers.sort((a, b) => compareText(a.code, b.code) || (a.productVariantId ?? 0) - (b.productVariantId ?? 0)),

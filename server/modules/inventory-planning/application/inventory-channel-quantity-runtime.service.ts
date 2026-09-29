@@ -1,6 +1,6 @@
 import type {
   AuthorityAwareInventoryPublicationService,
-  CanonicalInventoryPublicationIntent,
+  CanonicalInventoryChannelQuantity,
 } from "./inventory-availability-runtime-publication.service";
 
 export interface LegacyInventoryChannelQuantity {
@@ -49,7 +49,7 @@ interface NormalizedInventoryChannelQuantityTarget {
   externalScopeId?: string;
 }
 
-type PublicationRouter = Pick<AuthorityAwareInventoryPublicationService, "publishProduct">;
+type PublicationRouter = Pick<AuthorityAwareInventoryPublicationService, "publishProduct" | "readDropshipProductQuantities">;
 
 export class InventoryChannelQuantityRuntimeError extends Error {
   constructor(
@@ -82,10 +82,10 @@ export class InventoryChannelQuantityRuntimeService {
     const channelId = positiveInteger(request.channelId, "channelId");
     const target = normalizeTarget(request.target);
     const triggeredBy = nonblank(request.triggeredBy, "triggeredBy", 200);
-    const routed = await this.publicationForChannel(channelId).publishProduct(
-      { productId, dryRun: true, triggeredBy },
-      legacyReader,
-    );
+    const router = this.publicationForChannel(channelId);
+    const routed = target.destinationKind === "dropship_store_connection"
+      ? await router.readDropshipProductQuantities({ productId, dryRun: true, triggeredBy }, legacyReader)
+      : await router.publishProduct({ productId, dryRun: true, triggeredBy }, legacyReader);
 
     if (routed.authority === "legacy") {
       return {
@@ -109,6 +109,13 @@ export class InventoryChannelQuantityRuntimeService {
 
     const rows = routed.publication.rows.filter((row) =>
       row.channelId === channelId && targetMatches(row, target));
+    if (target.destinationKind === "dropship_store_connection") {
+      const blocked = rows.find(row => row.blockerCodes.length > 0);
+      if (blocked) throw runtimeError("CANONICAL_CHANNEL_QUANTITY_BLOCKED",
+        "The Dropship warehouse or channel policy cannot resolve a quantity.",
+        { productId, channelId, publicationTargetId: blocked.publicationTargetId,
+          productVariantId: blocked.productVariantId, blockerCodes: blocked.blockerCodes });
+    }
     return {
       authority: "canonical",
       productId,
@@ -147,13 +154,13 @@ function normalizeLegacyRows(
 }
 
 function normalizeCanonicalRows(
-  rows: readonly CanonicalInventoryPublicationIntent[],
+  rows: readonly CanonicalInventoryChannelQuantity[],
   productId: number,
   channelId: number,
   target: NormalizedInventoryChannelQuantityTarget,
   allowEquivalentDestinationRows: boolean,
 ): InventoryChannelQuantityRow[] {
-  const grouped = new Map<number, CanonicalInventoryPublicationIntent[]>();
+  const grouped = new Map<number, CanonicalInventoryChannelQuantity[]>();
   for (const row of rows) {
     const productVariantId = positiveInteger(row.productVariantId, "productVariantId");
     const current = grouped.get(productVariantId) ?? [];
@@ -201,7 +208,7 @@ function normalizeCanonicalRows(
 }
 
 function targetMatches(
-  row: CanonicalInventoryPublicationIntent,
+  row: CanonicalInventoryChannelQuantity,
   target: NormalizedInventoryChannelQuantityTarget,
 ): boolean {
   if (row.destinationKind !== target.destinationKind) return false;

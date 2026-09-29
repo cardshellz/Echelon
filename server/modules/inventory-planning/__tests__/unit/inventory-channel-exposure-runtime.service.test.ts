@@ -4,12 +4,62 @@ import type { SupplySnapshotContentDto } from "@shared/types/inventory-availabil
 
 import {
   InventoryChannelExposureRuntimeService,
+  planInventoryChannelExposureProduct,
   type ActiveInventoryPublicationTargetSnapshot,
   type InventoryChannelExposureRuntimeContext,
 } from "../../application/inventory-channel-exposure-runtime.service";
 import { sealSupplySnapshot } from "../../domain/inventory-availability-planner";
 
 const HASH = "a".repeat(64);
+
+describe("audited deferred Dropship ATP reads", () => {
+  function deferredTarget() {
+    const selected = target();
+    selected.destinationKind = "dropship_store_connection";
+    selected.channelProvider = "ebay";
+    selected.channelConnectionId = null;
+    selected.dropshipStoreConnectionId = 1;
+    selected.membership = { mode: "explicit", includedVariantIds: [] };
+    selected.mappings = [];
+    selected.deferredDropshipQuantityVariantIds = [102];
+    return selected;
+  }
+  function read(selected = deferredTarget()) {
+    return planInventoryChannelExposureProduct(canonicalContext([selected]), 10, { warn: vi.fn() }, "deferred_dropship_quantity_read");
+  }
+  it("reads the same canonical transformation ATP for only the audited SKU and creates no publication plan", () => {
+    const selected = deferredTarget(); const before = structuredClone(selected);
+    expect(read(selected).targets).toMatchObject([{ publishable: false, blockers: [],
+      rows: [{ productVariantId: 102, canonicalAtpUnits: "7", publishedUnits: "7", mapping: null, blockers: [] }] }]);
+    expect(read(selected).targets[0]!.rows).toHaveLength(1);
+    expect(planInventoryChannelExposureProduct(canonicalContext([selected]), 10).targets).toEqual([]);
+    expect(selected).toEqual(before);
+  });
+  it("retains warehouse selection, allocation dials and holds", () => {
+    const selected = deferredTarget();
+    selected.policies = selected.policies.map(policy => ({ ...policy, value: policyValue({ shareBps: 5000, holdbackSellableUnits: "1" }) }));
+    expect(read(selected).targets[0]!.rows[0]).toMatchObject({ canonicalAtpUnits: "7", publishedUnits: "2", sourceWarehouseBreakdown: [{ warehouseId: 1 }] });
+    selected.hold = { reason: "Vendor paused", heldAt: "2026-09-29T12:00:00.000Z", heldBy: "operator" };
+    expect(read(selected).targets[0]!.rows[0]!.publishedUnits).toBe("0");
+  });
+  it("does not bypass configuration errors or affect direct Shopify/eBay membership", () => {
+    const selected = deferredTarget(); selected.sourceBinding = null;
+    expect(read(selected).targets[0]!.blockers.map(row => row.code)).toContain("CHANNEL_SOURCE_BINDING_MISSING");
+    selected.sourceBinding = target().sourceBinding; selected.policies = [];
+    expect(read(selected).targets[0]!.rows[0]!.blockers.map(row => row.code)).toContain("CHANNEL_EXPOSURE_POLICY_INCOMPLETE");
+    selected.destinationKind = "channel_connection"; selected.channelConnectionId = 1; selected.dropshipStoreConnectionId = null;
+    expect(read(selected).targets).toEqual([]);
+  });
+  it("does not admit unrelated catalog variants or silently excuse a current member's missing mapping", () => {
+    const selected = deferredTarget(); selected.membership = { mode: "explicit", includedVariantIds: [101] };
+    const result = read(selected);
+    expect(result.targets[0]!.rows.map(row => row.productVariantId)).toEqual([101, 102]);
+    expect(result.targets[0]!.rows[0]!.blockers.map(row => row.code)).toContain("PUBLICATION_TARGET_VARIANT_MAPPING_MISSING");
+    selected.deferredDropshipQuantityVariantIds = [];
+    selected.membership = { mode: "explicit", includedVariantIds: [] };
+    expect(read(selected).targets).toEqual([]);
+  });
+});
 
 describe("explicit publication membership", () => {
   it("does not require mappings for deliberately excluded variants", async () => {

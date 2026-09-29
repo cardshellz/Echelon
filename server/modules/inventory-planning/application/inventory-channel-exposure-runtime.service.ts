@@ -76,6 +76,9 @@ export interface ActiveInventoryPublicationTargetSnapshot {
   /** Omitted only by legacy callers: preserve their whole-product semantics.
    * Explicit membership narrows output rows, never the ATP supply graph. */
   membership?: { mode: "whole_product" } | { mode: "explicit"; includedVariantIds: readonly number[] };
+  /** Only immutable initial-scope deferrals without a later membership decision.
+   * Loaded by the read-only Dropship path, never by a publication planner. */
+  deferredDropshipQuantityVariantIds?: readonly number[];
 }
 
 export interface InventoryChannelExposureRuntimeContext {
@@ -143,6 +146,7 @@ export function planInventoryChannelExposureProduct(
   context: InventoryChannelExposureRuntimeContext,
   productId: number,
   logger: InventoryChannelExposureRuntimeLogger = defaultLogger,
+  purpose: "publication" | "deferred_dropship_quantity_read" = "publication",
 ): InventoryChannelExposureRuntimePlan {
   const validatedProductId = positiveInteger(productId, "productId");
   if (context.authority === "legacy") {
@@ -197,19 +201,21 @@ export function planInventoryChannelExposureProduct(
 
   const plannedTargets = context.publicationTargets
     .slice()
+    .map(target => deferredDropshipReadTarget(target, purpose))
     .filter((target) => target.membership?.mode !== "explicit" || target.membership.includedVariantIds.length > 0)
     .sort((left, right) => left.publicationTargetId - right.publicationTargetId)
-    .map((target) => planTarget(context.supplySnapshot!, validatedProductId, variants, target));
+    .map((target) => planTarget(context.supplySnapshot!, validatedProductId, variants, target, purpose));
 
   applyPartitionOverages(plannedTargets);
   const targets: InventoryChannelExposureRuntimePlan["targets"] = plannedTargets.map((planned) => {
     const target = planned.target;
-    const publishable = target.rows.length > 0
+    const publishable = purpose === "publication" && target.rows.length > 0
       && target.blockers.length === 0
       && target.rows.every((row) => row.blockers.length === 0
         && row.policy !== null
         && row.mapping !== null);
-    if (!publishable || target.rows.some((row) => row.warnings.length > 0)) {
+    if ((purpose === "publication" && !publishable) || target.blockers.length > 0
+      || target.rows.some((row) => row.blockers.length > 0 || row.warnings.length > 0)) {
       logger.warn({
         event: "canonical_channel_exposure_not_clean",
         productId: validatedProductId,
@@ -251,6 +257,7 @@ function planTarget(
   productId: number,
   variants: SupplySnapshotDto["variants"],
   target: ActiveInventoryPublicationTargetSnapshot,
+  purpose: "publication" | "deferred_dropship_quantity_read",
 ): PlannedTarget {
   const targetBlockers: RuntimeIssue[] = [];
   const { selected: selectedVariants, unavailableVariantIds } = selectPublicationVariants(
@@ -353,7 +360,10 @@ function planTarget(
       ));
     }
     const mapping = mappings.get(variant.id) ?? null;
-    if (!mapping) {
+    const deferredRead = purpose === "deferred_dropship_quantity_read"
+      && target.destinationKind === "dropship_store_connection"
+      && target.deferredDropshipQuantityVariantIds?.includes(variant.id) === true;
+    if (!mapping && !deferredRead) {
       blockers.push(issue(
         "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING",
         "The SKU has no active exact provider inventory identity for this publication target.",
@@ -460,6 +470,15 @@ function planTarget(
       blockers: uniqueIssues(targetBlockers),
     },
   };
+}
+
+function deferredDropshipReadTarget(target: ActiveInventoryPublicationTargetSnapshot,
+  purpose: "publication" | "deferred_dropship_quantity_read"): ActiveInventoryPublicationTargetSnapshot {
+  if (purpose !== "deferred_dropship_quantity_read" || target.destinationKind !== "dropship_store_connection"
+    || target.membership?.mode !== "explicit" || !target.deferredDropshipQuantityVariantIds?.length) return target;
+  return { ...target, membership: { mode: "explicit", includedVariantIds: uniqueNumbers([
+    ...target.membership.includedVariantIds, ...target.deferredDropshipQuantityVariantIds,
+  ]) } };
 }
 
 function applyPartitionOverages(targets: PlannedTarget[]): void {
