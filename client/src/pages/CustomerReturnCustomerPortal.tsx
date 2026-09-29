@@ -18,7 +18,10 @@ import {
   downloadCustomerReturnLabel,
 } from "@/lib/customer-return-customer";
 import type { CustomerReturnFlowGateway } from "@/lib/customer-return-gateway";
-import type { CustomerReturnCustomerOrder } from "@shared/returns/customer-return-access.contract";
+import type {
+  CustomerReturnCustomerOrder,
+  CustomerReturnCustomerProfile,
+} from "@shared/returns/customer-return-access.contract";
 import type { CustomerReturnCustomerLabelStatus } from "@shared/returns/customer-return-customer.contract";
 
 type Session = Awaited<
@@ -27,6 +30,9 @@ type Session = Awaited<
 type History = Awaited<
   ReturnType<ReturnType<typeof createCustomerReturnTransport>["history"]>
 >;
+// Small server pages arrive progressively; bound each browse action so a long
+// order history cannot create an unbounded chain of provider inspections.
+const ORDER_PAGES_PER_LOAD = 5;
 const message = (cause: unknown) =>
   cause instanceof Error
     ? cause.message
@@ -148,13 +154,21 @@ function CustomerWorkspace({
     commands.getSnapshot,
   );
   const [orders, setOrders] = useState<CustomerReturnCustomerOrder[]>([]);
+  const [ordersLoading, setOrdersLoading] = useState(true);
+  const [ordersError, setOrdersError] = useState<string | null>(null);
   const [nextOrder, setNextOrder] = useState<number | null>(null);
   const [unavailableOrders, setUnavailableOrders] = useState(0);
+  const [profile, setProfile] = useState<CustomerReturnCustomerProfile | null>(
+    null,
+  );
+  const [profileLoading, setProfileLoading] = useState(true);
+  const [profileAttempt, setProfileAttempt] = useState(0);
   const [history, setHistory] = useState<History>({
     returns: [],
     nextBeforeAuthorizationId: null,
   });
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [selected, setSelected] = useState<CustomerReturnCustomerOrder | null>(
     null,
   );
@@ -165,6 +179,8 @@ function CustomerWorkspace({
   const [notice, setNotice] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const operation = useRef<AbortController | null>(null);
+  const orderRead = useRef<AbortController | null>(null);
+  const historyRead = useRef<AbortController | null>(null);
   const downloads = useRef(new Set<string>());
   const chooser = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
@@ -175,6 +191,8 @@ function CustomerWorkspace({
   useEffect(
     () => () => {
       operation.current?.abort();
+      orderRead.current?.abort();
+      historyRead.current?.abort();
       downloads.current.forEach((url) => URL.revokeObjectURL(url));
     },
     [],
@@ -201,40 +219,133 @@ function CustomerWorkspace({
     [onDenied],
   );
 
+  // This workspace is keyed by the verified session. Profile reads never hold
+  // up orders, and an old account's response cannot populate a new workspace.
   useEffect(() => {
-    if (command.record) return;
-    void run(async (signal) => {
-      const [page, prior] = await Promise.allSettled([
-        api.orders(null, signal),
-        api.history(null, signal),
-      ]);
-      if (signal.aborted) return;
-      for (const result of [page, prior])
-        if (
-          result.status === "rejected" &&
-          result.reason instanceof PreviewAccessError
-        )
-          throw result.reason;
-      if (page.status === "fulfilled") {
-        setOrders(page.value.orders);
-        setNextOrder(page.value.nextBeforeOmsOrderId);
-        setUnavailableOrders(page.value.unavailableOrderCount);
-      } else {
+    const controller = new AbortController();
+    setProfile(null);
+    setProfileLoading(true);
+    void api
+      .profile(controller.signal)
+      .then((value) => {
+        if (!controller.signal.aborted) setProfile(value);
+      })
+      .catch((cause) => {
+        if (!controller.signal.aborted && cause instanceof PreviewAccessError)
+          onDenied(cause.message);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setProfileLoading(false);
+      });
+    return () => controller.abort();
+  }, [api, onDenied, profileAttempt]);
+
+  const loadOrders = useCallback(
+    async (before: number | null) => {
+      orderRead.current?.abort();
+      const controller = new AbortController();
+      orderRead.current = controller;
+      setOrdersLoading(true);
+      setOrdersError(null);
+      if (before === null) {
         setOrders([]);
         setNextOrder(null);
         setUnavailableOrders(0);
-        setError(message(page.reason));
       }
-      if (prior.status === "fulfilled") {
-        setHistory(prior.value);
-        setHistoryError(null);
-      } else {
+      try {
+        let cursor = before;
+        for (
+          let pageIndex = 0;
+          pageIndex < ORDER_PAGES_PER_LOAD;
+          pageIndex += 1
+        ) {
+          const page = await api.orders(cursor, controller.signal);
+          if (controller.signal.aborted) return;
+          setOrders((previous) => [
+            ...previous.filter(
+              (item) =>
+                !page.orders.some(
+                  (next) => next.omsOrderId === item.omsOrderId,
+                ),
+            ),
+            ...page.orders,
+          ]);
+          setNextOrder(page.nextBeforeOmsOrderId);
+          setUnavailableOrders(
+            (previous) => previous + page.unavailableOrderCount,
+          );
+          if (page.nextBeforeOmsOrderId === null) break;
+          // The transport rejects a non-decreasing cursor before any page is
+          // displayed. Each subsequent request retains the same session header.
+          cursor = page.nextBeforeOmsOrderId;
+        }
+      } catch (cause) {
+        if (!controller.signal.aborted) {
+          if (cause instanceof PreviewAccessError) onDenied(cause.message);
+          else setOrdersError(message(cause));
+        }
+      } finally {
+        if (!controller.signal.aborted) setOrdersLoading(false);
+      }
+    },
+    [api, onDenied],
+  );
+
+  const loadHistory = useCallback(
+    async (before: number | null) => {
+      historyRead.current?.abort();
+      const controller = new AbortController();
+      historyRead.current = controller;
+      setHistoryLoading(true);
+      setHistoryError(null);
+      if (before === null)
         setHistory({ returns: [], nextBeforeAuthorizationId: null });
-        setHistoryError(message(prior.reason));
+      try {
+        const page = await api.history(before, controller.signal);
+        if (controller.signal.aborted) return;
+        setHistory((previous) => ({
+          ...page,
+          returns:
+            before === null
+              ? page.returns
+              : [
+                  ...previous.returns.filter(
+                    (item) =>
+                      !page.returns.some(
+                        (next) => next.authorizationId === item.authorizationId,
+                      ),
+                  ),
+                  ...page.returns,
+                ],
+        }));
+      } catch (cause) {
+        if (!controller.signal.aborted) {
+          if (cause instanceof PreviewAccessError) onDenied(cause.message);
+          else setHistoryError(message(cause));
+        }
+      } finally {
+        if (!controller.signal.aborted) setHistoryLoading(false);
       }
-    });
-    return () => operation.current?.abort();
-  }, [api, run, attempt, command.record !== null]);
+    },
+    [api, onDenied],
+  );
+
+  useEffect(() => {
+    if (command.record) return;
+    void loadOrders(null);
+    return () => orderRead.current?.abort();
+  }, [loadOrders, attempt, command.record !== null]);
+
+  useEffect(() => {
+    if (command.record) return;
+    void loadHistory(null);
+    return () => historyRead.current?.abort();
+  }, [loadHistory, attempt, command.record !== null]);
+
+  function stopOrderRead() {
+    orderRead.current?.abort();
+    setOrdersLoading(false);
+  }
 
   function chooseAnother(reason?: string) {
     operation.current?.abort();
@@ -284,15 +395,55 @@ function CustomerWorkspace({
     <Button
       variant="ghost"
       disabled={inProgress}
-      onClick={() =>
+      onClick={() => {
+        stopOrderRead();
         void run(async (signal) => {
           await api.logout(signal);
           if (!signal.aborted) onSignedOut();
-        })
-      }
+        });
+      }}
     >
       Sign out
     </Button>
+  );
+  const accountHeader = (
+    <section
+      aria-label="Signed-in customer"
+      className="flex items-start justify-between gap-3 rounded-xl border bg-white px-4 py-3 text-sm"
+    >
+      <div className="min-w-0 self-center">
+        {profileLoading ? (
+          <Loading text="Loading account details…" />
+        ) : profile?.name || profile?.email ? (
+          <>
+            <p className="text-xs text-muted-foreground">Signed in as</p>
+            <p className="font-medium [overflow-wrap:anywhere]">
+              {profile.name ?? profile.email}
+            </p>
+            {profile.name && profile.email && (
+              <p className="text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                {profile.email}
+              </p>
+            )}
+          </>
+        ) : (
+          <>
+            <p>Signed in to Card Shellz</p>
+            <p className="text-xs text-muted-foreground">
+              Account details are unavailable.
+            </p>
+            <Button
+              variant="link"
+              className="h-auto px-0 py-1 text-xs"
+              onClick={() => setProfileAttempt((value) => value + 1)}
+            >
+              Retry account details
+            </Button>
+          </>
+        )}
+      </div>
+      <div className="shrink-0">{signOut}</div>
+    </section>
   );
   async function download(parcelId: number) {
     if (!status) return;
@@ -320,88 +471,68 @@ function CustomerWorkspace({
   }
   if (showStatus)
     return (
-      <section
-        className="space-y-5 rounded-2xl border bg-white p-6 shadow-sm"
-        aria-label="Your return"
-      >
-        <Brand />
-        <h1 className="text-2xl font-semibold">
-          {status
-            ? `Return ${status.authorizationNumber}`
-            : command.rejected
-              ? "Return not accepted"
-              : "Checking your return"}
-        </h1>
-        <PreviewError message={error ?? command.error ?? notice} />
-        {!status && !command.rejected && (
-          <p className="text-sm text-muted-foreground">
-            Your request is saved. Check its status or retry this same request
-            before starting another return.
-          </p>
-        )}
-        {inProgress && <Loading text="Checking your return…" />}
-        {status?.parcels.map((parcel) => (
-          <section
-            key={parcel.parcelId}
-            className="space-y-3 rounded-xl border p-4"
-          >
-            <h2 className="font-semibold">Box {parcel.number}</h2>
-            <p className="text-sm">
-              {parcel.status === "ready"
-                ? "Ready to download."
-                : parcel.status === "pending"
-                  ? "Your label is waiting to be prepared."
-                  : parcel.status === "processing"
-                    ? "We are checking whether this label was created."
-                    : "This label needs verification. Contact support if checking its status does not resolve it."}
+      <>
+        {accountHeader}
+        <section
+          className="space-y-5 rounded-2xl border bg-white p-6 shadow-sm"
+          aria-label="Your return"
+        >
+          <Brand />
+          <h1 className="text-2xl font-semibold">
+            {status
+              ? `Return ${status.authorizationNumber}`
+              : command.rejected
+                ? "Return not accepted"
+                : "Checking your return"}
+          </h1>
+          <PreviewError message={error ?? command.error ?? notice} />
+          {!status && !command.rejected && (
+            <p className="text-sm text-muted-foreground">
+              Your request is saved. Check its status or retry this same request
+              before starting another return.
             </p>
-            {parcel.trackingNumber && (
-              <p className="break-all text-sm">
-                Tracking: {parcel.trackingNumber}
-              </p>
-            )}
-            {parcel.downloadPath && (
-              <Button
-                variant="outline"
-                disabled={inProgress}
-                onClick={() => void download(parcel.parcelId)}
-              >
-                Download label for box {parcel.number}
-              </Button>
-            )}
-          </section>
-        ))}
-        <div className="flex flex-wrap gap-3">
-          <Button
-            variant="outline"
-            disabled={inProgress}
-            onClick={() => {
-              if (command.record) void commands.check();
-              else if (status)
-                void run(async (signal) => {
-                  const result = await api.status(
-                    status.authorizationId,
-                    signal,
-                  );
-                  if (!signal.aborted) setHistoricalStatus(result);
-                });
-            }}
-          >
-            Check status
-          </Button>
-          {command.record && !status && !command.rejected && (
-            <Button disabled={inProgress} onClick={() => void commands.retry()}>
-              Retry saved request
-            </Button>
           )}
-          {status?.canProgress && (
+          {inProgress && <Loading text="Checking your return…" />}
+          {status?.parcels.map((parcel) => (
+            <section
+              key={parcel.parcelId}
+              className="space-y-3 rounded-xl border p-4"
+            >
+              <h2 className="font-semibold">Box {parcel.number}</h2>
+              <p className="text-sm">
+                {parcel.status === "ready"
+                  ? "Ready to download."
+                  : parcel.status === "pending"
+                    ? "Your label is waiting to be prepared."
+                    : parcel.status === "processing"
+                      ? "We are checking whether this label was created."
+                      : "This label needs verification. Contact support if checking its status does not resolve it."}
+              </p>
+              {parcel.trackingNumber && (
+                <p className="break-all text-sm">
+                  Tracking: {parcel.trackingNumber}
+                </p>
+              )}
+              {parcel.downloadPath && (
+                <Button
+                  variant="outline"
+                  disabled={inProgress}
+                  onClick={() => void download(parcel.parcelId)}
+                >
+                  Download label for box {parcel.number}
+                </Button>
+              )}
+            </section>
+          ))}
+          <div className="flex flex-wrap gap-3">
             <Button
+              variant="outline"
               disabled={inProgress}
               onClick={() => {
-                if (command.record) void commands.progress();
-                else
+                if (command.record) void commands.check();
+                else if (status)
                   void run(async (signal) => {
-                    const result = await api.progress(
+                    const result = await api.status(
                       status.authorizationId,
                       signal,
                     );
@@ -409,44 +540,69 @@ function CustomerWorkspace({
                   });
               }}
             >
-              Prepare or recover labels
+              Check status
             </Button>
-          )}
-          {command.record &&
-            (command.rejected || customerReturnCanLeave(status)) && (
+            {command.record && !status && !command.rejected && (
+              <Button
+                disabled={inProgress}
+                onClick={() => void commands.retry()}
+              >
+                Retry saved request
+              </Button>
+            )}
+            {status?.canProgress && (
+              <Button
+                disabled={inProgress}
+                onClick={() => {
+                  if (command.record) void commands.progress();
+                  else
+                    void run(async (signal) => {
+                      const result = await api.progress(
+                        status.authorizationId,
+                        signal,
+                      );
+                      if (!signal.aborted) setHistoricalStatus(result);
+                    });
+                }}
+              >
+                Prepare or recover labels
+              </Button>
+            )}
+            {command.record &&
+              (command.rejected || customerReturnCanLeave(status)) && (
+                <Button
+                  variant="ghost"
+                  disabled={inProgress}
+                  onClick={() => {
+                    commands.finish();
+                    if (!commands.getSnapshot().record) chooseAnother();
+                  }}
+                >
+                  Back to your orders
+                </Button>
+              )}
+            {!command.record && (
               <Button
                 variant="ghost"
                 disabled={inProgress}
-                onClick={() => {
-                  commands.finish();
-                  if (!commands.getSnapshot().record) chooseAnother();
-                }}
+                onClick={() => chooseAnother()}
               >
                 Back to your orders
               </Button>
             )}
-          {!command.record && (
-            <Button
-              variant="ghost"
-              disabled={inProgress}
-              onClick={() => chooseAnother()}
-            >
-              Back to your orders
-            </Button>
-          )}
-        </div>
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          Use one label per box. Our team inspects returned items and reviews
-          any refund. Creating a label does not issue a refund.
-        </p>
-        {signOut}
-      </section>
+          </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            Use one label per box. Our team inspects returned items and reviews
+            any refund. Creating a label does not issue a refund.
+          </p>
+        </section>
+      </>
     );
 
   if (selected && gateway)
     return (
       <>
-        <div className="flex justify-end">{signOut}</div>
+        {accountHeader}
         <PreviewError message={command.error} />
         {selected.settingsVersion === null && (
           <p role="status" className="rounded-lg border bg-white p-3 text-sm">
@@ -466,162 +622,149 @@ function CustomerWorkspace({
     );
 
   return (
-    <section className="space-y-6 rounded-2xl border bg-white p-6 shadow-sm">
-      <Brand />
-      <h1
-        ref={chooser}
-        tabIndex={-1}
-        className="text-2xl font-semibold outline-none"
-      >
-        Choose an order to return
-      </h1>
-      <PreviewError message={error ?? command.error ?? notice} />
-      {busy && <Loading text="Loading your orders…" />}
-      {unavailableOrders > 0 && (
-        <p role="status" className="text-sm text-muted-foreground">
-          Some orders could not be checked. Refresh or contact support.
-        </p>
-      )}
-      {!busy && !error && !orders.length && unavailableOrders === 0 && (
-        <p className="text-sm text-muted-foreground">
-          No eligible orders were found on this page. Items must meet the return
-          policy and have confirmed delivery.
-        </p>
-      )}
-      <div className="space-y-3">
-        {orders.map((item) => (
-          <div
-            key={item.omsOrderId}
-            className="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4"
-          >
-            <div>
-              <h2 className="font-semibold">
-                Order #{item.order.orderReference.replace(/^#\s*/, "")}
-              </h2>
-              <p className="text-sm text-muted-foreground">
-                {new Date(item.order.purchasedAt).toLocaleDateString()} ·{" "}
-                {item.order.lines.reduce(
-                  (sum, line) => sum + line.eligibleQuantity,
-                  0,
-                )}{" "}
-                items available
-              </p>
-            </div>
-            <Button
-              disabled={busy}
-              onClick={() =>
-                void run(async (signal) => {
-                  const detail = await api.order(item.omsOrderId, signal);
-                  if (!signal.aborted) {
-                    setNotice(null);
-                    setSelected(detail);
-                  }
-                })
-              }
-            >
-              Return items
-            </Button>
-          </div>
-        ))}
-      </div>
-      <div className="flex flex-wrap gap-3">
-        <Button
-          variant="outline"
-          disabled={busy}
-          onClick={() => setAttempt((value) => value + 1)}
+    <>
+      {accountHeader}
+      <section className="space-y-6 rounded-2xl border bg-white p-6 shadow-sm">
+        <Brand />
+        <h1
+          ref={chooser}
+          tabIndex={-1}
+          className="text-2xl font-semibold outline-none"
         >
-          Refresh orders
-        </Button>
-        {nextOrder !== null && (
-          <Button
-            variant="outline"
-            disabled={busy}
-            onClick={() =>
-              void run(async (signal) => {
-                const page = await api.orders(nextOrder, signal);
-                if (!signal.aborted) {
-                  setOrders((previous) => [
-                    ...previous.filter(
-                      (item) =>
-                        !page.orders.some(
-                          (next) => next.omsOrderId === item.omsOrderId,
-                        ),
-                    ),
-                    ...page.orders,
-                  ]);
-                  setNextOrder(page.nextBeforeOmsOrderId);
-                  setUnavailableOrders(
-                    (previous) => previous + page.unavailableOrderCount,
-                  );
-                }
-              })
+          Choose an order to return
+        </h1>
+        <PreviewError
+          message={error ?? ordersError ?? command.error ?? notice}
+        />
+        {ordersLoading && (
+          <Loading
+            text={
+              orders.length ? "Checking more orders…" : "Loading your orders…"
             }
-          >
-            More orders
-          </Button>
+          />
         )}
-      </div>
-      <section
-        className="space-y-3 border-t pt-5"
-        aria-label="Existing returns"
-      >
-        <h2 className="text-lg font-semibold">Your returns</h2>
-        <PreviewError message={historyError} />
-        {!history.returns.length && !historyError && (
-          <p className="text-sm text-muted-foreground">
-            Your saved returns will appear here.
+        {unavailableOrders > 0 && (
+          <p role="status" className="text-sm text-muted-foreground">
+            Some orders could not be checked. Refresh or contact support.
           </p>
         )}
-        {history.returns.map((item) => (
+        {!ordersLoading &&
+          !ordersError &&
+          !orders.length &&
+          unavailableOrders === 0 && (
+            <p className="text-sm text-muted-foreground">
+              No eligible orders were found on this page. Items must meet the
+              return policy and have confirmed delivery.
+            </p>
+          )}
+        <div className="space-y-3">
+          {orders.map((item) => (
+            <div
+              key={item.omsOrderId}
+              className="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4"
+            >
+              <div>
+                <h2 className="font-semibold">
+                  Order #{item.order.orderReference.replace(/^#\s*/, "")}
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  {new Date(item.order.purchasedAt).toLocaleDateString()} ·{" "}
+                  {item.order.lines.reduce(
+                    (sum, line) => sum + line.eligibleQuantity,
+                    0,
+                  )}{" "}
+                  items available
+                </p>
+              </div>
+              <Button
+                disabled={busy}
+                onClick={() => {
+                  stopOrderRead();
+                  void run(async (signal) => {
+                    const detail = await api.order(item.omsOrderId, signal);
+                    if (!signal.aborted) {
+                      setNotice(null);
+                      setSelected(detail);
+                    }
+                  });
+                }}
+              >
+                Return items
+              </Button>
+            </div>
+          ))}
+        </div>
+        <div className="flex flex-wrap gap-3">
           <Button
-            key={item.authorizationId}
             variant="outline"
-            className="mr-2 min-h-11"
-            disabled={busy}
-            onClick={() =>
-              void run(async (signal) => {
-                const result = await api.status(item.authorizationId, signal);
-                if (!signal.aborted) setHistoricalStatus(result);
-              })
-            }
+            disabled={busy || ordersLoading}
+            onClick={() => setAttempt((value) => value + 1)}
           >
-            {item.authorizationNumber}
-            {item.orderReference ? ` · Order ${item.orderReference}` : ""}
+            Refresh orders
           </Button>
-        ))}
-        {history.nextBeforeAuthorizationId !== null && (
-          <Button
-            variant="ghost"
-            disabled={busy}
-            onClick={() =>
-              void run(async (signal) => {
-                const page = await api.history(
-                  history.nextBeforeAuthorizationId,
-                  signal,
-                );
-                if (!signal.aborted)
-                  setHistory((previous) => ({
-                    ...page,
-                    returns: [
-                      ...previous.returns.filter(
-                        (item) =>
-                          !page.returns.some(
-                            (next) =>
-                              next.authorizationId === item.authorizationId,
-                          ),
-                      ),
-                      ...page.returns,
-                    ],
-                  }));
-              })
-            }
-          >
-            More returns
-          </Button>
-        )}
+          {nextOrder !== null && (
+            <Button
+              variant="outline"
+              disabled={busy || ordersLoading}
+              onClick={() => void loadOrders(nextOrder)}
+            >
+              More orders
+            </Button>
+          )}
+        </div>
+        <section
+          className="space-y-3 border-t pt-5"
+          aria-label="Existing returns"
+        >
+          <h2 className="text-lg font-semibold">Your returns</h2>
+          <PreviewError message={historyError} />
+          {historyLoading && <Loading text="Loading your returns…" />}
+          {!historyLoading && !history.returns.length && !historyError && (
+            <p className="text-sm text-muted-foreground">
+              Your saved returns will appear here.
+            </p>
+          )}
+          {historyError && (
+            <Button
+              variant="outline"
+              disabled={historyLoading}
+              onClick={() => void loadHistory(null)}
+            >
+              Retry loading returns
+            </Button>
+          )}
+          {history.returns.map((item) => (
+            <Button
+              key={item.authorizationId}
+              variant="outline"
+              className="mr-2 min-h-11"
+              disabled={busy}
+              onClick={() => {
+                stopOrderRead();
+                void run(async (signal) => {
+                  const result = await api.status(item.authorizationId, signal);
+                  if (!signal.aborted) setHistoricalStatus(result);
+                });
+              }}
+            >
+              {item.authorizationNumber}
+              {item.orderReference ? ` · Order ${item.orderReference}` : ""}
+            </Button>
+          ))}
+          {history.nextBeforeAuthorizationId !== null && (
+            <Button
+              variant="ghost"
+              disabled={busy || historyLoading}
+              onClick={() =>
+                void loadHistory(history.nextBeforeAuthorizationId)
+              }
+            >
+              More returns
+            </Button>
+          )}
+        </section>
       </section>
-      {signOut}
-    </section>
+    </>
   );
 }
 function Brand() {

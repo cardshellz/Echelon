@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
 import { PostgresCustomerReturnLocalInspectionReader } from "../../infrastructure/customer-return-local-inspection.reader";
 import { inspectionQueries } from "../../infrastructure/customer-return-local-inspection.queries";
+import { CUSTOMER_RETURN_INSPECTION_SNAPSHOT_QUERY } from "../../infrastructure/customer-return-local-inspection.snapshot-query";
 import { deriveLocalInspectionIssues } from "../../infrastructure/customer-return-local-inspection.issues";
 import { customerReturnLocalInspectionSnapshotSchema, type CustomerReturnLocalInspectionSnapshot } from "../../application/customer-return-local-inspection.ports";
 
@@ -28,8 +29,17 @@ function harness(override?: (text: string, values: unknown[]) => Promise<unknown
     if (rows !== undefined) return { rows };
     if (text === inspectionQueries.shops) return { rows: [{ ...configured }] };
     if (text === inspectionQueries.order) return { rows: [{ ...order, purchasedAt: NOW, isDropship: false }] };
-    if (text === inspectionQueries.lines) return { rows: [{ ...line }] };
-    if (text === inspectionQueries.wmsItems) return { rows: [{ ...item }] };
+    if (text === CUSTOMER_RETURN_INSPECTION_SNAPSHOT_QUERY) {
+      const collections = { lines: inspectionQueries.lines, wmsItems: inspectionQueries.wmsItems, rootClaims: inspectionQueries.rootClaims,
+        legacyClaims: inspectionQueries.legacyClaims, unallocatedReturns: inspectionQueries.unallocatedReturns,
+        inventoryReturnEvidence: inspectionQueries.inventoryReturns, fulfillmentBindings: inspectionQueries.bindings,
+        packageItems: inspectionQueries.packageItems, packageLabels: inspectionQueries.labels, carrierEvents: inspectionQueries.events };
+      const result: Record<string, unknown[]> = {};
+      for (const [name, originalQuery] of Object.entries(collections)) {
+        result[name] = await override?.(originalQuery, []) ?? (name === "lines" ? [{ ...line }] : name === "wmsItems" ? [{ ...item }] : []);
+      }
+      return { rows: [result] };
+    }
     return { rows: [] };
   });
   const release = vi.fn();
@@ -96,6 +106,9 @@ describe("private local order inspection boundary", () => {
     expect(customerReturnLocalInspectionSnapshotSchema.safeParse(result).success).toBe(true);
     expect(query.mock.calls[0][0]).toBe("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
     expect(query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+    expect(query).toHaveBeenCalledTimes(6);
+    expect(query.mock.calls[4]).toEqual([CUSTOMER_RETURN_INSPECTION_SNAPSHOT_QUERY,
+      [100, "100", 36, ["1000", "gid://shopify/Order/1000"], 201, 2001, 5001, 10001, 10001, 10001, 20001]]);
     expect(release).toHaveBeenCalledWith(false);
   });
 
@@ -115,6 +128,41 @@ describe("private local order inspection boundary", () => {
   it("rejects too many facts rather than returning a truncated entitlement picture", async () => {
     const { reader } = harness(async text => text === inspectionQueries.lines ? Array.from({ length: 201 }, (_, i) => ({ ...line, omsOrderLineId: i + 1 })) : undefined);
     await expect(reader.read(request)).rejects.toMatchObject({ code: "RETURN_INSPECTION_EVIDENCE_LIMIT" });
+  });
+
+  it.each([
+    { query: inspectionQueries.wmsItems, maximum: 2000 },
+    { query: inspectionQueries.rootClaims, maximum: 5000 },
+    { query: inspectionQueries.legacyClaims, maximum: 5000 },
+    { query: inspectionQueries.unallocatedReturns, maximum: 5000 },
+    { query: inspectionQueries.inventoryReturns, maximum: 5000 },
+    { query: inspectionQueries.bindings, maximum: 10000 },
+    { query: inspectionQueries.packageItems, maximum: 10000 },
+    { query: inspectionQueries.labels, maximum: 10000 },
+    { query: inspectionQueries.events, maximum: 20000 },
+  ])("rejects an oversized batched fact collection before interpreting any of its rows %#", async ({ query: collection, maximum }) => {
+    const { reader, query } = harness(async text => text === collection ? Array.from({ length: maximum + 1 }, () => ({})) : undefined);
+    await expect(reader.read(request)).rejects.toMatchObject({ code: "RETURN_INSPECTION_EVIDENCE_LIMIT" });
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+  });
+
+  it.each([{ rows: [] }, { rows: [{ lines: [] }] }, { rows: [source()] }, { rows: [{}, {}] }])(
+    "rejects incomplete or unexpected batched envelopes %#", async ({ rows }) => {
+      const { reader } = harness(async text => text === CUSTOMER_RETURN_INSPECTION_SNAPSHOT_QUERY ? rows : undefined);
+      await expect(reader.read(request)).rejects.toMatchObject({ code: "RETURN_INSPECTION_DATA_INVALID" });
+    },
+  );
+
+  it("normalizes lossless JSON numeric strings and offset timestamps without mutating the driver result", async () => {
+    const rawLine = { ...line, omsOrderLineId: "101", quantity: "4", unitWeightGrams: "12.34" };
+    const rawInventory = { transactionId: "1", wmsOrderId: "201", wmsOrderItemId: "301", quantityDelta: "1", occurredAt: "2026-09-23T08:00:00.123456-04:00" };
+    const { reader } = harness(async text => text === inspectionQueries.lines ? [rawLine]
+      : text === inspectionQueries.inventoryReturns ? [rawInventory] : undefined);
+    const result = await reader.read(request);
+    expect(result?.lines).toEqual([line]);
+    expect(result?.inventoryReturnEvidence[0]).toMatchObject({ transactionId: 1, quantityDelta: 1, occurredAt: "2026-09-23T12:00:00.123Z" });
+    expect(rawLine.omsOrderLineId).toBe("101");
+    expect(rawInventory.occurredAt).toBe("2026-09-23T08:00:00.123456-04:00");
   });
 
   it.each([{ omsOrderLineId: "9007199254740993" }, { quantity: -1 }, { privatePayload: "secret" }])(

@@ -12,9 +12,9 @@ function setup() {
   const { mode: _mode, scenarioId: _scenarioId, ...sample } = samples.lookup({ scenarioId: scenario.id, orderReference: scenario.orderReference });
   const order = { ...sample, mode: "admin_live" as const, sourceRevision: "a".repeat(64) };
   const principal = { channelId: 36, externalCustomerId: "123" };
-  const candidate = { channelId: 36, omsOrderId: 7, externalOrderId: "7000", externalOrderNumber: order.orderReference };
+  const candidate = { channelId: 36, omsOrderId: 7, externalOrderId: "7000", externalOrderNumber: order.orderReference, cancelled: undefined as boolean | undefined };
   const access = { list: vi.fn(async () => ({ orders: [candidate], nextBeforeOmsOrderId: null as number | null })), resolveOwned: vi.fn(async () => candidate) };
-  const live = { lookupCanonical: vi.fn(async () => order), reviewCanonical: vi.fn() };
+  const live = { lookupCanonical: vi.fn(async () => order), lookupCanonicalSummary: vi.fn(async () => order), reviewCanonical: vi.fn() };
   const reportUnavailableOrder = vi.fn();
   const service = new CustomerReturnCustomerOrdersService({ principal, access, live, shippingVersion: async () => 2, reportUnavailableOrder });
   return { service, order, access, live, candidate, principal, reportUnavailableOrder };
@@ -41,22 +41,38 @@ function setupLiveInspection() {
   return { service, localFacts, shopifyFacts, reportUnavailableOrder };
 }
 describe("customer eligible-order list", () => {
+  it("skips locally cancelled orders before provider inspection while retaining the page cursor", async () => {
+    const s = setup();
+    s.access.list.mockResolvedValue({ orders: [{ ...s.candidate, cancelled: true }], nextBeforeOmsOrderId: 7 });
+    expect(await s.service.list({})).toEqual({ orders: [], nextBeforeOmsOrderId: 7, unavailableOrderCount: 0 });
+    expect(s.live.lookupCanonicalSummary).not.toHaveBeenCalled();
+    expect(s.reportUnavailableOrder).not.toHaveBeenCalled();
+  });
+
+  it("uses small verified pages and leaves full box inspection for order selection", async () => {
+    const s = setup();
+    await s.service.list({});
+    expect(s.access.list).toHaveBeenCalledExactlyOnceWith({ pageSize: 2 });
+    expect(s.live.lookupCanonical).not.toHaveBeenCalled();
+    await s.service.order(7);
+    expect(s.live.lookupCanonical).toHaveBeenCalledExactlyOnceWith({ ...s.principal, omsOrderId: 7, externalOrderId: "7000" });
+  });
   it("passes only trusted canonical identity to the live verifier and removes private mode", async () => {
     const { service, live, principal } = setup();
     const result = await service.list({});
     expect(result.orders).toHaveLength(1);
-    expect(live.lookupCanonical).toHaveBeenCalledWith({ ...principal, omsOrderId: 7, externalOrderId: "7000" });
+    expect(live.lookupCanonicalSummary).toHaveBeenCalledWith({ ...principal, omsOrderId: 7, externalOrderId: "7000" });
     expect(JSON.stringify(result)).not.toContain("admin_live");
     expect(JSON.stringify(result)).not.toContain("externalCustomerId");
   });
   it("hides ineligible candidates while preserving continuation across empty pages", async () => {
     const s = setup(); s.access.list.mockResolvedValue({ orders: [s.candidate], nextBeforeOmsOrderId: 7 });
-    s.live.lookupCanonical.mockResolvedValue({ ...s.order, lines: s.order.lines.map(line => ({ ...line, eligibleQuantity: 0 })) });
+    s.live.lookupCanonicalSummary.mockResolvedValue({ ...s.order, lines: s.order.lines.map(line => ({ ...line, eligibleQuantity: 0 })) });
     expect(await s.service.list({ beforeOmsOrderId: 9 })).toEqual({ orders: [], nextBeforeOmsOrderId: 7, unavailableOrderCount: 0 });
-    expect(s.access.list).toHaveBeenCalledWith({ beforeOmsOrderId: 9, pageSize: 10 });
+    expect(s.access.list).toHaveBeenCalledWith({ beforeOmsOrderId: 9, pageSize: 2 });
   });
   it("reports provider failures instead of claiming the customer has no orders", async () => {
-    const s = setup(); s.live.lookupCanonical.mockRejectedValue(new Error("provider unavailable"));
+    const s = setup(); s.live.lookupCanonicalSummary.mockRejectedValue(new Error("provider unavailable"));
     expect(await s.service.list({})).toEqual({ orders: [], nextBeforeOmsOrderId: null, unavailableOrderCount: 1 });
     expect(s.reportUnavailableOrder).toHaveBeenCalledExactlyOnceWith({ channelId: 36, omsOrderId: 7,
       reason: "inspection_failed", causeCode: "RETURN_ORDER_INSPECTION_UNKNOWN" });
@@ -66,7 +82,7 @@ describe("customer eligible-order list", () => {
     "RETURN_INSPECTION_DATA_INVALID", "RETURN_PORTAL_POLICY_AMBIGUOUS",
   ])("reports the safe typed cause %s without adding diagnostics to the customer response", async causeCode => {
     const s = setup();
-    s.live.lookupCanonical.mockRejectedValue(new CustomerReturnLiveError(causeCode, "private provider credential", 503));
+    s.live.lookupCanonicalSummary.mockRejectedValue(new CustomerReturnLiveError(causeCode, "private provider credential", 503));
     expect(await s.service.list({})).toEqual({ orders: [], nextBeforeOmsOrderId: null, unavailableOrderCount: 1 });
     expect(s.reportUnavailableOrder).toHaveBeenCalledExactlyOnceWith({ channelId: 36, omsOrderId: 7,
       reason: "inspection_failed", causeCode });
@@ -80,7 +96,7 @@ describe("customer eligible-order list", () => {
     ["an oversized typed code", new CustomerReturnLiveError("RETURN_LIVE_" + "SECRET".repeat(1000), "private details", 503)],
   ])("uses an opaque cause for %s", async (_description, error) => {
     const s = setup();
-    s.live.lookupCanonical.mockRejectedValue(error);
+    s.live.lookupCanonicalSummary.mockRejectedValue(error);
     expect(await s.service.list({})).toEqual({ orders: [], nextBeforeOmsOrderId: null, unavailableOrderCount: 1 });
     expect(s.reportUnavailableOrder).toHaveBeenCalledExactlyOnceWith({ channelId: 36, omsOrderId: 7,
       reason: "inspection_failed", causeCode: "RETURN_ORDER_INSPECTION_UNKNOWN" });
@@ -88,7 +104,7 @@ describe("customer eligible-order list", () => {
   it("preserves verified orders and pagination when another order cannot be verified", async () => {
     const s = setup();
     s.access.list.mockResolvedValue({ orders: [s.candidate, { ...s.candidate, omsOrderId: 6 }], nextBeforeOmsOrderId: 6 });
-    s.live.lookupCanonical.mockRejectedValueOnce(new Error("provider credential must not be logged"));
+    s.live.lookupCanonicalSummary.mockRejectedValueOnce(new Error("provider credential must not be logged"));
     const result = await s.service.list({});
     expect(result.orders.map(order => order.omsOrderId)).toEqual([6]);
     expect(result).toMatchObject({ nextBeforeOmsOrderId: 6, unavailableOrderCount: 1 });
@@ -96,7 +112,7 @@ describe("customer eligible-order list", () => {
   });
   it("reports invalid provider output without exposing the malformed order", async () => {
     const s = setup();
-    s.live.lookupCanonical.mockResolvedValue({ ...s.order, sourceRevision: "bad" });
+    s.live.lookupCanonicalSummary.mockResolvedValue({ ...s.order, sourceRevision: "bad" });
     expect(await s.service.list({})).toEqual({ orders: [], nextBeforeOmsOrderId: null, unavailableOrderCount: 1 });
     expect(s.reportUnavailableOrder).toHaveBeenCalledExactlyOnceWith({ channelId: 36, omsOrderId: 7,
       reason: "invalid_response", causeCode: "RETURN_ORDER_RESPONSE_INVALID" });
@@ -110,7 +126,7 @@ describe("customer eligible-order list", () => {
   it("checks order ownership before querying Shopify on a direct selection", async () => {
     const s = setup(); s.access.resolveOwned.mockRejectedValue(new Error("not owned"));
     await expect(s.service.order(8)).rejects.toThrow("not owned");
-    expect(s.live.lookupCanonical).not.toHaveBeenCalled();
+    expect(s.live.lookupCanonicalSummary).not.toHaveBeenCalled();
   });
   it("omits a verified historical cancelled order without reporting country aliases as a verification failure", async () => {
     const s = setupLiveInspection();

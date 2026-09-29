@@ -13,6 +13,12 @@ async function fixtures(
     history?: boolean;
     changedReview?: boolean;
     unverifiedOrders?: boolean;
+    waitForProfile?: Promise<void>;
+    waitForOrders?: Promise<void>;
+    waitForHistory?: Promise<void>;
+    failProfile?: boolean;
+    failHistory?: boolean;
+    profile?: { name: string | null; email: string | null };
   } = {},
 ) {
   const service = new CustomerReturnPreviewService();
@@ -76,7 +82,23 @@ async function fixtures(
       signedOut = true;
       return route.fulfill({ json: { ok: true } });
     }
-    if (path === `${API}/orders`)
+    if (path === `${API}/profile`) {
+      await options.waitForProfile;
+      return options.failProfile
+        ? route.fulfill({
+            status: 503,
+            json: { error: { code: "RETURN_CUSTOMER_PROFILE_UNAVAILABLE" } },
+          })
+        : route.fulfill({
+            json:
+              options.profile ??
+              (sessionKey === identity
+                ? { name: "Taylor Sample", email: "taylor@example.test" }
+                : { name: "Jordan Sample", email: "jordan@example.test" }),
+          });
+    }
+    if (path === `${API}/orders`) {
+      await options.waitForOrders;
       return options.failOrders
         ? route.fulfill({
             status: 503,
@@ -89,6 +111,7 @@ async function fixtures(
               unavailableOrderCount: options.unverifiedOrders ? 1 : 0,
             },
           });
+    }
     if (path === `${API}/orders/10`) return route.fulfill({ json: detail });
     if (path === `${API}/orders/10/review`) {
       if (options.changedReview)
@@ -125,7 +148,13 @@ async function fixtures(
             status: 404,
             json: { error: { code: "CUSTOMER_RETURN_UNAVAILABLE" } },
           });
-    if (path === `${API}/returns`)
+    if (path === `${API}/returns`) {
+      await options.waitForHistory;
+      if (options.failHistory)
+        return route.fulfill({
+          status: 503,
+          json: { error: { code: "RETURN_CUSTOMER_UNAVAILABLE" } },
+        });
       return route.fulfill({
         json: {
           returns: options.history
@@ -142,6 +171,7 @@ async function fixtures(
           nextBeforeAuthorizationId: null,
         },
       });
+    }
     if (path === `${API}/returns/20`) return route.fulfill({ json: status });
     if (path.endsWith("/download"))
       return route.fulfill({
@@ -155,6 +185,7 @@ async function fixtures(
   });
   return {
     calls,
+    detail,
     changeSession: () => {
       sessionKey = "b".repeat(43);
     },
@@ -210,10 +241,19 @@ test("owned selection skips Find order, reviews exact quantities and creates onl
 }) => {
   const f = await fixtures(page);
   await page.goto("/customer-returns");
+  await expect(
+    page.getByRole("region", { name: "Signed-in customer" }),
+  ).toContainText("taylor@example.test");
   await selectAndPack(page);
+  await expect(
+    page.getByRole("region", { name: "Signed-in customer" }),
+  ).toContainText("taylor@example.test");
   await expect(
     page.getByRole("heading", { name: "Review your return", exact: true }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Signed-in customer" }),
+  ).toContainText("taylor@example.test");
   expect(
     f.calls.filter(
       (call) => call.path.endsWith("/returns") && call.method === "POST",
@@ -226,6 +266,9 @@ test("owned selection skips Find order, reviews exact quantities and creates onl
     page.getByRole("heading", { name: "Return RMA-20" }),
   ).toBeVisible();
   await expect(
+    page.getByRole("region", { name: "Signed-in customer" }),
+  ).toContainText("taylor@example.test");
+  await expect(
     page.getByRole("button", { name: "Download label for box 1" }),
   ).toBeVisible();
   expect(
@@ -234,6 +277,9 @@ test("owned selection skips Find order, reviews exact quantities and creates onl
     ),
   ).toHaveLength(1);
   expect(f.calls.some((call) => call.path.endsWith("/progress"))).toBe(false);
+  expect(f.calls.filter((call) => call.path === `${API}/profile`)).toHaveLength(
+    1,
+  );
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,
@@ -293,6 +339,12 @@ test("a different verified session cannot restore another customer's pending req
   ).toBeEnabled();
   f.changeSession();
   await page.reload();
+  await expect(
+    page.getByRole("region", { name: "Signed-in customer" }),
+  ).toContainText("jordan@example.test");
+  await expect(
+    page.getByText("taylor@example.test", { exact: true }),
+  ).toHaveCount(0);
   await expect(
     page.getByRole("heading", { name: "Choose an order to return" }),
   ).toBeVisible();
@@ -373,6 +425,9 @@ test("a cross-tab customer change is rejected before exposing another account's 
   await expect(
     page.getByRole("button", { name: "Return items", exact: true }),
   ).toHaveCount(0);
+  await expect(
+    page.getByRole("region", { name: "Signed-in customer" }),
+  ).toHaveCount(0);
 });
 
 test("sign out clears visible customer data and retains an uncertain saved request", async ({
@@ -395,6 +450,9 @@ test("sign out clears visible customer data and retains an uncertain saved reque
   await expect(
     page.getByRole("link", { name: "Sign in to Card Shellz" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Signed-in customer" }),
+  ).toHaveCount(0);
   expect(
     await page.evaluate(
       (key) => sessionStorage.getItem(key),
@@ -406,4 +464,263 @@ test("sign out clears visible customer data and retains an uncertain saved reque
       .filter((call) => call.path === `${API}/logout`)
       .map((call) => call.method),
   ).toEqual(["POST"]);
+});
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
+test("verified orders can be selected while account details and return history are still loading", async ({
+  page,
+}) => {
+  const profile = deferred();
+  const history = deferred();
+  const f = await fixtures(page, {
+    waitForProfile: profile.promise,
+    waitForHistory: history.promise,
+  });
+  try {
+    await page.goto("/customer-returns");
+    await expect(
+      page.getByRole("button", { name: "Return items", exact: true }),
+    ).toBeEnabled();
+    await expect(
+      page.getByText("Loading account details…", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Loading your returns…", { exact: true }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: "Return items", exact: true })
+      .click();
+    await expect(
+      page.getByRole("heading", { name: "What would you like to return?" }),
+    ).toBeVisible();
+    profile.resolve();
+    history.resolve();
+    await expect(
+      page.getByRole("region", { name: "Signed-in customer" }),
+    ).toContainText("taylor@example.test");
+    expect(f.calls.some((call) => call.method === "POST")).toBe(false);
+  } finally {
+    profile.resolve();
+    history.resolve();
+  }
+});
+
+test("account identity and existing returns stay usable while orders are still being verified", async ({
+  page,
+}) => {
+  const orders = deferred();
+  const f = await fixtures(page, {
+    waitForOrders: orders.promise,
+    history: true,
+  });
+  try {
+    await page.goto("/customer-returns");
+    await expect(
+      page.getByRole("region", { name: "Signed-in customer" }),
+    ).toContainText("taylor@example.test");
+    await expect(
+      page.getByText("Loading your orders…", { exact: true }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: "RMA-20 · Order TEST-1001" })
+      .click();
+    await expect(
+      page.getByRole("button", { name: "Download label for box 1" }),
+    ).toBeVisible();
+    orders.resolve();
+    expect(f.calls.every((call) => call.method === "GET")).toBe(true);
+  } finally {
+    orders.resolve();
+  }
+});
+
+test("failed identity and history reads have independent recovery without blocking orders", async ({
+  page,
+}) => {
+  const options = { failProfile: true, failHistory: true };
+  const f = await fixtures(page, options);
+  await page.goto("/customer-returns");
+  await expect(
+    page.getByRole("button", { name: "Return items", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    page.getByText("Account details are unavailable.", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("Signed in as", { exact: true })).toHaveCount(0);
+  options.failProfile = false;
+  options.failHistory = false;
+  await page.getByRole("button", { name: "Retry account details" }).click();
+  await page.getByRole("button", { name: "Retry loading returns" }).click();
+  await expect(
+    page.getByRole("region", { name: "Signed-in customer" }),
+  ).toContainText("taylor@example.test");
+  await expect(
+    page.getByText("Your saved returns will appear here."),
+  ).toBeVisible();
+  expect(f.calls.filter((call) => call.path === `${API}/orders`)).toHaveLength(
+    1,
+  );
+});
+
+test("signing out while profile is in flight cannot show the old account afterward", async ({
+  page,
+}) => {
+  const profile = deferred();
+  const f = await fixtures(page, { waitForProfile: profile.promise });
+  try {
+    await page.goto("/customer-returns");
+    await expect
+      .poll(() => f.calls.some((call) => call.path === `${API}/profile`))
+      .toBe(true);
+    await page.getByRole("button", { name: "Sign out", exact: true }).click();
+    await expect(
+      page.getByRole("link", { name: "Sign in to Card Shellz" }),
+    ).toBeVisible();
+    profile.resolve();
+    await expect(
+      page.getByRole("region", { name: "Signed-in customer" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByText("taylor@example.test", { exact: true }),
+    ).toHaveCount(0);
+  } finally {
+    profile.resolve();
+  }
+});
+
+test("the first verified page is usable before the next one and selection cancels further page reads", async ({
+  page,
+}) => {
+  const nextPage = deferred();
+  const f = await fixtures(page);
+  const cursors: (string | null)[] = [];
+  await page.route(
+    /\/api\/returns\/customer\/orders(?:\?.*)?$/,
+    async (route) => {
+      const before = new URL(route.request().url()).searchParams.get("before");
+      cursors.push(before);
+      if (before !== null) await nextPage.promise;
+      await route.fulfill({
+        json: {
+          orders: before === null ? [f.detail] : [],
+          nextBeforeOmsOrderId: before === null ? 9 : 8,
+          unavailableOrderCount: 0,
+        },
+      });
+    },
+  );
+  try {
+    await page.goto("/customer-returns");
+    await expect(
+      page.getByText("Checking more orders…", { exact: true }),
+    ).toBeVisible();
+    await expect.poll(() => cursors).toEqual([null, "9"]);
+    await page
+      .getByRole("button", { name: "Return items", exact: true })
+      .click();
+    await expect(
+      page.getByRole("heading", { name: "What would you like to return?" }),
+    ).toBeVisible();
+    nextPage.resolve();
+    await expect(
+      page.getByRole("region", { name: "Signed-in customer" }),
+    ).toContainText("taylor@example.test");
+    expect(f.calls.some((call) => call.path === `${API}/orders/10`)).toBe(true);
+    expect(cursors).toEqual([null, "9"]);
+  } finally {
+    nextPage.resolve();
+  }
+});
+
+test("progressive browsing stops after five pages and More orders continues from the saved cursor", async ({
+  page,
+}) => {
+  await fixtures(page);
+  const cursors: (string | null)[] = [];
+  await page.route(
+    /\/api\/returns\/customer\/orders(?:\?.*)?$/,
+    async (route) => {
+      const before = new URL(route.request().url()).searchParams.get("before");
+      cursors.push(before);
+      await route.fulfill({
+        json: {
+          orders: [],
+          nextBeforeOmsOrderId:
+            before === "95"
+              ? null
+              : (before === null ? 100 : Number(before)) - 1,
+          unavailableOrderCount: 0,
+        },
+      });
+    },
+  );
+  await page.goto("/customer-returns");
+  await expect(
+    page.getByRole("button", { name: "More orders", exact: true }),
+  ).toBeEnabled();
+  expect(cursors).toEqual([null, "99", "98", "97", "96"]);
+  await page.getByRole("button", { name: "More orders", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "More orders", exact: true }),
+  ).toHaveCount(0);
+  expect(cursors).toEqual([null, "99", "98", "97", "96", "95"]);
+});
+
+test("a non-decreasing order cursor is rejected without an endless request loop", async ({
+  page,
+}) => {
+  await fixtures(page);
+  const cursors: (string | null)[] = [];
+  await page.route(
+    /\/api\/returns\/customer\/orders(?:\?.*)?$/,
+    async (route) => {
+      cursors.push(new URL(route.request().url()).searchParams.get("before"));
+      await route.fulfill({
+        json: {
+          orders: [],
+          nextBeforeOmsOrderId: 10,
+          unavailableOrderCount: 0,
+        },
+      });
+    },
+  );
+  await page.goto("/customer-returns");
+  await expect(page.getByRole("alert")).toContainText("The order page changed");
+  expect(cursors).toEqual([null, "10"]);
+});
+
+test("account details wrap without horizontal overflow at the current viewport", async ({
+  page,
+}, testInfo) => {
+  await fixtures(page, {
+    profile: {
+      name: "Taylor Sample with a long customer account display name",
+      email:
+        "returns-testing-account-with-a-long-name@customer-accounts.example.test",
+    },
+  });
+  await page.goto("/customer-returns");
+  const account = page.getByRole("region", { name: "Signed-in customer" });
+  await expect(account).toContainText(
+    "returns-testing-account-with-a-long-name@customer-accounts.example.test",
+  );
+  await expect(
+    page.getByRole("button", { name: "Return items", exact: true }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: testInfo.outputPath("customer-identity.png"),
+    fullPage: true,
+  });
 });

@@ -5,6 +5,7 @@ import { PostgresCustomerReturnLocalInspectionReader } from "../../infrastructur
 import { PostgresCustomerReturnAuthorizationStore } from "../../infrastructure/customer-return-authorization.repository";
 import { customerReturnLocalInspectionSnapshotSchema } from "../../application/customer-return-local-inspection.ports";
 import { inspectionQueries } from "../../infrastructure/customer-return-local-inspection.queries";
+import { CUSTOMER_RETURN_INSPECTION_SNAPSHOT_QUERY } from "../../infrastructure/customer-return-local-inspection.snapshot-query";
 import { resolveReturnsTestDatabase } from "../support/disposable-database";
 import { createInspectionTestSchema, seedInspectionTestSchema } from "../support/customer-return-inspection-database";
 
@@ -29,6 +30,20 @@ integration("private return inspection against migration-defined PostgreSQL", ()
     const result = await pool.query(`INSERT INTO wms.returns (order_id,source,status) VALUES (201,'admin','expected') RETURNING id`);
     await pool.query(`INSERT INTO wms.return_items (return_id,order_item_id,oms_order_line_id,external_line_item_id,expected_qty,status)
       VALUES ($1,301,101,'500',1,'expected')`, [result.rows[0].id]);
+  }
+
+  async function rootClaim() {
+    const store = new PostgresCustomerReturnAuthorizationStore(drizzle(pool));
+    await store.transaction(async tx => {
+      await tx.lockCommand({ channelId: 36, idempotencyKey: "inspection-fixture" });
+      await tx.lockSource({ channelId: 36, omsOrderId: 100, omsOrderLineIds: [101] });
+      await tx.persist({ channelId: 36, omsOrderId: 100, idempotencyKey: "inspection-fixture",
+        semanticHash: "a".repeat(64), eligibilityRevision: "b".repeat(64), actor: "test:inspection", now: NOW,
+        policySnapshot: { returnWindowDays: 365, refundAuthority: "manual_shopify" }, warehouseSnapshot: { warehouseId: 1 },
+        lines: [{ omsOrderLineId: 101, externalLineItemId: "500", quantity: 1, reasonCode: null,
+          allocations: [{ wmsOrderItemId: 301, fulfillmentId: "600", fulfillmentLineItemId: "700",
+            quantity: 1, originalQuantity: 2, eligibleQuantity: 2, deliveryEvidence: { source: "shopify" } }] }] });
+    });
   }
 
   it("retains canonical customer ownership despite duplicate display numbers and later reassignment", async () => {
@@ -137,18 +152,44 @@ integration("private return inspection against migration-defined PostgreSQL", ()
     expect(snapshot?.issues).toContainEqual({ code: "inventory_return_correlation_unknown", omsOrderLineId: null });
   });
 
+  it("keeps the exact OR-query result through indexed candidate branches, including overlaps and contradictory parents", async () => {
+    // Retain the pre-optimization query as the independent parity oracle.
+    const original = `SELECT wi.id AS "wmsOrderItemId", wo.id AS "wmsOrderId", wi.oms_order_line_id AS "omsOrderLineId",
+      wo.channel_id AS "channelId", wo.source, wo.oms_fulfillment_order_id AS "omsOrderReference",
+      wo.source_table_id AS "legacyOrderReference", wo.external_order_id AS "externalOrderId",
+      wi.source_item_id AS "externalLineItemId", wi.quantity, wi.fulfilled_quantity AS "fulfilledQuantity",
+      wo.warehouse_status AS "warehouseStatus"
+      FROM wms.order_items wi JOIN wms.orders wo ON wo.id = wi.order_id
+      LEFT JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
+      WHERE ol.order_id = $1 OR wo.oms_fulfillment_order_id = $2 OR wo.source_table_id = $2
+      ORDER BY wo.id, wi.id LIMIT $3`;
+    await pool.query(`INSERT INTO wms.orders
+      (id,oms_fulfillment_order_id,source_table_id,channel_id,source,external_order_id,order_number,customer_name,warehouse_status)
+      OVERRIDING SYSTEM VALUE VALUES
+      (204,'999','100',37,'shopify','2000','LEGACY-ONLY','Synthetic','shipped'),
+      (205,'100','999',37,'oms','2000','DIRECT-ONLY','Synthetic','shipped'),
+      (206,'999','999',37,'oms','2000','LINE-ONLY','Synthetic','shipped'),
+      (207,'100','100',36,'oms','1000','ALL-BRANCHES','Synthetic','shipped'),
+      (208,NULL,NULL,37,'shopify','2000','UNRELATED','Synthetic','shipped'),
+      (209,NULL,'gid://shopify/Order/100',37,'shopify','2000','NOT-AN-OMS-ID','Synthetic','shipped'),
+      (210,'100',NULL,37,'oms','2000','UNMAPPED-LINE','Synthetic','shipped');
+      INSERT INTO wms.order_items(id,order_id,oms_order_line_id,sku,name,quantity,fulfilled_quantity) OVERRIDING SYSTEM VALUE VALUES
+      (305,204,201,'SAME','Legacy branch',1,1),(306,205,201,'SAME','Direct branch',1,1),
+      (307,206,101,'SAME','Line branch',1,1),(308,207,101,'SAME','Every branch',1,1),
+      (309,208,201,'SAME','Unrelated',1,1),(310,209,NULL,'SAME','Unparseable reference',1,1),
+      (311,210,NULL,'SAME','Unknown line',1,1)`);
+    for (const limit of [1, 3, 9, 2001]) {
+      const values = [100, "100", limit];
+      expect((await pool.query(inspectionQueries.wmsItems, values)).rows)
+        .toEqual((await pool.query(original, values)).rows);
+    }
+    const snapshot = await reader.read(input);
+    expect(snapshot?.wmsItems.map(item => item.wmsOrderItemId)).toEqual([301, 302, 303, 305, 306, 307, 308, 311]);
+    expect(snapshot?.issues).toContainEqual({ code: "wms_identity_conflict", omsOrderLineId: 101 });
+  });
+
   it("retains root claims and legacy expected claims once each, without guessing child correlation", async () => {
-    const store = new PostgresCustomerReturnAuthorizationStore(drizzle(pool));
-    await store.transaction(async tx => {
-      await tx.lockCommand({ channelId: 36, idempotencyKey: "inspection-fixture" });
-      await tx.lockSource({ channelId: 36, omsOrderId: 100, omsOrderLineIds: [101] });
-      await tx.persist({ channelId: 36, omsOrderId: 100, idempotencyKey: "inspection-fixture",
-        semanticHash: "a".repeat(64), eligibilityRevision: "b".repeat(64), actor: "test:inspection", now: NOW,
-        policySnapshot: { returnWindowDays: 365, refundAuthority: "manual_shopify" }, warehouseSnapshot: { warehouseId: 1 },
-        lines: [{ omsOrderLineId: 101, externalLineItemId: "500", quantity: 1, reasonCode: null,
-          allocations: [{ wmsOrderItemId: 301, fulfillmentId: "600", fulfillmentLineItemId: "700",
-            quantity: 1, originalQuantity: 2, eligibleQuantity: 2, deliveryEvidence: { source: "shopify" } }] }] });
-    });
+    await rootClaim();
     await legacyReturn();
     const snapshot = await reader.read(input);
     expect(snapshot?.rootClaims).toHaveLength(1);
@@ -263,6 +304,72 @@ integration("private return inspection against migration-defined PostgreSQL", ()
     return new PostgresCustomerReturnLocalInspectionReader(database, options);
   }
 
+  it("loads the complete evidence graph in one query after the shop and owned-order probes", async () => {
+    await packages();
+    await legacyReturn();
+    const calls: string[] = [];
+    const batched = hookedReader(async text => { calls.push(text); });
+    const snapshot = await batched.read(input);
+    expect(snapshot?.packageItems).toHaveLength(2);
+    expect(snapshot?.legacyClaims).toHaveLength(1);
+    expect(calls).toEqual([
+      "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+      "SELECT set_config('statement_timeout', $1, true)", inspectionQueries.shops, inspectionQueries.order,
+      CUSTOMER_RETURN_INSPECTION_SNAPSHOT_QUERY, "COMMIT",
+    ]);
+  });
+
+  it("matches every separately bounded collection without multiplying claims or losing package provenance", async () => {
+    await packages();
+    await rootClaim();
+    await legacyReturn();
+    await pool.query(`INSERT INTO wms.returns(order_id,source,status) VALUES(202,'admin','expected');
+      INSERT INTO inventory.inventory_transactions(transaction_type,variant_qty_delta,order_id,order_item_id,created_at)
+      VALUES('return',1,202,303,'2026-09-19 04:05:06.123456');
+      INSERT INTO wms.physical_shipment_items(id,physical_shipment_id,sku,quantity_shipped) OVERRIDING SYSTEM VALUE
+      VALUES(50,1,'UNATTRIBUTED',1);`);
+    const read = async (query: string, values: unknown[]) => (await pool.query(query, values)).rows;
+    const lines = await read(inspectionQueries.lines, [100, 201]);
+    const items = await read(inspectionQueries.wmsItems, [100, "100", 2001]);
+    const itemIds = items.map(item => item.wmsOrderItemId);
+    const orderIds = [...new Set(items.map(item => item.wmsOrderId))];
+    const bindings = await read(inspectionQueries.bindings, [100, 36, ["1000", "gid://shopify/Order/1000"], 10001]);
+    const packageItems = await read(inspectionQueries.packageItems, [itemIds, lines.map(line => line.omsOrderLineId),
+      bindings.map(binding => binding.physicalShipmentItemId).filter(id => id !== null),
+      bindings.map(binding => binding.physicalShipmentId).filter(id => id !== null), 10001]);
+    const labels = await read(inspectionQueries.labels, [[...new Set(packageItems.map(item => item.physicalShipmentId))], 10001]);
+    const expected = {
+      lines, wmsItems: items, rootClaims: await read(inspectionQueries.rootClaims, [100, itemIds, 5001]),
+      legacyClaims: await read(inspectionQueries.legacyClaims, [100, "100", itemIds, orderIds, 5001]),
+      unallocatedReturns: await read(inspectionQueries.unallocatedReturns, ["100", orderIds, 5001]),
+      inventoryReturnEvidence: await read(inspectionQueries.inventoryReturns, [orderIds, itemIds, "100", 5001]),
+      fulfillmentBindings: bindings, packageItems, packageLabels: labels,
+      carrierEvents: await read(inspectionQueries.events, [[...new Set(labels.map(label => label.labelId))], 20001]),
+    };
+    const actual = (await pool.query(CUSTOMER_RETURN_INSPECTION_SNAPSHOT_QUERY,
+      [100, "100", 36, ["1000", "gid://shopify/Order/1000"], 201, 2001, 5001, 10001, 10001, 10001, 20001])).rows[0];
+    const timestamps = new Set(["occurredAt", "actualDeliveryAt", "receivedAt", "voidedAt"]);
+    const comparable = (collections: Record<string, Array<Record<string, unknown>>>) => Object.fromEntries(
+      Object.entries(collections).map(([name, rows]) => [name, rows.map(row => Object.fromEntries(Object.entries(row).map(([key, value]) =>
+        [key, value !== null && timestamps.has(key) ? new Date(value as string | Date).toISOString()
+          : typeof value === "number" ? String(value) : value])))]));
+    expect(comparable(actual)).toEqual(comparable(expected));
+    expect(actual.rootClaims).toHaveLength(1);
+    expect(actual.legacyClaims).toHaveLength(1);
+    expect(actual.packageItems).toHaveLength(3);
+  });
+
+  it("retains exact bigint text through JSON transport and rejects unsafe application identities", async () => {
+    await packages();
+    const unsafeId = "9007199254740993";
+    await pool.query(`INSERT INTO wms.physical_shipment_items(id,physical_shipment_id,sku,quantity_shipped) OVERRIDING SYSTEM VALUE
+      VALUES($1,1,'UNATTRIBUTED',1)`, [unsafeId]);
+    const result = await pool.query(CUSTOMER_RETURN_INSPECTION_SNAPSHOT_QUERY,
+      [100, "100", 36, ["1000", "gid://shopify/Order/1000"], 201, 2001, 5001, 10001, 10001, 10001, 20001]);
+    expect(result.rows[0].packageItems.at(-1).physicalShipmentItemId).toBe(unsafeId);
+    await expect(reader.read(input)).rejects.toMatchObject({ code: "RETURN_INSPECTION_DATA_INVALID" });
+  });
+
   it("preserves UTC naive-column and carrier instants independently of database and Node host time zones", async () => {
     await packages();
     await pool.query(`UPDATE oms.oms_orders SET ordered_at='2026-09-17 16:37:49',cancelled_at='2026-09-18 01:02:03' WHERE id=100;
@@ -294,7 +401,7 @@ integration("private return inspection against migration-defined PostgreSQL", ()
   it("uses one repeatable-read read-only snapshot and sees a concurrent new claim only on the next request", async () => {
     let written = false;
     const isolated = hookedReader(async (text, client) => {
-      if (text === inspectionQueries.lines && !written) {
+      if (text === CUSTOMER_RETURN_INSPECTION_SNAPSHOT_QUERY && !written) {
         expect((await client.query("SHOW transaction_read_only")).rows[0].transaction_read_only).toBe("on");
         expect((await client.query("SHOW transaction_isolation")).rows[0].transaction_isolation).toBe("repeatable read");
         await legacyReturn(); written = true;
@@ -306,7 +413,7 @@ integration("private return inspection against migration-defined PostgreSQL", ()
 
   it("PostgreSQL itself rejects writes on the inspection connection", async () => {
     const isolated = hookedReader(async (text, client) => {
-      if (text === inspectionQueries.lines) {
+      if (text === CUSTOMER_RETURN_INSPECTION_SNAPSHOT_QUERY) {
         await expect(client.query("UPDATE oms.oms_orders SET external_order_number='CHANGED' WHERE id=100")).rejects.toMatchObject({ code: "25006" });
       }
     });

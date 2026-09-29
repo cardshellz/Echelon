@@ -14,7 +14,11 @@ Every customer workspace request includes its expected opaque `X-Return-Session`
 
 Order selection, inspection, review, submission, retries, RMA status, history, and downloads retain canonical order ownership. Both local snapshots and Shopify's order snapshot verify the customer. Missing or ambiguous ownership blocks access; email and order-number resemblance never supply it. Customer UI cannot select a channel, warehouse, carrier, or policy.
 
-The order list checks at most ten candidates per page, with at most two concurrent inspections. Unverifiable orders are excluded with an explicit incomplete-check message while other verified orders remain available. History is separately paginated and remains available when current new-return eligibility or policy changes.
+The order list checks at most two candidates per API page. The browser progressively displays each verified page, automatically checking up to five pages before offering more. Known local cancellations are excluded before provider inspection; all other candidates retain live ownership and eligibility checks. Original-box measurements are deferred until an order is selected, which performs a fresh full inspection. Unverifiable orders are excluded with an explicit incomplete-check message while other verified orders remain available. History loads independently and remains available when current new-return eligibility or policy changes.
+
+The signed-in name and email load independently through `/api/returns/customer/profile`, using the verified session's shop and Shopify customer ID. This read requires Shopify customer-data access, verifies the responding shop/customer and connection, and is bounded to five seconds and 32 KiB. A failure shows an account-details retry without delaying orders. Identity is display-only, never order authorization. Logout or a changed session clears the displayed account; this is still returns-session logout, not Shopify logout.
+
+Both staff order searches and customer inspections use the same optimized evidence reader: independent Shopify collection reads run with bounded concurrency while the two complete observations remain sequential. Local evidence is read in one bounded SQL statement per repeatable-read snapshot. No order/identity cache is introduced; fresh review and submission checks remain in place.
 
 ## Configuration
 
@@ -57,6 +61,38 @@ Preserve the active app version's existing scopes, redirect URLs, and other sett
 8. Confirm customers remain blocked until public launch is separately authorized. Do not publish store links or enable customer access as part of this migration.
 
 ## Evidence limits
+
+### September 29 lookup and account-display validation
+
+The lookup comparison used locally executed `CustomerReturnLiveService.lookup`
+against live order `#63210`, a read-only PostgreSQL connection, Shopify queries,
+and ShipStation dimension GETs. The baseline loaded the original service,
+Shopify reader, local reader, and local SQL from commit `3756b7ab`. No return,
+label, refund, or production data was created or changed by these checks.
+
+- Original full lookup measurements: 6.093, 6.243, and 7.405 seconds.
+- Final optimized full lookup measurements: 3.202 and 4.050 seconds. Both
+  returned the same eligible quantities (1 and 2) and two original-box options.
+  This is a small, sequential sample with variable network/database load, not
+  a deployed browser benchmark or a latency guarantee.
+- The full lookup still made 22 Shopify requests and two dimension requests;
+  independent reads overlap without removing either complete Shopify
+  observation. Each local inspection now uses six database roundtrips instead
+  of fifteen. Its WMS query resolves the same three identity branches with
+  `UNION`, avoiding the original cross-table `OR` join plan.
+- One exact-account profile read using the configured live Shopify credentials
+  returned both name and email in 236 ms. Actual customer details were not
+  included in diagnostic output. Deployed browser display remains to be checked.
+- Validation: 1,530 returns/client unit tests, 31 real PostgreSQL local-inspection
+  tests, 10 real PostgreSQL order-access tests, and 36 desktop/mobile browser
+  tests passed. Application, server-test, and client-test TypeScript checks and
+  the production build passed. Browser tests used mocked provider responses.
+
+Account details can fail independently and offer a retry; orders remain usable.
+Provider errors, changed evidence, missing ownership, and time/collection bounds
+still fail closed. More historical orders still require additional verified
+pages. A known local cancellation is skipped early, but this change does not
+make the chooser certify every downstream receiving/allocation prerequisite.
 
 Local signature, HTTP, lifecycle, and regression tests do not prove the deployed Shopify proxy or an authenticated customer roundtrip. Production customer-ID coverage, authenticated login, and real label purchase require separate live verification. Earlier Club server errors did not establish their cause and are not a dependency of this direct design.
 

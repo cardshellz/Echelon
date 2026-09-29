@@ -63,6 +63,13 @@ integration("customer return order lookup against migration-defined PostgreSQL",
     expect((await repository.listOwnedOrders({ ...input, beforeOmsOrderId: 2 })).map(row => row.omsOrderId)).toEqual([1]);
     expect(await repository.listOwnedOrders({ ...input, externalCustomerId: "unknown" })).toEqual([]);
   });
+  it("reads a local cancellation hint without skipping ownership or cursor boundaries", async () => {
+    await pool.query("UPDATE oms.oms_orders SET cancelled_at='2026-09-03' WHERE id IN (2,4)");
+    const result = await repository.listOwnedOrders({ channelId: 36, externalCustomerId: "customer-a", pageSize: 2 });
+    expect(result.map(row => row.omsOrderId)).toEqual([5, 2, 1]);
+    expect(result[1]).toMatchObject({ omsOrderId: 2, cancelled: true });
+    expect(result[0].cancelled).toBeUndefined();
+  });
   it("preserves leading zero identity", async () => {
     const result = await repository.findExactOrderCandidates({ ...customerInput, orderNumberAliases: ["063210", "#063210"] });
     expect(result.map(row => row.externalOrderId)).toEqual(["gid://shopify/Order/5"]);

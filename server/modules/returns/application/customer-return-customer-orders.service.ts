@@ -33,28 +33,35 @@ function inspectionCauseCode(error: unknown): string {
 }
 
 export const customerReturnCustomerReviewInputSchema = customerReturnFlowReviewInputSchema.omit({ orderReference: true }).strict();
+// A small verified page lets the browser display completed results without
+// waiting for every historical order. It follows the existing canonical cursor.
+export const CUSTOMER_RETURN_ORDER_PAGE_SIZE = 2;
 export class CustomerReturnCustomerOrdersService {
   constructor(private readonly dependencies: {
     principal: Pick<CustomerReturnCustomerSession, "channelId" | "externalCustomerId">;
     access: Pick<CustomerReturnOrderAccessService, "list" | "resolveOwned">;
-    live: Pick<CustomerReturnLiveService, "lookupCanonical" | "reviewCanonical">;
+    live: Pick<CustomerReturnLiveService, "lookupCanonical" | "lookupCanonicalSummary" | "reviewCanonical">;
     shippingVersion: () => Promise<number | null>;
     reportUnavailableOrder: (context: { channelId: number; omsOrderId: number; reason: "invalid_response" | "inspection_failed"; causeCode: string }) => void;
   }) {}
 
   async list(raw: unknown) {
     const input = z.object({ beforeOmsOrderId: z.number().int().positive().safe().optional() }).strict().parse(raw);
-    const page = await this.dependencies.access.list({ ...input, pageSize: 10 });
+    const page = await this.dependencies.access.list({ ...input, pageSize: CUSTOMER_RETURN_ORDER_PAGE_SIZE });
+    const candidates = page.orders.filter(order => order.cancelled !== true);
+    if (candidates.length === 0) return customerReturnCustomerOrderPageSchema.parse({
+      orders: [], nextBeforeOmsOrderId: page.nextBeforeOmsOrderId, unavailableOrderCount: 0,
+    });
     const orders = [];
     let unavailableOrderCount = 0;
     const version = await this.dependencies.shippingVersion();
     // An unverifiable order is excluded, with an explicit incomplete-page signal.
     // It must neither expose unverified data nor hide other verified eligible orders.
-    for (let i = 0; i < page.orders.length; i += 2) {
-      const batch = await Promise.all(page.orders.slice(i, i + 2).map(async order => {
+    for (let i = 0; i < candidates.length; i += CUSTOMER_RETURN_ORDER_PAGE_SIZE) {
+      const batch = await Promise.all(candidates.slice(i, i + CUSTOMER_RETURN_ORDER_PAGE_SIZE).map(async order => {
         const scope = { ...this.dependencies.principal, omsOrderId: order.omsOrderId, externalOrderId: order.externalOrderId };
         try {
-          const { mode: _mode, ...fields } = await this.dependencies.live.lookupCanonical(scope);
+          const { mode: _mode, ...fields } = await this.dependencies.live.lookupCanonicalSummary(scope);
           return customerReturnCustomerOrderSchema.parse({ omsOrderId: order.omsOrderId,
             order: customerReturnFlowOrderSchema.parse(fields), settingsVersion: version });
         } catch (error) {
