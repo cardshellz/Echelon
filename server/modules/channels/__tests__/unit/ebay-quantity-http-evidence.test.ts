@@ -150,6 +150,10 @@ describe("eBay quantity request evidence and rejection handling", () => {
   it.each([
     [400, { errors: [{ errorId: 25001, category: "APPLICATION", message: "A system error has occurred." }] }, false],
     [400, { errors: [{ errorId: 25709, category: "REQUEST", message: "Invalid Content-Language" }] }, true],
+    // A business-rule refusal at publish (a missing Brand and MPN pair) wrote nothing: it is a rejection, not an uncertain outcome.
+    [400, { errors: [{ errorId: 25002, category: "BUSINESS", message: "A user error has occurred. Input data for tag <BrandMPN> is invalid or missing." }] }, true],
+    [400, { errors: [{ errorId: 25002, category: "BUSINESS", message: "Refused" }, { errorId: 25001, category: "APPLICATION", message: "Unknown" }] }, false],
+    [400, { errors: [{ errorId: 25002, message: "No category" }] }, false],
     [400, { errors: [{ errorId: 25001, category: "APPLICATION", message: "Unknown" }, ...daily.errors] }, false],
     [400, {}, false], [408, daily, false], [500, daily, false],
   ])("classifies only explicit rejections (%s)", (status, body, rejected) => {

@@ -235,8 +235,18 @@ function PreviewImage({ url, alt, className }: { url?: string | null; alt: strin
     ? <div className={`flex items-center justify-center bg-zinc-50 text-zinc-400 ${className}`} role="img" aria-label={failed ? "Image could not be loaded" : "No image available"}><ImageOff aria-hidden="true" className="h-6 w-6" /></div>
     : <img src={safeUrl} alt={alt} className={className} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} />;
 }
+/** A badge alone leaves the vendor guessing; the first reasons sit under it, the rest are in the preview. */
+const MAX_INLINE_ROW_ISSUES = 2;
 function PreviewStatus({ row }: { row: DropshipListingPreviewRow }) {
-  return <Badge variant="outline" className={listingPreviewStatusTone(row.previewStatus)}>{formatStatus(row.previewStatus)}</Badge>;
+  const issues = [...new Set([...row.blockers, ...row.warnings])];
+  const hidden = issues.length - MAX_INLINE_ROW_ISSUES;
+  return <div className="space-y-1">
+    <Badge variant="outline" className={listingPreviewStatusTone(row.previewStatus)}>{formatStatus(row.previewStatus)}</Badge>
+    {issues.length > 0 && <ul className="max-w-72 space-y-0.5 text-xs text-zinc-600" data-testid={`listing-row-issues-${row.productVariantId}`}>
+      {issues.slice(0, MAX_INLINE_ROW_ISSUES).map((issue) => <li key={issue}>{formatListingPreviewIssue(issue)}</li>)}
+      {hidden > 0 && <li>{hidden} more in the preview.</li>}
+    </ul>}
+  </div>;
 }
 function moneyOrUnavailable(cents: number | null | undefined): string {
   return cents != null && Number.isSafeInteger(cents) && cents >= 0 ? formatCents(cents) : "Unavailable";

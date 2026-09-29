@@ -120,6 +120,29 @@ describe("describeListingPushOutcome", () => {
   });
 });
 
+describe("stock gate refusals", () => {
+  it("tells the vendor an unresolved earlier stock update is Card Shellz's to confirm, not theirs to retry", () => {
+    const outcome = describeListingPushOutcome(job({ status: "failed", items: [item({ status: "failed",
+      errorCode: "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED", errorMessage: "A prior provider quantity outcome requires reconciliation.",
+      retryable: false, listingUrl: null })] }), "marz_cards");
+    expect(outcome.items[0]).toMatchObject({
+      state: "failed",
+      line: "Could not list: an earlier stock update for this listing on eBay still has to be confirmed by Card Shellz.",
+      nextStep: "Nothing to fix on your side. Contact support with this message; once they confirm that earlier update, queue the listing again.",
+    });
+  });
+
+  it("says eBay asked for a pause when the cooldown gate refused", () => {
+    const outcome = describeListingPushOutcome(job({ status: "failed", items: [item({ status: "failed",
+      errorCode: "PUBLICATION_PROVIDER_COOLDOWN", errorMessage: "The provider retry window has not opened; no quantity request was sent.",
+      retryable: true, listingUrl: null })] }), "marz_cards");
+    expect(outcome.items[0]).toMatchObject({
+      line: "Could not list: eBay asked for a pause after the last attempt.",
+      nextStep: "Queue the listing again in a few minutes.",
+    });
+  });
+});
+
 describe("listingPushNextStep", () => {
   it("separates a temporary store problem from something the vendor must fix", () => {
     expect(listingPushNextStep("DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR", true)).toBe("This was a temporary problem at the store. Queue the listing again in a few minutes.");
