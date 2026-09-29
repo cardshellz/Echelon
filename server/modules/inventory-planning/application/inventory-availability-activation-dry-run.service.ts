@@ -24,13 +24,14 @@ import {
   InventoryAvailabilityBackfillService,
 } from "./inventory-availability-backfill.service";
 import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availability-master-data.contracts";
+import { isComparisonOnlyPublicationEvidence } from "../domain/inventory-publication-coverage";
 import {
   findPartitionedShareOverages,
   summarizeCutoverDivergence,
 } from "../domain/inventory-channel-exposure";
 
 const actorSchema = z.string().trim().min(1).max(100);
-const ACTIVATION_DRY_RUN_CONTRACT_VERSION = "atp_authoritative_publication_readiness_v8";
+const ACTIVATION_DRY_RUN_CONTRACT_VERSION = "atp_authoritative_publication_readiness_v9";
 
 export interface PublicationEvidenceKey {
   channelId: number;
@@ -348,7 +349,9 @@ export class InventoryAvailabilityActivationDryRunService {
             && preview.membership.excludedVariantIds?.includes(evidence.productVariantId));
         });
         const deliberatelyExcluded = evidence.configuredTargets.length > 0 && remainingTargets.length === 0;
-        if (!deliberatelyExcluded && !isProvenUnlistedPair(evidence, targetPreviews)) {
+        if (!deliberatelyExcluded && !isComparisonOnlyPublicationEvidence(
+          evidence, targetPreviews, exposureView.publicationTargets,
+        )) {
           blockers.push(...legacyPublicationCoverageBlockers(product.productId,
             { ...evidence, configuredTargets: remainingTargets }));
         }
@@ -555,19 +558,6 @@ function queueBlockers(product: InventoryAvailabilityBackfillQueueRow): Activati
     ));
   }
   return blockers;
-}
-
-/** Allocation theory is not listing membership. Keep the historical gate unless
- * there is no feed AND every configured target explicitly excludes this SKU.
- * Active, inactive, quarantined, whole-product and unknown evidence still goes
- * through the existing validation; an included SKU never takes this branch. */
-function isProvenUnlistedPair(evidence: CurrentPublicationEvidence, previews: InventoryChannelExposurePreview[]): boolean {
-  if (evidence.feedId !== null || evidence.mappingState !== "missing" || evidence.configuredTargets.length === 0) return false;
-  return evidence.configuredTargets.every(target => {
-    const preview = previews.find(candidate => candidate.publicationTargetId === target.publicationTargetId);
-    return preview?.membership?.mode === "explicit"
-      && !preview.membership.includedVariantIds.includes(evidence.productVariantId);
-  });
 }
 
 function legacyPublicationCoverageBlockers(

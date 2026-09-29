@@ -106,16 +106,108 @@ describe("inventory availability activation dry-run service", () => {
     expect(result.products[0]!.blockers.map(row => row.code)).toContain("ACTIVE_LEGACY_FEED_MAPPING_MISSING");
   });
 
-  it.each(["inactive", "quarantined"] as const)("preserves the %s legacy feed blocker even when explicit membership is empty", async mappingState => {
+  it.each([null, "historical-provider-item"])("retains inactive feed evidence (%s) without requiring an unselected publication", async providerItemId => {
     const fixture = readinessFixture("echelon");
     fixture.preview.membership = { mode: "explicit", includedVariantIds: [] };
     fixture.preview.rows = [];
-    fixture.publication.mappingState = mappingState;
+    fixture.publication.mappingState = "inactive";
+    fixture.publication.channelInventoryItemId = providerItemId;
+    fixture.publication.configuredTargets[0]!.mapping = null;
+    const before = structuredClone(fixture);
+
+    const result = await runReadinessFixture(fixture);
+
+    expect(result.state).toBe("ready_for_publication");
+    expect(result.products[0]!.proposedPublications).toEqual([]);
+    expect(result.products[0]!.publicationEvidence).toEqual([before.publication]);
+    expect(fixture).toEqual(before);
+    expect(result).toMatchObject({ runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false });
+  });
+
+  it("preserves quarantine even when explicit membership is empty", async () => {
+    const fixture = readinessFixture("echelon");
+    fixture.preview.membership = { mode: "explicit", includedVariantIds: [] };
+    fixture.preview.rows = [];
+    fixture.publication.mappingState = "quarantined";
     const result = await runReadinessFixture(fixture);
     expect(result.state).toBe("blocked");
-    expect(result.products[0]!.blockers.map(row => row.code)).toContain(
-      mappingState === "inactive" ? "ACTIVE_LEGACY_FEED_MAPPING_MISSING" : "PUBLICATION_MAPPING_QUARANTINED",
-    );
+    expect(result.products[0]!.blockers.map(row => row.code)).toContain("PUBLICATION_MAPPING_QUARANTINED");
+  });
+
+  it.each(["whole_product", "explicit"] as const)("does not skip an inactive SKU selected by %s membership", async mode => {
+    const fixture = readinessFixture("echelon");
+    fixture.preview.membership = mode === "explicit" ? { mode, includedVariantIds: [101] } : { mode };
+    fixture.publication.mappingState = "inactive";
+    fixture.preview.rows[0]!.mapping = null;
+    fixture.publication.configuredTargets[0]!.mapping = null;
+    const result = await runReadinessFixture(fixture);
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]!.blockers.map(row => row.code)).toEqual(expect.arrayContaining([
+      "ACTIVE_LEGACY_FEED_MAPPING_MISSING", "EXACT_TARGET_VARIANT_MAPPING_MISSING",
+    ]));
+  });
+
+  it("does not skip an inactive comparison when whole-product scope has no rows", async () => {
+    const fixture = readinessFixture("echelon");
+    fixture.preview.rows = [];
+    fixture.publication.mappingState = "inactive";
+    const result = await runReadinessFixture(fixture);
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]!.blockers.map(row => row.code)).toContain("ACTIVE_LEGACY_FEED_MAPPING_MISSING");
+  });
+
+  it("keeps exact target checks when inactive membership and preview rows contradict each other", async () => {
+    const fixture = readinessFixture("echelon");
+    fixture.preview.membership = { mode: "explicit", includedVariantIds: [] };
+    fixture.publication.mappingState = "inactive";
+    fixture.preview.rows[0]!.mapping = null;
+    const result = await runReadinessFixture(fixture);
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]!.blockers.map(row => row.code)).toContain("EXACT_TARGET_VARIANT_MAPPING_MISSING");
+  });
+
+  it("ignores an unconfigured channel comparison without changing the same SKU's configured publication", async () => {
+    const fixture = readinessFixture("echelon");
+    const before = await runReadinessFixture(fixture);
+    const unconfigured = unconfiguredChannelEvidence();
+    const result = await runReadinessFixture(fixture, [unconfigured]);
+    expect(result.state).toBe("ready_for_publication");
+    expect(result.products[0]!.proposedPublications).toEqual(before.products[0]!.proposedPublications);
+    expect(result.products[0]!.publicationTargetSelections).toEqual(before.products[0]!.publicationTargetSelections);
+    expect(result.products[0]!.publicationEvidence).toEqual([fixture.publication, unconfigured]);
+    expect(result).toMatchObject({ runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false });
+  });
+
+  it.each(["active", "quarantined", "inactive"] as const)("does not ignore a real %s feed on a targetless channel", async mappingState => {
+    const unconfigured = { ...unconfiguredChannelEvidence(), feedId: 91, mappingState };
+    const result = await runReadinessFixture(readinessFixture("echelon"), [unconfigured]);
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]!.blockers.map(row => row.code)).toContain(mappingState === "inactive"
+      ? "ACTIVE_LEGACY_FEED_MAPPING_MISSING" : "EXPLICIT_PUBLICATION_TARGET_MISSING");
+    if (mappingState === "quarantined") {
+      expect(result.products[0]!.blockers.map(row => row.code)).toContain("PUBLICATION_MAPPING_QUARANTINED");
+    }
+  });
+
+  it("does not treat a disabled known destination with missing captured evidence as an unconfigured channel", async () => {
+    const fixture = readinessFixture("echelon");
+    fixture.view.publicationTargets.push({ ...fixture.view.publicationTargets[0]!, id: 2, channelId: 104, state: "disabled" });
+    const result = await runReadinessFixture(fixture, [unconfiguredChannelEvidence()]);
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]!.blockers).toContainEqual(expect.objectContaining({
+      code: "ACTIVE_LEGACY_FEED_MAPPING_MISSING", context: expect.objectContaining({ channelId: 104 }),
+    }));
+  });
+
+  it("does not let an inactive unselected SKU hide target identity drift", async () => {
+    const fixture = readinessFixture("echelon");
+    fixture.preview.membership = { mode: "explicit", includedVariantIds: [] };
+    fixture.preview.rows = [];
+    fixture.publication.mappingState = "inactive";
+    fixture.publication.configuredTargets[0]!.revision = "2";
+    const result = await runReadinessFixture(fixture);
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]!.blockers.map(row => row.code)).toContain("PUBLICATION_TARGET_CHANGED_DURING_DRY_RUN");
   });
   it("records a ready full-catalog comparison without runtime, provider, or outbox writes", async () => {
     const queue = catalogQueue();
@@ -515,11 +607,24 @@ function readinessFixture(authority: "echelon" | "external_provider" | "manual")
   return { view, preview, publication };
 }
 
-async function runReadinessFixture(fixture: ReturnType<typeof readinessFixture>) {
+function unconfiguredChannelEvidence(): CurrentPublicationEvidence {
+  return { channelId: 104, productVariantId: 101, feedId: null, mappingState: "missing",
+    channelInventoryItemId: null, lastAcknowledgedUnits: null, lastAcknowledgedAt: null, configuredTargets: [] };
+}
+
+async function runReadinessFixture(
+  fixture: ReturnType<typeof readinessFixture>,
+  additionalEvidence: CurrentPublicationEvidence[] = [],
+) {
+  const legacyPreview = channelPreview();
+  legacyPreview.rows.push(...additionalEvidence.map(evidence => ({
+    ...legacyPreview.rows[0]!, channelId: evidence.channelId, productVariantId: evidence.productVariantId,
+    channelName: "Unconfigured channel", channelProvider: "walmart",
+  })));
   const service = new InventoryAvailabilityActivationDryRunService({
     getMigrationQueue: vi.fn(async () => catalogQueue()),
-    getChannelPreview: vi.fn(async () => channelPreview()),
-  } as never, fakeStore([fixture.publication]), {
+    getChannelPreview: vi.fn(async () => legacyPreview),
+  } as never, fakeStore([fixture.publication, ...additionalEvidence]), {
     getView: vi.fn(async () => fixture.view),
     preview: vi.fn(async () => fixture.preview),
   }, sequenceClock(STARTED_AT, COMPLETED_AT));

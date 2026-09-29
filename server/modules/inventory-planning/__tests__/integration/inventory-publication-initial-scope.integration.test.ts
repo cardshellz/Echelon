@@ -16,6 +16,8 @@ import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure
 import { PostgresInventoryAvailabilityShadowRepository } from "../../infrastructure/inventory-availability-shadow.repository";
 import { InventoryAvailabilityShadowService } from "../../application/inventory-availability-shadow.service";
 import { assertDryRunSelectionsCurrent } from "../../infrastructure/inventory-availability-activation.repository";
+import { PostgresInventoryAvailabilityActivationDryRunRepository } from "../../infrastructure/inventory-availability-activation-dry-run.repository";
+import { isComparisonOnlyPublicationEvidence } from "../../domain/inventory-publication-coverage";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -51,6 +53,39 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
     expect((await database.pool.query("SELECT * FROM inventory.publication_initial_scope_receipts")).rows).toEqual([]);
     expect((await database.pool.query("SELECT * FROM inventory.publication_membership_heads")).rows).toEqual([]);
   }
+  it("distinguishes inactive and unconfigured comparison evidence without changing stock, feeds or publication", async () => {
+    // Complete this reduced feed fixture for the real repeatable-read capture.
+    await database.pool.query(`ALTER TABLE channels.channel_feeds ADD COLUMN last_synced_qty integer;
+      ALTER TABLE channels.channel_feeds ADD COLUMN last_synced_at timestamptz;
+      UPDATE channels.channel_feeds SET is_active=0,last_synced_qty=5,last_synced_at='2026-09-27T12:00:00Z';
+      INSERT INTO channels.channels(id,name,provider) VALUES(104,'Unconfigured Walmart','walmart');`);
+    // Target 2 is already explicit under its Walmart setup contract. Prepare
+    // target 1 through the normal initial-scope owner, with no active feeds.
+    const reviewed = await service.review(selection);
+    expect(reviewed).toMatchObject({ ready: true, includedVariantIds: [], mappingImports: [], blockers: [] });
+    await service.prepare({ ...selection, expectedReviewHash: reviewed.reviewHash,
+      idempotencyKey: "comparison-scope-1" }, "operator");
+    const shadows = new PostgresInventoryAvailabilityShadowRepository(database.pool);
+    await new InventoryAvailabilityShadowService(shadows)
+      .runProductShadow(20, { idempotencyKey: "comparison-shadow" }, "operator");
+    const before = await protectedRows();
+    const store = new PostgresInventoryChannelExposureAdminStore(drizzle(database.pool, { schema }), shadows);
+    const scopes = await Promise.all([store.preview(1, 20), store.preview(2, 20)]);
+    expect(scopes.map(scope => scope.membership)).toEqual([
+      { mode: "explicit", includedVariantIds: [] },
+      { mode: "explicit", includedVariantIds: [] },
+    ]);
+    const registeredTargets = (await database.pool.query<{ channelId: number }>(
+      'SELECT channel_id AS "channelId" FROM inventory.inventory_publication_targets ORDER BY id',
+    )).rows;
+    const evidence = await new PostgresInventoryAvailabilityActivationDryRunRepository(database.pool)
+      .captureCurrentPublicationEvidence([{ channelId: 36, productVariantId: 101 }, { channelId: 104, productVariantId: 101 }]);
+    expect(evidence[0]).toMatchObject({ mappingState: "inactive", channelInventoryItemId: "test-item", lastAcknowledgedUnits: "5" });
+    expect(evidence[0]!.configuredTargets).toHaveLength(2);
+    expect(evidence[1]).toMatchObject({ mappingState: "missing", feedId: null, configuredTargets: [] });
+    expect(evidence.map(row => isComparisonOnlyPublicationEvidence(row, scopes, registeredTargets))).toEqual([true, true]);
+    expect(await protectedRows()).toEqual(before);
+  });
   it("keeps a failed listing unchanged, persists its deferral, and reads canonical ATP without provider work", async () => {
     await database.pool.query(`INSERT INTO dropship.dropship_vendors(id,business_name) VALUES(1,'Test vendor');
       INSERT INTO dropship.dropship_store_connections(id,vendor_id,platform,status,external_account_id)
