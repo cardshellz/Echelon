@@ -4,6 +4,7 @@ import type {
   DropshipMarketplaceListingValidationResult,
   DropshipStoreListingConfig,
 } from "../application/dropship-marketplace-listing-provider";
+import { ebayProductIdentifierWarnings } from "../domain/ebay-product-identifiers";
 
 export class ConfigDrivenDropshipMarketplaceListingProvider implements DropshipMarketplaceListingProvider {
   buildListingIntent(input: {
@@ -63,6 +64,9 @@ export class ConfigDrivenDropshipMarketplaceListingProvider implements DropshipM
     const storeCategoryNames = normalizeStoreCategoryNames(input.storeCategoryNames);
     if (input.config.platform === "ebay" && !marketplaceCategoryId) {
       blockers.push("ebay_browse_category_required");
+    }
+    if (input.config.platform === "ebay") {
+      warnings.push(...ebayProductIdentifierWarnings(input.content));
     }
 
     if (blockers.length > 0 || input.priceCents === null) {

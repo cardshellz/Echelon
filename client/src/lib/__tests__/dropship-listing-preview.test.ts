@@ -24,6 +24,10 @@ describe("product-cost preview issues", () => {
     expect(formatListingPreviewIssue("price_below_product_cost"))
       .toBe("Priced below your .ops product cost: you lose money on every sale at this price. Raise the price, or list anyway and take the loss.");
   });
+  it("tells the vendor what eBay will show when the catalog has no MPN", () => {
+    expect(formatListingPreviewIssue("ebay_mpn_placeholder"))
+      .toBe('The catalog has no manufacturer part number (MPN) for this product, so eBay will show "Does Not Apply". Contact support if the product has one.');
+  });
   it("retains existing setup labels and readable fallback for unrelated issues", () => {
     expect(formatListingPreviewIssue("missing_config:businessPolicies.paymentPolicyId")).toBe("eBay setup: Payment policy");
     expect(formatListingPreviewIssue("unrecognized_issue")).toBe("Unrecognized Issue");

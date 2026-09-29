@@ -39,6 +39,7 @@ export function formatListingPreviewIssue(value: string): string {
     "missing_config:businessPolicies.returnPolicyId": "eBay setup: Return policy",
     "missing_config:businessPolicies.fulfillmentPolicyId": "eBay setup: Fulfillment policy",
     ebay_browse_category_required: "Card Shellz marketplace category setup required",
+    ebay_mpn_placeholder: "The catalog has no manufacturer part number (MPN) for this product, so eBay will show \"Does Not Apply\". Contact support if the product has one.",
     vendor_unavailable: "Your Shellz Club account is unavailable. Contact support.",
     plan_unavailable: "Your .ops price list is unavailable. Contact support.",
     entitlement_inactive: "Your Shellz Club .ops access is inactive. Contact support.",

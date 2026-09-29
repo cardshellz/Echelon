@@ -69,6 +69,44 @@ describe("dropship marketplace listing push providers", () => {
     });
   });
 
+  it("sends eBay's placeholder MPN when the catalog has none, so publishing is not refused for the Brand and MPN pair", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([
+      jsonResponse({ offers: [] }),
+      emptyResponse(),
+      jsonResponse({ offerId: "offer-101" }),
+      emptyResponse(),
+    ]);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
+
+    await provider.pushListing(makeRequest({ platform: "ebay", marketplaceConfig: ebayMarketplaceConfig(), mpn: null }));
+
+    const inventoryBody = JSON.parse(String(fetcher.calls[1]?.init.body));
+    expect(inventoryBody.product).toMatchObject({
+      brand: "Card Shellz",
+      mpn: "Does Not Apply",
+      aspects: expect.objectContaining({ MPN: ["Does Not Apply"] }),
+    });
+  });
+
+  it("prefers an MPN item specific over eBay's placeholder", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([
+      jsonResponse({ offers: [] }),
+      emptyResponse(),
+      jsonResponse({ offerId: "offer-101" }),
+      emptyResponse(),
+    ]);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
+
+    await provider.pushListing(makeRequest({
+      platform: "ebay", marketplaceConfig: ebayMarketplaceConfig(), mpn: null, itemSpecifics: { Size: ["35pt"], MPN: ["ARM-50"] },
+    }));
+
+    const inventoryBody = JSON.parse(String(fetcher.calls[1]?.init.body));
+    expect(inventoryBody.product).toMatchObject({ mpn: "ARM-50", aspects: expect.objectContaining({ MPN: ["ARM-50"] }) });
+  });
+
   it("creates an eBay staged offer without publishing when listing mode is draft_first", async () => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([
@@ -632,6 +670,8 @@ function makeRequest(input: {
   weightGrams?: number | null;
   marketplaceCategoryId?: string | null;
   storeCategoryNames?: string[];
+  mpn?: string | null;
+  itemSpecifics?: Record<string, unknown> | null;
 }): DropshipMarketplaceListingPushRequest {
   return {
     vendorId: 10,
@@ -663,9 +703,9 @@ function makeRequest(input: {
       storeCategoryNames: input.storeCategoryNames ?? [],
       brand: "Card Shellz",
       gtin: "000000000101",
-      mpn: "TL35",
+      mpn: input.mpn === undefined ? "TL35" : input.mpn,
       condition: "new",
-      itemSpecifics: { Size: ["35pt"] },
+      itemSpecifics: input.itemSpecifics === undefined ? { Size: ["35pt"] } : input.itemSpecifics,
       imageUrls: ["https://cdn.example.test/toploader.jpg"],
       weightGrams: input.weightGrams === undefined ? 100 : input.weightGrams,
       priceCents: 1299,
