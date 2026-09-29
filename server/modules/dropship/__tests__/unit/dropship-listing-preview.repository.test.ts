@@ -135,7 +135,8 @@ describe("PgDropshipListingPreviewRepository", () => {
     expect(query).toContain("FROM ebay.ebay_category_mappings ecm");
     expect(query).toContain("supplier_channel.type = 'internal'");
     expect(query).toContain("supplier_channel.status = 'active'");
-    expect(query).toContain("ecm.listing_enabled = true");
+    // The Card Shellz listing toggle must not remove the dropship default category.
+    expect(query).not.toContain("ecm.listing_enabled");
     expect(query).toContain("HAVING COUNT(DISTINCT ecm.ebay_browse_category_id) = 1");
   });
 });
