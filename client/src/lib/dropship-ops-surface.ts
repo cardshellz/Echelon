@@ -3305,6 +3305,83 @@ export function buildStoreOrderProcessingConfigInput(input: {
   };
 }
 
+/** How a store takes pushes, in the admin's words. */
+export interface DropshipListingModeDescription {
+  value: DropshipListingMode;
+  label: string;
+  description: string;
+}
+
+/**
+ * Live publishes the offer. Drafts only stages it unpublished: the worker
+ * never calls publish. Manual only blocks the preview
+ * (`listing_config_manual_only`), so nothing can be queued.
+ */
+export const DROPSHIP_LISTING_MODE_OPTIONS: readonly DropshipListingModeDescription[] = [
+  {
+    value: "live",
+    label: "Live",
+    description: "A push publishes the listing on the store. Buyers can see it.",
+  },
+  {
+    value: "draft_first",
+    label: "Drafts only",
+    description:
+      "A push saves an unpublished offer on the store. Buyers cannot see it.",
+  },
+  {
+    value: "manual_only",
+    label: "Manual only",
+    description: "Pushes are blocked. The vendor lists by hand.",
+  },
+];
+
+const UNSET_LISTING_MODE: Omit<DropshipListingModeDescription, "value"> = {
+  label: "Not set",
+  description: "The store has no listing mode yet.",
+};
+
+export function describeDropshipListingMode(
+  mode: DropshipListingMode | null,
+): Omit<DropshipListingModeDescription, "value"> {
+  const option = DROPSHIP_LISTING_MODE_OPTIONS.find(
+    (candidate) => candidate.value === mode,
+  );
+  return option
+    ? { label: option.label, description: option.description }
+    : UNSET_LISTING_MODE;
+}
+
+/** A select's string value as a listing mode, or null for anything else. */
+export function parseDropshipListingMode(
+  value: string,
+): DropshipListingMode | null {
+  return allDropshipListingModes.find((mode) => mode === value) ?? null;
+}
+
+/**
+ * The replace request for a store's listing config with only the listing
+ * mode changed. The admin route replaces the whole config, so every other
+ * field is carried over from the config just read; nothing is invented.
+ */
+export function buildStoreListingModeChangeInput(
+  config: DropshipStoreListingConfigProfileResponse,
+  listingMode: DropshipListingMode,
+): DropshipStoreListingConfigInput {
+  if (!allDropshipListingModes.includes(listingMode)) {
+    throw new Error("listingMode is not supported.");
+  }
+  return {
+    listingMode,
+    inventoryMode: config.inventoryMode,
+    priceMode: config.priceMode,
+    marketplaceConfig: { ...config.marketplaceConfig },
+    requiredConfigKeys: [...config.requiredConfigKeys],
+    requiredProductFields: [...config.requiredProductFields],
+    isActive: config.isActive,
+  };
+}
+
 export function buildStoreListingConfigInput(input: {
   listingMode: DropshipListingMode;
   inventoryMode: DropshipListingInventoryMode;

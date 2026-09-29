@@ -63,6 +63,12 @@ export function listingPushPollingContinues(job: DropshipListingPushJob | undefi
   return answers < LISTING_PUSH_MAX_POLLS;
 }
 
+/** Whether the page stopped asking with the job still unfinished: the answer limit was reached first. */
+export function listingPushPollingGaveUp(job: DropshipListingPushJob | undefined, answers: number): boolean {
+  if (job === undefined || job.finished) return false;
+  return answers >= LISTING_PUSH_MAX_POLLS;
+}
+
 export type ListingPushOutcomeTone = "pending" | "success" | "partial" | "failed";
 
 export interface ListingPushItemOutcome {
@@ -106,7 +112,7 @@ export function describeListingPushOutcome(job: DropshipListingPushJob, storeNam
     if (LIVE_ITEM_STATUSES.has(item.status) && item.published === false) {
       return {
         ...base, state: "draft", line: `Saved on ${store} as an unpublished draft. Buyers cannot see it yet.`,
-        nextStep: `Your store is set to save drafts instead of publishing. Publish it from your ${store} account, or contact support to switch your store to live listings.`,
+        nextStep: "Your store is set to save drafts instead of publishing. Ask support to switch your store to live listings, then queue it again.",
       };
     }
     if (LIVE_ITEM_STATUSES.has(item.status)) {

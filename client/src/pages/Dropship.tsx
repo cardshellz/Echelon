@@ -123,7 +123,11 @@ import {
   buildCatalogExposureRuleFromPreviewRow,
   buildCatalogExposureRuleInput,
   buildStoreConnectionDisconnectInput,
+  buildStoreListingModeChangeInput,
   buildStoreOrderProcessingConfigInput,
+  describeDropshipListingMode,
+  DROPSHIP_LISTING_MODE_OPTIONS,
+  parseDropshipListingMode,
   countByKey,
   catalogExposureRecordToInput,
   catalogExposureRuleKey,
@@ -198,6 +202,8 @@ import {
   type DropshipAdminStoreConnectionListItem,
   type DropshipAdminStoreConnectionListResponse,
   type DropshipAdminStoreWebhookRepairResponse,
+  type DropshipListingMode,
+  type DropshipStoreListingConfigResponse,
   type DropshipAdminOpsOverview,
   type DropshipAdminOpsOverviewResponse,
   type DropshipAuditEventRecord,
@@ -3979,6 +3985,12 @@ function StoreConnectionOpsTab() {
   const [warehouseInput, setWarehouseInput] = useState("");
   const [savingWarehouseConnectionId, setSavingWarehouseConnectionId] =
     useState<number | null>(null);
+  const [listingModeTarget, setListingModeTarget] =
+    useState<DropshipAdminStoreConnectionListItem | null>(null);
+  const [listingModeInput, setListingModeInput] =
+    useState<DropshipListingMode>("live");
+  const [savingListingModeConnectionId, setSavingListingModeConnectionId] =
+    useState<number | null>(null);
   const [repairingWebhookConnectionId, setRepairingWebhookConnectionId] =
     useState<number | null>(null);
   const [message, setMessage] = useState("");
@@ -4095,6 +4107,58 @@ function StoreConnectionOpsTab() {
       );
     } finally {
       setSavingWarehouseConnectionId(null);
+    }
+  }
+
+  function openListingModeDialog(
+    connection: DropshipAdminStoreConnectionListItem,
+  ) {
+    setListingModeTarget(connection);
+    setListingModeInput(connection.listingConfig.listingMode ?? "live");
+    setError("");
+    setMessage("");
+  }
+
+  async function saveListingMode() {
+    if (!listingModeTarget) return;
+    setSavingListingModeConnectionId(listingModeTarget.storeConnectionId);
+    setError("");
+    setMessage("");
+    try {
+      const url = `/api/dropship/admin/store-connections/${listingModeTarget.storeConnectionId}/listing-config`;
+      // The route replaces the whole config, so read it first and change
+      // only the mode: the rest goes back exactly as it was.
+      const current = await fetchJson<DropshipStoreListingConfigResponse>(url);
+      const response = await putJson<DropshipStoreListingConfigResponse>(
+        url,
+        buildStoreListingModeChangeInput(current.config, listingModeInput),
+      );
+      setMessage(
+        `${storeConnectionDisplayName(listingModeTarget)} listing mode is now ` +
+          `${describeDropshipListingMode(response.config.listingMode).label}. ` +
+          "It applies to the next push. Anything queued before this change is refused as changed and must be queued again.",
+      );
+      setListingModeTarget(null);
+      await Promise.all([
+        storeConnectionsQuery.refetch(),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/dogfood-readiness"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/ops/overview"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/dropship/admin/audit-events"],
+        }),
+      ]);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Listing mode update failed.",
+      );
+    } finally {
+      setSavingListingModeConnectionId(null);
     }
   }
 
@@ -4312,12 +4376,111 @@ function StoreConnectionOpsTab() {
         }
         onDisableStoreConnection={openDisableStoreDialog}
         onOpenWarehouseConfig={openWarehouseConfigDialog}
+        onOpenListingModeConfig={openListingModeDialog}
         onRepairShopifyWebhooks={repairShopifyWebhooks}
         disablingConnectionId={disablingConnectionId}
         repairingWebhookConnectionId={repairingWebhookConnectionId}
         savingWarehouseConnectionId={savingWarehouseConnectionId}
+        savingListingModeConnectionId={savingListingModeConnectionId}
         total={storeConnectionsQuery.data?.total ?? 0}
       />
+
+      <Dialog
+        open={listingModeTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && savingListingModeConnectionId === null) {
+            setListingModeTarget(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Listing mode</DialogTitle>
+            <DialogDescription>
+              What a vendor&apos;s push does on this store. The change applies
+              to the next push. Anything queued before it is refused as changed
+              and must be queued again.
+            </DialogDescription>
+          </DialogHeader>
+          {listingModeTarget && (
+            <div className="space-y-4">
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="font-medium">
+                  {storeConnectionDisplayName(listingModeTarget)}
+                </div>
+                <div className="text-sm text-muted-foreground">
+                  {formatStatus(listingModeTarget.platform)} /{" "}
+                  {storeConnectionOwnerLabel(listingModeTarget)}
+                </div>
+              </div>
+              <div>
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="dropship-store-listing-mode"
+                >
+                  Mode
+                </label>
+                <Select
+                  value={listingModeInput}
+                  onValueChange={(value) => {
+                    const mode = parseDropshipListingMode(value);
+                    if (mode) setListingModeInput(mode);
+                  }}
+                >
+                  <SelectTrigger
+                    id="dropship-store-listing-mode"
+                    className="mt-2"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {DROPSHIP_LISTING_MODE_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p
+                  className="mt-2 text-sm text-muted-foreground"
+                  data-testid="dropship-store-listing-mode-description"
+                >
+                  {describeDropshipListingMode(listingModeInput).description}
+                </p>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={savingListingModeConnectionId !== null}
+              onClick={() => setListingModeTarget(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+              disabled={
+                savingListingModeConnectionId !== null ||
+                listingModeTarget?.listingConfig.listingMode ===
+                  listingModeInput
+              }
+              onClick={saveListingMode}
+            >
+              <Save
+                className={
+                  savingListingModeConnectionId !== null
+                    ? "h-4 w-4 animate-spin"
+                    : "h-4 w-4"
+                }
+              />
+              Save listing mode
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <EbayOAuthBrandingAdminPanel />
 
@@ -10248,9 +10411,11 @@ function StoreConnectionsTable({
   isLoading,
   onDisableStoreConnection,
   onOpenWarehouseConfig,
+  onOpenListingModeConfig,
   onRepairShopifyWebhooks,
   repairingWebhookConnectionId,
   savingWarehouseConnectionId,
+  savingListingModeConnectionId,
   total,
 }: {
   connections: DropshipAdminStoreConnectionListItem[];
@@ -10262,11 +10427,15 @@ function StoreConnectionsTable({
   onOpenWarehouseConfig: (
     connection: DropshipAdminStoreConnectionListItem,
   ) => void;
+  onOpenListingModeConfig: (
+    connection: DropshipAdminStoreConnectionListItem,
+  ) => void;
   onRepairShopifyWebhooks: (
     connection: DropshipAdminStoreConnectionListItem,
   ) => void;
   repairingWebhookConnectionId: number | null;
   savingWarehouseConnectionId: number | null;
+  savingListingModeConnectionId: number | null;
   total: number;
 }) {
   if (isLoading) {
@@ -10411,9 +10580,31 @@ function StoreConnectionsTable({
                   </div>
                 </TableCell>
                 <TableCell>
-                  <StoreConnectionStatusPill
-                    item={buildStoreConnectionListingJourney(connection)}
-                  />
+                  <div className="space-y-2">
+                    <StoreConnectionStatusPill
+                      item={buildStoreConnectionListingJourney(connection)}
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 w-full gap-2"
+                      disabled={
+                        disabled || savingListingModeConnectionId !== null
+                      }
+                      onClick={() => onOpenListingModeConfig(connection)}
+                    >
+                      <Store
+                        className={
+                          savingListingModeConnectionId ===
+                          connection.storeConnectionId
+                            ? "h-4 w-4 animate-spin"
+                            : "h-4 w-4"
+                        }
+                      />
+                      Listing mode
+                    </Button>
+                  </div>
                 </TableCell>
                 <TableCell>
                   <StoreConnectionStatusPill
@@ -12451,7 +12642,19 @@ function buildStoreConnectionListingJourney(
       state: "warning",
     };
   }
-  return { key: "listing", label: "Listing", value: "Ready", state: "ready" };
+  const mode = describeDropshipListingMode(connection.listingConfig.listingMode);
+  switch (connection.listingConfig.listingMode) {
+    case "live":
+      return { key: "listing", label: "Listing", value: "Ready", detail: mode.label, state: "ready" };
+    // Drafts only and manual only both leave the store without a visible
+    // listing after a push; the admin should see that before a vendor asks.
+    case "draft_first":
+      return { key: "listing", label: "Listing", value: mode.label, detail: "Pushed listings stay unpublished", state: "warning" };
+    case "manual_only":
+      return { key: "listing", label: "Listing", value: mode.label, detail: "Pushes are blocked", state: "warning" };
+    default:
+      return { key: "listing", label: "Listing", value: mode.label, detail: mode.description, state: "warning" };
+  }
 }
 
 function storeConnectionJourneyTone(

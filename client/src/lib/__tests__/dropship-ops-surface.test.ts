@@ -61,6 +61,10 @@ import {
   catalogExposureRuleKey,
   buildStoreConnectionOAuthStartInput,
   buildStoreListingConfigInput,
+  buildStoreListingModeChangeInput,
+  describeDropshipListingMode,
+  DROPSHIP_LISTING_MODE_OPTIONS,
+  parseDropshipListingMode,
   formatCents,
   formatStatus,
   fetchJson,
@@ -2710,3 +2714,65 @@ function makeListingPreviewRow(
     ...overrides,
   };
 }
+
+describe("store listing mode change", () => {
+  const config = {
+    id: 7,
+    storeConnectionId: 5,
+    platform: "ebay" as const,
+    listingMode: "draft_first" as const,
+    inventoryMode: "managed_quantity_sync" as const,
+    priceMode: "vendor_defined" as const,
+    marketplaceConfig: { marketplaceId: "EBAY_US" },
+    requiredConfigKeys: ["marketplaceId"],
+    requiredProductFields: ["sku" as const],
+    isActive: true,
+    createdAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:00:00.000Z",
+  };
+
+  it("changes only the listing mode and carries every other field over", () => {
+    expect(buildStoreListingModeChangeInput(config, "live")).toEqual({
+      listingMode: "live",
+      inventoryMode: "managed_quantity_sync",
+      priceMode: "vendor_defined",
+      marketplaceConfig: { marketplaceId: "EBAY_US" },
+      requiredConfigKeys: ["marketplaceId"],
+      requiredProductFields: ["sku"],
+      isActive: true,
+    });
+  });
+
+  it("does not share the read config's objects with the request", () => {
+    const input = buildStoreListingModeChangeInput(config, "live");
+    expect(input.marketplaceConfig).not.toBe(config.marketplaceConfig);
+    expect(input.requiredConfigKeys).not.toBe(config.requiredConfigKeys);
+    expect(input.requiredProductFields).not.toBe(config.requiredProductFields);
+  });
+
+  it("refuses a mode the server does not know", () => {
+    expect(() => buildStoreListingModeChangeInput(config, "published" as never)).toThrow(
+      "listingMode is not supported.",
+    );
+    expect(parseDropshipListingMode("published")).toBeNull();
+    expect(parseDropshipListingMode("live")).toBe("live");
+  });
+
+  it("names each mode in plain words, and says when none is set", () => {
+    expect(DROPSHIP_LISTING_MODE_OPTIONS.map((option) => option.value)).toEqual([
+      "live",
+      "draft_first",
+      "manual_only",
+    ]);
+    expect(describeDropshipListingMode("live")).toEqual({
+      label: "Live",
+      description: "A push publishes the listing on the store. Buyers can see it.",
+    });
+    expect(describeDropshipListingMode("draft_first").label).toBe("Drafts only");
+    expect(describeDropshipListingMode("manual_only").label).toBe("Manual only");
+    expect(describeDropshipListingMode(null)).toEqual({
+      label: "Not set",
+      description: "The store has no listing mode yet.",
+    });
+  });
+});
