@@ -19,6 +19,7 @@ export async function installWalmartPublicationInventoryFixture(
   await pool.query(cutoverCompositionChannelSeedSql);
   for (const file of [
     "0709_walmart_quantity_admission.sql",
+    "0716_inventory_publication_reconciliation.sql",
   ])
     await pool.query(
       readFileSync(resolve(process.cwd(), "migrations", file), "utf8"),
