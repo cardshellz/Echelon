@@ -4,7 +4,6 @@ import { z } from "zod";
 export const CUSTOMER_RETURN_PROXY_MAX_AGE_SECONDS = 300;
 export const CUSTOMER_RETURN_PROXY_FUTURE_SKEW_SECONDS = 30;
 const MAX_QUERY_BYTES = 8192;
-const MAX_QUERY_PARAMETERS = 40;
 const authorityParameters = new Set([
   "signature",
   "shop",
@@ -60,9 +59,11 @@ function invalidProof(): CustomerReturnShopifyProofError {
   );
 }
 
-/** Shopify's documented query algorithm: decode, group repeated values with
- * commas, sort key=value strings, concatenate, and HMAC SHA-256. Identity and
- * state fields may never repeat; no alternate canonicalization is accepted.
+/** Shopify's documented query algorithm sorts and concatenates decoded
+ * key=value strings, then applies HMAC SHA-256. This returns flow accepts only
+ * its six authority fields, each once: unknown values can otherwise absorb
+ * authority boundaries in the separator-free signed message. Do not broaden
+ * this allowlist to accommodate tracking or other arbitrary query parameters.
  * https://shopify.dev/docs/apps/build/online-store/app-proxies/authenticate-app-proxies
  */
 export function verifyCustomerReturnShopifyProof(input: {
@@ -86,8 +87,8 @@ export function verifyCustomerReturnShopifyProof(input: {
   )
     throw invalidProof();
   const entries = input.rawQuery.split("&");
-  if (entries.length > MAX_QUERY_PARAMETERS) throw invalidProof();
-  const values = new Map<string, string[]>();
+  if (entries.length > authorityParameters.size) throw invalidProof();
+  const values = new Map<string, string>();
   try {
     for (const entry of entries) {
       const separator = entry.indexOf("=");
@@ -99,26 +100,24 @@ export function verifyCustomerReturnShopifyProof(input: {
         entry.slice(separator + 1).replace(/\+/g, " "),
       );
       if (
-        !key ||
-        // Shopify concatenates key=value entries without separators. An '='
-        // in a decoded key can recast a signed guest query as customer proof.
-        key.includes("=") ||
-        key.length > 128 ||
+        // Exact membership also rejects decoded '=' keys. Restricting only
+        // key punctuation cannot prevent collisions via unknown values.
+        !authorityParameters.has(key) ||
+        values.has(key) ||
         value.length > 2048 ||
         /[\u0000-\u001f\u007f]/.test(key + value)
       )
         throw invalidProof();
-      if (authorityParameters.has(key) && values.has(key)) throw invalidProof();
-      values.set(key, [...(values.get(key) ?? []), value]);
+      values.set(key, value);
     }
   } catch {
     throw invalidProof();
   }
-  const signature = values.get("signature")?.[0];
+  const signature = values.get("signature");
   if (!signature || !/^[0-9a-f]{64}$/.test(signature)) throw invalidProof();
   const message = [...values.entries()]
     .filter(([key]) => key !== "signature")
-    .map(([key, value]) => `${key}=${value.join(",")}`)
+    .map(([key, value]) => `${key}=${value}`)
     .sort()
     .join("");
   const calculated = createHmac("sha256", input.shopifySecret)
@@ -127,11 +126,11 @@ export function verifyCustomerReturnShopifyProof(input: {
   if (!timingSafeEqual(calculated, Buffer.from(signature, "hex")))
     throw invalidProof();
   const parsed = proofSchema.safeParse({
-    shop: values.get("shop")?.[0],
-    customerId: values.get("logged_in_customer_id")?.[0],
-    pathPrefix: values.get("path_prefix")?.[0],
-    timestamp: values.get("timestamp")?.[0],
-    ...(values.has("state") ? { state: values.get("state")?.[0] } : {}),
+    shop: values.get("shop"),
+    customerId: values.get("logged_in_customer_id"),
+    pathPrefix: values.get("path_prefix"),
+    timestamp: values.get("timestamp"),
+    ...(values.has("state") ? { state: values.get("state") } : {}),
   });
   if (!parsed.success) throw invalidProof();
   if (parsed.data.shop !== input.expectedShop) {
