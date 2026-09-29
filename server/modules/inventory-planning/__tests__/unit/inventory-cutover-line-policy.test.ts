@@ -40,6 +40,40 @@ function opening(evidence: CutoverReconstructionEvidence) {
 }
 
 describe("cutover saved order identity and tracking policy", () => {
+  it("preserves product-only non-stock shipping without requiring or inventing a stock variant", () => {
+    const evidence = untouchedLine();
+    evidence.items[0].productId = null;
+    evidence.acceptedOmsDemand[0].productVariantId = null;
+    evidence.variants = [];
+    const before = structuredClone(evidence);
+    expect(planCutoverReconstruction(evidence)).toMatchObject({ ready: true, orders: [], blockers: [] });
+    expect(requiredOpeningItems(evidence)).toEqual([]);
+    expect(preflight(evidence).lines[0]).toMatchObject({ disposition: "no_inventory_demand", productVariantId: null });
+    expect(opening(evidence).ready).toBe(true);
+    expect(evidence).toEqual(before);
+  });
+  it.each(["missing_product", "different_product", "tracked_oms", "unknown_oms", "unexpected_variant"])(
+    "does not use product-only non-stock policy to hide %s", conflict => {
+      const evidence = untouchedLine();
+      evidence.items[0].productId = null;
+      evidence.acceptedOmsDemand[0].productVariantId = null;
+      evidence.variants = [];
+      if (conflict === "missing_product") evidence.items[0].catalogProductId = null;
+      if (conflict === "different_product") evidence.acceptedOmsDemand[0].catalogProductId = 21;
+      if (conflict === "tracked_oms") evidence.acceptedOmsDemand[0].inventoryTracking = true;
+      if (conflict === "unknown_oms") evidence.acceptedOmsDemand[0].inventoryTracking = null;
+      if (conflict === "unexpected_variant") evidence.acceptedOmsDemand[0].productVariantId = 101;
+      expect(planCutoverReconstruction(evidence).blockers).toContainEqual(expect.objectContaining({ code: "OMS_ACCEPTED_DEMAND_NOT_COVERED" }));
+      expect(opening(evidence).ready).toBe(false);
+    });
+  it.each(["reservedQty", "pickedQty"] as const)("retains product-only non-stock %s custody as a finding", field => {
+    const evidence = untouchedLine();
+    evidence.items[0].productId = null;
+    evidence.acceptedOmsDemand[0].productVariantId = null;
+    evidence.variants = [];
+    evidence.journals = [{ ...reconstructionEvidence().journals[0], reservedQty: "0", pickedQty: "0", [field]: "1" }];
+    expect(planCutoverReconstruction(evidence).blockers).toContainEqual(expect.objectContaining({ code: "NONINVENTORY_ITEM_ENCUMBERED" }));
+  });
   it.each([false, true])("covers a blank provider SKU through exact IDs (inventory tracking %s)", tracked => {
     const evidence = untouchedLine(tracked), before = structuredClone(evidence);
     const plan = planCutoverReconstruction(evidence);

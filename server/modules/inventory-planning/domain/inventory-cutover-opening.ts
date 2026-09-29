@@ -230,9 +230,9 @@ export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerif
     items: evidence.items.map(item => { const owner = owners.get(item.id); return owner ? { ...item,
       quantity: Number(owner.remainingQty), pickedQuantity: Number(owner.pickedQty), fulfilledQuantity: 0 } : item; }),
     costs: evidence.costs.filter(cost => selectedCosts.has(cost.id)),
-    // Full accepted-OMS coverage is checked on ORIGINAL quantities below. The
-    // opening projection contains remaining quantities and must not recheck them
-    // as if they were the original commercial authorization.
+    // OMS materialization and provider authority are checked against original
+    // WMS quantities/progress below. This remaining-only projection must not
+    // compare itself to the original materialized quantity a second time.
     acceptedOmsDemand: [],
     ...selectActiveCutoverWork(evidence),
   };

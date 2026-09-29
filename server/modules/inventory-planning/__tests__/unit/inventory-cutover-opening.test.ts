@@ -117,9 +117,30 @@ describe("independently verified current inventory opening", () => {
       originalQuantity:1,adjustmentQuantity:0,effectiveQuantity:"1",purpose:"customer_fulfillment",packageStatus }];
     expect(codes(evidence)).toContain("PHYSICAL_SHIPMENT_REQUIRES_REVIEW");
   });
-  it("retains accepted OMS coverage checks on original commercial quantities", () => {
+  it("retains exact OMS materialization and identity coverage", () => {
     const evidence=reconstructionEvidence(); evidence.acceptedOmsDemand=[{ lineId:"999",orderId:"1",productVariantId:101,sku:"P5",authorizedQty:"1",materializedQty:"1",authorizationStatus:"authorized" }];
     expect(codes(evidence)).toContain("OMS_ACCEPTED_DEMAND_NOT_COVERED");
+  });
+  it("keeps a held line while omitting its fully fulfilled sibling from new claims", () => {
+    const evidence = reconstructionEvidence();
+    evidence.journals = []; evidence.costs = [];
+    evidence.levels[0] = { ...evidence.levels[0], reservedQty: "0", pickedQty: "0" };
+    evidence.lots[0] = { ...evidence.lots[0], reservedQty: "0", pickedQty: "0" };
+    evidence.items[0] = { ...evidence.items[0], quantity: 2, pickedQuantity: 2, fulfilledQuantity: 2, status: "completed" };
+    evidence.items.push({ ...evidence.items[0], id: 12, omsOrderLineId: "12", quantity: 1,
+      pickedQuantity: 0, fulfilledQuantity: 0, status: "pending", onHold: true });
+    evidence.acceptedOmsDemand = evidence.items.map(item => ({ lineId: item.omsOrderLineId!, orderId: "9",
+      sku: item.sku, productVariantId: 101, authorizedQty: String(item.quantity - item.fulfilledQuantity),
+      materializedQty: String(item.quantity), authorizationStatus: "authorized" }));
+    const input = verification(evidence);
+    input.owners = evidence.items.map(item => ({ orderId: item.orderId, orderItemId: item.id,
+      remainingQty: String(item.quantity - item.fulfilledQuantity), reservedQty: "0", pickedQty: "0", allocations: [] }));
+    const before = structuredClone(evidence);
+    const result = evaluateCutoverOpening(evidence, input);
+    expect(result.blockers).toEqual([]);
+    expect(result.plan.orders).toMatchObject([{ orderId: 1, lines: [{ orderItemId: 12, requestedQty: "1" }] }]);
+    expect(result.plan.orders.flatMap(order => order.lines)).toHaveLength(1);
+    expect(evidence).toEqual(before);
   });
   it.each(["inventory_cutover_opening_v1", "inventory_cutover_opening_v2"] as const)("%s cannot archive accepted but unfulfilled terminal demand", (contractVersion) => {
     const evidence = reconstructionEvidence();

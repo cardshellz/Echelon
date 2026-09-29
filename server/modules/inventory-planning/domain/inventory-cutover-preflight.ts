@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { WMS_WAREHOUSE_STATUS_VALUES, isTerminalWmsDemandStatus } from "@shared/enums/order-status";
-import { cutoverLineIdentityConflicts, cutoverLineTracksInventory } from "@shared/inventory/cutover-line-policy";
+import { cutoverLineIdentityConflicts, cutoverLineTracksInventory, isProductOnlyNonInventoryLine } from "@shared/inventory/cutover-line-policy";
 import { wmsCutoverDemandCaptureSchema, type WmsCutoverDemandCapture } from "@shared/types/inventory-cutover-demand";
 import { inventoryCutoverEncumbranceSchema, type InventoryCutoverEncumbranceDto } from "@shared/types/inventory-cutover-encumbrance";
 import {
@@ -242,7 +242,8 @@ function classifyDemandLines(
     const fulfilled = BigInt(item.fulfilledQuantity);
     const skuVariants = variantsBySku.get(item.sku.toUpperCase()) ?? [];
     const matches = skuVariants.filter((variant) => variant.isActive);
-    const variant = matches.length === 1 ? matches[0]! : null;
+    const productOnlyNonInventory = isProductOnlyNonInventoryLine(item);
+    const variant = !productOnlyNonInventory && matches.length === 1 ? matches[0]! : null;
     const hasPackageEvidence = physicalItemIds.has(item.id) || sourceItemIds.has(item.id);
     const hasCanonicalInventoryEvidence = claimedItemIds.has(item.id);
     // Current activity controls new inventory demand, but it is not historical
@@ -262,8 +263,8 @@ function classifyDemandLines(
     if (variant && cutoverLineIdentityConflicts(item, variant)) {
       issue("VARIANT_IDENTITY_CONFLICT", "The saved product/variant identity disagrees with the exact SKU mapping.");
     }
-    // A non-stock policy does not supply a missing physical catalog identity.
-    const notInventoryTracked = item.requiresShipping === 0
+    // Physical non-stock items may have a saved product identity without a variant.
+    const notInventoryTracked = item.requiresShipping === 0 || productOnlyNonInventory
       || (variant !== null && cutoverLineTracksInventory(item, variant) === false);
     if (notInventoryTracked) {
       const packageEvidenceConflictsWithShippingConfiguration = hasPackageEvidence
