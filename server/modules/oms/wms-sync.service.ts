@@ -11,6 +11,7 @@
 
 import { db } from "../../db";
 import { sql, eq, and, notInArray } from "drizzle-orm";
+import { CountryCodeValidationError, parseCountryCode } from "@shared/country-code";
 import { omsOrders, omsOrderLines } from "@shared/schema/oms.schema";
 import {
   channelWarehouseAssignments,
@@ -738,6 +739,9 @@ export class WmsSyncService {
       }
 
       const omsOrder = omsOrderResult[0];
+      // Validate before cancellation, reconciliation, reservation, or routing
+      // side effects. Keep missing destinations unknown in the WMS snapshot.
+      const shippingCountry = parseCountryCode(omsOrder.shipToCountry);
       const isTerminalResidualRecovery = mode === "terminal_residual_recovery";
       const isDropshipAcceptanceClaim = mode === "dropship_acceptance_claim";
       const pinnedDropshipWarehouseId = isDropshipAcceptanceClaim
@@ -948,7 +952,7 @@ export class WmsSyncService {
         try {
           routing = await this.services.fulfillmentRouter.routeOrder({
             channelId: omsOrder.channelId,
-            country: (omsOrder as any).shipToCountry ?? null,
+            country: shippingCountry,
             skus: materializableOmsLines.map((l: any) => l.sku).filter(Boolean),
           });
         } catch (err: any) {
@@ -1016,7 +1020,7 @@ export class WmsSyncService {
         shippingCity: omsOrder.shipToCity || null,
         shippingState: omsOrder.shipToState || null,
         shippingPostalCode: omsOrder.shipToZip || null,
-        shippingCountry: omsOrder.shipToCountry || "US",
+        shippingCountry,
         priority,
         shippingServiceLevel: ((omsOrder as any).shippingServiceLevel as string | null) || "standard",
         memberPlanName,
@@ -1321,7 +1325,11 @@ export class WmsSyncService {
       // Before, errors also returned null, so every caller treated a harmless skip as a
       // failure and re-queued/dead-lettered it (e.g. old orders fulfilled in ShipStation
       // before Echelon's WMS existed).
-      console.error(`[WMS Sync] Failed to sync OMS order ${omsOrderId} to WMS: ${err.message}`);
+      if (err instanceof CountryCodeValidationError) {
+        console.error(JSON.stringify({ event: "oms_country_validation_failed", operation: "wms_sync", omsOrderId, code: err.code }));
+      } else {
+        console.error(`[WMS Sync] Failed to sync OMS order ${omsOrderId} to WMS: ${err.message}`);
+      }
       throw err;
     }
   }

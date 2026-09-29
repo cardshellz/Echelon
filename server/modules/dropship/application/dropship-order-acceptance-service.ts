@@ -1,4 +1,5 @@
 import { createHash } from "crypto";
+import { CountryCodeValidationError, requireCountryCode, type CountryCode } from "@shared/country-code";
 import {
   CentsSchema,
   PositiveCentsSchema,
@@ -580,8 +581,8 @@ export function buildDropshipOrderAcceptancePlan(
   assertVendorAndStoreCanAccept(input.vendor);
   assertQuoteBelongsToOrder(input);
 
-  const shipTo = requireCompleteShipTo(input.intake.normalizedPayload.shipTo);
-  assertQuoteDestinationMatchesShipTo(input.quote, shipTo);
+  const shipTo = requireDropshipAcceptanceShipTo(input.intake.normalizedPayload.shipTo);
+  assertDropshipQuoteDestinationMatchesShipTo(input.quote, shipTo);
   assertQuoteItemsMatchOrder(input.quote, input.lines);
   assertPricingPoliciesAllowAcceptance(input.lines, input.pricingPolicies);
   if (input.inventoryValidation === "legacy_exact_sku") {
@@ -808,7 +809,7 @@ function assertQuoteBelongsToOrder(input: DropshipAcceptancePlanningInput): void
   }
 }
 
-function requireCompleteShipTo(
+export function requireDropshipAcceptanceShipTo(
   shipTo: NormalizedDropshipOrderPayload["shipTo"],
 ): Required<NonNullable<NormalizedDropshipOrderPayload["shipTo"]>> {
   const required = ["name", "address1", "city", "region", "postalCode", "country"] as const;
@@ -819,7 +820,7 @@ function requireCompleteShipTo(
       { missingFields: required },
     );
   }
-  const missing = required.filter((field) => !shipTo?.[field]?.trim());
+  const missing = required.filter((field) => typeof shipTo[field] !== "string" || !shipTo[field]!.trim());
   if (missing.length > 0) {
     throw new DropshipError(
       "DROPSHIP_ORDER_SHIPPING_ADDRESS_REQUIRED",
@@ -835,18 +836,18 @@ function requireCompleteShipTo(
     city: shipTo.city!.trim(),
     region: shipTo.region!.trim(),
     postalCode: shipTo.postalCode!.trim(),
-    country: shipTo.country!.trim().toUpperCase(),
+    country: requireDropshipOrderCountry(shipTo.country),
     phone: shipTo.phone?.trim() ?? "",
     email: shipTo.email?.trim() ?? "",
   };
 }
 
-function assertQuoteDestinationMatchesShipTo(
+export function assertDropshipQuoteDestinationMatchesShipTo(
   quote: DropshipAcceptanceQuoteSnapshot,
   shipTo: Required<NonNullable<NormalizedDropshipOrderPayload["shipTo"]>>,
 ): void {
-  const quoteCountry = normalizeCountry(quote.destinationCountry);
-  const shipToCountry = normalizeCountry(shipTo.country);
+  const quoteCountry = requireDropshipOrderCountry(quote.destinationCountry);
+  const shipToCountry = requireDropshipOrderCountry(shipTo.country);
   const quotePostalCode = normalizePostalCode(quote.destinationPostalCode);
   const shipToPostalCode = normalizePostalCode(shipTo.postalCode);
   if (quoteCountry !== shipToCountry || (quotePostalCode && quotePostalCode !== shipToPostalCode)) {
@@ -1112,8 +1113,18 @@ function requirePositiveCents(value: number, field: string): number {
   return result.data;
 }
 
-function normalizeCountry(value: string | null | undefined): string {
-  return (value ?? "").trim().toUpperCase();
+/** Preserve the dropship error boundary without logging untrusted address values. */
+export function requireDropshipOrderCountry(value: unknown): CountryCode {
+  try {
+    return requireCountryCode(value);
+  } catch (error) {
+    if (!(error instanceof CountryCodeValidationError)) throw error;
+    throw new DropshipError(
+      "DROPSHIP_ORDER_SHIP_TO_COUNTRY_INVALID",
+      "Dropship order acceptance requires a recognized destination country.",
+      { retryable: false },
+    );
+  }
 }
 
 function normalizePostalCode(value: string | null | undefined): string {

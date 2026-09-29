@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { eq, inArray, sql, and, or, isNull } from "drizzle-orm";
+import { CountryCodeValidationError, parseCountryCode, type CountryCode } from "@shared/country-code";
 import {
   orders,
   orderItems,
@@ -18,12 +20,41 @@ import type {
 // ---------------------------------------------------------------------------
 
 type DrizzleDb = {
+  transaction: <T>(work: (tx: DrizzleDb) => Promise<T>) => Promise<T>;
   select: (...args: any[]) => any;
   insert: (...args: any[]) => any;
   update: (...args: any[]) => any;
   delete: (...args: any[]) => any;
   execute: (...args: any[]) => any;
 };
+
+interface OrderCountryFields {
+  shippingCountry?: string | null;
+  shipping_country?: string | null;
+}
+
+const ORDER_COMBINING_LOCK = "wms:order-combining:v1";
+
+function orderCountry(order: OrderCountryFields): CountryCode | null {
+  try {
+    return parseCountryCode("shippingCountry" in order ? order.shippingCountry : order.shipping_country);
+  } catch (error) {
+    if (!(error instanceof CountryCodeValidationError)) throw error;
+    return null;
+  }
+}
+
+function requireSameCountry(rows: readonly OrderCountryFields[]): CountryCode {
+  const countries = rows.map(orderCountry);
+  const country = countries[0] ?? null;
+  if (country === null || countries.includes(null)) {
+    throw new CombineError("A recognized destination country is required for every combined order", 400);
+  }
+  if (countries.some(candidate => candidate !== country)) {
+    throw new CombineError("Cannot combine orders from different destination countries", 400);
+  }
+  return country;
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -121,7 +152,7 @@ class OrderCombiningService {
     return postal.replace(/[^0-9A-Za-z]/g, "").substring(0, 5).toUpperCase();
   }
 
-  private createAddressHash(order: {
+  private createAddressHash(order: OrderCountryFields & {
     shippingAddress?: string | null;
     shippingCity?: string | null;
     shippingState?: string | null;
@@ -132,7 +163,9 @@ class OrderCombiningService {
     shipping_state?: string | null;
     shipping_postal_code?: string | null;
     customer_email?: string | null;
-  }): string {
+  }): string | null {
+    const country = orderCountry(order);
+    if (country === null) return null;
     const email = (order.customerEmail || order.customer_email || "").toLowerCase().trim();
     const normalized = [
       this.normalizeAddress(order.shippingAddress || order.shipping_address),
@@ -141,7 +174,9 @@ class OrderCombiningService {
       this.normalizePostalCode(order.shippingPostalCode || order.shipping_postal_code),
       email
     ].join("|");
-    return normalized;
+    if (!normalized.replace(/\|/g, "").trim()) return null;
+    // The persisted address_hash is varchar(64); the address itself is unbounded.
+    return createHash("sha256").update(`${country}|${normalized}`).digest("hex");
   }
 
   // ---- Settings (per-warehouse) ----
@@ -336,7 +371,7 @@ class OrderCombiningService {
 
     for (const order of readyOrders) {
       const hash = this.createAddressHash(order);
-      if (!hash || hash === "||||" || !hash.replace(/\|/g, "").trim()) continue;
+      if (!hash) continue;
       const whId = order.warehouse_id ?? "null";
       const compositeKey = `${whId}::${hash}`;
       if (!groupedByWarehouseAndAddress.has(compositeKey)) {
@@ -385,7 +420,7 @@ class OrderCombiningService {
           shippingCity: first.shipping_city,
           shippingState: first.shipping_state,
           shippingPostalCode: first.shipping_postal_code,
-          shippingCountry: first.shipping_country,
+          shippingCountry: requireSameCountry(grpOrders),
           orders: grpOrders.map((o: any) => ({
             id: o.id,
             orderNumber: o.order_number,
@@ -414,6 +449,15 @@ class OrderCombiningService {
   // ---- Combine orders ----
 
   async combineOrders(orderIds: number[], createdBy: string): Promise<CombineResult> {
+    return this.db.transaction(async tx => {
+      // Groups overlap across requests. Serialize combines before taking any
+      // order locks so selected-member -> remaining-member lock cycles cannot form.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${ORDER_COMBINING_LOCK}))`);
+      return new OrderCombiningService(tx).combineOrdersInTransaction(orderIds, createdBy);
+    });
+  }
+
+  private async combineOrdersInTransaction(orderIds: number[], createdBy: string): Promise<CombineResult> {
     if (!orderIds || !Array.isArray(orderIds) || orderIds.length < 1) {
       throw new CombineError("At least 1 order ID required", 400);
     }
@@ -421,11 +465,15 @@ class OrderCombiningService {
     const ordersToGroup: Order[] = await this.db
       .select()
       .from(orders)
-      .where(inArray(orders.id, orderIds));
+      .where(inArray(orders.id, orderIds))
+      .orderBy(orders.id)
+      .for("update");
 
     if (ordersToGroup.length !== orderIds.length) {
       throw new CombineError("Some orders not found", 400);
     }
+
+    const country = requireSameCountry(ordersToGroup);
 
     for (const order of ordersToGroup) {
       if (order.warehouseStatus !== "ready") {
@@ -469,6 +517,18 @@ class OrderCombiningService {
       if (order.combinedGroupId) existingGroupIds.add(order.combinedGroupId);
     }
     const newOrders = ordersToGroup.filter((o) => !o.combinedGroupId);
+
+    // Validate the complete retained groups, not merely the selected member.
+    // Locks keep concurrent address changes from invalidating the decision.
+    if (existingGroupIds.size > 0) {
+      const groupIds = Array.from(existingGroupIds).sort((a, b) => a - b);
+      const existingGroups: CombinedOrderGroup[] = await this.db.select().from(combinedOrderGroups)
+        .where(inArray(combinedOrderGroups.id, groupIds)).orderBy(combinedOrderGroups.id).for("update");
+      const existingMembers: Order[] = await this.db.select().from(orders)
+        .where(inArray(orders.combinedGroupId, groupIds)).orderBy(orders.id).for("update");
+      if (existingGroups.length !== groupIds.length) throw new CombineError("Existing combined group not found", 400);
+      requireSameCountry([...ordersToGroup, ...existingGroups, ...existingMembers]);
+    }
 
     // --- Add-to-group: all combined orders belong to one group, just add new ones ---
     if (existingGroupIds.size === 1 && newOrders.length > 0) {
@@ -592,7 +652,7 @@ class OrderCombiningService {
         shippingCity: parentOrder.shippingCity,
         shippingState: parentOrder.shippingState,
         shippingPostalCode: parentOrder.shippingPostalCode,
-        shippingCountry: parentOrder.shippingCountry,
+        shippingCountry: country,
         addressHash: this.createAddressHash(parentOrder),
         orderCount: ordersToGroup.length,
         totalItems: ordersToGroup.reduce((sum, o) => sum + (o.itemCount || 0), 0),
@@ -633,6 +693,16 @@ class OrderCombiningService {
     createdBy: string,
     warehouseId?: number | null
   ): Promise<{ groupsCreated: number; totalOrdersCombined: number }> {
+    return this.db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${ORDER_COMBINING_LOCK}))`);
+      return new OrderCombiningService(tx).combineAllInTransaction(createdBy, warehouseId);
+    });
+  }
+
+  private async combineAllInTransaction(
+    createdBy: string,
+    warehouseId?: number | null
+  ): Promise<{ groupsCreated: number; totalOrdersCombined: number }> {
     const scopedFilter = warehouseId != null
       ? sql`AND o.warehouse_id = ${warehouseId}`
       : sql``;
@@ -652,6 +722,8 @@ class OrderCombiningService {
         WHERE o.warehouse_status = 'ready'
           AND o.on_hold = 0
           ${scopedFilter}
+        ORDER BY o.id
+        FOR UPDATE OF o
       `);
     } catch {
       throw new CombineError("Failed to query orders", 500);
@@ -664,7 +736,7 @@ class OrderCombiningService {
 
     for (const order of readyOrders) {
       const hash = this.createAddressHash(order);
-      if (!hash || hash === "||||" || !hash.replace(/\|/g, "").trim()) continue;
+      if (!hash) continue;
       const whId = order.warehouse_id ?? "null";
       const compositeKey = `${whId}::${hash}`;
       if (!groupedByWarehouseAndAddress.has(compositeKey)) {
@@ -761,7 +833,7 @@ class OrderCombiningService {
           shippingCity: parentOrder.shipping_city,
           shippingState: parentOrder.shipping_state,
           shippingPostalCode: parentOrder.shipping_postal_code,
-          shippingCountry: parentOrder.shipping_country,
+          shippingCountry: requireSameCountry(grpOrders),
           addressHash: this.createAddressHash(parentOrder),
           orderCount: grpOrders.length,
           totalItems: grpOrders.reduce((sum: number, o: any) => sum + (o.item_count || 0), 0),
@@ -910,6 +982,10 @@ class OrderCombiningService {
       throw new CombineError("No orders found in group", 400);
     }
 
+    // Historical groups may predate country-aware grouping. Never ship one
+    // member's country as if it described a contradictory or unknown sibling.
+    const country = requireSameCountry([group, ...groupOrders]);
+
     // Get all items across all orders in the group
     const orderIdList = groupOrders.map((o: Order) => o.id);
     const items = await this.db
@@ -931,7 +1007,7 @@ class OrderCombiningService {
         city: group.shippingCity,
         state: group.shippingState,
         postalCode: group.shippingPostalCode,
-        country: group.shippingCountry,
+        country,
       },
       orders: groupOrders.map((o: Order) => ({
         id: o.id,

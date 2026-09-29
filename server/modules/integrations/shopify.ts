@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { resolveProviderCountryCode } from "@shared/country-code";
 
 // Use existing variable names from user's Shopify app setup
 
@@ -491,7 +492,7 @@ export function extractOrderFromWebhookPayload(payload: ShopifyOrder): Extracted
     shippingCity: shipping?.city || null,
     shippingState: shipping?.province || null,
     shippingPostalCode: shipping?.zip || null,
-    shippingCountry: shipping?.country || null,
+    shippingCountry: resolveProviderCountryCode(shipping?.country_code, shipping?.country),
     // Display only
     totalAmount: payload.total_price || null,
     currency: payload.currency || "USD",

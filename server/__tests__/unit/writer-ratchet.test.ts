@@ -46,6 +46,14 @@ describe("writer-ratchet (P2.1)", () => {
     expect(baseline["oms.archon_order_outbox"]).toEqual(["modules/oms"]);
   });
 
+  it("keeps country-repair approval and audit writes in the Orders maintenance owner", () => {
+    for (const table of ["oms.order_country_repair_operations", "oms.order_country_repairs"]) {
+      expect(current[table]).toEqual(["modules/orders"]);
+      expect(currentIncludingScripts[table]).toEqual(["modules/orders"]);
+      expect(baseline[table]).toEqual(["modules/orders"]);
+    }
+  });
+
   it("channel product identities have only the Channels owning writer, including operational scripts", () => {
     expect(current["channels.channel_product_identities"]).toEqual(["modules/channels"]);
     expect(currentIncludingScripts["channels.channel_product_identities"]).toEqual(["modules/channels"]);

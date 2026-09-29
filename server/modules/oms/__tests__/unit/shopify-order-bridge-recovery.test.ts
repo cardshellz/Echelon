@@ -35,6 +35,33 @@ function rawOrder(id: string, orderNumber: string) {
 }
 
 describe("Shopify raw-to-OMS bridge recovery", () => {
+  it.each([["United States", "US"], ["Canada", "CA"], [null, null], [" ", null]])(
+    "normalizes raw country %j before passing it to OMS", async (country, expected) => {
+      const execute = vi.fn()
+        .mockResolvedValueOnce({ rows: [{ ...rawOrder("1001", "#1001"), shipping_country: country }] })
+        .mockResolvedValueOnce({ rows: [{ channel_id: 36 }] })
+        .mockResolvedValueOnce({ rows: [] });
+      const ingestOrder = vi.fn().mockResolvedValue({ id: 10 });
+      await bridgeShopifyOrderToOms({ execute }, { ingestOrder } as any, "1001");
+      expect(ingestOrder).toHaveBeenCalledWith(36, "1001", expect.objectContaining({ shipToCountry: expected }));
+    },
+  );
+
+  it.each(["XX", "private-invalid-country", 123])("rejects malformed raw country %j before OMS ingestion", async country => {
+    const execute = vi.fn().mockResolvedValueOnce({ rows: [{ ...rawOrder("1001", "#1001"), shipping_country: country }] });
+    const ingestOrder = vi.fn();
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await expect(bridgeShopifyOrderToOms({ execute }, { ingestOrder } as any, "1001"))
+        .rejects.toMatchObject({ code: "ORDER_COUNTRY_INVALID" });
+      expect(ingestOrder).not.toHaveBeenCalled();
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(log).toHaveBeenCalledWith(JSON.stringify({ event: "oms_country_validation_failed", operation: "shopify_bridge", code: "ORDER_COUNTRY_INVALID", shopifyOrderId: "1001" }));
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("uses schema-qualified channel authority and never silently returns on routing failure", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce({ rows: [rawOrder("gid://shopify/Order/12161715011743", "#60303")] })

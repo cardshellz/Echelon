@@ -449,6 +449,27 @@ describe("DropshipOrderAcceptanceService", () => {
 });
 
 describe("buildDropshipOrderAcceptancePlan", () => {
+  it.each([["Canada", "CA"], ["UK", "GB"], ["United States", "US"]])("canonicalizes %s without changing the input", (country, expected) => {
+    const input = makePlanningInput();
+    input.intake.normalizedPayload.shipTo!.country = country;
+    input.quote.destinationCountry = expected;
+    expect(buildDropshipOrderAcceptancePlan(input).shipTo.country).toBe(expected);
+    expect(input.intake.normalizedPayload.shipTo!.country).toBe(country);
+  });
+
+  it("rejects matching bogus country codes in both order and quote", () => {
+    const input = makePlanningInput();
+    input.intake.normalizedPayload.shipTo!.country = "XX";
+    input.quote.destinationCountry = "XX";
+    expectDropshipError(() => buildDropshipOrderAcceptancePlan(input), "DROPSHIP_ORDER_SHIP_TO_COUNTRY_INVALID");
+  });
+
+  it("preserves the missing-address error for an absent country", () => {
+    const input = makePlanningInput();
+    input.intake.normalizedPayload.shipTo!.country = undefined;
+    expectDropshipError(() => buildDropshipOrderAcceptancePlan(input), "DROPSHIP_ORDER_SHIPPING_ADDRESS_REQUIRED");
+  });
+
   it("holds an order for a vendor paused for funding whatever the balance, under the normal hold window", () => {
     const plan = buildDropshipOrderAcceptancePlan(makePlanningInput({
       vendor: { ...makePlanningInput().vendor, vendorStatus: "paused", vendorStandingReason: "card_declined" },

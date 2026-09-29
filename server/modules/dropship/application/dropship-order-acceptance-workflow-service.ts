@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
 import { syncDropshipAcceptedOrderToWmsSafely } from "./dropship-fulfillment-sync-dispatch";
+import { requireDropshipOrderCountry } from "./dropship-order-acceptance-service";
 import type { NormalizedDropshipOrderPayload } from "./dropship-order-intake-service";
 import type {
   DropshipOrderAcceptanceResult,
@@ -181,14 +182,7 @@ function quoteDestinationFromOrder(
   intakeId: number,
 ): { country: string; region?: string; postalCode: string } {
   const shipTo = requireCompleteShipToForAcceptance(payload.shipTo, intakeId);
-  const country = requiredTrimmedString(shipTo?.country, "shipTo.country", 2, intakeId).toUpperCase();
-  if (country.length !== 2) {
-    throw new DropshipError(
-      "DROPSHIP_ORDER_SHIP_TO_COUNTRY_INVALID",
-      "Dropship order ship-to country must be a two-letter country code.",
-      { intakeId, country },
-    );
-  }
+  const country = requireDropshipOrderCountry(shipTo.country);
   const postalCode = requiredTrimmedString(shipTo?.postalCode, "shipTo.postalCode", 20, intakeId);
   const region = optionalTrimmedString(shipTo?.region, "shipTo.region", 100, intakeId);
   return region ? { country, region, postalCode } : { country, postalCode };
@@ -210,7 +204,7 @@ function requireCompleteShipToForAcceptance(
   requiredTrimmedString(shipTo.city, "shipTo.city", 120, intakeId);
   requiredTrimmedString(shipTo.region, "shipTo.region", 100, intakeId);
   requiredTrimmedString(shipTo.postalCode, "shipTo.postalCode", 20, intakeId);
-  requiredTrimmedString(shipTo.country, "shipTo.country", 2, intakeId);
+  requiredTrimmedString(shipTo.country, "shipTo.country", 100, intakeId);
   return shipTo;
 }
 

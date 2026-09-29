@@ -16,6 +16,7 @@ import { createHmac } from "crypto";
 import type { Request, Response, Express } from "express";
 import * as crypto from "crypto";
 import { sql, eq, and, ilike } from "drizzle-orm";
+import { CountryCodeValidationError, parseCountryCode, resolveProviderCountryCode } from "@shared/country-code";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
 import { omsOrders, omsOrderLines, omsOrderEvents, channelConnections } from "@shared/schema";
 import { db } from "../../db";
@@ -533,10 +534,13 @@ export const __test__ = {
   ...refundCascadeTest,
   mapShopifyLineFulfillmentStatus,
   deriveOmsUpdateFinality,
+  mapShopifyOrderToOrderData,
+  canonicalShipToFromShopifyUpdate,
 };
 
 function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
   const shipping = shopifyOrder.shipping_address || {};
+  const shipToCountry = resolveProviderCountryCode(shipping.country_code, shipping.country);
   const customer = shopifyOrder.customer || {};
 
   // Use normalizer to extract line items with full discount splitting
@@ -609,7 +613,7 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
     shipToCity: shipping.city,
     shipToState: shipping.province_code || shipping.province,
     shipToZip: shipping.zip,
-    shipToCountry: shipping.country_code || shipping.country,
+    shipToCountry,
     shippingMethod: shopifyOrder.shipping_lines?.[0]?.title || null,
     shippingMethodCode: shopifyOrder.shipping_lines?.[0]?.code || null,
     // Card Shellz only offers 'standard' today. When expedited/overnight
@@ -704,6 +708,13 @@ function canonicalShipToFromShopifyUpdate(shopifyOrder: any, existing: any): Can
   const shipping = shopifyOrder?.shipping_address && typeof shopifyOrder.shipping_address === "object"
     ? shopifyOrder.shipping_address
     : {};
+  // Omitted fields in a partial update preserve the existing country; an
+  // explicit unknown destination clears it. Neither path invents a US address.
+  const hasCountry = Object.prototype.hasOwnProperty.call(shipping, "country_code")
+    || Object.prototype.hasOwnProperty.call(shipping, "country");
+  const country = hasCountry
+    ? resolveProviderCountryCode(shipping.country_code, shipping.country)
+    : parseCountryCode(existing.shipToCountry);
   const customerName =
     `${shopifyOrder?.customer?.first_name || ""} ${shopifyOrder?.customer?.last_name || ""}`.trim();
 
@@ -715,7 +726,7 @@ function canonicalShipToFromShopifyUpdate(shopifyOrder: any, existing: any): Can
     city: cleanString(shipping.city) || existing.shipToCity || null,
     state: cleanString(shipping.province_code) || cleanString(shipping.province) || existing.shipToState || null,
     zip: cleanString(shipping.zip) || existing.shipToZip || null,
-    country: cleanString(shipping.country_code) || cleanString(shipping.country) || existing.shipToCountry || null,
+    country,
   };
 }
 
@@ -979,6 +990,9 @@ export function registerOmsWebhooks(
   }
 
   async function markInboxFailed(receipt: WebhookInboxReceipt, err: any): Promise<void> {
+    if (err instanceof CountryCodeValidationError) {
+      console.error(JSON.stringify({ event: "oms_country_validation_failed", operation: "shopify_webhook", inboxId: receipt.id, code: err.code }));
+    }
     try {
       await markWebhookFailed(db, receipt.id, err);
     } catch (markErr: any) {
@@ -1243,7 +1257,7 @@ export function registerOmsWebhooks(
             shipping_city = ${nextShipTo.city},
             shipping_state = ${nextShipTo.state},
             shipping_postal_code = ${nextShipTo.zip},
-            shipping_country = ${nextShipTo.country || "US"},
+            shipping_country = ${nextShipTo.country},
             financial_status = ${shopifyOrder.financial_status || "paid"},
             warehouse_status = CASE
               WHEN warehouse_status = 'pending' AND ${isPaidNow} THEN 'ready'

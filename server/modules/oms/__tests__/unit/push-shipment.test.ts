@@ -89,6 +89,23 @@ function okItem(
   };
 }
 
+const rejectedShippingCountries: Array<{
+  label: string;
+  country: unknown;
+  reasonCode: "ORDER_COUNTRY_REQUIRED" | "ORDER_COUNTRY_INVALID";
+}> = [
+  { label: "null", country: null, reasonCode: "ORDER_COUNTRY_REQUIRED" },
+  { label: "missing", country: undefined, reasonCode: "ORDER_COUNTRY_REQUIRED" },
+  { label: "empty", country: "", reasonCode: "ORDER_COUNTRY_REQUIRED" },
+  { label: "blank", country: " \t ", reasonCode: "ORDER_COUNTRY_REQUIRED" },
+  { label: "unknown code", country: "XX", reasonCode: "ORDER_COUNTRY_INVALID" },
+  { label: "unknown name", country: "private-country-value", reasonCode: "ORDER_COUNTRY_INVALID" },
+  { label: "number", country: 123, reasonCode: "ORDER_COUNTRY_INVALID" },
+  { label: "boolean", country: false, reasonCode: "ORDER_COUNTRY_INVALID" },
+  { label: "object", country: { country: "US" }, reasonCode: "ORDER_COUNTRY_INVALID" },
+  { label: "array", country: ["US"], reasonCode: "ORDER_COUNTRY_INVALID" },
+];
+
 // ─── validateShipmentForPush (pure) ──────────────────────────────────
 
 describe("validateShipmentForPush :: happy path", () => {
@@ -426,23 +443,18 @@ describe("validateShipmentForPush :: shipping country", () => {
     ).not.toThrow();
   });
 
-  it("accepts an empty country (defaults to US at push time)", () => {
-    expect(() =>
-      validateShipmentForPush(okShipment(), okOrder({ shipping_country: "" }), [okItem()]),
-    ).not.toThrow();
-  });
-
-  it("throws a permanent SS_PUSH_INVALID_SHIPMENT for a non-empty unmappable country", () => {
+  it.each(rejectedShippingCountries)("rejects $label country without retaining its raw value", ({ country, reasonCode }) => {
     let err: ShipStationPushError | undefined;
     try {
-      validateShipmentForPush(okShipment(), okOrder({ shipping_country: "Freedonia" }), [okItem()]);
+      validateShipmentForPush(okShipment(), okOrder({ shipping_country: country as WmsOrderRow["shipping_country"] }), [okItem()]);
     } catch (e) {
       err = e as ShipStationPushError;
     }
     expect(err).toBeInstanceOf(ShipStationPushError);
-    expect(err?.context.code).toBe(SS_PUSH_INVALID_SHIPMENT);
-    expect(err?.context.field).toBe("order.shipping_country");
-    expect(err?.context.value).toBe("Freedonia");
+    expect(err?.context).toEqual({ code: SS_PUSH_INVALID_SHIPMENT, shipmentId: 9001,
+      field: "order.shipping_country", reasonCode });
+    expect(err?.message).not.toContain("private-country-value");
+    expect(err).not.toHaveProperty("cause");
   });
 });
 
@@ -807,6 +819,29 @@ describe("pushShipment :: happy path", () => {
   afterEach(() => {
     globalThis.fetch = ORIGINAL_FETCH;
     vi.restoreAllMocks();
+  });
+
+  it.each([
+    { country: " United States ", expected: "US" },
+    { country: "uk", expected: "GB" },
+    { country: "Canada", expected: "CA" },
+    { country: "México", expected: "MX" },
+  ])("sends the recognized country $country as $expected", async ({ country, expected }) => {
+    const mock = makeDb([
+      { rows: [okShipment()] },
+      { rows: [okOrder({ shipping_country: country })] },
+      { rows: [{ non_shipping_total_cents: 0 }] },
+      { rows: [okItem()] },
+    ]);
+    const fetchMock = mockFetchForPush({ orderId: 555000, orderStatus: "awaiting_shipment" });
+    globalThis.fetch = fetchMock as any;
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+
+    await svc.pushShipment(9001);
+
+    const post = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(post).toBeDefined();
+    expect(JSON.parse(post![1].body).shipTo.country).toBe(expected);
   });
 
   it("reads WMS, calls SS /createorder, and UPDATEs the shipment to queued", async () => {
@@ -1460,6 +1495,52 @@ describe("pushShipment :: error cases", () => {
   afterEach(() => {
     globalThis.fetch = ORIGINAL_FETCH;
     vi.restoreAllMocks();
+  });
+
+  describe.each([false, true])("country validation with existing provider order %s", isUpdate => {
+    it.each(rejectedShippingCountries)("rejects $label before provider reads, writes or local updates", async ({ country, reasonCode }) => {
+      const shipment = okShipment({ ...(isUpdate ? { status: "queued", shipstation_order_id: 555000 } : {}) });
+      const mock = makeDb([
+        { rows: [shipment] },
+        { rows: [okOrder({ shipping_country: country as WmsOrderRow["shipping_country"] })] },
+        { rows: [{ non_shipping_total_cents: 0 }] },
+        { rows: [okItem()] },
+        { rows: [{ order_shippable_qty: 2, shipment_shippable_qty: 2 }] },
+      ]);
+      const fetchMock = vi.fn();
+      globalThis.fetch = fetchMock as any;
+      const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+
+      const error = await svc.pushShipment(shipment.id).catch(cause => cause);
+
+      expect(error).toBeInstanceOf(ShipStationPushError);
+      expect(error.context).toEqual({ code: SS_PUSH_INVALID_SHIPMENT, shipmentId: shipment.id,
+        field: "order.shipping_country", reasonCode });
+      expect(error.message).not.toContain("private-country-value");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(mock.db.transaction).not.toHaveBeenCalled();
+      expect(mock.getCallCount()).toBe(5);
+    });
+  });
+
+  it("keeps the cancelled provider order guard after local destination validation", async () => {
+    const mock = makeDb([
+      { rows: [okShipment({ status: "queued", shipstation_order_id: 555000 })] },
+      { rows: [okOrder()] },
+      { rows: [{ non_shipping_total_cents: 0 }] },
+      { rows: [okItem()] },
+      { rows: [{ order_shippable_qty: 2, shipment_shippable_qty: 2 }] },
+    ]);
+    const fetchMock = mockFetchOnceOk({ orderId: 555000, orderStatus: "cancelled" });
+    globalThis.fetch = fetchMock as any;
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+
+    await expect(svc.pushShipment(9001)).rejects.toMatchObject({ context: {
+      code: SS_PUSH_INVALID_SHIPMENT, field: "ss_order.cancelled", value: 555000,
+    } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1].method).toBe("GET");
+    expect(mock.db.transaction).not.toHaveBeenCalled();
   });
 
   it("throws ShipStationPushError when shipment is not found", async () => {

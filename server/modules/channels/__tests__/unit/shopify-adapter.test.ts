@@ -150,6 +150,21 @@ describe("Shopify Adapter", () => {
   // -----------------------------------------------------------------------
 
   describe("order mapping (receiveOrder)", () => {
+    it.each([
+      [{ country_code: " us ", country: "United States" }, "US"],
+      [{ country_code: " ", country: "Canada" }, "CA"],
+      [null, null],
+    ])("normalizes the provider country without guessing for %j", async (shipping_address, country) => {
+      const scopedAdapter = new ShopifyAdapter(createMockDb({ shopDomain: "test.myshopify.com", accessToken: "token", webhookSecret: null }) as any);
+      const order = await scopedAdapter.receiveOrder(1, { id: 1, shipping_address }, {});
+      expect(order?.shippingAddress?.country).toBe(country);
+    });
+    it.each([{ country_code: "ZZ", country: "United States" }, { country: "Atlantis" }, { country_code: 123 }])(
+      "rejects malformed country evidence %j before yielding an ingestible order", async shipping_address => {
+        const scopedAdapter = new ShopifyAdapter(createMockDb({ shopDomain: "test.myshopify.com", accessToken: "token", webhookSecret: null }) as any);
+        await expect(scopedAdapter.receiveOrder(1, { id: 1, shipping_address }, {})).rejects.toMatchObject({ code: "ORDER_COUNTRY_INVALID" });
+      },
+    );
     it("should map a Shopify order to canonical ChannelOrder format", async () => {
       const shopifyOrder = {
         id: 5551234567890,

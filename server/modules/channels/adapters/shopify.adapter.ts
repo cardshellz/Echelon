@@ -9,6 +9,7 @@
  */
 
 import { and, eq } from "drizzle-orm";
+import { resolveProviderCountryCode } from "@shared/country-code";
 import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../provider-request-limits";
 import {
   channelConnections,
@@ -450,7 +451,7 @@ export class ShopifyAdapter implements IChannelAdapter {
         city: shipping.city || null,
         province: shipping.province || null,
         zip: shipping.zip || null,
-        country: shipping.country_code || shipping.country || null,
+        country: resolveProviderCountryCode(shipping.country_code, shipping.country),
         phone: shipping.phone || null,
       },
       lineItems,

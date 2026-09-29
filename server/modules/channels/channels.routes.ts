@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { z } from "zod";
+import { CountryCodeValidationError, parseCountryCode } from "@shared/country-code";
 import { awaitPageReads, limitPageRead } from "../../platform/http/page-read-limit";
 import { channelsStorage } from "../channels";
 import { ordersStorage, orderPageQuerySchema } from "../orders";
@@ -252,7 +253,7 @@ export function registerChannelRoutes(app: Express) {
     shippingCity: z.string().optional(),
     shippingState: z.string().optional(),
     shippingPostalCode: z.string().optional(),
-    shippingCountry: z.string().optional(),
+    shippingCountry: z.unknown().optional(),
     notes: z.string().optional(),
     items: z.array(z.object({
       sku: z.string().min(1, "SKU required"),
@@ -274,6 +275,9 @@ export function registerChannelRoutes(app: Express) {
       }
 
       const data = parseResult.data;
+      // Validate before OMS intake: a rejected country must not leave a parent
+      // order behind when the later WMS write rejects the same address.
+      const shippingCountry = parseCountryCode(data.shippingCountry);
       const requestedSkus = [...new Set(data.items.map((item) => item.sku.trim().toUpperCase()))];
       const catalogVariants = await db
         .select({
@@ -322,7 +326,7 @@ export function registerChannelRoutes(app: Express) {
           shipToCity: data.shippingCity || undefined,
           shipToState: data.shippingState || undefined,
           shipToZip: data.shippingPostalCode || undefined,
-          shipToCountry: data.shippingCountry || undefined,
+          shipToCountry: shippingCountry ?? undefined,
           currency: data.currency,
           subtotalCents: 0,
           shippingCents: 0,
@@ -364,7 +368,7 @@ export function registerChannelRoutes(app: Express) {
         shippingCity: data.shippingCity || null,
         shippingState: data.shippingState || null,
         shippingPostalCode: data.shippingPostalCode || null,
-        shippingCountry: data.shippingCountry || null,
+        shippingCountry,
         notes: data.notes || null,
         warehouseStatus: "ready" as const,
         itemCount: data.items.reduce((sum, item) => sum + item.quantity, 0),
@@ -390,6 +394,9 @@ export function registerChannelRoutes(app: Express) {
 
       res.status(201).json(order);
     } catch (error) {
+      if (error instanceof CountryCodeValidationError) {
+        return res.status(400).json({ code: error.code, error: error.message, field: "shippingCountry" });
+      }
       if (error instanceof WmsOrderInvariantError) {
         console.error("[manual-order] WMS invariant violation:", error);
         return res.status(500).json({

@@ -12,7 +12,10 @@ import {
 import { db } from "../../db";
 import { OrderListRepository, type OrderPage, type OrderPageQuery, type OrderScanQuery, type OrderWithItems } from "./order-list.repository";
 import { eq, ne, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
-import { ValidationError } from "../../../shared/errors";
+import { IntegrityError, ValidationError } from "../../../shared/errors";
+import { parseCountryCode } from "@shared/country-code";
+import { wmsOmsOrderLinkSql } from "../oms/oms-wms-order-link.sql";
+import { normalizeShopifyRepairOrderId, normalizeShopifyRepairShopDomain, type ShopifyCustomerRepairScope } from "./shopify-customer-repair";
 import { computeSortRank, resolveSlaDueAt } from "./sort-rank";
 import { getSlaCutoffConfig, type SlaCutoffConfig } from "../warehouse/settings.resolver";
 import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
@@ -55,6 +58,8 @@ const SHIPMENT_DERIVED_STATUSES = new Set<OrderStatus>([
 
 const WMS_ORDER_CREATE_LOCK_NAMESPACE = 917403;
 const DEFAULT_FULFILLMENT_PARTITION_KEY = "default";
+// Keep repair query parameter counts bounded without committing partial batches.
+const ORDER_ADDRESS_BACKFILL_BATCH_SIZE = 500;
 
 function fulfillmentPartitionKeyForCreate(order: InsertOrder): string {
   return String((order as any).fulfillmentPartitionKey || DEFAULT_FULFILLMENT_PARTITION_KEY);
@@ -342,7 +347,7 @@ export interface IOrderStorage {
   syncFulfilledStatusesFromShopify(): Promise<void>;
   backfillOrdersFromOms(): Promise<{ updated: number }>;
   countOrdersMissingShippingData(): Promise<number>;
-  updateOmsRawOrderCustomer(orderId: string, data: {
+  updateOmsRawOrderCustomer(scope: ShopifyCustomerRepairScope, data: {
     customerName: string;
     customerEmail: string | null;
     shippingName: string | null;
@@ -790,6 +795,7 @@ export const orderMethods: IOrderStorage = {
   },
 
   async createOrderWithItems(order: InsertOrder, items: InsertOrderItem[], txOverride?: any): Promise<Order> {
+    const shippingCountry = parseCountryCode(order.shippingCountry);
     const create = async (tx: any): Promise<Order> => {
       await lockWmsOrderCreate(tx, order);
 
@@ -804,6 +810,7 @@ export const orderMethods: IOrderStorage = {
       // this function's signature once all direct callers are migrated.
       const payload = {
         ...order,
+        shippingCountry,
         itemCount: items.reduce((sum, item) => sum + item.quantity, 0),
       } as WmsOrderInsert;
       const { id: newOrderId } = await insertWmsOrder(tx, payload);
@@ -1055,6 +1062,9 @@ export const orderMethods: IOrderStorage = {
 
   async updateOrderFields(orderId: number, updates: Partial<Order>): Promise<Order | null> {
     const { id, createdAt, ...safeUpdates } = updates as any;
+    if (safeUpdates.shippingCountry !== undefined) {
+      safeUpdates.shippingCountry = parseCountryCode(safeUpdates.shippingCountry);
+    }
     
     if (Object.keys(safeUpdates).length === 0) {
       const existing = await this.getOrderById(orderId);
@@ -1399,20 +1409,57 @@ export const orderMethods: IOrderStorage = {
   },
 
   async backfillOrdersFromOms(): Promise<{ updated: number }> {
-    const result = await db.execute(sql`
-      UPDATE wms.orders o SET
-        customer_name = COALESCE(oms.customer_name, oms.ship_to_name, o.customer_name),
-        customer_email = COALESCE(oms.customer_email, o.customer_email),
-        shipping_address = COALESCE(oms.ship_to_address1, o.shipping_address),
-        shipping_city = COALESCE(oms.ship_to_city, o.shipping_city),
-        shipping_state = COALESCE(oms.ship_to_state, o.shipping_state),
-        shipping_postal_code = COALESCE(oms.ship_to_zip, o.shipping_postal_code),
-        shipping_country = COALESCE(oms.ship_to_country, o.shipping_country)
-      FROM oms.oms_orders oms
-      WHERE o.order_number = oms.external_order_number
-        AND (o.shipping_address IS NULL OR o.shipping_city IS NULL)
-    `);
-    return { updated: result.rowCount || 0 };
+    return db.transaction(async tx => {
+      // Lock the exact inputs before validation so a concurrent address edit
+      // cannot replace the verified country before the repair writes it.
+      const candidates = await tx.execute<{ id: number; oms_order_id: number; shipping_country: string | null }>(sql`
+        SELECT o.id, oms.id AS oms_order_id,
+          COALESCE(oms.ship_to_country, o.shipping_country) AS shipping_country
+        FROM wms.orders o
+        JOIN oms.oms_orders oms ON ${wmsOmsOrderLinkSql(sql`oms.id`, {
+          source: sql`o.source`,
+          omsFulfillmentOrderId: sql`o.oms_fulfillment_order_id`,
+          legacySourceTableId: sql`o.source_table_id`,
+        })} AND o.channel_id = oms.channel_id
+        WHERE (o.shipping_address IS NULL OR o.shipping_city IS NULL)
+          -- These source forms agree with both the shared link resolver and
+          -- migration108's OMS authority. Do not guess other legacy provenance.
+          AND (o.source = 'shopify' OR (
+            o.source = 'oms'
+            AND o.oms_fulfillment_order_id ~ '^[0-9]+$'
+            AND LENGTH(o.oms_fulfillment_order_id) <= 18
+          ))
+        ORDER BY o.id, oms.id
+        FOR UPDATE OF o, oms
+      `);
+      const seen = new Set<number>();
+      const normalized = candidates.rows.map(row => {
+        if (seen.has(row.id)) throw new IntegrityError("Order address repair requires one unambiguous OMS source.");
+        seen.add(row.id);
+        return { ...row, country: parseCountryCode(row.shipping_country) };
+      });
+      let updated = 0;
+      for (let offset = 0; offset < normalized.length; offset += ORDER_ADDRESS_BACKFILL_BATCH_SIZE) {
+        const batch = normalized.slice(offset, offset + ORDER_ADDRESS_BACKFILL_BATCH_SIZE);
+        const result = await tx.execute(sql`
+          UPDATE wms.orders o SET
+            customer_name = COALESCE(oms.customer_name, oms.ship_to_name, o.customer_name),
+            customer_email = COALESCE(oms.customer_email, o.customer_email),
+            shipping_address = COALESCE(oms.ship_to_address1, o.shipping_address),
+            shipping_city = COALESCE(oms.ship_to_city, o.shipping_city),
+            shipping_state = COALESCE(oms.ship_to_state, o.shipping_state),
+            shipping_postal_code = COALESCE(oms.ship_to_zip, o.shipping_postal_code),
+            shipping_country = normalized.country
+          FROM oms.oms_orders oms,
+            (VALUES ${sql.join(batch.map(row => sql`(${row.id}::integer, ${row.oms_order_id}::integer, ${row.country}::text)`), sql`, `)})
+            AS normalized(order_id, oms_order_id, country)
+          WHERE o.id = normalized.order_id AND oms.id = normalized.oms_order_id
+            AND o.channel_id = oms.channel_id
+        `);
+        updated += result.rowCount || 0;
+      }
+      return { updated };
+    });
   },
 
   async countOrdersMissingShippingData(): Promise<number> {
@@ -1425,7 +1472,7 @@ export const orderMethods: IOrderStorage = {
     return parseInt(result.rows[0]?.count || '0', 10);
   },
 
-  async updateOmsRawOrderCustomer(orderId: string, data: {
+  async updateOmsRawOrderCustomer(scope: ShopifyCustomerRepairScope, data: {
     customerName: string;
     customerEmail: string | null;
     shippingName: string | null;
@@ -1436,8 +1483,39 @@ export const orderMethods: IOrderStorage = {
     shippingPostalCode: string | null;
     shippingCountry: string | null;
   }): Promise<number> {
-    const result = await db.execute(sql`
-      UPDATE oms_orders SET
+    const shippingCountry = parseCountryCode(data.shippingCountry);
+    const shopDomain = normalizeShopifyRepairShopDomain(scope?.shopDomain);
+    const externalOrderId = normalizeShopifyRepairOrderId(scope?.externalOrderId);
+    const numericOrderId = externalOrderId.slice("gid://shopify/Order/".length);
+    return db.transaction(async tx => {
+      // Hold the resolved channel and connection through the write. A default
+      // channel or display number can never establish provider ownership.
+      const connections = await tx.execute<{ channel_id: number }>(sql`
+        SELECT c.id AS channel_id
+        FROM channels.channels c
+        JOIN channels.channel_connections cc ON cc.channel_id = c.id
+        WHERE c.provider = 'shopify' AND c.status = 'active'
+          AND LOWER(BTRIM(cc.shop_domain)) = ${shopDomain}
+        ORDER BY c.id, cc.id
+        LIMIT 2
+        FOR SHARE OF c, cc
+      `);
+      if (connections.rows.length !== 1) {
+        throw new IntegrityError("Customer repair requires one active Shopify channel connection for the configured shop.");
+      }
+      const channelId = connections.rows[0].channel_id;
+      const matches = await tx.execute<{ id: number }>(sql`
+        SELECT id FROM oms.oms_orders
+        WHERE channel_id = ${channelId}
+          AND external_order_id IN (${numericOrderId}, ${externalOrderId})
+        ORDER BY id LIMIT 2 FOR UPDATE
+      `);
+      if (matches.rows.length === 0) return 0;
+      if (matches.rows.length !== 1) {
+        throw new IntegrityError("Customer repair requires one OMS order for the exact Shopify order and channel.");
+      }
+      const result = await tx.execute(sql`
+      UPDATE oms.oms_orders SET
         customer_name = ${data.customerName},
         customer_email = ${data.customerEmail},
         ship_to_name = ${data.shippingName},
@@ -1446,10 +1524,12 @@ export const orderMethods: IOrderStorage = {
         ship_to_city = ${data.shippingCity},
         ship_to_state = ${data.shippingState},
         ship_to_zip = ${data.shippingPostalCode},
-        ship_to_country = ${data.shippingCountry}
-      WHERE id = ${orderId}
+        ship_to_country = ${shippingCountry}
+      WHERE id = ${matches.rows[0].id} AND channel_id = ${channelId}
+        AND external_order_id IN (${numericOrderId}, ${externalOrderId})
     `);
-    return result.rowCount || 0;
+      return result.rowCount || 0;
+    });
   },
 
   async countOmsRawOrdersMissingCustomerName(): Promise<number> {

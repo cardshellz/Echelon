@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createShipStationService } from "../../shipstation.service";
+import { createShipStationService, ShipStationPushError, SS_PUSH_INVALID_SHIPMENT } from "../../shipstation.service";
 
 // Order-scripted db mock (same pattern as push-shipment.test.ts): each
 // execute() shifts the next scripted response; select is unused here.
@@ -99,6 +99,28 @@ afterEach(() => {
 });
 
 describe("syncWmsOrderShipStationShipToAddress :: happy path", () => {
+  it.each([
+    { country: " United States ", expected: "US" },
+    { country: "uk", expected: "GB" },
+    { country: "Canada", expected: "CA" },
+    { country: "México", expected: "MX" },
+  ])("normalizes $country to $expected when replacing the provider address", async ({ country, expected }) => {
+    const mock = makeDb([
+      { rows: [{ ...WMS_ORDER_ROW, shipping_country: country }] },
+      { rows: [{ id: 3254, status: "queued", shipstation_order_id: 744000001 }] },
+      { rows: [] },
+    ]);
+    const fetchMock = mockFetchQueue([SS_ORDER, { orderId: 744000001 }]);
+    globalThis.fetch = fetchMock as any;
+    const svc = createShipStationService(mock.db);
+
+    await expect(svc.syncWmsOrderShipStationShipToAddress(42)).resolves.toEqual({ updated: 1, skipped: 0 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body).shipTo.country).toBe(expected);
+    expect(sqlTextOf(mock.executeCalls[2])).toContain("requires_review = false");
+  });
+
   it("swaps ONLY shipTo on ShipStation's own copy and clears the address review flag", async () => {
     const mock = makeDb([
       { rows: [WMS_ORDER_ROW] },                                                  // wms.orders
@@ -140,6 +162,35 @@ describe("syncWmsOrderShipStationShipToAddress :: happy path", () => {
 });
 
 describe("syncWmsOrderShipStationShipToAddress :: guards", () => {
+  it.each([
+    { label: "null", country: null, reasonCode: "ORDER_COUNTRY_REQUIRED" },
+    { label: "missing", country: undefined, reasonCode: "ORDER_COUNTRY_REQUIRED" },
+    { label: "empty", country: "", reasonCode: "ORDER_COUNTRY_REQUIRED" },
+    { label: "blank", country: " \t ", reasonCode: "ORDER_COUNTRY_REQUIRED" },
+    { label: "unknown code", country: "XX", reasonCode: "ORDER_COUNTRY_INVALID" },
+    { label: "unknown name", country: "private-country-value", reasonCode: "ORDER_COUNTRY_INVALID" },
+    { label: "number", country: 123, reasonCode: "ORDER_COUNTRY_INVALID" },
+    { label: "boolean", country: false, reasonCode: "ORDER_COUNTRY_INVALID" },
+    { label: "object", country: { country: "US" }, reasonCode: "ORDER_COUNTRY_INVALID" },
+    { label: "array", country: ["US"], reasonCode: "ORDER_COUNTRY_INVALID" },
+  ])("rejects $label country before provider reads, writes or clearing review", async ({ country, reasonCode }) => {
+    const mock = makeDb([{ rows: [{ ...WMS_ORDER_ROW, shipping_country: country }] }]);
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as any;
+    const svc = createShipStationService(mock.db);
+
+    const error = await svc.syncWmsOrderShipStationShipToAddress(42).catch(cause => cause);
+
+    expect(error).toBeInstanceOf(ShipStationPushError);
+    expect(error.context).toEqual({ code: SS_PUSH_INVALID_SHIPMENT,
+      field: "order.shipping_country", reasonCode });
+    expect(error.message).not.toContain("private-country-value");
+    expect(error).not.toHaveProperty("cause");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mock.execute).toHaveBeenCalledTimes(1);
+    expect(sqlTextOf(mock.executeCalls[0])).toContain("FROM wms.orders");
+  });
+
   it("skips a ShipStation order that is already shipped (invariant 2)", async () => {
     const mock = makeDb([
       { rows: [WMS_ORDER_ROW] },

@@ -10,6 +10,8 @@ import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebh
 import { broadcastOrdersUpdated } from "../websocket";
 import type { InsertOrderItem } from "@shared/schema";
 import crypto from "crypto";
+import { parseCountryCode, resolveProviderCountryCode } from "@shared/country-code";
+import { normalizeShopifyRepairOrderId, normalizeShopifyRepairShopDomain, type ShopifyCustomerRepairScope } from "../modules/orders/shopify-customer-repair";
 import { runReconciliationNow } from "../modules/orders/shopify-order-reconciliation";
 import { sql } from "drizzle-orm";
 import { processShopifyFulfillmentIngress } from "../modules/oms/shopify-fulfillment-ingress.adapter";
@@ -253,7 +255,10 @@ export function registerShopifyRoutes(app: Express) {
       const defaultChannelId = shopifyChannel?.id || null;
       
       // Fetch unfulfilled orders from oms_orders table
-      const rawOrderRows = await storage.getUnfulfilledOmsOrders();
+      // Validate the source batch before the first WMS order is created.
+      const rawOrderRows = (await storage.getUnfulfilledOmsOrders()).map(order => ({
+        ...order, ship_to_country: parseCountryCode(order.ship_to_country),
+      }));
       
       let created = 0;
       let skipped = 0;
@@ -412,7 +417,7 @@ export function registerShopifyRoutes(app: Express) {
     }
   });
 
-  // Backfill customer names from Shopify API into shopify_orders table
+  // Backfill canonical OMS customer addresses from the configured Shopify shop.
   // Processes ALL orders automatically by looping through all pages
   app.post("/api/shopify/backfill-customer-names", requireAuth, async (req, res) => {
     try {
@@ -425,7 +430,7 @@ export function registerShopifyRoutes(app: Express) {
         return res.status(400).json({ error: "Shopify credentials not configured" });
       }
       
-      const store = SHOPIFY_SHOP_DOMAIN.replace(/\.myshopify\.com$/, "");
+      const shopDomain = normalizeShopifyRepairShopDomain(SHOPIFY_SHOP_DOMAIN);
       const startTime = Date.now();
       const MAX_TIME_MS = 25000; // Stay under Heroku's 30s timeout
       
@@ -439,9 +444,9 @@ export function registerShopifyRoutes(app: Express) {
       // Loop through pages until timeout or done
       while (Date.now() - startTime < MAX_TIME_MS) {
         // Build URL for this page
-        let url = `https://${store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any`;
+        let url = `https://${shopDomain}/admin/api/2024-01/orders.json?limit=250&status=any`;
         if (pageInfo) {
-          url = `https://${store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&page_info=${pageInfo}`;
+          url = `https://${shopDomain}/admin/api/2024-01/orders.json?limit=250&page_info=${encodeURIComponent(pageInfo)}`;
         }
         
         console.log(`Fetching page ${pagesProcessed + 1}...`);
@@ -471,22 +476,25 @@ export function registerShopifyRoutes(app: Express) {
         const linkHeader = response.headers.get('Link');
         let nextPageInfo: string | null = null;
         if (linkHeader) {
-          const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&>]+)[^>]*>;\s*rel="next"/);
+          const nextMatch = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
           if (nextMatch) {
-            nextPageInfo = nextMatch[1];
+            nextPageInfo = new URL(nextMatch[1]).searchParams.get("page_info");
           }
         }
         
-        // Run all updates in parallel for speed
-        const updatePromises = shopifyOrders.map(async (shopifyOrder: any) => {
-          const orderId = `gid://shopify/Order/${shopifyOrder.id}`;
+        // Normalize the complete page before starting any of its writes.
+        const updates = shopifyOrders.map((shopifyOrder: any) => {
+          const scope: ShopifyCustomerRepairScope = {
+            shopDomain,
+            externalOrderId: normalizeShopifyRepairOrderId(shopifyOrder.id),
+          };
           const customerName = shopifyOrder.customer 
             ? `${shopifyOrder.customer.first_name || ''} ${shopifyOrder.customer.last_name || ''}`.trim()
             : shopifyOrder.shipping_address?.name || null;
           const customerEmail = shopifyOrder.email || shopifyOrder.customer?.email || null;
           const shipping = shopifyOrder.shipping_address || {};
           
-          const result = await storage.updateOmsRawOrderCustomer(orderId, {
+          return { scope, data: {
             customerName: customerName || 'Unknown',
             customerEmail,
             shippingName: shipping.name || null,
@@ -495,12 +503,12 @@ export function registerShopifyRoutes(app: Express) {
             shippingCity: shipping.city || null,
             shippingState: shipping.province || null,
             shippingPostalCode: shipping.zip || null,
-            shippingCountry: shipping.country || null,
-          });
-          return result;
+            shippingCountry: resolveProviderCountryCode(shipping.country_code, shipping.country),
+          } };
         });
         
-        const results = await Promise.all(updatePromises);
+        const results = await Promise.all(updates.map(({ scope, data }: { scope: ShopifyCustomerRepairScope; data: Parameters<typeof storage.updateOmsRawOrderCustomer>[1] }) =>
+          storage.updateOmsRawOrderCustomer(scope, data)));
         const pageUpdated = results.reduce((sum, count) => sum + count, 0);
         totalUpdated += pageUpdated;
         totalSkipped += shopifyOrders.length - pageUpdated;

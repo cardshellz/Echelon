@@ -909,6 +909,12 @@
     "modules/oms",
     "modules/orders"
   ],
+  "oms.order_country_repair_operations": [
+    "modules/orders"
+  ],
+  "oms.order_country_repairs": [
+    "modules/orders"
+  ],
   "oms.order_item_costs": [
     "modules/inventory"
   ],
