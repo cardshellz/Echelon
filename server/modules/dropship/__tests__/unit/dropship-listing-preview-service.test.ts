@@ -517,6 +517,37 @@ describe("DropshipListingPreviewService", () => {
     });
   });
 
+  it("warns, without blocking, when the catalog has no MPN for an eBay listing", async () => {
+    repository.context = { ...repository.context, platform: "ebay" };
+    repository.config = { ...repository.config!, platform: "ebay", marketplaceConfig: { profileId: "profile-1" } };
+    repository.candidate = { ...repository.candidate, mpn: null };
+
+    const result = await service.previewForMember("member-1", {
+      storeConnectionId: 22,
+      productVariantIds: [101],
+      requestedRetailPriceCents: 1299,
+    });
+
+    expect(result.rows[0]).toMatchObject({
+      previewStatus: "warning",
+      blockers: [],
+      warnings: expect.arrayContaining(["ebay_mpn_placeholder"]),
+    });
+    expect(result.rows[0]?.listingIntent).toMatchObject({ mpn: null });
+  });
+
+  it("does not warn about the MPN on a store that is not eBay", async () => {
+    repository.candidate = { ...repository.candidate, mpn: null };
+
+    const result = await service.previewForMember("member-1", {
+      storeConnectionId: 22,
+      productVariantIds: [101],
+      requestedRetailPriceCents: 1299,
+    });
+
+    expect(result.rows[0]?.warnings).not.toContain("ebay_mpn_placeholder");
+  });
+
   it("blocks eBay preview when the catalog product has no browse category", async () => {
     repository.context = {
       ...repository.context,

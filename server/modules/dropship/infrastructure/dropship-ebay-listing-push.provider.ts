@@ -1,4 +1,5 @@
 import { DropshipError } from "../domain/errors";
+import { resolveEbayMpn } from "../domain/ebay-product-identifiers";
 import { describeEbayErrors, parseEbayErrorBody } from "./ebay-error-body";
 import { ebaySellRequestHeaders } from "./ebay-sell-headers";
 import { createProviderRequestDeadline } from "../../channels/provider-request-limits";
@@ -721,7 +722,9 @@ export function buildDropshipEbayListingDraft(
         name: intent.title,
         barcode: null,
         gtin: intent.gtin,
-        mpn: intent.mpn,
+        // eBay refuses to publish with a Brand but no MPN; the placeholder
+        // stands in for products the catalog has no part number for.
+        mpn: resolveEbayMpn({ mpn: intent.mpn, itemSpecifics: intent.itemSpecifics }).mpn,
         weightGrams: intent.weightGrams,
         priceCents: intent.priceCents,
         compareAtPriceCents: null,
