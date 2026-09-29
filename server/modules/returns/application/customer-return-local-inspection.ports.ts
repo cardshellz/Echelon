@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { customerReturnCanonicalOrderScopeSchema } from "./customer-return-order-access.service";
 
 const id = z.number().int().positive().safe();
 const quantity = z.number().int().nonnegative().safe();
@@ -20,6 +21,9 @@ export type CustomerReturnInspectionShop = z.infer<typeof customerReturnInspecti
 
 export const customerReturnLocalOrderSchema = z.object({
   omsOrderId: id, channelId: id, externalOrderId: identity,
+  // Optional only for existing staff adapters. Canonical customer inspection
+  // requires the database-observed owner on every snapshot.
+  externalCustomerId: identity.nullable().optional(),
   externalOrderNumber: z.string().min(1).max(50), purchasedAt: timestamp,
   shipToCountry: z.string().max(100).nullable(), cancelledAt: timestamp.nullable(),
 }).strict();
@@ -120,9 +124,15 @@ export const customerReturnLocalInspectionSnapshotSchema = z.object({
 export type CustomerReturnLocalInspectionSnapshot = z.infer<typeof customerReturnLocalInspectionSnapshotSchema>;
 export type CustomerReturnLocalInspectionIssue = z.infer<typeof customerReturnLocalInspectionIssueSchema>;
 
+export const customerReturnLocalInspectionInputSchema = z.union([
+  z.object({ channelId: id, connectionId: id, orderReference: z.string() }).strict(),
+  z.object({ channelId: id, connectionId: id,
+    canonicalOrder: customerReturnCanonicalOrderScopeSchema.omit({ channelId: true }) }).strict(),
+]);
+export type CustomerReturnLocalInspectionInput = z.infer<typeof customerReturnLocalInspectionInputSchema>;
 export interface CustomerReturnLocalInspectionReader {
   listShops(): Promise<readonly CustomerReturnInspectionShop[]>;
-  read(input: { channelId: number; connectionId: number; orderReference: string }): Promise<CustomerReturnLocalInspectionSnapshot | null>;
+  read(input: CustomerReturnLocalInspectionInput): Promise<CustomerReturnLocalInspectionSnapshot | null>;
 }
 
 export class CustomerReturnLocalInspectionError extends Error {

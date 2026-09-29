@@ -24,9 +24,12 @@ export const initialPublicationScopeFactsSchema = z.object({
   }).strict()),
   ownerIssues: z.array(text),
   ownerEvidenceHashes: z.array(z.string().regex(/^[a-f0-9]{64}$/)),
+  mappingOwners: z.array(z.object({ productVariantId: id, externalInventoryItemId: text }).strict()),
   variants: z.array(z.object({
     id, productId: id, productActive: z.boolean(), variantActive: z.boolean(), requiresShipping: z.boolean(),
     inventoryTrackingDefault: z.boolean(), inventoryTrackingOverride: z.boolean().nullable(), salesEligibility: text,
+    mappingHistoryCount: z.number().int().nonnegative(),
+    mappingHeadExists: z.boolean(),
     mapping: z.object({ id, version: id, definitionHash: z.string().regex(/^[a-f0-9]{64}$/),
       externalInventoryItemId: text, externalSku: text.nullable() }).strict().nullable(),
   }).strict()),
@@ -61,7 +64,7 @@ export function reviewInitialPublicationScope(
     || new Set(facts.listings.map(row => row.sourceKey)).size !== facts.listings.length)
     add("INITIAL_SCOPE_DUPLICATE_EVIDENCE", "The listing census contains duplicate identities.");
   const variants = new Map(facts.variants.map(row => [row.id, row]));
-  const exclusions = [...(input.excludedVariants ?? [])].sort((a, b) => a.productVariantId - b.productVariantId);
+  const exclusions: NonNullable<InitialPublicationScopeReview["excludedVariants"]> = [...(input.excludedVariants ?? [])];
   const excludedIds = new Set(exclusions.map(row => row.productVariantId));
   for (const excluded of exclusions) {
     if (!facts.listings.some(listing => listing.productVariantId === excluded.productVariantId && listing.active)
@@ -71,40 +74,88 @@ export function reviewInitialPublicationScope(
   }
   const included = new Set<number>();
   const nonStock = new Set<number>();
-  for (const listing of [...facts.listings].sort((a, b) => compareText(a.sourceKey, b.sourceKey))) {
+  const mappingImports: NonNullable<InitialPublicationScopeReview["mappingImports"]> = [];
+  const identityOwners = new Map<string, number>();
+  for (const owner of facts.mappingOwners) identityOwners.set(owner.externalInventoryItemId, owner.productVariantId);
+  const listingsByVariant = new Map<number, InitialPublicationScopeFacts["listings"]>();
+  for (const listing of facts.listings) {
     if (!listing.active && !listing.uncertain) continue;
-    const variant = variants.get(listing.productVariantId);
-    if (!variant) { add("INITIAL_SCOPE_CATALOG_IDENTITY_MISSING", "A listed SKU has no current catalog identity.", listing.productVariantId); continue; }
-    if (!resolveInventoryTrackingPolicy(variant)) { nonStock.add(variant.id); continue; }
-    if (listing.uncertain) add("INITIAL_SCOPE_LISTING_UNCERTAIN", "A listing operation has an unresolved outcome.", variant.id);
-    if (listing.quarantined) add("INITIAL_SCOPE_LISTING_QUARANTINED", "A listed inventory mapping is quarantined.", variant.id);
-    // Exclusion is a reviewed operator decision, never an inference from zero
-    // stock or an API failure. It changes only outbound membership, not stock,
-    // the catalog product, an offer's contents, or the provider listing state.
-    if (excludedIds.has(variant.id)) continue;
-    included.add(variant.id);
-    if (!variant.productActive || !variant.variantActive || variant.salesEligibility !== "sellable")
-      add("INITIAL_SCOPE_LISTED_SKU_INELIGIBLE", "A listed inventory SKU is inactive or not customer-sellable.", variant.id);
-    const mapping = variant.mapping;
-    if (!mapping || !listing.externalInventoryItemId || mapping.externalInventoryItemId !== listing.externalInventoryItemId
-      || (listing.externalSku !== null && mapping.externalSku !== listing.externalSku))
-      add("INITIAL_SCOPE_MAPPING_UNVERIFIED", "The listed identity does not match the selected exact inventory mapping.", variant.id);
+    const current = listingsByVariant.get(listing.productVariantId) ?? [];
+    current.push(listing);
+    listingsByVariant.set(listing.productVariantId, current);
   }
+  for (const [variantId, currentListings] of [...listingsByVariant.entries()].sort(([a], [b]) => a - b)) {
+    const listings = [...currentListings].sort((a, b) => compareText(a.sourceKey, b.sourceKey));
+    const variant = variants.get(variantId);
+    if (!variant) { add("INITIAL_SCOPE_CATALOG_IDENTITY_MISSING", "A listed SKU has no current catalog identity.", variantId); continue; }
+    if (!resolveInventoryTrackingPolicy(variant)) { nonStock.add(variant.id); continue; }
+    if (listings.some(row => row.uncertain)) add("INITIAL_SCOPE_LISTING_UNCERTAIN", "A listing operation has an unresolved outcome.", variant.id);
+    if (excludedIds.has(variant.id)) {
+      if (listings.some(row => row.quarantined)) add("INITIAL_SCOPE_LISTING_QUARANTINED", "A listed inventory mapping is quarantined.", variant.id);
+      continue;
+    }
+    // Preserve skips the existing publisher already applies. These decisions
+    // are derived, displayed and sealed in the review, not caller-selectable
+    // exclusions or permission to clear quarantine, relink, or publish zero.
+    const skipReason = existingPublisherSkipReason(variant, listings, facts.target.provider);
+    if (skipReason) { exclusions.push({ productVariantId: variant.id, reason: skipReason }); continue; }
+    if (listings.some(row => row.quarantined)) add("INITIAL_SCOPE_LISTING_QUARANTINED", "A listed inventory mapping is quarantined.", variant.id);
+    included.add(variant.id);
+    const identity = listings[0]!;
+    const knownSkus = [...new Set(listings.map(row => row.externalSku).filter((sku): sku is string => sku !== null))];
+    if (!identity.externalInventoryItemId || listings.some(row => !row.externalInventoryItemId
+      || row.externalInventoryItemId !== identity.externalInventoryItemId) || knownSkus.length > 1) {
+      add("INITIAL_SCOPE_MAPPING_UNVERIFIED", "Existing listing sources do not agree on an exact inventory identity.", variant.id);
+      continue;
+    }
+    const externalSku = knownSkus[0] ?? null;
+    const owner = identityOwners.get(identity.externalInventoryItemId);
+    if (owner !== undefined && owner !== variant.id) {
+      add("INITIAL_SCOPE_MAPPING_IDENTITY_CONFLICT", "The provider inventory identity is already assigned to another SKU.", variant.id);
+      continue;
+    }
+    identityOwners.set(identity.externalInventoryItemId, variant.id);
+    const mapping = variant.mapping;
+    if (!mapping && variant.mappingHistoryCount === 0 && !variant.mappingHeadExists) {
+      mappingImports.push({ productVariantId: variant.id, externalInventoryItemId: identity.externalInventoryItemId,
+        externalSku, sourceKeys: listings.map(row => row.sourceKey) });
+    } else if (!mapping || mapping.externalInventoryItemId !== identity.externalInventoryItemId
+      || (externalSku !== null && mapping.externalSku !== null && mapping.externalSku !== externalSku)) {
+      add("INITIAL_SCOPE_MAPPING_UNVERIFIED", "The listed identity does not match the selected exact inventory mapping.", variant.id);
+    }
+  }
+  exclusions.sort((a, b) => a.productVariantId - b.productVariantId);
   const stableFacts = { ...facts,
     ownerIssues: [...facts.ownerIssues].sort(),
     ownerEvidenceHashes: [...facts.ownerEvidenceHashes].sort(),
     listings: [...facts.listings].sort((a, b) => compareText(a.sourceKey, b.sourceKey)),
     variants: [...facts.variants].sort((a, b) => a.id - b.id),
+    mappingOwners: [...facts.mappingOwners].sort((a, b) => a.productVariantId - b.productVariantId),
   };
   return initialPublicationScopeReviewSchema.parse({
     publicationTargetId: facts.target.id, targetRevision: facts.target.revision, authorityRevision: facts.authorityRevision,
-    reviewHash: inventoryCutoverEvidenceHash({ contractVersion: "initial_publication_scope_v2", facts: stableFacts, exclusions }),
+    reviewHash: inventoryCutoverEvidenceHash({ contractVersion: "initial_publication_scope_v3", facts: stableFacts, exclusions, mappingImports }),
     ready: blockers.length === 0, includedVariantIds: [...included].sort((a, b) => a - b),
     excludedNonStockVariantIds: [...nonStock].sort((a, b) => a - b),
     excludedVariants: exclusions,
+    mappingImports,
     blockers: blockers.sort((a, b) => compareText(a.code, b.code) || (a.productVariantId ?? 0) - (b.productVariantId ?? 0)),
     runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false,
   });
+}
+
+function existingPublisherSkipReason(
+  variant: InitialPublicationScopeFacts["variants"][number],
+  listings: InitialPublicationScopeFacts["listings"],
+  provider: string,
+): "legacy_inactive_catalog" | "legacy_quarantined" | "legacy_missing_inventory_identity" | null {
+  if (!variant.productActive || !variant.variantActive || variant.salesEligibility !== "sellable") return "legacy_inactive_catalog";
+  // A registered owner contradicting a disabled compatibility feed is not a
+  // proven legacy skip. Keep that disagreement visible instead of guessing.
+  if (!listings.every(row => row.sourceKey.startsWith("feed:"))) return null;
+  if (listings.every(row => row.quarantined)) return "legacy_quarantined";
+  if (provider === "shopify" && listings.every(row => !row.externalInventoryItemId)) return "legacy_missing_inventory_identity";
+  return null;
 }
 
 // Review identity must not depend on the host locale/ICU version.

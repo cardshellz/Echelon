@@ -32,6 +32,7 @@ function workerHarness() {
 
 describe("admin return preview cache isolation", () => {
   it.each([
+    "/customer-returns", "/customer-returns/start", "/api/returns/customer/session", "/api/returns/customer/orders/123",
     CUSTOMER_RETURN_PORTAL_PATH, CUSTOMER_RETURN_PORTAL_ACCESS_PATH, `${CUSTOMER_RETURN_PORTAL_ACCESS_PATH}/hidden`,
     `${CUSTOMER_RETURN_PORTAL_PATH}/?returnTo=untrusted`, "/RETURN-PORTAL/ACCESS",
     CUSTOMER_RETURN_PORTAL_LEGACY_PATH, `${CUSTOMER_RETURN_PORTAL_LEGACY_PATH}/?scenario=split_delivered`,
@@ -63,6 +64,7 @@ describe("admin return preview cache isolation", () => {
 
   it("isolates only portal page segments from the staff shell", () => {
     for (const path of [CUSTOMER_RETURN_PORTAL_PATH, CUSTOMER_RETURN_PORTAL_ACCESS_PATH,
+      "/customer-returns", "/CUSTOMER-RETURNS/",
       CUSTOMER_RETURN_PORTAL_LEGACY_PATH, `${CUSTOMER_RETURN_PORTAL_LEGACY_PATH}/hidden`,
       `${CUSTOMER_RETURN_PORTAL_PATH}/`, `${CUSTOMER_RETURN_PORTAL_ACCESS_PATH}/`,
       "/RETURN-PORTAL", "/RETURN-PORTAL/ACCESS/", "/RETURNS/PORTAL-PREVIEW/"]) {

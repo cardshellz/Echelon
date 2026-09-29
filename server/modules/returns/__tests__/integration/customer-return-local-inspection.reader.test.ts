@@ -31,6 +31,20 @@ integration("private return inspection against migration-defined PostgreSQL", ()
       VALUES ($1,301,101,'500',1,'expected')`, [result.rows[0].id]);
   }
 
+  it("retains canonical customer ownership despite duplicate display numbers and later reassignment", async () => {
+    await pool.query("UPDATE oms.oms_orders SET external_customer_id='customer-a' WHERE id=100");
+    await pool.query(`INSERT INTO oms.oms_orders(channel_id,external_order_id,external_order_number,external_customer_id,ordered_at)
+      VALUES(36,'different','TEST-1','customer-b','2026-09-01')`);
+    const canonical = { channelId: 36, connectionId: 4, canonicalOrder: { omsOrderId: 100,
+      externalOrderId: "1000", externalCustomerId: "customer-a" } };
+    expect((await reader.read(canonical))?.order.omsOrderId).toBe(100);
+    for (const changed of [{ omsOrderId: 101 }, { externalOrderId: "different" }, { externalCustomerId: "customer-b" }]) {
+      expect(await reader.read({ ...canonical, canonicalOrder: { ...canonical.canonicalOrder, ...changed } })).toBeNull();
+    }
+    await pool.query("UPDATE oms.oms_orders SET external_customer_id='customer-b' WHERE id=100");
+    expect(await reader.read(canonical)).toBeNull();
+  });
+
   it("returns only explicit approved shops without secrets and rechecks configuration on every read", async () => {
     expect(await reader.listShops()).toEqual([{ channelId: 36, connectionId: 4, shopDomain: "test-shop.myshopify.com", displayName: "Approved test shop" }]);
     await pool.query("UPDATE channels.channels SET status='paused' WHERE id=36");

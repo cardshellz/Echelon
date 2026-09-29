@@ -10,6 +10,8 @@ export async function installInitialScopeFixture(pool: Pool, canonical = false):
   await installWalmartPublicationInventoryFixture(pool);
   await pool.query(`UPDATE channels.channel_feeds SET channel_inventory_item_id='test-item';
     UPDATE channels.channels SET provider='shopify' WHERE id=36;
+    CREATE TABLE channels.channel_listings(id bigint PRIMARY KEY,channel_id integer,product_variant_id integer,
+      external_sku text,external_variant_id text,UNIQUE(channel_id,product_variant_id));
     CREATE TABLE dropship.dropship_vendor_listings(id bigint PRIMARY KEY,store_connection_id integer,product_variant_id integer,
       status text,external_listing_id text,external_offer_id text);
     CREATE SCHEMA marketplace;
@@ -31,6 +33,7 @@ export async function installInitialScopeFixture(pool: Pool, canonical = false):
   await installCutoverAdmissionFixturePrerequisites(pool);
   await pool.query(readFileSync(resolve("migrations/236_inventory_cutover_admission.sql"), "utf8"));
   await pool.query(readFileSync(resolve("migrations/0714_inventory_initial_publication_scope.sql"), "utf8"));
+  await pool.query(readFileSync(resolve("migrations/0715_inventory_existing_listing_scope.sql"), "utf8"));
 }
 
 export async function seedInitialScopeDropship(pool: Pool): Promise<void> {

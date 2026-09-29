@@ -80,6 +80,7 @@ import ReturnLabelSettings from "@/pages/ReturnLabelSettings";
 import ReturnCases from "@/pages/ReturnCases";
 import ReturnPolicies from "@/pages/ReturnPolicies";
 import CustomerReturnPortalPreview from "@/pages/CustomerReturnPortalPreview";
+import CustomerReturnCustomerPortal from "@/pages/CustomerReturnCustomerPortal";
 import CustomerReturnPortalAccess from "@/pages/CustomerReturnPortalAccess";
 import {
   CUSTOMER_RETURN_PORTAL_PATH,
@@ -303,6 +304,7 @@ function Router() {
   if (isCustomerReturnPortalPath(location)) {
     return (
       <Switch>
+        <Route path="/customer-returns" component={CustomerReturnCustomerPortal} />
         <Route path={CUSTOMER_RETURN_PORTAL_ACCESS_PATH} component={CustomerReturnPortalAccess} />
         <Route path={CUSTOMER_RETURN_PORTAL_PATH} component={CustomerReturnPortalPreview} />
         <Route path={CUSTOMER_RETURN_PORTAL_LEGACY_PATH}><Redirect to={CUSTOMER_RETURN_PORTAL_PATH} /></Route>

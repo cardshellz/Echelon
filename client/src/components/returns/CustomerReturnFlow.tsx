@@ -35,6 +35,8 @@ import {
 
 export interface CustomerReturnFlowProps {
   initialOrderReference: string;
+  initialOrder?: CustomerReturnFlowOrder;
+  onChooseAnotherOrder?: (message?: string) => void;
   gateway: CustomerReturnFlowGateway;
   onAccessDenied: (message: string) => void;
 }
@@ -63,15 +65,21 @@ function errorMessage(error: unknown): string {
 // access control and DTO parsing; the flow verifies replies match current intent.
 export function CustomerReturnFlow({
   initialOrderReference,
+  initialOrder,
+  onChooseAnotherOrder,
   gateway,
   onAccessDenied,
 }: CustomerReturnFlowProps) {
-  const [step, setStep] = useState<Step>("find");
+  const [step, setStep] = useState<Step>(initialOrder ? "items" : "find");
   const [reference, setReference] = useState(
     normalizedPreviewReference(initialOrderReference),
   );
-  const [order, setOrder] = useState<CustomerReturnFlowOrder | null>(null);
-  const [drafts, setDrafts] = useState<PreviewSelectionDraft[]>([]);
+  const [order, setOrder] = useState<CustomerReturnFlowOrder | null>(
+    initialOrder ?? null,
+  );
+  const [drafts, setDrafts] = useState<PreviewSelectionDraft[]>(() =>
+    initialOrder ? initialPreviewSelections(initialOrder) : [],
+  );
   const [parcels, setParcels] = useState<PreviewParcelDraft[]>([]);
   const [review, setReview] = useState<CustomerReturnFlowReview | null>(null);
   const [reviewInput, setReviewInput] =
@@ -81,6 +89,12 @@ export function CustomerReturnFlow({
   const canvas = useRef<HTMLElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const previousStep = useRef<Step>(step);
+  useEffect(() => {
+    if (initialOrder) {
+      canvas.current?.scrollIntoView({ block: "start", behavior: "auto" });
+      heading.current?.focus({ preventScroll: true });
+    }
+  }, []);
   const request = useRef<{
     sequence: number;
     controller: AbortController | null;
@@ -121,6 +135,10 @@ export function CustomerReturnFlow({
   function fail(cause: unknown) {
     if (cause instanceof PreviewAccessError) onAccessDenied(cause.message);
     else if (cause instanceof ReturnSourceChangedError) {
+      if (onChooseAnotherOrder) {
+        onChooseAnotherOrder(cause.message);
+        return;
+      }
       setOrder(null);
       setDrafts([]);
       setParcels([]);
@@ -224,7 +242,12 @@ export function CustomerReturnFlow({
     }
   }
   const selected = order ? validatePreviewSelections(order, drafts) : null;
-  const stepIndex = steps.findIndex((candidate) => candidate.id === step);
+  const visibleSteps = initialOrder
+    ? steps.filter((candidate) => candidate.id !== "find")
+    : steps;
+  const stepIndex = visibleSteps.findIndex(
+    (candidate) => candidate.id === step,
+  );
   return (
     <section
       ref={canvas}
@@ -242,8 +265,14 @@ export function CustomerReturnFlow({
         </div>
       </div>
       <div className="p-4 sm:p-6">
-        <ol aria-label="Return steps" className="mb-6 grid grid-cols-4 gap-2">
-          {steps.map((candidate, index) => (
+        <ol
+          aria-label="Return steps"
+          className={cn(
+            "mb-6 grid gap-2",
+            initialOrder ? "grid-cols-3" : "grid-cols-4",
+          )}
+        >
+          {visibleSteps.map((candidate, index) => (
             <li
               key={candidate.id}
               aria-current={step === candidate.id ? "step" : undefined}
@@ -360,7 +389,9 @@ export function CustomerReturnFlow({
               drafts={drafts}
               onChange={updateDrafts}
               onContinue={continueToPacking}
-              onBack={() => back("find")}
+              onBack={() =>
+                onChooseAnotherOrder ? onChooseAnotherOrder() : back("find")
+              }
             />
           )}
           {step === "packing" && order && selected?.ok && (
