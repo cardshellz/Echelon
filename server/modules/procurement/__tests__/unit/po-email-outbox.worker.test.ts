@@ -131,6 +131,28 @@ describe("PO email outbox worker", () => {
 
     expect(result).toEqual({ claimed: 1, sent: 0, retried: 0, deadLettered: 1 });
     expect(poolQuery.mock.calls[2][1][2]).toBe("dead_letter");
+    // The dead-letter time is a plain value: comparing the status parameter
+    // with a literal in SQL made PostgreSQL refuse the statement.
+    expect(String(poolQuery.mock.calls[2][0])).toContain("dead_lettered_at = $8");
+    expect(String(poolQuery.mock.calls[2][0])).not.toContain("CASE WHEN $3");
+    expect(poolQuery.mock.calls[2][1][7]).toEqual(new Date("2026-07-14T12:00:00.000Z"));
+  });
+
+  it("keeps a retried delivery's dead-letter time empty", async () => {
+    const poolQuery = vi.fn()
+      .mockResolvedValueOnce({ rowCount: 0, rows: [] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [claimedDelivery] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ status: "queued" }] });
+
+    const result = await processPoEmailOutboxBatch({
+      dbPool: { query: poolQuery },
+      deliver: vi.fn().mockRejectedValue(Object.assign(new Error("timeout"), { code: "ETIMEDOUT", responseCode: 421 })),
+      now: new Date("2026-07-14T12:00:00.000Z"),
+    });
+
+    expect(result).toEqual({ claimed: 1, sent: 0, retried: 1, deadLettered: 0 });
+    expect(poolQuery.mock.calls[2][1][2]).toBe("queued");
+    expect(poolQuery.mock.calls[2][1][7]).toBeNull();
   });
 });
 

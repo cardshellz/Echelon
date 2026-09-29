@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
  * left every listing push job "processing" for good and never revoked a
  * store's grant. Decide such branches in TypeScript and pass the value.
  */
-const ROOT = resolve(process.cwd(), "server/modules/dropship");
+const ROOTS = ["server/modules/dropship", "server/modules/procurement"].map((dir) => resolve(process.cwd(), dir));
 const PATTERN = /CASE\s+WHEN\s+\$\d+\s*(?:=|<>|IN\s*\()/g;
 
 function sourceFiles(directory: string): string[] {
@@ -21,12 +21,12 @@ function sourceFiles(directory: string): string[] {
   });
 }
 
-describe("dropship SQL never compares a query parameter with a literal", () => {
-  it("finds no CASE WHEN $n = 'literal' branch in the module's source", () => {
-    const offenders = sourceFiles(ROOT).flatMap((file) => {
+describe("dropship and procurement SQL never compare a query parameter with a literal", () => {
+  it("finds no CASE WHEN $n = 'literal' branch in the modules' source", () => {
+    const offenders = ROOTS.flatMap((root) => sourceFiles(root).flatMap((file) => {
       const source = readFileSync(file, "utf8");
-      return [...source.matchAll(PATTERN)].map((match) => `${file.slice(ROOT.length + 1)}: ${match[0]}`);
-    });
+      return [...source.matchAll(PATTERN)].map((match) => `${file.slice(process.cwd().length + 1)}: ${match[0]}`);
+    }));
     expect(offenders).toEqual([]);
   });
 });
