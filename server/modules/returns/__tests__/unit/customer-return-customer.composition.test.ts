@@ -4,17 +4,19 @@ import type { CustomerReturnIntakeInspection } from "../../application/customer-
 import type { CustomerReturnCustomerSession } from "../../application/customer-return-customer-auth.service";
 import { CustomerReturnLabelSettingsService } from "../../application/customer-return-label-settings.service";
 import { CustomerReturnLabelsService } from "../../application/customer-return-labels.service";
+import { CustomerReturnLiveError } from "../../application/customer-return-live-error";
+import { PostgresCustomerReturnSettingsStore } from "../../infrastructure/customer-return-label-settings.repository";
 import { labelPolicy, labelPreparationFixture, labelSettings, LABEL_KEY } from "../support/label-fixtures";
 import { LIVE_NOW } from "../support/live-inspection-fixtures";
 
 const ports = vi.hoisted(() => ({
-  live: vi.fn(), findOwnedOrder: vi.fn(), readOwnedAuthorization: vi.fn(), readOwnedCommand: vi.fn(),
+  live: vi.fn(), findOwnedOrder: vi.fn(), listOwnedOrders: vi.fn(), readOwnedAuthorization: vi.fn(), readOwnedCommand: vi.fn(),
   acquire: vi.fn(), read: vi.fn(), reject: vi.fn(), persist: vi.fn(),
 }));
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
 vi.mock("../../infrastructure/customer-return-live.composition", () => ({ createCustomerReturnLiveService: ports.live }));
 vi.mock("../../infrastructure/customer-return-order-access.repository", () => ({
-  PostgresCustomerReturnOrderAccessRepository: class { findOwnedOrder = ports.findOwnedOrder; },
+  PostgresCustomerReturnOrderAccessRepository: class { findOwnedOrder = ports.findOwnedOrder; listOwnedOrders = ports.listOwnedOrders; },
 }));
 vi.mock("../../infrastructure/customer-return-customer-ownership.repository", () => ({
   PostgresCustomerReturnCustomerOwnershipReader: class {
@@ -37,9 +39,12 @@ async function setup() {
   const fixture = await labelPreparationFixture();
   const inspectCanonicalForIntake = vi.fn(async (_scope: unknown): Promise<CustomerReturnIntakeInspection> => structuredClone(fixture.inspection));
   const inspectForIntake = vi.fn(async (): Promise<CustomerReturnIntakeInspection> => { throw new Error("Display-reference fallback must never run"); });
-  ports.live.mockResolvedValue({ inspectCanonicalForIntake, inspectForIntake,
+  const lookupCanonical = vi.fn(async () => structuredClone(fixture.inspection.order));
+  ports.live.mockResolvedValue({ inspectCanonicalForIntake, inspectForIntake, lookupCanonical,
     getState: async () => ({ shops: [{ channelId: 36 }] }) });
   ports.findOwnedOrder.mockResolvedValue([{ channelId: 36, omsOrderId: 100, externalOrderId: fixture.inspection.local.order.externalOrderId,
+    externalOrderNumber: fixture.inspection.local.order.externalOrderNumber, externalCustomerId: "123" }]);
+  ports.listOwnedOrders.mockResolvedValue([{ channelId: 36, omsOrderId: 100, externalOrderId: fixture.inspection.local.order.externalOrderId,
     externalOrderNumber: fixture.inspection.local.order.externalOrderNumber, externalCustomerId: "123" }]);
   ports.readOwnedAuthorization.mockResolvedValue({ authorizationId: 1, omsOrderId: 100 });
   ports.readOwnedCommand.mockResolvedValue({ authorizationId: 1, omsOrderId: 100 });
@@ -68,12 +73,26 @@ async function setup() {
   // receive the canonical inspection method through the label-service factory.
   const services = await createCustomerReturnCustomerServices(session);
   const { channelId: _channelId, orderReference: _reference, ...input } = fixture.input;
-  return { services, input, inspectCanonicalForIntake, inspectForIntake, requireEnabled, progress,
+  return { services, input, inspectCanonicalForIntake, inspectForIntake, lookupCanonical, requireEnabled, progress,
     markAccepted: () => { command!.status = "accepted"; command!.authorizationId = 1; } };
 }
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 describe("customer returns production composition", () => {
+  it("preserves the existing warning event and logs only safe inspection context", async () => {
+    const s = await setup();
+    vi.spyOn(PostgresCustomerReturnSettingsStore.prototype, "read").mockResolvedValue(null);
+    vi.spyOn(PostgresCustomerReturnSettingsStore.prototype, "readControl").mockResolvedValue({ paused: false, version: 0 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    s.lookupCanonical.mockRejectedValue(new CustomerReturnLiveError("RETURN_LIVE_DATA_UNVERIFIED", "private provider credential", 503));
+    expect(await s.services.orders.list({})).toEqual({ orders: [], nextBeforeOmsOrderId: null, unavailableOrderCount: 1 });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(warn.mock.calls[0][0])).toEqual({ event: "return_customer_order_unavailable",
+      code: "RETURN_ORDER_INSPECTION_UNAVAILABLE", channelId: 36, omsOrderId: 100,
+      reason: "inspection_failed", causeCode: "RETURN_LIVE_DATA_UNVERIFIED" });
+    expect(s.progress).not.toHaveBeenCalled();
+    expect(ports.acquire).not.toHaveBeenCalled();
+  });
   it("passes verified canonical ownership through the factory to intake without purchasing a label", async () => {
     const s = await setup();
     const result = await s.services.operations.submit(100, s.input);
