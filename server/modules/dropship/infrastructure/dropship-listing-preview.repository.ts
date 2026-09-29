@@ -348,6 +348,11 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
          FROM catalog.product_variants pv
          INNER JOIN catalog.products p ON p.id = pv.product_id
          LEFT JOIN catalog.product_line_products plp ON plp.product_id = p.id
+         -- The Card Shellz product-type mapping is the dropship default
+         -- category. Its listing_enabled toggle only says whether Card Shellz
+         -- lists that product type on its own store, so it is deliberately not
+         -- a condition here: switching a type off for the Card Shellz store
+         -- must not strip the default category from every vendor listing.
          LEFT JOIN LATERAL (
            SELECT
              MIN(ecm.ebay_browse_category_id) AS ebay_browse_category_id,
@@ -359,7 +364,6 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
              AND supplier_channel.provider = 'ebay'
              AND supplier_channel.type = 'internal'
              AND supplier_channel.status = 'active'
-             AND ecm.listing_enabled = true
              AND NULLIF(BTRIM(ecm.ebay_browse_category_id), '') IS NOT NULL
            HAVING COUNT(DISTINCT ecm.ebay_browse_category_id) = 1
          ) supplier_ebay_category ON true
