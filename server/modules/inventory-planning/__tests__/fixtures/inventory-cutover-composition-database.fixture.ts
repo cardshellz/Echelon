@@ -8,6 +8,8 @@ import { inventoryCutoverEvidenceHash } from "../../domain/inventory-cutover-man
 import { loadProposedPublicationTargetsForCutover } from "../../infrastructure/inventory-channel-exposure-runtime.repository";
 import { planInventoryChannelExposureProduct } from "../../application/inventory-channel-exposure-runtime.service";
 import { summarizeCutoverDivergence } from "../../domain/inventory-channel-exposure";
+import { projectCutoverSourceActivation } from "../../domain/inventory-cutover-publication-selection";
+import { readWarehouseSourceActivationEvidence } from "../../../warehouse/infrastructure/warehouse-source-activation.repository";
 import { cutoverShipmentSchemaFixtureSql } from "./inventory-cutover-shipment-schema.fixture";
 import { cutoverReceiptSchemaFixtureSql } from "./inventory-cutover-receipt-schema.fixture";
 
@@ -132,7 +134,12 @@ export async function seedCompositionReviewedDryRun(pool: Pool, historicalProvid
   try {
     await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     const snapshot = await captureProposedSupplySnapshotInsideTransaction(client, 20);
-    const targets = await loadProposedPublicationTargetsForCutover(client,20,[101]);
+    const recordedTargets = await loadProposedPublicationTargetsForCutover(client,20,[101]);
+    const nodeIds = [...new Set(recordedTargets.flatMap(target => target.sourceBinding?.members.map(member => member.fulfillmentNodeId) ?? []))].sort((a,b)=>a-b);
+    const targets = projectCutoverSourceActivation(recordedTargets, {
+      contractVersion: "inventory_cutover_selection_manifest_v1", productIds: [20], publicationTargetIds: recordedTargets.map(target => target.publicationTargetId), selections: [],
+      sourceNodes: await readWarehouseSourceActivationEvidence(client, nodeIds),
+    });
     const exposure = planInventoryChannelExposureProduct({ authority:"canonical",authorityRevision:"1",activationRunId:"1",
       supplySnapshot:snapshot,managedSellableVariantIds:[101],publicationTargets:targets },20);
     const observedTargets=(await client.query<{ id:number;channel_id:number;channel_connection_id:number;revision:string;
@@ -201,15 +208,20 @@ export async function seedCompositionReviewedDryRun(pool: Pool, historicalProvid
   finally { client.release(); }
 }
 
-export const cutoverCompositionChannelSeedSql = `
+export function cutoverCompositionChannelSeed({ activeSource = true, explicitMembership = false } = {}): string {
+  return `
 INSERT INTO channels.channels(id,name,provider) VALUES(36,'Test Shopify','shopify');
 INSERT INTO channels.channel_connections(id,channel_id) VALUES(7,36);
 INSERT INTO warehouse.fulfillment_nodes(code,name,node_type,warehouse_id,inventory_authority,fulfillment_authority,created_by)
  VALUES('COMPOSITION','Main','internal_warehouse',1,'echelon','echelon','operator');
-UPDATE warehouse.fulfillment_nodes SET lifecycle_status='active',activated_by='operator',activated_at=transaction_timestamp();
+${activeSource ? "UPDATE warehouse.fulfillment_nodes SET lifecycle_status='active',activated_by='operator',activated_at=transaction_timestamp();" : ""}
 INSERT INTO inventory.inventory_publication_targets(channel_id,channel_connection_id,fulfillment_node_id,provider_scope_type,
- external_scope_id,publication_authority,state,change_reason,created_by)
- VALUES(36,7,1,'location','test-location','echelon','disabled','Composition target','operator');
+ external_scope_id,publication_authority,state,change_reason,created_by${explicitMembership ? ",membership_mode" : ""})
+ VALUES(36,7,1,'location','test-location','echelon','disabled','Composition target','operator'${explicitMembership ? ",'explicit'" : ""});
+${explicitMembership ? `INSERT INTO inventory.publication_membership_versions(publication_target_id,product_variant_id,version,included,definition_hash,review_hash,created_by,created_at)
+  VALUES(1,101,1,true,repeat('a',64),repeat('a',64),'operator',transaction_timestamp());
+INSERT INTO inventory.publication_membership_heads(publication_target_id,product_variant_id,active_version_id)
+  SELECT publication_target_id,product_variant_id,id FROM inventory.publication_membership_versions WHERE publication_target_id=1;` : ""}
 INSERT INTO inventory.channel_exposure_policy_versions(scope_key,channel_id,scope_type,version,allocation_semantics,
  eligible,share_bps,holdback_sellable_units,max_publish_mode,min_publish_sellable_units,definition_hash,change_reason,idempotency_key,request_hash,created_by)
  VALUES('channel:36',36,'channel',1,'exposure',true,10000,0,'unlimited',0,repeat('e',64),'Full exposure','composition-exposure',repeat('e',64),'operator');
@@ -227,6 +239,9 @@ INSERT INTO inventory.publication_variant_mapping_heads(publication_target_id,pr
  VALUES(1,101,1,1,'operator','Reviewed item');
 UPDATE inventory.inventory_publication_targets SET state='preview',revision=revision+1,activated_by='operator',activated_at=transaction_timestamp();
 `;
+}
+
+export const cutoverCompositionChannelSeedSql = cutoverCompositionChannelSeed();
 
 export const cutoverCompositionObserveOnlySeedSql = `
 INSERT INTO channels.channel_connections(id,channel_id) VALUES(8,36);

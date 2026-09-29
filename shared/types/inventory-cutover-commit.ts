@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { cutoverOpeningProvenanceSchema, openingReservationRebaseSchema } from "./inventory-cutover-reconstruction";
+import { warehouseSourceActivationEvidenceSchema } from "./warehouse-source-activation";
 
 const id = z.number().int().positive().max(2_147_483_647);
 const bigintId = z.string().regex(/^[1-9][0-9]*$/).max(19)
@@ -19,6 +20,9 @@ export const inventoryCutoverManifestSchema = z.object({
   productIds: z.array(id).max(10_000),
   publicationTargetIds: z.array(id).max(10_000),
   selections: z.array(inventoryCutoverDefinitionSelectionSchema).max(100_000),
+  // Optional for historical receipts. New cutover reviews capture the exact
+  // referenced source identities and lifecycle, not every warehouse globally.
+  sourceNodes: z.array(warehouseSourceActivationEvidenceSchema).max(10_000).optional(),
 }).strict().superRefine((manifest, context) => {
   for (const field of ["productIds", "publicationTargetIds"] as const) {
     if (manifest[field].some((value, index, values) => index > 0 && value <= values[index - 1])) {
@@ -28,6 +32,9 @@ export const inventoryCutoverManifestSchema = z.object({
   const keys = manifest.selections.map((selection) => `${selection.kind}:${selection.key}`);
   if (new Set(keys).size !== keys.length) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["selections"], message: "A head can select only one definition." });
+  }
+  if (manifest.sourceNodes?.some((node, index, nodes) => index > 0 && node.nodeId <= nodes[index - 1].nodeId)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["sourceNodes"], message: "Source nodes must be unique and sorted." });
   }
 });
 
@@ -91,6 +98,7 @@ export const inventoryCutoverCommitResultSchema = z.object({
   reconstructionHash: hash,
   fullPublicationRows: z.number().int().nonnegative(),
   publicationVerification: z.literal("pending"),
+  activatedFulfillmentNodeIds: z.array(id).max(10_000).optional(),
   alreadyApplied: z.boolean(),
 }).strict();
 

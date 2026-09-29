@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { captureCutoverSourceNodes } from "./inventory-cutover-source-nodes.repository";
 
 import {
   inventoryActivationCommandResultSchema,
@@ -93,7 +94,8 @@ implements InventoryAvailabilityActivationStore {
         command.expectedDryRunResultHash,
       );
       await assertDryRunSelectionsCurrent(client, dryRun);
-      const manifest = buildInventoryCutoverManifest(dryRun, await selectedSnapshots(client, dryRun));
+      const manifest = await captureCutoverSourceNodes(client,
+        buildInventoryCutoverManifest(dryRun, await selectedSnapshots(client, dryRun)));
       const proposed = await projectInventoryCutoverStateInsideTransaction(client, manifest, dryRun.activationRunId, fence.authorityRevision);
       if (proposed.blockers.length > 0) {
         throw invalidEvidence("ACTIVATION_RECONSTRUCTION_BLOCKED", "Resolve current demand, custody and publication findings before conservative preparation.", { blockers: proposed.blockers });
