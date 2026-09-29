@@ -96,12 +96,15 @@ describe("explicit quantity publication recovery application boundary", () => {
 describe("one-click confirmation of stored provider answers", () => {
   const answer = { requestId: "9002", method: "POST", path: "/sell/inventory/v1/offer/77/publish", httpStatus: 400,
     errorCodes: ["25002"], responseHash: "b".repeat(64), recordedAt: "2026-09-29T09:30:00.000Z" } as const;
+  const termination = { requestCount: 1, lastActivityAt: "2026-09-29T09:30:00.000Z", quiescentSince: "2026-09-29T10:30:30.000Z",
+    providerRequestTimeoutSeconds: 30, quiescenceMarginMinutes: 60, evidenceHash: "e".repeat(64) } as const;
   function history() {
     const base = pendingRecovery(); const row = base.unresolvedAttempts[0];
     return { ...base, unresolvedAttempts: [
-      { ...row, attemptId: "20", providerAnswer: null },
-      { ...row, attemptId: "9", providerKey: "ebay" as const, providerAnswer: { ...answer, errorCodes: [...answer.errorCodes] } },
-      { ...row, attemptId: "100", providerKey: "ebay" as const, providerAnswer: { ...answer, errorCodes: [...answer.errorCodes], responseHash: "c".repeat(64) } },
+      { ...row, attemptId: "20", providerAnswer: null, requestTermination: null },
+      { ...row, attemptId: "9", providerKey: "ebay" as const, providerAnswer: { ...answer, errorCodes: [...answer.errorCodes] }, requestTermination: null },
+      { ...row, attemptId: "100", providerKey: "ebay" as const, providerAnswer: { ...answer, errorCodes: [...answer.errorCodes], responseHash: "c".repeat(64) }, requestTermination: null },
+      { ...row, attemptId: "300", providerKey: "ebay" as const, providerAnswer: null, requestTermination: { ...termination } },
     ] };
   }
   function receipt(attemptId: string, replay = false) { return { attemptId, basis: "operator_attestation" as const, replay, providerWriteAttempted: false as const }; }
@@ -110,12 +113,16 @@ describe("one-click confirmation of stored provider answers", () => {
     const { service, store } = fixture(); store.pending.mockResolvedValue(history());
     store.attest.mockImplementation(async command => receipt(command.attemptId));
     const result = await service.attestProviderAnswers({ activationRunId: "1", confirmations: [
-      { attemptId: "100", responseHash: "c".repeat(64) }, { attemptId: "20", responseHash: "a".repeat(64) },
-      { attemptId: "9", responseHash: "b".repeat(64) }, { attemptId: "5", responseHash: "d".repeat(64) } ] }, " operator ");
+      { attemptId: "100", evidenceHash: "c".repeat(64) }, { attemptId: "20", evidenceHash: "a".repeat(64) }, { attemptId: "300", evidenceHash: "e".repeat(64) },
+      { attemptId: "9", evidenceHash: "b".repeat(64) }, { attemptId: "5", evidenceHash: "d".repeat(64) } ] }, " operator ");
     expect(result).toEqual({ basis: "operator_attestation", providerWriteAttempted: false,
-      confirmed: [{ attemptId: "9", replay: false }, { attemptId: "100", replay: false }],
-      skipped: [{ attemptId: "5", reason: "not_pending" }, { attemptId: "20", reason: "no_provider_answer" }] });
-    expect(store.attest.mock.calls.map(([command]) => command.attemptId)).toEqual(["9", "100"]);
+      confirmed: [{ attemptId: "9", replay: false }, { attemptId: "100", replay: false }, { attemptId: "300", replay: false }],
+      skipped: [{ attemptId: "5", reason: "not_pending" }, { attemptId: "20", reason: "no_evidence" }] });
+    expect(store.attest.mock.calls.map(([command]) => command.attemptId)).toEqual(["9", "100", "300"]);
+    expect(store.attest.mock.calls[2][0]).toEqual({ attemptId: "300", idempotencyKey: `request-termination:300:${"e".repeat(64)}`, actor: "operator", now: NOW,
+      evidenceKind: "owner_process_and_request_termination_record", terminalOutcome: "completed", evidenceHash: "e".repeat(64),
+      evidenceReference: "Stored request record of attempt 300: 1 request; last activity at 2026-09-29T09:30:00.000Z; the 30-second provider request deadline and a 60-minute margin passed at 2026-09-29T10:30:30.000Z.",
+      reason: "eBay was last contacted for attempt 300 at 2026-09-29T09:30:00.000Z; every request of it has been terminated since 2026-09-29T10:30:30.000Z, so none can still change provider quantities. Catch-up republishes the current quantity." });
     expect(store.attest.mock.calls[0][0]).toEqual({ attemptId: "9", idempotencyKey: `provider-answer:9:${"b".repeat(64)}`, actor: "operator", now: NOW,
       evidenceKind: "provider_terminal_request_record", terminalOutcome: "completed", evidenceHash: "b".repeat(64),
       evidenceReference: "Stored provider request 9002: POST /sell/inventory/v1/offer/77/publish answered HTTP 400 (codes 25002) at 2026-09-29T09:30:00.000Z",
@@ -125,8 +132,8 @@ describe("one-click confirmation of stored provider answers", () => {
 
   it("skips an attempt whose stored answer no longer matches what the operator saw", async () => {
     const { service, store } = fixture(); store.pending.mockResolvedValue(history());
-    const result = await service.attestProviderAnswers({ confirmations: [{ attemptId: "9", responseHash: "f".repeat(64) }] }, "operator");
-    expect(result).toMatchObject({ confirmed: [], skipped: [{ attemptId: "9", reason: "answer_changed" }] });
+    const result = await service.attestProviderAnswers({ confirmations: [{ attemptId: "9", evidenceHash: "f".repeat(64) }, { attemptId: "300", evidenceHash: "f".repeat(64) }] }, "operator");
+    expect(result).toMatchObject({ confirmed: [], skipped: [{ attemptId: "9", reason: "evidence_changed" }, { attemptId: "300", reason: "evidence_changed" }] });
     expect(store.attest).not.toHaveBeenCalled(); expect(store.pending).toHaveBeenCalledExactlyOnceWith(undefined, NOW);
   });
 
@@ -135,7 +142,7 @@ describe("one-click confirmation of stored provider answers", () => {
     store.attest.mockRejectedValueOnce(new QuantityPublicationAdmissionError("PUBLICATION_RECOVERY_STATE_INVALID", "resolved meanwhile"))
       .mockResolvedValueOnce(receipt("100", true));
     const result = await service.attestProviderAnswers({ confirmations: [
-      { attemptId: "9", responseHash: "b".repeat(64) }, { attemptId: "100", responseHash: "c".repeat(64) }] }, "operator");
+      { attemptId: "9", evidenceHash: "b".repeat(64) }, { attemptId: "100", evidenceHash: "c".repeat(64) }] }, "operator");
     expect(result).toMatchObject({ confirmed: [{ attemptId: "100", replay: true }], skipped: [{ attemptId: "9", reason: "owner_conflict" }] });
     expect(store.attest).toHaveBeenCalledTimes(2);
   });
@@ -144,15 +151,16 @@ describe("one-click confirmation of stored provider answers", () => {
     const { service, store } = fixture(); store.pending.mockResolvedValue(history()); const error = new Error("Commit connection loss");
     store.attest.mockResolvedValueOnce(receipt("9")).mockRejectedValueOnce(error);
     await expect(service.attestProviderAnswers({ confirmations: [
-      { attemptId: "9", responseHash: "b".repeat(64) }, { attemptId: "100", responseHash: "c".repeat(64) }] }, "operator")).rejects.toBe(error);
+      { attemptId: "9", evidenceHash: "b".repeat(64) }, { attemptId: "100", evidenceHash: "c".repeat(64) }] }, "operator")).rejects.toBe(error);
     expect(store.attest).toHaveBeenCalledTimes(2);
   });
 
-  it.each([{}, { confirmations: [] }, { confirmations: [{ attemptId: "abc", responseHash: "b".repeat(64) }] },
-    { confirmations: [{ attemptId: "9", responseHash: "short" }] }, { confirmations: [{ attemptId: "9", responseHash: "B".repeat(64) }] },
-    { confirmations: [{ attemptId: "9", responseHash: "b".repeat(64) }, { attemptId: "9", responseHash: "c".repeat(64) }] },
-    { confirmations: [{ attemptId: "9", responseHash: "b".repeat(64) }], actor: "admin" },
-    { confirmations: [{ attemptId: "9", responseHash: "b".repeat(64) }], activationRunId: "0" },
+  it.each([{}, { confirmations: [] }, { confirmations: [{ attemptId: "abc", evidenceHash: "b".repeat(64) }] },
+    { confirmations: [{ attemptId: "9", evidenceHash: "short" }] }, { confirmations: [{ attemptId: "9", evidenceHash: "B".repeat(64) }] },
+    { confirmations: [{ attemptId: "9", evidenceHash: "b".repeat(64) }, { attemptId: "9", evidenceHash: "c".repeat(64) }] },
+    { confirmations: [{ attemptId: "9", responseHash: "b".repeat(64) }] },
+    { confirmations: [{ attemptId: "9", evidenceHash: "b".repeat(64) }], actor: "admin" },
+    { confirmations: [{ attemptId: "9", evidenceHash: "b".repeat(64) }], activationRunId: "0" },
   ])("rejects incomplete or overreaching confirmation requests before any store access: %#", async input => {
     const { service, store } = fixture();
     await expect(service.attestProviderAnswers(input, "operator")).rejects.toMatchObject({ code: "PUBLICATION_RECOVERY_ANSWERS_REQUEST_INVALID", status: 400 });
@@ -161,7 +169,7 @@ describe("one-click confirmation of stored provider answers", () => {
 
   it("requires current authentication before reading history", async () => {
     const { service, store } = fixture(() => { throw new Error("Clock must not run"); });
-    await expect(service.attestProviderAnswers({ confirmations: [{ attemptId: "9", responseHash: "b".repeat(64) }] }, " "))
+    await expect(service.attestProviderAnswers({ confirmations: [{ attemptId: "9", evidenceHash: "b".repeat(64) }] }, " "))
       .rejects.toMatchObject({ code: "PUBLICATION_RECOVERY_ACTOR_REQUIRED", status: 401 });
     expect(store.pending).not.toHaveBeenCalled(); expect(store.attest).not.toHaveBeenCalled();
   });
@@ -169,10 +177,10 @@ describe("one-click confirmation of stored provider answers", () => {
   it("rejects a receipt for a different attempt and history from a different run", async () => {
     const { service, store } = fixture(); store.pending.mockResolvedValue(history());
     store.attest.mockResolvedValueOnce(receipt("21"));
-    await expect(service.attestProviderAnswers({ confirmations: [{ attemptId: "9", responseHash: "b".repeat(64) }] }, "operator"))
+    await expect(service.attestProviderAnswers({ confirmations: [{ attemptId: "9", evidenceHash: "b".repeat(64) }] }, "operator"))
       .rejects.toMatchObject({ code: "PUBLICATION_RECOVERY_RESULT_INVALID", status: 500 });
     store.pending.mockResolvedValueOnce({ ...history(), activationRunId: "2" });
-    await expect(service.attestProviderAnswers({ activationRunId: "1", confirmations: [{ attemptId: "9", responseHash: "b".repeat(64) }] }, "operator"))
+    await expect(service.attestProviderAnswers({ activationRunId: "1", confirmations: [{ attemptId: "9", evidenceHash: "b".repeat(64) }] }, "operator"))
       .rejects.toMatchObject({ code: "PUBLICATION_RECOVERY_RESULT_INVALID", status: 500 });
     expect(store.attest).toHaveBeenCalledTimes(1);
   });

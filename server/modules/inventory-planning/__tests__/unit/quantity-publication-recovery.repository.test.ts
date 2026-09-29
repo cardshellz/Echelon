@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PostgresQuantityPublicationRecoveryRepository } from "../../infrastructure/quantity-publication-recovery.repository";
+import { summarizeRequestTermination } from "../../domain/quantity-publication-provider-answer";
 import { completionDrain, CUTOVER_COMPLETION_NOW as NOW } from "../fixtures/inventory-cutover-completion.fixture";
 import { recoveryRequest, recoveryResult } from "../fixtures/quantity-publication-recovery.fixture";
 
@@ -59,7 +60,7 @@ describe("publication recovery bounded owner transaction", () => {
     const result = await fixture().repository.pending("1", NOW);
     expect(result.unresolvedAttempts).toEqual([{ attemptId: "19", owner: "legacy", state: "uncertain", outboxId: null,
       destinationKind: "channel_connection", connectionId: 3, providerKey: "shopify", providerScopeType: "location",
-      externalScopeId: "location-1", externalInventoryItemId: "item-1", providerAnswer: null }]);
+      externalScopeId: "location-1", externalInventoryItemId: "item-1", providerAnswer: null, requestTermination: null }]);
     expect(result).not.toHaveProperty("latestAttemptsByScope");
   });
 
@@ -68,21 +69,50 @@ describe("publication recovery bounded owner transaction", () => {
     proof.unresolvedAttempts = [{ attemptId: "19", owner: "legacy", state: "uncertain", outboxId: null, scope: proof.latestAttemptsByScope[0].scope }];
     capture.mockResolvedValueOnce(proof);
     const { repository, client } = fixture();
-    const recordedAt = new Date("2026-09-29T09:30:00.000Z");
+    // Answers recorded two hours before the capture clock: beyond the 30-second deadline plus the 60-minute margin.
+    const startedAt = new Date(NOW.getTime() - 2 * 60 * 60 * 1000 - 10_000);
+    const recordedAt = new Date(NOW.getTime() - 2 * 60 * 60 * 1000);
+    const rows = [
+      { attempt_id: "19", request_id: "9001", ordinal: 1, method: "PUT", path: "/sell/inventory/v1/inventory_item/SKU", started_at: startedAt,
+        outcome: "completed", http_status: 204, response_hash: "a".repeat(64), error_codes: [], recorded_at: recordedAt },
+      { attempt_id: "19", request_id: "9002", ordinal: 2, method: "POST", path: "/sell/inventory/v1/offer/77/publish", started_at: startedAt,
+        outcome: "uncertain", http_status: 400, response_hash: "b".repeat(64), error_codes: ["25002"], recorded_at: recordedAt },
+    ];
+    client.query.mockImplementation(async (sql: string) => ({ rowCount: 0, rows:
+      sql.includes("FROM inventory.availability_activation_runs") ? [{ id: "1" }]
+      : sql.includes("FROM inventory.quantity_provider_requests") ? rows
+      : sql.includes("FROM inventory.quantity_publication_attempts") ? [{ id: "19", started_at: startedAt }] : [] }));
+    const result = await repository.pending("1", NOW);
+    expect(result.unresolvedAttempts[0]?.providerAnswer).toEqual({ requestId: "9002", method: "POST", path: "/sell/inventory/v1/offer/77/publish",
+      httpStatus: 400, errorCodes: ["25002"], responseHash: "b".repeat(64), recordedAt: recordedAt.toISOString() });
+    expect(result.unresolvedAttempts[0]?.requestTermination).toEqual(summarizeRequestTermination({ attemptId: "19", state: "uncertain", startedAt, now: NOW,
+      providerRequestTimeoutMs: 30_000, receipts: rows.map(row => ({ attemptId: row.attempt_id, requestId: row.request_id, ordinal: row.ordinal,
+        method: row.method, path: row.path, startedAt: row.started_at, outcome: row.outcome as "completed" | "uncertain", httpStatus: row.http_status,
+        responseHash: row.response_hash, errorCodes: row.error_codes, recordedAt: row.recorded_at })) }));
+    expect(result.unresolvedAttempts[0]?.requestTermination).toMatchObject({ requestCount: 2, lastActivityAt: recordedAt.toISOString(), providerRequestTimeoutSeconds: 30 });
+    const receipts = client.query.mock.calls.find(([sql]) => sql.includes("FROM inventory.quantity_provider_requests"))!;
+    expect(receipts[0]).toContain("LEFT JOIN inventory.quantity_provider_request_results"); expect(receipts[0]).toContain("q.started_at");
+    expect(receipts[1]).toEqual([["19"]]);
+    const timings = client.query.mock.calls.find(([sql]) => sql.includes("FROM inventory.quantity_publication_attempts"))!;
+    expect(timings[1]).toEqual([["19"]]);
+  });
+
+  it("offers no termination proof for an attempt active within the margin, or without a stored start", async () => {
+    const proof = completionDrain();
+    proof.unresolvedAttempts = [{ attemptId: "19", owner: "legacy", state: "uncertain", outboxId: null, scope: proof.latestAttemptsByScope[0].scope },
+      { attemptId: "21", owner: "legacy", state: "running", outboxId: null, scope: proof.latestAttemptsByScope[0].scope }];
+    capture.mockResolvedValueOnce(proof);
+    const { repository, client } = fixture();
+    const recent = new Date(NOW.getTime() - 10 * 60 * 1000);
     client.query.mockImplementation(async (sql: string) => ({ rowCount: 0, rows:
       sql.includes("FROM inventory.availability_activation_runs") ? [{ id: "1" }]
       : sql.includes("FROM inventory.quantity_provider_requests") ? [
-        { attempt_id: "19", request_id: "9001", ordinal: 1, method: "PUT", path: "/sell/inventory/v1/inventory_item/SKU", outcome: "completed",
-          http_status: 204, response_hash: "a".repeat(64), error_codes: [], recorded_at: recordedAt },
-        { attempt_id: "19", request_id: "9002", ordinal: 2, method: "POST", path: "/sell/inventory/v1/offer/77/publish", outcome: "uncertain",
-          http_status: 400, response_hash: "b".repeat(64), error_codes: ["25002"], recorded_at: recordedAt },
-      ] : [] }));
+        { attempt_id: "19", request_id: "9001", ordinal: 1, method: "PUT", path: "/sell/inventory/v1/inventory_item/SKU", started_at: recent,
+          outcome: null, http_status: null, response_hash: null, error_codes: [], recorded_at: null }]
+      : sql.includes("FROM inventory.quantity_publication_attempts") ? [{ id: "19", started_at: recent }] : [] }));
     const result = await repository.pending("1", NOW);
-    expect(result.unresolvedAttempts[0]?.providerAnswer).toEqual({ requestId: "9002", method: "POST", path: "/sell/inventory/v1/offer/77/publish",
-      httpStatus: 400, errorCodes: ["25002"], responseHash: "b".repeat(64), recordedAt: "2026-09-29T09:30:00.000Z" });
-    const receipts = client.query.mock.calls.find(([sql]) => sql.includes("FROM inventory.quantity_provider_requests"))!;
-    expect(receipts[0]).toContain("LEFT JOIN inventory.quantity_provider_request_results");
-    expect(receipts[1]).toEqual([["19"]]);
+    expect(result.unresolvedAttempts.map(attempt => [attempt.attemptId, attempt.providerAnswer, attempt.requestTermination]))
+      .toEqual([["19", null, null], ["21", null, null]]);
   });
 
   it("does not read receipts when nothing is unresolved, and offers no answer for an attempt without one", async () => {
@@ -94,6 +124,7 @@ describe("publication recovery bounded owner transaction", () => {
     capture.mockResolvedValueOnce(proof);
     const result = await fixture().repository.pending("1", NOW);
     expect(result.unresolvedAttempts[0]?.providerAnswer).toBeNull();
+    expect(result.unresolvedAttempts[0]?.requestTermination).toBeNull();
   });
 
   it("passes the exact attestation owner command and commits only strict audited output", async () => {

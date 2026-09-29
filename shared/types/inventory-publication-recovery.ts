@@ -26,18 +26,25 @@ export const quantityPublicationProviderAnswerSchema = z.object({
   responseHash: z.string().regex(/^[a-f0-9]{64}$/), recordedAt: z.string().datetime(),
 }).strict();
 export type QuantityPublicationProviderAnswer = z.infer<typeof quantityPublicationProviderAnswerSchema>;
-/** One click confirms every listed attempt whose stored provider answer the operator saw; the hash pins what was on screen. */
+/** Nothing of the attempt can still reach the provider: its last stored activity lies further back than the request deadline plus a wide margin. */
+export const quantityPublicationRequestTerminationSchema = z.object({
+  requestCount: z.number().int().nonnegative().max(10000), lastActivityAt: z.string().datetime(), quiescentSince: z.string().datetime(),
+  providerRequestTimeoutSeconds: z.number().int().positive().max(3600), quiescenceMarginMinutes: z.number().int().positive().max(1440),
+  evidenceHash: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+export type QuantityPublicationRequestTermination = z.infer<typeof quantityPublicationRequestTerminationSchema>;
+/** One click confirms every listed attempt whose stored evidence the operator saw; the hash pins what was on screen. */
 export const quantityPublicationProviderAnswerRecoverySchema = z.object({
   activationRunId: bigintId.optional(),
-  confirmations: z.array(z.object({ attemptId: bigintId, responseHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict()).min(1).max(1000),
+  confirmations: z.array(z.object({ attemptId: bigintId, evidenceHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict()).min(1).max(1000),
 }).strict().superRefine((value, ctx) => {
   if (new Set(value.confirmations.map(row => row.attemptId)).size !== value.confirmations.length) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["confirmations"], message: "Each attempt may be confirmed once per request." });
   }
 });
 export type QuantityPublicationProviderAnswerRecovery = z.infer<typeof quantityPublicationProviderAnswerRecoverySchema>;
-/** Why a listed attempt was not confirmed: it left the list, has no answer on file, its answer changed since it was shown, or another operator resolved it first. */
-export const quantityPublicationProviderAnswerSkipReasonSchema = z.enum(["not_pending", "no_provider_answer", "answer_changed", "owner_conflict"]);
+/** Why a listed attempt was not confirmed: it left the list, has no evidence on file, its record changed since it was shown, or another operator resolved it first. */
+export const quantityPublicationProviderAnswerSkipReasonSchema = z.enum(["not_pending", "no_evidence", "evidence_changed", "owner_conflict"]);
 export type QuantityPublicationProviderAnswerSkipReason = z.infer<typeof quantityPublicationProviderAnswerSkipReasonSchema>;
 export const quantityPublicationProviderAnswerRecoveryResultSchema = z.object({
   basis: z.literal("operator_attestation"), providerWriteAttempted: z.literal(false),
@@ -57,6 +64,7 @@ export const pendingQuantityPublicationRecoverySchema = z.object({
     providerScopeType: z.enum(["account", "location"]), externalScopeId: text(240), externalInventoryItemId: text(240),
     /** Optional so a client one release ahead of its server still parses; absent and null both mean no answer on file. */
     providerAnswer: quantityPublicationProviderAnswerSchema.nullable().optional(),
+    requestTermination: quantityPublicationRequestTerminationSchema.nullable().optional(),
   }).strict()).max(1000),
 }).strict().superRefine((value, ctx) => {
   if (new Set(value.unresolvedAttempts.map(row => row.attemptId)).size !== value.unresolvedAttempts.length) {
