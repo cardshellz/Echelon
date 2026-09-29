@@ -376,6 +376,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
     retryable: boolean;
     providerErrors?: ReadonlyArray<Record<string, unknown>>;
     endpoint?: string | null;
+    context?: Record<string, unknown>;
     workerId: string;
     eventType: string;
     now: Date;
@@ -397,6 +398,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
             retryable: input.retryable,
             ...(input.providerErrors ? { providerErrors: input.providerErrors } : {}),
             ...(input.endpoint ? { endpoint: input.endpoint } : {}),
+            ...(input.context ? { context: input.context } : {}),
             workerId: input.workerId,
             processedAt: input.now.toISOString(),
           },

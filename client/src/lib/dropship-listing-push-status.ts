@@ -122,8 +122,9 @@ export function describeListingPushOutcome(job: DropshipListingPushJob, storeNam
       };
     }
     if (FAILED_ITEM_STATUSES.has(item.status)) {
-      const reason = item.errorMessage?.trim() || "the store did not say why";
-      return { ...base, state: "failed", line: `Could not list: ${reason}`, nextStep: listingPushNextStep(item.errorCode, item.retryable) };
+      const gate = item.errorCode ? STOCK_GATE_REFUSALS[item.errorCode] : undefined;
+      const reason = gate?.reason ?? (item.errorMessage?.trim() || "the store did not say why");
+      return { ...base, state: "failed", line: `Could not list: ${reason}`, nextStep: gate?.nextStep ?? listingPushNextStep(item.errorCode, item.retryable) };
     }
     return { ...base, state: "pending", line: `Sending to ${store}…`, nextStep: null };
   });
@@ -161,6 +162,22 @@ export function describeListingPushOutcome(job: DropshipListingPushJob, storeNam
  * The step to take after a refusal. The reason itself comes from the store
  * (already in the item's line); this says what to do about it.
  */
+/**
+ * Refusals from Card Shellz's own stock gate, raised before any marketplace
+ * call. Their server messages are written for operators; the vendor gets what
+ * happened and the step in plain words.
+ */
+const STOCK_GATE_REFUSALS: Record<string, { reason: string; nextStep: string }> = {
+  PUBLICATION_PRIOR_OUTCOME_UNRESOLVED: {
+    reason: "an earlier stock update for this listing on eBay still has to be confirmed by Card Shellz.",
+    nextStep: "Nothing to fix on your side. Contact support with this message; once they confirm that earlier update, queue the listing again.",
+  },
+  PUBLICATION_PROVIDER_COOLDOWN: {
+    reason: "eBay asked for a pause after the last attempt.",
+    nextStep: "Queue the listing again in a few minutes.",
+  },
+};
+
 export function listingPushNextStep(errorCode: string | null, retryable: boolean | null): string {
   switch (errorCode) {
     case "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR":

@@ -31,13 +31,27 @@ export function ebayRetryNotBefore(value: string | null, observedAt: Date, minim
 }
 
 /** Narrow evidence classification; 408, 5xx, generic APPLICATION errors and malformed bodies stay uncertain. */
+/**
+ * eBay's REQUEST and BUSINESS error categories are eBay refusing the request
+ * as sent (bad input, or a business rule such as a missing product
+ * identifier at publish): nothing was written, so a 400 carrying only these
+ * is a rejection. APPLICATION is an eBay-side failure whose effect is unknown,
+ * and a missing category proves nothing; both stay uncertain and block the
+ * scope until an operator reconciles it.
+ */
+const PROVIDER_REFUSAL_CATEGORIES: ReadonlySet<string> = new Set(["REQUEST", "BUSINESS"]);
+
+function isProviderRefusalCategory(category: string | undefined): boolean {
+  return category !== undefined && PROVIDER_REFUSAL_CATEGORIES.has(category);
+}
+
 export function classifyEbayQuantityResponse(status: number, body: unknown): { rejected: boolean; dailyLimit: boolean; errorCodes: string[] } {
   const parsed = errorsSchema.safeParse(body);
   const errors = parsed.success ? parsed.data.errors : [];
   const isDaily = (error: typeof errors[number]): boolean => error.errorId === 25001
     && /exceeded your maximum call limit of 250 for item per day/i.test(error.message);
   const dailyLimit = status === 400 && errors.length > 0 && errors.every(isDaily);
-  const validation = status === 400 && errors.length > 0 && errors.every(error => error.category === "REQUEST");
+  const validation = status === 400 && errors.length > 0 && errors.every(error => isProviderRefusalCategory(error.category));
   return { rejected: dailyLimit || validation || [401, 403, 429].includes(status), dailyLimit,
     errorCodes: errors.map(error => String(error.errorId)) };
 }

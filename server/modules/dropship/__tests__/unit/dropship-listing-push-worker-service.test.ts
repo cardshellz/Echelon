@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { DropshipError } from "../../domain/errors";
+import { QuantityPublicationAdmissionError } from "../../../inventory-planning/domain/quantity-publication-admission";
 import type {
   DropshipLogEvent,
   DropshipNotificationSenderInput,
@@ -277,6 +278,43 @@ describe("DropshipListingPushWorkerService", () => {
     expect(notificationSender.sent[0]?.message).toBe(
       "1 of 1 listing could not be sent to your store (job 30). First reason: eBay listing push failed with HTTP 400: 25002 Invalid value for aspect (aspect: Brand)",
     );
+  });
+
+  it("treats an unresolved prior stock attempt as an operator problem: not retryable, logged for a human, attempt kept for support", async () => {
+    marketplacePush.error = new QuantityPublicationAdmissionError(
+      "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED",
+      "A prior provider quantity outcome requires reconciliation.",
+      { attemptId: "482" },
+    );
+
+    const result = await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-005" });
+
+    expect(result.items[0]).toMatchObject({ status: "failed", errorCode: "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED" });
+    expect(repository.failInputs[0]).toMatchObject({
+      code: "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED",
+      retryable: false,
+      context: { attemptId: "482", operatorAction: true },
+    });
+    expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_OPERATOR")).toMatchObject({
+      context: { jobId: 30, itemId: 1, errorCode: "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED", attemptId: "482" },
+    });
+  });
+
+  it("lets a provider cooldown refusal be queued again", async () => {
+    marketplacePush.error = new QuantityPublicationAdmissionError(
+      "PUBLICATION_PROVIDER_COOLDOWN",
+      "The provider retry window has not opened; no quantity request was sent.",
+      { retryNotBefore: "2026-09-29T12:00:00.000Z" },
+    );
+
+    await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-006" });
+
+    expect(repository.failInputs[0]).toMatchObject({
+      code: "PUBLICATION_PROVIDER_COOLDOWN",
+      retryable: true,
+      context: { attemptId: null, operatorAction: false },
+    });
+    expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_OPERATOR")).toBeUndefined();
   });
 
   it("does not fail the push worker when listing failure notification delivery fails", async () => {

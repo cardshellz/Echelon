@@ -1,4 +1,5 @@
 import { DropshipError } from "../domain/errors";
+import { QuantityPublicationAdmissionError } from "../../inventory-planning/domain/quantity-publication-admission";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type {
@@ -117,6 +118,8 @@ export interface DropshipListingPushWorkerRepository {
     providerErrors?: ReadonlyArray<Record<string, unknown>>;
     /** The marketplace call that refused ("PUT /sell/inventory/v1/inventory_item/SKU"), when the provider names it. */
     endpoint?: string | null;
+    /** What a refusing gate named (an attempt id, whether an operator must act); kept on the item for support. */
+    context?: Record<string, unknown>;
     workerId: string;
     now: Date;
   }): Promise<DropshipListingPushWorkerItemRecord>;
@@ -275,6 +278,26 @@ export class DropshipListingPushWorkerService {
       });
     } catch (error) {
       const classified = classifyListingPushError(error);
+      if (classified.needsOperator) {
+        // ERROR: a human must attest the prior attempt before this listing can
+        // move again; the vendor cannot fix it and a re-queue is refused the same way.
+        this.deps.logger.error({
+          code: "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_OPERATOR",
+          message: "A listing push item is blocked until an operator resolves a prior stock attempt.",
+          context: {
+            jobId: claim.job.jobId,
+            itemId: item.itemId,
+            vendorId: claim.job.vendorId,
+            storeConnectionId: claim.job.storeConnectionId,
+            listingId: item.listingId,
+            productVariantId: item.productVariantId,
+            platform: claim.job.platform,
+            errorCode: classified.code,
+            errorMessage: classified.message,
+            attemptId: classified.context?.attemptId ?? null,
+          },
+        });
+      }
       // The vendor is told by notification; this line is for the operator
       // reading the log for one job, with the marketplace's reason attached.
       this.deps.logger.warn({
@@ -301,6 +324,7 @@ export class DropshipListingPushWorkerService {
         code: classified.code,
         message: classified.message,
         retryable: classified.retryable,
+        context: classified.context,
         providerErrors: classified.providerErrors,
         endpoint: classified.endpoint,
         workerId: parsed.workerId,
@@ -482,13 +506,37 @@ export function describeFailedListingPushJob(result: DropshipListingPushWorkerRe
   return firstReason ? `${lead} First reason: ${firstReason}` : lead;
 }
 
+/**
+ * Stock-gate refusals that only a human clears: an earlier eBay quantity
+ * attempt with no proven outcome is resolved by operator attestation on the
+ * Inventory cutover page, never by queueing the listing again.
+ */
+const OPERATOR_RESOLVED_ADMISSION_CODES: ReadonlySet<string> = new Set(["PUBLICATION_PRIOR_OUTCOME_UNRESOLVED"]);
+
 function classifyListingPushError(error: unknown): {
   code: string;
   message: string;
   retryable: boolean;
   providerErrors?: ReadonlyArray<Record<string, unknown>>;
   endpoint?: string | null;
+  /** Kept on the item for support: which gate refused and what it named. */
+  context?: Record<string, unknown>;
+  /** True when a re-queue cannot help and an operator must act first. */
+  needsOperator?: boolean;
 } {
+  if (error instanceof QuantityPublicationAdmissionError) {
+    // The gate refused before any marketplace call, so there is no endpoint
+    // and no provider error; its own code is the useful fact.
+    const needsOperator = OPERATOR_RESOLVED_ADMISSION_CODES.has(error.code);
+    const attemptId = typeof error.context.attemptId === "string" ? error.context.attemptId : null;
+    return {
+      code: error.code,
+      message: error.message,
+      retryable: !needsOperator,
+      context: { attemptId, operatorAction: needsOperator },
+      needsOperator,
+    };
+  }
   if (error instanceof DropshipError) {
     const endpoint = error.context?.endpoint;
     return {

@@ -329,6 +329,8 @@ test("says plainly when nothing selected was ready to queue", async ({ page }) =
 
   await expect(card.getByTestId("listing-queue-result"))
     .toHaveText("Nothing was queued: the selected listing is not ready. The table below shows why.");
+  // The row itself says why, under its status badge.
+  await expect(card.getByTestId("listing-row-issues-101")).toHaveText("Catalog Package Data Required");
   expect(state.pushCalls).toBe(1);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
