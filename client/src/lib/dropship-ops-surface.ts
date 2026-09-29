@@ -2920,6 +2920,35 @@ export function buildAdminListingPushJobsUrl(input: {
   });
 }
 
+/**
+ * The retry route's refusals in the admin's words; null for anything else,
+ * which is shown as the server said it.
+ */
+export function describeListingPushRetryRefusal(
+  error: unknown,
+  jobId: number,
+): string | null {
+  if (!(error instanceof DropshipApiError)) return null;
+  if (error.code === "DROPSHIP_LISTING_PUSH_OPS_JOB_NOT_RETRYABLE") {
+    return (
+      `Nothing to retry on job ${jobId}: its failed item was refused for a reason a retry cannot change. ` +
+      "Queue the listing again from the vendor portal to push it afresh."
+    );
+  }
+  if (error.code === "DROPSHIP_LISTING_PUSH_OPS_STATUS_NOT_RETRYABLE") {
+    const minutes = error.context?.staleAfterMinutes;
+    const idleMinutes =
+      typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0
+        ? minutes
+        : 30;
+    return (
+      `Job ${jobId} cannot be retried in its current state. ` +
+      `A processing job can be recovered once it has been idle for ${idleMinutes} minutes.`
+    );
+  }
+  return null;
+}
+
 export function buildAdminListingPushJobRetryInput(input: {
   idempotencyKey: string;
   reason: string;

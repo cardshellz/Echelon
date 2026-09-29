@@ -63,6 +63,7 @@ import {
   buildStoreListingConfigInput,
   buildStoreListingModeChangeInput,
   describeDropshipListingMode,
+  describeListingPushRetryRefusal,
   DROPSHIP_LISTING_MODE_OPTIONS,
   parseDropshipListingMode,
   formatCents,
@@ -2774,5 +2775,30 @@ describe("store listing mode change", () => {
       label: "Not set",
       description: "The store has no listing mode yet.",
     });
+  });
+});
+
+describe("describeListingPushRetryRefusal", () => {
+  it("puts the two refusals in plain words and leaves other errors alone", () => {
+    const notRetryable = new DropshipApiError({
+      message: "Dropship listing push job has no retryable failed items.",
+      status: 409,
+      code: "DROPSHIP_LISTING_PUSH_OPS_JOB_NOT_RETRYABLE",
+    });
+    expect(describeListingPushRetryRefusal(notRetryable, 4)).toBe(
+      "Nothing to retry on job 4: its failed item was refused for a reason a retry cannot change. " +
+        "Queue the listing again from the vendor portal to push it afresh.",
+    );
+    const notStale = new DropshipApiError({
+      message: "Only failed or stale processing dropship listing push jobs can be retried.",
+      status: 409,
+      code: "DROPSHIP_LISTING_PUSH_OPS_STATUS_NOT_RETRYABLE",
+      context: { staleAfterMinutes: 45 },
+    });
+    expect(describeListingPushRetryRefusal(notStale, 5)).toBe(
+      "Job 5 cannot be retried in its current state. A processing job can be recovered once it has been idle for 45 minutes.",
+    );
+    expect(describeListingPushRetryRefusal(new DropshipApiError({ message: "Boom", status: 500, code: "X" }), 5)).toBeNull();
+    expect(describeListingPushRetryRefusal(new Error("Boom"), 5)).toBeNull();
   });
 });
