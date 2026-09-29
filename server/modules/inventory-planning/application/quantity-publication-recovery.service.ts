@@ -1,8 +1,21 @@
 import { z } from "zod";
 import { pendingQuantityPublicationRecoveryRequestSchema, pendingQuantityPublicationRecoverySchema,
+  quantityPublicationProviderAnswerRecoveryResultSchema, quantityPublicationProviderAnswerRecoverySchema,
   quantityPublicationRecoveryResultSchema, quantityPublicationRecoverySchema,
-  type PendingQuantityPublicationRecovery, type QuantityPublicationRecovery, type QuantityPublicationRecoveryResult } from "@shared/types/inventory-publication-recovery";
+  type PendingQuantityPublicationRecovery, type QuantityPublicationProviderAnswerRecoveryResult,
+  type QuantityPublicationRecovery, type QuantityPublicationRecoveryResult } from "@shared/types/inventory-publication-recovery";
+import { providerAnswerEvidence, providerAnswerIdempotencyKey } from "@shared/inventory-publication-recovery-evidence";
+import { QuantityPublicationAdmissionError } from "../domain/quantity-publication-admission";
 import { InventoryCutoverCommitError } from "./inventory-cutover-commit.service";
+
+/** The owner refused because someone else resolved or re-evidenced the attempt first; the rest of a batch is unaffected. */
+const OWNER_CONFLICT_CODES: ReadonlySet<string> = new Set(["PUBLICATION_RECOVERY_REPLAY_CONFLICT", "PUBLICATION_RECOVERY_STATE_INVALID"]);
+
+/** Attempt ids are decimal bigint strings; numeric order, not string order. */
+function compareAttemptIds(left: string, right: string): number {
+  if (left.length !== right.length) return left.length - right.length;
+  return left < right ? -1 : left > right ? 1 : 0;
+}
 
 export interface QuantityPublicationRecoveryCommand extends QuantityPublicationRecovery { actor: string; now: Date }
 export interface QuantityPublicationRecoveryStore {
@@ -34,6 +47,43 @@ export class QuantityPublicationRecoveryService {
     if (result.attemptId !== request.data.attemptId) throw new InventoryCutoverCommitError(
       "PUBLICATION_RECOVERY_RESULT_INVALID", "The attestation receipt belongs to a different publication attempt.", 500);
     return result;
+  }
+
+  /** Confirms, with one audited attestation each, every listed attempt whose stored provider answer the operator saw.
+   * Attempts without an answer on file, or whose answer changed since it was shown, are reported, never guessed. */
+  async attestProviderAnswers(input: unknown, actorInput: unknown): Promise<QuantityPublicationProviderAnswerRecoveryResult> {
+    const actor = this.actor(actorInput);
+    const request = quantityPublicationProviderAnswerRecoverySchema.safeParse(input);
+    if (!request.success) throw new InventoryCutoverCommitError("PUBLICATION_RECOVERY_ANSWERS_REQUEST_INVALID",
+      "The attempts to confirm and the stored answer each one showed are required.", 400);
+    const history = await this.pending(request.data.activationRunId === undefined ? {} : { activationRunId: request.data.activationRunId }, actorInput);
+    const attempts = new Map(history.unresolvedAttempts.map(attempt => [attempt.attemptId, attempt]));
+    const confirmed: QuantityPublicationProviderAnswerRecoveryResult["confirmed"] = [];
+    const skipped: QuantityPublicationProviderAnswerRecoveryResult["skipped"] = [];
+    // Ascending attempt order keeps the audit trail deterministic whatever order the client sent.
+    const ordered = [...request.data.confirmations].sort((left, right) => compareAttemptIds(left.attemptId, right.attemptId));
+    for (const confirmation of ordered) {
+      const attempt = attempts.get(confirmation.attemptId);
+      if (!attempt) { skipped.push({ attemptId: confirmation.attemptId, reason: "not_pending" }); continue; }
+      if (!attempt.providerAnswer) { skipped.push({ attemptId: attempt.attemptId, reason: "no_provider_answer" }); continue; }
+      if (attempt.providerAnswer.responseHash !== confirmation.responseHash) { skipped.push({ attemptId: attempt.attemptId, reason: "answer_changed" }); continue; }
+      const command = quantityPublicationRecoverySchema.parse({ attemptId: attempt.attemptId,
+        idempotencyKey: providerAnswerIdempotencyKey(attempt.attemptId, attempt.providerAnswer.responseHash),
+        ...providerAnswerEvidence(attempt, attempt.providerAnswer) });
+      let result: QuantityPublicationRecoveryResult;
+      try {
+        result = quantityPublicationRecoveryResultSchema.parse(await this.store.attest({ ...command, actor, now: this.now() }));
+      } catch (error) {
+        if (error instanceof QuantityPublicationAdmissionError && OWNER_CONFLICT_CODES.has(error.code)) {
+          skipped.push({ attemptId: attempt.attemptId, reason: "owner_conflict" }); continue;
+        }
+        throw error;
+      }
+      if (result.attemptId !== attempt.attemptId) throw new InventoryCutoverCommitError(
+        "PUBLICATION_RECOVERY_RESULT_INVALID", "The attestation receipt belongs to a different publication attempt.", 500);
+      confirmed.push({ attemptId: attempt.attemptId, replay: result.replay });
+    }
+    return quantityPublicationProviderAnswerRecoveryResultSchema.parse({ basis: "operator_attestation", providerWriteAttempted: false, confirmed, skipped });
   }
 
   private actor(input: unknown): string {

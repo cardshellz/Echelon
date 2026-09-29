@@ -5,11 +5,13 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { InventoryPublicationRecoveryPanel } from "../../inventory-publication-recovery-panel";
 
 const state = vi.hoisted(() => ({ data: null as unknown, error: null as Error | null,
-  result: null as unknown, fetching: false, mutate: vi.fn(), refetch: vi.fn() }));
+  result: null as unknown, answersResult: null as unknown, fetching: false, mutate: vi.fn(), refetch: vi.fn(), mutationCalls: 0 }));
 vi.mock("@tanstack/react-query", () => ({
   useQuery: vi.fn(() => ({ data: state.data, error: state.error, isError: state.error !== null,
     isFetching: state.fetching, refetch: state.refetch })),
-  useMutation: vi.fn(() => ({ data: state.result, error: null, isPending: false, mutate: state.mutate })),
+  // The panel declares two mutations per render, the single attestation first and the one-click confirmation second.
+  useMutation: vi.fn(() => ({ data: state.mutationCalls++ % 2 === 0 ? state.result : state.answersResult,
+    error: null, isPending: false, mutate: state.mutate })),
 }));
 const unresolved = { attemptId: "7", owner: "legacy", state: "uncertain", outboxId: null,
   destinationKind: "dropship_store_connection", connectionId: 9, providerKey: "ebay",
@@ -20,7 +22,8 @@ function render(overrides: Partial<Parameters<typeof InventoryPublicationRecover
   }));
 }
 beforeEach(() => {
-  state.data = null; state.error = null; state.result = null; state.fetching = false; vi.clearAllMocks();
+  state.data = null; state.error = null; state.result = null; state.answersResult = null; state.fetching = false;
+  state.mutationCalls = 0; vi.clearAllMocks();
 });
 describe("publication recovery operator panel", () => {
   it.each([{ canActivate: false }, { actorId: null }])("does not show recovery controls without authority %j", props => {
@@ -58,6 +61,31 @@ describe("publication recovery operator panel", () => {
     expect(state.mutate).not.toHaveBeenCalled();
   });
 
+  it("offers one click for every listed attempt whose refusal is on file, and never records it by itself", () => {
+    const answer = { requestId: "9002", method: "POST", path: "/sell/inventory/v1/offer/77/publish", httpStatus: 400,
+      errorCodes: ["25002"], responseHash: "b".repeat(64), recordedAt: "2026-09-29T09:30:00.000Z" };
+    state.data = { unresolvedAttempts: [{ ...unresolved, providerAnswer: answer },
+      { ...unresolved, attemptId: "8", externalInventoryItemId: "sku-P6", providerAnswer: { ...answer, requestId: "9003" } },
+      { ...unresolved, attemptId: "9", externalInventoryItemId: "sku-P7" }], pendingCatchupCount: 3 };
+    const html = render();
+    expect(html).toContain("eBay refused 2 of the 3 listed requests, and each refusal is on file.");
+    expect(html).toContain("The other entry stays listed because no answer is on file for it.");
+    expect(html).toContain("I reviewed these refusals and attest that none of these requests can still change provider quantities.");
+    expect(html).toMatch(/<button[^>]*disabled[^>]*>Confirm all 2 refused entries/);
+    expect(state.mutate).not.toHaveBeenCalled();
+  });
+  it("shows no one-click confirmation when no listed attempt has an answer on file", () => {
+    state.data = { unresolvedAttempts: [unresolved], pendingCatchupCount: 1 };
+    const html = render();
+    expect(html).not.toContain("Confirm all"); expect(html).not.toContain("refusal is on file");
+  });
+  it("reports the one-click outcome without claiming a provider write", () => {
+    state.data = { unresolvedAttempts: [], pendingCatchupCount: 0 };
+    state.answersResult = { basis: "operator_attestation", providerWriteAttempted: false,
+      confirmed: [{ attemptId: "7", replay: false }, { attemptId: "8", replay: true }], skipped: [{ attemptId: "9", reason: "owner_conflict" }] };
+    const html = render();
+    expect(html).toContain("Confirmed 1 entry · 1 already recorded · 1 skipped (resolved by someone else meanwhile). No provider write or provider verification was performed.");
+  });
   it("explicitly labels a successful manual attestation without claiming a provider write", () => {
     state.result = { attemptId: "7", basis: "operator_attestation", replay: false, providerWriteAttempted: false };
     const html = render();

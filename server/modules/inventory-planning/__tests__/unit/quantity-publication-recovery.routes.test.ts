@@ -16,12 +16,15 @@ const actions = ["pending", "attest"] as const;
 describe("publication recovery activation-role HTTP boundary", () => {
   let server: Awaited<ReturnType<typeof startServer>>;
   let session: { user?: { id?: string } };
-  let service: { pending: ReturnType<typeof vi.fn>; attest: ReturnType<typeof vi.fn> };
+  let service: { pending: ReturnType<typeof vi.fn>; attest: ReturnType<typeof vi.fn>; attestProviderAnswers: ReturnType<typeof vi.fn> };
+  const confirmation = { activationRunId: "1", confirmations: [{ attemptId: "20", responseHash: "b".repeat(64) }] };
+  const confirmationOutcome = { basis: "operator_attestation", providerWriteAttempted: false, confirmed: [{ attemptId: "20", replay: false }], skipped: [] };
   beforeEach(async () => {
     hasPermission.mockReset().mockResolvedValue(true);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     session = { user: { id: "operator-1" } };
-    service = { pending: vi.fn(async () => pendingRecovery()), attest: vi.fn(async () => recoveryResult()) };
+    service = { pending: vi.fn(async () => pendingRecovery()), attest: vi.fn(async () => recoveryResult()),
+      attestProviderAnswers: vi.fn(async () => confirmationOutcome) };
     server = await startServer(service, () => session);
   });
   afterEach(async () => { await server.close(); vi.restoreAllMocks(); });
@@ -55,6 +58,42 @@ describe("publication recovery activation-role HTTP boundary", () => {
     const response = await request(server.url + ROOT + "/attest", recoveryRequest());
     expect(response).toMatchObject({ status: 200, body: { basis: "operator_attestation", replay: true } });
     expect(response.headers["cache-control"]).toBe("no-store");
+  });
+
+  it("confirms stored provider answers for the session operator and reports the audited outcome", async () => {
+    const response = await request(server.url + ROOT + "/attest-provider-answers", confirmation);
+    expect(response).toMatchObject({ status: 200, body: confirmationOutcome });
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(hasPermission).toHaveBeenCalledExactlyOnceWith("operator-1", "inventory_planning", "activate");
+    expect(service.attestProviderAnswers).toHaveBeenCalledExactlyOnceWith(confirmation, "operator-1");
+    expect(service.attest).not.toHaveBeenCalled(); expect(service.pending).not.toHaveBeenCalled();
+  });
+
+  it.each([{}, { confirmations: [] }, { confirmations: [{ attemptId: "20", responseHash: "short" }] },
+    { confirmations: [{ attemptId: "20", responseHash: "b".repeat(64) }, { attemptId: "20", responseHash: "c".repeat(64) }] },
+    { ...confirmation, actor: "admin" }, { ...confirmation, force: true },
+  ])("rejects incomplete or overreaching confirmations before service access: %#", async body => {
+    expect(await request(server.url + ROOT + "/attest-provider-answers", body)).toMatchObject({ status: 400, body: { error: { code: "PUBLICATION_RECOVERY_ANSWERS_REQUEST_INVALID" } } });
+    expect(service.attestProviderAnswers).not.toHaveBeenCalled();
+  });
+
+  it("requires authentication, permission and a clean query for confirmations", async () => {
+    session = {};
+    expect((await request(server.url + ROOT + "/attest-provider-answers", confirmation)).status).toBe(401);
+    session = { user: { id: "operator-1" } }; hasPermission.mockResolvedValue(false);
+    expect((await request(server.url + ROOT + "/attest-provider-answers", confirmation)).status).toBe(403);
+    hasPermission.mockResolvedValue(true);
+    expect((await request(server.url + ROOT + "/attest-provider-answers?actor=admin", confirmation)).status).toBe(400);
+    expect(service.attestProviderAnswers).not.toHaveBeenCalled();
+  });
+
+  it("sanitizes confirmation failures and rejects misleading confirmation output", async () => {
+    service.attestProviderAnswers.mockRejectedValueOnce(new Error("secret SQL token"));
+    const failure = await request(server.url + ROOT + "/attest-provider-answers", confirmation);
+    expect(failure).toMatchObject({ status: 500, body: { error: { code: "CUTOVER_COMMAND_FAILED" } } });
+    expect(JSON.stringify(failure.body)).not.toMatch(/secret|token/);
+    service.attestProviderAnswers.mockResolvedValueOnce({ ...confirmationOutcome, providerWriteAttempted: true });
+    expect((await request(server.url + ROOT + "/attest-provider-answers", confirmation)).status).toBe(500);
   });
 
   it.each(actions)("rejects missing authentication before %s or permission access", async action => {
@@ -142,7 +181,7 @@ describe("publication recovery activation-role HTTP boundary", () => {
   });
 });
 
-async function startServer(service: Pick<QuantityPublicationRecoveryService, "pending" | "attest">, session: () => unknown) {
+async function startServer(service: Pick<QuantityPublicationRecoveryService, "pending" | "attest" | "attestProviderAnswers">, session: () => unknown) {
   const app = express(); app.use(express.json());
   app.use((req, _res, next) => { Object.defineProperty(req, "session", { configurable: true, value: session() }); next(); });
   registerQuantityPublicationRecoveryRoutes(app, service);

@@ -26,6 +26,25 @@ export const quantityPublicationProviderAnswerSchema = z.object({
   responseHash: z.string().regex(/^[a-f0-9]{64}$/), recordedAt: z.string().datetime(),
 }).strict();
 export type QuantityPublicationProviderAnswer = z.infer<typeof quantityPublicationProviderAnswerSchema>;
+/** One click confirms every listed attempt whose stored provider answer the operator saw; the hash pins what was on screen. */
+export const quantityPublicationProviderAnswerRecoverySchema = z.object({
+  activationRunId: bigintId.optional(),
+  confirmations: z.array(z.object({ attemptId: bigintId, responseHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict()).min(1).max(1000),
+}).strict().superRefine((value, ctx) => {
+  if (new Set(value.confirmations.map(row => row.attemptId)).size !== value.confirmations.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["confirmations"], message: "Each attempt may be confirmed once per request." });
+  }
+});
+export type QuantityPublicationProviderAnswerRecovery = z.infer<typeof quantityPublicationProviderAnswerRecoverySchema>;
+/** Why a listed attempt was not confirmed: it left the list, has no answer on file, its answer changed since it was shown, or another operator resolved it first. */
+export const quantityPublicationProviderAnswerSkipReasonSchema = z.enum(["not_pending", "no_provider_answer", "answer_changed", "owner_conflict"]);
+export type QuantityPublicationProviderAnswerSkipReason = z.infer<typeof quantityPublicationProviderAnswerSkipReasonSchema>;
+export const quantityPublicationProviderAnswerRecoveryResultSchema = z.object({
+  basis: z.literal("operator_attestation"), providerWriteAttempted: z.literal(false),
+  confirmed: z.array(z.object({ attemptId: bigintId, replay: z.boolean() }).strict()).max(1000),
+  skipped: z.array(z.object({ attemptId: bigintId, reason: quantityPublicationProviderAnswerSkipReasonSchema }).strict()).max(1000),
+}).strict();
+export type QuantityPublicationProviderAnswerRecoveryResult = z.infer<typeof quantityPublicationProviderAnswerRecoveryResultSchema>;
 /** Flattened operator view; this is recorded owner history, not a provider query. */
 export const pendingQuantityPublicationRecoverySchema = z.object({
   activationRunId: bigintId, gateEpoch: epoch, suppressed: z.boolean(), capturedAt: z.string().datetime(),

@@ -1,5 +1,6 @@
 import type { Express, RequestHandler, Response } from "express";
 import { pendingQuantityPublicationRecoveryRequestSchema, pendingQuantityPublicationRecoverySchema,
+  quantityPublicationProviderAnswerRecoveryResultSchema, quantityPublicationProviderAnswerRecoverySchema,
   quantityPublicationRecoverySchema, quantityPublicationRecoveryResultSchema } from "@shared/types/inventory-publication-recovery";
 import { requirePermission } from "../../../../routes/middleware";
 import { InventoryCutoverCommitError } from "../../application/inventory-cutover-commit.service";
@@ -11,7 +12,7 @@ import { sendInventoryCutoverError } from "./inventory-cutover-commit.routes";
 const noStore: RequestHandler = (_req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); };
 
 export function registerQuantityPublicationRecoveryRoutes(app: Express,
-  service: Pick<QuantityPublicationRecoveryService, "pending" | "attest"> = new QuantityPublicationRecoveryService(new PostgresQuantityPublicationRecoveryRepository()),
+  service: Pick<QuantityPublicationRecoveryService, "pending" | "attest" | "attestProviderAnswers"> = new QuantityPublicationRecoveryService(new PostgresQuantityPublicationRecoveryRepository()),
 ): void {
   app.post("/api/inventory-planning/admin/publication-recovery/pending", noStore, requirePermission("inventory_planning", "activate"), async (req, res) => {
     try {
@@ -28,6 +29,14 @@ export function registerQuantityPublicationRecoveryRoutes(app: Express,
         "PUBLICATION_RECOVERY_REQUEST_INVALID", "Exact retained terminal evidence is required; query filters and actor overrides are not accepted.", 400);
       const result = quantityPublicationRecoveryResultSchema.parse(await service.attest(request.data, req.session?.user?.id));
       return res.status(result.replay ? 200 : 201).json(result);
+    } catch (error) { return sendRecoveryError(res, error); }
+  });
+  app.post("/api/inventory-planning/admin/publication-recovery/attest-provider-answers", noStore, requirePermission("inventory_planning", "activate"), async (req, res) => {
+    try {
+      const request = quantityPublicationProviderAnswerRecoverySchema.safeParse(req.body);
+      if (!request.success || Object.keys(req.query).length > 0) throw new InventoryCutoverCommitError("PUBLICATION_RECOVERY_ANSWERS_REQUEST_INVALID",
+        "The attempts to confirm and the stored answer each one showed are required; query filters and actor overrides are not accepted.", 400);
+      return res.json(quantityPublicationProviderAnswerRecoveryResultSchema.parse(await service.attestProviderAnswers(request.data, req.session?.user?.id)));
     } catch (error) { return sendRecoveryError(res, error); }
   });
 }
