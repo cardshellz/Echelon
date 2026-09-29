@@ -18,6 +18,14 @@ export const quantityPublicationRecoverySchema = z.object({
 export type QuantityPublicationRecovery = z.infer<typeof quantityPublicationRecoverySchema>;
 
 export const pendingQuantityPublicationRecoveryRequestSchema = z.object({ activationRunId: bigintId.optional() }).strict();
+/** The provider's stored final answer to an uncertain attempt: every request has a receipt and the last is a 4xx refusal with the provider's codes. */
+export const quantityPublicationProviderAnswerSchema = z.object({
+  requestId: bigintId, method: z.enum(["POST", "PUT", "DELETE"]), path: text(1024),
+  // The code bound mirrors the writer (quantityProviderResponseEvidenceSchema); stored receipts are immutable, so nothing on file falls outside it.
+  httpStatus: z.number().int().min(400).max(499), errorCodes: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,100}$/)).max(25),
+  responseHash: z.string().regex(/^[a-f0-9]{64}$/), recordedAt: z.string().datetime(),
+}).strict();
+export type QuantityPublicationProviderAnswer = z.infer<typeof quantityPublicationProviderAnswerSchema>;
 /** Flattened operator view; this is recorded owner history, not a provider query. */
 export const pendingQuantityPublicationRecoverySchema = z.object({
   activationRunId: bigintId, gateEpoch: epoch, suppressed: z.boolean(), capturedAt: z.string().datetime(),
@@ -28,6 +36,8 @@ export const pendingQuantityPublicationRecoverySchema = z.object({
     outboxId: bigintId.nullable(), destinationKind: z.enum(["channel_connection", "dropship_store_connection"]),
     connectionId: z.number().int().positive().max(2147483647), providerKey: z.enum(["shopify", "ebay", "walmart"]),
     providerScopeType: z.enum(["account", "location"]), externalScopeId: text(240), externalInventoryItemId: text(240),
+    /** Optional so a client one release ahead of its server still parses; absent and null both mean no answer on file. */
+    providerAnswer: quantityPublicationProviderAnswerSchema.nullable().optional(),
   }).strict()).max(1000),
 }).strict().superRefine((value, ctx) => {
   if (new Set(value.unresolvedAttempts.map(row => row.attemptId)).size !== value.unresolvedAttempts.length) {

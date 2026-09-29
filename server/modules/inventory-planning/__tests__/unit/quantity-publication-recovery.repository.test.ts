@@ -9,7 +9,8 @@ vi.mock("../../infrastructure/quantity-publication-admission.repository", () => 
   captureQuantityPublicationDrainInsideTransaction: capture, attestQuantityPublicationAttemptInsideTransaction: attest,
 }));
 function fixture() {
-  const client = { query: vi.fn(async (sql: string, _values?: unknown[]) => ({
+  // Rows are untyped: each statement the repository issues returns a different shape.
+  const client = { query: vi.fn(async (sql: string, _values?: unknown[]): Promise<{ rows: unknown[]; rowCount: number }> => ({
     rows: sql.includes("FROM inventory.availability_activation_runs") ? [{ id: "1" }] : [], rowCount: 0,
   })), release: vi.fn() };
   const connectionPool = { connect: vi.fn(async () => client as unknown as PoolClient) };
@@ -58,8 +59,41 @@ describe("publication recovery bounded owner transaction", () => {
     const result = await fixture().repository.pending("1", NOW);
     expect(result.unresolvedAttempts).toEqual([{ attemptId: "19", owner: "legacy", state: "uncertain", outboxId: null,
       destinationKind: "channel_connection", connectionId: 3, providerKey: "shopify", providerScopeType: "location",
-      externalScopeId: "location-1", externalInventoryItemId: "item-1" }]);
+      externalScopeId: "location-1", externalInventoryItemId: "item-1", providerAnswer: null }]);
     expect(result).not.toHaveProperty("latestAttemptsByScope");
+  });
+
+  it("reads the stored receipts of each unresolved attempt and offers the provider's final refusal as the answer", async () => {
+    const proof = completionDrain();
+    proof.unresolvedAttempts = [{ attemptId: "19", owner: "legacy", state: "uncertain", outboxId: null, scope: proof.latestAttemptsByScope[0].scope }];
+    capture.mockResolvedValueOnce(proof);
+    const { repository, client } = fixture();
+    const recordedAt = new Date("2026-09-29T09:30:00.000Z");
+    client.query.mockImplementation(async (sql: string) => ({ rowCount: 0, rows:
+      sql.includes("FROM inventory.availability_activation_runs") ? [{ id: "1" }]
+      : sql.includes("FROM inventory.quantity_provider_requests") ? [
+        { attempt_id: "19", request_id: "9001", ordinal: 1, method: "PUT", path: "/sell/inventory/v1/inventory_item/SKU", outcome: "completed",
+          http_status: 204, response_hash: "a".repeat(64), error_codes: [], recorded_at: recordedAt },
+        { attempt_id: "19", request_id: "9002", ordinal: 2, method: "POST", path: "/sell/inventory/v1/offer/77/publish", outcome: "uncertain",
+          http_status: 400, response_hash: "b".repeat(64), error_codes: ["25002"], recorded_at: recordedAt },
+      ] : [] }));
+    const result = await repository.pending("1", NOW);
+    expect(result.unresolvedAttempts[0]?.providerAnswer).toEqual({ requestId: "9002", method: "POST", path: "/sell/inventory/v1/offer/77/publish",
+      httpStatus: 400, errorCodes: ["25002"], responseHash: "b".repeat(64), recordedAt: "2026-09-29T09:30:00.000Z" });
+    const receipts = client.query.mock.calls.find(([sql]) => sql.includes("FROM inventory.quantity_provider_requests"))!;
+    expect(receipts[0]).toContain("LEFT JOIN inventory.quantity_provider_request_results");
+    expect(receipts[1]).toEqual([["19"]]);
+  });
+
+  it("does not read receipts when nothing is unresolved, and offers no answer for an attempt without one", async () => {
+    const { repository, client } = fixture();
+    await repository.pending("1", NOW);
+    expect(client.query.mock.calls.some(([sql]) => sql.includes("quantity_provider_requests"))).toBe(false);
+    const proof = completionDrain();
+    proof.unresolvedAttempts = [{ attemptId: "19", owner: "legacy", state: "running", outboxId: null, scope: proof.latestAttemptsByScope[0].scope }];
+    capture.mockResolvedValueOnce(proof);
+    const result = await fixture().repository.pending("1", NOW);
+    expect(result.unresolvedAttempts[0]?.providerAnswer).toBeNull();
   });
 
   it("passes the exact attestation owner command and commits only strict audited output", async () => {

@@ -188,6 +188,51 @@ describe("same-evidence recovery retry flow", () => {
   });
 });
 
+describe("attestation filled from the provider's stored answer", () => {
+  const answered = { ...unresolved, providerAnswer: { requestId: "9002", method: "POST", path: "/sell/inventory/v1/offer/77/publish",
+    httpStatus: 400, errorCodes: ["25002"], responseHash: "b".repeat(64), recordedAt: TIME } };
+  const unanswered = { ...unresolved, attemptId: "8", externalInventoryItemId: "sku-P6" };
+  function summary(root: ReactNode) {
+    return nodes(root).find(props => typeof props["data-testid"] === "string" && String(props["data-testid"]).endsWith("-provider-answer"));
+  }
+
+  it("fills every evidence field from the stored answer when the attempt is selected and leaves the confirmation unticked", () => {
+    hooks.queryData = { unresolvedAttempts: [answered, unanswered], pendingCatchupCount: 0 };
+    let root = renderRecovery(); change(root, "-attempt", "7"); root = renderRecovery();
+    expect(field(root, "-kind").value).toBe("provider_terminal_request_record");
+    expect(field(root, "-outcome").value).toBe("completed");
+    expect(field(root, "-hash").value).toBe("b".repeat(64));
+    expect(String(field(root, "-reference").value)).toContain("Stored provider request 9002: POST /sell/inventory/v1/offer/77/publish answered HTTP 400 (codes 25002)");
+    expect(String(field(root, "-reason").value)).toContain("HTTP 400 with codes 25002");
+    expect(String(summary(root)?.children)).toContain("eBay answered HTTP 400 (codes 25002)");
+    expect(nodes(root).find(props => props.type === "checkbox")?.checked).toBe(false);
+    expect(button(root, "Record operator attestation")?.disabled).toBe(true);
+  });
+
+  it("clears the filled evidence when the operator switches to an attempt without a stored answer", () => {
+    hooks.queryData = { unresolvedAttempts: [answered, unanswered], pendingCatchupCount: 0 };
+    let root = renderRecovery(); change(root, "-attempt", "7"); root = renderRecovery();
+    expect(field(root, "-hash").value).toBe("b".repeat(64));
+    change(root, "-attempt", "8"); root = renderRecovery();
+    for (const suffix of ["-kind", "-outcome", "-reference", "-hash", "-reason"]) expect(field(root, suffix).value).toBe("");
+    expect(summary(root)).toBeUndefined();
+  });
+
+  it("records the filled attestation exactly as shown once the operator confirms it", async () => {
+    hooks.queryData = { unresolvedAttempts: [answered], pendingCatchupCount: 0 };
+    let root = renderRecovery(); change(root, "-attempt", "7"); root = renderRecovery();
+    const checkbox = nodes(root).find(props => props.type === "checkbox")!;
+    (checkbox.onChange as (event: { target: { checked: boolean } }) => void)({ target: { checked: true } });
+    root = renderRecovery(); expect(button(root, "Record operator attestation")?.disabled).toBe(false);
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(JSON.stringify(
+      { attemptId: "7", basis: "operator_attestation", replay: false, providerWriteAttempted: false }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(hooks.mutations[0].mutationFn()).resolves.toMatchObject({ basis: "operator_attestation", replay: false });
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({ attemptId: "7", evidenceKind: "provider_terminal_request_record",
+      terminalOutcome: "completed", evidenceHash: "b".repeat(64), evidenceReference: expect.stringContaining("Stored provider request 9002") });
+  });
+});
+
 describe("definitive rejection classification", () => {
   it.each([new CutoverHttpError("Unknown", 409), new CutoverHttpError("Unknown proxy", 409, "PROXY_CONFLICT"),
     new CutoverHttpError("Retry same key", 409, "CUTOVER_CONCURRENT_CHANGE"), new CutoverHttpError("Uncertain", 500, "CUTOVER_REVIEW_CHANGED"),
