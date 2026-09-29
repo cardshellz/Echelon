@@ -52,6 +52,26 @@ function publication(targetId = 3, variantId = 4): ActivationDryRunProduct["prop
 }
 
 describe("reviewed cutover selection manifest", () => {
+  it("seals only the warehouse and policy definitions needed for a deferred Dropship quantity, with no mapping or stock push", () => {
+    const supply = snapshot(); const row = product(supply);
+    row.publicationTargetSelections = [{ publicationTargetId: 4, revision: "3",
+      membership: { mode: "explicit", includedVariantIds: [] },
+      targetIdentity: { channelId: 103, destinationKind: "dropship_store_connection", channelConnectionId: null,
+        dropshipStoreConnectionId: 1, providerScopeType: "account", externalScopeId: "account-one", publicationAuthority: "echelon", state: "preview" },
+      quantityReadConfiguration: { productVariantIds: [1], sourceBindingId: 40, sourceBindingVersion: 1,
+        sourceBindingDefinitionHash: HASH, policySelections: [{ scopeKey: "channel:103", policyId: 60,
+          version: 1, definitionHash: HASH, authority: "draft" }] } }];
+    const manifest = buildInventoryCutoverManifest(dryRun([row]), [supply]);
+    expect(manifest.publicationTargetIds).toEqual([4]);
+    expect(manifest.selections).toEqual([
+      { kind: "channel_policy", key: "channel:103", definitionId: 60, definitionHash: HASH },
+      { kind: "model", key: "1", definitionId: 10, definitionHash: HASH },
+      { kind: "source_binding", key: "4", definitionId: 40, definitionHash: HASH },
+    ]);
+    expect(row.proposedPublications).toEqual([]);
+    row.publicationTargetSelections[0]!.targetIdentity!.publicationAuthority = "external_provider";
+    expect(() => buildInventoryCutoverManifest(dryRun([row]), [supply])).toThrow();
+  });
   it("retains a reviewed destination with no included SKUs in the target census", () => {
     const supply = snapshot();
     const row = product(supply);

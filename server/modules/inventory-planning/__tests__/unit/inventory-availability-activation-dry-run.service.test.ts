@@ -20,6 +20,27 @@ const STARTED_AT = new Date("2026-08-28T17:00:00.000Z");
 const COMPLETED_AT = new Date("2026-08-28T17:00:01.000Z");
 
 describe("inventory availability activation dry-run service", () => {
+  it("retains deferred Dropship warehouse and dial definitions without adding a stock publication", async () => {
+    const fixture = readinessFixture("echelon");
+    const identity = { destinationKind: "dropship_store_connection" as const, channelConnectionId: null,
+      dropshipStoreConnectionId: 1, providerScopeType: "account" as const, externalScopeId: "account-one" };
+    Object.assign(fixture.view.publicationTargets[0]!, identity);
+    Object.assign(fixture.preview, identity, { membership: { mode: "explicit", includedVariantIds: [] },
+      deferredDropshipQuantityVariantIds: [101], rows: [] });
+    Object.assign(fixture.publication.configuredTargets[0]!, identity, { mapping: null, latestReadbackUnits: null, latestReadbackAt: null });
+    Object.assign(fixture.publication, { feedId: null, mappingState: "missing", channelInventoryItemId: null,
+      lastAcknowledgedUnits: null, lastAcknowledgedAt: null });
+    const result = await runReadinessFixture(fixture);
+    expect(result.state).toBe("ready_for_publication");
+    expect(result.products[0]!.proposedPublications).toEqual([]);
+    expect(result.products[0]!.publicationTargetSelections![0]!.quantityReadConfiguration).toEqual({
+      productVariantIds: [101], sourceBindingId: fixture.preview.sourceBindingId,
+      sourceBindingVersion: fixture.preview.sourceBindingVersion,
+      sourceBindingDefinitionHash: fixture.preview.sourceBindingDefinitionHash,
+      policySelections: fixture.preview.selectedPolicies,
+    });
+    expect(result.outboxEnqueued).toBe(false);
+  });
   it("does not require an unlisted SKU when sealed explicit membership excludes it", async () => {
     const fixture = readinessFixture("echelon");
     fixture.preview.membership = { mode: "explicit", includedVariantIds: [] };

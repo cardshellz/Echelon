@@ -32,6 +32,7 @@ export const initialPublicationScopeReviewSchema = z.object({
   publicationTargetId: id, targetRevision: revision, authorityRevision: revision,
   reviewHash: hash, ready: z.boolean(), includedVariantIds: ids,
   excludedNonStockVariantIds: ids,
+  deferredUnpublishedVariantIds: ids.optional(),
   excludedVariants: z.array(initialScopeExclusionSchema).optional(),
   mappingImports: z.array(initialScopeMappingImportSchema).optional(),
   blockers: z.array(z.object({ code: z.string().min(1), message: z.string().min(1), productVariantId: id.nullable() }).strict()),
@@ -40,6 +41,7 @@ export const initialPublicationScopeReviewSchema = z.object({
 export const initialPublicationScopeReceiptSchema = z.object({
   publicationTargetId: id, previousRevision: revision, revision, reviewHash: hash,
   includedVariantIds: ids, preparedBy: z.string().trim().min(1).max(100), preparedAt: z.string().datetime(),
+  deferredUnpublishedVariantIds: ids.optional(),
   excludedVariants: z.array(initialScopeExclusionSchema).optional(),
   importedVariantIds: ids.optional(),
   alreadyApplied: z.boolean(), runtimeAuthorityChanged: z.literal(false),

@@ -107,7 +107,7 @@ export async function installWalmartPublicationInventoryFixture(
 }
 
 export async function activateWalmartPublicationInventoryFixture(
-  pool: Pool,
+  pool: Pick<Pool, "query">,
 ): Promise<void> {
   const dry = (
     await pool.query<{ id: string }>(
