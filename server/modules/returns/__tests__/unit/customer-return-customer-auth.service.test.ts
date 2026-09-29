@@ -57,7 +57,7 @@ describe("direct Shopify returns authentication", () => {
 
   it("transports the original signed proof without consuming the browser challenge", async () => {
     const s = setup();
-    const raw = signedQuery({ note: "pack + return" });
+    const raw = signedQuery();
     await expect(s.auth.proxy(raw)).resolves.toEqual({ kind: "handoff", proof: encoded(raw),
       callbackUrl: "https://returns.example.com/customer-returns/callback" });
     expect(s.create).not.toHaveBeenCalled(); expect(s.consume).not.toHaveBeenCalled();
@@ -65,14 +65,14 @@ describe("direct Shopify returns authentication", () => {
 
   it("returns to the Echelon start gate when signed browser state is absent", async () => {
     const s = setup();
-    await expect(s.auth.proxy(signedQuery({ state: undefined, logged_in_customer_id: "", return_to: "https://other.example.com" })))
+    await expect(s.auth.proxy(signedQuery({ state: undefined, logged_in_customer_id: "" })))
       .resolves.toEqual({ kind: "redirect", location: `https://returns.example.com/customer-returns/start?shop=${SHOP}` });
     expect(s.consume).not.toHaveBeenCalled(); expect(s.create).not.toHaveBeenCalled();
   });
 
   it("sends guests to the configured storefront login with only the fixed proxy path and state", async () => {
     const { auth } = setup();
-    const result = await auth.proxy(signedQuery({ logged_in_customer_id: "", return_to: "https://other.example.com" }));
+    const result = await auth.proxy(signedQuery({ logged_in_customer_id: "" }));
     expect(result.kind).toBe("redirect");
     if (result.kind !== "redirect") throw new Error("Expected login redirect");
     const login = new URL(result.location);

@@ -21,7 +21,7 @@ function query(
     logged_in_customer_id: "900719925474099312345",
     timestamp: String(timestamp),
     state,
-    path_prefix: "/apps/member-portal",
+    path_prefix: "/apps/echelon-returns",
     ...overrides,
   };
   const entries: [string, string][] = Object.entries(fields)
@@ -62,7 +62,7 @@ describe("returns Shopify proxy proof", () => {
     expect(verify(query())).toEqual({
       shop,
       customerId: "900719925474099312345",
-      pathPrefix: "/apps/member-portal",
+      pathPrefix: "/apps/echelon-returns",
       state,
       timestamp,
     });
@@ -73,20 +73,20 @@ describe("returns Shopify proxy proof", () => {
       verify(query({ logged_in_customer_id: customerId })).customerId,
     ).toBe(customerId);
   });
-  it("verifies documented comma aggregation for repeated non-identity parameters", () => {
-    const message = `extra=1,2logged_in_customer_id=123path_prefix=/apps/member-portalshop=${shop}state=${state}timestamp=${timestamp}`;
+  it("rejects repeated unknown parameters even with Shopify's documented comma-aggregated signature", () => {
+    const message = `extra=1,2logged_in_customer_id=123path_prefix=/apps/echelon-returnsshop=${shop}state=${state}timestamp=${timestamp}`;
     const signature = createHmac("sha256", secret)
       .update(message)
       .digest("hex");
-    expect(
-      verify(
-        `extra=1&extra=2&shop=${shop}&logged_in_customer_id=123&path_prefix=%2Fapps%2Fmember-portal&timestamp=${timestamp}&state=${state}&signature=${signature}`,
-      ).customerId,
-    ).toBe("123");
+    expectFailure(
+      `extra=1&extra=2&shop=${shop}&logged_in_customer_id=123&path_prefix=%2Fapps%2Fechelon-returns&timestamp=${timestamp}&state=${state}&signature=${signature}`,
+    );
   });
   it("accepts standard URL encoding but not a different signing algorithm", () => {
-    const valid = query({}, [["extra", "hello world/there"]]);
-    expect(verify(valid.replace("hello+world", "hello%20world"))).toBeDefined();
+    const valid = query({ path_prefix: "/apps/return items" });
+    expect(
+      verify(valid.replace("return+items", "return%20items")),
+    ).toBeDefined();
     const parameters = new URLSearchParams(valid);
     parameters.delete("signature");
     const nonstandard = [...parameters]
@@ -105,7 +105,7 @@ describe("returns Shopify proxy proof", () => {
     ).toEqual({
       shop,
       customerId: "",
-      pathPrefix: "/apps/member-portal",
+      pathPrefix: "/apps/echelon-returns",
       timestamp,
     });
   });
@@ -219,7 +219,7 @@ describe("returns Shopify proxy proof", () => {
         ),
       ),
     );
-    expectFailure(query({}, [["extra", "line\nvalue"]]));
+    expectFailure(query({ path_prefix: "/apps/line\nvalue" }));
     expect(() =>
       verifyCustomerReturnShopifyProof({
         rawQuery: query(),
@@ -230,42 +230,35 @@ describe("returns Shopify proxy proof", () => {
     ).toThrow("temporarily unavailable");
   });
 
-  it("accepts exactly 40 parameters and rejects the next parameter before identity use", () => {
-    const remaining = 40 - query().split("&").length;
-    const extras = Array.from(
-      { length: remaining },
-      (_, index) => [`extra${index}`, "value"] as [string, string],
-    );
-    expect(verify(query({}, extras)).customerId).toBe("900719925474099312345");
-    expectFailure(query({}, [...extras, ["overflow", "value"]]));
+  it("accepts only the six authority fields and rejects additional fields even below the count bound", () => {
+    expect(query().split("&")).toHaveLength(6);
+    expect(verify(query()).customerId).toBe("900719925474099312345");
+    expectFailure(query({}, [["tracking", "value"]]));
+    expectFailure(query({ state: undefined }, [["tracking", "value"]]));
   });
 
   it("applies the raw query byte limit inclusively without truncating signed input", () => {
-    const extras: [string, string][] = [
-      ["pad1", "a".repeat(2048)],
-      ["pad2", "a".repeat(2048)],
-      ["pad3", "a".repeat(2048)],
-      ["pad4", ""],
-    ];
-    extras[3][1] = "a".repeat(
-      8192 - Buffer.byteLength(query({}, extras), "utf8"),
-    );
-    const exact = query({}, extras);
+    const path = "€".repeat(850);
+    const pathPrefix =
+      path +
+      "a".repeat(
+        8192 - Buffer.byteLength(query({ path_prefix: path }), "utf8"),
+      );
+    const exact = query({ path_prefix: pathPrefix });
     expect(Buffer.byteLength(exact, "utf8")).toBe(8192);
     expect(verify(exact)).toBeDefined();
-    extras[3][1] += "a";
-    expectFailure(query({}, extras));
+    expectFailure(query({ path_prefix: `${pathPrefix}a` }));
   });
 
-  it("bounds decoded keys and values without normalizing their signed contents", () => {
+  it("bounds known decoded values and rejects unknown or malformed keys", () => {
     expect(
-      verify(query({}, [["x".repeat(128), "v".repeat(2048)]])),
-    ).toBeDefined();
+      verify(query({ path_prefix: "v".repeat(2048) })).pathPrefix,
+    ).toHaveLength(2048);
     expectFailure(query({}, [["x".repeat(129), "value"]]));
-    expectFailure(query({}, [["extra", "v".repeat(2049)]]));
+    expectFailure(query({ path_prefix: "v".repeat(2049) }));
     expectFailure(query({}, [["", "value"]]));
     expectFailure(query({}, [["key\u007f", "value"]]));
-    expectFailure(query({}, [["extra", "value\u0000"]]));
+    expectFailure(query({ path_prefix: "/apps/value\u0000" }));
   });
 
   it("requires one exact lowercase hexadecimal signature and the unchanged raw query", () => {
@@ -288,36 +281,65 @@ describe("returns Shopify proxy proof", () => {
     const guest = query({ logged_in_customer_id: "" }, [
       ["a", "logged_in_customer_id=123"],
     ]);
-    expect(verify(guest).customerId).toBe("");
+    expectFailure(guest);
     // These two queries produce the same separator-free signing message unless
     // decoded keys containing '=' are rejected. The signature is unchanged.
     const forged = new URLSearchParams(guest);
     forged.set("a", "");
     forged.set("logged_in_customer_id", "123");
     forged.delete("path_prefix");
-    forged.set("logged_in_customer_id=path_prefix", "/apps/member-portal");
+    forged.set("logged_in_customer_id=path_prefix", "/apps/echelon-returns");
+    expectFailure(forged.toString());
+  });
+
+  it("rejects customer authority absorbed into unknown values despite ordinary parameter names", () => {
+    const guest = query({ logged_in_customer_id: "" }, [
+      ["a", "foologged_in_customer_id=123m="],
+    ]);
+    const forged = new URLSearchParams(guest);
+    forged.set("a", "foo");
+    forged.set("logged_in_customer_id", "123");
+    forged.set("m", "logged_in_customer_id=");
+    const message = (raw: string) =>
+      [...new URLSearchParams(raw)]
+        .filter(([key]) => key !== "signature")
+        .map(([key, value]) => `${key}=${value}`)
+        .sort()
+        .join("");
+    expect(message(forged.toString())).toBe(message(guest));
+    expect(forged.get("signature")).toBe(
+      new URLSearchParams(guest).get("signature"),
+    );
+    expectFailure(guest);
     expectFailure(forged.toString());
   });
 
   it("rejects signed ambiguous parameter names even when all required authority fields are present", () => {
     expectFailure(query({}, [["extra=key", "value"]]));
     expectFailure(
-      query({}, [["logged_in_customer_id=path_prefix", "/apps/member-portal"]]),
+      query({}, [
+        ["logged_in_customer_id=path_prefix", "/apps/echelon-returns"],
+      ]),
     );
   });
+
+  it.each(["a", "m", "extra", "redirect", "utm_source", "SHOP", "state[]"])(
+    "rejects the unknown signed query key %s rather than discarding it",
+    (key) => expectFailure(query({ state: undefined }, [[key, "value"]])),
+  );
 
   it("returns the exact signed proxy path for the application's configured-path comparison", () => {
     expect(
       verify(query({ path_prefix: "/tools/return-items" })).pathPrefix,
     ).toBe("/tools/return-items");
     expect(
-      verify(query({ path_prefix: "/apps/member-portal/" })).pathPrefix,
-    ).toBe("/apps/member-portal/");
+      verify(query({ path_prefix: "/apps/echelon-returns/" })).pathPrefix,
+    ).toBe("/apps/echelon-returns/");
   });
 
   it("returns only validated identity facts and preserves the caller input", () => {
     const input = Object.freeze({
-      rawQuery: query({}, [["redirect", "https://untrusted.example/"]]),
+      rawQuery: query(),
       shopifySecret: secret,
       expectedShop: shop,
       now,
@@ -325,7 +347,7 @@ describe("returns Shopify proxy proof", () => {
     expect(verifyCustomerReturnShopifyProof(input)).toEqual({
       shop,
       customerId: "900719925474099312345",
-      pathPrefix: "/apps/member-portal",
+      pathPrefix: "/apps/echelon-returns",
       state,
       timestamp,
     });
