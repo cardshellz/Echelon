@@ -4,7 +4,7 @@ import { pendingQuantityPublicationRecoveryRequestSchema, pendingQuantityPublica
   quantityPublicationRecoveryResultSchema, quantityPublicationRecoverySchema,
   type PendingQuantityPublicationRecovery, type QuantityPublicationProviderAnswerRecoveryResult,
   type QuantityPublicationRecovery, type QuantityPublicationRecoveryResult } from "@shared/types/inventory-publication-recovery";
-import { providerAnswerEvidence, providerAnswerIdempotencyKey } from "@shared/inventory-publication-recovery-evidence";
+import { selectRecoveryEvidence } from "@shared/inventory-publication-recovery-evidence";
 import { QuantityPublicationAdmissionError } from "../domain/quantity-publication-admission";
 import { InventoryCutoverCommitError } from "./inventory-cutover-commit.service";
 
@@ -49,8 +49,9 @@ export class QuantityPublicationRecoveryService {
     return result;
   }
 
-  /** Confirms, with one audited attestation each, every listed attempt whose stored provider answer the operator saw.
-   * Attempts without an answer on file, or whose answer changed since it was shown, are reported, never guessed. */
+  /** Confirms, with one audited attestation each, every listed attempt whose stored evidence the operator saw: the
+   * provider's refusal, or a record proving nothing can still reach the provider. Attempts without evidence on file,
+   * or whose record changed since it was shown, are reported, never guessed. */
   async attestProviderAnswers(input: unknown, actorInput: unknown): Promise<QuantityPublicationProviderAnswerRecoveryResult> {
     const actor = this.actor(actorInput);
     const request = quantityPublicationProviderAnswerRecoverySchema.safeParse(input);
@@ -65,11 +66,10 @@ export class QuantityPublicationRecoveryService {
     for (const confirmation of ordered) {
       const attempt = attempts.get(confirmation.attemptId);
       if (!attempt) { skipped.push({ attemptId: confirmation.attemptId, reason: "not_pending" }); continue; }
-      if (!attempt.providerAnswer) { skipped.push({ attemptId: attempt.attemptId, reason: "no_provider_answer" }); continue; }
-      if (attempt.providerAnswer.responseHash !== confirmation.responseHash) { skipped.push({ attemptId: attempt.attemptId, reason: "answer_changed" }); continue; }
-      const command = quantityPublicationRecoverySchema.parse({ attemptId: attempt.attemptId,
-        idempotencyKey: providerAnswerIdempotencyKey(attempt.attemptId, attempt.providerAnswer.responseHash),
-        ...providerAnswerEvidence(attempt, attempt.providerAnswer) });
+      const selection = selectRecoveryEvidence(attempt);
+      if (!selection) { skipped.push({ attemptId: attempt.attemptId, reason: "no_evidence" }); continue; }
+      if (selection.evidenceHash !== confirmation.evidenceHash) { skipped.push({ attemptId: attempt.attemptId, reason: "evidence_changed" }); continue; }
+      const command = quantityPublicationRecoverySchema.parse({ attemptId: attempt.attemptId, idempotencyKey: selection.idempotencyKey, ...selection.evidence });
       let result: QuantityPublicationRecoveryResult;
       try {
         result = quantityPublicationRecoveryResultSchema.parse(await this.store.attest({ ...command, actor, now: this.now() }));

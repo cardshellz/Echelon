@@ -3,8 +3,8 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { pendingQuantityPublicationRecoverySchema, quantityPublicationProviderAnswerRecoveryResultSchema,
   quantityPublicationRecoverySchema, quantityPublicationRecoveryResultSchema,
   type QuantityPublicationRecovery } from "@shared/types/inventory-publication-recovery";
-import { attestationPrefillFromProviderAnswer, describeProviderAnswerBatch, describeProviderAnswerResult,
-  providerAnswerConfirmations, providerAnswerLabel } from "@/lib/inventory-publication-recovery";
+import { attestationPrefill, describeRecoveryEvidenceBatch, describeRecoveryEvidenceResult,
+  recoveryEvidenceConfirmations, recoveryEvidenceLabel } from "@/lib/inventory-publication-recovery";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -33,14 +33,14 @@ export function InventoryPublicationRecoveryPanel(props: Props) {
   const request = quantityPublicationRecoverySchema.safeParse({ attemptId, evidenceKind, terminalOutcome,
     evidenceReference, evidenceHash, reason, idempotencyKey: "validation-only" });
   const selected = pending.data?.unresolvedAttempts.find(row => row.attemptId === attemptId);
-  const prefill = selected ? attestationPrefillFromProviderAnswer(selected) : null;
-  /** Selecting an attempt fills the form from the provider's stored answer, or clears it: evidence belongs to one
+  const prefill = selected ? attestationPrefill(selected) : null;
+  /** Selecting an attempt fills the form from the evidence on file, or clears it: evidence belongs to one
    * attempt, and the server records the hash as given, so nothing typed for another attempt may carry over.
    * The operator still reads, confirms and records. */
   function selectAttempt(nextAttemptId: string): void {
     setAttemptId(nextAttemptId); setConfirmed(false);
     const row = pending.data?.unresolvedAttempts.find(candidate => candidate.attemptId === nextAttemptId);
-    const filled = row ? attestationPrefillFromProviderAnswer(row) : null;
+    const filled = row ? attestationPrefill(row) : null;
     setEvidenceKind(filled?.evidenceKind ?? ""); setTerminalOutcome(filled?.terminalOutcome ?? "");
     setEvidenceReference(filled?.evidenceReference ?? ""); setEvidenceHash(filled?.evidenceHash ?? ""); setReason(filled?.reason ?? "");
   }
@@ -60,14 +60,14 @@ export function InventoryPublicationRecoveryPanel(props: Props) {
     if (isDefinitiveCutoverRejection(error)) retained.current = null;
     props.onStateChanged();
   } });
-  /** One click records one attestation per listed attempt whose stored provider answer the operator saw. The
-   * hashes sent are the ones on screen, so the server confirms exactly what was reviewed and reports the rest. */
-  const confirmations = pending.data ? providerAnswerConfirmations(pending.data.unresolvedAttempts) : [];
-  const batchSummary = pending.data ? describeProviderAnswerBatch(pending.data.unresolvedAttempts) : null;
+  /** One click records one attestation per listed attempt whose stored evidence the operator saw. The hashes
+   * sent are the ones on screen, so the server confirms exactly what was reviewed and reports the rest. */
+  const confirmations = pending.data ? recoveryEvidenceConfirmations(pending.data.unresolvedAttempts) : [];
+  const batchSummary = pending.data ? describeRecoveryEvidenceBatch(pending.data.unresolvedAttempts) : null;
   const confirmAnswers = useMutation({ mutationFn: async () => {
     if (!enabled) throw new Error("Inventory activation permission is required.");
     if (!answersConfirmed || confirmations.length === 0 || pending.isFetching || pending.isError) {
-      throw new Error("Check the stalled publications and confirm the listed refusals before recording them.");
+      throw new Error("Check the stalled publications and confirm the listed evidence before recording it.");
     }
     return postInventoryPlanningCommand("publication-recovery", "attest-provider-answers",
       { ...(props.activationRunId === null ? {} : { activationRunId: props.activationRunId }), confirmations },
@@ -95,12 +95,12 @@ export function InventoryPublicationRecoveryPanel(props: Props) {
     {batchSummary && retained.current === null && <div className="space-y-2 rounded-md border p-3" data-testid={`${prefix}-provider-answers`}>
       <p className="text-sm">{batchSummary}</p>
       <label className="flex gap-2 text-sm"><input id={`${prefix}-answers-confirm`} type="checkbox" checked={answersConfirmed} disabled={batchDisabled}
-        onChange={event => setAnswersConfirmed(event.target.checked)} />I reviewed these refusals and attest that none of these requests can still change provider quantities.</label>
+        onChange={event => setAnswersConfirmed(event.target.checked)} />I reviewed this evidence and attest that none of these requests can still change provider quantities.</label>
       <Button disabled={!canConfirmAnswers} onClick={() => confirmAnswers.mutate()}>
-        {confirmAnswers.isPending ? "Recording attestations…" : `Confirm all ${confirmations.length} refused ${confirmations.length === 1 ? "entry" : "entries"}`}
+        {confirmAnswers.isPending ? "Recording attestations…" : `Confirm all ${confirmations.length} ${confirmations.length === 1 ? "entry" : "entries"}`}
       </Button>
     </div>}
-    {confirmAnswers.data && <p role="status" className="text-sm">{describeProviderAnswerResult(confirmAnswers.data)}</p>}
+    {confirmAnswers.data && <p role="status" className="text-sm">{describeRecoveryEvidenceResult(confirmAnswers.data)}</p>}
     {attest.data && <p role="status" className="text-sm">Operator attestation recorded for attempt {attest.data.attemptId}. No provider write or provider verification was performed. Capture fresh cutover evidence before proceeding.</p>}
     {((pending.data?.unresolvedAttempts.length ?? 0) > 0 || retained.current) && <div className="space-y-2">
       <Label htmlFor={`${prefix}-attempt`}>Exact unresolved attempt</Label>
@@ -108,7 +108,7 @@ export function InventoryPublicationRecoveryPanel(props: Props) {
         value={attemptId} onChange={event => selectAttempt(event.target.value)}>
         <option value="">Select an attempt</option>
         {pending.data?.unresolvedAttempts.map(row => <option key={row.attemptId} value={row.attemptId}>
-          #{row.attemptId} · {row.providerKey} connection {row.connectionId} · {row.externalInventoryItemId} · {row.state}{providerAnswerLabel(row)}
+          #{row.attemptId} · {row.providerKey} connection {row.connectionId} · {row.externalInventoryItemId} · {row.state}{recoveryEvidenceLabel(row)}
         </option>)}
       </select>
       {prefill && <p className="text-sm" data-testid={`${prefix}-provider-answer`}>{prefill.summary}</p>}

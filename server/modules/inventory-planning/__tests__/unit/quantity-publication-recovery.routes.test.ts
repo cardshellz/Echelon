@@ -17,7 +17,7 @@ describe("publication recovery activation-role HTTP boundary", () => {
   let server: Awaited<ReturnType<typeof startServer>>;
   let session: { user?: { id?: string } };
   let service: { pending: ReturnType<typeof vi.fn>; attest: ReturnType<typeof vi.fn>; attestProviderAnswers: ReturnType<typeof vi.fn> };
-  const confirmation = { activationRunId: "1", confirmations: [{ attemptId: "20", responseHash: "b".repeat(64) }] };
+  const confirmation = { activationRunId: "1", confirmations: [{ attemptId: "20", evidenceHash: "b".repeat(64) }] };
   const confirmationOutcome = { basis: "operator_attestation", providerWriteAttempted: false, confirmed: [{ attemptId: "20", replay: false }], skipped: [] };
   beforeEach(async () => {
     hasPermission.mockReset().mockResolvedValue(true);
@@ -69,8 +69,8 @@ describe("publication recovery activation-role HTTP boundary", () => {
     expect(service.attest).not.toHaveBeenCalled(); expect(service.pending).not.toHaveBeenCalled();
   });
 
-  it.each([{}, { confirmations: [] }, { confirmations: [{ attemptId: "20", responseHash: "short" }] },
-    { confirmations: [{ attemptId: "20", responseHash: "b".repeat(64) }, { attemptId: "20", responseHash: "c".repeat(64) }] },
+  it.each([{}, { confirmations: [] }, { confirmations: [{ attemptId: "20", evidenceHash: "short" }] },
+    { confirmations: [{ attemptId: "20", evidenceHash: "b".repeat(64) }, { attemptId: "20", evidenceHash: "c".repeat(64) }] },
     { ...confirmation, actor: "admin" }, { ...confirmation, force: true },
   ])("rejects incomplete or overreaching confirmations before service access: %#", async body => {
     expect(await request(server.url + ROOT + "/attest-provider-answers", body)).toMatchObject({ status: 400, body: { error: { code: "PUBLICATION_RECOVERY_ANSWERS_REQUEST_INVALID" } } });

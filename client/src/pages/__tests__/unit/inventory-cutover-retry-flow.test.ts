@@ -224,16 +224,16 @@ describe("attestation filled from the provider's stored answer", () => {
   it("records every listed refusal in one click, sending exactly the hashes the operator saw", async () => {
     hooks.queryData = { unresolvedAttempts: [answered, unanswered], pendingCatchupCount: 0 };
     let root = renderRecovery();
-    expect(button(root, "Confirm all 1 refused entry")?.disabled).toBe(true);
-    await expect(hooks.mutations[1].mutationFn()).rejects.toThrow("confirm the listed refusals");
+    expect(button(root, "Confirm all 1 entry")?.disabled).toBe(true);
+    await expect(hooks.mutations[1].mutationFn()).rejects.toThrow("confirm the listed evidence");
     tick(root, "-answers-confirm"); root = renderRecovery();
-    expect(button(root, "Confirm all 1 refused entry")?.disabled).toBe(false);
+    expect(button(root, "Confirm all 1 entry")?.disabled).toBe(false);
     const outcome = { basis: "operator_attestation", providerWriteAttempted: false, confirmed: [{ attemptId: "7", replay: false }], skipped: [] };
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(JSON.stringify(outcome), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     await expect(hooks.mutations[1].mutationFn()).resolves.toEqual(outcome);
     expect(fetchMock.mock.calls[0][0]).toBe("/api/inventory-planning/admin/publication-recovery/attest-provider-answers");
-    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ activationRunId: "1", confirmations: [{ attemptId: "7", responseHash: "b".repeat(64) }] });
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ activationRunId: "1", confirmations: [{ attemptId: "7", evidenceHash: "b".repeat(64) }] });
   });
 
   it("records the filled attestation exactly as shown once the operator confirms it", async () => {

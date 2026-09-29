@@ -61,23 +61,27 @@ describe("publication recovery operator panel", () => {
     expect(state.mutate).not.toHaveBeenCalled();
   });
 
-  it("offers one click for every listed attempt whose refusal is on file, and never records it by itself", () => {
+  it("offers one click for every listed attempt with evidence on file, and never records it by itself", () => {
     const answer = { requestId: "9002", method: "POST", path: "/sell/inventory/v1/offer/77/publish", httpStatus: 400,
       errorCodes: ["25002"], responseHash: "b".repeat(64), recordedAt: "2026-09-29T09:30:00.000Z" };
+    const termination = { requestCount: 1, lastActivityAt: "2026-09-29T09:30:00.000Z", quiescentSince: "2026-09-29T10:30:30.000Z",
+      providerRequestTimeoutSeconds: 30, quiescenceMarginMinutes: 60, evidenceHash: "e".repeat(64) };
     state.data = { unresolvedAttempts: [{ ...unresolved, providerAnswer: answer },
       { ...unresolved, attemptId: "8", externalInventoryItemId: "sku-P6", providerAnswer: { ...answer, requestId: "9003" } },
-      { ...unresolved, attemptId: "9", externalInventoryItemId: "sku-P7" }], pendingCatchupCount: 3 };
+      { ...unresolved, attemptId: "10", externalInventoryItemId: "sku-P8", requestTermination: termination },
+      { ...unresolved, attemptId: "9", externalInventoryItemId: "sku-P7" }], pendingCatchupCount: 4 };
     const html = render();
-    expect(html).toContain("eBay refused 2 of the 3 listed requests, and each refusal is on file.");
-    expect(html).toContain("The other entry stays listed because no answer is on file for it.");
-    expect(html).toContain("I reviewed these refusals and attest that none of these requests can still change provider quantities.");
-    expect(html).toMatch(/<button[^>]*disabled[^>]*>Confirm all 2 refused entries/);
+    expect(html).toContain("3 of the 4 listed entries can be confirmed: 2 refused by eBay with the refusal on file; 1 with no activity for more than 60 minutes");
+    expect(html).toContain("The other entry stays listed: it was active too recently.");
+    expect(html).toContain("#10 · ebay connection 9 · sku-P8 · uncertain · no activity since 2026-09-29T09:30:00.000Z");
+    expect(html).toContain("I reviewed this evidence and attest that none of these requests can still change provider quantities.");
+    expect(html).toMatch(/<button[^>]*disabled[^>]*>Confirm all 3 entries/);
     expect(state.mutate).not.toHaveBeenCalled();
   });
-  it("shows no one-click confirmation when no listed attempt has an answer on file", () => {
+  it("shows no one-click confirmation when no listed attempt has evidence on file", () => {
     state.data = { unresolvedAttempts: [unresolved], pendingCatchupCount: 1 };
     const html = render();
-    expect(html).not.toContain("Confirm all"); expect(html).not.toContain("refusal is on file");
+    expect(html).not.toContain("Confirm all"); expect(html).not.toContain("can be confirmed");
   });
   it("reports the one-click outcome without claiming a provider write", () => {
     state.data = { unresolvedAttempts: [], pendingCatchupCount: 0 };
