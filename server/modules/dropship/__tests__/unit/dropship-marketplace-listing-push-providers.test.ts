@@ -325,6 +325,56 @@ describe("dropship marketplace listing push providers", () => {
       ["group:CATALOG-GROUP", expect.any(Function), ["CATALOG-KEEP", "CATALOG-STALE"]],
     ]);
   });
+  it("lists a SKU that has no offer yet: eBay's 404 on the offer lookup means none, so the offer is created and published", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([
+      jsonResponse({ errors: [{ errorId: 25713, domain: "API_INVENTORY", category: "REQUEST", message: "This Offer is not available." }] }, 404),
+      emptyResponse(),
+      jsonResponse({ offerId: "offer-201" }),
+      emptyResponse(),
+      jsonResponse({ offerId: "offer-201", sku: "SKU-101", marketplaceId: "EBAY_US" }),
+      jsonResponse({ listingId: "listing-201" }),
+    ]);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
+
+    const result = await provider.pushListing(makeRequest({
+      platform: "ebay",
+      listingMode: "live",
+      marketplaceConfig: ebayMarketplaceConfig(),
+    }));
+
+    expect(result).toMatchObject({ status: "created", externalListingId: "listing-201", externalOfferId: "offer-201", rawResult: { published: true } });
+    expect(fetcher.calls.map((call) => `${call.init.method} ${new URL(call.url).pathname}`)).toEqual([
+      "GET /sell/inventory/v1/offer",
+      "PUT /sell/inventory/v1/inventory_item/SKU-101",
+      "POST /sell/inventory/v1/offer",
+      "PUT /sell/inventory/v1/offer/offer-201",
+      "GET /sell/inventory/v1/offer/offer-201",
+      "POST /sell/inventory/v1/offer/offer-201/publish",
+    ]);
+    expect(credentials.authFailures).toHaveLength(0);
+  });
+
+  it("still fails the push when a call other than the offer lookup answers 404", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([
+      jsonResponse({ errors: [{ errorId: 25713, message: "This Offer is not available." }] }, 404),
+      jsonResponse({ errors: [{ errorId: 25710, message: "We didn't find the entity you are requesting." }] }, 404),
+    ]);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
+
+    await expect(provider.pushListing(makeRequest({
+      platform: "ebay",
+      listingMode: "live",
+      marketplaceConfig: ebayMarketplaceConfig(),
+    }))).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
+      message: "eBay listing push failed with HTTP 404: 25710 We didn't find the entity you are requesting.",
+      context: { status: 404, retryable: false, endpoint: "PUT /sell/inventory/v1/inventory_item/SKU-101" },
+    });
+    expect(fetcher.calls).toHaveLength(2);
+  });
+
   it("does not invalidate store credentials for an ordinary eBay listing API 400", async () => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([

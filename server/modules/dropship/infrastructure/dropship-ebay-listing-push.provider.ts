@@ -345,10 +345,8 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
             path: `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
             baseUrl: input.baseUrl,
           });
-        } catch (error: any) {
-          if (String(error?.message ?? "").includes("404")) {
-            return null;
-          }
+        } catch (error: unknown) {
+          if (isEbayNotFound(error)) return null;
           throw error;
         }
       },
@@ -364,13 +362,22 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         });
       },
       getOffers: async (sku, marketplaceId) => {
-        const result = await this.requestEbay<EbayOfferResponse>({
-          credential: input.credential,
-          config: input.config,
-          method: "GET",
-          path: `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=${encodeURIComponent(marketplaceId)}`,
-          baseUrl: input.baseUrl,
-        });
+        let result: EbayOfferResponse;
+        try {
+          result = await this.requestEbay<EbayOfferResponse>({
+            credential: input.credential,
+            config: input.config,
+            method: "GET",
+            path: `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=${encodeURIComponent(marketplaceId)}`,
+            baseUrl: input.baseUrl,
+          });
+        } catch (error: unknown) {
+          // A SKU with no offer yet answers 404 (25713 "This Offer is not
+          // available"), not an empty list; the channel client reads it the
+          // same way. Every other refusal still fails the push.
+          if (isEbayNotFound(error)) return { offers: [] };
+          throw error;
+        }
         return {
           offers: (result.offers ?? [])
             .filter(
@@ -574,6 +581,10 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       );
   }
 
+}
+
+function isEbayNotFound(error: unknown): boolean {
+  return error instanceof DropshipError && error.context?.status === 404;
 }
 
 function assertRebuildMarketplaceMatches(
