@@ -1,4 +1,5 @@
 import type { Pool, PoolClient, QueryResultRow } from "pg";
+import { appendListingVerification } from "./pg-listing-verification-writer";
 
 import { pool as defaultPool } from "../../../db";
 import {
@@ -268,7 +269,10 @@ export class PgMarketplaceListingRegistrationRepository implements MarketplaceLi
         await client.query("COMMIT");
         return listingVerificationResultSchema.parse({
           kind: "verified",
-          publicationId: toSafeInteger(replay.source_publication_id, "verification.source_publication_id"),
+          publicationId: toSafeInteger(
+            replay.source_publication_id,
+            "verification.source_publication_id",
+          ),
           externalListingId: replay.external_listing_id,
           verifiedAt: toDate(replay.verified_at, "verification.verified_at"),
         });
@@ -280,21 +284,25 @@ export class PgMarketplaceListingRegistrationRepository implements MarketplaceLi
         input.plan,
       );
       const publication = await lockActivePublication(client, scopeId);
-      const verificationId = await insertVerificationSnapshot(
+      await appendListingVerification(
         client,
         scopeId,
         toSafeInteger(account.id, "verification.provider_account_id"),
-        publication,
-        input,
+        toSafeInteger(publication.id, "verification.source_publication_id"),
+        input.plan,
+        input.verifiedAt,
       );
-      await insertVerificationMembers(client, verificationId, input.plan);
       await client.query("SET CONSTRAINTS ALL IMMEDIATE");
       await client.query("COMMIT");
       return listingVerificationResultSchema.parse({
-        kind: publication.external_listing_id === input.plan.externalListingId
-          ? "verified"
-          : "adopted_replacement",
-        publicationId: toSafeInteger(publication.id, "verification.source_publication_id"),
+        kind:
+          publication.external_listing_id === input.plan.externalListingId
+            ? "verified"
+            : "adopted_replacement",
+        publicationId: toSafeInteger(
+          publication.id,
+          "verification.source_publication_id",
+        ),
         externalListingId: input.plan.externalListingId,
         verifiedAt: input.verifiedAt,
       });
@@ -303,7 +311,11 @@ export class PgMarketplaceListingRegistrationRepository implements MarketplaceLi
       const rollback = await rollbackTransaction(client);
       if (!rollback.ok) {
         destroyClient = true;
-        throw rollbackFailureError(persistenceError, rollback.error, input.plan);
+        throw rollbackFailureError(
+          persistenceError,
+          rollback.error,
+          input.plan,
+        );
       }
       throw persistenceError;
     } finally {
@@ -451,7 +463,9 @@ async function lockAndValidateVerificationAccount(
   );
   const account = result.rows[0];
   if (!account) {
-    throw databaseContractError("Verified listing scope has no provider account binding.");
+    throw databaseContractError(
+      "Verified listing scope has no provider account binding.",
+    );
   }
   assertProviderAccountMatchesOwner(account, plan.owner);
   if (
@@ -479,96 +493,11 @@ async function lockActivePublication(
   );
   const publication = result.rows[0];
   if (!publication?.external_listing_id?.trim()) {
-    throw databaseContractError("Verified listing scope has no active publication identity.");
+    throw databaseContractError(
+      "Verified listing scope has no active publication identity.",
+    );
   }
   return publication;
-}
-
-async function insertVerificationSnapshot(
-  client: PoolClient,
-  scopeId: number,
-  providerAccountId: number,
-  publication: ActivePublicationRow,
-  input: PersistVerifiedListingInput,
-): Promise<number> {
-  const plan = input.plan;
-  const result = await client.query<IdRow>(
-    `INSERT INTO marketplace.listing_verification_snapshots (
-       scope_id, product_id, source_publication_id, provider_account_id, idempotency_key,
-       request_hash, observation_hash, desired_state_hash,
-       provider_publication_key, external_listing_id, external_url, evidence,
-       observed_at, verified_at, verified_by_type, verified_by_id,
-       correlation_id, created_at
-     ) VALUES (
-       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-       $13, $14, $15, $16, $17, $14
-     ) RETURNING id`,
-    [
-      scopeId,
-      plan.owner.productId,
-      toSafeInteger(publication.id, "verification.source_publication_id"),
-      providerAccountId,
-      plan.idempotencyKey,
-      plan.requestHash,
-      plan.observationHash,
-      plan.desiredStateHash,
-      plan.providerPublicationKey,
-      plan.externalListingId,
-      plan.externalUrl,
-      JSON.stringify(plan.evidence),
-      plan.observedAt,
-      input.verifiedAt,
-      plan.requestedBy.type,
-      plan.requestedBy.id,
-      plan.correlationId,
-    ],
-  );
-  return toSafeInteger(
-    requiredRow(result.rows[0], "Verification snapshot insert returned no row.").id,
-    "verification.id",
-  );
-}
-
-async function insertVerificationMembers(
-  client: PoolClient,
-  verificationId: number,
-  plan: ListingRegistrationPlan,
-): Promise<void> {
-  const result = await client.query(
-    `INSERT INTO marketplace.listing_verification_members (
-       verification_id, product_id, product_variant_id, sku_snapshot, disposition,
-       reason_code, external_variant_id, external_offer_id,
-       external_inventory_item_id
-     )
-     SELECT $1, $2, member.product_variant_id, member.sku_snapshot,
-            member.disposition, member.reason_code, member.external_variant_id,
-            member.external_offer_id, member.external_inventory_item_id
-     FROM jsonb_to_recordset($3::jsonb) AS member(
-       product_variant_id INTEGER,
-       sku_snapshot TEXT,
-       disposition TEXT,
-       reason_code TEXT,
-       external_variant_id TEXT,
-       external_offer_id TEXT,
-       external_inventory_item_id TEXT
-     )`,
-    [
-      verificationId,
-      plan.owner.productId,
-      JSON.stringify(plan.members.map((member) => ({
-        product_variant_id: member.productVariantId,
-        sku_snapshot: member.skuSnapshot,
-        disposition: member.disposition,
-        reason_code: member.reasonCode,
-        external_variant_id: member.externalVariantId,
-        external_offer_id: member.externalOfferId,
-        external_inventory_item_id: member.externalInventoryItemId,
-      }))),
-    ],
-  );
-  if (result.rowCount !== plan.members.length) {
-    throw databaseContractError("Verification member insert was incomplete.");
-  }
 }
 
 async function lockAndValidateOwner(
