@@ -567,9 +567,11 @@ async function assertSelectedHeadRows(client: PoolClient, dryRun: InventoryActiv
   });
 
   const publications = dryRun.products.flatMap((product) => product.proposedPublications);
-  const sourceRefs = dedupeRefs(publications.map((row) => ({
+  const quantityReads = dryRun.products.flatMap(product => (product.publicationTargetSelections ?? [])
+    .flatMap(target => target.quantityReadConfiguration ? [{ targetId: target.publicationTargetId, ...target.quantityReadConfiguration }] : []));
+  const sourceRefs = dedupeRefs([...publications.map((row) => ({
     key: String(row.publicationTargetId), id: row.sourceBindingId, hash: row.sourceBindingDefinitionHash,
-  })));
+  })), ...quantityReads.map(row => ({ key: String(row.targetId), id: row.sourceBindingId, hash: row.sourceBindingDefinitionHash }))]);
   await assertHeadSelection(client, {
     refs: sourceRefs,
     query: `SELECT head.publication_target_id::text AS key, binding.id, binding.definition_hash
@@ -598,7 +600,7 @@ async function assertSelectedHeadRows(client: PoolClient, dryRun: InventoryActiv
   )).rows;
   assertRefs(mappingRefs, mappingRows, "ACTIVATION_VARIANT_MAPPING_CHANGED", true);
 
-  const policyRefs = dedupeRefs(publications.flatMap((row) => row.policySelections.map((policy) => ({
+  const policyRefs = dedupeRefs([...publications, ...quantityReads].flatMap((row) => row.policySelections.map((policy) => ({
     key: policy.scopeKey, id: policy.policyId, hash: policy.definitionHash,
   }))));
   const policyRows = policyRefs.length === 0 ? [] : (await client.query<Record<string, unknown>>(

@@ -100,6 +100,7 @@ export async function readInitialPublicationScopeFacts(
       const active = ["active", "paused", "drift_detected"].includes(row.status);
       const uncertain = !active && !["not_listed", "preview_ready", "ended"].includes(row.status);
       listings.push({ sourceKey: `dropship-listing:${row.id}`, productVariantId: row.product_variant_id,
+        listingStatus: row.status,
         active, uncertain, quarantined: row.status === "drift_detected",
         // A catalog SKU alone is not proof of what the vendor listed. A missing
         // exact registered identity remains a visible blocker, never a guess.

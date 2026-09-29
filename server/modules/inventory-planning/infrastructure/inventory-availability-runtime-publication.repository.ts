@@ -285,15 +285,15 @@ async function createPublicationContext(
   return {
     ...authority,
     listActivePublicationProductIds: (channelId) => listActivePublicationProductIds(client, channelId),
-    planProduct: async (productId, channelId) => {
+    planProduct: async (productId, channelId, purpose = "publication") => {
       const supplySnapshot = await captureActiveSupplySnapshotInsideTransaction(client, productId);
       const managedSellableVariantIds = await loadManagedSellableVariantIds(client, productId);
       const publicationTargets = await loadChannelExposurePublicationTargets(
-        client, productId, managedSellableVariantIds, channelId,
+        client, productId, managedSellableVariantIds, channelId, purpose === "deferred_dropship_quantity_read",
       );
       return planInventoryChannelExposureProduct({
         ...authority, supplySnapshot, managedSellableVariantIds, publicationTargets,
-      }, productId, logger);
+      }, productId, logger, purpose);
     },
     loadActivePublicationTargets: (input) => loadZeroPublicationTargets(client, input),
     enqueueFullPublications: (activationRunId, intents) => {

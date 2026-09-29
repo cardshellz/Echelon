@@ -30,7 +30,7 @@ import {
 } from "../domain/inventory-channel-exposure";
 
 const actorSchema = z.string().trim().min(1).max(100);
-const ACTIVATION_DRY_RUN_CONTRACT_VERSION = "atp_authoritative_publication_readiness_v7";
+const ACTIVATION_DRY_RUN_CONTRACT_VERSION = "atp_authoritative_publication_readiness_v8";
 
 export interface PublicationEvidenceKey {
   channelId: number;
@@ -438,6 +438,14 @@ export class InventoryAvailabilityActivationDryRunService {
         publicationTargetSelections: targetPreviews.map(preview => ({
           publicationTargetId: preview.publicationTargetId,
           revision: preview.publicationTargetRevision,
+          ...(preview.destinationKind === "dropship_store_connection" && preview.publicationAuthority === "echelon"
+            && preview.deferredDropshipQuantityVariantIds?.length && preview.sourceBindingId !== null
+            && preview.sourceBindingVersion !== null && preview.sourceBindingDefinitionHash !== null
+            ? { quantityReadConfiguration: {
+                productVariantIds: preview.deferredDropshipQuantityVariantIds,
+                sourceBindingId: preview.sourceBindingId, sourceBindingVersion: preview.sourceBindingVersion,
+                sourceBindingDefinitionHash: preview.sourceBindingDefinitionHash, policySelections: preview.selectedPolicies,
+              } } : {}),
           membership: preview.membership?.mode === "explicit"
             ? { ...preview.membership, excludedVariantIds: preview.membership.excludedVariantIds ?? [] }
             : { mode: "whole_product" as const },

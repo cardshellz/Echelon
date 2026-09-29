@@ -1,12 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PoolClient } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
+import * as schema from "@shared/schema";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { cutoverCompositionBaseSql } from "../fixtures/inventory-cutover-composition-database.fixture";
+import { cutoverCompositionBaseSql, seedCompositionReviewedDryRun } from "../fixtures/inventory-cutover-composition-database.fixture";
 import { installInitialScopeFixture, seedInitialScopeDropship } from "../fixtures/inventory-publication-initial-scope.fixture";
 import { InventoryPublicationInitialScopeService } from "../../application/inventory-publication-initial-scope.service";
 import { PostgresInitialPublicationScopeStore } from "../../infrastructure/inventory-publication-initial-scope.repository";
 import { acquireInventoryCutoverFenceInsideTransaction } from "../../infrastructure/inventory-cutover-admission-fence.repository";
 import { PostgresInventoryPublicationReadbackRepository } from "../../infrastructure/inventory-publication-readback.repository";
+import { loadDeferredDropshipQuantityVariants } from "../../infrastructure/inventory-channel-exposure-runtime.repository";
+import { createAuthorityAwareInventoryPublicationService, createInventoryChannelQuantityRuntimeService } from "../../infrastructure/inventory-availability-runtime-publication.repository";
+import { activateWalmartPublicationInventoryFixture } from "../fixtures/walmart-publication-inventory.fixture";
+import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
+import { PostgresInventoryAvailabilityShadowRepository } from "../../infrastructure/inventory-availability-shadow.repository";
+import { InventoryAvailabilityShadowService } from "../../application/inventory-availability-shadow.service";
+import { assertDryRunSelectionsCurrent } from "../../infrastructure/inventory-availability-activation.repository";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -42,6 +51,88 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
     expect((await database.pool.query("SELECT * FROM inventory.publication_initial_scope_receipts")).rows).toEqual([]);
     expect((await database.pool.query("SELECT * FROM inventory.publication_membership_heads")).rows).toEqual([]);
   }
+  it("keeps a failed listing unchanged, persists its deferral, and reads canonical ATP without provider work", async () => {
+    await database.pool.query(`INSERT INTO dropship.dropship_vendors(id,business_name) VALUES(1,'Test vendor');
+      INSERT INTO dropship.dropship_store_connections(id,vendor_id,platform,status,external_account_id)
+        VALUES(1,1,'ebay','connected','account-one');
+      INSERT INTO inventory.inventory_publication_targets(destination_kind,channel_id,dropship_store_connection_id,fulfillment_node_id,
+        provider_scope_type,external_scope_id,publication_authority,state,change_reason,created_by)
+        VALUES('dropship_store_connection',36,1,1,'account','account-one','echelon','disabled','Fixture Dropship','operator');
+      UPDATE inventory.inventory_publication_targets SET state='preview',revision=revision+1,activated_by='operator',activated_at=transaction_timestamp() WHERE id=3;
+      INSERT INTO dropship.dropship_vendor_listings VALUES(1,1,101,'failed','unfinished-listing','unfinished-offer');
+      INSERT INTO inventory.publication_source_binding_versions(publication_target_id,version,definition_hash,change_reason,idempotency_key,request_hash,created_by)
+        VALUES(3,1,repeat('f',64),'Dropship warehouse','dropship-binding',repeat('f',64),'operator');
+      INSERT INTO inventory.publication_source_binding_heads(publication_target_id,draft_binding_id,revision,updated_by,update_reason)
+        SELECT 3,id,1,'operator','Dropship warehouse' FROM inventory.publication_source_binding_versions WHERE publication_target_id=3;
+      INSERT INTO inventory.publication_source_binding_members(binding_id,publication_target_id,fulfillment_node_id,priority)
+        SELECT id,3,1,1 FROM inventory.publication_source_binding_versions WHERE publication_target_id=3;`);
+    const before = await protectedRows();
+    const listingBefore = (await database.pool.query("SELECT * FROM dropship.dropship_vendor_listings")).rows;
+    const input = { publicationTargetId: 3, expectedTargetRevision: "2" };
+    const reviewed = await service.review(input);
+    expect(reviewed).toMatchObject({ ready: true, includedVariantIds: [], deferredUnpublishedVariantIds: [101], mappingImports: [] });
+    const command = { ...input, expectedReviewHash: reviewed.reviewHash, idempotencyKey: "defer-failed-dropship" };
+    const prepared = await service.prepare(command, "operator");
+    expect(prepared).toMatchObject({ deferredUnpublishedVariantIds: [101], includedVariantIds: [], alreadyApplied: false });
+    expect(await service.prepare(command, "operator")).toMatchObject({ ...prepared, alreadyApplied: true });
+    expect(await protectedRows()).toEqual(before);
+    expect((await database.pool.query("SELECT * FROM inventory.publication_membership_heads WHERE publication_target_id=3")).rows).toEqual([]);
+    const client = await database.pool.connect();
+    try { expect([...await loadDeferredDropshipQuantityVariants(client, [3], [101, 102])]).toEqual([[3, [101]]]); }
+    finally { client.release(); }
+
+    const shadows = new PostgresInventoryAvailabilityShadowRepository(database.pool);
+    await new InventoryAvailabilityShadowService(shadows).runProductShadow(20, { idempotencyKey: "deferred-atp-shadow" }, "operator");
+    const preview = await new PostgresInventoryChannelExposureAdminStore(drizzle(database.pool, { schema }), shadows).preview(3, 20);
+    expect(preview).toMatchObject({ deferredDropshipQuantityVariantIds: [101], rows: [], blockers: [], sourceBindingAuthority: "draft" });
+    const reviewedRun = await seedCompositionReviewedDryRun(database.pool);
+    reviewedRun.products[0]!.publicationTargetSelections = [{ publicationTargetId: 3, revision: "3",
+      membership: { mode: "explicit", includedVariantIds: [], excludedVariantIds: [] },
+      targetIdentity: { channelId: 36, destinationKind: "dropship_store_connection", channelConnectionId: null, dropshipStoreConnectionId: 1,
+        providerScopeType: "account", externalScopeId: "account-one", publicationAuthority: "echelon", state: "preview" },
+      quantityReadConfiguration: { productVariantIds: [101], sourceBindingId: preview.sourceBindingId!,
+        sourceBindingVersion: preview.sourceBindingVersion!, sourceBindingDefinitionHash: preview.sourceBindingDefinitionHash!,
+        policySelections: preview.selectedPolicies } }];
+    const reviewClient = await database.pool.connect();
+    try {
+      await reviewClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await assertDryRunSelectionsCurrent(reviewClient, reviewedRun, false);
+      const changed = structuredClone(reviewedRun);
+      changed.products[0]!.publicationTargetSelections![0]!.quantityReadConfiguration!.sourceBindingDefinitionHash = "a".repeat(64);
+      await expect(assertDryRunSelectionsCurrent(reviewClient, changed, false)).rejects.toMatchObject({ code: "ACTIVATION_SOURCE_BINDING_CHANGED" });
+      await reviewClient.query("ROLLBACK");
+    } finally { reviewClient.release(); }
+
+    // Synthetic active lineage in this disposable fixture: exercise the actual
+    // runtime DB reader/authority lock, not a mocked ATP number or provider.
+    await database.pool.query(`UPDATE inventory.publication_source_binding_versions SET lifecycle_status='sealed',sealed_by='operator',sealed_at=transaction_timestamp()
+      WHERE publication_target_id=3;
+      UPDATE inventory.publication_source_binding_heads SET active_binding_id=draft_binding_id,draft_binding_id=NULL,
+        revision=revision+1,updated_by='operator',update_reason='Fixture activation' WHERE publication_target_id=3;
+      UPDATE inventory.inventory_publication_targets SET state='live',revision=revision+1 WHERE id=3;`);
+    const activationClient = await database.pool.connect();
+    try {
+      await activationClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      await acquireInventoryCutoverFenceInsideTransaction(activationClient, { expectedAuthority: "legacy", expectedConfigurationRunId: null });
+      await activateWalmartPublicationInventoryFixture(activationClient);
+      await activationClient.query("COMMIT");
+    } catch (error) { await activationClient.query("ROLLBACK"); throw error; }
+    finally { activationClient.release(); }
+    const legacy = vi.fn(async () => [{ productVariantId: 101, quantity: 999 }]);
+    const quantities = await createInventoryChannelQuantityRuntimeService(database.pool).readProduct({ productId: 20,
+      channelId: 36, target: { destinationKind: "dropship_store_connection", connectionId: 1, providerKey: "ebay" }, triggeredBy: "test" }, legacy);
+    expect(quantities.authority).toBe("canonical");
+    expect(quantities.rows).toHaveLength(1);
+    expect(quantities.rows[0]).toMatchObject({ productVariantId: 101, publicationTargetIds: [3] });
+    expect(quantities.rows[0]!.quantity).toBeGreaterThan(0);
+    expect(quantities.rows[0]!.quantity).not.toBe(999);
+    expect(legacy).not.toHaveBeenCalled();
+    const publication = await createAuthorityAwareInventoryPublicationService(database.pool, { channelId: 36 })
+      .publishProduct({ productId: 20, publicationTargetId: 3, dryRun: false }, legacy);
+    expect(publication).toMatchObject({ authority: "canonical", publication: { rows: [], enqueuedRows: 0 } });
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox")).rows).toEqual([]);
+    expect((await database.pool.query("SELECT * FROM dropship.dropship_vendor_listings")).rows).toEqual(listingBefore);
+  });
   it("reviews without writes, then changes only target scope, membership and immutable audit evidence", async () => {
     const before = await protectedRows();
     expect(await review()).toMatchObject({ ready: true, includedVariantIds: [101], blockers: [] });
@@ -338,12 +429,19 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
     await expect(service.prepare(await command(), "operator")).rejects.toMatchObject({ code: "INITIAL_SCOPE_REVIEW_BLOCKED" });
     await assertPristine(); expect(await protectedRows()).toEqual(before);
   });
-  it("does not interpret a failed Dropship push with no provider IDs as an empty or safely excluded listing", async () => {
+  it.each(["failed", "queued"])("distinguishes a terminal failed Dropship push from pending work (%s)", async status => {
     await seedInitialScopeDropship(database.pool);
-    await database.pool.query("INSERT INTO dropship.dropship_vendor_listings VALUES(1,1,101,'failed',NULL,NULL)");
+    await database.pool.query("INSERT INTO dropship.dropship_vendor_listings VALUES(1,1,101,$1,NULL,NULL)", [status]);
     const target = { publicationTargetId: 3, expectedTargetRevision: "2" };
     const before = await protectedRows();
     const checked = await service.review(target);
+    if (status === "failed") {
+      expect(checked).toMatchObject({ ready: true, includedVariantIds: [102], deferredUnpublishedVariantIds: [101], excludedVariants: [] });
+      expect(await protectedRows()).toEqual(before);
+      expect(await service.prepare({ ...target, expectedReviewHash: checked.reviewHash, idempotencyKey: "failed-dropship" }, "operator"))
+        .toMatchObject({ deferredUnpublishedVariantIds: [101], includedVariantIds: [102], providerWriteAttempted: false });
+      return;
+    }
     expect(checked.ready).toBe(false);
     expect(checked.blockers.map(row => row.code)).toEqual(expect.arrayContaining([
       "INITIAL_SCOPE_LISTING_UNCERTAIN", "INITIAL_SCOPE_MAPPING_UNVERIFIED",

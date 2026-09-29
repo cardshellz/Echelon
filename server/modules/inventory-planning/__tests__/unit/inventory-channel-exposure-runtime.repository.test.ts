@@ -1,8 +1,32 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { PostgresInventoryChannelExposureRuntimeExecutor } from "../../infrastructure/inventory-channel-exposure-runtime.repository";
+import { loadDeferredDropshipQuantityVariants, PostgresInventoryChannelExposureRuntimeExecutor } from "../../infrastructure/inventory-channel-exposure-runtime.repository";
 
 const HASH = "a".repeat(64);
+
+describe("deferred Dropship receipt reader", () => {
+  const receipt = { publicationTargetId: 4, previousRevision: "2", revision: "3", reviewHash: HASH,
+    includedVariantIds: [], deferredUnpublishedVariantIds: [101, 102, 999], preparedBy: "operator",
+    preparedAt: "2026-09-29T12:00:00.000Z", alreadyApplied: false, runtimeAuthorityChanged: false,
+    providerWriteAttempted: false, outboxEnqueued: false };
+  it("uses only exact receipt IDs for this product, removing later membership decisions", async () => {
+    const query = vi.fn(async () => ({ rows: [{ publication_target_id: 4, receipt, decided_variant_ids: [102] }] }));
+    const result = await loadDeferredDropshipQuantityVariants({ query } as never, [4], [101, 102, 103]);
+    expect([...result]).toEqual([[4, [101]]]);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("target.destination_kind='dropship_store_connection'"), [[4]]);
+  });
+  it("does not query for direct channels or empty managed products", async () => {
+    const query = vi.fn();
+    expect(await loadDeferredDropshipQuantityVariants({ query }, [], [101])).toEqual(new Map());
+    expect(await loadDeferredDropshipQuantityVariants({ query }, [4], [])).toEqual(new Map());
+    expect(query).not.toHaveBeenCalled();
+  });
+  it.each(["target", "malformed"])("rejects %s receipt evidence", async kind => {
+    const query = vi.fn(async () => ({ rows: [{ publication_target_id: 4,
+      receipt: { ...receipt, ...(kind === "target" ? { publicationTargetId: 5 } : { deferredUnpublishedVariantIds: [-1] }) }, decided_variant_ids: [] }] }));
+    await expect(loadDeferredDropshipQuantityVariants({ query } as never, [4], [101])).rejects.toThrow();
+  });
+});
 
 describe("PostgresInventoryChannelExposureRuntimeExecutor", () => {
   it("does not read canonical supply or channel configuration while legacy owns authority", async () => {

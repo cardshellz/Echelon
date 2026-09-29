@@ -40,7 +40,7 @@ function serviceWith<T>(result: InventoryPublicationRouteResult<T>) {
     return result;
   });
   return {
-    service: new InventoryChannelQuantityRuntimeService(() => ({ publishProduct } as never)),
+    service: new InventoryChannelQuantityRuntimeService(() => ({ publishProduct, readDropshipProductQuantities: publishProduct } as never)),
     publishProduct,
   };
 }

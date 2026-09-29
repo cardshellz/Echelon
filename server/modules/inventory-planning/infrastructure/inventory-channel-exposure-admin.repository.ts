@@ -1,6 +1,7 @@
 import { eq, sql } from "drizzle-orm";
 import { inventoryPublicationScopeSchema } from "@shared/types/inventory-publication-scope";
-import { selectPublicationVariants } from "../domain/inventory-publication-scope";
+import { selectDeferredPublicationQuantityVariants, selectPublicationVariants } from "../domain/inventory-publication-scope";
+import { initialPublicationScopeReceiptSchema } from "@shared/types/inventory-publication-initial-scope";
 
 import {
   channelExposurePolicyHeads,
@@ -1136,8 +1137,23 @@ implements InventoryChannelExposureAdminStore {
         : { mode: "whole_product" });
       const selection = selectPublicationVariants(sellableVariantRows.map(row => ({ id: positiveInteger(row.id, "variant.id") })), membership);
       const sellableVariantIds = new Set(selection.selected.map(row => row.id));
+      const deferredReceipts = target.destination_kind === "dropship_store_connection"
+        && target.publication_authority === "echelon" && target.membership_mode === "explicit"
+        ? rows(await tx.execute(sql`SELECT receipt FROM inventory.publication_initial_scope_receipts
+          WHERE publication_target_id=${publicationTargetId}`)) : [];
+      const deferredReceipt = deferredReceipts[0]
+        ? initialPublicationScopeReceiptSchema.parse(deferredReceipts[0].receipt) : null;
+      if (deferredReceipt && deferredReceipt.publicationTargetId !== publicationTargetId) {
+        throw new InventoryAvailabilityMasterDataError(409, "DEFERRED_DROPSHIP_TARGET_MISMATCH",
+          "The initial quantity-read receipt belongs to another destination.");
+      }
+      const deferredDropshipQuantityVariantIds = selectDeferredPublicationQuantityVariants(
+        deferredReceipt?.deferredUnpublishedVariantIds ?? [], sellableVariantRows.map(row => positiveInteger(row.id, "variant.id")),
+        membershipRows.map(row => positiveInteger(row.product_variant_id, "membership.variantId")));
+      const previewVariantIds = new Set([...sellableVariantIds, ...deferredDropshipQuantityVariantIds]);
       const previewIdentity = {
         membership,
+        ...(deferredDropshipQuantityVariantIds.length > 0 ? { deferredDropshipQuantityVariantIds } : {}),
         publicationTargetId,
         destinationKind: String(target.destination_kind),
         channelId,
@@ -1253,7 +1269,7 @@ implements InventoryChannelExposureAdminStore {
         SELECT hold.product_variant_id, hold.hold_reason, hold.held_at, hold.held_by
         FROM inventory.inventory_publication_target_variant_holds AS hold
         WHERE hold.publication_target_id = ${publicationTargetId}
-          AND hold.product_variant_id = ANY(${sqlIntegerArray([...sellableVariantIds])})
+          AND hold.product_variant_id = ANY(${sqlIntegerArray([...previewVariantIds])})
         ORDER BY hold.product_variant_id
       `));
       const variantHolds = new Map(variantHoldRows.map((row) => [
@@ -1327,12 +1343,12 @@ implements InventoryChannelExposureAdminStore {
       }
       const rowsByVariant = new Map<number, typeof run.results>();
       for (const result of run.results) {
-        if (!sellableVariantIds.has(result.productVariantId)) continue;
+        if (!previewVariantIds.has(result.productVariantId)) continue;
         const values = rowsByVariant.get(result.productVariantId) ?? [];
         values.push(result);
         rowsByVariant.set(result.productVariantId, values);
       }
-      for (const productVariantId of sellableVariantIds) {
+      for (const productVariantId of previewVariantIds) {
         const variantResults = rowsByVariant.get(productVariantId);
         if (!variantResults || !variantResults.some((row) => row.warehouseId === null)) {
           blockers.push({
@@ -1395,7 +1411,7 @@ implements InventoryChannelExposureAdminStore {
               hold,
             }];
           }
-          if (resolution.policy.eligible && mapping === null) {
+          if (sellableVariantIds.has(productVariantId) && resolution.policy.eligible && mapping === null) {
             blockers.push({
               code: "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING",
               message: "An eligible SKU has no exact provider inventory identity for this publication target.",
@@ -1430,7 +1446,7 @@ implements InventoryChannelExposureAdminStore {
         fulfillmentNodeIds,
         warehouseIds,
         selectedPolicies,
-        rows: previewRows,
+        rows: previewRows.filter(row => sellableVariantIds.has(row.productVariantId)),
         blockers: uniqueBlockers(blockers),
       });
     });

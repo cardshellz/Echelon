@@ -25,6 +25,40 @@ function removeMapping(source: InitialPublicationScopeFacts): void {
   variant.mappingHeadExists = false;
 }
 describe("initial publication scope policy", () => {
+  function failedDropship(): InitialPublicationScopeFacts {
+    const source = facts(); removeMapping(source);
+    source.target = { ...source.target, destinationKind: "dropship_store_connection", provider: "ebay",
+      channelConnectionId: null, dropshipStoreConnectionId: 1, providerScopeType: "account" };
+    source.listings = [{ sourceKey: "dropship-listing:1", productVariantId: 101, listingStatus: "failed",
+      active: false, uncertain: true, quarantined: false, externalInventoryItemId: null, externalSku: null }];
+    return source;
+  }
+  it("defers a failed unpublished Dropship listing without excluding its ATP or inventing a provider identity", () => {
+    const source = failedDropship(); const before = structuredClone(source);
+    expect(reviewInitialPublicationScope(input, source)).toMatchObject({ ready: true, includedVariantIds: [],
+      deferredUnpublishedVariantIds: [101], excludedVariants: [], mappingImports: [], blockers: [], providerWriteAttempted: false });
+    expect(source).toEqual(before);
+  });
+  it.each(["queued", "listing", "unknown", "drift_detected"])("does not defer unresolved %s listing work", status => {
+    const source = failedDropship(); source.listings[0]!.listingStatus = status;
+    expect(reviewInitialPublicationScope(input, source)).toMatchObject({ ready: false, deferredUnpublishedVariantIds: [] });
+  });
+  it.each(["active_owner", "quarantine", "pending_operation"])("does not hide %s behind a failed Dropship row", kind => {
+    const source = failedDropship();
+    if (kind === "active_owner") source.listings.push({ ...source.listings[0]!, sourceKey: "registered:1", active: true, uncertain: false });
+    if (kind === "quarantine") source.listings[0]!.quarantined = true;
+    if (kind === "pending_operation") source.ownerIssues = ["PENDING_LISTING_OPERATION"];
+    expect(reviewInitialPublicationScope(input, source).ready).toBe(false);
+  });
+  it("cannot use the Dropship deferral on a direct channel or retain a stale status review", () => {
+    const source = failedDropship();
+    const before = reviewInitialPublicationScope(input, source);
+    source.listings[0]!.listingStatus = "queued";
+    expect(reviewInitialPublicationScope(input, source).reviewHash).not.toBe(before.reviewHash);
+    source.listings[0]!.listingStatus = "failed";
+    source.target = facts().target;
+    expect(reviewInitialPublicationScope(input, source)).toMatchObject({ ready: false, deferredUnpublishedVariantIds: [] });
+  });
   it("seals an explicitly reviewed bundle exclusion without commissioning or changing its inventory", () => {
     const source = facts();
     const before = structuredClone(source);

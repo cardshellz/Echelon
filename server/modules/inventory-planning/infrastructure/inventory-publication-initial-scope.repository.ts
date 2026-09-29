@@ -40,6 +40,7 @@ export class PostgresInitialPublicationScopeStore implements InitialPublicationS
         revision: (BigInt(review.targetRevision) + BigInt(1)).toString(), reviewHash: review.reviewHash,
         includedVariantIds: review.includedVariantIds, preparedBy: actor, preparedAt: now.toISOString(), alreadyApplied: false,
         excludedVariants: review.excludedVariants ?? [],
+        deferredUnpublishedVariantIds: review.deferredUnpublishedVariantIds ?? [],
         importedVariantIds: (review.mappingImports ?? []).map(row => row.productVariantId),
         runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false,
       });
@@ -70,7 +71,8 @@ export class PostgresInitialPublicationScopeStore implements InitialPublicationS
       [now, actor, `inventory.inventory_publication_target:${input.publicationTargetId}`,
         JSON.stringify({ before: { mode: "whole_product", revision: review.targetRevision },
           after: { mode: "explicit", revision: receipt.revision, includedVariantIds: receipt.includedVariantIds,
-            excludedVariants: receipt.excludedVariants, mappingImports: review.mappingImports ?? [] } }),
+            excludedVariants: receipt.excludedVariants, deferredUnpublishedVariantIds: receipt.deferredUnpublishedVariantIds,
+            mappingImports: review.mappingImports ?? [] } }),
         JSON.stringify({ idempotencyKey: input.idempotencyKey, requestHash, reviewHash: review.reviewHash, receipt })]);
       return receipt;
     });
