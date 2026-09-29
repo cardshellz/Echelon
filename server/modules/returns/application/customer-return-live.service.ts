@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { normalizeCountryToIso2 } from "@shared/country-code";
 import {
   customerReturnLiveLookupInputSchema, customerReturnLiveOrderSchema, customerReturnLiveReviewInputSchema,
   customerReturnLiveReviewSchema, customerReturnLiveStateSchema,
@@ -241,11 +242,15 @@ function verifyProviderOwnership(provider: CustomerReturnShopifySnapshot, scope:
 // The existing Shopify ingestion writes created_at to OMS ordered_at. processedAt
 // can differ for imported/backdated orders and is not that field's provenance.
 function verifyIdentity(local: CustomerReturnLocalInspectionSnapshot, provider: CustomerReturnShopifySnapshot, reference: string): void {
+  // Legacy OMS imports retain country names; Shopify returns ISO codes. Compare
+  // their identities without rewriting evidence or inventing a missing country.
+  const localCountry = normalizeCountryToIso2(local.order.shipToCountry);
+  if (local.order.shipToCountry !== null && localCountry === null) throw unavailable();
   if (provider.shop.channelId !== local.shop.channelId || provider.shop.connectionId !== local.shop.connectionId
     || provider.shop.shopDomain !== local.shop.shopDomain || provider.order.id !== gid("Order", local.order.externalOrderId)
     || sourceOrderReference(provider.order.name) !== reference
     || Date.parse(provider.order.createdAt) !== Date.parse(local.order.purchasedAt)
-    || provider.order.destinationCountryCode !== local.order.shipToCountry
+    || provider.order.destinationCountryCode !== localCountry
     || local.lines.length !== provider.lines.length) throw unavailable();
   const localIds = new Set<string>();
   for (const line of local.lines) {

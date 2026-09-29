@@ -22,7 +22,8 @@ export async function createCustomerReturnCustomerServices(session: CustomerRetu
   return {
     orders: new CustomerReturnCustomerOrdersService({ principal, access, live,
       reportUnavailableOrder: (context) => console.warn(JSON.stringify({
-        event: "return_customer_order_unavailable", code: "RETURN_ORDER_INSPECTION_UNAVAILABLE", ...context,
+        event: "return_customer_order_unavailable", code: "RETURN_ORDER_INSPECTION_UNAVAILABLE",
+        channelId: context.channelId, omsOrderId: context.omsOrderId, reason: context.reason, causeCode: context.causeCode,
       })),
       shippingVersion: async () => {
         const [current, control] = await Promise.all([settings.read(principal.channelId), settings.readControl(principal.channelId)]);
