@@ -1,4 +1,8 @@
 import { randomUUID } from "crypto";
+import {
+  appendRecoveredSourceVerification,
+  withVerifiedRecoverySource,
+} from "./pg-listing-recovery-verification";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import { pool as defaultPool } from "../../../db";
@@ -16,6 +20,7 @@ import type {
 } from "../domain/listing-replacement-plan";
 
 interface OperationRow extends QueryResultRow {
+  created_at: Date | string;
   id: string | number;
   scope_id: string | number;
   source_publication_id: string | number;
@@ -194,7 +199,17 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         input.actor,
         sourceProviderSnapshot,
       );
-      return claim;
+      return operation.current_phase === "compensate"
+        ? {
+            ...claim,
+            operation: await withVerifiedRecoverySource(
+              client,
+              toId(operation.scope_id),
+              operation.created_at,
+              claim.operation,
+            ),
+          }
+        : claim;
     });
   }
 
@@ -452,9 +467,10 @@ export class PgMarketplaceListingReplacementExecutionRepository implements Marke
         input.claim.executor,
         input.result.evidence,
       );
-      await updateRestoredSourcePublication(
+      await appendRecoveredSourceVerification(
         client,
-        operation,
+        toId(operation.scope_id),
+        input.claim,
         input.result,
         input.completedAt,
       );
@@ -1102,12 +1118,21 @@ function executionError(
 function classifyExecutionError(
   error: unknown,
 ): MarketplaceListingReplacementError {
+  const metadata: Record<string, string> = {};
+  // Retain actionable database diagnostics, never SQL text, values, or credentials.
+  if (error && typeof error === "object") {
+    for (const key of ["code", "constraint"] as const) {
+      const value = (error as Record<string, unknown>)[key];
+      if (typeof value === "string" && /^[A-Za-z0-9_]{1,100}$/.test(value))
+        metadata[key] = value;
+    }
+  }
   return error instanceof MarketplaceListingReplacementError
     ? error
     : executionError(
         "MARKETPLACE_LISTING_REPLACEMENT_DATABASE_ERROR",
         "Replacement execution database operation failed.",
-        {},
+        metadata,
         error,
       );
 }
@@ -1218,49 +1243,6 @@ async function failClaimedStep(
   return requireRow(result.rows[0], "step failure");
 }
 
-async function updateRestoredSourcePublication(
-  client: PoolClient,
-  operation: OperationRow,
-  result: ListingReplacementStepSuccess,
-  at: Date,
-): Promise<void> {
-  const listingId = result.externalListingId?.trim();
-  if (!listingId) {
-    throw executionError(
-      "MARKETPLACE_LISTING_REPLACEMENT_RESTORED_SOURCE_IDENTITY_INVALID",
-      "Restored source publication returned no external listing ID.",
-    );
-  }
-  await requireSingleUpdate(
-    client,
-    `UPDATE marketplace.listing_publications
-     SET external_listing_id = $2, external_url = $3, verified_at = $4, updated_at = $4
-     WHERE id = $1 AND status = 'active'`,
-    [
-      toId(operation.source_publication_id),
-      listingId,
-      result.externalUrl?.trim() || null,
-      at,
-    ],
-    "restored source identity reconciliation",
-  );
-  for (const identity of result.memberIdentities ?? []) {
-    await requireSingleUpdate(
-      client,
-      `UPDATE marketplace.listing_publication_members
-       SET external_variant_id = $3, external_offer_id = $4, external_inventory_item_id = $5
-       WHERE publication_id = $1 AND product_variant_id = $2 AND disposition = 'included'`,
-      [
-        toId(operation.source_publication_id),
-        identity.productVariantId,
-        nullableText(identity.externalVariantId),
-        nullableText(identity.externalOfferId),
-        nullableText(identity.externalInventoryItemId),
-      ],
-      "restored source member identity reconciliation",
-    );
-  }
-}
 async function stageTargetPublication(
   client: PoolClient,
   operation: OperationRow,

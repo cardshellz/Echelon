@@ -9,6 +9,113 @@ import {
 import type { ListingReplacementExecutionContext } from "../../application/execution-ports";
 
 describe("EbayMarketplaceListingReplacementProvider", () => {
+  it("closes a stale replacement by observing the later verified P50/C750 listing, without writes", async () => {
+    const harness = correctedHarness();
+    await expect(
+      harness.provider.ensureTargetNotSellable(
+        correctedContext(),
+        "target-off",
+      ),
+    ).resolves.toMatchObject({ evidence: { targetGroupAbsent: true } });
+    await expect(
+      harness.provider.ensureSourceLive(correctedContext(), "reconcile"),
+    ).resolves.toMatchObject({
+      externalListingId: "corrected-listing",
+      evidence: {
+        recoveryMode: "verified_source_read_only",
+        sourceVerificationId: 8,
+        excludedSkus: ["ARM-ENV-SGL-C700"],
+      },
+      memberIdentities: [{ productVariantId: 12 }, { productVariantId: 13 }],
+    });
+    expectNoProviderWrites(harness);
+  });
+
+  it.each([
+    "missing",
+    "excluded-live",
+    "split",
+    "duplicate",
+    "offer-changed",
+    "unknown-group-member",
+    "target-present",
+  ])(
+    "does not mutate eBay when read-only recovery proof fails: %s",
+    async (failure) => {
+      const harness = correctedHarness();
+      if (failure === "missing") harness.offers.set("ARM-ENV-SGL-C750", []);
+      if (failure === "excluded-live")
+        harness.offers.set("ARM-ENV-SGL-C700", [
+          offer("offer-c700", "ARM-ENV-SGL-C700"),
+        ]);
+      if (failure === "split")
+        harness.offers.set("ARM-ENV-SGL-C750", [
+          {
+            ...offer("offer-c750", "ARM-ENV-SGL-C750"),
+            listingId: "other-listing",
+          },
+        ]);
+      if (failure === "duplicate")
+        harness.offers
+          .get("ARM-ENV-SGL-C750")!
+          .push(offer("another", "ARM-ENV-SGL-C750"));
+      if (failure === "offer-changed")
+        harness.offers.set("ARM-ENV-SGL-C750", [
+          {
+            ...offer("another", "ARM-ENV-SGL-C750"),
+            listingId: "corrected-listing",
+          },
+        ]);
+      if (failure === "unknown-group-member")
+        harness.groups.set("ARM-ENV-SGL-V1", {
+          ...harness.groups.get("ARM-ENV-SGL-V1")!,
+          variantSKUs: ["UNKNOWN"],
+        });
+      if (failure === "target-present")
+        harness.groups.set(
+          "ARM-ENV-SGL-V1-R52",
+          harness.groups.get("ARM-ENV-SGL-V1")!,
+        );
+      await expect(
+        harness.provider.ensureSourceLive(correctedContext(), "reconcile"),
+      ).rejects.toMatchObject({
+        code: `MARKETPLACE_LISTING_REPLACEMENT_EBAY_${["target-present", "split", "duplicate", "offer-changed"].includes(failure) ? "RECOVERY_TARGET_NOT_ABSENT" : "RECOVERY_SOURCE_CHANGED"}`,
+      });
+      expectNoProviderWrites(harness);
+    },
+  );
+
+  it("does not close an absent target group while one of its other offers is still live", async () => {
+    const harness = correctedHarness();
+    const recovery = {
+      ...correctedContext(),
+      targetMembers: [
+        ...correctedContext().targetMembers,
+        member(14, "ORPHAN", "offer-orphan"),
+      ],
+    };
+    harness.offers.set("ORPHAN", [
+      { ...offer("offer-orphan", "ORPHAN"), listingId: "abandoned-target" },
+    ]);
+    await expect(
+      harness.provider.ensureTargetNotSellable(recovery, "target-off"),
+    ).rejects.toMatchObject({
+      code: "MARKETPLACE_LISTING_REPLACEMENT_EBAY_RECOVERY_TARGET_NOT_ABSENT",
+    });
+    expectNoProviderWrites(harness);
+  });
+
+  it("does not mutate eBay when its read fails", async () => {
+    const harness = correctedHarness();
+    harness.client.getInventoryItemGroup.mockRejectedValueOnce(
+      new Error("read unavailable"),
+    );
+    await expect(
+      harness.provider.ensureSourceLive(correctedContext(), "reconcile"),
+    ).rejects.toThrow("read unavailable");
+    expectNoProviderWrites(harness);
+  });
+
   it("withdraws the source, publishes an exact target group, and verifies it", async () => {
     const harness = makeHarness();
     await expect(
@@ -204,6 +311,64 @@ function context(): ListingReplacementExecutionContext {
     actor: { type: "user", id: "admin-1" },
     correlationId: null,
   };
+}
+
+function correctedContext(): ListingReplacementExecutionContext {
+  return {
+    ...context(),
+    sourceVerification: { id: 8, readOnlyRecovery: true },
+    sourcePublication: {
+      ...context().sourcePublication,
+      externalListingId: "corrected-listing",
+    },
+    sourceMembers: [
+      {
+        ...member(11, "ARM-ENV-SGL-C700", null),
+        disposition: "excluded",
+        reasonCode: "not_in_observed_publication",
+      },
+      member(12, "ARM-ENV-SGL-C750", "offer-c750"),
+      member(13, "ARM-ENV-SGL-P50", "offer-p50"),
+    ],
+  };
+}
+
+function correctedHarness() {
+  const harness = makeHarness();
+  harness.groups.set("ARM-ENV-SGL-V1", {
+    ...harness.groups.get("ARM-ENV-SGL-V1")!,
+    variantSKUs: ["ARM-ENV-SGL-C700", "ARM-ENV-SGL-C750", "ARM-ENV-SGL-P50"],
+  });
+  harness.offers.set("ARM-ENV-SGL-C700", [
+    {
+      ...offer("offer-c700", "ARM-ENV-SGL-C700"),
+      status: "UNPUBLISHED",
+      listingId: undefined,
+    },
+  ]);
+  for (const sku of ["ARM-ENV-SGL-P50", "ARM-ENV-SGL-C750"]) {
+    harness.offers.set(
+      sku,
+      harness.offers
+        .get(sku)!
+        .map((entry) => ({ ...entry, listingId: "corrected-listing" })),
+    );
+  }
+  return harness;
+}
+
+function expectNoProviderWrites(harness: ReturnType<typeof makeHarness>) {
+  for (const method of [
+    "createOrReplaceInventoryItemGroup",
+    "deleteInventoryItemGroup",
+    "createOffer",
+    "publishOffer",
+    "publishOfferByInventoryItemGroup",
+    "withdrawOffer",
+    "withdrawOfferByInventoryItemGroup",
+  ] as const) {
+    expect(harness.client[method]).not.toHaveBeenCalled();
+  }
 }
 
 function stagedContext(): ListingReplacementExecutionContext {

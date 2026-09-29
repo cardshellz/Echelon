@@ -75,8 +75,7 @@ const DEFAULT_CONSISTENCY_POLICY: EbayListingReplacementConsistencyPolicy = {
 export class EbayMarketplaceListingReplacementProvider implements MarketplaceListingReplacementProvider {
   constructor(
     private readonly clients: EbayListingReplacementClientResolver,
-    private readonly consistency: EbayListingReplacementConsistencyPolicy =
-      DEFAULT_CONSISTENCY_POLICY,
+    private readonly consistency: EbayListingReplacementConsistencyPolicy = DEFAULT_CONSISTENCY_POLICY,
   ) {}
 
   async preflight(
@@ -285,6 +284,17 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
   ): Promise<ListingReplacementStepSuccess> {
     validateContext(context, idempotencyKey);
     const client = await this.clients.forOwner(context.owner);
+    if (context.sourceVerification?.readOnlyRecovery) {
+      await verifyAbandonedTargetAbsent(client, context);
+      return {
+        evidence: {
+          targetNotSellable: true,
+          targetGroupAbsent: true,
+          recoveryMode: "verified_source_read_only",
+          sourceVerificationId: context.sourceVerification.id,
+        },
+      };
+    }
     const members = included(context.targetMembers);
     const targetKey =
       context.targetProviderPublicationKey ?? targetGroupKey(context);
@@ -343,6 +353,9 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
   ): Promise<ListingReplacementStepSuccess> {
     validateContext(context, idempotencyKey);
     const client = await this.clients.forOwner(context.owner);
+    if (context.sourceVerification?.readOnlyRecovery) {
+      return verifyCorrectedSource(client, context);
+    }
     const sourceKey = context.sourcePublication.providerPublicationKey;
     const members = included(context.sourceMembers);
     const activeSource = await inspectAnyActiveListing(
@@ -428,6 +441,129 @@ export class EbayMarketplaceListingReplacementProvider implements MarketplaceLis
         sourceListingId: listingId,
       },
     };
+  }
+}
+
+/** A later saved verification is an explicit correction, not permission to replay
+ * an old replacement. This path deliberately has no provider mutation calls. */
+async function verifyCorrectedSource(
+  client: EbayListingReplacementClient,
+  context: ListingReplacementExecutionContext,
+): Promise<ListingReplacementStepSuccess> {
+  // Recheck even if the target-off step succeeded weeks ago.
+  await verifyAbandonedTargetAbsent(client, context);
+  const sourceKey = context.sourcePublication.providerPublicationKey!;
+  const group = await client.getInventoryItemGroup(sourceKey);
+  const members = included(context.sourceMembers);
+  const knownSkus = new Set(
+    context.sourceMembers.map((member) => member.skuSnapshot),
+  );
+  const groupSkus = group?.variantSKUs;
+  if (
+    !groupSkus ||
+    members.some((member) => !groupSkus.includes(member.skuSnapshot)) ||
+    groupSkus.some((sku) => !knownSkus.has(sku))
+  ) {
+    throw providerError(
+      "RECOVERY_SOURCE_CHANGED",
+      "The current source group no longer matches its saved verification.",
+    );
+  }
+  const offers: EbayReplacementOffer[] = [];
+  for (const member of context.sourceMembers) {
+    const active = (
+      await client.getOffers(member.skuSnapshot, context.owner.marketplaceId)
+    ).filter(isActive);
+    if (member.disposition === "excluded") {
+      if (active.length)
+        throw providerError(
+          "RECOVERY_SOURCE_CHANGED",
+          "An excluded source SKU is now published.",
+          { sku: member.skuSnapshot },
+        );
+      continue;
+    }
+    if (
+      active.length !== 1 ||
+      active[0].listingId !== context.sourcePublication.externalListingId ||
+      active[0].offerId !== member.externalOfferId ||
+      active[0].sku !== member.skuSnapshot
+    ) {
+      throw providerError(
+        "RECOVERY_SOURCE_CHANGED",
+        "The current source offer no longer matches its saved verification.",
+        { sku: member.skuSnapshot },
+      );
+    }
+    offers.push(active[0]);
+  }
+  const observed = publicationResult(
+    sourceKey,
+    context.sourcePublication.externalListingId,
+    members,
+    offers,
+    true,
+  );
+  return {
+    ...observed,
+    evidence: {
+      ...observed.evidence,
+      sourceLive: true,
+      alreadyLive: true,
+      recoveryMode: "verified_source_read_only",
+      sourceVerificationId: context.sourceVerification!.id,
+      targetGroupAbsent: true,
+      excludedSkus: context.sourceMembers
+        .filter((member) => member.disposition === "excluded")
+        .map((member) => member.skuSnapshot),
+    },
+  };
+}
+
+async function verifyAbandonedTargetAbsent(
+  client: EbayListingReplacementClient,
+  context: ListingReplacementExecutionContext,
+): Promise<void> {
+  const targetKey =
+    context.targetProviderPublicationKey ?? targetGroupKey(context);
+  // Without a distinct group identity, absence is not proven; do not guess or withdraw.
+  if (
+    !context.sourcePublication.providerPublicationKey ||
+    targetKey === context.sourcePublication.providerPublicationKey ||
+    (await client.getInventoryItemGroup(targetKey))
+  ) {
+    throw providerError(
+      "RECOVERY_TARGET_NOT_ABSENT",
+      "Read-only recovery requires the abandoned target group to be absent.",
+    );
+  }
+  // Group absence alone does not prove that previously staged target offers
+  // are unsellable. Shared SKUs may remain live only on the verified source.
+  const verifiedSource = new Map(
+    included(context.sourceMembers).map((member) => [
+      member.skuSnapshot,
+      member,
+    ]),
+  );
+  for (const member of included(context.targetMembers)) {
+    const allowed = verifiedSource.get(member.skuSnapshot);
+    const active = (
+      await client.getOffers(member.skuSnapshot, context.owner.marketplaceId)
+    ).filter(isActive);
+    if (
+      active.some(
+        (offer) =>
+          !allowed ||
+          offer.listingId !== context.sourcePublication.externalListingId ||
+          offer.offerId !== allowed.externalOfferId,
+      )
+    ) {
+      throw providerError(
+        "RECOVERY_TARGET_NOT_ABSENT",
+        "An abandoned target offer is still published outside the verified source.",
+        { sku: member.skuSnapshot },
+      );
+    }
   }
 }
 
