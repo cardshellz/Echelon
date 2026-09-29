@@ -24,6 +24,7 @@ export async function createIntakeTestSchema(pool: Pool, options: { carrierSelec
   await createInspectionTestSchema(pool);
   await pool.query(readFileSync("migrations/059_wms_order_items_prices.sql", "utf8"));
   await pool.query(readFileSync("migrations/251_customer_return_label_settings.sql", "utf8"));
+  await pool.query(readFileSync("migrations/256_customer_return_command_order.sql", "utf8"));
   if (options.carrierSelection !== false) {
     await pool.query(readFileSync("migrations/252_customer_return_carrier_selection.sql", "utf8"));
     await pool.query(readFileSync("migrations/254_customer_return_policy_resolution.sql", "utf8"));

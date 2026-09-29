@@ -18,11 +18,15 @@ import {
 } from "../support/label-fixtures";
 import { LIVE_NOW } from "../support/live-inspection-fixtures";
 import type { CustomerReturnLabelStatus } from "@shared/returns/customer-return-label.contract";
+import { customerReturnSubmissionHash } from "../../application/customer-return-intake-preparation";
+
+const customerScope = { channelId: 36, omsOrderId: 100, externalOrderId: "1001", externalCustomerId: "customer-1" };
 
 async function setup() {
   const fixture = await labelPreparationFixture();
   const command: ReturnSubmissionCommand = {
     request: structuredClone(fixture.input),
+    omsOrderId: null,
     actor: "original-admin",
     leaseToken: LABEL_LEASE,
     status: "preparing",
@@ -59,6 +63,8 @@ async function setup() {
   const inspectForIntake = vi.fn(async () =>
     structuredClone(fixture.inspection),
   );
+  const inspectCanonicalForIntake = vi.fn(async () => structuredClone(fixture.inspection));
+  const live = { inspectForIntake, inspectCanonicalForIntake };
   const requireEnabled = vi.fn(async () => ({
     settings: labelSettings,
     operationalPolicy: { id: 1, version: 1, snapshot: labelPolicy },
@@ -84,7 +90,7 @@ async function setup() {
   const service = new CustomerReturnSubmissionService({
     commands: { read, acquire, reject },
     intake: { persist, find: vi.fn() },
-    live: { inspectForIntake },
+    live,
     settings: { requireEnabled },
     labels: { status },
     authorizeChannel,
@@ -100,12 +106,71 @@ async function setup() {
     reject,
     persist,
     inspectForIntake,
+    inspectCanonicalForIntake,
+    live,
     requireEnabled,
     status,
     authorizeChannel,
   };
 }
 describe("private return submission and exact-intent recovery", () => {
+  it("binds customer intent before inspection and only inspects the verified canonical scope", async () => {
+    const s = await setup();
+    s.command.omsOrderId = 100;
+    await s.service.submitForOrder(s.input, "customer:36:customer-1", customerScope);
+    expect(s.acquire).toHaveBeenCalledWith(expect.objectContaining({ omsOrderId: 100, hash: customerReturnSubmissionHash(s.input, 100) }));
+    expect(s.inspectCanonicalForIntake).toHaveBeenCalledExactlyOnceWith(customerScope);
+    expect(s.inspectForIntake).not.toHaveBeenCalled();
+    expect(s.persist).toHaveBeenCalledWith(expect.objectContaining({ omsOrderId: 100, semanticHash: customerReturnSubmissionHash(s.input, 100) }));
+  });
+  it("preserves canonical identity through a resume", async () => {
+    const s = await setup();
+    s.command.omsOrderId = 100;
+    await s.service.resumeForOrder(36, LABEL_KEY, "customer", customerScope);
+    expect(s.acquire).toHaveBeenCalledWith(expect.objectContaining({ omsOrderId: 100, key: LABEL_KEY }));
+    expect(s.inspectCanonicalForIntake).toHaveBeenCalledExactlyOnceWith(customerScope);
+    expect(s.inspectForIntake).not.toHaveBeenCalled();
+  });
+  it("rejects an unbound legacy command before replaying its accepted result to a customer", async () => {
+    const s = await setup();
+    s.command.status = "accepted";
+    s.command.authorizationId = 1;
+    await expect(s.service.submitForOrder(s.input, "customer", customerScope)).rejects.toMatchObject({ code: "RETURN_LABEL_COMMAND_CONFLICT" });
+    expect(s.status).not.toHaveBeenCalled();
+  });
+  it("never falls back to display reference when customer canonical inspection is unavailable", async () => {
+    const s = await setup();
+    s.command.omsOrderId = 100;
+    Reflect.deleteProperty(s.live, "inspectCanonicalForIntake");
+    await expect(s.service.resumeForOrder(36, LABEL_KEY, "customer", customerScope)).rejects.toMatchObject({ code: "RETURN_LABEL_SUBMISSION_PROCESSING" });
+    expect(s.inspectForIntake).not.toHaveBeenCalled();
+    expect(s.persist).not.toHaveBeenCalled();
+    expect(s.reject).not.toHaveBeenCalled();
+  });
+  it("cannot persist an inspection of a different canonical order", async () => {
+    const s = await setup();
+    s.command.omsOrderId = 100;
+    s.inspectCanonicalForIntake.mockResolvedValue({ ...s.inspection, local: { ...s.inspection.local,
+      order: { ...s.inspection.local.order, omsOrderId: 101 } } });
+    await expect(s.service.submitForOrder(s.input, "customer", customerScope)).rejects.toMatchObject({ code: "RETURN_LABEL_SUBMISSION_REJECTED" });
+    expect(s.persist).not.toHaveBeenCalled();
+  });
+  it("replays accepted customer intent without current eligibility/provider calls", async () => {
+    const s = await setup();
+    s.command.omsOrderId = 100;
+    s.command.status = "accepted";
+    s.command.authorizationId = 1;
+    await s.service.submitForOrder(s.input, "customer", customerScope);
+    expect(s.requireEnabled).not.toHaveBeenCalled();
+    expect(s.inspectCanonicalForIntake).not.toHaveBeenCalled();
+    expect(s.persist).not.toHaveBeenCalled();
+  });
+  it("customer semantic identity survives display-number changes but not order changes", async () => {
+    const s = await setup();
+    expect(customerReturnSubmissionHash(s.input, 100)).toBe(customerReturnSubmissionHash({ ...s.input, orderReference: "#RENAMED" }, 100));
+    expect(customerReturnSubmissionHash(s.input, 100)).not.toBe(customerReturnSubmissionHash(s.input, 101));
+    expect(customerReturnSubmissionHash(s.input, 100)).not.toBe(customerReturnSubmissionHash(s.input));
+  });
   it("records intent before provider observation and persists trusted preparation before labels", async () => {
     const s = await setup();
     s.inspectForIntake.mockImplementation(async () => {

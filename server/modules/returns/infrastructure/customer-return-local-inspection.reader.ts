@@ -7,6 +7,7 @@ import {
   customerReturnLocalUnallocatedReturnSchema, customerReturnLocalInventoryReturnSchema,
   customerReturnLocalBindingSchema, customerReturnLocalPackageItemSchema, customerReturnLocalPackageLabelSchema,
   customerReturnLocalCarrierEventSchema, customerReturnLocalInspectionSnapshotSchema,
+  customerReturnLocalInspectionInputSchema,
   type CustomerReturnInspectionShop, type CustomerReturnLocalInspectionReader,
   type CustomerReturnLocalInspectionSnapshot,
 } from "../application/customer-return-local-inspection.ports";
@@ -15,7 +16,6 @@ import { inspectionQueries as queries } from "./customer-return-local-inspection
 import { deriveLocalInspectionIssues } from "./customer-return-local-inspection.issues";
 
 const positiveId = z.number().int().positive().safe();
-const inputSchema = z.object({ channelId: positiveId, connectionId: positiveId, orderReference: z.string() }).strict();
 const approvedDomainsSchema = z.array(z.string().trim().toLowerCase()
   .regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.myshopify\.com$/)).max(limits.shops)
   .refine(domains => new Set(domains).size === domains.length);
@@ -50,20 +50,28 @@ export class PostgresCustomerReturnLocalInspectionReader implements CustomerRetu
 
   async read(raw: Parameters<CustomerReturnLocalInspectionReader["read"]>[0]): Promise<CustomerReturnLocalInspectionSnapshot | null> {
     return this.boundary("read", async () => {
-      const parsed = inputSchema.safeParse(raw);
+      const parsed = customerReturnLocalInspectionInputSchema.safeParse(raw);
       if (!parsed.success) throw failure("RETURN_INSPECTION_INPUT_INVALID", "Select a configured shop and enter an exact order reference.");
       const input = parsed.data;
-      const aliases = buildCustomerReturnOrderNumberAliases(input.orderReference);
+      const lookup = "canonicalOrder" in input
+        ? { query: queries.canonicalOrder, values: [input.channelId, input.canonicalOrder.omsOrderId,
+          input.canonicalOrder.externalOrderId, input.canonicalOrder.externalCustomerId] }
+        : { query: queries.order, values: [input.channelId, buildCustomerReturnOrderNumberAliases(input.orderReference)] };
       if (this.domains.length === 0) throw failure("RETURN_INSPECTION_CONFIGURATION_REQUIRED", "Private live-order testing requires an approved Shopify shop.");
       return this.snapshot(async client => {
         const shops = await this.loadShops(client);
         const shop = shops.find(candidate => candidate.channelId === input.channelId && candidate.connectionId === input.connectionId);
         if (!shop) throw failure("RETURN_INSPECTION_SHOP_UNAVAILABLE", "The selected shop is not configured for private return testing.");
-        const orders = await readRows(client, localOrderRowSchema, queries.order, [shop.channelId, aliases], 2,
+        const orders = await readRows(client, localOrderRowSchema, lookup.query, lookup.values, 2,
           ["omsOrderId", "channelId"], ["purchasedAt", "cancelledAt"]);
         if (orders.length > 1) throw failure("RETURN_INSPECTION_ORDER_AMBIGUOUS", "The order reference matches more than one order in this shop.");
         if (orders.length === 0) return null;
         const { isDropship, ...order } = orders[0];
+        if (order.channelId !== shop.channelId || ("canonicalOrder" in input
+          && (order.omsOrderId !== input.canonicalOrder.omsOrderId || order.externalOrderId !== input.canonicalOrder.externalOrderId
+            || order.externalCustomerId !== input.canonicalOrder.externalCustomerId))) {
+          throw failure("RETURN_INSPECTION_DATA_INVALID", "The canonical order ownership could not be verified.");
+        }
         if (isDropship) throw failure("RETURN_INSPECTION_ORDER_SCOPE_UNSUPPORTED", "This order is outside the retail returns scope.");
         const snapshot = await this.loadOrderEvidence(client, shop, order);
         const instant = this.options.clock();

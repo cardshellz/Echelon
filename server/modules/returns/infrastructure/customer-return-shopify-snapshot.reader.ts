@@ -40,7 +40,8 @@ const returnHeaderSchema = customerReturnShopifyNativeReturnSchema.omit({ lines:
   .extend({ order: identity("Order") }).strict();
 const returnableHeaderSchema = customerReturnShopifyReturnableFulfillmentSchema.omit({ lines: true, fulfillmentId: true })
   .extend({ fulfillment: identity("Fulfillment").extend({ order: identity("Order") }).strict() }).strict();
-const orderHeaderSchema = customerReturnShopifyOrderSchema.omit({ destinationCountryCode: true }).extend({
+const orderHeaderSchema = customerReturnShopifyOrderSchema.omit({ destinationCountryCode: true, customerId: true }).extend({
+  customer: identity("Customer").nullable(),
   shippingAddress: customerReturnShopifyAddressSchema.nullable(),
   fulfillmentsCount: z.object({ count: quantity, precision: z.literal("EXACT") }).strict(),
   fulfillments: z.array(fulfillmentHeaderSchema).max(LIMIT), refunds: z.array(refundHeaderSchema).max(LIMIT),
@@ -71,7 +72,7 @@ type Query = typeof queries[keyof typeof queries];
 type RequestQuery = (query: Query, variables?: Record<string, unknown>) => Promise<Record<string, unknown>>;
 type Observation = Omit<CustomerReturnShopifySnapshot, "shop" | "apiVersion" | "observedAt">;
 
-/** A bounded provider read. It cannot authorize a return or establish WMS/customer ownership. */
+/** Bounded provider evidence. It cannot authorize a return or replace local ownership checks. */
 export class ShopifyCustomerReturnSnapshotReader implements CustomerReturnShopifySnapshotReader {
   constructor(private readonly dependencies: ShopifyCustomerReturnSnapshotReaderDependencies) {}
 
@@ -204,8 +205,9 @@ export class ShopifyCustomerReturnSnapshotReader implements CustomerReturnShopif
         data => parentConnection(data, "returnableFulfillment", "returnableFulfillmentLineItems", returnable));
       returnableFulfillments.push({ id: returnable.id, fulfillmentId: returnable.fulfillment.id, lines: items });
     }
-    const { fulfillments: _fulfillments, refunds: _refunds, fulfillmentsCount: _count, shippingAddress, ...order } = header;
-    return { order: { ...order, shippingAddress, destinationCountryCode: shippingAddress?.countryCodeV2 ?? null }, lines, fulfillments, returns, refunds, returnableFulfillments };
+    const { fulfillments: _fulfillments, refunds: _refunds, fulfillmentsCount: _count, shippingAddress, customer, ...order } = header;
+    return { order: { ...order, customerId: customer?.id ?? null, shippingAddress,
+      destinationCountryCode: shippingAddress?.countryCodeV2 ?? null }, lines, fulfillments, returns, refunds, returnableFulfillments };
   }
 }
 

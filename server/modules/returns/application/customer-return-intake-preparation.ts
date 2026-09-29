@@ -18,16 +18,18 @@ import type { CustomerReturnIntakeInspection } from "./customer-return-live.serv
 
 export function customerReturnSubmissionHash(
   input: CustomerReturnLabelSubmitInput,
+  omsOrderId?: number,
 ): string {
   // Provider observations do not change the command's semantic intent. Box order
   // does: it determines the label-to-box numbers shown to the customer.
+  // Customer commands use the canonical order even if its display number changes.
   return createHash("sha256")
     .update(
       JSON.stringify({
         channelId: input.channelId,
-        orderReference: normalizeCustomerReturnOrderReference(
-          input.orderReference,
-        ),
+        ...(omsOrderId === undefined
+          ? { orderReference: normalizeCustomerReturnOrderReference(input.orderReference) }
+          : { omsOrderId }),
         settingsVersion: input.settingsVersion,
         selections: [...input.selections].sort((a, b) =>
           compare(a.lineId, b.lineId),
@@ -48,11 +50,13 @@ export function prepareCustomerReturnIntake(
   operationalPolicy: PreparedCustomerReturnIntake["operationalPolicy"],
   actor: string,
   submissionLeaseToken: string,
+  expectedOmsOrderId?: number,
 ): PreparedCustomerReturnIntake {
   const input = customerReturnLabelSubmitInputSchema.parse(raw);
   const { local, provider, order, eligibility, facts } = inspection;
   if (
     input.channelId !== local.shop.channelId ||
+    (expectedOmsOrderId !== undefined && local.order.omsOrderId !== expectedOmsOrderId) ||
     input.sourceRevision !== order.sourceRevision ||
     normalizeCustomerReturnOrderReference(input.orderReference) !==
       order.orderReference ||
@@ -201,7 +205,7 @@ export function prepareCustomerReturnIntake(
     omsOrderId: local.order.omsOrderId,
     idempotencyKey: input.idempotencyKey,
     submissionLeaseToken,
-    semanticHash: customerReturnSubmissionHash(input),
+    semanticHash: customerReturnSubmissionHash(input, expectedOmsOrderId),
     eligibilityRevision: order.sourceRevision,
     actor,
     observedAt: provider.observedAt,

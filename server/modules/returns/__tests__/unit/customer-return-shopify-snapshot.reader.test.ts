@@ -22,7 +22,7 @@ const nativeLine = (id: number, fulfillmentLine: number) => ({ __typename: "Retu
   quantity: 1, processedQuantity: 0, refundedQuantity: 0,
   fulfillmentLineItem: { id: gid("FulfillmentLineItem", fulfillmentLine), lineItem: { id: gid("LineItem", 101) } } });
 const order = () => ({ id: gid("Order", 1001), name: "#TEST-1001", createdAt: timestamp, processedAt: timestamp,
-  updatedAt: timestamp, cancelledAt: null, shippingAddress: { countryCodeV2: "US" },
+  updatedAt: timestamp, cancelledAt: null, customer: { id: gid("Customer", 901) }, shippingAddress: { countryCodeV2: "US" },
   fulfillmentsCount: { count: 2, precision: "EXACT" }, fulfillments: [fulfillment(201, 3), fulfillment(202, 2)],
   refunds: [{ id: gid("Refund", 701), updatedAt: timestamp, return: { id: gid("Return", 501) } }],
 });
@@ -101,6 +101,7 @@ describe("read-only Shopify return snapshots", () => {
     expect(customerReturnShopifySnapshotSchema.safeParse(snapshot).success).toBe(true);
     expect(snapshot.shop).toEqual({ ...input.shop, shopId: gid("Shop", 1), scopes: { readOrders: true, readAllOrders: true, readReturns: true } });
     expect(snapshot.observedAt).toBe(observedAt);
+    expect(snapshot.order.customerId).toBe(gid("Customer", 901));
     expect(snapshot.fulfillments.map(item => item.lines)).toEqual([
       [{ id: gid("FulfillmentLineItem", 301), lineItemId: gid("LineItem", 101), quantity: 2 },
         { id: gid("FulfillmentLineItem", 302), lineItemId: gid("LineItem", 102), quantity: 1 }],
@@ -119,6 +120,44 @@ describe("read-only Shopify return snapshots", () => {
       expect(JSON.parse(String(init?.body)).query).toMatch(/^query ReturnSnapshot/);
       expect(JSON.parse(String(init?.body)).query).not.toMatch(/\bmutation\b/);
     }
+    const orderQueries = request.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).query as string)
+      .filter(query => query.startsWith("query ReturnSnapshotOrder("));
+    expect(orderQueries).toHaveLength(2);
+    expect(orderQueries.every(query => /customer\s*\{\s*id\s*\}/.test(query))).toBe(true);
+  });
+
+  it("preserves a guest order's explicit null customer without inventing ownership", async () => {
+    const { reader } = setup((data, operation) => {
+      if (operation === "ReturnSnapshotOrder") child(data, "order").customer = null;
+      return data;
+    });
+    expect((await reader.read(input)).order.customerId).toBeNull();
+  });
+  it("preserves a large customer GID exactly", async () => {
+    const customerId = gid("Customer", "900719925474099312345");
+    const { reader } = setup((data, operation) => {
+      if (operation === "ReturnSnapshotOrder") child(data, "order").customer = { id: customerId };
+      return data;
+    });
+    expect((await reader.read(input)).order.customerId).toBe(customerId);
+  });
+  it.each([undefined, {}, { id: null }, { id: "901" }, { id: gid("Order", 901) },
+    { id: gid("Customer", "0901") }, { id: gid("Customer", "901/subpath") }])(
+    "rejects missing or malformed provider customer evidence %j", async customer => {
+      const { reader, request } = setup((data, operation) => {
+        if (operation === "ReturnSnapshotOrder") child(data, "order").customer = customer;
+        return data;
+      });
+      await expect(reader.read(input)).rejects.toMatchObject({ code: "RETURN_SHOPIFY_RESPONSE_INVALID" });
+      expect(request).toHaveBeenCalledTimes(2);
+    },
+  );
+  it.each([null, { id: gid("Customer", 902) }])("rejects a changed provider owner even with unchanged order timestamps: %j", async customer => {
+    const { reader } = setup((data, operation, _variables, observation) => {
+      if (operation === "ReturnSnapshotOrder" && observation === 2) child(data, "order").customer = customer;
+      return data;
+    });
+    await expect(reader.read(input)).rejects.toMatchObject({ code: "RETURN_SHOPIFY_SNAPSHOT_CHANGED", failureClass: "transient" });
   });
 
   it("does not infer delivery from success or returnability", async () => {

@@ -2,7 +2,7 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./test/browser",
-  testMatch: ["returns-portal-preview.spec.ts", "returns-policy-shipping.spec.ts"],
+  testMatch: ["returns-portal-preview.spec.ts", "returns-policy-shipping.spec.ts", "returns-customer.spec.ts"],
   // Tests own their page and mocked API state. Balance individual tests across
   // CI shards while retaining one browser worker per isolated runner.
   fullyParallel: true,

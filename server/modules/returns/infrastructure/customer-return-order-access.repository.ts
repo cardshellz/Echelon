@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import { z } from "zod";
+import { customerReturnOwnedOrderInputSchema, customerReturnOrderListInputSchema } from "../application/customer-return-order-access.service";
 import type {
   CustomerReturnOrderAccessRepository,
   CustomerReturnOrderCandidate,
@@ -25,6 +26,18 @@ const queryInput = z.object({
   ]),
   orderNumberAliases: z.array(z.string().min(1).max(100)).min(1).max(3),
 }).strict();
+const ownedInput = customerReturnOwnedOrderInputSchema.extend({ channelId: queryInput.shape.channelId, scope: queryInput.shape.scope });
+const listInput = customerReturnOrderListInputSchema.extend({ channelId: queryInput.shape.channelId,
+  externalCustomerId: z.string().min(1).max(100) });
+const candidateColumns = `oo.id AS oms_order_id, oo.channel_id, oo.external_customer_id,
+  oo.external_order_id, oo.external_order_number`;
+
+function candidates(rows: unknown, maximum: number): CustomerReturnOrderCandidate[] {
+  return z.array(candidateRow).max(maximum).parse(rows).map(row => ({
+    omsOrderId: row.oms_order_id, channelId: row.channel_id, externalCustomerId: row.external_customer_id,
+    externalOrderId: row.external_order_id, externalOrderNumber: row.external_order_number,
+  }));
+}
 
 export class CustomerReturnOrderReadError extends Error {
   readonly code = "CUSTOMER_RETURN_ORDER_READ_FAILED";
@@ -37,6 +50,39 @@ export class CustomerReturnOrderReadError extends Error {
 /** Read port only: the caller supplies a request-scoped, verified principal. */
 export class PostgresCustomerReturnOrderAccessRepository implements CustomerReturnOrderAccessRepository {
   constructor(private readonly database: Pick<Pool, "query">) {}
+
+  async findOwnedOrder(raw: Parameters<CustomerReturnOrderAccessRepository["findOwnedOrder"]>[0]): Promise<readonly CustomerReturnOrderCandidate[]> {
+    try {
+      const input = ownedInput.parse(raw);
+      const values: unknown[] = [input.channelId, input.omsOrderId];
+      const predicates = ["oo.channel_id = $1", "oo.id = $2"];
+      if (input.scope.kind === "customer") {
+        values.push(input.scope.externalCustomerId);
+        predicates.push("oo.external_customer_id = $3");
+      } else {
+        values.push(input.scope.omsOrderId, input.scope.externalOrderId);
+        predicates.push("oo.id = $3", "oo.external_order_id = $4");
+      }
+      if (input.externalOrderId !== undefined) {
+        values.push(input.externalOrderId);
+        predicates.push(`oo.external_order_id = $${values.length}`);
+      }
+      const result = await this.database.query(`SELECT ${candidateColumns} FROM oms.oms_orders oo
+        WHERE ${predicates.join(" AND ")} LIMIT 2`, values);
+      return candidates(result.rows, 2);
+    } catch { throw new CustomerReturnOrderReadError(); }
+  }
+
+  async listOwnedOrders(raw: Parameters<CustomerReturnOrderAccessRepository["listOwnedOrders"]>[0]): Promise<readonly CustomerReturnOrderCandidate[]> {
+    try {
+      const input = listInput.parse(raw);
+      const result = await this.database.query(`SELECT ${candidateColumns} FROM oms.oms_orders oo
+        WHERE oo.channel_id = $1 AND oo.external_customer_id = $2
+          AND ($3::bigint IS NULL OR oo.id < $3::bigint)
+        ORDER BY oo.id DESC LIMIT $4`, [input.channelId, input.externalCustomerId, input.beforeOmsOrderId ?? null, input.pageSize + 1]);
+      return candidates(result.rows, input.pageSize + 1);
+    } catch { throw new CustomerReturnOrderReadError(); }
+  }
 
   async findExactOrderCandidates(
     raw: Parameters<CustomerReturnOrderAccessRepository["findExactOrderCandidates"]>[0],
@@ -64,13 +110,7 @@ export class PostgresCustomerReturnOrderAccessRepository implements CustomerRetu
         ORDER BY oo.id
         LIMIT 2
       `, values);
-      return z.array(candidateRow).max(2).parse(result.rows).map(row => ({
-        omsOrderId: row.oms_order_id,
-        channelId: row.channel_id,
-        externalCustomerId: row.external_customer_id,
-        externalOrderId: row.external_order_id,
-        externalOrderNumber: row.external_order_number,
-      }));
+      return candidates(result.rows, 2);
     } catch {
       // Keep raw driver/query/customer data out of caller-visible errors.
       throw new CustomerReturnOrderReadError();

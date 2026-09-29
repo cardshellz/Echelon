@@ -21,10 +21,10 @@ import {
   ReturnLabelProviderError,
   type ReturnLabelProvider,
 } from "../../shipping-engine/application/return-label-provider.port";
-import type { CustomerReturnLabelRouteServices } from "../interfaces/http/customer-return-label.routes";
 
-/** Instantiated only after the private route's fresh staff authorization. */
-export async function createCustomerReturnLabelServices(): Promise<CustomerReturnLabelRouteServices> {
+/** Instantiated after staff authorization or inside the exact customer ownership
+ * wrapper. These internal services must never be exposed directly to customers. */
+export async function createCustomerReturnLabelServices() {
   const [{ db, pool }, live] = await Promise.all([
     import("../../../db"),
     createCustomerReturnLiveService(),
