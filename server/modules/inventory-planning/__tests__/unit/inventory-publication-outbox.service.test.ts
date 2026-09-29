@@ -13,6 +13,7 @@ const NOW = new Date("2026-09-01T18:00:00.000Z");
 
 describe("InventoryPublicationOutboxService", () => {
   let store: {
+    finalizeFailedRuns: ReturnType<typeof vi.fn>;
     claimDue: ReturnType<typeof vi.fn>;
     runIfCurrent: ReturnType<typeof vi.fn>;
     recordVerified: ReturnType<typeof vi.fn>;
@@ -23,6 +24,7 @@ describe("InventoryPublicationOutboxService", () => {
 
   beforeEach(() => {
     store = {
+      finalizeFailedRuns: vi.fn(async () => undefined),
       claimDue: vi.fn(async () => [claim()]),
       runIfCurrent: vi.fn(async (_claim, work) => ({ status: "current" as const, value: await work() })),
       recordVerified: vi.fn(async () => "verified" as const),
@@ -76,6 +78,35 @@ describe("InventoryPublicationOutboxService", () => {
       expect.objectContaining({ outboxId: "41" }),
       expect.objectContaining({ observedQuantity: 7, completedAt: NOW }),
     );
+    expect(store.recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("attempts failed-run recovery even when no publication rows are due", async () => {
+    store.claimDue.mockResolvedValue([]);
+    const get = vi.fn();
+    const service = new InventoryPublicationOutboxService(store, { get }, { now: () => NOW }, () => "lease-1", quantityAdmission);
+    expect(await service.processDue()).toEqual({ claimed: 0, verified: 0, failed: 0, superseded: 0 });
+    expect(store.finalizeFailedRuns).toHaveBeenCalledTimes(2);
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("does not rewrite a committed provider result when subsequent cleanup fails", async () => {
+    let locked = false;
+    store.runIfCurrent.mockImplementation(async (_claim, work) => {
+      locked = true;
+      try { return { status: "current", value: await work() }; }
+      finally { locked = false; }
+    });
+    store.finalizeFailedRuns.mockImplementationOnce(async () => undefined).mockImplementationOnce(async () => {
+      expect(locked).toBe(false);
+      expect(store.recordVerified).toHaveBeenCalledOnce();
+      throw new Error("Cleanup persistence failed");
+    });
+    const adapter = { supportedScopeTypes: ["location"] as const,
+      publishAbsolute: vi.fn(async () => ({ publishedQuantity: 7, providerResponse: {} })),
+      readAbsolute: vi.fn(async () => ({ observedQuantity: 7, providerResponse: {} })) };
+    const service = new InventoryPublicationOutboxService(store, { get: () => adapter as never }, { now: () => NOW }, () => "lease-1", quantityAdmission);
+    await expect(service.processDue()).rejects.toThrow("Cleanup persistence failed");
     expect(store.recordFailure).not.toHaveBeenCalled();
   });
 

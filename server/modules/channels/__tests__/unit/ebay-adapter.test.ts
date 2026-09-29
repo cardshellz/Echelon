@@ -536,16 +536,13 @@ describe("eBay Listing Builder", () => {
       expect((adapter as any).delay).not.toHaveBeenCalled();
     });
 
-    it("uses eBay bulk price/quantity request shape for offer quantity updates", async () => {
+    it.each([
+      { format: "nested", responses: [{ sku: "CS-TL35-P25", offers: [{ offerId: "offer-101", statusCode: 200 }] }] },
+      { format: "combined", responses: [{ sku: "CS-TL35-P25", offerId: "offer-101", statusCode: 200 }] },
+      { format: "split", responses: [{ sku: "CS-TL35-P25", statusCode: 200 }, { sku: "CS-TL35-P25", offerId: "offer-101", statusCode: 200 }] },
+    ])("uses the shared quantity sender with a $format acknowledgement", async ({ responses }) => {
       const adapter = new EbayAdapter(createMockDb());
-      const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({
-        responses: [
-          {
-            sku: "CS-TL35-P25",
-            offers: [{ offerId: "offer-101", statusCode: 200 }],
-          },
-        ],
-      });
+      const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({ responses });
       (adapter as any).getApiClient = vi.fn().mockResolvedValue({ bulkUpdatePriceQuantity });
       (adapter as any).delay = vi.fn().mockResolvedValue(undefined);
 
@@ -569,6 +566,18 @@ describe("eBay Listing Builder", () => {
           },
         ],
       });
+    });
+
+    it("does not bypass local quantity validation through an individual fallback", async () => {
+      const adapter = new EbayAdapter(createMockDb());
+      const client = { bulkUpdatePriceQuantity: vi.fn(), getOffers: vi.fn(), updateOffer: vi.fn() };
+      (adapter as any).getApiClient = vi.fn().mockResolvedValue(client);
+      await expect(adapter.pushInventory(2, [{ variantId: 101, sku: "CS-TL35-P25",
+        externalVariantId: "offer-101", externalInventoryItemId: null, allocatedQty: -1 }]))
+        .rejects.toMatchObject({ code: "EBAY_QUANTITY_UPDATE_INPUT_INVALID" });
+      expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
+      expect(client.getOffers).not.toHaveBeenCalled();
+      expect(client.updateOffer).not.toHaveBeenCalled();
     });
 
     // A withdrawn+relisted offer gets a NEW offerId; the stored one then

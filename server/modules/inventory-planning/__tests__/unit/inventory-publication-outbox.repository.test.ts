@@ -208,7 +208,9 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
     const failureUpdate = client.queries.find(({ sql }) =>
       sql.includes("last_error_class = $4") && sql.includes("last_error_message = $5"));
     expect(failureUpdate?.values?.[2]).toBe("cancelled");
-    expect(client.queries.some(({ sql }) => sql.includes("SET state = 'failed'"))).toBe(true);
+    // Failure/result persistence no longer closes the run under a provider lock.
+    expect(client.queries.some(({ sql }) => sql.includes("SET state = 'failed'"))).toBe(false);
+    expect(client.queries.some(({ sql }) => sql.includes("availability_activation_freezes"))).toBe(false);
   });
 
   it("dead-letters only the failed full row instead of failing an active authority run", async () => {

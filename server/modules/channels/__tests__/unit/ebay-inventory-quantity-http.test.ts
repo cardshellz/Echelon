@@ -8,7 +8,7 @@ const sku = "P5+A&B";
 const now = () => new Date("2026-09-20T12:00:00Z");
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
 const page = () => ({ total: 1, offers: [{ offerId: "offer-1", sku, marketplaceId: "EBAY_GB", status: "PUBLISHED", availableQuantity: 38 }] });
-const ack = () => ({ responses: [{ offerId: "offer-1", statusCode: 200 }] });
+const ack = () => ({ responses: [{ sku, statusCode: 200 }, { sku, offerId: "offer-1", statusCode: 200 }] });
 
 function fixture(request: typeof fetch, blocked = false) {
   const admitted: string[] = [];

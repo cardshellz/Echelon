@@ -38,7 +38,9 @@ describe("EbayDropshipInventoryPublicationTransportAdapter", () => {
   it("publishes the supplied absolute quantity through the exact Dropship store", async () => {
     const fetchFn = vi.fn()
       .mockResolvedValueOnce(jsonResponse(offerPage(2)))
-      .mockResolvedValueOnce(jsonResponse({ responses: [{ sku: "SKU-101", offerId: "offer-1", statusCode: 200 }] }));
+      .mockResolvedValueOnce(jsonResponse({ responses: [
+        { sku: "SKU-101", statusCode: 200 }, { sku: "SKU-101", offerId: "offer-1", statusCode: 200 },
+      ] }));
     const { adapter, credentials } = fixture(fetchFn);
 
     await expect(adapter.publishAbsolute({

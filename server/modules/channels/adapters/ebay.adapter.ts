@@ -44,6 +44,7 @@ import { QuantityPublicationAdmissionError } from "../../inventory-planning/doma
 import { EbayAuthService, createEbayAuthConfig } from "./ebay/ebay-auth.service";
 import { EbayApiClient, createEbayApiClient } from "./ebay/ebay-api.client";
 import { EbayInventoryQuantityError, ebayInventoryMarketplace, publishEbayInventoryQuantity, readEbayInventoryQuantity } from "./ebay/ebay-inventory-quantity";
+import { EBAY_QUANTITY_BATCH_LIMIT, EbayQuantityUpdateInputError, sendEbayQuantityUpdates } from "./ebay/ebay-quantity-update";
 import { EbayListingBuilder, createEbayListingBuilder } from "./ebay/ebay-listing-builder";
 import { mapCarrierToEbay } from "./ebay/ebay-category-map";
 import { EbayMarketplaceListingConnector } from "../listing-connectors/ebay-listing.connector";
@@ -92,11 +93,12 @@ const ORDER_POLL_PAGE_SIZE = 50;
  * message hides which error class actually fired (prod 2026-07-05).
  */
 function formatEbayOfferError(
-  error: EbayError | undefined,
+  error: Partial<EbayError> | undefined,
   statusCode: number | undefined,
 ): string {
   if (!error) return `Status ${statusCode ?? "unknown"}`;
-  return error.errorId != null ? `[${error.errorId}] ${error.message}` : error.message;
+  return error.errorId != null ? `[${error.errorId}] ${error.message ?? "Provider rejected the operation"}`
+    : error.message ?? `Status ${statusCode ?? "unknown"}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +259,7 @@ export class EbayAdapter implements IChannelAdapter {
     const results: InventoryPushResult[] = [];
 
     // eBay supports bulk update — batch up to 25 items per call
-    const BATCH_SIZE = 25;
+    const BATCH_SIZE = EBAY_QUANTITY_BATCH_LIMIT;
     const batches: InventoryPushItem[][] = [];
 
     for (let i = 0; i < publicationItems.length; i += BATCH_SIZE) {
@@ -272,29 +274,19 @@ export class EbayAdapter implements IChannelAdapter {
       // Bulk update for items with existing offers
       if (itemsWithOffers.length > 0) {
         try {
-          const bulkRequest = {
-            requests: itemsWithOffers.map((item) => ({
+          const acknowledgements = await sendEbayQuantityUpdates(
+            request => client.bulkUpdatePriceQuantity(request),
+            itemsWithOffers.map((item) => ({
               sku: item.sku || String(item.variantId),
-              shipToLocationAvailability: { quantity: item.allocatedQty },
-              offers: [
-                {
-                  offerId: item.externalVariantId!,
-                  availableQuantity: item.allocatedQty,
-                },
-              ],
+              offerId: item.externalVariantId!,
+              quantity: item.allocatedQty,
             })),
-          };
-
-          const response = await client.bulkUpdatePriceQuantity(bulkRequest);
+          );
 
           for (const item of itemsWithOffers) {
-            const resp = response?.responses?.find((r) =>
-              r.offerId === item.externalVariantId ||
-              r.offers?.some((offer) => offer.offerId === item.externalVariantId),
-            );
-            const offerResp = resp?.offers?.find((offer) => offer.offerId === item.externalVariantId);
-            const statusCode = offerResp?.statusCode ?? resp?.statusCode;
-            if (statusCode && statusCode >= 200 && statusCode < 300) {
+            const acknowledgement = acknowledgements.find(result => result.offerId === item.externalVariantId)!;
+            const statusCode = acknowledgement.statusCode;
+            if (acknowledgement.confirmed) {
               results.push({
                 variantId: item.variantId,
                 pushedQty: item.allocatedQty,
@@ -305,7 +297,7 @@ export class EbayAdapter implements IChannelAdapter {
               // a NEW id) — that surfaces as a per-offer error inside an
               // otherwise-successful bulk response, so the catch fallback
               // below never sees it. Re-resolve by SKU and heal the mapping.
-              const recovered = this.isStaleOfferError(statusCode, offerResp?.errors, resp?.errors)
+              const recovered = this.isStaleOfferError(statusCode, acknowledgement.errors)
                 ? await this.recoverStaleOffer(client, item)
                 : null;
               results.push(
@@ -313,15 +305,17 @@ export class EbayAdapter implements IChannelAdapter {
                   variantId: item.variantId,
                   pushedQty: 0,
                   status: "error",
-                  error: formatEbayOfferError(offerResp?.errors?.[0] ?? resp?.errors?.[0], statusCode),
+                  error: acknowledgement.errors.length === 0 && (statusCode === undefined || statusCode < 300)
+                    ? "eBay did not confirm the exact SKU/offer quantity operation."
+                    : formatEbayOfferError(acknowledgement.errors[0], statusCode),
                 },
               );
             }
           }
         } catch (err: any) {
-          // Admission can reject locally before any eBay request. An offer lookup
-          // and individual retry cannot resolve that rejection and add churn.
-          if (err instanceof QuantityPublicationAdmissionError) throw err;
+          // Local admission/input rejection must not be bypassed by an offer
+          // lookup and individual mutation fallback.
+          if (err instanceof QuantityPublicationAdmissionError || err instanceof EbayQuantityUpdateInputError) throw err;
           // If bulk fails, try individual updates
           for (const item of itemsWithOffers) {
             try {
@@ -489,7 +483,7 @@ export class EbayAdapter implements IChannelAdapter {
    */
   private isStaleOfferError(
     statusCode: number | undefined,
-    ...errorLists: Array<EbayError[] | undefined>
+    ...errorLists: Array<Partial<EbayError>[] | undefined>
   ): boolean {
     if (statusCode === 404) return true;
     return errorLists.some((errors) =>

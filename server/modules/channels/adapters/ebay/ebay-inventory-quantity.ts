@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { EbayBulkPriceQuantityRequest } from "./ebay-types";
+import { readEbayQuantityUpdateResults, sendEbayQuantityUpdates } from "./ebay-quantity-update";
 
 const quantitySchema = z.number().int().nonnegative().safe();
 const identitySchema = z.string().min(1).refine((value) => value === value.trim());
@@ -110,27 +111,22 @@ export async function publishEbayInventoryQuantity(
     throw new EbayInventoryQuantityError("EBAY_INVENTORY_QUANTITY_INVALID", "The desired eBay quantity must be a nonnegative safe integer.");
   }
   const offer = await publishedOffer(client, sku, marketplaceId);
-  const response = await client.bulkUpdatePriceQuantity({ requests: [{
-    sku, shipToLocationAvailability: { quantity }, offers: [{ offerId: offer.offerId, availableQuantity: quantity }],
-  }] }, marketplaceId);
-  assertEbayQuantityAcknowledgement(response, sku, offer.offerId);
+  const [result] = await sendEbayQuantityUpdates(
+    request => client.bulkUpdatePriceQuantity(request, marketplaceId),
+    [{ sku, offerId: offer.offerId, quantity }],
+  );
+  if (!result?.confirmed) throw acknowledgementError();
   return { sku, marketplaceId, offerId: offer.offerId, quantity };
 }
 
 // The existing client also checks admission. Keep protocol validation here so the
 // independently credentialed Dropship transport receives the same protection.
 export function assertEbayQuantityAcknowledgement(value: unknown, sku: string, offerId: string): void {
-  const statusSchema = z.number().refine((status) => [200, 201, 204].includes(status));
-  const nestedSchema = z.object({ offerId: z.literal(offerId), statusCode: statusSchema, errors: z.array(z.unknown()).max(0).optional() });
-  const responseSchema = z.object({
-    errors: z.array(z.unknown()).max(0).optional(),
-    responses: z.array(z.object({
-      sku: z.literal(sku).optional(), offerId: z.literal(offerId).optional(), statusCode: statusSchema,
-      errors: z.array(z.unknown()).max(0).optional(), offers: z.array(nestedSchema).length(1).optional(),
-    }).refine((row) => row.offerId === offerId || (row.sku === sku && row.offers?.[0]?.offerId === offerId))).length(1),
-  });
-  if (!responseSchema.safeParse(value).success) {
-    // The request may have reached eBay; the durable outbox must reconcile, not fall back to another writer.
-    throw new EbayInventoryQuantityError("EBAY_INVENTORY_ACKNOWLEDGEMENT_INVALID", "eBay did not confirm the exact SKU/offer quantity operation.", true);
-  }
+  const [result] = readEbayQuantityUpdateResults(value, [{ sku, offerId, quantity: 0 }]);
+  if (!result?.confirmed) throw acknowledgementError();
+}
+
+function acknowledgementError(): EbayInventoryQuantityError {
+  // Unknown does not mean rejected: do not issue a fallback mutation here.
+  return new EbayInventoryQuantityError("EBAY_INVENTORY_ACKNOWLEDGEMENT_INVALID", "eBay did not confirm the exact SKU/offer quantity operation.", true);
 }
