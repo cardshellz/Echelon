@@ -474,6 +474,53 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.availability_cutover_opening_snapshots")).rows[0].count).toBe(1);
   });
 
+  it("persists zero remaining provider authority for a completed line while preserving its held sibling", async () => {
+    await pool.query(`UPDATE wms.order_items SET picked_quantity=6,fulfilled_quantity=6 WHERE id=11;
+      UPDATE inventory.inventory_levels SET reserved_qty=0,picked_qty=0 WHERE id=10;
+      UPDATE inventory.inventory_lots SET qty_reserved=0,qty_picked=0 WHERE id=4;
+      INSERT INTO wms.order_items(id,order_id,oms_order_line_id,sku,product_id,quantity,picked_quantity,
+        fulfilled_quantity,status,on_hold,requires_shipping) VALUES(12,1,12,'P5',101,1,0,0,'pending',true,1);
+      INSERT INTO oms.oms_orders(id,status) VALUES(500,'open');
+      INSERT INTO oms.oms_order_lines(id,order_id,product_variant_id,sku,requires_shipping,quantity,
+        authority_fulfillable_quantity,wms_materialized_quantity,authorization_status)
+        VALUES(11,500,101,'P5',true,6,0,6,'authorized'),(12,500,101,'P5',true,1,1,1,'authorized')`);
+    const input = await request();
+    input.verification.owners = [
+      { orderId:1,orderItemId:11,remainingQty:"0",reservedQty:"0",pickedQty:"0",allocations:[] },
+      { orderId:1,orderItemId:12,remainingQty:"1",reservedQty:"0",pickedQty:"0",allocations:[] },
+    ];
+    const before = await immutableBusinessState();
+    const assessment = await service.preview(input.verification, "operator");
+    expect(assessment).toMatchObject({ ready:true,blockers:[],plan:{orders:[{orderId:1,lines:[{
+      orderItemId:12,requestedQty:"1",pickedQty:"0",freshDemandQty:"1",
+    }]}]} });
+    expect(assessment.plan.orders[0].lines).toHaveLength(1);
+    await expect(service.save(input,"operator")).resolves.toMatchObject({stockChanged:false,authorityChanged:false});
+    expect(await immutableBusinessState()).toEqual(before);
+    expect((await pool.query("SELECT on_hold,picked_quantity,fulfilled_quantity FROM wms.order_items WHERE id=12")).rows)
+      .toEqual([{on_hold:true,picked_quantity:0,fulfilled_quantity:0}]);
+  });
+
+  it("persists a product-only non-stock shipping line without inventing a variant or inventory claim", async () => {
+    await pool.query(`INSERT INTO catalog.products(id,sku,inventory_tracking_default) VALUES(21,NULL,false);
+      INSERT INTO wms.order_items(id,order_id,oms_order_line_id,sku,product_id,catalog_product_id,inventory_tracking,
+        quantity,picked_quantity,fulfilled_quantity,status,on_hold,requires_shipping)
+        VALUES(12,1,12,'UNKNOWN',NULL,21,false,1,0,0,'pending',false,1);
+      INSERT INTO oms.oms_orders(id,status) VALUES(500,'open');
+      INSERT INTO oms.oms_order_lines(id,order_id,product_variant_id,catalog_product_id,inventory_tracking,sku,
+        requires_shipping,quantity,authority_fulfillable_quantity,wms_materialized_quantity,authorization_status)
+        VALUES(12,500,NULL,21,false,NULL,true,1,1,1,'authorized')`);
+    const input = await request();
+    const before = await immutableBusinessState();
+    const assessment = await service.preview(input.verification,"operator");
+    expect(assessment).toMatchObject({ready:true,blockers:[]});
+    expect(assessment.plan.orders.flatMap(order => order.lines).map(line => line.orderItemId)).toEqual([11]);
+    await expect(service.save(input,"operator")).resolves.toMatchObject({stockChanged:false,authorityChanged:false});
+    expect(await immutableBusinessState()).toEqual(before);
+    expect((await pool.query("SELECT product_id,catalog_product_id,inventory_tracking,requires_shipping,quantity FROM wms.order_items WHERE id=12")).rows)
+      .toEqual([{product_id:null,catalog_product_id:21,inventory_tracking:false,requires_shipping:1,quantity:1}]);
+  });
+
   it("does not hide an unshipped source by verifying its order line has zero remaining demand", async () => {
     await pool.query(`UPDATE wms.order_items SET picked_quantity=6,fulfilled_quantity=6 WHERE id=11;
       UPDATE inventory.inventory_levels SET reserved_qty=0,picked_qty=0 WHERE id=10;
