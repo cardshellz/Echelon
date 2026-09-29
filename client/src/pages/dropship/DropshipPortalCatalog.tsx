@@ -21,6 +21,7 @@ import {
   LISTING_PUSH_POLL_INTERVAL_MS,
   listingPushJobUrl,
   listingPushPollingContinues,
+  listingPushPollingGaveUp,
   parseDropshipListingPushJob,
 } from "@/lib/dropship-listing-push-status";
 import { Badge } from "@/components/ui/badge";
@@ -1393,7 +1394,7 @@ function ListingPushOutcomeNotice({ jobId, queuedMessage, storeName }: { jobId: 
   // The hook's result carries no answer count; the cache state does, and the
   // hook re-renders this notice on every answer, so the read is current.
   const answers = queryClient.getQueryState(queryKey)?.dataUpdateCount ?? 0;
-  const gaveUp = statusQuery.data !== undefined && !listingPushPollingContinues(statusQuery.data, answers);
+  const gaveUp = listingPushPollingGaveUp(statusQuery.data, answers);
   if (!statusQuery.data) {
     return (
       <div role="status" data-testid="listing-queue-result" className={`mt-4 rounded-md border p-4 text-sm ${PUSH_NOTICE_TONES.pending}`}>

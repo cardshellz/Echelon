@@ -283,6 +283,8 @@ test("queues in one click without a preview and shows what was queued", async ({
   // The page follows job 31 and shows what became of the listing, in the vendor's words.
   await expect(card.getByTestId("listing-queue-result")).toContainText("Live on Test Shop: 1 listing.");
   await expect(card.getByTestId("listing-push-outcome-1")).toHaveText("Envelope Single Pocket · Pack of 50 · ENV-SGL-P50: Live on Test Shop.");
+  // A finished job is never reported as still running.
+  await expect(card.getByTestId("listing-queue-result")).not.toContainText("Still not finished");
   expect(state.statusCalls).toBeGreaterThanOrEqual(1);
   await expect(card.getByText("This preview is out of date", { exact: false })).toHaveCount(0);
   await expect(card.getByText("ENV-SGL-P50").first()).toBeVisible();

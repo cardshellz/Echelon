@@ -4,6 +4,7 @@ import {
   listingPushJobUrl,
   listingPushNextStep,
   listingPushPollingContinues,
+  listingPushPollingGaveUp,
   LISTING_PUSH_MAX_POLLS,
   listingPushStoreLabel,
   parseDropshipListingPushJob,
@@ -46,6 +47,18 @@ describe("listingPushPollingContinues", () => {
   });
 });
 
+describe("listingPushPollingGaveUp", () => {
+  it("is true only when the answer limit was reached with the job still unfinished", () => {
+    const running = job({ status: "processing", finished: false, completedAt: null });
+    expect(listingPushPollingGaveUp(undefined, LISTING_PUSH_MAX_POLLS)).toBe(false);
+    expect(listingPushPollingGaveUp(running, LISTING_PUSH_MAX_POLLS - 1)).toBe(false);
+    expect(listingPushPollingGaveUp(running, LISTING_PUSH_MAX_POLLS)).toBe(true);
+    // A finished job never "gave up", however many answers it took.
+    expect(listingPushPollingGaveUp(job(), 1)).toBe(false);
+    expect(listingPushPollingGaveUp(job(), LISTING_PUSH_MAX_POLLS)).toBe(false);
+  });
+});
+
 describe("describeListingPushOutcome", () => {
   it("says a listing is live, with its page, once the job finished", () => {
     expect(describeListingPushOutcome(job(), "marz_cards")).toEqual({
@@ -68,7 +81,7 @@ describe("describeListingPushOutcome", () => {
     const outcome = describeListingPushOutcome(job({ items: [item({ published: false, listingUrl: null })] }), "marz_cards");
     expect(outcome).toMatchObject({ tone: "partial", title: "Saved on marz_cards as unpublished drafts: 1 listing. Buyers cannot see them yet." });
     expect(outcome.items[0]).toMatchObject({ state: "draft", line: "Saved on marz_cards as an unpublished draft. Buyers cannot see it yet.",
-      nextStep: "Your store is set to save drafts instead of publishing. Publish it from your marz_cards account, or contact support to switch your store to live listings.",
+      nextStep: "Your store is set to save drafts instead of publishing. Ask support to switch your store to live listings, then queue it again.",
       listingUrl: null, listingUrlLabel: null });
   });
 
