@@ -150,11 +150,11 @@ async function setup(page: Page, initial: Partial<StubState> = {}) {
 /** What the server answers for a push: the job, its items and the preview it queued from. */
 /** The worker's finished verdict for the job the page follows after queueing. */
 function pushJobStatus(jobId: number) {
-  return { job: { jobId, storeConnectionId: STORE_ID, platform: "shopify", status: "completed", finished: true,
+  return { job: { jobId, storeConnectionId: STORE_ID, platform: "shopify", environment: null, status: "completed", finished: true,
     createdAt: STAMP, updatedAt: STAMP, completedAt: STAMP,
     items: [{ itemId: 1, listingId: 100, productVariantId: 101, sku: "ENV-SGL-P50", productName: "Envelope Single Pocket",
       variantName: "Pack of 50", status: "completed", errorCode: null, errorMessage: null, retryable: null,
-      externalListingId: "gid://shopify/Product/900", listingUrl: null }] } };
+      externalListingId: "gid://shopify/Product/900", published: null, listingUrl: null }] } };
 }
 
 function pushResponse(rows: Array<typeof PREVIEW_ROW>, jobStatus: "queued" | "failed" = "queued") {

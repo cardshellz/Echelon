@@ -19,6 +19,8 @@ const listingPushItemSchema = z.object({
   errorMessage: z.string().nullable(),
   retryable: z.boolean().nullable(),
   externalListingId: z.string().nullable(),
+  /** false: the store saved a draft that buyers cannot see; null: the push did not say. */
+  published: z.boolean().nullable(),
   // Rendered as a link: only an https page is ever accepted.
   listingUrl: z.string().url().regex(/^https:\/\//).nullable(),
 }).strict();
@@ -27,6 +29,8 @@ const listingPushJobSchema = z.object({
   jobId: positiveInteger,
   storeConnectionId: positiveInteger,
   platform: z.string().min(1),
+  /** eBay's sandbox is a test site: a listing there is not on the real eBay. */
+  environment: z.enum(["sandbox", "production"]).nullable(),
   status: z.string().min(1),
   finished: z.boolean(),
   createdAt: z.string().datetime(),
@@ -65,12 +69,14 @@ export interface ListingPushItemOutcome {
   itemId: number;
   /** "Armalope Envelope Single Pocket · Pack of 50 · ARM-ENV-SGL-P50" */
   name: string;
-  state: "pending" | "live" | "failed";
+  state: "pending" | "live" | "draft" | "failed";
   /** One sentence in the vendor's words. */
   line: string;
-  /** The step to take, for a failed item. */
+  /** The step to take, for a failed item or a draft. */
   nextStep: string | null;
   listingUrl: string | null;
+  /** The words on the link, when there is one. */
+  listingUrlLabel: string | null;
 }
 
 export interface ListingPushOutcome {
@@ -88,40 +94,61 @@ export function listingPushStoreLabel(platform: string, storeName: string | null
   return platform === "ebay" ? "eBay" : "your store";
 }
 
+const SANDBOX_NOTE = "This is eBay's sandbox test site, not the real eBay.";
+
 export function describeListingPushOutcome(job: DropshipListingPushJob, storeName: string | null): ListingPushOutcome {
   const store = listingPushStoreLabel(job.platform, storeName);
+  const sandbox = job.environment === "sandbox";
+  const linkLabel = job.platform === "ebay" ? (sandbox ? "View on eBay sandbox" : "View on eBay") : "View listing";
   const items = job.items.map((item): ListingPushItemOutcome => {
     const name = [item.productName, item.variantName, item.sku].filter((part) => part && part.trim()).join(" · ");
+    const base = { itemId: item.itemId, name, listingUrl: null, listingUrlLabel: null };
+    if (LIVE_ITEM_STATUSES.has(item.status) && item.published === false) {
+      return {
+        ...base, state: "draft", line: `Saved on ${store} as an unpublished draft. Buyers cannot see it yet.`,
+        nextStep: `Your store is set to save drafts instead of publishing. Publish it from your ${store} account, or contact support to switch your store to live listings.`,
+      };
+    }
     if (LIVE_ITEM_STATUSES.has(item.status)) {
-      return { itemId: item.itemId, name, state: "live", line: `Live on ${store}.`, nextStep: null, listingUrl: item.listingUrl };
+      return {
+        ...base, state: "live", line: sandbox ? `Live on ${store} (eBay sandbox).` : `Live on ${store}.`, nextStep: null,
+        listingUrl: item.listingUrl, listingUrlLabel: item.listingUrl ? linkLabel : null,
+      };
     }
     if (FAILED_ITEM_STATUSES.has(item.status)) {
       const reason = item.errorMessage?.trim() || "the store did not say why";
-      return {
-        itemId: item.itemId, name, state: "failed", line: `Could not list: ${reason}`,
-        nextStep: listingPushNextStep(item.errorCode, item.retryable), listingUrl: null,
-      };
+      return { ...base, state: "failed", line: `Could not list: ${reason}`, nextStep: listingPushNextStep(item.errorCode, item.retryable) };
     }
-    return { itemId: item.itemId, name, state: "pending", line: `Sending to ${store}…`, nextStep: null, listingUrl: null };
+    return { ...base, state: "pending", line: `Sending to ${store}…`, nextStep: null };
   });
   const total = items.length;
-  const live = items.filter((item) => item.state === "live").length;
-  const failed = items.filter((item) => item.state === "failed").length;
-  const noun = (count: number) => `${count} listing${count === 1 ? "" : "s"}`;
+  const count = (state: ListingPushItemOutcome["state"]) => items.filter((item) => item.state === state).length;
+  const live = count("live");
+  const draft = count("draft");
+  const failed = count("failed");
+  const noun = (n: number) => `${n} listing${n === 1 ? "" : "s"}`;
   if (!job.finished) {
-    const pending = total - live - failed;
+    const pending = total - live - draft - failed;
     const title = pending > 0
       ? `Sending ${noun(pending)} to ${store}. This usually takes under a minute; the result shows here.`
       : `Finishing up at ${store}…`;
     return { tone: "pending", title, items };
   }
-  if (failed === 0 && live === total && total > 0) {
-    return { tone: "success", title: `Live on ${store}: ${noun(live)}.`, items };
+  if (total > 0 && live === total) {
+    return { tone: "success", title: `Live on ${store}: ${noun(live)}.${sandbox ? ` ${SANDBOX_NOTE}` : ""}`, items };
   }
-  if (live === 0) {
+  if (total > 0 && draft === total) {
+    return { tone: "partial", title: `Saved on ${store} as unpublished drafts: ${noun(draft)}. Buyers cannot see them yet.`, items };
+  }
+  if (live === 0 && draft === 0) {
     return { tone: "failed", title: `Could not list ${noun(total)} on ${store}.`, items };
   }
-  return { tone: "partial", title: `${live} of ${noun(total)} live on ${store}; ${failed} could not be listed.`, items };
+  const parts = [
+    live > 0 ? `${live} live` : null,
+    draft > 0 ? `${draft} saved as ${draft === 1 ? "a draft" : "drafts"}` : null,
+    failed > 0 ? `${failed} could not be listed` : null,
+  ].filter((part): part is string => part !== null);
+  return { tone: "partial", title: `Of ${noun(total)} on ${store}: ${parts.join(", ")}.${sandbox ? ` ${SANDBOX_NOTE}` : ""}`, items };
 }
 
 /**

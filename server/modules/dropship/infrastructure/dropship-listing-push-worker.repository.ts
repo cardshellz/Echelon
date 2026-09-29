@@ -317,12 +317,18 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
         : failedCount > 0
           ? "failed"
           : "completed";
+      // Decided here, not in SQL: a parameter that is both assigned to the
+      // varchar status column and compared with text literals makes
+      // PostgreSQL refuse the statement ("inconsistent types deduced for
+      // parameter"), which left every job "processing" for good.
+      const finishedAt = nextStatus === "processing" ? null : input.now;
+      const errorMessage = nextStatus === "failed" ? "One or more listing push items failed or were blocked." : null;
       const updated = await client.query<JobRow>(
         `UPDATE dropship.dropship_listing_push_jobs AS j
          SET status = $2,
-             completed_at = CASE WHEN $2 IN ('completed','failed') THEN $3 ELSE completed_at END,
-             updated_at = $3,
-             error_message = CASE WHEN $2 = 'failed' THEN $4 ELSE NULL END
+             completed_at = COALESCE($3::timestamptz, j.completed_at),
+             updated_at = $4,
+             error_message = $5
          WHERE j.id = $1
          RETURNING j.id, j.vendor_id, j.store_connection_id,
                    (SELECT sc.platform FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS platform,
@@ -333,12 +339,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
                    (SELECT sc.setup_status FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS setup_status,
                    (SELECT sc.access_token_ref FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS access_token_ref,
                    (SELECT sc.refresh_token_ref FROM dropship.dropship_store_connections sc WHERE sc.id = j.store_connection_id) AS refresh_token_ref`,
-        [
-          input.jobId,
-          nextStatus,
-          input.now,
-          failedCount > 0 ? "One or more listing push items failed or were blocked." : null,
-        ],
+        [input.jobId, nextStatus, finishedAt, input.now, errorMessage],
       );
       const currentJob = mapJobRow(requiredRow(updated.rows[0], "Dropship listing push job finalize did not return a row."));
       const items = await listJobItemsWithClient(client, input.jobId);

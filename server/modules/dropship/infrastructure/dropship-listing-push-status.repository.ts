@@ -4,6 +4,7 @@ import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
 import type {
   DropshipListingPushStatusRepository,
+  MarketplaceEnvironment,
   VendorListingPushItemRecord,
   VendorListingPushJobRecord,
 } from "../application/dropship-listing-push-status-service";
@@ -15,6 +16,7 @@ const jobRowSchema = z.object({
   vendor_id: positiveInteger,
   store_connection_id: positiveInteger,
   platform: z.string().min(1),
+  provider_environment: z.string().nullable(),
   status: z.string().min(1),
   created_at: z.date(),
   updated_at: z.date(),
@@ -30,6 +32,7 @@ const itemRowSchema = z.object({
   error_message: z.string().nullable(),
   retryable: z.boolean().nullable(),
   external_listing_id: z.string().nullable(),
+  published: z.boolean().nullable(),
   variant_sku: z.string().nullable(),
   variant_name: z.string(),
   product_name: z.string(),
@@ -49,7 +52,9 @@ export class PgDropshipListingPushStatusRepository implements DropshipListingPus
   /** The vendor id is part of the lookup, so a job another vendor owns is simply absent. */
   async loadVendorJob(input: { vendorId: number; jobId: number }): Promise<VendorListingPushJobRecord | null> {
     const jobs = await this.pool.query<Record<string, unknown>>(
-      `SELECT j.id, j.vendor_id, j.store_connection_id, sc.platform, j.status, j.created_at, j.updated_at, j.completed_at
+      `SELECT j.id, j.vendor_id, j.store_connection_id, sc.platform,
+              COALESCE(sc.provider_environment, sc.config -> 'tokenMetadata' ->> 'environment') AS provider_environment,
+              j.status, j.created_at, j.updated_at, j.completed_at
        FROM dropship.dropship_listing_push_jobs j
        JOIN dropship.dropship_store_connections sc ON sc.id = j.store_connection_id
        WHERE j.id = $1 AND j.vendor_id = $2`,
@@ -62,6 +67,7 @@ export class PgDropshipListingPushStatusRepository implements DropshipListingPus
       `SELECT i.id, i.listing_id, i.product_variant_id, i.status, i.error_code, i.error_message,
               (i.result -> 'push' ->> 'retryable')::boolean AS retryable,
               COALESCE(i.external_listing_id, l.external_listing_id) AS external_listing_id,
+              (i.result -> 'push' -> 'rawResult' ->> 'published')::boolean AS published,
               pv.sku AS variant_sku, pv.name AS variant_name, p.name AS product_name
        FROM dropship.dropship_listing_push_job_items i
        LEFT JOIN dropship.dropship_vendor_listings l ON l.id = i.listing_id
@@ -76,6 +82,7 @@ export class PgDropshipListingPushStatusRepository implements DropshipListingPus
       vendorId: job.vendor_id,
       storeConnectionId: job.store_connection_id,
       platform: job.platform,
+      environment: marketplaceEnvironment(job.provider_environment),
       status: job.status,
       createdAt: job.created_at,
       updatedAt: job.updated_at,
@@ -94,10 +101,17 @@ export class PgDropshipListingPushStatusRepository implements DropshipListingPus
           errorMessage: item.error_message,
           retryable: item.retryable,
           externalListingId: item.external_listing_id,
+          published: item.published,
         };
       }),
     };
   }
+}
+
+/** The store's recorded environment; anything else reads as unknown rather than guessed. */
+function marketplaceEnvironment(value: string | null): MarketplaceEnvironment | null {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "sandbox" || normalized === "production" ? normalized : null;
 }
 
 /** A stored row outside the contract is refused, never served half-read. */

@@ -17,13 +17,19 @@ export interface VendorListingPushItemRecord {
   /** The worker's own classification of a failure; null while the item has not failed. */
   retryable: boolean | null;
   externalListingId: string | null;
+  /** Whether the marketplace published the listing (false: saved as a draft); null when the push did not say. */
+  published: boolean | null;
 }
+
+/** Where the store's marketplace account lives; eBay's sandbox is a test site with its own item pages. */
+export type MarketplaceEnvironment = "sandbox" | "production";
 
 export interface VendorListingPushJobRecord {
   jobId: number;
   vendorId: number;
   storeConnectionId: number;
   platform: string;
+  environment: MarketplaceEnvironment | null;
   status: string;
   createdAt: Date;
   updatedAt: Date;
@@ -72,15 +78,27 @@ export class DropshipListingPushStatusService {
       finished: FINISHED_LISTING_PUSH_JOB_STATUSES.has(job.status),
       items: job.items.map((item) => ({
         ...item,
-        listingUrl: item.status === "completed" ? marketplaceListingUrl(job.platform, item.externalListingId) : null,
+        // A draft has no public page: the id we hold is the offer, not a listing.
+        listingUrl: item.status === "completed" && item.published !== false
+          ? marketplaceListingUrl(job.platform, item.externalListingId, job.environment)
+          : null,
       })),
     };
   }
 }
 
-/** Only an eBay item id forms a public page a vendor can open; other platforms keep the id alone. */
-export function marketplaceListingUrl(platform: string, externalListingId: string | null): string | null {
+/**
+ * Only an eBay item id forms a public page a vendor can open; other platforms
+ * keep the id alone. A sandbox listing lives on eBay's test site, where the
+ * production page would say the item cannot be found.
+ */
+export function marketplaceListingUrl(
+  platform: string,
+  externalListingId: string | null,
+  environment: MarketplaceEnvironment | null,
+): string | null {
   if (externalListingId === null) return null;
-  if (platform === "ebay" && /^\d{6,20}$/.test(externalListingId)) return `https://www.ebay.com/itm/${externalListingId}`;
-  return null;
+  if (platform !== "ebay" || !/^\d{6,20}$/.test(externalListingId)) return null;
+  const host = environment === "sandbox" ? "sandbox.ebay.com" : "www.ebay.com";
+  return `https://${host}/itm/${externalListingId}`;
 }
