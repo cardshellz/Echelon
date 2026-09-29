@@ -16,6 +16,7 @@ const DEFAULT_BATCH_SIZE = 25;
 const DEFAULT_LEASE_SECONDS = 120;
 
 export interface InventoryPublicationOutboxStore {
+  finalizeFailedRuns(now: Date): Promise<void>;
   claimDue(input: {
     batchSize: number;
     leaseSeconds: number;
@@ -61,6 +62,7 @@ export class InventoryPublicationOutboxService {
   async processDue(input: { batchSize?: number; leaseSeconds?: number } = {}): Promise<InventoryPublicationBatchResult> {
     const batchSize = positiveInteger(input.batchSize ?? DEFAULT_BATCH_SIZE, "batchSize");
     const leaseSeconds = positiveInteger(input.leaseSeconds ?? DEFAULT_LEASE_SECONDS, "leaseSeconds");
+    await this.store.finalizeFailedRuns(validNow(this.clock));
     const claims = await this.store.claimDue({
       batchSize,
       leaseSeconds,
@@ -85,6 +87,8 @@ export class InventoryPublicationOutboxService {
         result.failed += 1;
       }
     }
+    // runIfCurrent has released every provider lock before global cleanup.
+    await this.store.finalizeFailedRuns(validNow(this.clock));
     return result;
   }
 

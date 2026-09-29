@@ -4,6 +4,8 @@ import type { Pool, PoolClient } from "pg";
 import { canonicalJson } from "@shared/utils/canonical-json";
 
 import { pool } from "../../../db";
+import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
+import { releaseQuantityPublicationSuppressionInsideTransaction } from "./quantity-publication-admission.repository";
 
 export type ClaimedInventoryPublication = {
   outboxId: string;
@@ -65,7 +67,7 @@ export class PostgresInventoryPublicationOutboxRepository {
   }): Promise<ClaimedInventoryPublication[]> {
     return inTransaction(this.connectionPool, async (client) => {
       await lockPublicationRuns(client, input.now);
-      await recoverExpiredLeases(client, input.now);
+      await recoverExpiredInventoryPublicationLeases(client, input.now);
       const rows = (await client.query<Record<string, unknown>>(
         `WITH candidates AS (
            SELECT outbox.id
@@ -87,7 +89,9 @@ export class PostgresInventoryPublicationOutboxRepository {
             AND global_control.global_enabled = TRUE
            WHERE outbox.state = 'queued' AND outbox.available_at <= $1
              AND (
-               (outbox.publication_phase = 'conservative' AND run.state = 'publishing' AND target.state = 'preview')
+               (outbox.publication_phase = 'conservative' AND run.state = 'publishing' AND target.state = 'preview'
+                AND NOT EXISTS (SELECT 1 FROM inventory.inventory_publication_outbox failed
+                  WHERE failed.activation_run_id = run.id AND failed.state = 'dead_letter'))
                OR
                (outbox.publication_phase = 'full' AND run.state = 'active' AND target.state = 'live')
              )
@@ -106,6 +110,63 @@ export class PostgresInventoryPublicationOutboxRepository {
       )).rows;
       return rows.map((row) => parseClaim(row, input.now));
     });
+  }
+
+  /**
+   * Separate from result persistence: never take the global cutover fence while
+   * holding a provider target lock. A cleanup failure must not roll back an
+   * acknowledged result or resurrect its lease. Also runs on empty worker polls
+   * so a process crash between result commit and cleanup is recoverable.
+   */
+  async finalizeFailedRuns(now: Date): Promise<void> {
+    const reader = await this.connectionPool.connect();
+    let candidates: { id: string }[];
+    try {
+      candidates = (await reader.query<{ id: string }>(
+        `SELECT run.id::text FROM inventory.availability_activation_runs run
+         JOIN inventory.availability_activation_freezes configured_freeze ON configured_freeze.activation_run_id = run.id
+         WHERE run.state = 'publishing' AND configured_freeze.released_at IS NULL
+           AND EXISTS (SELECT 1 FROM inventory.inventory_publication_outbox failed
+             WHERE failed.activation_run_id = run.id AND failed.state = 'dead_letter')
+           AND NOT EXISTS (SELECT 1 FROM inventory.inventory_publication_outbox owned
+             WHERE owned.activation_run_id = run.id AND owned.state = 'leased' AND owned.lease_expires_at > $1)
+         ORDER BY run.id`,
+        [now.toISOString()],
+      )).rows;
+    } finally {
+      reader.release();
+    }
+    for (const candidate of candidates) {
+      try {
+        await inTransaction(this.connectionPool, async client => {
+          await acquireInventoryCutoverFenceInsideTransaction(client, {
+            expectedAuthority: "legacy", expectedConfigurationRunId: candidate.id,
+          });
+          await lockActivationRun(client, candidate.id);
+          await recoverExpiredInventoryPublicationLeases(client, now, candidate.id);
+          await finalizeDeadLetteredRunIfQuiescent(client, candidate.id, now);
+        });
+      } catch (error) {
+        // A concurrent finalizer can release the freeze after discovery. Only
+        // accept a proven completed cleanup, not an arbitrary fence failure.
+        if (!(error instanceof Error) || error.message !== "CUTOVER_CONFIGURATION_FREEZE_CHANGED"
+          || !await this.failedRunCleanupComplete(candidate.id)) throw error;
+      }
+    }
+  }
+
+  private async failedRunCleanupComplete(activationRunId: string): Promise<boolean> {
+    const client = await this.connectionPool.connect();
+    try {
+      return (await client.query<{ complete: boolean }>(
+        `SELECT run.state = 'failed' AND configured_freeze.released_at IS NOT NULL
+          AND gate.activation_run_id IS DISTINCT FROM run.id AS complete
+         FROM inventory.availability_activation_runs run
+         JOIN inventory.availability_activation_freezes configured_freeze ON configured_freeze.activation_run_id = run.id
+         CROSS JOIN inventory.quantity_publication_gate gate
+         WHERE run.id = $1 AND gate.singleton`, [activationRunId],
+      )).rows[0]?.complete === true;
+    } finally { client.release(); }
   }
 
   async runIfCurrent<T>(
@@ -267,7 +328,6 @@ export class PostgresInventoryPublicationOutboxRepository {
             [claim.outboxId,
               `Observed ${input.observedQuantity}; desired ${claim.desiredQuantity} after activation stopped.`],
           );
-          await finalizeDeadLetteredRunIfQuiescent(client, claim.activationRunId, input.completedAt);
           return "drifted";
         }
         await client.query(
@@ -281,12 +341,7 @@ export class PostgresInventoryPublicationOutboxRepository {
         );
         return "drifted";
       }
-      const failed = await finalizeDeadLetteredRunIfQuiescent(
-        client,
-        claim.activationRunId,
-        input.completedAt,
-      );
-      if (!failed && claim.publicationPhase === "conservative") {
+      if (claim.publicationPhase === "conservative") {
         await advancePublicationVerified(client, claim.activationRunId, input.completedAt);
       }
       return "verified";
@@ -344,7 +399,6 @@ export class PostgresInventoryPublicationOutboxRepository {
           [claim.outboxId],
         );
       }
-      await finalizeDeadLetteredRunIfQuiescent(client, claim.activationRunId, input.completedAt);
       return true;
     });
   }
@@ -422,16 +476,19 @@ async function lockPublicationRuns(client: PoolClient, now: Date): Promise<void>
   );
 }
 
-async function recoverExpiredLeases(client: PoolClient, now: Date): Promise<void> {
+export async function recoverExpiredInventoryPublicationLeases(
+  client: PoolClient, now: Date, activationRunId: string | null = null,
+): Promise<void> {
   const expired = (await client.query<Record<string, unknown>>(
     `SELECT outbox.*, run.state AS activation_state
      FROM inventory.inventory_publication_outbox AS outbox
      JOIN inventory.availability_activation_runs AS run ON run.id = outbox.activation_run_id
      WHERE outbox.state = 'leased' AND outbox.lease_expires_at <= $1
+       AND ($2::bigint IS NULL OR outbox.activation_run_id = $2)
        AND outbox.publication_phase IN ('conservative', 'full')
        AND pg_try_advisory_xact_lock(outbox.publication_target_id, outbox.product_variant_id)
      ORDER BY outbox.id FOR UPDATE OF outbox SKIP LOCKED`,
-    [now.toISOString()],
+    [now.toISOString(), activationRunId],
   )).rows;
   for (const row of expired) {
     const claim = parseClaim(row, validDate(row.updated_at, "attemptStartedAt"));
@@ -465,7 +522,6 @@ async function recoverExpiredLeases(client: PoolClient, now: Date): Promise<void
         [claim.outboxId],
       );
     }
-    await finalizeDeadLetteredRunIfQuiescent(client, claim.activationRunId, now);
   }
 }
 
@@ -599,13 +655,22 @@ async function finalizeDeadLetteredRunIfQuiescent(
      WHERE id = $1 AND state = 'publishing'`,
     [activationRunId, occurredAt.toISOString()],
   );
-  await client.query(
+  await releaseQuantityPublicationSuppressionInsideTransaction(client, {
+    activationRunId, outcome: "aborted", actor: "inventory-publication-worker", now: occurredAt,
+  });
+  const freezeReleased = await client.query(
     `UPDATE inventory.availability_activation_freezes
      SET released_by = 'inventory-publication-worker', released_at = $2,
          release_reason = 'Provider publication reached dead letter before authority cutover.'
      WHERE activation_run_id = $1 AND released_at IS NULL`,
     [activationRunId, occurredAt.toISOString()],
   );
+  if (freezeReleased.rowCount !== 1) {
+    throw new InventoryPublicationOutboxRepositoryError(
+      "ACTIVATION_FREEZE_MISSING", "Failed publication cleanup did not release exactly one configuration freeze.",
+      { activationRunId },
+    );
+  }
   const evidence = {
     activationRunId,
     failedOutboxId: failure.id,
@@ -684,7 +749,7 @@ async function inTransaction<T>(poolValue: ClientPool, work: (client: PoolClient
   const client = await poolValue.connect();
   let began = false;
   try {
-    await client.query("BEGIN");
+    await client.query("BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED");
     began = true;
     const result = await work(client);
     await client.query("COMMIT");

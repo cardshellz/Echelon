@@ -141,6 +141,24 @@ describe("shared eBay absolute inventory quantity protocol", () => {
     expect(() => assertEbayQuantityAcknowledgement({ responses: [{ sku, statusCode: 200,
       offers: [{ offerId: "offer-1", statusCode: 200 }] }] }, sku, "offer-1")).not.toThrow();
   });
+  it.each([false, true])("accepts separate item and offer confirmations in either order (%s)", async reverse => {
+    const client = fixture();
+    const responses = [{ sku, statusCode: 200 }, { sku, offerId: "offer-1", statusCode: 200 }];
+    client.bulkUpdatePriceQuantity.mockResolvedValue({ responses: reverse ? responses.reverse() : responses });
+    await expect(publishEbayInventoryQuantity(client, sku, market, 7)).resolves.toMatchObject({ quantity: 7 });
+    expect(client.bulkUpdatePriceQuantity).toHaveBeenCalledOnce();
+  });
+  it.each([
+    [{ sku, statusCode: 400 }, { sku, offerId: "offer-1", statusCode: 200 }],
+    [{ sku, statusCode: 200 }, { sku, offerId: "offer-1", statusCode: 400 }],
+    [{ sku, statusCode: 200 }, { sku, statusCode: 200 }, { sku, offerId: "offer-1", statusCode: 200 }],
+    [{ sku, statusCode: 200 }, { sku, offerId: "offer-1", statusCode: 200 }, { sku, offerId: "offer-1", statusCode: 200 }],
+    [{ sku: "FOREIGN", statusCode: 200 }, { sku, offerId: "offer-1", statusCode: 200 }],
+    [{ sku, statusCode: 200, errors: [{ message: "Item failed" }] }, { sku, offerId: "offer-1", statusCode: 200 }],
+    [{ sku, statusCode: 200 }, { sku, offerId: "offer-1", statusCode: 200, offers: [{ offerId: "wrong", statusCode: 200 }] }],
+  ].map(responses => ({ responses })))("rejects partial, duplicate and foreign split responses: %j", ({ responses }) => {
+    expect(() => assertEbayQuantityAcknowledgement({ responses }, sku, "offer-1")).toThrow("did not confirm");
+  });
   it("encodes provider identity and retains the existing default marketplace", () => {
     expect(ebayInventoryMarketplace(undefined)).toBe("EBAY_US");
     expect(ebayInventoryMarketplace("EBAY_GB")).toBe("EBAY_GB");

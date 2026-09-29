@@ -15,6 +15,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 
 import { pool } from "../../../db";
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
+import { recoverExpiredInventoryPublicationLeases } from "./inventory-publication-outbox.repository";
 import { buildInventoryCutoverManifest } from "../domain/inventory-cutover-manifest";
 import { projectInventoryCutoverStateInsideTransaction } from "./inventory-cutover-projection.repository";
 import { suppressQuantityPublicationInsideTransaction, releaseQuantityPublicationSuppressionInsideTransaction } from "./quantity-publication-admission.repository";
@@ -239,6 +240,10 @@ implements InventoryAvailabilityActivationStore {
           "The activation cannot be aborted after runtime authority changes.",
         );
       }
+      // Expiry alone is insufficient: recovery also requires the provider's
+      // target/variant lock to be free. Preserve unknown remote outcomes in the
+      // publication journal; do not attest that an expired request never ran.
+      await recoverExpiredInventoryPublicationLeases(client, command.occurredAt, command.activationRunId);
       const leasedCount = count((await client.query<{ count: string }>(
         `SELECT count(*)::text AS count
          FROM inventory.inventory_publication_outbox
