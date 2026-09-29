@@ -28,7 +28,7 @@ describe("customer returns HTTP boundaries", () => {
     app.use((req, _res, next) => { req.session = session as unknown as typeof req.session; next(); });
     registerCustomerReturnCustomerRoutes(app, { privateTesting: () => true, authorizeStaff: admin,
       context: async () => ({ config: { publicOrigin: "https://returns.example.com" }, auth: {
-        principal: sessionPrincipal, authenticate, start: vi.fn(async () => "https://store.example.com/apps/member-portal/returns?state=test"),
+        principal: sessionPrincipal, authenticate, start: vi.fn(async () => "https://store.example.com/apps/echelon-returns?state=test"),
       } }) as unknown as Awaited<ReturnType<NonNullable<CustomerReturnCustomerRouteDependencies["context"]>>>,
       services: services as unknown as NonNullable<CustomerReturnCustomerRouteDependencies["services"]>,
     });
@@ -80,15 +80,15 @@ describe("customer returns HTTP boundaries", () => {
   });
   it("callback form only relays; it cannot authenticate without the same-origin browser session", async () => {
     const request = await start(); admin.mockRejectedValue(new CustomerReturnCustomerAccessError("PRIVATE", "Private testing", 403));
-    const response = await request("/customer-returns/callback", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: "token=abc.def.ghi" });
+    const response = await request("/customer-returns/callback", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: "proof=c2lnbmVk" });
     expect(response.status).toBe(200); expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     expect(await response.text()).toContain("/api/returns/customer/session");
     expect(authenticate).not.toHaveBeenCalled(); expect(services).not.toHaveBeenCalled();
-    expect((await request("/api/returns/customer/session", { method: "POST", headers: { "Content-Type": "application/json", "Origin": "https://returns.example.com", "X-Return-Command": "1" }, body: JSON.stringify({ token: "abc.def.ghi" }) })).status).toBe(403);
+    expect((await request("/api/returns/customer/session", { method: "POST", headers: { "Content-Type": "application/json", "Origin": "https://returns.example.com", "X-Return-Command": "1" }, body: JSON.stringify({ proof: "c2lnbmVk" }) })).status).toBe(403);
   });
   it("rejects malformed callback content without reflecting it", async () => {
     const request = await start();
-    const response = await request("/customer-returns/callback", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: "token=%3Cscript%3Ealert(1)%3C%2Fscript%3E" });
+    const response = await request("/customer-returns/callback", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: "proof=%3Cscript%3Ealert(1)%3C%2Fscript%3E" });
     expect(response.status).toBe(400); expect(await response.text()).not.toContain("alert(1)");
   });
   it("GET cannot create returns, progress labels, or start a session", async () => {
