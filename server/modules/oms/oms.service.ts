@@ -6,6 +6,7 @@
  */
 
 import { eq, and, sql, desc, asc, gte, lte, or, ilike, count } from "drizzle-orm";
+import { CountryCodeValidationError, parseCountryCode } from "@shared/country-code";
 import {
   omsOrders, omsOrderLines, omsOrderEvents,
   type InsertOmsOrder, type InsertOmsOrderLine, type OmsOrder, type OmsOrderLine,
@@ -40,7 +41,7 @@ export interface OrderData {
   shipToCity?: string;
   shipToState?: string;
   shipToZip?: string;
-  shipToCountry?: string;
+  shipToCountry?: string | null;
   shippingMethod?: string | null;
   shippingMethodCode?: string | null;
   shippingServiceLevel?: "standard" | "expedited" | "overnight";
@@ -211,6 +212,17 @@ export function createOmsService(db: any, reservationService?: any) {
     externalOrderIdRaw: string,
     data: OrderData,
   ): Promise<OmsOrder> {
+    // Reject malformed destinations before order, line, or audit writes. A
+    // missing country is stored as unknown and must be supplied before shipping.
+    let shipToCountry: string | null;
+    try {
+      shipToCountry = parseCountryCode(data.shipToCountry);
+    } catch (error) {
+      if (error instanceof CountryCodeValidationError) {
+        console.error(JSON.stringify({ event: "oms_country_validation_failed", operation: "ingest_order", channelId, code: error.code }));
+      }
+      throw error;
+    }
     // Canonicalize the external id so the bridge (GID) and webhook (numeric)
     // paths converge on a single dedup key. See normalizeExternalOrderId.
     const externalOrderId = normalizeExternalOrderId(externalOrderIdRaw);
@@ -238,7 +250,7 @@ export function createOmsService(db: any, reservationService?: any) {
           shipToCity: data.shipToCity,
           shipToState: data.shipToState,
           shipToZip: data.shipToZip,
-          shipToCountry: data.shipToCountry,
+          shipToCountry,
           subtotalCents: data.subtotalCents || 0,
           grossSubtotalCents: data.grossSubtotalCents || 0,
           shippingCents: data.shippingCents || 0,

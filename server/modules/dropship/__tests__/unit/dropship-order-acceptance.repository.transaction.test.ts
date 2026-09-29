@@ -327,6 +327,43 @@ function baselineEntryRow() {
 const ANNOUNCED_FOR = new Date("2026-09-27T00:00:00.000Z");
 
 describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
+  it.each(["legacy", "canonical"])("rejects an invalid country before %s cost, wallet, or OMS writes", async mode => {
+    const intake = intakeRow();
+    intake.normalized_payload.shipTo.country = "XX";
+    const db = createFakeDb(baseHandlers({ intake: { match: "FROM dropship.dropship_order_intake", rows: [intake] } }));
+    const { repository, loadProductCosts } = createRepository(db, availableCost());
+    const operation = mode === "legacy" ? repository.acceptOrder(acceptanceInput()) : repository.prepareCanonicalOrder(acceptanceInput());
+    await expect(operation).rejects.toMatchObject({ code: "DROPSHIP_ORDER_SHIP_TO_COUNTRY_INVALID" });
+    expect(loadProductCosts).not.toHaveBeenCalled();
+    expect(db.calls.filter(call => /^\s*(INSERT|UPDATE|DELETE)\b/.test(call.sql))).toEqual([]);
+    expect(db.calls.at(-1)?.sql).toBe("ROLLBACK");
+  });
+
+  it("stores a recognized country name as ISO without mutating intake evidence", async () => {
+    const intake = intakeRow();
+    intake.normalized_payload.shipTo.country = "United States";
+    const db = createFakeDb(baseHandlers({ intake: { match: "FROM dropship.dropship_order_intake", rows: [intake] } }));
+    const { repository } = createRepository(db, availableCost());
+    await repository.acceptOrder(acceptanceInput());
+    expect(db.statements("INSERT INTO oms.oms_orders")[0].params[12]).toBe("US");
+    expect(intake.normalized_payload.shipTo.country).toBe("United States");
+  });
+
+  it.each([["XX", "DROPSHIP_ORDER_SHIP_TO_COUNTRY_INVALID"], ["CA", "DROPSHIP_ORDER_SHIPPING_QUOTE_DESTINATION_MISMATCH"]])(
+    "rejects quote country %s before cost, wallet, or OMS writes", async (country, code) => {
+      const handlers = baseHandlers();
+      const quoteHandler = handlers.find(handler => handler.match === "FROM dropship.dropship_shipping_quote_snapshots")!;
+      const quoteRows = quoteHandler.rows as Array<Record<string, unknown>>;
+      quoteRows[0].destination_country = country;
+      const db = createFakeDb(handlers);
+      const { repository, loadProductCosts } = createRepository(db, availableCost());
+      await expect(repository.acceptOrder(acceptanceInput())).rejects.toMatchObject({ code });
+      expect(loadProductCosts).not.toHaveBeenCalled();
+      expect(db.calls.filter(call => /^\s*(INSERT|UPDATE|DELETE)\b/.test(call.sql))).toEqual([]);
+      expect(db.calls.at(-1)?.sql).toBe("ROLLBACK");
+    },
+  );
+
   it("debits the wallet by the .ops cost times quantity plus shipping and freezes the provenance", async () => {
     const db = createFakeDb(baseHandlers());
     const { repository, loadProductCosts, productCostReaderForTransaction } = createRepository(db, availableCost());

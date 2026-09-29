@@ -24,6 +24,34 @@ import type {
 const now = new Date("2026-05-03T16:00:00.000Z");
 
 describe("DropshipOrderAcceptanceWorkflowService", () => {
+  it.each(["Canada", " ca ", "UK", "United Kingdom"])("canonicalizes %s before quoting", async country => {
+    const repository = new FakeWorkflowRepository();
+    repository.context.normalizedPayload.shipTo!.country = country;
+    const shippingQuoteService = new FakeShippingQuoteService();
+    const service = new DropshipOrderAcceptanceWorkflowService({
+      vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
+      repository, shippingQuoteService, acceptanceService: new FakeAcceptanceService(), logger: noopLogger,
+    });
+    await service.acceptOrderForMember("member-1", { intakeId: 7, idempotencyKey: "accept-order-007" });
+    expect(shippingQuoteService.lastInput).toMatchObject({ destination: { country: country.trim().toLowerCase().startsWith("ca") ? "CA" : "GB" } });
+    expect(repository.context.normalizedPayload.shipTo!.country).toBe(country);
+  });
+
+  it.each(["XX", "Atlantis", "constructor"])("rejects %s before quote and acceptance effects", async country => {
+    const repository = new FakeWorkflowRepository();
+    repository.context.normalizedPayload.shipTo!.country = country;
+    const shippingQuoteService = new FakeShippingQuoteService();
+    const acceptanceService = new FakeAcceptanceService();
+    const service = new DropshipOrderAcceptanceWorkflowService({
+      vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
+      repository, shippingQuoteService, acceptanceService, logger: noopLogger,
+    });
+    await expect(service.acceptOrderForMember("member-1", { intakeId: 7, idempotencyKey: "accept-order-007" }))
+      .rejects.toMatchObject({ code: "DROPSHIP_ORDER_SHIP_TO_COUNTRY_INVALID", context: { retryable: false } });
+    expect(shippingQuoteService.lastInput).toBeNull();
+    expect(acceptanceService.lastInput).toBeNull();
+  });
+
   it("quotes shipping from the order payload and accepts with the vendor actor", async () => {
     const repository = new FakeWorkflowRepository();
     const shippingQuoteService = new FakeShippingQuoteService();

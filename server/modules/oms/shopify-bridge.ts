@@ -6,6 +6,7 @@
  */
 
 import { sql } from "drizzle-orm";
+import { CountryCodeValidationError, parseCountryCode } from "@shared/country-code";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
 import { envPositiveInteger } from "../../infrastructure/scheduler-config";
 import { buildChannelLineDisplayName } from "./line-display-name";
@@ -106,6 +107,7 @@ export async function bridgeShopifyOrderToOms(
       throw new Error(`Shopify raw order ${shopifyOrderId} was not found`);
     }
     const raw = rawOrderResult.rows[0];
+    const shipToCountry = parseCountryCode(raw.shipping_country);
     const channelId = await resolveShopifyChannelId(db, raw);
 
 
@@ -206,7 +208,7 @@ export async function bridgeShopifyOrderToOms(
       shipToCity: raw.shipping_city,
       shipToState: raw.shipping_state,
       shipToZip: raw.shipping_postal_code,
-      shipToCountry: raw.shipping_country,
+      shipToCountry,
       subtotalCents: raw.subtotal_price_cents || 0,
       // Pre-discount merchandise subtotal = sum of line gross (retail × qty).
       grossSubtotalCents: lineItems.reduce(
@@ -266,9 +268,13 @@ export async function bridgeShopifyOrderToOms(
       channelId,
     };
   } catch (error: any) {
-    console.error(
-      `[Shopify Bridge] Failed to bridge ${shopifyOrderId}: ${error?.message ?? String(error)}`,
-    );
+    if (error instanceof CountryCodeValidationError) {
+      console.error(JSON.stringify({ event: "oms_country_validation_failed", operation: "shopify_bridge", code: error.code, shopifyOrderId }));
+    } else {
+      console.error(
+        `[Shopify Bridge] Failed to bridge ${shopifyOrderId}: ${error?.message ?? String(error)}`,
+      );
+    }
     throw error;
   }
 }

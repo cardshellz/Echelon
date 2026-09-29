@@ -24,6 +24,9 @@ import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapt
 import { isWarehouseEnabledForChannelWithClient } from "./dropship-oms-warehouse-assignments.reader";
 import {
   buildDropshipOrderAcceptancePlan,
+  assertDropshipQuoteDestinationMatchesShipTo,
+  requireDropshipAcceptanceShipTo,
+  requireDropshipOrderCountry,
   DROPSHIP_PRICING_SNAPSHOT_VERSION,
   type DropshipAcceptanceIntakeRecord,
   type DropshipAcceptanceInventoryAvailability,
@@ -1462,6 +1465,9 @@ async function planAcceptanceWithClient(
   wallet: DropshipAcceptanceWalletState;
   inventoryLevels: InventoryLevelRow[];
 }> {
+  // Validate before cost-schedule, wallet, or inventory work, including callers
+  // that bypass the member acceptance workflow.
+  const shipTo = requireDropshipAcceptanceShipTo(intake.normalizedPayload.shipTo);
   const vendor = await loadVendorContextForUpdate(client, {
     vendorId: input.vendorId,
     storeConnectionId: input.storeConnectionId,
@@ -1474,6 +1480,7 @@ async function planAcceptanceWithClient(
     );
   }
   const quote = await loadQuoteSnapshotWithClient(client, input);
+  assertDropshipQuoteDestinationMatchesShipTo(quote, shipTo);
   // The quote's warehouse is the store's default warehouse. It must remain an
   // enabled source for the exact Dropship OMS channel through the acceptance
   // transaction. This applies to both legacy exact-SKU validation and the
@@ -2133,6 +2140,7 @@ async function createOmsOrderWithClient(
   intake: DropshipAcceptanceIntakeRecord,
   options: { stagedForCanonicalAcceptance?: boolean } = {},
 ): Promise<number> {
+  const country = requireDropshipOrderCountry(plan.shipTo.country);
   const omsState = options.stagedForCanonicalAcceptance
     ? "'pending', 'pending'"
     : "'confirmed', 'paid'";
@@ -2165,7 +2173,7 @@ async function createOmsOrderWithClient(
       plan.shipTo.city,
       plan.shipTo.region,
       plan.shipTo.postalCode,
-      plan.shipTo.country,
+      country,
       plan.wholesaleSubtotalCents,
       plan.shippingCents,
       plan.totalDebitCents,

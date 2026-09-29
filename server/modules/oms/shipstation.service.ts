@@ -11,7 +11,7 @@
  */
 
 import { eq, and, sql } from "drizzle-orm";
-import { normalizeCountryToIso2 } from "@shared/country-code";
+import { CountryCodeValidationError, requireCountryCode } from "@shared/country-code";
 // Preserve existing callers while sharing the pure normalizer with returns.
 export { normalizeCountryToIso2 } from "@shared/country-code";
 import { omsOrderEvents, outboundShipments, wmsOrders, outboundShipmentItems, wmsOrderItems } from "@shared/schema";
@@ -199,6 +199,7 @@ export class ShipStationPushError extends Error {
       shipmentId?: number;
       field?: string;
       value?: unknown;
+      reasonCode?: CountryCodeValidationError["code"];
     },
   ) {
     super(message);
@@ -457,11 +458,26 @@ const PUSHABLE_SHIPMENT_STATUSES = new Set(["planned", "queued", "voided"]);
 //   3. amount_paid_cents >= 0  (header-level paid-order invariant)
 //   4. total_cents a non-negative integer (line-sum reconciliation removed; see NOTE below)
 //   5. shipping address present
-//   6. shipping country, when present, maps to ISO 3166-1 alpha-2
+//   6. shipping country is present and maps to ISO 3166-1 alpha-2
 //
 // A single `code` constant lets log pipelines pattern-match one event.
 
 export const SS_PUSH_INVALID_SHIPMENT = "SS_PUSH_INVALID_SHIPMENT";
+
+/** Preserve the provider boundary's classified error without retaining raw address data. */
+function requireShipStationCountryCode(input: unknown, shipmentId?: number): string {
+  try {
+    return requireCountryCode(input);
+  } catch (error) {
+    if (!(error instanceof CountryCodeValidationError)) throw error;
+    throw new ShipStationPushError(error.message, {
+      code: SS_PUSH_INVALID_SHIPMENT,
+      ...(shipmentId === undefined ? {} : { shipmentId }),
+      field: "order.shipping_country",
+      reasonCode: error.code,
+    });
+  }
+}
 
 export function validateShipmentForPush(
   shipment: Pick<WmsShipmentRow, "id">,
@@ -602,33 +618,9 @@ export function validateShipmentForPush(
     });
   }
 
-  // 6. Shipping country, when present, must resolve to an ISO 3166-1 alpha-2
-  //    code. A non-empty, unmappable value (e.g. a typo) would 400 at
-  //    ShipStation; reject it here BEFORE the network call so the failure is a
-  //    precise, deterministic field error rather than an opaque API 400. An
-  //    empty/null country is allowed — pushShipment defaults it to "US".
-  //    NOTE: this throw is not yet wired as a PERMANENT error class, so for a
-  //    genuinely-unmappable value the push retry worker still retries 5x and
-  //    the stale-push reconciler re-enqueues it (the loop persists for that
-  //    theoretical case). Every country value seen in production maps cleanly,
-  //    so this is not currently hit; fully draining that loop needs the worker
-  //    to treat SS_PUSH_INVALID_SHIPMENT as permanent (see PR follow-up).
-  if (
-    typeof order.shipping_country === "string" &&
-    order.shipping_country.trim().length > 0 &&
-    normalizeCountryToIso2(order.shipping_country) === null
-  ) {
-    throw new ShipStationPushError(
-      `order has an unrecognized shipping_country (cannot map to ISO 3166-1 alpha-2)`,
-      {
-        code: SS_PUSH_INVALID_SHIPMENT,
-        shipmentId,
-        field: "order.shipping_country",
-        value: order.shipping_country,
-      },
-    );
-  }
-
+  // 6. A provider request requires a known country. Missing source evidence
+  //    must never become a domestic destination by default.
+  requireShipStationCountryCode(order.shipping_country, shipmentId);
 }
 
 // ---------------------------------------------------------------------------
@@ -4925,6 +4917,7 @@ export function createShipStationService(
     `);
     const order = orderRows?.rows?.[0];
     if (!order || !order.shipping_address) return { updated: 0, skipped: 0 };
+    const shippingCountry = requireShipStationCountryCode(order.shipping_country);
 
     const shipmentRows: any = await db.execute(sql`
       SELECT id, status, shipstation_order_id
@@ -4964,7 +4957,7 @@ export function createShipStationService(
           city: order.shipping_city || "",
           state: order.shipping_state || "",
           postalCode: order.shipping_postal_code || "",
-          country: normalizeCountryToIso2(order.shipping_country) ?? "US",
+          country: shippingCountry,
           phone: ssOrder.shipTo?.phone || "",
         },
       }, { replaySafe: true });
@@ -5308,27 +5301,6 @@ export function createShipStationService(
         },
       );
     }
-    // Never resurrect a cancelled ShipStation order: createorder reactivates a
-    // cancelled order to awaiting_shipment (ENGINE-CANCEL-DIVERGENCE-DESIGN.md;
-    // markAsShipped already guards this for the ship path). Only relevant on an
-    // UPDATE (existing SS order) — a fresh create has nothing to resurrect.
-    // An explicit operator override (clear-review-and-push, P2) intentionally
-    // resurrects the cancelled SS order, so it skips this guard.
-    if (isUpdate && !opts.overrideReview) {
-      const liveSsOrder = await getOrderById(existingSsOrderId as number);
-      if (liveSsOrder?.orderStatus === "cancelled") {
-        throw new ShipStationPushError(
-          "ShipStation order is cancelled — refusing to resurrect it via push",
-          {
-            code: SS_PUSH_INVALID_SHIPMENT,
-            shipmentId,
-            field: "ss_order.cancelled",
-            value: existingSsOrderId,
-          },
-        );
-      }
-    }
-
     // ─── 2. Load order (WMS only, with financial snapshot) ──────────
     const orderRows = await db.select({
       id: wmsOrders.id,
@@ -5472,6 +5444,29 @@ export function createShipStationService(
     orderRow.is_partial_shipment = shipmentShippableQty > 0 && shipmentShippableQty < orderShippableQty;
 
     validateShipmentForPush(shipmentRow, orderRow, itemRows);
+    const shippingCountry = requireShipStationCountryCode(orderRow.shipping_country, shipmentId);
+
+    // Validate the local destination before even reading provider state.
+    // Never resurrect a cancelled ShipStation order: createorder reactivates a
+    // cancelled order to awaiting_shipment (ENGINE-CANCEL-DIVERGENCE-DESIGN.md;
+    // markAsShipped already guards this for the ship path). Only relevant on an
+    // UPDATE (existing SS order) — a fresh create has nothing to resurrect.
+    // An explicit operator override (clear-review-and-push, P2) intentionally
+    // resurrects the cancelled SS order, so it skips this guard.
+    if (isUpdate && !opts.overrideReview) {
+      const liveSsOrder = await getOrderById(existingSsOrderId as number);
+      if (liveSsOrder?.orderStatus === "cancelled") {
+        throw new ShipStationPushError(
+          "ShipStation order is cancelled — refusing to resurrect it via push",
+          {
+            code: SS_PUSH_INVALID_SHIPMENT,
+            shipmentId,
+            field: "ss_order.cancelled",
+            value: existingSsOrderId,
+          },
+        );
+      }
+    }
 
     // ─── 5. Build SS payload ────────────────────────────────────────
     // `let` because the sibling-dedup guard (step 6) may adopt an existing
@@ -5520,11 +5515,7 @@ export function createShipStationService(
         city: orderRow.shipping_city || "",
         state: orderRow.shipping_state || "",
         postalCode: orderRow.shipping_postal_code || "",
-        // Normalize to ISO 3166-1 alpha-2 (ShipStation requires it). Non-empty
-        // unmappable values are already rejected by validateShipmentForPush
-        // above, so the "US" fallback only applies to an empty/null country
-        // (the existing domestic default).
-        country: normalizeCountryToIso2(orderRow.shipping_country) ?? "US",
+        country: shippingCountry,
         phone: "",
       },
       items: itemRows.map((item) => ({

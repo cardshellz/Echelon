@@ -21,6 +21,7 @@
 import { db } from "../../db";
 import { sql } from "drizzle-orm";
 import { channelConnections } from "@shared/schema";
+import { resolveProviderCountryCode } from "@shared/country-code";
 import { eq } from "drizzle-orm";
 
 import type { OmsService } from "../oms/oms.service";
@@ -330,6 +331,8 @@ async function reconcileExistingOmsOrderReadiness(
   advancedQuantity: number;
   wmsSyncRequested: boolean;
 }> {
+  // Reject malformed source countries before readiness can advance or create WMS rows.
+  resolveProviderCountryCode(order.shipping_address?.country_code, order.shipping_address?.country);
   if (!wmsSyncService) {
     throw new Error(
       "wmsSyncService not initialized - call initReconciliation first",
@@ -380,6 +383,7 @@ async function reconcileExistingOmsOrderReadiness(
 
 async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
   const shopifyId = normalizeShopifyOrderGid(order.id);
+  const shippingCountry = resolveProviderCountryCode(order.shipping_address?.country_code, order.shipping_address?.country);
 
   // Check if already exists
   const existing = await db.execute<{ id: string }>(sql`
@@ -417,7 +421,7 @@ async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
       ${shipping?.city || null},
       ${shipping?.province || shipping?.province_code || null},
       ${shipping?.zip || null},
-      ${shipping?.country_code || shipping?.country || null},
+      ${shippingCountry},
       ${Math.round(parseFloat(order.total_price || "0") * 100)},
       ${Math.round(parseFloat(order.subtotal_price || "0") * 100)},
       ${Math.round((order.shipping_lines || []).reduce((s, l) => s + parseFloat(l.price || "0"), 0) * 100)},
