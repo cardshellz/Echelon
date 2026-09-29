@@ -126,6 +126,7 @@ import {
   buildStoreListingModeChangeInput,
   buildStoreOrderProcessingConfigInput,
   describeDropshipListingMode,
+  describeListingPushRetryRefusal,
   DROPSHIP_LISTING_MODE_OPTIONS,
   parseDropshipListingMode,
   countByKey,
@@ -1407,6 +1408,11 @@ function ListingPushOpsTab({
     setAppliedFilters({ search, status, platform });
   }
 
+  function showListingPushStatus(status: DropshipListingPushJobStatus) {
+    setStatus(status);
+    setAppliedFilters((current) => ({ ...current, status }));
+  }
+
   async function retryListingPushJob(job: DropshipAdminListingPushJobListItem) {
     setPendingRetryJobId(job.jobId);
     setError("");
@@ -1442,9 +1448,10 @@ function ListingPushOpsTab({
       ]);
     } catch (caught) {
       setError(
-        caught instanceof Error
-          ? caught.message
-          : "Dropship listing push job retry failed.",
+        describeListingPushRetryRefusal(caught, job.jobId) ??
+          (caught instanceof Error
+            ? caught.message
+            : "Dropship listing push job retry failed."),
       );
     } finally {
       setPendingRetryJobId(null);
@@ -1583,6 +1590,7 @@ function ListingPushOpsTab({
         }
         jobs={jobs}
         onRetry={retryListingPushJob}
+        onSelectStatus={showListingPushStatus}
         pendingRetryJobId={pendingRetryJobId}
         retryEligibilityNow={listingPushRetryNow}
         summary={listingPushJobsQuery.data?.summary ?? []}
@@ -8613,6 +8621,7 @@ function ListingPushJobsTable({
   isLoading,
   jobs,
   onRetry,
+  onSelectStatus,
   pendingRetryJobId,
   retryEligibilityNow,
   summary,
@@ -8621,6 +8630,8 @@ function ListingPushJobsTable({
   isLoading: boolean;
   jobs: DropshipAdminListingPushJobListItem[];
   onRetry: (job: DropshipAdminListingPushJobListItem) => void;
+  /** A status badge is a filter: clicking "Completed 3" shows those three jobs. */
+  onSelectStatus: (status: DropshipListingPushJobStatus) => void;
   pendingRetryJobId: number | null;
   retryEligibilityNow: Date;
   summary: DropshipAdminListingPushJobListResponse["summary"];
@@ -8656,13 +8667,20 @@ function ListingPushJobsTable({
         </div>
         <div className="flex flex-wrap gap-2">
           {summary.map((entry) => (
-            <Badge
+            <button
               key={entry.status}
-              variant="outline"
-              className={listingPushStatusTone(entry.status)}
+              type="button"
+              className="rounded-full"
+              aria-label={`Show ${formatStatus(entry.status).toLowerCase()} jobs`}
+              onClick={() => onSelectStatus(entry.status)}
             >
-              {formatStatus(entry.status)} {entry.count}
-            </Badge>
+              <Badge
+                variant="outline"
+                className={listingPushStatusTone(entry.status)}
+              >
+                {formatStatus(entry.status)} {entry.count}
+              </Badge>
+            </button>
           ))}
         </div>
       </div>
