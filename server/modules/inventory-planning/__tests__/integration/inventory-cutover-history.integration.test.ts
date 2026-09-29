@@ -7,8 +7,11 @@ import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase }
 import { cutoverCompositionBaseSql, cutoverCompositionSeedSql, installCutoverCompositionMigrations } from "../fixtures/inventory-cutover-composition-database.fixture";
 import { installCutoverAdmissionFixturePrerequisites } from "../fixtures/inventory-cutover-admission.fixture";
 import { InventoryCutoverHistoryService } from "../../application/inventory-cutover-history.service";
+import { InventoryCutoverOpeningService } from "../../application/inventory-cutover-opening.service";
 import { PostgresInventoryCutoverHistoryRepository } from "../../infrastructure/inventory-cutover-history.repository";
 import { PostgresInventoryCutoverOpeningRepository } from "../../infrastructure/inventory-cutover-opening.repository";
+import { PostgresInventoryCutoverReconstructionRepository } from "../../infrastructure/inventory-cutover-reconstruction.repository";
+import { loadLatestCutoverOpening } from "../../infrastructure/inventory-cutover-opening.reader";
 import { readHistoryAuditRows, readRetiredCutoverHistory, validateHistoryAudit, type HistoryAuditRow } from "../../infrastructure/inventory-cutover-history-audit.reader";
 import { assertReceiptNotRetired, assertShipmentNotRetiredPg } from "../../infrastructure/inventory-cutover-retired-work";
 import { planCutoverReconstruction } from "../../domain/inventory-cutover-reconstruction";
@@ -190,6 +193,50 @@ dbDescribe.sequential("narrow audited historical-work retirement in real Postgre
     for (const [command,actor] of [[{ ...input, reason: "different" },"operator"],[input,"other"]] as const) {
       await expect(service.retire(command,actor)).rejects.toMatchObject({ code: "HISTORY_IDEMPOTENCY_CONFLICT" });
     }
+  });
+
+  it("retires new terminal posting debt after a stale opening, preserves business rows, and requires a new opening", async () => {
+    await service.retire(await request("initial-history"), "operator");
+    const timestamp = new Date("2026-09-29T00:00:00.000Z");
+    const openingService = new InventoryCutoverOpeningService(opening, { now: () => timestamp });
+    const original = await openingService.capture("operator");
+    const saved = await openingService.save({ verification: verification(original),
+      reason: "Initial controlled test opening", idempotencyKey: "before-new-history" }, "operator");
+    const originalOpening = await loadLatestCutoverOpening(pool);
+    await pool.query(`INSERT INTO wms.outbound_shipments(id,order_id,status,requires_review,shipment_purpose,held)
+      VALUES(92,2,'queued',true,'customer_fulfillment',false);
+      INSERT INTO wms.outbound_shipment_items(id,shipment_id,order_item_id,product_variant_id,qty,shipment_item_purpose)
+      VALUES(93,92,21,101,1,'customer_fulfillment');`);
+    const review = await service.review("operator");
+    expect(review.readyForRetirement).toBe(true);
+    expect(review.decisions).toEqual([expect.objectContaining({ kind: "shipment", id: "92",
+      treatment: "terminal_order_posting_debt", sourceItemIds: [93] })]);
+    const before = await businessState();
+    const command = { expectedReviewHash: review.reviewHash, expectedAuthorityRevision: review.authorityRevision,
+      expectedConfigurationRunId: null, acceptUnresolvedOrigin: false,
+      reason: "Retire the exact terminal posting job; preserve the prior opening and all business rows", idempotencyKey: "after-stale-opening" };
+    const results = await Promise.all([service.retire(command, "operator"), service.retire(command, "operator")]);
+    expect(results.map(row => row.alreadyApplied).sort()).toEqual([false, true]);
+    expect(results.every(row => row.retiredShipments === 1 && row.retiredReceipts === 0 && !row.inventoryChanged && !row.authorityChanged)).toBe(true);
+    expect(await businessState()).toEqual(before);
+    expect(await loadLatestCutoverOpening(pool)).toEqual(originalOpening);
+    expect((await readRetiredCutoverHistory(pool)).map(row => `${row.kind}:${row.id}`).sort())
+      .toEqual(["receipt:20", "shipment:90", "shipment:92"]);
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const stale = await new PostgresInventoryCutoverReconstructionRepository().preview(client);
+      expect(stale.ready).toBe(false);
+      expect(stale.orders).toEqual([]);
+      expect(stale.blockers).toContainEqual(expect.objectContaining({ code: "CUTOVER_OPENING_EVIDENCE_CHANGED", subject: `opening:${saved.id}` }));
+    } finally { await client.query("ROLLBACK"); client.release(); }
+    const fresh = await openingService.capture("operator");
+    const newOpening = await openingService.save({ verification: verification(fresh),
+      reason: "Fresh opening after audited history retirement", idempotencyKey: "after-new-history" }, "operator");
+    expect(newOpening.id).not.toBe(saved.id);
+    expect(newOpening.sourceEvidenceHash).not.toBe(saved.sourceEvidenceHash);
+    expect(await businessState()).toEqual(before);
+    expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.availability_cutover_opening_snapshots")).rows[0].count).toBe(2);
   });
 
   it.each(["stock","attempt","source","package-label","current-order"])("rejects a stale %s review without partial retirement", async change => {

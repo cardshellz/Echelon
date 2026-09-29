@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { HistoryRetirementResult, RetireHistoryRequest } from "@shared/types/inventory-cutover-history";
+import type { OpeningSource } from "@shared/types/inventory-cutover-opening";
 import { InventoryCutoverHistoryService, type RetireHistoryCommand } from "../../application/inventory-cutover-history.service";
 import { activeCutoverHistory, assertHistoryRetirementApproved, reviewHistoricalWork } from "../../domain/inventory-cutover-history-retirement";
 import { historyFixture } from "../fixtures/inventory-cutover-history.fixture";
@@ -50,6 +51,41 @@ describe("historical retirement review and application boundary", () => {
     expect(review.readyForRetirement).toBe(false);
     expect(() => assertHistoryRetirementApproved(review, { ...request, expectedReviewHash: review.reviewHash })).toThrow("blocks historical retirement");
   });
+
+  function withSavedOpening(source: OpeningSource, evidenceHash: string): void {
+    source.latestVerification = { id: "36", sourceEvidenceHash: evidenceHash, verificationHash: "c".repeat(64),
+      authorityRevision: source.authorityRevision, historicalExceptionHash: "d".repeat(64), historicalExceptionCount: 0,
+      verifiedAt: source.capturedAt, actor: "operator", reason: "Previous immutable opening", alreadyApplied: false,
+      stockChanged: false, authorityChanged: false };
+  }
+
+  it("permits reviewed cleanup after a stale opening without mutating that opening or business evidence", () => {
+    const { source, facts, request } = reviewFixture();
+    withSavedOpening(source, "e".repeat(64));
+    const before = structuredClone({ source, facts });
+    const review = reviewHistoricalWork(source, facts);
+    expect(review.readyForRetirement).toBe(true);
+    expect(review.decisions.map(row => `${row.kind}:${row.id}`)).toEqual(["receipt:20", "shipment:90"]);
+    expect(() => assertHistoryRetirementApproved(review, { ...request, expectedReviewHash: review.reviewHash })).not.toThrow();
+    expect({ source, facts }).toEqual(before);
+    expect(review.activatesInventory).toBe(false);
+  });
+
+  it.each(["current-opening", "frozen", "authority-revision", "canonical"])(
+    "does not allow stale-opening recovery to bypass %s", change => {
+      const { source, facts, request } = reviewFixture();
+      withSavedOpening(source, "e".repeat(64));
+      if (change === "current-opening") source.latestVerification!.sourceEvidenceHash = source.evidenceHash;
+      if (change === "frozen") source.configurationRunId = "42";
+      if (change === "authority-revision") source.latestVerification!.authorityRevision = "2";
+      if (change === "canonical") source.runtimeAuthority = "canonical";
+      const review = reviewHistoricalWork(source, facts);
+      expect(review.blockers).toContainEqual({ code: "HISTORY_OPENING_ALREADY_SAVED", subject: "opening" });
+      expect(review.readyForRetirement).toBe(false);
+      expect(() => assertHistoryRetirementApproved(review, { ...request, expectedReviewHash: review.reviewHash }))
+        .toThrow("blocks historical retirement");
+    },
+  );
 
   it("projects only retired processing and preserves original inventory, orders, costs and packages", () => {
     const { source, review } = reviewFixture();

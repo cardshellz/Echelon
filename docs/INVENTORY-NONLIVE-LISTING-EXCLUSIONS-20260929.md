@@ -63,3 +63,28 @@ The exclusions persist after cutover. Products, inventory and other destinations
 This removes these four pairs from future publication planning. It does not prove all other provider requests will succeed. Historical eBay errors for variants 7/64 remain unexplained; their latest GETs show published offers, not proof of a successful future quantity write.
 
 The next cutover review must use target revisions **4**, not reuse a pre-exclusion selection manifest. No final cutover, additional inventory reconciliation, held-order change, Canada configuration change, PR creation, merge or deployment occurred in this exclusion operation.
+
+## Resume attempt and stale-opening restart fix
+
+The subsequent owner-authorized resume used deployed **v3087 / a0031ae8**. Fresh dry run **43** was ready for all **256** products and **392** Shopify/eBay publication rows, respecting the four exclusions. This is preview evidence, not completed publication or cutover.
+
+The deployed `QuantityPublicationRecoveryService.attestProviderAnswers` resolved **159** uncertain outbox attempts belonging to closed, failed run **42**, using retained request-termination evidence. The first batch stopped on a live publisher lock after partial durable progress; the remaining **82** were reviewed again and completed during the processing pause. These are operator-attestation receipts, **not** provider quantity-verification receipts. No stock, order, provider quantity or authority write was performed by that recovery.
+
+The new opening then stopped on shipment **18295**, source item **24339**, for order **#63663 / 209044**. The targeted database read at **23:40:37 UTC** shows its sole line **322531 / SHOPIFY-POKEMON** has quantity **17**, picked **17**, fulfilled **17**, `inventory_tracking=false`, catalog product **559**, and no variant. The order is recorded shipped; its old shipment intention remains queued with `inventory_deduction_missing_item_data`. This does not independently prove physical delivery.
+
+`proposeHistoricalWork` classifies that exact shipment as `terminal_order_posting_debt`, with no current-work or ownership conflict. `reviewHistoricalWork` nevertheless blocks it as `HISTORY_OPENING_ALREADY_SAVED` because a prior opening exists. `PostgresInventoryCutoverReconstructionRepository.resolvePlan` independently rejects that old opening when its source hash differs from current evidence. Thus the old opening cannot be used, but its mere existence also prevented the cleanup needed to create its replacement.
+
+The restart fix permits audited history retirement with a saved opening **only** when:
+
+- Runtime authority is still legacy and its revision matches the old opening.
+- No active configuration freeze exists.
+- The saved opening's evidence hash differs from current evidence.
+- All existing exact-owner, terminal-work, lease, source-membership, approval-hash and transaction checks pass.
+
+The old opening is never edited or deleted. Retirement appends immutable history; reconstruction still refuses the old opening and requires a newly verified snapshot. Current openings, active freezes, changed authority revisions and canonical authority remain blocked. No migration, ATP formula, channel setting or inventory writer changed.
+
+**Validation:** 202 tests passed across seven history/opening/composition suites, including 124 real disposable-PostgreSQL tests and 78 unit tests; no skips. The new database regression proves concurrent retry receipts, unchanged stock/orders/costs/package rows, unchanged prior opening, rejection of that stale opening after retirement, and successful saving of a distinct fresh opening. Application and server-test TypeScript checks passed. The initial local test connection was stale; final integration validation used a separate localhost-only PostgreSQL instance, not production.
+
+**Deployment boundary:** the restart fix has not been deployed or used for production retirement. Production readers rebuild retirement-audit hashes through `reviewHistoricalWork`, so the fix must be deployed before creating an audit with this new eligibility rule. No local-only bypass is valid. The paused web process was restored and maintenance disabled at **23:38:38 UTC**. Authority remains legacy; no ledger opening or authority commit occurred during this attempt.
+
+**Next:** deploy the reviewed restart fix, retire only the exact terminal posting job through the existing history owner, then resume a fresh opening and the existing publication/commit/completion sequence. Do not reapply the four exclusions or the 159 completed attempt attestations. The known product-only shipment validator behavior is not changed by this restart fix; do not replay the shipment to fabricate a variant or inventory deduction. Other provider responses remain unproven until the actual publication phase succeeds.
