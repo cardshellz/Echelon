@@ -4,6 +4,7 @@ import { rateLimit } from "express-rate-limit";
 import { CUSTOMER_RETURNS_API, CUSTOMER_RETURNS_PAGE } from "@shared/returns/customer-return-access.contract";
 import { createCustomerReturnCustomerAuth } from "../../infrastructure/customer-return-customer-auth.composition";
 import { createCustomerReturnCustomerServices } from "../../infrastructure/customer-return-customer.composition";
+import { registerCustomerReturnShopifyProxyRoutes } from "./customer-return-shopify-proxy.routes";
 import { registerCustomerReturnCustomerAuthRoutes, requireReturnCustomerCommand, requireReturnCustomerSession, returnCustomerError, returnCustomerPrivateResponse,
   type CustomerReturnCustomerAuthRouteDependencies } from "./customer-return-customer-auth.routes";
 
@@ -15,6 +16,7 @@ const cursor = (raw: unknown) => z.object({ before: z.string().optional() }).str
 export function registerCustomerReturnCustomerRoutes(app: Express, dependencies: CustomerReturnCustomerRouteDependencies = {}) {
   const context = dependencies.context ?? createCustomerReturnCustomerAuth;
   const services = dependencies.services ?? createCustomerReturnCustomerServices;
+  registerCustomerReturnShopifyProxyRoutes(app, { context });
   app.use([CUSTOMER_RETURNS_API, CUSTOMER_RETURNS_PAGE], (_req, res, next) => { returnCustomerPrivateResponse(res); next(); });
   app.use([CUSTOMER_RETURNS_API, CUSTOMER_RETURNS_PAGE], rateLimit({ windowMs: 60_000, limit: 60,
     standardHeaders: "draft-7", legacyHeaders: false,

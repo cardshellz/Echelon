@@ -3,6 +3,7 @@ import { customerReturnFlowOrderSchema } from "./customer-return-flow.contract";
 
 export const CUSTOMER_RETURNS_PAGE = "/customer-returns";
 export const CUSTOMER_RETURNS_API = "/api/returns/customer";
+export const CUSTOMER_RETURNS_SHOPIFY_PROXY = "/api/returns/shopify/proxy";
 export const RETURN_CUSTOMER_SESSION_HEADER = "X-Return-Session";
 export const customerReturnSessionStateSchema = z.object({
   authenticated: z.boolean(),

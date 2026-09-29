@@ -1,49 +1,63 @@
-# Customer returns access and private validation
+# Customer returns: Echelon-owned Shopify sign-in
 
-This change connects a Shopify customer login to the existing Echelon returns engine. It does not enable public customer access or change refund authority. Staff still apply refunds manually in Shopify. The existing `/return-portal` administrator preview remains separate.
+Shopify authenticates the customer; Echelon verifies that identity and owns order access, policy resolution, returns, and labels. The Club application is not in the sign-in path. Refunds remain manual in Shopify, and the existing `/return-portal` administrator preview remains available.
 
-## Identity and order authority
+## Identity and browser binding
 
-1. The Club application's new `/api/app-proxy/returns` entry validates Shopify's documented proxy signature, signed shop, timestamp, and customer identity. It does not require Club membership. The bridge is disabled by default.
-2. Echelon `/customer-returns/start` resolves the approved login destination and creates a five-minute challenge bound to the initiating browser session. Shop input here is only a navigation hint; it never grants order access.
-3. The bridge returns a 90-second, purpose-specific signed grant through a POST form to the fixed Echelon callback. Grants contain the verified shop/customer and challenge, never an authoritative browser-supplied channel.
-4. The callback relays the grant through a same-origin JSON request. Only that second request can redeem it, after browser binding and the private staff gate are verified. PostgreSQL atomically consumes the challenge; wrong browser, wrong shop, expiry, and replay fail closed. Expiry is rechecked after asynchronous work.
-5. Echelon maps the verified shop to exactly one configured Shopify channel and connection. The customer session expires after 30 minutes. Each request rechecks the shop mapping. Explicit returns logout removes this session; a Shopify logout does not currently revoke an already issued Echelon session immediately.
-6. The opaque browser-storage partition is stable for the same shop/customer across reauthentication. It is not a credential. A handoff-secret rotation changes this partition and invalidates existing customer sessions; accepted returns remain available through My returns after signing in again.
+1. Echelon `/customer-returns/start` resolves one approved shop and creates a five-minute challenge bound to the initiating browser session. An optional shop hint selects a login destination only; it grants no identity.
+2. The configured storefront proxy forwards directly to Echelon `/api/returns/shopify/proxy`. Echelon verifies Shopify's HMAC over the original query, the exact configured shop and proxy path, bounded timestamp, and customer identity. It uses only the signing secret explicitly configured for that shop's proxy-owning Shopify app.
+3. A guest returns to Shopify login with the same challenge and configured storefront path. A signed-in customer receives a form that posts the original signed proof, encoded as base64url, to Echelon's fixed callback. No Club token or intermediary JWT is issued or accepted.
+4. Shopify strips cookies from proxy requests. The callback therefore only relays the bounded proof through a same-origin JSON request; it cannot authenticate a customer itself. That request retains the private staff gate, verifies the Shopify proof again, checks the initiating browser, and atomically consumes the challenge. Replay, tampering, wrong browser/shop/path, and expiration fail closed. Expiry is checked again after database waits.
+5. The verified shop must resolve to exactly one approved, active retail Shopify channel and connection. The Echelon customer session lasts 30 minutes. Each request rechecks this mapping. Returns logout removes that session; Shopify logout does not immediately revoke a previously issued Echelon session.
 
-Every workspace request also carries its expected `X-Return-Session` partition. The server compares it with the verified current session before reading or executing anything. Signing into a different account in another tab cannot silently apply a stale tab's saved request to that account. Session discovery and the login exchange are the only exceptions.
+Every customer workspace request includes its expected opaque `X-Return-Session` partition. The server checks it before reading or executing anything, so an old tab cannot silently use a different account's ambient cookie. This partition is not an authentication credential. Keeping its storage secret stable preserves uncertain submission recovery across reauthentication and this migration.
 
-Order lists and direct selection require the canonical channel/customer pair. Canonical OMS order IDs remain attached to inspection, review, submission, and retry. Both local snapshots enforce ownership, and the Shopify snapshot independently confirms the current customer. Missing/ambiguous ownership blocks access; email or order-number resemblance never supplies it.
+Order selection, inspection, review, submission, retries, RMA status, history, and downloads retain canonical order ownership. Both local snapshots and Shopify's order snapshot verify the customer. Missing or ambiguous ownership blocks access; email and order-number resemblance never supply it. Customer UI cannot select a channel, warehouse, carrier, or policy.
 
-The eligible-order list evaluates at most ten candidates per page with at most two concurrent inspections. A provider or identity-verification failure excludes that candidate and reports an incomplete check while preserving other verified eligible orders. Empty eligible pages retain their continuation cursor. My returns is separately paginated and remains available when current policy/window/eligibility would block a new return.
+The order list checks at most ten candidates per page, with at most two concurrent inspections. Unverifiable orders are excluded with an explicit incomplete-check message while other verified orders remain available. History is separately paginated and remains available when current new-return eligibility or policy changes.
 
-New customer submission commands bind an immutable OMS order FK before acquisition. Existing staff commands remain unbound and staff-only. Every customer command replay, resume, RMA status, label progression, and PDF download checks exact ownership. Public response contracts omit channel settings and provider download URLs. Shipping and claims still use the existing transactional intake and provider recovery logic.
+## Configuration
 
-## Configuration and rollout
+The public Shopify route is a signature verifier and proof relay only. No order or label access is granted there. Leave `CUSTOMER_RETURN_CUSTOMER_ACCESS` unset during private testing; only its exact value `enabled` opens the customer surface. This change does not set it or publish customer-facing links.
 
-Deploy the paired Club handoff change and this Echelon change; Echelon migrations 256 and 257 are additive. Migration 256 binds new customer commands to canonical orders. Migration 257 creates ephemeral login challenges. Expired challenges older than 24 hours are removed in bounded batches during new challenge creation. No historical customer ownership is inferred or backfilled.
+Configure these Echelon values through the normal secret/configuration process:
 
-Configure these values through the normal deployment secret/configuration process:
+- `CUSTOMER_RETURN_PUBLIC_ORIGIN`: exact HTTPS Echelon origin, without a path or query.
+- `CUSTOMER_RETURN_SHOPIFY_DOMAINS`: existing approved canonical Shopify shop list.
+- `CUSTOMER_RETURN_SHOPIFY_APPS`: JSON map from canonical shop to `{ "proxyUrl": "https://store.example.com/apps/echelon-returns", "secretEnv": "CUSTOMER_RETURN_SHOPIFY_CLIENT_SECRET" }`. Each proxy URL identifies one Shopify proxy root, with no query, credentials, fragment, or custom port. The old member-portal proxy is rejected.
+- The environment variable named by each `secretEnv`: the actual client secret of the Shopify app that owns that proxy. A webhook secret or unrelated Admin API app credential is not evidence of proxy identity. There is no implicit global-secret fallback or search through other shops' secrets.
+- `CUSTOMER_RETURN_STORAGE_SECRET`: stable secret used only for the opaque browser recovery partition. To preserve existing private-test recovery, retain the previous value here or leave this unset while the legacy `CUSTOMER_RETURN_HANDOFF_SECRET` supplies the same value. That legacy value is never accepted as a Shopify signature or JWT login key.
 
-- Both applications: `CUSTOMER_RETURN_HANDOFF_SECRET`, the same dedicated random secret of 32–1024 characters. It must be separate from membership/session/API secrets.
-- Both applications: `CUSTOMER_RETURN_PUBLIC_ORIGIN`, the exact HTTPS Echelon customer-portal origin, without a path or query.
-- Club: `CUSTOMER_RETURN_SHOPIFY_DOMAIN`, the exact installed `*.myshopify.com` shop; existing `SHOPIFY_API_SECRET` verifies proxy signatures. `CUSTOMER_RETURN_HANDOFF_ENABLED=true` enables only the bridge.
-- Echelon: existing `CUSTOMER_RETURN_SHOPIFY_DOMAINS` approval list and `CUSTOMER_RETURN_LOGIN_URLS`, a JSON mapping from each approved canonical Shopify domain to its HTTPS storefront proxy URL ending in `/returns`. For the observed store the proxy path is `/apps/member-portal/returns`; do not infer another store's path.
-- Leave Echelon `CUSTOMER_RETURN_CUSTOMER_ACCESS` unset during private testing. Only the exact value `enabled` opens the customer surface publicly; this change does not set it. Private access requires a freshly authorized Echelon administrator as well as the Shopify customer login.
+`CUSTOMER_RETURN_LOGIN_URLS`, Club's handoff enablement setting, and Club-issued JWTs are no longer used. This is an intentional authentication cutover: in-progress old login attempts must restart, while existing Echelon sessions and saved return requests remain usable if the storage partition key is retained.
 
-The anonymous callback can only show a sign-in relay; it cannot disclose orders or establish a session without the browser-bound challenge and gates. No customer-facing links are published by this Echelon change. Enabling the Club bridge for a private canary does not bypass Echelon's administrator gate.
+No database migration or ownership backfill is required. Existing challenge and canonical-command tables continue to enforce single consumption and immutable order identity.
 
-## Private canary
+## Verified Shopify configuration and proposed route
 
-1. Sign into Echelon as an authorized administrator. Use **Test customer sign-in** from the private preview or open `/customer-returns` on the configured origin.
-2. Sign into the intended Shopify customer account in the same browser and complete the handoff. No Club subscription or membership row should be necessary.
-3. Confirm the eligible-order picker only lists that account's approved-shop orders. Orders without confirmed eligible quantities should not appear. Confirm another customer's canonical order ID returns the same unavailable response as an unknown ID.
-4. Select an order, pack one or multiple boxes, and review. Confirm the correct channel's policy/shipping settings apply without a channel/store selector.
-5. An explicit create/generate action creates a real return and can purchase real postage when that policy's shipping is enabled. Reading a page, restoring a pending request, or viewing My returns must not purchase postage.
-6. Simulate an interrupted response and reload. The saved request must retain the exact command UUID and quantities. Reauthentication must preserve its recovery partition. Only explicit retry/progress commands may resume work.
-7. Confirm existing returns and label downloads remain accessible after their new-return eligibility expires. A second customer or another shop must not be able to read them.
-8. Confirm signed-out and non-admin browsers remain blocked until launch is separately approved. Customer rollout requires deliberate link publication and the Echelon access setting; neither is performed here.
+The September 29 read-only check identified the installed Echelon Shopify app (Dev Dashboard app `313871204353`). Its active version had proxy permissions and no configured proxy. The existing Echelon environment's public client ID differed from this app's public client ID, so do not assume the generic `SHOPIFY_API_SECRET` belongs to it.
+
+Proposed app-proxy configuration, to apply after deploying this endpoint and binding the correct app secret:
+
+- Prefix: `apps`
+- Subpath: `echelon-returns`
+- Proxy URL: `https://cardshellz-echelon-f21ea7da3008.herokuapp.com/api/returns/shopify/proxy`
+- Storefront entry: `https://www.cardshellz.com/apps/echelon-returns`
+
+Preserve the active app version's existing scopes, redirect URLs, and other settings when adding this proxy. Do not repoint the Club app's existing member-portal proxy. Verify Shopify's resulting storefront path rather than assuming the proposed path was accepted unchanged.
+
+## Private validation
+
+1. Deploy the Echelon change, configure the actual Echelon Shopify app secret and direct proxy, and retain the Echelon staff gate. Confirm anonymous `/customer-returns` still requires staff authentication.
+2. Sign into Echelon as an authorized administrator. Use Test customer sign-in from `/return-portal` in the same browser as the intended Shopify customer login.
+3. Confirm the roundtrip uses the dedicated storefront proxy and Echelon only. Verify that Club can be unavailable without preventing this route. A nonmember customer must be able to sign in.
+4. Confirm the picker lists only that account's approved-shop eligible orders. Another customer's canonical order ID must be unavailable. The order determines policy automatically.
+5. Select items, pack one or multiple boxes, and review. Only an explicit create/generate action may create a return or purchase postage. Page reads, history, and pending-request restoration must not purchase anything.
+6. Interrupt a submission response and reload or sign in again. The exact saved command UUID and quantities must remain intact. Explicit retry/progress resumes that intent.
+7. Verify history and owned label downloads still work after new-return eligibility expires, and account changes in another tab reject stale requests.
+8. Confirm customers remain blocked until public launch is separately authorized. Do not publish store links or enable customer access as part of this migration.
 
 ## Evidence limits
 
-Source and local tests do not prove a live customer handoff or carrier label purchase. The inspected deployed Club revision matched its source, and the public member-portal entry presented Shopify login. No authenticated Shopify customer canary or new postage purchase was performed during implementation. Production customer-ID coverage and historical numeric/GID consistency require the separately approved aggregate read-only diagnostic; missing ownership must remain blocked until verified.
+Local signature, HTTP, lifecycle, and regression tests do not prove the deployed Shopify proxy or an authenticated customer roundtrip. Production customer-ID coverage, authenticated login, and real label purchase require separate live verification. Earlier Club server errors did not establish their cause and are not a dependency of this direct design.
+
+Shopify reference: https://shopify.dev/docs/apps/build/online-store/app-proxies/authenticate-app-proxies
