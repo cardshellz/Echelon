@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { cutoverCompositionBaseSql, cutoverCompositionSeedSql, cutoverCompositionChannelSeedSql, cutoverCompositionObserveOnlySeedSql, installCutoverCompositionMigrations, seedCompositionReviewedDryRun } from "../fixtures/inventory-cutover-composition-database.fixture";
+import { cutoverCompositionBaseSql, cutoverCompositionSeedSql, cutoverCompositionChannelSeedSql, cutoverCompositionChannelSeed, cutoverCompositionObserveOnlySeedSql, installCutoverCompositionMigrations, seedCompositionReviewedDryRun } from "../fixtures/inventory-cutover-composition-database.fixture";
 import { PostgresInventoryCutoverReconstructionRepository } from "../../infrastructure/inventory-cutover-reconstruction.repository";
 import { captureProposedClaimSupplySnapshotInsideTransaction } from "../../infrastructure/inventory-availability-shadow.repository";
 import { planFreshCutoverClaims } from "../../domain/inventory-cutover-reconstruction-planning";
@@ -33,6 +33,7 @@ import { SafetyDefinitionService } from "../../application/inventory-safety-defi
 import { PostgresSafetyDefinitionStore } from "../../infrastructure/inventory-safety-definition.repository";
 import { ChannelDefinitionService } from "../../application/inventory-channel-definition.service";
 import { PostgresChannelDefinitionStore } from "../../infrastructure/inventory-channel-definition.repository";
+import { activateReviewedWarehouseSourcesInsideTransaction } from "../../../warehouse/infrastructure/warehouse-source-activation.repository";
 
 // Only the application's process-global connection is disabled. Every owner under
 // test receives the uniquely created disposable pool/client; no owner is mocked.
@@ -475,7 +476,22 @@ dbDescribe.sequential.each([
     database = await createInventoryCutoverTestDatabase(databaseUrl,disposable,cutoverCompositionBaseSql);
     await installCutoverCompositionMigrations(database.pool);
     await database.pool.query(cutoverCompositionSeedSql);
-    await database.pool.query(cutoverCompositionChannelSeedSql);
+    // Production regression: sources are prepared as drafts, not pre-activated
+    // by a fixture. Excluded mapping drafts must not enter the reviewed set.
+    await database.pool.query(cutoverCompositionChannelSeed({ activeSource: false, explicitMembership: true }));
+    await database.pool.query(`INSERT INTO warehouse.warehouses(id,code) VALUES(90,'EXTERNAL');
+      INSERT INTO warehouse.fulfillment_nodes(code,name,node_type,warehouse_id,inventory_authority,fulfillment_authority,created_by)
+        VALUES('EXTERNAL','Uncommissioned 3PL','third_party_logistics',90,'external_provider','external_provider','operator');
+      INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(102,20,'EXCLUDED-P5');
+      INSERT INTO inventory.publication_variant_mapping_versions(publication_target_id,product_variant_id,version,external_inventory_item_id,external_sku,
+        definition_hash,change_reason,idempotency_key,request_hash,created_by)
+        VALUES(1,102,1,'excluded-item','EXCLUDED-P5',repeat('b',64),'Excluded draft','excluded-mapping',repeat('b',64),'operator');
+      INSERT INTO inventory.publication_variant_mapping_heads(publication_target_id,product_variant_id,draft_mapping_id,revision,updated_by,update_reason)
+        SELECT 1,102,id,1,'operator','Excluded draft' FROM inventory.publication_variant_mapping_versions WHERE product_variant_id=102;
+      INSERT INTO inventory.publication_membership_versions(publication_target_id,product_variant_id,version,included,definition_hash,review_hash,created_by,created_at)
+        VALUES(1,102,1,false,repeat('b',64),repeat('b',64),'operator',transaction_timestamp());
+      INSERT INTO inventory.publication_membership_heads(publication_target_id,product_variant_id,active_version_id)
+        SELECT 1,102,id FROM inventory.publication_membership_versions WHERE product_variant_id=102`);
     await database.pool.query(cutoverCompositionObserveOnlySeedSql);
     await database.pool.query(`INSERT INTO inventory.promise_safety_policy_versions(scope_key,scope_type,product_variant_id,warehouse_id,version,policy_mode,definition_hash,change_reason,idempotency_key,request_hash,created_by)
       VALUES('network:variant:101','network_variant',101,NULL,1,'off',repeat('e',64),'Test network SKU policy','composition-network-safety',repeat('e',64),'operator'),
@@ -506,6 +522,8 @@ dbDescribe.sequential.each([
     prepared = await service.prepare({ sourceDryRunId:dryRun.activationRunId,expectedDryRunResultHash:dryRun.resultHash,
       idempotencyKey:"composition-channel-prepare",reason:"Prepare one exact channel" },"operator");
     expect(prepared).toMatchObject({ state:"publishing",conservativePublicationRows:1,runtimeAuthority:"legacy" });
+    expect((await database.pool.query("SELECT lifecycle_status,activated_by,activated_at FROM warehouse.fulfillment_nodes WHERE id=1")).rows)
+      .toEqual([{ lifecycle_status: "draft", activated_by: null, activated_at: null }]);
     expect((await database.pool.query("SELECT desired_quantity::text,publication_phase,state FROM inventory.inventory_publication_outbox")).rows)
       .toEqual([{ desired_quantity:"14",publication_phase:"conservative",state:"queued" }]);
     expect((await database.pool.query("SELECT reserved_qty FROM inventory.inventory_levels")).rows).toEqual([{ reserved_qty:3 }]);
@@ -556,6 +574,22 @@ dbDescribe.sequential.each([
     const review = await service.preview({ activationRunId:prepared.activationRunId },"operator");
     expect(review.publicationRows).toEqual([{ publicationTargetId:1,productVariantId:101,desiredQuantity:"14" }]);
     expect(review.blockers).toEqual([]);
+    expect(review.manifest.sourceNodes).toMatchObject([{ nodeId: 1, warehouseId: 1, lifecycleStatus: "draft", warehouseActive: 1 }]);
+    expect(review.manifest.sourceNodes).toHaveLength(1);
+    expect(review.manifest.selections.some(selection => selection.kind === "variant_mapping" && selection.key === "1:102")).toBe(false);
+    const client = await database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await expect(activateReviewedWarehouseSourcesInsideTransaction(client, review.manifest.sourceNodes!, { actor: "operator", occurredAt: now }))
+        .rejects.toThrow("CUTOVER_EXCLUSIVE_ADMISSION_REQUIRED");
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
+    await expect(database.pool.query(`UPDATE warehouse.fulfillment_nodes SET lifecycle_status='active',
+      activated_by='operator',activated_at=transaction_timestamp() WHERE id=1`)).rejects.toThrow("CUTOVER_CONFIGURATION_FROZEN");
+    expect((await database.pool.query("SELECT lifecycle_status FROM warehouse.fulfillment_nodes WHERE id=1")).rows)
+      .toEqual([{ lifecycle_status: "draft" }]);
   });
 
   it("commits, publishes, verifies, finishes and replays with actual owners and immutable receipts", async () => {
@@ -582,12 +616,24 @@ dbDescribe.sequential.each([
     expect((await database.pool.query("SELECT reserved_qty FROM inventory.inventory_levels")).rows).toEqual([{ reserved_qty:3 }]);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.availability_claims")).rows[0].count).toBe(0);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.inventory_publication_outbox WHERE publication_phase='full'")).rows[0].count).toBe(0);
+    expect((await database.pool.query("SELECT lifecycle_status,activated_by,activated_at FROM warehouse.fulfillment_nodes WHERE id=1")).rows)
+      .toEqual([{ lifecycle_status: "draft", activated_by: null, activated_at: null }]);
     const originalCosts=(await database.pool.query("SELECT * FROM oms.order_item_costs")).rows;
     const commits=await Promise.allSettled([service.commit(request,"operator"),service.commit(request,"operator")]);
     expect(commits.map(result => result.status)).toEqual(["fulfilled","fulfilled"]);
     expect(commits.flatMap(result => result.status==="fulfilled" ? [result.value.alreadyApplied] : []).sort()).toEqual([false,true]);
     const committed=commits.flatMap(result => result.status==="fulfilled" && !result.value.alreadyApplied ? [result.value] : [])[0];
     expect(committed).toMatchObject({ runtimeAuthority:"canonical",authorityRevision:"2",fullPublicationRows:1,publicationVerification:"pending" });
+    expect(committed.activatedFulfillmentNodeIds).toEqual([1]);
+    expect((await database.pool.query(`SELECT selection_manifest,result_payload FROM inventory.availability_cutover_commits
+      WHERE activation_run_id=$1`, [prepared.activationRunId])).rows[0]).toMatchObject({
+      selection_manifest: { sourceNodes: [{ nodeId: 1, warehouseId: 1, lifecycleStatus: "draft", warehouseActive: 1 }] },
+      result_payload: { activatedFulfillmentNodeIds: [1] },
+    });
+    expect((await database.pool.query("SELECT id,lifecycle_status,activated_by FROM warehouse.fulfillment_nodes ORDER BY id")).rows)
+      .toEqual([{ id: 1, lifecycle_status: "active", activated_by: "operator" }, { id: 2, lifecycle_status: "draft", activated_by: null }]);
+    expect((await database.pool.query("SELECT lifecycle_status FROM inventory.publication_variant_mapping_versions WHERE product_variant_id=102")).rows)
+      .toEqual([{ lifecycle_status: "draft" }]);
     expect((await database.pool.query("SELECT state,revision::text FROM inventory.inventory_publication_targets WHERE id=2")).rows)
       .toEqual([{ state:"live",revision:"3" }]);
     expect((await database.pool.query("SELECT reserved_qty,picked_qty,variant_qty FROM inventory.inventory_levels")).rows)

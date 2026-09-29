@@ -318,7 +318,7 @@ describe("inventory availability Slice 1 migration contract", () => {
     expect(matching).toEqual([MIGRATION_FILENAME]);
   });
 
-  it("keeps current production paths disconnected from the inactive schema", () => {
+  it("keeps legacy production paths disconnected from canonical definitions", () => {
     const forbidden = [
       "inventory-planning.schema",
       "inventory.transformation_model_heads",
@@ -336,6 +336,10 @@ describe("inventory availability Slice 1 migration contract", () => {
         ) continue;
         const source = readFileSync(file, "utf8");
         for (const symbol of forbidden) {
+          // The Warehouse owner may activate reviewed sources inside the
+          // admitted final cutover transaction. No general runtime reader is added.
+          if (symbol === "warehouse.fulfillment_nodes" && file === resolve(process.cwd(),
+            "server/modules/warehouse/infrastructure/warehouse-source-activation.repository.ts")) continue;
           expect(source, `${relative(process.cwd(), file)} reads ${symbol}`).not.toContain(symbol);
         }
       }

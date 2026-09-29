@@ -10,6 +10,7 @@ import { loadManagedSellableVariantIds, loadProposedPublicationTargetsForCutover
 import { PostgresInventoryCutoverReconstructionRepository } from "./inventory-cutover-reconstruction.repository";
 import { loadLatestCutoverOpening } from "./inventory-cutover-opening.reader";
 import { projectVerifiedOpeningSupply } from "../domain/inventory-opening-supply-projection";
+import { projectCutoverSourceActivation, selectedCutoverPublicationMappings } from "../domain/inventory-cutover-publication-selection";
 type Blocker = InventoryCutoverReview["blockers"][number];
 
 /** Read-only proposed post-reconstruction state, shared by preparation and final review.
@@ -71,12 +72,13 @@ export async function projectInventoryCutoverStateInsideTransaction(
       ...row, reservedQty: (BigInt(row.reservedQty) + (additionalByLevel.get(row.inventoryLevelId) ?? BigInt(0))).toString(),
     })) });
     const variants = await loadManagedSellableVariantIds(client, productId);
-    const targets = await loadProposedPublicationTargetsForCutover(client, productId, variants);
+    const targets = projectCutoverSourceActivation(
+      await loadProposedPublicationTargetsForCutover(client, productId, variants), manifest);
     configurationEvidence.push({ productId, variants, targets });
     for (const target of targets) {
       for (const policy of target.policies) checkSelection(manifest, "channel_policy", policy.scopeKey, policy.policyId, policy.definitionHash, blockers);
       if (target.sourceBinding) checkSelection(manifest, "source_binding", String(target.publicationTargetId), target.sourceBinding.bindingId, target.sourceBinding.definitionHash, blockers);
-      for (const mapping of target.mappings) checkSelection(manifest, "variant_mapping", `${target.publicationTargetId}:${mapping.productVariantId}`, mapping.mappingId, mapping.definitionHash, blockers);
+      for (const mapping of selectedCutoverPublicationMappings(target)) checkSelection(manifest, "variant_mapping", `${target.publicationTargetId}:${mapping.productVariantId}`, mapping.mappingId, mapping.definitionHash, blockers);
     }
     // This is an explicit projection of the proposed authority, not a report that
     // the database singleton or target states have changed.

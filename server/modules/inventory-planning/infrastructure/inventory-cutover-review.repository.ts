@@ -1,4 +1,5 @@
 import { projectInventoryCutoverStateInsideTransaction } from "./inventory-cutover-projection.repository";
+import { captureCutoverSourceNodes } from "./inventory-cutover-source-nodes.repository";
 import type { PoolClient } from "pg";
 import { inventoryCutoverReviewSchema, type InventoryCutoverReview, type InventoryCutoverManifest } from "@shared/types/inventory-cutover-commit";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -35,7 +36,8 @@ export async function captureInventoryCutoverReviewInsideTransaction(
   }
   const dryRun = await loadReadyDryRun(client, run.source_dry_run_id, String(run.evidence_payload.sourceDryRunResultHash), false);
   await assertDryRunSelectionsCurrent(client, dryRun, false);
-  const manifest = buildInventoryCutoverManifest(dryRun, await selectedSnapshots(client, dryRun, false));
+  const manifest = await captureCutoverSourceNodes(client,
+    buildInventoryCutoverManifest(dryRun, await selectedSnapshots(client, dryRun, false)));
   const blockers: Blocker[] = [];
   // Readiness requires the durable suppression gate, no unresolved send, and
   // exact latest admitted outbox attempts preceding every provider readback.
