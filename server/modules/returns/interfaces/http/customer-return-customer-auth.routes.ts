@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { Express, NextFunction, Request, Response } from "express";
 import { z } from "zod";
 import { CUSTOMER_RETURNS_API, CUSTOMER_RETURNS_PAGE, RETURN_CUSTOMER_SESSION_HEADER, customerReturnSessionStateSchema } from "@shared/returns/customer-return-access.contract";
-import { CustomerReturnCustomerAccessError, type CustomerReturnCustomerSession } from "../../application/customer-return-customer-auth.service";
+import { CustomerReturnCustomerAccessError, RETURN_CUSTOMER_ENCODED_PROOF_MAX_LENGTH, type CustomerReturnCustomerSession } from "../../application/customer-return-customer-auth.service";
 import { requireCustomerReturnPreviewAccess } from "../../application/customer-return-preview-access";
 import { readCurrentPreviewIdentity } from "../../infrastructure/customer-return-preview-identity";
 import { createCustomerReturnCustomerAuth } from "../../infrastructure/customer-return-customer-auth.composition";
@@ -57,15 +57,15 @@ export function registerCustomerReturnCustomerAuthRoutes(app: Express, dependenc
   const authorizeStaff = dependencies.authorizeStaff ?? (req => requireCustomerReturnPreviewAccess(req.session?.user?.id, readCurrentPreviewIdentity));
 
   // A cross-site form cannot carry a SameSite=Lax cookie. This response ONLY
-  // relays a bounded token into a same-origin request; it grants no identity.
+  // relays bounded Shopify proof into a same-origin request; it grants no identity.
   app.post(`${CUSTOMER_RETURNS_PAGE}/callback`, (req, res) => {
     returnCustomerPrivateResponse(res);
-    const parsed = z.object({ token: z.string().max(4096).regex(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/) }).strict().safeParse(req.body);
+    const parsed = z.object({ proof: z.string().min(1).max(RETURN_CUSTOMER_ENCODED_PROOF_MAX_LENGTH).regex(/^[A-Za-z0-9_-]+$/) }).strict().safeParse(req.body);
     if (!parsed.success) { returnCustomerError(res, new z.ZodError([])); return; }
     const nonce = randomBytes(24).toString("base64");
     res.setHeader("Content-Security-Policy", `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'`);
-    const token = JSON.stringify(parsed.data.token);
-    res.type("html").send(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Signing in to returns</title><body><p id="status" role="status">Signing in to returns…</p><script nonce="${nonce}">fetch(${JSON.stringify(`${CUSTOMER_RETURNS_API}/session`)},{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json","X-Return-Command":"1"},body:JSON.stringify({token:${token}})}).then(async response=>{if(!response.ok)throw new Error();location.replace(${JSON.stringify(CUSTOMER_RETURNS_PAGE)})}).catch(()=>{document.getElementById("status").textContent="Sign-in could not be completed. Close this page and start again from your store account."});</script></body></html>`);
+    const proof = JSON.stringify(parsed.data.proof);
+    res.type("html").send(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Signing in to returns</title><body><p id="status" role="status">Signing in to returns…</p><script nonce="${nonce}">fetch(${JSON.stringify(`${CUSTOMER_RETURNS_API}/session`)},{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json","X-Return-Command":"1"},body:JSON.stringify({proof:${proof}})}).then(async response=>{if(!response.ok)throw new Error();location.replace(${JSON.stringify(CUSTOMER_RETURNS_PAGE)})}).catch(()=>{document.getElementById("status").textContent="Sign-in could not be completed. Close this page and start again from your store account."});</script></body></html>`);
   });
   app.use([CUSTOMER_RETURNS_API, CUSTOMER_RETURNS_PAGE], async (req, res, next) => {
     returnCustomerPrivateResponse(res);
@@ -102,8 +102,8 @@ export function registerCustomerReturnCustomerAuthRoutes(app: Express, dependenc
       const { config, auth } = await context();
       requireReturnCustomerCommand(req, config.publicOrigin);
       z.object({}).strict().parse(req.query);
-      const { token } = z.object({ token: z.string().max(4096) }).strict().parse(req.body);
-      const session = await auth.authenticate(req.session.returnLoginBrowserKey ?? "", token);
+      const { proof } = z.object({ proof: z.string().min(1).max(RETURN_CUSTOMER_ENCODED_PROOF_MAX_LENGTH).regex(/^[A-Za-z0-9_-]+$/) }).strict().parse(req.body);
+      const session = await auth.authenticate(req.session.returnLoginBrowserKey ?? "", proof);
       const user = req.session.user;
       await new Promise<void>((resolve, reject) => req.session.regenerate(error => error ? reject(error) : resolve()));
       if (user) req.session.user = user;
