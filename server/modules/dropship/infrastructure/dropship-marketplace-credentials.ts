@@ -422,14 +422,19 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
         && previousStatus !== "paused";
 
       if (transitioned || (effectiveStatus === "refresh_failed" && input.invalidateAccessToken === true)) {
+        // Decided here, not in SQL: comparing the status parameter with a
+        // literal while also assigning it to the varchar column makes
+        // PostgreSQL refuse the statement ("inconsistent types deduced for
+        // parameter"), which left a revoked grant's status unchanged.
+        const revokesGrant = effectiveStatus === "needs_reauth";
         await client.query(
           `UPDATE dropship.dropship_store_connections
            SET status = $4,
                setup_status = 'attention_required',
-               access_token_ref = CASE WHEN $4 = 'needs_reauth' THEN NULL ELSE access_token_ref END,
-               refresh_token_ref = CASE WHEN $4 = 'needs_reauth' THEN NULL ELSE refresh_token_ref END,
+               access_token_ref = CASE WHEN $7::boolean THEN NULL ELSE access_token_ref END,
+               refresh_token_ref = CASE WHEN $7::boolean THEN NULL ELSE refresh_token_ref END,
                token_expires_at = CASE
-                 WHEN $4 = 'needs_reauth' THEN NULL
+                 WHEN $7::boolean THEN NULL
                  WHEN $6::boolean THEN to_timestamp(0)
                  ELSE token_expires_at
                END,
@@ -444,6 +449,7 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
             effectiveStatus,
             input.now,
             effectiveStatus === "refresh_failed" && input.invalidateAccessToken === true,
+            revokesGrant,
           ],
         );
         if (effectiveStatus === "needs_reauth") {

@@ -72,10 +72,13 @@ export function createReceiptCostRecoveryRepository(pool: RecoveryPool): Receipt
           ORDER BY job.request_id LIMIT $2 FOR UPDATE OF job SKIP LOCKED`, [input.now, limit]);
         for (const before of stale.rows) {
           const state = before.receipt_state === "applied" || before.receipt_state === "review_required" ? before.receipt_state : "exhausted";
+          // Decided here, not in SQL: comparing the state parameter with a
+          // literal while assigning it to the column makes PostgreSQL refuse
+          // the statement ("inconsistent types deduced for parameter").
+          const lastErrorCode = state === "exhausted" ? "RECEIPT_COST_RECOVERY_LEASE_EXHAUSTED" : null;
           const changed = await client.query(`UPDATE procurement.receipt_cost_recovery_jobs
-            SET state=$2,lease_token=NULL,lease_expires_at=NULL,updated_at=$3,
-              last_error_code=CASE WHEN $2='exhausted' THEN 'RECEIPT_COST_RECOVERY_LEASE_EXHAUSTED' ELSE NULL END
-            WHERE request_id=$1 RETURNING *`, [before.request_id, state, input.now]);
+            SET state=$2,lease_token=NULL,lease_expires_at=NULL,updated_at=$3,last_error_code=$4
+            WHERE request_id=$1 RETURNING *`, [before.request_id, state, input.now, lastErrorCode]);
           await event(client, Number(before.request_id), "recovered", before, changed.rows[0], input.now);
         }
       });

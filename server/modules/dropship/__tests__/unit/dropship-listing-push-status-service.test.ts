@@ -13,13 +13,14 @@ function item(patch: Partial<VendorListingPushItemRecord> = {}): VendorListingPu
   return {
     itemId: 1, listingId: 100, productVariantId: 101, sku: "ARM-ENV-SGL-P50", productName: "Armalope Envelope Single Pocket",
     variantName: "Pack of 50", status: "completed", errorCode: null, errorMessage: null, retryable: null, externalListingId: "123456789012",
+    published: true,
     ...patch,
   };
 }
 
 function job(patch: Partial<VendorListingPushJobRecord> = {}): VendorListingPushJobRecord {
   return {
-    jobId: 31, vendorId: 10, storeConnectionId: 5, platform: "ebay", status: "completed",
+    jobId: 31, vendorId: 10, storeConnectionId: 5, platform: "ebay", environment: "production", status: "completed",
     createdAt: NOW, updatedAt: NOW, completedAt: NOW, items: [item()], ...patch,
   };
 }
@@ -49,7 +50,7 @@ describe("DropshipListingPushStatusService", () => {
     const result = await service.getForMember("member-5", 31);
 
     expect(result).toEqual({
-      jobId: 31, storeConnectionId: 5, platform: "ebay", status: "completed", finished: true,
+      jobId: 31, storeConnectionId: 5, platform: "ebay", environment: "production", status: "completed", finished: true,
       createdAt: NOW, updatedAt: NOW, completedAt: NOW,
       items: [{ ...item(), listingUrl: "https://www.ebay.com/itm/123456789012" }],
     });
@@ -102,10 +103,23 @@ describe("DropshipListingPushStatusService", () => {
 
 describe("marketplaceListingUrl", () => {
   it("forms a public page only from an eBay item id", () => {
-    expect(marketplaceListingUrl("ebay", "123456789012")).toBe("https://www.ebay.com/itm/123456789012");
-    expect(marketplaceListingUrl("ebay", "offer:abc:publish")).toBeNull();
-    expect(marketplaceListingUrl("ebay", null)).toBeNull();
-    expect(marketplaceListingUrl("shopify", "gid://shopify/Product/900")).toBeNull();
-    expect(marketplaceListingUrl("shopify", "123456789012")).toBeNull();
+    expect(marketplaceListingUrl("ebay", "123456789012", "production")).toBe("https://www.ebay.com/itm/123456789012");
+    expect(marketplaceListingUrl("ebay", "123456789012", null)).toBe("https://www.ebay.com/itm/123456789012");
+    expect(marketplaceListingUrl("ebay", "offer:abc:publish", "production")).toBeNull();
+    expect(marketplaceListingUrl("ebay", null, "production")).toBeNull();
+    expect(marketplaceListingUrl("shopify", "gid://shopify/Product/900", null)).toBeNull();
+    expect(marketplaceListingUrl("shopify", "123456789012", null)).toBeNull();
+  });
+
+  it("points a sandbox store's listing at eBay's test site, where it actually lives", () => {
+    expect(marketplaceListingUrl("ebay", "123456789012", "sandbox")).toBe("https://sandbox.ebay.com/itm/123456789012");
+  });
+
+  it("gives a draft no page: the id held is the offer, not a listing", async () => {
+    const repository = new FakeRepository();
+    repository.jobs.set("10:31", job({ environment: "sandbox", items: [item({ published: false }), item({ itemId: 2, published: null })] }));
+    const result = await new DropshipListingPushStatusService({ repository }).getForMember("member-5", 31);
+    expect(result.environment).toBe("sandbox");
+    expect(result.items.map((row) => row.listingUrl)).toEqual([null, "https://sandbox.ebay.com/itm/123456789012"]);
   });
 });

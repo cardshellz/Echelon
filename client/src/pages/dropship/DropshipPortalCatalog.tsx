@@ -1411,7 +1411,7 @@ function ListingPushOutcomeNotice({ jobId, queuedMessage, storeName }: { jobId: 
         {outcome.items.map((item) => (
           <li key={item.itemId} data-testid={`listing-push-outcome-${item.itemId}`}>
             <span className="font-medium">{item.name}</span>: {item.line}
-            {item.listingUrl && <>{" "}<a className="underline" href={item.listingUrl} target="_blank" rel="noreferrer">View on eBay</a></>}
+            {item.listingUrl && <>{" "}<a className="underline" href={item.listingUrl} target="_blank" rel="noreferrer">{item.listingUrlLabel ?? "View listing"}</a></>}
             {item.nextStep && <span className="block text-xs">{item.nextStep}</span>}
           </li>
         ))}

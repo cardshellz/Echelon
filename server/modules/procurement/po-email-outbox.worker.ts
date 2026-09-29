@@ -256,11 +256,16 @@ async function markDeliveryFailed(
   const details = classifyDeliveryError(error);
   const deadLetter = details.permanent || delivery.attemptCount >= delivery.maxAttempts;
   const nextAttemptAt = computeNextAttemptAt(now, delivery.attemptCount);
+  // Decided here, not in SQL: a parameter both assigned to the varchar status
+  // column and compared with the literal 'dead_letter' makes PostgreSQL refuse
+  // the whole statement ("inconsistent types deduced for parameter"), so a
+  // failed delivery could never be recorded.
+  const deadLetteredAt = deadLetter ? now : null;
   const result = await dbPool.query(
     `UPDATE procurement.po_email_outbox
      SET status = $3,
          next_attempt_at = $4,
-         dead_lettered_at = CASE WHEN $3 = 'dead_letter' THEN $5 ELSE NULL END,
+         dead_lettered_at = $8,
          last_error_code = $6,
          last_error_message = $7,
          lease_token = NULL,
@@ -276,6 +281,7 @@ async function markDeliveryFailed(
       now,
       truncate(details.code, 100),
       truncate(details.message, 1000),
+      deadLetteredAt,
     ],
   );
   if (result.rowCount !== 1) {

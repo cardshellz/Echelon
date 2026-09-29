@@ -99,6 +99,7 @@ describe("PgDropshipMarketplaceCredentialRepository token vault configuration", 
     expect(queries.some((entry) => (
       entry.sql.includes("UPDATE dropship.dropship_store_connections")
       && entry.params[3] === "needs_reauth"
+      && entry.params[6] === true
     ))).toBe(true);
     expect(queries.some((entry) => entry.sql.includes("DELETE FROM dropship.dropship_store_connection_tokens"))).toBe(true);
     expect(queries.some((entry) => entry.sql.includes("dropship.dropship_store_setup_checks"))).toBe(true);
@@ -160,7 +161,8 @@ describe("PgDropshipMarketplaceCredentialRepository token vault configuration", 
     ));
     expect(connectionUpdate?.params[3]).toBe("refresh_failed");
     expect(connectionUpdate?.params[5]).toBe(false);
-    expect(connectionUpdate?.sql).toContain("CASE WHEN $4 = 'needs_reauth' THEN NULL");
+    expect(connectionUpdate?.sql).toContain("CASE WHEN $7::boolean THEN NULL");
+    expect(connectionUpdate?.params[6]).toBe(false);
     expect(queries.some((entry) => entry.sql.includes("DELETE FROM dropship.dropship_store_connection_tokens"))).toBe(false);
     expect(queries.some((entry) => (
       entry.sql.includes("dropship.dropship_store_setup_checks")

@@ -28,10 +28,11 @@ class FakeService {
     this.calls.push([memberId, jobId]);
     if (this.fail) throw this.fail;
     return {
-      jobId, storeConnectionId: 5, platform: "ebay", status: "completed", finished: true, createdAt: NOW, updatedAt: NOW, completedAt: NOW,
+      jobId, storeConnectionId: 5, platform: "ebay", environment: "production", status: "completed", finished: true,
+      createdAt: NOW, updatedAt: NOW, completedAt: NOW,
       items: [{ itemId: 1, listingId: 100, productVariantId: 101, sku: "ARM-ENV-SGL-P50", productName: "Armalope Envelope Single Pocket",
         variantName: "Pack of 50", status: "completed", errorCode: null, errorMessage: null, retryable: null,
-        externalListingId: "123456789012", listingUrl: "https://www.ebay.com/itm/123456789012" }],
+        externalListingId: "123456789012", published: true, listingUrl: "https://www.ebay.com/itm/123456789012" }],
     };
   }
 }

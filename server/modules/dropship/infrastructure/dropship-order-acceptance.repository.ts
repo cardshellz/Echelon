@@ -1015,11 +1015,15 @@ async function markCanonicalInventoryClaimReleasedWithClient(
   const expired = intake.paymentHoldExpiresAt == null
     ? false
     : intake.paymentHoldExpiresAt <= input.acceptance.acceptedAt;
+  // Decided here, not in SQL: a parameter both assigned to a varchar column and
+  // compared with a text literal makes PostgreSQL refuse the statement
+  // ("inconsistent types deduced for parameter").
+  const expiredAt = expired ? input.acceptance.acceptedAt : null;
   await client.query(
     `UPDATE dropship.dropship_order_acceptance_claim_attempts
      SET state = $3,
          released_at = $4,
-         expired_at = CASE WHEN $3 = 'expired' THEN $4 ELSE NULL END,
+         expired_at = $5,
          updated_at = $4
      WHERE intake_id = $1 AND attempt_number = $2`,
     [
@@ -1027,16 +1031,17 @@ async function markCanonicalInventoryClaimReleasedWithClient(
       claimAttempt.attempt_number,
       expired ? "expired" : "released",
       input.acceptance.acceptedAt,
+      expiredAt,
     ],
   );
   await client.query(
     `UPDATE dropship.dropship_order_acceptance_stages
      SET state = $2,
          inventory_released_at = $3,
-         expired_at = CASE WHEN $2 = 'expired' THEN $3 ELSE NULL END,
+         expired_at = $4,
          updated_at = $3
      WHERE intake_id = $1`,
-    [input.acceptance.intakeId, expired ? "expired" : "inventory_released", input.acceptance.acceptedAt],
+    [input.acceptance.intakeId, expired ? "expired" : "inventory_released", input.acceptance.acceptedAt, expiredAt],
   );
   await recordCanonicalStageAuditEventWithClient(client, stage, input.acceptance, {
     eventType: "order_acceptance_inventory_claim_released",

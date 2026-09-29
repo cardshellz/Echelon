@@ -15,13 +15,13 @@ function item(patch: Partial<DropshipListingPushItem> = {}): DropshipListingPush
   return {
     itemId: 1, listingId: 100, productVariantId: 101, sku: "ARM-ENV-SGL-P50", productName: "Armalope Envelope Single Pocket",
     variantName: "Pack of 50", status: "completed", errorCode: null, errorMessage: null, retryable: null,
-    externalListingId: "123456789012", listingUrl: "https://www.ebay.com/itm/123456789012", ...patch,
+    externalListingId: "123456789012", published: true, listingUrl: "https://www.ebay.com/itm/123456789012", ...patch,
   };
 }
 
 function job(patch: Partial<DropshipListingPushJob> = {}): DropshipListingPushJob {
   return {
-    jobId: 31, storeConnectionId: 5, platform: "ebay", status: "completed", finished: true,
+    jobId: 31, storeConnectionId: 5, platform: "ebay", environment: "production", status: "completed", finished: true,
     createdAt: "2026-09-28T17:55:00.000Z", updatedAt: "2026-09-28T17:55:30.000Z", completedAt: "2026-09-28T17:55:30.000Z",
     items: [item()], ...patch,
   };
@@ -52,8 +52,24 @@ describe("describeListingPushOutcome", () => {
       tone: "success",
       title: "Live on marz_cards: 1 listing.",
       items: [{ itemId: 1, name: "Armalope Envelope Single Pocket · Pack of 50 · ARM-ENV-SGL-P50", state: "live",
-        line: "Live on marz_cards.", nextStep: null, listingUrl: "https://www.ebay.com/itm/123456789012" }],
+        line: "Live on marz_cards.", nextStep: null, listingUrl: "https://www.ebay.com/itm/123456789012", listingUrlLabel: "View on eBay" }],
     });
+  });
+
+  it("says a sandbox listing is on eBay's test site, with a link to that site", () => {
+    const outcome = describeListingPushOutcome(job({ environment: "sandbox",
+      items: [item({ listingUrl: "https://sandbox.ebay.com/itm/123456789012" })] }), "marz_cards");
+    expect(outcome.title).toBe("Live on marz_cards: 1 listing. This is eBay's sandbox test site, not the real eBay.");
+    expect(outcome.items[0]).toMatchObject({ state: "live", line: "Live on marz_cards (eBay sandbox).",
+      listingUrl: "https://sandbox.ebay.com/itm/123456789012", listingUrlLabel: "View on eBay sandbox" });
+  });
+
+  it("calls an unpublished offer a draft, with no page, and says what to do", () => {
+    const outcome = describeListingPushOutcome(job({ items: [item({ published: false, listingUrl: null })] }), "marz_cards");
+    expect(outcome).toMatchObject({ tone: "partial", title: "Saved on marz_cards as unpublished drafts: 1 listing. Buyers cannot see them yet." });
+    expect(outcome.items[0]).toMatchObject({ state: "draft", line: "Saved on marz_cards as an unpublished draft. Buyers cannot see it yet.",
+      nextStep: "Your store is set to save drafts instead of publishing. Publish it from your marz_cards account, or contact support to switch your store to live listings.",
+      listingUrl: null, listingUrlLabel: null });
   });
 
   it("says a listing is still on its way while the worker runs", () => {
@@ -85,7 +101,7 @@ describe("describeListingPushOutcome", () => {
       item({ itemId: 3, status: "blocked", errorCode: "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED", errorMessage: null, retryable: false, listingUrl: null }),
     ] }), "marz_cards");
     expect(outcome.tone).toBe("partial");
-    expect(outcome.title).toBe("1 of 3 listings live on marz_cards; 2 could not be listed.");
+    expect(outcome.title).toBe("Of 3 listings on marz_cards: 1 live, 2 could not be listed.");
     expect(outcome.items[2]).toMatchObject({ line: "Could not list: the store did not say why",
       nextStep: "Your account or store cannot list right now. See the notice at the top of this card." });
   });
