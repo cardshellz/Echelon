@@ -373,7 +373,7 @@ describe("direct Shopify returns proof HTTP lifecycle", () => {
     const guest = await s
       .browser(false)
       .request(
-        `${PROXY_PATH}?${signedQuery({ state, logged_in_customer_id: "", redirect: "https://untrusted.example/" })}`,
+        `${PROXY_PATH}?${signedQuery({ state, logged_in_customer_id: "" })}`,
       );
     expect(guest.status).toBe(303);
     const login = new URL(guest.headers.get("location")!);
@@ -487,6 +487,7 @@ describe("direct Shopify returns proof HTTP lifecycle", () => {
     ["wrong app key", {}, OTHER_SECRET],
     ["unknown shop", { shop: "unknown.myshopify.com" }, SHOPIFY_SECRET],
     ["shop signed by another app key", { shop: OTHER_SHOP }, SHOPIFY_SECRET],
+    ["unexpected redirect parameter", { redirect: "https://untrusted.example/" }, SHOPIFY_SECRET],
   ] as const)(
     "rejects %s at both proxy and session boundaries without service access",
     async (_label, overrides, secret) => {
@@ -522,6 +523,28 @@ describe("direct Shopify returns proof HTTP lifecycle", () => {
     ).toBe(401);
     expect(s.consume).not.toHaveBeenCalled();
     expect(s.services).not.toHaveBeenCalled();
+  });
+
+  it("rejects unknown parameters that turn signed guest bytes into customer proof without changing the signature", async () => {
+    const s = await setup();
+    const customer = s.browser();
+    const state = await s.start(customer.request);
+    const guest = new URLSearchParams(signedQuery({
+      state, logged_in_customer_id: "", a: "foologged_in_customer_id=123m=",
+    }));
+    const forged = new URLSearchParams(guest);
+    forged.set("a", "foo");
+    forged.set("logged_in_customer_id", "123");
+    forged.set("m", "logged_in_customer_id=");
+    const matchingCanonicalProof = new URLSearchParams(signedQuery({
+      state, logged_in_customer_id: "123", a: "foo", m: "logged_in_customer_id=",
+    }));
+    expect(forged.get("signature")).toBe(matchingCanonicalProof.get("signature"));
+    expect((await s.browser(false).request(`${PROXY_PATH}?${forged}`)).status).toBe(401);
+    expect((await s.redeem(customer.request, encodedProof(forged.toString()))).status).toBe(401);
+    expect(s.consume).not.toHaveBeenCalled();
+    expect(s.services).not.toHaveBeenCalled();
+    expect((await s.redeem(customer.request, encodedProof(signedQuery({ state })))).status).toBe(200);
   });
 
   it("rejects an expired browser challenge even when the Shopify proof is fresh", async () => {
