@@ -49,6 +49,15 @@ describe("publication recovery operator panel", () => {
     expect(html).toContain("Select an attempt"); expect(html).toContain("Choose terminal outcome");
     expect(html).toMatch(/<button[^>]*disabled[^>]*>Record operator attestation/);
   });
+  it("names a stored provider answer on the attempt so the operator knows the form can be filled from it", () => {
+    state.data = { unresolvedAttempts: [{ ...unresolved, providerAnswer: { requestId: "9002", method: "POST",
+      path: "/sell/inventory/v1/offer/77/publish", httpStatus: 400, errorCodes: ["25002"], responseHash: "b".repeat(64),
+      recordedAt: "2026-09-29T09:30:00.000Z" } }], pendingCatchupCount: 0 };
+    const html = render();
+    expect(html).toContain("#7 · ebay connection 9 · sku-P5 · uncertain · answered HTTP 400");
+    expect(state.mutate).not.toHaveBeenCalled();
+  });
+
   it("explicitly labels a successful manual attestation without claiming a provider write", () => {
     state.result = { attemptId: "7", basis: "operator_attestation", replay: false, providerWriteAttempted: false };
     const html = render();

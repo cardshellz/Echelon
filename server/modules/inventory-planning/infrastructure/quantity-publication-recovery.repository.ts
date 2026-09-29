@@ -7,9 +7,16 @@ import { pendingQuantityPublicationRecoveryRequestSchema, pendingQuantityPublica
 import type { QuantityPublicationRecoveryCommand, QuantityPublicationRecoveryStore } from "../application/quantity-publication-recovery.service";
 import { InventoryCutoverCommitError } from "../application/inventory-cutover-commit.service";
 import { quantityPublicationDrainProofSchema } from "../domain/quantity-publication-admission";
+import { summarizeProviderAnswer, type StoredProviderRequestReceipt } from "../domain/quantity-publication-provider-answer";
 import { attestQuantityPublicationAttemptInsideTransaction, captureQuantityPublicationDrainInsideTransaction } from "./quantity-publication-admission.repository";
 
 const commandActorClockSchema = z.object({ actor: z.string().trim().min(1).max(100), now: z.date() }).strict();
+
+interface StoredReceiptRow {
+  attempt_id: string; request_id: string; ordinal: number; method: string; path: string;
+  outcome: "completed" | "rejected" | "uncertain" | null; http_status: number | null; response_hash: string | null;
+  error_codes: string[] | null; recorded_at: Date | null;
+}
 
 /** Audits retained terminal evidence under the publication owner's try-lock.
  * Attestation does not acknowledge an outbox quantity or verify provider state.
@@ -27,6 +34,7 @@ export class PostgresQuantityPublicationRecoveryRepository implements QuantityPu
         WHERE ($1::bigint IS NULL OR id=$1::bigint) ORDER BY id DESC LIMIT 1`, [request.activationRunId ?? null])).rows[0];
       if (!run) throw new InventoryCutoverCommitError("PUBLICATION_RECOVERY_RUN_UNAVAILABLE", "No matching persisted activation run is available for publication recovery.");
       const proof = quantityPublicationDrainProofSchema.parse(await captureQuantityPublicationDrainInsideTransaction(client, run.id));
+      const receipts = await this.storedReceipts(client, proof.unresolvedAttempts.map(attempt => attempt.attemptId));
       return pendingQuantityPublicationRecoverySchema.parse({ activationRunId: proof.activationRunId, gateEpoch: proof.gateEpoch,
         suppressed: proof.suppressed, capturedAt, basis: "recorded_attempt_history", providerWriteAttempted: false,
         pendingCatchupCount: proof.pendingCatchupCount, unresolvedAttempts: proof.unresolvedAttempts.map(attempt => ({
@@ -34,8 +42,28 @@ export class PostgresQuantityPublicationRecoveryRepository implements QuantityPu
           destinationKind: attempt.scope.destinationKind, connectionId: attempt.scope.connectionId, providerKey: attempt.scope.providerKey,
           providerScopeType: attempt.scope.providerScopeType, externalScopeId: attempt.scope.externalScopeId,
           externalInventoryItemId: attempt.scope.externalInventoryItemId,
+          providerAnswer: summarizeProviderAnswer(attempt.state, receipts.get(attempt.attemptId) ?? []),
         })) });
     });
+  }
+
+  /** The immutable receipts each unresolved attempt stored; read only, so the operator sees what the provider answered. */
+  private async storedReceipts(client: PoolClient, attemptIds: readonly string[]): Promise<Map<string, StoredProviderRequestReceipt[]>> {
+    const receipts = new Map<string, StoredProviderRequestReceipt[]>();
+    if (attemptIds.length === 0) return receipts;
+    const rows = (await client.query<StoredReceiptRow>(`SELECT q.attempt_id::text AS attempt_id,q.id::text AS request_id,q.ordinal,q.method,q.path,
+        r.outcome,r.http_status,r.response_hash,r.error_codes,r.recorded_at
+      FROM inventory.quantity_provider_requests q
+      LEFT JOIN inventory.quantity_provider_request_results r ON r.request_id=q.id
+      WHERE q.attempt_id=ANY($1::bigint[]) ORDER BY q.attempt_id,q.ordinal`, [attemptIds])).rows;
+    for (const row of rows) {
+      const list = receipts.get(row.attempt_id) ?? [];
+      list.push({ attemptId: row.attempt_id, requestId: row.request_id, ordinal: row.ordinal, method: row.method, path: row.path,
+        outcome: row.outcome, httpStatus: row.http_status, responseHash: row.response_hash, errorCodes: row.error_codes ?? [],
+        recordedAt: row.recorded_at });
+      receipts.set(row.attempt_id, list);
+    }
+    return receipts;
   }
 
   async attest(command: QuantityPublicationRecoveryCommand): Promise<QuantityPublicationRecoveryResult> {

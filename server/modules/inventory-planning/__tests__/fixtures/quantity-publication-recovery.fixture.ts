@@ -14,5 +14,5 @@ export function pendingRecovery(): PendingQuantityPublicationRecovery {
     basis: "recorded_attempt_history", providerWriteAttempted: false, pendingCatchupCount: 1,
     unresolvedAttempts: [{ attemptId: "20", owner: "outbox", state: "uncertain", outboxId: "10",
       destinationKind: "channel_connection", connectionId: 3, providerKey: "shopify", providerScopeType: "location",
-      externalScopeId: "location-1", externalInventoryItemId: "item-1" }] };
+      externalScopeId: "location-1", externalInventoryItemId: "item-1", providerAnswer: null }] };
 }

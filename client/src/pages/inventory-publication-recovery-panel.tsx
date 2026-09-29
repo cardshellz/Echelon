@@ -2,6 +2,7 @@ import React, { useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { pendingQuantityPublicationRecoverySchema, quantityPublicationRecoverySchema,
   quantityPublicationRecoveryResultSchema, type QuantityPublicationRecovery } from "@shared/types/inventory-publication-recovery";
+import { attestationPrefillFromProviderAnswer, providerAnswerLabel } from "@/lib/inventory-publication-recovery";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -29,6 +30,17 @@ export function InventoryPublicationRecoveryPanel(props: Props) {
   const request = quantityPublicationRecoverySchema.safeParse({ attemptId, evidenceKind, terminalOutcome,
     evidenceReference, evidenceHash, reason, idempotencyKey: "validation-only" });
   const selected = pending.data?.unresolvedAttempts.find(row => row.attemptId === attemptId);
+  const prefill = selected ? attestationPrefillFromProviderAnswer(selected) : null;
+  /** Selecting an attempt fills the form from the provider's stored answer, or clears it: evidence belongs to one
+   * attempt, and the server records the hash as given, so nothing typed for another attempt may carry over.
+   * The operator still reads, confirms and records. */
+  function selectAttempt(nextAttemptId: string): void {
+    setAttemptId(nextAttemptId); setConfirmed(false);
+    const row = pending.data?.unresolvedAttempts.find(candidate => candidate.attemptId === nextAttemptId);
+    const filled = row ? attestationPrefillFromProviderAnswer(row) : null;
+    setEvidenceKind(filled?.evidenceKind ?? ""); setTerminalOutcome(filled?.terminalOutcome ?? "");
+    setEvidenceReference(filled?.evidenceReference ?? ""); setEvidenceHash(filled?.evidenceHash ?? ""); setReason(filled?.reason ?? "");
+  }
   const attest = useMutation({ mutationFn: async () => {
     if (!enabled) throw new Error("Inventory activation permission is required.");
     if (!retained.current) {
@@ -62,12 +74,13 @@ export function InventoryPublicationRecoveryPanel(props: Props) {
     {((pending.data?.unresolvedAttempts.length ?? 0) > 0 || retained.current) && <div className="space-y-2">
       <Label htmlFor={`${prefix}-attempt`}>Exact unresolved attempt</Label>
       <select id={`${prefix}-attempt`} className="h-10 w-full rounded-md border bg-background px-3 text-sm" disabled={fieldsDisabled}
-        value={attemptId} onChange={event => { setAttemptId(event.target.value); setConfirmed(false); }}>
+        value={attemptId} onChange={event => selectAttempt(event.target.value)}>
         <option value="">Select an attempt</option>
         {pending.data?.unresolvedAttempts.map(row => <option key={row.attemptId} value={row.attemptId}>
-          #{row.attemptId} · {row.providerKey} connection {row.connectionId} · {row.externalInventoryItemId} · {row.state}
+          #{row.attemptId} · {row.providerKey} connection {row.connectionId} · {row.externalInventoryItemId} · {row.state}{providerAnswerLabel(row)}
         </option>)}
       </select>
+      {prefill && <p className="text-sm" data-testid={`${prefix}-provider-answer`}>{prefill.summary}</p>}
       <Label htmlFor={`${prefix}-kind`}>Retained evidence type</Label>
       <select id={`${prefix}-kind`} className="h-10 w-full rounded-md border bg-background px-3 text-sm" disabled={fieldsDisabled}
         value={evidenceKind} onChange={event => setEvidenceKind(event.target.value)}>
