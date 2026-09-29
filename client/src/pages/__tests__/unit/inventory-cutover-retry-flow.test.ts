@@ -195,6 +195,9 @@ describe("attestation filled from the provider's stored answer", () => {
   function summary(root: ReactNode) {
     return nodes(root).find(props => typeof props["data-testid"] === "string" && String(props["data-testid"]).endsWith("-provider-answer"));
   }
+  function tick(root: ReactNode, suffix: string) {
+    (field(root, suffix).onChange as (event: { target: { checked: boolean } }) => void)({ target: { checked: true } });
+  }
 
   it("fills every evidence field from the stored answer when the attempt is selected and leaves the confirmation unticked", () => {
     hooks.queryData = { unresolvedAttempts: [answered, unanswered], pendingCatchupCount: 0 };
@@ -205,7 +208,7 @@ describe("attestation filled from the provider's stored answer", () => {
     expect(String(field(root, "-reference").value)).toContain("Stored provider request 9002: POST /sell/inventory/v1/offer/77/publish answered HTTP 400 (codes 25002)");
     expect(String(field(root, "-reason").value)).toContain("HTTP 400 with codes 25002");
     expect(String(summary(root)?.children)).toContain("eBay answered HTTP 400 (codes 25002)");
-    expect(nodes(root).find(props => props.type === "checkbox")?.checked).toBe(false);
+    expect(field(root, "-attest-confirm").checked).toBe(false);
     expect(button(root, "Record operator attestation")?.disabled).toBe(true);
   });
 
@@ -218,11 +221,25 @@ describe("attestation filled from the provider's stored answer", () => {
     expect(summary(root)).toBeUndefined();
   });
 
+  it("records every listed refusal in one click, sending exactly the hashes the operator saw", async () => {
+    hooks.queryData = { unresolvedAttempts: [answered, unanswered], pendingCatchupCount: 0 };
+    let root = renderRecovery();
+    expect(button(root, "Confirm all 1 refused entry")?.disabled).toBe(true);
+    await expect(hooks.mutations[1].mutationFn()).rejects.toThrow("confirm the listed refusals");
+    tick(root, "-answers-confirm"); root = renderRecovery();
+    expect(button(root, "Confirm all 1 refused entry")?.disabled).toBe(false);
+    const outcome = { basis: "operator_attestation", providerWriteAttempted: false, confirmed: [{ attemptId: "7", replay: false }], skipped: [] };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(JSON.stringify(outcome), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(hooks.mutations[1].mutationFn()).resolves.toEqual(outcome);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/inventory-planning/admin/publication-recovery/attest-provider-answers");
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ activationRunId: "1", confirmations: [{ attemptId: "7", responseHash: "b".repeat(64) }] });
+  });
+
   it("records the filled attestation exactly as shown once the operator confirms it", async () => {
     hooks.queryData = { unresolvedAttempts: [answered], pendingCatchupCount: 0 };
     let root = renderRecovery(); change(root, "-attempt", "7"); root = renderRecovery();
-    const checkbox = nodes(root).find(props => props.type === "checkbox")!;
-    (checkbox.onChange as (event: { target: { checked: boolean } }) => void)({ target: { checked: true } });
+    tick(root, "-attest-confirm");
     root = renderRecovery(); expect(button(root, "Record operator attestation")?.disabled).toBe(false);
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(JSON.stringify(
       { attemptId: "7", basis: "operator_attestation", replay: false, providerWriteAttempted: false }), { status: 200 }));
