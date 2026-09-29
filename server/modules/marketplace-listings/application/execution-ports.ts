@@ -39,6 +39,12 @@ export interface ListingReplacementExecutionContext {
   readonly desiredStateHash: string;
   /** Provider-owned recovery state captured durably during preflight. */
   readonly sourceProviderSnapshot: CanonicalJsonValue | null;
+  /** Later verified corrections supersede the sealed source for recovery only.
+   * Such recovery must observe the provider, never republish historical contents. */
+  readonly sourceVerification?: {
+    readonly id: number;
+    readonly readOnlyRecovery: boolean;
+  } | null;
   readonly sourceMembers: readonly ListingReplacementExecutionMember[];
   readonly targetMembers: readonly ListingReplacementExecutionMember[];
   readonly actor: ListingActor;
