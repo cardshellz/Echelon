@@ -8,6 +8,7 @@ import { inventoryCutoverEvidenceHash } from "../domain/inventory-cutover-manife
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { captureInventoryCutoverReviewInsideTransaction } from "./inventory-cutover-review.repository";
 import { promoteInventoryCutoverDefinitionsInsideTransaction } from "./inventory-cutover-definitions.repository";
+import { activateReviewedWarehouseSourcesInsideTransaction } from "../../warehouse/infrastructure/warehouse-source-activation.repository";
 import { PostgresInventoryCutoverReconstructionRepository } from "./inventory-cutover-reconstruction.repository";
 import { createTransactionScopedInventoryPublicationService } from "./inventory-availability-runtime-publication.repository";
 import { committedInventoryPublicationManifestSchema } from "../domain/inventory-cutover-full-publication-proof";
@@ -43,6 +44,8 @@ export class PostgresInventoryCutoverCommitRepository implements InventoryCutove
         throw new InventoryCutoverCommitError("CUTOVER_REVIEW_CHANGED", "Demand, supply, configuration or provider evidence changed; review the fresh result.");
       }
       await promoteInventoryCutoverDefinitionsInsideTransaction(client, review.manifest, { actor, reason: command.reason, occurredAt });
+      const activatedFulfillmentNodeIds = await activateReviewedWarehouseSourcesInsideTransaction(
+        client, review.manifest.sourceNodes ?? [], { actor, occurredAt });
       const nextRevision = (BigInt(fence.authorityRevision) + BigInt(1)).toString();
       const reconstruction = await new PostgresInventoryCutoverReconstructionRepository().persistReviewed(client, {
         expectedEvidenceHash: review.reconstructionHash, activationRunId: command.activationRunId,
@@ -116,6 +119,7 @@ export class PostgresInventoryCutoverCommitRepository implements InventoryCutove
         reviewHash: review.reviewHash, selectionManifestHash: review.selectionManifestHash,
         reconstructionHash: review.reconstructionHash, fullPublicationRows: publications.length,
         publicationVerification: "pending", alreadyApplied: false,
+        activatedFulfillmentNodeIds,
       });
       await client.query(
         `INSERT INTO inventory.availability_cutover_commits

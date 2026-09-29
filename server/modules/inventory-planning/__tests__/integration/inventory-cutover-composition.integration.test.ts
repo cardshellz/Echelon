@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { cutoverCompositionBaseSql, cutoverCompositionSeedSql, cutoverCompositionChannelSeedSql, cutoverCompositionObserveOnlySeedSql, installCutoverCompositionMigrations, seedCompositionReviewedDryRun } from "../fixtures/inventory-cutover-composition-database.fixture";
+import { cutoverCompositionBaseSql, cutoverCompositionSeedSql, cutoverCompositionChannelSeedSql, cutoverCompositionChannelSeed, cutoverCompositionObserveOnlySeedSql, installCutoverCompositionMigrations, seedCompositionReviewedDryRun } from "../fixtures/inventory-cutover-composition-database.fixture";
 import { PostgresInventoryCutoverReconstructionRepository } from "../../infrastructure/inventory-cutover-reconstruction.repository";
 import { captureProposedClaimSupplySnapshotInsideTransaction } from "../../infrastructure/inventory-availability-shadow.repository";
 import { planFreshCutoverClaims } from "../../domain/inventory-cutover-reconstruction-planning";
@@ -20,7 +20,10 @@ import { selectedSnapshots } from "../../infrastructure/inventory-availability-a
 import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructure/inventory-publication-outbox.repository";
 import { InventoryPublicationOutboxService } from "../../application/inventory-publication-outbox.service";
 import { InventoryPublicationTransportRegistry, type AbsoluteInventoryPublicationRequest } from "../../application/inventory-publication-transport";
-import { PostgresQuantityPublicationAdmission } from "../../infrastructure/quantity-publication-admission.repository";
+import { PostgresQuantityPublicationAdmission, quantityPublicationScopeLockKey } from "../../infrastructure/quantity-publication-admission.repository";
+import { QuantityPublicationReconciliationService } from "../../application/quantity-publication-reconciliation.service";
+import { PostgresQuantityPublicationReconciliationRepository } from "../../infrastructure/quantity-publication-reconciliation.repository";
+import type { PublicationReconciliationRequest } from "@shared/types/inventory-publication-reconciliation";
 import { InventoryCutoverCompletionService } from "../../application/inventory-cutover-completion.service";
 import { PostgresInventoryCutoverCompletionRepository } from "../../infrastructure/inventory-cutover-completion.repository";
 import { PostgresInventoryAvailabilityClaimRepository } from "../../infrastructure/inventory-availability-claim.repository";
@@ -33,6 +36,7 @@ import { SafetyDefinitionService } from "../../application/inventory-safety-defi
 import { PostgresSafetyDefinitionStore } from "../../infrastructure/inventory-safety-definition.repository";
 import { ChannelDefinitionService } from "../../application/inventory-channel-definition.service";
 import { PostgresChannelDefinitionStore } from "../../infrastructure/inventory-channel-definition.repository";
+import { activateReviewedWarehouseSourcesInsideTransaction } from "../../../warehouse/infrastructure/warehouse-source-activation.repository";
 
 // Only the application's process-global connection is disabled. Every owner under
 // test receives the uniquely created disposable pool/client; no owner is mocked.
@@ -471,11 +475,30 @@ dbDescribe.sequential.each([
   let dryRun: InventoryActivationDryRun;
   let prepared: InventoryActivationCommandResult;
   let now: Date;
+  let recoveryRequest: PublicationReconciliationRequest;
+  const recovery = () => new QuantityPublicationReconciliationService(new PostgresQuantityPublicationReconciliationRepository(database.pool), { now: () => now });
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl,disposable,cutoverCompositionBaseSql);
     await installCutoverCompositionMigrations(database.pool);
+    await database.pool.query(readFileSync(resolve(process.cwd(), "migrations/0709_walmart_quantity_admission.sql"), "utf8"));
+    await database.pool.query(readFileSync(resolve(process.cwd(), "migrations/0716_inventory_publication_reconciliation.sql"), "utf8"));
     await database.pool.query(cutoverCompositionSeedSql);
-    await database.pool.query(cutoverCompositionChannelSeedSql);
+    // Production regression: sources are prepared as drafts, not pre-activated
+    // by a fixture. Excluded mapping drafts must not enter the reviewed set.
+    await database.pool.query(cutoverCompositionChannelSeed({ activeSource: false, explicitMembership: true }));
+    await database.pool.query(`INSERT INTO warehouse.warehouses(id,code) VALUES(90,'EXTERNAL');
+      INSERT INTO warehouse.fulfillment_nodes(code,name,node_type,warehouse_id,inventory_authority,fulfillment_authority,created_by)
+        VALUES('EXTERNAL','Uncommissioned 3PL','third_party_logistics',90,'external_provider','external_provider','operator');
+      INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(102,20,'EXCLUDED-P5');
+      INSERT INTO inventory.publication_variant_mapping_versions(publication_target_id,product_variant_id,version,external_inventory_item_id,external_sku,
+        definition_hash,change_reason,idempotency_key,request_hash,created_by)
+        VALUES(1,102,1,'excluded-item','EXCLUDED-P5',repeat('b',64),'Excluded draft','excluded-mapping',repeat('b',64),'operator');
+      INSERT INTO inventory.publication_variant_mapping_heads(publication_target_id,product_variant_id,draft_mapping_id,revision,updated_by,update_reason)
+        SELECT 1,102,id,1,'operator','Excluded draft' FROM inventory.publication_variant_mapping_versions WHERE product_variant_id=102;
+      INSERT INTO inventory.publication_membership_versions(publication_target_id,product_variant_id,version,included,definition_hash,review_hash,created_by,created_at)
+        VALUES(1,102,1,false,repeat('b',64),repeat('b',64),'operator',transaction_timestamp());
+      INSERT INTO inventory.publication_membership_heads(publication_target_id,product_variant_id,active_version_id)
+        SELECT 1,102,id FROM inventory.publication_membership_versions WHERE product_variant_id=102`);
     await database.pool.query(cutoverCompositionObserveOnlySeedSql);
     await database.pool.query(`INSERT INTO inventory.promise_safety_policy_versions(scope_key,scope_type,product_variant_id,warehouse_id,version,policy_mode,definition_hash,change_reason,idempotency_key,request_hash,created_by)
       VALUES('network:variant:101','network_variant',101,NULL,1,'off',repeat('e',64),'Test network SKU policy','composition-network-safety',repeat('e',64),'operator'),
@@ -488,6 +511,16 @@ dbDescribe.sequential.each([
     await installQuantityCutoverFixture(database.pool);
     dryRun = await seedCompositionReviewedDryRun(database.pool, historicalProviderQuantity);
     now = new Date(Date.parse(dryRun.completedAt)+10);
+    // Durable process-loss history, not a fabricated terminal response. The
+    // current quantity owner must supersede it explicitly before publication.
+    const scope = { destinationKind: "channel_connection" as const, connectionId: 7, providerKey: "shopify" as const,
+      providerScopeType: "location" as const, externalScopeId: "test-location", externalInventoryItemId: "test-item", productId: 20, productVariantId: 101 };
+    for (const [index, state] of ["running", "uncertain"].entries()) {
+      await database.pool.query(`INSERT INTO inventory.quantity_publication_attempts
+        (owner_token,owner_kind,gate_epoch,scope_key,scope,affected_scope_keys,affected_scopes,state,started_at,error_code)
+        VALUES($1,'legacy',0,$2,$3::jsonb,ARRAY[$2],$4::jsonb,$5,$6,'HISTORICAL_RESPONSE_LOST')`,
+        [`10000000-0000-4000-8000-00000000000${index}`, quantityPublicationScopeLockKey(scope), JSON.stringify(scope), JSON.stringify([scope]), state, now]);
+    }
   },30_000);
   afterAll(async () => { await database?.close(); });
 
@@ -506,9 +539,92 @@ dbDescribe.sequential.each([
     prepared = await service.prepare({ sourceDryRunId:dryRun.activationRunId,expectedDryRunResultHash:dryRun.resultHash,
       idempotencyKey:"composition-channel-prepare",reason:"Prepare one exact channel" },"operator");
     expect(prepared).toMatchObject({ state:"publishing",conservativePublicationRows:1,runtimeAuthority:"legacy" });
+    expect((await database.pool.query("SELECT lifecycle_status,activated_by,activated_at FROM warehouse.fulfillment_nodes WHERE id=1")).rows)
+      .toEqual([{ lifecycle_status: "draft", activated_by: null, activated_at: null }]);
     expect((await database.pool.query("SELECT desired_quantity::text,publication_phase,state FROM inventory.inventory_publication_outbox")).rows)
       .toEqual([{ desired_quantity:"14",publication_phase:"conservative",state:"queued" }]);
     expect((await database.pool.query("SELECT reserved_qty FROM inventory.inventory_levels")).rows).toEqual([{ reserved_qty:3 }]);
+  });
+
+  it("reviews old requests without writes and rejects live owners, stale evidence and unaudited SQL recovery", async () => {
+    const before = (await database.pool.query("SELECT * FROM inventory.quantity_publication_attempts ORDER BY id")).rows;
+    const review = await recovery().review({ activationRunId: prepared.activationRunId }, "operator");
+    expect(review).toMatchObject({ ready: true, historicalOutcome: "unknown", publicationRows: 1, providerWriteAttempted: false });
+    expect(review.attempts.map(row => row.state)).toEqual(["running", "uncertain"]);
+    expect((await database.pool.query("SELECT * FROM inventory.quantity_publication_attempts ORDER BY id")).rows).toEqual(before);
+    recoveryRequest = { activationRunId: prepared.activationRunId, expectedReviewHash: review.reviewHash,
+      acceptUnknownRemoteOutcomes: true, reason: "Supersede obsolete local authority; remote outcomes remain unknown", idempotencyKey: "composition-reconcile" };
+    await expect(recovery().reconcile({ ...recoveryRequest, expectedReviewHash: "0".repeat(64) }, "operator"))
+      .rejects.toMatchObject({ code: "PUBLICATION_RECONCILIATION_REVIEW_CHANGED" });
+    const owner = await database.pool.connect();
+    try {
+      await owner.query("SELECT pg_advisory_lock_shared(918419,0)");
+      await expect(recovery().review({ activationRunId: prepared.activationRunId }, "operator")).rejects.toMatchObject({ code: "QUANTITY_PUBLICATION_DRAIN_BUSY" });
+      await expect(recovery().reconcile(recoveryRequest, "operator")).rejects.toMatchObject({ code: "QUANTITY_PUBLICATION_DRAIN_BUSY" });
+    } finally { await owner.query("SELECT pg_advisory_unlock_shared(918419,0)"); owner.release(); }
+    const client = await database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await acquireInventoryCutoverFenceInsideTransaction(client, { expectedAuthority: "legacy", expectedConfigurationRunId: prepared.activationRunId });
+      await expect(client.query("UPDATE inventory.quantity_publication_attempts SET state='superseded_unknown' WHERE id=1"))
+        .rejects.toMatchObject({ code: "23514" });
+    } finally { await client.query("ROLLBACK"); client.release(); }
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_publication_reconciliations")).rows[0].count).toBe(0);
+  });
+
+  it("rolls back the whole recovery on audit failure, then commits concurrent retries exactly once without touching inventory", async () => {
+    const before = (await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows;
+    const ordersBefore = (await database.pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows;
+    await database.pool.query(`CREATE FUNCTION public.fail_reconciliation_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.evidence_payload->>'historicalOutcome'='unknown' THEN RAISE EXCEPTION 'test recovery audit failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER zz_reconciliation_event_failure BEFORE INSERT ON inventory.availability_activation_events FOR EACH ROW EXECUTE FUNCTION public.fail_reconciliation_event()`);
+    try { await expect(recovery().reconcile(recoveryRequest, "operator")).rejects.toThrow("test recovery audit failure"); }
+    finally { await database.pool.query("DROP TRIGGER zz_reconciliation_event_failure ON inventory.availability_activation_events; DROP FUNCTION public.fail_reconciliation_event()"); }
+    expect((await database.pool.query("SELECT state FROM inventory.quantity_publication_attempts ORDER BY id")).rows).toEqual([{ state: "running" }, { state: "uncertain" }]);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_publication_reconciliations")).rows[0].count).toBe(0);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_publication_reconciliation_attempts")).rows[0].count).toBe(0);
+    const results = await Promise.all([recovery().reconcile(recoveryRequest, "operator"), recovery().reconcile(recoveryRequest, "operator")]);
+    expect(results.map(result => result.replay).sort()).toEqual([false, true]);
+    expect(results[0].reconciliationId).toBe(results[1].reconciliationId);
+    expect((await database.pool.query("SELECT state,completed_at,resolution_basis,error_code FROM inventory.quantity_publication_attempts ORDER BY id")).rows)
+      .toEqual(Array.from({ length: 2 }, () => ({ state: "superseded_unknown", completed_at: null, resolution_basis: null, error_code: "HISTORICAL_RESPONSE_LOST" })));
+    expect((await database.pool.query(`SELECT before_record->>'state' AS state FROM inventory.quantity_publication_reconciliation_attempts ORDER BY attempt_id`)).rows)
+      .toEqual([{ state: "running" }, { state: "uncertain" }]);
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows).toEqual(before);
+    expect((await database.pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows).toEqual(ordersBefore);
+    expect((await database.pool.query("SELECT authority FROM inventory.availability_runtime_authority")).rows).toEqual([{ authority: "legacy" }]);
+    expect((await database.pool.query("SELECT state FROM inventory.inventory_publication_outbox")).rows).toEqual([{ state: "queued" }]);
+    const run = (await database.pool.query("SELECT state,provider_write_attempted FROM inventory.availability_activation_runs WHERE id=$1", [prepared.activationRunId])).rows[0];
+    expect(run).toEqual({ state: "publishing", provider_write_attempted: false });
+  });
+
+  it("keeps historical outcomes immutable and cannot substitute recovery for fresh provider verification", async () => {
+    await expect(recovery().reconcile(recoveryRequest, "other-operator")).rejects.toMatchObject({ code: "PUBLICATION_RECONCILIATION_REPLAY_CONFLICT" });
+    await expect(database.pool.query("UPDATE inventory.quantity_publication_attempts SET state='succeeded',completed_at=transaction_timestamp() WHERE id=1"))
+      .rejects.toMatchObject({ code: "23514" });
+    await expect(database.pool.query("DELETE FROM inventory.quantity_publication_reconciliation_attempts")).rejects.toMatchObject({ code: "23514" });
+    await expect(database.pool.query("TRUNCATE inventory.quantity_publication_reconciliation_attempts")).rejects.toMatchObject({ code: "23514" });
+    await expect(database.pool.query("UPDATE inventory.quantity_publication_reconciliations SET reason='Rewrite history'"))
+      .rejects.toMatchObject({ code: "23514" });
+    const cutover = new InventoryCutoverCommitService(new PostgresInventoryCutoverCommitRepository(database.pool), { now: () => now });
+    const review = await cutover.preview({ activationRunId: prepared.activationRunId }, "operator");
+    expect(review.ready).toBe(false);
+    expect(review.blockers).toContainEqual(expect.objectContaining({ code: "CUTOVER_CONSERVATIVE_PUBLICATION_PENDING" }));
+    expect((await recovery().review({ activationRunId: prepared.activationRunId }, "operator")).ready).toBe(false);
+    // Even an admitted caller cannot commit a receipt without its complete
+    // retained before-images and attempt transitions.
+    const client = await database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await acquireInventoryCutoverFenceInsideTransaction(client, { expectedAuthority: "legacy", expectedConfigurationRunId: prepared.activationRunId });
+      await client.query("SELECT pg_try_advisory_xact_lock(918419,0)");
+      await client.query(`INSERT INTO inventory.quantity_publication_reconciliations
+        (activation_run_id,gate_epoch,idempotency_key,actor,reason,request_hash,review_hash,review_payload,result_hash,result_payload,created_at)
+        SELECT activation_run_id,gate_epoch,'orphan-test',actor,reason,request_hash,review_hash,review_payload,result_hash,result_payload,created_at
+        FROM inventory.quantity_publication_reconciliations WHERE idempotency_key='composition-reconcile'`);
+      await expect(client.query("COMMIT")).rejects.toMatchObject({ code: "23514" });
+    } finally { await client.query("ROLLBACK"); client.release(); }
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_publication_reconciliations")).rows[0].count).toBe(1);
   });
 
   it("blocks commit after a mismatched send and verifies a retry using actual outbox owners", async () => {
@@ -547,7 +663,7 @@ dbDescribe.sequential.each([
     expect((await database.pool.query("SELECT state FROM inventory.inventory_publication_outbox")).rows).toEqual([{ state:"verified" }]);
     expect((await database.pool.query("SELECT state FROM inventory.availability_activation_runs WHERE id=$1",[prepared.activationRunId])).rows)
       .toEqual([{ state:"publication_verified" }]);
-    expect((await database.pool.query("SELECT owner_kind,state,resolution_basis FROM inventory.quantity_publication_attempts ORDER BY id")).rows)
+    expect((await database.pool.query("SELECT owner_kind,state,resolution_basis FROM inventory.quantity_publication_attempts WHERE owner_kind='outbox' ORDER BY id")).rows)
       .toEqual(Array.from({ length:2 }, () => ({ owner_kind:"outbox",state:"succeeded",resolution_basis:"owner_completion" })));
   });
 
@@ -556,6 +672,22 @@ dbDescribe.sequential.each([
     const review = await service.preview({ activationRunId:prepared.activationRunId },"operator");
     expect(review.publicationRows).toEqual([{ publicationTargetId:1,productVariantId:101,desiredQuantity:"14" }]);
     expect(review.blockers).toEqual([]);
+    expect(review.manifest.sourceNodes).toMatchObject([{ nodeId: 1, warehouseId: 1, lifecycleStatus: "draft", warehouseActive: 1 }]);
+    expect(review.manifest.sourceNodes).toHaveLength(1);
+    expect(review.manifest.selections.some(selection => selection.kind === "variant_mapping" && selection.key === "1:102")).toBe(false);
+    const client = await database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await expect(activateReviewedWarehouseSourcesInsideTransaction(client, review.manifest.sourceNodes!, { actor: "operator", occurredAt: now }))
+        .rejects.toThrow("CUTOVER_EXCLUSIVE_ADMISSION_REQUIRED");
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
+    await expect(database.pool.query(`UPDATE warehouse.fulfillment_nodes SET lifecycle_status='active',
+      activated_by='operator',activated_at=transaction_timestamp() WHERE id=1`)).rejects.toThrow("CUTOVER_CONFIGURATION_FROZEN");
+    expect((await database.pool.query("SELECT lifecycle_status FROM warehouse.fulfillment_nodes WHERE id=1")).rows)
+      .toEqual([{ lifecycle_status: "draft" }]);
   });
 
   it("commits, publishes, verifies, finishes and replays with actual owners and immutable receipts", async () => {
@@ -582,12 +714,24 @@ dbDescribe.sequential.each([
     expect((await database.pool.query("SELECT reserved_qty FROM inventory.inventory_levels")).rows).toEqual([{ reserved_qty:3 }]);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.availability_claims")).rows[0].count).toBe(0);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.inventory_publication_outbox WHERE publication_phase='full'")).rows[0].count).toBe(0);
+    expect((await database.pool.query("SELECT lifecycle_status,activated_by,activated_at FROM warehouse.fulfillment_nodes WHERE id=1")).rows)
+      .toEqual([{ lifecycle_status: "draft", activated_by: null, activated_at: null }]);
     const originalCosts=(await database.pool.query("SELECT * FROM oms.order_item_costs")).rows;
     const commits=await Promise.allSettled([service.commit(request,"operator"),service.commit(request,"operator")]);
     expect(commits.map(result => result.status)).toEqual(["fulfilled","fulfilled"]);
     expect(commits.flatMap(result => result.status==="fulfilled" ? [result.value.alreadyApplied] : []).sort()).toEqual([false,true]);
     const committed=commits.flatMap(result => result.status==="fulfilled" && !result.value.alreadyApplied ? [result.value] : [])[0];
     expect(committed).toMatchObject({ runtimeAuthority:"canonical",authorityRevision:"2",fullPublicationRows:1,publicationVerification:"pending" });
+    expect(committed.activatedFulfillmentNodeIds).toEqual([1]);
+    expect((await database.pool.query(`SELECT selection_manifest,result_payload FROM inventory.availability_cutover_commits
+      WHERE activation_run_id=$1`, [prepared.activationRunId])).rows[0]).toMatchObject({
+      selection_manifest: { sourceNodes: [{ nodeId: 1, warehouseId: 1, lifecycleStatus: "draft", warehouseActive: 1 }] },
+      result_payload: { activatedFulfillmentNodeIds: [1] },
+    });
+    expect((await database.pool.query("SELECT id,lifecycle_status,activated_by FROM warehouse.fulfillment_nodes ORDER BY id")).rows)
+      .toEqual([{ id: 1, lifecycle_status: "active", activated_by: "operator" }, { id: 2, lifecycle_status: "draft", activated_by: null }]);
+    expect((await database.pool.query("SELECT lifecycle_status FROM inventory.publication_variant_mapping_versions WHERE product_variant_id=102")).rows)
+      .toEqual([{ lifecycle_status: "draft" }]);
     expect((await database.pool.query("SELECT state,revision::text FROM inventory.inventory_publication_targets WHERE id=2")).rows)
       .toEqual([{ state:"live",revision:"3" }]);
     expect((await database.pool.query("SELECT reserved_qty,picked_qty,variant_qty FROM inventory.inventory_levels")).rows)
@@ -659,6 +803,9 @@ dbDescribe.sequential.each([
     expect(finishes.flatMap(result => result.status==="fulfilled" ? [result.value.alreadyApplied] : []).sort()).toEqual([false,true]);
     expect(finished).toMatchObject({ configurationFreezeReleased:true,verifiedPublicationRows:1 });
     expect(await completion.finish(finish,"operator")).toEqual({ ...finished,alreadyApplied:true });
+    // The immutable reconciliation retry receipt remains available after the
+    // configuration freeze and publication gate have been released.
+    expect(await recovery().reconcile(recoveryRequest, "operator")).toMatchObject({ replay: true, historicalOutcome: "unknown" });
     expect((await database.pool.query("SELECT activation_run_id FROM inventory.quantity_publication_gate")).rows).toEqual([{ activation_run_id:null }]);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.availability_activation_freezes WHERE released_at IS NULL")).rows[0].count).toBe(0);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_publication_catchup WHERE completed_revision<revision")).rows[0].count).toBe(1);

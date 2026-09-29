@@ -193,6 +193,61 @@ describe("private live order inspection", () => {
     shopifyFacts.order.processedAt = "2026-08-31T12:00:00.000Z";
     expect((await service.lookup(lookup)).purchasedAt).toBe(shopifyFacts.order.createdAt);
   });
+  it.each(["United States", "United States of America", "USA", " u.s. ", "us"])(
+    "verifies a stored country alias %s without changing ownership, quantities, or raw evidence", async country => {
+      const s = setupCanonical();
+      s.localFacts.order.shipToCountry = country;
+      const before = structuredClone(s.localFacts);
+      const order = await s.service.lookupCanonical(s.scope);
+      expect(order.lines.map(line => line.eligibleQuantity)).toEqual([2, 1]);
+      const review = await reviewInput(s.service);
+      await expect(s.service.reviewCanonical(review, s.scope)).resolves.toMatchObject({ effects: "none" });
+      expect(s.localFacts).toEqual(before);
+      s.shopifyFacts.order.customerId = gid("Customer", 902);
+      await expect(s.service.lookupCanonical(s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_ORDER_NOT_FOUND" });
+    },
+  );
+  it("inspects a historical cancelled, unfulfilled order stored with a full country name as ineligible", async () => {
+    const s = setupCanonical();
+    const purchasedAt = "2021-10-18T15:30:08.000Z";
+    s.localFacts.order.shipToCountry = "United States";
+    s.localFacts.order.purchasedAt = purchasedAt;
+    s.localFacts.lines = [{ ...s.localFacts.lines[0], quantity: 1 }];
+    s.shopifyFacts.order.createdAt = purchasedAt;
+    s.shopifyFacts.order.processedAt = purchasedAt;
+    s.shopifyFacts.order.cancelledAt = "2021-10-19T10:25:19.000Z";
+    s.shopifyFacts.lines = [{ ...s.shopifyFacts.lines[0], quantity: 1, currentQuantity: 0, refundableQuantity: 0 }];
+    s.shopifyFacts.fulfillments = [];
+    for (const order of [await s.service.lookup(lookup), await s.service.lookupCanonical(s.scope)]) {
+      expect(order.message).toContain("canceled");
+      expect(order.lines).toHaveLength(1);
+      expect(order.lines[0]).toMatchObject({ purchasedQuantity: 1, deliveredQuantity: 0, eligibleQuantity: 0 });
+    }
+  });
+  it.each(["", "   ", "Freedonia", "XX", "constructor", "__proto__"])(
+    "never treats unknown stored country %j as a verified missing or US destination", async country => {
+      for (const providerCountry of [null, "US"]) {
+        const s = setupCanonical();
+        s.localFacts.order.shipToCountry = country;
+        s.shopifyFacts.order.destinationCountryCode = providerCountry;
+        await expect(s.service.lookupCanonical(s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_DATA_UNVERIFIED" });
+      }
+    },
+  );
+  it("keeps missing and verified foreign destinations ineligible and rejects conflicting countries", async () => {
+    for (const [localCountry, providerCountry] of [[null, null], ["Canada", "CA"]]) {
+      const s = setupCanonical();
+      s.localFacts.order.shipToCountry = localCountry;
+      s.shopifyFacts.order.destinationCountryCode = providerCountry;
+      const order = await s.service.lookupCanonical(s.scope);
+      expect(order.lines.every(line => line.eligibleQuantity === 0)).toBe(true);
+      expect(order.message).toContain("U.S. orders only");
+    }
+    const s = setupCanonical();
+    s.localFacts.order.shipToCountry = "United States";
+    s.shopifyFacts.order.destinationCountryCode = "CA";
+    await expect(s.service.lookupCanonical(s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_DATA_UNVERIFIED" });
+  });
   it("keeps domestic and cancellation policy separate from delivery", async () => {
     const first = setup(); first.localFacts.order.shipToCountry = "CA"; first.shopifyFacts.order.destinationCountryCode = "CA";
     expect((await first.service.lookup(lookup)).lines.every(line => line.eligibleQuantity === 0)).toBe(true);

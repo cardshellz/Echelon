@@ -730,6 +730,12 @@
   "inventory.quantity_publication_gate": [
     "modules/inventory-planning"
   ],
+  "inventory.quantity_publication_reconciliation_attempts": [
+    "modules/inventory-planning"
+  ],
+  "inventory.quantity_publication_reconciliations": [
+    "modules/inventory-planning"
+  ],
   "inventory.replen_rules": [
     "modules/catalog",
     "modules/inventory"

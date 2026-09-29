@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { Pool } from "pg";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { cutoverCompositionBaseSql, cutoverCompositionLegacyChannelSeedSql, cutoverCompositionSeedSql,
@@ -19,6 +21,9 @@ dbDescribe.sequential("durable eBay terminal evidence with actual migration0663"
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl,disposable,cutoverCompositionBaseSql);
     await installCutoverCompositionMigrations(database.pool);
+    for (const migration of ["0709_walmart_quantity_admission.sql", "0716_inventory_publication_reconciliation.sql"]) {
+      await database.pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
+    }
     await database.pool.query(cutoverCompositionSeedSql);
     await database.pool.query(cutoverCompositionLegacyChannelSeedSql);
   });
