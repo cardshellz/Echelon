@@ -139,7 +139,8 @@ describe("Dropship current-quantity catch-up owner", () => {
     });
     await new DropshipQuantityPublicationCatchupProvider({ ...context.dependencies, worker }).refresh(scope, claim);
     expect(context.retryJob).toHaveBeenCalledOnce();
-    expect(refreshListingIntent).toHaveBeenCalledWith({ vendorId: 5, storeConnectionId: 7, productVariantId: 101, queuedPriceCents: 1299 });
+    expect(refreshListingIntent).toHaveBeenCalledWith({ jobId: 9, jobItemId: 1, vendorId: 5, storeConnectionId: 7, productVariantId: 101,
+      queuedPriceCents: 1299, queuedMarketplaceCategory: null });
     expect(pushListing).toHaveBeenCalledWith(expect.objectContaining({ listingIntent: expect.objectContaining({ quantity: 14 }) }));
     expect(oldIntent.quantity).toBe(99);
     expect(completeItem).toHaveBeenCalledOnce();

@@ -2,7 +2,7 @@ import type { Pool } from "pg";
 import { pool as defaultPool } from "../../../db";
 import type { ContentRepository, ContentTransaction } from "../application/dropship-listing-content-service";
 import { DropshipError } from "../domain/errors";
-import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
+import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog.reader";
 import { readContentProfile, readListingContentSettings } from "./dropship-listing-content.reader";
 
 export class PgDropshipListingContentRepository implements ContentRepository {
@@ -38,12 +38,7 @@ export class PgDropshipListingContentRepository implements ContentRepository {
         [vendorId, input.storeConnectionId, kind, String(entityId), input.memberId, JSON.stringify({ before, after }), now]);
       };
       const result = await operation({
-        vendorId, catalog: PgDropshipListingPreviewRepository.readerForTransaction(client), loadProfile, loadSaved,
-        listProductLines: async (ids) => (await client.query<{ id: number; name: string }>(
-          "SELECT id, name FROM catalog.product_lines WHERE id = ANY($1::int[]) ORDER BY name, id", [ids])).rows,
-        listVariantIds: async (afterId, limit) => (await client.query<{ id: number }>(
-          `SELECT id FROM catalog.product_variants WHERE id > $1 AND requires_shipping = true
-           AND COALESCE(track_inventory, true) = true AND sales_eligibility = 'sellable' ORDER BY id LIMIT $2`, [afterId, limit])).rows.map((row) => row.id),
+        vendorId, ...selectedCatalogReaderForTransaction(client), loadProfile, loadSaved,
         findReplay: async (kind, key, hash) => {
           // Table names are a closed application-owned enum, never request text.
           const table = kind === "profile" ? "dropship_content_profile_revisions" : "dropship_listing_content_revisions";

@@ -2,6 +2,8 @@ import { createHash } from "crypto";
 import { listingPriceFollowsRules, resolveListingPrice, type SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
 import { decideDropshipListingAccess } from "../../../../shared/dropship/listing-access";
 import type { ListingRulePrice } from "./dropship-rule-price";
+import type { ResolvedEbayListingCategory } from "./dropship-ebay-category-resolver";
+import type { EbayCategorySource } from "../../../../shared/dropship/ebay-category-rules";
 import { z } from "zod";
 import type { DropshipListingPresentation, DropshipListingEconomics } from "../../../../shared/dropship/listing-presentation";
 import type { CatalogImageFile } from "../../catalog/catalog-media.reader";
@@ -59,6 +61,7 @@ import {
   generateVendorListingPreviewInputSchema,
   type CreateListingPushJobInput,
   type GenerateVendorListingPreviewInput,
+  type QueuedEbayCategory,
 } from "./dropship-use-case-dtos";
 
 export interface DropshipListingStoreContext {
@@ -108,6 +111,14 @@ export interface DropshipPricingPolicyRecord {
 
 export interface DropshipListingPreviewRow {
   contentEvidenceHash?: string;
+  /** eBay rows: whether a vendor rule, the store default or the Card Shellz catalog chose the category. */
+  marketplaceCategorySource?: EbayCategorySource;
+  marketplaceCategoryRuleName?: string | null;
+  /**
+   * Push time only: the rules give this listing no category now, so the one it was
+   * queued with is published instead (a changed category never fails a push).
+   */
+  marketplaceCategoryFallback?: "queued";
   rulePriceEvidenceHash?: string | null;
   pricingRuleName?: string | null;
   /** Local setting revision used to reject stale queue creation. */
@@ -204,6 +215,7 @@ export interface CreateDropshipListingPushJobRepositoryResult {
 
 export interface DropshipListingPreviewRepository {
   loadListingContents?(input: { vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[] }): Promise<Map<number, import("../../../../shared/dropship/listing-content").ResolvedListingContent>>;
+  loadEbayCategories?(input: { vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[] }): Promise<Map<number, ResolvedEbayListingCategory>>;
   loadRulePrices?(input: { vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[] }): Promise<Map<number, ListingRulePrice>>;
   listSavedListingPrices(input: {
     vendorId: number; storeConnectionId: number; productVariantIds: readonly number[];
@@ -387,6 +399,16 @@ export class DropshipListingPreviewService {
       storeConnectionId: parsed.storeConnectionId, candidates: ruleEligibleCandidates }) ?? new Map<number, ListingRulePrice>();
     const contents = await this.deps.repository.loadListingContents?.({ vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId, candidates: ruleEligibleCandidates });
+    // Every eBay row resolves its category through the store's current rules. The
+    // push-time refresh calls this again, so a push publishes the category the rules
+    // name when it is sent; a changed category never refuses a queue or fails a push.
+    const ebayCategories = context.platform === "ebay"
+      ? await this.deps.repository.loadEbayCategories?.({ vendorId: parsed.vendorId,
+        storeConnectionId: parsed.storeConnectionId, candidates })
+      : undefined;
+    if (ebayCategories && candidates.some((candidate) => !ebayCategories.has(candidate.productVariantId))) {
+      throw new Error("eBay category resolution returned an incomplete catalog result.");
+    }
     const productCosts = await this.loadProductCosts({
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
@@ -455,6 +477,8 @@ export class DropshipListingPreviewService {
       return buildListingPreviewRow({
         candidate,
         resolvedContent: contents?.get(productVariantId),
+        resolvedCategory: ebayCategories?.get(productVariantId) ?? null,
+        queuedCategory: parsed.queuedEbayCategoriesByVariantId?.[String(productVariantId)] ?? null,
         context,
         config: effectiveConfig,
         selectionDecision,
@@ -924,6 +948,9 @@ export const systemDropshipListingPreviewClock: DropshipClock = {
 
 function buildListingPreviewRow(input: {
   resolvedContent?: import("../../../../shared/dropship/listing-content").ResolvedListingContent;
+  resolvedCategory?: ResolvedEbayListingCategory | null;
+  /** Push time only: the category the listing was queued with. */
+  queuedCategory?: QueuedEbayCategory | null;
   candidate: DropshipListingCatalogCandidate;
   context: DropshipListingStoreContext;
   config: DropshipStoreListingConfig | null;
@@ -996,10 +1023,11 @@ function buildListingPreviewRow(input: {
     unitCostCents: input.productCost?.status === "available" ? input.productCost.unitCostCents : null,
   }).warnings);
 
+  const publishedCategory = publishedEbayCategory(input.resolvedCategory, input.queuedCategory);
   const marketplaceValidation = input.config
     ? input.marketplaceListing.buildListingIntent({
         config: input.config,
-        content: input.resolvedContent ? { ...input.candidate, description: input.resolvedContent.descriptionHtml } : input.candidate,
+        content: listingIntentContent(input.candidate, input.resolvedContent, publishedCategory),
         priceCents,
         quantity: marketplaceQuantity,
         storeCategoryNames: input.storeCategoryNames,
@@ -1022,6 +1050,9 @@ function buildListingPreviewRow(input: {
   const businessPolicySelection = input.context.platform === "ebay"
     ? buildBusinessPolicySelection(input.config, input.ebayListingPolicyOverride)
     : null;
+  // A blocked row has no intent; it still shows the category it would publish.
+  const fallbackCategory = publishedCategory
+    ?? { categoryId: input.candidate.ebayBrowseCategoryId, categoryName: input.candidate.ebayBrowseCategoryName };
   const previewHash = hashJson({
     ...(input.resolvedContent ? { contentEvidenceHash: input.resolvedContent.evidenceHash } : {}),
     ...(ruleOwned ? { rulePriceEvidenceHash: input.rulePrice?.evidenceHash ?? null } : {}),
@@ -1031,10 +1062,8 @@ function buildListingPreviewRow(input: {
     platform: input.context.platform,
     listingMode: input.config?.listingMode ?? null,
     priceCents,
-    marketplaceCategoryId: marketplaceValidation.intent?.marketplaceCategoryId
-      ?? input.candidate.ebayBrowseCategoryId,
-    marketplaceCategoryName: marketplaceValidation.intent?.marketplaceCategoryName
-      ?? input.candidate.ebayBrowseCategoryName,
+    marketplaceCategoryId: marketplaceValidation.intent?.marketplaceCategoryId ?? fallbackCategory.categoryId,
+    marketplaceCategoryName: marketplaceValidation.intent?.marketplaceCategoryName ?? fallbackCategory.categoryName,
     storeCategoryNames: marketplaceValidation.intent?.storeCategoryNames ?? [],
     marketplaceQuantity,
     listingTier: { tier: input.tierStatus.tier, eligible: input.tierStatus.eligible, reason: input.tierStatus.reason },
@@ -1049,6 +1078,11 @@ function buildListingPreviewRow(input: {
   return {
     priceSettingRevisionId: input.savedListingPrice?.revisionId ?? null,
     ...(input.resolvedContent ? { contentEvidenceHash: input.resolvedContent.evidenceHash } : {}),
+    ...(input.resolvedCategory ? {
+      marketplaceCategorySource: input.resolvedCategory.source,
+      marketplaceCategoryRuleName: input.resolvedCategory.ruleName,
+    } : {}),
+    ...(publishedCategory?.fromQueue ? { marketplaceCategoryFallback: "queued" as const } : {}),
     ...(ruleOwned ? { rulePriceEvidenceHash: input.rulePrice?.evidenceHash ?? null, pricingRuleName: input.rulePrice?.ruleName ?? null } : {}),
     productVariantId: input.candidate.productVariantId,
     productId: input.candidate.productId,
@@ -1062,10 +1096,8 @@ function buildListingPreviewRow(input: {
     warnings,
     marketplaceQuantity,
     priceCents,
-    marketplaceCategoryId: marketplaceValidation.intent?.marketplaceCategoryId
-      ?? input.candidate.ebayBrowseCategoryId,
-    marketplaceCategoryName: marketplaceValidation.intent?.marketplaceCategoryName
-      ?? input.candidate.ebayBrowseCategoryName,
+    marketplaceCategoryId: marketplaceValidation.intent?.marketplaceCategoryId ?? fallbackCategory.categoryId,
+    marketplaceCategoryName: marketplaceValidation.intent?.marketplaceCategoryName ?? fallbackCategory.categoryName,
     storeCategoryNames: marketplaceValidation.intent?.storeCategoryNames ?? [],
     businessPolicySelection,
     previewHash,
@@ -1074,6 +1106,41 @@ function buildListingPreviewRow(input: {
     listingTier: input.tierStatus,
     listingIntent: marketplaceValidation.intent,
   };
+}
+
+/** The candidate as the marketplace sees it: the resolved description and the eBay category to publish. */
+function listingIntentContent(
+  candidate: DropshipListingCatalogCandidate,
+  resolvedContent: import("../../../../shared/dropship/listing-content").ResolvedListingContent | undefined,
+  category: PublishedEbayCategory | null,
+): DropshipListingCatalogCandidate {
+  return {
+    ...candidate,
+    ...(resolvedContent ? { description: resolvedContent.descriptionHtml } : {}),
+    ...(category ? { ebayBrowseCategoryId: category.categoryId, ebayBrowseCategoryName: category.categoryName } : {}),
+  };
+}
+
+interface PublishedEbayCategory {
+  categoryId: string | null;
+  categoryName: string | null;
+  fromQueue: boolean;
+}
+
+/**
+ * The eBay category a row publishes: the one the rules name now; when they name
+ * none, the one the listing was queued with (push time only). Null keeps the
+ * candidate's own catalog fields, for rows the rules did not resolve.
+ */
+function publishedEbayCategory(
+  resolved: ResolvedEbayListingCategory | null | undefined,
+  queued: QueuedEbayCategory | null | undefined,
+): PublishedEbayCategory | null {
+  if (!resolved) return null;
+  if (resolved.categoryId === null && queued) {
+    return { categoryId: queued.categoryId, categoryName: queued.categoryName, fromQueue: true };
+  }
+  return { categoryId: resolved.categoryId, categoryName: resolved.categoryName, fromQueue: false };
 }
 
 function missingCatalogPreviewRow(input: {

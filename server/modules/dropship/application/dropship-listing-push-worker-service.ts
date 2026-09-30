@@ -18,7 +18,9 @@ import type {
 } from "./dropship-marketplace-listing-push-provider";
 import {
   processListingPushJobInputSchema,
+  queuedEbayCategorySchema,
   type ProcessListingPushJobInput,
+  type QueuedEbayCategory,
 } from "./dropship-use-case-dtos";
 
 const MAX_LISTING_PUSH_NOTIFICATION_ITEMS = 25;
@@ -138,16 +140,30 @@ export interface DropshipListingPushWorkerRepository {
   }): Promise<DropshipListingPushWorkerResult>;
 }
 
+/** What the worker hands the push-time refresh for one queued item. */
+export interface DropshipListingIntentRefreshInput {
+  jobId: number;
+  jobItemId: number;
+  vendorId: number;
+  storeConnectionId: number;
+  productVariantId: number;
+  /** The price the queued intent carried. */
+  queuedPriceCents: number;
+  /** The eBay category the queued intent carried; null when it had none the refresh may keep. */
+  queuedMarketplaceCategory: QueuedEbayCategory | null;
+}
+
 export interface DropshipListingPushWorkerServiceDependencies {
   /**
    * Rebuilds the listing intent at push time. `queuedPriceCents` is the price
    * the queued intent carried, so the refresh can refuse to publish a rule
    * price that changed since the vendor queued it when the cost change policy
-   * waits for the vendor's review (C5).
+   * waits for the vendor's review (C5). `queuedMarketplaceCategory` is the eBay
+   * category the queued intent carried: the push publishes the category the
+   * rules name now, and keeps this one only when they name none, so a changed
+   * category never fails a push.
    */
-  refreshListingIntent?: (input: {
-    vendorId: number; storeConnectionId: number; productVariantId: number; queuedPriceCents: number;
-  }) => Promise<DropshipMarketplaceListingIntent>;
+  refreshListingIntent?: (input: DropshipListingIntentRefreshInput) => Promise<DropshipMarketplaceListingIntent>;
   repository: DropshipListingPushWorkerRepository;
   marketplacePush: DropshipMarketplaceListingPushProvider;
   notificationSender?: DropshipNotificationSender;
@@ -251,8 +267,10 @@ export class DropshipListingPushWorkerService {
     try {
       // Persisted job intent identifies work, not a quantity snapshot to replay later.
       const currentIntent = this.deps.refreshListingIntent ? await this.deps.refreshListingIntent({
+        jobId: claim.job.jobId, jobItemId: item.itemId,
         vendorId: claim.job.vendorId, storeConnectionId: claim.job.storeConnectionId, productVariantId: item.productVariantId,
         queuedPriceCents: intent!.priceCents,
+        queuedMarketplaceCategory: queuedMarketplaceCategory(intent!),
       }) : intent!;
       const pushResult = await this.deps.marketplacePush.pushListing({
         vendorId: claim.job.vendorId,
@@ -476,6 +494,20 @@ function validateClaimEligibility(
     };
   }
   return null;
+}
+
+/**
+ * The eBay category a queued eBay intent carried, for the refresh to keep when
+ * the rules now name none. The stored intent is JSON, so it is checked again: an
+ * id that is not an eBay category number is not kept. The name is display only,
+ * so an unusable name is dropped rather than losing the category.
+ */
+function queuedMarketplaceCategory(intent: DropshipMarketplaceListingIntent): QueuedEbayCategory | null {
+  if (intent.platform !== "ebay") return null;
+  const categoryId = queuedEbayCategorySchema.shape.categoryId.safeParse(intent.marketplaceCategoryId);
+  if (!categoryId.success) return null;
+  const categoryName = queuedEbayCategorySchema.shape.categoryName.safeParse(intent.marketplaceCategoryName ?? null);
+  return { categoryId: categoryId.data, categoryName: categoryName.success ? categoryName.data : null };
 }
 
 function parseListingIntent(result: Record<string, unknown> | null): DropshipMarketplaceListingIntent | null {

@@ -23,6 +23,7 @@ import type { SavedListingPriceRevision } from "../../../../shared/dropship/list
 import { resolveListingRulePrice, type ListingRulePrice } from "../application/dropship-rule-price";
 import { readPricingProfile } from "./dropship-pricing-profile.reader";
 import { readResolvedListingContents } from "./dropship-listing-content.reader";
+import { readResolvedEbayCategories } from "./dropship-ebay-category-rules.reader";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 
 type ListingDatabasePool = Pick<Pool, "query"> & {
@@ -584,6 +585,19 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     try {
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       const result = await readResolvedListingContents(client, input);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      try { await client.query("ROLLBACK"); } catch { /* Preserve original failure. */ }
+      throw error;
+    } finally { client.release(); }
+  }
+
+  async loadEbayCategories(input: { vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[] }) {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const result = await readResolvedEbayCategories(client, input);
       await client.query("COMMIT");
       return result;
     } catch (error) {

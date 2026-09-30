@@ -8,13 +8,14 @@ import type {
 import type { DropshipMarketplaceListingPushProvider } from "../../application/dropship-marketplace-listing-push-provider";
 import {
   DropshipListingPushWorkerService,
+  type DropshipListingIntentRefreshInput,
   type DropshipListingPushWorkerClaim,
   type DropshipListingPushWorkerEligibility,
   type DropshipListingPushWorkerItemRecord,
   type DropshipListingPushWorkerJobRecord,
   type DropshipListingPushWorkerRepository,
 } from "../../application/dropship-listing-push-worker-service";
-import type { DropshipStoreListingConfig } from "../../application/dropship-marketplace-listing-provider";
+import type { DropshipMarketplaceListingIntent, DropshipStoreListingConfig } from "../../application/dropship-marketplace-listing-provider";
 
 const now = new Date("2026-05-01T19:00:00.000Z");
 
@@ -342,6 +343,69 @@ describe("DropshipListingPushWorkerService", () => {
         }),
       }),
     ]));
+  });
+
+  describe("push-time refresh", () => {
+    let refreshInputs: DropshipListingIntentRefreshInput[];
+
+    function useJob(platform: "ebay" | "shopify", intent: Record<string, unknown>) {
+      repository.job = { ...repository.job, platform };
+      repository.config = { ...repository.config, platform };
+      const queued = makeQueuedItem();
+      repository.items = [{ ...queued, result: { listingIntent: { ...queued.result!.listingIntent as Record<string, unknown>,
+        platform, ...intent } } }];
+      refreshInputs = [];
+      return new DropshipListingPushWorkerService({
+        repository,
+        marketplacePush,
+        notificationSender,
+        clock: { now: () => now },
+        logger: { info: (event) => logs.push(event), warn: (event) => logs.push(event), error: (event) => logs.push(event) },
+        refreshListingIntent: async (input) => {
+          refreshInputs.push(input);
+          return { ...(repository.items[0].result!.listingIntent as DropshipMarketplaceListingIntent), marketplaceCategoryId: "261328", quantity: 7 };
+        },
+      });
+    }
+
+    it("hands the refresh the eBay category the item was queued with, and pushes what the refresh returns", async () => {
+      const worker = useJob("ebay", { marketplaceCategoryId: "183438", marketplaceCategoryName: "Card Toploaders & Holders" });
+
+      const result = await worker.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-ebay-1" });
+
+      expect(refreshInputs).toEqual([{ jobId: 30, jobItemId: 1, vendorId: 10, storeConnectionId: 22, productVariantId: 101, queuedPriceCents: 1299,
+        queuedMarketplaceCategory: { categoryId: "183438", categoryName: "Card Toploaders & Holders" } }]);
+      expect(marketplacePush.requests[0].listingIntent).toMatchObject({ marketplaceCategoryId: "261328", quantity: 7 });
+      expect(result.job.status).toBe("completed");
+    });
+
+    it("keeps the queued category number when its name is unusable", async () => {
+      const worker = useJob("ebay", { marketplaceCategoryId: "183438", marketplaceCategoryName: "   " });
+
+      await worker.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-ebay-2" });
+
+      expect(refreshInputs[0].queuedMarketplaceCategory).toEqual({ categoryId: "183438", categoryName: null });
+    });
+
+    it.each([
+      ["no category", { marketplaceCategoryId: null, marketplaceCategoryName: null }],
+      ["an id that is not an eBay category number", { marketplaceCategoryId: "toploaders", marketplaceCategoryName: "Toploaders" }],
+      ["a zero id", { marketplaceCategoryId: "0", marketplaceCategoryName: "Toploaders" }],
+    ])("hands the refresh no queued category when the queued eBay intent has %s", async (_label, intent) => {
+      const worker = useJob("ebay", intent);
+
+      await worker.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-ebay-3" });
+
+      expect(refreshInputs[0].queuedMarketplaceCategory).toBeNull();
+    });
+
+    it("never hands a queued eBay category to the refresh of a store that is not eBay", async () => {
+      const worker = useJob("shopify", { marketplaceCategoryId: "183438", marketplaceCategoryName: "Card Toploaders & Holders" });
+
+      await worker.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-shopify-1" });
+
+      expect(refreshInputs[0].queuedMarketplaceCategory).toBeNull();
+    });
   });
 });
 
