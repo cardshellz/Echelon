@@ -5,6 +5,7 @@ import {
   listingDraftSchema,
   listingPriceRuleSchema,
   listingReviewSchema,
+  listingTaxonomySchema,
   saveListingDraftSchema,
   submitListingReviewSchema,
   type ListingAccount,
@@ -13,6 +14,7 @@ import {
   type ListingOperation,
   type ListingPriceRule,
   type ListingReview,
+  type ListingTaxonomy,
 } from "@shared/types/channel-listing-publication";
 import type { ChannelCatalogService } from "../../channels/channel-catalog.service";
 import { ChannelProviderError } from "../../channels/channel-provider.error";
@@ -134,14 +136,11 @@ export class ListingPublicationService {
       this.now(),
     );
   }
-  async taxonomy(channelId: number): Promise<{ productTypes: string[] }> {
+  async taxonomy(channelId: number): Promise<ListingTaxonomy> {
     const provider = await this.provider(channelId);
-    return {
-      productTypes: z
-        .array(z.string().min(1).max(200))
-        .max(20_000)
-        .parse(await provider.taxonomy(await provider.account(channelId))),
-    };
+    return listingTaxonomySchema.parse(
+      await provider.taxonomy(await provider.account(channelId)),
+    );
   }
   async requirements(channelId: number, input: unknown) {
     const query = z

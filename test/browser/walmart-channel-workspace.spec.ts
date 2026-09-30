@@ -250,7 +250,9 @@ test("publication selection survives pages and edits required schema fields with
   await expect(picker.getByLabel("Select CARD-1", { exact: true })).toBeChecked();
   await page.getByRole("button", { name: "Add 2 to draft", exact: true }).click();
   await page.getByRole("button", { name: "Edit CARD-1", exact: true }).click();
-  await page.getByLabel("Walmart product type", { exact: true }).fill("Trading Card Accessories");
+  await page.getByRole("button", { name: "Browse product types", exact: true }).click();
+  await page.getByRole("textbox", { name: "Search product types or categories", exact: true }).fill("Trading Card Accessories");
+  await page.getByRole("button", { name: "Select Trading Card Accessories", exact: true }).click();
   await page.getByLabel("Shipping weight", { exact: false }).fill("0.2");
   await page.getByLabel("Country of origin", { exact: false }).selectOption("US");
   await page.getByLabel("Fixed Walmart price (USD)", { exact: true }).fill("5.49");
@@ -266,6 +268,148 @@ test("publication selection survives pages and edits required schema fields with
   await page.screenshot({ path: info.outputPath("walmart-publication-draft.png"), fullPage: true });
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("product types browse through categories and only selecting a different leaf resets attributes", async ({ page }, info) => {
+  const state = await setup(page);
+  await selectFirstProduct(page);
+  await page.getByRole("button", { name: "Edit CARD-1", exact: true }).click();
+  const requirementsBefore = state.reads.filter(path => path.includes("/requirements?")).length;
+  await page.getByRole("button", { name: "Browse product types", exact: true }).click();
+  await page.getByRole("button", { name: "Browse Collectibles", exact: true }).click();
+  await page.getByRole("button", { name: "Browse Card Protection", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Select Trading Card Accessories", exact: true })).toBeVisible();
+  expect(state.reads.filter(path => path.includes("/requirements?")).length).toBe(requirementsBefore);
+  expect(state.publication.writes).toEqual([]);
+  await page.screenshot({ path: info.outputPath("product-type-category-browser.png"), fullPage: true });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.getByRole("button", { name: "Select Trading Card Accessories", exact: true }).click();
+  await page.getByLabel("Shipping weight", { exact: false }).fill("0.2");
+  await page.getByLabel("Country of origin", { exact: false }).selectOption("US");
+  await page.getByRole("button", { name: "Change product type", exact: true }).click();
+  await page.getByRole("textbox", { name: "Search product types or categories", exact: true }).fill("Card Protection");
+  await page.getByRole("button", { name: "Select Trading Card Accessories", exact: true }).click();
+  await expect(page.getByLabel("Shipping weight", { exact: false })).toHaveValue("0.2");
+  await expect(page.getByLabel("Country of origin", { exact: false })).toHaveValue("US");
+  await page.getByRole("button", { name: "Change product type", exact: true }).click();
+  await page.getByRole("textbox", { name: "Search product types or categories", exact: true }).fill("Card Storage");
+  await page.getByRole("button", { name: "Select Trading Card Storage", exact: true }).click();
+  await expect(page.getByLabel("Shipping weight", { exact: false })).toHaveValue("");
+  await page.getByRole("button", { name: "Update draft item", exact: true }).click();
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect(page.getByText("Draft saved. No listing has been submitted.", { exact: true })).toBeVisible();
+  expect(state.publication.draft.items[0]).toMatchObject({ productType: "Trading Card Storage", attributes: {} });
+  expect(state.publication.operations).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("product-type search finds ancestry, supports keyboard selection and does not save search text", async ({ page }, info) => {
+  const state = await setup(page);
+  await selectFirstProduct(page);
+  await page.getByRole("button", { name: "Edit CARD-1", exact: true }).click();
+  await page.getByRole("button", { name: "Browse product types", exact: true }).click();
+  const search = page.getByRole("textbox", { name: "Search product types or categories", exact: true });
+  await search.fill("not-a-real-product-type");
+  await expect(page.getByText("No product types match this search.", { exact: true })).toBeVisible();
+  await search.fill("collectibles storage");
+  const result = page.getByRole("button", { name: "Select Trading Card Storage", exact: true });
+  await expect(result).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select Office Folders", exact: true })).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath("product-type-search-results.png"), fullPage: true });
+  await result.focus();
+  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "Update draft item", exact: true }).click();
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect(page.getByText("Draft saved. No listing has been submitted.", { exact: true })).toBeVisible();
+  expect(state.publication.draft.items[0].productType).toBe("Trading Card Storage");
+  expect(state.publication.operations).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("taxonomy failure offers retry and preserves an existing draft type and attributes", async ({ page }) => {
+  const state = await setup(page);
+  state.publication.taxonomyError = true;
+  state.publication.draft = { ...state.publication.draft, revision: 1,
+    items: [listingDraftItemSchema.parse({ variantId: 1, productType: "Trading Card Accessories", attributes: { Orderable: { shippingWeight: 0.2 } } })] };
+  await page.reload();
+  await page.getByRole("button", { name: "Edit CARD-1", exact: true }).click();
+  await page.getByRole("button", { name: "Change product type", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Retry product types", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Shipping weight", { exact: false })).toHaveValue("0.2");
+  state.publication.taxonomyError = false;
+  await page.getByRole("button", { name: "Retry product types", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Browse Collectibles", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Close product type browser", exact: true }).click();
+  await expect(page.getByLabel("Shipping weight", { exact: false })).toHaveValue("0.2");
+  expect(state.publication.writes).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("legacy flat taxonomy remains selectable and large result sets can be expanded", async ({ page }) => {
+  const state = await setup(page);
+  state.publication.taxonomy = { productTypes: Array.from({ length: 65 }, (_, index) => `Legacy product type ${String(index + 1).padStart(2, "0")}`) };
+  await selectFirstProduct(page);
+  await page.getByRole("button", { name: "Edit CARD-1", exact: true }).click();
+  await page.getByRole("button", { name: "Browse product types", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Select Legacy product type 01", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select Legacy product type 65", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Show more product types", exact: true }).click();
+  await page.getByRole("button", { name: "Select Legacy product type 65", exact: true }).click();
+  await page.getByRole("button", { name: "Update draft item", exact: true }).click();
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect(page.getByText("Draft saved. No listing has been submitted.", { exact: true })).toBeVisible();
+  expect(state.publication.draft.items[0].productType).toBe("Legacy product type 65");
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("empty taxonomy retains an unknown saved selection without inventing a replacement", async ({ page }) => {
+  const state = await setup(page);
+  state.publication.taxonomy = { productTypes: [], entries: [] };
+  state.publication.draft = { ...state.publication.draft, revision: 1,
+    items: [listingDraftItemSchema.parse({ variantId: 1, productType: "Previously saved type", attributes: { Orderable: { shippingWeight: 0.2 } } })] };
+  await page.reload();
+  await page.getByRole("button", { name: "Edit CARD-1", exact: true }).click();
+  await expect(page.getByRole("dialog").getByText("Previously saved type", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Change product type", exact: true }).click();
+  await expect(page.getByText("No product types are available.", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Close product type browser", exact: true }).click();
+  await expect(page.getByLabel("Shipping weight", { exact: false })).toHaveValue("0.2");
+  expect(state.publication.writes).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("product-type loading is explicit and does not select or publish an item", async ({ page }) => {
+  const state = await setup(page);
+  let releaseTaxonomy!: () => void;
+  const responseGate = new Promise<void>(resolve => { releaseTaxonomy = resolve; });
+  await page.route(`**${PUBLICATION_BASE}/taxonomy`, async route => {
+    await responseGate;
+    await route.fulfill({ json: state.publication.taxonomy });
+  });
+  try {
+    await selectFirstProduct(page);
+    await page.getByRole("button", { name: "Edit CARD-1", exact: true }).click();
+    await page.getByRole("button", { name: "Browse product types", exact: true }).click();
+    await expect(page.getByText("Loading product types…", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Select Trading Card/ })).toHaveCount(0);
+    expect(state.publication.writes).toEqual([]);
+  } finally {
+    releaseTaxonomy();
+  }
+  await expect(page.getByRole("button", { name: "Browse Collectibles", exact: true })).toBeVisible();
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("read-only item details cannot change product type", async ({ page }) => {
+  const state = await setup(page, { readOnly: true });
+  state.publication.draft = { ...state.publication.draft, revision: 1,
+    items: [listingDraftItemSchema.parse({ variantId: 1, productType: "Trading Card Accessories" })] };
+  await page.reload();
+  await page.getByRole("button", { name: "View CARD-1", exact: true }).click();
+  await expect(page.getByRole("dialog").getByText("Trading Card Accessories", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Change product type", exact: true })).toBeDisabled();
+  expect(state.publication.writes).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
 test("server review blockers prevent submission and stale saves preserve local selection", async ({ page }) => {

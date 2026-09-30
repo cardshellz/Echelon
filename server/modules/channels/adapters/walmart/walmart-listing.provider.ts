@@ -4,6 +4,7 @@ import {
   listingDraftItemSchema,
   type ListingAccount,
   type ListingIssue,
+  type ListingTaxonomy,
 } from "@shared/types/channel-listing-publication";
 import type {
   ListingPublicationInput,
@@ -92,7 +93,7 @@ export class WalmartListingProvider implements ListingPublicationProvider {
     });
   }
 
-  async taxonomy(account: ListingAccount): Promise<string[]> {
+  async taxonomy(account: ListingAccount): Promise<ListingTaxonomy> {
     return (await this.api(account)).taxonomy();
   }
 
