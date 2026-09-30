@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider } from "../../../client/src/lib/auth";
 import { getQueryFn } from "../../../client/src/lib/queryClient";
 import ChannelAllocation from "../../../client/src/pages/ChannelAllocation";
+import Channels from "../../../client/src/pages/Channels";
 import Reserves from "../../../client/src/pages/Reserves";
 import Warehouses from "../../../client/src/pages/Warehouses";
 import "../../../client/src/index.css";
@@ -25,11 +26,13 @@ const client = new QueryClient({
 createRoot(document.getElementById("root")!).render(
   <QueryClientProvider client={client}>
     <AuthProvider>
-      {mode === "warehouses"
-        ? <Warehouses />
-        : mode === "reserves"
-          ? <Reserves />
-          : <ChannelAllocation />}
+      {mode === "channels"
+        ? <Channels />
+        : mode === "warehouses"
+          ? <Warehouses />
+          : mode === "reserves"
+            ? <Reserves />
+            : <ChannelAllocation />}
     </AuthProvider>
   </QueryClientProvider>,
 );

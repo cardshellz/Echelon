@@ -3,8 +3,30 @@ import { expect, test, type Page } from "@playwright/test";
 
 type Authority = "legacy" | "canonical" | "unavailable";
 
-async function setup(page: Page, mode: "allocation" | "reserves" | "warehouses", authority: Authority) {
-  const state = { unexpected: [] as string[], errors: [] as string[] };
+const connectedChannels = [
+  { id: 36, name: "Shopify", provider: "shopify", shopDomain: "example-us.myshopify.com" },
+  { id: 37, name: "Shopify-Canada", provider: "shopify", shopDomain: "example-ca.myshopify.com" },
+  { id: 67, name: "Ebay", provider: "ebay", shopDomain: "ebay.com/usr/example" },
+  { id: 103, name: "Dropship OMS", provider: "manual", shopDomain: null },
+  { id: 104, name: "Walmart", provider: "walmart", shopDomain: null },
+].map(({ shopDomain, ...channel }) => ({
+  ...channel, type: "internal", status: "active", isDefault: 0, priority: 1,
+  createdAt: "2026-09-14T00:00:00.000Z", partnerProfile: null,
+  connection: channel.provider === "manual" ? null : {
+    id: channel.id, channelId: channel.id, shopDomain, lastSyncAt: null, syncStatus: "ok", syncError: null,
+  },
+}));
+
+async function setup(
+  page: Page,
+  mode: "allocation" | "reserves" | "warehouses" | "channels",
+  authority: Authority,
+  options: { channelStatus?: number; emptyChannels?: boolean } = {},
+) {
+  const state = {
+    unexpected: [] as string[], errors: [] as string[], channelReads: 0,
+    channelStatus: options.channelStatus ?? 200,
+  };
   page.on("pageerror", (error) => state.errors.push(error.message));
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1"
     ? route.continue()
@@ -15,7 +37,7 @@ async function setup(page: Page, mode: "allocation" | "reserves" | "warehouses",
     if (request.method() === "GET" && path === "/api/auth/me") {
       return route.fulfill({ json: {
         user: { id: "operator-1", username: "operator", role: "admin" },
-        permissions: ["channels:view", "channels:edit", "inventory:view", "inventory:edit", "inventory_planning:view"],
+        permissions: ["channels:view", "channels:edit", "channels:create", "inventory:view", "inventory:edit", "inventory_planning:view"],
         roles: ["admin"],
       } });
     }
@@ -61,7 +83,14 @@ async function setup(page: Page, mode: "allocation" | "reserves" | "warehouses",
       }] });
     }
     if (request.method() === "GET" && path === "/api/channels") {
-      return route.fulfill({ json: [] });
+      state.channelReads += 1;
+      if (state.channelStatus !== 200) {
+        return route.fulfill({ status: state.channelStatus, json: { error: "Channels unavailable" } });
+      }
+      return route.fulfill({ json: mode === "channels" && !options.emptyChannels ? connectedChannels : [] });
+    }
+    if (mode === "channels" && request.method() === "GET" && path === "/api/warehouse-settings/default") {
+      return route.fulfill({ json: { channelSyncEnabled: 1 } });
     }
     state.unexpected.push(`${request.method()} ${path}`);
     return route.fulfill({ status: 500, json: { error: "Unexpected request" } });
@@ -77,6 +106,54 @@ async function setup(page: Page, mode: "allocation" | "reserves" | "warehouses",
 }
 
 test.describe("inventory runtime authority gates", () => {
+  for (const authority of ["canonical", "unavailable"] as const) {
+    test(`sales channels and saved connections load with ${authority} inventory authority`, async ({ page }) => {
+      const state = await setup(page, "channels", authority);
+      await expect(page.getByTestId(/^channel-card-/)).toHaveCount(5);
+      for (const channel of connectedChannels) {
+        await expect(page.getByTestId(`channel-card-${channel.id}`)).toContainText(channel.name);
+      }
+      await expect(page.getByText("No Channels Connected", { exact: true })).toHaveCount(0);
+      await expect(page.getByTestId("canonical-channel-publication-controls")).toBeVisible();
+      if (authority === "unavailable") {
+        await expect(page.getByText("Live allocator unknown", { exact: true })).toBeVisible();
+      }
+      await page.getByTestId("channel-card-36").click();
+      const dialog = page.getByRole("dialog");
+      await dialog.getByRole("tab", { name: "Connection", exact: true }).click();
+      await expect(dialog.getByRole("link")).toHaveAttribute("href", "https://example-us.myshopify.com");
+      await expect(dialog.getByRole("link")).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Open Channel Inventory", exact: true })).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Publish inventory to Shopify", exact: true })).toHaveCount(0);
+      expect(state.channelReads).toBe(1);
+      // Any legacy sync read or mutation would be captured as an unexpected request.
+      expect(state.unexpected).toEqual([]);
+      expect(state.errors).toEqual([]);
+    });
+  }
+
+  test("sales channel load failure shows a retry instead of claiming connections are missing", async ({ page }) => {
+    const state = await setup(page, "channels", "canonical", { channelStatus: 503 });
+    await expect(page.getByRole("alert").filter({ hasText: "Unable to load sales channels" })).toBeVisible();
+    await expect(page.getByText("No Channels Connected", { exact: true })).toHaveCount(0);
+    state.channelStatus = 200;
+    await page.getByRole("button", { name: "Retry loading channels", exact: true }).click();
+    await expect(page.getByTestId(/^channel-card-/)).toHaveCount(5);
+    await expect(page.getByText("Unable to load sales channels", { exact: true })).toHaveCount(0);
+    expect(state.channelReads).toBe(2);
+    expect(state.unexpected).toEqual([]);
+    expect(state.errors).toEqual([]);
+  });
+
+  test("sales channel empty state requires a successful empty response", async ({ page }) => {
+    const state = await setup(page, "channels", "canonical", { emptyChannels: true });
+    await expect(page.getByText("No Channels Connected", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Add Your First Channel", exact: true })).toBeVisible();
+    expect(state.channelReads).toBe(1);
+    expect(state.unexpected).toEqual([]);
+    expect(state.errors).toEqual([]);
+  });
+
   for (const mode of ["allocation", "reserves"] as const) {
     test(`${mode} retires legacy controls after canonical activation without reading legacy data`, async ({ page }) => {
       const state = await setup(page, mode, "canonical");
