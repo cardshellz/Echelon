@@ -201,6 +201,12 @@
   "dropship.dropship_cost_schedule_entries": [
     "modules/dropship"
   ],
+  "dropship.dropship_ebay_category_rule_profiles": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_ebay_category_rule_revisions": [
+    "modules/dropship"
+  ],
   "dropship.dropship_ebay_listing_policy_override_revisions": [
     "modules/dropship"
   ],
@@ -1172,10 +1178,10 @@
   "public.scheduler_runs": [
     "server/infrastructure/scheduler-run-registry.ts"
   ],
-  "returns.customer_return_allocation_case_items": [
+  "returns.customer_login_challenges": [
     "modules/returns"
   ],
-  "returns.customer_login_challenges": [
+  "returns.customer_return_allocation_case_items": [
     "modules/returns"
   ],
   "returns.customer_return_authorization_allocations": [
