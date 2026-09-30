@@ -151,14 +151,15 @@ export default function Channels() {
   const inventoryRuntimeAuthorityQuery = useInventoryRuntimeAuthority();
   const legacyInventoryAuthority = inventoryRuntimeAuthorityQuery.data?.authority === "legacy";
 
-  const { data: channels = [], isLoading } = useQuery<Channel[]>({
+  const { data: channels = [], isLoading, isError, isFetching, refetch: refetchChannels } = useQuery<Channel[]>({
     queryKey: ["/api/channels"],
     queryFn: async () => {
       const res = await fetch("/api/channels", { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch channels");
       return res.json();
     },
-    enabled: canView && legacyInventoryAuthority,
+    // Connection management remains available regardless of the inventory allocator.
+    enabled: canView,
   });
 
   const createMutation = useMutation({
@@ -457,6 +458,16 @@ export default function Channels() {
         <div className="flex items-center justify-center py-12">
           <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
+      ) : isError ? (
+        <Card className="p-12 text-center" role="alert">
+          <AlertCircle className="h-16 w-16 mx-auto text-destructive mb-4" />
+          <h2 className="text-xl font-semibold mb-2">Unable to load sales channels</h2>
+          <p className="text-muted-foreground mb-4">The channel list could not be loaded. Please try again.</p>
+          <Button onClick={() => void refetchChannels()} disabled={isFetching} className="min-h-[44px]">
+            <RefreshCw className={`h-4 w-4 mr-2 ${isFetching ? "animate-spin" : ""}`} />
+            Retry loading channels
+          </Button>
+        </Card>
       ) : channels.length === 0 ? (
         <Card className="p-12 text-center">
           <Store className="h-16 w-16 mx-auto text-muted-foreground mb-4" />
