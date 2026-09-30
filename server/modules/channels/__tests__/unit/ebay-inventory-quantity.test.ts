@@ -20,6 +20,38 @@ function fixture() {
 }
 
 describe("shared eBay absolute inventory quantity protocol", () => {
+  it.each([0, 38, Number.MAX_SAFE_INTEGER])("retains read-only convergence when both limits already equal %i", async quantity => {
+    const client = fixture();
+    client.getInventoryOffersPage.mockResolvedValue({ total: 1, offers: [offer(quantity)] });
+    client.getInventoryItem.mockResolvedValue(item(quantity));
+    await expect(publishEbayInventoryQuantity(client, sku, market, quantity)).resolves.toEqual({
+      sku, marketplaceId: market, offerId: "offer-1", quantity, effect: "already_current", providerWriteAttempted: false,
+      observation: { sku, marketplaceId: market, offerId: "offer-1", inventoryItemQuantity: quantity,
+        offerQuantity: quantity, observedQuantity: quantity },
+    });
+    expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
+    expect(client.getInventoryItem).toHaveBeenCalledExactlyOnceWith(sku);
+  });
+  it.each([[38,50], [50,38], [38,0], [0,38]])("writes when item %i and offer %i are not both the desired 38", async (itemQty, offerQty) => {
+    const client = fixture();
+    client.getInventoryOffersPage.mockResolvedValue({ total: 1, offers: [offer(offerQty)] });
+    client.getInventoryItem.mockResolvedValue(item(itemQty));
+    await expect(publishEbayInventoryQuantity(client, sku, market, 38)).resolves.toMatchObject({
+      quantity: 38, effect: "updated", providerWriteAttempted: true,
+    });
+    expect(client.bulkUpdatePriceQuantity).toHaveBeenCalledOnce();
+  });
+  it.each([null, "38", -1, Infinity])("does not use invalid item quantity %s as no-op proof", async quantity => {
+    const client = fixture(); client.getInventoryItem.mockResolvedValue(item(quantity));
+    await expect(publishEbayInventoryQuantity(client, sku, market, 38)).rejects.toMatchObject({ code: "EBAY_INVENTORY_QUANTITY_INVALID" });
+    expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
+  });
+  it("does not turn a failed convergence read into a success or a fallback mutation", async () => {
+    const client = fixture(); const error = new Error("provider read failed");
+    client.getInventoryItem.mockRejectedValue(error);
+    await expect(publishEbayInventoryQuantity(client, sku, market, 38)).rejects.toBe(error);
+    expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
+  });
   it.each([[50, 38, 38], [12, 50, 12], [0, 40, 0], [30, 0, 0]])(
     "observes both item %i and offer %i limits as %i, retaining both values", async (itemQty, offerQty, expected) => {
       const client = fixture();
