@@ -10,7 +10,13 @@ function Field({ label, children }: { label: string; children: import("react").R
   return <label className="block space-y-1 text-xs text-zinc-600"><span>{label}</span>{children}</label>;
 }
 type Scope = CatalogScope;
-export function DropshipCatalogScopePicker({ endpoint, value, onChange, disabled }: { endpoint: string; value: Scope; onChange: (value: Scope) => void; disabled: boolean }) {
+/**
+ * `onChange` also receives the chosen target's display name for single-target
+ * scopes (category, product line, product), so a caller can name a new rule after it.
+ */
+export function DropshipCatalogScopePicker({ endpoint, value, onChange, disabled }: {
+  endpoint: string; value: Scope; onChange: (value: Scope, targetName?: string) => void; disabled: boolean;
+}) {
   const [search, setSearch] = useState("");
   const [queryText, setQueryText] = useState("");
   const [page, setPage] = useState(0);
@@ -19,10 +25,10 @@ export function DropshipCatalogScopePicker({ endpoint, value, onChange, disabled
     queryFn: async () => catalogTargetsResponseSchema.parse(await fetchJson(`${endpoint}/targets?type=${value.type}&search=${encodeURIComponent(queryText)}&page=${page}`)) });
   const selected = value.type === "category" ? [value.category] : value.type === "product_line" ? [String(value.productLineId)]
     : value.type === "product" ? [String(value.productId)] : value.productVariantIds.map(String);
-  function choose(id: string) {
-    if (value.type === "category") onChange({ type: "category", category: id });
-    else if (value.type === "product_line") onChange({ type: "product_line", productLineId: Number(id) });
-    else if (value.type === "product") onChange({ type: "product", productId: Number(id) });
+  function choose(id: string, name: string) {
+    if (value.type === "category") onChange({ type: "category", category: id }, name);
+    else if (value.type === "product_line") onChange({ type: "product_line", productLineId: Number(id) }, name);
+    else if (value.type === "product") onChange({ type: "product", productId: Number(id) }, name);
     else onChange({ type: "listings", productVariantIds: selected.includes(id) ? value.productVariantIds.filter((item) => item !== Number(id)) : [...value.productVariantIds, Number(id)] });
   }
   return <div className="space-y-2"><div className="grid gap-3 sm:grid-cols-2">
@@ -36,7 +42,7 @@ export function DropshipCatalogScopePicker({ endpoint, value, onChange, disabled
       {query.isPending ? <p className="text-xs">Loading choices…</p> : query.error ? <div role="alert" className="text-xs text-rose-700">{queryErrorMessage(query.error, "Choices unavailable.")}
         <Button size="sm" variant="ghost" disabled={disabled} onClick={() => void query.refetch()}>Retry choices</Button></div>
         : query.data?.rows.map((row) => <label key={row.id} className="flex items-start gap-2 py-1 text-xs"><input type="checkbox" disabled={disabled}
-          checked={selected.includes(row.id)} onChange={() => choose(row.id)} /><span>{row.name}</span></label>)}
+          checked={selected.includes(row.id)} onChange={() => choose(row.id, row.name)} /><span>{row.name}</span></label>)}
       {query.data?.rows.length === 0 && <p className="text-xs text-zinc-500">No matching selected catalog items.</p>}
     </div>
     <div className="flex items-center justify-between text-xs text-zinc-500"><span>{selected.filter((id) => id !== "" && id !== "0").length} selected across searches</span>
