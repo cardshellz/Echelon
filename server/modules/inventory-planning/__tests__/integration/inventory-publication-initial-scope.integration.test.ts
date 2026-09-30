@@ -90,6 +90,21 @@ dbDescribe.sequential("pre-cutover explicit-scope non-live exclusion", () => {
     await expect(service.apply(input, "operator")).rejects.toMatchObject({ code: "PRECUTOVER_EXCLUSION_BLOCKED" });
     expect((await database.pool.query("SELECT * FROM inventory.publication_membership_versions")).rows).toHaveLength(1);
   });
+  it.each([false,true])("excludes a positive-quantity unpublished eBay offer, retaining listing proof when present (%s)", async retained => {
+    await database.pool.query("UPDATE channels.channels SET provider='ebay' WHERE id=$1", [request.exclusions[0]!.channelId]);
+    request.exclusions[0]!.evidence = { provider: "ebay", observedAt: NOW.toISOString(), offerHttpStatus: 200,
+      offerId: "unpublished-offer", status: "UNPUBLISHED", availableQuantity: 100, listingId: retained ? "old-listing" : null,
+      ...(retained ? { retainedListingEvidence: { requestedItemId: "old-listing", observedAt: NOW.toISOString(), httpStatus: 200 as const,
+        responseHash: "b".repeat(64), outcome: "inaccessible_to_seller" as const, errorCode: "17" as const } } : {}) };
+    const before = await protectedRows(); const input = await command();
+    expect((await service.review(request)).ready).toBe(true);
+    expect(await service.apply(input, "operator")).toMatchObject({ providerWriteAttempted: false, outboxEnqueued: false,
+      targets: [{ changedProductVariantIds: [101], revision: "4" }] });
+    expect(await protectedRows()).toEqual(before);
+    expect((await database.pool.query("SELECT review->'input'->'exclusions'->0->'evidence' AS evidence FROM inventory.publication_membership_applications")).rows)
+      .toEqual([{ evidence: request.exclusions[0]!.evidence }]);
+    expect(await service.apply(input, "operator")).toMatchObject({ targets: [{ alreadyApplied: true }] });
+  });
   it("rolls every membership and revision write back when the audit fails", async () => {
     const input = await command();
     await database.pool.query(`CREATE FUNCTION public.reject_exclusion_audit() RETURNS trigger LANGUAGE plpgsql AS $$

@@ -6,14 +6,23 @@ const revision = z.string().regex(/^[1-9][0-9]*$/)
   .refine(value => BigInt(value) < BigInt("9223372036854775807"));
 const text = z.string().trim().min(1).max(240);
 const observedAt = z.string().datetime();
+const retainedListingEvidenceSchema = z.object({
+  requestedItemId: text, observedAt, httpStatus: z.literal(200),
+  responseHash: z.string().regex(/^[a-f0-9]{64}$/),
+  // Error 17 means deleted OR not owned by this seller. Preserve that distinction;
+  // it does not certify that the listing never exists in another seller account.
+  outcome: z.enum(["ended", "completed", "inaccessible_to_seller"]),
+  errorCode: z.literal("17").nullable(),
+}).strict();
 /** Authenticated, exact-identity GET evidence supplied by the operator adapter.
  * This is not a public HTTP input or an assertion that remote stock is zero. */
 export const nonLiveListingEvidenceSchema = z.discriminatedUnion("provider", [
   z.object({ provider: z.literal("shopify"), observedAt,
     inventoryItemHttpStatus: z.literal(404) }).strict(),
   z.object({ provider: z.literal("ebay"), observedAt, offerHttpStatus: z.literal(200),
-    offerId: text, status: z.literal("UNPUBLISHED"), listingId: z.null(),
-    availableQuantity: z.literal(0) }).strict(),
+    offerId: text, status: z.literal("UNPUBLISHED"), listingId: text.nullable(),
+    availableQuantity: z.number().int().nonnegative().safe(),
+    retainedListingEvidence: retainedListingEvidenceSchema.optional() }).strict(),
 ]);
 const exclusionSchema = z.object({
   publicationTargetId: id, expectedTargetRevision: revision,
@@ -21,7 +30,17 @@ const exclusionSchema = z.object({
   providerScopeType: z.enum(["account", "location"]), externalScopeId: text,
   productVariantId: id, externalInventoryItemId: text, externalSku: text.nullable(),
   evidence: nonLiveListingEvidenceSchema,
-}).strict();
+}).strict().superRefine((row, context) => {
+  if (row.evidence.provider !== "ebay") return;
+  const evidence = row.evidence;
+  const retained = evidence.retainedListingEvidence;
+  if (evidence.listingId === null ? retained !== undefined
+    : !retained || retained.requestedItemId !== evidence.listingId
+      || (retained.outcome === "inaccessible_to_seller") !== (retained.errorCode === "17")) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["evidence", "retainedListingEvidence"],
+      message: "An unpublished offer retaining a listing ID requires exact seller-scoped non-live listing evidence." });
+  }
+});
 export const reviewPrecutoverExclusionSchema = z.object({
   exclusions: z.array(exclusionSchema).min(1).max(100).refine(rows =>
     new Set(rows.map(row => `${row.publicationTargetId}:${row.productVariantId}`)).size === rows.length,
@@ -84,6 +103,11 @@ export function reviewPrecutoverExclusion(input: ReviewPrecutoverExclusion,
     const age = now.getTime() - new Date(row.evidence.observedAt).getTime();
     if (age < 0 || age > PRE_CUTOVER_PROVIDER_EVIDENCE_MAX_AGE_MS)
       blockers.add("PRECUTOVER_EXCLUSION_PROVIDER_EVIDENCE_EXPIRED");
+    if (row.evidence.provider === "ebay" && row.evidence.retainedListingEvidence) {
+      const listingAge = now.getTime() - new Date(row.evidence.retainedListingEvidence.observedAt).getTime();
+      if (listingAge < 0 || listingAge > PRE_CUTOVER_PROVIDER_EVIDENCE_MAX_AGE_MS)
+        blockers.add("PRECUTOVER_EXCLUSION_PROVIDER_EVIDENCE_EXPIRED");
+    }
   }
   const byPair = (a: { publicationTargetId: number; productVariantId: number },
     b: { publicationTargetId: number; productVariantId: number }) =>
