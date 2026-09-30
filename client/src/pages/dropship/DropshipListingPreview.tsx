@@ -10,6 +10,7 @@ import { ebayListingPolicyQueryKey } from "@/lib/dropship-ebay-listing-query-syn
 import { formatCents, formatStatus, type DropshipEbayListingPolicyOverrideResponse,
   type DropshipListingPreviewResult, type DropshipListingPreviewRow } from "@/lib/dropship-ops-surface";
 import { formatListingPreviewIssue, listingPreviewStatusTone, pageListingPreviews, safeListingImageUrl } from "@/lib/dropship-listing-preview";
+import { ebayCategorySourceLabel } from "@/lib/dropship-ebay-category-rules";
 import { DropshipListingShippingEstimate } from "./DropshipListingShippingEstimate";
 import { DropshipListingPriceEditor } from "./DropshipListingPriceEditor";
 import { DropshipListingContentEditor } from "./DropshipListingContentEditor";
@@ -176,7 +177,10 @@ export function ListingPreviewDetailsContent({ row, generatedAt, shippingEstimat
         <Detail label="Listing mode" value={formatStatus(row.listingMode ?? row.platform)} />
         <Detail label="Available to list" value={`${row.marketplaceQuantity} sellable packs`} />
         <Detail label="Condition" value={content?.condition} /><Detail label="Brand" value={content?.brand} />
-        <Detail label="Marketplace category" value={row.marketplaceCategoryName ?? row.marketplaceCategoryId} />
+        <Detail label="Marketplace category" value={marketplaceCategoryLabel(row)} />
+        {row.marketplaceCategorySource && (
+          <Detail label="Category source" value={ebayCategorySourceLabel(row.marketplaceCategorySource, row.marketplaceCategoryRuleName)} />
+        )}
         <Detail label="Your Store categories" value={row.storeCategoryNames.join(" · ") || "Store default"} />
       </dl>
       {row.businessPolicySelection && <div className="mt-4 border-t pt-3"><h5 className="mb-2 text-sm font-medium">Effective listing policies</h5>
@@ -253,6 +257,10 @@ function moneyOrUnavailable(cents: number | null | undefined): string {
 }
 function MoneyDetail({ label, cents }: { label: string; cents: number | null | undefined }) {
   return <div><div className="text-xs text-zinc-500">{label}</div><div className="mt-1 text-lg font-semibold">{moneyOrUnavailable(cents)}</div></div>;
+}
+function marketplaceCategoryLabel(row: DropshipListingPreviewRow): string | null {
+  if (row.marketplaceCategoryName && row.marketplaceCategoryId) return `${row.marketplaceCategoryName} · #${row.marketplaceCategoryId}`;
+  return row.marketplaceCategoryName ?? row.marketplaceCategoryId;
 }
 function Detail({ label, value }: { label: string; value: string | null | undefined }) {
   return <div><dt className="text-xs text-zinc-500">{label}</dt><dd className="mt-1 break-words">{value || "Not provided"}</dd></div>;
