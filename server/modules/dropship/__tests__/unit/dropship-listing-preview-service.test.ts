@@ -4,6 +4,8 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DropshipListingTierEligibility } from "../../domain/listing-tiers";
 import { resolveListingContent, listingCatalogHash } from "../../application/dropship-listing-content-resolver";
+import { prepareEbayCategoryRules, resolveEbayListingCategory } from "../../application/dropship-ebay-category-resolver";
+import { TOPLOADERS, rulesProfile } from "../fixtures/ebay-category-rules.fixture";
 import { noContentProfile } from "../fixtures/listing-content.fixture";
 import type { SavedListingPriceRevision } from "../../../../../shared/dropship/listing-price";
 import type { ListingRulePrice } from "../../application/dropship-rule-price";
@@ -517,6 +519,85 @@ describe("DropshipListingPreviewService", () => {
     });
   });
 
+  describe("vendor eBay category rules", () => {
+    function useEbayStoreWithRule() {
+      repository.context = { ...repository.context, platform: "ebay" };
+      repository.config = { ...repository.config!, platform: "ebay", marketplaceConfig: { profileId: "profile-1" } };
+      const prepared = prepareEbayCategoryRules(3, rulesProfile({ rules: [{
+        id: "rule-1", name: "My toploaders", scope: { type: "product", productId: repository.candidate.productId }, category: TOPLOADERS,
+      }] }));
+      repository.loadEbayCategories = async ({ candidates }) => new Map(candidates.map((candidate) =>
+        [candidate.productVariantId, resolveEbayListingCategory(candidate, prepared)]));
+      return resolveEbayListingCategory(repository.candidate, prepared);
+    }
+
+    it("publishes the vendor's rule category and says where it came from", async () => {
+      const resolved = useEbayStoreWithRule();
+
+      const result = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1299 });
+
+      expect(result.rows[0]).toMatchObject({
+        previewStatus: "ready",
+        marketplaceCategoryId: TOPLOADERS.categoryId,
+        marketplaceCategoryName: "Toploaders",
+        marketplaceCategorySource: "rule",
+        marketplaceCategoryRuleName: "My toploaders",
+        marketplaceCategoryEvidenceHash: resolved.evidenceHash,
+      });
+      expect(result.rows[0].listingIntent).toMatchObject({ marketplaceCategoryId: TOPLOADERS.categoryId, marketplaceCategoryName: "Toploaders" });
+      expect(repository.candidate.ebayBrowseCategoryId).toBe("183438");
+      expect(toDropshipVendorListingPreview(result).rows[0]).toMatchObject({
+        marketplaceCategorySource: "rule", marketplaceCategoryRuleName: "My toploaders", marketplaceCategoryEvidenceHash: resolved.evidenceHash,
+      });
+    });
+
+    it("refuses a reviewed queue whose category evidence is missing or stale", async () => {
+      const resolved = useEbayStoreWithRule();
+      const request = { storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "category-queue", requestedRetailPriceCents: 1299 };
+
+      await expect(service.createListingPushJobForMember("member-1", request))
+        .rejects.toMatchObject({ code: "DROPSHIP_LISTING_CATEGORY_VERSION_CONFLICT" });
+      await expect(service.createListingPushJobForMember("member-1", { ...request, expectedMarketplaceCategoryEvidenceHashesByVariantId: { "101": "b".repeat(64) } }))
+        .rejects.toMatchObject({ code: "DROPSHIP_LISTING_CATEGORY_VERSION_CONFLICT" });
+      expect(repository.jobs).toHaveLength(0);
+
+      await service.createListingPushJobForMember("member-1", { ...request, expectedMarketplaceCategoryEvidenceHashesByVariantId: { "101": resolved.evidenceHash } });
+      expect(repository.lastCreatedInput?.preview.rows[0].listingIntent?.marketplaceCategoryId).toBe(TOPLOADERS.categoryId);
+    });
+
+    it("queues in one step with the category the rules choose now", async () => {
+      const resolved = useEbayStoreWithRule();
+
+      const result = await service.createListingPushJobForMember("member-1", {
+        storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "category-one-step", reviewMode: "current_preview", requestedRetailPriceCents: 1299,
+      });
+
+      expect(result.job.status).toBe("queued");
+      expect(repository.lastCreatedInput?.preview.rows[0]).toMatchObject({ marketplaceCategoryEvidenceHash: resolved.evidenceHash });
+      await expect(service.createListingPushJobForMember("member-1", {
+        storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "category-one-step-mixed", reviewMode: "current_preview",
+        expectedMarketplaceCategoryEvidenceHashesByVariantId: { "101": resolved.evidenceHash },
+      })).rejects.toMatchObject({ code: "DROPSHIP_LISTING_PUSH_REVIEW_MODE_CONFLICT" });
+    });
+
+    it("never resolves categories for a store that is not eBay", async () => {
+      const loader = vi.fn(async () => new Map());
+      repository.loadEbayCategories = loader;
+
+      await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1299 });
+
+      expect(loader).not.toHaveBeenCalled();
+    });
+
+    it("refuses an incomplete category result instead of publishing the catalog fallback", async () => {
+      useEbayStoreWithRule();
+      repository.loadEbayCategories = async () => new Map();
+
+      await expect(service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1299 }))
+        .rejects.toThrow("incomplete catalog result");
+    });
+  });
+
   it("warns, without blocking, when the catalog has no MPN for an eBay listing", async () => {
     repository.context = { ...repository.context, platform: "ebay" };
     repository.config = { ...repository.config!, platform: "ebay", marketplaceConfig: { profileId: "profile-1" } };
@@ -951,6 +1032,7 @@ class FakeAtpProvider implements DropshipAtpProvider {
 
 class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
   loadListingContents?: DropshipListingPreviewRepository["loadListingContents"];
+  loadEbayCategories?: DropshipListingPreviewRepository["loadEbayCategories"];
   rulePrices = new Map<number, ListingRulePrice>();
   ruleCandidateIds: number[] = [];
   async loadRulePrices(input: { candidates: readonly DropshipListingCatalogCandidate[] }): Promise<Map<number, ListingRulePrice>> {

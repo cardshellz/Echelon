@@ -54,10 +54,11 @@ export function registerDropshipListingRoutes(
     requireDropshipSensitiveActionProof("bulk_listing_push"),
     async (req, res) => {
       try {
-        // Every field of the push contract is forwarded. The two evidence maps
-        // were once left out here, so each two-step push reached the service
-        // with no evidence and was refused as changed even right after a
-        // preview. The service schema is strict and refuses anything unknown.
+        // Every field of the push contract is forwarded; a route test pins this
+        // list to the member schema. Evidence maps were once left out here, so
+        // each two-step push reached the service with no evidence and was
+        // refused as changed even right after a preview. The service schema is
+        // strict and refuses anything unknown.
         const result = await service.createListingPushJobForMember(req.session.dropship!.memberId, {
           storeConnectionId: req.body?.storeConnectionId,
           productVariantIds: req.body?.productVariantIds,
@@ -68,6 +69,7 @@ export function registerDropshipListingRoutes(
           expectedPriceCentsByVariantId: req.body?.expectedPriceCentsByVariantId,
           expectedRuleEvidenceHashesByVariantId: req.body?.expectedRuleEvidenceHashesByVariantId,
           expectedContentEvidenceHashesByVariantId: req.body?.expectedContentEvidenceHashesByVariantId,
+          expectedMarketplaceCategoryEvidenceHashesByVariantId: req.body?.expectedMarketplaceCategoryEvidenceHashesByVariantId,
           idempotencyKey: resolveIdempotencyKey(req),
         });
         return res.status(result.idempotentReplay ? 200 : 201).json({
@@ -145,6 +147,7 @@ function statusForDropshipListingError(code: string): number {
     case "DROPSHIP_IDEMPOTENCY_CONFLICT":
     case "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT":
     case "DROPSHIP_CONTENT_VERSION_CONFLICT":
+    case "DROPSHIP_LISTING_CATEGORY_VERSION_CONFLICT":
       return 409;
     default:
       return 500;

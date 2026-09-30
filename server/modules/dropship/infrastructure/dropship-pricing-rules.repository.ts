@@ -5,7 +5,7 @@ import { pricingImpactRowSchema, reviewPricingRulesInputSchema, type ApplyPricin
 import type { PricingRulesRepository, PricingRulesTransaction, StoredPricingReview } from "../application/dropship-pricing-rules-service";
 import { pricingHash } from "../application/dropship-rule-price";
 import { DropshipError } from "../domain/errors";
-import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
+import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog.reader";
 import { readPricingProfile } from "./dropship-pricing-profile.reader";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 
@@ -27,14 +27,8 @@ export class PgDropshipPricingRulesRepository implements PricingRulesRepository 
       if (!vendorId) throw new DropshipError("DROPSHIP_STORE_CONNECTION_REQUIRED", "Store connection was not found.");
       const target = { vendorId, storeConnectionId, memberId };
       const result = await operation({ vendorId,
-        catalog: PgDropshipListingPreviewRepository.readerForTransaction(client),
+        ...selectedCatalogReaderForTransaction(client),
         costs: PgShellzClubProductCostAdapter.forTransaction(client),
-        listProductLines: async (ids) => (await client.query<{ id: number; name: string }>(
-          `SELECT id, name FROM catalog.product_lines WHERE id = ANY($1::int[]) ORDER BY name, id`, [ids])).rows,
-        listVariantIds: async (afterId, limit) => (await client.query<{ id: number }>(
-          `SELECT id FROM catalog.product_variants WHERE id > $1 AND requires_shipping = true
-           AND COALESCE(track_inventory, true) = true AND sales_eligibility = 'sellable'
-           ORDER BY id LIMIT $2`, [afterId, limit])).rows.map((row) => row.id),
         loadProfile: () => readPricingProfile(client, storeConnectionId, vendorId),
         storeReview: async (review) => {
           await client.query(`INSERT INTO dropship.dropship_pricing_reviews

@@ -57,6 +57,10 @@ export function toDropshipVendorListingPreview(preview: DropshipListingPreviewRe
       ...(row.contentEvidenceHash !== undefined ? { contentEvidenceHash: row.contentEvidenceHash } : {}),
       ...(row.rulePriceEvidenceHash !== undefined ? { rulePriceEvidenceHash: row.rulePriceEvidenceHash } : {}),
       ...(row.pricingRuleName !== undefined ? { pricingRuleName: row.pricingRuleName } : {}),
+      // The category evidence is a digest; the source and rule name are the vendor's own settings.
+      ...(row.marketplaceCategoryEvidenceHash !== undefined ? { marketplaceCategoryEvidenceHash: row.marketplaceCategoryEvidenceHash } : {}),
+      ...(row.marketplaceCategorySource !== undefined ? { marketplaceCategorySource: row.marketplaceCategorySource } : {}),
+      ...(row.marketplaceCategoryRuleName !== undefined ? { marketplaceCategoryRuleName: row.marketplaceCategoryRuleName } : {}),
       ...(row.presentation ? { presentation: dropshipListingPresentationSchema.parse(row.presentation) } : {}),
       ...(row.economics ? { economics: dropshipListingEconomicsSchema.parse(row.economics) } : {}),
     })),

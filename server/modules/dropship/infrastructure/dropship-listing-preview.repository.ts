@@ -23,6 +23,7 @@ import type { SavedListingPriceRevision } from "../../../../shared/dropship/list
 import { resolveListingRulePrice, type ListingRulePrice } from "../application/dropship-rule-price";
 import { readPricingProfile } from "./dropship-pricing-profile.reader";
 import { readResolvedListingContents } from "./dropship-listing-content.reader";
+import { readResolvedEbayCategories } from "./dropship-ebay-category-rules.reader";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 
 type ListingDatabasePool = Pick<Pool, "query"> & {
@@ -592,6 +593,19 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     } finally { client.release(); }
   }
 
+  async loadEbayCategories(input: { vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[] }) {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const result = await readResolvedEbayCategories(client, input);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      try { await client.query("ROLLBACK"); } catch { /* Preserve original failure. */ }
+      throw error;
+    } finally { client.release(); }
+  }
+
   async createListingPushJob(
     input: CreateDropshipListingPushJobRepositoryInput,
   ): Promise<CreateDropshipListingPushJobRepositoryResult> {
@@ -636,6 +650,21 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
         const current = await readResolvedListingContents(client, { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, candidates });
         if (contentRows.some((row) => current.get(row.productVariantId)?.evidenceHash !== row.contentEvidenceHash)) {
           throw new DropshipError("DROPSHIP_CONTENT_VERSION_CONFLICT", "Listing content changed while queueing. Review a new preview.");
+        }
+      }
+      const categoryRows = input.preview.rows.filter((row) => row.marketplaceCategoryEvidenceHash);
+      if (categoryRows.length) {
+        const ids = categoryRows.map((row) => row.productVariantId);
+        // Pin each product's own eBay category until the job is inserted. Category rule
+        // saves already share the store lock. An admin edit of a product-type mapping is
+        // not locked here; the push re-resolves the category when it runs.
+        await client.query(`SELECT pv.id FROM catalog.product_variants pv JOIN catalog.products p ON p.id = pv.product_id
+          WHERE pv.id = ANY($1::int[]) FOR SHARE OF pv, p`, [ids]);
+        const candidates = await PgDropshipListingPreviewRepository.readerForTransaction(client).listCatalogCandidates(ids);
+        const current = await readResolvedEbayCategories(client, { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, candidates });
+        if (categoryRows.some((row) => current.get(row.productVariantId)?.evidenceHash !== row.marketplaceCategoryEvidenceHash)) {
+          throw new DropshipError("DROPSHIP_LISTING_CATEGORY_VERSION_CONFLICT",
+            "eBay categories changed while queueing. Generate a new preview.");
         }
       }
       const ruleRows = input.preview.rows.filter((row) => row.rulePriceEvidenceHash);

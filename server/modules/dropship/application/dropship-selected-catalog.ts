@@ -11,7 +11,8 @@ export interface SelectedCatalogReader {
   listVariantIds(afterId: number, limit: number): Promise<number[]>;
   listProductLines(ids: number[]): Promise<Array<{ id: number; name: string }>>;
 }
-export async function loadSelectedCandidates(tx: SelectedCatalogReader, now: Date, purpose: "pricing_review" | "catalog_targets" = "pricing_review"): Promise<DropshipListingCatalogCandidate[]> {
+export type SelectedCatalogPurpose = "pricing_review" | "catalog_targets" | "category_review";
+export async function loadSelectedCandidates(tx: SelectedCatalogReader, now: Date, purpose: SelectedCatalogPurpose = "pricing_review"): Promise<DropshipListingCatalogCandidate[]> {
   const [exposureRules, selectionRules] = await Promise.all([tx.catalog.listCatalogExposureRules(), tx.catalog.listSelectionRules(tx.vendorId)]);
   const selected: DropshipListingCatalogCandidate[] = [];
   // Keyset scan, independent of the browser's filters, pages and 500-item listing
@@ -34,6 +35,8 @@ export async function loadSelectedCandidates(tx: SelectedCatalogReader, now: Dat
     if (selected.length > MAX_NAMED_CATALOG_GROUP_ITEMS) {
       if (purpose === "catalog_targets") throw new DropshipError("DROPSHIP_CATALOG_TARGETS_TOO_LARGE",
         "This selection exceeds the 10,000-item group picker limit. Reduce the catalog selection before choosing group targets.");
+      if (purpose === "category_review") throw new DropshipError("DROPSHIP_EBAY_CATEGORY_REVIEW_TOO_LARGE",
+        "This store exceeds the 10,000-listing eBay category review limit. No category rules were changed.");
       throw new DropshipError("DROPSHIP_PRICING_REVIEW_TOO_LARGE",
         "This store exceeds the 10,000-listing pricing review limit. No rules were changed.");
     }

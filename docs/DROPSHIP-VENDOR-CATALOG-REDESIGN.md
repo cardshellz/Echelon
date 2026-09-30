@@ -1,7 +1,7 @@
 # Vendor Catalog redesign — final design
 
 Portal page: `cardshellz.io/catalog` (`client/src/pages/dropship/DropshipPortalCatalog.tsx`, mounted at `client/src/App.tsx:269`).
-Status: for owner approval. Date: 2026-09-30.
+Status: approved (PR #1616). Section 7 updated to what PR 1 built, with the owner's decisions on questions 13.1 and 13.2. Date: 2026-09-30.
 
 Evidence note. File and line citations were produced by the mapping pass. In this writing pass the following were re-read and confirmed: `DropshipPortalCatalog.tsx:186-187, 264, 323-331, 376-399, 1382-1392`; `DropshipListingPriceEditor.tsx:110-118, 198-199`; `dropship-auth.tsx:23, 61`; `dropship-selection-dtos.ts:11-79, 86-96`; `dropship-selection-atp-service.ts:229-305, 373-392`; `dropship-selection-atp.repository.ts:147-224`; `vendor-selection.ts:13-25, 88-105`; `catalog-exposure.ts:103-123`; `dropship-listing-preview-service.ts:339-380, 626-731, 818-859, 955, 1002-1068`; `dropship-listing-preview.repository.ts:327-369, 626-665, 720-728, 759-791`; `dropship-listing-push-worker.factory.ts:17-41`; `dropship-listing-push-worker-service.ts:180-185, 530-537`; `dropship-listing-push-worker.repository.ts:206-233, 291-325`; `dropship-listing-push-job-runner.ts:20-23, 88-105`; `dropship-use-case-dtos.ts:48-61`; `dropship-listing-dtos.ts:8`; `dropship-selected-catalog.ts:14-43`; `dropship-pricing-rules-service.ts:66-78, 96-102, 144`; `dropship-pricing-rules.routes.ts:13-16`; `dropship-listing-content.routes.ts:15-21`; `dropship-listing-content-service.ts:38-53`; `dropship-listing-content-resolver.ts:46-58`; `pricing-rules.ts:8-29, 84-98`; `catalog-scope.ts:1-31`; `listing-content.ts:15-26`; `listing-price.ts:56-62`; `dropship-vendor-catalog.routes.ts:22-56`; `dropship-listing.routes.ts:51-55`; `dropship-auth.routes.ts:81-87`; `domain/auth.ts:70`; `dropship-ebay-store-category-dtos.ts:10-23`; `dropship-ebay-store-category-service.ts:116-132`; `dropship-ebay-listing-setup-service.ts:82`; `ebay-taxonomy.routes.ts:24-30, 64-72, 183-215`; `rate-table-admin-body.middleware.ts:23-33, 44-52`; `inventory-cutover-opening-body.middleware.ts:5-10`; `server/index.ts:126`; `0086:187-212, 262-283, 294-340`; `0660:73-76`; `0713:12-60, 86-127`. No virtualizer is installed (`package.json` has neither `react-virtual` nor `react-window`). Anything marked HYPOTHESIS is not measured.
 
@@ -434,7 +434,7 @@ Rules apply top to bottom; the first matching rule wins. Exceptions on single li
 
 "Save & continue" runs a deterministic, per-part sequence. Each part has its own `expectedRevisionId` and a fingerprint-reused idempotency key:
 
-1. Pricing review (`POST …/pricing-rules/reviews`), category impact (`POST …/ebay-category-rules/impact`) and rules impact (`POST …/rules/impact`) → impact summary → vendor confirms. Blocked and stale handling as in 4.2.
+1. Pricing review (`POST …/pricing-rules/reviews`), category impact (`POST …/ebay-category-rules/review`) and rules impact (`POST …/rules/impact`) → impact summary → vendor confirms. Blocked and stale handling as in 4.2.
 2. Pricing apply (`reviewId`, `reviewHash`, retained apply key). Skipped, not failed, when the review was blocked.
 3. Category rules `PUT`.
 4. Content profile `PUT`.
@@ -454,121 +454,92 @@ The Step 2 "Rules by group" row is the union of groups that share one `id` acros
 
 "eBay category" here means the marketplace browse category (a leaf of the eBay taxonomy). "Store shelf" means an eBay Store custom category. They are different settings and stay in different columns.
 
-### 7.1 Data model
+The server layer is built (PR 1). This section records what was built. The main change from the approved draft: the push re-resolves the category instead of failing the item (end of 7.2). Smaller changes: the head table is `dropship_ebay_category_rule_profiles`, route names (`…/ebay-category-rules/review`, `…/ebay-categories`), a Browse view of eBay's tree beside search, leaf flags from the whole downloaded tree instead of one `get_category_subtree` call per category, `path` instead of `breadcrumb`, an evidence hash without the rules revision id (7.2), up to 20 search results, and the generic `rules/impact` moved to PR 6.
 
-Mirror migration `0660` (content profile): one revision per save, a head pointer, a linear-history trigger.
+### 7.1 Data model (as built: `migrations/0717_dropship_ebay_category_rules.sql`)
 
-```sql
--- Column types and key shapes follow migrations/0660_dropship_vendor_listing_content.sql
--- (integer identity ids, composite keys that pin a revision to its vendor and store).
-CREATE TABLE dropship.dropship_ebay_category_rule_revisions (
-  id                   integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  vendor_id            integer NOT NULL,
-  store_connection_id  integer NOT NULL,
-  previous_revision_id integer,
-  rules                jsonb  NOT NULL CHECK (jsonb_typeof(rules) = 'object'),
-  idempotency_key      varchar(200) NOT NULL,
-  request_hash         varchar(64)  NOT NULL,
-  actor_type           text NOT NULL,
-  actor_id             text NOT NULL CHECK (btrim(actor_id) <> ''),
-  created_at           timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (id, vendor_id, store_connection_id),
-  UNIQUE (vendor_id, idempotency_key),
-  FOREIGN KEY (store_connection_id, vendor_id) REFERENCES dropship.dropship_store_connections(id, vendor_id),
-  FOREIGN KEY (previous_revision_id, vendor_id, store_connection_id)
-    REFERENCES dropship.dropship_ebay_category_rule_revisions(id, vendor_id, store_connection_id)
-);
-CREATE TABLE dropship.dropship_ebay_category_rules (
-  store_connection_id  integer PRIMARY KEY,
-  vendor_id            integer NOT NULL,
-  revision_id          integer NOT NULL,
-  updated_at           timestamptz NOT NULL DEFAULT now(),
-  FOREIGN KEY (revision_id, vendor_id, store_connection_id)
-    REFERENCES dropship.dropship_ebay_category_rule_revisions(id, vendor_id, store_connection_id)
-);
--- trigger: NEW.previous_revision_id must equal the current head for the store (0660:73-76 pattern)
-```
+Mirror of migration `0660` (content profile): one immutable revision per save, one head row per store, and a predecessor check so two saves can never silently overwrite each other.
 
-Document (`shared/dropship/ebay-category-rules.ts`, Zod, `.strict()`):
+- `dropship.dropship_ebay_category_rule_revisions`: `id integer` identity, `vendor_id`, `store_connection_id`, `previous_revision_id`, `profile jsonb` (CHECK: an object with `version`, `defaultCategory` and a `rules` array), `idempotency_key varchar(200)` (`^[A-Za-z0-9:_-]+$`), `request_hash` (64 hex), `actor_id`, `created_at`. UNIQUE `(vendor_id, idempotency_key)` and `(id, vendor_id, store_connection_id)`; composite foreign keys to the store connection and to the predecessor revision.
+- `dropship.dropship_ebay_category_rule_profiles`: the head, one row per store (`store_connection_id` primary key, `vendor_id`, `revision_id` with a composite foreign key to the revision).
+- Triggers (SQLSTATE `23514`): revisions refuse UPDATE and DELETE; the head refuses DELETE, a change of vendor or store, and any revision whose predecessor is not the current head.
+
+Stored document (`shared/dropship/ebay-category-rules.ts`, Zod, strict):
 
 ```ts
 {
   version: 1,
-  defaultCategory: { categoryId: string, categoryName: string, breadcrumb: string[] } | null,
-  rules: [{
-    id: string,                 // ^[A-Za-z0-9_-]{1,80}$, unique
-    name: string,               // 1..120
-    scope: CatalogScope,        // catalog-scope.ts:10-16
-    categoryId: string,         // ≤40
-    categoryName: string,
-    breadcrumb: string[],
-  }]                            // ≤100 rules; ≤10,000 named listing ids in total (same refine as listing-content.ts:20-23)
+  defaultCategory: { categoryId, categoryName, path: string[] } | null,
+  rules: [{ id, name, scope: CatalogScope, category: { categoryId, categoryName, path: string[] } }]
 }
 ```
 
-Save input mirrors `saveContentProfileInputSchema` (`listing-content.ts:26`): `{ expectedRevisionId, idempotencyKey, rules }`. Array order is precedence. There are no priority numbers, so there are no ties. A document with 10,000 named ids is about 70 KB of ids plus names and breadcrumbs, over the 100 KiB global limit, so the `PUT` and `impact` routes get the dedicated parser (9.4).
+Limits: at most 100 rules; rule id `^[A-Za-z0-9_-]{1,80}$`, unique; rule name 1..120 characters; category number `^[1-9][0-9]{0,19}$`; category name at most 200 characters; path at most 12 levels; at most 10,000 named listings across all rules. Two rules on the same category, product line or product are refused, because the second could never match.
+
+Save input: `{ expectedRevisionId, idempotencyKey, draft: { defaultCategoryId, rules: [{ id, name, scope, categoryId }] } }`. The browser sends category numbers only. The server looks up every name and path in eBay's tree before it stores anything, so a stored name cannot be forged. Array order is precedence; there are no priority numbers and so no ties. A full rule set (100 rules, 10,000 named listings) is over the 100 KiB global body limit, so the save and review routes use the dedicated 1 MiB parser (`dropship-bulk-json.middleware.ts`).
 
 ### 7.2 Resolution order and evidence (pure resolver, `application/dropship-ebay-category-resolver.ts`)
 
-For each candidate, prepared once per batch like `prepareContentProfile`:
+For each listing, with the rules prepared once per batch (named-listing scopes become a Set):
 
-1. The first rule, in saved order, whose scope matches (`matchesCatalogScope`; `listings` via a precomputed Set).
+1. The first rule, in saved order, whose scope matches (`matchesCatalogScope`).
 2. Else the store default.
-3. Else the Card Shellz base: `candidate.ebayBrowseCategoryId/Name`. This is the existing `COALESCE(product override, product-type mapping)` in `listCatalogCandidates` (`dropship-listing-preview.repository.ts:327-335, 356-369`). It has no `listing_enabled` predicate; the comment at `:352-356` says why. **Keep it that way.** PR1 pins it with a test: a product-type mapping with `listing_enabled = false` still supplies the base default.
-4. Else none. The provider blocks with `ebay_browse_category_required` as today (`dropship-config-driven-marketplace-listing.provider.ts:66`). No change there.
+3. Else the Card Shellz base: `candidate.ebayBrowseCategoryId/Name`, the product's own eBay category, else its product-type mapping on the Card Shellz eBay channel (`listCatalogCandidates` in `dropship-listing-preview.repository.ts`). It does not depend on the mapping's `listing_enabled` toggle (PR #1613, pinned by a test).
+4. Else none. The listing stays blocked with `ebay_browse_category_required` (`dropship-config-driven-marketplace-listing.provider.ts`). No change there.
 
-Output per row:
+Output per row: `{ categoryId, categoryName, source: "rule" | "store_default" | "catalog" | "none", ruleId, ruleName, rulesRevisionId, evidenceHash }`, where `evidenceHash = sha256({ version: 1, categoryId, source, ruleId })`. The rules revision id is deliberately left out of the hash: saving one rule must not invalidate listings whose category did not change.
 
-```ts
-{ categoryId, categoryName, source: "rule" | "store_default" | "catalog" | "none",
-  ruleId, ruleName, rulesRevisionId,
-  evidenceHash }   // sha256 of { categoryId, source, ruleId, rulesRevisionId }
-```
+Preview (`dropship-listing-preview-service.ts`): every eBay row resolves its category through the rules. The resolved category goes into the listing intent and into the row's `marketplaceCategoryId/Name` (blocked rows too), and rows carry `marketplaceCategoryEvidenceHash`, `marketplaceCategorySource` and `marketplaceCategoryRuleName`. The vendor preview DTO forwards all three.
 
-Plug-in point: `dropship-listing-preview-service.ts:1002`. The `content` passed to `buildListingIntent` gets `ebayBrowseCategoryId/Name` from the resolver. The two fallbacks at `:1034-1037` and `:1065-1068` are replaced by the resolved value. The resolved id already enters `previewHash` (`marketplaceCategoryId`, `:1025-1047`), which affects only replay (`previewHash` is part of `requestHash`, `:664-680`); it is not what refuses a stale publish. What does:
+Queue:
 
-- Preview rows gain `marketplaceCategoryEvidenceHash` (the resolver's `evidenceHash`), `marketplaceCategorySource` and `marketplaceCategoryRuleName`.
-- `createListingPushJobInputSchema` (`dropship-use-case-dtos.ts:48-61`) gains `expectedMarketplaceCategoryEvidenceHashesByVariantId`, 64-hex per id like the two existing hash maps. `assertPreviewMatchesReviewedEvidence` (`:818-859`) compares it row by row. `hashListingPushJobRequest` (called at `:664-680`, defined at `:757-800`) hashes it. `carriesReviewedPreviewEvidence` includes it, so a `current_preview` push that carries it is refused as today.
-- The repository re-check under the store lock (`dropship-listing-preview.repository.ts:626-665`) reads the head revision and re-runs the resolver for the rows, and refuses with `DROPSHIP_LISTING_CATEGORY_VERSION_CONFLICT` (409) on any difference, beside the existing content and rule-price re-checks.
-- Queue → push: `refreshListingIntent` rebuilds the intent from current rules at push time (`dropship-listing-push-worker.factory.ts:17-24`). The queued `marketplaceCategoryId` is stored on the job item at queue time (new column `queued_marketplace_category_id` on `dropship_listing_push_job_items`, `0086:316-332`). The worker compares it with the refreshed intent and fails the item as permanent (`retryable: false`) with `DROPSHIP_LISTING_CATEGORY_CHANGED_SINCE_QUEUE`, the shape of `DROPSHIP_LISTING_PRICE_AWAITING_REVIEW` (`worker.factory.ts:29-39`). The vendor re-checks and publishes again. Nothing publishes a category the vendor did not see.
+- A reviewed push (`reviewMode` omitted or `reviewed_preview`) echoes `expectedMarketplaceCategoryEvidenceHashesByVariantId`. `assertPreviewMatchesReviewedEvidence` refuses any row whose evidence differs with `DROPSHIP_LISTING_CATEGORY_VERSION_CONFLICT` (409). The map is hashed into the request (added last, and only when sent, so existing request hashes do not change) and counted by `carriesReviewedPreviewEvidence`, so a `current_preview` push that sends it is refused as today. The HTTP route forwards it; a route test pins the forwarded fields to the member schema. The inventory catch-up provider echoes it.
+- Inside the queue transaction (store lock held, product rows `FOR SHARE`) the repository re-resolves each row that carries category evidence and refuses on any difference.
+- A one-step push (`current_preview`, which the vendor Catalog page uses) has nothing to echo: the preview built in the same request is what is queued.
 
-The push provider and `ebay-listing-builder` are untouched. Step 3 and the sheet show "Category: 183435 Trading Card Sleeves · from rule Envelopes".
+Push (changed from the draft): there is no `queued_marketplace_category_id` column and no `DROPSHIP_LISTING_CATEGORY_CHANGED_SINCE_QUEUE` failure. The worker already rebuilds each listing from the current settings when it sends it (`refreshListingIntent`, `dropship-listing-push-worker.factory.ts`), so the category published is the one the rules name at that moment, exactly as for the description. Reason: the vendor's own queue path is one-step, so there is no reviewed category to protect between queue and push, and a push-time failure would only make the vendor queue again to publish what their saved rules already say. Accepted consequence: a rules save between queue and push publishes the new category.
 
-### 7.3 Verification
+The push provider and `ebay-listing-builder` are untouched.
 
-- Every category the vendor can pick comes from `GET …/ebay-category-search?q=`, a new vendor route over the Taxonomy port (9.1). It returns `{ categoryId, categoryName, breadcrumb: string[], leaf: boolean }[]`, at most 10. It is not the admin route: `/api/ebay/category-search` returns `breadcrumb` as one joined string, has no leaf flag, and sits behind admin `requireAuth` (`ebay-taxonomy.routes.ts:183-215`).
-- On pick, the sheet calls `GET …/ebay-category-search/:categoryId` → `{ categoryId, categoryName, breadcrumb: string[], leaf: boolean } | 404`. Leaf is derived from `get_category_subtree` (`childCategoryTreeNodes` empty), as the admin children route does (`ebay-taxonomy.routes.ts:88-160`, fetch at `:115`, derivation `:152`). Non-leaf picks are refused in the sheet with "Pick a more specific category".
-- On save, the service re-verifies every distinct `categoryId` through the port (deduped, cached per id, TTL 24 h). A non-leaf or unknown id fails the whole save with `422 DROPSHIP_EBAY_CATEGORY_RULE_INVALID { ruleId, categoryId }` (mirror of `DROPSHIP_EBAY_STORE_CATEGORY_INVALID`, `dropship-ebay-store-category-service.ts:116-132`). The server stores `categoryName` and `breadcrumb` from its own lookup, never from the client, so the table never shows a bare id.
-- Repository: `pg_advisory_xact_lock` on the store id; replay by `(vendor_id, idempotency_key)` with `request_hash` (same payload → 200 replay; different → 409 `DROPSHIP_IDEMPOTENCY_CONFLICT`); `expectedRevisionId` mismatch → 409; insert revision with `previous_revision_id`; upsert head; one `dropship_audit_events` row with before → after. All in one transaction.
+### 7.3 Category list, verification and the eBay connection
+
+- Source: eBay's own US category tree (tree `0`) from eBay's Taxonomy API: the same tree and the same calls (full tree, `get_category_suggestions`) that the admin Category Mapping picker uses (`server/routes/ebay/ebay-taxonomy.routes.ts`). Names, numbers and paths are eBay's.
+- Connection (decided, 13.1): the vendor's own eBay connection, through `withEbaySafeReadRecovery`. When that connection has expired or been revoked, every category request answers `DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED` (403), so the page can say "Reconnect your eBay store" instead of showing an empty search. A store already marked `needs_reauth` gets that answer before eBay is called.
+- The whole tree is downloaded once per day per process (per eBay environment) and kept as an index, so browsing, paths and leaf checks never call eBay again. Loads are single-flight. A load that fails on another store's connection is retried with the asking store's own connection. Only an eBay-side failure (unavailable, invalid answer) falls back to the previous tree; a connection failure always reaches the vendor. Bounds: 25 s for the tree, 10 s for a search, 128 MiB body, 100,000 nodes, 2,000 children per browse level.
+- Search: eBay's suggestions for the typed words, mapped onto the tree, at most 20, query 2..100 characters. Browse: the tree one level at a time. Lookup: one category with its path and leaf flag.
+- Save: every distinct category number is checked against the tree. Unknown → 422 `DROPSHIP_EBAY_CATEGORY_RULE_INVALID` (`reason: "not_found"`); not a leaf → the same code (`reason: "not_leaf"`). Names and paths are stored from eBay's tree.
+- Repository: the write transaction takes a request-key advisory lock and the store's listing-push lock (`pg_advisory_xact_lock(hashtext('dropship_listing_push_job'), store)`, the lock queue creation takes), replays by `(vendor_id, idempotency_key)` with the request hash (same request → replay; different → 409 `DROPSHIP_IDEMPOTENCY_CONFLICT`), refuses a stale `expectedRevisionId` (409 `DROPSHIP_EBAY_CATEGORY_RULES_VERSION_CONFLICT`), inserts the revision, moves the head and writes one `dropship_audit_events` row (`ebay_category_rules_saved`, before → after), all in one transaction. A retry after a lost response replays from the database without asking eBay. Reads use a read-only repeatable-read transaction and take no store lock.
 - The resolver never calls eBay. Leaf status is checked only at save.
 
-### 7.4 Impact preview
+### 7.4 Impact review
 
-Two read-only endpoints, both over `loadSelectedCandidates` (`dropship-selected-catalog.ts:14-43`; one keyset scan of the catalog each, 250 ids per batch, refused above 10,000 selected):
+`POST …/ebay-category-rules/review { expectedRevisionId, draft }` is read-only. It verifies the draft's categories like a save, then resolves every selected listing before and after over `loadSelectedCandidates` (refused above 10,000 selected with `DROPSHIP_EBAY_CATEGORY_REVIEW_TOO_LARGE`) and returns `{ selectedCount, changedCount, unchangedCount, withoutCategoryBefore, withoutCategoryAfter, bySource, byRule: [{ ruleId, matched }], byCategory: [{ categoryId, categoryName, count }] (top 200), otherCategoriesCount, changes (first 50) }`. "Changed" means the published eBay category differs; a new source for the same category changes nothing at eBay. This is the guard against the wrong category on 800 listings: the page shows "142 move to 183435 Trading Card Sleeves" before the vendor confirms.
 
-- `POST …/ebay-category-rules/impact { expectedRevisionId, rules }` runs the resolver and returns `{ moved: n, byCategory: [{ categoryId, categoryName, count }], byRule: [{ ruleId, matched }], unchanged: n, first50: [...] }`. The Step 2 impact summary shows "142 move to 183435 Trading Card Sleeves" before the vendor confirms. This is the guard against the wrong category on 800 listings.
-- `POST …/rules/impact { rules: [{ id, scope }] }` returns `{ byRule: [{ id, matched }], unmatched }` under first-match over the given order. It is profile-agnostic, so one call gives the per-rule counts for the Price, eBay category and Description columns and the "Description: 142 use Env intro" line. The content profile has no review endpoint of its own (`dropship-listing-content.routes.ts:15-21`); this is its source.
+The generic `POST …/rules/impact` (per-rule counts for the Price and Description columns) is not built yet; it belongs to the Step 2 rules table (PR 6).
 
 ### 7.5 UI
 
-- Store defaults card, "eBay category" row: `defaultCategory` when set; else "Card Shellz mapping per product type (recommended)". A read-only base line under it shows the mapping for the current filter's product type so the vendor sees the whole fallback chain.
-- Rules by group table, "eBay category" column: the rule's category or "—" (inherit). Per-rule hit counts come from `rules/impact` on load and after each save.
+- Store defaults card, "eBay category" row: `defaultCategory` when set (decided, 13.2); else "Card Shellz category per product type (recommended)". A read-only base line under it shows the Card Shellz category for the current filter's product type so the vendor sees the whole fallback chain.
+- Category picker: search box plus a Browse view of eBay's tree, and eBay's suggestions for the listing's title. Only leaf categories can be picked.
+- When the eBay connection needs a refresh, the picker shows the reconnect notice (the `DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED` code joins `EBAY_AUTHORIZATION_PERMISSION_ERROR_CODES` in `EbayStoreCategoryAuthorizationRecovery.tsx`).
+- Rules by group table, "eBay category" column: the rule's category or "—" (inherit). Per-rule hit counts come from the review on load and after each save.
 - "N of 100 rules · M of 10,000 named listings" counter on the table. After three single-listing category rules, the sheet nudges: "Prefer a product rule. Single-listing rules use up your 100."
-- Step 3 group "No eBay category (n)": the fix button opens the Rule sheet with scope prefilled to the affected product. When all affected rows share one product, scope = that product. Otherwise scope = listings with those ids.
+- Step 3 group "No eBay category (n)": the fix button opens the rule sheet with the scope prefilled to the affected product. When all affected rows share one product, scope = that product. Otherwise scope = listings with those ids.
+- Listing detail shows "Category: 183435 Trading Card Sleeves · from rule Envelopes" (or "from your store default", "from Card Shellz").
 
-### 7.6 Routes
+### 7.6 Routes (as built, `interfaces/http/dropship-ebay-category-rules.routes.ts`)
 
 ```
 GET  /api/dropship/listings/stores/:storeConnectionId/ebay-category-rules
-PUT  /api/dropship/listings/stores/:storeConnectionId/ebay-category-rules          (bulk parser)
-POST /api/dropship/listings/stores/:storeConnectionId/ebay-category-rules/impact   (bulk parser)
-POST /api/dropship/listings/stores/:storeConnectionId/rules/impact                 (bulk parser)
-GET  /api/dropship/listings/stores/:storeConnectionId/ebay-category-rules/targets   (reuse selectedCatalogTargets)
-GET  /api/dropship/listings/stores/:storeConnectionId/ebay-category-search?q=
-GET  /api/dropship/listings/stores/:storeConnectionId/ebay-category-search/:categoryId
+PUT  /api/dropship/listings/stores/:storeConnectionId/ebay-category-rules            (bulk parser)
+POST /api/dropship/listings/stores/:storeConnectionId/ebay-category-rules/review     (bulk parser)
+GET  /api/dropship/listings/stores/:storeConnectionId/ebay-category-rules/targets    (reuses selectedCatalogTargets)
+GET  /api/dropship/listings/stores/:storeConnectionId/ebay-categories/search?q=
+GET  /api/dropship/listings/stores/:storeConnectionId/ebay-categories?parentId=      (browse; no parentId = top level)
+GET  /api/dropship/listings/stores/:storeConnectionId/ebay-categories/:categoryId
 ```
 
-All require a dropship session. PUT takes the key from body or `Idempotency-Key` header (`resolveIdempotencyKey`). No step-up (same posture as content profile). Rate limit 60/min per member (the content-profile figure, `dropship-listing-content.routes.ts:15-16`).
+All require a dropship session and answer `Cache-Control: no-store`. PUT takes the idempotency key from the body. No step-up (same posture as the content profile). Rate limits per member: 60/min for the rules routes, 120/min for search, browse and lookup. Only eBay US stores are supported (`DROPSHIP_EBAY_CATEGORY_MARKETPLACE_UNSUPPORTED` otherwise). Reading the rules works while the store is connected, needs reauthorization or failed a refresh; search, browse, lookup, review and save ask eBay, so they need a live connection and answer the reconnect code when it has expired.
 
 ---
 
@@ -606,20 +577,18 @@ Selection across pages: the checked set is ids only. "Sell these" and "Set how t
 
 Each change names the file it extends. Everything keeps Zod at the boundary, idempotency keys, structured `DropshipError`, and audit rows.
 
-### 9.1 eBay category rules layer (section 7)
+### 9.1 eBay category rules layer (section 7) — built in PR 1
 
-- Migration: new file mirroring `migrations/0660_dropship_vendor_listing_content.sql`, plus `queued_marketplace_category_id varchar(40)` on `dropship.dropship_listing_push_job_items`.
-- Shared schema: `shared/dropship/ebay-category-rules.ts` (uses `catalogScopeSchema` from `shared/dropship/catalog-scope.ts`, same named-listing refine as `listing-content.ts:20-23`).
-- Resolver: `server/modules/dropship/application/dropship-ebay-category-resolver.ts`, sibling of `dropship-listing-content-resolver.ts`, returning `evidenceHash` per row.
-- Reader: `server/modules/dropship/infrastructure/dropship-ebay-category-rules.reader.ts`, mirror of `dropship-listing-content.reader.ts:7-18`. Added to the `Promise.all` at `dropship-listing-preview-service.ts:339-380`, gated on `platform === 'ebay'`.
-- Evidence: preview row fields `marketplaceCategoryEvidenceHash`, `marketplaceCategorySource`, `marketplaceCategoryRuleName` (`dropship-listing-dtos.ts:29-63`); `expectedMarketplaceCategoryEvidenceHashesByVariantId` on `createListingPushJobInputSchema` (`dropship-use-case-dtos.ts:48-61`), checked in `assertPreviewMatchesReviewedEvidence`, hashed in `hashListingPushJobRequest`, counted by `carriesReviewedPreviewEvidence`; lock re-check in `dropship-listing-preview.repository.ts:626-665`; worker check in `dropship-listing-push-worker.factory.ts:17-41`. The client preview DTO (`toDropshipVendorListingPreview`) and the existing job route forward the new field.
-- Service + repository: mirror `dropship-ebay-store-category-service.ts` (leaf check) and `dropship-ebay-store-category.repository.ts:77-244` (lock, replay, revision, audit).
-- Taxonomy port: `server/modules/dropship/infrastructure/dropship-ebay-taxonomy.directory.ts` with `searchCategories(q): Promise<TaxonomyCategory[]>` (≤10) and `describeCategory(id): Promise<TaxonomyCategory | null>`, `TaxonomyCategory = { categoryId, categoryName, breadcrumb: string[], leaf: boolean }`. Leaf from `get_category_subtree`. In-process cache: per id 24 h, per query 1 h. Credential decision is open question 13.1; either path goes through `withEbaySafeReadRecovery` when the vendor's connection is used.
-- Impact: `ebay-category-rules/impact` and the generic `rules/impact` (7.4), both in the application layer over `loadSelectedCandidates`.
-- Routes: `server/modules/dropship/interfaces/http/dropship-ebay-category-rules.routes.ts`, shape of `dropship-listing-content.routes.ts:16-21`, bulk parser on PUT and the two impact POSTs.
-- Preview: `dropship-listing-preview-service.ts:1002, 1034-1037, 1065-1068`.
-- Test pinning the toggle: `dropship-listing-preview.repository` candidate query with `listing_enabled = false` still yields the base default.
-- Test pinning evidence: rules save between check and publish → `createListingPushJob` 409; rules save between queue and push → item fails `DROPSHIP_LISTING_CATEGORY_CHANGED_SINCE_QUEUE`, `retryable: false`.
+- Migration `migrations/0717_dropship_ebay_category_rules.sql` (revisions, head, two guard triggers). No column on `dropship_listing_push_job_items`: the push re-resolves the category (7.2).
+- Shared schema: `shared/dropship/ebay-category-rules.ts` (uses `catalogScopeSchema` from `shared/dropship/catalog-scope.ts`, same named-listing limit as `listing-content.ts`).
+- Resolver: `server/modules/dropship/application/dropship-ebay-category-resolver.ts`, sibling of `dropship-listing-content-resolver.ts`, returning `evidenceHash` per row, and the review summary.
+- Reader: `server/modules/dropship/infrastructure/dropship-ebay-category-rules.reader.ts`, mirror of `dropship-listing-content.reader.ts`. The preview loads it for every eBay candidate (`loadEbayCategories`, read-only transaction).
+- Evidence: preview row fields `marketplaceCategoryEvidenceHash`, `marketplaceCategorySource`, `marketplaceCategoryRuleName` (forwarded by `toDropshipVendorListingPreview`); `expectedMarketplaceCategoryEvidenceHashesByVariantId` on `createListingPushJobInputSchema`, checked in `assertPreviewMatchesReviewedEvidence`, hashed in `hashListingPushJobRequest`, counted by `carriesReviewedPreviewEvidence`, forwarded by `POST /api/dropship/listing-push-jobs` and by the inventory catch-up provider; lock re-check in `PgDropshipListingPreviewRepository.createListingPushJob`; `DROPSHIP_LISTING_CATEGORY_VERSION_CONFLICT` answers 409 and the client treats it as a stale preview.
+- Service: `application/dropship-ebay-category-rules-service.ts` (authorization, leaf check, review, replay-then-verify-then-write save). Repository: `infrastructure/dropship-ebay-category-rules.repository.ts` (request lock, store lock, replay, revision check, audit).
+- Selected-catalog reads shared by pricing, content and category rules: `infrastructure/dropship-selected-catalog.reader.ts`.
+- Taxonomy: `infrastructure/dropship-ebay-taxonomy.directory.ts` (tree index, search, browse, lookup; the vendor's own connection through `withEbaySafeReadRecovery`) and `infrastructure/dropship-ebay-category-rules.factory.ts` (one directory per process).
+- Routes: `interfaces/http/dropship-ebay-category-rules.routes.ts` (7.6); bulk parser `interfaces/http/dropship-bulk-json.middleware.ts`, skipped by the global parser.
+- Tests: resolver, shared schema, migration text, repository (DI-stubbed transaction), service, taxonomy directory, routes, listing route forwarding, preview service (category through rules, evidence refusal, request hash), catch-up provider, and a real-Postgres suite (triggers, concurrent saves, replay, cross-vendor refusal, audit rollback).
 
 ### 9.2 Catalog GET additions
 
@@ -722,7 +691,8 @@ Each PR is independently shippable. Category rules and the toggle pin come first
 
 | PR | Scope | Files | Tests |
 |---|---|---|---|
-| 1 | eBay category rules server layer + toggle pin + category evidence. Migration (rules tables, `queued_marketplace_category_id`), shared schema, resolver with `evidenceHash`, reader, service, repository, taxonomy port, routes incl. search, leaf check, category impact, generic rules impact, targets, bulk parser on PUT/impact. Preview plug-in; fifth evidence map through schema, assert, request hash, lock re-check, worker check. Test that the base default ignores `listing_enabled`. No UI. | 9.1, 9.4 (parser) | resolver first-match / default / catalog fallback / none; leaf rejection; replay; hash conflict; revision conflict; impact counts per category and per rule; rules save between check and publish → 409; rules save between queue and push → permanent item failure; `current_preview` with the fifth map refused; DI-stubbed transaction tests; toggle regression; 10,000-id PUT parses. |
+| 1 | Built. eBay category rules server layer + category evidence (the toggle pin shipped first, in PR #1613). Migration 0717 (revisions, head, triggers), shared schema, resolver with `evidenceHash`, reader, service, repository, taxonomy directory (tree index, search, browse, lookup, the vendor's own connection, reconnect code), routes incl. review and targets, bulk parser on PUT/review. Preview plug-in; fifth evidence map through schema, assert, request hash, route, catch-up provider and lock re-check. The push re-resolves the category instead of failing the item (7.2). The generic `rules/impact` moves to PR 6. No UI. | 9.1 | resolver first-match / default / catalog fallback / none; leaf and unknown-category refusal; replay without eBay; hash conflict; revision conflict; review counts per source, rule and category; stale reviewed queue → 409; one-step queue uses the current rules; non-eBay stores never resolve; route forwards every push field; reconnect code for an expired connection; tree index bounds and stale fallback; DI-stubbed transaction tests; real-Postgres triggers, concurrency, replay and audit rollback; 10,000-id PUT parses. |
+| 1b | Category rules UI on the current Catalog page: store default, ordered rules with the scope picker, category picker (search, browse, suggestions from the listing title), impact review before save, reconnect notice, category source on the listing preview. | 7.5 | picker leaf-only; review shown before any write; reconnect notice on the permission code; conflict keeps the draft. |
 | 2 | Routes and frame, no behaviour change. `/catalog/{choose,setup,publish,status}` under wouter, StepRail with ticks from existing fields (Step 1: any active include rule; Step 2: `missingFields` empty; Status: link only), StickyActionBar, store selector in the rail (eBay only), `/catalog` → `/catalog/choose`. Existing sections mounted under the steps as-is. | `App.tsx:269`, new `client/src/pages/dropship/catalog/*` | route → step mapping, tick derivation, redirect, non-eBay connection not selectable. |
 | 3 | Step 1 selection by group. Facet checkboxes (rules-only state, no ◪ yet) with two-step bulk bar; facet Stop selling removes includes and never adds a scope exclude; checked set; `TargetSet` lib with `describeTargetSet`; row-level exceptions as `variant` exclude rules with pills; "Your rules" chips with remove and "Convert to a category rule"; URL filters; tri-state Show; server paging 200 + Load more + windowed table (`@tanstack/react-virtual`). Uses the whole-set PUT keyed by `vendorSelectionRuleDedupeKey`, with a soft warning at 400 rules. | `dropship-listing-targets.ts`, `dropship-ops-surface.ts:4747-4800` | rule builders per scope, exception round-trip, "Sell these" removes matching excludes, facet Stop selling removes inner includes and creates no exclude, 400-rule warning, checked set survives paging, `TargetSet` promotion rule. |
 | 4 | Server catalog and selection: migration for `variants` (column, CHECK arms), dedupe key and canonical hash, matcher Set, `selectionRevisionId`, `summary`, facet `selectedCount` / `excludedCount`, `selection=` tri-state, filter-aware facets, `idsOnly`, `POST selection-rules/changes` with `ruleId` removal and bulk parser, dry-run diff script. Client switches to deltas, `ruleId`, the ◪ state, partial un-exclude, and the revision context key. | 9.2, 9.3 | DTOs, replay, hash conflict, revision conflict, facet counts incl. selected/excluded, `variants` matching, partial un-exclude keeps the other ids excluded, evaluator diff empty, admin rules reject `variants`, 10,000-id change parses. |
@@ -744,28 +714,28 @@ Each PR carries its own test migration for `DropshipPortalCatalog.test.ts`. Stat
 
 1. **Multi-profile saves are not atomic.** Pricing (review → apply), content, category rules and policies are separate transactions. A rule can be half-applied. Mitigation: per-part idempotent retry with retained keys, per-part result lines, server-recomputed readiness after every save. A single atomic rule-set endpoint is out of scope.
 2. **Readiness cost and staleness at scale.** Each ≤200-id preview does ATP reads and eBay preflight. 10k SKUs is 50 sequential heavy requests. Timing is HYPOTHESIS. `previewHash` depends on wallet tier, ATP, package data, costs and the capability hash, none of them a revision id, so a revision-keyed cache alone goes stale after a top-up, a cost change or an admin fix. Mitigation: 10-minute `staleTime`, always-available Re-check, per-row `checkedAt`; the projection in PR13.
-3. **Reviewed publish 409s after a long check.** Prices under cost-change review, a rules save in another tab, or a category rules save drift. Run expansion marks only the drifted rows `stale`; the UI shows the server's count and never resends the same evidence. A queued item whose category moved fails permanently at push and asks for a re-check.
+3. **Reviewed publish 409s after a long check.** Prices under cost-change review, a rules save in another tab, or a category rules save drift. Run expansion marks only the drifted rows `stale`; the UI shows the server's count and never resends the same evidence. A queued item publishes the category the rules name when it is sent (7.2); a rules save between queue and push publishes the new category.
 4. **Priority remapping.** `(index + 1) × 10` on first save rewrites existing group priorities. Semantics are preserved, numbers are not. Ties in legacy data are surfaced as a conflict before save. A reorder re-saves every profile whose priorities changed. A dry-run diff per vendor runs before PR6 ships.
 5. **Excludes always win.** An exception created by row-level "Stop selling these" survives re-ticking the category. The pills and chips make this visible. "Sell these" rewrites the exclude rule without the chosen ids. Facet-level Stop selling never creates an exclude.
 6. **`variants` scope touches the shared matcher.** A bug there changes every vendor's selection. Mitigation: admin rules reject the scope; the evaluator diff script must be empty before merge.
 7. **Facet counts ignore filters until PR4.** "Select all N matching" uses the query total, never facet `rowCount`. The ◪ state does not exist until PR4.
 8. **Selection has no step-up.** Copy must not imply MFA. The changes endpoint keeps the same posture.
 9. **Admin-owned blockers** (`listing_config_required`, `catalog_package_data_required`, `active_box_required`, `active_rate_table_required`; `dropship-listing-preview-service.ts:964-976`) cannot be fixed by the vendor. A first-time vendor can reach Step 3 with only "contact support". The Dashboard should surface these before Step 1 (out of this plan's scope; noted).
-10. **Taxonomy proxy credential.** Admin token vs vendor credential is undecided (13.1). Leaf verification is one eBay call per distinct category per save and is cached 24 h per id.
+10. **Category list through the vendor's connection** (13.1, decided). An expired or revoked connection stops search, review and save with the reconnect code; the page must show it (PR 1b). The tree is one download per process per day; a failed refresh serves the previous tree only when eBay itself failed. The admin picker reads the same tree with a user token (`ebay-taxonomy.routes.ts`); that eBay accepts the vendor's user token for the same calls is HYPOTHESIS until the first vendor search in production.
 11. **Policies and shelves stay checked-set-only until PR12,** and shelf saves are last-write-wins per variant with no revision check until then. The sheet and the shelf card say so.
 12. **Push run expansion and processing are slow and serial.** One worker, sequential jobs and items. A 10,000-item run is hours (HYPOTHESIS, section 8). If the sweep is down, runs sit in `preparing`. Alerts: `preparing` older than 5 minutes, `processing` with no target change for 30 minutes. The Status card shows elapsed time.
 13. **Windowed tables and checkboxes** change keyboard and screen-reader behaviour. Row identity is `productVariantId`; the checked set never depends on mounted rows. Sort/filter refetch is deferred while a row editor is open.
 14. **Redirect surprise.** Vendors who bookmarked `/catalog` land on Status once listings exist (from PR10). Step 1 is one click away in the rail and "Choose more" is in the Status bar.
 15. **Body sizes.** The global limit is 100 KiB. A 10,000-id run body is about 2.6 MB by arithmetic, and a 10,000-id `variants` rule, `listings` scope or category document is over 70 KB. Every such route gets its own parser (9.4) with a parse test at 10,000 ids; any route left on the global parser fails at roughly 1,200 ids.
 16. **10,000-selected cap per vendor.** Above it, Step 2's targets, review and impacts refuse. The UI explains and points to Step 1; nothing is silently truncated.
-17. **Rate limits.** Pricing routes 30/min, content and category routes 60/min, step-up 30 per 15 minutes. A Step 2 save spends 2 of the pricing budget; the targets picker spends one per debounced keystroke; the modal sends a code only without a live proof.
+17. **Rate limits.** Pricing routes 30/min, content and category rules routes 60/min, category search/browse/lookup 120/min, step-up 30 per 15 minutes. A Step 2 save spends 2 of the pricing budget; the targets picker spends one per debounced keystroke; the modal sends a code only without a live proof.
 
 ---
 
 ## 13. Open questions for the owner
 
-1. **Taxonomy credential.** Should the vendor category search and leaf check use the Card Shellz admin eBay token (as `ebay-taxonomy.routes.ts` does) or the vendor's own connection through `withEbaySafeReadRecovery`? Admin token is simpler and works before the vendor connects; vendor credential keeps call volume on the vendor's quota.
-2. **Store default for eBay category.** Should a vendor be allowed to set a store-wide default category at all, or only rules by scope with the Card Shellz mapping as the only fallback? A store-wide default is the easiest way to put 800 listings in the wrong category.
+1. **Taxonomy credential.** Decided: the vendor's own eBay connection, with a clear "reconnect your eBay store" signal when it needs a refresh (`DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED`). Built in PR 1; the notice is PR 1b.
+2. **Store default for eBay category.** Decided: yes, a vendor may set a store-wide default category. The impact review (7.4) shows how many listings move before the save.
 3. **Selection MFA.** Selection changes have no step-up today. Keep that, or add `manage_catalog_selection` (already defined in `dropship-auth.tsx:23` and `domain/auth.ts:18`) to the changes endpoint? Adding it means a code prompt on every "Sell these".
 4. **Below-cost confirmation.** Below-cost rows publish as warnings today. Should the confirm modal require ticking "I understand 8 listings are below cost" before Publish, or is the line of copy enough?
 5. **Launch cut.** Is PR1–PR10 the launch (category rules with evidence, selection by group, defaults, rules table, push runs, status), with `fixed` pricing, scoped policies and the projection after? Or must `fixed` pricing be in the first release?

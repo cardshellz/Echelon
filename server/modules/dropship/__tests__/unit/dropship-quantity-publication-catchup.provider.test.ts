@@ -11,7 +11,8 @@ const scope: QuantityPublicationScope = { destinationKind: "dropship_store_conne
 const claim: QuantityPublicationCatchup = { catchupId: "3", revision: "2", attemptBoundaryId: "0", scope };
 const listing = { listing_id: 4, vendor_id: 5, product_variant_id: 101, product_id: 20, sku: "P5", status: "active" };
 const row = { productId: 20, productVariantId: 101, sku: "P5", previewStatus: "ready", listingIntent: { quantity: 14 },
-  contentEvidenceHash: "a".repeat(64), rulePriceEvidenceHash: "b".repeat(64), priceSettingRevisionId: 8, priceCents: 1200 };
+  contentEvidenceHash: "a".repeat(64), rulePriceEvidenceHash: "b".repeat(64), marketplaceCategoryEvidenceHash: "c".repeat(64),
+  priceSettingRevisionId: 8, priceCents: 1200 };
 const job = { jobId: 9, vendorId: 5, storeConnectionId: 7, status: "queued" };
 const item = { listingId: 4, productVariantId: 101, status: "completed" };
 function setup() {
@@ -27,7 +28,7 @@ function setup() {
 }
 
 describe("Dropship current-quantity catch-up owner", () => {
-  it("creates one exact current-preview job with content, rule and price evidence, then awaits owner completion", async () => {
+  it("creates one exact current-preview job with content, rule, category and price evidence, then awaits owner completion", async () => {
     const context = setup();
     await context.provider.refresh(scope, claim);
     expect(context.generatePreview).toHaveBeenCalledWith({ vendorId: 5, storeConnectionId: 7,
@@ -36,6 +37,7 @@ describe("Dropship current-quantity catch-up owner", () => {
       idempotencyKey: "inventory-publication-catchup:3:2", productVariantIds: [101],
       expectedContentEvidenceHashesByVariantId: { "101": "a".repeat(64) },
       expectedRuleEvidenceHashesByVariantId: { "101": "b".repeat(64) },
+      expectedMarketplaceCategoryEvidenceHashesByVariantId: { "101": "c".repeat(64) },
       expectedPriceRevisionIdsByVariantId: { "101": 8 }, expectedPriceCentsByVariantId: { "101": 1200 },
     }));
     expect(context.processJob).toHaveBeenCalledWith(expect.objectContaining({ jobId: 9 }));
