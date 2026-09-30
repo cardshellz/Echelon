@@ -1,4 +1,7 @@
 export const SHARED_SHIPPING_LEGACY_FIXTURE_SQL = `CREATE SCHEMA shipping; CREATE SCHEMA dropship; CREATE SCHEMA warehouse; CREATE SCHEMA catalog; CREATE SCHEMA channels;
+      CREATE SCHEMA inventory;
+      CREATE TABLE inventory.availability_runtime_authority(singleton_key boolean PRIMARY KEY,authority text,revision bigint,activation_run_id bigint);
+      INSERT INTO inventory.availability_runtime_authority VALUES(true,'legacy',1,NULL);
       CREATE TABLE channels.channels(id integer PRIMARY KEY,name text,type text,provider text,status text,shipping_config jsonb);
       CREATE TABLE channels.channel_warehouse_assignments(channel_id integer,warehouse_id integer,enabled boolean);
       CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,sku text,product_id integer,weight_grams numeric,length_mm numeric,width_mm numeric,height_mm numeric,ships_in_own_container boolean,max_units_per_package integer,

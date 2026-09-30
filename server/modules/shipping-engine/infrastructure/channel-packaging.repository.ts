@@ -26,6 +26,7 @@ import {
 import { ShippingConfigurationError } from "../domain/configuration-error";
 import { configurationCommand } from "./configuration-command";
 import { planWarehouseSuiteAssignment } from "../domain/warehouse-suite-assignment";
+import { readChannelFulfillmentWarehouses } from "../../channels/channel-fulfillment-warehouses.reader";
 
 const conflict = () =>
   new ShippingConfigurationError(
@@ -105,9 +106,7 @@ export class ChannelPackagingRepository implements ChannelPackagingStore {
         await client.query(`SELECT p.channel_id AS "channelId",r.origin_warehouse_id AS "warehouseId",b.name,p.purpose
         FROM shipping.channel_policies p JOIN shipping.channel_policy_routes r ON r.policy_id=p.id
         JOIN shipping.rate_books b ON b.id=r.rate_book_id WHERE p.status='active' ORDER BY p.channel_id,r.id`);
-      const warehouseAssignments = await client.query(
-        `SELECT channel_id AS "channelId",warehouse_id AS "warehouseId",enabled FROM channels.channel_warehouse_assignments`,
-      );
+      const warehouseAssignments = await readChannelFulfillmentWarehouses(client);
       const result = packagingPolicyOverviewSchema.parse({
         channels: channels.rows.map((c) => ({
           id: c.id,
@@ -127,7 +126,7 @@ export class ChannelPackagingRepository implements ChannelPackagingStore {
         boxes: boxes.rows,
         suites: suites.rows,
         pricing: pricing.rows,
-        warehouseAssignments: warehouseAssignments.rows,
+        warehouseAssignments,
       });
       await client.query("COMMIT");
       return result;
@@ -155,6 +154,10 @@ export class ChannelPackagingRepository implements ChannelPackagingStore {
   }
 
   private async persistPolicy(client: PoolClient, input: SaveChannelPackaging) {
+    const enabledWarehouses = await readChannelFulfillmentWarehouses(client, {
+      channelId: input.channelId,
+      lock: true,
+    });
     const current = (
       await client.query(
         `SELECT ${POLICY_PROJECTION} FROM shipping.channel_packaging_policies p WHERE p.channel_id=$1 FOR UPDATE`,
@@ -175,17 +178,8 @@ export class ChannelPackagingRepository implements ChannelPackagingStore {
       );
     const warehouseIds = input.overrides.map((o) => o.warehouseId);
     if (warehouseIds.length > 0) {
-      const enabledWarehouses = await client.query(
-        `SELECT a.warehouse_id AS id
-           FROM channels.channel_warehouse_assignments a
-           JOIN warehouse.warehouses w ON w.id=a.warehouse_id
-          WHERE a.channel_id=$1
-            AND a.enabled
-            AND a.warehouse_id=ANY($2::int[])
-          FOR SHARE OF a`,
-        [input.channelId, warehouseIds],
-      );
-      if (enabledWarehouses.rows.length !== warehouseIds.length)
+      const enabledIds = new Set(enabledWarehouses.map(row => row.warehouseId));
+      if (warehouseIds.some(warehouseId => !enabledIds.has(warehouseId)))
         throw new ShippingConfigurationError(
           "SHIPPING_WAREHOUSE_NOT_ENABLED",
           "A packaging exception can only target a warehouse enabled for this fulfillment program.",
@@ -232,22 +226,18 @@ export class ChannelPackagingRepository implements ChannelPackagingStore {
         (a, b) => a.warehouseId - b.warehouseId,
       ),
     });
-    const enabledWarehouses = await client.query(
-      "SELECT warehouse_id FROM channels.channel_warehouse_assignments WHERE channel_id=$1 AND enabled",
-      [input.channelId],
-    );
-    for (const row of enabledWarehouses.rows) {
-      const selection = resolveChannelSuite(after, row.warehouse_id);
+    for (const row of enabledWarehouses) {
+      const selection = resolveChannelSuite(after, row.warehouseId);
       if (
         !eligiblePackagingBoxes(
           suiteBoxes.get(selection.suiteId)!,
-          row.warehouse_id,
+          row.warehouseId,
           input.requirement,
         ).length
       )
         throw new ShippingConfigurationError(
           "SHIPPING_SUITE_STRANDS_WAREHOUSE",
-          `No reviewed packaging is available at enabled warehouse ${row.warehouse_id}. Review availability or set a warehouse override before saving.`,
+          `No reviewed packaging is available at enabled warehouse ${row.warehouseId}. Review availability or set a warehouse override before saving.`,
         );
     }
     await client.query(

@@ -95,6 +95,15 @@ describeWithDisposableDb("Walmart account and order PostgreSQL transactions", ()
   it("rejects account identity replacement", async () => {
     await expect(repository.save({ ...command(), shipNodeId: "OTHER" }, channelId, "Seller", "operator", now, seal)).rejects.toMatchObject({ code: "WALMART_CONNECTION_IDENTITY_CONFLICT" });
   });
+  it("keeps fulfillment on the verified connection with no legacy assignment and rejects inactive routing", async () => {
+    const pool = getTestPool(), row = (await repository.get(channelId))!;
+    expect((await pool.query("SELECT warehouse_id FROM channels.channel_warehouse_assignments WHERE channel_id=$1", [channelId])).rows).toEqual([]);
+    await repository.assertWarehouse(row);
+    await expect(repository.assertWarehouse({ ...row, connection_id: row.connection_id + 100 })).rejects.toMatchObject({ code: "WALMART_WAREHOUSE_SCOPE_CHANGED" });
+    await pool.query("UPDATE warehouse.warehouses SET is_active=0 WHERE id=$1", [warehouseId]);
+    try { await expect(repository.assertWarehouse(row)).rejects.toMatchObject({ code: "WALMART_WAREHOUSE_SCOPE_CHANGED" }); }
+    finally { await pool.query("UPDATE warehouse.warehouses SET is_active=1 WHERE id=$1", [warehouseId]); }
+  });
   it("links exact SKU identities idempotently and rejects remapping", async () => {
     const account = { channelId, connectionId: (await repository.get(channelId))!.connection_id, provider: "walmart" };
     const item = { sku: "WALMART-SKU", title: "Product", externalProductId: "WPID", externalVariantId: "WALMART-SKU",

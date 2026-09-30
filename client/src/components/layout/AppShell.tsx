@@ -239,7 +239,6 @@ const navStructure: NavEntry[] = [
         href: "/channels/inventory",
         requiredPermission: { resource: "inventory_planning", action: "view" },
       },
-      { label: "Allocation", icon: Layers, href: "/channel-allocation" },
       { label: "Sync Log", icon: History, href: "/sync-log" },
       { label: "Subscriptions", icon: Crown, href: "/subscriptions" },
     ],

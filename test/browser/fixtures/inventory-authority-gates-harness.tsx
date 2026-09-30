@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider } from "../../../client/src/lib/auth";
 import { getQueryFn } from "../../../client/src/lib/queryClient";
 import ChannelAllocation from "../../../client/src/pages/ChannelAllocation";
-import Channels from "../../../client/src/pages/Channels";
+import Channels from "../../../client/src/pages/ChannelsPage";
 import Reserves from "../../../client/src/pages/Reserves";
 import Warehouses from "../../../client/src/pages/Warehouses";
 import "../../../client/src/index.css";

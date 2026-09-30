@@ -9,12 +9,12 @@
  * 4. Creates WMS order for pick queue
  */
 
-import { db } from "../../db";
+import { db, pool } from "../../db";
+import { readChannelFulfillmentWarehouses } from "../channels/channel-fulfillment-warehouses.reader";
 import { sql, eq, and, notInArray } from "drizzle-orm";
 import { CountryCodeValidationError, parseCountryCode } from "@shared/country-code";
 import { omsOrders, omsOrderLines } from "@shared/schema/oms.schema";
 import {
-  channelWarehouseAssignments,
   outboundShipments,
   productLocations,
   productVariants,
@@ -1366,25 +1366,15 @@ export class WmsSyncService {
           .where(eq(warehouses.id, warehouseId))
           .limit(1)
       : [];
-    const [assignment] = warehouseId && omsOrder.channelId
-      ? await db
-          .select({ id: channelWarehouseAssignments.id })
-          .from(channelWarehouseAssignments)
-          .where(
-            and(
-              eq(channelWarehouseAssignments.channelId, omsOrder.channelId),
-              eq(channelWarehouseAssignments.warehouseId, warehouseId),
-              eq(channelWarehouseAssignments.enabled, true),
-            ),
-          )
-          .limit(1)
+    const sources = warehouseId && omsOrder.channelId
+      ? await readChannelFulfillmentWarehouses(pool, { channelId: omsOrder.channelId })
       : [];
     const decision = decideDropshipOrderWarehouse({
       ...identity,
       omsOrderId: omsOrder.id,
       omsOrderWarehouseId: warehouseId,
       warehouse: warehouse ?? null,
-      enabledForChannel: assignment !== undefined,
+      enabledForChannel: sources.some(source => source.warehouseId === warehouseId),
     });
     if (decision.kind !== "pinned") return null;
     logger.info("wms_sync_dropship_warehouse", {

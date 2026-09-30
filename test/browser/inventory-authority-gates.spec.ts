@@ -125,6 +125,9 @@ test.describe("inventory runtime authority gates", () => {
       await expect(dialog.getByRole("link")).toBeVisible();
       await expect(dialog.getByRole("button", { name: "Open Channel Inventory", exact: true })).toBeVisible();
       await expect(dialog.getByRole("button", { name: "Publish inventory to Shopify", exact: true })).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: "Load Locations", exact: true })).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: "Save Mappings", exact: true })).toHaveCount(0);
+      await expect(page.getByRole("tab", { name: "Reserves", exact: true })).toHaveCount(0);
       expect(state.channelReads).toBe(1);
       // Any legacy sync read or mutation would be captured as an unexpected request.
       expect(state.unexpected).toEqual([]);

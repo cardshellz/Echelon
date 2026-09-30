@@ -106,10 +106,6 @@ export class WalmartConnectionRepository {
         partner_name = EXCLUDED.partner_name, revision = walmart_connections.revision + 1, updated_at = EXCLUDED.updated_at`,
       [channelId, connectionId, input.expectedPartnerId, partnerName, input.environment, input.shipNodeId, input.warehouseId,
         JSON.stringify(credential), input.importSince, now]);
-      if (!before) {
-        await client.query(`INSERT INTO channels.channel_warehouse_assignments (channel_id,warehouse_id,enabled,priority)
-          VALUES ($1,$2,true,0) ON CONFLICT (channel_id,warehouse_id) DO UPDATE SET enabled = true`, [channelId, input.warehouseId]);
-      }
       // Completing setup activates a pending channel. Preserve an explicit pause.
       await client.query("UPDATE channels.channels SET status='active',updated_at=$2 WHERE id=$1 AND status='pending_setup'", [channelId, now]);
       await this.event(client, channelId, actor, before ? "credentials_rotated" : "connected",
@@ -139,9 +135,12 @@ export class WalmartConnectionRepository {
     return result.rows.map(row => positiveId.parse(row.channel_id));
   }
   async assertWarehouse(row: WalmartConnectionRecord): Promise<void> {
-    const result = await this.query<{ warehouse_id: number }>(`SELECT a.warehouse_id FROM channels.channel_warehouse_assignments a
-      JOIN warehouse.warehouses w ON w.id=a.warehouse_id AND w.is_active=1
-      WHERE a.channel_id=$1 AND a.enabled`, [row.channel_id]);
+    // The verified connection owns order routing. Inventory publication separately
+    // requires an exact canonical supply binding; legacy allocations own neither.
+    const result = await this.query<{ warehouse_id: number }>(`SELECT connection.warehouse_id
+       FROM channels.walmart_connections connection
+       JOIN warehouse.warehouses w ON w.id=connection.warehouse_id AND w.is_active=1 AND w.warehouse_type <> '3pl'
+       WHERE connection.channel_id=$1 AND connection.connection_id=$2`, [row.channel_id, row.connection_id]);
     if (result.rows.length !== 1 || result.rows[0].warehouse_id !== row.warehouse_id) {
       throw new WalmartApiError("WALMART_WAREHOUSE_SCOPE_CHANGED", "The channel must route to its explicitly configured warehouse", false);
     }

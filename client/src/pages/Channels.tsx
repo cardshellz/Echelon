@@ -14,7 +14,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
   Store, Plus, Settings, RefreshCw, Trash2, CheckCircle2, AlertCircle,
-  Clock, Pause, Play, ExternalLink, Building2, Package, Lock, MapPin, Link2, Save, Upload,
+  Clock, Pause, Play, ExternalLink, Building2, Package, Lock, Upload,
   ShieldAlert, Radio, Loader2, XCircle,
 } from "lucide-react";
 import { useLocation as useWouterLocation } from "wouter";
@@ -55,29 +55,6 @@ interface Channel {
   createdAt: string;
   connection: ChannelConnection | null;
   partnerProfile: PartnerProfile | null;
-}
-
-interface ShopifyLocation {
-  id: string;
-  name: string;
-  address1: string | null;
-  city: string | null;
-  province: string | null;
-  country: string | null;
-  active: boolean;
-}
-
-interface LocationMapping {
-  shopifyLocationId: string;
-  warehouseId: number;
-  warehouseCode: string;
-  warehouseName: string;
-}
-
-interface WarehouseOption {
-  id: number;
-  code: string;
-  name: string;
 }
 
 // eBay-specific types
@@ -222,11 +199,6 @@ export default function Channels() {
   const [connectToken, setConnectToken] = useState("");
   const [connecting, setConnecting] = useState(false);
 
-  // Shopify location mapping state
-  const [shopifyLocations, setShopifyLocations] = useState<ShopifyLocation[]>([]);
-  const [locationMappings, setLocationMappings] = useState<Record<string, number | null>>({});
-  const [locationsLoading, setLocationsLoading] = useState(false);
-
   // eBay — minimal state (full config lives in /channels/ebay)
 
   const isEbaySelected = selectedChannel?.provider === 'ebay';
@@ -237,59 +209,6 @@ export default function Channels() {
   });
 
 
-
-  const { data: warehouses = [] } = useQuery<WarehouseOption[]>({
-    queryKey: ["/api/warehouses"],
-    queryFn: async () => {
-      const res = await fetch("/api/warehouses", { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to fetch warehouses");
-      return res.json();
-    },
-  });
-
-  const fetchShopifyLocations = async (channelId: number) => {
-    setLocationsLoading(true);
-    try {
-      const res = await fetch(`/api/channels/${channelId}/shopify-locations`, { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to fetch locations");
-      const data = await res.json();
-      setShopifyLocations(data.locations || []);
-      // Build mapping state from existing mappings
-      const map: Record<string, number | null> = {};
-      for (const loc of data.locations || []) {
-        const existing = (data.mappings || []).find((m: LocationMapping) => m.shopifyLocationId === loc.id);
-        map[loc.id] = existing ? existing.warehouseId : null;
-      }
-      setLocationMappings(map);
-    } catch (err) {
-      toast({ title: "Error", description: "Failed to fetch Shopify locations", variant: "destructive" });
-    } finally {
-      setLocationsLoading(false);
-    }
-  };
-
-  const saveLocationMappings = useMutation({
-    mutationFn: async (channelId: number) => {
-      const mappings = Object.entries(locationMappings)
-        .filter(([_, warehouseId]) => warehouseId !== null)
-        .map(([shopifyLocationId, warehouseId]) => ({ shopifyLocationId, warehouseId }));
-      const res = await fetch(`/api/channels/${channelId}/map-locations`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ mappings }),
-      });
-      if (!res.ok) throw new Error("Failed to save mappings");
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/warehouses"] });
-      toast({ title: "Location mappings saved" });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
-    },
-  });
 
   // Warehouse settings for channel sync kill switch
   const { data: warehouseSettings } = useQuery<any>({
@@ -752,86 +671,6 @@ export default function Channels() {
                         </div>
                       )}
 
-                      {/* Shopify Location Mapping */}
-                      {selectedChannel.provider === 'shopify' && (
-                        <div className="space-y-3">
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <MapPin className="h-4 w-4 text-muted-foreground" />
-                              <Label className="text-sm font-medium">Location Mapping</Label>
-                            </div>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="min-h-[36px]"
-                              onClick={() => fetchShopifyLocations(selectedChannel.id)}
-                              disabled={locationsLoading}
-                            >
-                              <RefreshCw className={`h-3 w-3 mr-1 ${locationsLoading ? 'animate-spin' : ''}`} />
-                              {shopifyLocations.length === 0 ? 'Load Locations' : 'Refresh'}
-                            </Button>
-                          </div>
-
-                          {shopifyLocations.length > 0 ? (
-                            <div className="space-y-2">
-                              <p className="text-xs text-muted-foreground">
-                                Map each Shopify location to an Echelon warehouse for inventory sync.
-                              </p>
-                              {shopifyLocations.map((loc) => (
-                                <div key={loc.id} className="flex items-center gap-3 p-3 border rounded-lg">
-                                  <div className="flex-1 min-w-0">
-                                    <p className="font-medium text-sm truncate">{loc.name}</p>
-                                    <p className="text-xs text-muted-foreground truncate">
-                                      {[loc.address1, loc.city, loc.province].filter(Boolean).join(", ") || "No address"}
-                                    </p>
-                                  </div>
-                                  <div className="flex items-center gap-2 shrink-0">
-                                    <Link2 className="h-3 w-3 text-muted-foreground" />
-                                    <Select
-                                      value={locationMappings[loc.id] != null ? String(locationMappings[loc.id]) : "none"}
-                                      onValueChange={(val) => {
-                                        setLocationMappings(prev => ({
-                                          ...prev,
-                                          [loc.id]: val === "none" ? null : parseInt(val),
-                                        }));
-                                      }}
-                                    >
-                                      <SelectTrigger className="w-[180px] h-9 text-sm">
-                                        <SelectValue placeholder="Not mapped" />
-                                      </SelectTrigger>
-                                      <SelectContent>
-                                        <SelectItem value="none">Not mapped</SelectItem>
-                                        {warehouses.map((wh) => (
-                                          <SelectItem key={wh.id} value={String(wh.id)}>
-                                            {wh.code} — {wh.name}
-                                          </SelectItem>
-                                        ))}
-                                      </SelectContent>
-                                    </Select>
-                                  </div>
-                                </div>
-                              ))}
-                              <Button
-                                className="w-full min-h-[44px] mt-2"
-                                onClick={() => saveLocationMappings.mutate(selectedChannel.id)}
-                                disabled={saveLocationMappings.isPending}
-                              >
-                                <Save className="h-4 w-4 mr-2" />
-                                {saveLocationMappings.isPending ? "Saving..." : "Save Mappings"}
-                              </Button>
-                            </div>
-                          ) : !locationsLoading ? (
-                            <p className="text-sm text-muted-foreground text-center py-4">
-                              Click "Load Locations" to fetch your Shopify locations and map them to warehouses.
-                            </p>
-                          ) : (
-                            <div className="flex items-center justify-center py-6">
-                              <RefreshCw className="h-5 w-5 animate-spin text-muted-foreground" />
-                              <span className="ml-2 text-sm text-muted-foreground">Fetching locations from Shopify...</span>
-                            </div>
-                          )}
-                        </div>
-                      )}
                     </div>
                   ) : (
                     <div className="py-4">
@@ -893,16 +732,6 @@ export default function Channels() {
                                 toast({ title: "Connected to Shopify!", description: `Shop: ${data.shop?.name}` });
                                 setConnectDomain("");
                                 setConnectToken("");
-                                // Load locations from the setup response
-                                if (data.locations?.length) {
-                                  setShopifyLocations(data.locations);
-                                  const map: Record<string, number | null> = {};
-                                  for (const loc of data.locations) {
-                                    const existing = (data.mappings || []).find((m: any) => m.shopifyLocationId === loc.id);
-                                    map[loc.id] = existing ? existing.warehouseId : null;
-                                  }
-                                  setLocationMappings(map);
-                                }
                                 queryClient.invalidateQueries({ queryKey: ["/api/channels"] });
                                 // Refresh selectedChannel to show connected state
                                 const refreshRes = await fetch("/api/channels", { credentials: "include" });

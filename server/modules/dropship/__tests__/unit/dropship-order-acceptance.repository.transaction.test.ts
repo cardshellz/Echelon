@@ -132,6 +132,7 @@ function canonicalClaimAttemptRow(overrides: Record<string, unknown> = {}) {
 
 function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowHandler[] {
   const defaults: Record<string, RowHandler> = {
+    runtimeAuthority: { match: "FROM inventory.availability_runtime_authority", rows: [{ authority: "legacy", revision: "1", activation_run_id: null }] },
     intake: { match: "FROM dropship.dropship_order_intake", rows: [intakeRow()] },
     vendor: {
       match: "FROM dropship.dropship_vendors v",
@@ -153,7 +154,7 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
     },
     warehouseAllocation: {
       match: "FROM channels.channel_warehouse_assignments",
-      rows: (params) => (params[0] === 103 && params[1] === 1 ? [{ warehouse_id: 1 }] : []),
+      rows: (params) => (params[0] === 103 ? [{ channel_id: 103, warehouse_id: 1 }] : []),
     },
     listings: {
       match: "FROM dropship.dropship_vendor_listings dl",
@@ -235,6 +236,23 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
     existingLedger: { match: "FROM dropship.dropship_wallet_ledger", rows: [] },
   };
   return Object.values({ ...defaults, ...overrides });
+}
+
+function canonicalWarehouseHandlers(warehouseId: number | null): Record<string, RowHandler> {
+  return {
+    runtimeAuthority: {
+      match: "FROM inventory.availability_runtime_authority",
+      rows: [{ authority: "canonical", revision: "2", activation_run_id: "46" }],
+    },
+    warehouseTargetLocks: { match: "SELECT id FROM inventory.inventory_publication_targets", rows: [] },
+    warehouseSourceLocks: { match: "SELECT head.publication_target_id", rows: [] },
+    warehouseAllocation: {
+      match: "SELECT DISTINCT target.channel_id,node.warehouse_id",
+      rows: (params) => params[0] === 103 && warehouseId !== null
+        ? [{ channel_id: 103, warehouse_id: warehouseId }]
+        : [],
+    },
+  };
 }
 
 /** The advance relations present, with the launch policy (1% fee, $500 cap) and no vendor override. */
@@ -712,10 +730,8 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     }
   });
 
-  it("refuses canonical preparation when the frozen quote warehouse is not allocated", async () => {
-    const db = createFakeDb(baseHandlers({
-      warehouseAllocation: { match: "FROM channels.channel_warehouse_assignments", rows: [] },
-    }));
+  it.each([null, 2])("refuses canonical preparation when source warehouse %s does not include the frozen quote warehouse", async warehouseId => {
+    const db = createFakeDb(baseHandlers(canonicalWarehouseHandlers(warehouseId)));
     const { repository, loadProductCosts } = createRepository(db, availableCost());
 
     await expect(repository.prepareCanonicalOrder(acceptanceInput())).rejects.toMatchObject({
@@ -730,6 +746,7 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     expect(db.statements("INSERT INTO dropship.dropship_order_acceptance_stages")).toHaveLength(0);
     expect(db.statements("UPDATE dropship.dropship_wallet_accounts")).toHaveLength(0);
     expect(db.statements("INSERT INTO dropship.dropship_wallet_ledger")).toHaveLength(0);
+    expect(db.statements("FROM channels.channel_warehouse_assignments")).toHaveLength(0);
   });
 
   it("marks a failed cost source read as retryable and refuses a zero cost outright", async () => {
@@ -774,7 +791,7 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
   });
 
   it("prepares canonical acceptance without exact-SKU inventory validation or financial writes", async () => {
-    const db = createFakeDb(baseHandlers());
+    const db = createFakeDb(baseHandlers(canonicalWarehouseHandlers(1)));
     const { repository } = createRepository(db, availableCost());
 
     const result = await repository.prepareCanonicalOrder(acceptanceInput());
@@ -785,6 +802,9 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
       idempotentReplay: false,
     });
     expect(db.statements("FROM inventory.inventory_levels il")).toHaveLength(0);
+    expect(db.statements("FROM channels.channel_warehouse_assignments")).toHaveLength(0);
+    expect(db.statements("FROM inventory.availability_runtime_authority")[0].sql).toContain("FOR SHARE");
+    expect(db.statements("SELECT head.publication_target_id")[0].sql).toContain("FOR SHARE OF head");
     expect(db.statements("UPDATE dropship.dropship_wallet_accounts")).toHaveLength(0);
     expect(db.statements("INSERT INTO dropship.dropship_wallet_ledger")).toHaveLength(0);
     expect(db.statements("INSERT INTO dropship.dropship_order_economics_snapshots")).toHaveLength(0);

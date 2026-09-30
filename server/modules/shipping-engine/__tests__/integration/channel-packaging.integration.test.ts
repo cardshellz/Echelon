@@ -14,6 +14,7 @@ import { BasicDropshipCartonizationProvider } from "../../../dropship/infrastruc
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@shared/schema";
 import { confirmParcel } from "../../application/packing.service";
+import { canonicalWarehouseSourceTablesSql } from "../../../channels/__tests__/fixtures/channel-fulfillment-warehouses.fixture";
 
 const enabled =
   Boolean(process.env.ECHELON_TEST_DATABASE_URL) &&
@@ -424,6 +425,31 @@ describe.skipIf(!enabled)(
       expect((await repo.resolve(11, 1))?.boxes.map((b) => b.id)).toEqual([
         whiteId,
       ]);
+    });
+    it("saves packaging from active canonical sources, not legacy assignments or draft changes", async () => {
+      await db.query(canonicalWarehouseSourceTablesSql);
+      await db.query(`INSERT INTO channels.channels VALUES(22,'Canonical source test','internal','manual','active',NULL);
+        INSERT INTO channels.channel_warehouse_assignments VALUES(22,1,true);
+        INSERT INTO warehouse.fulfillment_nodes VALUES(100,2,'active'),(101,1,'active');
+        INSERT INTO inventory.inventory_publication_targets(id,channel_id) VALUES(100,22);
+        INSERT INTO inventory.publication_source_binding_versions VALUES(100,100,'sealed'),(101,100,'draft');
+        INSERT INTO inventory.publication_source_binding_heads VALUES(100,100,101);
+        INSERT INTO inventory.publication_source_binding_members VALUES(100,100,100),(101,100,101);
+        UPDATE inventory.availability_runtime_authority SET authority='canonical',revision=2,activation_run_id=46;`);
+      try {
+        expect((await repo.overview()).warehouseAssignments.filter(a => a.channelId === 22))
+          .toEqual([{ channelId: 22, warehouseId: 2, enabled: true }]);
+        const input = { ...policy(22, whiteSuite), overrides: [{ warehouseId: 2, suiteId: whiteSuite }] };
+        const saved = await repo.savePolicy(input, "operator", now);
+        expect(saved.overrides).toEqual(input.overrides);
+        expect(await repo.savePolicy(input, "operator", now)).toEqual(saved);
+        const rejected = { ...policy(22, whiteSuite, 1), overrides: [{ warehouseId: 1, suiteId: whiteSuite }] };
+        await expect(repo.savePolicy(rejected, "operator", now)).rejects.toMatchObject({ code: "SHIPPING_WAREHOUSE_NOT_ENABLED" });
+        expect((await db.query("SELECT command_id FROM shipping.configuration_commands WHERE command_id=$1", [rejected.commandId])).rowCount).toBe(0);
+        expect((await repo.resolve(22, 2))?.source).toBe("warehouse");
+      } finally {
+        await db.query("UPDATE inventory.availability_runtime_authority SET authority='legacy',revision=3,activation_run_id=NULL");
+      }
     });
     it("confirms concurrent parcels atomically, journals once, and rolls back actuals on audit failure", async () => {
       await db.query(`CREATE SCHEMA wms; CREATE TABLE wms.orders(id integer PRIMARY KEY,warehouse_id integer,channel_id integer);
