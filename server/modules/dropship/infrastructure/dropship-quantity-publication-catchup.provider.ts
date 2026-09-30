@@ -79,8 +79,6 @@ export class DropshipQuantityPublicationCatchupProvider {
         vendorId: listing.vendor_id, storeConnectionId: scope.connectionId,
         productVariantIds: [listing.product_variant_id], requestedBy: actor, idempotencyKey: jobKey,
         expectedContentEvidenceHashesByVariantId: row.contentEvidenceHash ? { [variantKey]: row.contentEvidenceHash } : {},
-        expectedMarketplaceCategoryEvidenceHashesByVariantId: row.marketplaceCategoryEvidenceHash
-          ? { [variantKey]: row.marketplaceCategoryEvidenceHash } : {},
         expectedRuleEvidenceHashesByVariantId: row.rulePriceEvidenceHash ? { [variantKey]: row.rulePriceEvidenceHash } : {},
         expectedPriceRevisionIdsByVariantId: { [variantKey]: row.priceSettingRevisionId ?? null },
         expectedPriceCentsByVariantId: { [variantKey]: row.priceCents },

@@ -10,6 +10,8 @@ const idempotencyKeySchema = z.string().trim().min(8).max(200);
 export const generateVendorListingPreviewForMemberInputSchema = generateVendorListingPreviewInputSchema.omit({
   vendorId: true,
   actor: true,
+  // Only the push worker may say which category a queued listing carried.
+  queuedEbayCategoriesByVariantId: true,
 });
 
 export const createListingPushJobForMemberInputSchema = createListingPushJobInputSchema.omit({
@@ -57,8 +59,7 @@ export function toDropshipVendorListingPreview(preview: DropshipListingPreviewRe
       ...(row.contentEvidenceHash !== undefined ? { contentEvidenceHash: row.contentEvidenceHash } : {}),
       ...(row.rulePriceEvidenceHash !== undefined ? { rulePriceEvidenceHash: row.rulePriceEvidenceHash } : {}),
       ...(row.pricingRuleName !== undefined ? { pricingRuleName: row.pricingRuleName } : {}),
-      // The category evidence is a digest; the source and rule name are the vendor's own settings.
-      ...(row.marketplaceCategoryEvidenceHash !== undefined ? { marketplaceCategoryEvidenceHash: row.marketplaceCategoryEvidenceHash } : {}),
+      // Where the category came from: the vendor's own rule, store default or the Card Shellz catalog.
       ...(row.marketplaceCategorySource !== undefined ? { marketplaceCategorySource: row.marketplaceCategorySource } : {}),
       ...(row.marketplaceCategoryRuleName !== undefined ? { marketplaceCategoryRuleName: row.marketplaceCategoryRuleName } : {}),
       ...(row.presentation ? { presentation: dropshipListingPresentationSchema.parse(row.presentation) } : {}),

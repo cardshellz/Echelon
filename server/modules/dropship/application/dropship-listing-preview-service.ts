@@ -61,6 +61,7 @@ import {
   generateVendorListingPreviewInputSchema,
   type CreateListingPushJobInput,
   type GenerateVendorListingPreviewInput,
+  type QueuedEbayCategory,
 } from "./dropship-use-case-dtos";
 
 export interface DropshipListingStoreContext {
@@ -110,11 +111,14 @@ export interface DropshipPricingPolicyRecord {
 
 export interface DropshipListingPreviewRow {
   contentEvidenceHash?: string;
-  /** eBay rows: evidence of the category this listing would publish (see dropship-ebay-category-resolver). */
-  marketplaceCategoryEvidenceHash?: string;
   /** eBay rows: whether a vendor rule, the store default or the Card Shellz catalog chose the category. */
   marketplaceCategorySource?: EbayCategorySource;
   marketplaceCategoryRuleName?: string | null;
+  /**
+   * Push time only: the rules give this listing no category now, so the one it was
+   * queued with is published instead (a changed category never fails a push).
+   */
+  marketplaceCategoryFallback?: "queued";
   rulePriceEvidenceHash?: string | null;
   pricingRuleName?: string | null;
   /** Local setting revision used to reject stale queue creation. */
@@ -395,8 +399,9 @@ export class DropshipListingPreviewService {
       storeConnectionId: parsed.storeConnectionId, candidates: ruleEligibleCandidates }) ?? new Map<number, ListingRulePrice>();
     const contents = await this.deps.repository.loadListingContents?.({ vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId, candidates: ruleEligibleCandidates });
-    // Every eBay row resolves its category through the store's rules, so the preview,
-    // the queue and the push-time refresh all publish the same category.
+    // Every eBay row resolves its category through the store's current rules. The
+    // push-time refresh calls this again, so a push publishes the category the rules
+    // name when it is sent; a changed category never refuses a queue or fails a push.
     const ebayCategories = context.platform === "ebay"
       ? await this.deps.repository.loadEbayCategories?.({ vendorId: parsed.vendorId,
         storeConnectionId: parsed.storeConnectionId, candidates })
@@ -473,6 +478,7 @@ export class DropshipListingPreviewService {
         candidate,
         resolvedContent: contents?.get(productVariantId),
         resolvedCategory: ebayCategories?.get(productVariantId) ?? null,
+        queuedCategory: parsed.queuedEbayCategoriesByVariantId?.[String(productVariantId)] ?? null,
         context,
         config: effectiveConfig,
         selectionDecision,
@@ -682,7 +688,6 @@ export class DropshipListingPreviewService {
     const requestHash = hashListingPushJobRequest({
       reviewMode,
       expectedContentEvidenceHashesByVariantId: parsed.expectedContentEvidenceHashesByVariantId,
-      expectedMarketplaceCategoryEvidenceHashesByVariantId: parsed.expectedMarketplaceCategoryEvidenceHashesByVariantId,
       expectedRuleEvidenceHashesByVariantId: parsed.expectedRuleEvidenceHashesByVariantId,
       expectedPriceRevisionIdsByVariantId: parsed.expectedPriceRevisionIdsByVariantId,
       expectedPriceCentsByVariantId: parsed.expectedPriceCentsByVariantId,
@@ -776,7 +781,6 @@ export class DropshipListingPreviewService {
 export function hashListingPushJobRequest(input: {
   reviewMode?: ListingPushReviewMode;
   expectedContentEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
-  expectedMarketplaceCategoryEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
   expectedRuleEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
   expectedPriceRevisionIdsByVariantId?: Readonly<Record<string, number | null>>;
   expectedPriceCentsByVariantId?: Readonly<Record<string, number | null>>;
@@ -794,8 +798,7 @@ export function hashListingPushJobRequest(input: {
     productVariantIds: [...input.productVariantIds].sort((left, right) => left - right),
     requestedRetailPriceCents: input.requestedRetailPriceCents,
   };
-  // Keys join the payload only when sent, and new keys go last, so existing request hashes never change.
-  for (const key of ["expectedPriceRevisionIdsByVariantId", "expectedPriceCentsByVariantId", "expectedRuleEvidenceHashesByVariantId", "expectedContentEvidenceHashesByVariantId", "expectedMarketplaceCategoryEvidenceHashesByVariantId"] as const) {
+  for (const key of ["expectedPriceRevisionIdsByVariantId", "expectedPriceCentsByVariantId", "expectedRuleEvidenceHashesByVariantId", "expectedContentEvidenceHashesByVariantId"] as const) {
     if (input[key] !== undefined) payload[key] = Object.fromEntries(Object.entries(input[key]).sort(([left], [right]) => Number(left) - Number(right)));
   }
   if (Object.keys(requestedRetailPricesByVariantId).length > 0) {
@@ -822,13 +825,11 @@ export function hashListingPushJobRequest(input: {
 /** True when the request echoes anything from an earlier preview. */
 function carriesReviewedPreviewEvidence(input: {
   expectedContentEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
-  expectedMarketplaceCategoryEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
   expectedRuleEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
   expectedPriceRevisionIdsByVariantId?: Readonly<Record<string, number | null>>;
   expectedPriceCentsByVariantId?: Readonly<Record<string, number | null>>;
 }): boolean {
   return input.expectedContentEvidenceHashesByVariantId !== undefined
-    || input.expectedMarketplaceCategoryEvidenceHashesByVariantId !== undefined
     || input.expectedRuleEvidenceHashesByVariantId !== undefined
     || input.expectedPriceRevisionIdsByVariantId !== undefined
     || input.expectedPriceCentsByVariantId !== undefined;
@@ -842,7 +843,6 @@ function assertPreviewMatchesReviewedEvidence(
   preview: DropshipListingPreviewResult,
   parsed: {
     expectedContentEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
-    expectedMarketplaceCategoryEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
     expectedRuleEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
     expectedPriceRevisionIdsByVariantId?: Readonly<Record<string, number | null>>;
     expectedPriceCentsByVariantId?: Readonly<Record<string, number | null>>;
@@ -852,11 +852,6 @@ function assertPreviewMatchesReviewedEvidence(
   if (preview.rows.some((row) => row.contentEvidenceHash
     && parsed.expectedContentEvidenceHashesByVariantId?.[String(row.productVariantId)] !== row.contentEvidenceHash)) {
     throw new DropshipError("DROPSHIP_CONTENT_VERSION_CONFLICT", "Descriptions, catalog facts, or templates changed. Generate and review a new preview before queueing.");
-  }
-  if (preview.rows.some((row) => row.marketplaceCategoryEvidenceHash
-    && parsed.expectedMarketplaceCategoryEvidenceHashesByVariantId?.[String(row.productVariantId)] !== row.marketplaceCategoryEvidenceHash)) {
-    throw new DropshipError("DROPSHIP_LISTING_CATEGORY_VERSION_CONFLICT",
-      "eBay categories changed since your preview. Generate and review a new preview before queueing.");
   }
   const ruleRows = preview.rows.filter((row) => row.rulePriceEvidenceHash);
   if (ruleRows.some((row) => parsed.expectedRuleEvidenceHashesByVariantId?.[String(row.productVariantId)] !== row.rulePriceEvidenceHash)) {
@@ -954,6 +949,8 @@ export const systemDropshipListingPreviewClock: DropshipClock = {
 function buildListingPreviewRow(input: {
   resolvedContent?: import("../../../../shared/dropship/listing-content").ResolvedListingContent;
   resolvedCategory?: ResolvedEbayListingCategory | null;
+  /** Push time only: the category the listing was queued with. */
+  queuedCategory?: QueuedEbayCategory | null;
   candidate: DropshipListingCatalogCandidate;
   context: DropshipListingStoreContext;
   config: DropshipStoreListingConfig | null;
@@ -1026,10 +1023,11 @@ function buildListingPreviewRow(input: {
     unitCostCents: input.productCost?.status === "available" ? input.productCost.unitCostCents : null,
   }).warnings);
 
+  const publishedCategory = publishedEbayCategory(input.resolvedCategory, input.queuedCategory);
   const marketplaceValidation = input.config
     ? input.marketplaceListing.buildListingIntent({
         config: input.config,
-        content: listingIntentContent(input.candidate, input.resolvedContent, input.resolvedCategory),
+        content: listingIntentContent(input.candidate, input.resolvedContent, publishedCategory),
         priceCents,
         quantity: marketplaceQuantity,
         storeCategoryNames: input.storeCategoryNames,
@@ -1053,12 +1051,10 @@ function buildListingPreviewRow(input: {
     ? buildBusinessPolicySelection(input.config, input.ebayListingPolicyOverride)
     : null;
   // A blocked row has no intent; it still shows the category it would publish.
-  const fallbackCategory = input.resolvedCategory
-    ? { categoryId: input.resolvedCategory.categoryId, categoryName: input.resolvedCategory.categoryName }
-    : { categoryId: input.candidate.ebayBrowseCategoryId, categoryName: input.candidate.ebayBrowseCategoryName };
+  const fallbackCategory = publishedCategory
+    ?? { categoryId: input.candidate.ebayBrowseCategoryId, categoryName: input.candidate.ebayBrowseCategoryName };
   const previewHash = hashJson({
     ...(input.resolvedContent ? { contentEvidenceHash: input.resolvedContent.evidenceHash } : {}),
-    ...(input.resolvedCategory ? { marketplaceCategoryEvidenceHash: input.resolvedCategory.evidenceHash } : {}),
     ...(ruleOwned ? { rulePriceEvidenceHash: input.rulePrice?.evidenceHash ?? null } : {}),
     priceSettingRevisionId: input.savedListingPrice?.revisionId ?? null,
     productVariantId: input.candidate.productVariantId,
@@ -1083,10 +1079,10 @@ function buildListingPreviewRow(input: {
     priceSettingRevisionId: input.savedListingPrice?.revisionId ?? null,
     ...(input.resolvedContent ? { contentEvidenceHash: input.resolvedContent.evidenceHash } : {}),
     ...(input.resolvedCategory ? {
-      marketplaceCategoryEvidenceHash: input.resolvedCategory.evidenceHash,
       marketplaceCategorySource: input.resolvedCategory.source,
       marketplaceCategoryRuleName: input.resolvedCategory.ruleName,
     } : {}),
+    ...(publishedCategory?.fromQueue ? { marketplaceCategoryFallback: "queued" as const } : {}),
     ...(ruleOwned ? { rulePriceEvidenceHash: input.rulePrice?.evidenceHash ?? null, pricingRuleName: input.rulePrice?.ruleName ?? null } : {}),
     productVariantId: input.candidate.productVariantId,
     productId: input.candidate.productId,
@@ -1112,17 +1108,39 @@ function buildListingPreviewRow(input: {
   };
 }
 
-/** The candidate as the marketplace sees it: the resolved description and the resolved eBay category. */
+/** The candidate as the marketplace sees it: the resolved description and the eBay category to publish. */
 function listingIntentContent(
   candidate: DropshipListingCatalogCandidate,
   resolvedContent: import("../../../../shared/dropship/listing-content").ResolvedListingContent | undefined,
-  resolvedCategory: ResolvedEbayListingCategory | null | undefined,
+  category: PublishedEbayCategory | null,
 ): DropshipListingCatalogCandidate {
   return {
     ...candidate,
     ...(resolvedContent ? { description: resolvedContent.descriptionHtml } : {}),
-    ...(resolvedCategory ? { ebayBrowseCategoryId: resolvedCategory.categoryId, ebayBrowseCategoryName: resolvedCategory.categoryName } : {}),
+    ...(category ? { ebayBrowseCategoryId: category.categoryId, ebayBrowseCategoryName: category.categoryName } : {}),
   };
+}
+
+interface PublishedEbayCategory {
+  categoryId: string | null;
+  categoryName: string | null;
+  fromQueue: boolean;
+}
+
+/**
+ * The eBay category a row publishes: the one the rules name now; when they name
+ * none, the one the listing was queued with (push time only). Null keeps the
+ * candidate's own catalog fields, for rows the rules did not resolve.
+ */
+function publishedEbayCategory(
+  resolved: ResolvedEbayListingCategory | null | undefined,
+  queued: QueuedEbayCategory | null | undefined,
+): PublishedEbayCategory | null {
+  if (!resolved) return null;
+  if (resolved.categoryId === null && queued) {
+    return { categoryId: queued.categoryId, categoryName: queued.categoryName, fromQueue: true };
+  }
+  return { categoryId: resolved.categoryId, categoryName: resolved.categoryName, fromQueue: false };
 }
 
 function missingCatalogPreviewRow(input: {

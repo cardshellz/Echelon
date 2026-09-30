@@ -4,7 +4,6 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createListingPushJobForMemberInputSchema } from "../../application/dropship-listing-dtos";
 import type { DropshipListingPreviewService } from "../../application/dropship-listing-preview-service";
-import { DropshipError } from "../../domain/errors";
 import { registerDropshipListingRoutes } from "../../interfaces/http/dropship-listing.routes";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
@@ -31,17 +30,14 @@ const FULL_PUSH_BODY: Record<string, unknown> = {
   expectedPriceCentsByVariantId: { "101": 1299 },
   expectedRuleEvidenceHashesByVariantId: { "101": HASH },
   expectedContentEvidenceHashesByVariantId: { "101": HASH },
-  expectedMarketplaceCategoryEvidenceHashesByVariantId: { "101": HASH },
   idempotencyKey: "push-key-0001",
 };
 
 class FakeService {
   calls: Array<{ memberId: string; input: Record<string, unknown> }> = [];
-  fail: Error | null = null;
 
   async createListingPushJobForMember(memberId: string, input: Record<string, unknown>) {
     this.calls.push({ memberId, input });
-    if (this.fail) throw this.fail;
     return {
       job: { jobId: 31, status: "queued" },
       items: [],
@@ -82,14 +78,6 @@ describe("dropship vendor listing push route", () => {
     const response = await post(FULL_PUSH_BODY);
     expect(response.status).toBe(201);
     expect(service.calls).toEqual([{ memberId: "member-5", input: FULL_PUSH_BODY }]);
-  });
-
-  it("answers a changed eBay category with 409 so the vendor reviews a new preview", async () => {
-    service.fail = new DropshipError("DROPSHIP_LISTING_CATEGORY_VERSION_CONFLICT",
-      "eBay categories changed since your preview. Generate and review a new preview before queueing.");
-    const response = await post(FULL_PUSH_BODY);
-    expect(response.status).toBe(409);
-    expect((await response.json()).error.code).toBe("DROPSHIP_LISTING_CATEGORY_VERSION_CONFLICT");
   });
 
   function post(body: Record<string, unknown>) {

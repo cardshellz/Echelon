@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { matchesCatalogScope, type CatalogScopeCandidate } from "../../../../shared/dropship/catalog-scope";
 import {
   MAX_EBAY_CATEGORY_IMPACT_GROUPS,
@@ -8,9 +7,6 @@ import {
   type EbayCategoryRulesReview,
   type EbayCategorySource,
 } from "../../../../shared/dropship/ebay-category-rules";
-
-/** Bump when the evidence payload changes, so evidence of an older shape can never match. */
-const CATEGORY_EVIDENCE_VERSION = 1;
 
 /** A catalog listing as the resolver needs it. The eBay fields carry the Card Shellz base category. */
 export interface EbayCategoryCandidate extends CatalogScopeCandidate {
@@ -27,11 +23,6 @@ export interface ResolvedEbayListingCategory {
   ruleName: string | null;
   /** The rules revision this was resolved under; null before the store's first save. */
   rulesRevisionId: number | null;
-  /**
-   * SHA-256 of what the listing would publish (category, and the rule or default
-   * that chose it). Reviewed pushes echo it; a queue refuses when it no longer matches.
-   */
-  evidenceHash: string;
 }
 
 export interface PreparedEbayCategoryRules {
@@ -50,19 +41,6 @@ export function prepareEbayCategoryRules(revisionId: number | null, profile: Eba
       variantIds: rule.scope.type === "listings" ? new Set(rule.scope.productVariantIds) : null,
     })),
   };
-}
-
-export function ebayCategoryEvidenceHash(input: {
-  categoryId: string | null;
-  source: EbayCategorySource;
-  ruleId: string | null;
-}): string {
-  return createHash("sha256").update(JSON.stringify({
-    version: CATEGORY_EVIDENCE_VERSION,
-    categoryId: input.categoryId,
-    source: input.source,
-    ruleId: input.ruleId,
-  })).digest("hex");
 }
 
 export function resolveEbayListingCategory(
@@ -170,13 +148,9 @@ export function summarizeEbayCategoryRulesReview(input: {
 
 function resolved(
   prepared: PreparedEbayCategoryRules,
-  value: Omit<ResolvedEbayListingCategory, "rulesRevisionId" | "evidenceHash">,
+  value: Omit<ResolvedEbayListingCategory, "rulesRevisionId">,
 ): ResolvedEbayListingCategory {
-  return {
-    ...value,
-    rulesRevisionId: prepared.revisionId,
-    evidenceHash: ebayCategoryEvidenceHash(value),
-  };
+  return { ...value, rulesRevisionId: prepared.revisionId };
 }
 
 function summary(value: ResolvedEbayListingCategory) {

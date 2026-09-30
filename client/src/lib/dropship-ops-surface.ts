@@ -2811,7 +2811,6 @@ export function queryErrorCode(error: unknown): string | null {
 const STALE_LISTING_PREVIEW_ERROR_CODES: ReadonlySet<string> = new Set([
   "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
   "DROPSHIP_CONTENT_VERSION_CONFLICT",
-  "DROPSHIP_LISTING_CATEGORY_VERSION_CONFLICT",
 ]);
 
 export function isStaleListingPreviewError(error: unknown): boolean {

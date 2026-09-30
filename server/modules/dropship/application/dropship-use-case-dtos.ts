@@ -4,6 +4,7 @@ import {
   CurrencyCodeSchema,
   PositiveCentsSchema,
 } from "../../../../shared/validation/currency";
+import { EBAY_CATEGORY_ID_PATTERN, MAX_EBAY_CATEGORY_NAME_LENGTH } from "../../../../shared/dropship/ebay-category-rules";
 
 const positiveIdSchema = z.number().int().positive();
 const idempotencyKeySchema = z.string().trim().min(8).max(200);
@@ -26,12 +27,21 @@ const destinationAddressSchema = z.object({
   postalCode: z.string().trim().min(1).max(20),
 }).strict();
 
+/** The eBay category a queued listing carried; the push keeps it when the rules now give none. */
+export const queuedEbayCategorySchema = z.object({
+  categoryId: z.string().regex(EBAY_CATEGORY_ID_PATTERN),
+  categoryName: z.string().trim().min(1).max(MAX_EBAY_CATEGORY_NAME_LENGTH).nullable(),
+}).strict();
+export type QueuedEbayCategory = z.infer<typeof queuedEbayCategorySchema>;
+
 export const generateVendorListingPreviewInputSchema = z.object({
   vendorId: positiveIdSchema,
   storeConnectionId: positiveIdSchema,
   productVariantIds: z.array(positiveIdSchema).min(1).max(500),
   requestedRetailPriceCents: CentsSchema.optional(),
   requestedRetailPricesByVariantId: requestedRetailPricesByVariantIdSchema,
+  /** Push-time refresh only (worker). Vendors cannot send it: the member schema omits it. */
+  queuedEbayCategoriesByVariantId: z.record(z.string().regex(/^[1-9]\d*$/), queuedEbayCategorySchema).optional(),
   actor: actorSchema,
 }).strict();
 
@@ -49,7 +59,6 @@ export const createListingPushJobInputSchema = z.object({
   reviewMode: z.enum(listingPushReviewModes).optional(),
   expectedRuleEvidenceHashesByVariantId: z.record(z.string().regex(/^[1-9]\d*$/), z.string().regex(/^[a-f0-9]{64}$/)).optional(),
   expectedContentEvidenceHashesByVariantId: z.record(z.string().regex(/^[1-9]\d*$/), z.string().regex(/^[a-f0-9]{64}$/)).optional(),
-  expectedMarketplaceCategoryEvidenceHashesByVariantId: z.record(z.string().regex(/^[1-9]\d*$/), z.string().regex(/^[a-f0-9]{64}$/)).optional(),
   expectedPriceRevisionIdsByVariantId: z.record(z.string().regex(/^[1-9]\d*$/), z.number().int().positive().max(2_147_483_647).nullable()).optional(),
   expectedPriceCentsByVariantId: z.record(z.string().regex(/^[1-9]\d*$/), z.number().int().positive().max(2_147_483_647).nullable()).optional(),
   vendorId: positiveIdSchema,

@@ -69,7 +69,6 @@ export function registerDropshipListingRoutes(
           expectedPriceCentsByVariantId: req.body?.expectedPriceCentsByVariantId,
           expectedRuleEvidenceHashesByVariantId: req.body?.expectedRuleEvidenceHashesByVariantId,
           expectedContentEvidenceHashesByVariantId: req.body?.expectedContentEvidenceHashesByVariantId,
-          expectedMarketplaceCategoryEvidenceHashesByVariantId: req.body?.expectedMarketplaceCategoryEvidenceHashesByVariantId,
           idempotencyKey: resolveIdempotencyKey(req),
         });
         return res.status(result.idempotentReplay ? 200 : 201).json({
@@ -147,7 +146,6 @@ function statusForDropshipListingError(code: string): number {
     case "DROPSHIP_IDEMPOTENCY_CONFLICT":
     case "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT":
     case "DROPSHIP_CONTENT_VERSION_CONFLICT":
-    case "DROPSHIP_LISTING_CATEGORY_VERSION_CONFLICT":
       return 409;
     default:
       return 500;

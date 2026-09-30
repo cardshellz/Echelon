@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  ebayCategoryEvidenceHash,
   prepareEbayCategoryRules,
   resolveEbayListingCategory,
   summarizeEbayCategoryRulesReview,
@@ -46,18 +45,11 @@ describe("eBay category resolution", () => {
       .toMatchObject({ categoryId: null, categoryName: null, source: "none" });
   });
 
-  it("gives evidence that follows what publishes and ignores rule names and revision numbers", () => {
+  it("reports the rules revision it resolved under, with the eBay name the rules stored", () => {
     const candidate = categoryCandidate();
-    const first = resolveEbayListingCategory(candidate, prepareEbayCategoryRules(4, rulesProfile({ defaultCategory: SLEEVES })));
-    const renamedRevision = resolveEbayListingCategory(candidate, prepareEbayCategoryRules(9, rulesProfile({ defaultCategory: { ...SLEEVES, categoryName: "Renamed" } })));
-    expect(renamedRevision.evidenceHash).toBe(first.evidenceHash);
-    const sameCategoryByRule = resolveEbayListingCategory(candidate, prepareEbayCategoryRules(4, rulesProfile({ rules: [
-      { id: "all", name: "Everything", scope: { type: "product", productId: candidate.productId }, category: SLEEVES },
-    ] })));
-    expect(sameCategoryByRule.categoryId).toBe(first.categoryId);
-    expect(sameCategoryByRule.evidenceHash).not.toBe(first.evidenceHash);
-    expect(first.evidenceHash).toBe(ebayCategoryEvidenceHash({ categoryId: SLEEVES.categoryId, source: "store_default", ruleId: null }));
-    expect(first.evidenceHash).toMatch(/^[a-f0-9]{64}$/);
+    const resolved = resolveEbayListingCategory(candidate, prepareEbayCategoryRules(9, rulesProfile({ defaultCategory: { ...SLEEVES, categoryName: "Renamed" } })));
+    expect(resolved).toEqual({ categoryId: SLEEVES.categoryId, categoryName: "Renamed", source: "store_default",
+      ruleId: null, ruleName: null, rulesRevisionId: 9 });
   });
 
   it("resolves 10,000 named listings from one prepared profile without mutating inputs", () => {
