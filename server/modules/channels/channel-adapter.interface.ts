@@ -86,6 +86,8 @@ export interface InventoryPushResult {
   error?: string;
   errorCode?: string;
   retryable?: boolean;
+  /** Retains whether absolute convergence required a mutation or an exact provider read. */
+  providerResponse?: unknown;
   /**
    * Set when the adapter discovered the stored externalVariantId was stale
    * and recovered by re-resolving it on the channel (e.g. an eBay offerId

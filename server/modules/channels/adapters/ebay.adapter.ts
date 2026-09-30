@@ -459,8 +459,8 @@ export class EbayAdapter implements IChannelAdapter {
     const results: InventoryPushResult[] = [];
     for (const item of items) {
       try {
-        await publishEbayInventoryQuantity(client, exactEbayInventoryItemKey(item), ebayInventoryMarketplace(metadata.siteId), item.allocatedQty);
-        results.push({ variantId: item.variantId, pushedQty: item.allocatedQty, status: "success" });
+        const providerResponse = await publishEbayInventoryQuantity(client, exactEbayInventoryItemKey(item), ebayInventoryMarketplace(metadata.siteId), item.allocatedQty);
+        results.push({ variantId: item.variantId, pushedQty: item.allocatedQty, status: "success", providerResponse });
       } catch (error) {
         results.push({
           variantId: item.variantId, pushedQty: 0, status: "error",

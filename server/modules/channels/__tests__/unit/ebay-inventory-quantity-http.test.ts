@@ -27,6 +27,22 @@ beforeEach(() => vi.stubEnv("DRY_RUN", "false"));
 afterEach(() => vi.unstubAllEnvs());
 
 describe("eBay quantity protocol through the actual HTTP client and admission boundary", () => {
+  it("records fresh exact convergence without inventing a mutation receipt, then reads independently", async () => {
+    const item = { sku, availability: { shipToLocationAvailability: { quantity: 38 } } };
+    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(json(page())).mockResolvedValueOnce(json(item))
+      .mockResolvedValueOnce(json(page())).mockResolvedValueOnce(json(item));
+    const f = fixture(request);
+    await expect(f.collector.run(() => publishEbayInventoryQuantity(f.client, sku, "EBAY_GB", 38)))
+      .resolves.toMatchObject({ quantity: 38, effect: "already_current", providerWriteAttempted: false });
+    f.collector.assertNoAmbiguousRequests();
+    expect(f.evidence).toEqual([]);
+    expect(f.admitted).toEqual([]); // The enclosing outbox admission still owns its exact scope.
+    await expect(readEbayInventoryQuantity(f.client, sku, "EBAY_GB")).resolves.toMatchObject({
+      inventoryItemQuantity: 38, offerQuantity: 38, observedQuantity: 38,
+    });
+    expect(request).toHaveBeenCalledTimes(4);
+    expect(request.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+  });
   it.each([0, 7])("publishes absolute %i exactly once through admission, then reads both limits", async (quantity) => {
     const request = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(json(page())).mockResolvedValueOnce(json(ack()))

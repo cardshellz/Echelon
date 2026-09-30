@@ -46,7 +46,8 @@ describe("EbayDropshipInventoryPublicationTransportAdapter", () => {
     await expect(adapter.publishAbsolute({
       ...request(),
       desiredQuantity: 7,
-    })).resolves.toEqual({ publishedQuantity: 7, providerResponse: { sku: "SKU-101", marketplaceId: "EBAY_US", offerId: "offer-1", quantity: 7 } });
+    })).resolves.toEqual({ publishedQuantity: 7, providerResponse: { sku: "SKU-101", marketplaceId: "EBAY_US", offerId: "offer-1", quantity: 7,
+      effect: "updated", providerWriteAttempted: true } });
 
     expect(credentials.loadFreshForStoreConnection).toHaveBeenCalledWith({
       vendorId: 12,
@@ -80,6 +81,16 @@ describe("EbayDropshipInventoryPublicationTransportAdapter", () => {
       providerResponse: { sku: "SKU-101", marketplaceId: "EBAY_US", offerId: "offer-1", inventoryItemQuantity: 12, offerQuantity: 9, observedQuantity: 9 },
     });
     expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+  it("returns exact read-only convergence without creating a listing or sending a quantity mutation", async () => {
+    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(9))).mockResolvedValueOnce(jsonResponse(inventoryItem(9)));
+    const { adapter } = fixture(fetchFn);
+    await expect(adapter.publishAbsolute({ ...request(), desiredQuantity: 9 })).resolves.toMatchObject({
+      publishedQuantity: 9, providerResponse: { effect: "already_current", providerWriteAttempted: false,
+        observation: { inventoryItemQuantity: 9, offerQuantity: 9, observedQuantity: 9 } },
+    });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(fetchFn.mock.calls.every(([,init]) => init.method === "GET")).toBe(true);
   });
 
   it("uses the registered provider inventory-item ID when the optional SKU is absent", async () => {

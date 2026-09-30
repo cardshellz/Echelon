@@ -31,6 +31,38 @@ describe("pre-cutover non-live listing exclusion", () => {
     state.targets[0]!.provider = "ebay";
     expect(reviewPrecutoverExclusion(request, state, now).ready).toBe(true);
   });
+  it.each([0,48,Number.MAX_SAFE_INTEGER])("preserves positive draft quantity %i as evidence, not a live promise", quantity => {
+    const request = input(); const state = facts(); state.targets[0]!.provider = "ebay";
+    request.exclusions[0]!.evidence = { provider: "ebay", observedAt: now.toISOString(), offerHttpStatus: 200,
+      offerId: "offer", status: "UNPUBLISHED", listingId: null, availableQuantity: quantity };
+    expect(reviewPrecutoverExclusion(request, state, now).ready).toBe(true);
+    expect(request.exclusions[0]!.evidence.availableQuantity).toBe(quantity);
+  });
+  it.each(["ended", "completed", "inaccessible_to_seller"] as const)("requires exact retained-listing evidence for %s", outcome => {
+    const request = input(); const state = facts(); state.targets[0]!.provider = "ebay";
+    request.exclusions[0]!.evidence = { provider: "ebay", observedAt: now.toISOString(), offerHttpStatus: 200,
+      offerId: "offer", status: "UNPUBLISHED", listingId: "old-listing", availableQuantity: 100,
+      retainedListingEvidence: { requestedItemId: "old-listing", observedAt: now.toISOString(), httpStatus: 200,
+        responseHash: "b".repeat(64), outcome, errorCode: outcome === "inaccessible_to_seller" ? "17" : null } };
+    expect(reviewPrecutoverExclusion(request, state, now).ready).toBe(true);
+    request.exclusions[0]!.evidence.retainedListingEvidence!.observedAt = new Date(now.getTime() - 300001).toISOString();
+    expect(reviewPrecutoverExclusion(request, state, now).blockers).toContain("PRECUTOVER_EXCLUSION_PROVIDER_EVIDENCE_EXPIRED");
+  });
+  it.each([
+    undefined,
+    { requestedItemId: "other", outcome: "ended", errorCode: null },
+    { requestedItemId: "old-listing", outcome: "active", errorCode: null },
+    { requestedItemId: "old-listing", outcome: "inaccessible_to_seller", errorCode: null },
+    { requestedItemId: "old-listing", outcome: "ended", errorCode: "17" },
+  ])("rejects missing, mismatched, active or contradictory retained-listing evidence", partial => {
+    const request = input();
+    expect(reviewPrecutoverExclusionSchema.safeParse({ ...request, exclusions: [{ ...request.exclusions[0], evidence: {
+      provider: "ebay", observedAt: now.toISOString(), offerHttpStatus: 200, offerId: "offer", status: "UNPUBLISHED",
+      listingId: "old-listing", availableQuantity: 100, ...(partial ? { retainedListingEvidence: {
+        ...partial, observedAt: now.toISOString(), httpStatus: 200, responseHash: "b".repeat(64),
+      } } : {}),
+    } }] }).success).toBe(false);
+  });
   it.each([
     ["canonical authority", (state: PrecutoverExclusionFacts) => { state.authority = "canonical"; }],
     ["activation owner", (state: PrecutoverExclusionFacts) => { state.configurationRunId = "42"; }],

@@ -88,6 +88,11 @@ export async function readEbayInventoryQuantity(
   client: EbayInventoryQuantityClient, sku: string, marketplaceId: string,
 ): Promise<EbayInventoryQuantityObservation> {
   const offer = await publishedOffer(client, sku, marketplaceId);
+  return observeQuantity(client, sku, marketplaceId, offer);
+}
+
+async function observeQuantity(client: EbayInventoryQuantityClient, sku: string, marketplaceId: string,
+  offer: z.infer<typeof offerSchema>): Promise<EbayInventoryQuantityObservation> {
   const item = z.object({
     sku: z.literal(sku),
     availability: z.object({ shipToLocationAvailability: z.object({ quantity: quantitySchema }) }),
@@ -103,20 +108,36 @@ export async function readEbayInventoryQuantity(
   };
 }
 
-/** One quantity-only operation updates the existing item AND offer. No product replacement or relisting. */
+export type EbayInventoryQuantityPublication = {
+  sku: string; marketplaceId: string; offerId: string; quantity: number;
+} & ({ effect: "updated"; providerWriteAttempted: true }
+  | { effect: "already_current"; providerWriteAttempted: false; observation: EbayInventoryQuantityObservation });
+
+/** Converges the existing item AND offer. A fresh exact match is a read-only
+ * result, not a claimed mutation acknowledgement. The outbox still performs its
+ * independent readback under the ordinary exact-scope admission boundary. */
 export async function publishEbayInventoryQuantity(
   client: EbayInventoryQuantityClient, sku: string, marketplaceId: string, quantity: number,
-): Promise<{ sku: string; marketplaceId: string; offerId: string; quantity: number }> {
+): Promise<EbayInventoryQuantityPublication> {
   if (!quantitySchema.safeParse(quantity).success) {
     throw new EbayInventoryQuantityError("EBAY_INVENTORY_QUANTITY_INVALID", "The desired eBay quantity must be a nonnegative safe integer.");
   }
   const offer = await publishedOffer(client, sku, marketplaceId);
+  if (offer.availableQuantity === quantity) {
+    const observation = await observeQuantity(client, sku, marketplaceId, offer);
+    // Matching min(item, offer) is insufficient: the other limit must not be
+    // left above or below the requested absolute quantity.
+    if (observation.inventoryItemQuantity === quantity) {
+      return { sku, marketplaceId, offerId: offer.offerId, quantity,
+        effect: "already_current", providerWriteAttempted: false, observation };
+    }
+  }
   const [result] = await sendEbayQuantityUpdates(
     request => client.bulkUpdatePriceQuantity(request, marketplaceId),
     [{ sku, offerId: offer.offerId, quantity }],
   );
   if (!result?.confirmed) throw acknowledgementError();
-  return { sku, marketplaceId, offerId: offer.offerId, quantity };
+  return { sku, marketplaceId, offerId: offer.offerId, quantity, effect: "updated", providerWriteAttempted: true };
 }
 
 // The existing client also checks admission. Keep protocol validation here so the
