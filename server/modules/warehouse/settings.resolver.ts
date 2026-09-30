@@ -19,7 +19,7 @@
  * row Postgres hands back first. This resolver replaces it.
  */
 
-import { eq } from "drizzle-orm";
+import { eq, type SQL } from "drizzle-orm";
 import { db as defaultDb } from "../../db";
 import { warehouseSettings, warehouses } from "@shared/schema";
 import type { WarehouseSettings } from "@shared/schema";
@@ -31,38 +31,46 @@ export async function getSettingsForWarehouse(
   warehouseId?: number | null,
   tx: DbLike = defaultDb,
 ): Promise<WarehouseSettings | null> {
+  return resolveWarehouseSettings(warehouseId, tx, filter =>
+    tx.select().from(warehouseSettings).where(filter).limit(1));
+}
+
+/** Narrow transactional projection, using the identical warehouse fallback chain. */
+export async function getReplenishmentSettingsForWarehouse(
+  warehouseId: number,
+  tx: DbLike,
+): Promise<Pick<WarehouseSettings, "replenMode" | "inlineReplenMaxUnits"> | null> {
+  return resolveWarehouseSettings(warehouseId, tx, filter => tx.select({
+    replenMode: warehouseSettings.replenMode,
+    inlineReplenMaxUnits: warehouseSettings.inlineReplenMaxUnits,
+  }).from(warehouseSettings).where(filter).limit(1));
+}
+
+async function resolveWarehouseSettings<Row>(
+  warehouseId: number | null | undefined,
+  tx: DbLike,
+  read: (filter: SQL) => PromiseLike<Row[]>,
+): Promise<Row | null> {
   if (warehouseId != null) {
     // (1) Direct FK match
-    const [specific] = await tx
-      .select()
-      .from(warehouseSettings)
-      .where(eq(warehouseSettings.warehouseId, warehouseId))
-      .limit(1);
-    if (specific) return specific as WarehouseSettings;
+    const [specific] = await read(eq(warehouseSettings.warehouseId, warehouseId));
+    if (specific) return specific;
 
     // (2) Legacy code match
     const [wh] = await tx
-      .select()
+      .select({ code: warehouses.code })
       .from(warehouses)
       .where(eq(warehouses.id, warehouseId))
       .limit(1);
     if (wh) {
-      const [byCode] = await tx
-        .select()
-        .from(warehouseSettings)
-        .where(eq(warehouseSettings.warehouseCode, (wh as any).code))
-        .limit(1);
-      if (byCode) return byCode as WarehouseSettings;
+      const [byCode] = await read(eq(warehouseSettings.warehouseCode, wh.code));
+      if (byCode) return byCode;
     }
   }
 
   // (3) DEFAULT row fallback
-  const [defaultRow] = await tx
-    .select()
-    .from(warehouseSettings)
-    .where(eq(warehouseSettings.warehouseCode, "DEFAULT"))
-    .limit(1);
-  return (defaultRow as WarehouseSettings) ?? null;
+  const [defaultRow] = await read(eq(warehouseSettings.warehouseCode, "DEFAULT"));
+  return defaultRow ?? null;
 }
 
 /**

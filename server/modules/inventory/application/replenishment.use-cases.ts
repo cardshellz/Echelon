@@ -1,10 +1,11 @@
 import { eq, and, or, sql, inArray, isNull, asc } from "drizzle-orm";
 import { logger } from "../../../platform/observability/logger";
 import { validateReplenishmentTrigger } from "../domain/replenishment-trigger";
+import { resolveReplenishmentAutoExecution } from "../domain/replenishment-auto-execution";
+import { readReplenishmentRule, readReplenishmentTierDefault } from "../infrastructure/replenishment-policy.reader";
 import {
   replenRules,
   replenTasks,
-  replenTierDefaults,
   inventoryLevels,
   inventoryTransactions,
   warehouseLocations,
@@ -3272,17 +3273,7 @@ export class ReplenishmentUseCases {
   private async findRuleForVariant(
     pickProductVariantId: number,
   ): Promise<ReplenRule | null> {
-    const [rule] = await this.db
-      .select()
-      .from(replenRules)
-      .where(
-        and(
-          eq(replenRules.pickProductVariantId, pickProductVariantId),
-          eq(replenRules.isActive, 1),
-        ),
-      )
-      .limit(1);
-    return (rule as ReplenRule) ?? null;
+    return readReplenishmentRule(this.db, pickProductVariantId);
   }
 
   /**
@@ -3292,36 +3283,7 @@ export class ReplenishmentUseCases {
     hierarchyLevel: number,
     warehouseId?: number,
   ): Promise<ReplenTierDefault | null> {
-    // Try warehouse-specific first
-    if (warehouseId != null) {
-      const [specific] = await this.db
-        .select()
-        .from(replenTierDefaults)
-        .where(
-          and(
-            eq(replenTierDefaults.hierarchyLevel, hierarchyLevel),
-            eq(replenTierDefaults.warehouseId, warehouseId),
-            eq(replenTierDefaults.isActive, 1),
-          ),
-        )
-        .limit(1);
-      if (specific) return specific as ReplenTierDefault;
-    }
-
-    // Fall back to global default
-    const [global] = await this.db
-      .select()
-      .from(replenTierDefaults)
-      .where(
-        and(
-          eq(replenTierDefaults.hierarchyLevel, hierarchyLevel),
-          isNull(replenTierDefaults.warehouseId),
-          eq(replenTierDefaults.isActive, 1),
-        ),
-      )
-      .limit(1);
-
-    return (global as ReplenTierDefault) ?? null;
+    return readReplenishmentTierDefault(this.db, hierarchyLevel, warehouseId);
   }
 
   /**
@@ -3851,41 +3813,9 @@ export class ReplenishmentUseCases {
     qtyTargetUnits: number,
     replenMethod: string = "case_break",
   ): { shouldAutoExecute: boolean; executionMode: "inline" | "queue" } {
-    // Reserve transfers, pallet drops, and full-case moves require explicit
-    // warehouse work; only case-break replenishment can safely run inline.
-    if (replenMethod !== "case_break") {
-      return { shouldAutoExecute: false, executionMode: "queue" };
-    }
-
-    // Layer 1: SKU rule override (only 1=force-auto or 2=force-manual are overrides; 0/null = defer)
-    if (autoReplenFromRule === 1) {
-      return { shouldAutoExecute: true, executionMode: "inline" };
-    }
-    if (autoReplenFromRule === 2) {
-      return { shouldAutoExecute: false, executionMode: "queue" };
-    }
-
-    // Layer 2: Tier default override (only 1=force-auto or 2=force-manual are overrides; 0/null = defer)
-    if (autoReplenFromTierDefault === 1) {
-      return { shouldAutoExecute: true, executionMode: "inline" };
-    }
-    if (autoReplenFromTierDefault === 2) {
-      return { shouldAutoExecute: false, executionMode: "queue" };
-    }
-
-    // Layer 3: Warehouse settings fallback
-    const mode = settings?.replenMode || "queue";
-    if (mode === "inline") {
-      return { shouldAutoExecute: true, executionMode: "inline" };
-    }
-    if (mode === "hybrid") {
-      const threshold = settings?.inlineReplenMaxUnits || 50;
-      const auto = qtyTargetUnits <= threshold;
-      return { shouldAutoExecute: auto, executionMode: auto ? "inline" : "queue" };
-    }
-
-    // "queue" or anything else
-    return { shouldAutoExecute: false, executionMode: "queue" };
+    return resolveReplenishmentAutoExecution(
+      autoReplenFromRule, autoReplenFromTierDefault, settings, qtyTargetUnits, replenMethod,
+    );
   }
 
   /**
