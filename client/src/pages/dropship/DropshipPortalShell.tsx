@@ -81,13 +81,16 @@ export function DropshipPortalShell({ children }: { children: React.ReactNode })
         <nav className="mx-auto flex w-full max-w-7xl gap-1 overflow-x-auto px-4 pb-3 sm:px-6" data-testid="portal-nav">
           {visibleNavItems.map((item) => {
             const href = dropshipPortalPath(item.href);
-            const active = location === href || location === item.href || location.endsWith(item.href);
+            // A page's own sub-routes (the Catalog's steps) keep its item active.
+            const active = location === href || location === item.href || location.endsWith(item.href)
+              || location.startsWith(`${href}/`);
             return (
               <Button
                 key={item.href}
                 type="button"
                 variant={active ? "outline" : "ghost"}
                 size="sm"
+                aria-current={active ? "page" : undefined}
                 className={active
                   ? "h-9 shrink-0 gap-2 border-[#C060E0]/30 bg-[#C060E0]/10 text-[#8c35aa] hover:bg-[#C060E0]/15"
                   : "h-9 shrink-0 gap-2"}

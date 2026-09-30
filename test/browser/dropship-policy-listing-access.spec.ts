@@ -8,13 +8,14 @@ test.use({ serviceWorkers: "allow" });
 
 /** Where screenshots go when WALLET_SHOTS_DIR is set (never in CI). */
 const SHOTS_DIR = process.env.WALLET_SHOTS_DIR ?? null;
-const HARNESS_PATH = "/__catalog-access-test";
+/** The Catalog page's own addresses; the harness is served for each, so the page opens on the step it names. */
+const CATALOG_PATH = "/dropship-portal/catalog";
 const STAMP = "2026-09-27T12:00:00.000Z";
 const LIVE_PROOF = { method: "email_mfa", verifiedAt: STAMP, expiresAt: "2999-01-01T00:00:00.000Z" };
 const STORE_ID = 5;
-const SHOP_STORE = {
-  storeConnectionId: STORE_ID, vendorId: 1, platform: "shopify", externalAccountId: "test-shop", externalDisplayName: "Test Shop",
-  shopDomain: "test-shop.myshopify.com", status: "connected", setupStatus: "ready", disconnectReason: null, disconnectedAt: null,
+const EBAY_STORE = {
+  storeConnectionId: STORE_ID, vendorId: 1, platform: "ebay", externalAccountId: "test-ebay-seller", externalDisplayName: "Test eBay Store",
+  shopDomain: null, status: "connected", setupStatus: "ready", disconnectReason: null, disconnectedAt: null,
   graceEndsAt: null, tokenExpiresAt: null, hasAccessToken: true, hasRefreshToken: true, launchReady: true, lastSyncAt: null,
   lastOrderSyncAt: null, lastInventorySyncAt: null, orderProcessingConfig: { defaultWarehouseId: null }, createdAt: STAMP, updatedAt: STAMP,
 };
@@ -25,9 +26,9 @@ const SELECTED_ROW = {
   listingTier: { tier: "pack", eligible: true, reason: null, policyMinimumCents: 10_000, reserveShortfallCents: 0, balanceShortfallCents: 0 },
 };
 const PREVIEW_ROW = {
-  productVariantId: 101, productId: 11, sku: "ENV-SGL-P50", title: "Envelope Single Pocket, Pack of 50", platform: "shopify",
+  productVariantId: 101, productId: 11, sku: "ENV-SGL-P50", title: "Envelope Single Pocket, Pack of 50", platform: "ebay",
   listingMode: "create", currentListingStatus: "not_listed", previewStatus: "ready", blockers: [], warnings: [], marketplaceQuantity: 25,
-  priceCents: 699, marketplaceCategoryId: null, marketplaceCategoryName: null, storeCategoryNames: [], businessPolicySelection: null,
+  priceCents: 699, marketplaceCategoryId: "183435", marketplaceCategoryName: "Card Sleeves", storeCategoryNames: [], businessPolicySelection: null,
   previewHash: "d".repeat(64), priceSettingRevisionId: null, contentEvidenceHash: "c".repeat(64),
 };
 
@@ -80,7 +81,7 @@ function settingsJson(state: StubState) {
     vendor: { vendorId: 1, memberId: "m-1", businessName: vendor.businessName, email: vendor.email, status: vendor.status,
       entitlementStatus: vendor.entitlementStatus, includedStoreConnections: 1 },
     account: { hasContactEmail: true, hasBusinessName: true },
-    storeConnections: [{ ...SHOP_STORE, launchReady: state.storeReady, setupStatus: state.storeReady ? "ready" : "pending" }],
+    storeConnections: [{ ...EBAY_STORE, launchReady: state.storeReady, setupStatus: state.storeReady ? "ready" : "pending" }],
     wallet: { availableBalanceCents: 10_000, pendingBalanceCents: 0, autoReloadEnabled: true, fundingMethodCount: 1,
       activeStripeFundingMethodCount: 1, activeUsdcBaseFundingMethodCount: 0, autoReloadFundingMethodReady: true },
     notificationPreferences: { configuredCount: 0 }, sections: [], generatedAt: STAMP,
@@ -106,6 +107,10 @@ async function setup(page: Page, initial: Partial<StubState> = {}) {
       return route.fulfill({ json: onboardingJson(state) });
     }
     if (path === "/api/dropship/settings" && method === "GET") return route.fulfill({ json: settingsJson(state) });
+    // The step rail ticks Set how it lists from the store's eBay setup.
+    if (path === `/api/dropship/ebay/listing-setup/${STORE_ID}` && method === "GET") {
+      return route.fulfill({ json: { storeConnectionId: STORE_ID, marketplaceId: "EBAY_US", complete: true, missingFields: [] } });
+    }
     if (path === "/api/dropship/catalog" && method === "GET") {
       return route.fulfill({ json: { rows: [SELECTED_ROW], total: 1, page: 1, limit: Number(url.searchParams.get("limit") ?? 50),
         facets: { categories: [], productLines: [], products: [] } } });
@@ -117,7 +122,7 @@ async function setup(page: Page, initial: Partial<StubState> = {}) {
     }
     if (path === "/api/dropship/listings/preview" && method === "POST") {
       state.previewCalls += 1;
-      return route.fulfill({ json: { preview: { vendorId: 1, storeConnectionId: STORE_ID, platform: "shopify", generatedAt: STAMP,
+      return route.fulfill({ json: { preview: { vendorId: 1, storeConnectionId: STORE_ID, platform: "ebay", generatedAt: STAMP,
         rows: [PREVIEW_ROW], summary: { total: 1, ready: 1, blocked: 0, warning: 0 } } } });
     }
     if (path === "/api/dropship/listing-push-jobs" && method === "POST") {
@@ -139,22 +144,23 @@ async function setup(page: Page, initial: Partial<StubState> = {}) {
     state.unexpected.push(`${method} ${path}`);
     return route.fulfill({ status: 500, json: { error: { message: "Unexpected request" } } });
   });
-  await page.route(`**${HARNESS_PATH}**`, (route) => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1" />
+  await page.route(`**${CATALOG_PATH}**`, (route) => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1" />
     <script type="module">import RefreshRuntime from '/@react-refresh'; RefreshRuntime.injectIntoGlobalHook(window); window.$RefreshReg$=()=>{}; window.$RefreshSig$=()=>type=>type; window.__vite_plugin_react_preamble_installed__=true;</script></head>
     <body><div id="root"></div>
     <script type="module" src="/@fs/${resolve(process.cwd(), "test/browser/fixtures/dropship-catalog-harness.tsx").replaceAll("\\", "/")}"></script></body></html>` }));
-  await page.goto(HARNESS_PATH);
+  // The listing card lives on the Publish step.
+  await page.goto(`${CATALOG_PATH}/publish`);
   return state;
 }
 
 /** What the server answers for a push: the job, its items and the preview it queued from. */
 /** The worker's finished verdict for the job the page follows after queueing. */
 function pushJobStatus(jobId: number) {
-  return { job: { jobId, storeConnectionId: STORE_ID, platform: "shopify", environment: null, status: "completed", finished: true,
+  return { job: { jobId, storeConnectionId: STORE_ID, platform: "ebay", environment: null, status: "completed", finished: true,
     createdAt: STAMP, updatedAt: STAMP, completedAt: STAMP,
     items: [{ itemId: 1, listingId: 100, productVariantId: 101, sku: "ENV-SGL-P50", productName: "Envelope Single Pocket",
       variantName: "Pack of 50", status: "completed", errorCode: null, errorMessage: null, retryable: null,
-      externalListingId: "gid://shopify/Product/900", published: null, listingUrl: null }] } };
+      externalListingId: "110552738912", published: null, listingUrl: null }] } };
 }
 
 function pushResponse(rows: Array<typeof PREVIEW_ROW>, jobStatus: "queued" | "failed" = "queued") {
@@ -164,7 +170,7 @@ function pushResponse(rows: Array<typeof PREVIEW_ROW>, jobStatus: "queued" | "fa
       createdAt: STAMP, updatedAt: STAMP },
     items: rows.map((row, index) => ({ itemId: index + 1, jobId: 31, listingId: null, productVariantId: row.productVariantId,
       status: row.previewStatus === "blocked" ? "blocked" : "queued", previewHash: row.previewHash, errorCode: null, errorMessage: null })),
-    preview: { vendorId: 1, storeConnectionId: STORE_ID, platform: "shopify", generatedAt: STAMP, rows,
+    preview: { vendorId: 1, storeConnectionId: STORE_ID, platform: "ebay", generatedAt: STAMP, rows,
       summary: { total: rows.length, ready: rows.length - blocked, blocked, warning: 0 } },
     idempotentReplay: false,
   };
@@ -237,8 +243,8 @@ test("a refusal after the page loaded shows in the listing card with its fix, th
   await shot(page, testInfo, card, "catalog-access-refused-push");
   expect(state.onboardingReads).toBeGreaterThan(readsBeforePush);
   expect(state.pushCalls).toBe(1);
-  // Nothing about this failure is shown at the top of the page, away from the button.
-  await expect(page.locator("section").first().getByText("Selling is paused on your account")).toHaveCount(0);
+  // The failure shows once, inside the listing card next to its button, never at the top of the page.
+  await expect(page.getByText("Selling is paused on your account", { exact: false })).toHaveCount(1);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
@@ -267,7 +273,7 @@ test("an expired verification asks again instead of repeating the refusal", asyn
 test("a vendor with no ready store is sent to the store connection panel", async ({ page }) => {
   const state = await setup(page, { vendorStatus: "active", storeReady: false });
   const notice = listingCard(page).getByTestId("listing-access-notice");
-  await expect(notice).toHaveText(/Connect your store and finish its setup before previewing or pushing listings\./);
+  await expect(notice).toHaveText(/Connect your eBay store and finish its setup before previewing or pushing listings\./);
   await expect(notice.getByRole("link", { name: "Go to store connection" })).toHaveAttribute("href", "/dropship-portal/onboarding");
   await expect(listingCard(page).getByRole("button", { name: "Preview selected" })).toBeDisabled();
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
@@ -281,8 +287,8 @@ test("queues in one click without a preview and shows what was queued", async ({
   await card.getByRole("button", { name: "Queue ready listings" }).click();
 
   // The page follows job 31 and shows what became of the listing, in the vendor's words.
-  await expect(card.getByTestId("listing-queue-result")).toContainText("Live on Test Shop: 1 listing.");
-  await expect(card.getByTestId("listing-push-outcome-1")).toHaveText("Envelope Single Pocket · Pack of 50 · ENV-SGL-P50: Live on Test Shop.");
+  await expect(card.getByTestId("listing-queue-result")).toContainText("Live on Test eBay Store: 1 listing.");
+  await expect(card.getByTestId("listing-push-outcome-1")).toHaveText("Envelope Single Pocket · Pack of 50 · ENV-SGL-P50: Live on Test eBay Store.");
   // A finished job is never reported as still running.
   await expect(card.getByTestId("listing-queue-result")).not.toContainText("Still not finished");
   expect(state.statusCalls).toBeGreaterThanOrEqual(1);
@@ -311,7 +317,7 @@ test("sends the same request once more when a listing changed while it was being
 
   await card.getByRole("button", { name: "Queue ready listings" }).click();
 
-  await expect(card.getByTestId("listing-queue-result")).toContainText("Live on Test Shop: 1 listing.");
+  await expect(card.getByTestId("listing-queue-result")).toContainText("Live on Test eBay Store: 1 listing.");
   await expect(card.getByRole("alert")).toHaveCount(0);
   expect(state.pushCalls).toBe(2);
   // The refused attempt wrote nothing, so the retry reuses its key.

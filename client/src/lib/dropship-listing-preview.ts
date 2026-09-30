@@ -38,7 +38,7 @@ export function formatListingPreviewIssue(value: string): string {
     "missing_config:businessPolicies.paymentPolicyId": "eBay setup: Payment policy",
     "missing_config:businessPolicies.returnPolicyId": "eBay setup: Return policy",
     "missing_config:businessPolicies.fulfillmentPolicyId": "eBay setup: Fulfillment policy",
-    ebay_browse_category_required: "No eBay category. Choose one under eBay categories on this page: add a rule or set a store default.",
+    ebay_browse_category_required: "No eBay category. Add a rule or set a store default under eBay categories in step 2, Set how it lists.",
     ebay_mpn_placeholder: "The catalog has no manufacturer part number (MPN) for this product, so eBay will show \"Does Not Apply\". Contact support if the product has one.",
     vendor_unavailable: "Your Shellz Club account is unavailable. Contact support.",
     plan_unavailable: "Your .ops price list is unavailable. Contact support.",

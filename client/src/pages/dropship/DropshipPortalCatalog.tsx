@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
 import {
   AlertCircle,
   ArrowRight,
@@ -87,6 +87,27 @@ import { DropshipListingPreview, type ListingPriceSaveCallbacks } from "./Dropsh
 import { DropshipPricingRulesPanel } from "./DropshipPricingRulesPanel";
 import { DropshipContentTemplatesPanel } from "./DropshipContentTemplatesPanel";
 import { DropshipEbayCategoryRulesPanel } from "./DropshipEbayCategoryRulesPanel";
+import { CatalogStepRail } from "./catalog/CatalogStepRail";
+import { CatalogActionBar, type CatalogNextStepAction } from "./catalog/CatalogActionBar";
+import { ebayListingSetupQueryOptions } from "@/lib/dropship-ebay-listing-query-sync";
+import {
+  CATALOG_STEPS,
+  CATALOG_STEP_LABELS,
+  catalogBrowserStorage,
+  catalogStepFromLocation,
+  catalogStepPath,
+  catalogStoreOptions,
+  chooseCatalogStore,
+  chooseStepTick,
+  describeCatalogActionBar,
+  describeSetupStep,
+  isCatalogLocation,
+  readRememberedCatalogStore,
+  rememberCatalogStore,
+  setupStepTick,
+  type CatalogStep,
+  type CatalogStepTick,
+} from "@/lib/dropship-catalog-steps";
 export { formatListingPreviewIssue as formatIssue } from "@/lib/dropship-listing-preview";
 
 type PendingSelectionAction = string | null;
@@ -161,7 +182,13 @@ export default function DropshipPortalCatalog() {
   const [pendingSelectionAction, setPendingSelectionAction] = useState<PendingSelectionAction>(null);
   const [pendingListingAction, setPendingListingActionState] = useState<PendingListingAction>(null);
   const pendingListingActionRef = useRef<PendingListingAction>(null);
-  const [selectedStoreConnectionId, setSelectedStoreConnectionId] = useState("");
+  // The store the vendor chose on this visit. Until they choose, the remembered
+  // store (or the first eBay store) applies; see chooseCatalogStore.
+  const [chosenStoreConnectionId, setChosenStoreConnectionId] = useState<number | null>(null);
+  const [location, navigate] = useLocation();
+  // A bare /catalog (or an unknown step) shows Choose while the effect below corrects the address.
+  const step = catalogStepFromLocation(location);
+  const activeStep: CatalogStep = step ?? "choose";
   const [listingPreview, setListingPreview] = useState<DropshipListingPreviewResult | null>(null);
   const [listingPreviewStale, setListingPreviewStale] = useState(false);
   const [pendingPriceSaves, setPendingPriceSaves] = useState(0);
@@ -238,7 +265,18 @@ export default function DropshipPortalCatalog() {
     () => listLaunchReadyStoreConnections(settingsQuery.data?.settings.storeConnections ?? []),
     [settingsQuery.data?.settings.storeConnections],
   );
-  const selectedStoreConnectionIdNumber = Number(selectedStoreConnectionId);
+  const storeOptions = useMemo(
+    () => catalogStoreOptions(settingsQuery.data?.settings.storeConnections ?? []),
+    [settingsQuery.data?.settings.storeConnections],
+  );
+  const memberId = principal?.memberId ?? null;
+  const rememberedStoreConnectionId = useMemo(
+    () => readRememberedCatalogStore(catalogBrowserStorage(), memberId),
+    [memberId],
+  );
+  // Only an eBay store can be chosen (launch is eBay-only); 0 means none is ready.
+  const selectedStoreConnectionIdNumber = chooseCatalogStore(storeOptions, chosenStoreConnectionId ?? rememberedStoreConnectionId) ?? 0;
+  const selectedStoreConnectionId = selectedStoreConnectionIdNumber > 0 ? String(selectedStoreConnectionIdNumber) : "";
   // Store/selection identity and a monotonic request version reject late preview responses.
   const previewContextKey = `${selectedStoreConnectionId}:${selectedCatalogRows.map((row) => row.productVariantId).sort((a, b) => a - b).join(",")}`;
   const currentPreviewContext = useRef(previewContextKey);
@@ -258,9 +296,12 @@ export default function DropshipPortalCatalog() {
     queryFn: () => fetchJson<DropshipEbayStoreCategoryResponse>(
       `/api/dropship/ebay/store-categories/${selectedStoreConnectionIdNumber}`,
     ),
-    enabled: selectedStoreConnection?.platform === "ebay",
+    // Only the Set how it lists step shows them; other steps never ask eBay for them.
+    enabled: selectedStoreConnection?.platform === "ebay" && activeStep === "setup",
     staleTime: 60_000,
   });
+  // Shares its cache with EbayListingSetupPanel, so the rail's tick costs no extra request there.
+  const ebayListingSetupQuery = useQuery(ebayListingSetupQueryOptions(selectedStoreConnectionIdNumber));
   const activeBulkPushProof = useMemo(() => {
     return isDropshipSensitiveProofActive({
       principal,
@@ -270,11 +311,9 @@ export default function DropshipPortalCatalog() {
   }, [principal, sensitiveProofs.bulk_listing_push]);
 
   useEffect(() => {
-    if (selectedStoreConnectionId || launchReadyStoreConnections.length === 0) {
-      return;
-    }
-    setSelectedStoreConnectionId(String(launchReadyStoreConnections[0].storeConnectionId));
-  }, [launchReadyStoreConnections, selectedStoreConnectionId]);
+    if (step !== null || !isCatalogLocation(location)) return;
+    navigate(`${dropshipPortalPath(catalogStepPath("choose"))}${window.location.search}`, { replace: true });
+  }, [location, navigate, step]);
 
   useEffect(() => {
     invalidateListingPreview();
@@ -580,20 +619,53 @@ export default function DropshipPortalCatalog() {
     invalidateListingPreview();
   }
 
+  function chooseStore(storeConnectionId: number) {
+    setChosenStoreConnectionId(storeConnectionId);
+    rememberCatalogStore(catalogBrowserStorage(), memberId, storeConnectionId);
+    setListingError(null);
+    invalidateListingPreview();
+  }
+
+  const storeReady = selectedStoreConnection !== null;
+  const setupTick: CatalogStepTick = storeReady
+    ? setupStepTick(ebayListingSetupQuery.data)
+    : settingsQuery.data ? "todo" : "unknown";
+  const selectedCount = selectedCatalogQuery.isLoading ? null : selectedCatalogRows.length;
+  const actionBar = describeCatalogActionBar({
+    step: activeStep,
+    selectedCount,
+    storeName: storeReady ? selectedStoreName : null,
+  });
+  const stepHref = (target: CatalogStep) => dropshipPortalPath(catalogStepPath(target));
+  const nextAction: CatalogNextStepAction | null = actionBar.next
+    ? { label: actionBar.next.label, href: stepHref(actionBar.next.step), disabled: actionBar.next.disabled }
+    : null;
+
   return (
     <DropshipPortalShell>
       <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <h1 className="flex items-center gap-2 text-2xl font-semibold">
-              <Boxes className="h-6 w-6 text-[#C060E0]" />
-              Catalog
-            </h1>
-            <p className="mt-1 text-sm text-zinc-500">
-              Browse available items, choose what to sell, then preview and push those listings to your store.
-            </p>
-          </div>
+        <div>
+          <h1 className="flex items-center gap-2 text-2xl font-semibold">
+            <Boxes className="h-6 w-6 text-[#C060E0]" />
+            Catalog
+          </h1>
+          <p className="mt-1 text-sm text-zinc-500">
+            Choose what to sell, set how it lists, then publish it to your eBay store.
+          </p>
         </div>
+
+        <CatalogStepRail
+          current={activeStep}
+          hrefFor={stepHref}
+          ticks={{ choose: chooseStepTick(selectionRulesQuery.data?.rules), setup: setupTick, publish: null }}
+          details={{
+            choose: selectedCount === null ? "Loading selection" : `${selectedCount} selected`,
+            setup: describeSetupStep(setupTick, storeReady),
+          }}
+          storeOptions={storeOptions}
+          selectedStoreConnectionId={storeReady ? selectedStoreConnectionIdNumber : null}
+          onStoreChange={chooseStore}
+        />
 
         {error && (
           <Alert variant="destructive" className="mt-5">
@@ -640,158 +712,189 @@ export default function DropshipPortalCatalog() {
           </Alert>
         )}
 
-        <CatalogFilterPanel
-          category={categoryFilter}
-          categoryOptions={catalogFacets.categories}
-          disabled={catalogQuery.isFetching}
-          hasActiveFilters={hasActiveFilters}
-          productId={productIdFilter}
-          productLineIds={productLineIdsFilter}
-          productLineOptions={catalogFacets.productLines}
-          productOptions={catalogFacets.products}
-          search={search}
-          selectedOnly={selectedOnly}
-          onApply={applyCatalogFilters}
-          onCategoryChange={setCategoryFilter}
-          onProductChange={setProductIdFilter}
-          onProductLineChange={setProductLineIdsFilter}
-          onReset={resetCatalogFilters}
-          onSearchChange={setSearch}
-          onSelectedOnlyChange={setSelectedOnly}
-        />
-
-        <section className="mt-5 overflow-hidden rounded-md border border-zinc-200 bg-white">
-          <div className="flex flex-col gap-3 border-b border-zinc-200 p-4 sm:flex-row sm:items-start sm:justify-between">
-            <div>
-              <h2 className="text-lg font-semibold">Available catalog</h2>
-              <p className="mt-1 text-sm text-zinc-500">
-                Choose the variants you want to sell. Catalog selection does not require verification.
-              </p>
-            </div>
-            <Badge variant="outline" className="w-fit border-violet-200 bg-violet-50 text-violet-800">
-              {selectedCatalogQuery.isLoading ? "Loading selection" : `${selectedCatalogRows.length} selected`}
-            </Badge>
-          </div>
-          {catalogQuery.isLoading ? (
-            <div className="space-y-2 p-4">
-              <Skeleton className="h-12 w-full" />
-              <Skeleton className="h-12 w-full" />
-              <Skeleton className="h-12 w-full" />
-            </div>
-          ) : catalogQuery.error ? (
-            <Empty className="p-8">
-              <EmptyMedia variant="icon"><AlertCircle /></EmptyMedia>
-              <EmptyHeader>
-                <EmptyTitle>Catalog unavailable</EmptyTitle>
-                <EmptyDescription>The catalog API request failed.</EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          ) : catalogQuery.data?.rows.length ? (
-            <CatalogTable
-              bulkSelectionDisabled={selectionRulesQuery.isLoading || pendingSelectionAction !== null}
-              pendingSelectionAction={pendingSelectionAction}
-              rows={catalogQuery.data.rows}
-              selectableRowCount={visibleSelectableRows.length}
-              selectedRowCount={visibleSelectedRows.length}
-              total={catalogQuery.data.total}
-              onBulkDeselect={() => replaceSelection("exclude", visibleSelectedRows, "bulk:exclude")}
-              onBulkSelect={() => replaceSelection("include", visibleSelectableRows, "bulk:include")}
-              onDeselectRow={(row) => replaceSelection("exclude", [row], `variant:${row.productVariantId}:exclude`)}
-              onSelectRow={(row) => replaceSelection("include", [row], `variant:${row.productVariantId}:include`)}
-            />
-          ) : (
-            <Empty className="p-8">
-              <EmptyMedia variant="icon"><Boxes /></EmptyMedia>
-              <EmptyHeader>
-                <EmptyTitle>No catalog rows</EmptyTitle>
-                <EmptyDescription>No exposed catalog rows match the current filters.</EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          )}
-        </section>
-
-        {selectedStoreConnection?.platform === "ebay" && (
+        {activeStep === "choose" && (
           <>
-            <EbayListingSetupPanel
-              key={selectedStoreConnectionIdNumber}
-              storeConnectionId={selectedStoreConnectionIdNumber}
-              storeName={selectedStoreName}
-              onConfigurationChange={() => {
-                invalidateListingPreview();
-              }}
+            <CatalogStepIntro step="choose" detail="Selection applies to all your stores." />
+            <CatalogFilterPanel
+              category={categoryFilter}
+              categoryOptions={catalogFacets.categories}
+              disabled={catalogQuery.isFetching}
+              hasActiveFilters={hasActiveFilters}
+              productId={productIdFilter}
+              productLineIds={productLineIdsFilter}
+              productLineOptions={catalogFacets.productLines}
+              productOptions={catalogFacets.products}
+              search={search}
+              selectedOnly={selectedOnly}
+              onApply={applyCatalogFilters}
+              onCategoryChange={setCategoryFilter}
+              onProductChange={setProductIdFilter}
+              onProductLineChange={setProductLineIdsFilter}
+              onReset={resetCatalogFilters}
+              onSearchChange={setSearch}
+              onSelectedOnlyChange={setSelectedOnly}
             />
-            <EbayListingPolicyOverridePanel
-              key={selectedStoreConnectionIdNumber}
-              storeConnectionId={selectedStoreConnectionIdNumber}
-              storeName={selectedStoreName}
-              rows={selectedCatalogRows}
-              onConfigurationChange={() => {
-                invalidateListingPreview();
-              }}
-            />
-            <DropshipEbayCategoryRulesPanel
-              storeConnectionId={selectedStoreConnectionIdNumber}
-              storeName={selectedStoreName}
-              renderAuthorizationRecovery={(error) => (
-                <EbayStoreCategoryAuthorizationRecovery
-                  error={error}
+
+            <section className="mt-5 overflow-hidden rounded-md border border-zinc-200 bg-white">
+              <div className="flex flex-col gap-3 border-b border-zinc-200 p-4 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold">Available catalog</h2>
+                  <p className="mt-1 text-sm text-zinc-500">
+                    Choose the variants you want to sell. Catalog selection does not require verification.
+                  </p>
+                </div>
+                <Badge variant="outline" className="w-fit border-violet-200 bg-violet-50 text-violet-800">
+                  {selectedCatalogQuery.isLoading ? "Loading selection" : `${selectedCatalogRows.length} selected`}
+                </Badge>
+              </div>
+              {catalogQuery.isLoading ? (
+                <div className="space-y-2 p-4">
+                  <Skeleton className="h-12 w-full" />
+                  <Skeleton className="h-12 w-full" />
+                  <Skeleton className="h-12 w-full" />
+                </div>
+              ) : catalogQuery.error ? (
+                <Empty className="p-8">
+                  <EmptyMedia variant="icon"><AlertCircle /></EmptyMedia>
+                  <EmptyHeader>
+                    <EmptyTitle>Catalog unavailable</EmptyTitle>
+                    <EmptyDescription>The catalog API request failed.</EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
+              ) : catalogQuery.data?.rows.length ? (
+                <CatalogTable
+                  bulkSelectionDisabled={selectionRulesQuery.isLoading || pendingSelectionAction !== null}
+                  pendingSelectionAction={pendingSelectionAction}
+                  rows={catalogQuery.data.rows}
+                  selectableRowCount={visibleSelectableRows.length}
+                  selectedRowCount={visibleSelectedRows.length}
+                  total={catalogQuery.data.total}
+                  onBulkDeselect={() => replaceSelection("exclude", visibleSelectedRows, "bulk:exclude")}
+                  onBulkSelect={() => replaceSelection("include", visibleSelectableRows, "bulk:include")}
+                  onDeselectRow={(row) => replaceSelection("exclude", [row], `variant:${row.productVariantId}:exclude`)}
+                  onSelectRow={(row) => replaceSelection("include", [row], `variant:${row.productVariantId}:include`)}
+                />
+              ) : (
+                <Empty className="p-8">
+                  <EmptyMedia variant="icon"><Boxes /></EmptyMedia>
+                  <EmptyHeader>
+                    <EmptyTitle>No catalog rows</EmptyTitle>
+                    <EmptyDescription>No exposed catalog rows match the current filters.</EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
+              )}
+            </section>
+          </>
+        )}
+
+        {activeStep === "setup" && (
+          <>
+            <CatalogStepIntro step="setup" detail={storeReady ? `These settings apply to ${selectedStoreName}.` : null} />
+            {/* Only once the stores have loaded, so a slow load never tells the vendor to connect a store they have. */}
+            {settingsQuery.data && !storeReady && (
+              <ListingAccessNoticeView tone="notice" notice={{
+                message: "Connect your eBay store and finish its setup to set how your listings look.",
+                resolution: "finish_store_setup",
+                link: listingAccessLink("finish_store_setup"),
+              }} />
+            )}
+            {selectedStoreConnection?.platform === "ebay" && (
+              <>
+                <EbayListingSetupPanel
+                  key={selectedStoreConnectionIdNumber}
                   storeConnectionId={selectedStoreConnectionIdNumber}
                   storeName={selectedStoreName}
+                  onConfigurationChange={() => {
+                    invalidateListingPreview();
+                  }}
                 />
-              )}
-              {...priceSaveCallbacks}
-            />
-            <EbayStoreCategoryAssignmentPanel
-              authorizationRecovery={(
-                <EbayStoreCategoryAuthorizationRecovery
+                <EbayListingPolicyOverridePanel
+                  key={selectedStoreConnectionIdNumber}
+                  storeConnectionId={selectedStoreConnectionIdNumber}
+                  storeName={selectedStoreName}
+                  rows={selectedCatalogRows}
+                  onConfigurationChange={() => {
+                    invalidateListingPreview();
+                  }}
+                />
+                <DropshipEbayCategoryRulesPanel
+                  storeConnectionId={selectedStoreConnectionIdNumber}
+                  storeName={selectedStoreName}
+                  renderAuthorizationRecovery={(error) => (
+                    <EbayStoreCategoryAuthorizationRecovery
+                      error={error}
+                      storeConnectionId={selectedStoreConnectionIdNumber}
+                      storeName={selectedStoreName}
+                    />
+                  )}
+                  {...priceSaveCallbacks}
+                />
+                <EbayStoreCategoryAssignmentPanel
+                  authorizationRecovery={(
+                    <EbayStoreCategoryAuthorizationRecovery
+                      error={ebayStoreCategoryQuery.error}
+                      storeConnectionId={selectedStoreConnectionIdNumber}
+                      storeName={selectedStoreName}
+                    />
+                  )}
+                  data={ebayStoreCategoryQuery.data ?? null}
                   error={ebayStoreCategoryQuery.error}
-                  storeConnectionId={selectedStoreConnectionIdNumber}
-                  storeName={selectedStoreName}
+                  isLoading={ebayStoreCategoryQuery.isLoading}
+                  pendingProductVariantIds={pendingStoreCategoryVariantIds}
+                  rows={selectedCatalogRows}
+                  onAssignmentChange={updateEbayStoreCategoryAssignment}
                 />
-              )}
-              data={ebayStoreCategoryQuery.data ?? null}
-              error={ebayStoreCategoryQuery.error}
-              isLoading={ebayStoreCategoryQuery.isLoading}
-              pendingProductVariantIds={pendingStoreCategoryVariantIds}
-              rows={selectedCatalogRows}
-              onAssignmentChange={updateEbayStoreCategoryAssignment}
+              </>
+            )}
+
+            {selectedStoreConnectionIdNumber > 0 && <DropshipPricingRulesPanel storeConnectionId={selectedStoreConnectionIdNumber}
+              storeName={selectedStoreName} onConfigurationChange={() => invalidateListingPreview(true)} />}
+            {selectedStoreConnectionIdNumber > 0 && <DropshipContentTemplatesPanel storeConnectionId={selectedStoreConnectionIdNumber}
+              storeName={selectedStoreName} {...priceSaveCallbacks} />}
+          </>
+        )}
+
+        {activeStep === "publish" && (
+          <>
+            <CatalogStepIntro step="publish" detail={storeReady ? `Preview and queue your selected listings to ${selectedStoreName}.` : null} />
+            <ListingPreviewPanel
+              accessNotice={previewAccessNotice ?? pushAccessNotice}
+              previewBlocked={previewAccessNotice !== null}
+              pushBlocked={pushAccessNotice !== null}
+              listingError={listingError}
+              storeReady={storeReady}
+              emailCodeSent={emailCodeSent}
+              listingPreview={listingPreview}
+              listingPreviewStale={listingPreviewStale}
+              priceSavePending={pendingPriceSaves > 0}
+              priceSaveCallbacks={priceSaveCallbacks}
+              listingPushResult={listingPushResult}
+              selectedStoreName={selectedStoreName}
+              pendingListingAction={pendingListingAction}
+              selectedRows={selectedCatalogRows}
+              verificationCode={verificationCode}
+              onPreview={previewListings}
+              onPush={pushListings}
+              onVerificationCodeChange={setVerificationCode}
             />
           </>
         )}
 
-        {selectedStoreConnectionIdNumber > 0 && <DropshipPricingRulesPanel storeConnectionId={selectedStoreConnectionIdNumber}
-          storeName={selectedStoreName} onConfigurationChange={() => invalidateListingPreview(true)} />}
-        {selectedStoreConnectionIdNumber > 0 && <DropshipContentTemplatesPanel storeConnectionId={selectedStoreConnectionIdNumber}
-          storeName={selectedStoreName} {...priceSaveCallbacks} />}
-
-        <ListingPreviewPanel
-          accessNotice={previewAccessNotice ?? pushAccessNotice}
-          previewBlocked={previewAccessNotice !== null}
-          pushBlocked={pushAccessNotice !== null}
-          listingError={listingError}
-          launchReadyStoreConnections={launchReadyStoreConnections}
-          emailCodeSent={emailCodeSent}
-          listingPreview={listingPreview}
-          listingPreviewStale={listingPreviewStale}
-          priceSavePending={pendingPriceSaves > 0}
-          priceSaveCallbacks={priceSaveCallbacks}
-          listingPushResult={listingPushResult}
-          selectedStoreName={selectedStoreName}
-          pendingListingAction={pendingListingAction}
-          selectedRows={selectedCatalogRows}
-          selectedStoreConnectionId={selectedStoreConnectionId}
-          verificationCode={verificationCode}
-          onPreview={previewListings}
-          onPush={pushListings}
-          onSelectedStoreConnectionIdChange={(value) => {
-            setSelectedStoreConnectionId(value);
-            setListingError(null);
-            invalidateListingPreview();
-          }}
-          onVerificationCodeChange={setVerificationCode}
-        />
+        <CatalogActionBar summary={actionBar.summary} next={nextAction} />
       </div>
     </DropshipPortalShell>
+  );
+}
+
+/** The step's name and one line of context, above its panels. */
+function CatalogStepIntro({ detail, step }: { step: CatalogStep; detail: string | null }) {
+  return (
+    <div className="mt-5">
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-violet-700">
+        Step {CATALOG_STEPS.indexOf(step) + 1} · {CATALOG_STEP_LABELS[step]}
+      </h2>
+      {detail && <p className="mt-1 text-sm text-zinc-500">{detail}</p>}
+    </div>
   );
 }
 
@@ -1037,7 +1140,7 @@ export function EbayStoreCategoryAssignmentPanel({
         </div>
       ) : rows.length === 0 ? (
         <div className="p-4 text-sm text-zinc-500">
-          Select catalog items above before assigning your eBay Store categories.
+          Choose items in step 1, Choose what to sell, before assigning your eBay Store categories.
         </div>
       ) : (data?.categories.length ?? 0) === 0 ? (
         <div className="p-4 text-sm text-zinc-500">
@@ -1164,7 +1267,6 @@ export function EbayStoreCategoryAssignmentPanel({
 function ListingPreviewPanel({
   accessNotice,
   emailCodeSent,
-  launchReadyStoreConnections,
   listingPreview,
   listingPreviewStale,
   priceSavePending,
@@ -1173,20 +1275,18 @@ function ListingPreviewPanel({
   selectedStoreName,
   onPreview,
   onPush,
-  onSelectedStoreConnectionIdChange,
   onVerificationCodeChange,
   pendingListingAction,
   previewBlocked,
   pushBlocked,
   selectedRows,
-  selectedStoreConnectionId,
+  storeReady,
   verificationCode,
   listingError,
 }: {
   /** Why this account cannot preview or push, when it cannot. */
   accessNotice: ListingAccessNotice | null;
   emailCodeSent: boolean;
-  launchReadyStoreConnections: DropshipSettingsResponse["settings"]["storeConnections"];
   listingPreview: DropshipListingPreviewResult | null;
   listingPreviewStale: boolean;
   priceSavePending: boolean;
@@ -1196,26 +1296,24 @@ function ListingPreviewPanel({
   selectedStoreName: string;
   onPreview: () => void;
   onPush: () => void;
-  onSelectedStoreConnectionIdChange: (value: string) => void;
   onVerificationCodeChange: (value: string) => void;
   pendingListingAction: PendingListingAction;
   previewBlocked: boolean;
   pushBlocked: boolean;
   selectedRows: DropshipCatalogRow[];
-  selectedStoreConnectionId: string;
+  /** An eBay store is chosen in the rail. */
+  storeReady: boolean;
   verificationCode: string;
   listingError: ListingActionError | null;
 }) {
   const selectedRowCount = selectedRows.length;
-  const previewDisabled = launchReadyStoreConnections.length === 0
-    || !selectedStoreConnectionId
+  const previewDisabled = !storeReady
     || selectedRowCount === 0
     || priceSavePending
     || pendingListingAction !== null
     || previewBlocked;
   // Queueing needs no preview: the server previews the selection itself.
-  const pushDisabled = launchReadyStoreConnections.length === 0
-    || !selectedStoreConnectionId
+  const pushDisabled = !storeReady
     || selectedRowCount === 0
     || priceSavePending
     || pendingListingAction !== null
@@ -1236,22 +1334,6 @@ function ListingPreviewPanel({
           </p>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row">
-          <Select
-            value={selectedStoreConnectionId}
-            onValueChange={onSelectedStoreConnectionIdChange}
-            disabled={launchReadyStoreConnections.length === 0}
-          >
-            <SelectTrigger className="h-10 sm:w-64">
-              <SelectValue placeholder="Select launch-ready store" />
-            </SelectTrigger>
-            <SelectContent>
-              {launchReadyStoreConnections.map((connection) => (
-                <SelectItem key={connection.storeConnectionId} value={String(connection.storeConnectionId)}>
-                  {connection.externalDisplayName || connection.shopDomain || `${formatStatus(connection.platform)} store name pending`}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
           <Button
             type="button"
             variant="outline"
@@ -1293,9 +1375,9 @@ function ListingPreviewPanel({
         <PreviewMetric label="Blocked" value={String(listingPreview?.summary.blocked ?? 0)} />
       </div>
 
-      {launchReadyStoreConnections.length === 0 && (
+      {!storeReady && (
         <ListingAccessNoticeView tone="notice" notice={{
-          message: "Connect your store and finish its setup before previewing or pushing listings.",
+          message: "Connect your eBay store and finish its setup before previewing or pushing listings.",
           resolution: "finish_store_setup",
           link: listingAccessLink("finish_store_setup"),
         }} />
@@ -1334,7 +1416,7 @@ function ListingPreviewPanel({
 
       {!listingPreview && selectedRows.length === 0 && (
         <div className="mt-4 rounded-md border border-dashed border-zinc-300 bg-zinc-50 p-4 text-sm text-zinc-600">
-          Select items from the available catalog above. They will appear here before you preview or push them.
+          Choose items in step 1, Choose what to sell. They will appear here before you preview or push them.
         </div>
       )}
 

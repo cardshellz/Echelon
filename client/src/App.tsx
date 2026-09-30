@@ -265,7 +265,8 @@ function DropshipPortalRouter() {
         <Route path={`${portalRoot}/dashboard`}>
           <DropshipPortalProtectedRoute component={DropshipPortalDashboard} />
         </Route>
-        <Route path={`${portalRoot}/catalog`}>
+        {/* One page for every step, so the vendor's work survives moving between them. */}
+        <Route path={`${portalRoot}/catalog/:step?`}>
           <DropshipPortalProtectedRoute component={DropshipPortalCatalog} />
         </Route>
         <Route path={`${portalRoot}/orders`}>
