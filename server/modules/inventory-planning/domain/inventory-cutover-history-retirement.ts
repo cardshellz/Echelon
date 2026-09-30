@@ -16,7 +16,18 @@ export class CutoverHistoryError extends Error {
 export function reviewHistoricalWork(source: OpeningSource, facts: CutoverHistoryFacts): HistoryReview {
   const proposal = proposeHistoricalWork(source, facts);
   const blockers = [...proposal.blockers];
-  if (source.latestVerification !== null) blockers.push({ code: "HISTORY_OPENING_ALREADY_SAVED", subject: "opening" });
+  if (source.latestVerification !== null) {
+    // A failed cutover keeps its immutable opening. New history can make that
+    // opening stale before a retry; its existence must not permanently prevent
+    // reviewed cleanup. Only an unfrozen legacy owner may replace that stale
+    // basis. Reconstruction still rejects its old evidence hash, and retirement
+    // changes the hash again, so a fresh opening is required before activation.
+    const staleUnfrozenOpening = source.runtimeAuthority === "legacy"
+      && source.configurationRunId === null
+      && source.latestVerification.authorityRevision === source.authorityRevision
+      && source.latestVerification.sourceEvidenceHash !== source.evidenceHash;
+    if (!staleUnfrozenOpening) blockers.push({ code: "HISTORY_OPENING_ALREADY_SAVED", subject: "opening" });
+  }
   if (proposal.decisions.length === 0) blockers.push({ code: "HISTORY_NO_WORK", subject: "history" });
   const content = {
     contractVersion: "inventory_cutover_history_review_v1" as const,

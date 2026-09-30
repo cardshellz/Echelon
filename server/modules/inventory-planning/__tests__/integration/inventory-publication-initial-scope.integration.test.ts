@@ -18,6 +18,11 @@ import { InventoryAvailabilityShadowService } from "../../application/inventory-
 import { assertDryRunSelectionsCurrent } from "../../infrastructure/inventory-availability-activation.repository";
 import { PostgresInventoryAvailabilityActivationDryRunRepository } from "../../infrastructure/inventory-availability-activation-dry-run.repository";
 import { isComparisonOnlyPublicationEvidence } from "../../domain/inventory-publication-coverage";
+import { InventoryPublicationPrecutoverExclusionService } from "../../application/inventory-publication-precutover-exclusion.service";
+import { PostgresPrecutoverExclusionStore } from "../../infrastructure/inventory-publication-precutover-exclusion.repository";
+import type { ReviewPrecutoverExclusion } from "../../domain/inventory-publication-precutover-exclusion";
+import { quantityPublicationScopeLockKey } from "../../infrastructure/quantity-publication-admission.repository";
+import { PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "../../infrastructure/inventory-publication-target-stop.repository";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -25,6 +30,153 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const dbDescribe = url && disposable ? describe : describe.skip;
 const NOW = new Date("2026-09-28T15:00:00.000Z");
 const selection = { publicationTargetId: 1, expectedTargetRevision: "2" };
+
+dbDescribe.sequential("pre-cutover explicit-scope non-live exclusion", () => {
+  let database: InventoryCutoverTestDatabase;
+  let service: InventoryPublicationPrecutoverExclusionService;
+  let request: ReviewPrecutoverExclusion;
+  beforeEach(async () => {
+    database = await createInventoryCutoverTestDatabase(url, disposable, cutoverCompositionBaseSql);
+    await installInitialScopeFixture(database.pool);
+    const initial = new InventoryPublicationInitialScopeService(new PostgresInitialPublicationScopeStore(database.pool), { now: () => NOW });
+    const review = await initial.review(selection);
+    await initial.prepare({ ...selection, expectedReviewHash: review.reviewHash, idempotencyKey: "before-exclusion" }, "operator");
+    service = new InventoryPublicationPrecutoverExclusionService(new PostgresPrecutoverExclusionStore(database.pool), { now: () => NOW });
+    const target = (await database.pool.query("SELECT * FROM inventory.inventory_publication_targets WHERE id=1")).rows[0];
+    const mapping = (await database.pool.query(`SELECT m.* FROM inventory.publication_variant_mapping_heads h
+      JOIN inventory.publication_variant_mapping_versions m ON m.id=COALESCE(h.draft_mapping_id,h.active_mapping_id)
+      WHERE h.publication_target_id=1 AND h.product_variant_id=101`)).rows[0];
+    request = { reason: "Owner approved exclusion of this nonexistent provider item.", exclusions: [{
+      publicationTargetId: 1, expectedTargetRevision: String(target.revision), channelId: target.channel_id,
+      channelConnectionId: target.channel_connection_id, providerScopeType: target.provider_scope_type,
+      externalScopeId: target.external_scope_id, productVariantId: 101,
+      externalInventoryItemId: mapping.external_inventory_item_id, externalSku: mapping.external_sku,
+      evidence: { provider: "shopify", observedAt: NOW.toISOString(), inventoryItemHttpStatus: 404 },
+    }] };
+  }, 30_000);
+  afterEach(async () => { await database?.close(); });
+  const command = async () => ({ ...request, expectedReviewHash: (await service.review(request)).reviewHash, idempotencyKey: "exclude-one" });
+  async function protectedRows() {
+    const result: Record<string, unknown> = {};
+    for (const table of ["catalog.products", "catalog.product_variants", "inventory.inventory_levels", "inventory.inventory_lots",
+      "inventory.inventory_transactions", "inventory.availability_claims", "inventory.availability_runtime_authority",
+      "inventory.availability_activation_freezes", "inventory.quantity_publication_gate", "inventory.inventory_publication_outbox",
+      "channels.channel_feeds", "inventory.publication_variant_mapping_heads", "inventory.publication_variant_mapping_versions",
+      "inventory.publication_initial_scope_receipts", "wms.orders", "wms.order_items"]) {
+      result[table] = (await database.pool.query(`SELECT * FROM ${table} ORDER BY 1`)).rows;
+    }
+    result.otherTargets = (await database.pool.query("SELECT * FROM inventory.inventory_publication_targets WHERE id<>1 ORDER BY id")).rows;
+    return result;
+  }
+  it("appends an exclusion, preserves original history and all protected records, and retries exactly once", async () => {
+    const before = await protectedRows(); const input = await command();
+    expect((await service.review(request)).ready).toBe(true);
+    const receipt = await service.apply(input, "operator");
+    expect(receipt).toMatchObject({ runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false,
+      targets: [{ changedProductVariantIds: [101], revision: "4", publicationRows: 0, alreadyApplied: false }] });
+    expect(await service.apply(input, "operator")).toMatchObject({ targets: [{ alreadyApplied: true }] });
+    expect((await database.pool.query("SELECT included,version::text FROM inventory.publication_membership_versions ORDER BY id")).rows)
+      .toEqual([{ included: true, version: "1" }, { included: false, version: "2" }]);
+    expect((await database.pool.query("SELECT * FROM inventory.publication_membership_applications")).rows).toHaveLength(1);
+    expect(await protectedRows()).toEqual(before);
+    const shadows = new PostgresInventoryAvailabilityShadowRepository(database.pool);
+    await new InventoryAvailabilityShadowService(shadows).runProductShadow(20, { idempotencyKey: "exclusion-shadow" }, "operator");
+    const preview = new PostgresInventoryChannelExposureAdminStore(drizzle(database.pool, { schema }), shadows);
+    expect((await preview.preview(1, 20)).membership).toEqual({ mode: "explicit", includedVariantIds: [], excludedVariantIds: [101] });
+  });
+  it("rejects a stale revision without appending any version", async () => {
+    const input = await command();
+    await database.pool.query("UPDATE inventory.inventory_publication_targets SET revision=revision+1 WHERE id=1");
+    await expect(service.apply(input, "operator")).rejects.toMatchObject({ code: "PRECUTOVER_EXCLUSION_BLOCKED" });
+    expect((await database.pool.query("SELECT * FROM inventory.publication_membership_versions")).rows).toHaveLength(1);
+  });
+  it.each([false,true])("excludes a positive-quantity unpublished eBay offer, retaining listing proof when present (%s)", async retained => {
+    await database.pool.query("UPDATE channels.channels SET provider='ebay' WHERE id=$1", [request.exclusions[0]!.channelId]);
+    request.exclusions[0]!.evidence = { provider: "ebay", observedAt: NOW.toISOString(), offerHttpStatus: 200,
+      offerId: "unpublished-offer", status: "UNPUBLISHED", availableQuantity: 100, listingId: retained ? "old-listing" : null,
+      ...(retained ? { retainedListingEvidence: { requestedItemId: "old-listing", observedAt: NOW.toISOString(), httpStatus: 200 as const,
+        responseHash: "b".repeat(64), outcome: "inaccessible_to_seller" as const, errorCode: "17" as const } } : {}) };
+    const before = await protectedRows(); const input = await command();
+    expect((await service.review(request)).ready).toBe(true);
+    expect(await service.apply(input, "operator")).toMatchObject({ providerWriteAttempted: false, outboxEnqueued: false,
+      targets: [{ changedProductVariantIds: [101], revision: "4" }] });
+    expect(await protectedRows()).toEqual(before);
+    expect((await database.pool.query("SELECT review->'input'->'exclusions'->0->'evidence' AS evidence FROM inventory.publication_membership_applications")).rows)
+      .toEqual([{ evidence: request.exclusions[0]!.evidence }]);
+    expect(await service.apply(input, "operator")).toMatchObject({ targets: [{ alreadyApplied: true }] });
+  });
+  it("rolls every membership and revision write back when the audit fails", async () => {
+    const input = await command();
+    await database.pool.query(`CREATE FUNCTION public.reject_exclusion_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.action='inventory_availability.publication_scope.pre_cutover_excluded' THEN RAISE EXCEPTION 'injected audit failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER reject_exclusion_audit BEFORE INSERT ON public.audit_events FOR EACH ROW EXECUTE FUNCTION public.reject_exclusion_audit()`);
+    await expect(service.apply(input, "operator")).rejects.toThrow("injected audit failure");
+    expect((await database.pool.query("SELECT revision::text FROM inventory.inventory_publication_targets WHERE id=1")).rows[0].revision).toBe("3");
+    expect((await database.pool.query("SELECT * FROM inventory.publication_membership_versions")).rows).toHaveLength(1);
+    expect((await database.pool.query("SELECT * FROM inventory.publication_membership_applications")).rows).toEqual([]);
+  });
+  it("serializes concurrent retries and rejects reusing the key with another reason or actor", async () => {
+    const input = await command();
+    const results = await Promise.all([service.apply(input, "operator"), service.apply(input, "operator")]);
+    expect(results.map(result => result.targets[0]!.alreadyApplied).sort()).toEqual([false, true]);
+    await expect(service.apply({ ...input, reason: "different reason" }, "operator")).rejects.toMatchObject({ code: "PRECUTOVER_EXCLUSION_REPLAY_CONFLICT" });
+    await expect(service.apply(input, "other-operator")).rejects.toMatchObject({ code: "PRECUTOVER_EXCLUSION_REPLAY_CONFLICT" });
+  });
+  it("refuses a live provider lock without changing membership", async () => {
+    const input = await command(); const row = request.exclusions[0]!;
+    const provider = await database.pool.connect();
+    const key = quantityPublicationScopeLockKey({ destinationKind: "channel_connection", connectionId: row.channelConnectionId,
+      providerKey: "shopify", providerScopeType: row.providerScopeType, externalScopeId: row.externalScopeId,
+      externalInventoryItemId: row.externalInventoryItemId, productId: null, productVariantId: null });
+    try {
+      await provider.query("SELECT pg_advisory_lock(hashtextextended($1,$2))", [key, PUBLICATION_TARGET_SCOPE_LOCK_SEED]);
+      await expect(service.apply(input, "operator")).rejects.toMatchObject({ code: "PRECUTOVER_EXCLUSION_PROVIDER_BUSY" });
+      expect((await database.pool.query("SELECT * FROM inventory.publication_membership_versions")).rows).toHaveLength(1);
+    } finally {
+      await provider.query("SELECT pg_advisory_unlock(hashtextextended($1,$2))", [key, PUBLICATION_TARGET_SCOPE_LOCK_SEED]);
+      provider.release();
+    }
+  });
+  it("does not make canonical authority available to this maintenance command", async () => {
+    const input = await command();
+    const client = await database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await acquireInventoryCutoverFenceInsideTransaction(client, { expectedAuthority: "legacy", expectedConfigurationRunId: null });
+      await activateWalmartPublicationInventoryFixture(client);
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+    expect((await service.review(request)).ready).toBe(false);
+    await expect(service.apply(input, "operator")).rejects.toThrow();
+    expect((await database.pool.query("SELECT * FROM inventory.publication_membership_versions")).rows).toHaveLength(1);
+  });
+  it("rolls back the whole batch when a later destination fails, then commits both together", async () => {
+    await database.pool.query(`INSERT INTO inventory.inventory_publication_targets(channel_id,channel_connection_id,fulfillment_node_id,
+      provider_scope_type,external_scope_id,publication_authority,state,change_reason,created_by)
+      VALUES(36,8,1,'location','second-location','echelon','disabled','Fixture second target','operator');
+      UPDATE inventory.inventory_publication_targets SET state='preview',revision=revision+1,
+        activated_by='operator',activated_at=transaction_timestamp() WHERE id=3`);
+    const initial = new InventoryPublicationInitialScopeService(new PostgresInitialPublicationScopeStore(database.pool), { now: () => NOW });
+    const second = { publicationTargetId: 3, expectedTargetRevision: "2" };
+    await initial.prepare({ ...second, expectedReviewHash: (await initial.review(second)).reviewHash,
+      idempotencyKey: "second-initial" }, "operator");
+    request.exclusions.push({ ...request.exclusions[0]!, publicationTargetId: 3, channelConnectionId: 8, externalScopeId: "second-location" });
+    const input = await command();
+    await database.pool.query(`CREATE FUNCTION public.reject_second_exclusion_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.action='inventory_availability.publication_scope.pre_cutover_excluded'
+      AND NEW.target='inventory.inventory_publication_target:3' THEN RAISE EXCEPTION 'injected second-target failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER reject_second_exclusion_audit BEFORE INSERT ON public.audit_events FOR EACH ROW EXECUTE FUNCTION public.reject_second_exclusion_audit()`);
+    await expect(service.apply(input, "operator")).rejects.toThrow("injected second-target failure");
+    expect((await database.pool.query("SELECT * FROM inventory.publication_membership_applications")).rows).toEqual([]);
+    expect((await database.pool.query("SELECT included FROM inventory.publication_membership_versions ORDER BY id")).rows)
+      .toEqual([{ included: true }, { included: true }]);
+    await database.pool.query("DROP TRIGGER reject_second_exclusion_audit ON public.audit_events");
+    expect((await service.apply(input, "operator")).targets.map(row => row.publicationTargetId)).toEqual([1, 3]);
+    await expect(service.apply({ ...input, exclusions: [input.exclusions[0]!] }, "operator"))
+      .rejects.toMatchObject({ code: "PRECUTOVER_EXCLUSION_REPLAY_CONFLICT" });
+  });
+});
 
 dbDescribe.sequential("audited preview-only initial publication scope", () => {
   let database: InventoryCutoverTestDatabase;

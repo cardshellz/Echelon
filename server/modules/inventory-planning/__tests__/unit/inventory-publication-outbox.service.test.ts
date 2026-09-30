@@ -89,6 +89,20 @@ describe("InventoryPublicationOutboxService", () => {
     expect(store.finalizeFailedRuns).toHaveBeenCalledTimes(2);
     expect(get).not.toHaveBeenCalled();
   });
+  it("keeps read-only convergence admitted and requires independent readback before verification", async () => {
+    const convergence = { effect: "already_current", providerWriteAttempted: false,
+      observation: { inventoryItemQuantity: 7, offerQuantity: 7 } };
+    const adapter = { supportedScopeTypes: ["location"] as const,
+      publishAbsolute: vi.fn(async () => ({ publishedQuantity: 7, providerResponse: convergence })),
+      readAbsolute: vi.fn(async () => ({ observedQuantity: 7, providerResponse: { observed: 7 } })) };
+    const service = new InventoryPublicationOutboxService(store, { get: () => adapter as never }, { now: () => NOW }, () => "lease-1", quantityAdmission);
+    expect(await service.processDue()).toMatchObject({ verified: 1, failed: 0 });
+    expect(admittedClaims).toEqual([expect.objectContaining({ outboxId: "41" })]);
+    expect(adapter.readAbsolute).toHaveBeenCalledOnce();
+    expect(store.recordVerified).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      providerResponse: { push: convergence, readback: { observed: 7 } },
+    }));
+  });
 
   it("does not rewrite a committed provider result when subsequent cleanup fails", async () => {
     let locked = false;
