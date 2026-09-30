@@ -21,6 +21,15 @@ function row(): DropshipListingPreviewRow {
 }
 function render(component: React.ReactNode) { vi.stubGlobal("React", React); return renderToStaticMarkup(component); }
 describe("rich listing preview", () => {
+  it("says where an eBay listing's category came from, with eBay's category number", () => {
+    const value = { ...row(), marketplaceCategorySource: "rule" as const, marketplaceCategoryRuleName: "Envelopes" };
+    const markup = render(React.createElement(ListingPreviewDetailsContent, { row: value, generatedAt: "2026-09-30T12:00:00.000Z" }));
+    expect(markup).toContain("Envelopes · #123");
+    expect(markup).toContain("Category source");
+    expect(markup).toContain("From your rule &quot;Envelopes&quot;");
+    const withoutSource = render(React.createElement(ListingPreviewDetailsContent, { row: row(), generatedAt: "2026-09-30T12:00:00.000Z" }));
+    expect(withoutSource).not.toContain("Category source");
+  });
   it("labels the actual .ops product-cost source without implying a channel-wide discount", () => {
     const value = row();
     value.economics!.productCostSource = "variant_fixed_price";

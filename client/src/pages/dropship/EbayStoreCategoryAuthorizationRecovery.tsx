@@ -17,6 +17,7 @@ type PendingEbayAuthorizationAction = "send-code" | "verify-code" | "passkey-pro
 const EBAY_AUTHORIZATION_PERMISSION_ERROR_CODES = new Set([
   "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED",
   "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
+  "DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED",
 ]);
 
 export function EbayStoreCategoryAuthorizationRecovery({

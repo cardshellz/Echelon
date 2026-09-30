@@ -100,7 +100,7 @@ describe("DropshipPortalCatalog workflow", () => {
     );
 
     expect(source).toContain("Your eBay Store organization (optional)");
-    expect(source).toContain("Card Shellz supplies the required eBay marketplace category.");
+    expect(source).toContain("The required eBay category comes from your eBay categories above.");
     expect(source).toContain("Leaving both fields blank does not block preview or push.");
     const previewSource = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipListingPreview.tsx"), "utf8");
     expect(source).toContain("<DropshipListingPreview");
@@ -212,7 +212,7 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(formatIssue("missing_config:merchantLocationKey")).toBe("eBay setup: Inventory location");
     expect(formatIssue("missing_config:businessPolicies.returnPolicyId")).toBe("eBay setup: Return policy");
     expect(formatIssue("ebay_browse_category_required")).toBe(
-      "Card Shellz marketplace category setup required",
+      "No eBay category. Choose one under eBay categories on this page: add a rule or set a store default.",
     );
   });
 

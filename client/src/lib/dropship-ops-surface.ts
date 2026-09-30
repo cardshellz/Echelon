@@ -1,4 +1,5 @@
 import type { DropshipListingPresentation, DropshipListingEconomics } from "@shared/dropship/listing-presentation";
+import type { EbayCategorySource } from "@shared/dropship/ebay-category-rules";
 
 export type DropshipSectionStatus =
   "ready" | "attention_required" | "coming_soon";
@@ -1673,6 +1674,9 @@ export interface DropshipListingPreviewRow {
   rulePriceEvidenceHash?: string | null;
   contentEvidenceHash?: string;
   pricingRuleName?: string | null;
+  /** eBay rows: whether a vendor rule, the store default or the Card Shellz catalog chose the category. */
+  marketplaceCategorySource?: EbayCategorySource;
+  marketplaceCategoryRuleName?: string | null;
   presentation?: DropshipListingPresentation;
   economics?: DropshipListingEconomics;
 }

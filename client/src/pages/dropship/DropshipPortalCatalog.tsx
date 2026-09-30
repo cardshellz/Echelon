@@ -86,6 +86,7 @@ import { EbayStoreCategoryAuthorizationRecovery } from "./EbayStoreCategoryAutho
 import { DropshipListingPreview, type ListingPriceSaveCallbacks } from "./DropshipListingPreview";
 import { DropshipPricingRulesPanel } from "./DropshipPricingRulesPanel";
 import { DropshipContentTemplatesPanel } from "./DropshipContentTemplatesPanel";
+import { DropshipEbayCategoryRulesPanel } from "./DropshipEbayCategoryRulesPanel";
 export { formatListingPreviewIssue as formatIssue } from "@/lib/dropship-listing-preview";
 
 type PendingSelectionAction = string | null;
@@ -728,6 +729,18 @@ export default function DropshipPortalCatalog() {
                 invalidateListingPreview();
               }}
             />
+            <DropshipEbayCategoryRulesPanel
+              storeConnectionId={selectedStoreConnectionIdNumber}
+              storeName={selectedStoreName}
+              renderAuthorizationRecovery={(error) => (
+                <EbayStoreCategoryAuthorizationRecovery
+                  error={error}
+                  storeConnectionId={selectedStoreConnectionIdNumber}
+                  storeName={selectedStoreName}
+                />
+              )}
+              {...priceSaveCallbacks}
+            />
             <EbayStoreCategoryAssignmentPanel
               authorizationRecovery={(
                 <EbayStoreCategoryAuthorizationRecovery
@@ -995,7 +1008,7 @@ export function EbayStoreCategoryAssignmentPanel({
       <div className="border-b border-zinc-200 p-4">
         <h2 className="text-lg font-semibold">Your eBay Store organization (optional)</h2>
         <p className="mt-1 text-sm text-zinc-500">
-          Card Shellz supplies the required eBay marketplace category. Use these searchable fields only if you want a listing organized inside one or two custom categories in your own eBay Store.
+          The required eBay category comes from your eBay categories above. Use these searchable fields only if you want a listing organized inside one or two custom categories in your own eBay Store.
         </p>
         <p className="mt-1 text-xs text-zinc-500">
           Leaving both fields blank does not block preview or push. Category changes save immediately and are shown again in listing preview.
