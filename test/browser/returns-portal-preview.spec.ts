@@ -944,6 +944,179 @@ test("an old order response cannot replace a newly selected scenario", async ({
   expect(fixture.failures).toEqual([]);
 });
 
+test("compact box picker keeps selection and quantity in one control and undo restores the original box", async ({
+  page,
+}, testInfo) => {
+  if (testInfo.project.name === "mobile")
+    await page.setViewportSize({ width: 320, height: 844 });
+  const fixture = await installReturnPreviewFixtures(page);
+  await page.goto(PORTAL_PATH);
+  await useSampleSource(page);
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  await page
+    .getByLabel(
+      "Return quantity for item 1: Sample collector sleeves (100 count · Clear)",
+      { exact: true },
+    )
+    .fill("2");
+  await page
+    .getByLabel(
+      "Return quantity for item 2: Sample collector sleeves (100 count · Clear)",
+      { exact: true },
+    )
+    .fill("1");
+  await page
+    .getByRole("button", { name: "Continue to packing", exact: true })
+    .click();
+  await enterCustomBoxDimensions(page, 1, "12.125", "8", "4");
+  const split = page.getByRole("button", { name: "Split box 1", exact: true });
+  await split.click();
+  const dialog = page.getByRole("dialog", {
+    name: "Pack a new box",
+    exact: true,
+  });
+  const first = dialog.getByTestId("move-line-sample-line-1");
+  const second = dialog.getByTestId("move-line-sample-line-2");
+  const create = dialog.getByRole("button", {
+    name: "Create box",
+    exact: true,
+  });
+  const amount = first.getByRole("spinbutton");
+  const firstName = "item 1: Sample collector sleeves (100 count · Clear)";
+  const secondName = "item 2: Sample collector sleeves (100 count · Clear)";
+  const addFirst = first.getByRole("button", {
+    name: `Add ${firstName} to new box`,
+    exact: true,
+  });
+  const addSecond = second.getByRole("button", {
+    name: `Add ${secondName} to new box`,
+    exact: true,
+  });
+  const removeSecond = second.getByRole("button", {
+    name: `Remove ${secondName} from new box`,
+    exact: true,
+  });
+  const plus = first.getByRole("button", {
+    name: `Add one ${firstName} to new box`,
+    exact: true,
+  });
+  const minus = first.getByRole("button", {
+    name: `Move one ${firstName} back to Box 1`,
+    exact: true,
+  });
+  await expect(
+    dialog.getByText("Choose items from Box 1.", { exact: true }),
+  ).toBeVisible();
+  await expect(dialog.getByRole("checkbox")).toHaveCount(0);
+  await expect(dialog.getByRole("combobox")).toHaveCount(0);
+  await expect(dialog.getByRole("spinbutton")).toHaveCount(0);
+  await expect(
+    dialog.getByText(
+      /available|Select at least one|Leave at least one|Keep at least one/,
+    ),
+  ).toHaveCount(0);
+  await expect(
+    dialog.getByText("0 items in new box", { exact: true }),
+  ).toBeVisible();
+  await expect(create).toBeDisabled();
+
+  await addSecond.focus();
+  await addSecond.press("Space");
+  await expect(removeSecond).toHaveAttribute("aria-pressed", "true");
+  await expect(removeSecond).toBeFocused();
+  await expect(second.getByRole("spinbutton")).toHaveCount(0);
+  await expect(
+    dialog.getByText("1 item in new box", { exact: true }),
+  ).toBeVisible();
+  await removeSecond.press("Space");
+  await expect(addSecond).toHaveAttribute("aria-pressed", "false");
+  await expect(create).toBeDisabled();
+
+  await addFirst.focus();
+  await addFirst.press("Enter");
+  await expect(amount).toHaveValue("1");
+  await expect(amount).toBeFocused();
+  await expect(first.getByText("of 2", { exact: true })).toBeVisible();
+  await minus.click();
+  await expect(amount).toHaveCount(0);
+  await expect(addFirst).toBeFocused();
+  await addFirst.press("Enter");
+  await plus.click();
+  await expect(amount).toHaveValue("2");
+  await expect(plus).toBeDisabled();
+  await addSecond.click();
+  await expect(create).toBeDisabled();
+  await expect(dialog.getByRole("alert")).toContainText(
+    /(?:Leave|Keep) at least one item in Box 1/,
+  );
+  await removeSecond.click();
+  await expect(create).toBeEnabled();
+
+  for (const invalid of ["", "-1", "0.5", "3", "9007199254740992"]) {
+    await amount.fill(invalid);
+    await expect(amount).toHaveAttribute("aria-invalid", "true");
+    await expect(create).toBeDisabled();
+    await expect(page.locator('[data-testid^="preview-box-"]')).toHaveCount(1);
+  }
+  await amount.fill("0");
+  await expect(amount).toHaveCount(0);
+  await expect(addFirst).toBeFocused();
+  await expect(create).toBeDisabled();
+  await addFirst.click();
+  await expect(
+    dialog.getByText("2 items stay in Box 1", { exact: true }),
+  ).toBeVisible();
+  expect(
+    await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth),
+  ).toBe(true);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await dialog.screenshot({
+    animations: "disabled",
+    path: testInfo.outputPath("compact-box-picker.png"),
+  });
+  await create.click();
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Box 2", exact: true }),
+  ).toBeFocused();
+  await expect(page.getByTestId("preview-box-2")).toHaveAttribute(
+    "data-new-box",
+    "true",
+  );
+  await expectBoxQuantity(page, 1, "sample-line-1", 1, 2);
+  await expectBoxQuantity(page, 1, "sample-line-2", 1, 1);
+  await expectBoxQuantity(page, 2, "sample-line-1", 1, 2);
+  await expect(packingRow(page, 2, "sample-line-2")).toHaveCount(0);
+  await page
+    .getByRole("status")
+    .getByRole("button", { name: "Undo", exact: true })
+    .click();
+  await expect(page.locator('[data-testid^="preview-box-"]')).toHaveCount(1);
+  await expect(page.locator('[data-new-box="true"]')).toHaveCount(0);
+  await expectBoxQuantity(page, 1, "sample-line-1", 2, 2);
+  await expectBoxQuantity(page, 1, "sample-line-2", 1, 1);
+  await expect(
+    page.getByLabel("Length of box 1 in inches", { exact: true }),
+  ).toHaveValue("12.125");
+  await split.click();
+  await expect(
+    dialog.getByText("0 items in new box", { exact: true }),
+  ).toBeVisible();
+  await addFirst.click();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(split).toBeFocused();
+  await expectBoxQuantity(page, 1, "sample-line-1", 2, 2);
+  expect(
+    fixture.previewRequests.some((request) => request.path.endsWith("/review")),
+  ).toBe(false);
+  expect(fixture.failures).toEqual([]);
+});
+
 test("bulk splits keep same-name purchased lines distinct and full moves can undo donor pruning exactly", async ({
   page,
 }, testInfo) => {
@@ -994,7 +1167,7 @@ test("bulk splits keep same-name purchased lines distinct and full moves can und
   });
   await bulk.click();
   const dialog = page.getByRole("dialog", {
-    name: "Split Box 1",
+    name: "Pack a new box",
     exact: true,
   });
   await expect(
@@ -1005,27 +1178,31 @@ test("bulk splits keep same-name purchased lines distinct and full moves can und
   ).toHaveCount(0);
   const first = dialog.getByTestId("move-line-sample-line-1");
   const second = dialog.getByTestId("move-line-sample-line-2");
-  await expect(first.getByRole("checkbox")).not.toBeChecked();
-  await expect(second.getByRole("checkbox")).not.toBeChecked();
+  await expect(dialog.getByRole("checkbox")).toHaveCount(0);
+  await expect(first.getByRole("button", { name: /^Add / })).toBeVisible();
+  await expect(second.getByRole("button", { name: /^Add / })).toBeVisible();
   const create = dialog.getByRole("button", {
     name: "Create box",
     exact: true,
   });
   await expect(create).toBeDisabled();
   await first
-    .getByRole("checkbox", {
-      name: "Select item 1: Sample collector sleeves (100 count · Clear) to move",
+    .getByRole("button", {
+      name: "Add item 1: Sample collector sleeves (100 count · Clear) to new box",
       exact: true,
     })
-    .check();
-  await first.getByRole("spinbutton").fill("1");
+    .click();
+  await expect(first.getByRole("spinbutton")).toHaveValue("1");
   await second
-    .getByRole("checkbox", {
-      name: "Select item 2: Sample collector sleeves (100 count · Clear) to move",
+    .getByRole("button", {
+      name: "Add item 2: Sample collector sleeves (100 count · Clear) to new box",
       exact: true,
     })
-    .check();
-  await second.getByRole("spinbutton").fill("1");
+    .click();
+  await expect(second.getByRole("spinbutton")).toHaveCount(0);
+  await expect(
+    dialog.getByText("2 items in new box", { exact: true }),
+  ).toBeVisible();
   await expect(create).toBeEnabled();
   await page.screenshot({
     animations: "disabled",
@@ -1051,10 +1228,8 @@ test("bulk splits keep same-name purchased lines distinct and full moves can und
   await expect(
     dialog.getByRole("region", { name: "Move preview", exact: true }),
   ).toHaveCount(0);
-  await first.getByRole("checkbox").check();
-  await first.getByRole("spinbutton").fill("1");
-  await second.getByRole("checkbox").check();
-  await second.getByRole("spinbutton").fill("1");
+  await first.getByRole("button", { name: /^Add / }).click();
+  await second.getByRole("button", { name: /^Add / }).click();
   await create.click();
   await expect(dialog).toHaveCount(0);
   await expect(
@@ -1064,7 +1239,12 @@ test("bulk splits keep same-name purchased lines distinct and full moves can und
   await expect(packingRow(page, 1, "sample-line-2")).toHaveCount(0);
   await expectBoxQuantity(page, 2, "sample-line-1", 1, 2);
   await expectBoxQuantity(page, 2, "sample-line-2", 1, 1);
+  await expect(page.getByTestId("preview-box-2")).toHaveAttribute(
+    "data-new-box",
+    "true",
+  );
   await enterCustomBoxDimensions(page, 2, "11", "7", "5");
+  await expect(page.locator('[data-new-box="true"]')).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Undo", exact: true }),
   ).toHaveCount(0);
