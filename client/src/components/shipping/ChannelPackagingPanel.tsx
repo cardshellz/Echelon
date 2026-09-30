@@ -148,8 +148,8 @@ export function ChannelPackagingPanel({
           className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"
         >
           {channel.name} has no explicitly enabled fulfillment warehouse.{" "}
-          Enable the warehouse for this program in Channel Allocation before
-          configuring its packaging.
+          Configure its warehouse sources in Channel Inventory, or its explicit
+          fulfillment warehouse in the channel connection, before assigning packaging.
         </div>
       )}
       {!policy && (
@@ -247,8 +247,8 @@ export function ChannelPackagingPanel({
                   colSpan={renderPricing ? 5 : 4}
                 >
                   No warehouse is explicitly enabled for this fulfillment
-                  program. Enable at least one warehouse in Channel Allocation
-                  before assigning packaging.
+                  program. Configure its channel warehouse sources or fulfillment
+                  warehouse before assigning packaging.
                 </td>
               </tr>
             )}

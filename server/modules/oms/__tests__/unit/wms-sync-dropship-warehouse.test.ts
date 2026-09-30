@@ -23,7 +23,9 @@ describe("wms-sync.service :: Dropship warehouse authority", () => {
     expect(SRC).toContain('from "./dropship-order-warehouse"');
     expect(SRC).toContain("hasDropshipAcceptanceStamp(omsOrder.rawPayload)");
     expect(SRC).toContain("if (!isDropshipOmsOrder(identity)) return null;");
-    expect(SRC).toContain("eq(channelWarehouseAssignments.enabled, true)");
+    expect(SRC).toContain("readChannelFulfillmentWarehouses(pool, { channelId: omsOrder.channelId })");
+    expect(SRC).toContain("sources.some(source => source.warehouseId === warehouseId)");
+    expect(SRC).not.toContain("channelWarehouseAssignments");
     expect(SRC).toContain("isActive: warehouses.isActive");
     expect(SRC).toContain("decideDropshipOrderWarehouse({");
   });

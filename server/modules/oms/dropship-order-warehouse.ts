@@ -5,7 +5,7 @@
  * connection's default warehouse: acceptance locks inventory there and writes
  * it to oms_orders.warehouse_id. WMS sync must fulfil from that same warehouse
  * instead of asking the generic fulfillment router; otherwise the quantity the
- * vendor was shown (Channel Allocation over the Dropship OMS warehouses), the
+ * vendor was shown (ATP over the Dropship OMS warehouse sources), the
  * stock that was locked, and the stock that ships could be three different
  * warehouses. Pure: every fact is loaded by the caller.
  */
@@ -99,7 +99,7 @@ export function decideDropshipOrderWarehouse(
   if (!facts.enabledForChannel) {
     throw new WmsDropshipWarehouseError(
       "WMS_SYNC_DROPSHIP_WAREHOUSE_NOT_ALLOCATED",
-      "Dropship order's accepted warehouse is not enabled for the Dropship OMS channel in Channel Allocation.",
+      "Dropship order's accepted warehouse is not an active source for the Dropship OMS channel in Channel Inventory.",
       context,
     );
   }

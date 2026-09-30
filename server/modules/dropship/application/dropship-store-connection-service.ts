@@ -304,9 +304,9 @@ export interface DropshipStoreConnectionRepository {
 }
 
 /**
- * Which warehouses the Dropship program may ship from: the enabled warehouse
- * assignments of the Dropship OMS channel in Channel Allocation. The same set
- * the allocation engine computes Dropship quantities over.
+ * Which warehouses the Dropship program may ship from. After activation this
+ * reads active channel source bindings, not historical allocation assignments.
+ * The store's default still pins the actual quote, claim and fulfillment origin.
  */
 export interface DropshipOmsWarehouseAssignmentReader {
   listEnabledWarehouseIds(): Promise<number[]>;
@@ -780,7 +780,7 @@ export class DropshipStoreConnectionService {
     if (!enabledWarehouseIds.includes(defaultWarehouseId)) {
       throw new DropshipError(
         "DROPSHIP_STORE_DEFAULT_WAREHOUSE_NOT_ALLOCATED",
-        "The default warehouse must be enabled for the Dropship OMS channel in Channel Allocation before a store can ship from it.",
+        "The default warehouse must be an active source for the Dropship OMS channel in Channel Inventory before a store can ship from it.",
         { storeConnectionId, defaultWarehouseId, enabledWarehouseIds, retryable: false },
       );
     }

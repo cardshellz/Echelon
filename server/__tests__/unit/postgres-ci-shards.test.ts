@@ -56,6 +56,7 @@ function runnerFixture() {
 describe("PostgreSQL CI coverage and isolation", () => {
   it("preserves all 70 prior files and explicitly adds reviewed hardening suites", () => {
     const addedSuites = [
+      "server/modules/channels/__tests__/integration/channel-fulfillment-warehouses.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-cutover-history-reader.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-cutover-history.integration.test.ts",
       "server/modules/catalog/__tests__/integration/inventory-tracking-policy.integration.test.ts",

@@ -8,7 +8,9 @@ import {
 } from "../../infrastructure/dropship-oms-warehouse-assignments.reader";
 
 function fakePool(handler: (sql: string, params: unknown[]) => unknown[]) {
-  const query = vi.fn(async (sql: string, params: unknown[] = []) => ({ rows: handler(sql, params) }));
+  const query = vi.fn(async (sql: string, params: unknown[] = []) => ({ rows: sql.includes("FROM inventory.availability_runtime_authority")
+    ? [{ authority: "legacy", revision: "1", activation_run_id: null }]
+    : handler(sql, params) }));
   return { pool: { query } as unknown as Pick<Pool, "query">, query };
 }
 
@@ -20,14 +22,14 @@ describe("Dropship OMS warehouse assignment reader", () => {
       if (sql.includes("FROM channels.channels")) return [DROPSHIP_OMS];
       if (sql.includes("FROM channels.channel_warehouse_assignments")) {
         expect(params).toEqual([103]);
-        return [{ warehouse_id: 1 }, { warehouse_id: "35" }];
+        return [{ channel_id: 103, warehouse_id: 1 }, { channel_id: 103, warehouse_id: 35 }];
       }
       throw new Error(`unexpected statement: ${sql}`);
     });
 
     await expect(new PgDropshipOmsWarehouseAssignmentReader(pool).listEnabledWarehouseIds()).resolves.toEqual([1, 35]);
     const assignmentSql = String(query.mock.calls.find(([sql]) => String(sql).includes("channel_warehouse_assignments"))?.[0]);
-    expect(assignmentSql).toContain("enabled = true");
+    expect(assignmentSql).toContain("enabled=true");
   });
 
   it("propagates a missing Dropship OMS channel instead of returning an empty allowlist", async () => {
@@ -38,11 +40,11 @@ describe("Dropship OMS warehouse assignment reader", () => {
   });
 
   it("answers a single warehouse check with the enabled predicate in SQL", async () => {
-    const { pool, query } = fakePool((_sql, params) => (params[1] === 1 ? [{ warehouse_id: 1 }] : []));
+    const { pool, query } = fakePool((_sql, params) => (params[0] === 103 ? [{ channel_id: 103, warehouse_id: 1 }] : []));
     await expect(isWarehouseEnabledForChannelWithClient(pool, { channelId: 103, warehouseId: 1 })).resolves.toBe(true);
     await expect(isWarehouseEnabledForChannelWithClient(pool, { channelId: 103, warehouseId: 35 })).resolves.toBe(false);
-    expect(String(query.mock.calls[0][0])).toContain("enabled = true");
-    expect(query.mock.calls[0][1]).toEqual([103, 1]);
+    expect(String(query.mock.calls[1][0])).toContain("enabled=true");
+    expect(query.mock.calls[1][1]).toEqual([103]);
   });
 
   it("resolves the channel on its own client and releases it even when resolution fails", async () => {

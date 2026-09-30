@@ -1488,11 +1488,12 @@ async function planAcceptanceWithClient(
   const warehouseAllocated = await isWarehouseEnabledForChannelWithClient(client, {
     channelId: intake.channelId,
     warehouseId: quote.warehouseId,
+    lock: true,
   });
   if (!warehouseAllocated) {
     throw new DropshipError(
       "DROPSHIP_ORDER_WAREHOUSE_NOT_ALLOCATED",
-      "Dropship order acceptance requires the store's default warehouse to be enabled for the Dropship OMS channel in Channel Allocation.",
+      "Dropship order acceptance requires the store's default warehouse to be an active source for the Dropship OMS channel in Channel Inventory.",
       {
         intakeId: intake.intakeId,
         channelId: intake.channelId,

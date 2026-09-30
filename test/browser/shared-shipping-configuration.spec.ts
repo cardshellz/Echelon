@@ -460,7 +460,7 @@ test("warehouse packaging owns only physical availability", async ({ page }) => 
   await expect(page.getByLabel("Fulfillment program")).toHaveCount(0);
 });
 
-test("program packaging uses only warehouses enabled in Channel Allocation", async ({
+test("program packaging uses only the channel's eligible fulfillment warehouses", async ({
   page,
 }) => {
   const state = await setup(page, "assignments-none");
@@ -474,7 +474,7 @@ test("program packaging uses only warehouses enabled in Channel Allocation", asy
     page.getByRole("button", { name: "Add exception" }),
   ).toHaveCount(0);
   await expect(page.getByRole("table")).toContainText(
-    "Enable at least one warehouse in Channel Allocation",
+    "Configure its channel warehouse sources or fulfillment warehouse",
   );
   expect(state.writes).toEqual([]);
 });

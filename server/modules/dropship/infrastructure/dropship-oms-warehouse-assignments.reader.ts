@@ -2,6 +2,8 @@ import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import type { DropshipOmsWarehouseAssignmentReader } from "../application/dropship-store-connection-service";
 import { resolveDropshipOmsChannelIdWithClient } from "./dropship-order-intake.repository";
+import { readChannelFulfillmentWarehouses } from "../../channels/channel-fulfillment-warehouses.reader";
+import { z } from "zod";
 
 export type { DropshipOmsWarehouseAssignmentReader };
 
@@ -11,28 +13,17 @@ export async function listEnabledWarehouseIdsForChannelWithClient(
   client: Queryable,
   channelId: number,
 ): Promise<number[]> {
-  const result = await client.query<{ warehouse_id: number }>(
-    `SELECT warehouse_id
-     FROM channels.channel_warehouse_assignments
-     WHERE channel_id = $1 AND enabled = true
-     ORDER BY warehouse_id ASC`,
-    [channelId],
-  );
-  return result.rows.map((row) => Number(row.warehouse_id));
+  const rows = await readChannelFulfillmentWarehouses(client, { channelId });
+  return rows.map(row => row.warehouseId);
 }
 
 export async function isWarehouseEnabledForChannelWithClient(
   client: Queryable,
-  input: { channelId: number; warehouseId: number },
+  input: { channelId: number; warehouseId: number; lock?: boolean },
 ): Promise<boolean> {
-  const result = await client.query<{ warehouse_id: number }>(
-    `SELECT warehouse_id
-     FROM channels.channel_warehouse_assignments
-     WHERE channel_id = $1 AND warehouse_id = $2 AND enabled = true
-     LIMIT 1`,
-    [input.channelId, input.warehouseId],
-  );
-  return result.rows.length === 1;
+  const warehouseId = z.number().int().positive().max(2_147_483_647).parse(input.warehouseId);
+  const rows = await readChannelFulfillmentWarehouses(client, { channelId: input.channelId, lock: input.lock });
+  return rows.some(row => row.warehouseId === warehouseId);
 }
 
 /**

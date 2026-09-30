@@ -46,6 +46,7 @@ import {
 import { INVENTORY_LEGACY_ADMIN_CONTROLS } from "../inventory-planning/application/inventory-legacy-admin-control.service";
 import { createInventoryLegacyAdminControlService } from "../inventory-planning/infrastructure/inventory-legacy-admin-control.repository";
 import { sendInventoryLegacyAdminControlError } from "../inventory-planning/interfaces/http/inventory-legacy-admin-control.error";
+import { rejectLegacyLocationMapping } from "./legacy-location-mapping.handler";
 
 type ChannelRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
@@ -886,45 +887,8 @@ export function registerChannelRoutes(app: Express) {
     }
   });
 
-  // Save Shopify location → warehouse mappings
-  app.post("/api/channels/:id/map-locations", requirePermission("channels", "edit"), async (req, res) => {
-    try {
-      const channelId = parseInt(req.params.id);
-      const channel = await storage.getChannelById(channelId);
-      if (!channel) return res.status(404).json({ error: "Channel not found" });
-
-      const { mappings } = req.body as { mappings: Array<{ shopifyLocationId: string; warehouseId: number | null }> };
-      if (!Array.isArray(mappings)) {
-        return res.status(400).json({ error: "mappings must be an array" });
-      }
-
-      // Clear all existing Shopify location mappings first
-      const allWarehouses = await storage.getAllWarehouses();
-      for (const wh of allWarehouses) {
-        if ((wh as any).shopifyLocationId) {
-          await storage.updateWarehouse(wh.id, { shopifyLocationId: null } as any);
-        }
-      }
-
-      // Apply new mappings
-      for (const m of mappings) {
-        if (m.warehouseId) {
-          await storage.updateWarehouse(m.warehouseId, { shopifyLocationId: m.shopifyLocationId } as any);
-        }
-      }
-
-      // Return updated state
-      const updatedWarehouses = await storage.getAllWarehouses();
-      const updatedMappings = updatedWarehouses
-        .filter((w: any) => w.shopifyLocationId)
-        .map((w: any) => ({ warehouseId: w.id, warehouseCode: w.code, warehouseName: w.name, shopifyLocationId: w.shopifyLocationId }));
-
-      res.json({ success: true, mappings: updatedMappings });
-    } catch (error) {
-      console.error("Error saving location mappings:", error);
-      res.status(500).json({ error: "Failed to save location mappings" });
-    }
-  });
+  // Old bookmarks/clients receive an explicit retirement response, not a silent save.
+  app.post("/api/channels/:id/map-locations", requirePermission("channels", "edit"), rejectLegacyLocationMapping);
 
   // Update partner profile
   app.put("/api/channels/:id/partner-profile", requirePermission("channels", "edit"), async (req, res) => {
