@@ -1,4 +1,5 @@
-import { useId, useState } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
+import { Check, Minus, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -67,6 +68,143 @@ function boxQuantity(parcel: PreviewParcelDraft | undefined): number | null {
     total += quantity;
   }
   return total;
+}
+
+function SplitBoxItemControl({
+  accessibleName,
+  sourceName,
+  availableQuantity,
+  draft,
+  quantity,
+  invalid,
+  busy,
+  helpId,
+  onQuantityChange,
+}: {
+  accessibleName: string;
+  sourceName: string;
+  availableQuantity: number;
+  draft: Pick<MoveDraft, "selected" | "quantity">;
+  quantity: number | null;
+  invalid: boolean;
+  busy: boolean;
+  helpId: string;
+  onQuantityChange: (value: string) => void;
+}) {
+  const addButton = useRef<HTMLButtonElement>(null);
+  const quantityInput = useRef<HTMLInputElement>(null);
+  const wasSelected = useRef(draft.selected);
+  const singleItem = availableQuantity === 1;
+
+  useLayoutEffect(() => {
+    if (wasSelected.current !== draft.selected && !singleItem) {
+      // Add and the stepper replace each other; keep focus on the active control.
+      if (draft.selected) {
+        quantityInput.current?.focus();
+        quantityInput.current?.select();
+      } else {
+        addButton.current?.focus();
+      }
+    }
+    wasSelected.current = draft.selected;
+  }, [draft.selected, singleItem]);
+
+  if (singleItem || !draft.selected) {
+    return (
+      <Button
+        ref={addButton}
+        type="button"
+        variant={draft.selected ? "default" : "outline"}
+        className="min-h-11 w-28 shrink-0 gap-2"
+        aria-label={
+          draft.selected
+            ? `Remove ${accessibleName} from new box`
+            : `Add ${accessibleName} to new box`
+        }
+        aria-pressed={singleItem ? draft.selected : undefined}
+        disabled={busy}
+        onClick={() => onQuantityChange(draft.selected ? "0" : "1")}
+      >
+        {draft.selected ? (
+          <Check aria-hidden="true" className="h-4 w-4" />
+        ) : (
+          <Plus aria-hidden="true" className="h-4 w-4" />
+        )}
+        {draft.selected ? "Added" : "Add"}
+      </Button>
+    );
+  }
+
+  return (
+    <div
+      role="group"
+      aria-label={`${accessibleName}: quantity in new box`}
+      className="max-w-full space-y-1 text-center"
+    >
+      <div className="flex max-w-full items-center rounded-md border border-input bg-background">
+        <Button
+          type="button"
+          variant="ghost"
+          className="h-11 min-h-11 w-11 shrink-0 rounded-r-none p-0"
+          aria-label={`Move one ${accessibleName} back to ${sourceName}`}
+          disabled={busy || invalid || quantity === null}
+          onClick={() => {
+            if (quantity !== null) onQuantityChange(String(quantity - 1));
+          }}
+        >
+          <Minus aria-hidden="true" className="h-4 w-4" />
+        </Button>
+        <Input
+          ref={quantityInput}
+          type="number"
+          inputMode="numeric"
+          min="0"
+          max={availableQuantity}
+          step="1"
+          className="h-11 min-h-11 w-14 min-w-0 rounded-none border-x border-y-0 px-1 text-center tabular-nums shadow-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+          aria-label={`Quantity of ${accessibleName} in new box`}
+          aria-invalid={invalid || undefined}
+          aria-describedby={`${helpId}-limit${invalid ? ` ${helpId}` : ""}`}
+          disabled={busy}
+          value={draft.quantity}
+          onChange={(event) => onQuantityChange(event.target.value)}
+        />
+        <Button
+          type="button"
+          variant="ghost"
+          className="h-11 min-h-11 w-11 shrink-0 rounded-l-none p-0"
+          aria-label={`Add one ${accessibleName} to new box`}
+          disabled={
+            busy ||
+            invalid ||
+            quantity === null ||
+            quantity >= availableQuantity
+          }
+          onClick={() => {
+            if (quantity === null) return;
+            // A disabled + button cannot retain keyboard focus at the limit.
+            if (quantity + 1 === availableQuantity)
+              quantityInput.current?.focus();
+            onQuantityChange(String(quantity + 1));
+          }}
+        >
+          <Plus aria-hidden="true" className="h-4 w-4" />
+        </Button>
+      </div>
+      <p id={`${helpId}-limit`} className="text-xs text-muted-foreground">
+        of {availableQuantity}
+      </p>
+      {invalid && (
+        <p
+          id={helpId}
+          role="alert"
+          className="max-w-48 break-words text-xs text-destructive"
+        >
+          Enter a whole number from 0 to {availableQuantity}.
+        </p>
+      )}
+    </div>
+  );
 }
 
 export function CustomerReturnMoveItemsDialog({
@@ -230,9 +368,11 @@ export function CustomerReturnMoveItemsDialog({
     : !destination && fixedDestination
       ? "This destination is no longer available. Close this window and choose another box."
       : wouldOnlyReplaceBox
-        ? fixedDestination
-          ? `Leave at least one item in ${sourceName}.`
-          : `Leave at least one item in ${sourceName}, or choose an existing box.`
+        ? isSplit
+          ? `Keep at least one item in ${sourceName}.`
+          : fixedDestination
+            ? `Leave at least one item in ${sourceName}.`
+            : `Leave at least one item in ${sourceName}, or choose an existing box.`
         : preview && preview.kind !== "updated"
           ? moveError(preview.kind)
           : null;
@@ -246,7 +386,7 @@ export function CustomerReturnMoveItemsDialog({
   const title = request.removeSource
     ? `Remove ${sourceName}`
     : isSplit
-      ? `Split ${sourceName}`
+      ? "Pack a new box"
       : isDrop
         ? request.destination?.kind === "new"
           ? "Move to a new box"
@@ -269,6 +409,9 @@ export function CustomerReturnMoveItemsDialog({
     ? sources.filter((source) => source.lineId === request.lineId)
     : sources;
   const showMoveTotals = !singleProduct && !isSplit && !isDrop;
+  const splitQuantity = selected.length === 0 ? 0 : movingQuantity;
+  const remainingSourceQuantity =
+    splitQuantity === null ? null : sourceQuantity - splitQuantity;
   const destinationRenumbered =
     preview?.kind === "updated" &&
     destinationParcel !== undefined &&
@@ -355,7 +498,7 @@ export function CustomerReturnMoveItemsDialog({
             {request.removeSource
               ? "All items in this box will move together. Choose the box they should go in."
               : isSplit
-                ? "Choose what to put in a new box. Leave at least one item in this box."
+                ? `Choose items from ${sourceName}.`
                 : isDrop
                   ? "Choose how many to move."
                   : singleProduct
@@ -402,7 +545,9 @@ export function CustomerReturnMoveItemsDialog({
             </div>
           )}
           {contextValid && (
-            <div className="divide-y rounded-lg border">
+            <div
+              className={`divide-y rounded-lg border ${isSplit ? "overflow-hidden" : ""}`}
+            >
               {visibleSources.map((source, index) => {
                 const line = order.lines.find(
                   (item) => item.id === source.lineId,
@@ -433,6 +578,39 @@ export function CustomerReturnMoveItemsDialog({
                     )}
                   </span>
                 );
+                if (isSplit) {
+                  return (
+                    <div
+                      key={line.id}
+                      data-testid={`move-line-${line.id}`}
+                      className={`grid min-w-0 grid-cols-1 items-center gap-3 p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-4 ${draft.selected ? "bg-primary/5" : ""}`}
+                    >
+                      {product}
+                      <div className="max-w-full justify-self-end">
+                        <SplitBoxItemControl
+                          accessibleName={description.accessibleName}
+                          sourceName={sourceName}
+                          availableQuantity={source.quantity}
+                          draft={draft}
+                          quantity={quantity}
+                          invalid={invalid}
+                          busy={busy}
+                          helpId={helpId}
+                          onQuantityChange={(value) => {
+                            // Empty input is an unfinished edit, not a request to remove.
+                            const deselect =
+                              value !== "" && readPreviewQuantity(value) === 0;
+                            updateDraft(line.id, {
+                              selected: !deselect,
+                              quantity: value,
+                              quantityEdited: true,
+                            });
+                          }}
+                        />
+                      </div>
+                    </div>
+                  );
+                }
                 return (
                   <div
                     key={line.id}
@@ -523,7 +701,7 @@ export function CustomerReturnMoveItemsDialog({
               {error}
             </p>
           )}
-          {contextValid && !selected.length && (
+          {!isSplit && contextValid && !selected.length && (
             <p className="text-sm text-muted-foreground">
               Select at least one item to move.
             </p>
@@ -590,23 +768,61 @@ export function CustomerReturnMoveItemsDialog({
                 )}
               </section>
             )}
-          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-            <Button
-              type="button"
-              variant="ghost"
-              className="min-h-11"
-              onClick={onClose}
+          <div
+            className={
+              isSplit
+                ? "flex flex-wrap items-center justify-between gap-4 border-t pt-4"
+                : undefined
+            }
+          >
+            {isSplit && contextValid && (
+              <div
+                role="status"
+                aria-label="New box summary"
+                aria-live="polite"
+                aria-atomic="true"
+                className="min-w-0 space-y-1 text-sm"
+              >
+                <p className="font-medium tabular-nums">
+                  {splitQuantity === null
+                    ? "Check item quantities"
+                    : `${splitQuantity} ${splitQuantity === 1 ? "item" : "items"} in new box`}
+                </p>
+                {remainingSourceQuantity !== null && (
+                  <p className="text-xs text-muted-foreground tabular-nums">
+                    {remainingSourceQuantity}{" "}
+                    {remainingSourceQuantity === 1
+                      ? "item stays"
+                      : "items stay"}{" "}
+                    in {sourceName}
+                  </p>
+                )}
+              </div>
+            )}
+            <div
+              className={
+                isSplit
+                  ? "ml-auto flex flex-wrap gap-2"
+                  : "flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"
+              }
             >
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              className="min-h-11"
-              disabled={!ready}
-              aria-describedby={error ? `${id}-error` : undefined}
-            >
-              {action}
-            </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                className="min-h-11"
+                onClick={onClose}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                className="min-h-11"
+                disabled={!ready}
+                aria-describedby={error ? `${id}-error` : undefined}
+              >
+                {action}
+              </Button>
+            </div>
           </div>
         </form>
       </DialogContent>

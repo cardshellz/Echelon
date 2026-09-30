@@ -45,6 +45,7 @@ type PackingNotice = {
   text: string;
   after: PreviewParcelDraft[];
   before?: PreviewParcelDraft[];
+  createdParcelKey?: number;
 };
 
 export function CustomerReturnPacking({
@@ -147,6 +148,10 @@ export function CustomerReturnPacking({
       text: `Moved ${moved} ${moved === 1 ? "item" : "items"} to Box ${destination}.${result.removedParcelKeys.length ? " Empty source boxes were removed." : ""}`,
       before: parcels,
       after: result.parcels,
+      createdParcelKey:
+        command.destination.kind === "new"
+          ? result.destinationParcelKey
+          : undefined,
     });
     focusAfterDialog.current = { boxKey: result.destinationParcelKey };
     onChange(result.parcels);
@@ -449,6 +454,9 @@ export function CustomerReturnPacking({
           <section
             key={parcel.key}
             data-testid={`preview-box-${index + 1}`}
+            data-new-box={
+              currentNotice?.createdParcelKey === parcel.key || undefined
+            }
             aria-labelledby={`preview-box-title-${parcel.key}`}
             onDragOver={(event) => dragOver(event, parcel.key)}
             onDragLeave={(event) => {
@@ -459,7 +467,7 @@ export function CustomerReturnPacking({
                 setOverBox(null);
             }}
             onDrop={(event) => drop(event, parcel.key)}
-            className={`relative min-w-0 rounded-xl border p-4 transition-colors sm:p-5 ${overBox === parcel.key ? "border-primary bg-primary/5 ring-2 ring-primary/30" : "bg-background"}`}
+            className={`relative min-w-0 rounded-xl border p-4 transition-colors sm:p-5 ${overBox === parcel.key ? "border-primary bg-primary/5 ring-2 ring-primary/30" : currentNotice?.createdParcelKey === parcel.key ? "border-primary bg-primary/5" : "bg-background"}`}
           >
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <h3
