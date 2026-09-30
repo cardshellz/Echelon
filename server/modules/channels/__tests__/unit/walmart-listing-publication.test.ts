@@ -655,8 +655,9 @@ describe("Walmart listing response validation", () => {
       .mockResolvedValueOnce({ data: { itemTaxonomy: [category] }, metadata })
       .mockResolvedValueOnce({ data: { itemTaxonomy: category }, metadata });
     const api = new WalmartListingApi({ requestWithMetadata });
-    expect(await api.taxonomy()).toEqual([type]);
-    expect(await api.taxonomy()).toEqual([type]);
+    const expected = { productTypes: [type], entries: [{ productType: type, path: [], description: null }] };
+    expect(await api.taxonomy()).toEqual(expected);
+    expect(await api.taxonomy()).toEqual(expected);
   });
   it("sends regular prices as exact USD cents and validates the acknowledged SKU", async () => {
     const requestWithMetadata = vi

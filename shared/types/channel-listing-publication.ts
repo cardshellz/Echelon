@@ -166,6 +166,52 @@ export const listingAccountSchema = z.object({
   revision: z.number().int().positive(),
 });
 export type ListingAccount = z.infer<typeof listingAccountSchema>;
+export const LISTING_TAXONOMY_LIMITS = {
+  productTypes: 20_000,
+  entries: 20_000,
+  pathDepth: 8,
+  nameLength: 200,
+  descriptionLength: 10_000,
+} as const;
+const listingTaxonomyNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(LISTING_TAXONOMY_LIMITS.nameLength);
+export const listingTaxonomyEntrySchema = z.object({
+  productType: listingTaxonomyNameSchema,
+  // Provider ancestors only; the selected product type is the separate leaf.
+  path: z.array(listingTaxonomyNameSchema).max(LISTING_TAXONOMY_LIMITS.pathDepth),
+  description: z
+    .string()
+    .trim()
+    .max(LISTING_TAXONOMY_LIMITS.descriptionLength)
+    .nullable()
+    .optional()
+    .transform((value) => value || null),
+});
+export type ListingTaxonomyEntry = z.infer<typeof listingTaxonomyEntrySchema>;
+export const listingTaxonomySchema = z
+  .object({
+    // Retained for older clients; a response without entries remains a valid flat taxonomy.
+    productTypes: z.array(listingTaxonomyNameSchema).max(LISTING_TAXONOMY_LIMITS.productTypes),
+    entries: z.array(listingTaxonomyEntrySchema).max(LISTING_TAXONOMY_LIMITS.entries).default([]),
+  })
+  .superRefine((value, context) => {
+    const types = new Set(value.productTypes);
+    if (types.size !== value.productTypes.length)
+      context.addIssue({ code: "custom", path: ["productTypes"], message: "Taxonomy product types must be unique" });
+    const paths = new Set<string>();
+    for (const [index, entry] of value.entries.entries()) {
+      if (!types.has(entry.productType))
+        context.addIssue({ code: "custom", path: ["entries", index, "productType"], message: "Taxonomy paths must refer to a listed product type" });
+      const key = JSON.stringify([entry.path, entry.productType]);
+      if (paths.has(key))
+        context.addIssue({ code: "custom", path: ["entries", index], message: "Taxonomy paths must be unique" });
+      paths.add(key);
+    }
+  });
+export type ListingTaxonomy = z.infer<typeof listingTaxonomySchema>;
 export const listingDraftSchema = z.object({
   channelId: publicationIdSchema,
   revision: z.number().int().nonnegative(),

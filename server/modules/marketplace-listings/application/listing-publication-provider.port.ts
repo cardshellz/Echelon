@@ -4,6 +4,7 @@ import type {
   ListingDraftItem,
   ListingIssue,
   ListingRequirements,
+  ListingTaxonomy,
 } from "@shared/types/channel-listing-publication";
 import type { ChannelCatalogItem } from "@shared/types/channel-catalog";
 import { ChannelProviderError } from "../../channels/channel-provider.error";
@@ -47,7 +48,7 @@ export interface ListingSubmissionObservation {
 }
 export interface ListingPublicationProvider {
   account(channelId: number): Promise<ListingAccount>;
-  taxonomy(account: ListingAccount): Promise<string[]>;
+  taxonomy(account: ListingAccount): Promise<ListingTaxonomy>;
   requirements(
     account: ListingAccount,
     productType: string,

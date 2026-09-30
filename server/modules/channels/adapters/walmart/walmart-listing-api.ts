@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import type { ListingTaxonomy } from "@shared/types/channel-listing-publication";
 import type { WalmartClient, WalmartResponseMetadata } from "./walmart-client";
 import { WalmartApiError } from "./walmart-client";
 import {
@@ -7,6 +8,7 @@ import {
   type ListingSetupZeroIntent,
 } from "../../../inventory-planning/application/listing-setup-zero-intent";
 import { priceForWalmart } from "./walmart-listing-schema";
+import { normalizeWalmartListingTaxonomy } from "./walmart-listing-taxonomy";
 
 // Pinned from Walmart's recommended US specifications on 2026-09-27.
 // https://developer.walmart.com/us-marketplace/docs/item-spec-versioning-and-diff-reporting
@@ -134,7 +136,7 @@ export class WalmartListingApi {
     private readonly client: Pick<WalmartClient, "requestWithMetadata">,
   ) {}
 
-  async taxonomy(): Promise<string[]> {
+  async taxonomy(): Promise<ListingTaxonomy> {
     const query = new URLSearchParams({
       feedType: "MP_ITEM",
       version: WALMART_LISTING_SPEC.MP_ITEM,
@@ -143,36 +145,7 @@ export class WalmartListingApi {
       "GET",
       `/v3/items/taxonomy?${query}`,
     );
-    const categorySchema = z.object({
-      productTypeGroup: z
-        .array(
-          z.object({
-            productType: z
-              .array(z.object({ productTypeName: productTypeSchema }))
-              .max(10_000),
-          }),
-        )
-        .max(10_000),
-    });
-    // Walmart's reference schema models one category; its official example is an array.
-    const result = parse(
-      z.object({
-        itemTaxonomy: z.union([
-          z.array(categorySchema).max(10_000),
-          categorySchema.transform((value) => [value]),
-        ]),
-      }),
-      response.data,
-    );
-    return [
-      ...new Set(
-        result.itemTaxonomy.flatMap((category) =>
-          category.productTypeGroup.flatMap((group) =>
-            group.productType.map((item) => item.productTypeName),
-          ),
-        ),
-      ),
-    ].sort();
+    return normalizeWalmartListingTaxonomy(response.data);
   }
 
   async requirements(

@@ -1,10 +1,10 @@
 import { useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { z } from "zod";
 import {
   listingDraftItemSchema,
   listingProviderFieldsSchema,
   listingRequirementsSchema,
+  listingTaxonomySchema,
   type ListingCatalogItem,
   type ListingDraftItem,
 } from "@shared/types/channel-listing-publication";
@@ -23,6 +23,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { publicationRequest } from "./api";
 import { dollarsToCents, errorMessage, money } from "./model";
 import { SchemaFields } from "./SchemaFields";
+import { ListingProductTypePicker } from "./ListingProductTypePicker";
+import { selectListingProductType } from "./product-type-model";
 
 interface Props {
   base: string;
@@ -56,11 +58,7 @@ export function ListingItemEditor({
   const taxonomy = useQuery({
     queryKey: [base, "taxonomy"],
     queryFn: () =>
-      publicationRequest(
-        "GET",
-        `${base}/taxonomy`,
-        z.object({ productTypes: z.array(z.string()) }),
-      ),
+      publicationRequest("GET", `${base}/taxonomy`, listingTaxonomySchema),
   });
   const requirements = useQuery({
     queryKey: [base, "requirements", draft.productType, draft.method],
@@ -124,7 +122,7 @@ export function ListingItemEditor({
           </DialogDescription>
         </DialogHeader>
         <fieldset disabled={!canEdit} className="space-y-5 min-w-0">
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="sm:max-w-sm">
             <div className="space-y-1.5">
               <Label htmlFor={`${prefix}-method`}>Listing method</Label>
               <select
@@ -146,39 +144,37 @@ export function ListingItemEditor({
                 </option>
               </select>
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor={`${prefix}-type`}>Walmart product type</Label>
-              <Input
-                id={`${prefix}-type`}
-                list={`${prefix}-types`}
-                value={draft.productType}
-                onChange={(event) => {
-                  setDraft((previous) => ({
-                    ...previous,
-                    productType: event.target.value,
-                    attributes: {},
-                  }));
-                  setAdvanced("{}");
-                }}
-                placeholder="Search Walmart product types"
-              />
-              <datalist id={`${prefix}-types`}>
-                {taxonomy.data?.productTypes.map((type) => (
-                  <option key={type} value={type} />
-                ))}
-              </datalist>
-            </div>
           </div>
+          <ListingProductTypePicker
+            label="Walmart product type"
+            value={draft.productType}
+            taxonomy={taxonomy.data}
+            loading={taxonomy.isFetching}
+            error={taxonomy.error ? errorMessage(taxonomy.error) : undefined}
+            disabled={!canEdit}
+            onRetry={() => void taxonomy.refetch()}
+            onSelect={(productType) => {
+              if (!canEdit || !taxonomy.data) return;
+              try {
+                const next = selectListingProductType(
+                  draft,
+                  productType,
+                  taxonomy.data,
+                );
+                if (next !== draft) {
+                  setDraft(next);
+                  setAdvanced("{}");
+                }
+              } catch (failure) {
+                setError(errorMessage(failure));
+              }
+            }}
+          />
           <p className="text-xs text-muted-foreground">
             Changing the listing method or product type resets its provider
             attributes. Walmart validates catalog matches using the exact
             product identifier.
           </p>
-          {taxonomy.error && (
-            <p role="alert" className="text-sm text-destructive">
-              Unable to load product types: {errorMessage(taxonomy.error)}
-            </p>
-          )}
           <div className="grid gap-4 sm:grid-cols-[140px_1fr]">
             <div className="space-y-1.5">
               <Label htmlFor={`${prefix}-identifier-type`}>
