@@ -98,6 +98,12 @@ export const canonicalAvailabilityClaimReplacementCommandSchema = z.object({
   idempotencyKey: nonblank(120),
   actor: nonblank(100),
   reason: nonblank(1000),
+  /**
+   * Re-plan an unchanged-demand claim that was planned short, using supply that
+   * arrived after it was claimed. Commits only when no line loses planned
+   * quantity and total shortfall strictly drops; otherwise nothing changes.
+   */
+  refreshSupply: z.literal(true).optional(),
 }).strict();
 
 export const canonicalAvailabilityClaimOperationExecutionCommandSchema = z.object({

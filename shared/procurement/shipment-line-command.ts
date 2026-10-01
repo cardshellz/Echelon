@@ -5,6 +5,11 @@ export const SHIPMENT_LINE_IMPORT_LIMIT = 500;
 export const shipmentLineResourceIdSchema = z.number().int().positive().max(SHIPMENT_LINE_INTEGER_MAX);
 export const shipmentLineVersionSchema = z.string().regex(/^[0-9a-f]{64}$/, "Expected version must be a lowercase SHA-256 token");
 
+// Scales of procurement.inbound_shipment_lines: weight_kg numeric(10,3) and
+// length_cm / width_cm / height_cm numeric(8,2).
+export const SHIPMENT_LINE_WEIGHT_KG_SCALE = 3;
+export const SHIPMENT_LINE_DIMENSION_CM_SCALE = 2;
+
 // Decimal strings retain the entered precision. Match the actual PostgreSQL
 // numeric columns rather than allowing rounding or overflow at persistence.
 function dimension(integerDigits: number, scale: number) {
@@ -15,10 +20,10 @@ function dimension(integerDigits: number, scale: number) {
 export const shipmentLineEditableShape = {
   qtyShipped: shipmentLineResourceIdSchema,
   cartonCount: shipmentLineResourceIdSchema.nullable(),
-  weightKg: dimension(7, 3),
-  lengthCm: dimension(6, 2),
-  widthCm: dimension(6, 2),
-  heightCm: dimension(6, 2),
+  weightKg: dimension(7, SHIPMENT_LINE_WEIGHT_KG_SCALE),
+  lengthCm: dimension(6, SHIPMENT_LINE_DIMENSION_CM_SCALE),
+  widthCm: dimension(6, SHIPMENT_LINE_DIMENSION_CM_SCALE),
+  heightCm: dimension(6, SHIPMENT_LINE_DIMENSION_CM_SCALE),
   notes: z.string().max(10_000).nullable(),
 };
 export const SHIPMENT_LINE_EDITABLE_FIELDS = Object.freeze(Object.keys(shipmentLineEditableShape)) as readonly (keyof typeof shipmentLineEditableShape)[];

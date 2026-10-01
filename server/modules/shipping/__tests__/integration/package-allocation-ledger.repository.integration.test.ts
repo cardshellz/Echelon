@@ -1846,8 +1846,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     }
     await seedCanonicalRequestForSource(pool, source);
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    let testTime = new Date('2026-10-01T12:00:00Z');
-    const clock = { now: () => new Date(testTime) };
+    const clock = { now: () => new Date('2099-10-01T12:00:00Z') };
     const workflow = createPackageAllocationLabelCommercialWorkflow({ pool, clock, logger });
     let rollback = false;
     const handler = new PackageAllocationLabelCommercialFulfillmentService({ enabled: true, logger,
@@ -1917,13 +1916,6 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
           createShippingFulfillment: async () => { throw new Error('Replacement must consult the amendment adapter'); }, replaceShippingFulfillmentTracking: amend,
         } }),
       } });
-      // Command admission stamps next_attempt_at with PostgreSQL now(), so the fixed
-      // date above eventually precedes it and the worker would find nothing due.
-      // Advance the injected clock to the persisted schedule, rounding past
-      // PostgreSQL's sub-millisecond precision, as the eBay combined relabel test does.
-      const { rows: [due] } = await pool.query<{ due_at: Date | null }>(
-        "SELECT MAX(next_attempt_at) + INTERVAL '1 millisecond' AS due_at FROM oms.channel_fulfillment_pushes");
-      if (due.due_at && due.due_at > testTime) testTime = due.due_at;
       const worker = createChannelFulfillmentAuthorityService({ repository: createChannelFulfillmentAuthorityRepository(getTestDb()),
         providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor(push), projector: createChannelFulfillmentProjector(getTestDb()), clock, logger });
       expect(await worker.runDueBatch(), JSON.stringify(logger.error.mock.calls)).toMatchObject({ succeeded: 2, retryScheduled: 0, reviewRequired: 0 });
