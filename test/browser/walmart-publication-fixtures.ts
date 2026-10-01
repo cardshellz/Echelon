@@ -52,6 +52,8 @@ export interface PublicationMock {
     entries?: { productType: string; path: string[]; description: string | null }[];
   };
   taxonomyError: boolean;
+  requirementsSchema: Record<string, unknown> | null;
+  requirementsError: boolean;
 }
 export function createPublicationMock(): PublicationMock {
   return {
@@ -79,6 +81,8 @@ export function createPublicationMock(): PublicationMock {
       ],
     },
     taxonomyError: false,
+    requirementsSchema: null,
+    requirementsError: false,
   };
 }
 
@@ -138,12 +142,12 @@ export async function handlePublicationRequest(
         ? reply({ message: "Product types temporarily unavailable" }, 503)
         : reply(state.taxonomy);
     if (path.endsWith("/requirements"))
-      return reply({
+      return state.requirementsError ? reply({ message: "Requirements temporarily unavailable" }, 503) : reply({
         productType: "Trading Card Accessories",
         method: url.searchParams.get("method") ?? "create",
         version: "5.0",
         schemaHash: "b".repeat(64),
-        schema: {
+        schema: state.requirementsSchema ?? {
           type: "object",
           required: ["Orderable", "Visible"],
           properties: {
