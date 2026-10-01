@@ -59,30 +59,217 @@ export function itemSections(
   };
 }
 
+const EDITOR_SCHEMA_LIMITS = { depth: 32, nodes: 30_000 } as const;
+const UNSAFE_SCHEMA_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
+/** Inline bounded local definitions into the editor document. The original
+ * provider document remains the authority used for final payload validation. */
+function localEditorSchema(
+  value: unknown,
+  root: JsonObject,
+  budget: { nodes: number },
+  references = new Set<string>(),
+  depth = 0,
+): unknown {
+  if (
+    ++budget.nodes > EDITOR_SCHEMA_LIMITS.nodes ||
+    depth > EDITOR_SCHEMA_LIMITS.depth
+  )
+    throw new WalmartApiError(
+      "WALMART_LISTING_SCHEMA_INVALID",
+      "Walmart listing requirements exceed supported form limits",
+      false,
+    );
+  if (Array.isArray(value))
+    return value.map((child) =>
+      localEditorSchema(child, root, budget, references, depth + 1),
+    );
+  if (value === null || typeof value !== "object") return value;
+  const source = jsonObject(value);
+  const result: JsonObject = {};
+  for (const [key, child] of Object.entries(source)) {
+    if (UNSAFE_SCHEMA_KEYS.has(key))
+      throw new WalmartApiError(
+        "WALMART_LISTING_SCHEMA_INVALID",
+        "Walmart listing requirements contain an unsupported field",
+        false,
+      );
+    // Definitions are copied only at the reference site, never as a second
+    // unrestricted copy of the entire feed schema in the editable document.
+    if (["$ref", "$defs", "definitions", "$id", "$schema"].includes(key))
+      continue;
+    result[key] = localEditorSchema(child, root, budget, references, depth + 1);
+  }
+  if (source.$ref === undefined) return result;
+  const ref = source.$ref;
+  if (typeof ref !== "string" || !ref.startsWith("#/") || references.has(ref))
+    throw new WalmartApiError(
+      "WALMART_LISTING_SCHEMA_INVALID",
+      "Walmart listing requirements contain an unsupported reference",
+      false,
+    );
+  let target: unknown = root;
+  for (const encoded of ref.slice(2).split("/")) {
+    const key = encoded.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (
+      UNSAFE_SCHEMA_KEYS.has(key) ||
+      !target ||
+      typeof target !== "object" ||
+      !Object.prototype.hasOwnProperty.call(target, key)
+    )
+      throw new WalmartApiError(
+        "WALMART_LISTING_SCHEMA_INVALID",
+        "Walmart listing requirements contain an unresolved reference",
+        false,
+      );
+    target = (target as JsonObject)[key];
+  }
+  const resolved = localEditorSchema(
+    target,
+    root,
+    budget,
+    new Set(references).add(ref),
+    depth + 1,
+  );
+  return Object.keys(result).length ? { allOf: [resolved, result] } : resolved;
+}
+
+/** A conditional is retained whole, or omitted whole. Filtering only its
+ * predicate could turn a hidden inventory/identity condition into true. */
+function usesOnlyWritableFields(
+  value: unknown,
+  allowed: ReadonlySet<string>,
+): boolean {
+  if (typeof value === "boolean") return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const node = value as JsonObject;
+  if (
+    node.properties &&
+    Object.keys(jsonObject(node.properties)).some((key) => !allowed.has(key))
+  )
+    return false;
+  if (
+    node.required &&
+    (!Array.isArray(node.required) ||
+      node.required.some((key) => typeof key !== "string" || !allowed.has(key)))
+  )
+    return false;
+  // These object-wide constructs cannot be projected onto a subset of fields.
+  if (
+    [
+      "patternProperties",
+      "additionalProperties",
+      "propertyNames",
+      "minProperties",
+      "maxProperties",
+      "dependencies",
+      "dependentRequired",
+      "dependentSchemas",
+      "const",
+      "enum",
+    ].some((key) => key in node)
+  )
+    return false;
+  for (const key of ["allOf", "anyOf", "oneOf"]) {
+    if (
+      node[key] !== undefined &&
+      (!Array.isArray(node[key]) ||
+        !(node[key] as unknown[]).every((child) =>
+          usesOnlyWritableFields(child, allowed),
+        ))
+    )
+      return false;
+  }
+  return ["if", "then", "else", "not"].every(
+    (key) =>
+      node[key] === undefined || usesOnlyWritableFields(node[key], allowed),
+  );
+}
+
+function conditionFieldNames(value: unknown): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const node = value as JsonObject;
+  const names = node.properties ? Object.keys(jsonObject(node.properties)) : [];
+  if (Array.isArray(node.required))
+    names.push(
+      ...node.required.filter(
+        (name): name is string => typeof name === "string",
+      ),
+    );
+  for (const key of ["if", "then", "else", "not"])
+    names.push(...conditionFieldNames(node[key]));
+  for (const key of ["allOf", "anyOf", "oneOf"])
+    if (Array.isArray(node[key]))
+      names.push(...(node[key] as unknown[]).flatMap(conditionFieldNames));
+  return names;
+}
+
 function writableSection(
   schema: JsonObject,
   hidden: ReadonlySet<string>,
   title: string,
+  root: JsonObject,
+  budget: { nodes: number },
 ): JsonObject {
   const properties = Object.fromEntries(
-    Object.entries(jsonObject(schema.properties)).filter(
-      ([key]) => !hidden.has(key),
-    ),
+    Object.entries(jsonObject(schema.properties))
+      .filter(([key]) => !hidden.has(key) && !UNSAFE_SCHEMA_KEYS.has(key))
+      .map(([key, value]) => [key, localEditorSchema(value, root, budget)]),
   );
   const required = Array.isArray(schema.required)
     ? schema.required.filter(
         (key) => typeof key === "string" && !hidden.has(key),
       )
     : [];
-  // Conditional requirements remain enforced by the original full feed schema.
-  // The editor gets only writable fields, never an inventory/identity/price form.
-  return {
+  const result: JsonObject = {
     type: "object",
     title,
+    // The provider assembles these wrappers from canonical content even when
+    // the user has no writable attributes to supply for a section.
+    "x-editor-section": true,
     properties,
     required,
     additionalProperties: false,
   };
+  const allowed = new Set(Object.keys(properties));
+  const allOf = Array.isArray(schema.allOf) ? schema.allOf : [];
+  const conditions =
+    schema.if === undefined
+      ? allOf
+      : [
+          ...allOf,
+          {
+            if: schema.if,
+            ...(schema.then === undefined ? {} : { then: schema.then }),
+            ...(schema.else === undefined ? {} : { else: schema.else }),
+          },
+        ];
+  const resolvedConditions = conditions.map((condition) =>
+    localEditorSchema(condition, root, budget),
+  );
+  const projected = resolvedConditions.filter((condition) =>
+    usesOnlyWritableFields(condition, allowed),
+  );
+  if (projected.length) result.allOf = projected;
+  if (
+    [
+      "anyOf",
+      "oneOf",
+      "dependencies",
+      "dependentRequired",
+      "dependentSchemas",
+    ].some((key) => schema[key] !== undefined)
+  )
+    result["x-editor-review-required"] = true;
+  if (
+    resolvedConditions.some((condition) => {
+      if (usesOnlyWritableFields(condition, allowed)) return false;
+      const fields = conditionFieldNames(condition);
+      return !fields.length || !fields.every((name) => hidden.has(name));
+    })
+  )
+    result["x-editor-review-required"] = true;
+  return result;
 }
 
 export function editorSchema(
@@ -95,6 +282,7 @@ export function editorSchema(
     ...PROTECTED_ORDERABLE_FIELDS,
     ...(feedType === "MP_ITEM_MATCH" ? CANONICAL_VISIBLE_FIELDS : []),
   ]);
+  const budget = { nodes: 0 };
   return {
     type: "object",
     additionalProperties: false,
@@ -103,6 +291,8 @@ export function editorSchema(
         sections.orderable,
         hidden,
         "Shipping and offer details",
+        schema,
+        budget,
       ),
       ...(sections.visible
         ? {
@@ -110,6 +300,8 @@ export function editorSchema(
               sections.visible,
               CANONICAL_VISIBLE_FIELDS,
               "Product attributes",
+              schema,
+              budget,
             ),
           }
         : {}),
