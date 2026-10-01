@@ -34,7 +34,7 @@ import { ListingItemEditor } from "./ListingItemEditor";
 import { ListingPricingRules } from "./ListingPricingRules";
 import { ListingReviewDialog } from "./ListingReviewDialog";
 import { ListingBulkEditor } from "./ListingBulkEditor";
-import { applyBulkEdit, type BulkEditPatch } from "./bulk-edit-model";
+import { applyBulkEditBatch, type BulkEditCommand } from "./bulk-edit-batch";
 
 type Workspace = z.infer<typeof listingWorkspaceSchema>;
 interface Props {
@@ -157,7 +157,7 @@ export function ChannelListingPublicationWorkspace({
     if (items.length === 0) return;
     setBulkItems(structuredClone(items));
   }
-  function applyBulkPatch(patch: BulkEditPatch) {
+  function applyBulkPatch(command: BulkEditCommand) {
     const latest = currentDraft.current;
     if (!canEdit || busy !== null || !latest || !bulkItems)
       throw new Error(
@@ -165,7 +165,9 @@ export function ChannelListingPublicationWorkspace({
       );
     // Recheck selected snapshots against the latest draft after background
     // refreshes. Unselected edits survive; changed selected items require reopening.
-    const next = applyBulkEdit(latest.items, bulkItems, patch, { canEdit });
+    const next = applyBulkEditBatch(latest.items, bulkItems, command, {
+      canEdit,
+    });
     changeItems(next);
     setNotice(
       `Updated ${bulkItems.length} draft items. Save the draft when you are ready.`,

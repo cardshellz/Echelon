@@ -5,6 +5,7 @@ import {
   listingOperationSchema,
   listingReviewSchema,
   type ListingDraft,
+  type ListingCatalogItem,
   type ListingDraftItem,
   type ListingOperation,
   type ListingPriceRule,
@@ -39,6 +40,7 @@ export const publicationCatalog = [1, 26].map((id) =>
 
 export interface PublicationMock {
   draft: ListingDraft;
+  catalogItems: ListingCatalogItem[];
   pricingRule: ListingPriceRule | null;
   operations: ListingOperation[];
   blockedReview: boolean;
@@ -57,6 +59,7 @@ export interface PublicationMock {
 }
 export function createPublicationMock(): PublicationMock {
   return {
+    catalogItems: structuredClone(publicationCatalog),
     draft: listingDraftSchema.parse({
       channelId: 77,
       revision: 0,
@@ -126,10 +129,10 @@ export async function handlePublicationRequest(
         .map(Number);
       const offset = Number(url.searchParams.get("offset") ?? 0);
       const items = requested
-        ? publicationCatalog.filter((item) =>
+        ? state.catalogItems.filter((item) =>
             requested.includes(item.variantId),
           )
-        : [publicationCatalog[offset > 0 ? 1 : 0]];
+        : [state.catalogItems[offset > 0 ? 1 : 0]];
       return reply({
         items,
         total: requested ? items.length : 26,
@@ -211,7 +214,7 @@ export async function handlePublicationRequest(
           revision: 1,
         },
         items: state.draft.items.map((item) => {
-          const catalog = publicationCatalog.find(
+          const catalog = state.catalogItems.find(
             (candidate) => candidate.variantId === item.variantId,
           )!;
           return {
@@ -263,7 +266,7 @@ export async function handlePublicationRequest(
       submissionId: "feed-1",
       items: state.draft.items.map((item) => ({
         variantId: item.variantId,
-        sku: publicationCatalog.find(
+        sku: state.catalogItems.find(
           (candidate) => candidate.variantId === item.variantId,
         )!.sku,
         priceCents: item.priceOverrideCents ?? 499,

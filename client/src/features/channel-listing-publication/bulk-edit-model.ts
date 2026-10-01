@@ -250,7 +250,7 @@ function changedFields(
     result.push("attributes");
   return result;
 }
-function compute(
+export function prepareBulkEdit(
   items: readonly ListingDraftItem[],
   input: BulkEditPatch,
 ): { next: ListingDraftItem[]; preview: BulkEditPreview } {
@@ -295,14 +295,13 @@ export function previewBulkEdit(
   items: readonly ListingDraftItem[],
   patch: BulkEditPatch,
 ): BulkEditPreview {
-  return compute(items, patch).preview;
+  return prepareBulkEdit(items, patch).preview;
 }
 
 /** Apply to current state atomically; newer unselected edits are retained and stale selections fail closed. */
-export function applyBulkEdit(
+export function validateBulkSelection(
   currentItems: readonly ListingDraftItem[],
   selectedSnapshot: readonly ListingDraftItem[],
-  patch: BulkEditPatch,
   options: { canEdit: boolean } = { canEdit: true },
 ): ListingDraftItem[] {
   if (!options.canEdit)
@@ -328,7 +327,21 @@ export function applyBulkEdit(
     throw new Error(
       "A selected draft changed while bulk editing was open. Close bulk editing and review the latest drafts.",
     );
-  const result = compute(selectedCurrent, patch);
+  return selectedCurrent;
+}
+
+export function applyBulkEdit(
+  currentItems: readonly ListingDraftItem[],
+  selectedSnapshot: readonly ListingDraftItem[],
+  patch: BulkEditPatch,
+  options: { canEdit: boolean } = { canEdit: true },
+): ListingDraftItem[] {
+  const selectedCurrent = validateBulkSelection(
+    currentItems,
+    selectedSnapshot,
+    options,
+  );
+  const result = prepareBulkEdit(selectedCurrent, patch);
   if (!result.preview.changedCount)
     throw new Error("Choose at least one change to apply.");
   const updated = new Map(result.next.map((item) => [item.variantId, item]));
@@ -356,6 +369,39 @@ function leafChanges(change: BulkAttributeChange): BulkAttributeChange[] {
   );
 }
 
+function assertNoRemovedAncestor(
+  changes: readonly BulkAttributeChange[],
+  path: readonly string[],
+): void {
+  const removed = changes.find(
+    (change) =>
+      change.action === "remove" &&
+      change.path.length < path.length &&
+      change.path.every((segment, index) => segment === path[index]),
+  );
+  // Dropping a parent removal to set/undo one leaf would restore unrelated
+  // original siblings. Without the original item here, reject that ambiguity.
+  if (removed)
+    throw new Error(
+      `Undo the pending clear of ${removed.path.join(" › ")} before editing a field inside that group.`,
+    );
+}
+
+/** Undo only a pending field edit, retaining sibling edits in a changed object. */
+export function omitBulkAttributeChange(
+  changes: readonly BulkAttributeChange[],
+  path: readonly string[],
+): BulkAttributeChange[] {
+  bulkEditPatchSchema.parse({
+    attributeChanges: [{ path: [...path], action: "remove" }],
+  });
+  const validated = bulkEditPatchSchema.parse({ attributeChanges: changes });
+  assertNoRemovedAncestor(validated.attributeChanges ?? [], path);
+  return (validated.attributeChanges ?? [])
+    .flatMap(leafChanges)
+    .filter((change) => !pathsOverlap(change.path, path));
+}
+
 /** Preserve sibling edits when an object value is subsequently edited one leaf at a time. */
 export function updateBulkAttribute(
   changes: readonly BulkAttributeChange[],
@@ -372,6 +418,7 @@ export function updateBulkAttribute(
       : { path: [...path], action: "set" as const, value };
   const validatedNext = bulkEditPatchSchema.parse({ attributeChanges: [next] })
     .attributeChanges![0];
+  assertNoRemovedAncestor(previous, path);
   const result = [
     ...previous
       .flatMap(leafChanges)
