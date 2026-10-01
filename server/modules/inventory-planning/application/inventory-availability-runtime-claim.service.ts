@@ -94,6 +94,54 @@ export class InventoryAvailabilityRuntimeClaimError extends Error {
   }
 }
 
+/** Expected outcomes of a refresh attempt; the claim is left exactly as it was. */
+export const CLAIM_SUPPLY_REFRESH_DECLINED_CODES: ReadonlySet<string> = new Set([
+  "CLAIM_SUPPLY_REFRESH_NOT_SHORT",
+  "CLAIM_SUPPLY_REFRESH_NO_IMPROVEMENT",
+  "CLAIM_SUPPLY_REFRESH_LINE_REGRESSION",
+  "CLAIM_SUPPLY_REFRESH_PICK_IN_PROGRESS",
+  "CLAIM_SUPPLY_REFRESH_DEMAND_CHANGED",
+  "REPLACEMENT_ORDER_NOT_CLAIMABLE",
+  "ACTIVE_CLAIM_CHANGED",
+]);
+
+export type ClaimSupplyRefreshOutcome =
+  | { outcome: "refreshed"; claimId: string; idempotentReplay: boolean }
+  | { outcome: "declined"; code: string; message: string };
+
+/**
+ * Re-reserve a short claim from stock that arrived after it was planned.
+ * Keyed by the claim being replaced, so a retry of the same refresh replays and
+ * a declined attempt (rolled back, nothing persisted) may be retried later.
+ * Any other error is unexpected and propagates to the caller.
+ */
+export async function refreshCanonicalClaimSupply(
+  context: InventoryAvailabilityRuntimeClaimContext,
+  input: { orderId: number; claimId: string; actor: string; reason: string },
+): Promise<ClaimSupplyRefreshOutcome> {
+  try {
+    const result = await context.canonical.replaceOrderClaim({
+      orderId: input.orderId,
+      expectedClaimId: input.claimId,
+      idempotencyKey: commandKey("refresh-claim-supply", { orderId: input.orderId, claimId: input.claimId }),
+      actor: input.actor,
+      reason: input.reason,
+      refreshSupply: true,
+    });
+    return {
+      outcome: "refreshed",
+      claimId: result.replacementClaim.claimId,
+      idempotentReplay: result.idempotentReplay,
+    };
+  } catch (error) {
+    const code = structuredErrorCode(error);
+    if (code !== null && CLAIM_SUPPLY_REFRESH_DECLINED_CODES.has(code)) {
+      return { outcome: "declined", code, message: error instanceof Error ? error.message : code };
+    }
+    throw error;
+  }
+}
+
 /**
  * The single operational order-reservation boundary.
  *
@@ -361,6 +409,27 @@ export class AuthorityAwareReservationService implements ReservationServiceContr
       } catch (error) {
         throw demandReconciliationFailed(context, orderId, sourceEventId, error);
       }
+    });
+  }
+
+  /** Re-reserve an order's short claim from stock that has since arrived. */
+  async refreshShortClaimSupply(orderId: number, userId?: string): Promise<ClaimSupplyRefreshOutcome> {
+    const validatedOrderId = positiveInteger(orderId, "orderId");
+    return this.executor.execute(async (context) => {
+      if (context.authority !== "canonical") {
+        return { outcome: "declined", code: "CANONICAL_AUTHORITY_NOT_ACTIVE",
+          message: "Supply refresh applies only to canonical claims." };
+      }
+      const cursor = await context.getLatestClaim(validatedOrderId);
+      if (!cursor || cursor.status !== "active") {
+        return { outcome: "declined", code: "ACTIVE_CLAIM_NOT_FOUND", message: "The order has no active claim." };
+      }
+      return refreshCanonicalClaimSupply(context, {
+        orderId: validatedOrderId,
+        claimId: cursor.claimId,
+        actor: canonicalActor(userId),
+        reason: "Re-reserve short order from newly available stock",
+      });
     });
   }
 

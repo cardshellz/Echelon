@@ -8,6 +8,57 @@ import {
   type InventoryAvailabilityRuntimeClaimExecutor,
 } from "../../application/inventory-availability-runtime-claim.service";
 
+describe("AuthorityAwareReservationService.refreshShortClaimSupply", () => {
+  const activeClaim = vi.fn(async () => ({ claimId: "70", revision: 3, status: "active" as const, plan: {} as any }));
+
+  it("replaces the active claim with a supply refresh keyed by that claim", async () => {
+    const replaceOrderClaim = vi.fn(async () => ({ replacementClaim: { claimId: "71" }, idempotentReplay: false }));
+    const service = new AuthorityAwareReservationService(executor({
+      authority: "canonical", canonical: { replaceOrderClaim } as any, getLatestClaim: activeClaim,
+    }));
+    await expect(service.refreshShortClaimSupply(42)).resolves.toEqual({
+      outcome: "refreshed", claimId: "71", idempotentReplay: false,
+    });
+    expect(replaceOrderClaim).toHaveBeenCalledWith(expect.objectContaining({
+      orderId: 42, expectedClaimId: "70", refreshSupply: true,
+      idempotencyKey: expect.stringMatching(/^inventory-runtime:refresh-claim-supply:[0-9a-f]{64}$/),
+    }));
+  });
+
+  it("uses the same key for the same claim so a retried refresh replays", async () => {
+    const replaceOrderClaim = vi.fn(async () => ({ replacementClaim: { claimId: "71" }, idempotentReplay: true }));
+    const service = new AuthorityAwareReservationService(executor({
+      authority: "canonical", canonical: { replaceOrderClaim } as any, getLatestClaim: activeClaim,
+    }));
+    await service.refreshShortClaimSupply(42);
+    await service.refreshShortClaimSupply(42);
+    const calls = replaceOrderClaim.mock.calls as unknown as Array<[{ idempotencyKey: string }]>;
+    expect(calls[0][0].idempotencyKey).toBe(calls[1][0].idempotencyKey);
+  });
+
+  it("returns expected repository refusals as declines and rethrows anything else", async () => {
+    const declined = vi.fn(async () => { throw Object.assign(new Error("none"), { code: "CLAIM_SUPPLY_REFRESH_NO_IMPROVEMENT" }); });
+    await expect(new AuthorityAwareReservationService(executor({
+      authority: "canonical", canonical: { replaceOrderClaim: declined } as any, getLatestClaim: activeClaim,
+    })).refreshShortClaimSupply(42)).resolves.toMatchObject({ outcome: "declined", code: "CLAIM_SUPPLY_REFRESH_NO_IMPROVEMENT" });
+
+    const broken = vi.fn(async () => { throw Object.assign(new Error("db"), { code: "CLAIM_REPLACEMENT_RETRY_EXHAUSTED" }); });
+    await expect(new AuthorityAwareReservationService(executor({
+      authority: "canonical", canonical: { replaceOrderClaim: broken } as any, getLatestClaim: activeClaim,
+    })).refreshShortClaimSupply(42)).rejects.toMatchObject({ code: "CLAIM_REPLACEMENT_RETRY_EXHAUSTED" });
+  });
+
+  it("declines without touching inventory under legacy authority or with no active claim", async () => {
+    const replaceOrderClaim = vi.fn();
+    await expect(new AuthorityAwareReservationService(executor({ authority: "legacy" }))
+      .refreshShortClaimSupply(42)).resolves.toMatchObject({ outcome: "declined", code: "CANONICAL_AUTHORITY_NOT_ACTIVE" });
+    await expect(new AuthorityAwareReservationService(executor({
+      authority: "canonical", canonical: { replaceOrderClaim } as any,
+    })).refreshShortClaimSupply(42)).resolves.toMatchObject({ outcome: "declined", code: "ACTIVE_CLAIM_NOT_FOUND" });
+    expect(replaceOrderClaim).not.toHaveBeenCalled();
+  });
+});
+
 describe("AuthorityAwareReservationService", () => {
   it("delegates reservation and demand reconciliation unchanged while legacy owns authority", async () => {
     const legacy = fakeLegacy();
