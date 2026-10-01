@@ -14,6 +14,7 @@ import { COGSService } from "../inventory/cogs.service";
  */
 
 import { createShipmentLineMutationOwner, assertShipmentLineHistoryMutable } from "./shipment-line-mutations.service";
+import { catalogDimensionsForShipmentLine } from "./shipment-line-catalog-dimensions";
 import { versionShipmentLine } from "./shipment-line-version";
 import type { ShipmentPurchaseOrderReference } from "@shared/procurement/shipment-purchase-orders";
 import type {
@@ -737,15 +738,15 @@ export function createShipmentTrackingService(
     const vendorProduct = vendorId
       ? (await storage.getVendorProducts({ vendorId, productVariantId }, executor))[0] : undefined;
     const variant = await storage.getProductVariantById(productVariantId, executor);
-    const convert = (value: unknown, divisor: number): string | null => value == null
-      ? null : new Decimal(String(value)).div(divisor).toFixed();
+    const catalog = catalogDimensionsForShipmentLine(variant);
     // Resolve each field independently so partial supplier evidence does not
     // discard available catalog dimensions or overwrite entered line values.
+    // Supplier values are already stored at the line's scale.
     return {
-      weightKg: vendorProduct?.weightKg ?? convert(variant?.weightGrams, 1000),
-      lengthCm: vendorProduct?.lengthCm ?? convert(variant?.lengthMm, 10),
-      widthCm: vendorProduct?.widthCm ?? convert(variant?.widthMm, 10),
-      heightCm: vendorProduct?.heightCm ?? convert(variant?.heightMm, 10),
+      weightKg: vendorProduct?.weightKg ?? catalog.weightKg,
+      lengthCm: vendorProduct?.lengthCm ?? catalog.lengthCm,
+      widthCm: vendorProduct?.widthCm ?? catalog.widthCm,
+      heightCm: vendorProduct?.heightCm ?? catalog.heightCm,
     };
   }
 
