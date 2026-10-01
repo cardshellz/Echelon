@@ -40,6 +40,7 @@ const fixture = `CREATE SCHEMA wms;
   ${readFixture(schema.wmsOrderItems)}
   ${readFixture(schema.pickingLogs)}
   CREATE INDEX order_items_order_id ON wms.order_items(order_id);
+  CREATE INDEX idx_order_items_held_order_id ON wms.order_items(order_id) WHERE on_hold = true;
   CREATE INDEX picking_logs_order_id ON wms.picking_logs(order_id);
   CREATE INDEX orders_created_id ON wms.orders(created_at DESC, id DESC);
   CREATE TABLE public.orders (id integer);
@@ -79,11 +80,31 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
     return order;
   }
 
+  // An order whose only line carries the given hold state; the line rides along
+  // so the in-memory policy sees the same evidence as the SQL predicate.
+  async function seedWithLine(
+    status: string,
+    line: Partial<typeof schema.wmsOrderItems.$inferInsert>,
+    overrides: Partial<typeof schema.wmsOrders.$inferInsert> = {},
+  ) {
+    const [order] = await orm.insert(schema.wmsOrders).values({
+      orderNumber: "ORDER", customerName: "Test customer", warehouseStatus: status,
+      channelId: 1, warehouseId: 1, source: "oms", ...overrides,
+    }).returning();
+    const items = await orm.insert(schema.wmsOrderItems).values({
+      orderId: order.id, name: "Sleeves", sku: "SKU-1", quantity: 3, ...line,
+    }).returning();
+    return { ...order, items };
+  }
+
   it("matches every operational bucket including held/unknown statuses and scoped counts", async () => {
     const rows = [];
     for (const status of ["ready", "in_progress", "partially_shipped", "completed", "ready_to_ship", "exception", "on_hold", "shipped", "cancelled", "unknown", " READY "]) {
       rows.push(await seed(status));
       rows.push(await seed(status, { onHold: 1 }));
+      rows.push(await seedWithLine(status, { onHold: true }));
+      rows.push(await seedWithLine(status, { onHold: true, status: "cancelled" }));
+      rows.push(await seedWithLine(status, { onHold: true, quantity: 0 }));
     }
     await seed("ready", { channelId: 2 });
     await seed("ready", { warehouseId: 2 });
@@ -95,6 +116,26 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
       expect(page.orders.length).toBeLessThanOrEqual(2);
       for (const order of page.orders) expect(orderMatchesBucket(order, bucket)).toBe(true);
     }
+  });
+
+  it("files open orders with a held line under hold, but never closed lines or shipped/cancelled orders", async () => {
+    const readyHeld = await seedWithLine("ready", { onHold: true });
+    const partlyShippedHeld = await seedWithLine("partially_shipped", { onHold: true });
+    const orderHeld = await seed("in_progress", { onHold: 1 });
+    await seedWithLine("ready", { onHold: true, status: "cancelled" });
+    await seedWithLine("ready", { onHold: true, status: "short" });
+    await seedWithLine("shipped", { onHold: true });
+    await seedWithLine("cancelled", { onHold: true }, { onHold: 1 });
+
+    const page = await repository.page({ bucket: "hold" });
+
+    expect(page.orders.map(order => order.id).sort((a, b) => a - b))
+      .toEqual([readyHeld.id, partlyShippedHeld.id, orderHeld.id].sort((a, b) => a - b));
+    expect(page.buckets).toMatchObject({ hold: 3, needsPick: 2, shipped: 1, cancelled: 1, issues: 0, all: 7 });
+    // The line state the Orders page renders comes back with the page.
+    expect(page.orders.find(order => order.id === readyHeld.id)?.items).toEqual([
+      expect.objectContaining({ onHold: true, status: "pending", quantity: 3 }),
+    ]);
   });
 
   it("searches all matching orders before pagination, with literal wildcard and injection characters", async () => {
@@ -161,7 +202,9 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
       expect(page.orders).toHaveLength(100);
       expect(page.orders.flatMap(order => order.items)).toHaveLength(300);
     }
-    const itemReads = queries.filter(entry => entry.query.startsWith("select") && entry.query.includes('from "wms"."order_items"'));
+    // Line hydration is the only query whose own FROM is order_items; the
+    // bucket predicates mention order_items only inside an EXISTS subquery.
+    const itemReads = queries.filter(entry => /^select [^()]* from "wms"\."order_items" where /.test(entry.query));
     expect(itemReads).toHaveLength(8);
     for (const entry of itemReads) expect(entry.parameters).toHaveLength(100);
     const headerReads = queries.filter(entry => entry.query.startsWith('select "id"') && entry.query.includes('from "wms"."orders"'));

@@ -16,6 +16,8 @@ import {
 } from "../oms/webhook-retry.worker";
 import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
 import { reserveAndPushAfterHoldRelease } from "./release-hold-push";
+import { logHoldRelease } from "./hold-release-log";
+import { WMS_HOLD_RELEASE_ERROR_CODES, holdReleaseRefusalMessage, parseWmsRecordId } from "@shared/wms-hold-release";
 import { sql } from "drizzle-orm";
 import Papa from "papaparse";
 import { registerPickingHistoryRoutes } from "./picking-history.routes";
@@ -570,22 +572,55 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  // Release hold on an order (any authenticated user)
+  // Release hold on an order (any authenticated user). Guarded by
+  // decideOrderHoldRelease: releasing an order that is not held changes nothing
+  // and runs no side effects, and a shipped/cancelled order is refused.
   app.post("/api/orders/:id/release-hold", requireAuth, async (req, res) => {
     try {
       if (!req.session.user) {
         return res.status(401).json({ error: "Authentication required" });
       }
-      
-      const id = parseInt(req.params.id);
-      const orderBefore = await storage.getOrderById(id);
-      const order = await storage.releaseHoldOrder(id);
-      
-      if (!order) {
-        return res.status(404).json({ error: "Order not found" });
+
+      const id = parseWmsRecordId(req.params.id);
+      if (id === null) {
+        return res.status(400).json({ error: "Invalid order id", code: WMS_HOLD_RELEASE_ERROR_CODES.invalidId });
       }
 
-      // Local WMS state is authoritative; ShipStation sync is retried durably.
+      const result = await storage.releaseOrderHold(id, {
+        now: new Date(),
+        // The durable ShipStation release row commits with the release itself;
+        // the worker syncs ShipStation to the order's current flag.
+        followUp: (tx) => enqueueShipStationHoldSyncRetry(tx, id, "release", "ReleaseHold"),
+      });
+      logHoldRelease({
+        action: "order_hold_release",
+        outcome: result.outcome,
+        wmsOrderId: id,
+        omsOrderId: result.order?.omsFulfillmentOrderId ?? null,
+        actor: req.session.user.id,
+        before: result.before,
+        after: result.order
+          ? { onHold: result.order.onHold, heldAt: result.order.heldAt, warehouseStatus: result.order.warehouseStatus }
+          : null,
+      });
+
+      if (result.outcome === "not_found") {
+        return res.status(404).json({ error: "Order not found", code: WMS_HOLD_RELEASE_ERROR_CODES.notFound });
+      }
+      if (result.outcome === "order_terminal") {
+        return res.status(409).json({
+          error: holdReleaseRefusalMessage("order_terminal", result.order.warehouseStatus),
+          code: WMS_HOLD_RELEASE_ERROR_CODES.orderTerminal,
+        });
+      }
+      if (result.outcome === "not_held") {
+        return res.json({ ...result.order, holdReleased: false });
+      }
+      const order = result.order;
+
+      // Immediate engine release; its durable row committed with the release
+      // above, so the enqueue inside dedups against it. The sort-rank sync runs
+      // after releaseOrderHold recomputed the rank, so it pushes the new one.
       await queueShipStationHoldSync(id, "release", "ReleaseHold");
       await queueShipStationSortRankSync(id, "ReleaseHoldSortRank");
 
@@ -602,13 +637,13 @@ export function registerPickingRoutes(app: Express) {
         pickerRole: req.session.user.role,
         orderId: id,
         orderNumber: order.orderNumber,
-        orderStatusBefore: orderBefore?.warehouseStatus,
+        orderStatusBefore: result.before.warehouseStatus,
         orderStatusAfter: order.warehouseStatus,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
       }).catch(err => console.warn("[PickingLog] Failed to log order_unhold:", err.message));
-      
-      res.json(order);
+
+      res.json({ ...order, holdReleased: true });
     } catch (error: any) {
       console.error("Error releasing hold:", error);
       res.status(500).json({ error: "Failed to release hold" });
@@ -692,7 +727,9 @@ export function registerPickingRoutes(app: Express) {
     },
   );
 
-  // Release a single LINE ITEM hold — gated by orders:hold.
+  // Release a single LINE ITEM hold — gated by orders:hold. Guarded by
+  // decideLineHoldRelease: a line that is not held is a no-op, and a line whose
+  // whole order is still held (or already shipped/cancelled) is refused.
   app.post(
     "/api/orders/:id/items/:itemId/release-hold",
     requireAuth,
@@ -702,12 +739,15 @@ export function registerPickingRoutes(app: Express) {
         if (!req.session.user) {
           return res.status(401).json({ error: "Authentication required" });
         }
-        const orderId = parseInt(req.params.id);
-        const itemId = parseInt(req.params.itemId);
+        const orderId = parseWmsRecordId(req.params.id);
+        const itemId = parseWmsRecordId(req.params.itemId);
+        if (orderId === null || itemId === null) {
+          return res.status(400).json({ error: "Invalid order or line id", code: WMS_HOLD_RELEASE_ERROR_CODES.invalidId });
+        }
 
         const item = await storage.getOrderItemById(itemId);
         if (!item || item.orderId !== orderId) {
-          return res.status(404).json({ error: "Line item not found on this order" });
+          return res.status(404).json({ error: "Line item not found on this order", code: WMS_HOLD_RELEASE_ERROR_CODES.notFound });
         }
 
         // P2a: clear the line hold + un-hold its shipment in one transaction, then
@@ -718,12 +758,56 @@ export function registerPickingRoutes(app: Express) {
           orderItemId: itemId,
           now: new Date(),
         });
-        if (released.heldShipmentId) {
-          await enqueueShipStationShipmentPushRetry(db, released.heldShipmentId, "LineItemReleasedPush")
-            .catch((e: any) => console.warn("[line-item-hold] released push enqueue failed:", e?.message));
+        const order = await storage.getOrderById(orderId);
+        logHoldRelease({
+          action: "line_hold_release",
+          outcome: released.outcome,
+          wmsOrderId: orderId,
+          omsOrderId: order?.omsFulfillmentOrderId ?? null,
+          orderItemId: itemId,
+          shipmentId: released.heldShipmentId,
+          actor: req.session.user.id,
+          before: { lineOnHold: released.lineWasHeld, orderStatus: released.orderStatus },
+          after: {
+            lineOnHold: released.outcome === "released" ? false : released.lineWasHeld,
+            orderStatus: released.orderStatus,
+          },
+        });
+        if (released.outcome === "not_found") {
+          return res.status(404).json({ error: "Line item not found on this order", code: WMS_HOLD_RELEASE_ERROR_CODES.notFound });
+        }
+        if (released.outcome === "order_on_hold" || released.outcome === "order_terminal") {
+          return res.status(409).json({
+            error: holdReleaseRefusalMessage(released.outcome, released.orderStatus),
+            code: released.outcome === "order_on_hold"
+              ? WMS_HOLD_RELEASE_ERROR_CODES.orderOnHold
+              : WMS_HOLD_RELEASE_ERROR_CODES.orderTerminal,
+          });
+        }
+        if (released.outcome === "not_held") {
+          return res.json({ ok: true, released: false, heldShipmentId: null });
         }
 
-        const order = await storage.getOrderById(orderId);
+        if (released.heldShipmentId) {
+          const heldShipmentId = released.heldShipmentId;
+          await enqueueShipStationShipmentPushRetry(db, released.heldShipmentId, "LineItemReleasedPush")
+            .catch((e: any) => {
+              // The line is released but its shipment has no push queued. The
+              // scheduled flow reconciliation (autoQueueStaleShipStationPushRetries)
+              // re-queues never-pushed shipments; the warning covers the gap.
+              logHoldRelease({
+                action: "line_hold_release_push_enqueue",
+                outcome: "failed",
+                wmsOrderId: orderId,
+                omsOrderId: order?.omsFulfillmentOrderId ?? null,
+                orderItemId: itemId,
+                shipmentId: heldShipmentId,
+                actor: req.session.user?.id ?? null,
+                errorMessage: e?.message ?? String(e),
+              });
+            });
+        }
+
         storage
           .createPickingLog({
             actionType: "line_item_released",
@@ -739,7 +823,7 @@ export function registerPickingRoutes(app: Express) {
           .catch((err) => console.warn("[PickingLog] Failed to log line_item_released:", err.message));
 
         broadcastOrdersUpdated();
-        res.json({ ok: true, heldShipmentId: released.heldShipmentId });
+        res.json({ ok: true, released: true, heldShipmentId: released.heldShipmentId });
       } catch (error: any) {
         console.error("Error releasing line item hold:", error);
         res.status(500).json({ error: "Failed to release line item hold" });

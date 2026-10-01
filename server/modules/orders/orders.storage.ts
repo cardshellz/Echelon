@@ -24,6 +24,12 @@ import { transitionOrderStatus, completeOrder } from "./order-status-core";
 import { completeWmsOrderAndRelease, type ReservationReleaser } from "./cancel-wms-order";
 import type { WmsWarehouseStatus } from "@shared/enums/order-status";
 import {
+  releaseWmsOrderHold,
+  type OrderHoldReleaseFollowUp,
+  type OrderHoldReleaseResult,
+} from "../wms/order-hold-release";
+import { logHoldRelease } from "./hold-release-log";
+import {
   completePendingNonShippingWmsOrderItems,
   finalizePhysicallyCompleteWmsOrderItems,
   incrementWmsOrderItemFulfilledQuantityByShopifyLineId,
@@ -290,6 +296,10 @@ export interface IOrderStorage {
   updateOrderFields(orderId: number, updates: Partial<Order>): Promise<Order | null>;
   holdOrder(orderId: number): Promise<Order | null>;
   releaseHoldOrder(orderId: number): Promise<Order | null>;
+  releaseOrderHold(
+    orderId: number,
+    options: { now: Date; followUp?: OrderHoldReleaseFollowUp },
+  ): Promise<OrderHoldReleaseResult>;
   holdOrderItem(itemId: number, reason: string): Promise<OrderItem | null>;
   releaseOrderItem(itemId: number): Promise<OrderItem | null>;
   setOrderPriority(orderId: number, priority: number | "reset"): Promise<Order | null>;
@@ -1193,6 +1203,37 @@ export const orderMethods: IOrderStorage = {
       .returning();
     if (result[0]) await recomputeSortRank(orderId);
     return result[0] || null;
+  },
+
+  /**
+   * Guarded order-level release; see releaseWmsOrderHold. The sort rank is
+   * recomputed only when a release actually happened.
+   */
+  async releaseOrderHold(
+    orderId: number,
+    options: { now: Date; followUp?: OrderHoldReleaseFollowUp },
+  ): Promise<OrderHoldReleaseResult> {
+    const result = await releaseWmsOrderHold(db, { orderId, ...options });
+
+    if (result.outcome === "released") {
+      // After commit, as before: the SLA lookups behind the rank swallow failed
+      // queries, which inside a transaction would abort the release itself. A
+      // failure keeps the held rank until the startup recompute, so it is
+      // logged rather than thrown — the release already happened.
+      try {
+        await recomputeSortRank(orderId);
+      } catch (error: any) {
+        logHoldRelease({
+          action: "order_hold_release_sort_rank",
+          outcome: "failed",
+          wmsOrderId: orderId,
+          omsOrderId: result.order.omsFulfillmentOrderId ?? null,
+          actor: null,
+          errorMessage: error?.message ?? String(error),
+        });
+      }
+    }
+    return result;
   },
 
   // Line-item hold (LINE-ITEM-HOLD-DESIGN.md P1): mark a single line held so it
