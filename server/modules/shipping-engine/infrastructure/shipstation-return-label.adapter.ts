@@ -30,6 +30,11 @@ const packageSchema = z.object({
   dimensions: dimensionSchema,
   tracking_number: nonempty.optional(),
 });
+const addressSchema = z.object({
+  name: z.string(), phone: z.string().nullish(), company_name: z.string().nullish(),
+  address_line1: z.string(), address_line2: z.string().nullish(), address_line3: z.string().nullish(),
+  city_locality: z.string(), state_province: z.string(), postal_code: z.string(), country_code: z.string(),
+});
 const labelSchema = z.object({
   label_id: returnLabelProviderIdSchema,
   shipment_id: returnLabelProviderIdSchema,
@@ -52,11 +57,9 @@ const labelSchema = z.object({
   insurance_cost: moneySchema,
   label_download: z.object({ pdf: z.string().min(1).max(2048).optional(), href: z.string().min(1).max(2048) }),
   packages: z.array(packageSchema).length(1),
-});
-const addressSchema = z.object({
-  name: z.string(), phone: z.string().nullish(), company_name: z.string().nullish(),
-  address_line1: z.string(), address_line2: z.string().nullish(), address_line3: z.string().nullish(),
-  city_locality: z.string(), state_province: z.string(), postal_code: z.string(), country_code: z.string(),
+  // Shipment readback remains mandatory. Also verify a label-level destination
+  // whenever supplied; a correct shipment cannot excuse a conflicting label.
+  ship_to: addressSchema.optional(),
 });
 const shipmentSchema = z.object({
   shipment_id: returnLabelProviderIdSchema,
@@ -149,6 +152,9 @@ export function createShipStationReturnLabelAdapter(config: ShipStationReturnLab
       || label.label_format !== "pdf" || label.label_layout !== "4x6" || label.charge_event !== "carrier_default"
       || (label.external_shipment_id != null && label.external_shipment_id !== input.externalShipmentId)
       || label.packages[0].tracking_number !== label.tracking_number) fail("RETURN_LABEL_IDENTITY_MISMATCH", "unknown");
+    if (label.ship_to && !sameAddress(label.ship_to, input.shipTo)) {
+      fail("RETURN_LABEL_ADDRESS_MISMATCH", "unknown");
+    }
     assertPackage(label.packages[0], input);
     const shipmentResult = shipmentSchema.safeParse(await request("GET", `/shipments/${encodeURIComponent(label.shipment_id)}`, undefined, signal));
     if (!shipmentResult.success) fail("RETURN_LABEL_SHIPMENT_INVALID", "unknown");
@@ -224,8 +230,11 @@ export function buildReturnLabelRequest(rawInput: ReturnLabelInput): Record<stri
   return {
     is_return_label: true, rma_number: input.rmaNumber, charge_event: "carrier_default",
     label_format: "pdf", label_layout: "4x6", label_download_type: "url",
+    // POST /v2/labels defines this on the label request, not its shipment.
+    // Do not request address cleanup; verification still rejects returned changes.
+    validate_address: "no_validation",
     shipment: {
-      validate_address: "no_validation", external_shipment_id: input.externalShipmentId,
+      external_shipment_id: input.externalShipmentId,
       carrier_id: input.carrierId, service_code: input.serviceCode,
       ship_from: addressBody(input.shipFrom), ship_to: addressBody(input.shipTo),
       packages: [{ package_code: "package", weight: { value: input.parcel.weightGrams, unit: "gram" },
