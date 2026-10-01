@@ -56,6 +56,8 @@ const AUTO_TRACKING_RETRY_LIMIT = 10;
 const AUTO_CHANNEL_WRITEBACK_RETRY_LIMIT = 100;
 const AUTO_FLOW_REMEDIATION_LIMIT = 10;
 const AUTO_RESERVATION_REPAIR_LIMIT = 25;
+/** Short claims re-planned per run; each attempt is one serializable transaction. */
+const SHORT_CLAIM_REFRESH_LIMIT = 25;
 
 /**
  * Reservation service handle for release-on-cancel and the
@@ -75,6 +77,11 @@ export interface FlowReconciliationReservation {
     userId?: string,
     options?: { disposition?: "release" | "cancel" },
   ): Promise<{ released: number; failed: Array<{ sku: string; orderItemId: number; reason: string }> }>;
+  /** Canonical only: re-reserve a claim planned short once stock arrives. */
+  refreshShortClaimSupply?(orderId: number): Promise<
+    | { outcome: "refreshed"; claimId: string; idempotentReplay: boolean }
+    | { outcome: "declined"; code: string; message: string }
+  >;
 }
 export interface OmsFlowReconciliationDependencies {
   reservation: FlowReconciliationReservation | null;
@@ -882,6 +889,7 @@ export async function runOmsFlowReconciliation(
   await step("autoQueueStaleShipStationPushRetries", () => autoQueueStaleShipStationPushRetries(dbArg, issues), undefined);
   await step("autoQueueMissingShopifyFulfillmentRetries", () => autoQueueMissingShopifyFulfillmentRetries(dbArg, issues, dependencies), undefined);
   await step("remediateMissingReservations", () => remediateMissingReservations(dbArg, dependencies), undefined);
+  await step("refreshShortClaims", () => refreshShortClaims(dbArg, dependencies), undefined);
 
   // Surface partial failures on the heartbeat (ops-health) without failing the
   // run — completed steps' work is real and must count as progress.
@@ -964,6 +972,84 @@ async function remediateMissingReservations(
       );
     }
   }
+}
+
+/**
+ * Short-claim refresher.
+ *
+ * An order claimed while stock was missing keeps a 0 (or partial) reservation
+ * forever: nothing re-plans an unchanged order, so every pick on the short line
+ * fails with "The pick exceeds the claim line's remaining planned target
+ * quantity" even after the stock is received. This sweep re-plans active short
+ * claims, oldest order first, but only where an unreserved unit of the same
+ * product exists in a usable bin of the order's warehouse. The repository
+ * commits a refresh only when it strictly reduces shortfall and takes nothing
+ * from any line, so a declined attempt changes nothing and is retried next run.
+ */
+export async function refreshShortClaims(
+  db: any,
+  dependencies: OmsFlowReconciliationDependencies,
+): Promise<{ refreshed: number; declined: number; failed: number }> {
+  const totals = { refreshed: 0, declined: 0, failed: 0 };
+  const svc = dependencies.reservation;
+  if (!svc?.refreshShortClaimSupply) return totals;
+
+  const candidates = await db.execute(sql`
+    SELECT c.order_id
+    FROM inventory.availability_claims c
+    JOIN wms.orders o ON o.id = c.order_id
+    WHERE c.status = 'active'
+      AND c.plan_status = 'partial'
+      AND o.warehouse_status IN ('ready', 'in_progress')
+      AND COALESCE(o.on_hold, 0) = 0
+      AND EXISTS (
+        SELECT 1
+        FROM inventory.availability_claim_lines l
+        JOIN catalog.product_variants tv ON tv.id = l.target_variant_id
+        WHERE l.claim_id = c.id
+          AND l.shortfall_qty > 0
+          AND EXISTS (
+            SELECT 1
+            FROM inventory.inventory_levels il
+            JOIN catalog.product_variants sv ON sv.id = il.product_variant_id
+            JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+            WHERE sv.product_id = tv.product_id
+              AND il.variant_qty - il.reserved_qty > 0
+              AND wl.is_active = true
+              AND wl.cycle_count_freeze_id IS NULL
+              AND (o.warehouse_id IS NULL OR wl.warehouse_id = o.warehouse_id)
+          )
+      )
+    ORDER BY o.created_at, o.id
+    LIMIT ${SHORT_CLAIM_REFRESH_LIMIT}
+  `);
+
+  for (const row of candidates?.rows ?? []) {
+    const wmsOrderId = Number(row.order_id);
+    try {
+      const result = await svc.refreshShortClaimSupply(wmsOrderId);
+      if (result.outcome === "refreshed") {
+        totals.refreshed += 1;
+        console.log(JSON.stringify({ level: "info", action: "refresh_short_claim", outcome: "refreshed",
+          wms_order_id: wmsOrderId, after: { claimId: result.claimId }, idempotent_replay: result.idempotentReplay }));
+      } else {
+        // Expected while stock is still missing or reserved elsewhere.
+        totals.declined += 1;
+      }
+    } catch (err: any) {
+      totals.failed += 1;
+      console.error(JSON.stringify({ level: "error", action: "refresh_short_claim", outcome: "failed",
+        wms_order_id: wmsOrderId, error_code: err?.code ?? null, error: err?.message ?? String(err) }));
+    }
+  }
+  if (totals.refreshed + totals.failed > 0) {
+    console.log(`${LOG_PREFIX} short-claim refresh: refreshed=${totals.refreshed} declined=${totals.declined} failed=${totals.failed}`);
+  }
+  if (totals.failed > 0) {
+    // Surface on the scheduler heartbeat via the step wrapper.
+    throw new Error(`short-claim refresh failed for ${totals.failed} order(s)`);
+  }
+  return totals;
 }
 
 export async function autoCloseResolvedDeadFulfillmentRetries(db: any): Promise<number> {

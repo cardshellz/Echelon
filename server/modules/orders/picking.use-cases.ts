@@ -35,6 +35,7 @@ import type {
   InventoryAvailabilityRuntimeClaimContext,
   InventoryAvailabilityRuntimeClaimExecutor,
 } from "../inventory-planning/application/inventory-availability-runtime-claim.service";
+import { refreshCanonicalClaimSupply } from "../inventory-planning/application/inventory-availability-runtime-claim.service";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { requireCorrectivePick, PickCorrectionError, recordCorrectionEvent, correctionHash } from "../wms/pick-correction.repository";
 import { planConfirmedPickShipment, type ConfirmedPickShipmentPlan } from "./confirmed-pick-shipment";
@@ -1529,22 +1530,28 @@ export class PickingUseCases {
       return this.persistWmsOnlyPickProgress(input);
     }
     const target = resolved.target!;
-    const claim = await context.getLatestClaim(input.beforeItem.orderId);
-    if (!claim || claim.status !== "active") {
-      throw new IntegrityError("The order has no active canonical availability claim to pick", {
-        reason: "active_canonical_claim_missing",
-        orderId: input.beforeItem.orderId,
-        orderItemId: input.itemId,
-      });
-    }
-    if (!context.getClaimLinePickMovementCursor) {
-      throw new IntegrityError("Canonical claim pick-movement cursor lookup is not configured", {
-        reason: "canonical_pick_movement_cursor_lookup_missing",
-        orderId: input.beforeItem.orderId,
-        orderItemId: input.itemId,
-      });
-    }
-    const pickMovementCursor = await context.getClaimLinePickMovementCursor(claim.claimId, input.itemId);
+    const loadActiveClaim = async () => {
+      const latest = await context.getLatestClaim(input.beforeItem.orderId);
+      if (!latest || latest.status !== "active") {
+        throw new IntegrityError("The order has no active canonical availability claim to pick", {
+          reason: "active_canonical_claim_missing",
+          orderId: input.beforeItem.orderId,
+          orderItemId: input.itemId,
+        });
+      }
+      if (!context.getClaimLinePickMovementCursor) {
+        throw new IntegrityError("Canonical claim pick-movement cursor lookup is not configured", {
+          reason: "canonical_pick_movement_cursor_lookup_missing",
+          orderId: input.beforeItem.orderId,
+          orderItemId: input.itemId,
+        });
+      }
+      return {
+        claimId: latest.claimId,
+        pickMovementCursor: await context.getClaimLinePickMovementCursor(latest.claimId, input.itemId),
+      };
+    };
+    let claim = await loadActiveClaim();
 
     const actor = canonicalPickerActor(input.userId);
     const reason = `Picker advanced order item ${input.itemId} to ${input.effectivePickedQuantity} from ${target.locationCode}`;
@@ -1560,18 +1567,18 @@ export class PickingUseCases {
         ? input.shortReason ?? input.beforeItem.shortReason ?? null
         : null,
     };
-    const baseEvidence = {
-      claimId: claim.claimId,
-      orderId: input.beforeItem.orderId,
-      orderItemId: input.itemId,
-      warehouseLocationId: target.locationId,
-      quantity: remainingPickQuantity,
-      actor,
-      wmsProgress,
-      pickMovementCursor,
-    };
-    const run = (locationStrategy: "strict" | "reconcile_recorded_stock" | "reconcile_picker_observation") =>
-      context.canonical.pickClaimLine({
+    const run = (locationStrategy: "strict" | "reconcile_recorded_stock" | "reconcile_picker_observation") => {
+      const baseEvidence = {
+        claimId: claim.claimId,
+        orderId: input.beforeItem.orderId,
+        orderItemId: input.itemId,
+        warehouseLocationId: target.locationId,
+        quantity: remainingPickQuantity,
+        actor,
+        wmsProgress,
+        pickMovementCursor: claim.pickMovementCursor,
+      };
+      return context.canonical.pickClaimLine({
         claimId: claim.claimId,
         orderItemId: input.itemId,
         warehouseLocationId: target.locationId,
@@ -1593,10 +1600,43 @@ export class PickingUseCases {
         actor,
         reason,
       });
+    };
+
+    // A line claimed short (no stock at order time) stays short until something
+    // re-plans it. Re-reserve from current stock once, then retry the same pick.
+    const runStrict = async () => {
+      try {
+        return await run("strict");
+      } catch (overageError) {
+        if (structuredErrorCode(overageError) !== "CLAIM_LINE_PICK_OVERAGE") throw overageError;
+        const refresh = await refreshCanonicalClaimSupply(context, {
+          orderId: input.beforeItem.orderId,
+          claimId: claim.claimId,
+          actor,
+          reason: `Re-reserve short order ${input.beforeItem.orderId} before picking item ${input.itemId}`,
+        });
+        // Another writer (the short-claim sweeper) replaced the claim first: just use the new one.
+        if (refresh.outcome === "declined" && refresh.code !== "ACTIVE_CLAIM_CHANGED") {
+          throw new IntegrityError(
+            `Not enough stock is reserved for ${input.beforeItem.sku} on this order, and the system shows no free stock to reserve. `
+              + `Count or receive ${target.locationCode}, then retry.`,
+            {
+              reason: "claim_line_unreserved",
+              orderId: input.beforeItem.orderId,
+              orderItemId: input.itemId,
+              locationCode: target.locationCode,
+              refreshDeclinedCode: refresh.code,
+            },
+          );
+        }
+        claim = await loadActiveClaim();
+        return run("strict");
+      }
+    };
 
     let canonicalResult;
     try {
-      canonicalResult = await run("strict");
+      canonicalResult = await runStrict();
     } catch (strictError) {
       if (structuredErrorCode(strictError) !== "CLAIM_PICK_LOCATION_SHORTFALL") throw strictError;
       try {

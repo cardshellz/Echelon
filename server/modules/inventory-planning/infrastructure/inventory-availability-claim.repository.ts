@@ -1,6 +1,10 @@
 import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
 import { isClaimCaseBreakInline } from "../../inventory/infrastructure/replenishment-policy.reader";
 import { selectClaimPickCaseBreaks } from "../domain/claim-pick-case-breaks";
+import {
+  rejectSupplyRefreshBeforePlanning, rejectSupplyRefreshPlan,
+  type ClaimLineBalance, type ClaimSupplyRefreshRejection,
+} from "../domain/claim-supply-refresh";
 import { lockClaimPickCorrection } from "../../wms/pick-correction.repository";
 import { costEvidenceTransactionFromPg } from "../../inventory/infrastructure/cost-evidence-pg";
 import { createHash } from "node:crypto";
@@ -1046,6 +1050,47 @@ async function orderDemandMatchesClaim(
     requestedQty: String(line.requestedQty),
   })).sort((left, right) => left.lineKey.localeCompare(right.lineKey));
   return canonicalJson(current) === canonicalJson(persisted);
+}
+
+/** Caller holds the claim lock; balances come from the relational lines. */
+async function loadClaimLineBalances(client: PoolClient, claim: PersistedClaim): Promise<ClaimLineBalance[]> {
+  const lineRows = rows(await client.query(
+    `SELECT line_key, requested_qty, planned_qty, released_target_qty, consumed_target_qty, picked_target_qty
+     FROM inventory.availability_claim_lines
+     WHERE claim_id = $1
+     ORDER BY line_key`,
+    [claim.id.toString()],
+  ));
+  return lineRows.map((row) => {
+    const requested = positiveBigInt(row.requested_qty, "claimLine.requestedQty");
+    const planned = nonnegativeBigInt(row.planned_qty, "claimLine.plannedQty");
+    const settled = nonnegativeBigInt(row.released_target_qty, "claimLine.releasedTargetQty")
+      + nonnegativeBigInt(row.consumed_target_qty, "claimLine.consumedTargetQty")
+      + nonnegativeBigInt(row.picked_target_qty, "claimLine.pickedTargetQty");
+    if (settled > planned) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_DEMAND_LINEAGE_MISMATCH",
+        "The active claim's line custody exceeds its planned quantity.",
+        { claimId: claim.id.toString(), lineKey: String(row.line_key) },
+      );
+    }
+    return {
+      lineKey: String(row.line_key),
+      remainingRequestedQty: requested - settled,
+      remainingPlannedQty: planned - settled,
+      pickedTargetQty: nonnegativeBigInt(row.picked_target_qty, "claimLine.pickedTargetQty"),
+    };
+  });
+}
+
+function supplyRefreshError(
+  rejection: ClaimSupplyRefreshRejection,
+  orderId: number,
+  claim: PersistedClaim,
+): InventoryAvailabilityClaimRepositoryError {
+  const { code, message, ...detail } = rejection;
+  return new InventoryAvailabilityClaimRepositoryError(code, message,
+    { orderId, claimId: claim.id.toString(), ...detail });
 }
 
 function claimVariantIds(claim: PersistedClaim): number[] {
@@ -4444,7 +4489,22 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
             { orderId: command.orderId, preliminaryTargetVariantIds, lockedTargetVariantIds },
           );
         }
-        if (await orderDemandMatchesClaim(client, lockedOrder, claim)) {
+        const demandUnchanged = await orderDemandMatchesClaim(client, lockedOrder, claim);
+        let refreshBaseline: ClaimLineBalance[] | null = null;
+        if (command.refreshSupply) {
+          // A supply refresh never doubles as a demand change: a changed order
+          // must go through ordinary demand reconciliation and its events.
+          if (!demandUnchanged) {
+            throw new InventoryAvailabilityClaimRepositoryError(
+              "CLAIM_SUPPLY_REFRESH_DEMAND_CHANGED",
+              "The order demand changed; reconcile demand instead of refreshing supply.",
+              { orderId: command.orderId, claimId: claim.id.toString() },
+            );
+          }
+          refreshBaseline = await loadClaimLineBalances(client, claim);
+          const rejection = rejectSupplyRefreshBeforePlanning(refreshBaseline);
+          if (rejection) throw supplyRefreshError(rejection, command.orderId, claim);
+        } else if (demandUnchanged) {
           throw new InventoryAvailabilityClaimRepositoryError(
             "ORDER_DEMAND_UNCHANGED",
             "The locked order demand still matches its active canonical claim.",
@@ -4493,6 +4553,11 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
             "The active canonical planner blocked the whole-order replacement claim.",
             { orderId: command.orderId, supersededClaimId: claim.id.toString(), blockers: plan.blockers },
           );
+        }
+        if (refreshBaseline) {
+          // Throwing here rolls back the release above; the old claim stays intact.
+          const rejection = rejectSupplyRefreshPlan(refreshBaseline, plan.lines);
+          if (rejection) throw supplyRefreshError(rejection, command.orderId, claim);
         }
 
         const replacementClaimId = await insertClaimHeader(client, {
