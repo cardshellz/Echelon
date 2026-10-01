@@ -33,6 +33,8 @@ import { ListingCatalogPicker } from "./ListingCatalogPicker";
 import { ListingItemEditor } from "./ListingItemEditor";
 import { ListingPricingRules } from "./ListingPricingRules";
 import { ListingReviewDialog } from "./ListingReviewDialog";
+import { ListingBulkEditor } from "./ListingBulkEditor";
+import { applyBulkEdit, type BulkEditPatch } from "./bulk-edit-model";
 
 type Workspace = z.infer<typeof listingWorkspaceSchema>;
 interface Props {
@@ -57,6 +59,10 @@ export function ChannelListingPublicationWorkspace({
   const [dirty, setDirty] = useState(false);
   const [picking, setPicking] = useState(false);
   const [editing, setEditing] = useState<number | null>(null);
+  const [bulkSelectedIds, setBulkSelectedIds] = useState<ReadonlySet<number>>(
+    new Set(),
+  );
+  const [bulkItems, setBulkItems] = useState<ListingDraftItem[] | null>(null);
   const [busy, setBusy] = useState<
     "save" | "review" | "submit" | "retry" | null
   >(null);
@@ -98,6 +104,18 @@ export function ChannelListingPublicationWorkspace({
     () => new Set(draft?.items.map((item) => item.variantId) ?? []),
     [draft?.items],
   );
+  // Selection belongs to the workspace, not the filtered account page. Removed
+  // or submitted drafts must never remain eligible for a later bulk operation.
+  useEffect(() => {
+    setBulkSelectedIds((previous) => {
+      const next = new Set([...previous].filter((id) => selectedIds.has(id)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [selectedIds]);
+  const activeBulkSelection = useMemo(
+    () => new Set([...bulkSelectedIds].filter((id) => selectedIds.has(id))),
+    [bulkSelectedIds, selectedIds],
+  );
   const ids = [...selectedIds].sort((a, b) => a - b).join(",");
   const catalog = useQuery({
     queryKey: [base, "selected-catalog", ids],
@@ -130,6 +148,29 @@ export function ChannelListingPublicationWorkspace({
     setSubmitError("");
     setNotice("");
     command.current = null;
+  }
+  function openBulkEditor() {
+    if (!canEdit || busy !== null || !currentDraft.current) return;
+    const items = currentDraft.current.items.filter((item) =>
+      activeBulkSelection.has(item.variantId),
+    );
+    if (items.length === 0) return;
+    setBulkItems(structuredClone(items));
+  }
+  function applyBulkPatch(patch: BulkEditPatch) {
+    const latest = currentDraft.current;
+    if (!canEdit || busy !== null || !latest || !bulkItems)
+      throw new Error(
+        "Wait for the current change to finish before editing these drafts.",
+      );
+    // Recheck selected snapshots against the latest draft after background
+    // refreshes. Unselected edits survive; changed selected items require reopening.
+    const next = applyBulkEdit(latest.items, bulkItems, patch, { canEdit });
+    changeItems(next);
+    setNotice(
+      `Updated ${bulkItems.length} draft items. Save the draft when you are ready.`,
+    );
+    setBulkItems(null);
   }
   async function persistDraft(): Promise<ListingDraft> {
     if (!draft) throw new Error("The draft is still loading.");
@@ -347,7 +388,12 @@ export function ChannelListingPublicationWorkspace({
             operations={workspace.data.operations}
             busy={busy !== null}
             dirty={dirty}
-            catalogError={catalog.error ? errorMessage(catalog.error) : undefined}
+            selectedDraftIds={activeBulkSelection}
+            onDraftSelectionChange={setBulkSelectedIds}
+            onBulkEdit={openBulkEditor}
+            catalogError={
+              catalog.error ? errorMessage(catalog.error) : undefined
+            }
             onAdd={() => setPicking(true)}
             onEdit={setEditing}
             onRemove={(variantId) =>
@@ -409,6 +455,16 @@ export function ChannelListingPublicationWorkspace({
           }}
         />
       )}
+      {bulkItems && canEdit && (
+        <ListingBulkEditor
+          base={base}
+          items={bulkItems}
+          metadata={metadata}
+          canEdit={canEdit && busy === null}
+          onClose={() => setBulkItems(null)}
+          onApply={applyBulkPatch}
+        />
+      )}
       {editingItem && (
         <ListingItemEditor
           key={editingItem.variantId}
@@ -438,6 +494,12 @@ export function ChannelListingPublicationWorkspace({
             command.current = null;
           }}
           onSubmit={() => void submit()}
+          onEditItem={(variantId) => {
+            if (busy !== null) return;
+            setReview(null);
+            command.current = null;
+            setEditing(variantId);
+          }}
         />
       )}
     </div>

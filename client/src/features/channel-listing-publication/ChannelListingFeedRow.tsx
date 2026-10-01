@@ -2,6 +2,7 @@ import type { ChannelCatalogRow } from "@shared/types/channel-catalog";
 import type { ListingOperationItem } from "@shared/types/channel-listing-publication";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { TableCell, TableRow } from "@/components/ui/table";
 import type { ListingFeedRow } from "./feed-model";
 import { money, priceSourceLabel } from "./model";
@@ -67,13 +68,18 @@ export function ChannelListingFeedRow({
     <TableRow className="align-top">
       {canEdit && (
         <TableCell className="pt-4">
-          <input
-            type="checkbox"
-            aria-label={`Select ${row.sku ?? `variant ${variantId}`}`}
-            checked={selected}
-            disabled={!selectable || locked}
-            onChange={(event) => onSelect(event.target.checked)}
-          />
+          {selectable ? (
+            <Checkbox
+              aria-label={`Select ${row.sku ?? `variant ${variantId}`}`}
+              checked={selected}
+              disabled={locked}
+              onCheckedChange={(checked) => onSelect(checked === true)}
+            />
+          ) : (
+            <span className="sr-only">
+              No bulk action available for this account listing
+            </span>
+          )}
         </TableCell>
       )}
       <TableCell className="min-w-44 max-w-72">

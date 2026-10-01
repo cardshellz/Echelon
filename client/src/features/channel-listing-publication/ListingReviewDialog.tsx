@@ -18,6 +18,7 @@ interface Props {
   error: string;
   onClose(): void;
   onSubmit(): void;
+  onEditItem?(variantId: number): void;
 }
 
 export function ListingReviewDialog({
@@ -26,6 +27,7 @@ export function ListingReviewDialog({
   error,
   onClose,
   onSubmit,
+  onEditItem,
 }: Props) {
   const [expired, setExpired] = useState(
     Date.parse(review.expiresAt) <= Date.now(),
@@ -116,6 +118,18 @@ export function ListingReviewDialog({
                     </li>
                   ))}
                 </ul>
+              )}
+              {onEditItem && item.issues.length > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={submitting}
+                  aria-label={`Edit details for ${item.sku}`}
+                  onClick={() => onEditItem(item.variantId)}
+                >
+                  Fix listing details
+                </Button>
               )}
             </div>
           ))}

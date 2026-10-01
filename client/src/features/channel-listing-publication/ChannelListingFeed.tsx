@@ -1,5 +1,13 @@
 import { useMemo, useState } from "react";
-import { Link2, Loader2, Package, Plus, RefreshCw, Search } from "lucide-react";
+import {
+  Link2,
+  Loader2,
+  Package,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+} from "lucide-react";
 import type {
   ListingCatalogItem,
   ListingDraftItem,
@@ -14,6 +22,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Table,
   TableBody,
@@ -40,6 +49,9 @@ export interface ChannelListingFeedProps {
   operations: ListingOperation[];
   busy: boolean;
   dirty: boolean;
+  selectedDraftIds: ReadonlySet<number>;
+  onDraftSelectionChange(ids: ReadonlySet<number>): void;
+  onBulkEdit(): void;
   onAdd(): void;
   onEdit(variantId: number): void;
   onRemove(variantId: number): void;
@@ -70,6 +82,7 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
   // adds items to the publication draft or submits a listing operation.
   const matches = visibleRows.filter(
     (row) =>
+      !row.draft &&
       !row.issue &&
       row.remote?.mappingStatus === "matched" &&
       row.remote.variant !== null,
@@ -78,6 +91,50 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
     (row) => row.sku !== null && catalog.selected.has(row.sku),
   );
   const linkLocked = catalog.locked || catalog.feed.isFetching;
+  const visibleDraftIds = visibleRows.flatMap((row) =>
+    row.draft ? [row.draft.variantId] : [],
+  );
+  const selectedDrafts = draftItems.filter((item) =>
+    props.selectedDraftIds.has(item.variantId),
+  );
+  const visibleSelectedDrafts = visibleDraftIds.filter((id) =>
+    props.selectedDraftIds.has(id),
+  );
+  const selectableMatches = linkLocked
+    ? []
+    : matches.slice(0, MAX_LINK_SELECTION);
+  const selectedVisibleCount =
+    visibleSelectedDrafts.length +
+    chosen.filter((row) => selectableMatches.includes(row)).length;
+  const selectableCount = visibleDraftIds.length + selectableMatches.length;
+  const hiddenSelectedCount =
+    selectedDrafts.length - visibleSelectedDrafts.length;
+  function selectDraft(id: number, checked: boolean) {
+    if (catalog.locked) return;
+    const next = new Set(props.selectedDraftIds);
+    if (checked) next.add(id);
+    else next.delete(id);
+    props.onDraftSelectionChange(next);
+  }
+  function selectVisible(checked: boolean) {
+    if (catalog.locked) return;
+    const drafts = new Set(props.selectedDraftIds);
+    for (const id of visibleDraftIds) {
+      if (checked) drafts.add(id);
+      else drafts.delete(id);
+    }
+    props.onDraftSelectionChange(drafts);
+    if (!linkLocked)
+      catalog.setSelected((previous) => {
+        const next = new Set(previous);
+        for (const row of selectableMatches) {
+          if (row.sku === null) continue;
+          if (checked && next.size < MAX_LINK_SELECTION) next.add(row.sku);
+          else if (!checked) next.delete(row.sku);
+        }
+        return next;
+      });
+  }
   const resetDisplay = () => setDisplayLimit(DISPLAY_INCREMENT);
   const choose = (sku: string | null, checked: boolean) => {
     if (sku === null || linkLocked) return;
@@ -106,6 +163,38 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
             </Button>
           )}
         </div>
+        {canEdit && draftItems.length > 0 && (
+          <div
+            className="flex flex-wrap items-center gap-3 rounded-md border bg-muted/30 p-3"
+            aria-label="Draft bulk actions"
+          >
+            <p className="min-w-0 flex-1 text-sm">
+              <span className="font-medium">
+                {selectedDrafts.length} draft items selected
+              </span>
+              {hiddenSelectedCount > 0 && (
+                <span> · {hiddenSelectedCount} outside this view</span>
+              )}
+            </p>
+            {selectedDrafts.length > 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={catalog.locked}
+                onClick={() => props.onDraftSelectionChange(new Set())}
+              >
+                Clear draft selection
+              </Button>
+            )}
+            <Button
+              disabled={catalog.locked || selectedDrafts.length === 0}
+              onClick={props.onBulkEdit}
+            >
+              <Pencil className="mr-2 h-4 w-4" />
+              Bulk edit selected ({selectedDrafts.length})
+            </Button>
+          </div>
+        )}
         <CardDescription>
           Manage your {providerName} listings. Add products, set prices, and
           review the draft before publishing.
@@ -205,8 +294,10 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
         </div>
         <p className="text-xs text-muted-foreground">
           Drafts and recent submissions stay in the feed across account pages.
-          Search filters the feed; saving and review use the full draft. New
-          variants stay unselected. Manage stock in{" "}
+          Select drafts to edit several items together. The header selects
+          actionable rows in this view; draft selections stay selected across
+          searches and pages. Saving and review use the full draft. Manage stock
+          in{" "}
           <a className="underline" href="/channels/inventory">
             Channel Inventory
           </a>
@@ -251,29 +342,19 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
                   <TableRow>
                     {canEdit && (
                       <TableHead className="w-10">
-                        <input
-                          type="checkbox"
-                          aria-label={
-                            matches.length > MAX_LINK_SELECTION
-                              ? `Select up to ${MAX_LINK_SELECTION} exact matches`
-                              : "Select all exact matches"
-                          }
-                          disabled={!matches.length || linkLocked}
+                        <Checkbox
+                          aria-label="Select all actionable rows on this page"
+                          disabled={selectableCount === 0 || catalog.locked}
                           checked={
-                            matches.length > 0 &&
-                            chosen.length ===
-                              Math.min(matches.length, MAX_LINK_SELECTION)
+                            selectableCount > 0 &&
+                            selectedVisibleCount === selectableCount
+                              ? true
+                              : selectedVisibleCount > 0
+                                ? "indeterminate"
+                                : false
                           }
-                          onChange={(event) =>
-                            catalog.setSelected(
-                              new Set(
-                                event.target.checked
-                                  ? matches
-                                      .slice(0, MAX_LINK_SELECTION)
-                                      .map((row) => row.sku!)
-                                  : [],
-                              ),
-                            )
+                          onCheckedChange={(checked) =>
+                            selectVisible(checked === true)
                           }
                         />
                       </TableHead>
@@ -291,18 +372,20 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
                       key={row.key}
                       row={row}
                       canEdit={canEdit}
-                      locked={linkLocked}
+                      locked={row.draft ? catalog.locked : linkLocked}
                       selected={
-                        row.sku !== null &&
-                        catalog.selected.has(row.sku) &&
-                        matches.includes(row)
+                        row.draft
+                          ? props.selectedDraftIds.has(row.draft.variantId)
+                          : row.sku !== null &&
+                            catalog.selected.has(row.sku) &&
+                            matches.includes(row)
                       }
-                      selectable={
-                        matches.includes(row) &&
-                        (chosen.length < MAX_LINK_SELECTION ||
-                          (row.sku !== null && catalog.selected.has(row.sku)))
+                      selectable={Boolean(row.draft) || matches.includes(row)}
+                      onSelect={(checked) =>
+                        row.draft
+                          ? selectDraft(row.draft.variantId, checked)
+                          : choose(row.sku, checked)
                       }
-                      onSelect={(checked) => choose(row.sku, checked)}
                       onEdit={props.onEdit}
                       onRemove={props.onRemove}
                       onMatch={catalog.chooseVariant}
