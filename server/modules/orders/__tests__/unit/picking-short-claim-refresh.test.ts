@@ -25,7 +25,7 @@ function harness(options: { replace: ReturnType<typeof vi.fn>; pickClaimLine: Re
   const context: InventoryAvailabilityRuntimeClaimContext = {
     authority: "canonical", authorityRevision: "2", activationRunId: "8", legacy: {} as any,
     canonical: { pickClaimLine: options.pickClaimLine, replaceOrderClaim: options.replace } as any,
-    getLatestClaim: vi.fn(async () => ({ claimId: latestClaimId, revision: 1, status: "active", plan: {} as any })),
+    getLatestClaim: vi.fn(async () => ({ claimId: latestClaimId, revision: 1, status: "active" as const, plan: {} as any })),
     getClaimLinePickMovementCursor: vi.fn(async (claimId: string) => `cursor-${claimId}`),
     getVariantMetadata: vi.fn(async () => new Map()),
     getOrderIdByShopifyOrderId: vi.fn(async () => null),
