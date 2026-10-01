@@ -1846,7 +1846,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     }
     await seedCanonicalRequestForSource(pool, source);
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    const clock = { now: () => new Date('2026-10-01T12:00:00Z') };
+    const clock = { now: () => new Date('2099-10-01T12:00:00Z') };
     const workflow = createPackageAllocationLabelCommercialWorkflow({ pool, clock, logger });
     let rollback = false;
     const handler = new PackageAllocationLabelCommercialFulfillmentService({ enabled: true, logger,
