@@ -1,4 +1,6 @@
 import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
+import { isClaimCaseBreakInline } from "../../inventory/infrastructure/replenishment-policy.reader";
+import { selectClaimPickCaseBreaks } from "../domain/claim-pick-case-breaks";
 import { lockClaimPickCorrection } from "../../wms/pick-correction.repository";
 import { costEvidenceTransactionFromPg } from "../../inventory/infrastructure/cost-evidence-pg";
 import { createHash } from "node:crypto";
@@ -5057,7 +5059,9 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
       const client = await this.connectionPool.connect();
       try {
         await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
-        if (command.locationStrategy === "reconcile_picker_observation") {
+        if (command.wmsProgress || command.locationStrategy === "reconcile_picker_observation") {
+          // A WMS pick may materialize its reserved case break. Acquire the cost
+          // graph before product/order locks, exactly as explicit transformations do.
           await lockInventoryCostGraph(costEvidenceTransactionFromPg(client));
         }
         const replay = await loadPickReplay(client, command.idempotencyKey, requestHash, commandType);
@@ -5109,7 +5113,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
             { claimId: claimId.toString() },
           );
         }
-        await requirePickableLocation(client, command.warehouseLocationId, order.warehouseId);
+        const pickWarehouseId = await requirePickableLocation(client, command.warehouseLocationId, order.warehouseId);
         let line = await loadFulfillmentClaimLine(client, claim.id, command.orderItemId);
         if (command.wmsProgress) {
           const expectedPicked = BigInt(command.wmsProgress.expectedPickedQuantity);
@@ -5149,6 +5153,10 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
             "The pick exceeds the claim line's remaining planned target quantity.",
             { claimLineId: line.id.toString(), requestedQty: quantity.toString(), openQty: openTarget.toString() },
           );
+        }
+        if (command.wmsProgress && !command.assemblyWork
+          && await this.materializePickCaseBreaks(client, claim, line, command, quantity, pickWarehouseId, occurredAt)) {
+          line = await loadFulfillmentClaimLine(client, claim.id, command.orderItemId);
         }
         const selectedOpen = line.resources
           .filter((resource) => resource.warehouseLocationId === command.warehouseLocationId)
@@ -5982,6 +5990,79 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
     );
   }
 
+  /** Called only after order/correction/claim locks and custody validation.
+   * Conversion receipts, exact lots, surplus, pick and WMS progress share the
+   * caller's transaction. No partial conversion can survive a rejected pick.
+   */
+  private async materializePickCaseBreaks(
+    client: PoolClient,
+    claim: PersistedClaim,
+    line: FulfillmentClaimLine,
+    command: CanonicalAvailabilityClaimPickCommand,
+    quantity: bigint,
+    warehouseId: number,
+    occurredAt: Date,
+  ): Promise<boolean> {
+    const readyQty = line.resources.filter(resource => resource.warehouseId === warehouseId)
+      .reduce((total, resource) => total + openResourceQty(resource), BigInt(0));
+    if (readyQty >= quantity || !claim.plan.operations.some(operation =>
+      operation.lineKey === `order-item:${line.orderItemId}` && operation.operationType === "break_pack")) return false;
+    const stateRows = await client.query<{ operation_key: string; status: string }>(
+      `SELECT operation_key, status FROM inventory.availability_claim_operations
+       WHERE claim_id = $1 AND claim_line_id = $2 ORDER BY operation_key FOR UPDATE`,
+      [claim.id.toString(), line.id.toString()],
+    );
+    const operations = selectClaimPickCaseBreaks({
+      operations: claim.plan.operations, states: new Map(stateRows.rows.map(row => [row.operation_key, row.status])),
+      orderItemId: line.orderItemId, targetVariantId: line.targetVariantId,
+      warehouseId, locationId: command.warehouseLocationId, readyQty, pickQty: quantity,
+    });
+    for (const operation of operations) {
+      if (!await isClaimCaseBreakInline(client, {
+        destinationVariantId: operation.destinationVariantId, warehouseId: operation.warehouseId,
+        outputQty: BigInt(operation.outputQty),
+      })) {
+        throw new InventoryAvailabilityClaimRepositoryError("CLAIM_PICK_REPLENISHMENT_REQUIRED",
+          "This case break is configured for queued warehouse work, not inline picking.",
+          { claimId: claim.id.toString(), operationKey: operation.operationKey });
+      }
+      await requirePickableLocation(client, operation.outputLocationId!, warehouseId);
+      const executionCommand = canonicalAvailabilityClaimOperationExecutionCommandSchema.parse({
+        claimId: claim.id.toString(), operationKey: operation.operationKey,
+        idempotencyKey: `pick-case-break:${hash({ pick: command.idempotencyKey, operation: operation.operationKey })}`,
+        actor: command.actor, reason: command.reason,
+      });
+      await this.executeLockedPackageOperation(client, claim, executionCommand, occurredAt);
+    }
+    return operations.length > 0;
+  }
+
+  private async executeLockedPackageOperation(
+    client: PoolClient,
+    claim: PersistedClaim,
+    command: CanonicalAvailabilityClaimOperationExecutionCommand,
+    occurredAt: Date,
+  ): Promise<CanonicalAvailabilityClaimOperationExecutionResult> {
+    const operation = await lockPackageOperation(client, claim.id, command.operationKey);
+    const plannedOperation = assertOperationMatchesPlan(claim, operation);
+    const resources = await loadOperationExecutionResources(client, claim.id, operation, plannedOperation);
+    const execution = await this.inventoryWriter.executePackageOperation({
+      client, claimId: claim.id, claimOperationId: operation.id,
+      operationKey: operation.operationKey, operationType: operation.operationType, resources,
+      destinationVariantId: operation.destinationVariantId, outputLocationId: operation.outputLocationId,
+      outputQty: operation.outputQty, committedOutputQty: operation.committedOutputQty,
+      orderId: claim.orderId, orderItemId: operation.orderItemId,
+      actor: command.actor, reason: command.reason, occurredAt,
+    });
+    return recordOperationExecution(client, {
+      claim, operation, resources, command, requestHash: hash(command),
+      outputInventoryLevelId: execution.outputInventoryLevelId,
+      committedLotAllocations: execution.committedLotAllocations,
+      totalInputCostMills: execution.totalInputCostMills, occurredAt,
+      commandType: "execute", eventType: "claim_operation_executed",
+    });
+  }
+
   async executePackageOperation(
     rawCommand: CanonicalAvailabilityClaimOperationExecutionCommand,
   ): Promise<CanonicalAvailabilityClaimOperationExecutionResult> {
@@ -6047,39 +6128,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
             { claimId: claimId.toString() },
           );
         }
-        const operation = await lockPackageOperation(client, claim.id, command.operationKey);
-        const plannedOperation = assertOperationMatchesPlan(claim, operation);
-        const resources = await loadOperationExecutionResources(client, claim.id, operation, plannedOperation);
-        const execution = await this.inventoryWriter.executePackageOperation({
-          client,
-          claimId: claim.id,
-          claimOperationId: operation.id,
-          operationKey: operation.operationKey,
-          operationType: operation.operationType,
-          resources,
-          destinationVariantId: operation.destinationVariantId,
-          outputLocationId: operation.outputLocationId,
-          outputQty: operation.outputQty,
-          committedOutputQty: operation.committedOutputQty,
-          orderId: claim.orderId,
-          orderItemId: operation.orderItemId,
-          actor: command.actor,
-          reason: command.reason,
-          occurredAt,
-        });
-        const result = await recordOperationExecution(client, {
-          claim,
-          operation,
-          resources,
-          command,
-          requestHash,
-          outputInventoryLevelId: execution.outputInventoryLevelId,
-          committedLotAllocations: execution.committedLotAllocations,
-          totalInputCostMills: execution.totalInputCostMills,
-          occurredAt,
-          commandType: "execute",
-          eventType: "claim_operation_executed",
-        });
+        const result = await this.executeLockedPackageOperation(client, claim, command, occurredAt);
         await client.query("COMMIT");
         return result;
       } catch (error) {

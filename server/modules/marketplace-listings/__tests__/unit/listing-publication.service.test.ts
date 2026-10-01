@@ -27,7 +27,7 @@ function setup(snapshot = publicationSnapshot()) {
     account: vi.fn<ListingPublicationProvider["account"]>(async () =>
       structuredClone(snapshot.account),
     ),
-    taxonomy: vi.fn(async () => []),
+    taxonomy: vi.fn<ListingPublicationProvider["taxonomy"]>(async () => ({ productTypes: [], entries: [] })),
     requirements: vi.fn(),
     prepare: vi.fn<ListingPublicationProvider["prepare"]>(
       async (_account, input) =>
@@ -214,6 +214,20 @@ function setupMixedFeeds() {
 }
 
 describe("ListingPublicationService exact reviewed intent", () => {
+  it("returns provider taxonomy ancestry with the compatible flat product type list", async () => {
+    const h = setup();
+    const taxonomy = { productTypes: ["Exact Type"], entries: [{ productType: "Exact Type", path: ["Category", "Group"], description: null }] };
+    h.provider.taxonomy.mockResolvedValue(taxonomy);
+    await expect(h.service.taxonomy(104)).resolves.toEqual(taxonomy);
+    expect(h.provider.taxonomy).toHaveBeenCalledWith(await h.provider.account(104));
+    expect(h.provider.submit).not.toHaveBeenCalled();
+  });
+  it("rejects a provider taxonomy path whose leaf is absent from the allowed product type list", async () => {
+    const h = setup();
+    h.provider.taxonomy.mockResolvedValue({ productTypes: ["Allowed"], entries: [{ productType: "Unproven", path: ["Category"], description: null }] });
+    await expect(h.service.taxonomy(104)).rejects.toThrow("Taxonomy paths must refer to a listed product type");
+    expect(h.provider.submit).not.toHaveBeenCalled();
+  });
   it("returns the original operation on a lost acknowledgement before reading changed provider state", async () => {
     const h = setup();
     h.store.replay.mockResolvedValueOnce(h.operation);

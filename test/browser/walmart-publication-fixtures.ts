@@ -47,6 +47,11 @@ export interface PublicationMock {
   submittedItems: ListingDraftItem[];
   writes: { path: string; body: unknown }[];
   reviews: ListingReview[];
+  taxonomy: {
+    productTypes: string[];
+    entries?: { productType: string; path: string[]; description: string | null }[];
+  };
+  taxonomyError: boolean;
 }
 export function createPublicationMock(): PublicationMock {
   return {
@@ -64,6 +69,16 @@ export function createPublicationMock(): PublicationMock {
     loseSubmissionResponse: false,
     writes: [],
     reviews: [],
+    taxonomy: {
+      productTypes: ["Trading Card Accessories", "Trading Card Storage", "Office Folders"],
+      // Synthetic categories exercise the picker; they are not Walmart assignments.
+      entries: [
+        { productType: "Trading Card Accessories", path: ["Collectibles", "Card Protection"], description: null },
+        { productType: "Trading Card Storage", path: ["Collectibles", "Card Storage"], description: null },
+        { productType: "Office Folders", path: ["Office", "Organization"], description: null },
+      ],
+    },
+    taxonomyError: false,
   };
 }
 
@@ -119,7 +134,9 @@ export async function handlePublicationRequest(
       });
     }
     if (path.endsWith("/taxonomy"))
-      return reply({ productTypes: ["Trading Card Accessories"] });
+      return state.taxonomyError
+        ? reply({ message: "Product types temporarily unavailable" }, 503)
+        : reply(state.taxonomy);
     if (path.endsWith("/requirements"))
       return reply({
         productType: "Trading Card Accessories",
