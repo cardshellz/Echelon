@@ -34,7 +34,7 @@ import {
 } from "@shared/utils/money";
 import { PoLineType, PO_LINE_TYPES } from "@shared/schema/procurement.schema";
 import { useLocation, useParams } from "wouter";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useQueries, useMutation } from "@tanstack/react-query";
 
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -756,6 +756,156 @@ export function catalogReceiveConfiguration(row: {
   };
 }
 
+// ── Receive As ────────────────────────────────────────────────────────────
+//
+// Which package a line's goods arrive in (expected_receive_variant_id) decides
+// whether receiving books whole packs or loose pieces, and the server refuses a
+// product line without an explicit, active choice
+// (server/modules/procurement/receive-configuration-policy.ts). The editor
+// therefore offers every line its product's active variants in a dropdown and
+// blocks Save until one is chosen. Nothing is pre-selected for the operator,
+// not even a lone variant: the policy forbids inferring the answer.
+
+export type ReceiveConfigurationOption = {
+  variantId: number;
+  sku: string | null;
+  name: string | null;
+  unitsPerVariant: number;
+};
+
+export type ReceiveConfigurationOptionsState =
+  | { status: "loading" }
+  | { status: "error" }
+  | { status: "ready"; options: readonly ReceiveConfigurationOption[] };
+
+export const RECEIVE_AS_REQUIRED_ERROR =
+  "Choose how this line is received (Receive As)";
+export const RECEIVE_AS_INACTIVE_ERROR =
+  "The chosen Receive As variant is no longer active; choose again";
+
+function positiveSafeIntegerOrNull(value: unknown): number | null {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function trimmedTextOrNull(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text === "" ? null : text;
+}
+
+/**
+ * A product's active variants as Receive As options, smallest package first.
+ * Archived variants are never offered: on create the server quietly drops an
+ * archived choice, so the line would save with the question still open.
+ */
+export function receiveConfigurationOptions(
+  variants: unknown,
+): ReceiveConfigurationOption[] {
+  if (!Array.isArray(variants)) return [];
+  const options: ReceiveConfigurationOption[] = [];
+  for (const variant of variants) {
+    if (!variant || typeof variant !== "object") continue;
+    const row = variant as Record<string, unknown>;
+    if (row.isActive !== true) continue;
+    const variantId = positiveSafeIntegerOrNull(row.id);
+    const unitsPerVariant = positiveSafeIntegerOrNull(row.unitsPerVariant);
+    if (variantId === null || unitsPerVariant === null) continue;
+    options.push({
+      variantId,
+      sku: trimmedTextOrNull(row.sku),
+      name: trimmedTextOrNull(row.name),
+      unitsPerVariant,
+    });
+  }
+  return options.sort(
+    (a, b) => a.unitsPerVariant - b.unitsPerVariant || a.variantId - b.variantId,
+  );
+}
+
+export function receiveConfigurationOptionsState(query: {
+  isError: boolean;
+  data?: { variants?: unknown };
+}): ReceiveConfigurationOptionsState {
+  // Last good data wins over a failed background refetch.
+  if (query.data) {
+    return { status: "ready", options: receiveConfigurationOptions(query.data.variants) };
+  }
+  return query.isError ? { status: "error" } : { status: "loading" };
+}
+
+export function receiveConfigurationOptionName(
+  option: ReceiveConfigurationOption,
+): string {
+  return option.name ?? option.sku ?? `Variant ${option.variantId}`;
+}
+
+export function receiveConfigurationOptionLabel(
+  option: ReceiveConfigurationOption,
+): string {
+  const units = option.unitsPerVariant.toLocaleString("en-US");
+  const name = receiveConfigurationOptionName(option);
+  const sku = option.sku && option.sku !== name ? ` (${option.sku})` : "";
+  return `${name}${sku} · ${units} ${option.unitsPerVariant === 1 ? "pc" : "pcs"}`;
+}
+
+export function receiveConfigurationLinePatch(
+  option: ReceiveConfigurationOption,
+): Pick<LineDraft, "expectedReceiveVariantId" | "expectedReceiveUnitsPerVariant"> {
+  // The units must equal the variant's live units_per_variant: the server
+  // re-reads the variant under lock and refuses a mismatch
+  // (PO_LINE_RECEIVE_UNITS_MISMATCH) rather than trusting this value.
+  return {
+    expectedReceiveVariantId: option.variantId,
+    expectedReceiveUnitsPerVariant: option.unitsPerVariant,
+  };
+}
+
+/**
+ * The Receive As problem on a product line, or null when it may be saved.
+ * Until the product's variants have loaded only the unanswered case can be
+ * judged; the server re-validates a submitted choice either way.
+ */
+export function productLineReceiveConfigurationError(
+  line: Pick<LineDraft, "expectedReceiveVariantId" | "sku" | "productName">,
+  optionsState: ReceiveConfigurationOptionsState | undefined,
+): string | null {
+  const chosenVariantId = positiveSafeIntegerOrNull(line.expectedReceiveVariantId);
+  if (optionsState?.status === "ready") {
+    if (optionsState.options.length === 0) {
+      const product = line.sku || line.productName || "This product";
+      return `${product} has no active variant to receive into; add or reactivate one on the product`;
+    }
+    if (
+      chosenVariantId !== null &&
+      !optionsState.options.some((option) => option.variantId === chosenVariantId)
+    ) {
+      return RECEIVE_AS_INACTIVE_ERROR;
+    }
+  }
+  return chosenVariantId === null ? RECEIVE_AS_REQUIRED_ERROR : null;
+}
+
+/** "525 x 1,000 pcs", "1 x 1,000 pcs + 50 loose", or null for single pieces. */
+export function receiveAsBreakdown(
+  quantityPieces: number,
+  unitsPerVariant: number,
+): string | null {
+  const pieces = Math.max(0, Math.floor(Number(quantityPieces) || 0));
+  const units = Math.max(1, Math.floor(Number(unitsPerVariant) || 1));
+  if (units === 1 || pieces === 0) return null;
+  const fullPackages = Math.floor(pieces / units);
+  const loosePieces = pieces % units;
+  const parts: string[] = [];
+  if (fullPackages > 0) {
+    parts.push(`${fullPackages.toLocaleString("en-US")} x ${units.toLocaleString("en-US")} pcs`);
+  }
+  if (loosePieces > 0) parts.push(`${loosePieces.toLocaleString("en-US")} loose`);
+  return parts.join(" + ");
+}
+
 export function resolvePreloadCatalogPricingIdentity(line: {
   catalogSource?: string | null;
   pricingBasis?: string | null;
@@ -1318,6 +1468,44 @@ export default function PurchaseOrderEdit() {
   // product lines uses just productSubtotalCents (matches old behavior).
   const subtotalCents = totals.productSubtotalCents;
 
+  // ── Receive As options ───────────────────────────────────────
+  //
+  // One product fetch per distinct product on the order, shared by every line
+  // of that product. The same endpoint backs the detail page's variant picker.
+  const lineProductIds = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          lines
+            .filter((l) => l.lineType === "product" && l.productId)
+            .map((l) => Number(l.productId)),
+        ),
+      ).sort((a, b) => a - b),
+    [lines],
+  );
+  const lineProductQueries = useQueries({
+    queries: lineProductIds.map((productId) => ({
+      queryKey: ["/api/products", productId],
+      queryFn: async (): Promise<{ variants?: unknown }> => {
+        const res = await fetch(`/api/products/${productId}`);
+        if (!res.ok) throw new Error(`Failed to load product ${productId}`);
+        return res.json();
+      },
+      staleTime: 60_000,
+    })),
+  });
+  const receiveOptionsByProductId = useMemo(() => {
+    const byProductId = new Map<number, ReceiveConfigurationOptionsState>();
+    lineProductIds.forEach((productId, index) => {
+      const query = lineProductQueries[index];
+      byProductId.set(
+        productId,
+        query ? receiveConfigurationOptionsState(query) : { status: "loading" },
+      );
+    });
+    return byProductId;
+  }, [lineProductIds, lineProductQueries]);
+
   // ── Client-side line validation ──────────────────────────────
   //
   // Mirrors the server-side validateCreateWithLinesInput rules from
@@ -1336,6 +1524,14 @@ export default function PurchaseOrderEdit() {
       if (l.lineType === "product") {
         if (!l.productId) {
           errors[l.clientId] = "Pick a product";
+          continue;
+        }
+        const receiveError = productLineReceiveConfigurationError(
+          l,
+          receiveOptionsByProductId.get(Number(l.productId)),
+        );
+        if (receiveError) {
+          errors[l.clientId] = receiveError;
           continue;
         }
         if (!l.pricingDraft) {
@@ -1412,7 +1608,7 @@ export default function PurchaseOrderEdit() {
       }
     }
     return errors;
-  }, [lines]);
+  }, [lines, receiveOptionsByProductId]);
 
   const hasLineErrors = Object.keys(lineErrors).length > 0;
   const hasNoLines = lines.length === 0;
@@ -1446,6 +1642,11 @@ export default function PurchaseOrderEdit() {
 
       if (l.lineType === "product") {
         if (!l.productId) return `${label}: pick a product.`;
+        const receiveError = productLineReceiveConfigurationError(
+          l,
+          receiveOptionsByProductId.get(Number(l.productId)),
+        );
+        if (receiveError) return `${label}: ${receiveError}.`;
         if (!l.pricingDraft) return `${label}: enter the vendor quote.`;
         if (!l.hasExplicitPricing && !l.preserveLegacyPricing) {
           return `${label}: confirm the vendor quote.`;
@@ -2023,7 +2224,7 @@ export default function PurchaseOrderEdit() {
                               <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-24 px-3 py-2.5">
                                 Pieces
                               </TableHead>
-                              <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium w-36 px-3 py-2.5">
+                              <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium w-48 px-3 py-2.5">
                                 Receive As
                               </TableHead>
                               <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-36 px-3 py-2.5">
@@ -2050,6 +2251,11 @@ export default function PurchaseOrderEdit() {
                                   line={line}
                                   idx={lineIdx}
                                   error={lineErrors[line.clientId]}
+                                  receiveOptions={
+                                    line.productId
+                                      ? receiveOptionsByProductId.get(Number(line.productId))
+                                      : undefined
+                                  }
                                   onChange={(patch) => updateLine(line.clientId, patch)}
                                   onRemove={() => removeLine(line.clientId)}
                                   useVendorCatalogSearch={useVendorCatalogSearch}
@@ -2527,6 +2733,7 @@ type ProductLineTableRowProps = {
   line: LineDraft;
   idx: number;
   error?: string;
+  receiveOptions?: ReceiveConfigurationOptionsState;
   onChange: (patch: Partial<LineDraft>) => void;
   onRemove: () => void;
   useVendorCatalogSearch: (
@@ -2613,6 +2820,7 @@ function ProductLineTableRow({
   line,
   idx,
   error,
+  receiveOptions,
   onChange,
   onRemove,
   useVendorCatalogSearch,
@@ -2662,12 +2870,31 @@ function ProductLineTableRow({
     1,
     Number(line.expectedReceiveUnitsPerVariant || 1),
   );
-  const expectedReceiveQty = qty > 0
-    ? Math.ceil(qty / expectedReceiveUnits)
-    : 0;
 
   const hasError = Boolean(error);
   const hasProduct = Boolean(line.productId);
+  const chosenReceiveOption =
+    receiveOptions?.status === "ready"
+      ? receiveOptions.options.find(
+          (option) => option.variantId === line.expectedReceiveVariantId,
+        ) ?? null
+      : null;
+  const receiveAsSummary = chosenReceiveOption
+    ? receiveAsBreakdown(qty, chosenReceiveOption.unitsPerVariant)
+    : null;
+  // The quote editor's receiving summary follows the line's Receive As choice.
+  // While variants load, a saved choice keeps showing its stored units.
+  const modalReceiveConfiguration = chosenReceiveOption
+    ? {
+        label: receiveConfigurationOptionName(chosenReceiveOption),
+        unitsPerVariant: chosenReceiveOption.unitsPerVariant,
+      }
+    : line.expectedReceiveVariantId && receiveOptions?.status !== "ready"
+      ? {
+          label: line.productName || line.sku || "Selected product",
+          unitsPerVariant: expectedReceiveUnits,
+        }
+      : undefined;
 
   function handleQuotePopoverOpenChange(open: boolean): void {
     if (open) {
@@ -2899,16 +3126,49 @@ function ProductLineTableRow({
           <div className="text-[10px] text-slate-400">from quote</div>
         </TableCell>
 
+        {/* Receive As: the package the goods arrive in. Required, never inferred. */}
         <TableCell className="px-3 py-3">
-          <div className="text-sm text-slate-700">
-            {expectedReceiveUnits > 1
-              ? `${expectedReceiveQty.toLocaleString()} x ${expectedReceiveUnits.toLocaleString()} pcs`
-              : "Pieces"}
-          </div>
-          {expectedReceiveUnits > 1 && (
-            <div className="text-xs text-slate-400 mt-1">
-              {qty.toLocaleString()} pcs total
+          {!hasProduct ? (
+            <div className="text-sm text-slate-400 py-2">—</div>
+          ) : receiveOptions?.status === "ready" && receiveOptions.options.length > 0 ? (
+            <Select
+              value={chosenReceiveOption ? String(chosenReceiveOption.variantId) : ""}
+              onValueChange={(value) => {
+                const option = receiveOptions.options.find(
+                  (candidate) => String(candidate.variantId) === value,
+                );
+                if (option) onChange(receiveConfigurationLinePatch(option));
+              }}
+            >
+              <SelectTrigger
+                className={`h-9 text-sm ${chosenReceiveOption ? "" : "border-amber-300 bg-amber-50/40"}`}
+                aria-label={`Receive line ${idx + 1} as`}
+                data-testid={`select-receive-as-${idx}`}
+              >
+                <SelectValue placeholder="Choose…" />
+              </SelectTrigger>
+              <SelectContent>
+                {receiveOptions.options.map((option) => (
+                  <SelectItem key={option.variantId} value={String(option.variantId)}>
+                    {receiveConfigurationOptionLabel(option)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <div
+              className={`text-xs py-2 ${receiveOptions?.status === "error" || receiveOptions?.status === "ready" ? "text-amber-700" : "text-slate-500"}`}
+              data-testid={`receive-as-status-${idx}`}
+            >
+              {receiveOptions?.status === "error"
+                ? "Couldn't load variants"
+                : receiveOptions?.status === "ready"
+                  ? "No active variants"
+                  : "Loading…"}
             </div>
+          )}
+          {receiveAsSummary && (
+            <div className="text-xs text-slate-400 mt-1">{receiveAsSummary}</div>
           )}
         </TableCell>
 
@@ -2965,11 +3225,16 @@ function ProductLineTableRow({
                 <PoLinePricingEditor
                   value={quoteEditorPricing}
                   onChange={updateQuoteEditorPricing}
-                  receiveConfiguration={{
-                    label: line.productName || line.sku || "Selected product",
-                    unitsPerVariant: expectedReceiveUnits,
-                  }}
+                  receiveConfiguration={modalReceiveConfiguration}
                 />
+                {hasProduct && !modalReceiveConfiguration && (
+                  <p
+                    className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800"
+                    data-testid={`receive-as-missing-${idx}`}
+                  >
+                    Receive As isn't chosen yet. Pick it from the Receive As dropdown on the line; the purchase order can't be saved without it.
+                  </p>
+                )}
 
                 <div className="border-t pt-4 space-y-3">
                   <div className="space-y-2">
