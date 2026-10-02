@@ -5,6 +5,7 @@ import { useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import OperationsView from "./OperationsView";
 import InlineTransferDialog from "@/components/operations/InlineTransferDialog";
+import { warehouseLabel } from "@/lib/warehouse-label";
 import InlineCaseBreakDialog from "@/components/operations/InlineCaseBreakDialog";
 import BinHistorySheet from "@/components/operations/BinHistorySheet";
 import { useAuth } from "@/lib/auth";
@@ -285,7 +286,7 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, 
         return (
           <TableRow key={locLevel.id} className={`text-sm ${locLevel.isAssigned || !isPickable ? "bg-muted/20" : "bg-amber-50/50 dark:bg-amber-900/10"}`}>
             <TableCell colSpan={2} className="pl-8">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <MapPin className="h-3 w-3 text-muted-foreground shrink-0" />
                 <span className="font-mono text-xs">{locLevel.location?.code || "Unknown"}</span>
                 <span className={`text-[10px] px-1.5 py-0.5 rounded-sm ${
@@ -295,11 +296,9 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, 
                 }`}>
                   {locType.replace("_", " ")}
                 </span>
-                {locLevel.location?.warehouseId && (
-                  <span className="text-[10px] text-muted-foreground">
-                    [{warehouses.find(w => w.id === locLevel.location?.warehouseId)?.code || ""}]
-                  </span>
-                )}
+                <span className="text-xs text-muted-foreground">
+                  {warehouseLabel(locLevel.location?.warehouseId, warehouses)}
+                </span>
                 {!locLevel.isAssigned && isPickable && (
                   <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
                     STRAY
@@ -412,6 +411,7 @@ function LegacyCaseBreakLocationRows({
   targetUnitsPerVariant,
   canEdit,
   warehouseId,
+  warehouses,
   onCaseBreak,
 }: {
   sourceVariantId: number;
@@ -422,6 +422,7 @@ function LegacyCaseBreakLocationRows({
   targetUnitsPerVariant: number;
   canEdit: boolean;
   warehouseId?: number | null;
+  warehouses: Warehouse[];
   onCaseBreak: (input: {
     fromLocationId: number;
     fromLocationCode: string;
@@ -484,11 +485,14 @@ function LegacyCaseBreakLocationRows({
         return (
           <TableRow key={locLevel.id} className="bg-blue-50/20 dark:bg-blue-900/5 text-xs">
             <TableCell className="pl-16">
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <MapPin className="h-3 w-3 text-blue-400 shrink-0" />
                 <span className="font-mono">{locLevel.location?.code || "?"}</span>
                 <span className="text-[10px] px-1 py-0.5 rounded-sm bg-muted text-muted-foreground">
                   {locType.replace("_", " ")}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {warehouseLabel(locLevel.location?.warehouseId, warehouses)}
                 </span>
               </div>
             </TableCell>
@@ -1645,6 +1649,7 @@ export default function Inventory() {
                                           </TableCell>
                                         </TableRow>
                                         <LegacyCaseBreakLocationRows
+                                          warehouses={warehouses}
                                           sourceVariantId={source.variantId}
                                           sourceSku={source.sku}
                                           targetVariantId={level.variantId}

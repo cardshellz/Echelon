@@ -24,6 +24,7 @@ import { sendInventoryLegacyAdminControlError } from "../inventory-planning/inte
 import { projectCanonicalVariantsInsideRuntimeTransaction } from "../inventory-planning/application/inventory-availability-runtime-atp.service";
 import type { InventoryAvailabilityRuntimeAtpContext } from "../inventory-planning/application/inventory-availability-runtime-atp.service";
 import { createChannelSyncService } from "../channels/sync.service";
+import { inventoryTransferRequestSchema } from "@shared/types/inventory-transfer";
 
 type InventoryRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
@@ -129,30 +130,12 @@ export function registerInventoryRoutes(app: Express) {
   app.post("/api/inventory/transfer", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     try {
       const { inventoryCore } = req.app.locals.services;
-      const { fromLocationId, toLocationId, variantId, quantity, notes, moveReserved } = req.body;
-
-      // Validate required fields exist
-      if (!fromLocationId || !toLocationId || !variantId || !quantity) {
-        return res.status(400).json({ error: "Missing required fields: fromLocationId, toLocationId, variantId, quantity" });
+      const parsed = inventoryTransferRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ code: "TRANSFER_INPUT_INVALID", error: "Invalid inventory transfer", details: parsed.error.flatten() });
       }
-
-      // Parse and validate as integers
-      const fromLocId = parseInt(String(fromLocationId));
-      const toLocId = parseInt(String(toLocationId));
-      const varId = parseInt(String(variantId));
-      const qty = parseInt(String(quantity));
-
-      if (isNaN(fromLocId) || isNaN(toLocId) || isNaN(varId) || isNaN(qty)) {
-        return res.status(400).json({ error: "All numeric fields must be valid integers" });
-      }
-
-      if (fromLocId === toLocId) {
-        return res.status(400).json({ error: "Source and destination must be different" });
-      }
-
-      if (qty <= 0) {
-        return res.status(400).json({ error: "Quantity must be positive" });
-      }
+      const { fromLocationId: fromLocId, toLocationId: toLocId, variantId: varId, quantity: qty,
+        commandKey, notes, moveReserved, crossWarehouseArrivalConfirmed } = parsed.data;
 
       // Validate locations exist
       const fromLoc = await storage.getWarehouseLocationById(fromLocId);
@@ -172,7 +155,7 @@ export function registerInventoryRoutes(app: Express) {
       }
 
       const transferResult = await inventoryCore.transfer({
-        commandKey: req.body.commandKey,
+        commandKey,
         productVariantId: varId,
         fromLocationId: fromLocId,
         toLocationId: toLocId,
@@ -180,6 +163,7 @@ export function registerInventoryRoutes(app: Express) {
         userId,
         notes: typeof notes === "string" ? notes : undefined,
         moveReserved: moveReserved === true,
+        ...(crossWarehouseArrivalConfirmed !== undefined ? { crossWarehouseArrivalConfirmed } : {}),
       });
 
       // Sync to sales channels after transfer (fire-and-forget)
