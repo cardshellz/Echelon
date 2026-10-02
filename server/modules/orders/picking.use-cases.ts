@@ -1554,7 +1554,11 @@ export class PickingUseCases {
     let claim = await loadActiveClaim();
 
     const actor = canonicalPickerActor(input.userId);
-    const reason = `Picker advanced order item ${input.itemId} to ${input.effectivePickedQuantity} from ${target.locationCode}`;
+    // The reason is stored on the claim command and any warehouse review, so an
+    // auditor can tell a retrospective confirmation from a live scan.
+    const reason = input.pickMethod === "missed_pick_confirmation"
+      ? `Missed-pick confirmation recorded order item ${input.itemId} as picked to ${input.effectivePickedQuantity} from ${target.locationCode} after shipment`
+      : `Picker advanced order item ${input.itemId} to ${input.effectivePickedQuantity} from ${target.locationCode}`;
     const wmsProgress = {
       expectedStatus: input.beforeItem.status as "pending" | "in_progress" | "short",
       expectedPickedQuantity: alreadyPickedQuantity,
@@ -1649,9 +1653,12 @@ export class PickingUseCases {
           "CLAIM_LEVEL_CONFLICT",
           "CLAIM_LOT_CONFLICT",
         ]);
-        // A retrospective Yes is not a fresh observation of stock in the bin.
-        if (input.pickMethod === "missed_pick_confirmation"
-          || !observationEligibleCodes.has(structuredErrorCode(recordedError) ?? "")) throw recordedError;
+        // A missed-pick Yes uses the same reconciliation as a live scan: the item
+        // physically shipped, and the order's own reserved units (often booked in a
+        // reserve bin such as K-09 while the card shows the pick face) are moved
+        // into the directed bin by a costed transfer plus a warehouse review. No
+        // stock is created. Refusing here left such corrections stuck forever.
+        if (!observationEligibleCodes.has(structuredErrorCode(recordedError) ?? "")) throw recordedError;
         canonicalResult = await run("reconcile_picker_observation");
       }
     }
