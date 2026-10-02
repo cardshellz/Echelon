@@ -140,6 +140,7 @@ function makeStore(): InventoryAvailabilityClaimStore {
     getReservationStatus: vi.fn(async () => reservationStatus),
     claimOrder: vi.fn(async () => noClaimResult),
     replaceOrderClaim: vi.fn(async () => replacementResult),
+    displaceForConfirmedShipment: vi.fn(async () => ({ ...replacementResult, displacedOrderIds: [] })),
     releaseOrderClaim: vi.fn(async () => noClaimResult),
     executePackageOperation: vi.fn(async () => executionResult),
     executeBuildOperation: vi.fn(async () => executionResult),

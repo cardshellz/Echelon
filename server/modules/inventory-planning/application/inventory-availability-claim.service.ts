@@ -4,6 +4,8 @@ import {
   canonicalAvailabilityClaimBuildHandoffCommandSchema,
   canonicalAvailabilityClaimBuildHandoffResultSchema,
   canonicalAvailabilityClaimCommandSchema,
+  canonicalAvailabilityClaimDisplacementCommandSchema,
+  canonicalAvailabilityClaimDisplacementResultSchema,
   canonicalAvailabilityClaimOperationExecutionCommandSchema,
   canonicalAvailabilityClaimOperationExecutionResultSchema,
   canonicalAvailabilityClaimPickCommandSchema,
@@ -18,6 +20,7 @@ import {
   canonicalAvailabilityReservationStatusCommandSchema,
   canonicalAvailabilityReservationStatusProjectionSchema,
   type CanonicalAvailabilityClaimBuildHandoffResult,
+  type CanonicalAvailabilityClaimDisplacementResult,
   type CanonicalAvailabilityClaimOperationExecutionResult,
   type CanonicalAvailabilityClaimPickResult,
   type CanonicalAvailabilityClaimReplacementResult,
@@ -33,6 +36,7 @@ export type InventoryAvailabilityClaimOperation =
   | "claim_order"
   | "replace_order_claim"
   | "release_order_claim"
+  | "displace_for_confirmed_shipment"
   | "execute_package_operation"
   | "execute_build_operation"
   | "handoff_build_operation"
@@ -92,6 +96,16 @@ export class InventoryAvailabilityClaimService {
     return parseResult(
       canonicalAvailabilityClaimReplacementResultSchema,
       await this.store.replaceOrderClaim(command),
+      operation,
+    );
+  }
+
+  async displaceForConfirmedShipment(input: unknown): Promise<CanonicalAvailabilityClaimDisplacementResult> {
+    const operation = "displace_for_confirmed_shipment";
+    const command = parseCommand(canonicalAvailabilityClaimDisplacementCommandSchema, input, operation);
+    return parseResult(
+      canonicalAvailabilityClaimDisplacementResultSchema,
+      await this.store.displaceForConfirmedShipment(command),
       operation,
     );
   }
