@@ -355,6 +355,89 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
     await open();
   }
 
+  async function prepareCrossWarehouseTransfer(active = true) {
+    // The reduced cutover fixture uses timestamptz here; production inventoryLots
+    // defines a timestamp without time zone. Exercise Drizzle against that type.
+    await pool.query("ALTER TABLE inventory.inventory_lots ALTER COLUMN received_at TYPE timestamp USING received_at AT TIME ZONE 'UTC'");
+    await pool.query(`INSERT INTO warehouse.warehouses(id,code,is_active) VALUES(2,'REMOTE',${active ? 1 : 0});
+      INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code,is_active,is_pickable)
+        VALUES(102,2,'REMOTE-FLOOR',1,1)`);
+    await prepareOperationalMetadata();
+    return { commandKey: "operational:cross-warehouse:1", productVariantId: 101,
+      fromLocationId: 100, toLocationId: 102, qty: 7, userId: "operator", crossWarehouseArrivalConfirmed: true };
+  }
+
+  it("requires explicit arrival confirmation before a cross-warehouse transfer", async () => {
+    const input = await prepareCrossWarehouseTransfer();
+    const before = await state();
+    await expect(transaction(client => operationalOwner(client).transfer({ ...input, crossWarehouseArrivalConfirmed: false })))
+      .rejects.toMatchObject({ code: "TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED" });
+    expect(await state()).toEqual(before);
+  });
+
+  it("posts a cross-warehouse transfer once with exact warehouse, quantity and cost identities", async () => {
+    const input = await prepareCrossWarehouseTransfer();
+    await transaction(client => operationalOwner(client).transfer(input));
+    await transaction(client => operationalOwner(client).transfer(input));
+    const current = await state();
+    expect(current.commands).toBe(2);
+    expect(current.levels.map((level: Record<string, unknown>) => [level.warehouse_location_id, level.variant_qty, level.reserved_qty, level.picked_qty]))
+      .toEqual([[100,13,3,2],[102,7,0,0]]);
+    const destinations = (await pool.query(`SELECT qty_received,qty_on_hand,total_unit_cost_mills::text,received_at
+      FROM inventory.inventory_lots WHERE warehouse_location_id=102`)).rows;
+    expect(destinations).toHaveLength(1);
+    expect(destinations[0]).toMatchObject({ qty_received: 7, qty_on_hand: 7, total_unit_cost_mills: "200" });
+    expect((await pool.query(`SELECT output.received_at = source.received_at AS fifo_preserved
+      FROM inventory.inventory_lots output CROSS JOIN inventory.inventory_lots source
+      WHERE output.warehouse_location_id=102 AND source.id=4`)).rows).toEqual([{ fifo_preserved: true }]);
+    expect((await pool.query(`SELECT warehouse_id,on_hand_delta FROM inventory.quantity_entries
+      WHERE command_id=(SELECT id FROM inventory.quantity_commands WHERE kind='transfer') ORDER BY warehouse_id`)).rows)
+      .toEqual([{ warehouse_id: 1, on_hand_delta: -7 }, { warehouse_id: 2, on_hand_delta: 7 }]);
+    expect((await pool.query("SELECT source_lot_id,source_qty,output_qty,operation_kind FROM inventory.lot_cost_contributions")).rows)
+      .toEqual([{ source_lot_id: 4, source_qty: 7, output_qty: 7, operation_kind: "transfer" }]);
+  });
+
+  it("protects reservations and picked custody during cross-warehouse moves", async () => {
+    const input = await prepareCrossWarehouseTransfer();
+    const before = await state();
+    await expect(transaction(client => operationalOwner(client).transfer({ ...input, qty: 18 })))
+      .rejects.toMatchObject({ code: "TRANSFER_BLOCKED_BY_RESERVATION" });
+    await expect(transaction(client => operationalOwner(client).transfer({ ...input, qty: 18, moveReserved: true })))
+      .rejects.toThrow("cannot relocate canonical claim ownership");
+    expect(await state()).toEqual(before);
+  });
+
+  it("rejects cross-warehouse moves to inactive warehouses", async () => {
+    const input = await prepareCrossWarehouseTransfer(false);
+    const before = await state();
+    await expect(transaction(client => operationalOwner(client).transfer(input)))
+      .rejects.toMatchObject({ code: "TRANSFER_WAREHOUSE_INACTIVE" });
+    expect(await state()).toEqual(before);
+  });
+
+  it("rolls back both warehouses and cost lineage when a later write fails", async () => {
+    const input = await prepareCrossWarehouseTransfer();
+    const before = await state();
+    await expect(transaction(async client => {
+      await operationalOwner(client).transfer(input);
+      throw new Error("Injected failure after transfer");
+    })).rejects.toThrow("Injected failure after transfer");
+    expect(await state()).toEqual(before);
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.lot_cost_contributions")).rows[0].count).toBe(0);
+    await transaction(client => operationalOwner(client).transfer(input));
+    expect((await state()).commands).toBe(2);
+  });
+
+  it("serializes competing cross-warehouse moves without overspending source stock", async () => {
+    const input = await prepareCrossWarehouseTransfer();
+    const results = await Promise.allSettled(["a", "b"].map(key => transaction(client =>
+      operationalOwner(client).transfer({ ...input, qty: 12, commandKey: `cross-warehouse-race:${key}` }))));
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
+    expect((await state()).levels.map((level: Record<string, unknown>) => level.variant_qty)).toEqual([8,12]);
+    expect((await state()).commands).toBe(2);
+  });
+
   it("posts operational receive, transfer, adjustment and reversal through real Drizzle without duplicate counters", async () => {
     await prepareOperationalMetadata();
     const receive = { commandKey: "operational:receive:1", productVariantId: 101, warehouseLocationId: 100,

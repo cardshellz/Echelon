@@ -1,28 +1,20 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useId } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, Search } from "lucide-react";
+import { ArrowRight } from "lucide-react";
+import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { useInventoryCommand } from "@/lib/inventory-command";
-import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
+import { isActionableWarehouseLocation } from "@/lib/warehouse-locations";
+import {
+  TransferLocationField, transferLocationLabel, transferLocationSchema, transferWarehouseSchema,
+} from "./TransferLocationField";
 
 interface InlineTransferDialogProps {
   open: boolean;
@@ -36,279 +28,168 @@ interface InlineTransferDialogProps {
   defaultQty?: number;
 }
 
-interface Location {
-  id: number;
-  code: string;
-  locationType: string;
-  zone: string | null;
-  warehouseId: number | null;
-  isActive: number;
-}
+const skuAtLocationSchema = z.object({
+  variantId: z.number().int().positive(), sku: z.string(), name: z.string(), available: z.number().int(),
+});
 
-interface SkuAtLocation {
-  variantId: number;
-  sku: string;
-  name: string;
-  variantQty: number;
+async function readList<T>(url: string, schema: z.ZodType<T>, signal: AbortSignal): Promise<T> {
+  const response = await fetch(url, { signal });
+  if (!response.ok) throw new Error(`Unable to load transfer options (${response.status}).`);
+  return schema.parse(await response.json());
 }
 
 export default function InlineTransferDialog({
-  open,
-  onOpenChange,
-  defaultFromLocationId,
-  defaultFromLocationCode,
-  defaultToLocationId,
-  defaultToLocationCode,
-  defaultVariantId,
-  defaultSku,
-  defaultQty,
+  open, onOpenChange, defaultFromLocationId, defaultFromLocationCode, defaultToLocationId,
+  defaultToLocationCode, defaultVariantId, defaultSku, defaultQty,
 }: InlineTransferDialogProps) {
+  const id = useId();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const inventoryCommand = useInventoryCommand();
-
   const [fromLocationId, setFromLocationId] = useState<number | null>(null);
   const [toLocationId, setToLocationId] = useState<number | null>(null);
+  const [fromWarehouseId, setFromWarehouseId] = useState<number | null>(null);
+  const [toWarehouseId, setToWarehouseId] = useState<number | null>(null);
   const [variantId, setVariantId] = useState<number | null>(null);
   const [quantity, setQuantity] = useState("");
   const [notes, setNotes] = useState("");
-  const [locationSearch, setLocationSearch] = useState("");
+  const [arrivalConfirmed, setArrivalConfirmed] = useState(false);
 
-  // Reset form when dialog opens with defaults
   useEffect(() => {
-    if (open) {
-      setFromLocationId(defaultFromLocationId ?? null);
-      setToLocationId(defaultToLocationId ?? null);
-      setVariantId(defaultVariantId ?? null);
-      setQuantity(defaultQty ? defaultQty.toString() : "");
-      setNotes("");
-      setLocationSearch("");
-    }
-  }, [open, defaultFromLocationId, defaultToLocationId, defaultVariantId]);
+    if (!open) return;
+    setFromLocationId(defaultFromLocationId ?? null);
+    setToLocationId(defaultToLocationId ?? null);
+    setFromWarehouseId(null);
+    setToWarehouseId(null);
+    setVariantId(defaultVariantId ?? null);
+    setQuantity(defaultQty ? String(defaultQty) : "");
+    setNotes("");
+    setArrivalConfirmed(false);
+  }, [open, defaultFromLocationId, defaultToLocationId, defaultVariantId, defaultQty]);
 
-  // Fetch all locations
-  const { data: locations } = useQuery<Location[]>({
+  const locationsQuery = useQuery({
     queryKey: ["/api/warehouse/locations"],
-    queryFn: async () => {
-      const res = await fetch("/api/warehouse/locations");
-      if (!res.ok) throw new Error("Failed to fetch locations");
-      return res.json();
-    },
+    queryFn: ({ signal }) => readList("/api/warehouse/locations", z.array(transferLocationSchema), signal),
     enabled: open,
   });
-
-  // Fetch SKUs at source location
-  const { data: skusAtLocation } = useQuery<SkuAtLocation[]>({
-    queryKey: ["/api/inventory/skus/search", fromLocationId],
-    queryFn: async () => {
-      const res = await fetch(`/api/inventory/skus/search?locationId=${fromLocationId}&limit=100`);
-      if (!res.ok) throw new Error("Failed to fetch SKUs");
-      return res.json();
-    },
-    enabled: open && !!fromLocationId,
+  const warehousesQuery = useQuery({
+    queryKey: ["/api/warehouses"],
+    queryFn: ({ signal }) => readList("/api/warehouses", z.array(transferWarehouseSchema), signal),
+    enabled: open,
   });
-
-  // Filter locations for search
-  const filteredLocations = useMemo(() => {
-    return filterActionableWarehouseLocations(locations ?? [], { search: locationSearch });
-  }, [locations, locationSearch]);
+  const skusQuery = useQuery({
+    queryKey: ["/api/inventory/skus/search", fromLocationId],
+    queryFn: ({ signal }) => readList(`/api/inventory/skus/search?locationId=${fromLocationId}&limit=100`, z.array(skuAtLocationSchema), signal),
+    enabled: open && fromLocationId !== null,
+  });
+  const locations = locationsQuery.data ?? [];
+  const warehouses = warehousesQuery.data ?? [];
+  const from = locations.find((location) => location.id === fromLocationId);
+  const to = locations.find((location) => location.id === toLocationId);
+  const crossWarehouse = from?.warehouseId != null && to?.warehouseId != null && from.warehouseId !== to.warehouseId;
+  const selectedSku = skusQuery.data?.find((sku) => sku.variantId === variantId);
+  // This endpoint's legacy "available" field is physical on-hand, not ATP.
+  // The posting service separately protects reservations.
+  const maxQty = selectedSku?.available;
+  const qtyNum = Number(quantity);
+  const overMax = maxQty !== undefined && qtyNum > maxQty;
+  const loadFailed = locationsQuery.isError || warehousesQuery.isError || skusQuery.isError;
+  const optionsReady = locationsQuery.isSuccess && warehousesQuery.isSuccess && !loadFailed;
+  const activeWarehouse = (warehouseId: number | null | undefined) => warehouses.some((warehouse) => warehouse.id === warehouseId && warehouse.isActive === 1);
+  const isValid = optionsReady && isActionableWarehouseLocation(from) && isActionableWarehouseLocation(to)
+    && activeWarehouse(from?.warehouseId) && activeWarehouse(to?.warehouseId)
+    && variantId !== null && Number.isSafeInteger(qtyNum) && qtyNum > 0 && !overMax
+    && fromLocationId !== toLocationId && (!crossWarehouse || arrivalConfirmed);
 
   const transferMutation = useMutation({
     mutationFn: async () => {
+      if (!isValid) throw new Error("Choose valid warehouses, locations and a whole-number quantity before transferring.");
       return inventoryCommand("/api/inventory/transfer", {
-        fromLocationId,
-        toLocationId,
-        variantId,
-        quantity: parseInt(quantity),
-        notes: notes || undefined,
+        fromLocationId, toLocationId, variantId, quantity: qtyNum, notes: notes || undefined,
+        // Omitting this for same-building transfers preserves their existing command identity.
+        crossWarehouseArrivalConfirmed: crossWarehouse ? true : undefined,
       });
     },
     onSuccess: () => {
-      const sku = defaultSku || skusAtLocation?.find((s) => s.variantId === variantId)?.sku || "";
-      toast({ title: "Transfer complete", description: `Moved ${quantity} ${sku} units` });
-      queryClient.invalidateQueries({ queryKey: ["/api/operations/bin-inventory"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/operations/location-health"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/operations/action-queue"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/operations/exceptions"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/operations/pick-readiness"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/operations/unassigned-inventory"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/inventory/summary"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/operations/activity"] });
+      const sku = defaultSku || selectedSku?.sku || "";
+      toast({ title: "Transfer complete", description: `Moved ${quantity} ${sku} units to ${to ? transferLocationLabel(to, warehouses) : "the destination"}` });
+      queryClient.invalidateQueries({ predicate: (query) => {
+        const key = query.queryKey[0];
+        return typeof key === "string" && (key.startsWith("/api/inventory/") || key.startsWith("/api/operations/"));
+      } });
       onOpenChange(false);
     },
-    onError: (error: any) => {
-      toast({ title: "Transfer failed", description: error.message, variant: "destructive" });
-    },
+    onError: (error: Error) => toast({ title: "Transfer failed", description: error.message, variant: "destructive" }),
   });
+  const busy = transferMutation.isPending;
 
-  const selectedSku = skusAtLocation?.find((s) => s.variantId === variantId);
-  const maxQty = selectedSku?.variantQty ?? 0;
-  const qtyNum = parseInt(quantity) || 0;
-  const isValid = fromLocationId && toLocationId && variantId && qtyNum > 0 && fromLocationId !== toLocationId;
-  const overMax = maxQty > 0 && qtyNum > maxQty;
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[480px]">
-        <DialogHeader>
-          <DialogTitle>Transfer Inventory</DialogTitle>
-          <DialogDescription>
-            Move inventory from one location to another.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-4 py-2">
-          {/* Source location */}
-          <div className="space-y-2">
-            <Label>From Location</Label>
-            {defaultFromLocationCode ? (
-              <Input value={defaultFromLocationCode} disabled className="font-mono" />
-            ) : (
-              <>
-                <div className="relative">
-                  <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-                  <Input
-                    placeholder="Search locations..."
-                    value={locationSearch}
-                    onChange={(e) => setLocationSearch(e.target.value)}
-                    className="pl-9 h-9 mb-1"
-                  />
-                </div>
-                <Select
-                  value={fromLocationId?.toString() || ""}
-                  onValueChange={(v) => { setFromLocationId(parseInt(v)); setVariantId(null); setLocationSearch(""); }}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select source location" />
-                  </SelectTrigger>
-                  <SelectContent className="max-h-[200px]">
-                    {filteredLocations.map((loc) => (
-                      <SelectItem key={loc.id} value={loc.id.toString()}>
-                        {loc.code} ({loc.locationType.replace("_", " ")})
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </>
-            )}
-          </div>
-
-          {/* SKU selector */}
-          <div className="space-y-2">
-            <Label>SKU</Label>
-            {defaultSku ? (
-              <Input value={defaultSku} disabled className="font-mono" />
-            ) : (
-              <Select
-                value={variantId?.toString() || ""}
-                onValueChange={(v) => setVariantId(parseInt(v))}
-                disabled={!fromLocationId}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder={fromLocationId ? "Select SKU" : "Select location first"} />
-                </SelectTrigger>
-                <SelectContent className="max-h-[200px]">
-                  {skusAtLocation?.map((s) => (
-                    <SelectItem key={s.variantId} value={s.variantId.toString()}>
-                      {s.sku} — {s.name} (qty: {s.variantQty})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-          </div>
-
-          {/* Quantity */}
-          <div className="space-y-2">
-            <Label>Quantity {maxQty > 0 && <span className="text-muted-foreground">(max {maxQty})</span>}</Label>
-            <div className="flex gap-2">
-              <Input
-                type="number"
-                min="1"
-                max={maxQty || undefined}
-                value={quantity}
-                onChange={(e) => setQuantity(e.target.value)}
-                placeholder="Enter quantity"
-                className={`font-mono ${overMax ? "border-red-500 focus-visible:ring-red-500" : ""}`}
-              />
-              {maxQty > 0 && (
-                <Button variant="outline" size="sm" onClick={() => setQuantity(maxQty.toString())}>
-                  All
-                </Button>
-              )}
-            </div>
-            {overMax && (
-              <p className="text-xs text-red-600">Exceeds available quantity ({maxQty})</p>
-            )}
-          </div>
-
-          {/* Destination */}
-          <div className="space-y-2">
-            <Label>To Location</Label>
-            {defaultToLocationCode ? (
-              <Input value={defaultToLocationCode} disabled className="font-mono" />
-            ) : (
-              <>
-                {!defaultFromLocationCode && (
-                  <div className="relative">
-                    <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-                    <Input
-                      placeholder="Search locations..."
-                      value={locationSearch}
-                      onChange={(e) => setLocationSearch(e.target.value)}
-                      className="pl-9 h-9 mb-1"
-                    />
-                  </div>
-                )}
-                <Select
-                  value={toLocationId?.toString() || ""}
-                  onValueChange={(v) => { setToLocationId(parseInt(v)); setLocationSearch(""); }}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select destination" />
-                  </SelectTrigger>
-                  <SelectContent className="max-h-[200px]">
-                    {(defaultFromLocationCode ? locations : filteredLocations)
-                      ?.filter((loc) => loc.id !== fromLocationId)
-                      .map((loc) => (
-                        <SelectItem key={loc.id} value={loc.id.toString()}>
-                          {loc.code} ({loc.locationType.replace("_", " ")})
-                        </SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
-              </>
-            )}
-          </div>
-
-          {/* Notes */}
-          <div className="space-y-2">
-            <Label>Notes (optional)</Label>
-            <Textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="Reason for transfer..."
-              rows={2}
-            />
-          </div>
+  return <Dialog open={open} onOpenChange={(next) => { if (!busy) onOpenChange(next); }}>
+    <DialogContent className="sm:max-w-[620px] max-h-[90dvh] flex flex-col overflow-hidden">
+      <DialogHeader className="shrink-0">
+        <DialogTitle>Transfer Inventory</DialogTitle>
+        <DialogDescription>Record stock moved between locations, in the same warehouse or another building.</DialogDescription>
+      </DialogHeader>
+      <div className="space-y-4 py-2 min-h-0 overflow-y-auto">
+        {loadFailed && <div role="alert" className="space-y-2 text-sm text-destructive">
+          <p>Could not load warehouse, location or stock details. Reload these details before transferring.</p>
+          <Button variant="outline" size="sm" onClick={() => {
+            void locationsQuery.refetch(); void warehousesQuery.refetch();
+            if (fromLocationId !== null) void skusQuery.refetch();
+          }}>Retry loading</Button>
+        </div>}
+        <TransferLocationField key={`${open}-from`} direction="From" locations={locations} warehouses={warehouses}
+          locationId={fromLocationId} warehouseId={fromWarehouseId} fixed={defaultFromLocationId != null}
+          fallbackCode={defaultFromLocationCode} disabled={!optionsReady || busy}
+          onWarehouseChange={(value) => { setFromWarehouseId(value); setFromLocationId(null); if (!defaultVariantId) setVariantId(null); setArrivalConfirmed(false); }}
+          onLocationChange={(value) => { setFromLocationId(value); if (!defaultVariantId) setVariantId(null); setArrivalConfirmed(false); }} />
+        <div className="space-y-2">
+          <Label htmlFor={`${id}-sku`}>SKU</Label>
+          {defaultSku ? <Input id={`${id}-sku`} value={defaultSku} readOnly className="font-mono" /> : (
+            <Select value={variantId?.toString() ?? ""} onValueChange={(value) => { setVariantId(Number(value)); setArrivalConfirmed(false); }} disabled={!fromLocationId || busy}>
+              <SelectTrigger id={`${id}-sku`}><SelectValue placeholder={fromLocationId ? "Select SKU" : "Select source first"} /></SelectTrigger>
+              <SelectContent className="max-h-[200px]">{skusQuery.data?.map((sku) =>
+                <SelectItem key={sku.variantId} value={String(sku.variantId)}>{sku.sku} — {sku.name} (on hand: {sku.available})</SelectItem>)}
+              </SelectContent>
+            </Select>
+          )}
         </div>
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button
-            onClick={() => transferMutation.mutate()}
-            disabled={!isValid || overMax || transferMutation.isPending}
-          >
-            {transferMutation.isPending ? "Transferring..." : (
-              <>
-                <ArrowRight className="h-4 w-4 mr-2" />
-                Transfer
-              </>
-            )}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
+        <div className="space-y-2">
+          <Label htmlFor={`${id}-qty`}>Quantity {maxQty !== undefined && <span className="text-muted-foreground">(on hand {maxQty})</span>}</Label>
+          <div className="flex gap-2">
+            <Input id={`${id}-qty`} type="number" min="1" step="1" max={maxQty} value={quantity} disabled={busy}
+              onChange={(event) => { setQuantity(event.target.value); setArrivalConfirmed(false); }} placeholder="Enter quantity" className="font-mono" />
+            {maxQty !== undefined && maxQty > 0 && <Button variant="outline" size="sm" disabled={busy}
+              onClick={() => { setQuantity(String(maxQty)); setArrivalConfirmed(false); }}>All</Button>}
+          </div>
+          {overMax && <p className="text-xs text-destructive">Exceeds on-hand quantity ({maxQty}). Reserved stock cannot be moved.</p>}
+        </div>
+        <TransferLocationField key={`${open}-to`} direction="To" locations={locations} warehouses={warehouses}
+          locationId={toLocationId} warehouseId={toWarehouseId} fixed={defaultToLocationId != null}
+          fallbackCode={defaultToLocationCode} excludeLocationId={fromLocationId} disabled={!optionsReady || busy}
+          onWarehouseChange={(value) => { setToWarehouseId(value); setToLocationId(null); setArrivalConfirmed(false); }}
+          onLocationChange={(value) => { setToLocationId(value); setArrivalConfirmed(false); }} />
+        {from && to && <div className="rounded-md border bg-muted/30 p-3 text-sm space-y-2" data-testid="transfer-route">
+          <p><span className="font-medium">From:</span> {transferLocationLabel(from, warehouses)}</p>
+          <p><span className="font-medium">To:</span> {transferLocationLabel(to, warehouses)}</p>
+          {crossWarehouse && <>
+            <p>This updates both warehouses immediately. Record it after the stock arrives, not while it is in transit.</p>
+            <div className="flex items-start gap-2">
+              <Checkbox id={`${id}-arrival`} checked={arrivalConfirmed} disabled={busy} onCheckedChange={(value) => setArrivalConfirmed(value === true)} />
+              <Label htmlFor={`${id}-arrival`} className="leading-5">The stock has arrived at the destination location.</Label>
+            </div>
+          </>}
+        </div>}
+        <div className="space-y-2">
+          <Label htmlFor={`${id}-notes`}>Notes (optional)</Label>
+          <Textarea id={`${id}-notes`} value={notes} disabled={busy} onChange={(event) => setNotes(event.target.value)} placeholder="Reason for transfer…" rows={2} />
+        </div>
+      </div>
+      <DialogFooter className="shrink-0 border-t pt-3">
+        <Button variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>Cancel</Button>
+        <Button onClick={() => transferMutation.mutate()} disabled={!isValid || busy}>
+          {busy ? "Transferring…" : <><ArrowRight className="h-4 w-4 mr-2" />Transfer</>}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>;
 }

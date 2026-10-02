@@ -87,7 +87,10 @@ async function setup(page: Page) {
     if (path === "/api/inventory/quantity-capabilities") {
       return route.fulfill({ json: { legacyQuantityImportAllowed: false } });
     }
-    if (path === "/api/warehouses") return route.fulfill({ json: [] });
+    if (path === "/api/warehouses") return route.fulfill({ json: [
+      { id: 1, code: "LEON", name: "20 Leonberg", isActive: 1 },
+      { id: 2, code: "RTE-19", name: "Route 19 reserve", isActive: 1 },
+    ] });
     if (path === "/api/operations/location-health") return route.fulfill({ json: {
       totalLocations: 1,
       emptyLocations: 0,
@@ -117,11 +120,11 @@ async function setup(page: Page) {
       unreservedQty: 84,
       available: 999,
       isAssigned: true,
-      location: { id: 9, code: "RESERVE-1", name: "Reserve one", locationType: "reserve", isPickable: 0, warehouseId: 1 },
+      location: { id: 9, code: "RESERVE-1", name: "Reserve one", locationType: "reserve", isPickable: 0, warehouseId: 2 },
     }] });
     if (path === "/api/warehouse/locations") return route.fulfill({ json: [
       { id: 8, code: "PICK-1", locationType: "pick", zone: "A", warehouseId: 1, isActive: 1 },
-      { id: 9, code: "RESERVE-1", locationType: "reserve", zone: "A", warehouseId: 1, isActive: 1 },
+      { id: 9, code: "RESERVE-1", locationType: "reserve", zone: "A", warehouseId: 2, isActive: 1 },
     ] });
     if (path === "/api/inventory/by-bin") return route.fulfill({ json: [{
       locationId: 8,
@@ -175,6 +178,8 @@ test("renders authority ATP and keeps physical bin stock explicitly unreserved",
     await expect(page.getByText("PICK-1", { exact: true })).toBeVisible();
     await expect(page.getByText("Legacy case-break controls — physical stock only; ATP above is server-calculated", { exact: true })).toBeVisible();
     await expect(page.getByText("RESERVE-1", { exact: true })).toBeVisible();
+    await expect(page.getByRole("row").filter({ hasText: "PICK-1" })).toContainText("LEON — 20 Leonberg");
+    await expect(page.getByRole("row").filter({ hasText: "RESERVE-1" })).toContainText("RTE-19 — Route 19 reserve");
     const breakCaseButton = page.getByRole("button", { name: "Break Case", exact: true });
     await expect(breakCaseButton).toBeEnabled();
     await breakCaseButton.click();
