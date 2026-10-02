@@ -8,6 +8,14 @@ import {
   saveCorrectivePickIntent, hasNewerPickDeclaration, type CorrectionExecutor,
 } from "../wms/pick-correction.repository";
 import type { PickingUseCases } from "./picking.use-cases";
+import { confirmedShipmentHoldRelease } from "../wms/confirmed-shipment-holds";
+import { releaseLineHoldInTransaction } from "../wms/line-item-hold";
+
+/**
+ * Recording what already shipped is never blocked by a hold; a hold only
+ * blocks a new physical pick (the corrective scan after "No").
+ */
+type HoldPolicy = "record_despite_hold" | "refuse_held_order";
 
 export interface CorrectionDatabase extends CorrectionExecutor {
   transaction<T>(work: (tx: CorrectionExecutor) => Promise<T>): Promise<T>;
@@ -25,13 +33,15 @@ export class PickCorrectionService {
 
   list(): Promise<PickCorrection[]> { return readPickCorrections(this.db); }
 
-  private async lock(tx: CorrectionExecutor, id: number): Promise<PickCorrection> {
+  private async lock(tx: CorrectionExecutor, id: number, holds: HoldPolicy): Promise<PickCorrection> {
     if (!Number.isSafeInteger(id) || id <= 0) throw new PickCorrectionError("INVALID_INPUT", "Invalid correction ID.");
     const initial = await readPickCorrection(tx, id);
     const order = await tx.execute(sql`SELECT warehouse_status,on_hold FROM wms.orders
       WHERE id=${initial.orderId} FOR UPDATE`);
-    if (!order.rows[0] || order.rows[0].warehouse_status === "cancelled" || Number(order.rows[0].on_hold) === 1)
-      throw new PickCorrectionError("ORDER_NOT_PICKABLE", "This order is cancelled or on hold.");
+    if (!order.rows[0] || order.rows[0].warehouse_status === "cancelled")
+      throw new PickCorrectionError("ORDER_NOT_PICKABLE", "This order is cancelled.");
+    if (holds === "refuse_held_order" && Number(order.rows[0].on_hold) === 1)
+      throw new PickCorrectionError("ORDER_NOT_PICKABLE", "This order is on hold. Release it before picking.");
     await tx.execute(sql`SELECT id FROM wms.order_items WHERE id=${initial.orderItemId} FOR UPDATE`);
     await tx.execute(sql`SELECT id FROM wms.pick_corrections WHERE id=${id} FOR UPDATE`);
     return readPickCorrection(tx, id);
@@ -42,7 +52,7 @@ export class PickCorrectionService {
     if (!actor.trim()) throw new PickCorrectionError("INVALID_ACTOR", "A signed-in picker is required.");
     const hash = correctionHash({ id, actor, command });
     const correction = await this.db.transaction(async tx => {
-      const before = await this.lock(tx, id);
+      const before = await this.lock(tx, id, "record_despite_hold");
       const replay = await tx.execute(sql`SELECT request_hash,after_state FROM wms.pick_correction_events WHERE command_id=${command.commandId}`);
       if (replay.rows.length) {
         if (replay.rows[0].request_hash !== hash) throw new PickCorrectionError("IDEMPOTENCY_CONFLICT", "This command was already used for a different answer.");
@@ -62,8 +72,11 @@ export class PickCorrectionService {
       await recordCorrectionEvent(tx, { correctionId: id, commandId: command.commandId, requestHash: hash,
         actor, action: command.answer === "yes" ? "pick_confirmed_by_operator" : "corrective_pick_requested",
         before, after, occurredAt: this.clock() });
-      return after;
+      if (command.answer === "yes") await this.retireHoldsOnShippedUnits(tx, after, actor, command.commandId);
+      return readPickCorrection(tx, id);
     });
+    // The answer and any retired holds are already committed above, so an
+    // inventory failure here cannot undo the Yes or bring the question back.
     if (command.answer === "yes" && correction.state !== "resolved" && correction.pickedQuantity < correction.declaredQuantity) {
       await this.applyPick(correction, correction.declaredQuantity, actor, "missed_pick_confirmation");
     }
@@ -71,12 +84,52 @@ export class PickCorrectionService {
     return readPickCorrection(this.db, id);
   }
 
+  /**
+   * The picker confirmed these units shipped. Holds that only protected those
+   * units are retired in the same transaction as the answer, so a held, shipped
+   * item stops blocking its own pick record, the queue and shipment posting.
+   */
+  private async retireHoldsOnShippedUnits(tx: CorrectionExecutor, correction: PickCorrection,
+    actor: string, commandId: string): Promise<void> {
+    const facts = await tx.execute(sql`SELECT o.warehouse_status, o.on_hold AS order_on_hold,
+        oi.on_hold AS line_on_hold, oi.quantity
+      FROM wms.order_items oi JOIN wms.orders o ON o.id = oi.order_id
+      WHERE oi.id = ${correction.orderItemId}`);
+    const row = facts.rows[0];
+    if (!row) throw new PickCorrectionError("ITEM_NOT_FOUND", "The order item no longer exists.");
+    const lineOnHold = row.line_on_hold === true;
+    const orderOnHold = Number(row.order_on_hold) === 1;
+    const release = confirmedShipmentHoldRelease({
+      lineOnHold,
+      lineQuantity: Number(row.quantity),
+      declaredShippedQuantity: correction.declaredQuantity,
+      orderOnHold,
+      orderShipped: row.warehouse_status === "shipped",
+    });
+    if (!release.releaseLine && !release.releaseOrder) return;
+    const now = this.clock();
+    const line = release.releaseLine
+      ? await releaseLineHoldInTransaction(tx, { wmsOrderId: correction.orderId, orderItemId: correction.orderItemId, now })
+      : null;
+    if (release.releaseOrder) {
+      await tx.execute(sql`UPDATE wms.orders SET on_hold = 0, held_at = NULL
+        WHERE id = ${correction.orderId} AND on_hold = 1`);
+    }
+    await recordCorrectionEvent(tx, { correctionId: correction.id, commandId: `holds-retired:${commandId}`,
+      requestHash: correctionHash({ correctionId: correction.id, commandId, release }), actor,
+      action: "holds_retired_for_confirmed_shipment",
+      before: { lineOnHold, orderOnHold },
+      after: { lineOnHold: lineOnHold && !release.releaseLine, orderOnHold: orderOnHold && !release.releaseOrder,
+        heldShipmentAction: line?.action ?? null, retiredShipmentId: line?.retiredShipmentId ?? null },
+      occurredAt: now });
+  }
+
   async complete(id: number, raw: unknown, actor: string): Promise<PickCorrection> {
     const command = completeCorrectivePickSchema.parse(raw);
     if (!actor.trim()) throw new PickCorrectionError("INVALID_ACTOR", "A signed-in picker is required.");
     const hash = correctionHash({ id, actor, command });
     const correction = await this.db.transaction(async tx => {
-      const before = await this.lock(tx, id);
+      const before = await this.lock(tx, id, "refuse_held_order");
       const replay = await tx.execute(sql`SELECT request_hash,before_state FROM wms.pick_correction_events WHERE command_id=${command.commandId}`);
       if (replay.rows.length) {
         if (replay.rows[0].request_hash !== hash) throw new PickCorrectionError("IDEMPOTENCY_CONFLICT", "This command was already used for another pick.");
@@ -107,7 +160,7 @@ export class PickCorrectionService {
 
   private async finishIfPicked(id: number, actor: string): Promise<void> {
     await this.db.transaction(async tx => {
-      await this.lock(tx, id);
+      await this.lock(tx, id, "record_despite_hold");
       await resolveCorrectivePick(tx, id, actor, this.clock());
     });
   }
@@ -119,7 +172,7 @@ export class PickCorrectionService {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Corrective pick failed. No completion was recorded.";
       const committedByAnotherAttempt = await this.db.transaction(async tx => {
-        const before = await this.lock(tx, correction.id);
+        const before = await this.lock(tx, correction.id, "record_despite_hold");
         if (before.pickedQuantity >= targetQuantity) return true;
         // A stale attempt must not add its error to a newer operator decision.
         if (before.state === "resolved" || before.revision !== correction.revision) return false;

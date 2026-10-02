@@ -91,37 +91,112 @@ export async function holdLineItemWithSplit(
 }
 
 /**
- * Atomically release a line's hold and un-hold its shipment so it can ship.
- * Returns the held shipment id so the caller pushes it (it becomes a normal
- * planned shipment that the engine will now accept).
+ * What a released line's held shipment must do. A held shipment is never pushed,
+ * but ShipStation can still ship the line through the shipment it was split from
+ * (for example before the main shipment was re-pushed without it). Pushing the
+ * held shipment then would create a second provider order for units that already
+ * left, so it may only be pushed while none of the line has shipped.
  */
-export async function releaseLineItemFromHold(
-  db: any,
+export type HeldShipmentReleaseAction = "push" | "cancel_already_shipped" | "review_partially_shipped";
+
+export function heldShipmentReleaseAction(line: {
+  quantity: number;
+  fulfilledQuantity: number;
+}): HeldShipmentReleaseAction {
+  if (!Number.isSafeInteger(line.quantity) || !Number.isSafeInteger(line.fulfilledQuantity)
+    || line.quantity < 0 || line.fulfilledQuantity < 0) {
+    throw new Error("Line quantities must be non-negative integers");
+  }
+  if (line.fulfilledQuantity === 0) return "push";
+  if (line.fulfilledQuantity >= line.quantity) return "cancel_already_shipped";
+  return "review_partially_shipped";
+}
+
+export interface LineHoldReleaseResult {
+  /** Push this shipment so the released line ships; null when nothing may be pushed. */
+  heldShipmentId: number | null;
+  action: HeldShipmentReleaseAction | "none";
+  /** The held shipment closed or sent to review instead of being pushed. */
+  retiredShipmentId: number | null;
+}
+
+/**
+ * Release a line's hold inside the caller's transaction. The line flag always
+ * clears. Its held shipment is un-held for push only while nothing has shipped;
+ * a fully shipped line's held shipment is cancelled (it never reached the engine,
+ * so there is nothing to cancel there), and a partly shipped one stays held and
+ * is flagged for review because its quantity still covers the shipped units.
+ */
+export async function releaseLineHoldInTransaction(
+  tx: any,
   args: { wmsOrderId: number; orderItemId: number; now: Date },
-): Promise<{ heldShipmentId: number | null }> {
-  return await db.transaction(async (tx: any) => {
-    await tx.execute(sql`
-      UPDATE wms.order_items SET on_hold = false, hold_reason = NULL
-      WHERE id = ${args.orderItemId}
-    `);
-    const heldRows: any = await tx.execute(sql`
-      SELECT os.id
-      FROM wms.outbound_shipment_items osi
-      JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
-      WHERE osi.order_item_id = ${args.orderItemId}
-        AND os.order_id = ${args.wmsOrderId}
-        AND os.held = true
-      ORDER BY os.id DESC
-      LIMIT 1
-    `);
-    const held = heldRows?.rows?.[0];
-    if (!held) return { heldShipmentId: null };
-    const heldShipmentId = Number(held.id);
+): Promise<LineHoldReleaseResult> {
+  const itemRows: any = await tx.execute(sql`
+    SELECT quantity, COALESCE(fulfilled_quantity, 0) AS fulfilled_quantity
+    FROM wms.order_items
+    WHERE id = ${args.orderItemId} AND order_id = ${args.wmsOrderId}
+    FOR UPDATE
+  `);
+  const item = itemRows?.rows?.[0];
+  if (!item) throw new Error(`Line ${args.orderItemId} is not on WMS order ${args.wmsOrderId}`);
+  await tx.execute(sql`
+    UPDATE wms.order_items SET on_hold = false, hold_reason = NULL
+    WHERE id = ${args.orderItemId}
+  `);
+  const heldRows: any = await tx.execute(sql`
+    SELECT os.id
+    FROM wms.outbound_shipment_items osi
+    JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
+    WHERE osi.order_item_id = ${args.orderItemId}
+      AND os.order_id = ${args.wmsOrderId}
+      AND os.held = true
+    ORDER BY os.id DESC
+    LIMIT 1
+    FOR UPDATE OF os
+  `);
+  const held = heldRows?.rows?.[0];
+  if (!held) return { heldShipmentId: null, action: "none", retiredShipmentId: null };
+  const heldShipmentId = Number(held.id);
+  const action = heldShipmentReleaseAction({
+    quantity: Number(item.quantity),
+    fulfilledQuantity: Number(item.fulfilled_quantity),
+  });
+  if (action === "push") {
     await tx.execute(sql`
       UPDATE wms.outbound_shipments
       SET held = false, held_at = NULL, on_hold_reason = NULL, updated_at = ${args.now}
       WHERE id = ${heldShipmentId}
     `);
-    return { heldShipmentId };
-  });
+    return { heldShipmentId, action, retiredShipmentId: null };
+  }
+  if (action === "cancel_already_shipped") {
+    // Stays held as a second guard; cancelled is terminal and never pushable.
+    const cancelled: any = await tx.execute(sql`
+      UPDATE wms.outbound_shipments
+      SET status = 'cancelled', cancelled_at = ${args.now},
+          voided_reason = 'line_shipped_while_held', updated_at = ${args.now}
+      WHERE id = ${heldShipmentId} AND status = 'planned'
+      RETURNING id
+    `);
+    if ((cancelled?.rows?.length ?? 0) === 1) return { heldShipmentId: null, action, retiredShipmentId: heldShipmentId };
+  }
+  // Partly shipped, or a held shipment that is unexpectedly past 'planned':
+  // keep it held (never pushed) and ask a person to split the remainder.
+  await tx.execute(sql`
+    UPDATE wms.outbound_shipments
+    SET requires_review = true, review_reason = 'held_line_partially_shipped', updated_at = ${args.now}
+    WHERE id = ${heldShipmentId}
+  `);
+  return { heldShipmentId: null, action: "review_partially_shipped", retiredShipmentId: heldShipmentId };
+}
+
+/**
+ * Atomically release a line's hold. Returns the held shipment id only when the
+ * caller must push it (nothing on the line has shipped yet).
+ */
+export async function releaseLineItemFromHold(
+  db: any,
+  args: { wmsOrderId: number; orderItemId: number; now: Date },
+): Promise<LineHoldReleaseResult> {
+  return await db.transaction((tx: any) => releaseLineHoldInTransaction(tx, args));
 }

@@ -5153,8 +5153,10 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
         }
         await lockGraphProducts(client, graphProductIds);
         const order = await loadOrder(client, preliminaryClaim.orderId, true);
-        if (order.warehouseStatus === "cancelled" || order.onHold
-          || (order.warehouseStatus === "shipped" && !command.wmsProgress?.pickCorrectionId)) {
+        // A correction records units the provider already shipped, so shipped or
+        // held cannot stop it; its owner refuses held orders for a new scan pick.
+        if (order.warehouseStatus === "cancelled"
+          || ((order.onHold || order.warehouseStatus === "shipped") && !command.wmsProgress?.pickCorrectionId)) {
           throw new InventoryAvailabilityClaimRepositoryError(
             "CLAIM_ORDER_NOT_PICKABLE",
             "A cancelled, shipped, or held order cannot consume a canonical claim pick.",
