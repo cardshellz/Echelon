@@ -203,7 +203,7 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(recoverySource).toContain('action: "connect_store"');
     expect(recoverySource).toContain('"/api/dropship/store-connections/oauth/start"');
     expect(recoverySource).toContain('intent: "refresh_connection"');
-    expect(recoverySource).toContain('returnTo: dropshipPortalPath("/catalog")');
+    expect(recoverySource).toContain('returnTo: dropshipPortalPath("/catalog/setup")');
     expect(recoverySource).toContain("window.location.assign(result.authorizationUrl)");
     expect(catalogSource).not.toContain('setLocation(dropshipPortalPath("/settings"))');
   });
@@ -212,7 +212,7 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(formatIssue("missing_config:merchantLocationKey")).toBe("eBay setup: Inventory location");
     expect(formatIssue("missing_config:businessPolicies.returnPolicyId")).toBe("eBay setup: Return policy");
     expect(formatIssue("ebay_browse_category_required")).toBe(
-      "No eBay category. Choose one under eBay categories on this page: add a rule or set a store default.",
+      "No eBay category. Add a rule or set a store default under eBay categories in step 2, Set how it lists.",
     );
   });
 
