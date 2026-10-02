@@ -5,7 +5,8 @@ import {
 import {
   correctionHash, PickCorrectionError, readPickCorrection, readPickCorrections,
   recordCorrectionEvent, resolveCorrectivePick, savePickCorrectionAnswer, savePickCorrectionReview,
-  saveCorrectivePickIntent, hasNewerPickDeclaration, type CorrectionExecutor,
+  saveCorrectivePickIntent, hasNewerPickDeclaration, readConfirmedCorrectionsDueForRetry,
+  touchPickCorrectionRetry, type CorrectionExecutor,
 } from "../wms/pick-correction.repository";
 import type { PickingUseCases } from "./picking.use-cases";
 import { confirmedShipmentHoldRelease } from "../wms/confirmed-shipment-holds";
@@ -16,6 +17,14 @@ import { releaseLineHoldInTransaction } from "../wms/line-item-hold";
  * blocks a new physical pick (the corrective scan after "No").
  */
 type HoldPolicy = "record_despite_hold" | "refuse_held_order";
+
+/**
+ * A saved Yes whose inventory record failed waits on the books (a receipt, a
+ * count, stock freed elsewhere), which this service cannot observe. Retrying at
+ * most this often bounds the work and keeps a stuck card from flooding logs.
+ */
+export const CONFIRMED_PICK_RETRY_INTERVAL_MS = 30 * 60 * 1000;
+const RETRY_ACTOR = "system:pick-correction-retry";
 
 export interface CorrectionDatabase extends CorrectionExecutor {
   transaction<T>(work: (tx: CorrectionExecutor) => Promise<T>): Promise<T>;
@@ -165,8 +174,53 @@ export class PickCorrectionService {
     });
   }
 
+  /**
+   * Retry the inventory record of one saved Yes. The answer and its retired
+   * holds are re-applied idempotently, then the pick is attempted as the picker
+   * who confirmed it (the physical act is theirs; only the retry is automatic).
+   */
+  async retryConfirmedPick(id: number): Promise<PickCorrection> {
+    const correction = await this.db.transaction(async tx => {
+      const current = await this.lock(tx, id, "record_despite_hold");
+      if (current.state !== "picking_required" || current.answer !== "yes" || current.assignedPickerId === null) return current;
+      // Yes answers saved before holds were retired on confirmation still carry them.
+      await this.retireHoldsOnShippedUnits(tx, current, RETRY_ACTOR, `retry:${id}:${current.revision}`);
+      return readPickCorrection(tx, id);
+    });
+    if (correction.state !== "picking_required" || correction.answer !== "yes" || correction.assignedPickerId === null) return correction;
+    if (correction.pickedQuantity < correction.declaredQuantity) {
+      await this.applyPick(correction, correction.declaredQuantity, correction.assignedPickerId,
+        "missed_pick_confirmation", { quietRepeat: true });
+    }
+    await this.finishIfPicked(id, correction.assignedPickerId);
+    return readPickCorrection(this.db, id);
+  }
+
+  /** One bounded sweep over saved Yes answers that have not posted. */
+  async retryConfirmedPicks(limit: number): Promise<{ resolved: number; waiting: number }> {
+    if (!Number.isSafeInteger(limit) || limit <= 0) throw new PickCorrectionError("INVALID_INPUT", "Invalid retry limit.");
+    const due = await readConfirmedCorrectionsDueForRetry(this.db, {
+      lastAttemptBefore: new Date(this.clock().getTime() - CONFIRMED_PICK_RETRY_INTERVAL_MS), limit });
+    const totals = { resolved: 0, waiting: 0 };
+    for (const id of due) {
+      try {
+        const after = await this.retryConfirmedPick(id);
+        if (after.state === "resolved") totals.resolved += 1; else totals.waiting += 1;
+      } catch (error) {
+        // Expected while the books still lack the stock: the reason is saved on
+        // the correction and listed in Control Tower; the next sweep retries.
+        totals.waiting += 1;
+        console.debug(JSON.stringify({ level: "debug", action: "pick_correction_retry", outcome: "waiting",
+          correction_id: id, error_code: error instanceof PickCorrectionError ? error.code
+            : (error as { code?: unknown })?.code ?? null,
+          error: error instanceof Error ? error.message : String(error) }));
+      }
+    }
+    return totals;
+  }
+
   private async applyPick(correction: PickCorrection, targetQuantity: number, actor: string,
-    method: "scan" | "missed_pick_confirmation"): Promise<void> {
+    method: "scan" | "missed_pick_confirmation", options: { quietRepeat?: boolean } = {}): Promise<void> {
     try {
       await this.pick({ correction, targetQuantity, actor, method });
     } catch (error) {
@@ -176,6 +230,11 @@ export class PickCorrectionService {
         if (before.pickedQuantity >= targetQuantity) return true;
         // A stale attempt must not add its error to a newer operator decision.
         if (before.state === "resolved" || before.revision !== correction.revision) return false;
+        // An automatic retry that hit the same failure records only that it tried.
+        if (options.quietRepeat && before.reviewReason === message.slice(0, 1000)) {
+          await touchPickCorrectionRetry(tx, correction.id, this.clock());
+          return false;
+        }
         await savePickCorrectionReview(tx, correction.id, message, this.clock());
         const after = await readPickCorrection(tx, correction.id);
         await recordCorrectionEvent(tx, { correctionId: correction.id, commandId: `review:${correction.id}:${after.revision}`,

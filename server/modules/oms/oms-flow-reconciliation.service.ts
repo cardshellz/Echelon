@@ -58,6 +58,8 @@ const AUTO_FLOW_REMEDIATION_LIMIT = 10;
 const AUTO_RESERVATION_REPAIR_LIMIT = 25;
 /** Short claims re-planned per run; each attempt is one serializable transaction. */
 const SHORT_CLAIM_REFRESH_LIMIT = 25;
+/** Confirmed pick corrections retried per run; each is a few short transactions. */
+const CONFIRMED_PICK_RETRY_LIMIT = 50;
 
 /**
  * Reservation service handle for release-on-cancel and the
@@ -83,11 +85,17 @@ export interface FlowReconciliationReservation {
     | { outcome: "declined"; code: string; message: string }
   >;
 }
+/** Retries the inventory record of picks a picker already confirmed shipped. */
+export interface FlowReconciliationPickCorrections {
+  retryConfirmedPicks(limit: number): Promise<{ resolved: number; waiting: number }>;
+}
+
 export interface OmsFlowReconciliationDependencies {
   reservation: FlowReconciliationReservation | null;
   fulfillmentAuthority: ChannelFulfillmentAuthorityService;
   reviewRetry?: ChannelFulfillmentReviewRetryService;
   receiptRetry?: ChannelFulfillmentReceiptRetryService;
+  pickCorrections?: FlowReconciliationPickCorrections;
 }
 
 function requireFlowFulfillmentAuthority(
@@ -890,6 +898,8 @@ export async function runOmsFlowReconciliation(
   await step("autoQueueMissingShopifyFulfillmentRetries", () => autoQueueMissingShopifyFulfillmentRetries(dbArg, issues, dependencies), undefined);
   await step("remediateMissingReservations", () => remediateMissingReservations(dbArg, dependencies), undefined);
   await step("refreshShortClaims", () => refreshShortClaims(dbArg, dependencies), undefined);
+  // After short claims are re-planned, so newly reserved stock can post.
+  await step("retryConfirmedPickCorrections", () => retryConfirmedPickCorrections(dependencies), undefined);
 
   // Surface partial failures on the heartbeat (ops-health) without failing the
   // run — completed steps' work is real and must count as progress.
@@ -1048,6 +1058,22 @@ export async function refreshShortClaims(
   if (totals.failed > 0) {
     // Surface on the scheduler heartbeat via the step wrapper.
     throw new Error(`short-claim refresh failed for ${totals.failed} order(s)`);
+  }
+  return totals;
+}
+
+/**
+ * A picker's "Yes, it shipped" is final; recording it in inventory is system work.
+ * When that record failed (stock not received, reserved elsewhere, a bad lot),
+ * it waits here instead of on the gun, and posts as soon as the books allow.
+ */
+export async function retryConfirmedPickCorrections(
+  dependencies: OmsFlowReconciliationDependencies,
+): Promise<{ resolved: number; waiting: number }> {
+  if (!dependencies.pickCorrections) return { resolved: 0, waiting: 0 };
+  const totals = await dependencies.pickCorrections.retryConfirmedPicks(CONFIRMED_PICK_RETRY_LIMIT);
+  if (totals.resolved > 0) {
+    console.log(`${LOG_PREFIX} confirmed pick corrections posted: resolved=${totals.resolved} waiting=${totals.waiting}`);
   }
   return totals;
 }
