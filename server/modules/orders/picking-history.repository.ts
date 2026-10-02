@@ -55,16 +55,31 @@ export class PickingHistoryRepository {
     return this.database.transaction(async transaction => {
       await transaction.execute(sql`select set_config('statement_timeout', ${String(ORDER_LIST_STATEMENT_TIMEOUT_MS)}, true)`);
       const scope = and(...predicates);
-      const [count] = await transaction.select({ total: sql<number>`count(*)`.mapWith(Number) })
-        .from(orders).leftJoin(channels, eq(orders.channelId, channels.id)).where(scope);
-      // Do not hydrate raw metadata/address blobs or every order's audit. The
-      // small scalar audit projection is evaluated only for this header page.
-      const page = await transaction.select({
-        id: orders.id, orderNumber: orders.orderNumber, customerName: orders.customerName,
-        warehouseStatus: orders.warehouseStatus, warehouseId: orders.warehouseId,
-        channelName: channels.name, createdAt: orders.createdAt, completedAt: orders.completedAt,
-      }).from(orders).leftJoin(channels, eq(orders.channelId, channels.id)).where(scope)
-        .orderBy(desc(orders.createdAt), desc(orders.id)).limit(query.limit).offset(query.offset);
+      // Count and page consume the same CTE, so PostgreSQL evaluates the costly
+      // historical search only once. Only IDs/sort keys are materialized there;
+      // headers, lines and picker details are hydrated for the page alone.
+      const matches = transaction.$with("picking_history_matches").as(
+        transaction.select({ id: orders.id, createdAt: orders.createdAt })
+          .from(orders).leftJoin(channels, eq(orders.channelId, channels.id)).where(scope),
+      );
+      const count = transaction.select({ total: sql<number>`count(*)`.mapWith(Number).as("total") })
+        .from(matches).as("history_count");
+      const pageIds = transaction.select({ id: matches.id, createdAt: matches.createdAt }).from(matches)
+        .orderBy(desc(matches.createdAt), desc(matches.id)).limit(query.limit).offset(query.offset).as("history_page");
+      // Keep the aggregate row even for zero matches or an out-of-range page.
+      // That preserves exact counts and lets the client correct a shrinking page.
+      const result = await transaction.with(matches).select({
+        total: count.total,
+        order: {
+          id: orders.id, orderNumber: orders.orderNumber, customerName: orders.customerName,
+          warehouseStatus: orders.warehouseStatus, warehouseId: orders.warehouseId,
+          createdAt: orders.createdAt, completedAt: orders.completedAt,
+        },
+        channelName: channels.name,
+      }).from(count).leftJoin(pageIds, sql`true`).leftJoin(orders, eq(orders.id, pageIds.id))
+        .leftJoin(channels, eq(orders.channelId, channels.id))
+        .orderBy(desc(orders.createdAt), desc(orders.id));
+      const page = result.flatMap(row => row.order ? [{ ...row.order, channelName: row.channelName }] : []);
       const byOrder = new Map<number, PickingHistoryItem[]>();
       const auditByOrder = new Map<number, { lastPickAt: string | null; lastPickerName: string | null }>();
       if (page.length > 0) {
@@ -96,7 +111,7 @@ export class PickingHistoryRepository {
           createdAt: order.createdAt.toISOString(), completedAt: order.completedAt?.toISOString() ?? null,
           lastPickAt: null, lastPickerName: null, ...auditByOrder.get(order.id), items: byOrder.get(order.id) ?? [],
         })),
-        total: count.total, limit: query.limit, offset: query.offset,
+        total: result[0].total, limit: query.limit, offset: query.offset,
       });
     }, { isolationLevel: "repeatable read", accessMode: "read only" });
   }

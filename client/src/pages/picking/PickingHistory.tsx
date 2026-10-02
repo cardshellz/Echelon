@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { QueryLoadError } from "@/components/query-load-error";
-import { PICKING_HISTORY_PAGE_SIZE, pickingHistoryPageSchema, type PickingHistoryOrder } from "@shared/picking-history";
+import { PICKING_HISTORY_PAGE_SIZE, type PickingHistoryOrder } from "@shared/picking-history";
+import { PickingHistoryTimeoutError, readPickingHistory } from "@/lib/picking-history";
 
 function dateLabel(value: string | null): string {
   return value ? new Date(value).toLocaleString() : "Not recorded";
@@ -13,31 +15,30 @@ function dateLabel(value: string | null): string {
 
 /** Historical viewing must never reuse queue cards with claim/release actions. */
 export default function PickingHistory({ search, provider }: { search: string; provider: string }) {
-  const [debouncedSearch, setDebouncedSearch] = useState(search.trim());
+  const normalizedSearch = search.trim();
+  const [debouncedSearch, setDebouncedSearch] = useState(normalizedSearch);
   useEffect(() => {
-    const timeout = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    const timeout = setTimeout(() => setDebouncedSearch(normalizedSearch), 300);
     return () => clearTimeout(timeout);
-  }, [search]);
-  const scope = JSON.stringify([debouncedSearch, provider]);
+  }, [normalizedSearch]);
+  const waitingForSearch = normalizedSearch !== debouncedSearch;
+  const scope = JSON.stringify([normalizedSearch, provider]);
   const [pagination, setPagination] = useState({ scope, offset: 0 });
   // Derive page zero synchronously on scope changes: no request can use the
   // previous store/search's offset, even before React runs effects.
   const offset = pagination.scope === scope ? pagination.offset : 0;
   const [selected, setSelected] = useState<PickingHistoryOrder | null>(null);
   const history = useQuery({
-    queryKey: ["picking-history", debouncedSearch, provider, offset],
+    // Change observers immediately when the text changes, cancelling the old
+    // request and hiding its results. Only issuing the new request is debounced.
+    queryKey: ["picking-history", normalizedSearch, provider, offset],
+    enabled: !waitingForSearch,
     meta: { handlesLoadError: true },
     staleTime: 0,
     gcTime: 0, // Browsing years of pages must not retain years of data in the tab.
-    queryFn: async ({ signal }) => {
-      const params = new URLSearchParams({ limit: String(PICKING_HISTORY_PAGE_SIZE), offset: String(offset) });
-      if (debouncedSearch) params.set("search", debouncedSearch);
-      if (provider !== "all") params.set("provider", provider);
-      const response = await fetch(`/api/picking/history?${params}`, { signal, credentials: "include" });
-      if (!response.ok) throw new Error("Failed to load picking history");
-      return pickingHistoryPageSchema.parse(await response.json());
-    },
+    queryFn: ({ signal }) => readPickingHistory({ search: normalizedSearch, provider, offset }, signal),
   });
+  const loading = waitingForSearch || history.isPending || history.isFetching;
   const page = history.data;
   useEffect(() => {
     if (page && offset > 0 && offset >= page.total) {
@@ -46,20 +47,25 @@ export default function PickingHistory({ search, provider }: { search: string; p
     }
   }, [page, offset, scope]);
 
-  return <section aria-label="Picking history" className="space-y-3">
+  return <section aria-label="Picking history" aria-busy={loading} className="space-y-3">
     <div className="flex flex-wrap items-start justify-between gap-2">
       <div>
         <h2 className="font-semibold">Picking history — all dates</h2>
         <p className="text-sm text-muted-foreground">Newest orders first. Search all history by order number, customer or SKU.</p>
       </div>
-      <Button variant="outline" disabled={history.isFetching} onClick={() => void history.refetch()}>Refresh history</Button>
+      <Button variant="outline" disabled={loading} onClick={() => void history.refetch()}>Refresh history</Button>
     </div>
     {history.isError && <QueryLoadError subject="picking history" retry={() => void history.refetch()} refreshing={history.isFetching} stale={history.dataUpdatedAt > 0} />}
-    {history.isPending && <p role="status">Loading picking history…</p>}
-    {history.isFetching && !history.isPending && <p role="status">Updating picking history…</p>}
+    {history.error instanceof PickingHistoryTimeoutError && <p className="text-sm text-destructive">{history.error.message}</p>}
+    {loading && <div role="status" aria-live="polite" className="flex items-center gap-3 rounded-md border bg-muted/50 p-4">
+      <Loader2 className="h-5 w-5 animate-spin shrink-0" aria-hidden="true" />
+      <p className="font-medium">{normalizedSearch ? `Searching all picking history for “${normalizedSearch}”…` : "Loading picking history…"}</p>
+    </div>}
     {page && <>
       <p className="text-sm text-muted-foreground" aria-live="polite">
-        {page.total === 0 ? "No picking history matches your search." : `${offset + 1}–${Math.min(offset + page.orders.length, page.total)} of ${page.total} orders`}
+        {page.total === 0
+          ? !loading && !history.isError && "No picking history matches your search."
+          : `${offset + 1}–${Math.min(offset + page.orders.length, page.total)} of ${page.total} orders`}
       </p>
       {page.orders.map(order => <Card key={order.id}>
         <CardContent className="p-0">

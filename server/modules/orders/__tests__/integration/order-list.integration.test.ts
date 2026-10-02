@@ -261,6 +261,47 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
     for (const entry of itemReads) expect(entry.parameters).toHaveLength(50);
   });
 
+  it("searches a large pick archive without probing child tables once per unrelated order", async () => {
+    await database.pool.query(`INSERT INTO wms.orders (order_number, customer_name, warehouse_status, created_at)
+      SELECT CASE WHEN n = 60000 THEN '#62770' ELSE 'SEARCH-' || n END,
+        'Synthetic customer', 'shipped', '2020-01-01'::timestamp FROM generate_series(1, 60000) n;
+      INSERT INTO wms.order_items (order_id, sku, name, quantity, picked_quantity)
+      SELECT o.id, 'SLEEVE', 'Synthetic line', 2, 2 FROM wms.orders o CROSS JOIN generate_series(1, 3);
+      INSERT INTO wms.picking_logs (order_id, action_type, timestamp, picker_name)
+      SELECT o.id, 'item_picked', '2020-01-01'::timestamp, 'Test picker' FROM wms.orders o CROSS JOIN generate_series(1, 3);
+      ANALYZE wms.orders; ANALYZE wms.order_items; ANALYZE wms.picking_logs;`);
+    queries.length = 0;
+    const searchStartedAt = performance.now();
+    const page = await new PickingHistoryRepository(orm).page({ search: "62770" });
+    const searchMs = performance.now() - searchStartedAt;
+    expect(page.total).toBe(1);
+    expect(page.orders.map(order => order.orderNumber)).toEqual(["#62770"]);
+    const searches = queries.filter(entry => entry.query.startsWith('with "picking_history_matches"'));
+    expect(searches).toHaveLength(1);
+    const count = searches[0];
+    interface QueryPlan {
+      "Relation Name"?: string;
+      "Actual Loops": number;
+      Plans?: QueryPlan[];
+    }
+    const explain = await database.pool.query<{ "QUERY PLAN": { Plan: QueryPlan; "Execution Time": number }[] }>(
+      `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${count.query}`, count.parameters,
+    );
+    const plan = explain.rows[0]["QUERY PLAN"][0];
+    const childReads: QueryPlan[] = [];
+    function visit(node: QueryPlan): void {
+      if (["order_items", "picking_logs"].includes(node["Relation Name"] ?? "")) childReads.push(node);
+      node.Plans?.forEach(visit);
+    }
+    visit(plan.Plan);
+    if (process.env.PICKING_HISTORY_EXPLAIN === "true") {
+      process.stdout.write(`Picking history search: ${JSON.stringify({ searchMs, executionMs: plan["Execution Time"], childLoops: childReads.map(node => ({ table: node["Relation Name"], loops: node["Actual Loops"] })) })}\n`);
+    }
+    // Assert the work shape, not a wall-clock threshold that varies across CI.
+    expect(childReads.length).toBeGreaterThan(0);
+    expect(childReads.every(node => node["Actual Loops"] <= 1)).toBe(true);
+  });
+
   it("times out blocked list SQL, rolls back, and leaves the pooled connection usable", async () => {
     const blocker = await database.pool.connect();
     try {
