@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { InventoryAtpServiceContract } from "../../../inventory/atp.service";
 import type { SupplySnapshotContentDto } from "@shared/types/inventory-availability-planner";
 import { sealSupplySnapshot } from "../../domain/inventory-availability-planner";
+import { hubReserveSupply } from "../fixtures/inventory-hub-reserve.fixture";
 import {
   AuthorityAwareInventoryAtpService,
   type InventoryAvailabilityRuntimeAtpContext,
@@ -12,6 +13,24 @@ import {
 const HASH = "a".repeat(64);
 
 describe("AuthorityAwareInventoryAtpService", () => {
+  it("uses the same linked-reserve pool for warehouse readers and keeps the network deduplicated", async () => {
+    const legacy = fakeLegacy();
+    const service = new AuthorityAwareInventoryAtpService(executor({
+      authority: "canonical", legacy,
+      captureActiveSupplySnapshot: vi.fn(async () => sealSupplySnapshot(hubReserveSupply())),
+      getProductIdsByVariantIds: vi.fn(async () => new Map([[173, 10], [174, 10]])),
+    }));
+    await expect(service.getAtpPerVariantByWarehouse(10, 1)).resolves.toMatchObject([
+      { productVariantId: 173, atpUnits: 1985 }, { productVariantId: 174, atpUnits: 198 },
+    ]);
+    await expect(service.getDirectVariantAtpByWarehouse([173, 174], 1))
+      .resolves.toEqual(new Map([[173, 1985], [174, 198]]));
+    await expect(service.getAtpPerVariant(10)).resolves.toMatchObject([
+      { productVariantId: 173, atpUnits: 2055 }, { productVariantId: 174, atpUnits: 205 },
+    ]);
+    expect(legacy.getAtpPerVariantByWarehouse).not.toHaveBeenCalled();
+    expect(legacy.getDirectVariantAtpByWarehouse).not.toHaveBeenCalled();
+  });
   it("delegates the complete read to the legacy calculator while legacy owns runtime authority", async () => {
     const legacy = fakeLegacy();
     const captureActiveSupplySnapshot = vi.fn();

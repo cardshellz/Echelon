@@ -9,8 +9,103 @@ import {
   type InventoryChannelExposureRuntimeContext,
 } from "../../application/inventory-channel-exposure-runtime.service";
 import { sealSupplySnapshot } from "../../domain/inventory-availability-planner";
+import { hubReserveSupply } from "../fixtures/inventory-hub-reserve.fixture";
 
 const HASH = "a".repeat(64);
+
+describe("linked-reserve channel supply", () => {
+  function hubContext(configured: ActiveInventoryPublicationTargetSnapshot[]): InventoryChannelExposureRuntimeContext {
+    return { ...canonicalContext(configured), supplySnapshot: sealSupplySnapshot(hubReserveSupply()),
+      managedSellableVariantIds: [173, 174] };
+  }
+  function hubTarget(input: Parameters<typeof target>[0] = {}): ActiveInventoryPublicationTargetSnapshot {
+    const configured = target(input);
+    configured.mappings = configured.mappings.map((mapping, index) => ({ ...mapping,
+      productVariantId: index === 0 ? 173 : 174, externalSku: index === 0 ? "B200" : "C2000" }));
+    return configured;
+  }
+  function plan(configured: ActiveInventoryPublicationTargetSnapshot[]) {
+    return planInventoryChannelExposureProduct(hubContext(configured), 10, { warn: vi.fn() });
+  }
+
+  it.each(["shopify", "ebay", "tiktok", "walmart", "dropship-ebay"])(
+    "includes reserve stock through the existing hub binding for %s", provider => {
+      const configured = hubTarget();
+      configured.channelProvider = provider === "dropship-ebay" ? "ebay" : provider;
+      if (provider === "dropship-ebay") {
+        configured.destinationKind = "dropship_store_connection";
+        configured.channelConnectionId = null;
+        configured.dropshipStoreConnectionId = 77;
+      }
+      const before = structuredClone(configured);
+      const result = plan([configured]);
+      expect(result.targets[0]).toMatchObject({ publishable: true, sourceBinding: { warehouseIds: [1] }, rows: [
+        { productVariantId: 173, canonicalAtpUnits: "1985", publishedUnits: "1985",
+          sourceWarehouseBreakdown: [{ warehouseId: 1, canonicalAtpUnits: "485" }, { warehouseId: 2, canonicalAtpUnits: "1500" }] },
+        { productVariantId: 174, canonicalAtpUnits: "198", publishedUnits: "198" },
+      ] });
+      expect(result).toMatchObject({ providerWriteAttempted: false, outboxEnqueued: false });
+      expect(configured).toEqual(before);
+    },
+  );
+
+  it("applies the channel dial, holdback and cap after deduplicating the physical supply union", () => {
+    const configured = hubTarget({ sourceWarehouseIds: [1, 2], policy: policyValue({
+      shareBps: 5000, holdbackSellableUnits: "2", maxPublish: { mode: "units", units: "900" },
+    }) });
+    expect(plan([configured]).targets[0].rows).toMatchObject([
+      { canonicalAtpUnits: "1985", sharedUnits: "992", afterHoldbackUnits: "990", publishedUnits: "900" },
+      { canonicalAtpUnits: "198", sharedUnits: "99", afterHoldbackUnits: "97", publishedUnits: "97" },
+    ]);
+    configured.variantHolds = [{ productVariantId: 173, hold: { reason: "SKU paused", heldBy: "operator", heldAt: "2026-10-02T12:00:00.000Z" } }];
+    expect(plan([configured]).targets[0].rows.map(row => row.publishedUnits)).toEqual(["0", "97"]);
+  });
+
+  it("expands overridden hubs but never adds their parent or siblings when a reserve alone is selected", () => {
+    const configured = hubTarget({ sourceWarehouseIds: [3] });
+    configured.sourceOverrideMembers = [
+      { fulfillmentNodeId: 12, warehouseId: 1, fulfillmentNodeLifecycleStatus: "active" },
+      { fulfillmentNodeId: 13, warehouseId: 2, fulfillmentNodeLifecycleStatus: "active" },
+    ];
+    const inherited = { allocationSemantics: null, eligible: null, shareBps: null,
+      holdbackSellableUnits: null, maxPublish: null, minPublishSellableUnits: null };
+    configured.policies = [...configured.policies,
+      { scopeKey: "channel:7:product:10", scopeType: "product", policyId: 500, version: 1, definitionHash: HASH,
+        value: { ...inherited, sourceFulfillmentNodeIds: [12] } },
+      { scopeKey: "channel:7:variant:174", scopeType: "variant", policyId: 501, version: 1, definitionHash: HASH,
+        value: { ...inherited, sourceFulfillmentNodeIds: [13] } },
+    ];
+    expect(plan([configured]).targets[0].rows.map(row => [row.canonicalAtpUnits, row.sourceWarehouseBreakdown.map(source => source.warehouseId)]))
+      .toEqual([["1985", [1, 2]], ["150", [2]]]);
+  });
+
+  it("detects partition overlap when another channel explicitly selects the hub's reserve", () => {
+    const hub = hubTarget({ policy: policyValue({ allocationSemantics: "partitioned", shareBps: 6000 }) });
+    const reserve = hubTarget({ publicationTargetId: 92, channelId: 8, sourceWarehouseIds: [2],
+      policy: policyValue({ allocationSemantics: "partitioned", shareBps: 5000 }) });
+    const result = plan([hub, reserve]);
+    expect(result.targets.map(row => row.publishable)).toEqual([false, false]);
+    expect(result.targets.every(target => target.rows.every(row => row.blockers.some(blocker =>
+      blocker.code === "PARTITIONED_CHANNEL_SHARE_EXCEEDS_100_PERCENT")))).toBe(true);
+  });
+
+  it("uses the same hub pool for deferred Dropship availability without creating publication work", () => {
+    const configured = hubTarget();
+    configured.destinationKind = "dropship_store_connection";
+    configured.channelProvider = "ebay";
+    configured.channelConnectionId = null;
+    configured.dropshipStoreConnectionId = 77;
+    configured.membership = { mode: "explicit", includedVariantIds: [] };
+    configured.mappings = [];
+    configured.deferredDropshipQuantityVariantIds = [173];
+    const result = planInventoryChannelExposureProduct(hubContext([configured]), 10, { warn: vi.fn() }, "deferred_dropship_quantity_read");
+    expect(result.targets).toMatchObject([{ publishable: false, rows: [{ productVariantId: 173,
+      canonicalAtpUnits: "1985", publishedUnits: "1985", mapping: null, blockers: [] }] }]);
+    expect(result.targets[0].rows).toHaveLength(1);
+    expect(result).toMatchObject({ providerWriteAttempted: false, outboxEnqueued: false });
+    expect(plan([configured]).targets).toEqual([]);
+  });
+});
 
 describe("audited deferred Dropship ATP reads", () => {
   function deferredTarget() {
