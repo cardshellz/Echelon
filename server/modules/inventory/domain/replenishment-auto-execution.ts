@@ -17,8 +17,9 @@ export function resolveReplenishmentAutoExecution(
     shouldAutoExecute: inline,
     executionMode: inline ? "inline" as const : "queue" as const,
   });
-  // Transfers, assembly and other warehouse work never become implicit picks.
-  if (method !== "case_break") return decision(false);
+  // Package conversion is same-product, unit-conserving repackaging proved by
+  // the claim owner. Component builds and transfers remain separate work.
+  if (method !== "case_break" && method !== "package_conversion") return decision(false);
   for (const override of [ruleOverride, tierOverride]) {
     if (override === 1) return decision(true);
     if (override === 2) return decision(false);

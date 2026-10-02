@@ -13,6 +13,8 @@ import { PostgresCanonicalClaimInventoryRepository } from "../../../inventory/in
 import { PostgresInventoryAvailabilityClaimRepository } from "../../infrastructure/inventory-availability-claim.repository";
 import { PickCorrectionService } from "../../../orders/pick-correction.service";
 import { observeMissingPick } from "../../../wms/pick-correction.repository";
+import { PostgresCanonicalClaimDispatchRepository } from "../../infrastructure/inventory-availability-dispatch.repository";
+import { WmsCanonicalClaimDispatchSourceOwner } from "../../../wms/canonical-claim-dispatch-source";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -25,9 +27,18 @@ suite.sequential("canonical picker case conversions with active quantity authori
   let context: QuantityLedgerTestContext;
   let owner: PostgresInventoryAvailabilityClaimRepository;
   let claimId: string;
+  let packagingPathId: number;
   beforeEach(async () => {
     context = await createQuantityLedgerTestContext(url, disposable);
     await prepareQuantityLotCreationMetadata(context.pool);
+    // The admission fixture's SQL-only dispatch tables have no posting columns.
+    // Replace those empty stubs with the real receipt/FK/deferred-journal schema.
+    await context.pool.query("DROP TABLE inventory.availability_claim_dispatch_movements; DROP TABLE inventory.availability_claim_dispatch_receipts");
+    await context.pool.query(readFileSync("migrations/0662_inventory_availability_claim_dispatch.sql","utf8"));
+    for (const table of ["availability_claim_dispatch_movements","availability_claim_dispatch_receipts"]) {
+      await context.pool.query(`CREATE TRIGGER aa_cutover_writer_admission BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON inventory.${table}
+        FOR EACH STATEMENT EXECUTE FUNCTION inventory.pin_cutover_writer_admission()`);
+    }
     await context.pool.query(readFileSync("migrations/0703_corrective_picking.sql", "utf8"));
     for (const table of [replenRules, replenTierDefaults, warehouseSettings]) {
       const definition = getTableConfig(table);
@@ -45,6 +56,7 @@ suite.sequential("canonical picker case conversions with active quantity authori
         VALUES(5,200,102,2,0,0,0,0,'active','2026-09-29',4000,4000,0,0,4000,0,'purchase_order',0);
       INSERT INTO inventory.warehouse_settings(id,warehouse_id,warehouse_code,replen_mode,inline_replen_max_units)
         VALUES(1,1,'MAIN','inline',50);`);
+    await seedRepackagingConfiguration();
     await context.open();
     await context.pool.query(`INSERT INTO wms.orders(id,order_number,warehouse_id,warehouse_status,on_hold) VALUES(2,'#CASE-PICK',1,'ready',0);
       INSERT INTO wms.order_items(id,order_id,sku,name,location,product_id,catalog_product_id,inventory_tracking,
@@ -105,13 +117,188 @@ suite.sequential("canonical picker case conversions with active quantity authori
       receipts: (await context.pool.query("SELECT * FROM inventory.availability_claim_commands ORDER BY id")).rows,
       movements: (await context.pool.query("SELECT * FROM inventory.availability_claim_pick_movements ORDER BY id")).rows,
       costs: (await context.pool.query("SELECT * FROM oms.order_item_costs ORDER BY id")).rows,
-      item: (await context.pool.query("SELECT * FROM wms.order_items WHERE id=21")).rows };
+      item: (await context.pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows };
   }
+
+  async function seedRepackagingConfiguration() {
+    await context.pool.query(`INSERT INTO catalog.product_variants(id,product_id,sku,units_per_variant,hierarchy_level)
+        VALUES(103,20,'EA',1,0);
+      INSERT INTO inventory.inventory_levels(id,warehouse_location_id,product_variant_id,variant_qty,reserved_qty,picked_qty,packed_qty)
+        VALUES(30,100,103,0,0,0,0);
+      INSERT INTO inventory.inventory_lots(id,warehouse_location_id,product_variant_id,qty_received,qty_on_hand,qty_reserved,qty_picked,qty_packed,
+        status,received_at,unit_cost_mills,po_unit_cost_mills,packaging_cost_mills,landed_cost_mills,total_unit_cost_mills,cost_provisional,cost_source,qty_consumed)
+        VALUES(6,100,103,25,0,0,0,0,'active','2026-09-29',31800,31800,0,0,31800,0,'purchase_order',0);`);
+    // Define the conversion in the initial draft before opening freezes it.
+    packagingPathId = (await context.pool.query(`INSERT INTO inventory.transformation_model_paths
+      (model_id,source_variant_id,destination_variant_id,input_qty,output_qty,source_units_per_variant,destination_units_per_variant,
+       operation_type,authority_state,validation_state)
+      SELECT id,103,101,5,1,1,5,'directed_conversion','allowed','valid'
+      FROM inventory.transformation_model_versions WHERE product_id=20 AND version=1 RETURNING id`)).rows[0].id;
+    await context.pool.query("UPDATE inventory.transformation_model_versions SET validation_state='valid',validation_errors='[]' WHERE product_id=20 AND version=1");
+  }
+
+  async function repackagingScenario() {
+    await context.pool.query(`INSERT INTO wms.orders(id,order_number,warehouse_id,warehouse_status,on_hold) VALUES(3,'#REPACK-PICK',1,'ready',0);
+      INSERT INTO wms.order_items(id,order_id,sku,name,location,product_id,catalog_product_id,inventory_tracking,
+        quantity,picked_quantity,fulfilled_quantity,status,on_hold,requires_shipping)
+        VALUES(31,3,'P5','Pack of five','PICK',101,20,true,3,0,0,'pending',false,1);`);
+    const authorityId = packagingPathId;
+    const operationType = "directed_conversion";
+    const plan = claimPlanSchema.parse({ requestKey:"repack-pick",scope:{ kind:"warehouse",warehouseId:1 },status:"satisfied",
+      lines:[{ lineKey:"order-item:31",targetVariantId:101,requestedQty:"3",plannedQty:"3",shortfallQty:"0" }],
+      resourceClaims:[
+        { lineKey:"order-item:31",consumerOperationKey:null,warehouseId:1,warehouseLocationId:100,inventoryLevelId:10,sourceVariantId:101,claimedQty:"2" },
+        { lineKey:"order-item:31",consumerOperationKey:"eaches-pack",warehouseId:1,warehouseLocationId:100,inventoryLevelId:30,sourceVariantId:103,claimedQty:"5" },
+      ],operations:[{ lineKey:"order-item:31",warehouseId:1,operationKey:"eaches-pack",parentOperationKey:null,
+        operationType,authorityId,sourceVariantIds:[103],inputs:[{ sourceVariantId:103,requiredQty:"5" }],
+        destinationVariantId:101,plannedExecutions:"1",outputQty:"1",committedOutputQty:"1",outputLocationId:100 }],
+      fulfillmentGroups:[{ groupKey:"repack:warehouse:1",warehouseId:1,lineAllocations:[{ lineKey:"order-item:31",targetVariantId:101,plannedQty:"3" }] }],
+      modelEvidence:[],blockers:[],snapshotFingerprint:"b".repeat(64) });
+    await context.transaction(async client => {
+      await context.ledger.postInsideTransaction(client, {
+        contractVersion:"inventory_quantity_v1",kind:"receive",idempotencyKey:"seed-eaches",actor:"fixture",
+        reason:"Known physical eaches",occurredAt:now.toISOString(),reference:{ type:"test",id:"seed-eaches" },reversesCommandId:null,
+        movements:[{ inventoryLotId:6,inventoryLevelId:30,warehouseLocationId:100,warehouseId:1,productVariantId:103,
+          delta:{ onHand:25,reserved:0,picked:0,packed:0 } }],
+      });
+      claimId = (await client.query(`INSERT INTO inventory.availability_claims(claim_key,order_id,revision,status,plan_status,scope_kind,scope_warehouse_id,
+        activation_run_id,runtime_authority_revision,request_hash,plan_hash,snapshot_fingerprint,request_payload,plan_payload,model_evidence,requested_by,reason,reserved_at)
+        SELECT 'repack-pick',3,1,'active','satisfied','warehouse',1,activation_run_id,revision,$1,$1,$2,$3,$3,'[]','picker','Repack fixture',$4
+        FROM inventory.availability_runtime_authority RETURNING id`,[hash(plan),plan.snapshotFingerprint,JSON.stringify(plan),now])).rows[0].id;
+      const lineId = (await client.query(`INSERT INTO inventory.availability_claim_lines(claim_id,line_key,order_item_id,target_variant_id,requested_qty,planned_qty,shortfall_qty)
+        VALUES($1,'order-item:31',31,101,3,3,0) RETURNING id`,[claimId])).rows[0].id;
+      const operationId = (await client.query(`INSERT INTO inventory.availability_claim_operations(claim_id,claim_line_id,operation_key,warehouse_id,operation_type,authority_id,
+        destination_variant_id,planned_executions,output_qty,committed_output_qty,output_location_id)
+        VALUES($1,$2,'eaches-pack',1,$3,$4,101,1,1,1,100) RETURNING id`,[claimId,lineId,operationType,authorityId])).rows[0].id;
+      await client.query(`INSERT INTO inventory.availability_claim_operation_inputs(claim_operation_id,claim_id,source_variant_id,required_qty,input_ordinal)
+        VALUES($1,$2,103,5,0)`,[operationId,claimId]);
+      const writer = new PostgresCanonicalClaimInventoryRepository();
+      for (const resource of plan.resourceClaims) {
+        const resourceId = (await client.query(`INSERT INTO inventory.availability_claim_resources(claim_id,claim_line_id,consumer_operation_key,warehouse_id,
+          warehouse_location_id,inventory_level_id,source_variant_id,claimed_qty) VALUES($1,$2,$3,1,100,$4,$5,$6) RETURNING id`,
+        [claimId,lineId,resource.consumerOperationKey,resource.inventoryLevelId,resource.sourceVariantId,resource.claimedQty])).rows[0].id;
+        const allocations = await writer.reserveResource({ client,commandKey:`repack-reserve:${resource.sourceVariantId}`,
+          claimId:BigInt(claimId),claimResourceId:BigInt(resourceId),inventoryLevelId:resource.inventoryLevelId,
+          warehouseLocationId:100,sourceVariantId:resource.sourceVariantId,claimedQty:Number(resource.claimedQty),
+          orderId:3,orderItemId:31,consumerOperationKey:resource.consumerOperationKey,actor:"fixture",occurredAt:now });
+        for (const allocation of allocations) await client.query(`INSERT INTO inventory.availability_claim_lot_allocations
+          (claim_id,claim_resource_id,inventory_lot_id,claimed_qty,unit_cost_mills,po_unit_cost_mills,packaging_unit_cost_mills,landed_unit_cost_mills)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,[claimId,resourceId,allocation.inventoryLotId,allocation.qty,
+          allocation.unitCostMills.toString(),allocation.poUnitCostMills.toString(),allocation.packagingUnitCostMills.toString(),allocation.landedUnitCostMills.toString()]);
+      }
+    });
+    await owner.pickClaimLine(command({ orderItemId:31,idempotencyKey:"repack-first-two",wmsProgress:{
+      expectedStatus:"pending",expectedPickedQuantity:0,expectedFulfilledQuantity:0,targetStatus:"in_progress",targetPickedQuantity:2 } }));
+    return command({ orderItemId:31,quantity:"1",idempotencyKey:"repack-third",reason:"Record the remaining P5 from five eaches",wmsProgress:{
+      expectedStatus:"in_progress",expectedPickedQuantity:2,expectedFulfilledQuantity:0,targetStatus:"completed",targetPickedQuantity:3 } });
+  }
+
+  it("picks a third P5 from five reserved eaches through directed conversion exactly once", async () => {
+    const remaining = await repackagingScenario();
+    const earlierPicks = (await context.pool.query("SELECT * FROM inventory.availability_claim_pick_movements ORDER BY id")).rows;
+    const earlierCosts = (await context.pool.query("SELECT * FROM oms.order_item_costs ORDER BY id")).rows;
+    const results = await Promise.all([owner.pickClaimLine(remaining),owner.pickClaimLine(remaining)]);
+    expect(results.map(result => result.idempotentReplay).sort()).toEqual([false,true]);
+    expect((await context.pool.query("SELECT variant_qty,reserved_qty,picked_qty FROM inventory.inventory_levels WHERE id=30")).rows)
+      .toEqual([{ variant_qty:20,reserved_qty:0,picked_qty:0 }]);
+    expect((await context.pool.query("SELECT status,executed_executions::text FROM inventory.availability_claim_operations WHERE claim_id=$1",[claimId])).rows)
+      .toEqual([{ status:"completed",executed_executions:"1" }]);
+    expect((await context.pool.query("SELECT picked_quantity,fulfilled_quantity,status FROM wms.order_items WHERE id=31")).rows)
+      .toEqual([{ picked_quantity:3,fulfilled_quantity:0,status:"completed" }]);
+    const picks = (await context.pool.query("SELECT * FROM inventory.availability_claim_pick_movements ORDER BY id")).rows;
+    expect(picks.slice(0,earlierPicks.length)).toEqual(earlierPicks);
+    expect(picks.slice(earlierPicks.length).map(row => row.quantity)).toEqual(["1"]);
+    const costs = (await context.pool.query("SELECT * FROM oms.order_item_costs ORDER BY id")).rows;
+    expect(costs.slice(0,earlierCosts.length)).toEqual(earlierCosts);
+    expect(costs.slice(earlierCosts.length)).toMatchObject([{ qty:1,total_cost_mills:"159000" }]);
+    const beforeReplay = await evidence();
+    await owner.pickClaimLine(remaining);
+    expect(await evidence()).toEqual(beforeReplay);
+  });
+
+  it("preserves two already-dispatched P5 packs while converting and recording only the remaining one", async () => {
+    const remaining = await repackagingScenario();
+    // Reduced fixture columns for the real WMS dispatch-source reader.
+    await context.pool.query(`ALTER TABLE wms.orders ADD COLUMN IF NOT EXISTS cancelled_at timestamptz;
+      ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS shipment_purpose text DEFAULT 'customer_fulfillment',
+        ADD COLUMN IF NOT EXISTS replaces_shipment_id integer, ADD COLUMN IF NOT EXISTS cancelled_at timestamptz,
+        ADD COLUMN IF NOT EXISTS voided_at timestamptz;
+      ALTER TABLE wms.outbound_shipment_items ADD COLUMN IF NOT EXISTS provider_membership_state text DEFAULT 'authoritative';
+      INSERT INTO wms.outbound_shipments(id,order_id,status,held,requires_review,shipment_purpose)
+        VALUES(31,3,'shipped',false,false,'customer_fulfillment');
+      INSERT INTO wms.outbound_shipment_items(id,shipment_id,order_item_id,product_variant_id,qty,from_location_id,shipment_item_purpose,provider_membership_state)
+        VALUES(31,31,31,101,2,100,'customer_fulfillment','authoritative');`);
+    const dispatch = new PostgresCanonicalClaimDispatchRepository(context.pool,new WmsCanonicalClaimDispatchSourceOwner(),
+      new PostgresCanonicalClaimInventoryRepository(),async ({ client }) => {
+        await client.query("UPDATE wms.order_items SET fulfilled_quantity=2 WHERE id=31");
+      },() => now);
+    await dispatch.dispatch({ claimId,orderId:3,orderItemId:31,warehouseId:1,warehouseLocationId:100,productVariantId:101,
+      outboundShipmentId:31,sourceShipmentItemId:31,physicalShipmentId:null,physicalShipmentItemId:null,quantity:"2",
+      idempotencyKey:"dispatch-first-two",actor:"shipping",reason:"Provider-declared first two packs" });
+    const beforeCosts = (await context.pool.query("SELECT * FROM oms.order_item_costs ORDER BY id")).rows;
+    const beforeShipments = (await context.pool.query("SELECT * FROM wms.outbound_shipment_items ORDER BY id")).rows;
+    await owner.pickClaimLine({ ...remaining,wmsProgress:{ ...remaining.wmsProgress!,expectedFulfilledQuantity:2 } });
+    expect((await context.pool.query("SELECT consumed_target_qty::text,picked_target_qty::text FROM inventory.availability_claim_lines WHERE claim_id=$1",[claimId])).rows)
+      .toEqual([{ consumed_target_qty:"2",picked_target_qty:"1" }]);
+    expect((await context.pool.query("SELECT picked_quantity,fulfilled_quantity FROM wms.order_items WHERE id=31")).rows)
+      .toEqual([{ picked_quantity:3,fulfilled_quantity:2 }]);
+    expect((await context.pool.query("SELECT * FROM oms.order_item_costs ORDER BY id")).rows.slice(0,beforeCosts.length)).toEqual(beforeCosts);
+    expect((await context.pool.query("SELECT * FROM wms.outbound_shipment_items ORDER BY id")).rows).toEqual(beforeShipments);
+  });
+
+  it("rolls repackaging, source consumption and cost lineage back if final pick progress fails", async () => {
+    const remaining = await repackagingScenario();
+    const before = await evidence();
+    await context.pool.query(`CREATE FUNCTION wms.fail_repack_pick() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'injected repack pick failure'; END $$;
+      CREATE TRIGGER fail_repack_pick BEFORE UPDATE ON wms.order_items FOR EACH ROW EXECUTE FUNCTION wms.fail_repack_pick()`);
+    await expect(owner.pickClaimLine(remaining)).rejects.toThrow("injected repack pick failure");
+    expect(await evidence()).toEqual(before);
+    await context.pool.query("DROP TRIGGER fail_repack_pick ON wms.order_items");
+    await expect(owner.pickClaimLine(remaining)).resolves.toMatchObject({ outcome:"picked",quantity:"1" });
+  });
+
+  it("keeps a manual or queued repackaging choice authoritative without falling through to bin rebinding", async () => {
+    const remaining = await repackagingScenario();
+    await context.pool.query("INSERT INTO inventory.replen_rules(id,pick_product_variant_id,is_active,auto_replen) VALUES(1,101,1,2)");
+    const before = await evidence();
+    await expect(owner.pickClaimLine(remaining)).rejects.toMatchObject({ code:"CLAIM_PICK_REPLENISHMENT_REQUIRED" });
+    expect(await evidence()).toEqual(before);
+  });
+
+  it.each(["missing_path","component_build"] as const)("does not turn %s into an implicit packaging pick", async fault => {
+    const remaining = await repackagingScenario();
+    // Corrupt only this synthetic claim, not an immutable live model. The claim
+    // hash and operation row agree, so the packaging/work guard must reject it.
+    const row = (await context.pool.query("SELECT plan_payload FROM inventory.availability_claims WHERE id=$1",[claimId])).rows[0];
+    const plan = claimPlanSchema.parse(row.plan_payload);
+    const operation = plan.operations[0];
+    if (fault === "missing_path") operation.authorityId = 2147483647;
+    else operation.operationType = "component_build";
+    await context.pool.query("UPDATE inventory.availability_claims SET plan_payload=$2,plan_hash=$3 WHERE id=$1",[claimId,JSON.stringify(plan),hash(plan)]);
+    await context.pool.query("UPDATE inventory.availability_claim_operations SET authority_id=$2,operation_type=$3 WHERE claim_id=$1",
+      [claimId,operation.authorityId,operation.operationType]);
+    const before = await evidence();
+    await expect(owner.pickClaimLine(remaining)).rejects.toMatchObject({ code:"CLAIM_PICK_OPERATION_REQUIRES_WORK" });
+    expect(await evidence()).toEqual(before);
+  });
+
+  it("prevents two distinct pick commands from spending the remaining repackaging inputs twice", async () => {
+    const remaining = await repackagingScenario();
+    const results = await Promise.allSettled([owner.pickClaimLine(remaining),
+      owner.pickClaimLine({ ...remaining,idempotencyKey:"competing-repack-pick" })]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
+    expect((await context.pool.query("SELECT variant_qty,reserved_qty FROM inventory.inventory_levels WHERE id=30")).rows)
+      .toEqual([{ variant_qty:20,reserved_qty:0 }]);
+    expect((await context.pool.query("SELECT count(*)::int AS n FROM inventory.availability_claim_commands WHERE claim_id=$1 AND command_type='execute'",[claimId])).rows[0].n).toBe(1);
+  });
   it("atomically opens one case, picks two packs, retains 38 surplus packs and replays exactly once", async () => {
     const results = await Promise.all([owner.pickClaimLine(command()), owner.pickClaimLine(command())]);
     expect(results.map(result => result.idempotentReplay).sort()).toEqual([false,true]);
     expect((await context.pool.query("SELECT id,variant_qty,reserved_qty,picked_qty FROM inventory.inventory_levels ORDER BY id")).rows)
-      .toEqual([{ id:10,variant_qty:58,reserved_qty:3,picked_qty:4 }, { id:20,variant_qty:1,reserved_qty:0,picked_qty:0 }]);
+      .toEqual([{ id:10,variant_qty:58,reserved_qty:3,picked_qty:4 }, { id:20,variant_qty:1,reserved_qty:0,picked_qty:0 },
+        { id:30,variant_qty:0,reserved_qty:0,picked_qty:0 }]);
     expect((await context.pool.query("SELECT status,executed_executions::text FROM inventory.availability_claim_operations")).rows)
       .toEqual([{ status:"completed",executed_executions:"1" }]);
     expect((await context.pool.query("SELECT qty,total_cost_mills::text FROM oms.order_item_costs WHERE order_item_id=21")).rows)

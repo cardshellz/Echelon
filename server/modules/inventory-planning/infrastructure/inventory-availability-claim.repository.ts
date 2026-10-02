@@ -1,6 +1,7 @@
 import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
-import { isClaimCaseBreakInline } from "../../inventory/infrastructure/replenishment-policy.reader";
-import { selectClaimPickCaseBreaks } from "../domain/claim-pick-case-breaks";
+import { isClaimPackageConversionInline } from "../../inventory/infrastructure/replenishment-policy.reader";
+import { isClaimPickRepackaging, selectClaimPickPackageConversions } from "../domain/claim-pick-package-conversions";
+import { readClaimPickPackagingPath } from "./claim-pick-packaging-path.reader";
 import {
   rejectSupplyRefreshBeforePlanning, rejectSupplyRefreshPlan,
   type ClaimLineBalance, type ClaimSupplyRefreshRejection,
@@ -5637,7 +5638,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           );
         }
         if (command.wmsProgress && !command.assemblyWork
-          && await this.materializePickCaseBreaks(client, claim, line, command, quantity, pickWarehouseId, occurredAt)) {
+          && await this.materializePickPackageConversions(client, claim, line, command, quantity, pickWarehouseId, occurredAt)) {
           line = await loadFulfillmentClaimLine(client, claim.id, command.orderItemId);
         }
         const selectedOpen = line.resources
@@ -6476,7 +6477,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
    * Conversion receipts, exact lots, surplus, pick and WMS progress share the
    * caller's transaction. No partial conversion can survive a rejected pick.
    */
-  private async materializePickCaseBreaks(
+  private async materializePickPackageConversions(
     client: PoolClient,
     claim: PersistedClaim,
     line: FulfillmentClaimLine,
@@ -6488,30 +6489,38 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
     const readyQty = line.resources.filter(resource => resource.warehouseId === warehouseId)
       .reduce((total, resource) => total + openResourceQty(resource), BigInt(0));
     if (readyQty >= quantity || !claim.plan.operations.some(operation =>
-      operation.lineKey === `order-item:${line.orderItemId}` && operation.operationType === "break_pack")) return false;
+      operation.lineKey === `order-item:${line.orderItemId}`)) return false;
     const stateRows = await client.query<{ operation_key: string; status: string }>(
       `SELECT operation_key, status FROM inventory.availability_claim_operations
        WHERE claim_id = $1 AND claim_line_id = $2 ORDER BY operation_key FOR UPDATE`,
       [claim.id.toString(), line.id.toString()],
     );
-    const operations = selectClaimPickCaseBreaks({
+    const operations = selectClaimPickPackageConversions({
       operations: claim.plan.operations, states: new Map(stateRows.rows.map(row => [row.operation_key, row.status])),
       orderItemId: line.orderItemId, targetVariantId: line.targetVariantId,
       warehouseId, locationId: command.warehouseLocationId, readyQty, pickQty: quantity,
     });
     for (const operation of operations) {
-      if (!await isClaimCaseBreakInline(client, {
+      if (operation.operationType !== "break_pack"
+        && !isClaimPickRepackaging(operation, await readClaimPickPackagingPath(client, operation.authorityId))) {
+        throw new InventoryAvailabilityClaimRepositoryError("CLAIM_PICK_OPERATION_REQUIRES_WORK",
+          "This transformation requires explicit warehouse work; it is not same-product package conversion.",
+          { claimId: claim.id.toString(), operationKey: operation.operationKey });
+      }
+      if (!await isClaimPackageConversionInline(client, {
         destinationVariantId: operation.destinationVariantId, warehouseId: operation.warehouseId,
         outputQty: BigInt(operation.outputQty),
+        method: operation.operationType === "break_pack" ? "case_break" : "package_conversion",
       })) {
         throw new InventoryAvailabilityClaimRepositoryError("CLAIM_PICK_REPLENISHMENT_REQUIRED",
-          "This case break is configured for queued warehouse work, not inline picking.",
+          "This package conversion is configured for queued warehouse work, not inline picking.",
           { claimId: claim.id.toString(), operationKey: operation.operationKey });
       }
       await requirePickableLocation(client, operation.outputLocationId!, warehouseId);
       const executionCommand = canonicalAvailabilityClaimOperationExecutionCommandSchema.parse({
         claimId: claim.id.toString(), operationKey: operation.operationKey,
-        idempotencyKey: `pick-case-break:${hash({ pick: command.idempotencyKey, operation: operation.operationKey })}`,
+        // Preserve existing case-break receipt identities across deployment.
+        idempotencyKey: `${operation.operationType === "break_pack" ? "pick-case-break" : "pick-package-conversion"}:${hash({ pick: command.idempotencyKey, operation: operation.operationKey })}`,
         actor: command.actor, reason: command.reason,
       });
       await this.executeLockedPackageOperation(client, claim, executionCommand, occurredAt);
