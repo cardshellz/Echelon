@@ -1395,6 +1395,36 @@ function PickingWorkspace() {
     },
   });
 
+  // Release a held line. A line that already shipped is closed out server-side
+  // instead of being re-sent to ShipStation.
+  const releaseLineHoldMutation = useMutation({
+    mutationFn: async ({ wmsOrderId, itemId }: { wmsOrderId: number; itemId: number }) => {
+      const res = await fetch(`/api/orders/${wmsOrderId}/items/${itemId}/release-hold`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || "Failed to release line");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+      playSound("success");
+      toast({ title: "Line released", description: "The hold is off this line." });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Couldn't release line",
+        description: error.message || "Failed to release line. Try again.",
+        variant: "destructive",
+      });
+      playSound("error");
+    },
+  });
+
   const resolveAllocationMutation = useMutation({
     mutationFn: ({ itemId, locationCode }: { itemId: number; locationCode: string }) =>
       resolveAllocationBin(itemId, locationCode),
@@ -3668,15 +3698,20 @@ function PickingWorkspace() {
                                     Hold
                                   </button>
                                 )}
-                                {order.onHold && (
+                                {(order.onHold || hasHeldLine(order)) && (
                                   <button
                                     className="text-emerald-600 hover:text-emerald-700 flex items-center gap-0.5 font-medium"
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       setFlashingOrderId(order.id);
-                                      const holdSubIds = getSubOrderIds(order.id);
-                                      for (const subId of holdSubIds) {
-                                        releaseHoldMutation.mutate(subId);
+                                      if (order.onHold) {
+                                        for (const subId of getSubOrderIds(order.id)) {
+                                          releaseHoldMutation.mutate(subId);
+                                        }
+                                      }
+                                      // An order can sit under Hold because of a held line alone.
+                                      for (const heldItem of order.items.filter((item) => item.onHold)) {
+                                        releaseLineHoldMutation.mutate({ wmsOrderId: heldItem.wmsOrderId, itemId: heldItem.id });
                                       }
                                       setTimeout(() => setFlashingOrderId(null), 600);
                                     }}
@@ -4479,17 +4514,30 @@ function PickingWorkspace() {
                       Short Pick
                     </Button>
                   </div>
-                  {/* Hold this line and keep picking the rest of the order. */}
-                  <Button
-                    variant="outline"
-                    className="w-full mt-3 h-12 min-h-[44px] text-base font-medium text-slate-700 border-slate-300 hover:bg-slate-50"
-                    onClick={() => openHoldLine(currentItem)}
-                    disabled={holdLineItemMutation.isPending || currentItem.picked > 0}
-                    data-testid="button-hold-line"
-                  >
-                    <Pause className="h-5 w-5 mr-2" />
-                    Hold line
-                  </Button>
+                  {/* Hold this line and keep picking the rest of the order, or release it. */}
+                  {currentItem.onHold ? (
+                    <Button
+                      variant="outline"
+                      className="w-full mt-3 h-12 min-h-[44px] text-base font-medium text-emerald-700 border-emerald-300 hover:bg-emerald-50"
+                      onClick={() => releaseLineHoldMutation.mutate({ wmsOrderId: currentItem.wmsOrderId, itemId: currentItem.id })}
+                      disabled={releaseLineHoldMutation.isPending}
+                      data-testid="button-release-line"
+                    >
+                      <Play className="h-5 w-5 mr-2" />
+                      Release hold
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      className="w-full mt-3 h-12 min-h-[44px] text-base font-medium text-slate-700 border-slate-300 hover:bg-slate-50"
+                      onClick={() => openHoldLine(currentItem)}
+                      disabled={holdLineItemMutation.isPending || currentItem.picked > 0}
+                      data-testid="button-hold-line"
+                    >
+                      <Pause className="h-5 w-5 mr-2" />
+                      Hold line
+                    </Button>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -4665,14 +4713,25 @@ function PickingWorkspace() {
                                   <AlertTriangle className="h-4 w-4 mr-2" />
                                   Short pick
                                 </DropdownMenuItem>
-                                <DropdownMenuItem
-                                  disabled={item.picked > 0 || holdLineItemMutation.isPending}
-                                  onClick={() => openHoldLine(item)}
-                                  data-testid={`menu-hold-${item.id}`}
-                                >
-                                  <Pause className="h-4 w-4 mr-2" />
-                                  Hold line
-                                </DropdownMenuItem>
+                                {item.onHold ? (
+                                  <DropdownMenuItem
+                                    disabled={releaseLineHoldMutation.isPending}
+                                    onClick={() => releaseLineHoldMutation.mutate({ wmsOrderId: item.wmsOrderId, itemId: item.id })}
+                                    data-testid={`menu-release-${item.id}`}
+                                  >
+                                    <Play className="h-4 w-4 mr-2" />
+                                    Release hold
+                                  </DropdownMenuItem>
+                                ) : (
+                                  <DropdownMenuItem
+                                    disabled={item.picked > 0 || holdLineItemMutation.isPending}
+                                    onClick={() => openHoldLine(item)}
+                                    data-testid={`menu-hold-${item.id}`}
+                                  >
+                                    <Pause className="h-4 w-4 mr-2" />
+                                    Hold line
+                                  </DropdownMenuItem>
+                                )}
                                 <DropdownMenuItem
                                   disabled={item.picked <= 0}
                                   onClick={() => handleListItemDecrement(idx)}

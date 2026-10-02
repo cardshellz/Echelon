@@ -48,6 +48,16 @@ describe("pick-floor line hold", () => {
     expect(holdMutation).toContain('title: "Line held"');
   });
 
+  it("releases a held line from the scan card, the list menu and the order card", () => {
+    // 2026-10-02: the gun could hold a line but never release one, and an order
+    // held only by a line had no Release button at all.
+    expect(PICKING).toContain('data-testid="button-release-line"');
+    expect(PICKING).toContain("data-testid={`menu-release-${item.id}`}");
+    expect(PICKING).toContain("`/api/orders/${wmsOrderId}/items/${itemId}/release-hold`");
+    expect(PICKING).toContain("{(order.onHold || hasHeldLine(order)) && (");
+    expect(PICKING).toContain("releaseLineHoldMutation.mutate({ wmsOrderId: heldItem.wmsOrderId, itemId: heldItem.id })");
+  });
+
   it("files an order with a held line under Hold instead of losing it", () => {
     // A line hold does not set the order-level flag, so without this an order
     // whose only outstanding line is held shows in neither Ready nor Hold.

@@ -388,6 +388,16 @@ function canonicalPickerCommandKey(
   return `inventory-picker-runtime:${operation}:${digest}`;
 }
 
+/**
+ * A missed-pick "Yes" records units ShipStation already shipped. Holds stop
+ * future picking and shipping; they cannot un-ship units, so they must not stop
+ * the record of them. A "No" corrective scan is a new physical pick and still
+ * respects every hold.
+ */
+function recordsConfirmedShipment(input: { pickCorrectionId?: number; pickMethod?: string }): boolean {
+  return Boolean(input.pickCorrectionId) && input.pickMethod === "missed_pick_confirmation";
+}
+
 function structuredErrorCode(error: unknown): string | null {
   if (typeof error !== "object" || error === null || !("code" in error)) return null;
   const code = (error as { code?: unknown }).code;
@@ -1149,7 +1159,7 @@ export class PickingUseCases {
         `Cannot pick item ${input.itemId}: order ${input.beforeItem.orderId} is ${orderState.warehouse_status}`,
       );
     }
-    if (Number(orderState.on_hold) === 1) {
+    if (Number(orderState.on_hold) === 1 && !recordsConfirmedShipment(input)) {
       throw new IntegrityError(
         `Cannot pick item ${input.itemId}: order ${input.beforeItem.orderId} is on hold`,
         { reason: "order_on_hold", orderId: input.beforeItem.orderId, orderItemId: input.itemId },
@@ -1290,6 +1300,7 @@ export class PickingUseCases {
     shortReason?: string;
     userId?: string;
     status: ItemStatus;
+    pickMethod?: string;
     pickCorrectionId?: number;
     pickCorrectionRevision?: number;
   }): Promise<PickProgressAtomicResult> {
@@ -1310,7 +1321,7 @@ export class PickingUseCases {
           `Cannot pick item ${input.itemId}: order ${input.beforeItem.orderId} is ${orderState.warehouse_status}`,
         );
       }
-      if (Number(orderState.on_hold) === 1) {
+      if (Number(orderState.on_hold) === 1 && !recordsConfirmedShipment(input)) {
         throw new IntegrityError(
           `Cannot pick item ${input.itemId}: order ${input.beforeItem.orderId} is on hold`,
           { reason: "order_on_hold", orderId: input.beforeItem.orderId, orderItemId: input.itemId },
@@ -1798,8 +1809,10 @@ export class PickingUseCases {
       throw new IntegrityError(`Item ${itemId} not found`);
     }
     // Held lines (line-item hold) live in their own held shipment and must not be
-    // picked until released (LINE-ITEM-HOLD-DESIGN.md P2). Refuse a pick attempt.
-    if (beforeItem.onHold && status !== "pending") {
+    // picked until released (LINE-ITEM-HOLD-DESIGN.md P2). Refuse a pick attempt,
+    // except the record of units a picker confirmed ShipStation already shipped.
+    const confirmsShippedUnits = recordsConfirmedShipment(params);
+    if (beforeItem.onHold && status !== "pending" && !confirmsShippedUnits) {
       throw new IntegrityError(`Item ${itemId} is on hold and cannot be picked`, {
         reason: "line_on_hold",
         itemId,
@@ -1814,7 +1827,7 @@ export class PickingUseCases {
       throw new PickCorrectionError("PICK_CORRECTION_REQUIRED", "Answer the missing-pick confirmation before recording this pick.");
     }
 
-    if (orderForPick?.onHold === 1) {
+    if (orderForPick?.onHold === 1 && !confirmsShippedUnits) {
       const message = `Cannot pick item ${itemId}: order ${beforeItem.orderId} is on hold`;
       await this.logRejectedPickCommand({
         beforeItem,

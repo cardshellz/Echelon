@@ -711,7 +711,9 @@ export function registerPickingRoutes(app: Express) {
         }
 
         // P2a: clear the line hold + un-hold its shipment in one transaction, then
-        // push that shipment so the released line ships on its own.
+        // push that shipment so the released line ships on its own. A line that
+        // already shipped gets heldShipmentId = null: its held shipment is closed
+        // (or sent to review) so ShipStation never receives a second order for it.
         const { releaseLineItemFromHold } = await import("../wms/line-item-hold");
         const released = await releaseLineItemFromHold(db, {
           wmsOrderId: orderId,
@@ -732,14 +734,14 @@ export function registerPickingRoutes(app: Express) {
             pickerRole: req.session.user.role,
             orderId,
             orderNumber: order?.orderNumber,
-            notes: `SKU ${item.sku} -> shipment ${released.heldShipmentId ?? "?"}`,
+            notes: `SKU ${item.sku} -> ${released.action} (push ${released.heldShipmentId ?? "none"}, retired ${released.retiredShipmentId ?? "none"})`,
             deviceType: (req.headers["x-device-type"] as string) || "desktop",
             sessionId: req.sessionID,
           })
           .catch((err) => console.warn("[PickingLog] Failed to log line_item_released:", err.message));
 
         broadcastOrdersUpdated();
-        res.json({ ok: true, heldShipmentId: released.heldShipmentId });
+        res.json({ ok: true, heldShipmentId: released.heldShipmentId, action: released.action });
       } catch (error: any) {
         console.error("Error releasing line item hold:", error);
         res.status(500).json({ error: "Failed to release line item hold" });

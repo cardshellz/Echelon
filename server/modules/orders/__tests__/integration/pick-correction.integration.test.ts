@@ -5,6 +5,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { PickCorrectionService, createPickCorrectionService } from "../../pick-correction.service";
+import { releaseLineItemFromHold } from "../../../wms/line-item-hold";
 import { assertNoOpenPickCorrection, observeMissingPick, readPickCorrection, requireCorrectivePick } from "../../../wms/pick-correction.repository";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -12,9 +13,17 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const suite = url && disposable ? describe : describe.skip;
 const now = new Date("2026-09-24T12:00:00Z");
 const foundation = `CREATE SCHEMA wms;
-CREATE TABLE wms.orders(id integer PRIMARY KEY,order_number text,warehouse_status text,on_hold integer);
+CREATE TABLE wms.orders(id integer PRIMARY KEY,order_number text,warehouse_status text,on_hold integer,held_at timestamptz);
 CREATE TABLE wms.order_items(id integer PRIMARY KEY,order_id integer REFERENCES wms.orders,
-  sku text,name text,barcode text,location text,quantity integer,picked_quantity integer);
+  sku text,name text,barcode text,location text,quantity integer,picked_quantity integer,
+  fulfilled_quantity integer NOT NULL DEFAULT 0,on_hold boolean NOT NULL DEFAULT false,hold_reason text);
+-- The line-hold columns the hold release reads and writes.
+CREATE TABLE wms.outbound_shipments(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  order_id integer REFERENCES wms.orders,status text NOT NULL,held boolean NOT NULL DEFAULT false,held_at timestamptz,
+  on_hold_reason text,cancelled_at timestamptz,voided_reason text,requires_review boolean NOT NULL DEFAULT false,
+  review_reason text,updated_at timestamptz);
+CREATE TABLE wms.outbound_shipment_items(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  shipment_id integer REFERENCES wms.outbound_shipments,order_item_id integer REFERENCES wms.order_items);
 CREATE TABLE wms.physical_shipments(id bigint PRIMARY KEY);
 -- A narrow test movement journal: workflow tests exercise the real service/repository;
 -- the existing inventory-owner suites separately prove lot/cost posting.
@@ -127,6 +136,72 @@ suite("corrective picking durable PostgreSQL workflow", () => {
     const { service: repaired } = service();
     await repaired.answer(correctionId, answer("yes", (await read()).revision), "picker");
     expect(await movements()).toEqual([{ quantity: 2 }]);
+  });
+  // 2026-10-02: a held pre-order line shipped through ShipStation. "Yes" could
+  // never be saved or recorded, and the popup reappeared forever.
+  async function holdShippedLine(orderOnHold: boolean) {
+    await database.pool.query("UPDATE wms.orders SET on_hold=$1 WHERE id=1", [orderOnHold ? 1 : 0]);
+    await database.pool.query("UPDATE wms.order_items SET on_hold=true,hold_reason='preorder',fulfilled_quantity=3 WHERE id=10");
+    const shipment = (await database.pool.query(`INSERT INTO wms.outbound_shipments(order_id,status,held,held_at,on_hold_reason)
+      VALUES(1,'planned',true,now(),'preorder') RETURNING id`)).rows[0].id;
+    await database.pool.query("INSERT INTO wms.outbound_shipment_items(shipment_id,order_item_id) VALUES($1,10)", [shipment]);
+    return Number(shipment);
+  }
+  const holds = async () => (await database.pool.query(`SELECT o.on_hold AS order_hold, i.on_hold AS line_hold
+    FROM wms.orders o JOIN wms.order_items i ON i.order_id=o.id WHERE i.id=10`)).rows[0];
+  it("Yes on a held line of a shipped, held order is saved, retires both holds and records the pick", async () => {
+    const heldShipment = await holdShippedLine(true);
+    const { service: sut } = service(); const command = answer("yes");
+    expect(await sut.answer(correctionId, command, "picker")).toMatchObject({ state: "resolved", pickedQuantity: 3 });
+    expect(await holds()).toEqual({ order_hold: 0, line_hold: false });
+    // The held shipment never reached ShipStation; it is closed, never re-sent.
+    expect((await database.pool.query("SELECT status,held,voided_reason FROM wms.outbound_shipments WHERE id=$1", [heldShipment])).rows[0])
+      .toEqual({ status: "cancelled", held: true, voided_reason: "line_shipped_while_held" });
+    expect(await movements()).toEqual([{ quantity: 2 }]);
+    expect((await database.pool.query(`SELECT actor,after_state FROM wms.pick_correction_events
+      WHERE action='holds_retired_for_confirmed_shipment'`)).rows).toEqual([{ actor: "picker",
+      after_state: { lineOnHold: false, orderOnHold: false, heldShipmentAction: "cancel_already_shipped", retiredShipmentId: heldShipment } }]);
+    // Replaying the same Yes changes nothing.
+    await sut.answer(correctionId, command, "picker");
+    expect(await movements()).toEqual([{ quantity: 2 }]);
+  });
+  it("a Yes whose inventory step fails is still saved and its holds stay retired", async () => {
+    await holdShippedLine(true);
+    const { service: broken } = service(true);
+    await expect(broken.answer(correctionId, answer("yes"), "picker")).rejects.toThrow("injected");
+    expect(await read()).toMatchObject({ state: "picking_required", answer: "yes", reviewReason: "injected stock-owner failure" });
+    expect(await holds()).toEqual({ order_hold: 0, line_hold: false });
+    expect(await movements()).toEqual([]);
+  });
+  it("a held order that has not fully shipped keeps its hold, but the confirmed units are recorded", async () => {
+    await database.pool.query("UPDATE wms.orders SET warehouse_status='partially_shipped',on_hold=1 WHERE id=1");
+    const { service: sut } = service();
+    expect(await sut.answer(correctionId, answer("yes"), "picker")).toMatchObject({ state: "resolved" });
+    expect(await holds()).toEqual({ order_hold: 1, line_hold: false });
+    expect(await movements()).toEqual([{ quantity: 2 }]);
+  });
+  it("No on a held order is saved, but its new corrective pick waits for the hold to be released", async () => {
+    await database.pool.query("UPDATE wms.orders SET on_hold=1 WHERE id=1");
+    const { service: sut } = service();
+    expect(await sut.answer(correctionId, answer("no"), "picker")).toMatchObject({ state: "picking_required", answer: "no" });
+    await expect(sut.complete(correctionId, scan(3), "picker")).rejects.toMatchObject({ code: "ORDER_NOT_PICKABLE" });
+    expect(await movements()).toEqual([]);
+  });
+  it("releasing a held line pushes its shipment only while nothing on the line has shipped", async () => {
+    const unshipped = await holdShippedLine(false);
+    await database.pool.query("UPDATE wms.order_items SET fulfilled_quantity=0 WHERE id=10");
+    expect(await releaseLineItemFromHold(db, { wmsOrderId: 1, orderItemId: 10, now }))
+      .toEqual({ heldShipmentId: unshipped, action: "push", retiredShipmentId: null });
+    expect((await database.pool.query("SELECT held FROM wms.outbound_shipments WHERE id=$1", [unshipped])).rows[0].held).toBe(false);
+  });
+  it("a partly shipped held line goes to review and is never pushed", async () => {
+    const partial = await holdShippedLine(false);
+    await database.pool.query("UPDATE wms.order_items SET fulfilled_quantity=1 WHERE id=10");
+    expect(await releaseLineItemFromHold(db, { wmsOrderId: 1, orderItemId: 10, now }))
+      .toEqual({ heldShipmentId: null, action: "review_partially_shipped", retiredShipmentId: partial });
+    expect((await database.pool.query("SELECT status,held,requires_review FROM wms.outbound_shipments WHERE id=$1", [partial])).rows[0])
+      .toEqual({ status: "planned", held: true, requires_review: true });
+    expect((await holds()).line_hold).toBe(false);
   });
   it("recovers a crash after committed pick progress but before closing the correction", async () => {
     const { service: sut } = service();
