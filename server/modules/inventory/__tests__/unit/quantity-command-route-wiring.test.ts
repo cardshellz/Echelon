@@ -15,7 +15,10 @@ describe("quantity owner HTTP wiring ratchet", () => {
     "forwards validated client intent for %s", path => {
       const handler = route(inventory, "post", `/api/inventory/${path}`);
       expect(handler).toContain("validateInventoryCommandKey");
-      expect(handler).toContain("commandKey: req.body.commandKey");
+      if (path === "transfer") {
+        expect(handler).toContain("inventoryTransferRequestSchema.safeParse(req.body)");
+        expect(handler).toContain("commandKey,");
+      } else expect(handler).toContain("commandKey: req.body.commandKey");
       expect(handler).toContain("sendInventoryQuantityError(res, error)");
     });
   it.each(["/api/inventory/upload-csv", "/api/inventory/import-csv", "/api/inventory/lots/create-legacy",
