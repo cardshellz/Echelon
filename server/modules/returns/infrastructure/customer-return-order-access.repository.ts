@@ -16,6 +16,7 @@ const candidateRow = z.object({
   external_customer_id: z.string().min(1).max(100).nullable(),
   external_order_id: z.string().min(1).max(100),
   external_order_number: z.string().min(1).max(50),
+  cancelled: z.boolean().optional(),
 }).strict();
 
 const queryInput = z.object({
@@ -36,6 +37,7 @@ function candidates(rows: unknown, maximum: number): CustomerReturnOrderCandidat
   return z.array(candidateRow).max(maximum).parse(rows).map(row => ({
     omsOrderId: row.oms_order_id, channelId: row.channel_id, externalCustomerId: row.external_customer_id,
     externalOrderId: row.external_order_id, externalOrderNumber: row.external_order_number,
+    ...(row.cancelled === true ? { cancelled: true } : {}),
   }));
 }
 
@@ -76,7 +78,7 @@ export class PostgresCustomerReturnOrderAccessRepository implements CustomerRetu
   async listOwnedOrders(raw: Parameters<CustomerReturnOrderAccessRepository["listOwnedOrders"]>[0]): Promise<readonly CustomerReturnOrderCandidate[]> {
     try {
       const input = listInput.parse(raw);
-      const result = await this.database.query(`SELECT ${candidateColumns} FROM oms.oms_orders oo
+      const result = await this.database.query(`SELECT ${candidateColumns}, (oo.cancelled_at IS NOT NULL) AS cancelled FROM oms.oms_orders oo
         WHERE oo.channel_id = $1 AND oo.external_customer_id = $2
           AND ($3::bigint IS NULL OR oo.id < $3::bigint)
         ORDER BY oo.id DESC LIMIT $4`, [input.channelId, input.externalCustomerId, input.beforeOmsOrderId ?? null, input.pageSize + 1]);
