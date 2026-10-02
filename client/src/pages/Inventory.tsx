@@ -30,7 +30,6 @@ import {
   ArrowDown,
   ArrowLeftRight,
   Building2,
-  Trash2,
   Grid3x3,
   Repeat2,
   Layers,
@@ -226,24 +225,12 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, 
   onTransfer: (fromLocationId: number, fromLocationCode: string, variantId: number, sku: string) => void;
   warehouseId?: number | null;
 }) {
-  const queryClient = useQueryClient();
   const [, navigate] = useLocation();
   const locationUrl = warehouseId
     ? `/api/inventory/variants/${variantId}/locations?warehouseId=${warehouseId}`
     : `/api/inventory/variants/${variantId}/locations`;
   const { data: locationLevels = [], isLoading, isError } = useQuery<VariantLocationLevel[]>({
     queryKey: [locationUrl],
-  });
-
-  const deleteOrphanMutation = useMutation({
-    mutationFn: async (levelId: number) => {
-      const res = await fetch(`/api/inventory/levels/${levelId}`, { method: "DELETE" });
-      if (!res.ok) throw new Error((await res.json()).error);
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [locationUrl] });
-      queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
-    },
   });
 
   if (isLoading) {
@@ -357,21 +344,8 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, 
                       </DropdownMenuContent>
                     </DropdownMenu>
                   )}
-                  {locLevel.variantQty === 0 && !locLevel.reservedQty && !locLevel.isAssigned ? (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 text-xs px-2 text-destructive hover:text-destructive"
-                      disabled={deleteOrphanMutation.isPending}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deleteOrphanMutation.mutate(locLevel.id);
-                      }}
-                    >
-                      <Trash2 className="h-3 w-3 mr-1" />
-                      Delete
-                    </Button>
-                  ) : (
+                  {/* Empty, unassigned rows are history the ledger keeps; the server hides them. */}
+                  {locLevel.variantQty > 0 && (
                     <Button
                       variant="ghost"
                       size="sm"

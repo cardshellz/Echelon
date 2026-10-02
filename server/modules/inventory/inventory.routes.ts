@@ -1,3 +1,4 @@
+import { isLevelDeleteForbiddenError, isRetiredEmptyLevel } from "./domain/retired-inventory-level";
 import type { Express } from "express";
 import { awaitPageReads, limitPageRead } from "../../platform/http/page-read-limit";
 import { offsetPageQuerySchema } from "../../platform/http/page-query";
@@ -626,6 +627,8 @@ export function registerInventoryRoutes(app: Express) {
       const result = levels
         .filter((level) => warehouseId == null
           || locationMap.get(level.warehouseLocationId)?.warehouseId === warehouseId)
+        // History-only rows (empty and unassigned) can never be deleted; hide them.
+        .filter((level) => !isRetiredEmptyLevel(level, assignedLocationIds.has(level.warehouseLocationId)))
         .map((level) => {
           const unreservedQty = level.variantQty - level.reservedQty;
           return {
@@ -668,6 +671,11 @@ export function registerInventoryRoutes(app: Express) {
       await storage.deleteInventoryLevel(id);
       res.json({ success: true });
     } catch (error: any) {
+      if (isLevelDeleteForbiddenError(error)) {
+        // Expected since the quantity ledger opened: the row keeps stock history.
+        return res.status(409).json({ code: "INVENTORY_LEVEL_HISTORY_RETAINED",
+          error: "Empty bin rows keep their stock history and can't be deleted. They are hidden from inventory automatically." });
+      }
       console.error("Error deleting inventory level:", error);
       res.status(500).json({ error: error.message || "Failed to delete" });
     }
