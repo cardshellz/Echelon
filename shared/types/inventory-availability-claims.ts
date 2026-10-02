@@ -62,6 +62,12 @@ export const canonicalAvailabilityClaimCommandSchema = z.object({
   idempotencyKey: nonblank(120),
   actor: nonblank(100),
   reason: nonblank(1000),
+  /**
+   * Claim a shipped order's shipped-but-unrecorded units so a picker's
+   * confirmation of that shipment can be recorded. Shipped orders are otherwise
+   * not claimable.
+   */
+  recordConfirmedShipment: z.literal(true).optional(),
 }).strict();
 
 export const canonicalAvailabilityClaimReleaseCommandSchema = z.object({
@@ -102,6 +108,8 @@ export const canonicalAvailabilityClaimReplacementCommandSchema = z.object({
    * Re-plan an unchanged-demand claim that was planned short, using supply that
    * arrived after it was claimed. Commits only when no line loses planned
    * quantity and total shortfall strictly drops; otherwise nothing changes.
+   * Allowed on a shipped order, whose remaining demand is only its shipped
+   * units that were never recorded as picked.
    */
   refreshSupply: z.literal(true).optional(),
 }).strict();

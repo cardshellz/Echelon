@@ -35,7 +35,10 @@ import type {
   InventoryAvailabilityRuntimeClaimContext,
   InventoryAvailabilityRuntimeClaimExecutor,
 } from "../inventory-planning/application/inventory-availability-runtime-claim.service";
-import { refreshCanonicalClaimSupply } from "../inventory-planning/application/inventory-availability-runtime-claim.service";
+import {
+  claimCanonicalOrderForConfirmedShipment,
+  refreshCanonicalClaimSupply,
+} from "../inventory-planning/application/inventory-availability-runtime-claim.service";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { requireCorrectivePick, PickCorrectionError, recordCorrectionEvent, correctionHash } from "../wms/pick-correction.repository";
 import { planConfirmedPickShipment, type ConfirmedPickShipmentPlan } from "./confirmed-pick-shipment";
@@ -396,6 +399,29 @@ function canonicalPickerCommandKey(
  */
 function recordsConfirmedShipment(input: { pickCorrectionId?: number; pickMethod?: string }): boolean {
   return Boolean(input.pickCorrectionId) && input.pickMethod === "missed_pick_confirmation";
+}
+
+/**
+ * Says why a short line could not be re-reserved, so the reader knows what to
+ * do. Only a genuine lack of free stock asks for a count or receipt.
+ */
+export function shortClaimMessage(declinedCode: string, sku: string, locationCode: string): string {
+  switch (declinedCode) {
+    case "CLAIM_SUPPLY_REFRESH_NO_IMPROVEMENT":
+    case "CLAIM_SUPPLY_REFRESH_NOT_SHORT":
+      return `Not enough stock is reserved for ${sku} on this order, and the system shows no free stock to reserve. `
+        + `Count or receive ${locationCode}, then retry.`;
+    case "CLAIM_SUPPLY_REFRESH_PICK_IN_PROGRESS":
+      return `${sku} cannot be re-reserved while another line of this order is partly picked. Finish or unpick that line, then retry.`;
+    case "CLAIM_SUPPLY_REFRESH_LINE_REGRESSION":
+      return `Re-reserving ${sku} would take stock from another line of this order. Review the order's reservation.`;
+    case "CLAIM_SUPPLY_REFRESH_DEMAND_CHANGED":
+      return `This order changed since it was reserved. Wait for the order update to finish, then retry ${sku}.`;
+    case "REPLACEMENT_ORDER_NOT_CLAIMABLE":
+      return `This order can no longer be reserved (cancelled or nothing left to ship), so ${sku} cannot be recorded here.`;
+    default:
+      return `Not enough stock is reserved for ${sku} on this order (${declinedCode}).`;
+  }
 }
 
 function structuredErrorCode(error: unknown): string | null {
@@ -1542,7 +1568,18 @@ export class PickingUseCases {
     }
     const target = resolved.target!;
     const loadActiveClaim = async () => {
-      const latest = await context.getLatestClaim(input.beforeItem.orderId);
+      let latest = await context.getLatestClaim(input.beforeItem.orderId);
+      // A confirmed shipment can outlive its claim (a post-ship edit or refund
+      // releases a shipped order's claim). Claim its unrecorded units again.
+      if ((!latest || latest.status !== "active") && recordsConfirmedShipment(input)) {
+        const claimed = await claimCanonicalOrderForConfirmedShipment(context, {
+          orderId: input.beforeItem.orderId,
+          priorClaimId: latest?.claimId ?? null,
+          actor: canonicalPickerActor(input.userId),
+          reason: `Claim order ${input.beforeItem.orderId} to record shipped item ${input.itemId}`,
+        });
+        if (claimed !== null) latest = await context.getLatestClaim(input.beforeItem.orderId);
+      }
       if (!latest || latest.status !== "active") {
         throw new IntegrityError("The order has no active canonical availability claim to pick", {
           reason: "active_canonical_claim_missing",
@@ -1632,17 +1669,13 @@ export class PickingUseCases {
         });
         // Another writer (the short-claim sweeper) replaced the claim first: just use the new one.
         if (refresh.outcome === "declined" && refresh.code !== "ACTIVE_CLAIM_CHANGED") {
-          throw new IntegrityError(
-            `Not enough stock is reserved for ${input.beforeItem.sku} on this order, and the system shows no free stock to reserve. `
-              + `Count or receive ${target.locationCode}, then retry.`,
-            {
-              reason: "claim_line_unreserved",
-              orderId: input.beforeItem.orderId,
-              orderItemId: input.itemId,
-              locationCode: target.locationCode,
-              refreshDeclinedCode: refresh.code,
-            },
-          );
+          throw new IntegrityError(shortClaimMessage(refresh.code, input.beforeItem.sku, target.locationCode), {
+            reason: "claim_line_unreserved",
+            orderId: input.beforeItem.orderId,
+            orderItemId: input.itemId,
+            locationCode: target.locationCode,
+            refreshDeclinedCode: refresh.code,
+          });
         }
         claim = await loadActiveClaim();
         return run("strict");

@@ -689,6 +689,11 @@ async function loadOrder(client: PoolClient, orderId: number, lock: boolean): Pr
              variant.id AS target_variant_id,
              CASE
                WHEN item.status IN ('cancelled', 'completed') THEN 0
+               -- A shipped order cannot ship more: it owes only units the provider
+               -- shipped that were never recorded as picked (a pick correction).
+               WHEN $2::boolean THEN GREATEST(
+                 LEAST(COALESCE(item.quantity, 0), COALESCE(item.fulfilled_quantity, 0))
+                 - COALESCE(item.picked_quantity, 0), 0)
                ELSE GREATEST(COALESCE(item.quantity, 0) - COALESCE(item.picked_quantity, 0), 0)
              END AS requested_qty,
             variant.product_id AS root_product_id,
@@ -704,7 +709,7 @@ async function loadOrder(client: PoolClient, orderId: number, lock: boolean): Pr
      WHERE item.order_id = $1
      ORDER BY item.id
      ${lock ? "FOR UPDATE OF item" : ""}`,
-    [orderId],
+    [orderId, orderRow.warehouse_status === "shipped"],
   ));
   const lines: OrderLine[] = [];
   for (const row of itemRows) {
@@ -1050,6 +1055,16 @@ async function orderDemandMatchesClaim(
     requestedQty: String(line.requestedQty),
   })).sort((left, right) => left.lineKey.localeCompare(right.lineKey));
   return canonicalJson(current) === canonicalJson(persisted);
+}
+
+/**
+ * Cancelled orders and orders with nothing left to reserve are never claimable.
+ * A shipped order is claimable only to record units that already shipped
+ * without a pick record; loadOrder limits its demand to exactly those units.
+ */
+function orderClaimable(order: LockedOrder, recordingConfirmedShipment: boolean): boolean {
+  if (order.lines.length === 0 || order.warehouseStatus === "cancelled") return false;
+  return order.warehouseStatus !== "shipped" || recordingConfirmedShipment;
 }
 
 /** Caller holds the claim lock; balances come from the relational lines. */
@@ -4233,8 +4248,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
 
         const authority = await requireCanonicalAuthority(client);
         const preliminaryOrder = await loadOrder(client, command.orderId, false);
-        if (["cancelled", "shipped"].includes(preliminaryOrder.warehouseStatus)
-          || preliminaryOrder.lines.length === 0) {
+        if (!orderClaimable(preliminaryOrder, command.recordConfirmedShipment === true)) {
           const result = await persistNoopCommand(client, command, "claim", requestHash, occurredAt);
           await client.query("COMMIT");
           return result;
@@ -4251,8 +4265,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
         );
         await lockPlanningPolicyHeads(client, preliminarySnapshot);
         const lockedOrder = await loadOrder(client, command.orderId, true);
-        if (["cancelled", "shipped"].includes(lockedOrder.warehouseStatus)
-          || lockedOrder.lines.length === 0) {
+        if (!orderClaimable(lockedOrder, command.recordConfirmedShipment === true)) {
           const result = await persistNoopCommand(client, command, "claim", requestHash, occurredAt);
           await client.query("COMMIT");
           return result;
@@ -4420,8 +4433,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
         }
 
         const preliminaryOrder = await loadOrder(client, command.orderId, false);
-        if (["cancelled", "shipped"].includes(preliminaryOrder.warehouseStatus)
-          || preliminaryOrder.lines.length === 0) {
+        if (!orderClaimable(preliminaryOrder, command.refreshSupply === true)) {
           throw new InventoryAvailabilityClaimRepositoryError(
             "REPLACEMENT_ORDER_NOT_CLAIMABLE",
             "A terminal order or an order without remaining claimable demand must use canonical release or cancellation.",
@@ -4457,8 +4469,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
         await lockPlanningPolicyHeads(client, preliminarySnapshot);
 
         const lockedOrder = await loadOrder(client, command.orderId, true);
-        if (["cancelled", "shipped"].includes(lockedOrder.warehouseStatus)
-          || lockedOrder.lines.length === 0) {
+        if (!orderClaimable(lockedOrder, command.refreshSupply === true)) {
           throw new InventoryAvailabilityClaimRepositoryError(
             "REPLACEMENT_ORDER_NOT_CLAIMABLE",
             "The order became terminal or lost all claimable demand while replacement locks were being acquired.",

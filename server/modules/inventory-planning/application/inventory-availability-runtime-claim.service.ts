@@ -143,6 +143,29 @@ export async function refreshCanonicalClaimSupply(
 }
 
 /**
+ * Claim an order that has no active claim so a picker's confirmation that its
+ * units already shipped can be recorded. A shipped order is claimed only for
+ * its shipped-but-unrecorded units. Keyed by the last claim the order had (if
+ * any), so a retry replays while a later release allows a fresh claim.
+ * Returns the new claim id, or null when there is nothing to claim.
+ */
+export async function claimCanonicalOrderForConfirmedShipment(
+  context: InventoryAvailabilityRuntimeClaimContext,
+  input: { orderId: number; priorClaimId: string | null; actor: string; reason: string },
+): Promise<string | null> {
+  const result = await context.canonical.claimOrder({
+    orderId: input.orderId,
+    idempotencyKey: commandKey("claim-confirmed-shipment", { orderId: input.orderId, priorClaimId: input.priorClaimId }),
+    actor: input.actor,
+    reason: input.reason,
+    recordConfirmedShipment: true,
+  });
+  if (result.outcome === "no_claim_required") return null;
+  if (result.outcome !== "claimed") throw invalidCanonicalResult("claim_order_confirmed_shipment", result, context);
+  return result.claimId;
+}
+
+/**
  * The single operational order-reservation boundary.
  *
  * Legacy authority delegates to the deployed reservation service. Canonical
