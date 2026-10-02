@@ -684,6 +684,14 @@ const BASE_ISSUES: FlowIssueDef[] = [
     sample: () => sql`SELECT os.id AS shipment_id, wo.order_number, os.on_hold_reason, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.held = true AND COALESCE(os.source, '') <> 'line_item_hold' ORDER BY os.created_at DESC LIMIT 50`,
   },
   {
+    code: "PICK_CORRECTION_INVENTORY_BLOCKED", kind: "stuck", stage: "wms_fulfill", severity: "warning",
+    message: "Picks confirmed as shipped are waiting on inventory",
+    why: "A picker confirmed these items shipped, but the inventory record could not post yet. The system retries every 30 minutes; the saved reason says what the books need, such as receiving the purchase order or counting the bin.",
+    remediation: "MANUAL_REVIEW", replaySafe: false,
+    count: () => sql`SELECT COUNT(*)::int AS count FROM wms.pick_corrections c JOIN wms.order_items oi ON oi.id = c.order_item_id JOIN wms.orders wo ON wo.id = oi.order_id WHERE c.state = 'picking_required' AND c.answer = 'yes' AND wo.warehouse_status <> 'cancelled'`,
+    sample: () => sql`SELECT c.id AS correction_id, wo.order_number, oi.sku, oi.location, c.review_reason, c.updated_at AS at FROM wms.pick_corrections c JOIN wms.order_items oi ON oi.id = c.order_item_id JOIN wms.orders wo ON wo.id = oi.order_id WHERE c.state = 'picking_required' AND c.answer = 'yes' AND wo.warehouse_status <> 'cancelled' ORDER BY c.updated_at ASC LIMIT 50`,
+  },
+  {
     code: "LINE_HELD_AGING", kind: "stuck", stage: "wms_fulfill", severity: "warning",
     message: `Pre-order line holds have aged past ${HELD_LINE_AGING_DAYS} days`,
     why: "These held lines have remained outside the ship-now shipment past the review threshold. Confirm the purchase order is still expected, then release or cancel each line deliberately.",

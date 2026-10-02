@@ -55,7 +55,7 @@ suite("corrective picking durable PostgreSQL workflow", () => {
       declaredQuantity: quantity, pickedQuantity: item.rows[0].picked_quantity as number, occurredAt: now });
   });
   const read = () => readPickCorrection(db, correctionId);
-  function service(fail = false) {
+  function service(fail = false, clock: () => Date = () => now) {
     const pick = vi.fn(async ({ correction, targetQuantity, actor }: Parameters<ConstructorParameters<typeof PickCorrectionService>[1]>[0]) => {
       await db.transaction(async tx => {
         await tx.execute(sql`SELECT id FROM wms.orders WHERE id=1 FOR UPDATE`);
@@ -69,7 +69,7 @@ suite("corrective picking durable PostgreSQL workflow", () => {
         if (fail) throw new Error("injected stock-owner failure");
       });
     });
-    return { pick, service: new PickCorrectionService(db, pick, () => now) };
+    return { pick, service: new PickCorrectionService(db, pick, clock) };
   }
   const answer = (answer: "yes" | "no", revision = 1) => ({ answer, expectedRevision: revision, commandId: randomUUID() });
   const scan = (pickedQuantity: number, revision = 2, barcode = "12345") => ({ pickedQuantity, expectedRevision: revision, barcode, commandId: randomUUID() });
@@ -202,6 +202,43 @@ suite("corrective picking durable PostgreSQL workflow", () => {
     expect((await database.pool.query("SELECT status,held,requires_review FROM wms.outbound_shipments WHERE id=$1", [partial])).rows[0])
       .toEqual({ status: "planned", held: true, requires_review: true });
     expect((await holds()).line_hold).toBe(false);
+  });
+  it("takes a saved Yes off the gun, retries it as the system, and posts once the books allow", async () => {
+    const { service: broken } = service(true);
+    await expect(broken.answer(correctionId, answer("yes"), "picker")).rejects.toThrow("injected");
+    const saved = await read();
+    // The picker's part is done: the card no longer appears on the gun.
+    expect(await broken.list()).toEqual([]);
+    const events = async () => Number((await database.pool.query(
+      "SELECT count(*)::int AS n FROM wms.pick_correction_events WHERE correction_id=$1", [correctionId])).rows[0].n);
+    const eventsAfterAnswer = await events();
+    // Not due yet: the last attempt is newer than the retry interval.
+    expect(await broken.retryConfirmedPicks(10)).toEqual({ resolved: 0, waiting: 0 });
+    // Due, same failure: only the attempt time changes; no revision, no new audit row.
+    const later = new Date(now.getTime() + 31 * 60 * 1000);
+    const { service: stillBroken } = service(true, () => later);
+    expect(await stillBroken.retryConfirmedPicks(10)).toEqual({ resolved: 0, waiting: 1 });
+    expect(await read()).toMatchObject({ revision: saved.revision, reviewReason: saved.reviewReason });
+    expect(await events()).toBe(eventsAfterAnswer);
+    expect((await database.pool.query("SELECT updated_at FROM wms.pick_corrections WHERE id=$1", [correctionId]))
+      .rows[0].updated_at.getTime()).toBe(later.getTime());
+    // The books now allow it: the retry posts as the picker who confirmed it.
+    const { service: repaired, pick } = service(false, () => new Date(later.getTime() + 31 * 60 * 1000));
+    expect(await repaired.retryConfirmedPicks(10)).toEqual({ resolved: 1, waiting: 0 });
+    expect(pick).toHaveBeenCalledWith(expect.objectContaining({ actor: "picker", method: "missed_pick_confirmation" }));
+    expect(await read()).toMatchObject({ state: "resolved", pickedQuantity: 3 });
+    expect(await movements()).toEqual([{ quantity: 2 }]);
+  });
+  it("a system retry also retires holds left on a Yes saved before holds were retired", async () => {
+    const { service: broken } = service(true);
+    await expect(broken.answer(correctionId, answer("yes"), "picker")).rejects.toThrow("injected");
+    // Simulate a Yes saved by the earlier release, which never retired holds.
+    await holdShippedLine(true);
+    const { service: repaired } = service(false, () => new Date(now.getTime() + 31 * 60 * 1000));
+    expect(await repaired.retryConfirmedPicks(10)).toEqual({ resolved: 1, waiting: 0 });
+    expect(await holds()).toEqual({ order_hold: 0, line_hold: false });
+    expect((await database.pool.query(`SELECT actor FROM wms.pick_correction_events
+      WHERE action='holds_retired_for_confirmed_shipment'`)).rows).toEqual([{ actor: "system:pick-correction-retry" }]);
   });
   it("recovers a crash after committed pick progress but before closing the correction", async () => {
     const { service: sut } = service();

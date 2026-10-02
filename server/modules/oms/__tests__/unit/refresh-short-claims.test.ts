@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { refreshShortClaims } from "../../oms-flow-reconciliation.service";
+import { refreshShortClaims, retryConfirmedPickCorrections } from "../../oms-flow-reconciliation.service";
 
 function deps(refreshShortClaimSupply?: ReturnType<typeof vi.fn>) {
   return {
@@ -37,6 +37,21 @@ describe("refreshShortClaims", () => {
     expect(refresh).toHaveBeenCalledTimes(2);
     expect(String(error.mock.calls[0][0])).toContain("CLAIM_REPLACEMENT_RETRY_EXHAUSTED");
     error.mockRestore();
+    log.mockRestore();
+  });
+});
+
+describe("retryConfirmedPickCorrections", () => {
+  it("is a no-op when pick corrections are not wired", async () => {
+    await expect(retryConfirmedPickCorrections(deps(undefined))).resolves.toEqual({ resolved: 0, waiting: 0 });
+  });
+
+  it("delegates one bounded sweep to the correction owner", async () => {
+    const retryConfirmedPicks = vi.fn(async () => ({ resolved: 2, waiting: 3 }));
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await expect(retryConfirmedPickCorrections({ ...deps(undefined), pickCorrections: { retryConfirmedPicks } }))
+      .resolves.toEqual({ resolved: 2, waiting: 3 });
+    expect(retryConfirmedPicks).toHaveBeenCalledWith(50);
     log.mockRestore();
   });
 });

@@ -22,9 +22,16 @@ const correctionView = sql`
   FROM wms.pick_corrections c JOIN wms.order_items oi ON oi.id = c.order_item_id
   JOIN wms.orders o ON o.id = oi.order_id`;
 
+/**
+ * Picker work only: a correction still needing an answer, or a "No" awaiting
+ * its corrective scan. A saved Yes is done from the picker's side; its
+ * inventory record is retried by the system and listed in Control Tower
+ * (PICK_CORRECTION_INVENTORY_BLOCKED), not left on the gun.
+ */
 export async function readPickCorrections(db: CorrectionExecutor): Promise<PickCorrection[]> {
   const result = await db.execute(sql`${correctionView}
     WHERE c.state <> 'resolved' AND o.warehouse_status <> 'cancelled'
+      AND NOT (c.state = 'picking_required' AND c.answer = 'yes')
     ORDER BY c.id LIMIT 200`);
   return result.rows.map(row => pickCorrectionSchema.parse(row));
 }
@@ -138,6 +145,26 @@ export async function savePickCorrectionAnswer(db: CorrectionExecutor, id: numbe
   answer: "yes" | "no", actor: string, occurredAt: Date): Promise<void> {
   await db.execute(sql`UPDATE wms.pick_corrections SET state='picking_required',answer=${answer},
     assigned_picker_id=${actor},review_reason=NULL,revision=revision+1,updated_at=${occurredAt} WHERE id=${id}`);
+}
+
+/**
+ * Saved Yes answers whose inventory record has not posted, oldest attempt first.
+ * The picker's part is done; these wait only on the books.
+ */
+export async function readConfirmedCorrectionsDueForRetry(db: CorrectionExecutor, input: {
+  lastAttemptBefore: Date; limit: number;
+}): Promise<number[]> {
+  const result = await db.execute(sql`SELECT c.id FROM wms.pick_corrections c
+    JOIN wms.order_items oi ON oi.id = c.order_item_id JOIN wms.orders o ON o.id = oi.order_id
+    WHERE c.state = 'picking_required' AND c.answer = 'yes' AND c.assigned_picker_id IS NOT NULL
+      AND o.warehouse_status <> 'cancelled' AND c.updated_at < ${input.lastAttemptBefore}
+    ORDER BY c.updated_at, c.id LIMIT ${input.limit}`);
+  return result.rows.map(row => Number(row.id));
+}
+
+/** Marks an unchanged failed retry without a new revision or audit event. */
+export async function touchPickCorrectionRetry(db: CorrectionExecutor, id: number, occurredAt: Date): Promise<void> {
+  await db.execute(sql`UPDATE wms.pick_corrections SET updated_at=${occurredAt} WHERE id=${id}`);
 }
 
 export async function savePickCorrectionReview(db: CorrectionExecutor, id: number,

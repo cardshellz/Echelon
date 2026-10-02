@@ -889,6 +889,7 @@ function startEchelonSyncScheduler(
         startOmsFlowReconciliationScheduler(db, {
           reservation: services.reservation,
           fulfillmentAuthority: services.channelFulfillmentAuthority,
+          pickCorrections: services.pickCorrections,
         });
       } else {
         logSchedulerDisabled("scheduler", "OMS flow reconciliation scheduler", "OMS_FLOW_RECONCILIATION_SCHEDULER_DISABLED");
