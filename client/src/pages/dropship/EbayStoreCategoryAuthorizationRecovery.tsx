@@ -109,7 +109,8 @@ export function EbayStoreCategoryAuthorizationRecovery({
           intent: "refresh_connection",
           storeConnectionId,
           shopDomain: "",
-          returnTo: dropshipPortalPath("/catalog"),
+          // Both panels that offer this live on the Set how it lists step.
+          returnTo: dropshipPortalPath("/catalog/setup"),
         }),
       );
       window.location.assign(result.authorizationUrl);

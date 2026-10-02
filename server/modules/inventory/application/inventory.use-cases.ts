@@ -22,6 +22,7 @@ import { allocateBuildCostLayers } from "../domain/build.domain";
 import {
   planReplenishmentExecution,
 } from "../domain/replenishment-execution.domain";
+import { InventoryQuantityError } from "../domain/quantity-ledger";
 
 export class FreezeViolationError extends Error {
   code = "LOCATION_FROZEN";
@@ -1938,8 +1939,18 @@ export class InventoryUseCases {
      * never silently follow stock around.
      */
     moveReserved?: boolean;
+    /** Explicit completed physical move, not dispatch/in-transit work. Automated
+     * replenishment and other callers remain same-warehouse unless they opt in. */
+    crossWarehouseArrivalConfirmed?: boolean;
   }): Promise<{ reservedMoved: number; orderItemsRepointed: number }> {
-    if (!Number.isSafeInteger(params.qty) || params.qty <= 0) throw new Error("qty must be a positive safe integer");
+    for (const field of ["productVariantId", "fromLocationId", "toLocationId", "qty"] as const) {
+      if (!Number.isSafeInteger(params[field]) || params[field] <= 0 || params[field] > 2_147_483_647) {
+        throw new ValidationError(`${field} must be a positive safe integer within PostgreSQL bounds`);
+      }
+    }
+    if (params.crossWarehouseArrivalConfirmed !== undefined && typeof params.crossWarehouseArrivalConfirmed !== "boolean") {
+      throw new ValidationError("Cross-warehouse arrival confirmation must be a boolean");
+    }
     if (params.fromLocationId === params.toLocationId) throw new Error("Source and destination must differ");
 
     let reservedMoved = 0;
@@ -1956,6 +1967,11 @@ export class InventoryUseCases {
         reservedMoved = result.reservedMoved; orderItemsRepointed = result.orderItemsRepointed; replayed = true; return;
       }
       await lockInventoryCostGraph(tx);
+      if (params.crossWarehouseArrivalConfirmed) {
+        // Pin location identity/freeze state until both sides of the move commit.
+        await tx.execute(sql`SELECT id FROM warehouse.warehouse_locations
+          WHERE id IN (${params.fromLocationId}, ${params.toLocationId}) ORDER BY id FOR SHARE`);
+      }
       const [fromLoc] = await tx
         .select()
         .from(warehouseLocations)
@@ -1976,9 +1992,19 @@ export class InventoryUseCases {
       if (fromLoc.warehouseId == null) throw new Error(`Source location ${fromLoc.code} is not assigned to a warehouse`);
       if (toLoc.warehouseId == null) throw new Error(`Destination location ${toLoc.code} is not assigned to a warehouse`);
       if (fromLoc.warehouseId !== toLoc.warehouseId) {
-        throw new Error(
-          `Inventory transfer must stay within one warehouse (${fromLoc.code} warehouse ${fromLoc.warehouseId}, ${toLoc.code} warehouse ${toLoc.warehouseId})`,
+        if (!params.crossWarehouseArrivalConfirmed) throw new InventoryQuantityError(
+          "TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED",
+          "This transfer crosses warehouses. Confirm the stock has arrived at the destination.",
+          { fromWarehouseId: fromLoc.warehouseId, toWarehouseId: toLoc.warehouseId },
         );
+        if (!quantityPosting || !params.userId?.trim()) throw new InventoryQuantityError(
+          "TRANSFER_QUANTITY_AUTHORITY_REQUIRED", "Cross-warehouse transfers require the quantity ledger and an authenticated actor.",
+        );
+        const activeWarehouses = await tx.execute(sql`SELECT id, is_active FROM warehouse.warehouses
+          WHERE id IN (${fromLoc.warehouseId}, ${toLoc.warehouseId}) ORDER BY id FOR SHARE`);
+        if (activeWarehouses.rows.length !== 2 || activeWarehouses.rows.some((row: { is_active?: unknown }) => row.is_active !== 1)) {
+          throw new InventoryQuantityError("TRANSFER_WAREHOUSE_INACTIVE", "Both transfer warehouses must be active.");
+        }
       }
 
       if (quantityPosting) await tx.execute(sql`SELECT id FROM inventory.inventory_levels
