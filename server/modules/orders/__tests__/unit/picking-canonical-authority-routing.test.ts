@@ -417,7 +417,7 @@ describe("PickingUseCases canonical authority routing", () => {
         targetPickedQuantity: 1,
         targetShortReason: null,
       },
-      idempotencyKey: expect.stringMatching(/^inventory-picker-runtime:pick-reconcile_picker_observation:[a-f0-9]{64}$/),
+      idempotencyKey: expect.stringMatching(/^inventory-picker-runtime:pick-observed:[a-f0-9]{64}$/),
     }));
     expect(inventoryCore.pickItem).not.toHaveBeenCalled();
     expect(replenishment.createAndExecuteReplen).toHaveBeenCalledWith(105, 1, "picker-1", {

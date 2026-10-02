@@ -382,6 +382,23 @@ function canonicalPickerActor(userId?: string): string {
   return actor || "system:inventory-picker-runtime";
 }
 
+/**
+ * Idempotency labels per pick strategy. Canonical claim keys allow at most
+ * CANONICAL_CLAIM_IDEMPOTENCY_KEY_MAX characters, and the key is
+ * "inventory-picker-runtime:<label>:<64 hex>". Labelling the observation
+ * strategy "pick-reconcile_picker_observation" produced 123 characters, so the
+ * claim command failed validation and that reconciliation never ran (picks whose
+ * stock was booked in another bin failed with "Canonical claim command failed
+ * application validation"). Existing labels are kept so replay keys are stable;
+ * the observation key never committed, so changing it cannot break a replay.
+ */
+const PICK_KEY_OPERATION = {
+  strict: "pick-strict",
+  reconcile_recorded_stock: "pick-reconcile_recorded_stock",
+  reconcile_picker_observation: "pick-observed",
+} as const;
+export const CANONICAL_CLAIM_IDEMPOTENCY_KEY_MAX = 120;
+
 function canonicalPickerCommandKey(
   operation: string,
   evidence: Readonly<Record<string, unknown>>,
@@ -1653,7 +1670,7 @@ export class PickingUseCases {
           },
         } : {}),
         wmsProgress,
-        idempotencyKey: canonicalPickerCommandKey(`pick-${locationStrategy}`, baseEvidence),
+        idempotencyKey: canonicalPickerCommandKey(PICK_KEY_OPERATION[locationStrategy], baseEvidence),
         actor,
         reason,
       });

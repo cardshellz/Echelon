@@ -77,3 +77,28 @@ describe("missed-pick Yes when the reservation sits in another bin", () => {
     expect(pickClaimLine.mock.calls[0][0].reason).toBe("Picker advanced order item 700 to 1 from RACK-14");
   });
 });
+
+describe("every canonical pick command the gun sends passes the claim schema", () => {
+  // The claim service validates commands against this schema before the store
+  // runs. Mocked stores above never did, which hid a 123-character observation
+  // key that failed every observation pick in production (limit 120).
+  it.each(["scan", "missed_pick_confirmation"])("strict, recorded-stock and observation commands are valid (%s)", async (pickMethod) => {
+    const { canonicalAvailabilityClaimPickCommandSchema } = await import("@shared/types/inventory-availability-claims");
+    const { CANONICAL_CLAIM_IDEMPOTENCY_KEY_MAX } = await import("../../picking.use-cases");
+    const sent: unknown[] = [];
+    const pickClaimLine = vi.fn(async (command: unknown) => {
+      sent.push(command);
+      const parsed = canonicalAvailabilityClaimPickCommandSchema.safeParse(command);
+      if (!parsed.success) throw codedError("INVALID_CANONICAL_CLAIM_COMMAND");
+      if (sent.length === 1) throw codedError("CLAIM_PICK_LOCATION_SHORTFALL");
+      if (sent.length === 2) throw codedError("CLAIM_RESOURCE_CONFLICT");
+      return { outcome: "picked_with_observation", warehouseLocationIds: [14], observedRelocatedQuantity: "1" };
+    });
+    await expect(harness(pickClaimLine, pickMethod)()).resolves.toMatchObject({ item: { pickedQuantity: 1 } });
+    expect(sent).toHaveLength(3);
+    for (const command of sent as Array<{ idempotencyKey: string }>) {
+      expect(canonicalAvailabilityClaimPickCommandSchema.safeParse(command).success).toBe(true);
+      expect(command.idempotencyKey.length).toBeLessThanOrEqual(CANONICAL_CLAIM_IDEMPOTENCY_KEY_MAX);
+    }
+  });
+});
