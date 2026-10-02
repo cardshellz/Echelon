@@ -20,7 +20,17 @@ interface Props {
   value: FieldSchema;
   onChange(value: FieldSchema): void;
   /** Explicit edits only; undefined means clear. Arrays are atomic. */
-  onFieldChange?(path: readonly string[], value: unknown): void;
+  onFieldChange?(
+    path: readonly string[],
+    value: unknown,
+    editedPath?: readonly string[],
+  ): boolean | void;
+  /** Optional workbench numeric input; updates still use this form's atomic paths. */
+  renderNumericField?(
+    node: SchemaFieldNode,
+    onChange: (value: number | undefined) => boolean,
+    accessibility: { id: string; describedBy?: string },
+  ): React.ReactNode;
   mode?: "item" | "patch";
   disabled?: boolean;
 }
@@ -36,6 +46,7 @@ export function SchemaFields({
   onFieldChange,
   disabled,
   mode = "item",
+  renderNumericField,
 }: Props) {
   const prefix = useId();
   const model = useMemo(
@@ -63,7 +74,7 @@ export function SchemaFields({
   }, [focusPath, query, expandedOptional]);
 
   function update(path: readonly string[], next: unknown) {
-    if (disabled) return;
+    if (disabled) return false;
     const updated = updateSchemaFieldValue(value, path, next);
     onChange(updated);
     let atomicPath = [...path];
@@ -73,7 +84,13 @@ export function SchemaFields({
         break;
       }
     }
-    onFieldChange?.(atomicPath, fieldValueAtPath(updated, atomicPath));
+    return (
+      onFieldChange?.(
+        atomicPath,
+        fieldValueAtPath(updated, atomicPath),
+        path,
+      ) !== false
+    );
   }
 
   function jump(path: readonly string[]) {
@@ -333,17 +350,24 @@ export function SchemaFields({
             <option value="false">No</option>
           </select>
         ) : node.type === "number" || node.type === "integer" ? (
-          <Input
-            {...common}
-            type="number"
-            step={node.type === "integer" ? 1 : "any"}
-            value={typeof node.value === "number" ? node.value : ""}
-            onChange={(event) => {
-              if (event.target.value === "") update(node.path, undefined);
-              else if (Number.isFinite(Number(event.target.value)))
-                update(node.path, Number(event.target.value));
-            }}
-          />
+          renderNumericField ? (
+            renderNumericField(node, (next) => update(node.path, next), {
+              id,
+              describedBy: common["aria-describedby"],
+            })
+          ) : (
+            <Input
+              {...common}
+              type="number"
+              step={node.type === "integer" ? 1 : "any"}
+              value={typeof node.value === "number" ? node.value : ""}
+              onChange={(event) => {
+                if (event.target.value === "") update(node.path, undefined);
+                else if (Number.isFinite(Number(event.target.value)))
+                  update(node.path, Number(event.target.value));
+              }}
+            />
+          )
         ) : typeof node.schema.maxLength === "number" &&
           node.schema.maxLength > 300 ? (
           <Textarea

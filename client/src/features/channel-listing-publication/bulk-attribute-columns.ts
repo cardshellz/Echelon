@@ -9,7 +9,6 @@ import {
 } from "./schema-field-model";
 
 export const BULK_ATTRIBUTE_COLUMN_LIMITS = {
-  initial: 10,
   total: 250,
 } as const;
 export type BulkAttributeScalarType =
@@ -17,13 +16,22 @@ export type BulkAttributeScalarType =
   | "number"
   | "integer"
   | "boolean";
+export interface BulkAttributeHelp {
+  path: string[];
+  label: string;
+  description: string;
+}
 export interface BulkAttributeColumn {
   key: string;
   path: string[];
   label: string;
   pathLabel: string;
   group: string;
-  type: BulkAttributeScalarType;
+  /** Exact provider guidance, ordered from ancestor groups to this field. */
+  help: BulkAttributeHelp[];
+  type: BulkAttributeScalarType | "complex";
+  kind: "scalar" | "complex";
+  complexReason: "array" | "object" | "conditional" | "unsupported" | null;
   schema: FieldSchema;
   required: boolean;
   requiredForSome: boolean;
@@ -110,9 +118,8 @@ function controlSignature(node: SchemaFieldNode): string {
 }
 
 /**
- * Columns are provider-derived scalar leaves. Each row resolves its own
- * conditional requirements; arrays and conflicting controls remain whole in
- * item details rather than being flattened into lossy spreadsheet cells.
+ * Scalar leaves use direct cells; arrays and ambiguous values remain visible
+ * as complex cells opening the inline inspector. Each row keeps its own rules.
  */
 export function buildBulkAttributeColumns(
   schema: FieldSchema,
@@ -129,7 +136,6 @@ export function buildBulkAttributeColumns(
       required: Set<number>;
     }
   >();
-  const excluded = new Set<string>();
   const warnings = new Set<string>();
   const requiredKeysByRow: string[][] = [];
   const applicableKeysByRow: string[][] = [];
@@ -144,30 +150,42 @@ export function buildBulkAttributeColumns(
     const applicableKeys: string[] = [];
     function visit(
       node: SchemaFieldNode,
-      ancestors: string[],
+      ancestors: SchemaFieldNode[],
       ambiguous: boolean,
     ): void {
       const key = JSON.stringify(node.path);
       const blocked =
         ambiguous ||
         AMBIGUOUS_KEYS.some((keyword) => node.schema[keyword] !== undefined);
-      if (node.type === "array" || blocked) {
-        hasRowDetails = true;
-        excluded.add(key);
-        return;
-      }
-      if (node.type === "object" || node.schema.properties) {
-        if (!node.children.length && node.path.length) hasRowDetails = true;
+      if (
+        !blocked &&
+        node.type !== "array" &&
+        (node.type === "object" || node.schema.properties) &&
+        node.children.length
+      ) {
         node.children.forEach((child) =>
           visit(
             child,
-            node.path.length ? [...ancestors, node.label] : ancestors,
+            node.path.length ? [...ancestors, node] : ancestors,
             blocked,
           ),
         );
         return;
       }
-      const type = scalarType(node);
+      const scalar =
+        blocked || node.type === "array" || node.type === "object"
+          ? null
+          : scalarType(node);
+      const type = scalar ?? "complex";
+      const complexReason = scalar
+        ? null
+        : blocked
+          ? "conditional"
+          : node.type === "array"
+            ? "array"
+            : node.type === "object"
+              ? "object"
+              : "unsupported";
       if (!writablePaths.has(key))
         writablePaths.set(
           key,
@@ -176,17 +194,22 @@ export function buildBulkAttributeColumns(
           }).success,
         );
       const writable = writablePaths.get(key);
-      if (!type || !writable) {
+      if (!writable) {
         hasRowDetails = true;
-        excluded.add(key);
         return;
       }
+      if (!scalar) hasRowDetails = true;
       if (node.required) requiredKeys.push(key);
       applicableKeys.push(key);
       const signature = controlSignature(node);
       const previous = candidates.get(key);
       if (previous) {
-        if (previous.signature !== signature) excluded.add(key);
+        if (previous.signature !== signature || previous.column.type !== type) {
+          previous.column.type = "complex";
+          previous.column.kind = "complex";
+          previous.column.complexReason = "conditional";
+          hasRowDetails = true;
+        }
         previous.present.add(rowIndex);
         if (node.required) previous.required.add(rowIndex);
       } else if (candidates.size < BULK_ATTRIBUTE_COLUMN_LIMITS.total) {
@@ -195,9 +218,24 @@ export function buildBulkAttributeColumns(
             key,
             path: [...node.path],
             label: node.label,
-            pathLabel: [...ancestors, node.label].join(" › "),
-            group: ancestors.join(" › "),
+            pathLabel: [...ancestors, node]
+              .map((field) => field.label)
+              .join(" › "),
+            group: ancestors.map((field) => field.label).join(" › "),
+            help: [...ancestors, node].flatMap((field) =>
+              field.description?.trim()
+                ? [
+                    {
+                      path: [...field.path],
+                      label: field.label,
+                      description: field.description,
+                    },
+                  ]
+                : [],
+            ),
             type,
+            kind: scalar ? "scalar" : "complex",
+            complexReason,
             schema: node.schema,
             required: false,
             requiredForSome: false,
@@ -213,22 +251,15 @@ export function buildBulkAttributeColumns(
     requiredKeysByRow.push(requiredKeys);
     applicableKeysByRow.push(applicableKeys);
   });
-  const columns = [...candidates.values()]
-    .filter((candidate) => {
-      const safe = !excluded.has(candidate.column.key);
-      if (!safe) hasRowDetails = true;
-      return safe;
-    })
-    .map(({ column, required, present }) => ({
+  const columns = [...candidates.values()].map(
+    ({ column, required, present }) => ({
       ...column,
       required: required.size > 0,
       requiredForSome: required.size > 0 && required.size < rows.length,
       appliesToAll: present.size === rows.length,
-    }));
-  const defaults = [...columns]
-    .sort((left, right) => Number(right.required) - Number(left.required))
-    .slice(0, BULK_ATTRIBUTE_COLUMN_LIMITS.initial)
-    .map((column) => column.key);
+    }),
+  );
+  const defaults = columns.map((column) => column.key);
   if (hasRowDetails) warnings.add(DETAIL_WARNING);
   return {
     columns,
@@ -249,6 +280,11 @@ export function parseBulkAttributeCellInput(
   column: BulkAttributeColumn,
   raw: string,
 ): BulkAttributeInputResult {
+  if (column.type === "complex")
+    return {
+      value: undefined,
+      error: "Edit this value in the item details panel.",
+    };
   if (raw === "") return { value: undefined, error: null };
   if (Array.isArray(column.schema.enum)) {
     const match = /^choice:(\d+)$/.exec(raw);

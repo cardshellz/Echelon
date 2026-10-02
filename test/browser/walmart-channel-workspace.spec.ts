@@ -23,7 +23,7 @@ async function setup(page: Page, options: { readOnly?: boolean; connected?: bool
     if (await handlePublicationRequest(route, state.publication)) return;
     if (await handleMembershipRequest(route, state.membership)) return;
     if (req.method() === "GET") {
-      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "operator", username: "operator", role: "operator" }, roles: ["operator"],
+      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "operator", username: "operator", role: "lead" }, roles: ["lead"],
         permissions: [...(options.readOnly ? ["channels:view"] : ["channels:view", "channels:edit"]), ...(options.inventoryAccess ? ["inventory_planning:view"] : []), ...(options.inventoryAccess === "activate" ? ["inventory_planning:activate"] : [])] } });
       if (path === "/api/warehouses") return route.fulfill({ json: [{ id: 1, code: "LEON", name: "20 LEONBERG", isActive: 1, warehouseType: "operations" }] });
       if (path === `${BASE}/walmart`) return route.fulfill({ json: state.connected ? { ...status, orderSyncBlockedReason: options.blocked ? "Automatic order sync is disabled by server configuration." : null } : null });
@@ -50,10 +50,10 @@ async function setup(page: Page, options: { readOnly?: boolean; connected?: bool
     state.unexpected.push(`${req.method()} ${path}`);
     return route.fulfill({ status: 500, json: { error: "Unexpected test request" } });
   });
-  await page.route("**/__walmart-test", route => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1" />
+  await page.route(/\/(?:__walmart-test|channels\/walmart\/77(?:\/listings\/bulk)?)(?:\?.*)?$/, route => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1" />
     <script type="module">import RefreshRuntime from '/@react-refresh';RefreshRuntime.injectIntoGlobalHook(window);window.$RefreshReg$=()=>{};window.$RefreshSig$=()=>type=>type;window.__vite_plugin_react_preamble_installed__=true;</script>
     </head><body><main id="root"></main><script type="module" src="/@fs/${resolve("test/browser/fixtures/walmart-channel-harness.tsx").replaceAll("\\", "/")}"></script></body></html>` }));
-  await page.goto("/__walmart-test");
+  await page.goto("/channels/walmart/77");
   await expect(page.getByText("Store Setup", { exact: true })).toBeVisible();
   return state;
 }
@@ -533,184 +533,162 @@ test("server review blockers prevent submission and stale saves preserve local s
   expect(state.errors).toEqual([]);
 });
 
-test("bulk edits use direct fields and preserve each identifier and untouched attributes", async ({ page }, info) => {
-  const state = await setup(page, { catalogEmpty: true });
-  seedTwoDrafts(state);
+async function openBulkWorkspace(page: Page, count: number) {
+  await page.getByRole("button", { name: "Bulk edit selected (" + count + ")", exact: true }).click();
+  const bulk = page.getByRole("region", { name: "Bulk listing workspace", exact: true });
+  await expect(bulk).toBeVisible();
+  await expect(page).toHaveURL(/\/channels\/walmart\/77\/listings\/bulk\?variantIds=/);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByText("Store Setup", { exact: true })).toBeHidden();
+  return bulk;
+}
+async function saveBulkWorkspace(page: Page) {
+  const bulk = page.getByRole("region", { name: "Bulk listing workspace", exact: true });
+  await bulk.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect(bulk.getByRole("status")).toContainText("Draft saved.");
+}
+
+test("full-page bulk editing saves one draft update and preserves identifiers and untouched attributes", async ({ page }, info) => {
+  const state = await setup(page, { catalogEmpty: true }); seedTwoDrafts(state);
   const original = structuredClone(state.publication.draft.items);
   await page.reload();
   await page.getByLabel("Select all actionable rows on this page", { exact: true }).check();
-  await page.getByRole("button", { name: "Bulk edit selected (2)", exact: true }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.getByRole("button", { name: "Apply to 2 draft items", exact: true })).toBeDisabled();
-  await expect(dialog.getByLabel("Brand", { exact: true })).toHaveAttribute("placeholder", "Multiple values — unchanged");
-  await expect(dialog.getByLabel("Change shared provider attributes", { exact: true })).toHaveCount(0);
-  await dialog.getByLabel("Brand", { exact: true }).fill("Shared test brand");
-  await dialog.getByLabel("Fixed Walmart price (USD)", { exact: true }).fill("8.99");
-  await dialog.getByLabel(/Country of origin for all selected items/).selectOption("choice:0");
-  await dialog.getByRole("button", { name: "Apply Country of origin to all", exact: true }).click();
-  await dialog.getByRole("region", { name: "Bulk edit preview", exact: true }).scrollIntoViewIfNeeded();
-  await expect(dialog.getByText("2 of 2 selected drafts will change.", { exact: false })).toBeVisible();
-  await dialog.screenshot({ path: info.outputPath("bulk-edit-preview.png") });
+  const bulk = await openBulkWorkspace(page, 2);
+  await expect(bulk.getByRole("button", { name: "Save draft", exact: true })).toBeDisabled();
+  await bulk.getByLabel("Brand for all selected items", { exact: true }).fill("Shared test brand");
+  await expect(bulk.getByRole("button", { name: "Save draft", exact: true })).toBeDisabled();
+  await bulk.getByRole("button", { name: "Apply Brand to all", exact: true }).click();
+  await bulk.getByLabel("Price (USD) for all selected items", { exact: true }).fill("8.99");
+  await bulk.getByRole("button", { name: "Apply Price (USD) to all", exact: true }).click();
+  await bulk.getByLabel(/Country of origin for all selected items/).selectOption("choice:0");
+  await bulk.getByRole("button", { name: "Apply Country of origin to all", exact: true }).click();
+  await bulk.getByRole("button", { name: "Changes (2)", exact: true }).click();
+  await expect(bulk.getByRole("complementary", { name: "Bulk edit preview", exact: true })).toContainText("2 of 2 items changed");
   expect(state.publication.writes).toEqual([]);
-  await dialog.getByRole("button", { name: "Apply to 2 draft items", exact: true }).click();
-  await expect(dialog).toHaveCount(0);
-  expect(state.publication.writes).toEqual([]);
-  await page.getByRole("button", { name: "Save draft", exact: true }).click();
-  await expect(page.getByText("Draft saved. No listing has been submitted.", { exact: true })).toBeVisible();
+  await saveBulkWorkspace(page);
+  expect(state.publication.writes).toHaveLength(1);
   expect(state.publication.draft.items).toEqual(original.map(item => ({ ...item, brand: "Shared test brand", priceOverrideCents: 899,
     attributes: { ...item.attributes, Visible: { ...(item.attributes.Visible as object), countryOfOrigin: "US" } } })));
-  expect(state.publication.operations).toEqual([]);
-  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+  await expect(bulk.getByRole("button", { name: "Save draft", exact: true })).toBeDisabled();
+  await bulk.getByRole("button", { name: "Changes (0)", exact: true }).click();
+  await page.screenshot({ path: info.outputPath("bulk-workspace-content.png"), fullPage: true });
+  expect(state.publication.operations).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
-test("bulk cancel and invalid price preserve the draft and one selected item can return to inherited pricing", async ({ page }) => {
-  const state = await setup(page, { catalogEmpty: true });
-  seedTwoDrafts(state);
+test("bulk invalid price can be discarded on leaving and a selected row can inherit pricing", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true }); seedTwoDrafts(state);
   const original = structuredClone(state.publication.draft.items);
-  await page.reload();
-  await page.getByLabel("Select CARD-1", { exact: true }).check();
-  await page.getByRole("button", { name: "Bulk edit selected (1)", exact: true }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.getByLabel("Fixed Walmart price (USD)", { exact: true })).toHaveValue("5.49");
-  await dialog.getByLabel("Fixed Walmart price (USD)", { exact: true }).fill("0");
-  await expect(dialog.getByRole("button", { name: "Apply to 1 draft item", exact: true })).toBeDisabled();
-  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
-  expect(state.publication.draft.items).toEqual(original);
-  expect(state.publication.writes).toEqual([]);
-  await page.getByRole("button", { name: "Bulk edit selected (1)", exact: true }).click();
-  await dialog.getByRole("button", { name: "Use pricing rules", exact: true }).click();
-  await dialog.getByRole("button", { name: "Apply to 1 draft item", exact: true }).click();
-  await page.getByRole("button", { name: "Save draft", exact: true }).click();
-  await expect(page.getByText("Draft saved. No listing has been submitted.", { exact: true })).toBeVisible();
+  await page.reload(); await page.getByLabel("Select CARD-1", { exact: true }).check();
+  const bulk = await openBulkWorkspace(page, 1);
+  const price = bulk.getByLabel("Price (USD) for CARD-1", { exact: true });
+  await expect(price).toHaveValue("5.49"); await price.fill("0");
+  await expect(price).toHaveAttribute("aria-invalid", "true");
+  await expect(bulk.getByRole("button", { name: "Save draft", exact: true })).toBeDisabled();
+  page.once("dialog", dialog => dialog.accept());
+  await bulk.getByRole("button", { name: "Back to listing feed", exact: true }).click();
+  await expect(bulk).toHaveCount(0);
+  expect(state.publication.draft.items).toEqual(original); expect(state.publication.writes).toEqual([]);
+  await openBulkWorkspace(page, 1); await price.fill(""); await saveBulkWorkspace(page);
   expect(state.publication.draft.items).toEqual([{ ...original[0], priceOverrideCents: null }, original[1]]);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
-test("bulk product type changes preview and clear only attributes belonging to the changed type", async ({ page }) => {
-  const state = await setup(page, { catalogEmpty: true });
-  seedTwoDrafts(state);
+test("mixed categories keep product columns editable and changing category clears only affected attributes", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true }); seedTwoDrafts(state);
   state.publication.draft.items[1].productType = "Trading Card Storage";
   const original = structuredClone(state.publication.draft.items);
-  await page.reload();
-  await page.getByLabel("Select all actionable rows on this page", { exact: true }).check();
-  await page.getByRole("button", { name: "Bulk edit selected (2)", exact: true }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.getByRole("table", { name: "Draft item attributes", exact: true })).toHaveCount(0);
-  await dialog.getByRole("button", { name: "Browse product types", exact: true }).click();
-  await dialog.getByRole("button", { name: "Browse Collectibles", exact: true }).click();
-  await dialog.getByRole("button", { name: "Browse Card Storage", exact: true }).click();
-  await dialog.getByRole("button", { name: "Select Trading Card Storage", exact: true }).click();
-  await expect(dialog.getByRole("table", { name: "Draft item attributes", exact: true })).toBeVisible();
-  await expect(dialog.getByText("Existing provider attributes will be cleared on 1 item.", { exact: false })).toBeVisible();
-  await dialog.getByRole("button", { name: "Apply to 2 draft items", exact: true }).click();
-  await page.getByRole("button", { name: "Save draft", exact: true }).click();
-  await expect(page.getByText("Draft saved. No listing has been submitted.", { exact: true })).toBeVisible();
+  await page.reload(); await page.getByLabel("Select all actionable rows on this page", { exact: true }).check();
+  const bulk = await openBulkWorkspace(page, 2);
+  await expect(bulk.getByRole("table", { name: "Draft item attributes", exact: true })).toBeVisible();
+  await expect(bulk.getByLabel("Brand for CARD-1", { exact: true })).toHaveValue("First brand");
+  await bulk.getByRole("button", { name: "Choose category", exact: true }).click();
+  await bulk.getByRole("button", { name: "Browse product types", exact: true }).click();
+  await bulk.getByRole("button", { name: "Browse Collectibles", exact: true }).click();
+  await bulk.getByRole("button", { name: "Browse Card Storage", exact: true }).click();
+  await bulk.getByRole("button", { name: "Select Trading Card Storage", exact: true }).click();
+  await expect(bulk.getByText("Category or method changes clear prior provider attributes on 1 items.", { exact: false })).toBeVisible();
+  await saveBulkWorkspace(page);
   expect(state.publication.draft.items).toEqual([{ ...original[0], productType: "Trading Card Storage", attributes: {} }, original[1]]);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
-test("bulk attribute table applies shared columns across 100 items and preserves individual row edits", async ({ page }, info) => {
-  const state = await setup(page, { catalogEmpty: true });
-  seedAttributeTable(state, 100);
+test("bulk grid supports 100 rows, column defaults, explicit replacement and individual shipping edits", async ({ page }, info) => {
+  const state = await setup(page, { catalogEmpty: true }); seedAttributeTable(state, 100);
   const original = structuredClone(state.publication.draft.items);
-  await page.reload();
-  await expect(page.getByText("100 draft items", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Show more listings", exact: true }).click();
-  await expect(page.getByRole("checkbox", { name: /^Select ROW-/ })).toHaveCount(100);
+  await page.reload(); await page.getByRole("button", { name: "Show more listings", exact: true }).click();
   await page.getByLabel("Select all actionable rows on this page", { exact: true }).check();
-  await page.getByRole("button", { name: "Bulk edit selected (100)", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Bulk edit 100 draft items", exact: true });
-  const table = dialog.getByRole("table", { name: "Draft item attributes", exact: true });
+  const bulk = await openBulkWorkspace(page, 100);
+  const table = bulk.getByRole("table", { name: "Draft item attributes", exact: true });
   await expect(table.locator("tbody tr")).toHaveCount(25);
-  await dialog.getByLabel("Shipping › Shipping weight for all selected items", { exact: true }).fill("2.5");
-  await expect(dialog.getByRole("button", { name: "Apply to 100 draft items", exact: true })).toBeDisabled();
-  await dialog.getByRole("button", { name: "Apply Shipping weight to all", exact: true }).click();
-  const firstWeight = dialog.getByLabel("Shipping › Shipping weight for ROW-001", { exact: true });
-  await expect(firstWeight).toHaveValue("2.5");
-  await firstWeight.fill("7");
-  await dialog.getByRole("button", { name: "Undo Shipping › Shipping weight change for ROW-001", exact: true }).click();
-  await expect(firstWeight).toHaveValue("2.5");
-  await dialog.getByLabel("Product › Dimensions › Width for ROW-002", { exact: true }).fill("6.5");
-  await dialog.getByLabel("Product › Ships in own container for ROW-002", { exact: true }).selectOption("true");
-  await table.scrollIntoViewIfNeeded();
-  await dialog.screenshot({ path: info.outputPath("bulk-attribute-table.png") });
-  await dialog.getByRole("button", { name: "Next draft rows", exact: true }).click();
-  await expect(dialog.getByText("Showing 26–50 of 100 selected items", { exact: true })).toBeVisible();
-  await dialog.getByLabel("Shipping › Shipping weight for ROW-026", { exact: true }).fill("9.75");
-  await dialog.getByRole("button", { name: "Next draft rows", exact: true }).click();
-  await dialog.getByRole("button", { name: "Next draft rows", exact: true }).click();
-  await dialog.getByLabel("Product › Ships in own container for ROW-100", { exact: true }).selectOption("true");
-  await dialog.getByRole("button", { name: "Apply to 100 draft items", exact: true }).click();
-  await expect(dialog).toHaveCount(0);
-  expect(state.publication.writes).toEqual([]);
-  await page.getByRole("button", { name: "Save draft", exact: true }).click();
-  await expect(page.getByText("Draft saved. No listing has been submitted.", { exact: true })).toBeVisible();
+  const weight = bulk.getByLabel("Shipping › Shipping weight for ROW-001", { exact: true });
+  await weight.fill("7");
+  await bulk.getByLabel("Shipping › Shipping weight for all selected items", { exact: true }).fill("2.5");
+  await bulk.getByRole("button", { name: "Apply Shipping weight to all", exact: true }).click();
+  await expect(weight).toHaveValue("7");
+  await bulk.getByLabel("Shipping › Shipping weight for all selected items", { exact: true }).fill("3");
+  await bulk.getByRole("button", { name: "Replace Shipping weight row edits", exact: true }).click();
+  await expect(weight).toHaveValue("3");
+  await bulk.getByLabel("Product › Dimensions › Width for ROW-002", { exact: true }).fill("6.5");
+  await bulk.getByLabel("Product › Ships in own container for ROW-002", { exact: true }).selectOption("true");
+  await bulk.getByRole("button", { name: "Next draft rows", exact: true }).click();
+  await bulk.getByLabel("Shipping › Shipping weight for ROW-026", { exact: true }).fill("9.75");
+  await bulk.getByLabel("Rows per page", { exact: true }).selectOption("100");
+  await expect(table.locator("tbody tr")).toHaveCount(100);
+  await bulk.getByLabel("Product › Ships in own container for ROW-100", { exact: true }).selectOption("true");
+  await saveBulkWorkspace(page);
+  expect(state.publication.writes).toHaveLength(1);
   expect(state.publication.draft.items).toEqual(original.map(item => ({ ...item, attributes: {
-    Orderable: { shippingWeight: item.variantId === 26 ? 9.75 : 2.5 },
+    Orderable: { shippingWeight: item.variantId === 26 ? 9.75 : 3 },
     Visible: { ...(item.attributes.Visible as object), dimensions: { width: item.variantId === 2 ? 6.5 : item.variantId, height: 10 },
       shipsInOwnContainer: item.variantId === 2 || item.variantId === 100 },
   } })));
-  expect(state.publication.operations).toEqual([]);
+  await bulk.getByLabel("Shipping › Shipping weight for ROW-001", { exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: info.outputPath("bulk-workspace-100-items.png"), fullPage: true });
+  expect(state.publication.operations).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("invalid cell buffers survive paging and filters without locking unrelated editing", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true }); seedAttributeTable(state, 30);
+  await page.reload(); await page.getByLabel("Select all actionable rows on this page", { exact: true }).check();
+  const bulk = await openBulkWorkspace(page, 30);
+  const weight = bulk.getByLabel("Shipping › Shipping weight for ROW-001", { exact: true });
+  await weight.fill(""); await weight.pressSequentially("0.25"); await expect(weight).toHaveValue("0.25");
+  await weight.fill("not a number"); await expect(weight).toHaveAttribute("aria-invalid", "true");
+  await expect(bulk.getByRole("button", { name: "Save draft", exact: true })).toBeDisabled();
+  await bulk.getByRole("button", { name: "Next draft rows", exact: true }).click();
+  await bulk.getByLabel("Brand for ROW-026", { exact: true }).fill("Row 26 brand");
+  await bulk.getByRole("button", { name: "Previous draft rows", exact: true }).click();
+  await expect(weight).toHaveValue("not a number");
+  await bulk.getByLabel("Search attribute columns", { exact: true }).fill("Brand"); await expect(weight).toHaveCount(0);
+  await bulk.getByLabel("Search attribute columns", { exact: true }).fill(""); await expect(weight).toHaveValue("not a number");
+  await expect(bulk.getByRole("button", { name: "Save draft", exact: true })).toBeDisabled();
+  await weight.fill("0.25"); await bulk.getByLabel("Price (USD) for ROW-001", { exact: true }).fill("bad price");
+  await expect(weight).toHaveValue("0.25"); await expect(bulk.getByRole("button", { name: "Save draft", exact: true })).toBeDisabled();
+  await bulk.getByLabel("Price (USD) for ROW-001", { exact: true }).fill("8.99"); await saveBulkWorkspace(page);
+  expect(state.publication.draft.items[0]).toMatchObject({ priceOverrideCents: 899, attributes: { Orderable: { shippingWeight: 0.25 } } });
+  expect(state.publication.draft.items[25].brand).toBe("Row 26 brand");
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
-test("bulk table retains invalid input until corrected or discarded and decimals survive typing", async ({ page }) => {
-  const state = await setup(page, { catalogEmpty: true });
-  seedAttributeTable(state, 30);
-  await page.reload();
-  await page.getByLabel("Select all actionable rows on this page", { exact: true }).check();
-  await page.getByRole("button", { name: "Bulk edit selected (30)", exact: true }).click();
-  const dialog = page.getByRole("dialog");
-  const weight = dialog.getByLabel("Shipping › Shipping weight for ROW-001", { exact: true });
-  await weight.fill("");
-  await weight.pressSequentially("0.25");
-  await expect(weight).toHaveValue("0.25");
-  await weight.fill("not a number");
-  await expect(weight).toHaveAttribute("aria-invalid", "true");
-  await expect(dialog.getByRole("button", { name: "Next draft rows", exact: true })).toBeDisabled();
-  await expect(dialog.getByRole("button", { name: "Apply to 30 draft items", exact: true })).toBeDisabled();
-  await dialog.getByText("Choose columns (4)", { exact: true }).click();
-  await expect(dialog.getByRole("checkbox", { name: "Shipping › Shipping weight (required)", exact: true })).toBeDisabled();
-  await dialog.getByRole("button", { name: "Discard invalid Shipping › Shipping weight value for ROW-001", exact: true }).click();
-  await expect(weight).toHaveValue("0.25");
-  await expect(dialog.getByRole("button", { name: "Next draft rows", exact: true })).toBeEnabled();
-  await dialog.getByLabel("Fixed Walmart price (USD)", { exact: true }).fill("bad price");
-  await expect(weight).toHaveValue("0.25");
-  await expect(dialog.getByRole("button", { name: "Apply to 30 draft items", exact: true })).toBeDisabled();
-  await dialog.getByRole("button", { name: "Undo fixed walmart price (usd) change", exact: true }).click();
-  await dialog.getByRole("button", { name: "Next draft rows", exact: true }).click();
-  await dialog.getByRole("button", { name: "Previous draft rows", exact: true }).click();
-  await expect(weight).toHaveValue("0.25");
-  await weight.fill("invalid");
-  await dialog.getByRole("button", { name: "Undo all attribute changes", exact: true }).click();
-  await expect(weight).toHaveValue("1");
-  await expect(dialog.getByRole("button", { name: "Apply to 30 draft items", exact: true })).toBeDisabled();
-  await expect(dialog.getByRole("button", { name: "Next draft rows", exact: true })).toBeEnabled();
-  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
-  expect(state.publication.writes).toEqual([]);
-  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
-});
-
-test("bulk row Details edits array values only for that item and keeps table edits", async ({ page }) => {
-  const state = await setup(page, { catalogEmpty: true });
-  seedAttributeTable(state, 2);
+test("docked item details edit arrays while the grid retains individual edits", async ({ page }, info) => {
+  const state = await setup(page, { catalogEmpty: true }); seedAttributeTable(state, 2);
   const original = structuredClone(state.publication.draft.items);
-  await page.reload();
-  await page.getByLabel("Select all actionable rows on this page", { exact: true }).check();
-  await page.getByRole("button", { name: "Bulk edit selected (2)", exact: true }).click();
-  const bulk = page.getByRole("dialog", { name: "Bulk edit 2 draft items", exact: true });
+  await page.reload(); await page.getByLabel("Select all actionable rows on this page", { exact: true }).check();
+  const bulk = await openBulkWorkspace(page, 2);
   await bulk.getByLabel("Product › Dimensions › Width for ROW-001", { exact: true }).fill("4.5");
   await bulk.getByRole("button", { name: "Edit attributes for ROW-001", exact: true }).click();
-  const details = page.getByRole("dialog", { name: "Attributes for ROW-001", exact: true });
+  const details = bulk.getByRole("complementary", { name: "Item details", exact: true });
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await details.getByLabel(/^Features 1/).fill("Individual feature");
-  await details.getByRole("button", { name: "Done", exact: true }).click();
+  await page.screenshot({ path: info.outputPath("bulk-workspace-details.png"), fullPage: true });
+  await details.getByRole("button", { name: "Close details", exact: true }).click();
   await expect(bulk.getByLabel("Product › Dimensions › Width for ROW-001", { exact: true })).toHaveValue("4.5");
+  await bulk.getByRole("button", { name: "Choose category", exact: true }).click();
   await bulk.getByRole("button", { name: "Change product type", exact: true }).click();
   await bulk.getByRole("button", { name: "Select Trading Card Accessories", exact: true }).click();
   await expect(bulk.getByLabel("Product › Dimensions › Width for ROW-001", { exact: true })).toHaveValue("4.5");
-  await bulk.getByRole("button", { name: "Apply to 2 draft items", exact: true }).click();
-  await page.getByRole("button", { name: "Save draft", exact: true }).click();
-  await expect(page.getByText("Draft saved. No listing has been submitted.", { exact: true })).toBeVisible();
+  await saveBulkWorkspace(page);
   expect(state.publication.draft.items).toEqual([{ ...original[0], attributes: {
     ...original[0].attributes, Visible: { ...(original[0].attributes.Visible as object),
       dimensions: { width: 4.5, height: 10 }, features: ["Individual feature"] },
@@ -718,36 +696,185 @@ test("bulk row Details edits array values only for that item and keeps table edi
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
-test("rejected edits beneath a cleared group retain their buffers and cannot apply stale values", async ({ page }) => {
-  const state = await setup(page, { catalogEmpty: true });
-  seedAttributeTable(state, 2);
+test("failed bulk saves retain row edits and retry sends the same validated draft", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true }); seedTwoDrafts(state);
+  await page.reload(); await page.getByLabel("Select CARD-1", { exact: true }).check();
+  const bulk = await openBulkWorkspace(page, 1);
+  await bulk.getByLabel("Brand for CARD-1", { exact: true }).fill("Retained brand");
+  await bulk.getByLabel("Product identifier for CARD-1", { exact: true }).fill("036000291452");
+  state.publication.staleDraft = true;
+  await bulk.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect(bulk.getByRole("alert").filter({ hasText: "The draft changed" })).toBeVisible();
+  await expect(bulk.getByLabel("Brand for CARD-1", { exact: true })).toHaveValue("Retained brand");
+  expect(state.publication.draft.items[0].brand).toBe("First brand");
+  state.publication.staleDraft = false; await saveBulkWorkspace(page);
+  expect(state.publication.draft.items[0]).toMatchObject({ brand: "Retained brand", identifier: { type: "UPC", value: "036000291452" } });
+  expect(state.publication.draft.items[1].brand).toBe("Second brand");
+  expect(state.publication.operations).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("bulk page reload restores only explicitly selected saved drafts", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true }); seedTwoDrafts(state);
+  await page.reload(); await page.getByLabel("Select CARD-26", { exact: true }).check();
+  await openBulkWorkspace(page, 1);
+  const previousEpoch = await page.evaluate(() => history.state.echelonListingNavigation.epoch);
+  await page.reload();
+  const bulk = page.getByRole("region", { name: "Bulk listing workspace", exact: true });
+  await expect(bulk.getByLabel("Brand for CARD-26", { exact: true })).toHaveValue("Second brand");
+  expect(await page.evaluate(() => history.state.echelonListingNavigation.epoch)).not.toBe(previousEpoch);
+  await expect(bulk.getByLabel("Brand for CARD-1", { exact: true })).toHaveCount(0);
+  expect(state.publication.writes).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("clean bulk history entries restore the selection encoded in their URLs", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true }); seedTwoDrafts(state);
+  await page.reload(); await page.getByLabel("Select CARD-1", { exact: true }).check();
+  const bulk = await openBulkWorkspace(page, 1);
+  await bulk.getByRole("button", { name: "Back to listing feed", exact: true }).click();
+  await page.getByLabel("Select CARD-1", { exact: true }).uncheck();
+  await page.getByLabel("Select CARD-26", { exact: true }).check();
+  await openBulkWorkspace(page, 1);
+  await expect(bulk.getByLabel("Brand for CARD-26", { exact: true })).toHaveValue("Second brand");
+  await page.goBack(); await page.goBack();
+  await expect(page).toHaveURL(/variantIds=1$/);
+  await expect(bulk.getByLabel("Brand for CARD-1", { exact: true })).toHaveValue("First brand");
+  await expect(bulk.getByLabel("Brand for CARD-26", { exact: true })).toHaveCount(0);
+  await page.goForward(); await page.goForward();
+  await expect(page).toHaveURL(/variantIds=26$/);
+  await expect(bulk.getByLabel("Brand for CARD-26", { exact: true })).toHaveValue("Second brand");
+  expect(state.publication.writes).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("browser Back cancellation preserves unsaved bulk cells and history can still return to the feed", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true }); seedTwoDrafts(state);
+  await page.reload(); await page.getByLabel("Select CARD-1", { exact: true }).check();
+  const bulk = await openBulkWorkspace(page, 1);
+  await bulk.getByLabel("Brand for CARD-1", { exact: true }).fill("Unsaved brand");
+  page.once("dialog", dialog => dialog.dismiss()); await page.goBack();
+  await expect(page).toHaveURL(/\/listings\/bulk\?/);
+  await expect(bulk.getByLabel("Brand for CARD-1", { exact: true })).toHaveValue("Unsaved brand");
+  page.once("dialog", dialog => dialog.accept()); await page.goBack();
+  await expect(page).toHaveURL("/channels/walmart/77");
+  await expect(page.getByText("Store Setup", { exact: true })).toBeVisible();
+  expect(state.publication.draft.items[0].brand).toBe("First brand");
+  expect(state.publication.writes).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+test("unknown staff history entries retain bulk buffers and unload protection until resumed", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true }); seedTwoDrafts(state);
+  // Create a staff entry before this channel's guard epoch, as when arriving
+  // from another application page. Do not fake an owner that never unmounts.
+  await page.evaluate(() => history.replaceState({ marker: "prior-staff-entry" }, "", "/test-other"));
+  await expect(page.getByText("Another staff page", { exact: true })).toBeVisible();
+  await page.evaluate(() => history.pushState(null, "", "/channels/walmart/77"));
+  await page.reload(); await page.getByLabel("Select CARD-1", { exact: true }).check();
+  const bulk = await openBulkWorkspace(page, 1);
+  await bulk.getByLabel("Brand for CARD-1", { exact: true }).fill("Retained across staff pages");
+  await expect(bulk.getByRole("button", { name: "Changes (1)", exact: true })).toBeVisible();
+  await page.evaluate(() => history.go(-2));
+  await expect(page).toHaveURL("/test-other");
+  await expect(bulk).toBeHidden();
+  expect(await page.evaluate(() => history.state.marker)).toBe("prior-staff-entry");
+  expect(await page.evaluate(() => !window.dispatchEvent(new Event("beforeunload", { cancelable: true })))).toBe(true);
+  await page.goForward(); await page.goForward();
+  await expect(bulk.getByLabel("Brand for CARD-1", { exact: true })).toHaveValue("Retained across staff pages");
+  await saveBulkWorkspace(page);
+  expect(state.publication.draft.items[0].brand).toBe("Retained across staff pages");
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("bulk measurement columns retain parent help and require explicit quantity edits", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true }); seedAttributeTable(state, 2);
+  const original = structuredClone(state.publication.draft.items);
+  state.publication.requirementsSchema = { type: "object", required: ["Visible"], properties: {
+    Visible: { type: "object", title: "Product", required: ["netContent", "pieceCount"], properties: {
+      netContent: { type: "object", title: "Net Content", description: "If contents use the same unit, add their quantities. For mixed units, use 1 Each.", required: ["unit", "measure"], properties: {
+        unit: { type: "string", title: "Unit", enum: ["Each", "Count"], description: "The unit used to describe the package contents." },
+        measure: { type: "number", title: "Measure", description: "The quantity expressed in the selected unit." },
+      } },
+      pieceCount: { type: "integer", title: "Number of Pieces", description: "Total individual pieces inside the package." },
+    } },
+  } };
+  await page.reload(); await page.getByLabel("Select all actionable rows on this page", { exact: true }).check();
+  const bulk = await openBulkWorkspace(page, 2);
+  await bulk.getByLabel("Search attribute columns", { exact: true }).fill("Measure");
+  await bulk.getByLabel("Help for Product › Net Content › Measure", { exact: true }).click();
+  await expect(bulk.getByText("If contents use the same unit, add their quantities. For mixed units, use 1 Each.", { exact: false })).toBeVisible();
+  await expect(bulk.getByLabel("Product › Net Content › Measure for ROW-001", { exact: true })).toHaveValue("");
+  expect(state.publication.draft.items).toEqual(original); expect(state.publication.writes).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("bulk inspector clears descendant displays and retains rejected edits until discarded", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true }); seedAttributeTable(state, 2);
   const properties = state.publication.requirementsSchema!.properties as Record<string, Record<string, unknown>>;
   properties.Visible.required = [];
-  await page.reload();
-  await page.getByLabel("Select all actionable rows on this page", { exact: true }).check();
-  await page.getByRole("button", { name: "Bulk edit selected (2)", exact: true }).click();
-  const bulk = page.getByRole("dialog", { name: "Bulk edit 2 draft items", exact: true });
-  await bulk.getByRole("button", { name: "Edit attributes for ROW-001", exact: true }).click();
-  const details = page.getByRole("dialog", { name: "Attributes for ROW-001", exact: true });
-  await details.getByRole("button", { name: "Clear Dimensions", exact: true }).click();
-  await details.getByRole("button", { name: "Done", exact: true }).click();
-  const sharedWidth = bulk.getByLabel("Product › Dimensions › Width for all selected items", { exact: true });
-  await sharedWidth.fill("5");
-  await bulk.getByRole("button", { name: "Apply Width to all", exact: true }).click();
-  await expect(sharedWidth).toHaveValue("5");
-  await expect(bulk.getByRole("alert").filter({ hasText: "Undo the pending clear" })).toBeVisible();
-  await expect(bulk.getByRole("button", { name: "Apply to 2 draft items", exact: true })).toBeDisabled();
-  await bulk.getByRole("button", { name: "Discard Product › Dimensions › Width column value", exact: true }).click();
+  await page.reload(); await page.getByLabel("Select all actionable rows on this page", { exact: true }).check();
+  const bulk = await openBulkWorkspace(page, 2);
   const width = bulk.getByLabel("Product › Dimensions › Width for ROW-001", { exact: true });
-  await width.fill("6");
-  await expect(width).toHaveValue("6");
+  await width.fill("4.5");
+  await bulk.getByRole("button", { name: "Edit attributes for ROW-001", exact: true }).click();
+  const details = bulk.getByRole("complementary", { name: "Item details", exact: true });
+  await details.getByLabel("Search listing fields", { exact: true }).fill("Dimensions");
+  await details.getByRole("button", { name: "Clear Dimensions", exact: true }).click();
+  await details.getByRole("button", { name: "Close details", exact: true }).click();
+  await expect(width).toHaveValue("");
+  await width.fill("6"); await expect(width).toHaveValue("6");
   await expect(width).toHaveAttribute("aria-invalid", "true");
-  await expect(bulk.getByRole("button", { name: "Apply to 2 draft items", exact: true })).toBeDisabled();
-  await bulk.getByRole("button", { name: "Undo all attribute changes", exact: true }).click();
-  await expect(width).toHaveValue("1");
-  await expect(width).not.toHaveAttribute("aria-invalid", "true");
-  await bulk.getByRole("button", { name: "Cancel", exact: true }).click();
-  expect(state.publication.writes).toEqual([]);
+  await expect(bulk.getByRole("button", { name: "Save draft", exact: true })).toBeDisabled();
+  await bulk.getByRole("button", { name: "Discard all invalid cell values", exact: true }).click();
+  await saveBulkWorkspace(page);
+  expect(state.publication.draft.items[0].attributes.Visible).not.toHaveProperty("dimensions");
+  expect(state.publication.draft.items[1].attributes.Visible).toHaveProperty("dimensions.width", 2);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("bulk inspector preserves incomplete numeric input including nested array values", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true }); seedAttributeTable(state, 2);
+  const properties = state.publication.requirementsSchema!.properties as Record<string, { properties: Record<string, unknown> }>;
+  properties.Visible.properties.measurements = { type: "array", title: "Measurements", items: {
+    type: "object", required: ["amount", "unit"], properties: {
+      amount: { type: "number", title: "Amount", minimum: 0 }, length: { type: "integer", title: "Length", minimum: 0 },
+      unit: { type: "string", title: "Unit", enum: ["lb", "oz"] },
+    },
+  } };
+  state.publication.draft.items = state.publication.draft.items.map(item => ({ ...item, attributes: { ...item.attributes,
+    Visible: { ...(item.attributes.Visible as object), measurements: [{ amount: item.variantId, length: 8, unit: "lb" }] },
+  } }));
+  await page.reload(); await page.getByLabel("Select all actionable rows on this page", { exact: true }).check();
+  const bulk = await openBulkWorkspace(page, 2);
+  await bulk.getByRole("button", { name: "Edit attributes for ROW-001", exact: true }).click();
+  const details = bulk.getByRole("complementary", { name: "Item details", exact: true });
+  await details.getByLabel("Width for ROW-001", { exact: true }).fill("-");
+  await expect(details.getByLabel("Width for ROW-001", { exact: true })).toHaveValue("-");
+  await expect(bulk.getByRole("button", { name: "Save draft", exact: true })).toBeDisabled();
+  await details.getByRole("button", { name: "Close details", exact: true }).click();
+  await bulk.getByRole("button", { name: "Edit attributes for ROW-001", exact: true }).click();
+  await expect(details.getByLabel("Width for ROW-001", { exact: true })).toHaveValue("-");
+  await details.getByLabel("Width for ROW-001", { exact: true }).fill("0.25");
+  await details.getByLabel("Amount for ROW-001", { exact: true }).fill("-");
+  await details.getByLabel("Length for ROW-001", { exact: true }).fill("-");
+  await expect(bulk.getByRole("button", { name: "Save draft", exact: true })).toBeDisabled();
+  await details.getByRole("button", { name: "Close details", exact: true }).click();
+  await bulk.getByRole("button", { name: "Edit attributes for ROW-001", exact: true }).click();
+  await expect(details.getByLabel("Amount for ROW-001", { exact: true })).toHaveValue("-");
+  await details.getByLabel("Amount for ROW-001", { exact: true }).fill("0.75");
+  await expect(details.getByLabel("Amount for ROW-001", { exact: true })).toHaveValue("0.75");
+  await expect(details.getByLabel("Length for ROW-001", { exact: true })).toHaveValue("-");
+  await expect(bulk.getByRole("button", { name: "Save draft", exact: true })).toBeDisabled();
+  await details.getByLabel("Length for ROW-001", { exact: true }).fill("4");
+  await saveBulkWorkspace(page);
+  expect(state.publication.draft.items[0].attributes.Visible).toMatchObject({ dimensions: { width: 0.25, height: 10 }, measurements: [{ amount: 0.75, length: 4, unit: "lb" }] });
+  expect(state.publication.draft.items[1].attributes.Visible).toHaveProperty("measurements", [{ amount: 2, length: 8, unit: "lb" }]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("bulk Save includes products added in the feed even when no bulk fields changed", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true });
+  await selectFirstProduct(page);
+  await page.getByLabel("Select CARD-1", { exact: true }).check();
+  await openBulkWorkspace(page, 1); await saveBulkWorkspace(page);
+  expect(state.publication.draft.items.map(item => item.variantId)).toEqual([1]);
+  expect(state.publication.writes).toHaveLength(1); expect(state.publication.operations).toEqual([]);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
@@ -847,17 +974,17 @@ test("bulk editing rejects changed selected drafts after polling without applyin
   seedTwoDrafts(state);
   await page.reload();
   await page.getByLabel("Select all actionable rows on this page", { exact: true }).check();
-  await page.getByRole("button", { name: "Bulk edit selected (2)", exact: true }).click();
-  const dialog = page.getByRole("dialog");
-  await dialog.getByLabel("Brand", { exact: true }).fill("My bulk brand");
+  const bulk = await openBulkWorkspace(page, 2);
+  await bulk.getByLabel("Brand for all selected items", { exact: true }).fill("My bulk brand");
+  await bulk.getByRole("button", { name: "Apply Brand to all", exact: true }).click();
   state.publication.draft = { ...state.publication.draft, revision: 2,
     items: state.publication.draft.items.map(item => item.variantId === 26 ? { ...item, brand: "New operator brand" } : item) };
   const expected = structuredClone(state.publication.draft.items);
   const refresh = page.waitForResponse(response => new URL(response.url()).pathname === PUBLICATION_BASE);
   await page.clock.runFor(10_100);
   await refresh;
-  await dialog.getByRole("button", { name: "Apply to 2 draft items", exact: true }).click();
-  await expect(dialog.getByRole("alert").filter({ hasText: "A selected draft changed while bulk editing was open" })).toBeVisible();
+  await bulk.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect(bulk.getByRole("alert").filter({ hasText: "A selected draft changed while bulk editing was open" })).toBeVisible();
   expect(state.publication.writes).toEqual([]);
   expect(state.publication.draft.items).toEqual(expected);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
