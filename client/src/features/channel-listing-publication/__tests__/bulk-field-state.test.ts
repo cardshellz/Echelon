@@ -11,6 +11,8 @@ import {
   setBulkFieldEdit,
   undoBulkFieldEdit,
   type BulkFieldEdits,
+  projectBulkIdentifier,
+  parseBulkItemIdentifier,
 } from "../bulk-field-state";
 import { applyBulkEdit } from "../bulk-edit-model";
 
@@ -47,6 +49,34 @@ const metadata = (...items: ListingCatalogItem[]) =>
   new Map(items.map((item) => [item.variantId, item]));
 
 describe("bulk field presentation", () => {
+  it("projects each item's inherited identifier without creating or sharing an override", () => {
+    const first = item(1);
+    const source = catalog(1, {
+      identifier: { type: "UPC", value: "036000291452" },
+    });
+    const result = projectBulkIdentifier(first, source);
+    expect(result).toEqual({ value: source.identifier, source: "catalog" });
+    expect(result.value).not.toBe(source.identifier);
+    expect(first.identifier).toBeNull();
+    expect(projectBulkIdentifier(item(2), source)).toEqual({
+      value: null,
+      source: "unavailable",
+    });
+    expect(
+      projectBulkIdentifier(
+        item(1, { identifier: { type: "EAN", value: "4006381333931" } }),
+        source,
+      ),
+    ).toEqual({
+      value: { type: "EAN", value: "4006381333931" },
+      source: "custom",
+    });
+    expect(parseBulkItemIdentifier("UPC", " 036000291452 ")).toEqual(
+      source.identifier,
+    );
+    expect(parseBulkItemIdentifier("UPC", " ")).toBeNull();
+    expect(() => parseBulkItemIdentifier("ASIN" as never, "123")).toThrow();
+  });
   it("shows actual common catalog content without making a patch", () => {
     const items = [item(1), item(2)];
     const source = metadata(catalog(1), catalog(2));

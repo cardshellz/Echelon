@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRoute } from "wouter";
+import { useLocation } from "wouter";
 import { CheckCircle2, Loader2, ShieldCheck } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { apiRequest } from "@/lib/queryClient";
@@ -14,23 +14,46 @@ import { walmartStatusSchema } from "@shared/types/walmart-channel";
 import { ChannelListingPublicationWorkspace } from "@/features/channel-listing-publication/ChannelListingPublicationWorkspace";
 
 export default function WalmartChannelPage() {
-  const [, params] = useRoute("/channels/walmart/:channelId");
-  const channelId = Number(params?.channelId);
+  const [location] = useLocation();
+  const channelId = Number(/^\/channels\/walmart\/(\d+)(?:\/listings\/bulk)?$/.exec(location)?.[1]);
   if (!Number.isSafeInteger(channelId) || channelId <= 0) return <p role="alert" className="p-6">Select a valid Walmart channel.</p>;
   return <WalmartChannelWorkspace key={channelId} channelId={channelId} />;
 }
-export function WalmartChannelWorkspace({ channelId }: { channelId: number }) {
+/** Retain only unsaved sessions across same-document navigation. A hidden
+ * session keeps raw cell buffers mounted, with all owner polling disabled. */
+export function WalmartChannelRouteHost({ navigationDocumentId }: { navigationDocumentId?: string } = {}) {
+  // History entries survive reloads. Keep entropy at this explicit boundary;
+  // the navigation guard itself derives deterministic generations from it.
+  const [documentId] = useState(() => navigationDocumentId ?? crypto.randomUUID());
+  const [location] = useLocation();
+  const { user } = useAuth();
+  const activeId = Number(/^\/channels\/walmart\/([1-9]\d*)(?:\/listings\/bulk)?$/.exec(location)?.[1]);
+  const [retained, setRetained] = useState<ReadonlySet<number>>(new Set());
+  if (!user || !["admin", "lead"].includes(user.role)) return null;
+  const ids = new Set(retained);
+  if (Number.isSafeInteger(activeId) && activeId > 0) ids.add(activeId);
+  return <>{[...ids].map(channelId => <div key={channelId} hidden={channelId !== activeId} className={location.endsWith("/listings/bulk") && channelId === activeId ? "h-full min-h-0" : undefined}>
+    <WalmartChannelWorkspace channelId={channelId} navigationDocumentId={documentId} active={channelId === activeId} onRetainChange={retain => setRetained(previous => {
+      if (previous.has(channelId) === retain) return previous;
+      const next = new Set(previous); if (retain) next.add(channelId); else next.delete(channelId); return next;
+    })} />
+  </div>)}</>;
+}
+export function WalmartChannelWorkspace({ channelId, navigationDocumentId, active = true, onRetainChange }: { channelId: number; navigationDocumentId?: string; active?: boolean; onRetainChange?(retain: boolean): void }) {
+  const [documentId] = useState(() => navigationDocumentId ?? crypto.randomUUID());
+  const [location] = useLocation();
+  const workbench = location === `/channels/walmart/${channelId}/listings/bulk`;
   const { hasPermission } = useAuth();
   const canView = hasPermission("channels", "view");
   const canEdit = canView && hasPermission("channels", "edit");
   const client = useQueryClient();
   const [connecting, setConnecting] = useState(false);
   const base = `/api/channels/${channelId}/walmart`;
-  const status = useQuery({ queryKey: [base], enabled: canView, queryFn: async () => walmartStatusSchema.nullable().parse(await (await apiRequest("GET", base)).json()), refetchInterval: 30_000 });
+  const status = useQuery({ queryKey: [base], enabled: canView && active, queryFn: async () => walmartStatusSchema.nullable().parse(await (await apiRequest("GET", base)).json()), refetchInterval: active ? 30_000 : false });
   const warehouses = useQuery<{ id: number; code: string; name: string; isActive?: number; warehouseType?: string }[]>({ queryKey: ["/api/warehouses"],
-    enabled: canView, queryFn: async () => (await apiRequest("GET", "/api/warehouses")).json() });
-  const exceptions = useQuery<{ purchaseOrderId: string; errorCode: string; observedAt: string }[]>({ queryKey: [base, "exceptions"], enabled: canView && !!status.data,
-    queryFn: async () => (await apiRequest("GET", `${base}/exceptions`)).json(), refetchInterval: 30_000 });
+    enabled: canView && active && !workbench, queryFn: async () => (await apiRequest("GET", "/api/warehouses")).json() });
+  const exceptions = useQuery<{ purchaseOrderId: string; errorCode: string; observedAt: string }[]>({ queryKey: [base, "exceptions"], enabled: canView && active && !workbench && !!status.data,
+    queryFn: async () => (await apiRequest("GET", `${base}/exceptions`)).json(), refetchInterval: active && !workbench ? 30_000 : false });
   const connected = async () => {
     await client.invalidateQueries({ queryKey: [base] });
     await client.invalidateQueries({ queryKey: ["/api/channels"] });
@@ -39,7 +62,9 @@ export function WalmartChannelWorkspace({ channelId }: { channelId: number }) {
   };
   if (!canView) return <p role="alert" className="p-6">You do not have permission to view this channel.</p>;
   const warehouse = warehouses.data?.find(location => location.id === status.data?.warehouseId);
-  return <div className="p-2 sm:p-4 md:p-6 space-y-4 sm:space-y-6 max-w-6xl mx-auto">
+  return <div className={workbench ? "h-dvh min-h-0 w-full [[data-app-scroll-container]_&]:h-full" : "p-2 sm:p-4 md:p-6 space-y-4 sm:space-y-6 max-w-6xl mx-auto"}>
+    {workbench && !status.data && <div className="space-y-3 p-6"><h1 className="text-lg font-semibold">Edit Walmart listings</h1><p role={status.isLoading ? "status" : "alert"}>{status.isLoading ? "Loading Walmart connection…" : status.error ? status.error.message : "Connect this Walmart channel before editing listings."}</p><a className="underline" href={`/channels/walmart/${channelId}`}>Back to channel setup</a></div>}
+    <div hidden={workbench} className="space-y-4 sm:space-y-6">
     <ChannelWorkspaceHeader name="Walmart" description="Store setup, listing feed, pricing, and publication activity" />
     <Card><CardHeader className="px-3 sm:px-6"><CardTitle className="flex items-center gap-2"><ShieldCheck className="h-5 w-5" />Store Setup</CardTitle>
       <CardDescription>Walmart US account and seller fulfillment location</CardDescription></CardHeader>
@@ -66,9 +91,10 @@ export function WalmartChannelWorkspace({ channelId }: { channelId: number }) {
         </>}
       </CardContent>
     </Card>
-    {status.data && <ChannelListingPublicationWorkspace channelId={channelId} connectionId={status.data.connectionId} canEdit={canEdit} providerName="Walmart"
+    </div>
+    {status.data && <ChannelListingPublicationWorkspace navigationDocumentId={documentId} channelId={channelId} connectionId={status.data.connectionId} canEdit={canEdit} providerName="Walmart" active={active} onRetainChange={onRetainChange}
       onMappingsChanged={() => client.invalidateQueries({ queryKey: [base] })} />}
-    {(exceptions.error || !!exceptions.data?.length) && <Card><CardHeader><CardTitle>Orders needing attention</CardTitle></CardHeader><CardContent>
+    {!workbench && (exceptions.error || !!exceptions.data?.length) && <Card><CardHeader><CardTitle>Orders needing attention</CardTitle></CardHeader><CardContent>
       {exceptions.error && <p role="alert">{exceptions.error.message}</p>}
       {exceptions.data?.map(issue => <div key={issue.purchaseOrderId} className="flex flex-wrap justify-between gap-2 border-b py-3 text-sm"><span>{issue.purchaseOrderId}</span><span className="text-destructive">{issue.errorCode}</span><time>{new Date(issue.observedAt).toLocaleString()}</time></div>)}
     </CardContent></Card>}

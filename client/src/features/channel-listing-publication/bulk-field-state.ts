@@ -1,6 +1,7 @@
-import type {
-  ListingCatalogItem,
-  ListingDraftItem,
+import {
+  listingDraftItemSchema,
+  type ListingCatalogItem,
+  type ListingDraftItem,
 } from "@shared/types/channel-listing-publication";
 import {
   bulkEditPatchSchema,
@@ -161,4 +162,33 @@ export function buildBulkFieldPatch(edits: BulkFieldEdits): BulkContentPatch {
         .join("; "),
     );
   return parsed.data;
+}
+
+export interface BulkIdentifierPresentation {
+  value: ListingDraftItem["identifier"];
+  source: "custom" | "catalog" | "unavailable";
+}
+
+/** Display inheritance without copying one item's identifier into another row. */
+export function projectBulkIdentifier(
+  item: ListingDraftItem,
+  catalog: ListingCatalogItem | undefined,
+): BulkIdentifierPresentation {
+  if (item.identifier !== null)
+    return { value: { ...item.identifier }, source: "custom" };
+  if (!catalog || catalog.variantId !== item.variantId)
+    return { value: null, source: "unavailable" };
+  return {
+    value: catalog.identifier ? { ...catalog.identifier } : null,
+    source: "catalog",
+  };
+}
+
+export function parseBulkItemIdentifier(
+  type: NonNullable<ListingDraftItem["identifier"]>["type"],
+  raw: string,
+): ListingDraftItem["identifier"] {
+  return listingDraftItemSchema.shape.identifier.parse(
+    raw.trim() ? { type, value: raw } : null,
+  );
 }

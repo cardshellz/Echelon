@@ -104,7 +104,7 @@ import ShippingServiceLevels from "@/pages/ShippingServiceLevels";
 import ShippingServiceLevelDetail from "@/pages/ShippingServiceLevelDetail";
 import NotificationPreferences from "@/pages/NotificationPreferences";
 import EbayChannelPage from "@/pages/EbayChannelPage";
-import WalmartChannelPage from "@/pages/WalmartChannelPage";
+import { WalmartChannelRouteHost } from "@/pages/WalmartChannelPage";
 import ShopifyChannelPage from "@/pages/ShopifyChannelPage";
 import SyncLogPage from "@/pages/SyncLogPage";
 import OmsOrders from "@/pages/OmsOrders";
@@ -343,6 +343,7 @@ function Router() {
 
   return (
     <Layout>
+      <WalmartChannelRouteHost key={user.id} />
       <Switch>
         <Route path="/">
           {isPickerOnly ? <Redirect to="/picking" /> : <Dashboard />}
@@ -454,8 +455,8 @@ function Router() {
         <Route path="/channels/ebay">
           <ProtectedRoute component={EbayChannelPage} allowedRoles={["admin", "lead"]} />
         </Route>
-        <Route path="/channels/walmart/:channelId">
-          <ProtectedRoute component={WalmartChannelPage} allowedRoles={["admin", "lead"]} />
+        <Route path={/^\/channels\/walmart\/[1-9]\d*(?:\/listings\/bulk)?$/}>
+          {["admin", "lead"].includes(user.role) ? null : <Redirect to="/picking" />}
         </Route>
         <Route path="/channels/inventory">
           <ProtectedRoute

@@ -11,6 +11,10 @@ import {
   setBulkSharedAttribute,
   undoBulkItemAttribute,
   undoBulkSharedAttribute,
+  bulkEditCommandSchema,
+  setBulkItemField,
+  undoBulkItemField,
+  setBulkSharedField,
   type BulkEditCommand,
 } from "../bulk-edit-batch";
 
@@ -310,4 +314,204 @@ describe("bulk listing table edit batches", () => {
         .effectiveItems[1],
     ).toBe(rows[1]);
   });
+
+  it("edits one row's identifier without permitting shared identifier copying or changing another row", () => {
+    const rows = [item(1), item(2)];
+    const identifier = { type: "GTIN" as const, value: "00012345678905" };
+    const command = setBulkItemField(empty(), 1, "identifier", identifier);
+    const result = applyBulkEditBatch(rows, rows, command);
+    expect(result[0].identifier).toEqual(identifier);
+    expect(result[1]).toBe(rows[1]);
+    expect(rows[0].identifier).toEqual(item(1).identifier);
+    expect(undoBulkItemField(command, 1, "identifier")).toEqual(empty());
+    expect(
+      bulkEditCommandSchema.safeParse({
+        shared: { identifier },
+        itemChanges: [],
+      }).success,
+    ).toBe(false);
+    expect(() =>
+      setBulkSharedField(empty(), "identifier" as never, identifier),
+    ).toThrow(/cannot be copied/);
+    expect(() => setBulkItemField(empty(), 1, "sku" as never, "NEW")).toThrow(
+      /cannot be changed/,
+    );
+    expect(() => setBulkItemField(empty(), 1, "identifier", undefined)).toThrow(
+      /identifier/,
+    );
+  });
+
+  it("column content defaults preserve row overrides unless replacement is explicit", () => {
+    const rows = [item(1), item(2)];
+    const individual = setBulkItemField(empty(), 1, "brand", "Individual");
+    const defaults = setBulkSharedField(individual, "brand", "Column default");
+    expect(
+      previewBulkEditBatch(rows, defaults).effectiveItems.map(
+        (row) => row.brand,
+      ),
+    ).toEqual(["Individual", "Column default"]);
+    expect(
+      previewBulkEditBatch(
+        rows,
+        undoBulkItemField(defaults, 1, "brand"),
+      ).effectiveItems.map((row) => row.brand),
+    ).toEqual(["Column default", "Column default"]);
+    const replaced = setBulkSharedField(
+      defaults,
+      "brand",
+      "Replace all",
+      "replace-all",
+    );
+    expect(
+      previewBulkEditBatch(rows, replaced).effectiveItems.map(
+        (row) => row.brand,
+      ),
+    ).toEqual(["Replace all", "Replace all"]);
+    expect(replaced.itemChanges).toEqual([]);
+  });
+
+  it("preserves row attribute overrides when updating a column default in preserve mode", () => {
+    const rows = [item(1), item(2)];
+    const row = setBulkItemAttribute(empty(), 1, weight, 2);
+    const defaults = setBulkSharedAttribute(
+      row,
+      weight,
+      5,
+      "preserve-overrides",
+    );
+    expect(
+      previewBulkEditBatch(rows, defaults).effectiveItems.map(
+        (row) => row.attributes.Orderable,
+      ),
+    ).toEqual([{ shippingWeight: 2 }, { shippingWeight: 5 }]);
+    const changed = setBulkSharedAttribute(
+      defaults,
+      weight,
+      10,
+      "preserve-overrides",
+    );
+    expect(
+      previewBulkEditBatch(rows, changed).effectiveItems.map(
+        (row) => row.attributes.Orderable,
+      ),
+    ).toEqual([{ shippingWeight: 2 }, { shippingWeight: 10 }]);
+    expect(
+      previewBulkEditBatch(
+        rows,
+        undoBulkItemAttribute(changed, 1, weight),
+      ).effectiveItems.map((row) => row.attributes.Orderable),
+    ).toEqual([{ shippingWeight: 10 }, { shippingWeight: 10 }]);
+  });
+
+  it("keeps explicit per-row inheritance independent of a shared fixed price and content override", () => {
+    const rows = [item(1), item(2)];
+    let command = setBulkSharedField(empty(), "priceOverrideCents", 1599);
+    command = setBulkItemField(command, 1, "priceOverrideCents", null);
+    command = setBulkSharedField(command, "title", "Shared title");
+    command = setBulkItemField(command, 2, "title", null);
+    command = setBulkItemField(command, 1, "identifier", null);
+    const result = previewBulkEditBatch(rows, command).effectiveItems;
+    expect(result.map((row) => row.priceOverrideCents)).toEqual([null, 1599]);
+    expect(result.map((row) => row.title)).toEqual(["Shared title", null]);
+    expect(result.map((row) => row.identifier)).toEqual([
+      null,
+      rows[1].identifier,
+    ]);
+  });
+
+  it("resolves final row context once so an original-type override preserves original attributes", () => {
+    const rows = [
+      item(1, { productType: "Type B" }),
+      item(2, { productType: "Type B" }),
+    ];
+    let command: BulkEditCommand = {
+      shared: { productType: "Type A" },
+      itemChanges: [],
+    };
+    command = setBulkItemField(command, 1, "productType", "Type B");
+    const result = previewBulkEditBatch(rows, command);
+    expect(result.effectiveItems[0]).toBe(rows[0]);
+    expect(result.effectiveItems[1]).toMatchObject({
+      productType: "Type A",
+      attributes: {},
+    });
+    expect(result.preview.resetCount).toBe(1);
+    expect(() =>
+      previewBulkEditBatch(
+        rows,
+        setBulkSharedAttribute(command, weight, 4, "preserve-overrides"),
+      ),
+    ).toThrow(/common listing method/);
+  });
+
+  it("per-row context changes clear only pending schema attributes, retaining content and identifiers", () => {
+    let command = setBulkItemAttribute(empty(), 1, weight, 3);
+    command = setBulkItemField(command, 1, "title", "Custom title");
+    command = setBulkItemField(command, 1, "identifier", null);
+    command = setBulkItemField(command, 1, "productType", "New type");
+    expect(command.itemChanges[0].patch).toEqual({
+      title: "Custom title",
+      identifier: null,
+      productType: "New type",
+    });
+    expect(
+      undoBulkItemField(command, 1, "productType").itemChanges[0].patch,
+    ).toEqual({ title: "Custom title", identifier: null });
+  });
+
+  it.each([
+    ["method", "create", "create"],
+    ["productType", "Card Protection", "  Card Protection  "],
+  ] as const)(
+    "preserves pending attributes when setting the same normalized %s",
+    (field, value, repeated) => {
+      let command = setBulkItemField(empty(), 1, field, value);
+      command = setBulkItemAttribute(command, 1, weight, 0);
+      command = setBulkItemField(command, 1, "title", "Pending title");
+      const before = structuredClone(command);
+      const result = setBulkItemField(command, 1, field, repeated);
+      expect(result).toEqual(before);
+      expect(command).toEqual(before);
+      expect(result.itemChanges[0].patch.attributeChanges).toEqual([
+        { path: weight, action: "set", value: 0 },
+      ]);
+    },
+  );
+
+  it.each(["method", "productType"] as const)(
+    "does not discard attributes when undoing an absent %s override",
+    (field) => {
+      let command = setBulkItemAttribute(empty(), 1, weight, 3);
+      command = setBulkItemField(command, 1, "title", "Pending title");
+      const before = structuredClone(command);
+      expect(undoBulkItemField(command, 1, field)).toEqual(before);
+      expect(undoBulkItemField(command, 2, field)).toEqual(before);
+      expect(command).toEqual(before);
+    },
+  );
+
+  it.each([
+    ["method", "create", "match"],
+    ["productType", "Card Protection", "Card Storage"],
+  ] as const)(
+    "still clears schema-bound edits when changing or undoing a pending %s override",
+    (field, first, next) => {
+      let command = setBulkItemField(empty(), 1, field, first);
+      command = setBulkItemAttribute(command, 1, weight, 3);
+      command = setBulkItemField(command, 1, "identifier", null);
+      const before = structuredClone(command);
+      expect(
+        setBulkItemField(command, 1, field, next).itemChanges[0].patch,
+      ).toEqual({
+        [field]: next,
+        identifier: null,
+      });
+      expect(undoBulkItemField(command, 1, field).itemChanges[0].patch).toEqual(
+        {
+          identifier: null,
+        },
+      );
+      expect(command).toEqual(before);
+    },
+  );
 });

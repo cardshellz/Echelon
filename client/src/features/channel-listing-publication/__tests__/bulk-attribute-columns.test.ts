@@ -86,6 +86,104 @@ describe("provider-derived bulk attribute columns", () => {
         ?.required,
     ).toBe(true);
   });
+  it("preserves exact ancestor guidance on flattened measurement fields without inferring values", () => {
+    // Synthetic annotations exercise the generic contract, not category rules.
+    const input: FieldSchema = {
+      type: "object",
+      properties: {
+        Visible: {
+          type: "object",
+          title: "Product attributes",
+          description: "Describe the item being sold.",
+          properties: {
+            netContent: {
+              type: "object",
+              title: "Net Content",
+              description:
+                "  Provider guidance for the measure and unit together.  ",
+              properties: {
+                unit: {
+                  type: "string",
+                  title: "Unit",
+                  enum: ["Each", "Count"],
+                },
+                measure: {
+                  type: "number",
+                  title: "Measure",
+                  description: "Provider measure guidance.",
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    const values = [{ Visible: { netContent: { unit: "Each" } } }, {}];
+    const before = structuredClone({ input, values });
+    const result = buildBulkAttributeColumns(input, values);
+    const inherited = [
+      {
+        path: ["Visible"],
+        label: "Product attributes",
+        description: "Describe the item being sold.",
+      },
+      {
+        path: ["Visible", "netContent"],
+        label: "Net Content",
+        description: "  Provider guidance for the measure and unit together.  ",
+      },
+    ];
+    expect(
+      result.columns.find((entry) => entry.path.at(-1) === "unit")?.help,
+    ).toEqual(inherited);
+    expect(
+      result.columns.find((entry) => entry.path.at(-1) === "measure")?.help,
+    ).toEqual([
+      ...inherited,
+      {
+        path: ["Visible", "netContent", "measure"],
+        label: "Measure",
+        description: "Provider measure guidance.",
+      },
+    ]);
+    expect({ input, values }).toEqual(before);
+  });
+  it("includes complex-field help and skips absent or blank annotations", () => {
+    const input: FieldSchema = {
+      type: "object",
+      properties: {
+        Visible: {
+          type: "object",
+          description: "   ",
+          properties: {
+            contents: {
+              type: "array",
+              title: "Contents",
+              description: "Provider list guidance.",
+              items: { type: "string" },
+            },
+            note: { type: "string" },
+          },
+        },
+      },
+    };
+    const result = buildBulkAttributeColumns(input, [{}]);
+    expect(
+      result.columns.find((entry) => entry.path.at(-1) === "contents"),
+    ).toMatchObject({
+      kind: "complex",
+      help: [
+        {
+          path: ["Visible", "contents"],
+          label: "Contents",
+          description: "Provider list guidance.",
+        },
+      ],
+    });
+    expect(
+      result.columns.find((entry) => entry.path.at(-1) === "note")?.help,
+    ).toEqual([]);
+  });
   it("resolves required flags for each row rather than applying a shared discriminator to everyone", () => {
     const result = buildBulkAttributeColumns(schema, [
       { Visible: { hasWarranty: true }, Orderable: { dimensions: {} } },
@@ -106,13 +204,20 @@ describe("provider-derived bulk attribute columns", () => {
       key("Orderable", "dimensions", "width"),
     );
   });
-  it("never flattens arrays or ambiguous schema branches into editable cells", () => {
+  it("shows arrays and ambiguous branches as complex columns without flattening their values", () => {
     const result = buildBulkAttributeColumns(schema, [
       { Orderable: { packages: [{ count: 1 }] } },
     ]);
     expect(
-      result.columns.some((column) => column.path.includes("packages")),
-    ).toBe(false);
+      result.columns.find((column) => column.path.at(-1) === "packages"),
+    ).toMatchObject({
+      type: "complex",
+      kind: "complex",
+      complexReason: "array",
+    });
+    expect(result.columns.some((column) => column.path.includes("count"))).toBe(
+      false,
+    );
     expect(result.hasRowDetails).toBe(true);
     const ambiguous = {
       type: "object",
@@ -125,12 +230,14 @@ describe("provider-derived bulk attribute columns", () => {
         },
       },
     };
-    expect(buildBulkAttributeColumns(ambiguous, [{}]).columns).toEqual([]);
+    expect(buildBulkAttributeColumns(ambiguous, [{}]).columns).toEqual([
+      expect.objectContaining({ path: ["Visible", "shape"], kind: "complex" }),
+    ]);
     expect(
       buildBulkAttributeColumns(ambiguous, [{}]).warnings.length,
     ).toBeGreaterThan(0);
   });
-  it("excludes conflicting conditional scalar controls across selected rows", () => {
+  it("shows conflicting conditional controls as complex columns", () => {
     const conditional = {
       type: "object",
       properties: {
@@ -146,10 +253,9 @@ describe("provider-derived bulk attribute columns", () => {
       { Visible: { mode: true } },
       { Visible: { mode: false } },
     ]);
-    expect(result.columns.map((column) => column.path)).not.toContainEqual([
-      "Visible",
-      "value",
-    ]);
+    expect(
+      result.columns.find((column) => column.path.at(-1) === "value"),
+    ).toMatchObject({ kind: "complex", complexReason: "conditional" });
     expect(result.hasRowDetails).toBe(true);
   });
   it("includes safe condition-only columns with exact per-row applicability", () => {
@@ -200,7 +306,7 @@ describe("provider-derived bulk attribute columns", () => {
       ),
     ).toEqual([["Orderable", "safe"]]);
   });
-  it("bounds the initial column set, prioritizes required fields, and retains other choices", () => {
+  it("shows every available column by default and retains required metadata", () => {
     const properties = Object.fromEntries(
       Array.from({ length: 30 }, (_, index) => [
         "field" + index,
@@ -216,10 +322,14 @@ describe("provider-derived bulk attribute columns", () => {
     };
     const result = buildBulkAttributeColumns(input, [{}]);
     expect(result.columns).toHaveLength(30);
-    expect(result.defaultColumnKeys).toHaveLength(
-      BULK_ATTRIBUTE_COLUMN_LIMITS.initial,
+    expect(result.defaultColumnKeys).toHaveLength(30);
+    expect(result.defaultColumnKeys).toEqual(
+      result.columns.map((column) => column.key),
     );
-    expect(result.defaultColumnKeys[0]).toBe(key("Visible", "field29"));
+    expect(
+      result.columns.find((column) => column.key === key("Visible", "field29"))
+        ?.required,
+    ).toBe(true);
   });
   it("does not mutate selected values or synthesize row writes when discovering columns", () => {
     const values = [
@@ -255,7 +365,43 @@ describe("provider-derived bulk attribute columns", () => {
         },
       },
     };
-    expect(buildBulkAttributeColumns(input, [{}]).columns).toEqual([]);
+    expect(buildBulkAttributeColumns(input, [{}]).columns).toHaveLength(3);
+    expect(
+      buildBulkAttributeColumns(input, [{}]).columns.every(
+        (column) => column.kind === "complex",
+      ),
+    ).toBe(true);
+  });
+  it("bounds the full column set and discloses overflow rather than implying all fields were shown", () => {
+    const input = {
+      type: "object",
+      properties: {
+        Visible: {
+          type: "object",
+          properties: Object.fromEntries(
+            Array.from({ length: 300 }, (_, index) => [
+              "field" + index,
+              { type: "string" },
+            ]),
+          ),
+        },
+      },
+    };
+    const result = buildBulkAttributeColumns(input, [{}]);
+    expect(result.columns).toHaveLength(BULK_ATTRIBUTE_COLUMN_LIMITS.total);
+    expect(result.defaultColumnKeys).toHaveLength(
+      BULK_ATTRIBUTE_COLUMN_LIMITS.total,
+    );
+    expect(result.hasRowDetails).toBe(true);
+    expect(result.warnings.length).toBeGreaterThan(0);
+    const complex = {
+      ...column(["Orderable", "weight"]),
+      type: "complex" as const,
+      kind: "complex" as const,
+    };
+    expect(parseBulkAttributeCellInput(complex, "1").error).toContain(
+      "details panel",
+    );
   });
 });
 

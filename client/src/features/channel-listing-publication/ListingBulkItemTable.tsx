@@ -1,543 +1,1017 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ListingCatalogItem,
   ListingDraftItem,
 } from "@shared/types/channel-listing-publication";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { SchemaFields } from "./SchemaFields";
+import { Textarea } from "@/components/ui/textarea";
 import { fieldValueAtPath, type FieldSchema } from "./schema-field-model";
-import { buildBulkAttributeColumns } from "./bulk-attribute-columns";
-import { ListingBulkAttributeCell } from "./ListingBulkAttributeCell";
+import {
+  buildBulkAttributeColumns,
+  parseBulkAttributeCellInput,
+  type BulkAttributeColumn,
+} from "./bulk-attribute-columns";
+import {
+  ListingBulkAttributeCell,
+  displayBulkAttributeValue,
+} from "./ListingBulkAttributeCell";
+import { ListingBulkContentCell } from "./ListingBulkContentCell";
+import { ListingBulkItemInspector } from "./ListingBulkItemInspector";
+import {
+  buildBulkFieldPatch,
+  projectBulkField,
+  type BulkContentField,
+} from "./bulk-field-state";
+import {
+  BULK_GRID_CORE_COLUMNS,
+  bulkGridBufferKey,
+  bulkGridAttributeWriteConflicts,
+  acknowledgeBulkGridAttributeWrite,
+  bulkGridPathsOverlap,
+  bulkGridValueSummary,
+  discardBulkGridBuffers,
+  reconcileBulkGridControls,
+  type BulkGridBuffer,
+  type BulkGridColumn,
+  type BulkGridField,
+} from "./bulk-grid-state";
 import type { BulkEditPatch } from "./bulk-edit-model";
+import type { BulkItemPatch } from "./bulk-edit-batch";
+import { canonicalDraftValue } from "./draft-item-snapshot";
+import { errorMessage } from "./model";
 
-const ROWS_PER_PAGE = 25;
-type ItemChange = { variantId: number; patch: BulkEditPatch };
 interface Props {
   items: readonly ListingDraftItem[];
+  originalItems?: readonly ListingDraftItem[];
   metadata: ReadonlyMap<number, ListingCatalogItem>;
-  schema: FieldSchema;
-  itemChanges: readonly ItemChange[];
+  schema?: FieldSchema;
+  sharedPatch?: BulkEditPatch;
+  itemChanges: readonly { variantId: number; patch: BulkItemPatch }[];
   canEdit: boolean;
-  onItemAttribute(
-    variantId: number,
+  providerFieldsDisabled?: boolean;
+  attributeResetRevision?: number;
+  onItemAttribute(id: number, path: readonly string[], value: unknown): boolean;
+  onSharedAttribute(
     path: readonly string[],
     value: unknown,
+    replaceOverrides?: boolean,
   ): boolean;
-  onSharedAttribute(path: readonly string[], value: unknown): boolean;
-  onUndoItemAttribute(variantId: number, path: readonly string[]): void;
-  onUndoItem(variantId: number): void;
+  onUndoItemAttribute(id: number, path: readonly string[]): boolean;
+  onUndoItem(id: number): boolean;
+  onItemField(id: number, field: BulkGridField, value: unknown): boolean;
+  onUndoItemField(id: number, field: BulkGridField): boolean;
+  onSharedField(
+    field: BulkContentField,
+    value: string | null,
+    replaceOverrides: boolean,
+  ): boolean;
   onValidityChange(error: string | null): void;
 }
-type HeaderValue = { value: unknown; pending: boolean };
+type Column =
+  | { kind: "core"; key: string; field: BulkGridColumn }
+  | { kind: "attribute"; key: string; field: BulkAttributeColumn };
+type Inspector = { variantId: number; field: Column | null };
+const EMPTY_SCHEMA: FieldSchema = Object.freeze({
+  type: "object",
+  properties: {},
+});
+const has = (value: object | undefined, key: string) =>
+  value !== undefined && Object.prototype.hasOwnProperty.call(value, key);
+const overlaps = bulkGridPathsOverlap;
+const controlSignature = (column: BulkAttributeColumn) =>
+  canonicalDraftValue([column.type, column.schema.enum]);
 
 export function ListingBulkItemTable({
   items,
+  originalItems = items,
   metadata,
   schema,
+  sharedPatch = {},
   itemChanges,
   canEdit,
+  providerFieldsDisabled = false,
+  attributeResetRevision = 0,
   onItemAttribute,
   onSharedAttribute,
   onUndoItemAttribute,
   onUndoItem,
+  onItemField,
+  onUndoItemField,
+  onSharedField,
   onValidityChange,
 }: Props) {
   const model = useMemo(
     () =>
       buildBulkAttributeColumns(
-        schema,
+        schema ?? EMPTY_SCHEMA,
         items.map((item) => item.attributes),
       ),
     [schema, items],
   );
-  const [selectedKeys, setSelectedKeys] = useState<ReadonlySet<string> | null>(
-    null,
+  const [buffers, setBuffers] = useState<ReadonlyMap<string, BulkGridBuffer>>(
+    new Map(),
   );
   const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState("all");
+  const [group, setGroup] = useState("all");
   const [page, setPage] = useState(0);
-  const [detailId, setDetailId] = useState<number | null>(null);
-  const [headerValues, setHeaderValues] = useState<
-    ReadonlyMap<string, HeaderValue>
-  >(new Map());
-  const [errors, setErrors] = useState<ReadonlyMap<string, string>>(new Map());
-  const [bufferRevisions, setBufferRevisions] = useState<
-    ReadonlyMap<string, number>
-  >(new Map());
-  const selected = selectedKeys ?? new Set(model.defaultColumnKeys);
-  const columns = model.columns.filter((column) => selected.has(column.key));
-  const hiddenRequired = model.columns.filter(
-    (column) => column.required && !selected.has(column.key),
+  const [pageSize, setPageSize] = useState(25);
+  const [inspector, setInspector] = useState<Inspector | null>(null);
+  const [showDefaults, setShowDefaults] = useState(true);
+  const [focusKey, setFocusKey] = useState<string | null>(null);
+  const cells = useRef(new Map<string, HTMLTableCellElement>());
+  const revision = useRef(attributeResetRevision);
+  const itemById = useMemo(
+    () => new Map(items.map((item) => [item.variantId, item])),
+    [items],
   );
-  const choices = model.columns.filter((column) =>
-    query
-      .trim()
-      .toLowerCase()
-      .split(/\s+/)
-      .filter(Boolean)
-      .every((token) => column.pathLabel.toLowerCase().includes(token)),
+  const originalById = useMemo(
+    () => new Map(originalItems.map((item) => [item.variantId, item])),
+    [originalItems],
   );
-  const groups: Array<{ label: string; count: number }> = [];
-  for (const column of columns) {
-    const previous = groups[groups.length - 1];
-    if (previous?.label === column.group) previous.count++;
-    else groups.push({ label: column.group, count: 1 });
+  const changesById = useMemo(
+    () =>
+      new Map(itemChanges.map((change) => [change.variantId, change.patch])),
+    [itemChanges],
+  );
+  const allColumns = useMemo<Column[]>(
+    () => [
+      ...BULK_GRID_CORE_COLUMNS.map((field) => ({
+        kind: "core" as const,
+        key: "core:" + field.key,
+        field,
+      })),
+      ...model.columns.map((field) => ({
+        kind: "attribute" as const,
+        key: "attribute:" + field.key,
+        field,
+      })),
+    ],
+    [model.columns],
+  );
+  const groups = [
+    ...new Set(
+      allColumns.map((column) => column.field.group || "Product attributes"),
+    ),
+  ];
+  const controls = useMemo(
+    () =>
+      new Map(
+        model.columns.map((column) => [
+          "attribute:" + column.key,
+          controlSignature(column),
+        ]),
+      ),
+    [model.columns],
+  );
+  function changed(column: Column) {
+    if ([...buffers.keys()].some((key) => key.endsWith(":" + column.key)))
+      return true;
+    return items.some((item) => {
+      const original = originalById.get(item.variantId);
+      if (!original) return true;
+      return column.kind === "core"
+        ? canonicalDraftValue(item[column.field.key]) !==
+            canonicalDraftValue(original[column.field.key])
+        : canonicalDraftValue(
+            fieldValueAtPath(item.attributes, column.field.path),
+          ) !==
+            canonicalDraftValue(
+              fieldValueAtPath(original.attributes, column.field.path),
+            );
+    });
   }
-  const pending = [...headerValues.values()].some((value) => value.pending);
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const columns = allColumns.filter(
+    (column) =>
+      (group === "all" ||
+        (column.field.group || "Product attributes") === group) &&
+      words.every((word) =>
+        `${column.field.group} ${column.kind === "attribute" ? column.field.pathLabel : column.field.label}`
+          .toLowerCase()
+          .includes(word),
+      ) &&
+      (filter !== "required" ||
+        column.kind === "core" ||
+        column.field.required) &&
+      (filter !== "changed" || changed(column)),
+  );
+  const headerGroups: Array<{ label: string; count: number }> = [];
+  for (const column of columns) {
+    const label = column.field.group || "Product attributes";
+    const last = headerGroups[headerGroups.length - 1];
+    if (last?.label === label) last.count++;
+    else headerGroups.push({ label, count: 1 });
+  }
+  const errors = [...buffers].filter(([, value]) => value.error !== null);
+  const pending = [...buffers].filter(([key]) => key.startsWith("shared:"));
   const currentPage = Math.min(
     page,
-    Math.max(0, Math.ceil(items.length / ROWS_PER_PAGE) - 1),
+    Math.max(0, Math.ceil(items.length / pageSize) - 1),
   );
-  const offset = currentPage * ROWS_PER_PAGE;
-  const rows = items.slice(offset, offset + ROWS_PER_PAGE);
-  const detailItem = items.find((item) => item.variantId === detailId);
+  const offset = currentPage * pageSize;
+  const rows = items.slice(offset, offset + pageSize);
+  const detailItem = inspector ? itemById.get(inspector.variantId) : undefined;
   const skuFor = (item: ListingDraftItem) =>
     metadata.get(item.variantId)?.sku ?? `Variant ${item.variantId}`;
   useEffect(() => {
     onValidityChange(
-      errors.size
-        ? "Correct invalid table values before applying the draft changes."
-        : pending
-          ? "Apply or discard pending column values before applying the draft changes."
+      errors.length
+        ? "Correct or discard invalid cell values before saving."
+        : pending.length
+          ? "Apply or discard pending column defaults before saving."
           : null,
     );
-  }, [errors, pending, onValidityChange]);
-  function validity(key: string, error: string | null) {
-    setErrors((previous) => {
-      if ((previous.get(key) ?? null) === error) return previous;
-      const next = new Map(previous);
-      if (error) next.set(key, error);
-      else next.delete(key);
-      return next;
-    });
+  }, [errors.length, pending.length, onValidityChange]);
+  useEffect(() => {
+    if (revision.current === attributeResetRevision) return;
+    revision.current = attributeResetRevision;
+    setBuffers((previous) =>
+      discardBulkGridBuffers(previous, (key) => key.includes(":attribute:")),
+    );
+    setInspector((previous) =>
+      previous?.field?.kind === "core" ? previous : null,
+    );
+  }, [attributeResetRevision]);
+  useEffect(() => {
+    if (!focusKey) return;
+    const cell = cells.current.get(focusKey);
+    if (!cell) return;
+    cell.scrollIntoView({ block: "nearest", inline: "nearest" });
+    cell.querySelector<HTMLElement>("input, select, textarea, button")?.focus();
+    setFocusKey(null);
+  }, [focusKey, columns, currentPage]);
+  useEffect(() => {
+    setBuffers((previous) => reconcileBulkGridControls(previous, controls));
+  }, [controls]);
+  function buffer(key: string, value: BulkGridBuffer) {
+    setBuffers((previous) => new Map(previous).set(key, value));
   }
-  function toggleColumn(key: string, checked: boolean) {
-    setSelectedKeys((previous) => {
-      const next = new Set(previous ?? model.defaultColumnKeys);
-      if (checked) next.add(key);
-      else next.delete(key);
-      return next;
-    });
-  }
-  function discardHeader(key: string) {
-    setHeaderValues((previous) => {
-      const next = new Map(previous);
-      next.delete(key);
-      return next;
-    });
-    validity(`header:${key}`, null);
-    setBufferRevisions((previous) =>
-      new Map(previous).set(
-        `header:${key}`,
-        (previous.get(`header:${key}`) ?? 0) + 1,
-      ),
+  function discard(key: string) {
+    setBuffers((previous) =>
+      discardBulkGridBuffers(previous, (candidate) => candidate === key),
     );
   }
-  function discardInvalidCell(key: string) {
-    validity(key, null);
-    setBufferRevisions((previous) =>
-      new Map(previous).set(key, (previous.get(key) ?? 0) + 1),
+  function applyItemAttribute(
+    id: number,
+    path: readonly string[],
+    value: unknown,
+    editedPath?: readonly string[],
+  ): boolean {
+    if (!canEdit || providerFieldsDisabled) return false;
+    const key = bulkGridBufferKey(id, "attribute:" + JSON.stringify(path));
+    const conflicting = bulkGridAttributeWriteConflicts(
+      buffers,
+      id,
+      path,
+      value,
+      itemById.get(id)?.attributes,
+      editedPath,
+    );
+    let accepted = false;
+    let error = conflicting
+      ? "Discard the invalid value inside this field before replacing the group."
+      : "This change could not be applied. Correct or discard it before saving.";
+    try {
+      accepted = !conflicting && onItemAttribute(id, path, value);
+    } catch (cause) {
+      error = errorMessage(cause);
+    }
+    if (!accepted) {
+      const column = model.columns.find(
+        (column) => JSON.stringify(column.path) === JSON.stringify(path),
+      );
+      buffer(key, {
+        raw:
+          column?.kind === "scalar"
+            ? displayBulkAttributeValue(column, value)
+            : value === undefined
+              ? ""
+              : JSON.stringify(value, null, 2),
+        error,
+        ...(column?.kind === "scalar"
+          ? { controlSignature: controlSignature(column) }
+          : {}),
+      });
+      return false;
+    }
+    setBuffers((previous) =>
+      acknowledgeBulkGridAttributeWrite(previous, id, path, editedPath),
+    );
+    return true;
+  }
+  function rowOverride(item: ListingDraftItem, column: Column) {
+    const patch = changesById.get(item.variantId);
+    return column.kind === "core"
+      ? has(patch, column.field.key)
+      : Boolean(
+          patch?.attributeChanges?.some((change) =>
+            overlaps(change.path, column.field.path),
+          ),
+        );
+  }
+  function sharedValue(column: Column) {
+    return column.kind === "core"
+      ? has(sharedPatch, column.field.key)
+      : Boolean(
+          sharedPatch.attributeChanges?.some((change) =>
+            overlaps(change.path, column.field.path),
+          ),
+        );
+  }
+  function jump(key: string) {
+    setQuery("");
+    setGroup("all");
+    setFilter("all");
+    setShowDefaults(true);
+    const index = items.findIndex(
+      (item) => item.variantId === Number(key.split(":", 1)[0]),
+    );
+    if (index >= 0) setPage(Math.floor(index / pageSize));
+    if (!allColumns.some((column) => key.endsWith(":" + column.key))) {
+      if (index >= 0)
+        setInspector({ variantId: items[index].variantId, field: null });
+      setFocusKey(null);
+      return;
+    }
+    setFocusKey(key);
+  }
+  function undoCell(item: ListingDraftItem, column: Column) {
+    if (!canEdit) return;
+    const accepted =
+      column.kind === "core"
+        ? onUndoItemField(item.variantId, column.field.key)
+        : onUndoItemAttribute(item.variantId, column.field.path);
+    if (accepted) discard(bulkGridBufferKey(item.variantId, column.key));
+  }
+  function applyDefault(column: Column, replaceOverrides: boolean) {
+    const key = bulkGridBufferKey("shared", column.key);
+    const candidate = buffers.get(key);
+    if (
+      !canEdit ||
+      (column.kind === "attribute" && providerFieldsDisabled) ||
+      !candidate ||
+      candidate.error
+    )
+      return;
+    // An explicit replacement must not silently drop unfinished invalid input.
+    if (
+      replaceOverrides &&
+      [...buffers].some(
+        ([rowKey, value]) =>
+          rowKey !== key && rowKey.endsWith(":" + column.key) && value.error,
+      )
+    ) {
+      buffer(key, {
+        ...candidate,
+        error:
+          "Discard invalid row values in this column before replacing row edits.",
+      });
+      return;
+    }
+    try {
+      let accepted = false;
+      if (column.kind === "core" && column.field.key !== "identifier")
+        accepted = onSharedField(
+          column.field.key,
+          candidate.raw,
+          replaceOverrides,
+        );
+      else if (column.kind === "attribute" && column.field.appliesToAll) {
+        const parsed = parseBulkAttributeCellInput(column.field, candidate.raw);
+        if (parsed.error) throw new Error(parsed.error);
+        accepted = onSharedAttribute(
+          column.field.path,
+          parsed.value,
+          replaceOverrides,
+        );
+      }
+      if (!accepted)
+        throw new Error("This column default could not be applied.");
+      setBuffers((previous) =>
+        discardBulkGridBuffers(previous, (rowKey, value) => {
+          if (rowKey === key) return true;
+          if (!rowKey.endsWith(":" + column.key) || value.error) return false;
+          const item = itemById.get(Number(rowKey.split(":", 1)[0]));
+          return (
+            replaceOverrides ||
+            (item !== undefined && !rowOverride(item, column))
+          );
+        }),
+      );
+    } catch (cause) {
+      buffer(key, { ...candidate, error: errorMessage(cause) });
+    }
+  }
+  function renderDefault(column: Column) {
+    const key = bulkGridBufferKey("shared", column.key);
+    const candidate = buffers.get(key);
+    if (column.kind === "core" && column.field.key === "identifier")
+      return (
+        <p className="text-[10px] text-muted-foreground">Unique to each item</p>
+      );
+    if (
+      column.kind === "attribute" &&
+      (column.field.kind === "complex" || !column.field.appliesToAll)
+    )
+      return (
+        <p className="text-[10px] text-muted-foreground">Edit in each item</p>
+      );
+    let control: React.ReactNode;
+    if (column.kind === "attribute") {
+      const first = items[0]
+        ? fieldValueAtPath(items[0].attributes, column.field.path)
+        : undefined;
+      const common = items.every(
+        (item) =>
+          canonicalDraftValue(
+            fieldValueAtPath(item.attributes, column.field.path),
+          ) === canonicalDraftValue(first),
+      )
+        ? first
+        : undefined;
+      control = (
+        <ListingBulkAttributeCell
+          column={column.field}
+          value={common}
+          sku="all selected items"
+          disabled={!canEdit || providerFieldsDisabled}
+          buffer={candidate}
+          onBufferChange={(value) =>
+            buffer(key, {
+              ...value,
+              controlSignature: controlSignature(column.field),
+            })
+          }
+          onChange={() => true}
+        />
+      );
+    } else {
+      const field = column.field.key as BulkContentField;
+      const common = projectBulkField(items, metadata, field);
+      const props = {
+        "aria-label": `${column.field.label} for all selected items`,
+        disabled: !canEdit,
+        value: candidate?.raw ?? common.value,
+        placeholder:
+          common.status === "mixed"
+            ? "Mixed values"
+            : common.status === "unavailable"
+              ? "Catalog unavailable"
+              : "Not set",
+        onChange: (
+          event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
+        ) => {
+          let error: string | null = null;
+          try {
+            buildBulkFieldPatch({ [field]: event.target.value });
+          } catch (cause) {
+            error = errorMessage(cause);
+          }
+          buffer(key, { raw: event.target.value, error });
+        },
+      };
+      control = column.field.long ? (
+        <Textarea
+          {...props}
+          rows={1}
+          className="h-8 min-h-8 resize-y px-2 py-1 text-xs"
+        />
+      ) : (
+        <Input
+          {...props}
+          className="h-8 px-2 text-xs"
+          inputMode={field === "priceOverrideCents" ? "decimal" : undefined}
+        />
+      );
+    }
+    return (
+      <div className="space-y-1">
+        {control}
+        {candidate && (
+          <div className="flex flex-wrap gap-x-2 gap-y-1 text-[10px]">
+            <button
+              type="button"
+              className="text-primary underline disabled:opacity-50"
+              title="Keep individual row edits"
+              aria-label={`Apply ${column.field.label} to all`}
+              disabled={
+                !canEdit ||
+                (column.kind === "attribute" && providerFieldsDisabled) ||
+                Boolean(candidate.error)
+              }
+              onClick={() => applyDefault(column, false)}
+            >
+              Apply default
+            </button>
+            <button
+              type="button"
+              className="text-primary underline disabled:opacity-50"
+              aria-label={`Replace ${column.field.label} row edits`}
+              disabled={
+                !canEdit ||
+                (column.kind === "attribute" && providerFieldsDisabled) ||
+                Boolean(candidate.error)
+              }
+              onClick={() => applyDefault(column, true)}
+            >
+              Replace row edits
+            </button>
+            <button
+              type="button"
+              className="underline"
+              aria-label={`Discard ${column.kind === "attribute" ? column.field.pathLabel : column.field.label} column value`}
+              onClick={() => discard(key)}
+            >
+              Discard
+            </button>
+          </div>
+        )}
+        {column.kind === "core" && candidate?.error && (
+          <p role="alert" className="text-xs text-destructive">
+            {candidate.error}
+          </p>
+        )}
+      </div>
     );
   }
-  function discardInvalidValues() {
-    const invalidKeys = [...errors.keys()];
-    setHeaderValues((previous) => {
-      const next = new Map(previous);
-      for (const key of invalidKeys)
-        if (key.startsWith("header:")) next.delete(key.slice("header:".length));
-      return next;
-    });
-    setBufferRevisions((previous) => {
-      const next = new Map(previous);
-      for (const key of invalidKeys) next.set(key, (next.get(key) ?? 0) + 1);
-      return next;
-    });
-    setErrors(new Map());
+  function renderCell(
+    item: ListingDraftItem,
+    column: Column,
+    rowIndex: number,
+  ) {
+    const key = bulkGridBufferKey(item.variantId, column.key);
+    const cellBuffer = buffers.get(key);
+    const override = rowOverride(item, column);
+    const applicable =
+      column.kind === "core" ||
+      model.applicableKeysByRow[rowIndex]?.includes(column.field.key);
+    return (
+      <td
+        key={column.key}
+        ref={(element) => {
+          if (element) cells.current.set(key, element);
+          else cells.current.delete(key);
+        }}
+        className="border-r border-b px-2 py-2 align-top"
+        style={{ minWidth: width(column), width: width(column) }}
+      >
+        {!applicable ? (
+          <span className="text-xs text-muted-foreground">
+            Not used for this item
+          </span>
+        ) : column.kind === "core" ? (
+          <ListingBulkContentCell
+            item={item}
+            metadata={metadata}
+            field={column.field.key}
+            label={column.field.label}
+            sku={skuFor(item)}
+            buffer={cellBuffer}
+            disabled={!canEdit}
+            onBufferChange={(value) => buffer(key, value)}
+            onDiscardBuffer={() => discard(key)}
+            onChange={(value) =>
+              onItemField(item.variantId, column.field.key, value)
+            }
+            onExpand={() =>
+              setInspector({ variantId: item.variantId, field: column })
+            }
+          />
+        ) : column.field.kind === "complex" ? (
+          <button
+            type="button"
+            className="h-8 w-full truncate rounded-md border px-2 text-left text-xs hover:bg-muted"
+            aria-label={`Edit ${column.field.pathLabel} for ${skuFor(item)}`}
+            onClick={() =>
+              setInspector({ variantId: item.variantId, field: column })
+            }
+          >
+            {bulkGridValueSummary(
+              fieldValueAtPath(item.attributes, column.field.path),
+            )}{" "}
+            · Edit
+          </button>
+        ) : (
+          <ListingBulkAttributeCell
+            column={column.field}
+            value={fieldValueAtPath(item.attributes, column.field.path)}
+            sku={skuFor(item)}
+            buffer={cellBuffer}
+            disabled={!canEdit || providerFieldsDisabled}
+            required={model.requiredKeysByRow[rowIndex]?.includes(
+              column.field.key,
+            )}
+            onBufferChange={(value) =>
+              buffer(key, {
+                ...value,
+                controlSignature: controlSignature(column.field),
+              })
+            }
+            onChange={(value) =>
+              applyItemAttribute(item.variantId, column.field.path, value)
+            }
+          />
+        )}
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 text-[10px] leading-3">
+          {override ? (
+            <>
+              <span className="text-primary">Row edit</span>
+              <button
+                type="button"
+                className="underline disabled:opacity-50"
+                aria-label={`Undo ${column.field.label} change for ${skuFor(item)}`}
+                disabled={!canEdit}
+                onClick={() => undoCell(item, column)}
+              >
+                Undo
+              </button>
+            </>
+          ) : sharedValue(column) ? (
+            <span className="text-muted-foreground">Column default</span>
+          ) : null}
+          {cellBuffer?.error && (
+            <button
+              type="button"
+              className="text-destructive underline"
+              aria-label={`Discard invalid ${column.field.label} value for ${skuFor(item)}`}
+              onClick={() => discard(key)}
+            >
+              Discard invalid value
+            </button>
+          )}
+          {column.kind === "core" &&
+            (item[column.field.key] !== null || cellBuffer) && (
+              <button
+                type="button"
+                disabled={!canEdit}
+                className="text-muted-foreground underline disabled:opacity-50"
+                aria-label={`Use ${column.field.key === "priceOverrideCents" ? "pricing rules" : "catalog"} for ${column.field.label.toLowerCase()} for ${skuFor(item)}`}
+                onClick={() => {
+                  if (onItemField(item.variantId, column.field.key, null))
+                    discard(key);
+                }}
+              >
+                {column.field.key === "priceOverrideCents"
+                  ? "Use rules"
+                  : "Use catalog"}
+              </button>
+            )}
+        </div>
+      </td>
+    );
   }
   return (
     <section
-      className="min-w-0 space-y-3"
+      className="flex min-h-0 min-w-0 flex-1 flex-col gap-2"
       aria-label="Per-item listing attributes"
     >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h3 className="font-medium">Item attributes</h3>
-          <p className="text-xs text-muted-foreground">
-            Edit each row directly. Column changes apply to all {items.length}{" "}
-            selected items, including other pages.
-          </p>
-        </div>
-        <details className="min-w-0 rounded-md border p-2">
-          <summary className="cursor-pointer text-sm font-medium">
-            Choose columns ({columns.length})
-          </summary>
-          <div className="mt-3 space-y-2">
-            <Input
-              aria-label="Search attribute columns"
-              placeholder="Find a column"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-            <div className="max-h-64 max-w-sm space-y-2 overflow-y-auto">
-              {choices.map((column) => (
-                <label
-                  key={column.key}
-                  className="flex items-start gap-2 text-sm"
-                >
-                  <input
-                    type="checkbox"
-                    className="mt-1"
-                    disabled={errors.size > 0 || pending}
-                    checked={selected.has(column.key)}
-                    onChange={(event) =>
-                      toggleColumn(column.key, event.target.checked)
-                    }
-                  />
-                  <span className="break-words">
-                    {column.pathLabel}
-                    {column.required &&
-                      (column.requiredForSome
-                        ? " (required for some items)"
-                        : " (required)")}
-                  </span>
-                </label>
-              ))}
-              {choices.length === 0 && (
-                <p className="text-sm text-muted-foreground">
-                  No columns match this search.
-                </p>
-              )}
-            </div>
-          </div>
-        </details>
-      </div>
-      {hiddenRequired.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 text-sm">
-          <p>
-            {hiddenRequired.length} required{" "}
-            {hiddenRequired.length === 1 ? "column is" : "columns are"} hidden.
-          </p>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={errors.size > 0 || pending}
-            onClick={() =>
-              setSelectedKeys(
-                new Set([
-                  ...selected,
-                  ...hiddenRequired.map((column) => column.key),
-                ]),
-              )
-            }
-          >
-            Show required columns
-          </Button>
-        </div>
-      )}
-      {errors.size > 0 && (
-        <div className="space-y-2">
-          <p role="alert" className="text-sm text-destructive">
-            Correct or discard invalid cell values before changing pages, hiding
-            columns, or editing other fields.
-          </p>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={discardInvalidValues}
-          >
-            Discard all invalid cell values
-          </Button>
-        </div>
-      )}
-      {pending && (
-        <p className="text-sm text-muted-foreground">
-          Apply or discard the pending column value before editing rows or
-          changing pages.
-        </p>
-      )}
-      {model.warnings.map((warning) => (
-        <p key={warning} className="text-xs text-muted-foreground">
-          {warning}
-        </p>
-      ))}
-      {model.hasRowDetails && (
-        <p className="text-xs text-muted-foreground">
-          Lists, nested groups and fields with different requirements are
-          available in each row's Details.
-        </p>
-      )}
-      <div className="max-h-[55dvh] max-w-full overflow-auto rounded-md border">
-        <table
-          className="min-w-full text-sm"
-          aria-label="Draft item attributes"
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <div
+          className="flex rounded-md border p-0.5"
+          aria-label="Field filters"
         >
-          <thead className="sticky top-0 z-20 bg-background">
-            <tr className="border-b bg-muted/40">
-              <th
-                rowSpan={2}
-                className="sticky left-0 z-20 w-32 min-w-32 max-w-32 border-r bg-background p-3 text-left sm:w-48 sm:min-w-48 sm:max-w-56"
+          {[
+            ["all", "All fields"],
+            ["required", "Required"],
+            ["changed", "Changed"],
+          ].map(([value, label]) => (
+            <Button
+              key={value}
+              type="button"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              variant={filter === value ? "secondary" : "ghost"}
+              aria-pressed={filter === value}
+              onClick={() => setFilter(value)}
+            >
+              {label}
+            </Button>
+          ))}
+        </div>
+        <select
+          aria-label="Field group"
+          value={group}
+          onChange={(event) => setGroup(event.target.value)}
+          className="h-8 max-w-60 rounded-md border bg-background px-2 text-xs"
+        >
+          <option value="all">All groups</option>
+          {groups.map((value) => (
+            <option key={value} value={value}>
+              {value}
+            </option>
+          ))}
+        </select>
+        <Input
+          aria-label="Search attribute columns"
+          placeholder="Find a field"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          className="h-8 w-48 text-xs"
+        />
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-8 text-xs"
+          aria-pressed={showDefaults}
+          onClick={() => setShowDefaults(!showDefaults)}
+        >
+          Column defaults
+        </Button>
+        <p className="ml-auto text-xs text-muted-foreground">
+          {columns.length} of {allColumns.length} fields · {items.length} items
+        </p>
+      </div>
+      {showDefaults && (
+        <p className="shrink-0 text-xs text-muted-foreground">
+          Set a value for all selected items; keep row edits made here, or
+          replace those too.
+        </p>
+      )}
+      {(errors.length > 0 || pending.length > 0) && (
+        <div className="shrink-0 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs dark:bg-amber-950/20">
+          <p role="alert">
+            {errors.length > 0
+              ? `${errors.length} invalid values. Correct or discard before saving.`
+              : `${pending.length} column defaults need Apply or Discard before saving.`}{" "}
+            You can continue editing other fields.
+          </p>
+          <div className="mt-1 flex flex-wrap gap-3">
+            {(errors.length ? errors : pending).slice(0, 3).map(([key]) => (
+              <button
+                key={key}
+                type="button"
+                className="underline"
+                onClick={() => jump(key)}
               >
-                Draft item
-              </th>
-              {groups.map((group, index) => (
+                Go to {bufferLabel(key)}
+              </button>
+            ))}
+            <button
+              type="button"
+              className="underline"
+              onClick={() =>
+                setBuffers((previous) =>
+                  discardBulkGridBuffers(previous, (key, value) =>
+                    errors.length
+                      ? Boolean(value.error)
+                      : key.startsWith("shared:"),
+                  ),
+                )
+              }
+            >
+              {errors.length
+                ? "Discard all invalid cell values"
+                : "Discard pending column defaults"}
+            </button>
+          </div>
+        </div>
+      )}
+      {!schema && (
+        <p className="shrink-0 text-xs text-muted-foreground">
+          Content, identifiers and prices are available now. Choose a shared
+          product type to show its attributes.
+        </p>
+      )}
+      <div className="flex min-h-0 flex-1 flex-col gap-2 xl:flex-row">
+        <div
+          className={`${detailItem ? "hidden xl:block" : ""} min-h-0 min-w-0 flex-1 overflow-auto rounded-md border`}
+        >
+          <table
+            className="w-max border-separate border-spacing-0 text-xs"
+            aria-label="Draft item attributes"
+          >
+            <thead className="sticky top-0 z-20 bg-background">
+              <tr>
                 <th
-                  key={`${group.label}-${index}`}
-                  colSpan={group.count}
-                  className="border-r px-3 py-2 text-left text-xs font-medium"
+                  rowSpan={2}
+                  className="sticky left-0 z-30 w-52 min-w-52 max-w-52 border-b border-r bg-background px-3 py-2 text-left"
                 >
-                  {group.label || "Product attributes"}
+                  Product / SKU
                 </th>
-              ))}
-              <th rowSpan={2} className="px-3 text-left">
-                Details
-              </th>
-            </tr>
-            <tr className="border-b bg-muted/20">
-              {columns.map((column) => (
-                <th
-                  key={column.key}
-                  scope="col"
-                  className="min-w-56 border-r px-3 py-2 text-left font-medium"
-                >
-                  {column.label}
-                  {column.required && (
-                    <span
-                      className="ml-1 text-destructive"
-                      title={
-                        column.requiredForSome
-                          ? "Required for some selected items"
-                          : "Required"
-                      }
-                    >
-                      *
-                    </span>
-                  )}
-                </th>
-              ))}
-            </tr>
-            <tr className="border-b">
-              <th className="sticky left-0 z-20 w-32 min-w-32 max-w-32 border-r bg-background p-3 text-left align-top text-xs font-medium sm:w-48 sm:min-w-48 sm:max-w-56">
-                Set a value for all selected items
-              </th>
-              {columns.map((column) => {
-                const header = headerValues.get(column.key);
-                return (
-                  <td
-                    key={column.key}
-                    className="min-w-56 space-y-2 border-r p-3 align-top"
+                {headerGroups.map((value, index) => (
+                  <th
+                    key={`${value.label}-${index}`}
+                    colSpan={value.count}
+                    className="border-b border-r bg-muted/60 px-2 py-1 text-left text-[10px] font-medium"
                   >
-                    <ListingBulkAttributeCell
-                      key={bufferRevisions.get(`header:${column.key}`) ?? 0}
-                      column={column}
-                      value={header?.value}
-                      sku="all selected items"
-                      disabled={
-                        !canEdit ||
-                        !column.appliesToAll ||
-                        (pending && !header?.pending) ||
-                        (errors.size > 0 && !errors.has(`header:${column.key}`))
-                      }
-                      onChange={(value) =>
-                        setHeaderValues((previous) =>
-                          new Map(previous).set(column.key, {
-                            value,
-                            pending: true,
-                          }),
-                        )
-                      }
-                      onValidityChange={(error) =>
-                        validity(`header:${column.key}`, error)
-                      }
-                    />
-                    {!column.appliesToAll && (
-                      <p className="text-xs text-muted-foreground">
-                        Applies only to some rows. Edit those items
-                        individually.
-                      </p>
-                    )}
-                    <div className="flex flex-wrap gap-1">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        disabled={
-                          !canEdit ||
-                          !column.appliesToAll ||
-                          !header?.pending ||
-                          errors.size > 0
-                        }
-                        onClick={() => {
-                          if (!header || !canEdit) return;
-                          if (onSharedAttribute(column.path, header.value))
-                            discardHeader(column.key);
-                        }}
-                      >
-                        {header?.pending && header.value === undefined
-                          ? `Clear ${column.label} for all`
-                          : `Apply ${column.label} to all`}
-                      </Button>
-                      {(header?.pending ||
-                        errors.has(`header:${column.key}`)) && (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          aria-label={`Discard ${column.pathLabel} column value`}
-                          onClick={() => discardHeader(column.key)}
-                        >
-                          Discard
-                        </Button>
+                    {value.label}
+                  </th>
+                ))}
+              </tr>
+              <tr>
+                {columns.map((column) => (
+                  <th
+                    scope="col"
+                    key={column.key}
+                    className="border-b border-r bg-background px-2 py-2 text-left font-medium"
+                    style={{ minWidth: width(column), width: width(column) }}
+                  >
+                    {column.kind === "attribute" &&
+                      column.field.pathLabel !== column.field.label && (
+                        <span className="mb-0.5 block whitespace-normal text-[10px] font-normal text-muted-foreground">
+                          {column.field.pathLabel
+                            .split(" › ")
+                            .slice(0, -1)
+                            .join(" / ")}
+                        </span>
                       )}
-                    </div>
-                  </td>
-                );
-              })}
-              <td />
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((item, rowIndex) => {
-              const sku = skuFor(item);
-              const changes =
-                itemChanges.find(
-                  (change) => change.variantId === item.variantId,
-                )?.patch.attributeChanges ?? [];
-              const required = new Set(
-                model.requiredKeysByRow[offset + rowIndex],
-              );
-              const applicable = new Set(
-                model.applicableKeysByRow[offset + rowIndex],
-              );
-              return (
-                <tr key={item.variantId} className="border-b last:border-b-0">
+                    {column.field.label}
+                    {column.kind === "attribute" && column.field.required && (
+                      <span
+                        className="ml-1 text-destructive"
+                        title={
+                          column.field.requiredForSome
+                            ? "Required for some items"
+                            : "Required"
+                        }
+                      >
+                        *
+                      </span>
+                    )}
+                    {column.kind === "attribute" &&
+                      column.field.help.length > 0 && (
+                        <details className="mt-1 max-w-48 font-normal">
+                          <summary
+                            className="cursor-pointer text-[10px] text-primary"
+                            aria-label={`Help for ${column.field.pathLabel}`}
+                          >
+                            Field help
+                          </summary>
+                          {column.field.help.map((help) => (
+                            <p
+                              key={JSON.stringify(help.path)}
+                              className="mt-1 whitespace-normal text-xs"
+                            >
+                              <strong>{help.label}: </strong>
+                              {help.description}
+                            </p>
+                          ))}
+                        </details>
+                      )}
+                  </th>
+                ))}
+              </tr>
+              {showDefaults && (
+                <tr>
+                  <th className="sticky left-0 z-30 w-52 min-w-52 max-w-52 border-b border-r bg-muted px-3 py-2 text-left align-top font-medium">
+                    Column defaults
+                    <span className="block text-[10px] font-normal text-muted-foreground">
+                      All {items.length} selected items
+                    </span>
+                  </th>
+                  {columns.map((column) => (
+                    <td
+                      key={column.key}
+                      ref={(element) => {
+                        const key = bulkGridBufferKey("shared", column.key);
+                        if (element) cells.current.set(key, element);
+                        else cells.current.delete(key);
+                      }}
+                      className="border-b border-r bg-muted px-2 py-2 align-top"
+                      style={{ minWidth: width(column), width: width(column) }}
+                    >
+                      {renderDefault(column)}
+                    </td>
+                  ))}
+                </tr>
+              )}
+            </thead>
+            <tbody>
+              {rows.map((item, rowIndex) => (
+                <tr key={item.variantId}>
                   <th
                     scope="row"
-                    className="sticky left-0 z-10 w-32 min-w-32 max-w-32 border-r bg-background p-3 text-left align-top sm:w-48 sm:min-w-48 sm:max-w-56"
+                    className="sticky left-0 z-10 w-52 min-w-52 max-w-52 border-b border-r bg-background px-3 py-2 text-left align-top"
                   >
-                    <p className="break-words font-medium">{sku}</p>
-                    <p className="mt-1 break-words text-xs font-normal text-muted-foreground">
+                    <p className="break-words font-medium">{skuFor(item)}</p>
+                    <p className="mt-0.5 line-clamp-2 text-[10px] font-normal text-muted-foreground">
                       {metadata.get(item.variantId)?.name}
                     </p>
-                  </th>
-                  {columns.map((column) => {
-                    const key = `${item.variantId}:${column.key}`;
-                    return (
-                      <td
-                        key={column.key}
-                        className="min-w-56 space-y-1 border-r p-3 align-top"
-                      >
-                        {applicable.has(column.key) ? (
-                          <ListingBulkAttributeCell
-                            key={bufferRevisions.get(key) ?? 0}
-                            column={column}
-                            value={fieldValueAtPath(
-                              item.attributes,
-                              column.path,
-                            )}
-                            sku={sku}
-                            disabled={
-                              !canEdit ||
-                              pending ||
-                              (errors.size > 0 && !errors.has(key))
-                            }
-                            required={required.has(column.key)}
-                            onChange={(value) =>
-                              onItemAttribute(
-                                item.variantId,
-                                column.path,
-                                value,
-                              )
-                            }
-                            onValidityChange={(error) => validity(key, error)}
-                          />
-                        ) : (
-                          <p className="text-xs text-muted-foreground">
-                            Not used for this item
-                          </p>
-                        )}
-                        {errors.has(key) && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            aria-label={`Discard invalid ${column.pathLabel} value for ${sku}`}
-                            onClick={() => discardInvalidCell(key)}
-                          >
-                            Discard invalid value
-                          </Button>
-                        )}
-                        {changes.some(
-                          (change) =>
-                            JSON.stringify(change.path) === column.key,
-                        ) && (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="ghost"
-                            disabled={!canEdit || errors.size > 0 || pending}
-                            aria-label={`Undo ${column.pathLabel} change for ${sku}`}
-                            onClick={() =>
-                              onUndoItemAttribute(item.variantId, column.path)
-                            }
-                          >
-                            Undo change
-                          </Button>
-                        )}
-                      </td>
-                    );
-                  })}
-                  <td className="p-3 align-top">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={errors.size > 0 || pending}
-                      aria-label={`Edit attributes for ${sku}`}
-                      onClick={() => setDetailId(item.variantId)}
-                    >
-                      Details
-                    </Button>
-                    {changes.length > 0 && (
-                      <Button
+                    <p className="mt-1 line-clamp-2 text-[10px] font-normal text-muted-foreground">
+                      {item.method === "match" ? "Match" : "Create"} ·{" "}
+                      {item.productType || "Type not selected"}
+                    </p>
+                    <div className="mt-1 flex gap-2 text-[10px] font-normal">
+                      <button
                         type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={!canEdit || errors.size > 0 || pending}
-                        aria-label={`Undo all attribute changes for ${sku}`}
-                        onClick={() => onUndoItem(item.variantId)}
+                        className="text-primary underline"
+                        aria-label={`Edit attributes for ${skuFor(item)}`}
+                        onClick={() =>
+                          setInspector({
+                            variantId: item.variantId,
+                            field: null,
+                          })
+                        }
                       >
-                        Undo row changes
-                      </Button>
-                    )}
-                  </td>
+                        Item details
+                      </button>
+                      {changesById.has(item.variantId) && (
+                        <button
+                          type="button"
+                          className="underline disabled:opacity-50"
+                          disabled={!canEdit}
+                          aria-label={`Undo row changes for ${skuFor(item)}`}
+                          onClick={() => {
+                            if (!onUndoItem(item.variantId)) return;
+                            setBuffers((previous) =>
+                              discardBulkGridBuffers(previous, (key) =>
+                                key.startsWith(item.variantId + ":"),
+                              ),
+                            );
+                          }}
+                        >
+                          Undo row
+                        </button>
+                      )}
+                    </div>
+                  </th>
+                  {columns.map((column) =>
+                    renderCell(item, column, offset + rowIndex),
+                  )}
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
+              ))}
+            </tbody>
+          </table>
+          {columns.length === 0 && (
+            <p className="p-4 text-sm text-muted-foreground">
+              No fields match this filter. Your edits are retained.
+            </p>
+          )}
+        </div>
+        {detailItem && inspector && (
+          <ListingBulkItemInspector
+            item={detailItem}
+            metadata={metadata}
+            schema={schema}
+            column={
+              inspector.field?.kind === "attribute"
+                ? inspector.field.field
+                : null
+            }
+            contentField={
+              inspector.field?.kind === "core" ? inspector.field.field : null
+            }
+            buffers={buffers}
+            canEdit={canEdit}
+            providerFieldsDisabled={providerFieldsDisabled}
+            onBufferChange={buffer}
+            onDiscardBuffer={discard}
+            onItemField={onItemField}
+            onItemAttribute={applyItemAttribute}
+            onClose={() => setInspector(null)}
+            onPrevious={
+              items.findIndex(
+                (item) => item.variantId === detailItem.variantId,
+              ) > 0
+                ? () => moveInspector(-1)
+                : undefined
+            }
+            onNext={
+              items.findIndex(
+                (item) => item.variantId === detailItem.variantId,
+              ) <
+              items.length - 1
+                ? () => moveInspector(1)
+                : undefined
+            }
+          />
+        )}
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+      <div
+        className={`${detailItem ? "hidden xl:flex" : "flex"} shrink-0 flex-wrap items-center justify-between gap-2 text-xs`}
+      >
         <p>
           Showing {items.length ? offset + 1 : 0}–
-          {Math.min(offset + ROWS_PER_PAGE, items.length)} of {items.length}{" "}
-          selected items
+          {Math.min(offset + pageSize, items.length)} of {items.length} selected
+          items
         </p>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1">
+            Rows
+            <select
+              aria-label="Rows per page"
+              className="h-8 rounded-md border bg-background px-2"
+              value={pageSize}
+              onChange={(event) => {
+                setPageSize(Number(event.target.value));
+                setPage(0);
+              }}
+            >
+              {[25, 50, 100].map((size) => (
+                <option key={size} value={size}>
+                  {size}
+                </option>
+              ))}
+            </select>
+          </label>
           <Button
             type="button"
             variant="outline"
             size="sm"
-            disabled={errors.size > 0 || pending || currentPage === 0}
+            disabled={currentPage === 0}
             onClick={() => setPage(currentPage - 1)}
           >
             Previous draft rows
@@ -546,53 +1020,47 @@ export function ListingBulkItemTable({
             type="button"
             variant="outline"
             size="sm"
-            disabled={
-              errors.size > 0 ||
-              pending ||
-              offset + ROWS_PER_PAGE >= items.length
-            }
+            disabled={offset + pageSize >= items.length}
             onClick={() => setPage(currentPage + 1)}
           >
             Next draft rows
           </Button>
         </div>
       </div>
-      {detailItem && (
-        <Dialog
-          open
-          onOpenChange={(open) => {
-            if (!open) setDetailId(null);
-          }}
-        >
-          <DialogContent className="flex max-h-[85dvh] max-w-3xl flex-col overflow-hidden">
-            <DialogHeader className="shrink-0">
-              <DialogTitle>Attributes for {skuFor(detailItem)}</DialogTitle>
-              <DialogDescription>
-                Changes apply to this draft item only. Shared column values
-                remain the fallback when you undo a row change.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="min-h-0 overflow-y-auto">
-              <SchemaFields
-                schema={schema}
-                value={detailItem.attributes}
-                disabled={!canEdit}
-                onChange={() => {
-                  /* Exact path changes below preserve unrelated per-item values. */
-                }}
-                onFieldChange={(path, value) =>
-                  onItemAttribute(detailItem.variantId, path, value)
-                }
-              />
-            </div>
-            <DialogFooter className="shrink-0">
-              <Button type="button" onClick={() => setDetailId(null)}>
-                Done
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+      {model.warnings.length > 0 && (
+        <details className="shrink-0 text-xs text-muted-foreground">
+          <summary className="cursor-pointer">
+            Field guidance ({model.warnings.length})
+          </summary>
+          {model.warnings.map((warning) => (
+            <p key={warning}>{warning}</p>
+          ))}
+        </details>
       )}
     </section>
   );
+  function moveInspector(delta: number) {
+    if (!inspector) return;
+    const index = items.findIndex(
+      (item) => item.variantId === inspector.variantId,
+    );
+    const next = items[index + delta];
+    if (next) setInspector({ ...inspector, variantId: next.variantId });
+  }
+  function bufferLabel(key: string) {
+    const column = allColumns.find((column) => key.endsWith(":" + column.key));
+    const item = itemById.get(Number(key.split(":", 1)[0]));
+    return `${column?.field.label ?? "hidden field"}${item ? ` for ${skuFor(item)}` : " default"}`;
+  }
+}
+function width(column: Column): number {
+  if (column.kind === "core") return column.field.width;
+  if (column.field.type === "integer" || column.field.type === "number")
+    return 120;
+  if (
+    column.field.type === "boolean" ||
+    Array.isArray(column.field.schema.enum)
+  )
+    return 160;
+  return 190;
 }
