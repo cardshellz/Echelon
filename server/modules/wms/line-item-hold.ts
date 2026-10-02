@@ -13,6 +13,7 @@
  */
 
 import { sql } from "drizzle-orm";
+import { decideLineHoldRelease, type LineHoldReleaseDecision } from "@shared/wms-hold-release";
 
 const HELD_SHIPMENT_SOURCE = "line_item_hold";
 
@@ -90,16 +91,67 @@ export async function holdLineItemWithSplit(
   });
 }
 
+export type LineHoldReleaseOutcome = "released" | Exclude<LineHoldReleaseDecision, "release">;
+
+export interface LineHoldReleaseResult {
+  outcome: LineHoldReleaseOutcome;
+  /** Set only when released: the caller pushes this shipment so the line ships. */
+  heldShipmentId: number | null;
+  /** Locked state the decision was made on (null when that row was not found). */
+  orderStatus: string | null;
+  lineWasHeld: boolean | null;
+}
+
 /**
  * Atomically release a line's hold and un-hold its shipment so it can ship.
  * Returns the held shipment id so the caller pushes it (it becomes a normal
  * planned shipment that the engine will now accept).
+ *
+ * Guarded by decideLineHoldRelease: a line that is not held is a no-op, and a
+ * line whose whole order is still held (or already shipped/cancelled) is
+ * refused before anything changes. Locks the order row, then the line — the
+ * same order the pick path locks them — so a concurrent order hold or pick
+ * waits instead of interleaving with the decision.
  */
 export async function releaseLineItemFromHold(
   db: any,
   args: { wmsOrderId: number; orderItemId: number; now: Date },
-): Promise<{ heldShipmentId: number | null }> {
+): Promise<LineHoldReleaseResult> {
   return await db.transaction(async (tx: any) => {
+    const orderRows: any = await tx.execute(sql`
+      SELECT id, on_hold, warehouse_status
+      FROM wms.orders
+      WHERE id = ${args.wmsOrderId}
+      FOR UPDATE
+    `);
+    const lineRows: any = await tx.execute(sql`
+      SELECT id, order_id, on_hold, status, quantity
+      FROM wms.order_items
+      WHERE id = ${args.orderItemId}
+      FOR UPDATE
+    `);
+    const orderRow = orderRows?.rows?.[0];
+    const lineRow = lineRows?.rows?.[0];
+    const decision = decideLineHoldRelease({
+      wmsOrderId: args.wmsOrderId,
+      order: orderRow
+        ? { id: Number(orderRow.id), onHold: orderRow.on_hold, warehouseStatus: orderRow.warehouse_status }
+        : null,
+      line: lineRow
+        ? {
+            orderId: Number(lineRow.order_id),
+            onHold: lineRow.on_hold === true,
+            status: lineRow.status,
+            quantity: Number(lineRow.quantity ?? 0),
+          }
+        : null,
+    });
+    const orderStatus = orderRow ? String(orderRow.warehouse_status) : null;
+    const lineWasHeld = lineRow ? lineRow.on_hold === true : null;
+    if (decision !== "release") {
+      return { outcome: decision, heldShipmentId: null, orderStatus, lineWasHeld };
+    }
+
     await tx.execute(sql`
       UPDATE wms.order_items SET on_hold = false, hold_reason = NULL
       WHERE id = ${args.orderItemId}
@@ -115,13 +167,15 @@ export async function releaseLineItemFromHold(
       LIMIT 1
     `);
     const held = heldRows?.rows?.[0];
-    if (!held) return { heldShipmentId: null };
+    // A held line with no held shipment predates the P2 split (or its split
+    // found no shippable shipment): clearing the flag is the whole release.
+    if (!held) return { outcome: "released", heldShipmentId: null, orderStatus, lineWasHeld };
     const heldShipmentId = Number(held.id);
     await tx.execute(sql`
       UPDATE wms.outbound_shipments
       SET held = false, held_at = NULL, on_hold_reason = NULL, updated_at = ${args.now}
       WHERE id = ${heldShipmentId}
     `);
-    return { heldShipmentId };
+    return { outcome: "released", heldShipmentId, orderStatus, lineWasHeld };
   });
 }

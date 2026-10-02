@@ -75,6 +75,9 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { format, formatDistanceToNow } from "date-fns";
+import type { WmsOrderBucket, WmsOrderBucketCounts } from "@shared/wms-order-listing";
+import { HoldReleaseButton, OrderHoldPanel } from "@/components/orders/OrderHoldPanel";
+import { buildOrderHoldView, countOpenHeldLines } from "@/lib/order-hold-release";
 
 interface Channel {
   id: number;
@@ -122,6 +125,7 @@ interface Order {
   totalAmount: string | null;
   currency: string | null;
   onHold: number;
+  heldAt: string | null;
   createdAt: string;
   orderPlacedAt: string | null;
   startedAt: string | null;
@@ -153,17 +157,7 @@ interface OrdersResponse {
   buckets?: WmsOrderBucketCounts;
 }
 
-type WmsOrderBucket = "needs_pick" | "picked" | "issues" | "shipped" | "cancelled" | "all";
 type WmsOrderTab = WmsOrderBucket | "combined";
-
-interface WmsOrderBucketCounts {
-  needsPick: number;
-  picked: number;
-  issues: number;
-  shipped: number;
-  cancelled: number;
-  all: number;
-}
 
 interface CombinableOrder {
   id: number;
@@ -215,6 +209,7 @@ const statusColors: Record<string, string> = {
 const emptyBucketCounts: WmsOrderBucketCounts = {
   needsPick: 0,
   picked: 0,
+  hold: 0,
   issues: 0,
   shipped: 0,
   cancelled: 0,
@@ -224,6 +219,7 @@ const emptyBucketCounts: WmsOrderBucketCounts = {
 const orderTabs: Array<{ value: WmsOrderTab; label: string; countKey?: keyof WmsOrderBucketCounts; className?: string; testId: string }> = [
   { value: "needs_pick", label: "Needs Pick", countKey: "needsPick", testId: "tab-needs-pick" },
   { value: "picked", label: "Picked", countKey: "picked", testId: "tab-picked" },
+  { value: "hold", label: "On Hold", countKey: "hold", className: "text-amber-700", testId: "tab-hold" },
   { value: "issues", label: "Issues", countKey: "issues", className: "text-amber-600", testId: "tab-issues" },
   { value: "shipped", label: "Shipped", countKey: "shipped", testId: "tab-shipped" },
   { value: "cancelled", label: "Cancelled", countKey: "cancelled", testId: "tab-cancelled" },
@@ -256,9 +252,13 @@ function getEmptyState(tab: WmsOrderTab): { title: string; description: string }
       title: "No picked orders",
       description: "Picked orders waiting for shipment will appear here.",
     },
+    hold: {
+      title: "Nothing on hold",
+      description: "Orders held whole, or with a held line, appear here with a Release for each hold.",
+    },
     issues: {
       title: "No order issues",
-      description: "Held and exception orders will appear here.",
+      description: "Exception orders will appear here.",
     },
     shipped: {
       title: "No shipped orders",
@@ -286,13 +286,24 @@ const priorityColors: Record<string, string> = {
   normal: "",
 };
 
-function LineItemHoldControls({ orderId, item }: { orderId: number; item: OrderItem }) {
+function HeldLinesBadge({ order }: { order: Order }) {
+  const heldLines = countOpenHeldLines(order);
+  if (heldLines === 0) return null;
+  return (
+    <Badge variant="outline" className="text-xs bg-amber-50 text-amber-700 border-amber-200">
+      {heldLines} {heldLines === 1 ? "line" : "lines"} held
+    </Badge>
+  );
+}
+
+function LineItemHoldControls({ order, item }: { order: OrderDetail; item: OrderItem }) {
   const { hasPermission } = useAuth();
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [pickingReason, setPickingReason] = useState(false);
   const [reason, setReason] = useState("Pre-order — not yet in stock");
   const canHold = hasPermission("orders", "hold");
+  const orderId = order.id;
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/wms/orders"] });
@@ -320,33 +331,19 @@ function LineItemHoldControls({ orderId, item }: { orderId: number; item: OrderI
     onError: (e: Error) => toast({ title: "Couldn't hold line", description: e.message, variant: "destructive" }),
   });
 
-  const releaseMutation = useMutation({
-    mutationFn: async () => {
-      const res = await fetch(`/api/orders/${orderId}/items/${item.id}/release-hold`, { method: "POST" });
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        throw new Error(e.error || "Failed to release line");
-      }
-      return res.json();
-    },
-    onSuccess: () => {
-      invalidate();
-      toast({ title: "Hold released" });
-    },
-    onError: (e: Error) => toast({ title: "Couldn't release line", description: e.message, variant: "destructive" }),
-  });
-
   if (item.onHold) {
+    // Same release rules as the On Hold queue: a closed line has nothing to
+    // release, and a line waits for its order's own hold to be released.
+    const held = buildOrderHoldView(order, canHold).heldLines.find((entry) => entry.line.id === item.id);
     return (
       <div className="flex items-center gap-2 flex-wrap mt-2">
         <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200">
           <Clock className="h-3 w-3 mr-1" /> Held{item.holdReason ? ` · ${item.holdReason}` : ""}
         </Badge>
-        {canHold && (
-          <Button size="sm" variant="outline" className="h-6 px-2 text-xs" disabled={releaseMutation.isPending} onClick={() => releaseMutation.mutate()}>
-            Release
-          </Button>
+        {canHold && held && (
+          <HoldReleaseButton target={held.target} disabled={held.blockedReason !== null} label="Release line" />
         )}
+        {canHold && held?.blockedReason && <span className="text-xs text-amber-700">{held.blockedReason}</span>}
       </div>
     );
   }
@@ -665,6 +662,9 @@ function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () =
         </CardContent>
       </Card>
 
+      {/* Whole-order hold + release. Held lines are released from Line Items below. */}
+      <OrderHoldPanel order={order} showLines={false} />
+
       {/* Priority Management — Lead/Admin only */}
       <PriorityControlCard order={order} onUpdated={() => refetch()} />
 
@@ -775,7 +775,7 @@ function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () =
                     {item.shortReason && (
                       <p className="text-xs text-red-500 mt-1">Short: {item.shortReason}</p>
                     )}
-                    <LineItemHoldControls orderId={order.id} item={item} />
+                    <LineItemHoldControls order={order} item={item} />
                   </div>
                 </div>
               </div>
@@ -1144,7 +1144,9 @@ export default function Orders() {
     totalPickedCount?: number;
   }
 
-  const groupedOrders: DisplayOrder[] = (() => {
+  // A hold is released per order, so the hold queue lists each held order on
+  // its own card instead of folding it into its combined group.
+  const groupedOrders: DisplayOrder[] = statusFilter === "hold" ? filteredOrders : (() => {
     const result: DisplayOrder[] = [];
     const processedGroupIds = new Set<number>();
 
@@ -1496,6 +1498,10 @@ export default function Orders() {
                                 {order.onHold === 1 && (
                                   <Badge variant="destructive" className="text-xs">ON HOLD</Badge>
                                 )}
+                                <HeldLinesBadge order={order} />
+                                {order.combinedGroupId && (
+                                  <Badge variant="outline" className="text-xs bg-indigo-50 text-indigo-700 border-indigo-200">Combined</Badge>
+                                )}
                               </div>
                               <div className="text-sm text-muted-foreground mt-1">
                                 {order.customerName} • {order.itemCount} items
@@ -1533,6 +1539,12 @@ export default function Orders() {
                           </div>
                           <Progress value={(order.pickedCount / order.itemCount) * 100} className="h-1.5" />
                         </div>
+                      </div>
+                    )}
+
+                    {statusFilter === "hold" && (
+                      <div className="mt-4">
+                        <OrderHoldPanel order={order} />
                       </div>
                     )}
                   </CardContent>

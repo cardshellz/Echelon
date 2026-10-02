@@ -2,6 +2,7 @@ import { and, asc, desc, eq, gt, inArray, isNotNull, max, notInArray, sql, type 
 import { z } from "zod";
 import { wmsOrders as orders, wmsOrderItems as items, type WmsOrder, type WmsOrderItem } from "@shared/schema";
 import { WMS_BUCKET_STATUSES, WMS_ORDER_BUCKETS, type WmsOrderBucket, type WmsOrderBucketCounts } from "@shared/wms-order-listing";
+import { WMS_CLOSED_LINE_STATUSES, WMS_TERMINAL_ORDER_STATUSES } from "@shared/wms-hold-release";
 import type { db } from "../../db";
 
 export const ORDER_PAGE_SIZE = 100;
@@ -42,12 +43,31 @@ const scanQuerySchema = z.object({
 export type OrderScanQuery = z.input<typeof scanQuerySchema>;
 type ReadDatabase = Pick<typeof db, "select">;
 
+// SQL twin of isWmsOrderInHoldQueue (@shared/wms-order-listing); the
+// integration test holds the two to the same answer for every bucket.
+function holdQueuePredicate(): SQL {
+  const normalizedStatus = sql`lower(btrim(${orders.warehouseStatus}))`;
+  const orderLevelHold = sql`(coalesce(${orders.onHold}, 0) = 1 or ${normalizedStatus} = 'on_hold')`;
+  // `on_hold = true` matches the partial index from migration 0718, so the probe
+  // reads a near-empty index instead of every line of the order.
+  const openHeldLine = sql`exists (select 1 from ${items} where ${items.orderId} = ${orders.id}
+    and ${items.onHold} = true
+    and coalesce(${items.quantity}, 0) > 0
+    and ${notInArray(sql`lower(btrim(${items.status}))`, [...WMS_CLOSED_LINE_STATUSES])})`;
+  // Cheapest test first. The executor evaluates AND/OR left to right and stops
+  // early (in practice; Postgres does not promise it), so shipped and cancelled
+  // history normally skips the probe. The result does not depend on the order.
+  return sql`(not ${inArray(normalizedStatus, [...WMS_TERMINAL_ORDER_STATUSES])} and (${orderLevelHold} or ${openHeldLine}))`;
+}
+
 function bucketPredicate(bucket: WmsOrderBucket): SQL {
   if (bucket === "all") return sql`true`;
+  if (bucket === "hold") return holdQueuePredicate();
   const normalizedStatus = sql`lower(btrim(${orders.warehouseStatus}))`;
-  const held = sql`(coalesce(${orders.onHold}, 0) = 1 or ${normalizedStatus} = 'on_hold')`;
   const matchesStatus = inArray(normalizedStatus, [...WMS_BUCKET_STATUSES[bucket]]);
-  return bucket === "issues" ? sql`(${held} or ${matchesStatus})` : sql`(not ${held} and ${matchesStatus})`;
+  // Terminal buckets win over a leftover hold flag; open buckets yield to hold.
+  if (bucket === "shipped" || bucket === "cancelled") return matchesStatus;
+  return sql`(${matchesStatus} and not ${holdQueuePredicate()})`;
 }
 
 function scopePredicate(query: z.output<typeof orderPageQuerySchema>): SQL | undefined {
@@ -104,6 +124,7 @@ export class OrderListRepository {
       const [counts] = await transaction.select({
         needsPick: countWhere(bucketPredicate("needs_pick")),
         picked: countWhere(bucketPredicate("picked")),
+        hold: countWhere(bucketPredicate("hold")),
         issues: countWhere(bucketPredicate("issues")),
         shipped: countWhere(bucketPredicate("shipped")),
         cancelled: countWhere(bucketPredicate("cancelled")),

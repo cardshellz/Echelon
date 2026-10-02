@@ -1,6 +1,14 @@
+import {
+  isOpenHeldLine,
+  isOrderLevelHold,
+  isTerminalOrder,
+  normalizeWmsStatus,
+} from "./wms-hold-release";
+
 export const WMS_ORDER_BUCKETS = [
   "needs_pick",
   "picked",
+  "hold",
   "issues",
   "shipped",
   "cancelled",
@@ -13,6 +21,10 @@ export interface WmsOrderListItem {
   sku?: string | null;
   name?: string | null;
   title?: string | null;
+  /** Line-hold evidence for the hold bucket. Absent means "not held". */
+  onHold?: boolean | null;
+  status?: string | null;
+  quantity?: number | null;
 }
 
 export interface WmsOrderListOrder {
@@ -33,6 +45,7 @@ export interface WmsOrderListOrder {
 export interface WmsOrderBucketCounts {
   needsPick: number;
   picked: number;
+  hold: number;
   issues: number;
   shipped: number;
   cancelled: number;
@@ -47,27 +60,40 @@ export interface WmsOrderScopeFilters {
 }
 
 // Also used by the database read model so pagination preserves bucket policy.
+// Membership of `hold` is not status-based; see isWmsOrderInHoldQueue. The
+// legacy 'on_hold' status counts as an order-level hold, so it files under hold.
 export const WMS_BUCKET_STATUSES = {
   needs_pick: ["ready", "in_progress", "partially_shipped"],
   picked: ["completed", "ready_to_ship"],
-  issues: ["exception", "on_hold"],
+  issues: ["exception"],
   shipped: ["shipped"],
   cancelled: ["cancelled"],
 } as const;
 const NEEDS_PICK_STATUSES = new Set<string>(WMS_BUCKET_STATUSES.needs_pick);
 const PICKED_STATUSES = new Set<string>(WMS_BUCKET_STATUSES.picked);
 const ISSUE_STATUSES = new Set<string>(WMS_BUCKET_STATUSES.issues);
-const SHIPPED_STATUSES = new Set(["shipped"]);
-const CANCELLED_STATUSES = new Set(["cancelled"]);
+const SHIPPED_STATUSES = new Set<string>(WMS_BUCKET_STATUSES.shipped);
+const CANCELLED_STATUSES = new Set<string>(WMS_BUCKET_STATUSES.cancelled);
 
 const EMPTY_BUCKET_COUNTS: WmsOrderBucketCounts = {
   needsPick: 0,
   picked: 0,
+  hold: 0,
   issues: 0,
   shipped: 0,
   cancelled: 0,
   all: 0,
 };
+
+// Every order lands in at most one of these; "all" counts every order.
+const COUNTED_BUCKETS: ReadonlyArray<[Exclude<WmsOrderBucket, "all">, keyof WmsOrderBucketCounts]> = [
+  ["hold", "hold"],
+  ["issues", "issues"],
+  ["needs_pick", "needsPick"],
+  ["picked", "picked"],
+  ["shipped", "shipped"],
+  ["cancelled", "cancelled"],
+];
 
 export function parseWmsOrderBucket(value: unknown): WmsOrderBucket {
   if (typeof value !== "string") return "needs_pick";
@@ -102,20 +128,35 @@ export function normalizeSearchTerm(value: unknown): string | undefined {
 }
 
 export function isWmsOrderOnHold(order: Pick<WmsOrderListOrder, "onHold" | "warehouseStatus">): boolean {
-  return order.onHold === true || Number(order.onHold ?? 0) === 1 || normalizeStatus(order.warehouseStatus) === "on_hold";
+  return isOrderLevelHold(order);
+}
+
+/**
+ * The order is waiting on a release: the whole order is held, or one of its
+ * lines is. A line hold leaves the order flag alone, so without the line check
+ * an order whose held line is all that is left would show in no hold view.
+ * Shipped and cancelled orders never qualify, whatever flag was left behind.
+ */
+export function isWmsOrderInHoldQueue(order: WmsOrderListOrder): boolean {
+  if (isTerminalOrder(order)) return false;
+  return isOrderLevelHold(order) || (order.items ?? []).some(isOpenHeldLine);
 }
 
 export function orderMatchesBucket(order: WmsOrderListOrder, bucket: WmsOrderBucket): boolean {
   if (bucket === "all") return true;
-  if (bucket === "issues") return isWmsOrderOnHold(order) || ISSUE_STATUSES.has(normalizeStatus(order.warehouseStatus));
 
-  if (isWmsOrderOnHold(order)) return false;
-
-  const status = normalizeStatus(order.warehouseStatus);
-  if (bucket === "needs_pick") return NEEDS_PICK_STATUSES.has(status);
-  if (bucket === "picked") return PICKED_STATUSES.has(status);
+  const status = normalizeWmsStatus(order.warehouseStatus);
   if (bucket === "shipped") return SHIPPED_STATUSES.has(status);
   if (bucket === "cancelled") return CANCELLED_STATUSES.has(status);
+
+  // Hold wins over every open bucket: a held order needs a person to act.
+  const inHoldQueue = isWmsOrderInHoldQueue(order);
+  if (bucket === "hold") return inHoldQueue;
+  if (inHoldQueue) return false;
+
+  if (bucket === "issues") return ISSUE_STATUSES.has(status);
+  if (bucket === "needs_pick") return NEEDS_PICK_STATUSES.has(status);
+  if (bucket === "picked") return PICKED_STATUSES.has(status);
   return false;
 }
 
@@ -153,16 +194,8 @@ export function buildWmsOrderBucketCounts(orders: WmsOrderListOrder[]): WmsOrder
 
   for (const order of orders) {
     counts.all += 1;
-
-    if (orderMatchesBucket(order, "issues")) {
-      counts.issues += 1;
-      continue;
-    }
-
-    if (orderMatchesBucket(order, "needs_pick")) counts.needsPick += 1;
-    else if (orderMatchesBucket(order, "picked")) counts.picked += 1;
-    else if (orderMatchesBucket(order, "shipped")) counts.shipped += 1;
-    else if (orderMatchesBucket(order, "cancelled")) counts.cancelled += 1;
+    const match = COUNTED_BUCKETS.find(([bucket]) => orderMatchesBucket(order, bucket));
+    if (match) counts[match[1]] += 1;
   }
 
   return counts;
@@ -170,10 +203,6 @@ export function buildWmsOrderBucketCounts(orders: WmsOrderListOrder[]): WmsOrder
 
 export function compareWmsOrdersNewestFirst(a: WmsOrderListOrder, b: WmsOrderListOrder): number {
   return toTime(b.createdAt) - toTime(a.createdAt);
-}
-
-function normalizeStatus(status: string | null | undefined): string {
-  return String(status ?? "").trim().toLowerCase();
 }
 
 function stringIncludes(value: string | null | undefined, normalizedSearch: string): boolean {
