@@ -100,6 +100,111 @@ describe("PgDropshipOrderIntakeHealthRepository", () => {
     expect(sqlCalls(harness.client).at(-1)).toBe("COMMIT");
   });
 
+  it("never changes a store's setup status when it records a poll", async () => {
+    for (const record of ["succeeded", "failed"] as const) {
+      const harness = makeHarness({
+        connection: makeConnection({ setup_status: "attention_required" }),
+        healthRows: [makeHealthRow({ status: "stopped", consecutive_failures: 6 })],
+      });
+      const repository = new PgDropshipOrderIntakeHealthRepository(harness.pool as any);
+
+      if (record === "succeeded") {
+        await repository.recordPollSucceeded({
+          vendorId: 10, storeConnectionId: 22, platform: "ebay", mode: "poll", syncedThrough: now, now, policy,
+        });
+      } else {
+        await repository.recordPollFailed({
+          vendorId: 10, storeConnectionId: 22, platform: "ebay", mode: "poll",
+          failureCode: "EBAY_UNAVAILABLE", failureMessage: "provider unavailable", now, policy,
+        });
+      }
+
+      expect(sqlCalls(harness.client).some((sql) => sql.includes("SET setup_status"))).toBe(false);
+    }
+  });
+
+  it("puts a store held only by its intake health check back to ready, under its lock, with an audit event", async () => {
+    const harness = makeHarness({
+      connection: makeConnection({ setup_status: "attention_required" }),
+      candidateRows: [{ id: 22 }],
+      healthRows: [makeHealthRow({
+        status: "stopped",
+        consecutive_failures: 21,
+        last_failure_code: "DROPSHIP_EBAY_ORDER_MONEY_INVALID",
+      })],
+    });
+    const repository = new PgDropshipOrderIntakeHealthRepository(harness.pool as any);
+
+    const restored = await repository.restoreStoresHeldOnlyByOrderIntakeHealth({ platform: "ebay", limit: 25, now });
+
+    expect(restored).toEqual([{
+      vendorId: 10,
+      storeConnectionId: 22,
+      platform: "ebay",
+      externalDisplayName: "marz_cards",
+      shopDomain: null,
+    }]);
+    const candidateSql = String(harness.pool.query.mock.calls[0]?.[0]);
+    expect(candidateSql).toContain("sc.setup_status = 'attention_required'");
+    expect(candidateSql).toContain("health_check.check_key = $2");
+    expect(candidateSql).toContain("ssc.check_key <> $2");
+    expect(harness.pool.query.mock.calls[0]?.[1]).toEqual(["ebay", "order_intake_health", 25]);
+
+    const calls = sqlCalls(harness.client);
+    expect(calls[0]).toBe("BEGIN");
+    expect(calls[1]).toContain("pg_advisory_xact_lock");
+    expect(calls[2]).toContain("FOR UPDATE");
+    const updateIndex = calls.findIndex((sql) => sql.includes("SET setup_status = 'ready'"));
+    expect(updateIndex).toBeGreaterThan(2);
+    // The UPDATE re-checks every condition under the lock.
+    expect(calls[updateIndex]).toContain("AND sc.status = 'connected'");
+    expect(calls[updateIndex]).toContain("AND sc.setup_status = 'attention_required'");
+    expect(calls[updateIndex]).toContain("health_check.check_key = $2");
+    expect(harness.client.query.mock.calls[updateIndex]?.[1]).toEqual([22, "order_intake_health", now]);
+    expect(calls.at(-1)).toBe("COMMIT");
+
+    const audit = harness.client.query.mock.calls.find(([, params]) =>
+      Array.isArray(params) && params.includes("store_setup_status_restored"));
+    expect(String(audit?.[0])).toContain("'dropship_store_connection'");
+    expect(JSON.parse(String((audit?.[1] as unknown[])[5]))).toEqual({
+      previousSetupStatus: "attention_required",
+      setupStatus: "ready",
+      reason: "order_intake_health_does_not_block",
+      healthStatus: "stopped",
+      consecutiveFailures: 21,
+      lastFailureCode: "DROPSHIP_EBAY_ORDER_MONEY_INVALID",
+    });
+  });
+
+  it("changes nothing when the store moved on before its lock was taken", async () => {
+    const harness = makeHarness({
+      connection: makeConnection({ setup_status: "attention_required" }),
+      candidateRows: [{ id: 22 }],
+      healthRows: [makeHealthRow({ status: "stopped", consecutive_failures: 6 })],
+      // Under the lock the guarded UPDATE finds another blocker, or a new status.
+      setupStatusRestoreRowCount: 0,
+    });
+    const repository = new PgDropshipOrderIntakeHealthRepository(harness.pool as any);
+
+    const restored = await repository.restoreStoresHeldOnlyByOrderIntakeHealth({ platform: "ebay", limit: 25, now });
+
+    expect(restored).toEqual([]);
+    expect(harness.client.query.mock.calls.some(([, params]) =>
+      Array.isArray(params) && params.includes("store_setup_status_restored"))).toBe(false);
+    expect(sqlCalls(harness.client).at(-1)).toBe("COMMIT");
+  });
+
+  it("does not restore a store of another platform", async () => {
+    const harness = makeHarness({
+      connection: makeConnection({ platform: "shopify", setup_status: "attention_required" }),
+      candidateRows: [{ id: 22 }],
+    });
+    const repository = new PgDropshipOrderIntakeHealthRepository(harness.pool as any);
+
+    expect(await repository.restoreStoresHeldOnlyByOrderIntakeHealth({ platform: "ebay", limit: 25, now })).toEqual([]);
+    expect(sqlCalls(harness.client).some((sql) => sql.includes("SET setup_status"))).toBe(false);
+  });
+
   it("fails closed when persisted health state contains an unknown status", async () => {
     const harness = makeHarness({
       healthRows: [makeHealthRow({ status: "mystery" })],
@@ -126,15 +231,19 @@ function makeHarness(input: {
   connection?: ReturnType<typeof makeConnection>;
   candidateRows?: Array<{ id: number }>;
   healthRows?: Array<ReturnType<typeof makeHealthRow>>;
+  setupStatusRestoreRowCount?: number;
 }) {
   const connection = input.connection ?? makeConnection();
   const client = {
-    query: vi.fn(async (sql: string) => {
+    query: vi.fn(async (sql: string, _params?: unknown[]) => {
       if (sql.includes("FROM dropship.dropship_store_connections") && sql.includes("FOR UPDATE")) {
         return { rows: [connection], rowCount: 1 };
       }
       if (sql.includes("FROM dropship.dropship_store_order_intake_health") && sql.includes("FOR UPDATE")) {
         return { rows: input.healthRows ?? [], rowCount: input.healthRows?.length ?? 0 };
+      }
+      if (sql.includes("SET setup_status")) {
+        return { rows: [], rowCount: input.setupStatusRestoreRowCount ?? 1 };
       }
       return { rows: [], rowCount: 1 };
     }),

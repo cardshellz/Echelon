@@ -34,6 +34,10 @@ interface CancellationActionRow extends CancellationCandidateRow {
   status: string;
 }
 
+interface ClaimedCancellationCandidateRow extends CancellationCandidateRow {
+  only_dropship_lines: boolean | null;
+}
+
 export class PgDropshipOrderCancellationRepository implements DropshipOrderCancellationRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
 
@@ -45,9 +49,31 @@ export class PgDropshipOrderCancellationRepository implements DropshipOrderCance
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN");
-      const result = await client.query<CancellationCandidateRow>(
+      // only_dropship_lines: for eBay, whether every line of the eBay order (the
+      // whole order, as recorded in raw_payload) sold through one of this store's
+      // dropship listings. eBay cancels whole orders, so the service refuses to
+      // cancel one that also sells the vendor's own items. A CASE fixes the order
+      // of the checks: jsonb_array_length fails on anything but an array. NULL
+      // for platforms this check does not cover.
+      const result = await client.query<ClaimedCancellationCandidateRow>(
         `WITH candidates AS (
-           SELECT oi.id
+           SELECT oi.id,
+                  CASE
+                    WHEN oi.platform <> 'ebay' THEN NULL
+                    WHEN jsonb_typeof(oi.raw_payload->'lineItems') IS DISTINCT FROM 'array' THEN false
+                    WHEN jsonb_array_length(oi.raw_payload->'lineItems') = 0 THEN false
+                    ELSE NOT EXISTS (
+                      SELECT 1
+                      FROM jsonb_array_elements(oi.raw_payload->'lineItems') AS line_item
+                      WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM dropship.dropship_vendor_listings dl
+                        WHERE dl.store_connection_id = oi.store_connection_id
+                          AND dl.vendor_id = oi.vendor_id
+                          AND dl.external_listing_id = line_item->>'legacyItemId'
+                      )
+                    )
+                  END AS only_dropship_lines
            FROM dropship.dropship_order_intake oi
            INNER JOIN dropship.dropship_store_connections sc ON sc.id = oi.store_connection_id
              AND sc.vendor_id = oi.vendor_id
@@ -80,7 +106,8 @@ export class PgDropshipOrderCancellationRepository implements DropshipOrderCance
                    oi.external_order_id, oi.external_order_number, oi.source_order_id,
                    oi.normalized_payload->>'orderedAt' AS ordered_at,
                    oi.rejection_reason,
-                   oi.cancellation_status`,
+                   oi.cancellation_status,
+                   candidates.only_dropship_lines`,
         [
           input.now,
           CLAIMABLE_CANCELLATION_STATUSES,
@@ -255,7 +282,7 @@ async function recordCancellationAuditEvent(
   );
 }
 
-function mapCancellationCandidateRow(row: CancellationCandidateRow): DropshipOrderCancellationCandidate {
+function mapCancellationCandidateRow(row: ClaimedCancellationCandidateRow): DropshipOrderCancellationCandidate {
   return {
     intakeId: row.id,
     vendorId: row.vendor_id,
@@ -267,6 +294,7 @@ function mapCancellationCandidateRow(row: CancellationCandidateRow): DropshipOrd
     orderedAt: row.ordered_at,
     rejectionReason: row.rejection_reason,
     cancellationStatus: row.cancellation_status,
+    onlyDropshipLines: row.only_dropship_lines,
   };
 }
 

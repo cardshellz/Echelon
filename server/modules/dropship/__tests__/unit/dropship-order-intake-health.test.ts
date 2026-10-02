@@ -111,6 +111,54 @@ describe("dropship order-intake health domain", () => {
   });
 });
 
+describe("DropshipOrderIntakeHealthService store recovery", () => {
+  it("restores the stores held only by their intake health check and logs each change", async () => {
+    const repository = fakeRepository({
+      restored: [{
+        vendorId: 10,
+        storeConnectionId: 22,
+        platform: "ebay",
+        externalDisplayName: "marz_cards",
+        shopDomain: null,
+      }],
+    });
+    const logger = nullLogger();
+    const service = new DropshipOrderIntakeHealthService({
+      repository,
+      clock: { now: () => now },
+      logger,
+      policy,
+    });
+
+    const restored = await service.restoreStoresHeldOnlyByOrderIntakeHealth({ platform: "ebay", limit: 25 });
+
+    expect(restored.map((store) => store.storeConnectionId)).toEqual([22]);
+    expect(repository.restoreStoresHeldOnlyByOrderIntakeHealth).toHaveBeenCalledWith({
+      platform: "ebay",
+      limit: 25,
+      now,
+    });
+    expect(logger.info).toHaveBeenCalledWith(expect.objectContaining({
+      code: "DROPSHIP_STORE_SETUP_STATUS_RESTORED",
+      context: expect.objectContaining({ storeConnectionId: 22, before: "attention_required", after: "ready" }),
+    }));
+  });
+
+  it("refuses invalid input before touching the repository", async () => {
+    const repository = fakeRepository({});
+    const service = new DropshipOrderIntakeHealthService({
+      repository,
+      clock: { now: () => now },
+      logger: nullLogger(),
+      policy,
+    });
+
+    await expect(service.restoreStoresHeldOnlyByOrderIntakeHealth({ platform: "", limit: 25 })).rejects.toThrow();
+    await expect(service.restoreStoresHeldOnlyByOrderIntakeHealth({ platform: "ebay", limit: 0 })).rejects.toThrow();
+    expect(repository.restoreStoresHeldOnlyByOrderIntakeHealth).not.toHaveBeenCalled();
+  });
+});
+
 describe("DropshipOrderIntakeHealthService notifications", () => {
   it("emails and records an in-app critical alert only when intake becomes degraded", async () => {
     const result = makeResult("degraded", "warning", true);
@@ -237,11 +285,13 @@ function makeResult(
 function fakeRepository(results: {
   succeeded?: DropshipOrderIntakeHealthRepositoryResult;
   failed?: DropshipOrderIntakeHealthRepositoryResult;
+  restored?: Awaited<ReturnType<DropshipOrderIntakeHealthRepository["restoreStoresHeldOnlyByOrderIntakeHealth"]>>;
 }): DropshipOrderIntakeHealthRepository {
   return {
     recordPollSucceeded: vi.fn(async () => results.succeeded ?? makeResult("healthy", null, true)),
     recordPollFailed: vi.fn(async () => results.failed ?? makeResult("warning", "healthy", true)),
     recordStalePolls: vi.fn(async () => []),
+    restoreStoresHeldOnlyByOrderIntakeHealth: vi.fn(async () => results.restored ?? []),
   };
 }
 

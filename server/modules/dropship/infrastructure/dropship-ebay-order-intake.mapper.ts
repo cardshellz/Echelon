@@ -2,6 +2,9 @@ import { DropshipError } from "../domain/errors";
 import type { RecordDropshipOrderIntakeInput } from "../application/dropship-order-intake-service";
 import type { EbayAmount, EbayOrder, EbayOrderLineItem } from "../../channels/adapters/ebay/ebay-types";
 
+/** A minus sign directly followed by an amount eBay could report: "-1", "-1.5", "-1.50". */
+const NEGATIVE_EBAY_AMOUNT_PATTERN = /^-(\d+(?:\.\d{1,2})?)$/;
+
 export interface EbayDropshipOrderIntakeStoreContext {
   vendorId: number;
   storeConnectionId: number;
@@ -10,6 +13,12 @@ export interface EbayDropshipOrderIntakeStoreContext {
 export function buildEbayDropshipOrderIntakeInput(input: {
   store: EbayDropshipOrderIntakeStoreContext;
   order: EbayOrder;
+  /**
+   * The order lines that sold through this store's dropship listings
+   * (`selectEbayDropshipLineItems`). Defaults to every line. The raw payload
+   * always keeps the whole eBay order for the audit trail.
+   */
+  lineItems?: readonly EbayOrderLineItem[];
 }): RecordDropshipOrderIntakeInput {
   const externalOrderId = readRequiredString(input.order.orderId, "orderId");
   const externalOrderNumber =
@@ -26,7 +35,7 @@ export function buildEbayDropshipOrderIntakeInput(input: {
     sourceOrderId: readOptionalString(input.order.legacyOrderId) ?? undefined,
     rawPayload: input.order as unknown as Record<string, unknown>,
     normalizedPayload: {
-      lines: buildEbayDropshipOrderLines(input.order),
+      lines: buildEbayDropshipOrderLines(input.order, input.lineItems),
       shipTo: buildEbayShipTo(input.order),
       totals: buildEbayTotals(input.order),
       orderedAt: readEbayOrderedAt(input.order),
@@ -39,9 +48,34 @@ export function buildEbayDropshipOrderIntakeInput(input: {
   };
 }
 
+/**
+ * The lines of an eBay order that sold through one of this store's dropship
+ * listings. A vendor's eBay store also sells the vendor's own items; those lines
+ * are not dropship work and never enter intake. A line counts only when its eBay
+ * item number is a listing this store published for dropship: a SKU alone is no
+ * proof, because the vendor may list their own stock under the same SKU.
+ */
+export function selectEbayDropshipLineItems(
+  order: EbayOrder,
+  dropshipListingIds: ReadonlySet<string>,
+): EbayOrderLineItem[] {
+  const lineItems = Array.isArray(order.lineItems) ? order.lineItems : [];
+  return lineItems.filter((item) => {
+    const itemId = readOptionalString(item.legacyItemId);
+    return itemId !== null && dropshipListingIds.has(itemId);
+  });
+}
+
 export function shouldRecordEbayDropshipOrder(input: {
   order: EbayOrder;
-}): { record: true } | { record: false; reason: string } {
+  dropshipListingIds: ReadonlySet<string>;
+}): { record: true; lineItems: EbayOrderLineItem[] } | { record: false; reason: string } {
+  // Checked first: an order with no dropship line is the vendor's own sale and is
+  // never recorded, so it can never be rejected, failed or cancelled by dropship.
+  const lineItems = selectEbayDropshipLineItems(input.order, input.dropshipListingIds);
+  if (lineItems.length === 0) {
+    return { record: false, reason: "no_dropship_listing" };
+  }
   const cancelState = readOptionalString(input.order.cancelStatus?.cancelState)?.toUpperCase();
   if (cancelState === "CANCELED" || cancelState === "CANCELLED") {
     return { record: false, reason: "order_cancelled" };
@@ -52,7 +86,29 @@ export function shouldRecordEbayDropshipOrder(input: {
   if (input.order.orderFulfillmentStatus === "FULFILLED") {
     return { record: false, reason: "order_already_fulfilled" };
   }
-  return { record: true };
+  return { record: true, lineItems };
+}
+
+/**
+ * A discount in cents. eBay can report a discount as a negative amount (for
+ * example "-1.50"); intake records the size of the discount either way. Any
+ * other value is read exactly as `parseEbayMoneyCents` reads it.
+ */
+export function parseEbayDiscountCents(value: unknown, field: string): number {
+  const raw = isEbayAmount(value) ? value.value : value;
+  const text = typeof raw === "string" ? raw.trim() : null;
+  if (text === null || !text.startsWith("-")) {
+    return parseEbayMoneyCents(value, field);
+  }
+  const negative = text.match(NEGATIVE_EBAY_AMOUNT_PATTERN);
+  if (!negative) {
+    throw new DropshipError(
+      "DROPSHIP_EBAY_ORDER_MONEY_INVALID",
+      "eBay order discount must be a decimal with at most two fractional digits.",
+      { field, value: raw, retryable: false },
+    );
+  }
+  return parseEbayMoneyCents(negative[1], field);
 }
 
 export function parseEbayMoneyCents(value: unknown, field: string): number {
@@ -84,8 +140,9 @@ export function parseEbayMoneyCents(value: unknown, field: string): number {
 
 function buildEbayDropshipOrderLines(
   order: EbayOrder,
+  selectedLineItems?: readonly EbayOrderLineItem[],
 ): RecordDropshipOrderIntakeInput["normalizedPayload"]["lines"] {
-  const lineItems = Array.isArray(order.lineItems) ? order.lineItems : [];
+  const lineItems = selectedLineItems ?? (Array.isArray(order.lineItems) ? order.lineItems : []);
   if (lineItems.length === 0) {
     throw new DropshipError(
       "DROPSHIP_EBAY_ORDER_LINES_REQUIRED",
@@ -152,7 +209,7 @@ function buildEbayTotals(
     retailSubtotalCents: parseEbayMoneyCents(pricing.priceSubtotal, "pricingSummary.priceSubtotal"),
     shippingPaidCents: parseEbayMoneyCents(pricing.deliveryCost, "pricingSummary.deliveryCost"),
     taxCents: parseEbayMoneyCents(pricing.tax, "pricingSummary.tax"),
-    discountCents: parseEbayMoneyCents(pricing.priceDiscount, "pricingSummary.priceDiscount"),
+    discountCents: parseEbayDiscountCents(pricing.priceDiscount, "pricingSummary.priceDiscount"),
     grandTotalCents: parseEbayMoneyCents(pricing.total, "pricingSummary.total"),
     currency: (readMoneyCurrency(pricing.total) ?? "USD").toUpperCase(),
   };

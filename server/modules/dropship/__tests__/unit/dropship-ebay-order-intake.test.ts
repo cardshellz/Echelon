@@ -20,7 +20,9 @@ import type {
 } from "../../infrastructure/dropship-marketplace-credentials";
 import {
   buildEbayDropshipOrderIntakeInput,
+  parseEbayDiscountCents,
   parseEbayMoneyCents,
+  selectEbayDropshipLineItems,
   shouldRecordEbayDropshipOrder,
 } from "../../infrastructure/dropship-ebay-order-intake.mapper";
 import { EbayDropshipOrderIntakeProvider } from "../../infrastructure/dropship-ebay-order-intake.provider";
@@ -112,13 +114,107 @@ describe("eBay dropship order intake mapper", () => {
   it("ignores unpaid, cancelled, and already fulfilled orders before intake recording", () => {
     expect(shouldRecordEbayDropshipOrder({
       order: { ...makeEbayOrder(), orderPaymentStatus: "PENDING" },
+      dropshipListingIds: DROPSHIP_LISTING_IDS,
     })).toEqual({ record: false, reason: "order_not_paid" });
     expect(shouldRecordEbayDropshipOrder({
       order: { ...makeEbayOrder(), cancelStatus: { cancelState: "CANCELED" } },
+      dropshipListingIds: DROPSHIP_LISTING_IDS,
     })).toEqual({ record: false, reason: "order_cancelled" });
     expect(shouldRecordEbayDropshipOrder({
       order: { ...makeEbayOrder(), orderFulfillmentStatus: "FULFILLED" },
+      dropshipListingIds: DROPSHIP_LISTING_IDS,
     })).toEqual({ record: false, reason: "order_already_fulfilled" });
+  });
+
+  it("ignores an order with no line sold through the store's dropship listings", () => {
+    // The vendor's own sale on the same eBay store: same SKU, a different item.
+    const ownSale = makeEbayOrder();
+    ownSale.lineItems![0].legacyItemId = "vendor-own-item";
+
+    expect(shouldRecordEbayDropshipOrder({
+      order: ownSale,
+      dropshipListingIds: DROPSHIP_LISTING_IDS,
+    })).toEqual({ record: false, reason: "no_dropship_listing" });
+    expect(shouldRecordEbayDropshipOrder({
+      order: makeEbayOrder(),
+      dropshipListingIds: new Set(),
+    })).toEqual({ record: false, reason: "no_dropship_listing" });
+  });
+
+  it("checks for a dropship line before anything else, so the vendor's own orders are never judged", () => {
+    const ownCancelledSale = {
+      ...makeEbayOrder(),
+      cancelStatus: { cancelState: "CANCELED" },
+    };
+    ownCancelledSale.lineItems = [{ ...ownCancelledSale.lineItems![0], legacyItemId: "vendor-own-item" }];
+
+    expect(shouldRecordEbayDropshipOrder({
+      order: ownCancelledSale,
+      dropshipListingIds: DROPSHIP_LISTING_IDS,
+    })).toEqual({ record: false, reason: "no_dropship_listing" });
+  });
+
+  it("keeps only the dropship lines of an order that also sells the vendor's own items", () => {
+    const mixed = makeEbayOrder();
+    mixed.lineItems = [
+      mixed.lineItems![0],
+      {
+        ...mixed.lineItems![0],
+        lineItemId: "line-own",
+        legacyItemId: "vendor-own-item",
+        sku: "SKU-101",
+        title: "Vendor's own toploader",
+      },
+    ];
+
+    const decision = shouldRecordEbayDropshipOrder({
+      order: mixed,
+      dropshipListingIds: DROPSHIP_LISTING_IDS,
+    });
+    expect(decision.record).toBe(true);
+    if (!decision.record) throw new Error("expected the mixed order to be recorded");
+    expect(decision.lineItems.map((item) => item.lineItemId)).toEqual(["line-1"]);
+
+    const input = buildEbayDropshipOrderIntakeInput({
+      store: { vendorId: 10, storeConnectionId: 22 },
+      order: mixed,
+      lineItems: decision.lineItems,
+    });
+    expect(input.normalizedPayload.lines.map((line) => line.externalLineItemId)).toEqual(["line-1"]);
+    // The audit copy of the order stays whole.
+    expect((input.rawPayload.lineItems as unknown[])).toHaveLength(2);
+    expect(recordDropshipOrderIntakeInputSchema.safeParse(input).success).toBe(true);
+  });
+
+  it("does not count a line without an eBay item number as a dropship line", () => {
+    const order = makeEbayOrder();
+    delete order.lineItems![0].legacyItemId;
+
+    expect(selectEbayDropshipLineItems(order, DROPSHIP_LISTING_IDS)).toEqual([]);
+    expect(selectEbayDropshipLineItems({ ...order, lineItems: undefined }, DROPSHIP_LISTING_IDS)).toEqual([]);
+  });
+
+  it("reads a discount eBay reports as a negative amount", () => {
+    expect(parseEbayDiscountCents({ value: "-1.50", currency: "USD" }, "discount")).toBe(150);
+    expect(parseEbayDiscountCents({ value: "1.50", currency: "USD" }, "discount")).toBe(150);
+    expect(parseEbayDiscountCents("-0.00", "discount")).toBe(0);
+    expect(parseEbayDiscountCents(undefined, "discount")).toBe(0);
+    for (const invalid of ["-", "--1.00", "-1.999", "- "]) {
+      expect(() => parseEbayDiscountCents(invalid, "discount")).toThrowError(
+        expect.objectContaining({ code: "DROPSHIP_EBAY_ORDER_MONEY_INVALID" }),
+      );
+    }
+
+    const order = makeEbayOrder();
+    order.pricingSummary!.priceDiscount = { value: "-1.00", currency: "USD" };
+    const input = buildEbayDropshipOrderIntakeInput({ store: { vendorId: 10, storeConnectionId: 22 }, order });
+    expect(input.normalizedPayload.totals?.discountCents).toBe(100);
+  });
+
+  it("keeps every other money field strict: a negative price is still refused", () => {
+    expect(() => parseEbayMoneyCents("-1.00", "pricingSummary.total")).toThrowError(
+      expect.objectContaining({ code: "DROPSHIP_EBAY_ORDER_MONEY_INVALID" }),
+    );
   });
 });
 
@@ -144,7 +240,7 @@ describe("EbayDropshipOrderIntakeProvider", () => {
     });
 
     const result = await provider.fetchOrders({
-      connection: { vendorId: 10, storeConnectionId: 22, lastOrderSyncAt: null },
+      connection: makeProviderConnection(),
       since: new Date("2026-05-03T14:00:00.000Z"),
       until: new Date("2026-05-03T15:00:00.000Z"),
     });
@@ -184,7 +280,7 @@ describe("EbayDropshipOrderIntakeProvider", () => {
     });
 
     const result = await provider.fetchOrders({
-      connection: { vendorId: 10, storeConnectionId: 22, lastOrderSyncAt: new Date("2026-05-03T15:30:00.000Z") },
+      connection: makeProviderConnection({ lastOrderSyncAt: new Date("2026-05-03T15:30:00.000Z") }),
       since: new Date("2026-05-03T15:15:00.000Z"),
       until: new Date("2026-05-03T15:30:00.000Z"),
     });
@@ -202,13 +298,98 @@ describe("EbayDropshipOrderIntakeProvider", () => {
     });
 
     await expect(provider.fetchOrders({
-      connection: { vendorId: 10, storeConnectionId: 22, lastOrderSyncAt: null },
+      connection: makeProviderConnection(),
       since: new Date("2026-05-03T15:15:00.000Z"),
       until: new Date("2026-05-03T15:30:00.000Z"),
     })).rejects.toMatchObject({ code: "DROPSHIP_EBAY_ORDER_INTAKE_HTTP_ERROR" });
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(credentials.authFailures).toHaveLength(0);
+  });
+
+  it("does not call eBay or load credentials for a store with no dropship listing", async () => {
+    const credentials = new FakeCredentialRepository();
+    const loadForStoreConnection = vi.spyOn(credentials, "loadForStoreConnection");
+    const fetchImpl = vi.fn();
+    const provider = new EbayDropshipOrderIntakeProvider(credentials, fetchImpl as any, {
+      now: () => new Date("2026-05-03T15:30:00.000Z"),
+    });
+
+    const result = await provider.fetchOrders({
+      connection: makeProviderConnection({ dropshipListingIds: [] }),
+      since: new Date("2026-05-03T15:15:00.000Z"),
+      until: new Date("2026-05-03T15:30:00.000Z"),
+    });
+
+    expect(result).toEqual({ orders: [], ignored: 0 });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(loadForStoreConnection).not.toHaveBeenCalled();
+  });
+
+  it("skips the vendor's own orders, even ones intake could not read, and records the dropship order", async () => {
+    // The incident: a non-dropship order on the vendor's store carried a money
+    // value intake cannot parse, and failing on it stopped every later poll.
+    const unreadableOwnSale = {
+      ...makeEbayOrder(),
+      orderId: "vendor-own-order",
+      pricingSummary: { ...makeEbayOrder().pricingSummary, total: { value: "not-money", currency: "USD" } },
+      lineItems: [{ ...makeEbayOrder().lineItems![0], legacyItemId: "vendor-own-item" }],
+    };
+    const credentials = new FakeCredentialRepository();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      href: "https://api.ebay.com/sell/fulfillment/v1/order",
+      total: 2,
+      limit: 50,
+      offset: 0,
+      orders: [unreadableOwnSale, makeEbayOrder()],
+    }), { status: 200 }));
+    const provider = new EbayDropshipOrderIntakeProvider(credentials, fetchImpl as any, {
+      now: () => new Date("2026-05-03T15:30:00.000Z"),
+    });
+
+    const result = await provider.fetchOrders({
+      connection: makeProviderConnection(),
+      since: new Date("2026-05-03T15:15:00.000Z"),
+      until: new Date("2026-05-03T15:30:00.000Z"),
+    });
+
+    expect(result.ignored).toBe(1);
+    expect(result.orders.map((order) => order.externalOrderId)).toEqual(["11-11111-11111"]);
+  });
+
+  it("names the eBay order and the field when a dropship order cannot be read", async () => {
+    const unreadable = {
+      ...makeEbayOrder(),
+      pricingSummary: { ...makeEbayOrder().pricingSummary, total: { value: "not-money", currency: "USD" } },
+    };
+    const credentials = new FakeCredentialRepository();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      href: "https://api.ebay.com/sell/fulfillment/v1/order",
+      total: 1,
+      limit: 50,
+      offset: 0,
+      orders: [unreadable],
+    }), { status: 200 }));
+    const provider = new EbayDropshipOrderIntakeProvider(credentials, fetchImpl as any, {
+      now: () => new Date("2026-05-03T15:30:00.000Z"),
+    });
+
+    const failure = await provider.fetchOrders({
+      connection: makeProviderConnection(),
+      since: new Date("2026-05-03T15:15:00.000Z"),
+      until: new Date("2026-05-03T15:30:00.000Z"),
+    }).then(() => null, (error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(DropshipError);
+    expect(failure).toMatchObject({
+      code: "DROPSHIP_EBAY_ORDER_MONEY_INVALID",
+      context: expect.objectContaining({
+        externalOrderId: "11-11111-11111",
+        field: "pricingSummary.total",
+        retryable: false,
+      }),
+    });
+    expect((failure as DropshipError).message).toContain("(eBay order 11-11111-11111, field pricingSummary.total)");
   });
 });
 
@@ -283,6 +464,50 @@ describe("DropshipEbayOrderIntakePollService", () => {
       platform: "ebay",
       syncedThrough: new Date("2026-05-03T15:00:00.000Z"),
     }]);
+  });
+
+  it("puts stores held only by their intake health back to ready before it lists stores to poll", async () => {
+    // An order recorded while its store is not ready is rejected, so the store
+    // must be ready before any of its orders are fetched.
+    const events: string[] = [];
+    const repository = new FakePollRepository(events);
+    const healthService = new FakeOrderIntakeHealthService(events);
+    const service = new DropshipEbayOrderIntakePollService({
+      repository,
+      healthService,
+      provider: { fetchOrders: vi.fn(async () => ({ ignored: 0, orders: [] })) },
+      orderIntakeService: { recordMarketplaceOrder: vi.fn() },
+      clock: { now: () => new Date("2026-05-03T15:00:00.000Z") },
+      logger: nullLogger(),
+    });
+
+    await service.pollConnectedStores({ limit: 10, initialLookbackMinutes: 240, overlapMinutes: 15 });
+
+    expect(events).toEqual(["restore stores", "list stores"]);
+    expect(healthService.restores).toEqual([{ platform: "ebay", limit: 10 }]);
+  });
+
+  it("still polls when putting stores back to ready fails, and logs it for a person", async () => {
+    const repository = new FakePollRepository();
+    const healthService = new FakeOrderIntakeHealthService();
+    healthService.restoreError = new Error("database unavailable");
+    const logger = nullLogger();
+    const service = new DropshipEbayOrderIntakePollService({
+      repository,
+      healthService,
+      provider: { fetchOrders: vi.fn(async () => ({ ignored: 0, orders: [] })) },
+      orderIntakeService: { recordMarketplaceOrder: vi.fn() },
+      clock: { now: () => new Date("2026-05-03T15:00:00.000Z") },
+      logger,
+    });
+
+    const result = await service.pollConnectedStores({ limit: 10, initialLookbackMinutes: 240, overlapMinutes: 15 });
+
+    expect(result).toMatchObject({ storesScanned: 1, storesSucceeded: 1 });
+    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({
+      code: "DROPSHIP_STORE_SETUP_STATUS_RESTORE_FAILED",
+      context: { error: "database unavailable" },
+    }));
   });
 
   it("does not advance the store sync cursor when order recording fails", async () => {
@@ -431,12 +656,59 @@ describe("PgDropshipEbayOrderIntakeRepository", () => {
     await repository.listPollableStoreConnections({ limit: 25 });
 
     const [sql, params] = dbPool.query.mock.calls[0] ?? [];
-    expect(sql).toContain("platform = 'ebay'");
-    expect(sql).toContain("status = 'connected'");
-    expect(sql).toContain("setup_status = 'ready'");
-    expect(sql).toContain("access_token_ref IS NOT NULL");
-    expect(sql).toContain("refresh_token_ref IS NOT NULL");
+    expect(sql).toContain("sc.platform = 'ebay'");
+    expect(sql).toContain("sc.status = 'connected'");
+    expect(sql).toContain("sc.setup_status = 'ready'");
+    expect(sql).not.toContain("attention_required");
+    expect(sql).toContain("sc.access_token_ref IS NOT NULL");
+    expect(sql).toContain("sc.refresh_token_ref IS NOT NULL");
     expect(params).toEqual([25]);
+  });
+
+  it("returns each store's dropship listing item numbers from its own listings", async () => {
+    const dbPool = {
+      query: vi.fn(async () => ({
+        rows: [{
+          id: 22,
+          vendor_id: 10,
+          platform: "ebay",
+          last_order_sync_at: null,
+          dropship_listing_ids: ["168741367796"],
+        }],
+      })),
+    };
+    const repository = new PgDropshipEbayOrderIntakeRepository(dbPool as any);
+
+    const connections = await repository.listPollableStoreConnections({ limit: 25 });
+
+    expect(connections).toEqual([{
+      vendorId: 10,
+      storeConnectionId: 22,
+      platform: "ebay",
+      lastOrderSyncAt: null,
+      dropshipListingIds: ["168741367796"],
+    }]);
+    const sql = String(dbPool.query.mock.calls[0]?.[0]);
+    expect(sql).toContain("FROM dropship.dropship_vendor_listings dl");
+    expect(sql).toContain("dl.store_connection_id = sc.id");
+    expect(sql).toContain("dl.vendor_id = sc.vendor_id");
+    expect(sql).toContain("dl.external_listing_id IS NOT NULL");
+    // Every listing counts whatever its status: an ended one can still have a paid order.
+    expect(sql).not.toContain("dl.status");
+  });
+
+  it("refuses listing ids that are not a list of strings", async () => {
+    const dbPool = {
+      query: vi.fn(async () => ({
+        rows: [{ id: 22, vendor_id: 10, platform: "ebay", last_order_sync_at: null, dropship_listing_ids: null }],
+      })),
+    };
+    const repository = new PgDropshipEbayOrderIntakeRepository(dbPool as any);
+
+    await expect(repository.listPollableStoreConnections({ limit: 25 })).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_ORDER_INTAKE_LISTING_IDS_INVALID",
+      context: { storeConnectionId: 22, retryable: false },
+    });
   });
 
   it("records an immutable conflict once under a transaction-scoped advisory lock", async () => {
@@ -524,8 +796,11 @@ class FakeCredentialRepository implements DropshipMarketplaceCredentialRepositor
 class FakePollRepository implements DropshipEbayOrderIntakeRepository {
   immutableConflicts: Array<Parameters<DropshipEbayOrderIntakeRepository["recordImmutableOrderConflict"]>[0]> = [];
 
+  constructor(private readonly events: string[] = []) {}
+
   async listPollableStoreConnections(): Promise<DropshipEbayOrderIntakeStoreConnection[]> {
-    return [{ vendorId: 10, storeConnectionId: 22, platform: "ebay", lastOrderSyncAt: null }];
+    this.events.push("list stores");
+    return [makeProviderConnection()];
   }
 
   async recordImmutableOrderConflict(
@@ -537,6 +812,18 @@ class FakePollRepository implements DropshipEbayOrderIntakeRepository {
 }
 
 class FakeOrderIntakeHealthService {
+  restores: Array<{ platform: string; limit: number }> = [];
+  restoreError: Error | null = null;
+
+  constructor(private readonly events: string[] = []) {}
+
+  async restoreStoresHeldOnlyByOrderIntakeHealth(input: { platform: string; limit: number }): Promise<[]> {
+    this.events.push("restore stores");
+    this.restores.push(input);
+    if (this.restoreError) throw this.restoreError;
+    return [];
+  }
+
   successes: Array<{
     vendorId: number;
     storeConnectionId: number;
@@ -558,6 +845,21 @@ class FakeOrderIntakeHealthService {
   async recordPollFailed(input: (typeof this.failures)[number]): Promise<void> {
     this.failures.push(input);
   }
+}
+
+const DROPSHIP_LISTING_IDS: ReadonlySet<string> = new Set(["listing-1"]);
+
+function makeProviderConnection(
+  overrides: Partial<DropshipEbayOrderIntakeStoreConnection> = {},
+): DropshipEbayOrderIntakeStoreConnection {
+  return {
+    vendorId: 10,
+    storeConnectionId: 22,
+    platform: "ebay",
+    lastOrderSyncAt: null,
+    dropshipListingIds: ["listing-1"],
+    ...overrides,
+  };
 }
 
 function nullLogger() {

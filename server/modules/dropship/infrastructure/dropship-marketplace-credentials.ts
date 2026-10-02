@@ -5,6 +5,7 @@ import type { DropshipStoreConnectionTokenRecord } from "../application/dropship
 import type { DropshipSupportedStorePlatform } from "../domain/store-connection";
 import { DropshipError } from "../domain/errors";
 import { AesGcmDropshipStoreTokenCipher } from "./dropship-token-cipher";
+import { hasOpenStoreSetupBlockers } from "./dropship-store-setup-blockers";
 import type {
   DropshipLogger,
   DropshipNotificationSender,
@@ -740,22 +741,6 @@ async function resolveStoreAuthHealthCheck(
        AND resolved_at IS NULL`,
     [storeConnectionId, now],
   );
-}
-
-async function hasOpenStoreSetupBlockers(
-  client: PoolClient,
-  storeConnectionId: number,
-): Promise<boolean> {
-  const result = await client.query<{ count: string | number }>(
-    `SELECT COUNT(*) AS count
-     FROM dropship.dropship_store_setup_checks
-     WHERE store_connection_id = $1
-       AND resolved_at IS NULL
-       AND status <> 'passed'
-       AND severity IN ('blocker','error')`,
-    [storeConnectionId],
-  );
-  return Number(result.rows[0]?.count ?? 0) > 0;
 }
 
 async function recordStoreAuthHealthAuditEvent(

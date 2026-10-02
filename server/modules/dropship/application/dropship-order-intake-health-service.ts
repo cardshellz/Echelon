@@ -57,6 +57,11 @@ export interface DropshipOrderIntakeHealthRepository {
     now: Date;
     policy: DropshipOrderIntakeHealthPolicy;
   }): Promise<DropshipOrderIntakeHealthRepositoryResult[]>;
+  restoreStoresHeldOnlyByOrderIntakeHealth(input: {
+    platform: string;
+    limit: number;
+    now: Date;
+  }): Promise<DropshipOrderIntakeHealthConnectionIdentity[]>;
 }
 
 export interface DropshipOrderIntakeHealthServiceDependencies {
@@ -137,6 +142,39 @@ export class DropshipOrderIntakeHealthService {
       storesEvaluated: results.length,
       storesTransitioned: results.filter((result) => result.transition.transitioned).length,
     };
+  }
+
+  /**
+   * Puts back to "ready" the stores held in "attention_required" only by their
+   * order-intake health check, which no longer blocks a store. Run it before a
+   * poll lists its stores, so their orders are recorded while launch-ready.
+   */
+  async restoreStoresHeldOnlyByOrderIntakeHealth(input: {
+    platform: string;
+    limit: number;
+  }): Promise<DropshipOrderIntakeHealthConnectionIdentity[]> {
+    const parsed = z.object({
+      platform: platformSchema,
+      limit: z.number().int().positive().max(1000),
+    }).strict().parse(input);
+    const restored = await this.deps.repository.restoreStoresHeldOnlyByOrderIntakeHealth({
+      ...parsed,
+      now: this.deps.clock.now(),
+    });
+    for (const connection of restored) {
+      this.deps.logger.info({
+        code: "DROPSHIP_STORE_SETUP_STATUS_RESTORED",
+        message: "Dropship store is ready again: only its order-intake health check was holding it.",
+        context: {
+          vendorId: connection.vendorId,
+          storeConnectionId: connection.storeConnectionId,
+          platform: connection.platform,
+          before: "attention_required",
+          after: "ready",
+        },
+      });
+    }
+    return restored;
   }
 
   private async notifyTransition(result: DropshipOrderIntakeHealthRepositoryResult): Promise<void> {

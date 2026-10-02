@@ -6,6 +6,7 @@ import type {
   DropshipStoreWebhookRepairRepository,
 } from "../application/dropship-store-webhook-repair-service";
 import { PgDropshipMarketplaceCredentialRepository } from "./dropship-marketplace-credentials";
+import { hasOpenStoreSetupBlockers } from "./dropship-store-setup-blockers";
 
 interface StoreConnectionLookupRow {
   id: number;
@@ -13,10 +14,6 @@ interface StoreConnectionLookupRow {
   platform: string;
   status: string;
   shop_domain: string | null;
-}
-
-interface CountRow {
-  count: string | number;
 }
 
 interface UpdatedStoreConnectionRow {
@@ -178,22 +175,6 @@ async function upsertWebhookRepairSetupCheck(
       input.repairedAt,
     ],
   );
-}
-
-async function hasOpenStoreSetupBlockers(
-  client: PoolClient,
-  storeConnectionId: number,
-): Promise<boolean> {
-  const result = await client.query<CountRow>(
-    `SELECT COUNT(*) AS count
-     FROM dropship.dropship_store_setup_checks
-     WHERE store_connection_id = $1
-       AND resolved_at IS NULL
-       AND status <> 'passed'
-       AND severity IN ('blocker','error')`,
-    [storeConnectionId],
-  );
-  return Number(result.rows[0]?.count ?? 0) > 0;
 }
 
 async function updateShopifyStoreSetupStatus(

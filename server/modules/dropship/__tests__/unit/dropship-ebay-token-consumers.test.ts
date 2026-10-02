@@ -217,7 +217,9 @@ function makeFetch(repo: CoordinatedCredentialRepository) {
 async function runConsumer(name: ConsumerName, repo: DropshipMarketplaceCredentialRepository, fetchFn: typeof fetch): Promise<unknown> {
   if (name === "order intake") {
     return new EbayDropshipOrderIntakeProvider(repo, fetchFn, clock).fetchOrders({
-      connection: { ...identity, platform: "ebay", lastOrderSyncAt: null }, since: NOW, until: NOW,
+      // A store with no dropship listing never calls eBay, so this store has one.
+      connection: { ...identity, platform: "ebay", lastOrderSyncAt: null, dropshipListingIds: ["listing-1"] },
+      since: NOW, until: NOW,
     });
   }
   if (name === "return intake") {

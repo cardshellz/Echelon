@@ -12,6 +12,7 @@ import type {
 const DEFAULT_CANCELLATION_BATCH_LIMIT = 100;
 const PAYMENT_HOLD_EXPIRED_REASON = "Payment hold expired before wallet funds were available.";
 const MARKETPLACE_CANCELLATION_FAILED_REASON_PREFIX = "Marketplace cancellation failed:";
+export const NON_DROPSHIP_LINES_CANCELLATION_CODE = "DROPSHIP_ORDER_CANCELLATION_HAS_NON_DROPSHIP_LINES";
 
 const processDropshipOrderCancellationsInputSchema = z.object({
   workerId: z.string().trim().min(1).max(255),
@@ -33,6 +34,12 @@ export interface DropshipOrderCancellationCandidate {
     | "order_intake_rejected"
     | "marketplace_cancellation_retrying"
     | "marketplace_cancellation_processing";
+  /**
+   * Whether every line of the marketplace order sold through one of the
+   * store's dropship listings. `null` when the platform's orders are not
+   * checked this way (only eBay orders are).
+   */
+  onlyDropshipLines: boolean | null;
 }
 
 export interface DropshipOrderCancellationRepository {
@@ -96,6 +103,7 @@ export class DropshipOrderCancellationService {
     for (const candidate of candidates) {
       result.attempted += 1;
       try {
+        assertCancellationCoversOnlyDropshipLines(candidate);
         const cancellation = await this.deps.marketplaceCancellation.cancelOrder(
           buildCancellationRequest(candidate),
         );
@@ -154,6 +162,32 @@ export class DropshipOrderCancellationService {
 
     return result;
   }
+}
+
+/**
+ * A marketplace cancels a whole order. Echelon asks for that only when every
+ * line of the order sold through one of the store's dropship listings: any
+ * other line is the vendor's own sale, and cancelling it would cancel the
+ * vendor's own business. Such an order is refused as a permanent failure, so
+ * it is left for review and never sent to the marketplace.
+ */
+export function assertCancellationCoversOnlyDropshipLines(
+  candidate: Pick<
+    DropshipOrderCancellationCandidate,
+    "intakeId" | "storeConnectionId" | "externalOrderId" | "onlyDropshipLines"
+  >,
+): void {
+  if (candidate.onlyDropshipLines !== false) return;
+  throw new DropshipError(
+    NON_DROPSHIP_LINES_CANCELLATION_CODE,
+    "The marketplace order has lines that are not this store's dropship listings, so Echelon will not cancel it. Review the order.",
+    {
+      intakeId: candidate.intakeId,
+      storeConnectionId: candidate.storeConnectionId,
+      externalOrderId: candidate.externalOrderId,
+      retryable: false,
+    },
+  );
 }
 
 export function buildCancellationRequest(

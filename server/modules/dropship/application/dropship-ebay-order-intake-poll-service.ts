@@ -14,6 +14,12 @@ export interface DropshipEbayOrderIntakeStoreConnection {
   storeConnectionId: number;
   platform: "ebay";
   lastOrderSyncAt: Date | null;
+  /**
+   * eBay item numbers (`legacyItemId`) of every listing this store published
+   * for dropship. Only order lines sold through one of these are dropship work;
+   * the rest of the vendor's eBay store is the vendor's own business.
+   */
+  dropshipListingIds: readonly string[];
 }
 
 export interface DropshipEbayOrderIntakeOrder {
@@ -71,7 +77,7 @@ export interface DropshipEbayOrderIntakePollServiceDependencies {
   repository: DropshipEbayOrderIntakeRepository;
   healthService: Pick<
     DropshipOrderIntakeHealthService,
-    "recordPollSucceeded" | "recordPollFailed"
+    "recordPollSucceeded" | "recordPollFailed" | "restoreStoresHeldOnlyByOrderIntakeHealth"
   >;
   provider: DropshipEbayOrderIntakeProvider;
   orderIntakeService: Pick<DropshipOrderIntakeService, "recordMarketplaceOrder">;
@@ -88,6 +94,7 @@ export class DropshipEbayOrderIntakePollService {
     overlapMinutes: number;
   }): Promise<DropshipEbayOrderIntakeSweepResult> {
     const now = this.deps.clock.now();
+    await this.restoreStoresHeldOnlyByIntakeHealthSafely(input.limit);
     const connections = await this.deps.repository.listPollableStoreConnections({
       limit: input.limit,
     });
@@ -162,6 +169,25 @@ export class DropshipEbayOrderIntakePollService {
     }
 
     return result;
+  }
+
+  /**
+   * Runs before the stores are listed, so a store left in "attention_required"
+   * only by its intake health check is ready again before its orders are
+   * fetched: an order recorded while the store is not ready is rejected. A
+   * failure here is logged and the sweep goes on; such a store is then simply
+   * not polled this time, and the next sweep tries again.
+   */
+  private async restoreStoresHeldOnlyByIntakeHealthSafely(limit: number): Promise<void> {
+    try {
+      await this.deps.healthService.restoreStoresHeldOnlyByOrderIntakeHealth({ platform: "ebay", limit });
+    } catch (error) {
+      this.deps.logger.error({
+        code: "DROPSHIP_STORE_SETUP_STATUS_RESTORE_FAILED",
+        message: "Dropship eBay order intake could not restore stores held only by their intake health check.",
+        context: { error: error instanceof Error ? error.message : String(error) },
+      });
+    }
   }
 
   private async recordPollFailureSafely(
