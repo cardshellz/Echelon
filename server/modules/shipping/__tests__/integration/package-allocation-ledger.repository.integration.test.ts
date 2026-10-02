@@ -1050,6 +1050,15 @@ function planIndexNames(root: Record<string, unknown>): readonly string[] {
   return [...names].sort();
 }
 
+async function channelCommandWorkerTime(pool: Pool, currentTime: Date): Promise<Date> {
+  // Command admission uses PostgreSQL now(). Advance from the persisted schedule
+  // instead of a calendar deadline, rounding past PostgreSQL's sub-millisecond precision.
+  const { rows } = await pool.query<{ due_at: Date | null }>(
+    "SELECT MAX(next_attempt_at) + INTERVAL '1 millisecond' AS due_at FROM oms.channel_fulfillment_pushes",
+  );
+  return new Date(Math.max(currentTime.getTime(), rows[0].due_at?.getTime() ?? currentTime.getTime()));
+}
+
 describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () => {
   let pool: Pool;
 
@@ -1108,13 +1117,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     let workerTime = new Date("2026-09-18T12:00:00Z");
     const clock = { now: () => new Date(workerTime) };
     async function advanceWorkerClockToDueCommands() {
-      // Command admission uses PostgreSQL now(). A fixed test date eventually
-      // precedes that deadline. Advance this injected worker clock from the
-      // persisted schedule, rounding past PostgreSQL's sub-millisecond precision.
-      const { rows } = await pool.query<{ due_at: Date | null }>(
-        "SELECT MAX(next_attempt_at) + INTERVAL '1 millisecond' AS due_at FROM oms.channel_fulfillment_pushes",
-      );
-      if (rows[0].due_at && rows[0].due_at > workerTime) workerTime = rows[0].due_at;
+      workerTime = await channelCommandWorkerTime(pool, workerTime);
     }
     const workflow = createPackageAllocationLabelCommercialWorkflow({ pool, clock, logger });
     let failBeforeCommit = false;
@@ -1846,7 +1849,8 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     }
     await seedCanonicalRequestForSource(pool, source);
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    const clock = { now: () => new Date('2099-10-01T12:00:00Z') };
+    let workerTime = new Date('2026-10-01T12:00:00Z');
+    const clock = { now: () => new Date(workerTime) };
     const workflow = createPackageAllocationLabelCommercialWorkflow({ pool, clock, logger });
     let rollback = false;
     const handler = new PackageAllocationLabelCommercialFulfillmentService({ enabled: true, logger,
@@ -1918,7 +1922,15 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       } });
       const worker = createChannelFulfillmentAuthorityService({ repository: createChannelFulfillmentAuthorityRepository(getTestDb()),
         providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor(push), projector: createChannelFulfillmentProjector(getTestDb()), clock, logger });
-      expect(await worker.runDueBatch(), JSON.stringify(logger.error.mock.calls)).toMatchObject({ succeeded: 2, retryScheduled: 0, reviewRequired: 0 });
+      const queued = await pool.query<{ tracking_number: string; push_status: string; attempt_count: number }>(
+        "SELECT tracking_number, push_status, attempt_count FROM oms.channel_fulfillment_pushes WHERE tracking_number = ANY($1::text[]) ORDER BY tracking_number",
+        [['REPACK71002', 'REPACK71003']],
+      );
+      expect(queued.rows).toEqual(['REPACK71002', 'REPACK71003'].map(tracking => ({
+        tracking_number: tracking, push_status: 'pending', attempt_count: 0,
+      })));
+      workerTime = await channelCommandWorkerTime(pool, workerTime);
+      expect(await worker.runDueBatch(), JSON.stringify(logger.error.mock.calls)).toMatchObject({ claimed: 2, succeeded: 2, retryScheduled: 0, reviewRequired: 0 });
       expect(amend).toHaveBeenCalledTimes(2);
     }
     await voidLabel(a.id); await voidLabel(b.id);

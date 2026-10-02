@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react";
+import { useCallback, useId, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   listingRequirementsSchema,
@@ -21,30 +21,32 @@ import { Textarea } from "@/components/ui/textarea";
 import { publicationRequest } from "./api";
 import { errorMessage, labelForKey, money } from "./model";
 import { ListingProductTypePicker } from "./ListingProductTypePicker";
-import { SchemaFields } from "./SchemaFields";
+import { ListingBulkItemTable } from "./ListingBulkItemTable";
 import {
   buildSchemaFieldModel,
   type SchemaFieldNode,
 } from "./schema-field-model";
+import { commonBulkContext, type BulkEditPatch } from "./bulk-edit-model";
 import {
-  bulkEditPatchSchema,
-  bulkFixedPriceCents,
-  commonBulkContext,
-  previewBulkEdit,
-  updateBulkAttribute,
-  type BulkAttributeChange,
-  type BulkEditPatch,
-} from "./bulk-edit-model";
+  buildBulkFieldPatch,
+  projectBulkField,
+  setBulkFieldEdit,
+  undoBulkFieldEdit,
+  type BulkFieldEdits,
+  type BulkContentField,
+} from "./bulk-field-state";
+import {
+  previewBulkEditBatch,
+  resetBulkAttributeEdits,
+  setBulkItemAttribute,
+  setBulkSharedAttribute,
+  undoBulkItemAttribute,
+  undoBulkSharedAttribute,
+  type BulkEditCommand,
+} from "./bulk-edit-batch";
 
-type OverrideField =
-  | "brand"
-  | "title"
-  | "description"
-  | "images"
-  | "priceOverrideCents";
-type EditMode = "unchanged" | "override" | "inherit";
 const OVERRIDES: readonly {
-  field: OverrideField;
+  field: BulkContentField;
   label: string;
   maximum: number;
   multiline?: boolean;
@@ -79,61 +81,87 @@ const FIELD_LABELS: Record<string, string> = {
 
 function OverrideControl({
   definition,
-  mode,
   value,
-  onMode,
+  placeholder,
+  hint,
+  changed,
+  onInherit,
+  onUndo,
   onValue,
 }: {
   definition: (typeof OVERRIDES)[number];
-  mode: EditMode;
   value: string;
-  onMode(mode: EditMode): void;
+  placeholder: string;
+  hint: string;
+  changed: boolean;
+  onInherit(): void;
+  onUndo(): void;
   onValue(value: string): void;
 }) {
   const prefix = useId();
   const { field, label, maximum, multiline } = definition;
   return (
     <div className="min-w-0 space-y-2">
-      <Label htmlFor={`${prefix}-mode`}>{label} action</Label>
-      <select
-        id={`${prefix}-mode`}
-        className={SELECT_CLASS}
-        value={mode}
-        onChange={(event) => onMode(event.target.value as EditMode)}
-      >
-        <option value="unchanged">Leave unchanged</option>
-        <option value="override">Set for selected drafts</option>
-        <option value="inherit">Inherit catalog/rules</option>
-      </select>
-      {mode === "override" && (
-        <div className="space-y-1.5">
-          <Label htmlFor={`${prefix}-value`}>
-            Shared {label.toLowerCase()}
-          </Label>
-          {multiline ? (
-            <Textarea
-              id={`${prefix}-value`}
-              rows={3}
-              maxLength={maximum}
-              value={value}
-              onChange={(event) => onValue(event.target.value)}
-            />
-          ) : (
-            <Input
-              id={`${prefix}-value`}
-              maxLength={maximum}
-              inputMode={field === "priceOverrideCents" ? "decimal" : undefined}
-              value={value}
-              onChange={(event) => onValue(event.target.value)}
-            />
-          )}
-          {field === "images" && (
-            <p className="text-xs text-muted-foreground">
-              One URL per line, up to 20. This replaces the selected items'
-              image overrides.
-            </p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Label htmlFor={`${prefix}-value`}>{label}</Label>
+        <div className="flex flex-wrap gap-1">
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            aria-label={
+              field === "priceOverrideCents"
+                ? "Use pricing rules"
+                : `Use catalog ${label.toLowerCase()}`
+            }
+            onClick={onInherit}
+          >
+            {field === "priceOverrideCents"
+              ? "Use pricing rules"
+              : "Use catalog"}
+          </Button>
+          {changed && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              aria-label={`Undo ${label.toLowerCase()} change`}
+              onClick={onUndo}
+            >
+              Undo change
+            </Button>
           )}
         </div>
+      </div>
+      {multiline ? (
+        <Textarea
+          id={`${prefix}-value`}
+          rows={3}
+          maxLength={maximum}
+          value={value}
+          placeholder={placeholder}
+          aria-describedby={`${prefix}-hint`}
+          onChange={(event) => onValue(event.target.value)}
+        />
+      ) : (
+        <Input
+          id={`${prefix}-value`}
+          maxLength={maximum}
+          inputMode={field === "priceOverrideCents" ? "decimal" : undefined}
+          value={value}
+          placeholder={placeholder}
+          aria-describedby={`${prefix}-hint`}
+          onChange={(event) => onValue(event.target.value)}
+        />
+      )}
+      <p id={`${prefix}-hint`} className="text-xs text-muted-foreground">
+        {hint}
+      </p>
+      {field === "images" && (
+        <p className="text-xs text-muted-foreground">
+          One URL per line, up to 20. This replaces the selected items' image
+          overrides.
+        </p>
       )}
     </div>
   );
@@ -146,7 +174,7 @@ export interface ListingBulkEditorProps {
   metadata: ReadonlyMap<number, ListingCatalogItem>;
   canEdit: boolean;
   onClose(): void;
-  onApply(patch: BulkEditPatch): void;
+  onApply(command: BulkEditCommand): void;
 }
 
 export function ListingBulkEditor({
@@ -158,40 +186,36 @@ export function ListingBulkEditor({
   onApply,
 }: ListingBulkEditorProps) {
   const prefix = useId();
-  const [method, setMethod] = useState<
-    "unchanged" | ListingDraftItem["method"]
-  >("unchanged");
-  const [changeType, setChangeType] = useState(false);
-  const [productType, setProductType] = useState("");
-  const [modes, setModes] = useState<Partial<Record<OverrideField, EditMode>>>(
-    {},
-  );
-  const [values, setValues] = useState<Partial<Record<OverrideField, string>>>(
-    {},
-  );
-  const [changeAttributes, setChangeAttributes] = useState(false);
-  const [attributeValues, setAttributeValues] = useState<
-    Record<string, unknown>
-  >({});
-  const [attributeChanges, setAttributeChanges] = useState<
-    BulkAttributeChange[]
-  >([]);
+  const [method, setMethod] = useState<ListingDraftItem["method"]>();
+  const [productType, setProductType] = useState<string>();
+  const [fieldEdits, setFieldEdits] = useState<BulkFieldEdits>({});
+  const [attributeCommand, setAttributeCommand] = useState<BulkEditCommand>({
+    shared: {},
+    itemChanges: [],
+  });
   const [error, setError] = useState("");
   const [attributeError, setAttributeError] = useState("");
+  const [tableError, setTableError] = useState<string | null>(null);
+  const [attributeBufferRevision, setAttributeBufferRevision] = useState(0);
+  const handleTableValidity = useCallback((failure: string | null) => {
+    setTableError(failure);
+    if (!failure) setAttributeError("");
+  }, []);
+  const methodState = projectBulkField(items, metadata, "method");
+  const typeState = projectBulkField(items, metadata, "productType");
   const contextPatch = {
-    ...(method !== "unchanged" ? { method } : {}),
-    ...(changeType && productType ? { productType } : {}),
+    ...(method !== undefined ? { method } : {}),
+    ...(productType !== undefined ? { productType } : {}),
   };
   const context = commonBulkContext(items, contextPatch);
   const taxonomy = useQuery({
     queryKey: [base, "taxonomy"],
-    enabled: changeType,
     queryFn: () =>
       publicationRequest("GET", `${base}/taxonomy`, listingTaxonomySchema),
   });
   const requirements = useQuery({
     queryKey: [base, "requirements", context?.productType, context?.method],
-    enabled: changeAttributes && context !== null,
+    enabled: context !== null,
     queryFn: () =>
       publicationRequest(
         "GET",
@@ -207,11 +231,9 @@ export function ListingBulkEditor({
         titles.set(JSON.stringify(node.path), node.schema.title);
       node.children.forEach(visit);
     };
-    visit(
-      buildSchemaFieldModel(requirements.data.schema, attributeValues).root,
-    );
+    visit(buildSchemaFieldModel(requirements.data.schema, {}).root);
     return titles;
-  }, [requirements.data, attributeValues]);
+  }, [requirements.data]);
   function attributeLabel(path: readonly string[]): string {
     return path
       .map((key, index) => {
@@ -224,75 +246,112 @@ export function ListingBulkEditor({
       .join(" › ");
   }
   function resetAttributes() {
-    setAttributeValues({});
-    setAttributeChanges([]);
+    setAttributeCommand((previous) => resetBulkAttributeEdits(previous));
     setError("");
     setAttributeError("");
+    setTableError(null);
+    setAttributeBufferRevision((previous) => previous + 1);
   }
+  function changeContext(
+    nextMethod: ListingDraftItem["method"] | undefined,
+    nextType: string | undefined,
+  ) {
+    const next = commonBulkContext(items, {
+      ...(nextMethod !== undefined ? { method: nextMethod } : {}),
+      ...(nextType !== undefined ? { productType: nextType } : {}),
+    });
+    if (
+      context?.method !== next?.method ||
+      context?.productType !== next?.productType
+    )
+      resetAttributes();
+    setMethod(nextMethod);
+    setProductType(nextType);
+  }
+  // An invalid unfinished price/content buffer must not make already-edited row
+  // attributes disappear. Project the table independently of those buffers.
+  const tableItems = useMemo(() => {
+    try {
+      return previewBulkEditBatch(items, {
+        shared: { ...attributeCommand.shared, ...contextPatch },
+        itemChanges: attributeCommand.itemChanges,
+      }).effectiveItems;
+    } catch {
+      // The complete preview below reports the same validation error and blocks Apply.
+      return items;
+    }
+  }, [items, method, productType, attributeCommand]);
   const prepared = useMemo(() => {
     try {
       const patch: BulkEditPatch = {
-        ...(method !== "unchanged" ? { method } : {}),
-        ...(changeType ? { productType } : {}),
+        ...attributeCommand.shared,
+        ...contextPatch,
+        ...buildBulkFieldPatch(fieldEdits),
       };
-      if (changeType && !productType)
-        throw new Error(
-          "Choose a Walmart product type to apply to the selected drafts.",
-        );
-      for (const { field, label } of OVERRIDES) {
-        const mode = modes[field] ?? "unchanged";
-        if (mode === "unchanged") continue;
-        if (mode === "inherit") {
-          patch[field] = null;
-          continue;
-        }
-        const value = values[field] ?? "";
-        if (!value.trim())
-          throw new Error(
-            `Enter ${label.toLowerCase()}, or choose Inherit catalog/rules.`,
-          );
-        if (field === "priceOverrideCents")
-          patch.priceOverrideCents = bulkFixedPriceCents(value);
-        else if (field === "images")
-          patch.images = value
-            .split(/\r?\n/)
-            .map((url) => url.trim())
-            .filter(Boolean);
-        else patch[field] = value;
-      }
-      if (changeAttributes && attributeChanges.length)
-        patch.attributeChanges = attributeChanges;
-      const parsed = bulkEditPatchSchema.parse(patch);
+      const command = {
+        shared: patch,
+        itemChanges: attributeCommand.itemChanges,
+      };
+      const result = previewBulkEditBatch(items, command);
       return {
-        patch: parsed,
-        preview: previewBulkEdit(items, parsed),
+        patch,
+        command,
+        preview: result.preview,
+        effectiveItems: result.effectiveItems,
         error: "",
       };
     } catch (failure) {
-      return { patch: null, preview: null, error: errorMessage(failure) };
+      return {
+        patch: null,
+        command: null,
+        preview: null,
+        effectiveItems: items,
+        error: errorMessage(failure),
+      };
     }
-  }, [
-    items,
-    method,
-    changeType,
-    productType,
-    modes,
-    values,
-    changeAttributes,
-    attributeChanges,
-  ]);
+  }, [items, method, productType, fieldEdits, attributeCommand]);
   function apply() {
-    if (!canEdit || !prepared.patch || !prepared.preview?.changedCount) return;
+    if (
+      !canEdit ||
+      !prepared.command ||
+      !prepared.preview?.changedCount ||
+      tableError ||
+      attributeError
+    )
+      return;
     try {
-      onApply(prepared.patch);
+      onApply(prepared.command);
     } catch (failure) {
       setError(errorMessage(failure));
     }
   }
   const attributesBusy =
-    changeAttributes &&
-    Boolean(attributeChanges.length) &&
+    Boolean(
+      attributeCommand.shared.attributeChanges?.length ||
+        attributeCommand.itemChanges.length,
+    ) &&
     (requirements.isFetching || Boolean(requirements.error));
+  function editAttributes(
+    edit: (command: BulkEditCommand) => BulkEditCommand,
+  ): boolean {
+    if (!canEdit) return false;
+    try {
+      setAttributeCommand(edit(attributeCommand));
+      setAttributeError("");
+      return true;
+    } catch (failure) {
+      setAttributeError(errorMessage(failure));
+      return false;
+    }
+  }
+  function valueLabel(value: unknown, path: readonly string[]): string {
+    if (value === undefined) return "Not set";
+    if (value === null)
+      return path[0] === "attributes" ? "null" : "Use catalog/pricing";
+    if (path[0] === "priceOverrideCents" && typeof value === "number")
+      return money(value);
+    return typeof value === "object" ? JSON.stringify(value) : String(value);
+  }
   function previewFieldLabel(field: string): string {
     if (FIELD_LABELS[field]) return FIELD_LABELS[field];
     const paths = prepared.patch?.attributeChanges
@@ -302,20 +361,61 @@ export function ListingBulkEditor({
       ? [...new Set(paths)].join(", ")
       : attributeLabel(field.replace(/^attributes\./, "").split("."));
   }
-  const renderOverride = (definition: (typeof OVERRIDES)[number]) => (
-    <OverrideControl
-      key={definition.field}
-      definition={definition}
-      mode={modes[definition.field] ?? "unchanged"}
-      value={values[definition.field] ?? ""}
-      onMode={(mode) =>
-        setModes((previous) => ({ ...previous, [definition.field]: mode }))
-      }
-      onValue={(value) =>
-        setValues((previous) => ({ ...previous, [definition.field]: value }))
-      }
-    />
-  );
+  const renderOverride = (definition: (typeof OVERRIDES)[number]) => {
+    const edit = fieldEdits[definition.field];
+    const changed = Object.prototype.hasOwnProperty.call(
+      fieldEdits,
+      definition.field,
+    );
+    const projection = projectBulkField(items, metadata, definition.field, {
+      inherit: changed && edit === null,
+    });
+    const value = typeof edit === "string" ? edit : projection.value;
+    const inheritedLabel =
+      definition.field === "priceOverrideCents" ? "pricing" : "catalog";
+    const hint = changed
+      ? edit === null || (typeof edit === "string" && !edit.trim())
+        ? `Each selected item will use its own ${inheritedLabel} value.`
+        : `This edit applies to all ${items.length} selected items.`
+      : projection.status === "mixed"
+        ? "Multiple values. Each item keeps its value until you edit this field."
+        : projection.status === "unavailable"
+          ? "Some source values are unavailable. Existing per-item settings stay unchanged until you edit."
+          : projection.source === "mixed"
+            ? "The displayed value is shared, but its sources differ. Untouched settings stay unchanged."
+            : `Current ${projection.source === "custom" ? "override" : inheritedLabel} value. Untouched settings stay unchanged.`;
+    return (
+      <OverrideControl
+        key={definition.field}
+        definition={definition}
+        value={value}
+        placeholder={
+          projection.status === "mixed"
+            ? "Multiple values — unchanged"
+            : projection.status === "unavailable"
+              ? "Source value unavailable"
+              : "No value"
+        }
+        hint={hint}
+        changed={changed}
+        onInherit={() =>
+          setFieldEdits((previous) =>
+            setBulkFieldEdit(previous, definition.field, null),
+          )
+        }
+        onUndo={() =>
+          setFieldEdits((previous) =>
+            undoBulkFieldEdit(previous, definition.field),
+          )
+        }
+        onValue={(value) =>
+          setFieldEdits((previous) =>
+            setBulkFieldEdit(previous, definition.field, value),
+          )
+        }
+      />
+    );
+  };
   return (
     <Dialog
       open
@@ -323,16 +423,16 @@ export function ListingBulkEditor({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="flex max-h-[90dvh] max-w-3xl flex-col overflow-hidden p-0">
+      <DialogContent className="flex max-h-[92dvh] max-w-[min(96vw,90rem)] flex-col overflow-hidden p-0">
         <DialogHeader className="shrink-0 border-b px-4 py-4 sm:px-6">
           <DialogTitle className="pr-6">
             Bulk edit {items.length} draft{" "}
             {items.length === 1 ? "item" : "items"}
           </DialogTitle>
           <DialogDescription>
-            Choose only the fields to change. Applying updates your local draft;
-            Save draft and Review remain separate steps. Product identifiers and
-            SKUs stay individual.
+            Edit common settings above the table, or change individual rows.
+            Applying updates your local draft; Save draft and Review remain
+            separate steps. Product identifiers and SKUs stay individual.
           </DialogDescription>
         </DialogHeader>
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-6">
@@ -342,59 +442,89 @@ export function ListingBulkEditor({
               <select
                 id={`${prefix}-method`}
                 className={SELECT_CLASS}
-                value={method}
+                value={
+                  method ??
+                  (methodState.status === "common" ? methodState.value : "")
+                }
                 onChange={(event) => {
-                  setMethod(event.target.value as typeof method);
-                  resetAttributes();
+                  const value = event.target
+                    .value as ListingDraftItem["method"];
+                  changeContext(
+                    methodState.status === "common" &&
+                      methodState.value === value
+                      ? undefined
+                      : value,
+                    productType,
+                  );
                 }}
               >
-                <option value="unchanged">Leave unchanged</option>
+                {methodState.status !== "common" && (
+                  <option value="" disabled>
+                    Multiple methods — keep individual values
+                  </option>
+                )}
                 <option value="create">Create product on Walmart</option>
                 <option value="match">
                   Match existing Walmart catalog product
                 </option>
               </select>
+              {method !== undefined && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Undo listing method change"
+                  onClick={() => changeContext(undefined, productType)}
+                >
+                  Undo change
+                </Button>
+              )}
             </div>
             <div className="space-y-3">
-              <label className="flex items-start gap-2 text-sm font-medium">
-                <input
-                  type="checkbox"
-                  className="mt-0.5"
-                  checked={changeType}
-                  onChange={(event) => {
-                    setChangeType(event.target.checked);
-                    resetAttributes();
-                  }}
-                />
-                Change product type for selected drafts
-              </label>
-              {changeType ? (
-                <ListingProductTypePicker
-                  label="Shared Walmart product type"
-                  value={productType}
-                  taxonomy={taxonomy.data}
-                  loading={taxonomy.isFetching}
-                  error={
-                    taxonomy.error ? errorMessage(taxonomy.error) : undefined
-                  }
-                  disabled={!canEdit}
-                  onRetry={() => void taxonomy.refetch()}
-                  onSelect={(value) => {
-                    if (value !== productType) {
-                      setProductType(value);
-                      resetAttributes();
-                    }
-                  }}
-                />
-              ) : (
+              <ListingProductTypePicker
+                label="Shared Walmart product type"
+                value={
+                  productType ??
+                  (typeState.status === "common" ? typeState.value : "")
+                }
+                taxonomy={taxonomy.data}
+                loading={taxonomy.isFetching}
+                error={
+                  taxonomy.error ? errorMessage(taxonomy.error) : undefined
+                }
+                disabled={!canEdit}
+                onRetry={() => void taxonomy.refetch()}
+                onSelect={(value) => {
+                  changeContext(
+                    method,
+                    typeState.status === "common" && typeState.value === value
+                      ? undefined
+                      : value,
+                  );
+                }}
+              />
+              {typeState.status === "mixed" && productType === undefined && (
                 <p className="text-xs text-muted-foreground">
-                  Product types: leave unchanged.
+                  Multiple product types. Each item keeps its current type until
+                  you choose one.
                 </p>
+              )}
+              {productType !== undefined && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Undo product type change"
+                  onClick={() => changeContext(method, undefined)}
+                >
+                  Undo change
+                </Button>
               )}
               <p className="text-xs text-muted-foreground">
                 Changing an item's method or product type clears its existing
                 provider attributes. Items already using that method and type
-                keep their attributes.
+                keep their attributes. Changing the shared method or type also
+                clears attribute edits made in this dialog.
               </p>
             </div>
             <div className="grid min-w-0 gap-4 sm:grid-cols-2">
@@ -404,22 +534,10 @@ export function ListingBulkEditor({
               ).map(renderOverride)}
             </div>
             <section className="space-y-3 rounded-md border p-3">
-              <label className="flex items-start gap-2 text-sm font-medium">
-                <input
-                  type="checkbox"
-                  className="mt-0.5"
-                  checked={changeAttributes}
-                  disabled={!canEdit || !context}
-                  onChange={(event) =>
-                    setChangeAttributes(event.target.checked)
-                  }
-                />
-                Change shared provider attributes
-              </label>
               {!context && (
                 <p className="text-sm text-muted-foreground">
                   The selected drafts need a common listing method and product
-                  type before shared attributes can be edited. Choose them
+                  type before the attribute table can be shown. Choose them
                   above, or edit these items individually.
                 </p>
               )}
@@ -429,17 +547,12 @@ export function ListingBulkEditor({
                     ? "Create product"
                     : "Catalog match"}
                   {context.productType ? ` · ${context.productType}` : ""}.
-                  Untouched fields stay unchanged. Shared values merge into each
-                  item's attributes; changing an array replaces that array.
+                  Untouched fields stay unchanged. Use column actions for shared
+                  values or edit each item independently.
                 </p>
               )}
-              {changeAttributes && context && (
+              {context && (
                 <>
-                  <p className="text-xs text-muted-foreground">
-                    These controls start empty. Fill a field to change it on all
-                    selected drafts. Clearing a field you edited removes that
-                    value from all selected drafts.
-                  </p>
                   {requirements.isFetching && (
                     <p role="status" className="text-sm text-muted-foreground">
                       Loading shared listing requirements…
@@ -460,33 +573,53 @@ export function ListingBulkEditor({
                       </Button>
                     </div>
                   )}
-                  {requirements.data && !requirements.error && (
-                    <SchemaFields
-                      mode="patch"
-                      key={JSON.stringify(context)}
+                  {requirements.data && (
+                    <ListingBulkItemTable
+                      key={`${JSON.stringify(context)}:${attributeBufferRevision}`}
                       schema={requirements.data.schema}
-                      value={attributeValues}
-                      onChange={setAttributeValues}
-                      onFieldChange={(path, value) => {
-                        try {
-                          setAttributeChanges(
-                            updateBulkAttribute(attributeChanges, path, value),
-                          );
-                          setAttributeError("");
-                        } catch (failure) {
-                          setAttributeError(errorMessage(failure));
-                        }
-                      }}
-                      disabled={!canEdit || requirements.isFetching}
+                      items={tableItems}
+                      metadata={metadata}
+                      itemChanges={attributeCommand.itemChanges}
+                      canEdit={
+                        canEdit &&
+                        !requirements.isFetching &&
+                        !requirements.error
+                      }
+                      onItemAttribute={(variantId, path, value) =>
+                        editAttributes((command) =>
+                          setBulkItemAttribute(command, variantId, path, value),
+                        )
+                      }
+                      onSharedAttribute={(path, value) =>
+                        editAttributes((command) =>
+                          setBulkSharedAttribute(command, path, value),
+                        )
+                      }
+                      onUndoItemAttribute={(variantId, path) =>
+                        editAttributes((command) =>
+                          undoBulkItemAttribute(command, variantId, path),
+                        )
+                      }
+                      onUndoItem={(variantId) =>
+                        editAttributes((command) => ({
+                          ...command,
+                          itemChanges: command.itemChanges.filter(
+                            (change) => change.variantId !== variantId,
+                          ),
+                        }))
+                      }
+                      onValidityChange={handleTableValidity}
                     />
                   )}
-                  {(attributeChanges.length > 0 || Boolean(attributeError)) && (
+                  {(attributeCommand.shared.attributeChanges?.length ||
+                    attributeCommand.itemChanges.length > 0 ||
+                    Boolean(attributeError)) && (
                     <Button
                       type="button"
                       variant="outline"
                       onClick={resetAttributes}
                     >
-                      Leave all provider attributes unchanged
+                      Undo all attribute changes
                     </Button>
                   )}
                 </>
@@ -520,7 +653,9 @@ export function ListingBulkEditor({
             )}
             {prepared.preview && (
               <>
-                {prepared.patch && Object.keys(prepared.patch).length === 0 ? (
+                {prepared.command &&
+                Object.keys(prepared.command.shared).length === 0 &&
+                prepared.command.itemChanges.length === 0 ? (
                   <p className="text-sm text-muted-foreground">
                     Choose a field to change. Every selected draft keeps its
                     current values until you apply an explicit change.
@@ -568,6 +703,20 @@ export function ListingBulkEditor({
                               typeof change.value === "object"
                             ? JSON.stringify(change.value)
                             : String(change.value)}
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          disabled={!canEdit || Boolean(tableError)}
+                          aria-label={`Undo shared ${attributeLabel(change.path)} change`}
+                          onClick={() =>
+                            editAttributes((command) =>
+                              undoBulkSharedAttribute(command, change.path),
+                            )
+                          }
+                        >
+                          Undo change
+                        </Button>
                       </li>
                     ))}
                   </ul>
@@ -583,9 +732,24 @@ export function ListingBulkEditor({
                           `Variant ${item.variantId}`}
                         :
                       </strong>{" "}
-                      {item.fields.length
-                        ? item.fields.map(previewFieldLabel).join(", ")
-                        : "No changes"}
+                      {item.changes.length ? (
+                        <ul className="mt-1 space-y-1">
+                          {item.changes.map((change) => (
+                            <li
+                              key={JSON.stringify(change.path)}
+                              className="break-words"
+                            >
+                              {change.path[0] === "attributes"
+                                ? attributeLabel(change.path.slice(1))
+                                : previewFieldLabel(change.path.join("."))}
+                              : {valueLabel(change.before, change.path)} →{" "}
+                              {valueLabel(change.after, change.path)}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        "No changes"
+                      )}
                       {item.attributesReset &&
                         " · existing provider attributes cleared"}
                     </li>
@@ -599,7 +763,12 @@ export function ListingBulkEditor({
               {error}
             </p>
           )}
-          {changeAttributes && attributeError && (
+          {tableError && (
+            <p role="alert" className="break-words text-sm text-destructive">
+              {tableError}
+            </p>
+          )}
+          {attributeError && (
             <p role="alert" className="break-words text-sm text-destructive">
               {attributeError}
             </p>
@@ -615,7 +784,8 @@ export function ListingBulkEditor({
               !canEdit ||
               !prepared.preview?.changedCount ||
               attributesBusy ||
-              (changeAttributes && Boolean(attributeError))
+              Boolean(attributeError) ||
+              Boolean(tableError)
             }
             onClick={apply}
           >
