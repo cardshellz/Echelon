@@ -8,6 +8,7 @@ import {
   claimSupplySnapshotSchema,
   claimPlanRequestSchema,
   claimPlanSchema,
+  plannerWarehouseSchema,
   supplySnapshotContentSchema,
   supplySnapshotSchema,
   type AtpProjectionDto,
@@ -28,6 +29,7 @@ import {
   type RecipeDefinition,
   type WarehouseRecipeSnapshot,
 } from "../../inventory/domain/recipe-capacity.domain";
+import { resolvePromiseWarehouseIds } from "./inventory-warehouse-scope";
 
 const POSTGRES_BIGINT_MAX = BigInt("9223372036854775807");
 const MILLI_UNITS_SQUARED = BigInt(1_000_000);
@@ -1028,13 +1030,19 @@ function fulfillUpTo(
   return result;
 }
 
-function warehouseIds(snapshot: PlannerSupplySnapshot, scope: Scope): number[] {
+function physicalWarehouseIds(snapshot: PlannerSupplySnapshot, scope: Scope): number[] {
   return scope.kind === "warehouse"
     ? [scope.warehouseId]
     : snapshot.warehouses
         .filter((warehouse) => warehouse.isActive)
         .map((warehouse) => warehouse.id)
         .sort((left, right) => left - right);
+}
+
+function warehouseIds(snapshot: PlannerSupplySnapshot, scope: Scope): number[] {
+  return scope.kind === "warehouse"
+    ? resolvePromiseWarehouseIds(snapshot.warehouses, [scope.warehouseId])
+    : physicalWarehouseIds(snapshot, scope);
 }
 
 function modelEvidence(snapshot: PlannerSupplySnapshot): AtpProjectionDto["modelEvidence"] {
@@ -1055,22 +1063,61 @@ export function projectCanonicalAtp(
 ): AtpProjectionDto {
   const snapshot = parseSupplySnapshot(rawSnapshot);
   const request = atpProjectionRequestSchema.parse(rawRequest);
-  const target = snapshot.variants.find((variant) => variant.id === request.targetVariantId);
+  const target = requireProjectionTarget(snapshot, request.targetVariantId);
+  return projectAtPhysicalWarehouses(snapshot, target, request.scope, warehouseIds(snapshot, request.scope));
+}
+
+export interface CanonicalAtpWarehouseProjection {
+  warehouseId: number;
+  projection: AtpProjectionDto;
+}
+
+/**
+ * Channel sources may contain both a hub and one of its reserves. Expand their
+ * union once, then calculate each physical contribution with the same planner
+ * used by warehouse ATP. The breakdown never attributes reserve stock to a hub
+ * bin, and partitioned channel shares can detect overlapping physical supply.
+ */
+export function projectCanonicalAtpWarehouseBreakdown(
+  rawSnapshot: SupplySnapshotDto,
+  rawTargetVariantId: number,
+  rawSourceWarehouseIds: readonly number[],
+): CanonicalAtpWarehouseProjection[] {
+  const snapshot = parseSupplySnapshot(rawSnapshot);
+  const targetVariantId = atpProjectionRequestSchema.shape.targetVariantId.parse(rawTargetVariantId);
+  const sourceWarehouseIds = plannerWarehouseSchema.shape.id.array().parse(rawSourceWarehouseIds);
+  const target = requireProjectionTarget(snapshot, targetVariantId);
+  return resolvePromiseWarehouseIds(snapshot.warehouses, sourceWarehouseIds).map(warehouseId => ({
+    warehouseId,
+    projection: projectAtPhysicalWarehouses(snapshot, target, { kind: "warehouse", warehouseId }, [warehouseId]),
+  }));
+}
+
+function requireProjectionTarget(snapshot: SupplySnapshotDto, targetVariantId: number): Variant {
+  const target = snapshot.variants.find((variant) => variant.id === targetVariantId);
   if (!target || target.productId !== snapshot.productId || !target.isActive) {
     throw new InventoryAvailabilityPlannerError(
       "TARGET_VARIANT_NOT_FOUND",
       "The requested active target variant does not belong to the snapshot product.",
-      { productId: snapshot.productId, targetVariantId: request.targetVariantId },
+      { productId: snapshot.productId, targetVariantId },
     );
   }
   if (!isCustomerSellableVariant(target)) {
     throw new InventoryAvailabilityPlannerError(
       "TARGET_VARIANT_NOT_CUSTOMER_SELLABLE",
       "The requested target variant is an internal inventory/transformation identity.",
-      { productId: snapshot.productId, targetVariantId: request.targetVariantId },
+      { productId: snapshot.productId, targetVariantId },
     );
   }
+  return target;
+}
 
+function projectAtPhysicalWarehouses(
+  snapshot: SupplySnapshotDto,
+  target: Variant,
+  scope: Scope,
+  physicalIds: readonly number[],
+): AtpProjectionDto {
   let atp = BigInt(0);
   let exact = BigInt(0);
   let claims = BigInt(0);
@@ -1080,7 +1127,7 @@ export function projectCanonicalAtp(
   let buildable = BigInt(0);
   const blockers: PlannerBlockerDto[] = [];
   const safetyEvidence: SafetyEvidence[] = [];
-  for (const warehouseId of warehouseIds(snapshot, request.scope)) {
+  for (const warehouseId of physicalIds) {
     const context = buildContext(snapshot, warehouseId);
     const capacity = maxFulfillableQty(
       context,
@@ -1107,7 +1154,7 @@ export function projectCanonicalAtp(
   const resolvedBlockers = uniqueProblems(blockers);
   return atpProjectionSchema.parse({
     targetVariantId: target.id,
-    scope: request.scope,
+    scope,
     status: resolvedBlockers.length === 0 ? "ready" : "blocked",
     atpUnits: atp.toString(),
     atpBaseUnits: multiply(atp, BigInt(target.unitsPerVariant), "projection.atpBaseUnits").toString(),
@@ -1397,7 +1444,9 @@ export function calculateLegacyAtpFromSnapshot(
         - qty(position.reservedQty, "legacy.reservedQty"),
       ), BigInt(0));
   }
-  return warehouseIds(snapshot, request.scope).reduce(
+  // Preserve the deployed legacy recipe comparison: only canonical promise
+  // scopes expand hub reserves here. Legacy fungible/exact scopes are above.
+  return physicalWarehouseIds(snapshot, request.scope).reduce(
     (sum, warehouseId) => sum + legacyRecipeAtpForWarehouse(snapshot, target.id, warehouseId),
     BigInt(0),
   );
@@ -1446,7 +1495,7 @@ function hasExcludedPhysical(snapshot: SupplySnapshotDto, variantId: number, sco
     if (position.productVariantId !== variantId || qty(position.variantQty, "variantQty") <= BigInt(0)) return false;
     const location = locations.get(position.warehouseLocationId);
     if (!location?.warehouseId) return scope.kind === "network";
-    if (scope.kind === "warehouse" && location.warehouseId !== scope.warehouseId) return false;
+    if (!legacyPositionInScope(snapshot, position, scope)) return false;
     return !isPromiseEligibleLocation(location, warehouses.get(location.warehouseId)?.isActive ?? false);
   });
 }

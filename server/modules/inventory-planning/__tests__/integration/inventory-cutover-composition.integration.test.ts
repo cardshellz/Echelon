@@ -287,18 +287,24 @@ dbDescribe.sequential("cutover composition with actual snapshot, claim and recei
   }, 20000);
 });
 
-dbDescribe.sequential("empty-bin promise handoff through complete cutover composition", () => {
+dbDescribe.sequential.each([
+  { source: "same warehouse", supplyWarehouseId: 1 },
+  { source: "linked reserve warehouse", supplyWarehouseId: 2 },
+])("empty-bin promise handoff from $source through complete cutover composition", ({ supplyWarehouseId }) => {
   let database: InventoryCutoverTestDatabase;
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, cutoverCompositionBaseSql);
     await installCutoverCompositionMigrations(database.pool);
     await database.pool.query(cutoverCompositionSeedSql);
     await database.pool.query(cutoverCompositionChannelSeedSql);
+    await database.pool.query(`INSERT INTO warehouse.warehouses(id,code,warehouse_type,hub_warehouse_id)
+      VALUES(2,'RESERVE','bulk_storage',1)`);
     await database.pool.query(`DELETE FROM oms.order_item_costs; DELETE FROM inventory.inventory_transactions;
       UPDATE wms.order_items SET picked_quantity=0;
       UPDATE inventory.inventory_levels SET variant_qty=0,reserved_qty=6,picked_qty=0;
       UPDATE inventory.inventory_lots SET qty_on_hand=0,qty_reserved=0,qty_picked=0;
-      INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(200,1,'OTHER-PICK');
+      INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code,location_type,is_pickable)
+        VALUES(200,${supplyWarehouseId},'OTHER-STOCK','reserve',0);
       INSERT INTO inventory.inventory_levels(id,warehouse_location_id,product_variant_id,variant_qty,reserved_qty,picked_qty,packed_qty)
         VALUES(20,200,101,20,0,0,0);
       INSERT INTO inventory.inventory_lots(id,warehouse_location_id,product_variant_id,qty_on_hand,qty_reserved,qty_picked,status,received_at,
@@ -379,6 +385,41 @@ dbDescribe.sequential("empty-bin promise handoff through complete cutover compos
     expect((await database.pool.query("SELECT desired_quantity::text FROM inventory.inventory_publication_outbox WHERE publication_phase='full'")).rows)
       .toEqual([{ desired_quantity: "14" }]);
     expect((await database.pool.query("SELECT * FROM oms.order_item_costs")).rows).toEqual([]);
+
+    // Promise ownership stays with the real source building and bin; no channel
+    // connection, fulfillment node, stock relocation or fake pick is required.
+    expect((await database.pool.query(`SELECT warehouse_id,warehouse_location_id,inventory_level_id,claimed_qty::text
+      FROM inventory.availability_claim_resources`)).rows)
+      .toEqual([{ warehouse_id: supplyWarehouseId, warehouse_location_id: 200, inventory_level_id: 20, claimed_qty: "6" }]);
+    expect((await database.pool.query("SELECT warehouse_id FROM warehouse.fulfillment_nodes")).rows)
+      .toEqual([{ warehouse_id: 1 }]);
+
+    await database.pool.query(`INSERT INTO oms.oms_orders(id,status) VALUES(2,'pending');
+      INSERT INTO oms.oms_order_lines(id,order_id,product_variant_id,sku,requires_shipping,quantity,authority_fulfillable_quantity,wms_materialized_quantity,authorization_status)
+        VALUES(12,2,101,'P5',true,1,1,1,'authorized');
+      INSERT INTO wms.orders(id,warehouse_id,warehouse_status,on_hold,channel_id,source,external_order_id,oms_fulfillment_order_id,fulfillment_partition_key)
+        VALUES(2,1,'ready',0,36,'shopify','example-2','fo-2','default');
+      INSERT INTO wms.order_items(id,order_id,oms_order_line_id,source_item_id,sku,product_id,quantity,picked_quantity,fulfilled_quantity,status,on_hold,requires_shipping)
+        VALUES(12,2,12,'source-12','P5',101,1,0,0,'pending',false,1)`);
+    const claims = new PostgresInventoryAvailabilityClaimRepository(new PostgresCanonicalClaimInventoryRepository(), database.pool, () => now);
+    const claimCommand = { orderId: 2, idempotencyKey: "hub-reserve-live-order", actor: "operator", reason: "Prove live hub promise ownership" };
+    const claimResults = await Promise.all([claims.claimOrder(claimCommand), claims.claimOrder(claimCommand)]);
+    if (claimResults[0].outcome !== "claimed" || claimResults[1].outcome !== "claimed") {
+      throw new Error("Both accepted-demand attempts must return a canonical claim.");
+    }
+    expect(claimResults[0].claimId).toBe(claimResults[1].claimId);
+    expect(claimResults.map(result => result.idempotentReplay).sort()).toEqual([false, true]);
+    expect((await database.pool.query(`SELECT resource.warehouse_id,resource.warehouse_location_id,resource.claimed_qty::text
+      FROM inventory.availability_claim_resources resource JOIN inventory.availability_claims claim ON claim.id=resource.claim_id
+      WHERE claim.order_id=2`)).rows)
+      .toEqual([{ warehouse_id: supplyWarehouseId, warehouse_location_id: 200, claimed_qty: "1" }]);
+    expect((await database.pool.query("SELECT variant_qty,reserved_qty,picked_qty FROM inventory.inventory_levels WHERE id=20")).rows)
+      .toEqual([{ variant_qty: 20, reserved_qty: 7, picked_qty: 0 }]);
+    await createAuthorityAwareInventoryPublicationService(database.pool).publishProduct({ productId: 20, dryRun: false,
+      triggeredBy: "hub_reserve_claim_test" }, async () => { throw new Error("Canonical hub publication cannot call legacy."); });
+    expect((await database.pool.query(`SELECT desired_quantity::text FROM inventory.inventory_publication_outbox
+      WHERE publication_target_id=1 ORDER BY desired_revision DESC LIMIT 1`)).rows)
+      .toEqual([{ desired_quantity: "13" }]);
   }, 20_000);
 });
 

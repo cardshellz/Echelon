@@ -15,7 +15,7 @@ import {
   resolveChannelSourceOverride,
   type ChannelExposurePolicyCandidate,
 } from "../domain/inventory-channel-exposure";
-import { projectCanonicalAtp } from "../domain/inventory-availability-planner";
+import { projectCanonicalAtpWarehouseBreakdown } from "../domain/inventory-availability-planner";
 import type { InventoryAvailabilityRuntimeAuthority } from "./inventory-availability-runtime-atp.service";
 
 const POSTGRES_BIGINT_MAX = BigInt("9223372036854775807");
@@ -376,25 +376,22 @@ function planTarget(
       ));
     }
 
-    const sourceWarehouseBreakdown = rowWarehouseIds.map((warehouseId) => {
-      const projection = projectCanonicalAtp(snapshot, {
-        targetVariantId: variant.id,
-        scope: { kind: "warehouse", warehouseId },
+    const sourceWarehouseBreakdown = projectCanonicalAtpWarehouseBreakdown(snapshot, variant.id, rowWarehouseIds)
+      .map(({ warehouseId, projection }) => {
+        if (projection.blockers.length > 0) {
+          warnings.push(issue(
+            "CANONICAL_ATP_PROJECTION_BLOCKED",
+            "Canonical ATP used its path-local fail-closed quantity because projection evidence has blockers.",
+            {
+              publicationTargetId: target.publicationTargetId,
+              productVariantId: variant.id,
+              warehouseId,
+              blockerCodes: projection.blockers.map((blocker) => blocker.code),
+            },
+          ));
+        }
+        return { warehouseId, canonicalAtpUnits: projection.atpUnits };
       });
-      if (projection.blockers.length > 0) {
-        warnings.push(issue(
-          "CANONICAL_ATP_PROJECTION_BLOCKED",
-          "Canonical ATP used its path-local fail-closed quantity because projection evidence has blockers.",
-          {
-            publicationTargetId: target.publicationTargetId,
-            productVariantId: variant.id,
-            warehouseId,
-            blockerCodes: projection.blockers.map((blocker) => blocker.code),
-          },
-        ));
-      }
-      return { warehouseId, canonicalAtpUnits: projection.atpUnits };
-    });
     const canonicalAtp = sourceWarehouseBreakdown.reduce(
       (total, row) => addQuantity(total, BigInt(row.canonicalAtpUnits), {
         publicationTargetId: target.publicationTargetId,
