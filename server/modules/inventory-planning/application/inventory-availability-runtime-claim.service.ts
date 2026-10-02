@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type {
+  CanonicalAvailabilityClaimDisplacementResult,
   CanonicalAvailabilityClaimReplacementResult,
   CanonicalAvailabilityClaimResult,
   CanonicalAvailabilityClaimPickResult,
@@ -47,6 +48,7 @@ export interface RuntimeCanonicalClaimService {
   getReservationStatus(input: unknown): Promise<CanonicalAvailabilityReservationStatusProjection>;
   claimOrder(input: unknown): Promise<CanonicalAvailabilityClaimResult>;
   replaceOrderClaim(input: unknown): Promise<CanonicalAvailabilityClaimReplacementResult>;
+  displaceForConfirmedShipment(input: unknown): Promise<CanonicalAvailabilityClaimDisplacementResult>;
   releaseOrderClaim(input: unknown): Promise<CanonicalAvailabilityClaimResult>;
   pickClaimLine(input: unknown): Promise<CanonicalAvailabilityClaimPickResult>;
   unpickClaimLine(input: unknown): Promise<CanonicalAvailabilityClaimPickResult>;
@@ -136,6 +138,55 @@ export async function refreshCanonicalClaimSupply(
   } catch (error) {
     const code = structuredErrorCode(error);
     if (code !== null && CLAIM_SUPPLY_REFRESH_DECLINED_CODES.has(code)) {
+      return { outcome: "declined", code, message: error instanceof Error ? error.message : code };
+    }
+    throw error;
+  }
+}
+
+/** Expected outcomes of a displacement attempt; nothing was changed. */
+export const CLAIM_DISPLACEMENT_DECLINED_CODES: ReadonlySet<string> = new Set([
+  "CLAIM_DISPLACEMENT_NO_DONORS",
+  "CLAIM_DISPLACEMENT_INSUFFICIENT",
+  "CLAIM_DISPLACEMENT_NOT_REQUIRED",
+  "CLAIM_DISPLACEMENT_SET_CHANGED",
+  "CLAIM_DISPLACEMENT_SCOPE_UNSUPPORTED",
+  "CLAIM_SUPPLY_REFRESH_PICK_IN_PROGRESS",
+  "CLAIM_SUPPLY_REFRESH_LINE_REGRESSION",
+  "CLAIM_SUPPLY_REFRESH_NO_IMPROVEMENT",
+  "CLAIM_SUPPLY_REFRESH_DEMAND_CHANGED",
+  "REPLACEMENT_ORDER_NOT_CLAIMABLE",
+  "ACTIVE_CLAIM_CHANGED",
+]);
+
+export type ClaimDisplacementOutcome =
+  | { outcome: "displaced"; claimId: string; displacedOrderIds: number[] }
+  | { outcome: "declined"; code: string; message: string };
+
+/**
+ * Take the stock a confirmed shipment already used from the newest unstarted
+ * orders (see displaceForConfirmedShipment). Keyed by the recipient claim and
+ * line, so a retry replays; a declined attempt changed nothing.
+ */
+export async function displaceClaimsForConfirmedShipment(
+  context: InventoryAvailabilityRuntimeClaimContext,
+  input: { orderId: number; claimId: string; orderItemId: number; quantity: number; actor: string; reason: string },
+): Promise<ClaimDisplacementOutcome> {
+  try {
+    const result = await context.canonical.displaceForConfirmedShipment({
+      orderId: input.orderId,
+      expectedClaimId: input.claimId,
+      orderItemId: input.orderItemId,
+      quantity: String(input.quantity),
+      idempotencyKey: commandKey("displace-confirmed-shipment", {
+        orderId: input.orderId, claimId: input.claimId, orderItemId: input.orderItemId, quantity: input.quantity }),
+      actor: input.actor,
+      reason: input.reason,
+    });
+    return { outcome: "displaced", claimId: result.replacementClaim.claimId, displacedOrderIds: result.displacedOrderIds };
+  } catch (error) {
+    const code = structuredErrorCode(error);
+    if (code !== null && CLAIM_DISPLACEMENT_DECLINED_CODES.has(code)) {
       return { outcome: "declined", code, message: error instanceof Error ? error.message : code };
     }
     throw error;

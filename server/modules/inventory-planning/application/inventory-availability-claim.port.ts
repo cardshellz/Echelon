@@ -2,6 +2,8 @@ import type {
   CanonicalAvailabilityClaimBuildHandoffCommand,
   CanonicalAvailabilityClaimBuildHandoffResult,
   CanonicalAvailabilityClaimCommand,
+  CanonicalAvailabilityClaimDisplacementCommand,
+  CanonicalAvailabilityClaimDisplacementResult,
   CanonicalAvailabilityClaimOperationExecutionCommand,
   CanonicalAvailabilityClaimOperationExecutionResult,
   CanonicalAvailabilityClaimPickCommand,
@@ -30,6 +32,9 @@ export interface InventoryAvailabilityClaimStore {
     command: CanonicalAvailabilityClaimReplacementCommand,
   ): Promise<CanonicalAvailabilityClaimReplacementResult>;
   releaseOrderClaim(command: CanonicalAvailabilityClaimReleaseCommand): Promise<CanonicalAvailabilityClaimResult>;
+  displaceForConfirmedShipment(
+    command: CanonicalAvailabilityClaimDisplacementCommand,
+  ): Promise<CanonicalAvailabilityClaimDisplacementResult>;
   executePackageOperation(
     command: CanonicalAvailabilityClaimOperationExecutionCommand,
   ): Promise<CanonicalAvailabilityClaimOperationExecutionResult>;

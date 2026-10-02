@@ -114,6 +114,24 @@ export const canonicalAvailabilityClaimReplacementCommandSchema = z.object({
   refreshSupply: z.literal(true).optional(),
 }).strict();
 
+/**
+ * A picker confirmed units of this order already shipped, but every unit of the
+ * variant in its warehouse is reserved by orders that have not started picking.
+ * Those units physically left that shared stock, so the lowest-priority (then
+ * newest) such orders give up exactly the shortfall and are re-planned; this order is re-planned to own
+ * what it shipped. All or nothing.
+ */
+export const canonicalAvailabilityClaimDisplacementCommandSchema = z.object({
+  orderId: positiveInteger,
+  expectedClaimId: positiveBigintString,
+  orderItemId: positiveInteger,
+  /** Units of the line that must be owned by the claim for the pick to record. */
+  quantity: positiveBigintString,
+  idempotencyKey: nonblank(120),
+  actor: nonblank(100),
+  reason: nonblank(1000),
+}).strict();
+
 export const canonicalAvailabilityClaimOperationExecutionCommandSchema = z.object({
   claimId: positiveBigintString,
   operationKey: nonblank(300),
@@ -329,6 +347,11 @@ export const canonicalAvailabilityClaimReplacementResultSchema = z.object({
   idempotentReplay: z.boolean(),
 }).strict();
 
+export const canonicalAvailabilityClaimDisplacementResultSchema = canonicalAvailabilityClaimReplacementResultSchema.extend({
+  /** Orders whose unstarted claims gave up stock; empty on an idempotent replay. */
+  displacedOrderIds: z.array(positiveInteger).max(1000),
+}).strict();
+
 export const canonicalAvailabilityReservationStatusCommandSchema = z.object({
   orderId: positiveInteger,
 }).strict();
@@ -429,6 +452,12 @@ export type CanonicalAvailabilityClaimReleaseCommand = z.infer<
 >;
 export type CanonicalAvailabilityClaimReplacementCommand = z.infer<
   typeof canonicalAvailabilityClaimReplacementCommandSchema
+>;
+export type CanonicalAvailabilityClaimDisplacementCommand = z.infer<
+  typeof canonicalAvailabilityClaimDisplacementCommandSchema
+>;
+export type CanonicalAvailabilityClaimDisplacementResult = z.infer<
+  typeof canonicalAvailabilityClaimDisplacementResultSchema
 >;
 export type CanonicalAvailabilityClaimReplacementResult = z.infer<
   typeof canonicalAvailabilityClaimReplacementResultSchema

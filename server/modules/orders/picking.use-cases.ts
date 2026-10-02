@@ -37,6 +37,7 @@ import type {
 } from "../inventory-planning/application/inventory-availability-runtime-claim.service";
 import {
   claimCanonicalOrderForConfirmedShipment,
+  displaceClaimsForConfirmedShipment,
   refreshCanonicalClaimSupply,
 } from "../inventory-planning/application/inventory-availability-runtime-claim.service";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -409,8 +410,12 @@ export function shortClaimMessage(declinedCode: string, sku: string, locationCod
   switch (declinedCode) {
     case "CLAIM_SUPPLY_REFRESH_NO_IMPROVEMENT":
     case "CLAIM_SUPPLY_REFRESH_NOT_SHORT":
+    case "CLAIM_DISPLACEMENT_NO_DONORS":
+    case "CLAIM_DISPLACEMENT_INSUFFICIENT":
       return `Not enough stock is reserved for ${sku} on this order, and the system shows no free stock to reserve. `
         + `Count or receive ${locationCode}, then retry.`;
+    case "CLAIM_DISPLACEMENT_SET_CHANGED":
+      return `Stock for ${sku} changed while it was being reserved. It will be retried automatically.`;
     case "CLAIM_SUPPLY_REFRESH_PICK_IN_PROGRESS":
       return `${sku} cannot be re-reserved while another line of this order is partly picked. Finish or unpick that line, then retry.`;
     case "CLAIM_SUPPLY_REFRESH_LINE_REGRESSION":
@@ -1667,15 +1672,32 @@ export class PickingUseCases {
           actor,
           reason: `Re-reserve short order ${input.beforeItem.orderId} before picking item ${input.itemId}`,
         });
-        // Another writer (the short-claim sweeper) replaced the claim first: just use the new one.
-        if (refresh.outcome === "declined" && refresh.code !== "ACTIVE_CLAIM_CHANGED") {
-          throw new IntegrityError(shortClaimMessage(refresh.code, input.beforeItem.sku, target.locationCode), {
+        const unreserved = (code: string) => new IntegrityError(
+          shortClaimMessage(code, input.beforeItem.sku, target.locationCode), {
             reason: "claim_line_unreserved",
             orderId: input.beforeItem.orderId,
             orderItemId: input.itemId,
             locationCode: target.locationCode,
-            refreshDeclinedCode: refresh.code,
+            refreshDeclinedCode: code,
           });
+        // Another writer (the short-claim sweeper) replaced the claim first: just use the new one.
+        if (refresh.outcome === "declined" && refresh.code !== "ACTIVE_CLAIM_CHANGED") {
+          // No free stock, but a confirmed shipment already used units that
+          // newer, unstarted orders still hold on paper: take them back.
+          if (refresh.code !== "CLAIM_SUPPLY_REFRESH_NO_IMPROVEMENT" || !recordsConfirmedShipment(input)) {
+            throw unreserved(refresh.code);
+          }
+          const displaced = await displaceClaimsForConfirmedShipment(context, {
+            orderId: input.beforeItem.orderId,
+            claimId: claim.claimId,
+            orderItemId: input.itemId,
+            quantity: remainingPickQuantity,
+            actor,
+            reason: `Record shipped item ${input.itemId} of order ${input.beforeItem.orderId} from stock held by unstarted orders`,
+          });
+          if (displaced.outcome === "declined" && displaced.code !== "ACTIVE_CLAIM_CHANGED") {
+            throw unreserved(displaced.code);
+          }
         }
         claim = await loadActiveClaim();
         return run("strict");
