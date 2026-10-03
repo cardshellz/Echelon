@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  decideDropshipCatalogOrderAvailability,
   evaluateDropshipCatalogExposure,
   type DropshipCatalogExposureRule,
   type DropshipCatalogVariantCandidate,
@@ -105,6 +106,54 @@ describe("dropship catalog exposure domain", () => {
 
     expect(decision.exposed).toBe(false);
     expect(decision.reason).toBe("missing_include_rule");
+  });
+});
+
+describe("dropship catalog order availability", () => {
+  const includeCatalog: DropshipCatalogExposureRule[] = [{ id: 1, scopeType: "catalog", action: "include" }];
+
+  it("lets an order through for anything the catalog lets vendors list", () => {
+    expect(decideDropshipCatalogOrderAvailability({
+      subject: activeCandidate,
+      customerSellable: true,
+      rules: includeCatalog,
+      now,
+    })).toEqual({ available: true, reason: "exposed" });
+  });
+
+  it("refuses an order for what vendors could not list, naming the catalog's reason", () => {
+    const decide = (overrides: Partial<Parameters<typeof decideDropshipCatalogOrderAvailability>[0]>) =>
+      decideDropshipCatalogOrderAvailability({
+        subject: activeCandidate,
+        customerSellable: true,
+        rules: includeCatalog,
+        now,
+        ...overrides,
+      });
+
+    expect(decide({ customerSellable: false })).toEqual({ available: false, reason: "not_customer_sellable" });
+    expect(decide({ subject: { ...activeCandidate, variantIsActive: false } }))
+      .toEqual({ available: false, reason: "inactive_product_or_variant" });
+    expect(decide({ rules: [] })).toEqual({ available: false, reason: "missing_include_rule" });
+    expect(decide({
+      rules: [...includeCatalog, { id: 2, scopeType: "product", action: "exclude", productId: 10 }],
+    })).toEqual({ available: false, reason: "excluded_by_admin_rule" });
+  });
+
+  it("reads the rules at the order's time: a rule that has ended no longer exposes", () => {
+    const ended: DropshipCatalogExposureRule[] = [{
+      id: 1,
+      scopeType: "catalog",
+      action: "include",
+      endsAt: new Date("2026-04-30T11:59:59.000Z"),
+    }];
+
+    expect(decideDropshipCatalogOrderAvailability({
+      subject: activeCandidate,
+      customerSellable: true,
+      rules: ended,
+      now,
+    })).toEqual({ available: false, reason: "missing_include_rule" });
   });
 });
 

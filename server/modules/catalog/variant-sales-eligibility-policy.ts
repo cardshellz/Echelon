@@ -11,7 +11,6 @@ export { VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE };
 
 export type VariantSalesEligibilityBlocker =
   | "shopify_mapping"
-  | "dropship_enabled"
   | "active_channel_feed"
   | "channel_listing"
   | "channel_allocation_configuration"
@@ -62,19 +61,19 @@ interface ExistingVariantSalesIdentity {
   salesEligibility: VariantSalesEligibility;
   shopifyVariantId: string | null;
   shopifyInventoryItemId: string | null;
-  dropshipEligible: boolean | null;
 }
 
+// Dropship needs no flag on the variant: an internal-only variant cannot be in
+// the dropship catalog (decideDropshipCatalogOrderAvailability), and one with a
+// dropship listing cannot become internal-only (the dropship_listing check below).
 export function assertVariantSalesIdentityCompatible(input: {
   salesEligibility: VariantSalesEligibility;
   shopifyVariantId: string | null | undefined;
   shopifyInventoryItemId: string | null | undefined;
-  dropshipEligible: boolean | null | undefined;
 }): void {
   if (input.salesEligibility !== "internal_only") return;
   const blockers: VariantSalesEligibilityBlocker[] = [];
   if (input.shopifyVariantId || input.shopifyInventoryItemId) blockers.push("shopify_mapping");
-  if (input.dropshipEligible === true) blockers.push("dropship_enabled");
   if (blockers.length > 0) throw new VariantSalesEligibilityError(blockers);
 }
 
@@ -118,7 +117,6 @@ export async function assertVariantSalesEligibilityTransitionAllowed(
   if (existing.shopifyVariantId || existing.shopifyInventoryItemId) {
     blockers.push("shopify_mapping");
   }
-  if (existing.dropshipEligible === true) blockers.push("dropship_enabled");
 
   const result = await executor.execute(sql`
     SELECT

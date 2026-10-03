@@ -92,7 +92,6 @@ export type ProposedPieceVariant = {
   requiresShipping: true;
   trackInventory: true;
   isActive: true;
-  dropshipEligible: false;
 };
 
 export type PieceVariantSkuConflict = {
@@ -262,9 +261,9 @@ const INSERT_PIECE_VARIANT_QUERY = `
   INSERT INTO catalog.product_variants AS pv (
     product_id, sku, name, uom_type, units_per_variant, hierarchy_level,
     parent_variant_id, is_base_unit, sales_eligibility, requires_shipping,
-    inventory_tracking_override, track_inventory, is_active, dropship_eligible
+    inventory_tracking_override, track_inventory, is_active
   )
-  SELECT $1, $2, $3, $4, $5, $6, NULL, $7, $8, $9, $10, $10, $11, $12
+  SELECT $1, $2, $3, $4, $5, $6, NULL, $7, $8, $9, $10, $10, $11
   WHERE NOT EXISTS (
     SELECT 1
     FROM catalog.product_variants single_unit
@@ -343,7 +342,6 @@ export function buildProposedPieceVariant(productSku: string): ProposedPieceVari
     requiresShipping: true,
     trackInventory: true,
     isActive: true,
-    dropshipEligible: false,
   };
   // productId is required by the insert schema; 1 is a placeholder for shape
   // validation only. The real product id is bound at INSERT time.
@@ -353,7 +351,6 @@ export function buildProposedPieceVariant(productSku: string): ProposedPieceVari
     salesEligibility: proposed.salesEligibility,
     shopifyVariantId: null,
     shopifyInventoryItemId: null,
-    dropshipEligible: proposed.dropshipEligible,
   });
   return proposed;
 }
@@ -558,7 +555,6 @@ export async function applyPieceVariantBackfill(input: {
         proposed.requiresShipping,
         proposed.trackInventory,
         proposed.isActive,
-        proposed.dropshipEligible,
       ]);
       if (inserted.rowCount !== 1) {
         throw new Error(

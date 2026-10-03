@@ -162,10 +162,12 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
         product_line_ids: [], listing_status: "active", external_listing_id: "L1", external_offer_id: "O1",
         vendor_retail_price_cents: 1152, product_sku: "ARM-ENV", variant_sku: "ARM-ENV-SGL-P50",
         product_name: "Armalope Envelope", variant_name: "Pack of 50", category: "supplies",
-        product_is_active: true, variant_is_active: true, sales_eligibility: "sellable", dropship_eligible: true,
+        product_is_active: true, variant_is_active: true, sales_eligibility: "sellable",
         catalog_retail_price_cents: 899,
       }],
     },
+    // The admin catalog rules vendors list under; acceptance applies the same rule.
+    catalogRules: { match: "FROM dropship.dropship_catalog_rules", rows: [catalogRuleRow()] },
     policies: { match: "FROM dropship.dropship_pricing_policies", rows: [] },
     // The vendor's cost schedule (migration 0711), empty by default so the first
     // acceptance starts it; the price protection tests seed an entry.
@@ -235,6 +237,16 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
     existingLedger: { match: "FROM dropship.dropship_wallet_ledger", rows: [] },
   };
   return Object.values({ ...defaults, ...overrides });
+}
+
+function catalogRuleRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 1, revision_id: 1, scope_type: "catalog", action: "include",
+    product_line_id: null, product_id: null, product_variant_id: null, category: null,
+    priority: 0, is_active: true, starts_at: null, ends_at: null, notes: null, metadata: null,
+    created_at: new Date("2026-01-01T00:00:00.000Z"), updated_at: new Date("2026-01-01T00:00:00.000Z"),
+    ...overrides,
+  };
 }
 
 /** The advance relations present, with the launch policy (1% fee, $500 cap) and no vendor override. */
@@ -683,6 +695,46 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
       "INSERT INTO oms.oms_orders",
       "INSERT INTO dropship.dropship_order_economics_snapshots",
       "UPDATE dropship.dropship_order_intake",
+    ]) {
+      expect(db.statements(fragment), fragment).toHaveLength(0);
+    }
+  });
+
+  it("accepts a listed variant the dropship catalog offers, reading no separate dropship switch", async () => {
+    const db = createFakeDb(baseHandlers());
+    const { repository } = createRepository(db, availableCost());
+
+    await repository.acceptOrder(acceptanceInput());
+
+    expect(db.statements("FROM dropship.dropship_catalog_rules")).toHaveLength(1);
+    expect(db.calls.some((call) => call.sql.includes("dropship_eligible"))).toBe(false);
+    expect(db.statements("UPDATE dropship.dropship_wallet_accounts")).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      label: "excluded by the catalog rules",
+      rules: [catalogRuleRow(), catalogRuleRow({ id: 2, scope_type: "product", action: "exclude", product_id: 7 })],
+      catalogReason: "excluded_by_admin_rule",
+    },
+    { label: "included by no catalog rule", rules: [], catalogReason: "missing_include_rule" },
+  ])("rolls back before any financial write for a variant $label", async ({ rules, catalogReason }) => {
+    const db = createFakeDb(baseHandlers({
+      catalogRules: { match: "FROM dropship.dropship_catalog_rules", rows: rules },
+    }));
+    const { repository, loadProductCosts } = createRepository(db, availableCost());
+
+    await expect(repository.acceptOrder(acceptanceInput())).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_CATALOG_VARIANT_NOT_ELIGIBLE",
+      context: expect.objectContaining({ productVariantId: VARIANT_ID, catalogReason }),
+    });
+
+    expect(loadProductCosts).not.toHaveBeenCalled();
+    expect(db.calls.some((call) => call.sql === "COMMIT")).toBe(false);
+    for (const fragment of [
+      "UPDATE dropship.dropship_wallet_accounts",
+      "INSERT INTO dropship.dropship_wallet_ledger",
+      "INSERT INTO oms.oms_orders",
     ]) {
       expect(db.statements(fragment), fragment).toHaveLength(0);
     }

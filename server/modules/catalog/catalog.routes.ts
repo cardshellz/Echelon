@@ -62,6 +62,20 @@ import { sendInventoryLegacyAdminControlError } from "../inventory-planning/inte
 
 type CatalogRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
+/**
+ * Fields a variant write may no longer set. `dropship_eligible` is retired:
+ * dropship decides from the admin catalog rules, never from a flag on the
+ * variant, and the variant routes spread req.body into the write.
+ */
+const RETIRED_VARIANT_WRITE_FIELDS = ["dropshipEligible"] as const;
+
+export function withoutRetiredVariantFields<T>(body: T): T {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  const payload: Record<string, unknown> = { ...(body as Record<string, unknown>) };
+  for (const field of RETIRED_VARIANT_WRITE_FIELDS) delete payload[field];
+  return payload as T;
+}
+
 // Physical packing facts beyond weight/dims. Canonical on the variant since
 // migration 185; validated here because the variant PUT spreads req.body.
 const variantPackingFlagsSchema = z.object({
@@ -1628,11 +1642,10 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
         salesEligibility: salesIdentity.salesEligibility ?? "sellable",
         shopifyVariantId: req.body.shopifyVariantId,
         shopifyInventoryItemId: req.body.shopifyInventoryItemId,
-        dropshipEligible: req.body.dropshipEligible,
       });
       const uomAttributes = validateVariantUomWrite(req.body);
       const variant = await storage.createProductVariant({
-        ...req.body,
+        ...withoutRetiredVariantFields(req.body),
         ...packageAttributes,
         ...packingFlags,
         ...fulfillment,
@@ -1723,14 +1736,11 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           shopifyInventoryItemId: Object.prototype.hasOwnProperty.call(req.body, "shopifyInventoryItemId")
             ? req.body.shopifyInventoryItemId
             : existing.shopifyInventoryItemId,
-          dropshipEligible: Object.prototype.hasOwnProperty.call(req.body, "dropshipEligible")
-            ? req.body.dropshipEligible
-            : existing.dropshipEligible,
         });
         await assertVariantSalesEligibilityTransitionAllowed(tx, existing, nextSalesEligibility);
 
         const payload = {
-          ...req.body,
+          ...withoutRetiredVariantFields(req.body),
           ...packageAttributes,
           ...packingFlags,
           ...salesIdentity,
