@@ -7,6 +7,8 @@ import OperationsView from "./OperationsView";
 import InlineTransferDialog from "@/components/operations/InlineTransferDialog";
 import { warehouseLabel } from "@/lib/warehouse-label";
 import InlineCaseBreakDialog from "@/components/operations/InlineCaseBreakDialog";
+import { allowedCaseBreakSources } from "@/features/inventory/allowed-case-breaks";
+import type { AllowedInventoryConversion } from "@shared/types/inventory-conversions";
 import BinHistorySheet from "@/components/operations/BinHistorySheet";
 import { useAuth } from "@/lib/auth";
 import {
@@ -163,7 +165,7 @@ interface VariantLevel {
   barcode: string | null;
   binCount: number;
   noBin: boolean;
-  noCaseBreak: boolean;
+  allowedConversions?: AllowedInventoryConversion[];
   noBarcode: boolean;
   noReplen: boolean;
   overReserved: boolean;
@@ -376,13 +378,12 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, 
 
 // Legacy execution control retained until canonical transformation execution is active.
 // Quantities shown here are physical bin evidence only; ATP comes from the server projection above.
-function LegacyCaseBreakLocationRows({
+function AuthorizedCaseBreakLocationRows({
   sourceVariantId,
   sourceSku,
   targetVariantId,
   targetSku,
-  sourceUnitsPerVariant,
-  targetUnitsPerVariant,
+  conversion,
   canEdit,
   warehouseId,
   warehouses,
@@ -392,8 +393,7 @@ function LegacyCaseBreakLocationRows({
   sourceSku: string;
   targetVariantId: number;
   targetSku: string;
-  sourceUnitsPerVariant: number;
-  targetUnitsPerVariant: number;
+  conversion: AllowedInventoryConversion;
   canEdit: boolean;
   warehouseId?: number | null;
   warehouses: Warehouse[];
@@ -404,7 +404,8 @@ function LegacyCaseBreakLocationRows({
     sourceSku: string;
     targetVariantId: number;
     targetSku: string;
-    conversionRatio: number;
+    conversionOutputQty: number;
+    conversionInputQty: number;
   }) => void;
 }) {
   const locationUrl = warehouseId
@@ -434,13 +435,9 @@ function LegacyCaseBreakLocationRows({
     );
   }
 
-  const conversionRatio = sourceUnitsPerVariant / targetUnitsPerVariant;
-  const hasValidConversionRatio = Number.isSafeInteger(sourceUnitsPerVariant)
-    && Number.isSafeInteger(targetUnitsPerVariant)
-    && sourceUnitsPerVariant > 0
-    && targetUnitsPerVariant > 0
-    && Number.isSafeInteger(conversionRatio)
-    && conversionRatio > 0;
+  const hasValidConversionRatio = Number.isSafeInteger(conversion.inputQty)
+    && Number.isSafeInteger(conversion.outputQty)
+    && conversion.inputQty > 0 && conversion.outputQty > 0;
 
   if (locationLevels.length === 0) {
     return (
@@ -499,7 +496,8 @@ function LegacyCaseBreakLocationRows({
                       sourceSku,
                       targetVariantId,
                       targetSku,
-                      conversionRatio,
+                      conversionOutputQty: conversion.outputQty,
+                      conversionInputQty: conversion.inputQty,
                     });
                   }}
                 >
@@ -544,7 +542,8 @@ export default function Inventory() {
     sourceSku?: string;
     targetVariantId?: number;
     targetSku?: string;
-    conversionRatio?: number;
+    conversionOutputQty?: number;
+    conversionInputQty?: number;
   }>({ open: false });
   const [exporting, setExporting] = useState(false);
 
@@ -625,7 +624,7 @@ export default function Inventory() {
   const [sortField, setSortField] = useState<string>("sku");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | null>(null);
-  const [stockFilter, setStockFilter] = useState<"all" | "order_now" | "order_soon" | "oos" | "duplicates" | "stray" | "no_bin" | "no_case_break" | "no_barcode" | "no_replen" | "over_reserved" | "negative_qty">("all");
+  const [stockFilter, setStockFilter] = useState<"all" | "order_now" | "order_soon" | "oos" | "duplicates" | "stray" | "no_bin" | "no_barcode" | "no_replen" | "over_reserved" | "negative_qty">("all");
   const [binFilter, setBinFilter] = useState<"all" | "unassigned" | "pick" | "reserve">("all");
   const [binSortField, setBinSortField] = useState<string>("code");
   const [binSortDirection, setBinSortDirection] = useState<"asc" | "desc">("asc");
@@ -681,29 +680,15 @@ export default function Inventory() {
     staleTime: 30_000,
   });
 
-  // Hierarchy data is retained only to expose the existing case-break execution control.
-  // It does not participate in ATP calculation or display.
-  const childrenByTargetVariantId = useMemo(() => {
-    const children = new Map<number, VariantLevel[]>();
-    for (const variant of variantLevels) {
-      if (variant.parentVariantId == null) continue;
-      const existing = children.get(variant.parentVariantId) ?? [];
-      existing.push(variant);
-      children.set(variant.parentVariantId, existing);
-    }
-    return children;
-  }, [variantLevels]);
-
   const targetsWithCaseBreakSources = useMemo(() => {
     const result = new Set<number>();
     for (const variant of variantLevels) {
-      const directSources = childrenByTargetVariantId.get(variant.variantId) ?? [];
-      if (directSources.some((source) => source.locationCount > 0 || source.variantQty !== 0)) {
+      if (allowedCaseBreakSources(variant, variantLevels).length > 0) {
         result.add(variant.variantId);
       }
     }
     return result;
-  }, [childrenByTargetVariantId, variantLevels]);
+  }, [variantLevels]);
 
   // Bin-centric inventory view
   const { data: binInventory = [], isLoading: loadingBinInventory } = useQuery<BinInventory[]>({
@@ -859,12 +844,11 @@ export default function Inventory() {
   const duplicateCount = variantLevels.filter(v => v.isDuplicate).length;
   const strayCount = variantLevels.filter(v => !v.productId).length;
   const noBinCount = variantLevels.filter(v => v.noBin).length;
-  const noCaseBreakCount = variantLevels.filter(v => v.noCaseBreak).length;
   const noBarcodeCount = variantLevels.filter(v => v.noBarcode).length;
   const noReplenCount = variantLevels.filter(v => v.noReplen).length;
   const overReservedCount = variantLevels.filter(v => v.overReserved).length;
   const negativeQtyCount = variantLevels.filter(v => v.negativeQty).length;
-  const issueCount = duplicateCount + strayCount + negativeQtyCount + overReservedCount + noBinCount + noReplenCount + noCaseBreakCount + noBarcodeCount;
+  const issueCount = duplicateCount + strayCount + negativeQtyCount + overReservedCount + noBinCount + noReplenCount + noBarcodeCount;
 
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -888,7 +872,6 @@ export default function Inventory() {
       stockFilter === "duplicates" ? v.isDuplicate :
       stockFilter === "stray" ? !v.productId :
       stockFilter === "no_bin" ? v.noBin :
-      stockFilter === "no_case_break" ? v.noCaseBreak :
       stockFilter === "no_barcode" ? v.noBarcode :
       stockFilter === "no_replen" ? v.noReplen :
       stockFilter === "over_reserved" ? v.overReserved :
@@ -1281,17 +1264,6 @@ export default function Inventory() {
                     </button>
                   </>
                 )}
-                {noCaseBreakCount > 0 && (
-                  <>
-                    <span className="text-muted-foreground/40">·</span>
-                    <button
-                      className={`hover:underline ${stockFilter === "no_case_break" ? "underline font-semibold" : ""} text-amber-600 font-medium`}
-                      onClick={() => setStockFilter(stockFilter === "no_case_break" ? "all" : "no_case_break")}
-                    >
-                      {noCaseBreakCount} no case break
-                    </button>
-                  </>
-                )}
                 {noBarcodeCount > 0 && (
                   <>
                     <span className="text-muted-foreground/40">·</span>
@@ -1406,11 +1378,6 @@ export default function Inventory() {
                                 NO REPLEN
                               </span>
                             )}
-                            {level.noCaseBreak && (
-                              <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
-                                NO CASE BREAK
-                              </span>
-                            )}
                             {level.noBarcode && (
                               <span className="text-[10px] px-1 py-0.5 rounded-sm bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400 whitespace-nowrap">
                                 NO BARCODE
@@ -1518,7 +1485,7 @@ export default function Inventory() {
                                   {level.productName && (
                                     <div className="text-xs font-sans font-normal text-muted-foreground truncate max-w-[280px]">{level.productName}</div>
                                   )}
-                                  {(level.isDuplicate || !level.productId || level.negativeQty || level.overReserved || level.noBin || level.noReplen || level.noCaseBreak || level.noBarcode) && (
+                                  {(level.isDuplicate || !level.productId || level.negativeQty || level.overReserved || level.noBin || level.noReplen || level.noBarcode) && (
                                     <div className="flex flex-wrap gap-0.5 mt-0.5">
                                       {level.isDuplicate && (
                                         <span className="text-[10px] px-1 py-0.5 rounded-sm bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 whitespace-nowrap">
@@ -1548,11 +1515,6 @@ export default function Inventory() {
                                       {level.noReplen && (
                                         <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
                                           NO REPLEN
-                                        </span>
-                                      )}
-                                      {level.noCaseBreak && (
-                                        <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
-                                          NO CASE BREAK
                                         </span>
                                       )}
                                       {level.noBarcode && (
@@ -1592,18 +1554,7 @@ export default function Inventory() {
                                 }}
                               />
                               {(() => {
-                                const descendants: VariantLevel[] = [];
-                                const pending = [...(childrenByTargetVariantId.get(level.variantId) ?? [])];
-                                const visited = new Set<number>();
-                                while (pending.length > 0) {
-                                  const source = pending.shift()!;
-                                  if (visited.has(source.variantId)) continue;
-                                  visited.add(source.variantId);
-                                  if (source.locationCount > 0 || source.variantQty !== 0) {
-                                    descendants.push(source);
-                                  }
-                                  pending.push(...(childrenByTargetVariantId.get(source.variantId) ?? []));
-                                }
+                                const descendants = allowedCaseBreakSources(level, variantLevels);
 
                                 if (descendants.length === 0) return null;
                                 return (
@@ -1611,10 +1562,10 @@ export default function Inventory() {
                                     <TableRow className="bg-blue-50/50 dark:bg-blue-900/10">
                                       <TableCell colSpan={canEdit ? 6 : 5} className="py-1.5 pl-8 text-xs text-muted-foreground">
                                         <Boxes className="h-3 w-3 inline mr-1.5" />
-                                        Legacy case-break controls — physical stock only; ATP above is server-calculated
+                                        Allowed case-break sources — active conversion rules; ATP above is server-calculated
                                       </TableCell>
                                     </TableRow>
-                                    {descendants.map((source) => (
+                                    {descendants.map(({ source, conversion }) => (
                                       <React.Fragment key={source.variantId}>
                                         <TableRow className="bg-blue-50/30 dark:bg-blue-900/5">
                                           <TableCell colSpan={canEdit ? 6 : 5} className="pl-10 font-mono text-xs font-medium text-blue-700 dark:text-blue-400 py-1">
@@ -1622,14 +1573,13 @@ export default function Inventory() {
                                             <span className="font-normal text-muted-foreground ml-1">{source.name}</span>
                                           </TableCell>
                                         </TableRow>
-                                        <LegacyCaseBreakLocationRows
+                                        <AuthorizedCaseBreakLocationRows
                                           warehouses={warehouses}
                                           sourceVariantId={source.variantId}
                                           sourceSku={source.sku}
                                           targetVariantId={level.variantId}
                                           targetSku={level.sku}
-                                          sourceUnitsPerVariant={source.unitsPerVariant}
-                                          targetUnitsPerVariant={level.unitsPerVariant}
+                                          conversion={conversion}
                                           canEdit={canEdit}
                                           warehouseId={selectedWarehouseId}
                                           onCaseBreak={(input) => {
@@ -1641,7 +1591,8 @@ export default function Inventory() {
                                               sourceSku: input.sourceSku,
                                               targetVariantId: input.targetVariantId,
                                               targetSku: input.targetSku,
-                                              conversionRatio: input.conversionRatio,
+                                              conversionOutputQty: input.conversionOutputQty,
+                                              conversionInputQty: input.conversionInputQty,
                                             });
                                           }}
                                         />
@@ -2672,7 +2623,8 @@ export default function Inventory() {
         sourceSku={caseBreakDialog.sourceSku}
         pickVariantId={caseBreakDialog.targetVariantId}
         pickSku={caseBreakDialog.targetSku}
-        conversionRatio={caseBreakDialog.conversionRatio}
+        conversionOutputQty={caseBreakDialog.conversionOutputQty}
+        conversionInputQty={caseBreakDialog.conversionInputQty}
       />
 
     </div>

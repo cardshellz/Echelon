@@ -6,6 +6,17 @@ This document is the cold-start design and execution plan for replacing Echelon'
 exclusive product inventory-strategy switch with an explicit, versioned supply and
 transformation model.
 
+**2026-10-02 superseding operator decision:** Catalog must expose a product choice
+of Physical only, Package hierarchy, or Build managed. Store that choice on the
+canonical transformation-model version, where it constrains the allowed paths
+and recipe bindings. Do not restore the retired Catalog flag as an independent
+authority. Build managed can combine component assemblies and recipe-backed
+forward conversions; no mode implies a reverse path, and all modes can use exact
+finished stock. The correction is recorded in
+`docs/INVENTORY-BEHAVIOR-AUTHORITY-CORRECTION.md`. Older text retiring the choice
+entirely is superseded; the explicit-path architecture and existing ATP planner
+remain in place. This correction does not itself activate new product rules.
+
 It is a planning record only. It does not authorize production inventory writes,
 configuration changes, recipe activation, channel inventory publication, or data
 repair. Every production mutation remains subject to preview, explicit approval,

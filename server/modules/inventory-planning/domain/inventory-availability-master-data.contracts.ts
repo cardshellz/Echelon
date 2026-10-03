@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { z } from "zod";
+import { inventoryBehaviorSchema, inventoryBehaviorDefinitionIssues } from "@shared/inventory/inventory-behavior";
 
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
 const positiveInteger = z.number().int().positive().max(POSTGRES_INTEGER_MAX);
@@ -166,10 +167,14 @@ function pathIdentity(path: z.infer<typeof transformationPathDraftSchema>): stri
 
 export const transformationModelDefinitionSchema = z.object({
   productId: positiveInteger,
+  inventoryBehavior: inventoryBehaviorSchema.optional(),
   buildToPromiseEnabled: z.boolean(),
   paths: z.array(transformationPathDraftSchema),
   recipeBindings: z.array(transformationRecipeBindingDraftSchema),
 }).strict().superRefine((definition, context) => {
+  for (const message of inventoryBehaviorDefinitionIssues(definition)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["inventoryBehavior"], message });
+  }
   const bindingsByKey = new Map<string, z.infer<typeof transformationRecipeBindingDraftSchema>>();
   const bindingScopes = new Set<string>();
   definition.recipeBindings.forEach((binding, bindingIndex) => {
@@ -367,6 +372,8 @@ export function calculateTransformationModelDefinitionHash(
   );
   const projection = {
     productId: definition.productId,
+    // Do not change hashes of previously sealed definitions with no explicit mode.
+    ...(definition.inventoryBehavior === undefined ? {} : { inventoryBehavior: definition.inventoryBehavior }),
     buildToPromiseEnabled: definition.buildToPromiseEnabled,
     paths: [...definition.paths]
       .sort(comparePaths)
@@ -522,6 +529,7 @@ export interface InventoryAvailabilityMasterDataRepository {
   createTransformationModelDraft(
     command: z.infer<typeof auditedDraftCommandSchema> & {
       definition: TransformationModelDefinition;
+      expectedHeadRevision?: string;
       backfillEvidence?: z.infer<typeof transformationBackfillEvidenceSchema>;
       occurredAt: Date;
     },

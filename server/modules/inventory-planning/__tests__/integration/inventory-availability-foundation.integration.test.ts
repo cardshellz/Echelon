@@ -365,6 +365,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(variantHoldMigrationSql);
       await migrationClient.query(readFileSync(resolve(process.cwd(), "migrations/0687_inventory_channel_definition_completion.sql"), "utf8"));
       await migrationClient.query(publicationMembershipMigrationSql);
+      await migrationClient.query(readFileSync(resolve(process.cwd(), "migrations/0718_inventory_model_behavior.sql"), "utf8"));
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");
@@ -1222,6 +1223,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
   it("requires an atomic head swap when a draft definition is sealed", async () => {
     const scope = await seedProductAndWarehouse();
     const modelId = await insertDraftModel(scope.productId, "head-swap");
+    await pool.query("UPDATE inventory.transformation_model_versions SET inventory_behavior='physical_only' WHERE id=$1", [modelId]);
     await pool.query(
       `INSERT INTO inventory.transformation_model_heads (
          product_id, draft_model_id, updated_by, update_reason
@@ -1274,6 +1276,10 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       [scope.productId],
     );
     expect(head.rows[0]).toEqual({ active_model_id: modelId, draft_model_id: null });
+    await expect(pool.query("UPDATE inventory.transformation_model_versions SET inventory_behavior='build_managed' WHERE id=$1", [modelId]))
+      .rejects.toThrow();
+    expect((await pool.query("SELECT inventory_behavior FROM inventory.transformation_model_versions WHERE id=$1", [modelId])).rows)
+      .toEqual([{ inventory_behavior: "physical_only" }]);
   });
 
   it("executes location and safety policy lifecycle guards on their concrete row shapes", async () => {
@@ -1631,6 +1637,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     const store = new PostgresInventoryAvailabilityMasterDataStore(testDatabase);
     const definition = transformationModelDefinitionSchema.parse({
       productId: scope.productId,
+      inventoryBehavior: "package_hierarchy",
       buildToPromiseEnabled: false,
       paths: [{
         sourceProductId: scope.productId,
@@ -1695,6 +1702,27 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       path_count: "1",
       audit_count: "1",
     });
+    expect((await pool.query("SELECT inventory_behavior FROM inventory.transformation_model_versions WHERE id=$1", [created.modelId])).rows)
+      .toEqual([{ inventory_behavior: "package_hierarchy" }]);
+    // Even a direct database writer cannot contradict a validated definition.
+    for (const invalidMode of ["physical_only", "build_managed"]) {
+      await expect(pool.query("UPDATE inventory.transformation_model_versions SET inventory_behavior=$2 WHERE id=$1", [created.modelId, invalidMode]))
+        .rejects.toMatchObject({ code: "23514" });
+    }
+    expect((await pool.query("SELECT inventory_behavior FROM inventory.transformation_model_versions WHERE id=$1", [created.modelId])).rows)
+      .toEqual([{ inventory_behavior: "package_hierarchy" }]);
+  });
+
+  it("rejects a stale create head token before creating a model or an audit", async () => {
+    const scope = await seedProductAndWarehouse();
+    const store = new PostgresInventoryAvailabilityMasterDataStore(drizzle(pool, { schema: databaseSchema }));
+    await expect(store.createTransformationModelDraft({
+      actorId: "integration-test", changeReason: "Stale edit", idempotencyKey: "behavior-stale-create", requestHash: HASH,
+      expectedHeadRevision: "99", occurredAt: new Date(FIXED_TIME),
+      definition: { productId: scope.productId, inventoryBehavior: "physical_only", buildToPromiseEnabled: false, paths: [], recipeBindings: [] },
+    })).rejects.toMatchObject({ code: "INVENTORY_AVAILABILITY_DRAFT_CHANGED", status: 409 });
+    expect((await pool.query("SELECT count(*)::int AS n FROM inventory.transformation_model_versions")).rows).toEqual([{ n: 0 }]);
+    expect((await pool.query("SELECT count(*)::int AS n FROM public.audit_events")).rows).toEqual([{ n: 0 }]);
   });
 
   it("serializes concurrent draft creation by product owner", async () => {

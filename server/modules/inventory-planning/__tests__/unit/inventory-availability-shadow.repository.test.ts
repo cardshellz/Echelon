@@ -14,6 +14,7 @@ import {
 } from "../../domain/inventory-availability-planner";
 import {
   captureActiveSupplySnapshotInsideTransaction,
+  captureActiveClaimSupplySnapshotInsideTransaction,
   captureProductDraftReviewSnapshotInsideTransaction,
   captureSafetyDraftReviewSnapshotInsideTransaction,
   InventoryAvailabilityShadowRepositoryError,
@@ -25,6 +26,34 @@ const CAPTURED_AT = "2026-08-27T12:00:00.000Z";
 const COMPLETED_AT = new Date("2026-08-27T12:00:01.000Z");
 
 describe("Postgres inventory availability shadow repository", () => {
+  it("never loads mutable legacy recipes for operational ATP, claims or reviewed definitions", async () => {
+    const captures = [
+      (client: never) => captureActiveSupplySnapshotInsideTransaction(client, 10),
+      (client: never) => captureActiveClaimSupplySnapshotInsideTransaction(client, [101]),
+      (client: never) => captureProductDraftReviewSnapshotInsideTransaction(client, 10, 10),
+      (client: never) => captureSafetyDraftReviewSnapshotInsideTransaction(client, 10, "business"),
+    ];
+    for (const capture of captures) {
+      const client = fakeSnapshotClient();
+      const query = client.query.getMockImplementation()!;
+      client.query.mockImplementation(async statement => {
+        if (String(statement).includes("inventory.build_recipes")) throw new Error("Corrupt unrelated legacy recipe");
+        return query(statement);
+      });
+      const snapshot = await capture(client as never);
+      expect(snapshot.legacyRecipes).toEqual([]);
+      if (snapshot.schemaVersion === "inventory_availability_snapshot_v1") {
+        expect(projectCanonicalAtp(snapshot, { targetVariantId: 101, scope: { kind: "warehouse", warehouseId: 1 } }).atpUnits).toBe("5");
+      }
+    }
+  });
+
+  it("retains legacy recipe loading only for an explicit shadow comparison", async () => {
+    const client = fakeSnapshotClient();
+    const repository = new PostgresInventoryAvailabilityShadowRepository({ connect: vi.fn(async () => client) } as never);
+    await repository.captureSupplySnapshot(10);
+    expect(client.query.mock.calls.some(call => String(call[0]).includes("inventory.build_recipes"))).toBe(true);
+  });
   it("selects only the named safety draft with active models and other policies", async () => {
     const client = fakeSnapshotClient();
     await captureSafetyDraftReviewSnapshotInsideTransaction(client as never, 10, "business");

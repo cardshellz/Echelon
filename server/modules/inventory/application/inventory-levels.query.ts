@@ -1,3 +1,6 @@
+import type { AllowedInventoryConversion } from "@shared/types/inventory-conversions";
+import type { InventoryConversionReader } from "../../inventory-planning/application/inventory-conversion-read.port";
+
 export interface InventoryLevelAtpRow {
   productVariantId: number;
   atpUnits: number;
@@ -34,7 +37,9 @@ export interface InventoryLevelProjection {
   pickableQty: number;
   binCount: number;
   noBin: boolean;
+  /** @deprecated Missing legacy parents are not configuration failures. */
   noCaseBreak: boolean;
+  allowedConversions: AllowedInventoryConversion[];
   noBarcode: boolean;
   noReplen: boolean;
   overReserved: boolean;
@@ -55,6 +60,7 @@ function nullablePositiveInteger(value: unknown): number | null {
 export async function projectInventoryLevels(input: {
   rows: Array<Record<string, unknown>>;
   atp: InventoryLevelAtpReader;
+  conversions: InventoryConversionReader;
   warehouseId?: number;
 }): Promise<InventoryLevelProjection[]> {
   const levels = input.rows.map((row) => {
@@ -90,7 +96,8 @@ export async function projectInventoryLevels(input: {
       pickableQty: integer(row.pickable_variant_qty),
       binCount,
       noBin: variantQty > 0 && binCount === 0,
-      noCaseBreak: hierarchyLevel >= 2 && !parentVariantId && !isBaseUnit,
+      noCaseBreak: false,
+      allowedConversions: [] as AllowedInventoryConversion[],
       noBarcode: !barcode,
       noReplen: binCount > 0 && integer(row.has_replen_rule) !== 1,
       overReserved: reservedQty > variantQty,
@@ -111,11 +118,21 @@ export async function projectInventoryLevels(input: {
   for (const row of atpRows.flat()) {
     atpByVariant.set(row.productVariantId, row.atpUnits);
   }
+  // Missing/retired models return no directions. Read failure fails this view;
+  // never reconstruct a path from parent links, units or another SKU's stock.
+  const conversionRows = await Promise.all(productIds.map(productId => input.conversions.getAllowedConversions(productId)));
+  const conversionsByTarget = new Map<number, AllowedInventoryConversion[]>();
+  for (const conversion of conversionRows.flat()) {
+    const entries = conversionsByTarget.get(conversion.destinationVariantId) ?? [];
+    entries.push(conversion);
+    conversionsByTarget.set(conversion.destinationVariantId, entries);
+  }
 
   const skuCounts = new Map<string, number>();
   for (const level of levels) {
     level.atpUnits = atpByVariant.get(level.variantId) ?? 0;
     level.available = level.atpUnits;
+    level.allowedConversions = conversionsByTarget.get(level.variantId) ?? [];
     if (level.sku) {
       const normalizedSku = level.sku.toUpperCase();
       skuCounts.set(normalizedSku, (skuCounts.get(normalizedSku) ?? 0) + 1);

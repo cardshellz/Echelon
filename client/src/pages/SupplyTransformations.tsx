@@ -1329,6 +1329,8 @@ function buildCreateRequestCandidate(input: {
   );
   return {
     productId: input.view.product.id,
+    inventoryBehavior: (input.view.draftModel ?? input.view.activeModel)?.inventoryBehavior,
+    expectedHeadRevision: input.view.head?.revision ?? "0",
     buildToPromiseEnabled: input.buildToPromiseEnabled,
     paths: input.paths.map((path) => ({
       sourceVariantId: path.sourceVariantId,

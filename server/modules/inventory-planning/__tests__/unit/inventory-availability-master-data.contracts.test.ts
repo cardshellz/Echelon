@@ -72,6 +72,33 @@ function explicitPackagingDefinition(): TransformationModelDefinition {
 }
 
 describe("inventory availability master-data contracts", () => {
+  it("includes an explicit behavior in model identity without rehashing absent legacy fields", () => {
+    const existing = explicitPackagingDefinition();
+    expect(calculateTransformationModelDefinitionHash({ ...existing, inventoryBehavior: undefined }))
+      .toBe(calculateTransformationModelDefinitionHash(existing));
+    expect(calculateTransformationModelDefinitionHash({ ...existing, inventoryBehavior: "package_hierarchy" }))
+      .not.toBe(calculateTransformationModelDefinitionHash(existing));
+    const empty = { ...existing, paths: [] };
+    expect(calculateTransformationModelDefinitionHash({ ...empty, inventoryBehavior: "physical_only" }))
+      .not.toBe(calculateTransformationModelDefinitionHash({ ...empty, inventoryBehavior: "package_hierarchy" }));
+  });
+
+  it.each(["physical_only", "build_managed"] as const)("rejects recipe-free package paths for %s", inventoryBehavior => {
+    expect(transformationModelDefinitionSchema.safeParse({ ...explicitPackagingDefinition(), inventoryBehavior }).success).toBe(false);
+  });
+
+  it("permits explicit hierarchy directions and exact-stock-only modes without fabricating paths", () => {
+    expect(transformationModelDefinitionSchema.parse({ ...explicitPackagingDefinition(), inventoryBehavior: "package_hierarchy" }).paths).toHaveLength(2);
+    for (const inventoryBehavior of ["physical_only", "package_hierarchy", "build_managed"] as const) {
+      expect(transformationModelDefinitionSchema.parse({ ...explicitPackagingDefinition(), paths: [], inventoryBehavior }).paths).toEqual([]);
+    }
+  });
+
+  it.each(["physical_only", "package_hierarchy"] as const)("rejects component promise for %s", inventoryBehavior => {
+    expect(transformationModelDefinitionSchema.safeParse({ ...explicitPackagingDefinition(), paths: [],
+      inventoryBehavior, buildToPromiseEnabled: true }).success).toBe(false);
+  });
+
   it("accepts separately authorized paths in both directions", () => {
     expect(transformationModelDefinitionSchema.safeParse(explicitPackagingDefinition()).success).toBe(true);
   });

@@ -1805,10 +1805,10 @@ export default function ProductDetail() {
       return res.json();
     },
     onSuccess: (created: { id: number }) => {
-      toast({ title: "Product duplicated", description: "Created as a draft — review and activate when ready." });
+      toast({ title: "Product duplicated", description: "Choose and apply this copy's inventory behavior before activating it. Conversion permissions and recipes were not copied." });
       setDuplicateOpen(false);
       queryClient.invalidateQueries({ queryKey: ["/api/products"] });
-      setLocation(`/products/${created.id}`);
+      setLocation(`/products/${created.id}?tab=variants`);
     },
     onError: (err: Error) => {
       toast({ title: "Duplicate failed", description: err.message, variant: "destructive" });
@@ -2713,7 +2713,8 @@ export default function ProductDetail() {
             <DialogDescription>
               Creates a new <strong>draft</strong> product with these details prefilled. Base fields, images,
               category, brand and procurement settings are copied. Inventory, channels, pick locations and
-              suppliers are not.
+              suppliers are not. Conversion directions and recipe bindings are not copied. Next, choose and review
+              this copy's Inventory behavior on its Variants tab.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
@@ -2896,14 +2897,14 @@ export default function ProductDetail() {
                       <div className="rounded-md border bg-muted/30 p-3 text-sm" data-testid="inventory-behavior-read-only">
                         <p className="font-medium">
                           {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
-                            ? "Legacy inventory behavior is retired for live planning."
+                            ? "Inventory behavior is controlled by this product's active rules."
                             : "Inventory behavior cannot be edited until live authority is confirmed."}
                         </p>
                         <p className="mt-1 text-xs text-muted-foreground">
-                          Recorded legacy value: {editForm.inventoryStrategy}. Configure directed package paths and build bindings in Supply Transformations.
+                          Choose Physical only, Package hierarchy or Build managed on Variants. Review and apply changes to update ATP and warehouse execution together.
                         </p>
-                        <Button asChild variant="outline" size="sm" className="mt-3">
-                          <Link href="/inventory/supply-transformations">Open Supply Transformations</Link>
+                        <Button variant="outline" size="sm" className="mt-3" onClick={() => setActiveTab("variants")}>
+                          Manage inventory behavior
                         </Button>
                       </div>
                     )}
@@ -3621,10 +3622,6 @@ export default function ProductDetail() {
                       {/* Mobile cards */}
                       <div className="md:hidden space-y-2">
                         {sortedVariants.map((variant) => {
-                          const parentVariant = variant.parentVariantId
-                            ? sortedVariants.find((v) => v.id === variant.parentVariantId)
-                            : null;
-                          const needsConfig = !variant.parentVariantId && variant.hierarchyLevel > 1 && !variant.isBaseUnit;
                           const packageDisplay = buildVariantPackageDisplay(variant);
                           return (
                           <div
@@ -3635,11 +3632,6 @@ export default function ProductDetail() {
                             <div className="flex items-center justify-between mb-2">
                               <span className="font-mono text-sm text-primary">{variant.sku}</span>
                               <div className="flex items-center gap-1.5">
-                                {needsConfig && (
-                                  <Badge variant="outline" className="text-[10px] bg-yellow-50 text-yellow-700 border-yellow-300">
-                                    Needs config
-                                  </Badge>
-                                )}
                                 {variant.salesEligibility === "internal_only" && (
                                   <Badge variant="outline" className="text-[10px] bg-slate-50 text-slate-700 border-slate-300">
                                     Internal only
@@ -3652,7 +3644,7 @@ export default function ProductDetail() {
                             </div>
                             <p className="text-sm mb-2">{variant.name}</p>
                             <div className="flex items-center justify-between text-xs text-muted-foreground">
-                              <span>Units: {variant.unitsPerVariant}{parentVariant ? ` · Legacy parent: ${parentVariant.sku}` : ""}</span>
+                              <span>Units: {variant.unitsPerVariant}</span>
                               <span className="font-mono">{variant.barcode || "No barcode"}</span>
                             </div>
                             <div className="mt-2">
@@ -3694,7 +3686,6 @@ export default function ProductDetail() {
                               <TableHead>Name</TableHead>
                               <TableHead>Type</TableHead>
                               <TableHead>Units</TableHead>
-                              <TableHead>Legacy parent</TableHead>
                               <TableHead>Barcode</TableHead>
                               <TableHead>Package</TableHead>
                               <TableHead>Customer sale</TableHead>
@@ -3703,10 +3694,6 @@ export default function ProductDetail() {
                           </TableHeader>
                           <TableBody>
                             {sortedVariants.map((variant) => {
-                              const parentVariant = variant.parentVariantId
-                                ? sortedVariants.find((v) => v.id === variant.parentVariantId)
-                                : null;
-                              const needsConfig = !variant.parentVariantId && variant.hierarchyLevel > 1 && !variant.isBaseUnit;
                               const packageDisplay = buildVariantPackageDisplay(variant);
                               return (
                               <TableRow
@@ -3721,17 +3708,6 @@ export default function ProductDetail() {
                                   </Badge>
                                 </TableCell>
                                 <TableCell>{variant.unitsPerVariant}</TableCell>
-                                <TableCell>
-                                  {parentVariant ? (
-                                    <span className="font-mono text-xs">{parentVariant.sku || parentVariant.name}</span>
-                                  ) : needsConfig ? (
-                                    <Badge variant="outline" className="text-xs bg-yellow-50 text-yellow-700 border-yellow-300">
-                                      Needs config
-                                    </Badge>
-                                  ) : (
-                                    <span className="text-xs text-muted-foreground">Base</span>
-                                  )}
-                                </TableCell>
                                 <TableCell className="font-mono text-sm">
                                   {variant.barcode || "-"}
                                 </TableCell>
@@ -3813,7 +3789,6 @@ export default function ProductDetail() {
                 <ProductConversionCard
                   enabled={activeTab === "variants"}
                   productId={product.productId}
-                  inventoryStrategy={product.inventoryStrategy ?? DEFAULT_PRODUCT_INVENTORY_STRATEGY}
                 />
               )}
             </TabsContent>
@@ -4325,52 +4300,7 @@ export default function ProductDetail() {
               />
             )}
 
-            <fieldset disabled className="space-y-1.5">
-              <legend className="text-sm font-medium">Legacy parent (read only)</legend>
-              {isSingleUnitVariantUomType(variantForm.uomType) ? (
-                <p className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
-                  {getVariantUomDefinition(variantForm.uomType).label} is a base inventory unit and does not break down further.
-                </p>
-              ) : (
-                <div className="flex items-center gap-2">
-                  <Checkbox
-                    id="isBaseUnit"
-                    checked={variantForm.isBaseUnit}
-                    onCheckedChange={(checked) => setVariantForm((prev) => ({
-                      ...prev,
-                      isBaseUnit: checked === true,
-                      parentVariantId: checked === true ? null : prev.parentVariantId,
-                    }))}
-                  />
-                  <label htmlFor="isBaseUnit" className="text-sm text-muted-foreground cursor-pointer">
-                    This is the smallest inventory unit and does not break down further
-                  </label>
-                </div>
-              )}
-              {!variantForm.isBaseUnit && (
-                <Select
-                  value={variantForm.parentVariantId ? String(variantForm.parentVariantId) : "none"}
-                  onValueChange={(v) => setVariantForm((prev) => ({ ...prev, parentVariantId: v === "none" ? null : parseInt(v) }))}
-                >
-                  <SelectTrigger className="h-11">
-                    <SelectValue placeholder="None (base variant)" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">None (base variant)</SelectItem>
-                    {sortedVariants
-                      .filter((v) => v.id !== editingVariant?.id && v.unitsPerVariant < variantForm.unitsPerVariant)
-                      .map((v) => (
-                        <SelectItem key={v.id} value={String(v.id)}>
-                          {v.sku || v.name} ({v.unitsPerVariant} units)
-                        </SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
-              )}
-              <p className="text-xs text-muted-foreground">
-                Retained for compatibility. Manage conversion directions in the product's Variants section; this legacy value is not the conversion model.
-              </p>
-            </fieldset>
+            <p className="text-xs text-muted-foreground">Physical SKU details do not authorize conversions. Manage allowed directions and recipes in Inventory behavior on the Variants tab.</p>
           </div>
           <DialogFooter className="gap-2">
             <Button variant="outline" onClick={() => setVariantDialogOpen(false)}>

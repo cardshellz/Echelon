@@ -366,12 +366,18 @@ export class BuildRepository {
     });
 
     return this.db.transaction(async (tx) => {
+      // Authoring is not permission to execute. After cutover the sealed model
+      // authorizes builds; the retired catalog classification must not block a
+      // recipe needed for a new Build-managed draft.
+      const runtime = await this.transformationAuthority.pinRuntime(tx, await this.transformationAuthority.readRuntime());
       const variantFacts = await loadActiveBuildVariantFacts(
         tx,
         [input.outputVariantId, ...input.components.map((item) => item.componentVariantId)],
       );
       const outputFacts = getVariantFacts(variantFacts, input.outputVariantId);
-      await assertRecipeManagedOutputProduct(tx, outputFacts.productId, { outputVariantId: input.outputVariantId });
+      if (runtime.authority === "legacy") {
+        await assertRecipeManagedOutputProduct(tx, outputFacts.productId, { outputVariantId: input.outputVariantId });
+      }
       const componentDefinitions = input.components.map((component) => ({
         ...getVariantFacts(variantFacts, component.componentVariantId),
         qtyPerBuild: component.qtyPerBuild,
@@ -440,6 +446,7 @@ export class BuildRepository {
     });
 
     return this.db.transaction(async (tx) => {
+      const runtime = await this.transformationAuthority.pinRuntime(tx, await this.transformationAuthority.readRuntime());
       await tx.execute(sql`
         SELECT pg_advisory_xact_lock(
           hashtext('inventory.build_recipe_edit'),
@@ -546,10 +553,11 @@ export class BuildRepository {
       const outputFacts = getVariantFacts(variantFacts, input.outputVariantId, {
         recipeId: input.recipeId,
       });
-      await assertRecipeManagedOutputProduct(tx, outputFacts.productId, {
-        recipeId: input.recipeId,
-        outputVariantId: input.outputVariantId,
-      });
+      if (runtime.authority === "legacy") {
+        await assertRecipeManagedOutputProduct(tx, outputFacts.productId, {
+          recipeId: input.recipeId, outputVariantId: input.outputVariantId,
+        });
+      }
       const componentDefinitions = input.components.map((component) => ({
         ...getVariantFacts(variantFacts, component.componentVariantId, {
           recipeId: input.recipeId,
@@ -723,7 +731,9 @@ export class BuildRepository {
           status: recipe.status,
         });
       }
-      await assertRecipeManagedOutputProduct(tx, Number(recipe.output_product_id), { recipeId: input.recipeId });
+      if (authorization.runtime.authority === "legacy") {
+        await assertRecipeManagedOutputProduct(tx, Number(recipe.output_product_id), { recipeId: input.recipeId });
+      }
 
       const componentResult = await tx.execute(sql`
         SELECT id, component_variant_id, component_product_id,

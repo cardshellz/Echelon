@@ -37,6 +37,7 @@ import { PostgresSafetyDefinitionStore } from "../../infrastructure/inventory-sa
 import { ChannelDefinitionService } from "../../application/inventory-channel-definition.service";
 import { PostgresChannelDefinitionStore } from "../../infrastructure/inventory-channel-definition.repository";
 import { activateReviewedWarehouseSourcesInsideTransaction } from "../../../warehouse/infrastructure/warehouse-source-activation.repository";
+import { readInventoryProductBalances } from "../../infrastructure/inventory-product-balances.reader";
 
 // Only the application's process-global connection is disabled. Every owner under
 // test receives the uniquely created disposable pool/client; no owner is mocked.
@@ -192,6 +193,15 @@ dbDescribe.sequential("cutover composition with actual snapshot, claim and recei
     try { await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); await work(client); }
     finally { await client.query("ROLLBACK"); client.release(); }
   }
+
+  it("reads physical summary facts without computing legacy availability", async () => readOnly(async (client) => {
+    await expect(readInventoryProductBalances(client, 20)).resolves.toMatchObject({
+      productId: 20, sku: "PACK", variants: [
+        { productVariantId: 101, unitsPerVariant: 5, physicalQty: 20, reservedQty: 3, pickedQty: 2 },
+      ],
+    });
+    await expect(readInventoryProductBalances(client, 404)).resolves.toBeNull();
+  }));
 
   it("captures real proposed models, exact physical stock and cumulative fresh demand without writes", async () => readOnly(async (client) => {
     const plan = await reconstruction.preview(client);

@@ -1,8 +1,8 @@
-import type { Pool, PoolClient } from "pg";
+import type { Pool } from "pg";
 import { pool } from "../../../db";
 import type { AllowedConversion, InventoryConversionReader } from "../application/inventory-conversion-read.port";
-
-type QueryClient = Pick<PoolClient, "query" | "release">;
+import { inventoryBehaviorSchema, permitsPackagePath } from "@shared/inventory/inventory-behavior";
+import { allowedInventoryConversionSchema } from "@shared/types/inventory-conversions";
 
 /** Read-only adapter for the planning module's published conversion interface. */
 export class PostgresInventoryConversionReader implements InventoryConversionReader {
@@ -14,9 +14,9 @@ export class PostgresInventoryConversionReader implements InventoryConversionRea
     try {
       const result = await client.query<{
         source_variant_id: number; destination_variant_id: number; operation_type: AllowedConversion["operationType"];
-        input_qty: number; output_qty: number;
+        input_qty: number; output_qty: number; inventory_behavior?: unknown; transformation_recipe_binding_id?: number | null;
       }>(`SELECT path.source_variant_id, path.destination_variant_id, path.operation_type,
-                  path.input_qty, path.output_qty
+                  path.input_qty, path.output_qty, model.inventory_behavior, path.transformation_recipe_binding_id
            FROM inventory.transformation_model_heads AS head
            JOIN inventory.transformation_model_versions AS model
              ON model.id = head.active_model_id
@@ -29,7 +29,10 @@ export class PostgresInventoryConversionReader implements InventoryConversionRea
              AND path.authority_state = 'allowed'
              AND path.validation_state = 'valid'
            ORDER BY path.source_variant_id, path.destination_variant_id, path.id`, [productId]);
-      return result.rows.map((row) => ({
+      return result.rows.filter(row => permitsPackagePath(
+        row.inventory_behavior == null ? undefined : inventoryBehaviorSchema.parse(row.inventory_behavior),
+        row.operation_type, row.transformation_recipe_binding_id != null,
+      )).map((row) => allowedInventoryConversionSchema.parse({
         sourceVariantId: Number(row.source_variant_id), destinationVariantId: Number(row.destination_variant_id),
         operationType: row.operation_type, inputQty: Number(row.input_qty), outputQty: Number(row.output_qty),
       }));

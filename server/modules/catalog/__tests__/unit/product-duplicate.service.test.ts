@@ -89,10 +89,10 @@ describe("duplicateProduct", () => {
     expect(result.id).toBe(5000);
   });
 
-  it("honours status=active when requested", async () => {
+  it("rejects direct activation before creating any copied records", async () => {
     const { storage } = buildMockStorage(makeSource());
-    await duplicateProduct(storage as any, 10, { ...baseInput, status: "active" });
-    expect((storage.createProduct.mock.calls[0][0] as any).status).toBe("active");
+    await expect(duplicateProduct(storage as any, 10, { ...baseInput, status: "active" })).rejects.toMatchObject({ statusCode: 400 });
+    expect(storage.createProduct).not.toHaveBeenCalled();
   });
 
   it("copies active variants with new SKUs and resets their Shopify keys", async () => {
@@ -122,12 +122,12 @@ describe("duplicateProduct", () => {
     expect(createdVariants[1].priceCents).toBe(1999);
   });
 
-  it("remaps parent hierarchy to the new variant ids", async () => {
+  it("does not copy retired strategy or parent permissions into the new product", async () => {
     const variants = [
       { id: 50, productId: 10, sku: "P", name: "case", unitsPerVariant: 800, isActive: true, parentVariantId: null, hierarchyLevel: 1 },
       { id: 51, productId: 10, sku: "C", name: "each", unitsPerVariant: 1, isActive: true, parentVariantId: 50, hierarchyLevel: 2 },
     ];
-    const { storage, createdVariants } = buildMockStorage(makeSource(), variants);
+    const { storage, createdVariants } = buildMockStorage({ ...makeSource(), inventoryStrategy: "recipe_managed" }, variants);
 
     await duplicateProduct(storage as any, 10, {
       ...baseInput,
@@ -137,11 +137,10 @@ describe("duplicateProduct", () => {
       ],
     });
 
-    const parent = createdVariants.find((v) => v.sku === "P2");
     const child = createdVariants.find((v) => v.sku === "C2");
-    // Child's parent points at the NEW parent id, not the source id 50.
-    expect(child.parentVariantId).toBe(parent.id);
-    expect(child.parentVariantId).not.toBe(50);
+    expect(child.parentVariantId).toBeNull();
+    expect(storage.updateProductVariant).not.toHaveBeenCalled();
+    expect(storage.createProduct).toHaveBeenCalledWith(expect.objectContaining({ inventoryStrategy: "physical_only", status: "draft" }));
   });
 
   it("copies assets and remaps variant-scoped assets to the new variant id", async () => {

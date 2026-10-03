@@ -15,6 +15,7 @@ import {
   updateTransformationModelDraftRequestSchema,
 } from "@shared/types/inventory-availability-admin";
 import { z } from "zod";
+import { describeInventoryBehavior } from "@shared/inventory/inventory-behavior";
 
 import {
   auditedDraftCommandSchema,
@@ -168,6 +169,7 @@ export class InventoryAvailabilityMasterDataService {
     return this.store.createTransformationModelDraft({
       ...audited,
       definition,
+      expectedHeadRevision: request.expectedHeadRevision,
       occurredAt: this.clock.now(),
     });
   }
@@ -211,6 +213,7 @@ export class InventoryAvailabilityMasterDataService {
     }
     const definition = buildTransformationDefinition({
       productId,
+      inventoryBehavior: request.inventoryBehavior,
       buildToPromiseEnabled: request.buildToPromiseEnabled,
       paths: request.paths,
       recipeBindings: request.recipeBindings,
@@ -321,6 +324,8 @@ export class InventoryAvailabilityMasterDataService {
 function transformationCreateIntent(request: CreateTransformationModelDraftRequest) {
   return {
     productId: request.productId,
+    ...(request.inventoryBehavior === undefined ? {} : { inventoryBehavior: request.inventoryBehavior }),
+    ...(request.expectedHeadRevision === undefined ? {} : { expectedHeadRevision: request.expectedHeadRevision }),
     buildToPromiseEnabled: request.buildToPromiseEnabled,
     paths: request.paths,
     recipeBindings: request.recipeBindings,
@@ -338,6 +343,7 @@ function transformationUpdateIntent(
     expectedVersion: request.expectedVersion,
     expectedDefinitionHash: request.expectedDefinitionHash,
     expectedHeadRevision: request.expectedHeadRevision,
+    ...(request.inventoryBehavior === undefined ? {} : { inventoryBehavior: request.inventoryBehavior }),
     buildToPromiseEnabled: request.buildToPromiseEnabled,
     paths: request.paths,
     recipeBindings: request.recipeBindings,
@@ -455,6 +461,10 @@ function buildTransformationDefinition(
     transformationModelDefinitionSchema,
     {
       productId: context.product.id,
+      inventoryBehavior: request.inventoryBehavior
+        ?? context.draftModel?.inventoryBehavior
+        ?? context.activeModel?.inventoryBehavior
+        ?? describeInventoryBehavior({ paths, recipeBindings }),
       buildToPromiseEnabled: request.buildToPromiseEnabled,
       paths,
       recipeBindings,

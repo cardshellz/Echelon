@@ -99,8 +99,10 @@ describe("AuthorityAwareInventoryAtpService", () => {
     });
   });
 
-  it("overlays canonical per-SKU values onto the backward-compatible inventory summary", async () => {
+  it("builds both summaries from physical balances and canonical ATP without calling legacy recipes", async () => {
     const legacy = fakeLegacy();
+    vi.mocked(legacy.getProductSummary).mockRejectedValue(new Error("Legacy recipe graph must not be read"));
+    vi.mocked(legacy.getInventoryItemSummary).mockRejectedValue(new Error("Legacy recipe graph must not be read"));
     const service = new AuthorityAwareInventoryAtpService(executor({
       authority: "canonical",
       legacy,
@@ -108,12 +110,36 @@ describe("AuthorityAwareInventoryAtpService", () => {
     }));
 
     await expect(service.getInventoryItemSummary(10)).resolves.toMatchObject({
+      totalOnHandPieces: 35,
       totalAtpPieces: 35,
       variants: [
         { variantId: 101, available: 25, atpPieces: 25 },
         { variantId: 102, available: 7, atpPieces: 35 },
       ],
     });
+    await expect(service.getProductSummary(10)).resolves.toMatchObject({
+      totalOnHandBase: 35,
+      totalAtpBase: 35,
+      variants: [
+        { productVariantId: 101, physicalQty: 25, atpUnits: 25 },
+        { productVariantId: 102, physicalQty: 2, atpUnits: 7 },
+      ],
+    });
+    expect(legacy.getInventoryItemSummary).not.toHaveBeenCalled();
+    expect(legacy.getProductSummary).not.toHaveBeenCalled();
+  });
+
+  it("returns null for a missing product without projecting ATP or calling legacy", async () => {
+    const legacy = fakeLegacy();
+    const capture = vi.fn();
+    const service = new AuthorityAwareInventoryAtpService(executor({
+      authority: "canonical", legacy, captureActiveSupplySnapshot: capture,
+      readProductBalances: vi.fn(async () => null),
+    }));
+    expect(await service.getProductSummary(404)).toBeNull();
+    expect(await service.getInventoryItemSummary(404)).toBeNull();
+    expect(capture).not.toHaveBeenCalled();
+    expect(legacy.getProductSummary).not.toHaveBeenCalled();
   });
 });
 
@@ -122,6 +148,7 @@ function executor(input: {
   legacy: InventoryAtpServiceContract;
   captureActiveSupplySnapshot: InventoryAvailabilityRuntimeAtpContext["captureActiveSupplySnapshot"];
   getProductIdsByVariantIds?: InventoryAvailabilityRuntimeAtpContext["getProductIdsByVariantIds"];
+  readProductBalances?: InventoryAvailabilityRuntimeAtpContext["readProductBalances"];
 }): InventoryAvailabilityRuntimeAtpExecutor {
   return {
     execute: (work) => work({
@@ -129,6 +156,15 @@ function executor(input: {
       authorityRevision: "9",
       activationRunId: input.authority === "canonical" ? "44" : null,
       legacy: input.legacy,
+      readProductBalances: input.readProductBalances ?? vi.fn(async () => ({
+        productId: 10, sku: "PRODUCT", name: "Product", inventoryStrategy: "recipe_managed",
+        variants: [
+          { productVariantId: 101, sku: "EA", name: "Each", isActive: true, unitsPerVariant: 1,
+            physicalQty: 25, reservedQty: 0, pickedQty: 0 },
+          { productVariantId: 102, sku: "P5", name: "Pack 5", isActive: true, unitsPerVariant: 5,
+            physicalQty: 2, reservedQty: 0, pickedQty: 0 },
+        ],
+      })),
       captureActiveSupplySnapshot: input.captureActiveSupplySnapshot,
       getProductIdsByVariantIds: input.getProductIdsByVariantIds ?? vi.fn(async () => new Map()),
     }),

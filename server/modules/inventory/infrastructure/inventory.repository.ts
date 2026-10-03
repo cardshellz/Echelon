@@ -901,9 +901,9 @@ export function createInventoryMethods(
         AND pv.requires_shipping = true
         AND COALESCE(pv.track_inventory, true) = true
       GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, p.name, p.inventory_strategy, pv.barcode
-      HAVING COALESCE(SUM(il.variant_qty), 0) != 0
-          OR COALESCE(SUM(il.reserved_qty), 0) != 0
-          OR p.inventory_strategy = 'recipe_managed'
+      -- Keep zero-physical SKUs visible for authoritative ATP projection, just
+      -- like the all-warehouses query. A retired catalog flag cannot decide
+      -- whether an exact SKU has conversion/build supply in this warehouse.
       ORDER BY pv.sku
     `) : await db.execute(sql`
       SELECT

@@ -8,13 +8,14 @@
 // (partial unique index on UPPER(sku) WHERE is_active — migration 0251), so the
 // new SKUs must be provided and validated up front.
 //
-// What it COPIES: all base product fields, every ACTIVE variant, and all assets
+// What it COPIES: descriptive product fields, every ACTIVE variant, and all assets
 // (images/media, product- and variant-scoped).
-// What it RESETS: identity (ids), status → draft by default, and — critically —
+// What it RESETS: identity (ids), status → draft, and — critically —
 // every Shopify sync key (shopifyProductId / shopifyVariantId /
 // shopifyInventoryItemId) plus lastPushedAt, so the copy is fully unlinked and
 // can't corrupt the source's channel sync.
-// What it does NOT copy: inventory levels, channel feeds, bin/pick locations,
+// What it does NOT copy: inventory behavior, directions, recipe bindings,
+// inventory levels, channel feeds, bin/pick locations,
 // supplier SKUs — those live in other tables and are established per-product
 // after creation.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -43,7 +44,7 @@ export interface DuplicateProductInput {
   name: string;
   sku: string;
   variants?: Array<{ sourceVariantId: number; sku: string }>;
-  status?: string; // "draft" (default) | "active"
+  status?: string; // Only draft is accepted; inventory behavior requires review.
 }
 
 export interface DuplicateProductStorage {
@@ -54,7 +55,6 @@ export interface DuplicateProductStorage {
   getProductAssetsByProductId(productId: number): Promise<ProductAsset[]>;
   createProduct(product: InsertProduct): Promise<Product>;
   createProductVariant(variant: InsertProductVariant): Promise<ProductVariant>;
-  updateProductVariant(id: number, updates: Partial<InsertProductVariant>): Promise<ProductVariant | null>;
   createProductAsset(asset: InsertProductAsset): Promise<ProductAsset>;
 }
 
@@ -67,7 +67,9 @@ export async function duplicateProduct(
   const sku = (input.sku ?? "").trim();
   if (!name) throw new ProductDuplicateError("Product name is required");
   if (!sku) throw new ProductDuplicateError("Base SKU is required");
-  const targetStatus = input.status === "active" ? "active" : "draft"; // default: draft
+  if (input.status !== undefined && input.status !== "draft") {
+    throw new ProductDuplicateError("A duplicate must start as a draft. Review its inventory behavior before activating it.");
+  }
 
   const source = await storage.getProductById(sourceId);
   if (!source) throw new ProductDuplicateError("Product not found", 404);
@@ -122,11 +124,14 @@ export async function duplicateProduct(
     title: null, // Shopify display title — the unlinked copy has none; falls back to name.
     shopifyProductId: null, // MUST reset — never bind the copy to the source's Shopify product.
     lastPushedAt: null,
-    status: targetStatus,
+    status: "draft",
+    // No source strategy/permission is silently inherited. The new product
+    // has no active model until its own Inventory behavior is reviewed/applied.
+    inventoryStrategy: "physical_only",
     isActive: true,
   } as InsertProduct);
 
-  // ── Copy variants (two-pass so parent hierarchy remaps to the new ids) ──
+  // Copy physical SKU definitions. Parent links are retired conversion controls.
   const newIdBySourceVariant = new Map<number, number>();
   for (const v of sourceVariants) {
     const { id: _vid, createdAt: _vc, updatedAt: _vu, trackInventory: _effectiveTracking, ...variantFields } = v as any;
@@ -134,21 +139,12 @@ export async function duplicateProduct(
       ...variantFields,
       productId: newProduct.id,
       sku: newSkuBySourceVariant.get(v.id)!,
-      parentVariantId: null, // resolved in the second pass below
+      parentVariantId: null,
       shopifyVariantId: null, // MUST reset
       shopifyInventoryItemId: null, // MUST reset
       isActive: true,
     } as InsertProductVariant);
     newIdBySourceVariant.set(v.id, created.id);
-  }
-  // Second pass: remap parentVariantId for hierarchical variants to the new ids.
-  for (const v of sourceVariants) {
-    if (v.parentVariantId == null) continue;
-    const newId = newIdBySourceVariant.get(v.id);
-    const newParentId = newIdBySourceVariant.get(v.parentVariantId);
-    if (newId != null && newParentId != null) {
-      await storage.updateProductVariant(newId, { parentVariantId: newParentId });
-    }
   }
 
   // ── Copy assets (images/media); remap variant-scoped assets to new variant ids ──

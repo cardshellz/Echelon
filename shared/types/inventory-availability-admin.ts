@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { inventoryBehaviorSchema } from "../inventory/inventory-behavior";
 import { PRODUCT_INVENTORY_STRATEGIES } from "../catalog/inventory-strategy";
 import { VARIANT_SALES_ELIGIBILITIES } from "../catalog/variant-sales-eligibility";
 import { VARIANT_UOM_TYPES } from "../catalog/variant-uom";
@@ -63,6 +64,8 @@ export const transformationDraftPathInputSchema = z.object({
 
 export const createTransformationModelDraftRequestSchema = z.object({
   productId: positiveInteger,
+  inventoryBehavior: inventoryBehaviorSchema.optional(),
+  expectedHeadRevision: postgresBigintStringSchema.optional(),
   buildToPromiseEnabled: z.boolean(),
   paths: z.array(transformationDraftPathInputSchema).max(500),
   recipeBindings: z.array(transformationDraftBindingInputSchema).max(200),
@@ -71,6 +74,7 @@ export const createTransformationModelDraftRequestSchema = z.object({
 }).strict();
 
 export const updateTransformationModelDraftRequestSchema = z.object({
+  inventoryBehavior: inventoryBehaviorSchema.optional(),
   expectedVersion: positiveInteger,
   expectedDefinitionHash: z.string().regex(/^[0-9a-f]{64}$/),
   expectedHeadRevision: postgresBigintStringSchema,
@@ -184,6 +188,7 @@ export const transformationAdminPathSchema = z.object({
 }).strict();
 
 export const transformationAdminModelSchema = z.object({
+  inventoryBehavior: inventoryBehaviorSchema.optional(),
   id: positiveInteger,
   productId: positiveInteger,
   version: positiveInteger,

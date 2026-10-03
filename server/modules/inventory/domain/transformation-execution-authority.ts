@@ -1,3 +1,5 @@
+import { inventoryBehaviorSchema, permitsPackagePath, permitsRecipeBuild } from "@shared/inventory/inventory-behavior";
+
 export type InventoryTransformationRuntimeAuthority = "legacy" | "canonical";
 export type PackageConversionOperation = "break_pack" | "assemble_pack";
 export type BuildRecipeRelationshipRole = "component_build" | "directional_conversion";
@@ -86,6 +88,7 @@ export interface RuntimeAuthorityRecord {
 }
 
 export interface PackageConversionDefinitionRecord {
+  modelInventoryBehavior?: unknown;
   headRevision: unknown;
   modelId: unknown;
   modelProductId: unknown;
@@ -113,6 +116,7 @@ export interface PackageConversionDefinitionRecord {
 }
 
 export interface BuildBindingDefinitionRecord {
+  modelInventoryBehavior?: unknown;
   headRevision: unknown;
   modelId: unknown;
   modelProductId: unknown;
@@ -200,6 +204,16 @@ function validHash(value: unknown, field: string): string {
 
 function isEmptyErrorArray(value: unknown): boolean {
   return Array.isArray(value) && value.length === 0;
+}
+
+function assertBehaviorPermission(value: unknown, operation: PackageConversionOperation | "recipe"): void {
+  if (value === null || value === undefined) return; // Immutable, pre-mode model.
+  const parsed = inventoryBehaviorSchema.safeParse(value);
+  if (!parsed.success || !(operation === "recipe"
+    ? permitsRecipeBuild(parsed.data) : permitsPackagePath(parsed.data, operation, false))) {
+    throw new TransformationExecutionAuthorityError("INVENTORY_BEHAVIOR_OPERATION_NOT_ALLOWED",
+      "The model's inventory behavior does not authorize this operation.", { inventoryBehavior: value, operation });
+  }
 }
 
 function assertRequestVariant(snapshot: PackageConversionVariantSnapshot, field: string): void {
@@ -332,6 +346,7 @@ export function authorizePackageConversionDefinition(input: {
   }
   const row = records[0]!;
   const model = assertModelAuthority(row, request.productId);
+  assertBehaviorPermission(row.modelInventoryBehavior, request.operation);
   const headRevision = nonNegativeBigintText(row.headRevision, "head.revision");
   const pathId = positiveInteger(row.pathId, "path.id");
   const inputQty = positiveInteger(row.inputQty, "path.inputQty");
@@ -518,6 +533,7 @@ export function authorizeBuildBindingDefinition(input: {
   }
   const row = input.records[0]!;
   const model = assertModelAuthority(row, request.outputProductId, input.retained === true);
+  assertBehaviorPermission(row.modelInventoryBehavior, "recipe");
   const bindingId = positiveInteger(row.bindingId, "binding.id");
   const bindingWarehouseId = row.warehouseId === null || row.warehouseId === undefined
     ? null

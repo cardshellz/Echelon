@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 
 import {
   calculateRecipeCapacity,
@@ -10,7 +10,7 @@ import {
 } from "./domain/recipe-capacity.domain";
 
 type QueryExecutor = {
-  execute: (query: unknown) => Promise<{ rows: any[] }>;
+  execute: (query: SQL) => Promise<{ rows: any[] }>;
 };
 
 type RecipeGraph = {

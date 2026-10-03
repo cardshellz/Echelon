@@ -179,6 +179,7 @@ async function loadSelectedModel(
             model.version,
             model.lifecycle_status,
             model.build_to_promise_enabled,
+            model.inventory_behavior,
             model.definition_hash,
             model.validation_state,
             model.validation_errors
@@ -263,6 +264,7 @@ async function loadSelectedModel(
       : "draft_head",
     lifecycleStatus: modelRow.lifecycle_status,
     buildToPromiseEnabled: bool(modelRow.build_to_promise_enabled),
+    ...(modelRow.inventory_behavior == null ? {} : { inventoryBehavior: modelRow.inventory_behavior }),
     definitionHash: String(modelRow.definition_hash),
     validationState: modelRow.validation_state,
     validationErrors: jsonArray(modelRow.validation_errors),
@@ -399,6 +401,7 @@ async function captureGraphInsideTransaction(
   rootProducts: readonly SnapshotProduct[],
   capturedAt: string,
   selection: SnapshotSelection,
+  includeLegacyComparison: boolean,
 ): Promise<CapturedGraphContent> {
   const rootProductIds = rootProducts.map((product) => product.productId);
   const models = await loadModelGraphForProducts(client, rootProductIds, selection);
@@ -426,7 +429,11 @@ async function captureGraphInsideTransaction(
       && bool(row.is_active)
       && row.sales_eligibility === "sellable")
     .map((row) => integer(row.id, "targetVariant.id"));
-  const legacyRecipes = await loadLegacyRecipes(client, targetVariantIds);
+  // Operational reads use only sealed bindings. Mutable legacy recipes belong
+  // exclusively to the explicit shadow comparison, never to ATP/claim validity.
+  const legacyRecipes = includeLegacyComparison
+    ? await loadLegacyRecipes(client, targetVariantIds)
+    : [];
   const relevantProductIds = new Set(modelProductIds);
   for (const recipe of legacyRecipes) {
     relevantProductIds.add(recipe.outputProductId);
@@ -696,13 +703,14 @@ async function captureInsideTransaction(
   client: QueryClient,
   productId: number,
   selection: SnapshotSelection,
+  includeLegacyComparison = false,
 ): Promise<SupplySnapshotDto> {
   const snapshotRow = rows(await client.query(
     `SELECT transaction_timestamp() AS captured_at`,
   ))[0];
   const [product] = await loadSnapshotProducts(client, [productId]);
   const capturedAt = iso(snapshotRow?.captured_at, "snapshot.capturedAt");
-  const graph = await captureGraphInsideTransaction(client, [product!], capturedAt, selection);
+  const graph = await captureGraphInsideTransaction(client, [product!], capturedAt, selection, includeLegacyComparison);
   const content: SupplySnapshotContentDto = {
     schemaVersion: "inventory_availability_snapshot_v1",
     productId: product!.productId,
@@ -800,7 +808,7 @@ async function captureClaimInsideTransaction(
     targetRows.map((row) => integer(row.product_id, "targetVariant.productId")),
   );
   const capturedAt = iso(snapshotRow?.captured_at, "snapshot.capturedAt");
-  const graph = await captureGraphInsideTransaction(client, products, capturedAt, selection);
+  const graph = await captureGraphInsideTransaction(client, products, capturedAt, selection, false);
   return sealClaimSupplySnapshot({
     schemaVersion: "inventory_availability_claim_snapshot_v1",
     rootProducts: products.map((product) => ({
@@ -1118,7 +1126,7 @@ implements InventoryAvailabilityShadowStore, InventoryAvailabilityClaimSnapshotS
     return inTransaction(
       this.connectionPool,
       "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
-      (client) => captureInsideTransaction(client, validatedProductId, "draft_preferred"),
+      (client) => captureInsideTransaction(client, validatedProductId, "draft_preferred", true),
     );
   }
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ArrowLeft, ArrowLeftRight, Check, Hammer, Loader2, Plus, X } from "lucide-react";
-import { useLocation, useRoute } from "wouter";
+import { useLocation, useRoute, useSearch } from "wouter";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useToast } from "@/hooks/use-toast";
 import { BuildVariantSelector } from "@/features/inventory-builds/BuildVariantSelector";
+import { loadProductConversions, transformationQueryKey } from "@/features/inventory-builds/package-conversion-draft";
 import {
   calculateRecipeEvidence,
   type BuildVariantResult,
@@ -96,6 +97,11 @@ function SectionHeading({ number, title, detail }: { number: number; title: stri
 
 export default function BuildRecipeCreate() {
   const [, navigate] = useLocation();
+  const search = useSearch();
+  const productContext = Number(new URLSearchParams(search).get("productId"));
+  const productId = Number.isSafeInteger(productContext) && productContext > 0 ? productContext : null;
+  const returnTo = productId === null ? "/inventory/builds?tab=recipes" : `/products/${productId}?tab=variants`;
+  const returnLabel = productId === null ? "Back to Builds" : "Back to product variants";
   const [, editParams] = useRoute("/inventory/builds/recipes/:recipeId/edit");
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -115,6 +121,11 @@ export default function BuildRecipeCreate() {
   ]);
   const hydratedRecipeId = useRef<number | null>(null);
   const editIdempotencyKey = useRef<string | null>(null);
+  const productContextQuery = useQuery({
+    queryKey: transformationQueryKey(productId ?? 0),
+    queryFn: ({ signal }) => loadProductConversions(productId!, signal),
+    enabled: productId !== null,
+  });
 
   const { data: recipes = [], isLoading: recipesLoading } = useQuery<BuildRecipeView[]>({
     queryKey: ["/api/inventory/build-recipes"],
@@ -173,6 +184,9 @@ export default function BuildRecipeCreate() {
     code.trim()
     && name.trim()
     && evidence?.valid
+    && (productId === null || (!productContextQuery.isError
+      && productContextQuery.data?.variants.some(variant => variant.isActive
+        && variant.id === outputVariant?.productVariantId && variant.productId === productId)))
     && (!isEditing || (recipe && isLatestVersion && changeReason.trim())),
   );
   const editCommandSignature = useMemo(() => JSON.stringify({
@@ -236,12 +250,13 @@ export default function BuildRecipeCreate() {
     onSuccess: async (savedRecipe) => {
       editIdempotencyKey.current = null;
       await queryClient.invalidateQueries({ queryKey: ["/api/inventory/build-recipes"] });
+      if (productId !== null) await queryClient.invalidateQueries({ queryKey: ["/api/inventory-planning/admin/supply-transformations", productId] });
       toast({
         title: isEditing
           ? `Recipe version ${savedRecipe.version} saved`
           : "Build recipe created",
       });
-      navigate("/inventory/builds?tab=recipes");
+      navigate(returnTo);
     },
     onError: (error: Error) => toast({
       title: isEditing ? "Recipe update failed" : "Recipe creation failed",
@@ -257,8 +272,8 @@ export default function BuildRecipeCreate() {
     return (
       <div className="space-y-3 p-6">
         <h1 className="text-xl font-semibold">Recipe not found</h1>
-        <Button variant="outline" onClick={() => navigate("/inventory/builds?tab=recipes")}>
-          <ArrowLeft className="mr-2 h-4 w-4" />Back to Builds
+        <Button variant="outline" onClick={() => navigate(returnTo)}>
+          <ArrowLeft className="mr-2 h-4 w-4" />{returnLabel}
         </Button>
       </div>
     );
@@ -268,14 +283,14 @@ export default function BuildRecipeCreate() {
     <div className="mx-auto max-w-6xl space-y-6 p-3 md:p-6">
       <header className="flex flex-col justify-between gap-4 border-b pb-5 sm:flex-row sm:items-start">
         <div>
-          <Button variant="ghost" className="mb-2 px-0" onClick={() => navigate("/inventory/builds?tab=recipes")}>
-            <ArrowLeft className="mr-2 h-4 w-4" />Back to Builds
+          <Button variant="ghost" className="mb-2 px-0" onClick={() => navigate(returnTo)}>
+            <ArrowLeft className="mr-2 h-4 w-4" />{returnLabel}
           </Button>
           <h1 className="text-2xl font-bold">{isEditing ? `Edit ${code}` : "Create build recipe"}</h1>
           <p className="text-sm text-muted-foreground">{isEditing ? "Save changes as a new immutable recipe version. Existing build orders retain their original version." : "Define a versioned, repeatable transformation from component inventory into an output SKU."}</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={() => navigate("/inventory/builds?tab=recipes")}>Cancel</Button>
+          <Button variant="outline" onClick={() => navigate(returnTo)}>Cancel</Button>
           <Button disabled={!valid || saveRecipe.isPending} onClick={() => saveRecipe.mutate()}>
             {saveRecipe.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}{isEditing ? "Save new version" : "Create recipe"}
           </Button>
@@ -324,7 +339,17 @@ export default function BuildRecipeCreate() {
       <section className="space-y-5 border-b pb-6">
         <SectionHeading number={2} title="Output" detail="Select the SKU produced by one build, or create it without leaving this recipe." />
         <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_180px] md:pl-10">
-          <div><Label>Output variant *</Label><BuildVariantSelector value={outputVariant} onChange={setOutputVariant} label="Search output SKU" /></div>
+          <div><Label htmlFor="recipe-output-variant">Output variant *</Label>{productId === null
+            ? <BuildVariantSelector value={outputVariant} onChange={setOutputVariant} label="Search output SKU" />
+            : <><Select value={outputVariant?.productVariantId.toString() ?? ""} onValueChange={value => {
+              const variant = productContextQuery.data?.variants.find(candidate => candidate.id === Number(value) && candidate.isActive);
+              if (variant) setOutputVariant(recipeVariant({ variantId: variant.id, productId: variant.productId,
+                unitsPerVariant: variant.unitsPerVariant, sku: variant.sku, name: variant.name }));
+            }}><SelectTrigger id="recipe-output-variant"><SelectValue placeholder="Choose this product's output SKU" /></SelectTrigger>
+              <SelectContent>{productContextQuery.data?.variants.filter(variant => variant.isActive).map(variant =>
+                <SelectItem key={variant.id} value={String(variant.id)}>{variant.sku ?? variant.name}</SelectItem>)}</SelectContent>
+            </Select>{productContextQuery.isError && <p role="alert" className="text-sm text-destructive">The product's variants could not be loaded. Reload before saving.</p>}</>}
+          </div>
           <div><Label>Output units per build *</Label><Input type="number" min="1" step="1" value={outputQty} onChange={(event) => setOutputQty(event.target.value)} /></div>
         </div>
       </section>
@@ -443,7 +468,7 @@ export default function BuildRecipeCreate() {
       )}
 
       <footer className="flex justify-end gap-2 pb-8">
-        <Button variant="outline" onClick={() => navigate("/inventory/builds?tab=recipes")}>Cancel</Button>
+        <Button variant="outline" onClick={() => navigate(returnTo)}>Cancel</Button>
         <Button disabled={!valid || saveRecipe.isPending} onClick={() => saveRecipe.mutate()}>
           {saveRecipe.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}{isEditing ? "Save new version" : "Create recipe"}
         </Button>

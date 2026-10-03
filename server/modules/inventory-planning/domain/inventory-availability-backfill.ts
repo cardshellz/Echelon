@@ -180,6 +180,7 @@ function toPublicDefinition(
   definition: TransformationModelDefinition,
 ): InventoryAvailabilityBackfillDefinition {
   return inventoryAvailabilityBackfillDefinitionSchema.parse({
+    ...(definition.inventoryBehavior === undefined ? {} : { inventoryBehavior: definition.inventoryBehavior }),
     buildToPromiseEnabled: definition.buildToPromiseEnabled,
     paths: definition.paths.map((path) => ({
       sourceVariantId: path.sourceVariantId,

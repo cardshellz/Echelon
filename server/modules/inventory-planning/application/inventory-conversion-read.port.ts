@@ -1,12 +1,7 @@
-export type AllowedConversionOperation = "break_pack" | "assemble_pack" | "directed_conversion";
+import type { AllowedInventoryConversion } from "@shared/types/inventory-conversions";
 
-export interface AllowedConversion {
-  sourceVariantId: number;
-  destinationVariantId: number;
-  operationType: AllowedConversionOperation;
-  inputQty: number;
-  outputQty: number;
-}
+export type AllowedConversion = AllowedInventoryConversion;
+export type AllowedConversionOperation = AllowedConversion["operationType"];
 
 /** Published internal interface for conversion facts. Consumers must not read planning tables. */
 export interface InventoryConversionReader {

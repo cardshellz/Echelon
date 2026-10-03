@@ -21,7 +21,8 @@ describe("recipe-derived ATP invalidation", () => {
       "utf8",
     );
 
-    expect(source).toContain("recipeCapacity.getAffectedOutputProductIds(productVariantId)");
+    expect(source).toContain("inventorySupplyDependencies.getAffectedProductIds(productVariantId)");
+    expect(source).not.toContain("recipeCapacity.getAffectedOutputProductIds(productVariantId)");
     expect(source).toContain("queueProductInventorySync(productId, triggeredBy)");
     expect(source).toContain("channelSync.setInventoryChangePublisher(queueVariantInventorySync)");
     expect(source).toContain("inventoryCore.onInventoryChange(queueVariantInventorySync)");
