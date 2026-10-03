@@ -615,30 +615,6 @@ export async function setWmsOrderItemLocation(
   return updated ?? null;
 }
 
-export async function resetUnstartedWmsOrderItems(
-  executor: WmsOrderItemExecutor,
-  orderId: number,
-): Promise<number> {
-  assertPositiveInteger(orderId, "orderId");
-  const result = await executor
-    .update(wmsOrderItems)
-    .set({
-      status: "pending",
-      pickedQuantity: 0,
-      shortReason: null,
-      pickedAt: null,
-    })
-    .where(
-      and(
-        eq(wmsOrderItems.orderId, orderId),
-        eq(wmsOrderItems.pickedQuantity, 0),
-        eq(wmsOrderItems.fulfilledQuantity, 0),
-      ),
-    )
-    .returning({ id: wmsOrderItems.id });
-  return result.length;
-}
-
 export async function completePendingNonShippingWmsOrderItems(
   executor: WmsOrderItemExecutor,
   orderId: number,

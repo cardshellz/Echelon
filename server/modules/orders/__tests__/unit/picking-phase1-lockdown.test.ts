@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { PickingUseCases } from "../../picking.use-cases";
+import { createPickingAssignmentReleaseRepository } from "../../picking-assignment-release.repository";
+
+vi.mock("../../picking-assignment-release.repository", () => ({ createPickingAssignmentReleaseRepository: vi.fn() }));
 
 function makeItem(overrides: Record<string, unknown> = {}) {
   return {
@@ -30,38 +33,31 @@ describe("picking phase 1 mutation lockdown", () => {
       warehouseStatus: "ready",
       assignedPickerId: null,
     };
-    const storage = {
-      getOrderById: vi.fn(async () => orderBefore),
-      releaseOrder: vi.fn(async () => releasedOrder),
-      getUser: vi.fn(async () => ({ id: "admin-1", username: "admin", role: "admin" })),
-      createPickingLog: vi.fn(async () => ({})),
+    const tx = {
+      readActor: vi.fn(async () => ({ id: "picker-1", name: "Picker", role: "picker", active: true, permissions: ["picking:perform"] })),
+      lockOrder: vi.fn(async () => orderBefore as any),
+      clearAssignment: vi.fn(async () => releasedOrder as any),
+      recordRelease: vi.fn(async () => {}),
     };
-    const service = new PickingUseCases({} as any, {} as any, {} as any, storage as any);
+    vi.mocked(createPickingAssignmentReleaseRepository).mockReturnValue({ transaction: run => run(tx) });
+    const service = new PickingUseCases({} as any, {} as any, {} as any, {} as any);
 
-    await expect(service.releaseOrder(900, { userId: "admin-1" })).resolves.toEqual(releasedOrder);
+    await expect(service.releaseOrder(900, { userId: "picker-1" })).resolves.toEqual(releasedOrder);
 
-    expect(storage.releaseOrder).toHaveBeenCalledWith(900, false);
-    expect(storage.createPickingLog).toHaveBeenCalledWith(expect.objectContaining({
-      actionType: "order_released",
-      pickerId: "admin-1",
-      reason: "Progress preserved",
-    }));
+    expect(tx.clearAssignment).toHaveBeenCalledWith(900);
+    expect(tx.recordRelease).toHaveBeenCalledTimes(1);
   });
 
   it("rejects picker release attempts that request progress reset", async () => {
-    const storage = {
-      getOrderById: vi.fn(),
-      releaseOrder: vi.fn(),
-      getUser: vi.fn(),
-      createPickingLog: vi.fn(),
-    };
-    const service = new PickingUseCases({} as any, {} as any, {} as any, storage as any);
+    const transaction = vi.fn();
+    vi.mocked(createPickingAssignmentReleaseRepository).mockReturnValue({ transaction });
+    const service = new PickingUseCases({} as any, {} as any, {} as any, {} as any);
 
     await expect(service.releaseOrder(900, { resetProgress: true })).rejects.toMatchObject({
       statusCode: 400,
       code: "VALIDATION_ERROR",
     });
-    expect(storage.releaseOrder).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
   });
 
   it("rejects active item picks on held orders before changing item state", async () => {

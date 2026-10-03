@@ -29,7 +29,6 @@ import {
   incrementWmsOrderItemFulfilledQuantityByShopifyLineId,
   insertWmsOrderItems,
   persistWmsOrderItemPickProgress,
-  resetUnstartedWmsOrderItems,
   setWmsOrderItemHoldState,
   setWmsOrderItemLocation,
   syncWmsOrderItemsFulfilledFromOms,
@@ -284,8 +283,6 @@ export interface IOrderStorage {
   getPickQueueOrders(): Promise<(Order & { items: OrderItem[] })[]>;
   createOrderWithItems(order: InsertOrder, items: InsertOrderItem[], txOverride?: any): Promise<Order>;
   claimOrder(orderId: number, pickerId: string): Promise<Order | null>;
-  releaseOrder(orderId: number, resetProgress?: boolean): Promise<Order | null>;
-  forceReleaseOrder(orderId: number, resetProgress?: boolean): Promise<Order | null>;
   updateOrderStatus(orderId: number, status: OrderStatus): Promise<Order | null>;
   updateOrderFields(orderId: number, updates: Partial<Order>): Promise<Order | null>;
   holdOrder(orderId: number): Promise<Order | null>;
@@ -918,76 +915,6 @@ export const orderMethods: IOrderStorage = {
       console.log(`[CLAIM] Order ${orderId} claimed successfully by picker ${pickerId}`);
     }
 
-    return result[0] || null;
-  },
-
-  async releaseOrder(orderId: number, resetProgress: boolean = false): Promise<Order | null> {
-    if (resetProgress) {
-      throw new ValidationError("releaseOrder cannot reset pick progress; use forceReleaseOrder admin repair");
-    }
-
-    const beforeOrder = await db.select().from(orders).where(eq(orders.id, orderId));
-    console.log(`[RELEASE] Order ${orderId} before release:`, {
-      warehouseStatus: beforeOrder[0]?.warehouseStatus,
-      assignedPickerId: beforeOrder[0]?.assignedPickerId,
-      resetProgress
-    });
-    
-    const orderUpdates: any = {
-      warehouseStatus: "ready" as OrderStatus,
-      assignedPickerId: null,
-      startedAt: null,
-    };
-    
-    const result = await db
-      .update(orders)
-      .set(orderUpdates)
-      .where(eq(orders.id, orderId))
-      .returning();
-    
-    console.log(`[RELEASE] Order ${orderId} after release:`, {
-      warehouseStatus: result[0]?.warehouseStatus,
-      assignedPickerId: result[0]?.assignedPickerId
-    });
-    
-    return result[0] || null;
-  },
-
-  async forceReleaseOrder(orderId: number, resetProgress: boolean = false): Promise<Order | null> {
-    if (resetProgress) {
-      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, orderId));
-      const pickedItem = items.find(item => (item.pickedQuantity || 0) > 0);
-      if (pickedItem) {
-        throw new ValidationError(
-          "Cannot reset pick progress after picking has started; use the explicit unpick workflow",
-          { orderId, orderItemId: pickedItem.id, pickedQuantity: pickedItem.pickedQuantity },
-        );
-      }
-    }
-
-    const orderUpdates: any = {
-      warehouseStatus: "ready" as OrderStatus,
-      assignedPickerId: null,
-      startedAt: null,
-      onHold: 0,
-      heldAt: null,
-    };
-    
-    if (resetProgress) {
-      orderUpdates.pickedCount = 0;
-      orderUpdates.completedAt = null;
-    }
-    
-    const result = await db
-      .update(orders)
-      .set(orderUpdates)
-      .where(eq(orders.id, orderId))
-      .returning();
-    
-    if (resetProgress) {
-      await resetUnstartedWmsOrderItems(db, orderId);
-    }
-    
     return result[0] || null;
   },
 

@@ -49,6 +49,7 @@ export const DEFAULT_PERMISSIONS: InsertAuthPermission[] = [
   { resource: "orders", action: "resolve_exception", description: "Resolve order exceptions", category: "orders" },
   { resource: "picking", action: "view", description: "View picking queue", category: "picking" },
   { resource: "picking", action: "perform", description: "Perform picking operations", category: "picking" },
+  { resource: "picking", action: "release_any", description: "Release another picker’s assignment without changing holds or pick progress", category: "picking" },
   { resource: "picking", action: "complete", description: "Mark picks as complete", category: "picking" },
   { resource: "channels", action: "view", description: "View sales channels", category: "channels" },
   { resource: "channels", action: "create", description: "Create new channels", category: "channels" },
@@ -97,7 +98,7 @@ export const SYSTEM_ROLES = {
     permissions: [
       "dashboard:view", "operations:view", "operations:triage", "operations:assign", "operations:view_technical",
       "inventory:view", "orders:view", "orders:claim", "orders:hold", "orders:priority", "orders:resolve_exception",
-      "picking:view", "picking:perform", "picking:complete", "purchasing:view", "purchasing:create", "purchasing:edit", "purchasing:cancel",
+      "picking:view", "picking:perform", "picking:complete", "picking:release_any", "purchasing:view", "purchasing:create", "purchasing:edit", "purchasing:cancel",
       "reports:view", "users:view", "shopify:view", "dropship:view", "locations:view",
     ],
   },

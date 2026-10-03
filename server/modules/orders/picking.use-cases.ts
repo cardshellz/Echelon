@@ -43,6 +43,9 @@ import {
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { requireCorrectivePick, PickCorrectionError, recordCorrectionEvent, correctionHash } from "../wms/pick-correction.repository";
 import { planConfirmedPickShipment, type ConfirmedPickShipmentPlan } from "./confirmed-pick-shipment";
+import type { PickingAssignmentSnapshot } from "@shared/types/picking-assignment-release";
+import { releasePickingAssignment } from "./picking-assignment-release.service";
+import { createPickingAssignmentReleaseRepository } from "./picking-assignment-release.repository";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -146,7 +149,6 @@ type Storage = {
   createPickingLog: (log: any) => Promise<any>;
   updateOrderProgress: (orderId: number, postPickStatus?: string) => Promise<Order | null>;
   claimOrder: (orderId: number, pickerId: string) => Promise<Order | null>;
-  releaseOrder: (orderId: number, resetProgress?: boolean) => Promise<Order | null>;
   updateOrderStatus: (orderId: number, status: OrderStatus) => Promise<Order | null>;
   getOrderById: (id: number) => Promise<Order | undefined>;
   getOrderItems: (orderId: number) => Promise<OrderItem[]>;
@@ -3643,38 +3645,15 @@ export class PickingUseCases {
 
   async releaseOrder(orderId: number, options?: {
     resetProgress?: boolean;
+    expectedAssignment?: PickingAssignmentSnapshot;
     reason?: string;
     userId?: string;
     deviceType?: string;
     sessionId?: string;
-  }): Promise<Order | null> {
-    const resetProgress = options?.resetProgress ?? false;
-    if (resetProgress) {
-      throw new ValidationError("Picker release cannot reset pick progress; use the admin repair reset workflow");
-    }
-
-    const orderBefore = await this.storage.getOrderById(orderId);
-    const order = await this.storage.releaseOrder(orderId, false);
-    if (!order) return null;
-
-    // Audit log
-    const pickerId = options?.userId || orderBefore?.assignedPickerId;
-    const picker = pickerId ? await this.storage.getUser(pickerId) : null;
-    await this.storage.createPickingLog({
-      actionType: "order_released",
-      pickerId: pickerId || undefined,
-      pickerName: picker?.displayName || picker?.username || pickerId || undefined,
-      pickerRole: picker?.role,
-      orderId,
-      orderNumber: order.orderNumber,
-      orderStatusBefore: orderBefore?.warehouseStatus,
-      orderStatusAfter: order.warehouseStatus,
-      reason: options?.reason || "Progress preserved",
-      deviceType: options?.deviceType || "desktop",
-      sessionId: options?.sessionId,
+  }): Promise<Order> {
+    return releasePickingAssignment(createPickingAssignmentReleaseRepository(this.db), {
+      ...options, orderId,
     });
-
-    return order;
   }
 
   // -------------------------------------------------------------------------

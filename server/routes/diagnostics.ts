@@ -231,46 +231,14 @@ export function registerDiagnosticsRoutes(app: Express) {
     }
   });
 
-  // Bulk release ALL stuck in_progress orders with an assignedPickerId
-  // Safe to run — only unassigns orders, doesn't reset pick progress
-  app.post("/api/_internal/diagnostics/release-stuck-orders", requireAuth, async (req, res) => {
-    try {
-      const { orderNumberGte, resetProgress = false } = req.body; // e.g. orderNumberGte: "55561"
-      let whereClause = `warehouse_status = 'in_progress' AND assigned_picker_id IS NOT NULL`;
-      if (orderNumberGte) {
-        whereClause += ` AND CAST(REGEXP_REPLACE(order_number, '[^0-9]', '', 'g') AS INTEGER) >= ${parseInt(orderNumberGte)}`;
-      }
-      const result = await db.execute(sql.raw(`
-        UPDATE wms.orders SET
-          warehouse_status = 'ready',
-          assigned_picker_id = NULL,
-          started_at = NULL
-        WHERE ${whereClause}
-        RETURNING id, order_number, assigned_picker_id
-      `));
-      res.json({ released: result.rowCount, orders: result.rows });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Force release an order by order number (admin use only)
-  app.post("/api/_internal/diagnostics/force-release-by-number/:orderNumber", requireAuth, async (req, res) => {
-    try {
-      const { orderNumber } = req.params;
-      const { resetProgress = false } = req.body;
-      const storage = (req.app.locals as any).services?.ordersStorage
-        || (await import("../modules/orders")).ordersStorage;
-      // Find by order number
-      const result = await db.execute(sql`
-        SELECT id FROM wms.orders WHERE order_number = ${orderNumber} LIMIT 1
-      `);
-      if (!result.rows.length) return res.status(404).json({ error: "Order not found: " + orderNumber });
-      const orderId = result.rows[0].id as number;
-      const order = await storage.forceReleaseOrder(orderId, Boolean(resetProgress));
-      res.json({ success: true, orderId, order });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  // Retired unaudited release bypasses. Use the per-order, permission-checked
+  // assignment command with the assignment snapshot shown in the queue.
+  for (const path of ["release-stuck-orders", "force-release-by-number/:orderNumber"]) {
+    app.post(`/api/_internal/diagnostics/${path}`, requireAuth, (_req, res) => {
+      res.status(410).json({
+        code: "PICKING_RELEASE_ENDPOINT_RETIRED",
+        error: "Use Release picking assignment in the pick queue. Holds and pick progress are preserved.",
+      });
+    });
+  }
 }
