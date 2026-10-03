@@ -6,9 +6,9 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { fieldValueAtPath, type FieldSchema } from "./schema-field-model";
+import { fieldValueAtPath } from "./schema-field-model";
 import {
-  buildBulkAttributeColumns,
+  buildBulkAttributeColumnsForRows,
   parseBulkAttributeCellInput,
   type BulkAttributeColumn,
 } from "./bulk-attribute-columns";
@@ -25,6 +25,7 @@ import {
 } from "./bulk-field-state";
 import {
   BULK_GRID_CORE_COLUMNS,
+  bulkGridCoreFieldRequired,
   bulkGridBufferKey,
   bulkGridAttributeWriteConflicts,
   acknowledgeBulkGridAttributeWrite,
@@ -40,17 +41,18 @@ import type { BulkEditPatch } from "./bulk-edit-model";
 import type { BulkItemPatch } from "./bulk-edit-batch";
 import { canonicalDraftValue } from "./draft-item-snapshot";
 import { errorMessage } from "./model";
+import type { BulkRowRequirements } from "./use-bulk-row-requirements";
 
 interface Props {
   items: readonly ListingDraftItem[];
   originalItems?: readonly ListingDraftItem[];
   metadata: ReadonlyMap<number, ListingCatalogItem>;
-  schema?: FieldSchema;
+  requirementsByVariant: ReadonlyMap<number, BulkRowRequirements>;
+  sharedAttributesAllowed: boolean;
+  onChooseCategory(id: number): void;
   sharedPatch?: BulkEditPatch;
   itemChanges: readonly { variantId: number; patch: BulkItemPatch }[];
   canEdit: boolean;
-  providerFieldsDisabled?: boolean;
-  attributeResetRevision?: number;
   onItemAttribute(id: number, path: readonly string[], value: unknown): boolean;
   onSharedAttribute(
     path: readonly string[],
@@ -72,26 +74,27 @@ type Column =
   | { kind: "core"; key: string; field: BulkGridColumn }
   | { kind: "attribute"; key: string; field: BulkAttributeColumn };
 type Inspector = { variantId: number; field: Column | null };
-const EMPTY_SCHEMA: FieldSchema = Object.freeze({
-  type: "object",
-  properties: {},
-});
 const has = (value: object | undefined, key: string) =>
   value !== undefined && Object.prototype.hasOwnProperty.call(value, key);
 const overlaps = bulkGridPathsOverlap;
 const controlSignature = (column: BulkAttributeColumn) =>
   canonicalDraftValue([column.type, column.schema.enum]);
+const IDENTITY_COLUMN_STYLE = {
+  width: "var(--bulk-identity-width)",
+  minWidth: "var(--bulk-identity-width)",
+  maxWidth: "var(--bulk-identity-width)",
+};
 
 export function ListingBulkItemTable({
   items,
   originalItems = items,
   metadata,
-  schema,
+  requirementsByVariant,
+  sharedAttributesAllowed,
+  onChooseCategory,
   sharedPatch = {},
   itemChanges,
   canEdit,
-  providerFieldsDisabled = false,
-  attributeResetRevision = 0,
   onItemAttribute,
   onSharedAttribute,
   onUndoItemAttribute,
@@ -103,11 +106,13 @@ export function ListingBulkItemTable({
 }: Props) {
   const model = useMemo(
     () =>
-      buildBulkAttributeColumns(
-        schema ?? EMPTY_SCHEMA,
-        items.map((item) => item.attributes),
+      buildBulkAttributeColumnsForRows(
+        items.map((item) => ({
+          schema: requirementsByVariant.get(item.variantId)?.schema,
+          value: item.attributes,
+        })),
       ),
-    [schema, items],
+    [requirementsByVariant, items],
   );
   const [buffers, setBuffers] = useState<ReadonlyMap<string, BulkGridBuffer>>(
     new Map(),
@@ -121,7 +126,14 @@ export function ListingBulkItemTable({
   const [showDefaults, setShowDefaults] = useState(true);
   const [focusKey, setFocusKey] = useState<string | null>(null);
   const cells = useRef(new Map<string, HTMLTableCellElement>());
-  const revision = useRef(attributeResetRevision);
+  const rowContexts = useRef(
+    new Map(
+      items.map((item) => [
+        item.variantId,
+        JSON.stringify([item.method, item.productType]),
+      ]),
+    ),
+  );
   const itemById = useMemo(
     () => new Map(items.map((item) => [item.variantId, item])),
     [items],
@@ -136,19 +148,22 @@ export function ListingBulkItemTable({
     [itemChanges],
   );
   const allColumns = useMemo<Column[]>(
-    () => [
-      ...BULK_GRID_CORE_COLUMNS.map((field) => ({
-        kind: "core" as const,
-        key: "core:" + field.key,
-        field,
-      })),
-      ...model.columns.map((field) => ({
-        kind: "attribute" as const,
-        key: "attribute:" + field.key,
-        field,
-      })),
-    ],
-    [model.columns],
+    () =>
+      [
+        ...BULK_GRID_CORE_COLUMNS.map((field) => ({
+          kind: "core" as const,
+          key: "core:" + field.key,
+          field,
+        })),
+        ...model.columns.map((field) => ({
+          kind: "attribute" as const,
+          key: "attribute:" + field.key,
+          field,
+        })),
+      ].sort(
+        (left, right) => Number(required(right)) - Number(required(left)),
+      ) as Column[],
+    [model.columns, items],
   );
   const groups = [
     ...new Set(
@@ -157,13 +172,21 @@ export function ListingBulkItemTable({
   ];
   const controls = useMemo(
     () =>
-      new Map(
-        model.columns.map((column) => [
+      new Map<string, string>([
+        ...model.columns.map((column): [string, string] => [
           "attribute:" + column.key,
           controlSignature(column),
         ]),
-      ),
-    [model.columns],
+        ...items.flatMap((item, index) =>
+          [...model.columnsByRow[index].values()].map(
+            (column): [string, string] => [
+              bulkGridBufferKey(item.variantId, "attribute:" + column.key),
+              controlSignature(column),
+            ],
+          ),
+        ),
+      ]),
+    [model.columns, model.columnsByRow, items],
   );
   function changed(column: Column) {
     if ([...buffers.keys()].some((key) => key.endsWith(":" + column.key)))
@@ -192,14 +215,13 @@ export function ListingBulkItemTable({
           .toLowerCase()
           .includes(word),
       ) &&
-      (filter !== "required" ||
-        column.kind === "core" ||
-        column.field.required) &&
+      (filter !== "required" || required(column)) &&
+      (filter !== "optional" || !required(column)) &&
       (filter !== "changed" || changed(column)),
   );
   const headerGroups: Array<{ label: string; count: number }> = [];
   for (const column of columns) {
-    const label = column.field.group || "Product attributes";
+    const label = required(column) ? "Required" : "Optional";
     const last = headerGroups[headerGroups.length - 1];
     if (last?.label === label) last.count++;
     else headerGroups.push({ label, count: 1 });
@@ -225,15 +247,40 @@ export function ListingBulkItemTable({
     );
   }, [errors.length, pending.length, onValidityChange]);
   useEffect(() => {
-    if (revision.current === attributeResetRevision) return;
-    revision.current = attributeResetRevision;
+    const next = new Map(
+      items.map((item) => [
+        item.variantId,
+        JSON.stringify([item.method, item.productType]),
+      ]),
+    );
+    const changed = new Set(
+      items
+        .filter(
+          (item) =>
+            rowContexts.current.get(item.variantId) !==
+            next.get(item.variantId),
+        )
+        .map((item) => item.variantId),
+    );
+    rowContexts.current = next;
+    if (changed.size === 0) return;
     setBuffers((previous) =>
-      discardBulkGridBuffers(previous, (key) => key.includes(":attribute:")),
+      discardBulkGridBuffers(
+        previous,
+        (key) =>
+          key.includes(":attribute:") &&
+          (key.startsWith("shared:") ||
+            changed.has(Number(key.split(":", 1)[0]))),
+      ),
     );
     setInspector((previous) =>
-      previous?.field?.kind === "core" ? previous : null,
+      previous &&
+      changed.has(previous.variantId) &&
+      previous.field?.kind !== "core"
+        ? null
+        : previous,
     );
-  }, [attributeResetRevision]);
+  }, [items]);
   useEffect(() => {
     if (!focusKey) return;
     const cell = cells.current.get(focusKey);
@@ -259,7 +306,8 @@ export function ListingBulkItemTable({
     value: unknown,
     editedPath?: readonly string[],
   ): boolean {
-    if (!canEdit || providerFieldsDisabled) return false;
+    if (!canEdit || requirementsByVariant.get(id)?.status !== "ready")
+      return false;
     const key = bulkGridBufferKey(id, "attribute:" + JSON.stringify(path));
     const conflicting = bulkGridAttributeWriteConflicts(
       buffers,
@@ -279,9 +327,8 @@ export function ListingBulkItemTable({
       error = errorMessage(cause);
     }
     if (!accepted) {
-      const column = model.columns.find(
-        (column) => JSON.stringify(column.path) === JSON.stringify(path),
-      );
+      const rowIndex = items.findIndex((item) => item.variantId === id);
+      const column = model.columnsByRow[rowIndex]?.get(JSON.stringify(path));
       buffer(key, {
         raw:
           column?.kind === "scalar"
@@ -350,7 +397,7 @@ export function ListingBulkItemTable({
     const candidate = buffers.get(key);
     if (
       !canEdit ||
-      (column.kind === "attribute" && providerFieldsDisabled) ||
+      (column.kind === "attribute" && !sharedAttributesAllowed) ||
       !candidate ||
       candidate.error
     )
@@ -413,7 +460,9 @@ export function ListingBulkItemTable({
       );
     if (
       column.kind === "attribute" &&
-      (column.field.kind === "complex" || !column.field.appliesToAll)
+      (column.field.kind === "complex" ||
+        !column.field.appliesToAll ||
+        !sharedAttributesAllowed)
     )
       return (
         <p className="text-[10px] text-muted-foreground">Edit in each item</p>
@@ -436,7 +485,7 @@ export function ListingBulkItemTable({
           column={column.field}
           value={common}
           sku="all selected items"
-          disabled={!canEdit || providerFieldsDisabled}
+          disabled={!canEdit || !sharedAttributesAllowed}
           buffer={candidate}
           onBufferChange={(value) =>
             buffer(key, {
@@ -498,7 +547,7 @@ export function ListingBulkItemTable({
               aria-label={`Apply ${column.field.label} to all`}
               disabled={
                 !canEdit ||
-                (column.kind === "attribute" && providerFieldsDisabled) ||
+                (column.kind === "attribute" && !sharedAttributesAllowed) ||
                 Boolean(candidate.error)
               }
               onClick={() => applyDefault(column, false)}
@@ -511,7 +560,7 @@ export function ListingBulkItemTable({
               aria-label={`Replace ${column.field.label} row edits`}
               disabled={
                 !canEdit ||
-                (column.kind === "attribute" && providerFieldsDisabled) ||
+                (column.kind === "attribute" && !sharedAttributesAllowed) ||
                 Boolean(candidate.error)
               }
               onClick={() => applyDefault(column, true)}
@@ -544,9 +593,12 @@ export function ListingBulkItemTable({
     const key = bulkGridBufferKey(item.variantId, column.key);
     const cellBuffer = buffers.get(key);
     const override = rowOverride(item, column);
-    const applicable =
-      column.kind === "core" ||
-      model.applicableKeysByRow[rowIndex]?.includes(column.field.key);
+    const rowRequirements = requirementsByVariant.get(item.variantId);
+    const rowColumn =
+      column.kind === "attribute"
+        ? model.columnsByRow[rowIndex]?.get(column.field.key)
+        : undefined;
+    const applicable = column.kind === "core" || rowColumn !== undefined;
     return (
       <td
         key={column.key}
@@ -555,11 +607,22 @@ export function ListingBulkItemTable({
           else cells.current.delete(key);
         }}
         className="border-r border-b px-2 py-2 align-top"
-        style={{ minWidth: width(column), width: width(column) }}
+        style={{
+          minWidth: width(column),
+          width: width(column),
+          maxWidth: width(column),
+          scrollMarginLeft: "var(--bulk-identity-width)",
+        }}
       >
         {!applicable ? (
           <span className="text-xs text-muted-foreground">
-            Not used for this item
+            {rowRequirements?.status === "missing"
+              ? "Choose a category"
+              : rowRequirements?.status === "loading"
+                ? "Loading requirements…"
+                : rowRequirements?.status === "error"
+                  ? "Requirements unavailable"
+                  : "Not used for this item"}
           </span>
         ) : column.kind === "core" ? (
           <ListingBulkContentCell
@@ -579,7 +642,7 @@ export function ListingBulkItemTable({
               setInspector({ variantId: item.variantId, field: column })
             }
           />
-        ) : column.field.kind === "complex" ? (
+        ) : !rowColumn || rowColumn.kind === "complex" ? (
           <button
             type="button"
             className="h-8 w-full truncate rounded-md border px-2 text-left text-xs hover:bg-muted"
@@ -595,18 +658,18 @@ export function ListingBulkItemTable({
           </button>
         ) : (
           <ListingBulkAttributeCell
-            column={column.field}
+            column={rowColumn}
             value={fieldValueAtPath(item.attributes, column.field.path)}
             sku={skuFor(item)}
             buffer={cellBuffer}
-            disabled={!canEdit || providerFieldsDisabled}
+            disabled={!canEdit || rowRequirements?.status !== "ready"}
             required={model.requiredKeysByRow[rowIndex]?.includes(
               column.field.key,
             )}
             onBufferChange={(value) =>
               buffer(key, {
                 ...value,
-                controlSignature: controlSignature(column.field),
+                controlSignature: controlSignature(rowColumn),
               })
             }
             onChange={(value) =>
@@ -664,7 +727,7 @@ export function ListingBulkItemTable({
   }
   return (
     <section
-      className="flex min-h-0 min-w-0 flex-1 flex-col gap-2"
+      className="flex min-h-0 min-w-0 flex-1 flex-col gap-2 [--bulk-identity-width:140px] sm:[--bulk-identity-width:208px]"
       aria-label="Per-item listing attributes"
     >
       <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -675,6 +738,7 @@ export function ListingBulkItemTable({
           {[
             ["all", "All fields"],
             ["required", "Required"],
+            ["optional", "Optional"],
             ["changed", "Changed"],
           ].map(([value, label]) => (
             <Button
@@ -769,10 +833,13 @@ export function ListingBulkItemTable({
           </div>
         </div>
       )}
-      {!schema && (
+      {items.some(
+        (item) =>
+          requirementsByVariant.get(item.variantId)?.status === "missing",
+      ) && (
         <p className="shrink-0 text-xs text-muted-foreground">
-          Content, identifiers and prices are available now. Choose a shared
-          product type to show its attributes.
+          Some items need a category. Their product fields remain editable;
+          known categories already show their attributes.
         </p>
       )}
       <div className="flex min-h-0 flex-1 flex-col gap-2 xl:flex-row">
@@ -780,14 +847,24 @@ export function ListingBulkItemTable({
           className={`${detailItem ? "hidden xl:block" : ""} min-h-0 min-w-0 flex-1 overflow-auto rounded-md border`}
         >
           <table
-            className="w-max border-separate border-spacing-0 text-xs"
+            className="table-fixed border-separate border-spacing-0 text-xs"
             aria-label="Draft item attributes"
+            style={{
+              width: `calc(var(--bulk-identity-width) + ${columns.reduce((total, column) => total + width(column), 0)}px)`,
+            }}
           >
+            <colgroup>
+              <col style={{ width: "var(--bulk-identity-width)" }} />
+              {columns.map((column) => (
+                <col key={column.key} style={{ width: width(column) }} />
+              ))}
+            </colgroup>
             <thead className="sticky top-0 z-20 bg-background">
               <tr>
                 <th
                   rowSpan={2}
-                  className="sticky left-0 z-30 w-52 min-w-52 max-w-52 border-b border-r bg-background px-3 py-2 text-left"
+                  className="sticky left-0 z-30 border-b border-r bg-background px-3 py-2 text-left"
+                  style={IDENTITY_COLUMN_STYLE}
                 >
                   Product / SKU
                 </th>
@@ -797,7 +874,12 @@ export function ListingBulkItemTable({
                     colSpan={value.count}
                     className="border-b border-r bg-muted/60 px-2 py-1 text-left text-[10px] font-medium"
                   >
-                    {value.label}
+                    <span
+                      className="sticky inline-block"
+                      style={{ left: "var(--bulk-identity-width)" }}
+                    >
+                      {value.label}
+                    </span>
                   </th>
                 ))}
               </tr>
@@ -819,10 +901,11 @@ export function ListingBulkItemTable({
                         </span>
                       )}
                     {column.field.label}
-                    {column.kind === "attribute" && column.field.required && (
+                    {required(column) && (
                       <span
                         className="ml-1 text-destructive"
                         title={
+                          column.kind === "attribute" &&
                           column.field.requiredForSome
                             ? "Required for some items"
                             : "Required"
@@ -856,7 +939,10 @@ export function ListingBulkItemTable({
               </tr>
               {showDefaults && (
                 <tr>
-                  <th className="sticky left-0 z-30 w-52 min-w-52 max-w-52 border-b border-r bg-muted px-3 py-2 text-left align-top font-medium">
+                  <th
+                    className="sticky left-0 z-30 border-b border-r bg-muted px-3 py-2 text-left align-top font-medium"
+                    style={IDENTITY_COLUMN_STYLE}
+                  >
                     Column defaults
                     <span className="block text-[10px] font-normal text-muted-foreground">
                       All {items.length} selected items
@@ -884,7 +970,8 @@ export function ListingBulkItemTable({
                 <tr key={item.variantId}>
                   <th
                     scope="row"
-                    className="sticky left-0 z-10 w-52 min-w-52 max-w-52 border-b border-r bg-background px-3 py-2 text-left align-top"
+                    className="sticky left-0 z-10 border-b border-r bg-background px-3 py-2 text-left align-top"
+                    style={IDENTITY_COLUMN_STYLE}
                   >
                     <p className="break-words font-medium">{skuFor(item)}</p>
                     <p className="mt-0.5 line-clamp-2 text-[10px] font-normal text-muted-foreground">
@@ -894,6 +981,17 @@ export function ListingBulkItemTable({
                       {item.method === "match" ? "Match" : "Create"} ·{" "}
                       {item.productType || "Type not selected"}
                     </p>
+                    {item.method === "create" && !item.productType && (
+                      <button
+                        type="button"
+                        className="mt-1 text-xs text-primary underline disabled:opacity-50"
+                        disabled={!canEdit}
+                        aria-label={`Choose category for ${skuFor(item)}`}
+                        onClick={() => onChooseCategory(item.variantId)}
+                      >
+                        Choose category
+                      </button>
+                    )}
                     <div className="mt-1 flex gap-2 text-[10px] font-normal">
                       <button
                         type="button"
@@ -945,10 +1043,14 @@ export function ListingBulkItemTable({
           <ListingBulkItemInspector
             item={detailItem}
             metadata={metadata}
-            schema={schema}
+            schema={requirementsByVariant.get(detailItem.variantId)?.schema}
             column={
               inspector.field?.kind === "attribute"
-                ? inspector.field.field
+                ? (model.columnsByRow[
+                    items.findIndex(
+                      (item) => item.variantId === detailItem.variantId,
+                    )
+                  ]?.get(inspector.field.field.key) ?? inspector.field.field)
                 : null
             }
             contentField={
@@ -956,7 +1058,10 @@ export function ListingBulkItemTable({
             }
             buffers={buffers}
             canEdit={canEdit}
-            providerFieldsDisabled={providerFieldsDisabled}
+            providerFieldsDisabled={
+              requirementsByVariant.get(detailItem.variantId)?.status !==
+              "ready"
+            }
             onBufferChange={buffer}
             onDiscardBuffer={discard}
             onItemField={onItemField}
@@ -1046,6 +1151,13 @@ export function ListingBulkItemTable({
     );
     const next = items[index + delta];
     if (next) setInspector({ ...inspector, variantId: next.variantId });
+  }
+  function required(column: Column): boolean {
+    return column.kind === "core"
+      ? items.some((item) =>
+          bulkGridCoreFieldRequired(column.field.key, item.method),
+        )
+      : column.field.required;
   }
   function bufferLabel(key: string) {
     const column = allColumns.find((column) => key.endsWith(":" + column.key));

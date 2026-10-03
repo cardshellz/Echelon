@@ -1,8 +1,10 @@
 import { resolve } from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import type { ChannelCatalogRow } from "../../shared/types/channel-catalog";
 import { listingDraftItemSchema, listingOperationSchema } from "../../shared/types/channel-listing-publication";
 import { createMembershipMock, createPublicationMock, handleMembershipRequest, handlePublicationRequest, PUBLICATION_BASE } from "./walmart-publication-fixtures";
+import { editorSchema } from "../../server/modules/channels/adapters/walmart/walmart-listing-schema";
 
 const BASE = "/api/channels/77";
 const status = { channelId: 77, connectionId: 9, partnerId: "10002558022", partnerName: "Card Shellz", environment: "production",
@@ -141,6 +143,11 @@ async function selectFirstProduct(page: Page) {
   await page.getByRole("button", { name: "Add 1 to draft", exact: true }).click();
 }
 
+async function reviewSelectedDrafts(page: Page, skus: readonly string[]) {
+  for (const sku of skus) await page.getByLabel(`Select ${sku}`, { exact: true }).check();
+  await page.getByRole("button", { name: `Review selected (${skus.length})`, exact: true }).click();
+}
+
 function seedTwoDrafts(state: Awaited<ReturnType<typeof setup>>) {
   state.publication.draft = { ...state.publication.draft, revision: 1, items: [
     listingDraftItemSchema.parse({ variantId: 1, productType: "Trading Card Accessories", brand: "First brand", priceOverrideCents: 549,
@@ -256,7 +263,7 @@ test("one feed shows existing listings and selected drafts but publishes only th
   const existing = table.getByRole("row").filter({ has: page.getByText("CARD-P5", { exact: true }) });
   await expect(existing.getByRole("button", { name: /^Edit / })).toHaveCount(0);
   await expect(existing.getByText("$4.99", { exact: true })).toHaveCount(0);
-  await page.getByRole("button", { name: "Review 1 items", exact: true }).click();
+  await reviewSelectedDrafts(page, ["CARD-1"]);
   await expect(page.getByRole("dialog").getByRole("button", { name: "Publish 1 items", exact: true })).toBeVisible();
   expect(state.publication.draft.items.map(item => item.variantId)).toEqual([1]);
   expect(state.publication.reviews.at(-1)?.items.map(item => item.sku)).toEqual(["CARD-1"]);
@@ -522,7 +529,7 @@ test("server review blockers prevent submission and stale saves preserve local s
   await expect(page.getByRole("alert").filter({ hasText: "The draft changed" })).toBeVisible();
   await expect(page.getByText("CARD-1", { exact: true })).toBeVisible();
   state.publication.staleDraft = false; state.publication.blockedReview = true;
-  await page.getByRole("button", { name: "Review 1 items", exact: true }).click();
+  await reviewSelectedDrafts(page, ["CARD-1"]);
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("Shipping weight is required", { exact: false })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Publish 1 items", exact: true })).toBeDisabled();
@@ -547,6 +554,188 @@ async function saveBulkWorkspace(page: Page) {
   await bulk.getByRole("button", { name: "Save draft", exact: true }).click();
   await expect(bulk.getByRole("status")).toContainText("Draft saved.");
 }
+
+async function showGridColumn(column: Locator) {
+  await column.evaluate(element => {
+    const cell = element.closest("td, th")!;
+    const table = cell.closest("table")!;
+    const viewport = table.parentElement!;
+    const pinnedWidth = table.querySelector("tbody tr th")!.getBoundingClientRect().width;
+    viewport.scrollLeft += cell.getBoundingClientRect().left - viewport.getBoundingClientRect().left - pinnedWidth - 2;
+  });
+}
+
+test("selected review and submission preserve every unselected draft", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true }); seedTwoDrafts(state);
+  const untouched = structuredClone(state.publication.draft.items[1]);
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Review selected (0)", exact: true })).toBeDisabled();
+  await page.getByLabel("Select CARD-1", { exact: true }).check();
+  await page.getByLabel("Search exact SKU", { exact: true }).fill("CARD-26");
+  await page.getByRole("button", { name: "Search listings", exact: true }).click();
+  await expect(page.getByLabel("Select CARD-1", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Review selected (1)", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("CARD-1", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("CARD-26", { exact: true })).toHaveCount(0);
+  expect(state.publication.writes).toEqual([{ path: `${PUBLICATION_BASE}/review`, body: { expectedRevision: 1, variantIds: [1] } }]);
+  const review = state.publication.reviews.at(-1)!;
+  expect(state.publication.reviewedItems[review.id]).toEqual([state.publication.draft.items[0]]);
+  state.publication.loseSubmissionResponse = true;
+  await dialog.getByRole("button", { name: "Publish 1 items", exact: true }).click();
+  await expect(dialog.getByRole("alert").filter({ hasText: "Submission response interrupted" })).toBeVisible();
+  expect(state.publication.draft.items).toEqual([untouched]);
+  await dialog.getByRole("button", { name: "Publish 1 items", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const submissions = state.publication.writes.filter(write => write.path.endsWith("/operations"));
+  expect(submissions).toHaveLength(2); expect(submissions[0].body).toEqual(submissions[1].body);
+  expect(state.publication.operations).toHaveLength(1);
+  expect(state.publication.operations[0].items.map(item => item.variantId)).toEqual([1]);
+  expect(state.publication.submittedItems.map(item => item.variantId)).toEqual([1]);
+  expect(state.publication.draft).toMatchObject({ revision: 2, items: [untouched] });
+  await page.getByRole("tab", { name: "Listing Feed", exact: true }).click();
+  await expect(page.getByText("1 draft items", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review selected (0)", exact: true })).toBeDisabled();
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("bulk GTIN and product type persist through save, feed, reload and selected review", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true }); seedTwoDrafts(state);
+  state.publication.draft.items[0] = { ...state.publication.draft.items[0], identifier: null, productType: "", attributes: {} };
+  state.publication.catalogItems[0] = { ...state.publication.catalogItems[0], identifier: null };
+  const untouched = structuredClone(state.publication.draft.items[1]);
+  await page.reload(); await page.getByLabel("Select CARD-1", { exact: true }).check();
+  const bulk = await openBulkWorkspace(page, 1);
+  await bulk.getByLabel("Identifier type for CARD-1", { exact: true }).selectOption("GTIN");
+  await bulk.getByLabel("Product identifier for CARD-1", { exact: true }).fill("00036000291452");
+  await bulk.getByRole("button", { name: "Choose category", exact: true }).click();
+  await bulk.getByRole("button", { name: "Browse product types", exact: true }).click();
+  await bulk.getByRole("button", { name: "Browse Collectibles", exact: true }).click();
+  await bulk.getByRole("button", { name: "Browse Card Storage", exact: true }).click();
+  await bulk.getByRole("button", { name: "Select Trading Card Storage", exact: true }).click();
+  await saveBulkWorkspace(page);
+  const expected = structuredClone(state.publication.draft.items[0]);
+  expect(expected).toMatchObject({ identifier: { type: "GTIN", value: "00036000291452" }, productType: "Trading Card Storage" });
+  expect(state.publication.draft.items[1]).toEqual(untouched);
+  expect(state.publication.writes).toHaveLength(1);
+  expect(state.publication.writes[0]).toMatchObject({ path: `${PUBLICATION_BASE}/draft`, body: { expectedRevision: 1, items: [expected, untouched] } });
+  await bulk.getByRole("button", { name: "Back to listing feed", exact: true }).click();
+  const row = page.getByRole("row").filter({ has: page.getByText("CARD-1", { exact: true }) });
+  await expect(row).toContainText("Trading Card Storage");
+  await reviewSelectedDrafts(page, ["CARD-1"]);
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("Trading Card Storage");
+  expect(state.publication.reviewedItems[state.publication.reviews.at(-1)!.id]).toEqual([expected]);
+  await dialog.getByRole("button", { name: "Back to draft", exact: true }).click();
+  await page.reload(); await page.getByLabel("Select CARD-1", { exact: true }).check();
+  await openBulkWorkspace(page, 1);
+  await expect(bulk.getByLabel("Identifier type for CARD-1", { exact: true })).toHaveValue("GTIN");
+  await expect(bulk.getByLabel("Product identifier for CARD-1", { exact: true })).toHaveValue("00036000291452");
+  await expect(bulk).toContainText("Trading Card Storage");
+  expect(state.publication.operations).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("a review response containing unselected variants cannot open publication confirmation", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true }); seedTwoDrafts(state);
+  state.publication.reviewIncludesUnselected = true;
+  await page.reload(); await reviewSelectedDrafts(page, ["CARD-1"]);
+  await expect(page.getByRole("alert").filter({ hasText: "The review did not match your selected items" })).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Publish / })).toHaveCount(0);
+  expect(state.publication.writes).toEqual([{ path: `${PUBLICATION_BASE}/review`, body: { expectedRevision: 1, variantIds: [1] } }]);
+  expect(state.publication.operations).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("a delayed pre-save workspace poll cannot replace the acknowledged bulk draft", async ({ page }) => {
+  await page.clock.install();
+  const state = await setup(page, { catalogEmpty: true }); seedTwoDrafts(state);
+  await page.reload(); await page.getByLabel("Select CARD-1", { exact: true }).check();
+  const bulk = await openBulkWorkspace(page, 1);
+  await bulk.getByLabel("Product identifier for CARD-1", { exact: true }).fill("036000291452");
+  await bulk.getByLabel("Brand for CARD-1", { exact: true }).fill("Saved after old poll started");
+  let release = () => {};
+  let captured = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const oldReadStarted = new Promise<void>(resolve => { captured = resolve; });
+  let holdNext = true;
+  await page.route(`**${PUBLICATION_BASE}`, async route => {
+    if (route.request().method() !== "GET" || !holdNext) return route.fallback();
+    holdNext = false;
+    const snapshot = structuredClone({ draft: state.publication.draft, pricingRule: state.publication.pricingRule, operations: state.publication.operations });
+    captured();
+    await gate;
+    await route.fulfill({ json: snapshot });
+  });
+  try {
+    await page.clock.runFor(10_100); await oldReadStarted;
+    await saveBulkWorkspace(page);
+    const saved = structuredClone(state.publication.draft);
+    const lateResponse = page.waitForResponse(response => new URL(response.url()).pathname === PUBLICATION_BASE);
+    release(); await lateResponse;
+    await bulk.getByRole("button", { name: "Back to listing feed", exact: true }).click();
+    await reviewSelectedDrafts(page, ["CARD-1"]);
+    await expect(page.getByRole("dialog")).toBeVisible();
+    expect(state.publication.writes.filter(write => write.path.endsWith("/review")).at(-1)?.body).toEqual({ expectedRevision: saved.revision, variantIds: [1] });
+    expect(state.publication.reviewedItems[state.publication.reviews.at(-1)!.id]).toEqual([saved.items[0]]);
+    expect(state.publication.writes.filter(write => write.path.endsWith("/draft"))).toHaveLength(1);
+    expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+  } finally { release(); }
+});
+
+test("mixed typed drafts retain real Walmart required columns and bounded editable descriptions", async ({ page }, info) => {
+  const state = await setup(page, { catalogEmpty: true }); seedTwoDrafts(state);
+  const productType = "Trading Card Sleeves & Holders";
+  const providerSchema = JSON.parse(readFileSync(resolve("server/modules/channels/__tests__/fixtures/walmart-listing-sleeves.schema.json"), "utf8"));
+  state.publication.requirementsSchema = editorSchema(providerSchema, "MP_ITEM", productType);
+  state.publication.taxonomy = { productTypes: [productType], entries: [{ productType, path: ["Collectibles", "Card Protection"], description: null }] };
+  const originalHtml = `<p><strong>Protect every card.</strong> ${"Long description with detailed fit information. ".repeat(160)}</p>`;
+  state.publication.catalogItems[0] = { ...state.publication.catalogItems[0], description: originalHtml };
+  state.publication.draft.items = state.publication.draft.items.map((item, index) => ({ ...item, productType: index === 0 ? productType : "", attributes: {} }));
+  const untouched = structuredClone(state.publication.draft.items[1]);
+  await page.reload(); await page.getByLabel("Select all actionable rows on this page", { exact: true }).check();
+  const bulk = await openBulkWorkspace(page, 2);
+  const table = bulk.getByRole("table", { name: "Draft item attributes", exact: true });
+  const pinnedWidth = await table.locator("tbody tr").first().getByRole("rowheader").evaluate(element => element.getBoundingClientRect().width);
+  const expectedPinnedWidth = page.viewportSize()!.width < 640 ? 140 : 208;
+  expect(pinnedWidth).toBeGreaterThanOrEqual(expectedPinnedWidth - 1);
+  expect(pinnedWidth).toBeLessThanOrEqual(expectedPinnedWidth + 1);
+  await expect(table.getByRole("columnheader", { name: "Required", exact: true })).toHaveCount(1);
+  await expect(table.getByRole("columnheader", { name: "Optional", exact: true })).toHaveCount(1);
+  for (const label of ["Shipping Weight", "Country of origin substantial transformation", "Condition", "Key Features", "Count Per Pack", "Multipack Quantity", "Is Prop65 Warning Required", "Has written warranty", "Product Net Content Unit", "Product Net Content Measure", "Piece Count"])
+    await expect(table.getByRole("columnheader", { name: new RegExp(`(?:^|\\s)${label}\\*?$`) })).toHaveCount(1);
+  const weight = bulk.getByLabel("Shipping and offer details › Shipping Weight for CARD-1", { exact: true });
+  await expect(weight).toBeEnabled(); await expect(weight).toHaveValue("");
+  await expect(bulk.getByLabel("Product attributes › Condition for CARD-1", { exact: true })).toHaveValue("");
+  await expect(bulk.getByLabel("Product attributes › Net Content › Product Net Content Measure for CARD-1", { exact: true })).toHaveValue("");
+  await expect(bulk.getByRole("button", { name: "Choose category for CARD-26", exact: true })).toBeVisible();
+  await expect(bulk.getByLabel("Shipping and offer details › Shipping Weight for CARD-26", { exact: true })).toHaveCount(0);
+  const preview = bulk.getByLabel("Description preview for CARD-1", { exact: true });
+  await expect(preview).toHaveValue(/Protect every card\./);
+  expect(await preview.inputValue()).not.toContain("<strong>");
+  expect((await preview.inputValue()).length).toBeLessThan(originalHtml.length);
+  const width = await preview.evaluate(element => element.getBoundingClientRect().width);
+  expect(width).toBeLessThanOrEqual(320);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await showGridColumn(preview);
+  await page.screenshot({ path: info.outputPath("walmart-required-columns-description.png"), fullPage: true });
+  await table.evaluate(element => { element.parentElement!.scrollLeft = 0; });
+  await page.screenshot({ path: info.outputPath("walmart-required-columns-start.png"), fullPage: true });
+  await showGridColumn(bulk.getByLabel("Product attributes › Net Content › Product Net Content Measure for CARD-1", { exact: true }));
+  await page.screenshot({ path: info.outputPath("walmart-required-columns-net-content.png"), fullPage: true });
+  await showGridColumn(table.getByRole("columnheader", { name: /(?:^|\s)State Restrictions$/ }));
+  await page.screenshot({ path: info.outputPath("walmart-optional-columns-start.png"), fullPage: true });
+  await bulk.getByRole("button", { name: "Edit description for CARD-1", exact: true }).click();
+  const editor = bulk.getByLabel("Description for CARD-1", { exact: true });
+  await expect(editor).toHaveValue(originalHtml);
+  await editor.fill("<p>Changed <strong>listing description</strong>.</p>");
+  await saveBulkWorkspace(page);
+  expect(state.publication.draft.items[0]).toMatchObject({ description: "<p>Changed <strong>listing description</strong>.</p>", productType, attributes: {} });
+  expect(state.publication.draft.items[1]).toEqual(untouched);
+  expect(state.publication.writes).toHaveLength(1);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
 
 test("full-page bulk editing saves one draft update and preserves identifiers and untouched attributes", async ({ page }, info) => {
   const state = await setup(page, { catalogEmpty: true }); seedTwoDrafts(state);
@@ -1005,7 +1194,7 @@ test("read-only draft rows cannot select items or open bulk editing", async ({ p
 test("publication retries reuse command identity and later batches preserve submitted prices", async ({ page }) => {
   const state = await setup(page);
   await selectFirstProduct(page);
-  await page.getByRole("button", { name: "Review 1 items", exact: true }).click();
+  await reviewSelectedDrafts(page, ["CARD-1"]);
   state.publication.loseSubmissionResponse = true;
   await page.getByRole("button", { name: "Publish 1 items", exact: true }).click();
   await expect(page.getByRole("alert").filter({ hasText: "Submission response interrupted" })).toBeVisible();
@@ -1032,7 +1221,7 @@ test("publication retries reuse command identity and later batches preserve subm
   await page.getByRole("button", { name: "Edit CARD-26", exact: true }).click();
   await page.getByLabel("Fixed Walmart price (USD)", { exact: true }).fill("9.99");
   await page.getByRole("button", { name: "Update draft item", exact: true }).click();
-  await page.getByRole("button", { name: "Review 1 items", exact: true }).click();
+  await reviewSelectedDrafts(page, ["CARD-26"]);
   await page.getByRole("button", { name: "Publish 1 items", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(state.publication.operations).toHaveLength(2);
@@ -1077,7 +1266,7 @@ test("pricing requires explicit preview and rejects a zero fixed selling price",
 test("failed items return to the draft without overwriting unrelated unsaved edits", async ({ page }) => {
   const state = await setup(page);
   await selectFirstProduct(page);
-  await page.getByRole("button", { name: "Review 1 items", exact: true }).click();
+  await reviewSelectedDrafts(page, ["CARD-1"]);
   await page.getByRole("button", { name: "Publish 1 items", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   state.publication.operations[0].state = "needs_attention";
@@ -1094,7 +1283,7 @@ test("failed items return to the draft without overwriting unrelated unsaved edi
   await page.getByRole("button", { name: "Edit failed items", exact: true }).click();
   await expect(page.getByText("$9.99", { exact: true })).toBeVisible();
   await expect(page.getByText("CARD-1", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Review 2 items", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review selected (0)", exact: true })).toBeDisabled();
   expect(state.publication.operations).toHaveLength(1);
   await page.getByRole("button", { name: "Save draft", exact: true }).click();
   await expect(page.getByText("Draft saved. No listing has been submitted.", { exact: true })).toBeVisible();
@@ -1104,7 +1293,7 @@ test("failed items return to the draft without overwriting unrelated unsaved edi
 
 async function verifyFirstPublication(page: Page) {
   await selectFirstProduct(page);
-  await page.getByRole("button", { name: "Review 1 items", exact: true }).click();
+  await reviewSelectedDrafts(page, ["CARD-1"]);
   await page.getByRole("button", { name: "Publish 1 items", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.getByRole("button", { name: "Check Walmart status", exact: true }).click();

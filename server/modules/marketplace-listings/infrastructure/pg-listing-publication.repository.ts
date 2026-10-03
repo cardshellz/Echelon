@@ -11,6 +11,8 @@ import {
   listingAccountKey,
   listingProgressSchema,
   listingSnapshotSchema,
+  listingHash,
+  remainingDraftAfterReview,
   summarizeListingProgress,
   type ListingProgress,
   type ListingSnapshot,
@@ -125,11 +127,17 @@ export class PostgresListingPublicationRepository
       await lockAccount(client, snapshot.account);
       const draft = (
         await client.query(
-          "SELECT revision FROM marketplace.channel_listing_drafts WHERE channel_id=$1 FOR SHARE",
+          "SELECT revision,items,account_key FROM marketplace.channel_listing_drafts WHERE channel_id=$1 FOR SHARE",
           [snapshot.account.channelId],
         )
       ).rows[0];
-      if (!draft || draft.revision !== snapshot.draft.revision) stale();
+      if (
+        !draft ||
+        draft.revision !== snapshot.draft.revision ||
+        draft.account_key !== listingAccountKey(snapshot.account)
+      )
+        stale();
+      remainingDraftAfterReview(draft.items, snapshot);
       await client.query(
         `INSERT INTO marketplace.channel_listing_reviews(id,channel_id,draft_revision,review_hash,snapshot,created_by,created_at,expires_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
@@ -156,6 +164,7 @@ export class PostgresListingPublicationRepository
           reviewId: snapshot.review.id,
           hash: snapshot.review.reviewHash,
           canSubmit: snapshot.review.canSubmit,
+          variantIds: snapshot.draft.items.map((item) => item.variantId),
         },
         now,
       );
@@ -212,7 +221,7 @@ export class PostgresListingPublicationRepository
       ).rows[0];
       const draft = (
         await client.query(
-          "SELECT revision FROM marketplace.channel_listing_drafts WHERE channel_id=$1 FOR SHARE",
+          "SELECT revision,items,account_key FROM marketplace.channel_listing_drafts WHERE channel_id=$1 FOR UPDATE",
           [snapshot.account.channelId],
         )
       ).rows[0];
@@ -220,9 +229,13 @@ export class PostgresListingPublicationRepository
         !reviewed ||
         reviewed.review_hash !== snapshot.review.reviewHash ||
         new Date(reviewed.expires_at) <= now ||
-        draft?.revision !== snapshot.draft.revision
+        draft?.revision !== snapshot.draft.revision ||
+        draft.account_key !== listingAccountKey(snapshot.account) ||
+        listingHash(listingSnapshotSchema.parse(reviewed.snapshot)) !==
+          listingHash(snapshot)
       )
         stale();
+      const remainingItems = remainingDraftAfterReview(draft.items, snapshot);
       if (!snapshot.review.canSubmit || snapshot.prepared.length === 0)
         throw new ListingPublicationError(
           "LISTING_REVIEW_BLOCKED",
@@ -339,8 +352,13 @@ export class PostgresListingPublicationRepository
       // Consume the reviewed selection with the command, so a second batch never
       // depends on a browser cleanup request succeeding after publication starts.
       await client.query(
-        "UPDATE marketplace.channel_listing_drafts SET revision=revision+1,items='[]'::jsonb,updated_by=$2,updated_at=$3 WHERE channel_id=$1",
-        [snapshot.account.channelId, input.actor, now],
+        "UPDATE marketplace.channel_listing_drafts SET revision=revision+1,items=$4::jsonb,updated_by=$2,updated_at=$3 WHERE channel_id=$1",
+        [
+          snapshot.account.channelId,
+          input.actor,
+          now,
+          JSON.stringify(remainingItems),
+        ],
       );
       await event(
         client,
@@ -349,9 +367,12 @@ export class PostgresListingPublicationRepository
         null,
         "draft_submitted",
         input.actor,
-        snapshot.draft.items,
+        draft.items,
         {
-          items: [],
+          items: remainingItems,
+          submittedVariantIds: snapshot.draft.items.map(
+            (item) => item.variantId,
+          ),
           operationId: input.id,
           revision: snapshot.draft.revision + 1,
         },

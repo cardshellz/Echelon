@@ -49,6 +49,7 @@ export interface ChannelListingFeedProps {
   operations: ListingOperation[];
   busy: boolean;
   dirty: boolean;
+  reviewBlocked?: boolean;
   selectedDraftIds: ReadonlySet<number>;
   onDraftSelectionChange(ids: ReadonlySet<number>): void;
   onBulkEdit(): void;
@@ -296,8 +297,8 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
           Drafts and recent submissions stay in the feed across account pages.
           Select drafts to edit several items together. The header selects
           actionable rows in this view; draft selections stay selected across
-          searches and pages. Saving and review use the full draft. Manage stock
-          in{" "}
+          searches and pages. Saving keeps the full draft; review and publishing
+          use only the selected draft items. Manage stock in{" "}
           <a className="underline" href="/channels/inventory">
             Channel Inventory
           </a>
@@ -460,10 +461,14 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
               Save draft
             </Button>
             <Button
-              disabled={catalog.locked || draftItems.length === 0}
+              disabled={
+                catalog.locked ||
+                selectedDrafts.length === 0 ||
+                props.reviewBlocked
+              }
               onClick={props.onReview}
             >
-              Review {draftItems.length} items
+              Review selected ({selectedDrafts.length})
             </Button>
           </div>
         )}

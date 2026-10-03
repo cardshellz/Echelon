@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   bulkGridAttributePath,
+  bulkDescriptionPreview,
+  bulkGridCoreFieldRequired,
   bulkGridAttributeWriteConflicts,
   acknowledgeBulkGridAttributeWrite,
   bulkGridBufferKey,
@@ -12,6 +14,29 @@ import {
 } from "../bulk-grid-state";
 
 describe("bulk listing grid edit boundaries", () => {
+  it("bounds an HTML description preview without replacing the editable source", () => {
+    const original =
+      '<p>Card &amp; sleeve</p><script>alert("no")</script><p>' +
+      "X".repeat(30_000) +
+      "</p>";
+    const preview = bulkDescriptionPreview(original);
+    expect(preview).toHaveLength(240);
+    expect(preview).toMatch(/^Card & sleeve X/);
+    expect(preview).not.toContain("<p>");
+    expect(preview).not.toContain("alert");
+    expect(preview.endsWith("…")).toBe(true);
+    expect(original).toContain('<script>alert("no")</script>');
+  });
+  it("marks identity and price required for both methods and creation content required only for create", () => {
+    for (const method of ["create", "match"] as const) {
+      expect(bulkGridCoreFieldRequired("identifier", method)).toBe(true);
+      expect(bulkGridCoreFieldRequired("priceOverrideCents", method)).toBe(
+        true,
+      );
+    }
+    expect(bulkGridCoreFieldRequired("description", "create")).toBe(true);
+    expect(bulkGridCoreFieldRequired("description", "match")).toBe(false);
+  });
   it("corrects one invalid array leaf through an atomic write without losing another invalid leaf", () => {
     const path = ["Visible", "quantities"];
     const amount = [...path, "0", "amount"];

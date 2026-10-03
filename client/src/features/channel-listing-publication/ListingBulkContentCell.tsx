@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { projectBulkField, projectBulkIdentifier } from "./bulk-field-state";
 import {
   parseBulkGridField,
+  bulkDescriptionPreview,
   type BulkGridBuffer,
   type BulkGridField,
 } from "./bulk-grid-state";
@@ -112,7 +113,26 @@ export function ListingBulkContentCell({
           </select>
           <Input {...common} className="h-8 min-w-0 px-2 text-xs" />
         </div>
-      ) : (field === "description" || field === "images") && !expanded ? (
+      ) : field === "description" && !expanded ? (
+        <div className="min-w-0 space-y-1">
+          <Textarea
+            aria-label={`Description preview for ${sku}`}
+            value={bulkDescriptionPreview(raw)}
+            readOnly
+            rows={3}
+            className="h-20 min-h-20 w-full min-w-0 resize-none whitespace-pre-wrap break-words px-2 py-1 text-xs [overflow-wrap:anywhere]"
+            placeholder={unavailable ? "Catalog unavailable" : "Not set"}
+          />
+          <button
+            type="button"
+            className="text-xs text-primary underline"
+            aria-label={`Edit description for ${sku}`}
+            onClick={onExpand}
+          >
+            Edit description
+          </button>
+        </div>
+      ) : field === "images" && !expanded ? (
         <button
           type="button"
           className="h-8 w-full truncate rounded-md border bg-background px-2 text-left text-xs hover:bg-muted"
