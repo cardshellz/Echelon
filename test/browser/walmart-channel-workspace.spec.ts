@@ -1176,9 +1176,13 @@ test("actual sleeves details show one guidance block and preserve other fields w
   await expectPinnedListingEditor(dialog);
   await page.screenshot({ path: info.outputPath("sku-details-key-features-viewport.png") });
   await dialog.screenshot({ path: info.outputPath("sku-details-key-features.png") });
-  await dialog.getByRole("button", { name: "Add Key Features", exact: true }).evaluate(element => element.parentElement!.scrollIntoView({ block: "nearest" }));
+  // Center the action group before requiring full visibility. Nearest-edge
+  // scrolling can leave a fractional pixel outside the scrollport in Chromium.
+  await dialog.getByRole("button", { name: "Add Key Features", exact: true }).evaluate(element => element.parentElement!.scrollIntoView({ block: "center" }));
   await expectPinnedListingEditor(dialog);
-  await expect(dialog.getByRole("button", { name: "Clear all Key Features", exact: true })).toBeInViewport({ ratio: 1 });
+  const clearFeatures = dialog.getByRole("button", { name: "Clear all Key Features", exact: true });
+  await expect(clearFeatures).toBeInViewport({ ratio: 1 });
+  await clearFeatures.click({ trial: true });
   await dialog.screenshot({ path: info.outputPath("sku-details-key-features-actions.png") });
   await remove.click();
   await expect(dialog.getByLabel(/^Key Features 2/)).toHaveValue("Archival material protects the surface");
