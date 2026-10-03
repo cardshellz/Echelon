@@ -130,7 +130,6 @@ describe("piece variant backfill preview", () => {
       requiresShipping: true,
       trackInventory: true,
       isActive: true,
-      dropshipEligible: false,
     });
   });
 
@@ -336,9 +335,11 @@ describe("piece variant backfill apply", () => {
     const inserts = calls.filter((call) => call.sql.includes("INSERT INTO catalog.product_variants"));
     expect(inserts).toHaveLength(2);
     expect(inserts[0].values).toEqual([
-      1, "SHLZ-TOP-35PT-BLU-PC1", "Piece", "piece", 1, 1, true, "internal_only", true, true, true, false,
+      1, "SHLZ-TOP-35PT-BLU-PC1", "Piece", "piece", 1, 1, true, "internal_only", true, true, true,
     ]);
     expect(inserts[0].sql).toContain("WHERE NOT EXISTS");
+    // The retired dropship flag is left to its column default.
+    expect(inserts[0].sql).not.toContain("dropship_eligible");
 
     // The audit rows travel through persistAuditEvent on the same stubbed
     // client, which is what keeps them inside this transaction.

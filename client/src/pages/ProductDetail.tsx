@@ -14,7 +14,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
 import {
   ArrowLeft,
@@ -355,7 +354,6 @@ interface ProductVariantRow {
   parentVariantId: number | null;
   isBaseUnit: boolean;
   isActive: boolean;
-  dropshipEligible: boolean;
 }
 
 interface ProductDetailData {
@@ -2358,24 +2356,6 @@ export default function ProductDetail() {
     },
   });
 
-  const dropshipMutation = useMutation({
-    mutationFn: async ({ variantId, eligible }: { variantId: number; eligible: boolean }) => {
-      const res = await fetch(`/api/admin/variants/${variantId}/dropship-eligible`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ eligible }),
-      });
-      if (!res.ok) throw new Error("Failed to update dropship eligibility");
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
-    },
-    onError: () => {
-      toast({ title: "Failed to update dropship eligibility", variant: "destructive" });
-    },
-  });
-
   const updateVariantMutation = useMutation({
     mutationFn: async ({ id, data }: { id: number; data: typeof variantForm }) => {
       const packageAttributes = buildVariantPackagePayload(data.package, "null");
@@ -3681,17 +3661,7 @@ export default function ProductDetail() {
                               </Badge>
                               <p className="mt-1 text-xs text-muted-foreground">{packageDisplay.detail}</p>
                             </div>
-                            <div className="flex justify-between items-center mt-2">
-                              <div className="flex items-center gap-2">
-                                <Label className="text-xs text-muted-foreground">Dropship</Label>
-                                <Switch
-                                  checked={!!variant.dropshipEligible}
-                                  disabled={variant.salesEligibility === "internal_only"}
-                                  onCheckedChange={(checked) => {
-                                    dropshipMutation.mutate({ variantId: variant.id, eligible: checked });
-                                  }}
-                                />
-                              </div>
+                            <div className="flex justify-end items-center mt-2">
                               <div className="flex justify-end gap-2">
                               <Button
                                 variant="ghost"
@@ -3728,7 +3698,6 @@ export default function ProductDetail() {
                               <TableHead>Barcode</TableHead>
                               <TableHead>Package</TableHead>
                               <TableHead>Customer sale</TableHead>
-                              <TableHead>Dropship</TableHead>
                               <TableHead className="w-[80px]"></TableHead>
                             </TableRow>
                           </TableHeader>
@@ -3782,15 +3751,6 @@ export default function ProductDetail() {
                                       Sellable
                                     </Badge>
                                   )}
-                                </TableCell>
-                                <TableCell>
-                                  <Switch
-                                    checked={!!variant.dropshipEligible}
-                                    disabled={variant.salesEligibility === "internal_only"}
-                                    onCheckedChange={(checked) => {
-                                      dropshipMutation.mutate({ variantId: variant.id, eligible: checked });
-                                    }}
-                                  />
                                 </TableCell>
                                 <TableCell>
                                   <div className="flex gap-1">

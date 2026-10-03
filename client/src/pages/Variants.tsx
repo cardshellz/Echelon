@@ -27,7 +27,6 @@ import {
   Check,
   Store,
 } from "lucide-react";
-import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   buildVariantPackageDisplay,
@@ -82,7 +81,6 @@ interface ProductVariant {
   shopifyVariantId: string | null;
   shopifyInventoryItemId?: string | null;
   isActive: boolean;
-  dropshipEligible?: boolean;
   salesEligibility?: VariantSalesEligibility;
   weightGrams: number | null;
   lengthMm: number | null;
@@ -273,25 +271,6 @@ export default function Variants() {
     },
   });
 
-  const dropshipMutation = useMutation({
-    mutationFn: async ({ variantId, eligible }: { variantId: number; eligible: boolean }) => {
-      const res = await fetch(`/api/admin/variants/${variantId}/dropship-eligible`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ eligible }),
-      });
-      if (!res.ok) throw new Error("Failed to update dropship eligibility");
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });
-      toast({ title: "Dropship eligibility updated" });
-    },
-    onError: () => {
-      toast({ title: "Failed to update dropship eligibility", variant: "destructive" });
-    },
-  });
-
   const shopifySearchMutation = useMutation({
     mutationFn: async ({
       variantId,
@@ -379,26 +358,6 @@ export default function Variants() {
       const message = error instanceof Error ? error.message : "Failed to link Shopify variant";
       setShopifyLinkError(message);
       toast({ title: "Shopify link failed", description: message, variant: "destructive" });
-    },
-  });
-
-  const bulkDropshipMutation = useMutation({
-    mutationFn: async ({ variantIds, eligible }: { variantIds: number[]; eligible: boolean }) => {
-      const res = await fetch("/api/admin/variants/bulk-dropship-eligible", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ variantIds, eligible }),
-      });
-      if (!res.ok) throw new Error("Failed to update bulk dropship eligibility");
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });
-      setSelectedVariantIds([]);
-      toast({ title: "Bulk dropship eligibility updated" });
-    },
-    onError: () => {
-      toast({ title: "Failed to update bulk dropship eligibility", variant: "destructive" });
     },
   });
 
@@ -1332,7 +1291,6 @@ export default function Variants() {
                   <TableHead>Linked Product</TableHead>
                   <TableHead>Package</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead>Dropship</TableHead>
                   <TableHead className="w-40">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -1406,16 +1364,6 @@ export default function Variants() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <Switch
-                        checked={!!variant.dropshipEligible}
-                        onClick={(event) => event.stopPropagation()}
-                        onCheckedChange={(checked) => {
-                          dropshipMutation.mutate({ variantId: variant.id, eligible: checked });
-                        }}
-                        disabled={variant.salesEligibility === "internal_only"}
-                      />
-                    </TableCell>
-                    <TableCell>
                       <div className="flex gap-2">
                         <Button
                           variant="outline"
@@ -1473,24 +1421,6 @@ export default function Variants() {
             disabled={bulkPackageMutation.isPending}
           >
             Package Editor
-          </Button>
-          <Button 
-            size="sm" 
-            variant="ghost" 
-            className="hover:bg-slate-800 text-green-400 hover:text-green-300 transition-colors"
-            onClick={() => bulkDropshipMutation.mutate({ variantIds: selectedVariantIds, eligible: true })}
-            disabled={bulkDropshipMutation.isPending}
-          >
-            Enable Dropship
-          </Button>
-          <Button 
-            size="sm" 
-            variant="ghost" 
-            className="hover:bg-slate-800 text-red-400 hover:text-red-300 transition-colors"
-            onClick={() => bulkDropshipMutation.mutate({ variantIds: selectedVariantIds, eligible: false })}
-            disabled={bulkDropshipMutation.isPending}
-          >
-            Disable Dropship
           </Button>
           <Button
             size="sm"

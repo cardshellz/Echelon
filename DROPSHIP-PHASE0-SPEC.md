@@ -177,6 +177,10 @@ INDEXES:
 
 ### 2.5 Modified Table: `products`
 
+> **Superseded (2026-10):** dropship uses no flag on products or SKU variants. Dropship
+> availability is decided by the admin catalog rules (`decideDropshipCatalogOrderAvailability`).
+> Do not build this flag or its toggle.
+
 Add one column for admin-level dropship eligibility control.
 
 ```
@@ -988,6 +992,10 @@ Update vendor status (activate, suspend, close).
 
 #### `PUT /api/admin/products/:id/dropship-eligible`
 
+> **Superseded (2026-10):** dropship uses no flag on products or SKU variants. Dropship
+> availability is decided by the admin catalog rules (`decideDropshipCatalogOrderAvailability`).
+> Do not build this flag or its toggle.
+
 Toggle a product's dropship eligibility.
 
 **Request:**
@@ -1009,6 +1017,8 @@ Toggle a product's dropship eligibility.
 ---
 
 #### `PUT /api/admin/products/bulk-dropship-eligible`
+
+> **Superseded (2026-10):** see the note on the single-product route above. Do not build this route.
 
 Bulk toggle.
 
@@ -1805,6 +1815,10 @@ Tabbed layout:
 - **Activity tab:** Audit log of admin actions on this vendor
 
 #### Product Catalog Enhancement
+
+> **Superseded (2026-10):** dropship uses no flag on products or SKU variants. Dropship
+> availability is decided by the admin catalog rules (`decideDropshipCatalogOrderAvailability`).
+> Do not build this flag or its toggle.
 
 Add a "Dropship" toggle column to the existing product catalog pages:
 

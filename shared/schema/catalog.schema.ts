@@ -260,7 +260,10 @@ export const productVariants = catalogSchema.table("product_variants", {
   ebayFulfillmentPolicyOverride: varchar("ebay_fulfillment_policy_override", { length: 100 }),
   ebayReturnPolicyOverride: varchar("ebay_return_policy_override", { length: 100 }),
   ebayPaymentPolicyOverride: varchar("ebay_payment_policy_override", { length: 100 }),
-  dropshipEligible: boolean("dropship_eligible").default(false), // Whether variant is eligible for dropship vendors
+  // Retired: nothing reads or writes it. Dropship decides from the admin catalog
+  // rules (decideDropshipCatalogOrderAvailability). Kept only until a migration
+  // drops the column and the internal-only check below that names it.
+  dropshipEligible: boolean("dropship_eligible").default(false),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
