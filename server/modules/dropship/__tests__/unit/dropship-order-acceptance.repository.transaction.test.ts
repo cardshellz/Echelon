@@ -464,6 +464,8 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
       intakeId: 1,
       vendorId: 10,
       storeConnectionId: 22,
+      // The vendor's plan, which WMS sync scores pick priority from.
+      vendorMembershipPlanId: "plan-ops",
       externalOrderId: "EBAY-ORDER-1",
       buyerShippingServiceCode: "USPSPriority",
     });
@@ -878,9 +880,46 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     expect(db.statements("INSERT INTO dropship.dropship_cost_schedule_entries")).toHaveLength(1);
     const [omsOrder] = db.statements("INSERT INTO oms.oms_orders");
     expect(omsOrder.sql).toContain("'pending', 'pending'");
-    expect(JSON.parse(String(omsOrder.params[18])).dropship.acceptanceState)
-      .toBe("inventory_claim_required");
+    const stamp = JSON.parse(String(omsOrder.params[18])).dropship;
+    expect(stamp.acceptanceState).toBe("inventory_claim_required");
+    // Staging creates the WMS order, and its pick priority, from this OMS order,
+    // so the vendor's plan must already be on it before the inventory claim.
+    expect(stamp.vendorMembershipPlanId).toBe("plan-ops");
     expect(db.calls.at(-1)?.sql).toBe("COMMIT");
+  });
+
+  it.each([
+    {
+      label: "the vendor's stored plan id when the plan row is missing",
+      vendorPlan: { current_plan_id: "plan-retired", membership_plan_id: null },
+      expected: "plan-retired",
+    },
+    {
+      label: "no plan when the vendor carries none",
+      vendorPlan: { current_plan_id: null, membership_plan_id: null },
+      expected: null,
+    },
+  ])("stamps $label on the OMS order", async ({ vendorPlan, expected }) => {
+    const db = createFakeDb(baseHandlers({
+      vendor: {
+        match: "FROM dropship.dropship_vendors v",
+        rows: [{
+          vendor_id: 10, member_id: "member-1", ...vendorPlan,
+          vendor_status: "active", vendor_standing_reason: null, entitlement_status: "active",
+          store_connection_id: 22, store_platform: "ebay", store_status: "connected", setup_status: "ready",
+          access_token_ref: "vault:access", refresh_token_ref: "vault:refresh",
+        }],
+      },
+    }));
+    const { repository } = createRepository(db, availableCost());
+
+    await repository.prepareCanonicalOrder(acceptanceInput());
+
+    const [omsOrder] = db.statements("INSERT INTO oms.oms_orders");
+    expect(JSON.parse(String(omsOrder.params[18])).dropship.vendorMembershipPlanId).toBe(expected);
+    // The stage records the same plan id the OMS order carries.
+    const [stage] = db.statements("INSERT INTO dropship.dropship_order_acceptance_stages");
+    expect(stage.params[12]).toBe(expected);
   });
 
   it("finalizes a claimed canonical stage and debits exactly once in one transaction", async () => {
