@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   customerReturnLabelSettingsInputSchema,
+  DEFAULT_RETURN_WAREHOUSE_ADDRESS_TYPE,
   type CustomerReturnLabelSettingsInput,
   type CustomerReturnLabelSettingsState,
 } from "@shared/returns/customer-return-label.contract";
@@ -24,6 +25,7 @@ export interface ReturnCarrierRuleDraft {
 }
 export interface ReturnLabelSettingsDraft {
   warehouseId: string;
+  warehouseAddressType?: "commercial" | "residential";
   selectionMode: "fixed_service" | "cheapest_eligible";
   carrierId: string;
   serviceCode: string;
@@ -36,6 +38,7 @@ export interface ReturnLabelSettingsDraft {
 
 export type ReturnLabelSettingsField =
   | "warehouseId"
+  | "warehouseAddressType"
   | "contactName"
   | "contactPhone"
   | "carrierId"
@@ -59,6 +62,7 @@ export function createReturnLabelSettingsDraft(
   ]);
   return {
     warehouseId: settings ? String(settings.warehouseId) : "",
+    warehouseAddressType: settings?.warehouseAddressType ?? DEFAULT_RETURN_WAREHOUSE_ADDRESS_TYPE,
     selectionMode: settings?.selectionMode ?? "cheapest_eligible",
     carrierId: settings?.carrierId ?? "",
     serviceCode: settings?.serviceCode ?? "",
@@ -99,6 +103,7 @@ export function parseReturnLabelSettingsDraft(
     expectedVersion,
     enabled: draft.enabled,
     warehouseId: Number(draft.warehouseId),
+    warehouseAddressType: draft.warehouseAddressType ?? DEFAULT_RETURN_WAREHOUSE_ADDRESS_TYPE,
     selectionMode: draft.selectionMode,
     carrierId: automatic ? null : draft.carrierId,
     serviceCode: automatic ? null : draft.serviceCode,
@@ -221,7 +226,9 @@ export function returnLabelSettingsReadiness(
   if (!parsed.success) {
     for (const issue of parsed.error.issues) {
       const field = issue.path[0];
-      if (field === "parcelGuardrails") {
+      if (field === "warehouseAddressType")
+        add("warehouseAddressType", "Choose commercial or residential for the return warehouse address.");
+      else if (field === "parcelGuardrails") {
         add("parcelGuardrails", "Check the box weight, length, girth and reference size limits. USPS allows at most 20 lb and 130 inches; UPS/FedEx allow at most 50 lb, 108 inches on the longest side and 165 inches with girth.");
       }
       else if (field === "contactName")

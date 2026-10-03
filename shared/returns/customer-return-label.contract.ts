@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { shippingAddressTypeSchema } from "../shipping/address-type";
 import { customerReturnShippingGuardrailsSchema } from "./customer-return-shipping-guardrails";
 import { customerReturnLiveReviewInputSchema } from "./customer-return-live.contract";
 import {
@@ -8,6 +9,10 @@ import {
 
 export const CUSTOMER_RETURN_LABEL_API =
   "/api/returns/admin/portal-preview/live";
+export const customerReturnWarehouseAddressTypeSchema = shippingAddressTypeSchema.exclude(["unknown"]);
+// Merchant return destinations default to commercial; admins can override them.
+// Preserve old policy JSON; resolve this default only when preparing a new request.
+export const DEFAULT_RETURN_WAREHOUSE_ADDRESS_TYPE = "commercial" as const;
 const id = z.number().int().positive().safe();
 const text = (maximum: number) =>
   z
@@ -34,6 +39,7 @@ export const customerReturnLabelSettingsFieldsSchema = z
   .object({
     enabled: z.boolean(),
     warehouseId: id,
+    warehouseAddressType: customerReturnWarehouseAddressTypeSchema.optional(),
     ...customerReturnCarrierPolicyFields,
     parcelGuardrails: customerReturnShippingGuardrailsSchema.nullable().optional(),
     contactName: text(200),

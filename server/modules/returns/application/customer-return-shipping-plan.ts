@@ -1,5 +1,6 @@
 import Decimal from "decimal.js";
-import { customerReturnLabelAddressSchema, type CustomerReturnLabelSettings } from "@shared/returns/customer-return-label.contract";
+import { customerReturnLabelAddressSchema, customerReturnWarehouseAddressTypeSchema,
+  DEFAULT_RETURN_WAREHOUSE_ADDRESS_TYPE, type CustomerReturnLabelSettings } from "@shared/returns/customer-return-label.contract";
 import type { CustomerReturnDimensions } from "@shared/returns/customer-return-parcel";
 import { MILLIMETERS_PER_INCH, DIMENSION_INCH_DECIMAL_PLACES } from "@shared/shipping/dimensions";
 import { returnRateShipmentSchema } from "../../shipping-engine/application/return-rate-provider.port";
@@ -7,6 +8,9 @@ import type { CustomerReturnShopifySnapshot } from "./customer-return-shopify-sn
 import { CustomerReturnIntakeError } from "./customer-return-intake.ports";
 
 const Exact = Decimal.clone({ precision: 40 });
+export function customerReturnWarehouseAddressType(value: unknown) {
+  return customerReturnWarehouseAddressTypeSchema.parse(value === undefined ? DEFAULT_RETURN_WAREHOUSE_ADDRESS_TYPE : value);
+}
 export function customerReturnProviderDimensions(dimensions: CustomerReturnDimensions) {
   const inches = (millimeters: number) => new Exact(millimeters).div(MILLIMETERS_PER_INCH)
     .toDecimalPlaces(DIMENSION_INCH_DECIMAL_PLACES, Decimal.ROUND_CEIL).toNumber();
@@ -31,7 +35,7 @@ export function customerReturnPreflightShipments(
     // Quick quotes do not persist provider shipments. These identifiers must never
     // be used for purchases; real purchases use the durable RMA/parcel identity.
     externalShipmentId: `echelon-return-preflight-${index + 1}`, rmaNumber: "RETURN-PREFLIGHT",
-    shipFrom: origin, shipTo: settings.destinationAddress,
+    shipFrom: origin, shipTo: { ...settings.destinationAddress, addressType: customerReturnWarehouseAddressType(settings.warehouseAddressType) },
     parcel: { weightGrams: parcel.weightGrams, dimensionsInches: customerReturnProviderDimensions(parcel.dimensions) },
   }));
 }
