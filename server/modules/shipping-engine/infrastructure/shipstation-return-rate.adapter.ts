@@ -15,6 +15,7 @@ import {
   type ReturnRateProvider,
   type ReturnRateResult,
 } from "../application/return-rate-provider.port";
+import { shipStationReturnWeightPounds } from "./shipstation-return-weight";
 
 const RATES_URL = "https://api.shipstation.com/v2/rates";
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -177,6 +178,8 @@ export function buildReturnRateRequest(
   const parsed = returnRateInputSchema.safeParse(rawInput);
   if (!parsed.success) fail("RETURN_RATE_INPUT_INVALID", "rejected");
   const { shipment, carrierIds } = parsed.data;
+  const weightPounds = shipStationReturnWeightPounds(shipment.parcel.weightGrams);
+  if (weightPounds === null) fail("RETURN_RATE_INPUT_INVALID", "rejected");
   return {
     rate_options: {
       carrier_ids: carrierIds,
@@ -192,7 +195,7 @@ export function buildReturnRateRequest(
       packages: [
         {
           package_code: "package",
-          weight: { value: shipment.parcel.weightGrams, unit: "gram" },
+          weight: { value: weightPounds, unit: "pound" },
           dimensions: { ...shipment.parcel.dimensionsInches, unit: "inch" },
         },
       ],

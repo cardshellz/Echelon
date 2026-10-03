@@ -10,6 +10,7 @@ import {
   type ReturnLabelProvider,
   type ReturnLabelRecord,
 } from "../application/return-label-provider.port";
+import { matchesShipStationReturnWeight, shipStationReturnWeightPounds } from "./shipstation-return-weight";
 
 const API_ORIGIN = "https://api.shipstation.com";
 const API_PATH = "/v2";
@@ -221,6 +222,8 @@ function parseInput(input: unknown, outcome: "rejected" | "unknown" = "rejected"
 
 export function buildReturnLabelRequest(rawInput: ReturnLabelInput): Record<string, unknown> {
   const input = parseInput(rawInput);
+  const weightPounds = shipStationReturnWeightPounds(input.parcel.weightGrams);
+  if (weightPounds === null) fail("RETURN_LABEL_INPUT_INVALID", "rejected");
   return {
     is_return_label: true, rma_number: input.rmaNumber, charge_event: "carrier_default",
     label_format: "pdf", label_layout: "4x6", label_download_type: "url",
@@ -228,7 +231,7 @@ export function buildReturnLabelRequest(rawInput: ReturnLabelInput): Record<stri
       validate_address: "no_validation", external_shipment_id: input.externalShipmentId,
       carrier_id: input.carrierId, service_code: input.serviceCode,
       ship_from: addressBody(input.shipFrom), ship_to: addressBody(input.shipTo),
-      packages: [{ package_code: "package", weight: { value: input.parcel.weightGrams, unit: "gram" },
+      packages: [{ package_code: "package", weight: { value: weightPounds, unit: "pound" },
         dimensions: { ...input.parcel.dimensionsInches, unit: "inch" } }],
     },
   };
@@ -249,8 +252,7 @@ function sameAddress(actual: z.infer<typeof addressSchema>, expected: ReturnLabe
 }
 
 function assertPackage(actual: z.infer<typeof packageSchema>, input: ReturnLabelInput): void {
-  const gramsPerUnit = { gram: "1", kilogram: "1000", ounce: "28.349523125", pound: "453.59237" };
-  if (!new Exact(actual.weight.value).times(gramsPerUnit[actual.weight.unit]).eq(input.parcel.weightGrams)) {
+  if (!matchesShipStationReturnWeight(actual.weight, input.parcel.weightGrams)) {
     fail("RETURN_LABEL_MEASUREMENTS_MISMATCH", "unknown");
   }
   for (const axis of ["length", "width", "height"] as const) {

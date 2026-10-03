@@ -17,7 +17,7 @@ const INPUT: ReturnLabelInput = {
 };
 const PDF = "https://api.shipstation.com/v2/downloads/account/token/label-1.pdf";
 function parcel() {
-  return { package_code: "package", weight: { value: 500, unit: "gram" },
+  return { package_code: "package", weight: { value: 1.10231132, unit: "pound" },
     dimensions: { unit: "inch", length: 12.125, width: 8, height: 4 }, tracking_number: "TRACK-42" };
 }
 function label() {
@@ -71,13 +71,13 @@ describe("ShipStation return-label request", () => {
         carrier_id: "se-101", service_code: "ups_ground",
         ship_from: { name: "Fictional Customer", address_line1: "100 Sample Street", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US" },
         ship_to: { name: "Fictional Returns", company_name: "Sample Warehouse", phone: "5550101000", address_line1: "200 Example Road", address_line2: "Suite 2", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US" },
-        packages: [{ package_code: "package", weight: { value: 500, unit: "gram" }, dimensions: { unit: "inch", length: 12.125, width: 8, height: 4 } }],
+        packages: [{ package_code: "package", weight: { value: 1.10231132, unit: "pound" }, dimensions: { unit: "inch", length: 12.125, width: 8, height: 4 } }],
       },
     });
     expect(fetchFn.mock.calls[1][0]).toBe("https://api.shipstation.com/v2/shipments/se-301");
   });
 
-  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])("rejects invalid whole parcel grams %s before transport", async weightGrams => {
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1])("rejects invalid or unrepresentable parcel grams %s before transport", async weightGrams => {
     const { provider, fetchFn } = fixture();
     await expect(provider.purchase({ ...INPUT, parcel: { ...INPUT.parcel, weightGrams } })).rejects.toMatchObject({ code: "RETURN_LABEL_INPUT_INVALID", outcome: "rejected" });
     expect(fetchFn).not.toHaveBeenCalled();
@@ -157,6 +157,22 @@ describe("purchase outcomes", () => {
 });
 
 describe("exact provider evidence", () => {
+  it("accepts the exact declared fractional pounds returned as decimal strings", async () => {
+    const converted = { ...parcel(), weight: { value: "1.102311320", unit: "pound" } };
+    const { provider } = fixture([json({ ...label(), packages: [converted] }), json({ ...shipment(), packages: [converted] })]);
+    await expect(provider.purchase(INPUT)).resolves.toMatchObject({ labelId: "se-201" });
+  });
+  it.each(["1.10231131", "1.10231133", "1.1023113201"])("refuses a changed pound weight %s in either label or stored shipment without repeating the purchase", async value => {
+    const changed = { ...parcel(), weight: { value, unit: "pound" } };
+    for (const evidence of [
+      [json({ ...label(), packages: [changed] })],
+      [json(label()), json({ ...shipment(), packages: [changed] })],
+    ]) {
+      const { provider, fetchFn } = fixture(evidence);
+      await expect(provider.purchase(INPUT)).rejects.toMatchObject({ code: "RETURN_LABEL_MEASUREMENTS_MISMATCH", outcome: "unknown" });
+      expect(fetchFn.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    }
+  });
   it.each([
     { is_return_label: false }, { is_international: true }, { trackable: false }, { voided: true },
     { voided_at: "2026-09-26T12:01:00Z" }, { external_shipment_id: "wrong" }, { rma_number: "wrong" },
@@ -207,6 +223,16 @@ describe("exact provider evidence", () => {
 });
 
 describe("read-only uncertain-purchase recovery", () => {
+  it("continues to recover historical labels and shipments created in grams without a purchase", async () => {
+    const historical = { ...parcel(), weight: { value: 500, unit: "gram" } };
+    const { provider, fetchFn } = fixture([
+      json(listing(["se-201"])),
+      json({ ...label(), packages: [historical] }),
+      json({ ...shipment(), packages: [historical] }),
+    ]);
+    await expect(provider.recover(INPUT)).resolves.toMatchObject({ labelId: "se-201" });
+    expect(fetchFn.mock.calls.map(([, init]) => init?.method)).toEqual(["GET", "GET", "GET"]);
+  });
   it("returns not-found without issuing another purchase", async () => {
     const { provider, fetchFn } = fixture([json({ labels: [], total: 0, page: 1, pages: 0 })]);
     await expect(provider.recover(INPUT)).resolves.toBeNull();
