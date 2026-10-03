@@ -88,6 +88,8 @@ export interface DropshipOrderProcessingRepository {
 
   resolveQuoteItems(input: {
     intake: DropshipOrderProcessingIntakeRecord;
+    /** When the dropship catalog rules are read (they can start and end). */
+    now: Date;
   }): Promise<DropshipOrderProcessingQuoteItem[]>;
 
   markIntakeFailure(input: {
@@ -171,6 +173,7 @@ export class DropshipOrderProcessingService {
       const destination = buildQuoteDestination(claim.intake);
       const items = aggregateQuoteItems(await this.deps.repository.resolveQuoteItems({
         intake: claim.intake,
+        now: this.deps.clock.now(),
       }));
       const quote = await this.deps.shippingQuote.quote({
         vendorId: claim.intake.vendorId,

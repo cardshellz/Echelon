@@ -5,6 +5,11 @@ import { DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES } from "../../../../share
 import { DropshipError } from "../domain/errors";
 import { vendorOrderAdmissionFor } from "../domain/vendor-standing";
 import {
+  decideDropshipCatalogOrderAvailability,
+  type DropshipCatalogExposureRule,
+} from "../domain/catalog-exposure";
+import { listActiveDropshipCatalogRules } from "./dropship-catalog-exposure.repository";
+import {
   decideAcceptanceFunding,
   type DropshipAcceptanceFundingDecision,
   type DropshipAdvanceContext,
@@ -109,7 +114,6 @@ interface ListingCandidateRow {
   product_is_active: boolean;
   variant_is_active: boolean;
   sales_eligibility: "sellable" | "internal_only";
-  dropship_eligible: boolean | null;
   catalog_retail_price_cents: string | number | null;
 }
 
@@ -1758,7 +1762,6 @@ async function resolveAcceptanceLinesWithClient(
        p.is_active AS product_is_active,
        pv.is_active AS variant_is_active,
        pv.sales_eligibility,
-       pv.dropship_eligible,
        COALESCE((ROUND(retail_cache.price::numeric * 100))::bigint, pv.price_cents) AS catalog_retail_price_cents
      FROM dropship.dropship_vendor_listings dl
      INNER JOIN catalog.product_variants pv ON pv.id = dl.product_variant_id
@@ -1798,6 +1801,8 @@ async function resolveAcceptanceLinesWithClient(
     ],
   );
   const candidates = result.rows.map((row) => mapListingCandidateRow(row));
+  // Read on this transaction's client, so the decision and the debit share one snapshot.
+  const catalogRules = await listActiveDropshipCatalogRules(client);
   const matchedLines = input.rawLines.map((line, index) => {
     const candidate = findCandidateForOrderLine(candidates, line);
     if (!candidate) {
@@ -1813,7 +1818,10 @@ async function resolveAcceptanceLinesWithClient(
         },
       );
     }
-    assertListingCandidateCanAccept(candidate, index);
+    assertListingCandidateCanAccept(candidate, index, {
+      catalogRules,
+      now: input.observedAt,
+    });
     return { line, index, candidate };
   });
 
@@ -2839,7 +2847,6 @@ function mapListingCandidateRow(
   productIsActive: boolean;
   variantIsActive: boolean;
   customerSellable: boolean;
-  dropshipEligible: boolean;
 } {
   const catalogRetailPriceCents = row.catalog_retail_price_cents === null
     ? null
@@ -2871,7 +2878,6 @@ function mapListingCandidateRow(
     productIsActive: row.product_is_active,
     variantIsActive: row.variant_is_active,
     customerSellable: row.sales_eligibility === "sellable",
-    dropshipEligible: row.dropship_eligible === true,
   };
 }
 
@@ -2898,6 +2904,10 @@ function findCandidateForOrderLine(
 function assertListingCandidateCanAccept(
   candidate: ReturnType<typeof mapListingCandidateRow>,
   lineIndex: number,
+  catalog: {
+    catalogRules: readonly DropshipCatalogExposureRule[];
+    now: Date;
+  },
 ): void {
   if (!["active", "drift_detected", "paused"].includes(candidate.listingStatus)) {
     throw new DropshipError(
@@ -2910,15 +2920,18 @@ function assertListingCandidateCanAccept(
       },
     );
   }
-  if (
-    !candidate.productIsActive
-    || !candidate.variantIsActive
-    || !candidate.customerSellable
-    || !candidate.dropshipEligible
-  ) {
+  // The rule vendors list under, and nothing else: see
+  // decideDropshipCatalogOrderAvailability.
+  const availability = decideDropshipCatalogOrderAvailability({
+    subject: candidate,
+    customerSellable: candidate.customerSellable,
+    rules: catalog.catalogRules,
+    now: catalog.now,
+  });
+  if (!availability.available) {
     throw new DropshipError(
       "DROPSHIP_ORDER_CATALOG_VARIANT_NOT_ELIGIBLE",
-      "Dropship order line variant is not eligible for dropship acceptance.",
+      "Dropship order line variant is not in the dropship catalog vendors list from.",
       {
         lineIndex,
         productId: candidate.productId,
@@ -2926,7 +2939,7 @@ function assertListingCandidateCanAccept(
         productIsActive: candidate.productIsActive,
         variantIsActive: candidate.variantIsActive,
         customerSellable: candidate.customerSellable,
-        dropshipEligible: candidate.dropshipEligible,
+        catalogReason: availability.reason,
       },
     );
   }

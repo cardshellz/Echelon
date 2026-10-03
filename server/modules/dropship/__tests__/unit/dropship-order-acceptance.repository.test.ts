@@ -35,7 +35,7 @@ describe("PgDropshipOrderAcceptanceRepository", () => {
     expect(insertBlock).toContain("'dropship', 'unfulfilled'");
   });
 
-  it("rejects an internal-only catalog identity before accepting the order", () => {
+  it("accepts only what the dropship catalog lets vendors list, with no separate dropship switch", () => {
     const candidateQuery = sourceBlock(
       ACCEPTANCE_REPOSITORY_SRC,
       "async function resolveAcceptanceLinesWithClient",
@@ -48,7 +48,11 @@ describe("PgDropshipOrderAcceptanceRepository", () => {
     );
 
     expect(candidateQuery).toContain("pv.sales_eligibility");
-    expect(candidateValidation).toContain("!candidate.customerSellable");
+    expect(candidateQuery).toContain("listActiveDropshipCatalogRules(client)");
+    expect(candidateQuery).not.toContain("dropship_eligible");
+    expect(candidateValidation).toContain("decideDropshipCatalogOrderAvailability");
+    expect(candidateValidation).toContain("customerSellable: candidate.customerSellable");
     expect(candidateValidation).toContain("DROPSHIP_ORDER_CATALOG_VARIANT_NOT_ELIGIBLE");
+    expect(ACCEPTANCE_REPOSITORY_SRC).not.toContain("dropship_eligible");
   });
 });
