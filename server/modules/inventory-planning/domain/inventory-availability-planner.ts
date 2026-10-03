@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { permitsPackagePath, permitsRecipeBuild } from "@shared/inventory/inventory-behavior";
 import {
   atpProjectionRequestSchema,
   atpProjectionSchema,
@@ -709,9 +710,21 @@ function buildContext(snapshot: PlannerSupplySnapshot, warehouseId: number, simu
     }
     for (const path of model.paths) {
       if (path.authorityState !== "allowed" || path.validationState !== "valid") continue;
+      if (!permitsPackagePath(model.inventoryBehavior, path.operationType, path.transformationRecipeBindingId !== null)) {
+        blockers.push(problem("INVENTORY_BEHAVIOR_PATH_CONFLICT", "An allowed path conflicts with the product's inventory behavior.",
+          { modelId: model.modelId, pathId: path.pathId, inventoryBehavior: model.inventoryBehavior }));
+        continue;
+      }
       const candidates = pathsByDestination.get(path.destinationVariantId) ?? [];
       candidates.push(path);
       pathsByDestination.set(path.destinationVariantId, candidates);
+    }
+    if (!permitsRecipeBuild(model.inventoryBehavior)) {
+      if (model.recipeBindings.length > 0 || model.buildToPromiseEnabled) {
+        blockers.push(problem("INVENTORY_BEHAVIOR_RECIPE_CONFLICT", "Recipes conflict with the product's inventory behavior.",
+          { modelId: model.modelId, inventoryBehavior: model.inventoryBehavior }));
+      }
+      continue;
     }
     if (!model.buildToPromiseEnabled) continue;
     for (const recipe of model.recipeBindings) {

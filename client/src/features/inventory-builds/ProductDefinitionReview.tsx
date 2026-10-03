@@ -7,7 +7,8 @@ import { productDefinitionReviewSchema, productDefinitionReceiptSchema, productD
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth";
 import { fetchJson, HttpResponseError } from "@/pages/inventory-planning-http";
-import { transformationQueryKey } from "./package-conversion-draft";
+import { modelInventoryBehavior, transformationQueryKey } from "./package-conversion-draft";
+import { INVENTORY_BEHAVIORS } from "@shared/inventory/inventory-behavior";
 
 const endpoint = "/api/inventory-planning/admin/product-definitions";
 const post = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -71,6 +72,8 @@ export function ProductDefinitionReview({ view, onApplyBlockedChange }: {
         {[{ label: "Current rules", model: view.activeModel }, { label: "Your saved draft", model: draft }].map(({ label, model }) =>
           <div key={label} className="rounded border p-2 text-sm">
             <h4 className="font-medium">{label}</h4>
+            {model && <p>{INVENTORY_BEHAVIORS.find(option => option.value === modelInventoryBehavior(model))?.label}
+              {model.inventoryBehavior === undefined ? " · existing saved rules" : ""}</p>}
             <p>{model ? `Version ${model.version} · Build to promise ${model.buildToPromiseEnabled ? "on" : "off"}` : "No active model"}</p>
             <ul>{model?.paths.map(path => <li key={`${path.sourceVariantId}:${path.destinationVariantId}`}>
               {path.inputQty} {view.variants.find(v => v.id === path.sourceVariantId)?.sku ?? path.sourceVariantId} → {path.outputQty} {view.variants.find(v => v.id === path.destinationVariantId)?.sku ?? path.destinationVariantId}: {path.authorityState}

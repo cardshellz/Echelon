@@ -7,6 +7,8 @@ import {
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { calculateRecipeDefinitionHash } from "../../domain/inventory-availability-master-data.contracts";
 import { PostgresTransformationExecutionAuthorityRepository } from "../../infrastructure/transformation-execution-authority.repository";
+import { PostgresInventorySupplyDependencyReader } from "../../infrastructure/inventory-supply-dependency-read.repository";
+import { PostgresInventoryAvailabilityRuntimeAtpExecutor } from "../../infrastructure/inventory-availability-runtime-atp.repository";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -46,7 +48,7 @@ const fixtureSql = `
   CREATE TABLE inventory.transformation_model_versions (
     id integer PRIMARY KEY, product_id integer NOT NULL, version integer NOT NULL,
     lifecycle_status text NOT NULL, validation_state text NOT NULL,
-    validation_errors jsonb NOT NULL, definition_hash text NOT NULL
+    validation_errors jsonb NOT NULL, definition_hash text NOT NULL, inventory_behavior text
   );
   CREATE TABLE inventory.transformation_model_heads (
     product_id integer PRIMARY KEY, active_model_id integer, revision bigint NOT NULL
@@ -121,12 +123,68 @@ const fixtureSql = `
 describeDatabase.sequential("PostgreSQL transformation execution authority", () => {
   let database: InventoryCutoverTestDatabase;
 
+  it("invalidates the transitive sealed model graph without any Catalog strategy or mutable recipe tables", async () => {
+    const client = await database.pool.connect();
+    // The executor owns its transaction; the fixture variants/model rows are
+    // restored explicitly so subsequent execution-authority cases remain isolated.
+    try {
+      await client.query("UPDATE inventory.transformation_model_versions SET inventory_behavior='build_managed' WHERE id=501");
+      await client.query(`INSERT INTO inventory.transformation_model_versions VALUES
+        (503,30,1,'sealed','valid','[]','${MODEL_HASH}','build_managed'),
+        (504,40,1,'draft','valid','[]','${MODEL_HASH}','build_managed');
+        INSERT INTO inventory.transformation_model_heads VALUES(30,503,0),(40,504,0);
+        INSERT INTO inventory.transformation_recipe_bindings
+          SELECT 703,503,recipe_id,relationship_role,warehouse_id,recipe_code_snapshot,recipe_version_snapshot,
+            recipe_definition_hash,30,301,1,1,validation_state,validation_errors
+          FROM inventory.transformation_recipe_bindings WHERE id=701;
+        INSERT INTO inventory.transformation_recipe_bindings
+          SELECT 704,504,recipe_id,relationship_role,warehouse_id,recipe_code_snapshot,recipe_version_snapshot,
+            recipe_definition_hash,40,401,1,1,validation_state,validation_errors
+          FROM inventory.transformation_recipe_bindings WHERE id=701;
+        INSERT INTO inventory.transformation_recipe_component_snapshots VALUES(703,503,101,10,1,1),(704,504,201,20,1,1);`);
+      const reader = new PostgresInventorySupplyDependencyReader(new PostgresInventoryAvailabilityRuntimeAtpExecutor(database.pool));
+      await expect(reader.getAffectedProductIds(201)).resolves.toEqual([10,20,30]);
+      // Invalidation is product-level: another package of the changed product
+      // can also feed the exact component via its canonical package rules.
+      await expect(reader.getAffectedProductIds(105)).resolves.toEqual([10,30]);
+      await client.query("UPDATE inventory.transformation_model_versions SET inventory_behavior='physical_only' WHERE id=501");
+      await expect(reader.getAffectedProductIds(201)).resolves.toEqual([20]);
+    } finally {
+      await client.query(`DELETE FROM inventory.transformation_recipe_component_snapshots WHERE model_id IN (503,504);
+        DELETE FROM inventory.transformation_recipe_bindings WHERE model_id IN (503,504);
+        DELETE FROM inventory.transformation_model_heads WHERE product_id IN (30,40);
+        DELETE FROM inventory.transformation_model_versions WHERE id IN (503,504);
+        UPDATE inventory.transformation_model_versions SET inventory_behavior=NULL WHERE id=501;`);
+      client.release();
+    }
+  });
+
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, fixtureSql);
   });
 
   afterAll(async () => {
     await database?.close();
+  });
+
+  it("carries explicit behavior through active and retained execution reads", async () => {
+    const client = await database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const authority = new PostgresTransformationExecutionAuthorityRepository(drizzle(client) as any);
+      const request = { productId: 10, operation: "break_pack" as const,
+        source: { variantId: 125, productId: 10, unitsPerVariant: 25 },
+        destination: { variantId: 105, productId: 10, unitsPerVariant: 5 } };
+      await client.query("UPDATE inventory.transformation_model_versions SET inventory_behavior='physical_only' WHERE id=501");
+      await expect(authority.authorizePackageConversion(request)).rejects.toMatchObject({ code: "INVENTORY_BEHAVIOR_OPERATION_NOT_ALLOWED" });
+      await expect(authority.validatePinnedBuildOrder(drizzle(client) as any, 801)).rejects.toMatchObject({ code: "INVENTORY_BEHAVIOR_OPERATION_NOT_ALLOWED" });
+      await client.query("UPDATE inventory.transformation_model_versions SET inventory_behavior='package_hierarchy' WHERE id=501");
+      await expect(authority.authorizePackageConversion(request)).resolves.toMatchObject({ pathId: 601 });
+      await expect(authority.validatePinnedBuildOrder(drizzle(client) as any, 801)).rejects.toMatchObject({ code: "INVENTORY_BEHAVIOR_OPERATION_NOT_ALLOWED" });
+      await client.query("UPDATE inventory.transformation_model_versions SET inventory_behavior='build_managed' WHERE id=501");
+      await expect(authority.authorizePackageConversion(request)).rejects.toMatchObject({ code: "INVENTORY_BEHAVIOR_OPERATION_NOT_ALLOWED" });
+      await expect(authority.validatePinnedBuildOrder(drizzle(client) as any, 801)).resolves.toMatchObject({ bindingId: 701 });
+    } finally { await client.query("ROLLBACK"); client.release(); }
   });
 
   it("pins the exact active directed path and locks its catalog UOM snapshots", async () => {

@@ -17,6 +17,24 @@ import {
 const NOW = new Date("2026-08-27T12:00:00.000Z");
 
 describe("InventoryAvailabilityMasterDataService", () => {
+  it.each(["physical_only", "package_hierarchy", "build_managed"] as const)("persists the explicit %s choice rather than the legacy strategy", async inventoryBehavior => {
+    const context = editorView();
+    context.product.legacyInventoryStrategy = "physical_only";
+    const store = new FakeStore(context);
+    await createService(store).createTransformationModelDraft({ ...baseRequest(), inventoryBehavior, expectedHeadRevision: "0" }, "operator-1");
+    expect(store.transformationCommands[0]).toMatchObject({ expectedHeadRevision: "0",
+      definition: { inventoryBehavior, paths: [], recipeBindings: [] } });
+  });
+
+  it("rejects a Physical-only request that tries to authorize a package conversion", async () => {
+    const store = new FakeStore(editorView());
+    await expect(createService(store).createTransformationModelDraft({ ...baseRequest(), inventoryBehavior: "physical_only",
+      paths: [{ sourceVariantId: 11, destinationVariantId: 12, inputQty: 5, outputQty: 1,
+        operationType: "assemble_pack", authorityState: "allowed", transformationRecipeBindingKey: null }],
+    }, "operator-1")).rejects.toMatchObject({ code: "INVENTORY_AVAILABILITY_INVALID_INPUT" });
+    expect(store.transformationCommands).toEqual([]);
+  });
+
   it("hydrates immutable catalog and recipe snapshots before persistence", async () => {
     const store = new FakeStore(editorView());
     const service = createService(store);

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { inventoryBehaviorSchema } from "../inventory/inventory-behavior";
 
 import { PRODUCT_INVENTORY_STRATEGIES } from "../catalog/inventory-strategy";
 import {
@@ -36,6 +37,7 @@ export const inventoryAvailabilityBackfillIssueSchema = z.object({
 }).strict();
 
 export const inventoryAvailabilityBackfillDefinitionSchema = z.object({
+  inventoryBehavior: inventoryBehaviorSchema.optional(),
   buildToPromiseEnabled: z.boolean(),
   paths: z.array(transformationDraftPathInputSchema).max(500),
   recipeBindings: z.array(transformationDraftBindingInputSchema).max(200),

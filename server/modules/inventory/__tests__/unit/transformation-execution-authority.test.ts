@@ -119,6 +119,27 @@ function buildRecord(overrides: Partial<BuildBindingDefinitionRecord> = {}): Bui
 }
 
 describe("transformation execution authority", () => {
+  it.each(["physical_only", "build_managed", "invalid-mode"])("rejects manual package breaks under %s", modelInventoryBehavior => {
+    expect(() => authorizePackageConversionDefinition({ runtime: canonicalRuntime, request: packageRequest(), records: [packageRecord({ modelInventoryBehavior })] }))
+      .toThrow("inventory behavior");
+  });
+
+  it("accepts hierarchy paths while still requiring the exact saved direction", () => {
+    expect(() => authorizePackageConversionDefinition({ runtime: canonicalRuntime, request: packageRequest(), records: [packageRecord({ modelInventoryBehavior: "package_hierarchy" })] }))
+      .not.toThrow();
+    expect(() => authorizePackageConversionDefinition({ runtime: canonicalRuntime, request: packageRequest(), records: [] })).toThrow();
+  });
+
+  it.each(["physical_only", "package_hierarchy", "invalid-mode"])("rejects recipe execution under %s", modelInventoryBehavior => {
+    expect(() => authorizeBuildBindingDefinition({ runtime: canonicalRuntime, request: buildRequest(), records: [buildRecord({ modelInventoryBehavior })] }))
+      .toThrow("inventory behavior");
+  });
+
+  it("accepts an explicitly selected build-managed recipe", () => {
+    expect(() => authorizeBuildBindingDefinition({ runtime: canonicalRuntime, request: buildRequest(), records: [buildRecord({ modelInventoryBehavior: "build_managed" })] }))
+      .not.toThrow();
+  });
+
   it("parses exact runtime lineage and rejects a changed activation", () => {
     expect(parseTransformationRuntimeAuthority([{
       authority: "canonical",

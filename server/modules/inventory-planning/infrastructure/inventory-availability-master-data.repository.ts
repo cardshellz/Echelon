@@ -226,6 +226,11 @@ implements InventoryAvailabilityMasterDataAdminStore {
       if (head?.draftModelId) {
         throw draftExists("transformation model", String(productId));
       }
+      if (command.expectedHeadRevision !== undefined
+        && String(head?.revision ?? 0) !== command.expectedHeadRevision) {
+        throw new InventoryAvailabilityMasterDataError(409, "INVENTORY_AVAILABILITY_DRAFT_CHANGED",
+          "The active product rules changed. Reload before creating a draft.");
+      }
       if (command.backfillEvidence) {
         const [source] = await loadInventoryAvailabilityBackfillSources(tx, [productId]);
         if (!source) {
@@ -263,6 +268,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
           version,
           lifecycleStatus: "draft",
           buildToPromiseEnabled: command.definition.buildToPromiseEnabled,
+          inventoryBehavior: command.definition.inventoryBehavior ?? null,
           definitionHash,
           validationState: "invalid",
           validationErrors: [{ code: "members_pending" }],
@@ -304,13 +310,14 @@ implements InventoryAvailabilityMasterDataAdminStore {
         action: "inventory_availability.transformation_model.draft_created",
         target: `inventory.transformation_model:${created.id}`,
         changes: {
-          before: previous ? { modelId: previous.id, version: previous.version } : null,
+          before: previous ? { modelId: previous.id, version: previous.version, inventoryBehavior: previous.inventoryBehavior ?? null } : null,
           after: {
             modelId: created.id,
             productId,
             version,
             definitionHash,
             validationState: "valid",
+            inventoryBehavior: command.definition.inventoryBehavior ?? null,
           },
         },
         context: {
@@ -416,6 +423,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
       const [created] = await tx.insert(transformationModelVersions).values({
         productId: command.productId, version, lifecycleStatus: "draft",
         buildToPromiseEnabled: command.definition.buildToPromiseEnabled,
+        inventoryBehavior: command.definition.inventoryBehavior ?? null,
         definitionHash, validationState: "invalid", validationErrors: [{ code: "members_pending" }],
         supersedesModelId: command.draftModelId, changeReason: command.changeReason,
         idempotencyKey: successorKey, requestHash: command.requestHash,
@@ -602,6 +610,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
           version,
           lifecycleStatus: "draft",
           buildToPromiseEnabled: command.definition.buildToPromiseEnabled,
+          inventoryBehavior: command.definition.inventoryBehavior ?? null,
           definitionHash,
           validationState: "invalid",
           validationErrors: [{ code: "members_pending" }],
@@ -1124,6 +1133,7 @@ async function loadTransformationModel(
     version: model.version,
     lifecycleStatus: model.lifecycleStatus as TransformationAdminModel["lifecycleStatus"],
     buildToPromiseEnabled: model.buildToPromiseEnabled,
+    ...(model.inventoryBehavior == null ? {} : { inventoryBehavior: model.inventoryBehavior as TransformationAdminModel["inventoryBehavior"] }),
     definitionHash: model.definitionHash,
     origin: model.origin as TransformationAdminModel["origin"],
     originInputHash: model.originInputHash,
@@ -1482,6 +1492,7 @@ async function latestTransformationModel(tx: Transaction, productId: number) {
     .select({
       id: transformationModelVersions.id,
       version: transformationModelVersions.version,
+      inventoryBehavior: transformationModelVersions.inventoryBehavior,
     })
     .from(transformationModelVersions)
     .where(eq(transformationModelVersions.productId, productId))

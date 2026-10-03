@@ -45,6 +45,7 @@ const parityMigrationSql = [
   demandObservationDaysMigrationSql,
   readFileSync(resolve(process.cwd(), "migrations",
     "0654_inventory_manual_transformation_review.sql"), "utf8"),
+  readFileSync(resolve(process.cwd(), "migrations", "0718_inventory_model_behavior.sql"), "utf8"),
 ].join("\n");
 const compactMigrationSql = migrationSql.replace(/\s+/g, " ").trim();
 const schemaPath = resolve(process.cwd(), "shared/schema/inventory-planning.schema.ts");
@@ -136,7 +137,7 @@ function migrationColumns(schemaName: string, tableName: string): string[] {
     "gi",
   );
   const addedColumns = [...parityMigrationSql.matchAll(alterPattern)]
-    .flatMap((match) => [...match[1].matchAll(/\bADD\s+COLUMN\s+([a-z_][a-z0-9_]*)/gi)])
+    .flatMap((match) => [...match[1].matchAll(/\bADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)/gi)])
     .map((match) => match[1]);
   return [...new Set([...createColumns, ...addedColumns])].sort();
 }

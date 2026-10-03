@@ -2,14 +2,14 @@ import React, { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { ArrowRightLeft, RefreshCw } from "lucide-react";
-import type { ProductInventoryStrategy } from "@shared/catalog/inventory-strategy";
 import type { SupplyTransformationsAdminView } from "@shared/types/inventory-availability-admin";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/lib/auth";
 import { prefillPathsFromModel, transformationRuntimeLabel } from "@/pages/supply-transformations-model";
-import { ProductBuildRelationships } from "./ProductBuildRelationships";
+import { ProductRecipeRules } from "./ProductRecipeRules";
+import { INVENTORY_BEHAVIORS } from "@shared/inventory/inventory-behavior";
 import { ProductDefinitionReview } from "./ProductDefinitionReview";
 import {
   buildPackageLadder, updatePackageLadderDirection, type PackageDirection,
@@ -19,12 +19,10 @@ import {
   PACKAGE_CONVERSION_AUDIT_NOTE, packageConversionEditIssues, packageConversionHasChanges,
   PackageConversionHttpError, savePackageConversionCommand, transformationQueryKey,
   type PackageConversionCommand, type PackageConversionEdit,
+  changeInventoryBehavior, modelInventoryBehavior,
 } from "./package-conversion-draft";
 
-type Props = { productId: number; inventoryStrategy: ProductInventoryStrategy; enabled: boolean };
-const STRATEGY_TITLES: Record<ProductInventoryStrategy, string> = {
-  physical_fungible: "Package hierarchy", recipe_managed: "Build managed", physical_only: "Physical only",
-};
+type Props = { productId: number; enabled: boolean };
 const DIRECTIONS: ReadonlyArray<{ value: PackageDirection; label: string }> = [
   { value: "none", label: "None" }, { value: "break_down", label: "Break down" },
   { value: "build_up", label: "Build up" }, { value: "reversible", label: "Reversible" },
@@ -96,6 +94,7 @@ function ActivePackageSharingSummary({ view }: { view: SupplyTransformationsAdmi
     </li>)}
   </ul>;
   return <div className="space-y-2 text-xs" data-testid="product-conversion-active-summary">
+    {model && <p className="font-medium">{INVENTORY_BEHAVIORS.find(option => option.value === modelInventoryBehavior(model))?.label}</p>}
     <p className="font-medium">{transformationRuntimeLabel(view)}.</p>
     <div>
       <p className="font-medium">Sealed package sharing{model ? ` · v${model.version}` : ""}</p>
@@ -111,16 +110,15 @@ function ActivePackageSharingSummary({ view }: { view: SupplyTransformationsAdmi
 
 export function ProductConversionCard(props: Props) {
   const { user, hasPermission } = useAuth();
-  if (props.inventoryStrategy === "physical_only") return null;
   if (!hasPermission("inventory_planning", "view")) return <Card>
-    <CardHeader><CardTitle className="text-base">{STRATEGY_TITLES[props.inventoryStrategy]}</CardTitle></CardHeader>
+    <CardHeader><CardTitle className="text-base">Inventory behavior</CardTitle></CardHeader>
     <CardContent className="text-sm text-muted-foreground">Inventory planning view permission is required to see conversion rules.</CardContent>
   </Card>;
   return <AuthorizedConversionCard key={`${props.productId}:${user?.id}`} {...props}
     canEdit={hasPermission("inventory_planning", "edit")} />;
 }
 
-function AuthorizedConversionCard({ productId, inventoryStrategy, enabled, canEdit }: Props & { canEdit: boolean }) {
+function AuthorizedConversionCard({ productId, enabled, canEdit }: Props & { canEdit: boolean }) {
   const query = useProductConversions(productId, enabled);
   const queryClient = useQueryClient();
   const [edit, setEdit] = useState<PackageConversionEdit | null>(null);
@@ -160,7 +158,7 @@ function AuthorizedConversionCard({ productId, inventoryStrategy, enabled, canEd
   const paths = edit?.paths ?? (model ? prefillPathsFromModel(model, 1).paths : []);
   const ladder = buildPackageLadder(view?.variants ?? [], paths);
   const issues = view ? packageConversionEditIssues(view) : [];
-  const strategy = view?.product.legacyInventoryStrategy ?? inventoryStrategy;
+  const behavior = edit?.inventoryBehavior ?? (model ? modelInventoryBehavior(model) : null);
   const busy = mutation.isPending || uncertain || conflict;
   const advancedUrl = `/inventory/supply-transformations?productId=${productId}`;
   const editDirection = (lowerVariantId: number, upperVariantId: number, direction: PackageDirection) => {
@@ -178,17 +176,13 @@ function AuthorizedConversionCard({ productId, inventoryStrategy, enabled, canEd
       mutation.mutate(pendingCommand.current);
     } catch (failure) { setError(failure instanceof Error ? failure.message : "Review the conversion directions."); }
   };
-  if (strategy === "physical_only") return null;
   return <div className="space-y-4">
     <Card data-testid="product-conversion-card">
       <CardHeader className="p-3 md:p-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div><CardTitle className="flex items-center gap-2 text-base md:text-lg"><ArrowRightLeft className="h-4 w-4" />
-            {STRATEGY_TITLES[strategy]}</CardTitle>
-            <CardDescription className="mt-1">{strategy === "physical_fungible"
-              ? "Choose how adjacent package sizes can convert. Quantities come from their units per variant."
-              : strategy === "recipe_managed" ? "Recipes define what these SKUs produce or consume."
-                : "This catalog strategy uses stocked SKUs independently."}</CardDescription>
+            Inventory behavior</CardTitle>
+            <CardDescription className="mt-1">Choose how this product can supply inventory. These same rules govern ATP, replenishment, picking and builds.</CardDescription>
           </div>
           <Button asChild variant="outline" size="sm"><Link href={advancedUrl}>Detailed rules</Link></Button>
         </div>
@@ -199,11 +193,27 @@ function AuthorizedConversionCard({ productId, inventoryStrategy, enabled, canEd
           <Button size="sm" variant="outline" onClick={() => query.refetch()}><RefreshCw className="mr-2 h-4 w-4" />Retry</Button>
         </div> : !view ? <p className="text-sm text-muted-foreground">Loading conversion rules…</p> : <>
           <ModelSummary view={view} editing={edit !== null} />
+          {model && model.inventoryBehavior === undefined && <p className="text-xs text-muted-foreground">
+            Existing model: the selection below describes its saved rules. Saving records an explicit behavior on a new version; live rules stay unchanged until Apply.
+          </p>}
+          <fieldset disabled={!edit || busy}>
+            <legend className="mb-2 text-sm font-medium">Product inventory behavior</legend>
+            <div className="grid gap-2 lg:grid-cols-3">{INVENTORY_BEHAVIORS.map(option => <label key={option.value}
+              className={`flex cursor-pointer items-start gap-2 rounded-md border p-3 ${behavior === option.value ? "border-primary bg-primary/5" : ""}`}>
+              <input type="radio" name={`inventory-behavior-${productId}`} value={option.value}
+                checked={behavior === option.value} onChange={() => { if (edit) {
+                  setEdit(changeInventoryBehavior(edit, option.value)); setError(null); pendingCommand.current = null;
+                } }} />
+              <span><span className="block text-sm font-medium">{option.label}</span>
+                <span className="mt-1 block text-xs text-muted-foreground">{option.description}</span></span>
+            </label>)}</div>
+          </fieldset>
+          {edit && <p className="text-xs text-muted-foreground">Changing behavior clears incompatible directions and recipe selections in this draft. It does not delete recipe definitions or move physical inventory.</p>}
           {!edit && view.draftModel && <div className="rounded-md border bg-muted/30 p-3 text-sm">
             <p className="font-medium">Draft changes available · Draft v{view.draftModel.version}</p>
             <p className="text-muted-foreground">The rules below have not been replaced by this draft.</p>
           </div>}
-          {strategy === "physical_fungible" ? <>
+          {behavior === "package_hierarchy" ? <>
             {ladder.issues.length > 0 && <ul className="list-disc space-y-1 pl-5 text-sm text-destructive">
               {ladder.issues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
             {ladder.rows.length === 0 && ladder.issues.length === 0 && <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
@@ -240,17 +250,22 @@ function AuthorizedConversionCard({ productId, inventoryStrategy, enabled, canEd
             {ladder.unmanagedPaths.length > 0 && <p className="text-sm text-muted-foreground">
               {ladder.unmanagedPaths.length} additional path(s) remain unchanged. Review them in <Link className="underline" href={advancedUrl}>Detailed rules</Link>.
             </p>}
+          </> : behavior === "build_managed" ? <ProductRecipeRules view={view} model={model ?? null} edit={edit} disabled={busy}
+            onChange={next => { setEdit(next); setError(null); pendingCommand.current = null; }} />
+            : <p className="text-sm text-muted-foreground">{behavior === "physical_only"
+              ? "Each SKU uses only its own physical stock. No conversion or build is allowed."
+              : "No behavior has been configured. Edit inventory behavior to prepare this product's rules."}</p>}
             {issues.length > 0 && <div className="rounded-md border bg-muted/30 p-3 text-sm">
               <p className="font-medium">This model needs the detailed editor</p>
               <ul className="mt-2 list-disc space-y-1 pl-5">{issues.map(issue => <li key={issue}>{issue}</li>)}</ul>
             </div>}
             {!canEdit && <p className="text-sm text-muted-foreground">View only. Inventory planning edit permission is required to change directions.</p>}
-            {canEdit && !edit && <Button variant="outline" disabled={applyBlocked || issues.length > 0 || ladder.rows.length === 0 || query.isFetching}
+            {canEdit && !edit && <Button variant="outline" disabled={applyBlocked || issues.length > 0 || query.isFetching}
               onClick={() => {
                 if (!query.data) return;
                 try { setEdit(beginPackageConversionEdit(query.data)); setMessage(null); setError(null); }
                 catch (failure) { setError(failure instanceof Error ? failure.message : "Reload before editing."); }
-              }}>{view.draftModel ? "Continue editing draft" : "Edit directions"}</Button>}
+              }}>{view.draftModel ? "Continue editing draft" : "Edit inventory behavior"}</Button>}
             {edit && <div className="space-y-3 border-t pt-4">
               <p className="text-xs text-muted-foreground">Save creates a draft only. Automatic audit note: {PACKAGE_CONVERSION_AUDIT_NOTE}</p>
               <div className="flex flex-wrap gap-2">
@@ -262,13 +277,11 @@ function AuthorizedConversionCard({ productId, inventoryStrategy, enabled, canEd
                 }}>{conflict ? "Reload and review" : "Cancel"}</Button>
               </div>
             </div>}
-          </> : <p className="text-sm text-muted-foreground">Recipe relationships are shown below. Package paths and model approval remain available in Detailed rules.</p>}
         </>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         {message && <p role="status" className="text-sm text-green-700 dark:text-green-300">{message}</p>}
         {!edit && view && <ProductDefinitionReview key={productId} view={view} onApplyBlockedChange={setApplyBlocked} />}
       </CardContent>
     </Card>
-    {strategy === "recipe_managed" && <ProductBuildRelationships productId={productId} enabled={enabled} />}
   </div>;
 }

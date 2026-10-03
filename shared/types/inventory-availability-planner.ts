@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { inventoryBehaviorSchema } from "../inventory/inventory-behavior";
 
 import { PRODUCT_INVENTORY_STRATEGIES } from "../catalog/inventory-strategy";
 import { VARIANT_SALES_ELIGIBILITIES } from "../catalog/variant-sales-eligibility";
@@ -150,6 +151,8 @@ export const plannerRecipeBindingSchema = z.object({
 }).strict();
 
 export const plannerTransformationModelSchema = z.object({
+  // Optional to retain verification of already-sealed snapshots and claims.
+  inventoryBehavior: inventoryBehaviorSchema.optional(),
   modelId: positiveInteger,
   productId: positiveInteger,
   version: positiveInteger,

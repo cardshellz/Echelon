@@ -30,10 +30,11 @@ describe("product inventory strategy UI contract", () => {
     expect(productDetailSource).toContain("PRODUCT_INVENTORY_STRATEGY_DEFINITIONS.map");
   });
 
-  it("fails closed while authority is unknown and directs canonical edits to Supply Transformations", () => {
+  it("fails closed while authority is unknown and directs canonical edits to the product's own Variants controls", () => {
     expect(productDetailSource).toContain("Inventory behavior cannot be edited until live authority is confirmed.");
-    expect(productDetailSource).toContain("Legacy inventory behavior is retired for live planning.");
-    expect(productDetailSource).toContain('href="/inventory/supply-transformations"');
+    expect(productDetailSource).toContain("Inventory behavior is controlled by this product's active rules.");
+    expect(productDetailSource).toContain("Manage inventory behavior");
+    expect(productDetailSource).toContain('onClick={() => setActiveTab("variants")}');
   });
 
   it("does not load or render legacy per-product allocation controls under canonical or unknown authority", () => {

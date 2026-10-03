@@ -2916,14 +2916,14 @@ export default function ProductDetail() {
                       <div className="rounded-md border bg-muted/30 p-3 text-sm" data-testid="inventory-behavior-read-only">
                         <p className="font-medium">
                           {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
-                            ? "Legacy inventory behavior is retired for live planning."
+                            ? "Inventory behavior is controlled by this product's active rules."
                             : "Inventory behavior cannot be edited until live authority is confirmed."}
                         </p>
                         <p className="mt-1 text-xs text-muted-foreground">
-                          Recorded legacy value: {editForm.inventoryStrategy}. Configure directed package paths and build bindings in Supply Transformations.
+                          Choose Physical only, Package hierarchy or Build managed on Variants. Review and apply changes to update ATP and warehouse execution together.
                         </p>
-                        <Button asChild variant="outline" size="sm" className="mt-3">
-                          <Link href="/inventory/supply-transformations">Open Supply Transformations</Link>
+                        <Button variant="outline" size="sm" className="mt-3" onClick={() => setActiveTab("variants")}>
+                          Manage inventory behavior
                         </Button>
                       </div>
                     )}
@@ -3853,7 +3853,6 @@ export default function ProductDetail() {
                 <ProductConversionCard
                   enabled={activeTab === "variants"}
                   productId={product.productId}
-                  inventoryStrategy={product.inventoryStrategy ?? DEFAULT_PRODUCT_INVENTORY_STRATEGY}
                 />
               )}
             </TabsContent>

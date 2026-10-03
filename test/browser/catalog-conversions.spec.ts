@@ -6,10 +6,11 @@ import type { SupplyTransformationsAdminView, TransformationAdminModel } from ".
 function viewFixture(strategy: ProductInventoryStrategy): SupplyTransformationsAdminView {
   const draft: TransformationAdminModel = {
     id: 61, productId: 17, version: 2, lifecycleStatus: "draft", buildToPromiseEnabled: false,
+    inventoryBehavior: strategy === "physical_fungible" ? "package_hierarchy" : strategy === "recipe_managed" ? "build_managed" : "physical_only",
     definitionHash: "a".repeat(64), origin: "operator", originInputHash: null, originResultHash: null,
     validationState: "valid", validationErrors: [], changeReason: "Fixture", createdBy: "operator",
     createdAt: "2026-09-18T12:00:00.000Z", updatedAt: "2026-09-18T12:00:00.000Z", bindings: [],
-    paths: strategy === "physical_only" ? [] : [{
+    paths: strategy !== "physical_fungible" ? [] : [{
       sourceVariantId: 3, destinationVariantId: 1, sourceUnitsPerVariant: 800, destinationUnitsPerVariant: 1,
       inputQty: 1, outputQty: 800, operationType: "break_pack", authorityState: "allowed", transformationRecipeBindingKey: null,
     }],
@@ -18,8 +19,9 @@ function viewFixture(strategy: ProductInventoryStrategy): SupplyTransformationsA
     product: { id: 17, sku: "SLEEVE", name: "Sleeves", isActive: true, legacyInventoryStrategy: strategy },
     variants: [{ id: 1, sku: "EA", unitsPerVariant: 1 }, { id: 2, sku: "P20", unitsPerVariant: 20 }, { id: 3, sku: "C800", unitsPerVariant: 800 }]
       .map(v => ({ ...v, productId: 17, name: v.sku, uomType: "pack", isActive: true })),
-    recipes: [], head: { revision: "4", activeModelId: null, draftModelId: 61 }, activeModel: null, draftModel: draft,
-    runtimeSelection: { authority: "legacy", revision: "1", activationRunId: null },
+    recipes: [], head: { revision: "4", activeModelId: 60, draftModelId: 61 },
+    activeModel: { ...draft, id: 60, version: 1, lifecycleStatus: "sealed" }, draftModel: draft,
+    runtimeSelection: { authority: "canonical", revision: "2", activationRunId: "1" },
     runtimeAuthority: { kind: "legacy_inventory_strategy", value: strategy, draftAffectsRuntime: false },
   };
 }
@@ -28,7 +30,7 @@ async function setup(page: Page, options: { strategy?: ProductInventoryStrategy;
   const strategy = options.strategy ?? "physical_fungible";
   const state = { view: viewFixture(strategy), reads: 0, writes: [] as Array<{ method: string; body: Record<string, unknown> }>,
     errors: [] as string[], failure: 0 };
-  if (options.empty) { state.view.draftModel = null; state.view.head = null; }
+  if (options.empty) { state.view.draftModel = null; state.view.activeModel = null; state.view.head = null; }
   page.on("pageerror", error => state.errors.push(error.message));
   await page.route("**/api/**", async route => {
     const request = route.request();
@@ -36,7 +38,7 @@ async function setup(page: Page, options: { strategy?: ProductInventoryStrategy;
     if (path === "/api/auth/me") return route.fulfill({ json: {
       user: { id: "operator", username: "operator", role: "admin" },
       permissions: options.permission === "none" ? [] : options.permission === "view"
-        ? ["inventory_planning:view"] : ["inventory_planning:view", "inventory_planning:edit", ...(options.permission === "activate" ? ["inventory_planning:activate"] : [])], roles: [],
+        ? ["inventory_planning:view"] : ["inventory_planning:view", "inventory_planning:edit", "inventory:adjust", ...(options.permission === "activate" ? ["inventory_planning:activate"] : [])], roles: [],
     } });
     if (path === "/api/inventory/build-relationships/products/17") return route.fulfill({ json: [] });
     if (path === "/api/inventory-planning/admin/product-definitions/17/progress") return route.fulfill({ json: null });
@@ -48,11 +50,12 @@ async function setup(page: Page, options: { strategy?: ProductInventoryStrategy;
       if (state.failure) return route.fulfill({ status: state.failure, json: { message: "Test save failure" } });
       const existing = state.view.draftModel ?? viewFixture(strategy).draftModel!;
       state.view.draftModel = { ...existing, id: existing.id + 1, version: existing.version + 1,
+        inventoryBehavior: body.inventoryBehavior, buildToPromiseEnabled: body.buildToPromiseEnabled,
         paths: body.paths.map((path: { sourceVariantId: number; destinationVariantId: number }) => ({ ...path,
           sourceUnitsPerVariant: state.view.variants.find(v => v.id === path.sourceVariantId)!.unitsPerVariant,
           destinationUnitsPerVariant: state.view.variants.find(v => v.id === path.destinationVariantId)!.unitsPerVariant,
         })), definitionHash: "b".repeat(64) };
-      state.view.head = { revision: "5", activeModelId: null, draftModelId: state.view.draftModel.id };
+      state.view.head = { revision: "5", activeModelId: state.view.activeModel?.id ?? null, draftModelId: state.view.draftModel.id };
       return route.fulfill({ json: { modelId: state.view.draftModel.id, version: state.view.draftModel.version,
         definitionHash: state.view.draftModel.definitionHash, alreadyApplied: false } });
     }
@@ -202,7 +205,8 @@ test.describe("catalog conversion controls", () => {
 
   test("starts a new model as a draft only", async ({ page }) => {
     const state = await setup(page, { empty: true });
-    await page.getByRole("button", { name: "Edit directions" }).click();
+    await page.getByRole("button", { name: "Edit inventory behavior" }).click();
+    await page.getByRole("radio", { name: /Package hierarchy/ }).check();
     await page.getByRole("region", { name: "Conversion EA to P20", exact: true }).getByLabel("Break down", { exact: true }).check();
     await page.getByRole("button", { name: "Save draft", exact: true }).click();
     await expect(page.getByRole("status")).toContainText("Live conversion rules and inventory are unchanged");
@@ -221,8 +225,9 @@ test.describe("catalog conversion controls", () => {
   test("read-only permission shows directions but no editing", async ({ page }) => {
     const state = await setup(page, { permission: "view" });
     await expect(page.getByText("View only.", { exact: false })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Edit directions" })).toHaveCount(0);
-    await expect(page.getByRole("radio")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Edit inventory behavior" })).toHaveCount(0);
+    await expect(page.getByRole("radio")).toHaveCount(3);
+    for (const radio of await page.getByRole("radio").all()) await expect(radio).toBeDisabled();
     expect(state.writes).toEqual([]); expect(state.errors).toEqual([]);
   });
 
@@ -260,11 +265,18 @@ test.describe("catalog conversion controls", () => {
     expect(state.errors).toEqual([]);
   });
 
-  test("physical-only products have no package editor", async ({ page }) => {
+  test("physical-only products can change their behavior without fabricating conversions", async ({ page }) => {
     const state = await setup(page, { strategy: "physical_only" });
     await expect(page.getByRole("heading", { name: "Product variants" })).toBeVisible();
-    await expect(page.getByTestId("product-conversion-card")).toHaveCount(0);
-    await expect(page.getByRole("radio")).toHaveCount(0); expect(state.errors).toEqual([]);
+    await expect(page.getByRole("radio", { name: /Physical only/ })).toBeChecked();
+    await page.getByRole("button", { name: "Continue editing draft" }).click();
+    await page.getByRole("radio", { name: /Package hierarchy/ }).check();
+    await expect(page.getByRole("region", { name: "Conversion EA to P20", exact: true }).getByLabel("None", { exact: true })).toBeChecked();
+    await page.getByRole("button", { name: "Save draft", exact: true }).click();
+    await expect(page.getByRole("status")).toContainText("Live conversion rules and inventory are unchanged");
+    expect(state.writes[0].body).toMatchObject({ inventoryBehavior: "package_hierarchy", paths: [], recipeBindings: [] });
+    await expect(page.getByRole("radio", { name: /Physical only/ })).toBeChecked();
+    expect(state.errors).toEqual([]);
   });
 
   test("shows active directions until the operator explicitly opens the draft", async ({ page }) => {
@@ -291,10 +303,24 @@ test.describe("catalog conversion controls", () => {
     expect(state.errors).toEqual([]);
   });
 
-  test("recipe-managed products retain build relationships", async ({ page }) => {
+  test("build-managed products expose recipe authoring and selection independently of the retired strategy", async ({ page }) => {
     const state = await setup(page, { strategy: "recipe_managed" });
-    await expect(page.getByText("Build Relationships", { exact: true })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Open Builds" })).toHaveAttribute("href", "/inventory/builds?tab=recipes");
-    await expect(page.getByRole("radio")).toHaveCount(0); expect(state.errors).toEqual([]);
+    state.view.product.legacyInventoryStrategy = "physical_only";
+    state.view.recipes = [{ id: 71, code: "EA-P20", name: "Assemble P20", version: 1, status: "active", recipeType: "conversion",
+      outputProductId: 17, outputVariantId: 2, outputUnitsPerVariant: 20, outputQty: 1,
+      components: [{ componentVariantId: 1, componentProductId: 17, componentUnitsPerVariant: 1, componentQty: 20,
+        sku: "EA", name: "Each", isActive: true }] }];
+    await page.getByRole("button", { name: "Refresh test data" }).click();
+    await expect(page.getByRole("heading", { name: "Build recipes", exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Create recipe" })).toHaveAttribute("href", "/inventory/builds/recipes/new?productId=17");
+    await page.getByRole("button", { name: "Continue editing draft" }).click();
+    await page.getByRole("checkbox", { name: "Assemble P20 · v1" }).check();
+    await page.getByRole("button", { name: "Save draft", exact: true }).click();
+    await expect(page.getByRole("status")).toContainText("Draft v3 saved");
+    expect(state.writes[0].body).toMatchObject({ inventoryBehavior: "build_managed",
+      paths: [{ sourceVariantId: 1, destinationVariantId: 2, inputQty: 20, outputQty: 1, operationType: "directed_conversion",
+        transformationRecipeBindingKey: "recipe:71:network" }],
+      recipeBindings: [{ recipeId: 71, relationshipRole: "directional_conversion" }] });
+    expect(state.errors).toEqual([]);
   });
 });

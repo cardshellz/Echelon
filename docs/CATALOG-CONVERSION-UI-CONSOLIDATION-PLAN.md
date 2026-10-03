@@ -5,6 +5,24 @@
 > where an operator edits it, and how `catalog.product_variants.parent_variant_id`
 > is removed cleanly rather than left as a legacy shadow.
 
+## Superseding product-behavior decision — 2026-10-02
+
+The operator must be able to choose **Physical only**, **Package hierarchy**, or
+**Build managed**. This is an explicit field of the canonical, versioned
+transformation model (`inventory_behavior`), not a revival of the retired
+`catalog.products.inventory_strategy` writer. The choice constrains the saved
+paths and recipe bindings; it does not grant conversions by package ratio.
+
+The implementation in `codex/product-inventory-behavior-authority` keeps the card
+visible in every mode, supports recipe authoring and selection, and carries the
+choice through validation, planning and execution. It is not a new ATP engine or
+another global cutover. Deployment and production Apply are separate, unperformed
+steps. See [the correction and verification record](INVENTORY-BEHAVIOR-AUTHORITY-CORRECTION.md).
+
+This supersedes the earlier strategy-shaped/hide-physical-only UI decisions.
+Older phase implementation records below remain historical evidence, not current
+deployment assertions.
+
 ## Goal
 
 One place to declare what converts into what: the product's **Variants** tab.
@@ -51,14 +69,21 @@ In progress; not ready for deployment or activation.** Draft editing remains
 available under either runtime authority. Routine Apply must use canonical
 authority and must not invoke the legacy-to-canonical migration command.
 
-Replace `ProductBuildRelationships` with a single card whose shape follows
-`products.inventory_strategy` (`shared/catalog/inventory-strategy.ts`):
+Replace `ProductBuildRelationships` with a single Inventory behavior card whose
+choice comes from the canonical active model (or the explicitly opened draft):
 
-| Strategy | Label | Card shows |
+| Canonical model behavior | Label | Card shows |
 |---|---|---|
-| `physical_fungible` | Package hierarchy | The package ladder, one row per adjacent pair, with a direction control |
-| `recipe_managed` | Build managed | Recipes — today's Build Relationships content |
-| `physical_only` | Physical only | Hide this section entirely. Existing rule evidence remains accessible through Overview and the detailed administrative editor. |
+| `package_hierarchy` | Package hierarchy | The package ladder, one row per adjacent pair, with an explicit direction control |
+| `build_managed` | Build managed | Exact recipe selection, recipe create/edit links, and the component-build ATP option; no implicit reverse direction |
+| `physical_only` | Physical only | The same behavior selector and review workflow; exact-SKU stock only, with no conversions or builds |
+
+All three choices allow existing exact-SKU stock. Selecting a different behavior
+clears directions and recipe selections in the draft only. Save, Review and Apply
+reuse the existing product-definition workflow and permissions. Existing sealed
+models without the new field retain their exact saved rules and hashes; their UI
+classification is descriptive until a reviewed successor records the explicit
+choice. No legacy Catalog field is copied into active authority.
 
 ### The ladder control
 

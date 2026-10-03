@@ -1,5 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { Router } from "wouter";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useQuery } from "@tanstack/react-query";
 import type { SupplyTransformationsAdminView, TransformationAdminModel } from "@shared/types/inventory-availability-admin";
@@ -7,7 +8,9 @@ import { ProductConversionCard, ProductConversionSummary } from "../ProductConve
 
 const state = vi.hoisted(() => ({ canView: true, data: undefined as SupplyTransformationsAdminView | undefined, isError: false }));
 vi.mock("@/lib/auth", () => ({ useAuth: () => ({ hasPermission: () => state.canView }) }));
-vi.mock("@tanstack/react-query", () => ({ useQuery: vi.fn(() => ({ data: state.data, isError: state.isError })) }));
+vi.mock("@tanstack/react-query", () => ({ useQuery: vi.fn(() => ({ data: state.data, isError: state.isError })),
+  useMutation: () => ({ isPending: false }), useQueryClient: () => ({ invalidateQueries: vi.fn() }) }));
+vi.mock("../ProductDefinitionReview", () => ({ ProductDefinitionReview: () => null }));
 
 const HASH = "a".repeat(64);
 const TIME = "2026-09-18T12:00:00.000Z";
@@ -100,11 +103,15 @@ describe("product overview active package sharing", () => {
     expect(render()).not.toContain("1 P5 → 5 EA");
   });
 
-  it("does not mount a conversion card or query for physical-only products", () => {
-    const html = renderToStaticMarkup(createElement(ProductConversionCard, {
-      productId: 10, inventoryStrategy: "physical_only", enabled: true,
+  it("does not let a legacy physical-only value hide the canonical controls", () => {
+    state.data!.product.legacyInventoryStrategy = "physical_only";
+    const html = renderToStaticMarkup(createElement(Router, {
+      ssrPath: "/products/10",
+      children: createElement(ProductConversionCard, { productId: 10, enabled: true }),
     }));
-    expect(html).toBe("");
-    expect(useQuery).not.toHaveBeenCalled();
+    expect(html).toContain("Inventory behavior");
+    expect(html).toContain("Package hierarchy");
+    expect(html).toContain("Edit inventory behavior");
+    expect(useQuery).toHaveBeenCalled();
   });
 });

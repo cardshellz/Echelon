@@ -117,7 +117,7 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
               binding.output_units_per_variant_snapshot, binding.output_qty_snapshot,
               binding.validation_state, binding.validation_errors,
               model.product_id AS model_product_id, model.version AS model_version,
-              model.lifecycle_status AS model_lifecycle_status,
+              model.lifecycle_status AS model_lifecycle_status, model.inventory_behavior,
               model.validation_state AS model_validation_state,
               model.validation_errors AS model_validation_errors,
               model.definition_hash AS model_definition_hash,
@@ -141,7 +141,8 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
     const expectedRelationshipRole = binding.recipe_type === "assembly"
       ? "component_build"
       : "directional_conversion";
-    if (binding.relationship_role !== expectedRelationshipRole
+    if ((binding.inventory_behavior != null && binding.inventory_behavior !== "build_managed")
+      || binding.relationship_role !== expectedRelationshipRole
       || binding.validation_state !== "valid"
       || !Array.isArray(binding.validation_errors)
       || binding.validation_errors.length !== 0
@@ -577,7 +578,7 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
               binding.validation_errors AS binding_validation_errors,
               model.product_id AS model_product_id, model.version AS model_version,
               model.definition_hash AS model_definition_hash,
-              model.lifecycle_status AS model_lifecycle_status,
+              model.lifecycle_status AS model_lifecycle_status, model.inventory_behavior,
               model.validation_state AS model_validation_state,
               model.validation_errors AS model_validation_errors
        FROM inventory.availability_claim_build_handoffs AS handoff
@@ -640,6 +641,7 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
       && Array.isArray(authorization.binding_validation_errors)
       && authorization.binding_validation_errors.length === 0
       && ["sealed", "retired"].includes(String(authorization.model_lifecycle_status))
+      && (authorization.inventory_behavior == null || authorization.inventory_behavior === "build_managed")
       && authorization.model_validation_state === "valid"
       && Array.isArray(authorization.model_validation_errors)
       && authorization.model_validation_errors.length === 0

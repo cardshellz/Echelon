@@ -7,6 +7,8 @@ import {
 import { updatePackageLadderDirection } from "../package-conversion-ladder";
 import {
   beginPackageConversionEdit,
+  changeInventoryBehavior,
+  selectBuildRecipe,
   buildPackageConversionCommand,
   loadProductConversions,
   PACKAGE_CONVERSION_AUDIT_NOTE,
@@ -26,7 +28,7 @@ describe("package conversion draft commands", () => {
     expect(command).toEqual({
       method: "POST", url: "/api/inventory-planning/admin/supply-transformations/10/drafts",
       request: {
-        productId: 10, buildToPromiseEnabled: false, recipeBindings: [],
+        productId: 10, inventoryBehavior: "package_hierarchy", expectedHeadRevision: "0", buildToPromiseEnabled: false, recipeBindings: [],
         paths: [
           { sourceVariantId: 1, destinationVariantId: 2, inputQty: 5, outputQty: 1,
             operationType: "assemble_pack", authorityState: "allowed", transformationRecipeBindingKey: null },
@@ -76,7 +78,7 @@ describe("package conversion draft commands", () => {
     const initial = beginPackageConversionEdit(view({ draftModel: model(), head: { revision: "4", draftModelId: 501, activeModelId: null } }));
     expect(packageConversionHasChanges(initial)).toBe(false);
     expect(packageConversionHasChanges({ ...initial, paths: initial.paths.map(path => ({ ...path, rowId: 88 })).reverse() })).toBe(false);
-    expect(() => buildPackageConversionCommand(initial, "attempt-no-change")).toThrow("Choose a conversion direction");
+    expect(() => buildPackageConversionCommand(initial, "attempt-no-change")).toThrow("Change the inventory behavior");
     const changed = changeDirection(initial);
     expect(packageConversionHasChanges(changed)).toBe(true);
     const reverted = { ...changed, ...updatePackageLadderDirection({
@@ -105,13 +107,13 @@ describe("package conversion draft commands", () => {
     expect(() => beginPackageConversionEdit(view(patch))).toThrow("saved head");
   });
 
-  it("rejects inactive products, unsupported strategies, and malformed responses", () => {
+  it("rejects inactive products and malformed responses but does not use the retired catalog strategy", () => {
     const inactive = view();
     inactive.product.isActive = false;
     expect(packageConversionEditIssues(inactive)).toContain("Archived products cannot be edited here.");
     const recipeManaged = view();
     recipeManaged.product.legacyInventoryStrategy = "recipe_managed";
-    expect(() => beginPackageConversionEdit(recipeManaged)).toThrow("Package hierarchy products only");
+    expect(beginPackageConversionEdit(recipeManaged).inventoryBehavior).toBe("physical_only");
     const invalid = view();
     invalid.variants[0]!.unitsPerVariant = 0;
     expect(() => beginPackageConversionEdit(invalid)).toThrow();
@@ -135,11 +137,49 @@ describe("package conversion draft commands", () => {
     expect(() => beginPackageConversionEdit(mismatched)).toThrow("belong to a different product");
   });
 
-  it("blocks any recipe-binding model instead of resnapshotting or dropping its authority", () => {
-    const original = view({ draftModel: model({ bindings: [binding()] }), head: { revision: "4", draftModelId: 501, activeModelId: null } });
+  it("preserves binding identity and requires explicitly removing incompatible rules", () => {
+    const original = view({ draftModel: model({ inventoryBehavior: "build_managed", bindings: [binding()] }), head: { revision: "4", draftModelId: 501, activeModelId: null } });
     const before = structuredClone(original);
-    expect(() => beginPackageConversionEdit(original)).toThrow("cannot save it without re-snapshotting");
+    const edit = beginPackageConversionEdit(original);
+    expect(edit.recipeBindings).toEqual([{ bindingKey: "recipe:71", recipeId: 71,
+      relationshipRole: "directional_conversion", warehouseId: null }]);
+    expect(() => buildPackageConversionCommand({ ...edit, buildToPromiseEnabled: true }, "invalid-build-path"))
+      .toThrow("requires a recipe for every allowed transformation");
     expect(original).toEqual(before);
+  });
+
+  it("changes to Physical only in a successor draft without changing the sealed baseline", () => {
+    const original = view({ activeModel: model({ lifecycleStatus: "sealed", inventoryBehavior: "build_managed", bindings: [binding()] }),
+      head: { revision: "5", activeModelId: 501, draftModelId: null } });
+    const before = structuredClone(original);
+    const edit = changeInventoryBehavior(beginPackageConversionEdit(original), "physical_only");
+    expect(buildPackageConversionCommand(edit, "physical-choice").request).toMatchObject({
+      inventoryBehavior: "physical_only", paths: [], recipeBindings: [], buildToPromiseEnabled: false, expectedHeadRevision: "5",
+    });
+    expect(original).toEqual(before);
+  });
+
+  it("records an explicit mode on the successor of an older sealed model", () => {
+    const edit = beginPackageConversionEdit(view({ activeModel: model({ inventoryBehavior: undefined, lifecycleStatus: "sealed" }),
+      head: { revision: "4", activeModelId: 501, draftModelId: null } }));
+    expect(edit.inventoryBehavior).toBe("package_hierarchy");
+    expect(packageConversionHasChanges(edit)).toBe(true);
+    expect(buildPackageConversionCommand(edit, "record-mode").request.paths).toHaveLength(1);
+  });
+
+  it("selects only a recipe's forward path and removes the bound path with its recipe", () => {
+    const baseline = view();
+    baseline.recipes = [{ id: 71, code: "P5", name: "Pack five", version: 1, status: "active",
+      recipeType: "conversion", outputProductId: 10, outputVariantId: 2, outputUnitsPerVariant: 5, outputQty: 1,
+      components: [{ componentVariantId: 1, componentProductId: 10, componentUnitsPerVariant: 1, componentQty: 5,
+        sku: "EA", name: "Each", isActive: true }] }];
+    const edit = changeInventoryBehavior(beginPackageConversionEdit(baseline), "build_managed");
+    const selected = selectBuildRecipe(edit, 71, true);
+    expect(selected.paths).toHaveLength(1);
+    expect(buildPackageConversionCommand(selected, "recipe-selection").request).toMatchObject({ inventoryBehavior: "build_managed",
+      paths: [{ sourceVariantId: 1, destinationVariantId: 2, operationType: "directed_conversion", transformationRecipeBindingKey: "recipe:71:network" }] });
+    expect(selectBuildRecipe(selected, 71, false)).toMatchObject({ paths: [], recipeBindings: [] });
+    expect(edit).toMatchObject({ paths: [], recipeBindings: [] });
   });
 
   it("validates command quantity and idempotency fields before transport", () => {
@@ -208,6 +248,7 @@ describe("package conversion API boundary", () => {
 });
 
 function changeDirection(edit: PackageConversionEdit): PackageConversionEdit {
+  edit = changeInventoryBehavior(edit, "package_hierarchy");
   return { ...edit, ...updatePackageLadderDirection({
     variants: edit.baseline.variants, paths: edit.paths, nextRowId: edit.nextRowId,
     lowerVariantId: 1, upperVariantId: 2, direction: "reversible",
@@ -229,7 +270,7 @@ function view(patch: Partial<SupplyTransformationsAdminView> = {}): SupplyTransf
 
 function model(patch: Partial<TransformationAdminModel> = {}): TransformationAdminModel {
   return {
-    id: 501, productId: 10, version: 4, lifecycleStatus: "draft", buildToPromiseEnabled: false,
+    id: 501, productId: 10, version: 4, lifecycleStatus: "draft", inventoryBehavior: "package_hierarchy", buildToPromiseEnabled: false,
     definitionHash: "a".repeat(64), origin: "operator", originInputHash: null, originResultHash: null,
     validationState: "valid", validationErrors: [], changeReason: "Existing model", createdBy: "operator",
     createdAt: "2026-09-18T12:00:00.000Z", updatedAt: "2026-09-18T12:00:00.000Z", bindings: [],

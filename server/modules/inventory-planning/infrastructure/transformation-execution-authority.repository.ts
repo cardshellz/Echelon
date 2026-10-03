@@ -135,7 +135,7 @@ implements TransformationExecutionAuthorityPort {
     const head = headRows[0];
     const modelResult = await owner.execute(sql`
       SELECT id, product_id, version, lifecycle_status, validation_state,
-             validation_errors, definition_hash
+             validation_errors, definition_hash, inventory_behavior
       FROM inventory.transformation_model_versions
       WHERE id = ${Number(head.active_model_id)} AND product_id = ${productId}${lockClause(lock)}
     `);
@@ -185,6 +185,7 @@ implements TransformationExecutionAuthorityPort {
       modelValidationState: model.validation_state,
       modelValidationErrors: model.validation_errors,
       modelDefinitionHash: model.definition_hash,
+      modelInventoryBehavior: model.inventory_behavior,
       pathId: path.id,
       pathModelId: path.model_id,
       sourceVariantId: path.source_variant_id,
@@ -321,6 +322,7 @@ implements TransformationExecutionAuthorityPort {
         modelValidationState: model.validation_state,
         modelValidationErrors: model.validation_errors,
         modelDefinitionHash: model.definition_hash,
+        modelInventoryBehavior: model.inventory_behavior,
         bindingId: binding.id,
         bindingModelId: binding.model_id,
         recipeId: binding.recipe_id,
@@ -542,7 +544,7 @@ implements TransformationExecutionAuthorityPort {
     const bindingId = positiveId(order.transformation_recipe_binding_id, "buildOrder.transformationRecipeBindingId");
     const modelResult = await tx.execute(sql`
       SELECT id, product_id, version, lifecycle_status, validation_state,
-             validation_errors, definition_hash
+             validation_errors, definition_hash, inventory_behavior
       FROM inventory.transformation_model_versions
       WHERE id = ${modelId}
         AND product_id = ${request.outputProductId}

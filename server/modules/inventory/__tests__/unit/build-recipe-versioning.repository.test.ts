@@ -27,7 +27,7 @@ function command(overrides: Partial<UpdateBuildRecipeInput> = {}): UpdateBuildRe
 }
 
 describe("BuildRepository recipe versioning", () => {
-  it("commits the successor definition and immutable audit event in one transaction", async () => {
+  it.each(["legacy", "canonical"] as const)("commits recipe authoring under %s authority without using retired strategy after cutover", async authority => {
     const current = {
       id: 41,
       code: "QUAD-BOX-EA",
@@ -67,7 +67,7 @@ describe("BuildRepository recipe versioning", () => {
         { id: 101, is_active: true, product_id: 11, units_per_variant: 1 },
         { id: 102, is_active: true, product_id: 12, units_per_variant: 1 },
       ] },
-      { rows: [{ id: 30, inventory_strategy: "recipe_managed" }] },
+      ...(authority === "legacy" ? [{ rows: [{ id: 30, inventory_strategy: "recipe_managed" }] }] : []),
       { rows: [] },
       { rows: [] },
       { rows: [] },
@@ -91,7 +91,11 @@ describe("BuildRepository recipe versioning", () => {
       ...tx,
       transaction: vi.fn(async (work: (client: typeof tx) => Promise<unknown>) => work(tx)),
     };
-    const repository = new BuildRepository(db as any);
+    const runtime = { authority, revision: "2", activationRunId: authority === "canonical" ? "1" : null };
+    const pinRuntime = vi.fn(async () => runtime);
+    const repository = new BuildRepository(db as any, { transformationAuthority: {
+      readRuntime: vi.fn(async () => runtime), pinRuntime,
+    } as any });
 
     const result = await repository.updateRecipe(command());
 
@@ -102,6 +106,8 @@ describe("BuildRepository recipe versioning", () => {
       previousOutputVariantId: 300,
     });
     expect(results).toHaveLength(0);
+    expect(pinRuntime).toHaveBeenCalledWith(tx, runtime);
+    expect(pinRuntime.mock.invocationCallOrder[0]).toBeLessThan(execute.mock.invocationCallOrder[0]);
     expect(auditValues).toHaveBeenCalledWith(expect.objectContaining({
       actor: "admin-42",
       action: "inventory.build_recipe.version_created",

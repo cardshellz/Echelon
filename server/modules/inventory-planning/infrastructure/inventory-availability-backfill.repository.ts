@@ -188,6 +188,7 @@ async function captureProducts(
       operatorInputHash: transformationModelVersions.operatorInputHash,
       validationState: transformationModelVersions.validationState,
       buildToPromiseEnabled: transformationModelVersions.buildToPromiseEnabled,
+      inventoryBehavior: transformationModelVersions.inventoryBehavior,
     })
     .from(transformationModelHeads)
     .innerJoin(
@@ -210,6 +211,7 @@ async function captureProducts(
     [binding.id, `recipe:${binding.recipeId}:${binding.warehouseId ?? "network"}`] as const));
   const definitionByModel = new Map(headRows.filter((row) => row.origin === "operator").map((row) =>
     [row.modelId, inventoryAvailabilityBackfillDefinitionSchema.parse({
+      ...(row.inventoryBehavior == null ? {} : { inventoryBehavior: row.inventoryBehavior }),
       buildToPromiseEnabled: row.buildToPromiseEnabled,
       paths: paths.filter((path) => path.modelId === row.modelId).map((path) => ({
         sourceVariantId: path.sourceVariantId, destinationVariantId: path.destinationVariantId,

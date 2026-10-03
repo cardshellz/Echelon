@@ -131,6 +131,45 @@ function path(input: {
 }
 
 describe("inventory availability canonical planner", () => {
+  it.each([
+    ["physical_only", "2"], ["build_managed", "2"], ["package_hierarchy", "22"],
+  ] as const)("uses %s identically for ATP and claims, ignoring the retired catalog flag", (inventoryBehavior, expected) => {
+    const base = content({ legacyInventoryStrategy: "recipe_managed", inventoryPositions: [
+      position({ id: 1, variantId: 105, physical: 2 }), position({ id: 2, variantId: 125, physical: 4 }),
+    ] });
+    const snapshot = sealSupplySnapshot({ ...base, transformationModels: [{ ...base.transformationModels[0]!, inventoryBehavior,
+      paths: [path({ id: 1, source: 125, destination: 105, inputQty: 1, outputQty: 5, sourceUnits: 25, destinationUnits: 5 })],
+    }] });
+    const scope = { kind: "warehouse" as const, warehouseId: 1 };
+    expect(projectCanonicalAtp(snapshot, { targetVariantId: 105, scope }).atpUnits).toBe(expected);
+    const claim = planCanonicalClaim(snapshot, { requestKey: `mode:${inventoryBehavior}`, scope,
+      lines: [{ lineKey: "p5", targetVariantId: 105, requestedQty: "22" }] });
+    expect(claim.lines[0]?.plannedQty).toBe(expected);
+    expect(claim.operations).toHaveLength(inventoryBehavior === "package_hierarchy" ? 1 : 0);
+  });
+
+  it("a build-managed P5 uses its EA recipe and never fabricates C25 to P5", () => {
+    const base = content({ legacyInventoryStrategy: "physical_fungible", inventoryPositions: [
+      position({ id: 1, variantId: 101, physical: 5 }), position({ id: 2, variantId: 125, physical: 100 }),
+      position({ id: 3, variantId: 105, physical: 2 }),
+    ] });
+    const snapshot = sealSupplySnapshot({ ...base, transformationModels: [{ ...base.transformationModels[0]!, inventoryBehavior: "build_managed",
+      paths: [{ ...path({ id: 1, source: 101, destination: 105, inputQty: 5, outputQty: 1, sourceUnits: 1, destinationUnits: 5 }),
+        operationType: "directed_conversion", transformationRecipeBindingId: 701 }],
+      recipeBindings: [{ bindingId: 701, recipeId: 77, relationshipRole: "directional_conversion", warehouseId: null,
+        recipeCodeSnapshot: "EA-P5", recipeVersionSnapshot: 1, recipeDefinitionHash: HASH, outputProductId: 10,
+        outputVariantId: 105, outputUnitsPerVariant: 5, outputQty: "1", validationState: "valid", validationErrors: [],
+        components: [{ componentVariantId: 101, componentProductId: 10, componentUnitsPerVariant: 1, componentQty: "5" }] }],
+    }] });
+    const scope = { kind: "warehouse" as const, warehouseId: 1 };
+    expect(projectCanonicalAtp(snapshot, { targetVariantId: 105, scope }).atpUnits).toBe("3");
+    const claim = planCanonicalClaim(snapshot, { requestKey: "quad-box-mode", scope,
+      lines: [{ lineKey: "p5", targetVariantId: 105, requestedQty: "4" }] });
+    expect(claim.lines[0]).toMatchObject({ plannedQty: "3", shortfallQty: "1" });
+    expect(claim.operations).toEqual([expect.objectContaining({ operationType: "directed_conversion", authorityId: 1 })]);
+    expect(claim.resourceClaims.some(resource => resource.sourceVariantId === 125)).toBe(false);
+  });
+
   it("aggregates eligible physical and claims before clamping once", () => {
     const snapshot = sealSupplySnapshot(content({
       inventoryPositions: [

@@ -14,7 +14,7 @@ describe("Inventory Builds UI contract", () => {
   const variantClient = source("client/src/features/catalog/create-product-variant.ts");
   const app = source("client/src/App.tsx");
   const shell = source("client/src/components/layout/AppShell.tsx");
-  const relationships = source("client/src/features/inventory-builds/ProductBuildRelationships.tsx");
+  const relationships = source("client/src/features/inventory-builds/ProductRecipeRules.tsx");
   const productDetail = source("client/src/pages/ProductDetail.tsx");
   const variants = source("client/src/pages/Variants.tsx");
 
@@ -87,11 +87,11 @@ describe("Inventory Builds UI contract", () => {
     expect(shell).toContain('{ label: "Builds", icon: PackageCheck, href: "/inventory/builds" }');
   });
 
-  it("shows catalog variant build relationships and deep-links to recipes", () => {
-    expect(relationships).toContain("/api/inventory/build-relationships/products/");
-    expect(relationships).toContain('href="/inventory/builds?tab=recipes"');
+  it("shows canonical recipe selections and product-scoped recipe authoring", () => {
+    expect(relationships).toContain("view.recipes.map");
+    expect(relationships).toContain('/inventory/builds/recipes/new?productId=');
     expect(productDetail).toContain("<ProductConversionCard");
-    expect(source("client/src/features/inventory-builds/ProductConversionCard.tsx")).toContain("<ProductBuildRelationships");
+    expect(source("client/src/features/inventory-builds/ProductConversionCard.tsx")).toContain("<ProductRecipeRules");
     expect(builds).toContain('new URLSearchParams(search).get("tab") === "recipes"');
     expect(builds).toContain("value={activeBuildsTab}");
   });

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 
 import { projectInventoryLevels } from "../../application/inventory-levels.query";
 
@@ -36,6 +37,12 @@ function row(input: {
 }
 
 describe("projectInventoryLevels", () => {
+  it("does not hide zero-physical warehouse rows based on the retired Catalog strategy", () => {
+    const source = readFileSync(new URL("../../infrastructure/inventory.repository.ts", import.meta.url), "utf8");
+    const query = source.slice(source.indexOf("async getInventoryLevelsSummary("), source.indexOf("async getInventoryByBin("));
+    expect(query).not.toContain("HAVING");
+    expect(query).not.toContain("p.inventory_strategy = 'recipe_managed'");
+  });
   it("uses centralized ATP for every strategy without changing physical quantities", async () => {
     const atp = {
       getAtpPerVariant: vi.fn(async () => [

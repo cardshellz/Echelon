@@ -422,6 +422,7 @@ export const transformationModelVersions = inventoryPlanningSchema.table(
     version: integer("version").notNull(),
     lifecycleStatus: varchar("lifecycle_status", { length: 20 }).notNull().default("draft"),
     buildToPromiseEnabled: boolean("build_to_promise_enabled").notNull().default(false),
+    inventoryBehavior: varchar("inventory_behavior", { length: 30 }),
     definitionHash: varchar("definition_hash", { length: 64 }).notNull(),
     validationState: varchar("validation_state", { length: 20 }).notNull(),
     validationErrors: jsonb("validation_errors").notNull().default(sql`'[]'::jsonb`),
@@ -463,6 +464,8 @@ export const transformationModelVersions = inventoryPlanningSchema.table(
       .on(table.supersedesModelId)
       .where(sql`${table.supersedesModelId} IS NOT NULL`),
     versionPositive: check("transformation_model_versions_version_chk", sql`${table.version} > 0`),
+    behaviorValid: check("transformation_model_versions_behavior_chk",
+      sql`${table.inventoryBehavior} IS NULL OR ${table.inventoryBehavior} IN ('physical_only', 'package_hierarchy', 'build_managed')`),
     statusValid: check(
       "transformation_model_versions_status_chk",
       sql`${table.lifecycleStatus} IN ('draft', 'sealed', 'retired', 'superseded')`,

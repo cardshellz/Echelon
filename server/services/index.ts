@@ -175,7 +175,8 @@ import { WorkConfigurationRepository } from "../modules/warehouse/work/infrastru
 import { PostgresCanonicalClaimInventoryRepository } from "../modules/inventory/infrastructure/canonical-claim-inventory.repository";
 import { PostgresCanonicalClaimBuildRepository } from "../modules/inventory/infrastructure/canonical-claim-build.repository";
 import { PostgresCanonicalClaimPickerObservationReviewRepository } from "../modules/orders/canonical-claim-picker-observation-review.repository";
-import { createAuthorityAwareInventoryAtpService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
+import { createAuthorityAwareInventoryAtpService, PostgresInventoryAvailabilityRuntimeAtpExecutor } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
+import { PostgresInventorySupplyDependencyReader } from "../modules/inventory-planning/infrastructure/inventory-supply-dependency-read.repository";
 import { createAuthorityAwareReservationRuntime } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-claim.repository";
 import { PostgresCanonicalClaimDispatchRepository } from "../modules/inventory-planning/infrastructure/inventory-availability-dispatch.repository";
 import { PostgresCanonicalClaimDispatchSourceCommandResolver } from "../modules/inventory-planning/infrastructure/inventory-availability-dispatch-source-command.repository";
@@ -186,8 +187,6 @@ import { PostgresOperationalShipmentDispatchRepository } from "../modules/invent
 import { WmsOperationalShipmentSourceOwner } from "../modules/wms/operational-shipment-source";
 import { createAuthorityAwareInventoryPublicationService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
 import { createTransformationExecutionAuthorityRepository } from "../modules/inventory-planning/infrastructure/transformation-execution-authority.repository";
-import { productVariants as pvTable } from "@shared/schema";
-import { eq as eqOp } from "drizzle-orm";
 
 const systemCanonicalClaimClock = (): Date => new Date();
 
@@ -203,6 +202,9 @@ export function createServices(
   const recipeCapacity = createRecipeCapacityService(db);
   const transformationExecutionAuthority = createTransformationExecutionAuthorityRepository(db);
   const atp = createAuthorityAwareInventoryAtpService(databasePool);
+  const inventorySupplyDependencies = new PostgresInventorySupplyDependencyReader(
+    new PostgresInventoryAvailabilityRuntimeAtpExecutor(databasePool),
+  );
   const canonicalClaimInventory = new PostgresCanonicalClaimInventoryRepository();
   const dispatchSourceOwner = new WmsCanonicalClaimDispatchSourceOwner();
   const canonicalDispatch = new PostgresCanonicalClaimDispatchRepository(
@@ -522,22 +524,16 @@ export function createServices(
     triggeredBy: string,
   ): Promise<void> => {
     try {
-      const [variant] = await db
-        .select({ productId: pvTable.productId })
-        .from(pvTable)
-        .where(eqOp(pvTable.id, productVariantId))
-        .limit(1);
-      if (!variant) return;
-
-      const affectedProductIds = new Set<number>([
-        Number(variant.productId),
-        ...await recipeCapacity.getAffectedOutputProductIds(productVariantId),
-      ]);
+      const affectedProductIds = await inventorySupplyDependencies.getAffectedProductIds(productVariantId);
       for (const productId of affectedProductIds) {
         queueProductInventorySync(productId, triggeredBy);
       }
-    } catch (err: any) {
-      console.warn(`[InventorySync] Failed to resolve dependencies for variant ${productVariantId}: ${err.message}`);
+    } catch (err: unknown) {
+      const failure = describeAllocationFailure(err);
+      platformLogger.error("inventory_sync_dependencies", {
+        outcome: "failed", product_variant_id: productVariantId, triggered_by: triggeredBy,
+        error_code: failure.error_code, error_class: failure.error_class, error: failure.message,
+      });
     }
   };
   channelSync.setInventoryChangePublisher(queueVariantInventorySync);

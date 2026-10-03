@@ -179,6 +179,7 @@ async function loadSelectedModel(
             model.version,
             model.lifecycle_status,
             model.build_to_promise_enabled,
+            model.inventory_behavior,
             model.definition_hash,
             model.validation_state,
             model.validation_errors
@@ -263,6 +264,7 @@ async function loadSelectedModel(
       : "draft_head",
     lifecycleStatus: modelRow.lifecycle_status,
     buildToPromiseEnabled: bool(modelRow.build_to_promise_enabled),
+    ...(modelRow.inventory_behavior == null ? {} : { inventoryBehavior: modelRow.inventory_behavior }),
     definitionHash: String(modelRow.definition_hash),
     validationState: modelRow.validation_state,
     validationErrors: jsonArray(modelRow.validation_errors),
