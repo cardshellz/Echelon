@@ -53,7 +53,7 @@ describe("pick-floor line hold", () => {
     expect(PICKING).toContain('data-testid="button-release-line"');
     expect(PICKING).toContain("data-testid={`menu-release-${item.id}`}");
     expect(PICKING).toContain("`/api/orders/${wmsOrderId}/items/${itemId}/release-hold`");
-    expect(PICKING).toContain("{(order.onHold || hasHeldLine(order)) && (");
+    expect(PICKING.includes("{canManageHolds && (order.onHold || hasHeldLine(order)) && (")).toBe(true);
     expect(PICKING).toContain("releaseLineHoldMutation.mutate({ wmsOrderId: heldItem.wmsOrderId, itemId: heldItem.id })");
   });
 
@@ -81,8 +81,9 @@ describe("pick-floor line hold", () => {
     expect(PICKING).not.toContain("Release order");
     expect(PICKING).toContain('title: "Picking assignment released"');
     expect(PICKING).toContain('title: "Couldn\'t release picking assignment"');
-    expect(PICKING).toContain("Recover stuck order");
-    expect(PICKING).toContain('activeOrder?.status === "in_progress"');
+    expect(PICKING).not.toContain("Recover stuck order");
+    expect(PICKING).not.toContain("forceReleaseOrder");
+    expect(PICKING).toContain("canReleaseOrder(activeOrderId)");
     expect(PICKING).toContain("Picking assignment ended. Pick progress and holds are preserved.");
     expect(PICKING).toContain('title: "Hold removed"');
     expect(PICKING).toContain('title: "Couldn\'t remove hold"');

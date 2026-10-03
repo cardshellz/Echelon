@@ -11,7 +11,7 @@ describe("claimOrder claimable states", () => {
   it("treats ready / partially_shipped / ready_to_ship / in_progress as claimable statuses", () => {
     const claimBlock = ORDERS_STORAGE_SRC.slice(
       ORDERS_STORAGE_SRC.indexOf("async claimOrder"),
-      ORDERS_STORAGE_SRC.indexOf("async releaseOrder"),
+      ORDERS_STORAGE_SRC.indexOf("async updateOrderStatus"),
     );
     expect(claimBlock).toMatch(/inArray\(orders\.warehouseStatus, \[/);
     expect(claimBlock).toContain('"ready"');
@@ -23,7 +23,7 @@ describe("claimOrder claimable states", () => {
   it("blocks ONLY when in_progress under a different picker (stale picker id never blocks)", () => {
     const claimBlock = ORDERS_STORAGE_SRC.slice(
       ORDERS_STORAGE_SRC.indexOf("async claimOrder"),
-      ORDERS_STORAGE_SRC.indexOf("async releaseOrder"),
+      ORDERS_STORAGE_SRC.indexOf("async updateOrderStatus"),
     );
     // The lock is expressed as: NOT (in_progress AND held by someone else),
     // i.e. allow if status != in_progress OR picker is null OR picker is me.
@@ -35,7 +35,7 @@ describe("claimOrder claimable states", () => {
   it("does NOT require assigned_picker_id to be null as a blanket guard", () => {
     const claimBlock = ORDERS_STORAGE_SRC.slice(
       ORDERS_STORAGE_SRC.indexOf("async claimOrder"),
-      ORDERS_STORAGE_SRC.indexOf("async releaseOrder"),
+      ORDERS_STORAGE_SRC.indexOf("async updateOrderStatus"),
     );
     // The old bug: a top-level `isNull(orders.assignedPickerId)` in the AND(...)
     // blocked claims on any order carrying a stale attribution picker id.

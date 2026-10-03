@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { QueryLoadError } from "@/components/query-load-error";
+import { canReleasePickingAssignment, type PickingAssignmentSnapshot } from "@shared/types/picking-assignment-release";
 import PickingHistory from "./picking/PickingHistory";
 import { Link } from "wouter";
 import { 
@@ -130,13 +131,16 @@ async function claimOrder(orderId: number, claimSource: ClaimSource): Promise<Or
   return res.json();
 }
 
-async function releaseOrder(orderId: number): Promise<Order> {
+async function releaseOrder(orderId: number, expectedAssignment: PickingAssignmentSnapshot): Promise<Order> {
   const res = await fetch(`/api/picking/orders/${orderId}/release`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ expectedAssignment }),
   });
-  if (!res.ok) throw new Error("Failed to release picking assignment");
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(typeof body?.error === "string" ? body.error : "Failed to release picking assignment. Refresh the queue.");
+  }
   return res.json();
 }
 
@@ -188,17 +192,6 @@ async function setOrderPriority(orderId: number, priority: number | "reset"): Pr
     body: JSON.stringify({ priority }),
   });
   if (!res.ok) throw new Error("Failed to set priority");
-  return res.json();
-}
-
-async function forceReleaseOrder(orderId: number, resetProgress: boolean = false): Promise<Order> {
-  const res = await fetch(`/api/orders/${orderId}/force-release`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
-    body: JSON.stringify({ resetProgress }),
-  });
-  if (!res.ok) throw new Error("Failed to recover stuck order");
   return res.json();
 }
 
@@ -697,9 +690,10 @@ export default function Picking() {
 
 function PickingWorkspace() {
   // Get current user for role-based UI
-  const { user, hasPermission } = useAuth();
+  const { user, permissions, hasPermission } = useAuth();
   const isAdminOrLead = user && (user.role === "admin" || user.role === "lead");
   const canViewReplenTasks = isAdminOrLead || hasPermission("inventory", "view");
+  const canManageHolds = hasPermission("orders", "hold");
   const { toast } = useToast();
   
   // Get picking mode, view mode, and sound/haptic settings from context
@@ -1048,21 +1042,37 @@ function PickingWorkspace() {
   const claimMutation = useMutation({
     mutationFn: ({ orderId, claimSource }: { orderId: number; claimSource: ClaimSource }) =>
       claimOrder(orderId, claimSource),
-    onSuccess: () => {
+    onSuccess: (claimed) => {
+      // Release must use the assignment returned by this claim, even before the
+      // queue refetch completes (including an immediate Exit on the pick gun).
+      queryClient.setQueryData<OrderWithItems[]>(["picking-queue"], current =>
+        current?.map(order => order.id === claimed.id ? { ...order, ...claimed } : order));
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
     },
   });
   
   // Mutation for releasing orders
   const releaseMutation = useMutation({
-    mutationFn: ({ orderId }: { orderId: number }) => releaseOrder(orderId),
-    onSuccess: (_, { orderId }) => {
+    mutationFn: ({ orderId }: { orderId: number }) => {
+      const order = apiOrders.find(candidate => candidate.id === orderId);
+      if (!order || !canReleasePickingAssignment(pickerId, permissions, order)) {
+        throw new Error("You cannot release this picking assignment. Refresh the queue.");
+      }
+      return releaseOrder(orderId, {
+        assignedPickerId: order.assignedPickerId,
+        startedAt: order.startedAt ? new Date(order.startedAt).toISOString() : null,
+      });
+    },
+    onSuccess: (released, { orderId }) => {
       // Clear local state for this order so it refreshes from API
       setLocalSingleQueue(prev => prev.filter(o => o.id !== String(orderId)));
+      queryClient.setQueryData<OrderWithItems[]>(["picking-queue"], current =>
+        current?.map(order => order.id === released.id ? { ...order, ...released } : order));
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
     },
     onError: (error) => {
       console.error("Failed to release order:", error);
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
       // Show error feedback
       playSound("error");
     },
@@ -1133,30 +1143,6 @@ function PickingWorkspace() {
       playSound("error");
       toast({
         title: "Failed to set priority",
-        description: "Please try again",
-        variant: "destructive",
-      });
-    },
-  });
-  
-  // Mutation for force releasing stuck orders (admin only)
-  const forceReleaseMutation = useMutation({
-    mutationFn: ({ orderId, resetProgress }: { orderId: number; resetProgress?: boolean }) => 
-      forceReleaseOrder(orderId, resetProgress),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
-      setLocalSingleQueue(prev => prev.filter(o => o.id !== String(data.id)));
-      playSound("success");
-      toast({
-        title: "Stuck order recovered",
-        description: `Picking assignment and whole-order hold cleared for ${data.orderNumber}. Pick progress and item holds are preserved.`,
-      });
-    },
-    onError: (error) => {
-      console.error("Failed to force release:", error);
-      playSound("error");
-      toast({
-        title: "Couldn't recover stuck order",
         description: "Please try again",
         variant: "destructive",
       });
@@ -2934,6 +2920,7 @@ function PickingWorkspace() {
           }
         } catch (error) {
           console.error("Failed to release order:", error);
+          toast({ title: "Couldn't release picking assignment", description: error instanceof Error ? error.message : "Refresh the queue before retrying.", variant: "destructive" });
         }
       }
     }
@@ -3002,12 +2989,22 @@ function PickingWorkspace() {
   };
 
   // Release the picking assignment without removing holds or undoing picks.
+  const releasableOrders = (id: string) => {
+    const ids = getSubOrderIds(id);
+    const members = ids.map(memberId => apiOrders.find(order => order.id === memberId));
+    if (members.some(order => !order)) return [];
+    const active = members.filter((order): order is OrderWithItems => order?.warehouseStatus === "in_progress");
+    return active.every(order => canReleasePickingAssignment(pickerId, permissions, order)) ? active : [];
+  };
+  const canReleaseOrder = (id: string) => releasableOrders(id).length > 0;
+
   const handleReleaseOrder = async (orderStringId: string) => {
+    if (releaseMutation.isPending) return;
     console.log("[RELEASE] Attempting to release order:", orderStringId);
-    const subOrderIds = getSubOrderIds(orderStringId);
+    const subOrderIds = releasableOrders(orderStringId).map(order => order.id);
     if (subOrderIds.length === 0) {
       console.error("[RELEASE] No valid order IDs found for:", orderStringId);
-      toast({ title: "Couldn't release picking assignment", description: "Could not find order IDs", variant: "destructive" });
+      toast({ title: "Couldn't release picking assignment", description: "No assignment you may release was found. Refresh the queue.", variant: "destructive" });
       return;
     }
 
@@ -3024,7 +3021,7 @@ function PickingWorkspace() {
       }
     } catch (error) {
       console.error("[RELEASE] Failed to release:", error);
-      toast({ title: "Couldn't release picking assignment", description: "Please try again", variant: "destructive" });
+      toast({ title: "Couldn't release picking assignment", description: error instanceof Error ? error.message : "Refresh the queue before retrying.", variant: "destructive" });
     }
   };
 
@@ -3520,8 +3517,8 @@ function PickingWorkspace() {
                     if (isMyOrder) {
                       // Resume picking own order
                       handleStartPicking(order.id, { claimSource: "active_resume" });
-                    } else if (isAdminOrLead) {
-                      // Admin/lead can release the assignment for another picker.
+                    } else if (canReleaseOrder(order.id)) {
+                      // The explicit release permission authorizes reassignment.
                       toast({
                         title: "Order in progress",
                         description: `This order is being picked by ${order.pickerName || 'another user'}. Use Release picking assignment to make it available to another picker.`,
@@ -3651,7 +3648,7 @@ function PickingWorkspace() {
                               </div>
                             )}
                             {/* Admin action buttons (Bump / Normal / Hold / Release) — kept inline */}
-                            {(isAdminOrLead || order.onHold) && (
+                            {(isAdminOrLead || canManageHolds) && (
                               <div className="text-[10px] text-muted-foreground/70 flex items-center gap-2 mt-0.5">
                                 {isAdminOrLead && order.status === "ready" && !order.onHold && order.priority < 9999 && (
                                   <button
@@ -3683,7 +3680,7 @@ function PickingWorkspace() {
                                     Normal
                                   </button>
                                 )}
-                                {order.status === "ready" && !order.onHold && (
+                                {canManageHolds && order.status === "ready" && !order.onHold && (
                                   <button
                                     className="text-slate-600 hover:text-slate-700 flex items-center gap-0.5 font-medium"
                                     onClick={(e) => {
@@ -3698,7 +3695,7 @@ function PickingWorkspace() {
                                     Hold
                                   </button>
                                 )}
-                                {(order.onHold || hasHeldLine(order)) && (
+                                {canManageHolds && (order.onHold || hasHeldLine(order)) && (
                                   <button
                                     className="text-emerald-600 hover:text-emerald-700 flex items-center gap-0.5 font-medium"
                                     onClick={(e) => {
@@ -3778,10 +3775,8 @@ function PickingWorkspace() {
                         )}
                       </div>
                     </div>
-                    {isAdminOrLead && order.status === "in_progress" && (
+                    {canReleaseOrder(order.id) && (
                     <div className="flex items-center gap-1 justify-end border-t pt-2 mt-1 flex-wrap">
-                      {order.status === "in_progress" && (
-                        <>
                           <Button
                             variant="ghost"
                             size="sm"
@@ -3792,31 +3787,11 @@ function PickingWorkspace() {
                             }}
                             data-testid={`button-release-${order.id}`}
                             title="End the picking assignment. Pick progress and holds are preserved."
+                            disabled={releaseMutation.isPending}
                           >
                             <Unlock className="h-4 w-4 mr-1" />
                             Release picking assignment
                           </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-9 px-2 text-red-600 hover:text-red-700 hover:bg-red-50"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (confirm(`Recover stuck order ${order.orderNumber}? This ends the picking assignment and removes the whole-order hold. Pick progress and item holds are preserved.`)) {
-                                const subIds = getSubOrderIds(order.id);
-                                for (const subId of subIds) {
-                                  forceReleaseMutation.mutate({ orderId: subId, resetProgress: false });
-                                }
-                              }
-                            }}
-                            data-testid={`button-force-release-${order.id}`}
-                            title="Admin recovery: clear the picking assignment and whole-order hold. Preserve picks and item holds."
-                          >
-                            <AlertTriangle className="h-4 w-4 mr-1" />
-                            Recover stuck order
-                          </Button>
-                        </>
-                      )}
                     </div>
                     )}
                   </div>
@@ -4265,7 +4240,7 @@ function PickingWorkspace() {
             <Button variant="ghost" size="sm" onClick={handleBackToQueue} className="text-muted-foreground h-8 px-2">
               <ChevronRight className="h-4 w-4 rotate-180" /> Exit
             </Button>
-            {pickingMode === "single" && activeOrderId && activeOrder?.status === "in_progress" && (
+            {pickingMode === "single" && activeOrderId && canReleaseOrder(activeOrderId) && (
               <Button 
                 variant="ghost" 
                 size="sm" 
@@ -4273,6 +4248,7 @@ function PickingWorkspace() {
                 className="text-amber-600 hover:text-amber-700 hover:bg-amber-50 h-8 px-2"
                 title="End the picking assignment. Pick progress and holds are preserved."
                 data-testid="button-release-active-order"
+                disabled={releaseMutation.isPending}
               >
                 <Unlock className="h-4 w-4 mr-1" /> Release picking assignment
               </Button>
@@ -4519,7 +4495,7 @@ function PickingWorkspace() {
                     </Button>
                   </div>
                   {/* Hold this line and keep picking the rest of the order, or release it. */}
-                  {currentItem.onHold ? (
+                  {canManageHolds && (currentItem.onHold ? (
                     <Button
                       variant="outline"
                       className="w-full mt-3 h-12 min-h-[44px] text-base font-medium text-emerald-700 border-emerald-300 hover:bg-emerald-50"
@@ -4541,7 +4517,7 @@ function PickingWorkspace() {
                       <Pause className="h-5 w-5 mr-2" />
                       Hold line
                     </Button>
-                  )}
+                  ))}
                 </div>
               </CardContent>
             </Card>
@@ -4717,7 +4693,7 @@ function PickingWorkspace() {
                                   <AlertTriangle className="h-4 w-4 mr-2" />
                                   Short pick
                                 </DropdownMenuItem>
-                                {item.onHold ? (
+                                {canManageHolds && (item.onHold ? (
                                   <DropdownMenuItem
                                     disabled={releaseLineHoldMutation.isPending}
                                     onClick={() => releaseLineHoldMutation.mutate({ wmsOrderId: item.wmsOrderId, itemId: item.id })}
@@ -4735,7 +4711,7 @@ function PickingWorkspace() {
                                     <Pause className="h-4 w-4 mr-2" />
                                     Hold line
                                   </DropdownMenuItem>
-                                )}
+                                ))}
                                 <DropdownMenuItem
                                   disabled={item.picked <= 0}
                                   onClick={() => handleListItemDecrement(idx)}

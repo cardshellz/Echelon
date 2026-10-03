@@ -20,6 +20,7 @@ export const getAllPermissions = repository.getAllPermissions;
 export const getRolePermissions = repository.getRolePermissions;
 
 export { readWarehouseWorkActor, readWarehouseWorkEmployees } from "./infrastructure/work-access.repository";
+export { readPickingReleaseActor } from "./infrastructure/picking-release-access.repository";
 
 export const assignUserRoles = usecases.assignUserRolesUseCase;
 export const createRole = usecases.createRoleUseCase;

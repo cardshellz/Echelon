@@ -20,10 +20,12 @@ import { sql } from "drizzle-orm";
 import Papa from "papaparse";
 import { registerPickingHistoryRoutes } from "./picking-history.routes";
 import { registerPickCorrectionRoutes } from "./pick-correction.routes";
+import { registerPickingAssignmentReleaseRoutes } from "./picking-assignment-release.routes";
 
 export function registerPickingRoutes(app: Express) {
   registerPickingHistoryRoutes(app);
   registerPickCorrectionRoutes(app, app.locals.services.pickCorrections);
+  registerPickingAssignmentReleaseRoutes(app, app.locals.services.picking);
   const { orderCombining } = app.locals.services;
   const pickerReplenAuthorityRemoved = (res: any) => res.status(410).json({
     error: "Picker replen confirmation has been removed",
@@ -315,35 +317,6 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/picking/orders/:id/release", requireAuth, async (req, res) => {
-    try {
-      const { picking } = req.app.locals.services;
-      const id = parseInt(req.params.id);
-      const { resetProgress = false, reason } = req.body || {};
-      if (resetProgress === true) {
-        return res.status(400).json({
-          error: "Picker release cannot reset pick progress; use admin repair reset",
-          reason: "reset_not_allowed_on_release",
-        });
-      }
-      const order = await picking.releaseOrder(id, {
-        resetProgress: false,
-        reason,
-        userId: req.session.user?.id,
-        deviceType: req.headers["x-device-type"] as string,
-        sessionId: req.sessionID,
-      });
-      if (!order) return res.status(404).json({ error: "Order not found" });
-      res.json(order);
-    } catch (error: any) {
-      console.error("Error releasing order:", error);
-      const status = error?.isOperational && typeof error.statusCode === "number"
-        ? error.statusCode
-        : 500;
-      res.status(status).json({ error: error.message || "Failed to release order" });
-    }
-  });
-
   app.patch("/api/picking/items/:id", requireAuth, async (req, res) => {
     try {
       const { picking } = req.app.locals.services;
@@ -530,7 +503,7 @@ export function registerPickingRoutes(app: Express) {
   }));
 
   // Hold an order (any authenticated user)
-  app.post("/api/orders/:id/hold", requireAuth, async (req, res) => {
+  app.post("/api/orders/:id/hold", requireAuth, requirePermission("orders", "hold"), async (req, res) => {
     try {
       if (!req.session.user) {
         return res.status(401).json({ error: "Authentication required" });
@@ -571,7 +544,7 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Release hold on an order (any authenticated user)
-  app.post("/api/orders/:id/release-hold", requireAuth, async (req, res) => {
+  app.post("/api/orders/:id/release-hold", requireAuth, requirePermission("orders", "hold"), async (req, res) => {
     try {
       if (!req.session.user) {
         return res.status(401).json({ error: "Authentication required" });
@@ -795,76 +768,6 @@ export function registerPickingRoutes(app: Express) {
     } catch (error: any) {
       console.error("Error setting priority:", error);
       res.status(500).json({ error: "Failed to set priority" });
-    }
-  });
-
-  // Force release an order (admin only) - for stuck orders
-  app.post("/api/orders/:id/force-release", requireAuth, async (req, res) => {
-    try {
-      if (!req.session.user || req.session.user.role !== "admin") {
-        return res.status(403).json({ error: "Admin access required" });
-      }
-      
-      const id = parseInt(req.params.id);
-      const { resetProgress, reason } = req.body || {};
-      const resetRequested = resetProgress === true;
-      
-      const orderBefore = await storage.getOrderById(id);
-      if (!orderBefore) {
-        return res.status(404).json({ error: "Order not found" });
-      }
-
-      if (resetRequested) {
-        const resetReason = typeof reason === "string" ? reason.trim() : "";
-        if (!resetReason) {
-          return res.status(400).json({
-            error: "Admin reset requires a reason",
-            reason: "reset_reason_required",
-          });
-        }
-
-        const items = await storage.getOrderItems(id);
-        const pickedItem = items.find(item => (item.pickedQuantity || 0) > 0);
-        if (pickedItem) {
-          return res.status(409).json({
-            error: "Cannot reset pick progress after picking has started; use the explicit unpick workflow",
-            reason: "reset_blocked_after_pick",
-            orderItemId: pickedItem.id,
-            pickedQuantity: pickedItem.pickedQuantity,
-          });
-        }
-      }
-      
-      // Force release: clear assignment and optionally reset progress
-      const order = await storage.forceReleaseOrder(id, resetRequested);
-      
-      if (!order) {
-        return res.status(404).json({ error: "Order not found" });
-      }
-      
-      // Log the force release (non-blocking)
-      storage.createPickingLog({
-        actionType: "order_released",
-        pickerId: req.session.user.id,
-        pickerName: req.session.user.displayName || req.session.user.username,
-        pickerRole: req.session.user.role,
-        orderId: id,
-        orderNumber: order.orderNumber,
-        orderStatusBefore: orderBefore?.warehouseStatus,
-        orderStatusAfter: order.warehouseStatus,
-        reason: resetRequested ? reason.trim() : "Admin force release",
-        notes: resetRequested ? "Progress was reset" : "Progress preserved",
-        deviceType: req.headers["x-device-type"] as string || "desktop",
-        sessionId: req.sessionID,
-      }).catch(err => console.warn("[PickingLog] Failed to log force_release:", err.message));
-      
-      res.json(order);
-    } catch (error: any) {
-      console.error("Error force releasing order:", error);
-      const status = error?.isOperational && typeof error.statusCode === "number"
-        ? error.statusCode
-        : 500;
-      res.status(status).json({ error: error.message || "Failed to force release order" });
     }
   });
 

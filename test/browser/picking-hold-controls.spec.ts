@@ -7,6 +7,8 @@ function heldOrder(warehouseStatus: "ready" | "in_progress", onHold = 0) {
   return {
     id: 101, orderNumber: "#HOLD-TEST", customerName: "Test order", warehouseStatus,
     onHold, assignedPickerId: warehouseStatus === "in_progress" ? "picker" : null,
+    startedAt: warehouseStatus === "in_progress" ? "2026-10-03T10:00:00.000Z" : null,
+    combinedGroupId: null as number | null, combinedRole: null as string | null,
     priority: 100, itemCount: 2, unitCount: 3, pickedCount: 1,
     orderPlacedAt: "2026-10-03T08:00:00.000Z", channelName: "Shopify", channelProvider: "shopify",
     items: [
@@ -24,11 +26,23 @@ async function mount(page: Page, warehouseStatus: "ready" | "in_progress", optio
   failRemoveHold?: boolean;
   failReleaseAssignment?: boolean;
   orderHold?: boolean;
+  userId?: string;
+  role?: string;
+  permissions?: string[];
+  combinedPickerId?: string;
+  failChildReleaseOnce?: boolean;
 } = {}) {
   const order = heldOrder(warehouseStatus, options.orderHold ? 1 : 0);
+  const child: ReturnType<typeof heldOrder> | null = options.combinedPickerId ? {
+    ...heldOrder("in_progress"), id: 102, orderNumber: "#COMBINED-CHILD",
+    assignedPickerId: options.combinedPickerId, combinedGroupId: 7, combinedRole: "child",
+    items: heldOrder("in_progress").items.map(item => ({ ...item, id: item.id + 100, orderId: 102 })),
+  } : null;
+  if (child) { order.combinedGroupId = 7; order.combinedRole = "parent"; }
   if (options.orderHold) order.items[1].onHold = false;
   const writes: Array<{ path: string; body: unknown }> = [];
   const unexpected: string[] = [];
+  let childReleaseFailuresRemaining = options.failChildReleaseOnce ? 1 : 0;
   await page.addInitScript(() => {
     localStorage.setItem("pickingMode", "single");
     localStorage.setItem("pickerViewMode", "list");
@@ -47,9 +61,9 @@ async function mount(page: Page, warehouseStatus: "ready" | "in_progress", optio
     const path = new URL(request.url()).pathname;
     if (request.method() === "GET") {
       const replies: Record<string, unknown> = {
-        "/api/auth/me": { user: { id: "picker", username: "picker", displayName: "Test picker", role: "admin" },
-          permissions: ["orders:hold", "picking:view", "picking:perform"], roles: ["Administrator"] },
-        "/api/picking/queue": [order],
+        "/api/auth/me": { user: { id: options.userId ?? "picker", username: "picker", displayName: "Test picker", role: options.role ?? "picker" },
+          permissions: options.permissions ?? ["orders:hold", "picking:view", "picking:perform"], roles: [] },
+        "/api/picking/queue": child ? [order, child] : [order],
         "/api/orders/exceptions": [],
         "/api/warehouses/1/fifo": { enabled: false },
         "/api/picking/corrections": [],
@@ -68,11 +82,17 @@ async function mount(page: Page, warehouseStatus: "ready" | "in_progress", optio
         order.onHold = 0;
         return route.fulfill({ json: order });
       }
-      if (path === "/api/picking/orders/101/release") {
+      if (path === "/api/picking/orders/101/release" || (child && path === "/api/picking/orders/102/release")) {
         if (options.failReleaseAssignment) return route.fulfill({ status: 409, json: { error: "Assignment release rejected by server" } });
-        order.warehouseStatus = "ready";
-        order.assignedPickerId = null;
-        return route.fulfill({ json: order });
+        if (path.includes("/102/") && childReleaseFailuresRemaining > 0) {
+          childReleaseFailuresRemaining--;
+          return route.fulfill({ status: 409, json: { error: "Refresh the queue before retrying this assignment." } });
+        }
+        const released = path.includes("/102/") ? child! : order;
+        released.warehouseStatus = "ready";
+        released.assignedPickerId = null;
+        released.startedAt = null;
+        return route.fulfill({ json: released });
       }
       if (path === "/api/picking/orders/101/claim") return route.fulfill({ json: order });
     }
@@ -81,8 +101,8 @@ async function mount(page: Page, warehouseStatus: "ready" | "in_progress", optio
   });
   await page.goto(harnessPath);
   await page.getByRole("button", { name: /^1 Hold$/ }).click();
-  await expect(page.getByTestId("button-release-hold-101")).toBeVisible();
-  return { order, writes, unexpected };
+  await expect(page.getByTestId(child ? "card-order-combined-7" : "card-order-101")).toBeVisible();
+  return { order, child, writes, unexpected };
 }
 
 test("Remove hold targets the held line, not the picker assignment or previous picks", async ({ page }) => {
@@ -109,7 +129,7 @@ test("Release picking assignment leaves the item hold and picks intact", async (
   await expect(page.getByText("Picking assignment ended. Pick progress and holds are preserved.", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Release picking assignment", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Remove hold", exact: true })).toBeVisible();
-  expect(state.writes).toEqual([{ path: "/api/picking/orders/101/release", body: {} }]);
+  expect(state.writes).toEqual([{ path: "/api/picking/orders/101/release", body: { expectedAssignment: { assignedPickerId: "picker", startedAt: "2026-10-03T10:00:00.000Z" } } }]);
   expect(state.order).toMatchObject({ warehouseStatus: "ready", assignedPickerId: null, pickedCount: 1 });
   expect(state.order.items[0]).toMatchObject({ pickedQuantity: 1, fulfilledQuantity: 1 });
   expect(state.order.items[1]).toMatchObject({ onHold: true, pickedQuantity: 0, fulfilledQuantity: 0 });
@@ -154,22 +174,75 @@ test("failed picking release names the assignment and leaves the hold and picks 
   expect(state.order).toMatchObject({ warehouseStatus: "in_progress", assignedPickerId: "picker", pickedCount: 1 });
   expect(state.order.items[0]).toMatchObject({ pickedQuantity: 1, fulfilledQuantity: 1 });
   expect(state.order.items[1]).toMatchObject({ onHold: true, pickedQuantity: 0, fulfilledQuantity: 0 });
-  expect(state.writes).toEqual([{ path: "/api/picking/orders/101/release", body: {} }]);
+  expect(state.writes).toEqual([{ path: "/api/picking/orders/101/release", body: { expectedAssignment: { assignedPickerId: "picker", startedAt: "2026-10-03T10:00:00.000Z" } } }]);
   expect(state.unexpected).toEqual([]);
 });
 
-test("admin recovery explicitly warns that it also removes the whole-order hold", async ({ page }) => {
-  const state = await mount(page, "in_progress");
-  const confirmation = new Promise<string>(resolveMessage => {
-    page.once("dialog", async dialog => {
-      const message = dialog.message();
-      await dialog.dismiss();
-      resolveMessage(message);
-    });
+test("supervisor release uses the same control and preserves a whole-order hold", async ({ page }) => {
+  const state = await mount(page, "in_progress", { orderHold: true, userId: "supervisor",
+    permissions: ["picking:view", "picking:release_any"] });
+  await expect(page.getByRole("button", { name: "Recover stuck order", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Remove hold", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Release picking assignment", exact: true }).click();
+  await expect(page.getByText("Picking assignment released", { exact: true })).toBeVisible();
+  expect(state.order).toMatchObject({ warehouseStatus: "ready", onHold: 1, pickedCount: 1 });
+  expect(state.writes).toEqual([{ path: "/api/picking/orders/101/release", body: {
+    expectedAssignment: { assignedPickerId: "picker", startedAt: "2026-10-03T10:00:00.000Z" },
+  } }]);
+  expect(state.unexpected).toEqual([]);
+});
+
+for (const role of ["picker", "admin"]) {
+  test(`a ${role} without override permission cannot release another picker`, async ({ page }) => {
+    const state = await mount(page, "in_progress", { userId: "someone-else", role });
+    await expect(page.getByRole("button", { name: "Release picking assignment", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Recover stuck order", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Remove hold", exact: true })).toBeVisible();
+    expect(state.writes).toEqual([]);
   });
-  await page.getByRole("button", { name: "Recover stuck order", exact: true }).click();
-  expect(await confirmation).toBe("Recover stuck order #HOLD-TEST? This ends the picking assignment and removes the whole-order hold. Pick progress and item holds are preserved.");
+}
+
+test("an owner without picking permission has neither assignment-release nor hold controls", async ({ page }) => {
+  const state = await mount(page, "in_progress", { permissions: ["picking:view"] });
+  await expect(page.getByRole("button", { name: "Release picking assignment", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Remove hold", exact: true })).toHaveCount(0);
   expect(state.writes).toEqual([]);
+});
+
+test("a combined group releases each owned assignment without touching either order's held lines", async ({ page }) => {
+  const state = await mount(page, "in_progress", { combinedPickerId: "picker" });
+  await page.getByRole("button", { name: "Release picking assignment", exact: true }).click();
+  await expect(page.getByText("Picking assignment released", { exact: true })).toBeVisible();
+  expect(state.writes.map(write => write.path)).toEqual(["/api/picking/orders/101/release", "/api/picking/orders/102/release"]);
+  expect(state.order).toMatchObject({ warehouseStatus: "ready", pickedCount: 1 });
+  expect(state.child).toMatchObject({ warehouseStatus: "ready", pickedCount: 1 });
+  expect(state.child!.items[1].onHold).toBe(true);
+  expect(state.order.items[1].onHold).toBe(true);
+  expect(state.unexpected).toEqual([]);
+});
+
+test("a picker cannot release a combined group containing someone else's active assignment", async ({ page }) => {
+  const state = await mount(page, "in_progress", { combinedPickerId: "someone-else" });
+  await expect(page.getByRole("button", { name: "Release picking assignment", exact: true })).toHaveCount(0);
+  expect(state.writes).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+});
+
+test("a partial combined release reports the failure and retries only the still-active member", async ({ page }) => {
+  const state = await mount(page, "in_progress", { combinedPickerId: "picker", failChildReleaseOnce: true });
+  const release = page.getByRole("button", { name: "Release picking assignment", exact: true });
+  await release.click();
+  await expect(page.getByText("Couldn't release picking assignment", { exact: true })).toBeVisible();
+  expect(state.order.warehouseStatus).toBe("ready");
+  expect(state.child!.warehouseStatus).toBe("in_progress");
+  await expect(release).toBeEnabled();
+  await release.click();
+  await expect(page.getByText("Picking assignment released", { exact: true })).toBeVisible();
+  expect(state.writes.map(write => write.path)).toEqual([
+    "/api/picking/orders/101/release", "/api/picking/orders/102/release", "/api/picking/orders/102/release",
+  ]);
+  expect(state.order.items[1].onHold).toBe(true);
+  expect(state.child!.items[1].onHold).toBe(true);
   expect(state.unexpected).toEqual([]);
 });
 
