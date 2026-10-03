@@ -41,6 +41,13 @@ export interface OmsLineAuthorityState {
   authoritySourceInboxId: number | null;
 }
 
+/**
+ * Dropship order acceptance. A dropship order is paid when the vendor's wallet
+ * is debited for it, and acceptance grants this authority in that same
+ * transaction (grantDropshipAcceptanceLineAuthorityWithClient).
+ */
+export const DROPSHIP_ACCEPTANCE_AUTHORITY_TOPIC = "dropship/acceptance";
+
 const AUTHORIZING_TOPICS = new Set([
   "orders/create",
   "orders/paid",
@@ -55,6 +62,7 @@ const AUTHORIZING_TOPICS = new Set([
   // unauthorized by a defect (e.g. the 2026-07 orders/paid+orders/updated race).
   // Authorizes from order-paid truth, same as a first-party paid event.
   "reconciler/authorize",
+  DROPSHIP_ACCEPTANCE_AUTHORITY_TOPIC,
 ]);
 
 const PAID_FINANCIAL_STATUSES = new Set([
@@ -263,4 +271,35 @@ export function getOmsLineRemainingMaterializableQuantity(line: {
     "wmsMaterializedQuantity",
   );
   return Math.max(authorizedQuantity - materializedQuantity, 0);
+}
+
+/**
+ * Units of a line that dropship acceptance stages into WMS before the order is
+ * paid.
+ *
+ * Staging runs before the vendor's wallet is debited, so the line has no OMS
+ * authority yet: authority_fulfillable_quantity is still 0, its column default
+ * (migration 106). Staging needs the ordered quantity so it can hold one
+ * whole-order inventory claim. Its WMS order is created `pending`, which is not
+ * pickable and which the WMS authority trigger (migration 108) does not check.
+ * Finalization grants paid authority for the same quantity in the transaction
+ * that marks the OMS order paid, so the sync that then promotes the paid order
+ * to `ready` finds authority equal to what WMS holds.
+ */
+export function getOmsLineDropshipStagingQuantity(line: {
+  quantity?: number | null;
+}): number {
+  return requireNonNegativeInteger(line.quantity ?? 0, "quantity");
+}
+
+export function getOmsLineRemainingDropshipStagingQuantity(line: {
+  quantity?: number | null;
+  wmsMaterializedQuantity?: number | null;
+}): number {
+  const stagingQuantity = getOmsLineDropshipStagingQuantity(line);
+  const materializedQuantity = requireNonNegativeInteger(
+    line.wmsMaterializedQuantity ?? 0,
+    "wmsMaterializedQuantity",
+  );
+  return Math.max(stagingQuantity - materializedQuantity, 0);
 }

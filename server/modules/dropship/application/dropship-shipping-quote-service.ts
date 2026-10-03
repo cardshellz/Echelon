@@ -18,7 +18,11 @@ import type {
   DropshipVendorProvisioningService,
 } from "./dropship-vendor-provisioning-service";
 import type { DropshipCartonizationProvider, DropshipCartonizationResult } from "./dropship-cartonization-provider";
-import { quoteDropshipShippingForMemberInputSchema } from "./dropship-shipping-dtos";
+import {
+  quoteDropshipShippingForMemberInputSchema,
+  replayDropshipShippingQuoteInputSchema,
+  type ReplayDropshipShippingQuoteInput,
+} from "./dropship-shipping-dtos";
 import type {
   DropshipShippingPricingProvider,
   DropshipShippingPricingResult,
@@ -110,6 +114,7 @@ export interface DropshipShippingQuoteRepository {
     vendorId: number;
     idempotencyKey: string;
   }): Promise<DropshipShippingQuoteSnapshotRecord | null>;
+  findQuoteSnapshotById(input: ReplayDropshipShippingQuoteInput): Promise<DropshipShippingQuoteSnapshotRecord | null>;
   loadStoreContext(input: {
     vendorId: number;
     storeConnectionId: number;
@@ -167,6 +172,29 @@ export class DropshipShippingQuoteService {
       actorType: "vendor",
       actorId: memberId,
     });
+  }
+
+  /**
+   * A saved quote as it was saved, without pricing anything.
+   *
+   * Dropship acceptance stages an order with the quote it was priced at
+   * (dropship_order_acceptance_stages.shipping_quote_snapshot_id), and resumes
+   * that stage only with the same quote; any other is refused as
+   * DROPSHIP_ORDER_ACCEPTANCE_IDEMPOTENCY_CONFLICT. A later pass for a staged
+   * intake therefore replays the staged quote through here instead of pricing
+   * a new one.
+   */
+  async replayQuoteSnapshot(input: unknown): Promise<DropshipShippingQuoteResult> {
+    const parsed = replayDropshipShippingQuoteInputSchema.parse(input);
+    const snapshot = await this.deps.repository.findQuoteSnapshotById(parsed);
+    if (!snapshot) {
+      throw new DropshipError(
+        "DROPSHIP_SHIPPING_QUOTE_SNAPSHOT_NOT_FOUND",
+        "The saved shipping quote was not found for this vendor and store.",
+        { ...parsed },
+      );
+    }
+    return mapSnapshotToQuoteResult(snapshot, true);
   }
 
   async quote(input: unknown): Promise<DropshipShippingQuoteResult> {

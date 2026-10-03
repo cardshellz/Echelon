@@ -56,12 +56,32 @@ describe("PgDropshipOrderProcessingRepository", () => {
         status: "processing",
         externalOrderId: "EXT-91",
         previousStatus: "payment_hold",
+        stagedShippingQuoteSnapshotId: null,
       }),
       now,
     ]);
+    expect(result.stagedShippingQuoteSnapshotId).toBeNull();
     expect(client.query).toHaveBeenCalledWith("BEGIN");
     expect(client.query).toHaveBeenCalledWith("COMMIT");
     expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns and audits the quote an acceptance stage froze, read inside the claim transaction", async () => {
+    const client = makeClaimClient(makeProcessingIntakeRow({ status: "retrying" }), 3652);
+    const repository = new PgDropshipOrderProcessingRepository(makePool(client));
+
+    const result = await repository.claimIntake({ intakeId: 91, workerId: "dropship-admin-process:admin:7", now });
+
+    expect(result).toMatchObject({ claimed: true, stagedShippingQuoteSnapshotId: 3652 });
+    const statements = client.query.mock.calls.map((call) => String(call[0]));
+    const stageRead = statements.findIndex((sql) => sql.includes("FROM dropship.dropship_order_acceptance_stages"));
+    expect(stageRead).toBeGreaterThan(statements.findIndex((sql) => sql.includes("FOR UPDATE OF oi")));
+    expect(stageRead).toBeLessThan(statements.indexOf("COMMIT"));
+    expect(client.query.mock.calls[stageRead][1]).toEqual([91]);
+    const auditQuery = client.query.mock.calls.find((call) =>
+      String(call[0]).includes("INSERT INTO dropship.dropship_audit_events"),
+    );
+    expect(JSON.parse(String(auditQuery?.[1][6]))).toMatchObject({ stagedShippingQuoteSnapshotId: 3652 });
   });
 
   it("quotes a listed variant the dropship catalog offers, with no separate dropship switch", async () => {
@@ -200,7 +220,7 @@ function makePool(client: PoolClient): Pool {
   } as unknown as Pool;
 }
 
-function makeClaimClient(row: ProcessingRow): PoolClient & {
+function makeClaimClient(row: ProcessingRow, stagedShippingQuoteSnapshotId: number | null = null): PoolClient & {
   query: ReturnType<typeof vi.fn>;
   release: ReturnType<typeof vi.fn>;
 } {
@@ -211,6 +231,13 @@ function makeClaimClient(row: ProcessingRow): PoolClient & {
       }
       if (String(query).includes("SET status = 'processing'")) {
         return { rows: [{ ...row, status: "processing" }] };
+      }
+      if (String(query).includes("FROM dropship.dropship_order_acceptance_stages")) {
+        return {
+          rows: stagedShippingQuoteSnapshotId === null
+            ? []
+            : [{ shipping_quote_snapshot_id: stagedShippingQuoteSnapshotId }],
+        };
       }
       return { rows: [] };
     }),

@@ -71,7 +71,9 @@ import {
 } from "./webhook-retry.worker";
 import { buildChannelLineDisplayName } from "./line-display-name";
 import {
+  getOmsLineDropshipStagingQuantity,
   getOmsLineMaterializableQuantity,
+  getOmsLineRemainingDropshipStagingQuantity,
   getOmsLineRemainingMaterializableQuantity,
 } from "./oms-line-authority";
 import { refreshOmsLineMaterializedQuantities } from "./oms-line-materialization.repository";
@@ -104,7 +106,7 @@ const DEFAULT_FULFILLMENT_PARTITION_KEY = "default";
 const UNAUTHORIZED_PAID_LINE_RECOVERY_PARTITION_KEY =
   "recovery:unauthorized-paid-lines:v1";
 
-type WmsSyncMode =
+export type WmsSyncMode =
   | "standard"
   | "terminal_residual_recovery"
   | "dropship_acceptance_claim";
@@ -232,6 +234,36 @@ function resolveOmsFulfillmentPartitionKey(mode: WmsSyncMode): string {
       ? UNAUTHORIZED_PAID_LINE_RECOVERY_PARTITION_KEY
       : DEFAULT_FULFILLMENT_PARTITION_KEY,
   );
+}
+
+/**
+ * Units of an OMS line that a sync in `mode` may materialize into WMS.
+ *
+ * Paid syncs read OMS line authority. Dropship acceptance staging runs before
+ * payment, when the line has no authority yet, and stages the ordered quantity
+ * as pending demand instead (getOmsLineDropshipStagingQuantity).
+ */
+export function omsLineQuantityToMaterialize(
+  line: { quantity?: number | null; authorityFulfillableQuantity?: number | null },
+  mode: WmsSyncMode,
+): number {
+  return mode === "dropship_acceptance_claim"
+    ? getOmsLineDropshipStagingQuantity(line)
+    : getOmsLineMaterializableQuantity(line);
+}
+
+/** The part of omsLineQuantityToMaterialize that WMS does not hold yet. */
+export function omsLineRemainingQuantityToMaterialize(
+  line: {
+    quantity?: number | null;
+    authorityFulfillableQuantity?: number | null;
+    wmsMaterializedQuantity?: number | null;
+  },
+  mode: WmsSyncMode,
+): number {
+  return mode === "dropship_acceptance_claim"
+    ? getOmsLineRemainingDropshipStagingQuantity(line)
+    : getOmsLineRemainingMaterializableQuantity(line);
 }
 
 function buildOmsWmsOrderScope(omsOrderId: number, fulfillmentPartitionKey: string) {
@@ -871,8 +903,8 @@ export class WmsSyncService {
 
       const materializableOmsLines = omsLines.filter((line) =>
         isTerminalResidualRecovery
-          ? getOmsLineRemainingMaterializableQuantity(line) > 0
-          : getOmsLineMaterializableQuantity(line) > 0,
+          ? omsLineRemainingQuantityToMaterialize(line, mode) > 0
+          : omsLineQuantityToMaterialize(line, mode) > 0,
       );
 
       if (materializableOmsLines.length === 0) {
@@ -896,7 +928,7 @@ export class WmsSyncService {
         },
         materializableOmsLines.map((l) => ({
           id: l.id,
-          quantity: getOmsLineMaterializableQuantity(l),
+          quantity: omsLineQuantityToMaterialize(l, mode),
           paidPriceCents: (l as any).paidPriceCents ?? 0,
           totalPriceCents: (l as any).totalPriceCents ?? 0,
         })),
@@ -1032,7 +1064,7 @@ export class WmsSyncService {
         warehouseStatus,
         fulfillmentPartitionKey,
         itemCount: materializableOmsLines.length,
-        unitCount: materializableOmsLines.reduce((sum, line) => sum + getOmsLineMaterializableQuantity(line), 0),
+        unitCount: materializableOmsLines.reduce((sum, line) => sum + omsLineQuantityToMaterialize(line, mode), 0),
         orderPlacedAt: omsOrder.orderedAt,
         ...orderFinancialSnapshot,
       };
@@ -1092,7 +1124,7 @@ export class WmsSyncService {
 
         const lockedOmsLines = await this.lockOmsLinesForMaterialization(tx, omsOrderId);
         const remainingOmsLines = lockedOmsLines.filter(
-          (line) => getOmsLineRemainingMaterializableQuantity(line) > 0,
+          (line) => omsLineRemainingQuantityToMaterialize(line, mode) > 0,
         );
 
         if (remainingOmsLines.length === 0) {
@@ -1108,7 +1140,7 @@ export class WmsSyncService {
             await buildWmsLineItemFromOmsLine(
               tx,
               line,
-              getOmsLineRemainingMaterializableQuantity(line),
+              omsLineRemainingQuantityToMaterialize(line, mode),
               0,
               isTerminalResidualRecovery
                 ? "residual_quantity"

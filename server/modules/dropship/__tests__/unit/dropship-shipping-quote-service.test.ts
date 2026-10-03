@@ -503,6 +503,61 @@ describe("DropshipShippingQuoteService", () => {
     })).rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT" });
   });
 
+  it("replays a saved quote by id exactly as saved, without pricing anything", async () => {
+    const saved = await service.quoteForMember("member-1", {
+      storeConnectionId: 22,
+      warehouseId: 3,
+      destination: { country: "US", region: "NY", postalCode: "10001" },
+      items: [{ productVariantId: 101, quantity: 2 }],
+      idempotencyKey: "quote-staged-001",
+    });
+    const pricedRequests = rateProvider.requests.length;
+    const savedSnapshots = repository.snapshots.length;
+
+    const replayed = await service.replayQuoteSnapshot({
+      vendorId: 10,
+      storeConnectionId: 22,
+      quoteSnapshotId: saved.quoteSnapshotId,
+    });
+
+    expect(replayed).toEqual({ ...saved, idempotentReplay: true });
+    expect(rateProvider.requests).toHaveLength(pricedRequests);
+    expect(repository.snapshots).toHaveLength(savedSnapshots);
+  });
+
+  it.each([
+    { label: "another vendor", input: { vendorId: 11, storeConnectionId: 22 } },
+    { label: "another store", input: { vendorId: 10, storeConnectionId: 23 } },
+  ])("does not replay a saved quote for $label", async ({ input }) => {
+    const saved = await service.quoteForMember("member-1", {
+      storeConnectionId: 22,
+      warehouseId: 3,
+      destination: { country: "US", postalCode: "10001" },
+      items: [{ productVariantId: 101, quantity: 1 }],
+      idempotencyKey: "quote-staged-002",
+    });
+
+    await expect(service.replayQuoteSnapshot({ ...input, quoteSnapshotId: saved.quoteSnapshotId }))
+      .rejects.toMatchObject({
+        code: "DROPSHIP_SHIPPING_QUOTE_SNAPSHOT_NOT_FOUND",
+        context: { ...input, quoteSnapshotId: saved.quoteSnapshotId },
+      });
+  });
+
+  it("reports a missing saved quote", async () => {
+    await expect(service.replayQuoteSnapshot({ vendorId: 10, storeConnectionId: 22, quoteSnapshotId: 3652 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_SHIPPING_QUOTE_SNAPSHOT_NOT_FOUND" });
+  });
+
+  it.each([
+    { label: "a zero quote id", input: { vendorId: 10, storeConnectionId: 22, quoteSnapshotId: 0 } },
+    { label: "a text quote id", input: { vendorId: 10, storeConnectionId: 22, quoteSnapshotId: "3652" } },
+    { label: "a missing store", input: { vendorId: 10, quoteSnapshotId: 3652 } },
+    { label: "an unknown field", input: { vendorId: 10, storeConnectionId: 22, quoteSnapshotId: 3652, idempotencyKey: "x" } },
+  ])("rejects a replay with $label", async ({ input }) => {
+    await expect(service.replayQuoteSnapshot(input)).rejects.toThrow();
+  });
+
   it('uses the shared final charge without reading or adding legacy fees', async () => {
     const charge = applyProgramCharges(800,{ markup: { bps: 100,fixedCents: 0,minCents: null,maxCents: null }, insurance: { bps: 200,fixedCents: 0,minCents: null,maxCents: null } },3);
     const quote = sharedQuote(800);
@@ -773,6 +828,18 @@ class FakeShippingQuoteRepository implements DropshipShippingQuoteRepository {
   }): Promise<DropshipShippingQuoteSnapshotRecord | null> {
     return this.snapshots.find((snapshot) =>
       snapshot.vendorId === input.vendorId && snapshot.idempotencyKey === input.idempotencyKey
+    ) ?? null;
+  }
+
+  async findQuoteSnapshotById(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    quoteSnapshotId: number;
+  }): Promise<DropshipShippingQuoteSnapshotRecord | null> {
+    return this.snapshots.find((snapshot) =>
+      snapshot.quoteSnapshotId === input.quoteSnapshotId
+      && snapshot.vendorId === input.vendorId
+      && snapshot.storeConnectionId === input.storeConnectionId
     ) ?? null;
   }
 
