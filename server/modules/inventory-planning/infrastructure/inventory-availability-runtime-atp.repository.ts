@@ -14,6 +14,7 @@ import {
   type InventoryAvailabilityRuntimeAtpLogger,
 } from "../application/inventory-availability-runtime-atp.service";
 import { captureActiveSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
+import { readInventoryProductBalances } from "./inventory-product-balances.reader";
 
 type ClientPool = Pick<Pool, "connect">;
 export type PostgresInventoryAvailabilityRuntimeTransaction = Pick<
@@ -55,6 +56,7 @@ implements InventoryAvailabilityRuntimeAtpExecutor<PostgresInventoryAvailability
         authorityRevision: authority.authorityRevision,
         activationRunId: authority.activationRunId,
         legacy,
+        readProductBalances: (productId) => readInventoryProductBalances(client, productId),
         captureActiveSupplySnapshot: (productId) =>
           captureActiveSupplySnapshotInsideTransaction(client, productId),
         getProductIdsByVariantIds: (variantIds) =>

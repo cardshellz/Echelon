@@ -108,6 +108,34 @@ async function setupSafety(page: Page, permissions: string[]) {
   return state;
 }
 
+test("creates a recipe pack SKU without a retired parent or implicit conversion permission", async ({ page }, testInfo) => {
+  const state = await setup(page);
+  let created: Record<string, unknown> | undefined;
+  await page.route("**/api/products", route => route.fulfill({ json: [{ id: 17, sku: "QUAD", name: "Quad Box", isActive: true }] }));
+  await page.route("**/api/inventory/skus/search?*", route => route.fulfill({ json: [] }));
+  await page.route("**/api/products/17/variants", route => {
+    created = route.request().postDataJSON();
+    return route.fulfill({ json: { ...created, id: 99, productId: 17 } });
+  });
+  await page.goto("/__catalog-conversion-test?variant=1");
+  await page.getByPlaceholder("Find recipe SKU").fill("QUAD-P5");
+  await page.getByRole("button", { name: "Create QUAD-P5", exact: true }).click();
+  await page.getByLabel("Parent product *", { exact: true }).click();
+  await page.getByRole("option", { name: /QUAD.*Quad Box/ }).click();
+  await page.getByLabel("Type *", { exact: true }).click();
+  await page.getByRole("option", { name: "Pack", exact: true }).click();
+  await page.getByLabel("Units per variant *", { exact: true }).fill("5");
+  await page.getByLabel("Display name *", { exact: true }).fill("Pack of 5");
+  await expect(page.getByText("Breaks into", { exact: false })).toHaveCount(0);
+  await expect(page.getByText(/Set allowed directions and recipes/)).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("recipe-variant-creation.png"), fullPage: true });
+  await page.getByRole("button", { name: "Create and select", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Clear Find recipe SKU" })).toBeVisible();
+  expect(created).toMatchObject({ sku: "QUAD-P5", unitsPerVariant: 5, parentVariantId: null, isBaseUnit: false });
+  expect(created).not.toHaveProperty("inventoryBehavior");
+  expect(state.errors).toEqual([]);
+});
+
 test.describe("Procurement safety controls", () => {
   test("reviews business-wide impact and retries the identical Apply after uncertainty", async ({ page }, testInfo) => {
     const state = await setupSafety(page, ["inventory_planning:view", "inventory_planning:edit", "inventory_planning:activate"]);

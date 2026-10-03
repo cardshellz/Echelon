@@ -33,7 +33,8 @@ interface InlineCaseBreakDialogProps {
   sourceSku?: string;
   pickVariantId?: number;
   pickSku?: string;
-  conversionRatio?: number;
+  conversionOutputQty?: number;
+  conversionInputQty?: number;
 }
 
 interface Location {
@@ -54,7 +55,8 @@ export default function InlineCaseBreakDialog({
   sourceSku,
   pickVariantId,
   pickSku,
-  conversionRatio = 1,
+  conversionOutputQty = 0,
+  conversionInputQty = 0,
 }: InlineCaseBreakDialogProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -66,17 +68,23 @@ export default function InlineCaseBreakDialog({
   const [locationSearch, setLocationSearch] = useState("");
 
   // Auto-calculate target units
-  const casesQty = parseInt(qtySourceUnits) || 0;
-  const qtyTargetUnits = Math.floor(casesQty * conversionRatio).toString();
+  const casesQty = Number(qtySourceUnits);
+  const hasWholeBatches = Number.isSafeInteger(casesQty) && casesQty > 0
+    && Number.isSafeInteger(conversionInputQty) && conversionInputQty > 0
+    && Number.isSafeInteger(conversionOutputQty) && conversionOutputQty > 0
+    && casesQty % conversionInputQty === 0;
+  const targetQty = hasWholeBatches ? (casesQty / conversionInputQty) * conversionOutputQty : 0;
+  const hasValidQuantity = hasWholeBatches && Number.isSafeInteger(targetQty) && targetQty > 0;
+  const qtyTargetUnits = hasValidQuantity ? String(targetQty) : "—";
 
   useEffect(() => {
     if (open) {
       setToLocationId(null);
-      setQtySourceUnits("1");
+      setQtySourceUnits(String(conversionInputQty));
       setNotes("");
       setLocationSearch("");
     }
-  }, [open]);
+  }, [open, conversionInputQty]);
 
   const { data: locations } = useQuery<Location[]>({
     queryKey: ["/api/warehouse/locations"],
@@ -138,7 +146,8 @@ export default function InlineCaseBreakDialog({
     },
   });
 
-  const isValid = defaultFromLocationId && toLocationId && sourceVariantId && pickVariantId && parseInt(qtySourceUnits) > 0;
+  const isValid = defaultFromLocationId && toLocationId && sourceVariantId && pickVariantId
+    && hasValidQuantity;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -199,13 +208,14 @@ export default function InlineCaseBreakDialog({
             <Label>How many cases to break?</Label>
             <Input
               type="number"
-              min="1"
+              min={conversionInputQty}
+              step={conversionInputQty}
               value={qtySourceUnits}
               onChange={(e) => setQtySourceUnits(e.target.value)}
               placeholder="1"
               className="font-mono"
             />
-            {casesQty > 0 && conversionRatio > 0 && (
+            {hasValidQuantity && (
               <p className="text-xs text-muted-foreground mt-1">
                 Will yield <span className="font-medium text-foreground">{qtyTargetUnits} {pickSku}</span> units.
               </p>

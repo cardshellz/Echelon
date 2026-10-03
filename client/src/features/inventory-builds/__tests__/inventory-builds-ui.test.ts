@@ -96,9 +96,12 @@ describe("Inventory Builds UI contract", () => {
     expect(builds).toContain("value={activeBuildsTab}");
   });
 
-  it("labels legacy parents read-only and omits them from ordinary SKU updates", () => {
-    expect(productDetail).toContain("<TableHead>Legacy parent</TableHead>");
-    expect(productDetail).toContain("Legacy parent (read only)");
+  it("does not expose legacy parent controls in Catalog or contextual recipe SKU creation", () => {
+    expect(productDetail).not.toContain("<TableHead>Legacy parent</TableHead>");
+    expect(productDetail).not.toContain("Legacy parent (read only)");
+    expect(variantSelector).not.toContain("Breaks into");
+    expect(variantSelector).not.toContain("draft.parentVariantId");
+    expect(variantSelector).toContain("Inventory behavior");
     const update = productDetail.slice(productDetail.indexOf("const updateVariantMutation = useMutation({"));
     const request = update.slice(0, update.indexOf("onSuccess:"));
     expect(request).not.toContain("parentVariantId:");

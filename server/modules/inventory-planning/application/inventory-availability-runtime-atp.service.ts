@@ -10,6 +10,7 @@ import type {
   VariantAtp,
 } from "../../inventory/atp.service";
 import { projectCanonicalAtp } from "../domain/inventory-availability-planner";
+import { totalBalanceBaseUnits, type InventoryProductBalances } from "./inventory-product-balances";
 
 export type InventoryAvailabilityRuntimeAuthority = "legacy" | "canonical";
 
@@ -18,6 +19,7 @@ export interface InventoryAvailabilityRuntimeAtpContext {
   authorityRevision: string;
   activationRunId: string | null;
   legacy: InventoryAtpServiceContract;
+  readProductBalances(productId: number): Promise<InventoryProductBalances | null>;
   captureActiveSupplySnapshot(productId: number): Promise<SupplySnapshotDto>;
   getProductIdsByVariantIds(variantIds: readonly number[]): Promise<Map<number, number>>;
 }
@@ -197,19 +199,30 @@ export class AuthorityAwareInventoryAtpService implements InventoryAtpServiceCon
   async getProductSummary(productId: number): Promise<ProductAtpSummary | null> {
     const validatedProductId = positiveInteger(productId, "productId");
     return this.executor.execute(async (context) => {
-      const legacySummary = await context.legacy.getProductSummary(validatedProductId);
-      if (context.authority === "legacy" || legacySummary === null) return legacySummary;
+      if (context.authority === "legacy") return context.legacy.getProductSummary(validatedProductId);
+      const balances = await context.readProductBalances(validatedProductId);
+      if (balances === null) return null;
       const canonical = await this.projectCanonicalVariants(context, validatedProductId, { kind: "network" });
       const byVariantId = new Map(canonical.map((variant) => [variant.productVariantId, variant] as const));
       return {
-        ...legacySummary,
+        productId: balances.productId,
+        sku: balances.sku,
+        name: balances.name,
+        // Retained response metadata, never an authority input.
+        inventoryStrategy: balances.inventoryStrategy,
+        totalOnHandBase: totalBalanceBaseUnits(balances.variants, "physicalQty"),
+        totalReservedBase: totalBalanceBaseUnits(balances.variants, "reservedQty"),
         // This compatibility aggregate is non-additive because target-SKU ATP
         // projections can consume the same physical resource through different
         // directed paths. The largest represented capacity is conservative and
         // is display-only; promise decisions consume the per-SKU rows above.
         totalAtpBase: maximumAtpBase(canonical),
-        variants: legacySummary.variants.map((variant) => ({
-          ...variant,
+        variants: balances.variants.filter((variant) => variant.isActive).map((variant) => ({
+          productVariantId: variant.productVariantId,
+          sku: variant.sku,
+          name: variant.name,
+          unitsPerVariant: variant.unitsPerVariant,
+          physicalQty: variant.physicalQty,
           atpUnits: byVariantId.get(variant.productVariantId)?.atpUnits ?? 0,
         })),
       };
@@ -219,17 +232,28 @@ export class AuthorityAwareInventoryAtpService implements InventoryAtpServiceCon
   async getInventoryItemSummary(productId: number): Promise<InventoryItemAtpSummary | null> {
     const validatedProductId = positiveInteger(productId, "productId");
     return this.executor.execute(async (context) => {
-      const legacySummary = await context.legacy.getInventoryItemSummary(validatedProductId);
-      if (context.authority === "legacy" || legacySummary === null) return legacySummary;
+      if (context.authority === "legacy") return context.legacy.getInventoryItemSummary(validatedProductId);
+      const balances = await context.readProductBalances(validatedProductId);
+      if (balances === null) return null;
       const canonical = await this.projectCanonicalVariants(context, validatedProductId, { kind: "network" });
       const byVariantId = new Map(canonical.map((variant) => [variant.productVariantId, variant] as const));
       return {
-        ...legacySummary,
+        productId: balances.productId,
+        baseSku: balances.sku,
+        name: balances.name,
+        totalOnHandPieces: totalBalanceBaseUnits(balances.variants, "physicalQty"),
+        totalReservedPieces: totalBalanceBaseUnits(balances.variants, "reservedQty"),
         totalAtpPieces: maximumAtpBase(canonical),
-        variants: legacySummary.variants.map((variant) => {
-          const atp = byVariantId.get(variant.variantId);
+        variants: balances.variants.map((variant) => {
+          const atp = byVariantId.get(variant.productVariantId);
           return {
-            ...variant,
+            variantId: variant.productVariantId,
+            sku: variant.sku,
+            name: variant.name,
+            unitsPerVariant: variant.unitsPerVariant,
+            variantQty: variant.physicalQty,
+            reservedQty: variant.reservedQty,
+            pickedQty: variant.pickedQty,
             available: atp?.atpUnits ?? 0,
             atpPieces: atp?.atpBase ?? 0,
           };

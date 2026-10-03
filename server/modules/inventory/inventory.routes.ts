@@ -2240,6 +2240,7 @@ export function registerInventoryRoutes(app: Express) {
       const result = await projectInventoryLevels({
         rows: inventoryRows,
         atp: req.app.locals.services.atp,
+        conversions: req.app.locals.services.inventoryConversions,
         warehouseId,
       });
 

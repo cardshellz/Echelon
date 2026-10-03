@@ -187,6 +187,7 @@ import { PostgresOperationalShipmentDispatchRepository } from "../modules/invent
 import { WmsOperationalShipmentSourceOwner } from "../modules/wms/operational-shipment-source";
 import { createAuthorityAwareInventoryPublicationService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
 import { createTransformationExecutionAuthorityRepository } from "../modules/inventory-planning/infrastructure/transformation-execution-authority.repository";
+import { PostgresInventoryConversionReader } from "../modules/inventory-planning/infrastructure/inventory-conversion-read.repository";
 
 const systemCanonicalClaimClock = (): Date => new Date();
 
@@ -202,6 +203,7 @@ export function createServices(
   const recipeCapacity = createRecipeCapacityService(db);
   const transformationExecutionAuthority = createTransformationExecutionAuthorityRepository(db);
   const atp = createAuthorityAwareInventoryAtpService(databasePool);
+  const inventoryConversions = new PostgresInventoryConversionReader(databasePool);
   const inventorySupplyDependencies = new PostgresInventorySupplyDependencyReader(
     new PostgresInventoryAvailabilityRuntimeAtpExecutor(databasePool),
   );
@@ -715,6 +717,7 @@ export function createServices(
     inventoryLots,
     atp,
     cogs,
+    inventoryConversions,
     breakAssembly,
     builds,
     reservation,

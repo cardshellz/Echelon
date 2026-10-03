@@ -14,7 +14,7 @@ import {
  *   3. cost_variance_soft (> ±25% default; configurable)
  *   4. cost_variance_hard (> 5× or < 0.2×)
  *   5. variant_base_unit_misconfig (upv > 1 && is_base_unit)
- *   6. variant_missing_parent (no parent while siblings have one)
+ *   6. Retired parent pointers never produce receiving warnings.
  *
  * Plus the dogfood case: case variant misconfigured as base unit posting
  * 360 cases as 360 pieces triggers both UOM and base-unit warnings.
@@ -225,13 +225,13 @@ describe("evaluateReceiveWarnings — variant config sanity", () => {
     expect(warnings.some((x) => x.kind === "variant_base_unit_misconfig")).toBe(false);
   });
 
-  it("flags a case variant missing parent_variant_id when siblings have one", () => {
+  it("does not interpret missing legacy parents as missing conversion permission", () => {
     const warnings = evaluateReceiveWarnings({
       ...baseInput,
       variant: { id: 11, unitsPerVariant: 50, isBaseUnit: false, parentVariantId: null },
       siblingsHaveParent: true,
     });
-    expect(warnings.some((x) => x.kind === "variant_missing_parent")).toBe(true);
+    expect(warnings.some((x) => x.kind === "variant_missing_parent")).toBe(false);
   });
 
   it("does not flag missing parent when no siblings have one", () => {

@@ -169,6 +169,7 @@ function executor(
       authorityRevision: "9",
       activationRunId: authority === "canonical" ? "44" : null,
       legacy: {} as never,
+      readProductBalances: vi.fn(),
       captureActiveSupplySnapshot: vi.fn(),
       getProductIdsByVariantIds: vi.fn(),
     }, transaction),

@@ -27,6 +27,7 @@ const variantLevels = [
     binCount: 1,
     noBin: false,
     noCaseBreak: false,
+    allowedConversions: [{ sourceVariantId: 300, destinationVariantId: 200, operationType: "break_pack", inputQty: 1, outputQty: 5 }],
     noBarcode: false,
     noReplen: false,
     overReserved: false,
@@ -64,7 +65,7 @@ const variantLevels = [
   },
 ];
 
-async function setup(page: Page) {
+async function setup(page: Page, allowConversions = true) {
   const unexpected: string[] = [];
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -101,7 +102,10 @@ async function setup(page: Page) {
       items: [],
       summary: { outOfStock: 0, belowReorderPoint: 0, orderSoon: 0, noMovement: 0 },
     } });
-    if (path === "/api/inventory/levels") return route.fulfill({ json: variantLevels });
+    if (path === "/api/inventory/levels") return route.fulfill({ json: variantLevels.map(row => ({
+      ...row, allowedConversions: allowConversions ? row.allowedConversions ?? [] : [],
+      noCaseBreak: true, // Old fields deliberately disagree with active permission.
+    })) });
     if (path === "/api/inventory/variants/200/locations") return route.fulfill({ json: [{
       id: 91,
       variantQty: 2,
@@ -176,7 +180,7 @@ test("renders authority ATP and keeps physical bin stock explicitly unreserved",
     await variant.click();
     await expect(page.getByText("Unreserved", { exact: true })).toBeVisible();
     await expect(page.getByText("PICK-1", { exact: true })).toBeVisible();
-    await expect(page.getByText("Legacy case-break controls — physical stock only; ATP above is server-calculated", { exact: true })).toBeVisible();
+    await expect(page.getByText("Allowed case-break sources — active conversion rules; ATP above is server-calculated", { exact: true })).toBeVisible();
     await expect(page.getByText("RESERVE-1", { exact: true })).toBeVisible();
     await expect(page.getByRole("row").filter({ hasText: "PICK-1" })).toContainText("LEON — 20 Leonberg");
     await expect(page.getByRole("row").filter({ hasText: "RESERVE-1" })).toContainText("RTE-19 — Route 19 reserve");
@@ -186,6 +190,11 @@ test("renders authority ATP and keeps physical bin stock explicitly unreserved",
     await expect(page.getByRole("dialog").getByRole("heading", { name: "Break Case", exact: true })).toBeVisible();
     await expect(page.getByRole("dialog")).toContainText("CARD-C25");
     await expect(page.getByRole("dialog")).toContainText("CARD-P5");
+    await expect(page.getByRole("dialog").getByRole("button", { name: "Break into 5 packs", exact: true })).toBeEnabled();
+    await page.getByRole("dialog").getByRole("spinbutton").fill("0.5");
+    await expect(page.getByRole("dialog").getByRole("button", { name: "Break into — packs", exact: true })).toBeDisabled();
+    await page.getByRole("dialog").getByRole("spinbutton").fill("2");
+    await expect(page.getByRole("dialog").getByRole("button", { name: "Break into 10 packs", exact: true })).toBeEnabled();
     await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
   }
 
@@ -201,6 +210,15 @@ test("renders authority ATP and keeps physical bin stock explicitly unreserved",
     await expect(row).toContainText("7");
     await expect(row).not.toContainText("999");
   }
+  expect(state.unexpected).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
+test("does not offer an unauthorized case break or legacy missing-parent warning", async ({ page }, testInfo) => {
+  const state = await setup(page, false);
+  if (testInfo.project.name === "desktop") await page.getByTestId("row-variant-200").click();
+  await expect(page.getByRole("button", { name: "Break Case", exact: true })).toHaveCount(0);
+  await expect(page.getByText("NO CASE BREAK", { exact: true })).toHaveCount(0);
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
 });

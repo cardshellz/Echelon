@@ -16,8 +16,8 @@
  *      ±25%, echelon_settings key `receiving_cost_variance_warn_pct`), or is
  *      an order of magnitude off (ratio > 5× or < 0.2×) — hard warn.
  *   3. Variant config sanity — case-named variant (units_per_variant > 1)
- *      flagged is_base_unit, or missing parent_variant_id where siblings
- *      have one.
+ *      flagged is_base_unit. Conversion permissions are not receiving warnings:
+ *      they belong to the reviewed transformation model, never parent links.
  *
  * Money discipline (Rule #3): integer mills only. Ratios are computed with
  * integer cross-multiplication — no floats anywhere on the money path.
@@ -33,7 +33,7 @@ export const RECEIVE_WARNING_KINDS = [
   "cost_variance_soft",
   "cost_variance_hard",
   "variant_base_unit_misconfig",
-  "variant_missing_parent",
+  "variant_missing_parent", // Historical warning records only; no current detector emits this.
 ] as const;
 export type ReceiveWarningKind = typeof RECEIVE_WARNING_KINDS[number];
 
@@ -59,11 +59,11 @@ export type ReceiveWarningInput = {
     id: number;
     unitsPerVariant: number;
     isBaseUnit?: boolean | null;
+    /** @deprecated Accepted for older callers; never used to infer conversion permissions. */
     parentVariantId?: number | null;
     name?: string | null;
   } | null;
-  // True when at least one sibling variant of the same product has a
-  // parent_variant_id (used by the missing-parent detector).
+  /** @deprecated Accepted for older callers; the missing-parent detector is retired. */
   siblingsHaveParent?: boolean;
   // Linked PO line.
   poLine?: {
@@ -203,27 +203,6 @@ export function evaluateReceiveWarnings(
       });
     }
 
-    const missingParent =
-      (variant.parentVariantId === null || variant.parentVariantId === undefined) &&
-      input.siblingsHaveParent === true &&
-      unitsPerVariant > 1;
-    if (missingParent) {
-      warnings.push({
-        kind: "variant_missing_parent",
-        severity: "warn",
-        receivingLineId: input.receivingLineId,
-        purchaseOrderLineId: poLine?.id,
-        title: "Case variant missing parent link",
-        detail:
-          `Variant "${variant.name ?? variant.id}" packs ${unitsPerVariant} pieces but has no ` +
-          `parent_variant_id while sibling variants do. Catalog hierarchy is incomplete.`,
-        payload: {
-          receivingLineId: input.receivingLineId,
-          variantId: variant.id,
-          unitsPerVariant,
-        },
-      });
-    }
   }
 
   return warnings;
@@ -337,11 +316,10 @@ export class ReceiveValidationService {
     for (const row of lineRows.rows) {
       const variantId = Number(row.product_variant_id);
       let variant: ReceiveWarningInput["variant"] = null;
-      let siblingsHaveParent = false;
 
       if (Number.isSafeInteger(variantId) && variantId > 0) {
         const variantRows = await this.db.execute(sql`
-          SELECT id, units_per_variant, is_base_unit, parent_variant_id, name, product_id
+          SELECT id, units_per_variant, is_base_unit, name, product_id
           FROM catalog.product_variants
           WHERE id = ${variantId}
           LIMIT 1
@@ -352,20 +330,8 @@ export class ReceiveValidationService {
             id: Number(v.id),
             unitsPerVariant: Math.max(1, Number(v.units_per_variant) || 1),
             isBaseUnit: v.is_base_unit === true,
-            parentVariantId: v.parent_variant_id === null ? null : Number(v.parent_variant_id),
             name: v.name ?? null,
           };
-          const productId = Number(v.product_id ?? row.product_id);
-          if (Number.isSafeInteger(productId) && productId > 0) {
-            const siblingRows = await this.db.execute(sql`
-              SELECT COUNT(*)::int AS n
-              FROM catalog.product_variants
-              WHERE product_id = ${productId}
-                AND id <> ${variantId}
-                AND parent_variant_id IS NOT NULL
-            `);
-            siblingsHaveParent = Number(siblingRows.rows?.[0]?.n ?? 0) > 0;
-          }
         }
       }
 
@@ -404,7 +370,6 @@ export class ReceiveValidationService {
             unitCostMills: row.unit_cost_mills === null ? null : Number(row.unit_cost_mills),
             unitCostCents: row.unit_cost === null ? null : Number(row.unit_cost),
             variant,
-            siblingsHaveParent,
             poLine,
           },
           { costVarianceWarnPct: warnPct },

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronDown, ChevronUp, Loader2, Plus, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -20,13 +20,6 @@ import {
 import type { BuildVariantResult } from "./build-recipe-model";
 
 type ProductSummary = { id: number; sku: string | null; name: string; isActive?: boolean | number };
-type ProductVariantSummary = {
-  id: number;
-  sku: string | null;
-  name: string;
-  unitsPerVariant: number;
-  isActive?: boolean | number;
-};
 
 type VariantDraft = {
   productId: number | null;
@@ -35,8 +28,6 @@ type VariantDraft = {
   sku: string;
   name: string;
   barcode: string;
-  parentVariantId: number | null;
-  isBaseUnit: boolean;
   package: VariantPackageInput;
   shipsInOwnContainer: boolean;
   maxUnitsPerPackage: string;
@@ -50,8 +41,6 @@ function newVariantDraft(search: string): VariantDraft {
     sku: search.trim(),
     name: "Each",
     barcode: "",
-    parentVariantId: null,
-    isBaseUnit: true,
     package: emptyVariantPackageInput(),
     shipsInOwnContainer: false,
     maxUnitsPerPackage: "",
@@ -76,6 +65,7 @@ export function BuildVariantSelector({
   allowCreate?: boolean;
 }) {
   const queryClient = useQueryClient();
+  const fieldId = useId();
   const { toast } = useToast();
   const [search, setSearch] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
@@ -93,14 +83,6 @@ export function BuildVariantSelector({
     enabled: !value && !createOpen && search.trim().length >= 2,
   });
   const { data: products = [] } = useQuery<ProductSummary[]>({ queryKey: ["/api/products"] });
-  const { data: productVariants = [] } = useQuery<ProductVariantSummary[]>({
-    queryKey: ["/api/products", draft.productId, "variants"],
-    queryFn: async () => responseJson<ProductVariantSummary[]>(await fetch(
-      `/api/products/${draft.productId}/variants`,
-      { credentials: "include" },
-    )),
-    enabled: draft.productId != null,
-  });
 
   useEffect(() => {
     if (!createOpen) return;
@@ -128,8 +110,7 @@ export function BuildVariantSelector({
     && draft.name.trim().length > 0
     && Number.isSafeInteger(unitsPerVariant)
     && unitsPerVariant > 0
-    && (maxUnitsPerPackage == null || (Number.isSafeInteger(maxUnitsPerPackage) && maxUnitsPerPackage > 0))
-    && (draft.isBaseUnit || draft.parentVariantId != null);
+    && (maxUnitsPerPackage == null || (Number.isSafeInteger(maxUnitsPerPackage) && maxUnitsPerPackage > 0));
 
   const createMutation = useMutation({
     mutationFn: async () => {
@@ -142,8 +123,10 @@ export function BuildVariantSelector({
         hierarchyLevel: getVariantUomDefinition(draft.uomType).defaultHierarchyLevel,
         uomType: draft.uomType,
         barcode: draft.barcode.trim() || null,
-        parentVariantId: draft.isBaseUnit ? null : draft.parentVariantId,
-        isBaseUnit: draft.isBaseUnit,
+        // Creating a physical SKU grants no conversion permissions. Those live
+        // exclusively in its product's reviewed inventory behavior model.
+        parentVariantId: null,
+        isBaseUnit: isSingleUnitVariantUomType(draft.uomType),
         ...packageAttributes,
         shipsInOwnContainer: draft.shipsInOwnContainer,
         maxUnitsPerPackage,
@@ -238,10 +221,10 @@ export function BuildVariantSelector({
 
           <div className="grid gap-4 md:grid-cols-2">
             <div className="md:col-span-2">
-              <Label>Parent product *</Label>
+              <Label htmlFor={`${fieldId}-product`}>Parent product *</Label>
               <Popover open={productPickerOpen} onOpenChange={setProductPickerOpen}>
                 <PopoverTrigger asChild>
-                  <Button type="button" variant="outline" className="w-full justify-between bg-background font-normal">
+                  <Button id={`${fieldId}-product`} type="button" variant="outline" className="w-full justify-between bg-background font-normal">
                     {selectedProduct ? `${selectedProduct.sku ?? "-"} - ${selectedProduct.name}` : "Select catalog product"}
                     <Search className="h-4 w-4 text-muted-foreground" />
                   </Button>
@@ -257,7 +240,7 @@ export function BuildVariantSelector({
                             key={product.id}
                             value={String(product.id)}
                             onSelect={() => {
-                              setDraft((current) => ({ ...current, productId: product.id, parentVariantId: null }));
+                              setDraft((current) => ({ ...current, productId: product.id }));
                               setProductPickerOpen(false);
                               setProductSearch("");
                             }}
@@ -274,7 +257,7 @@ export function BuildVariantSelector({
               </Popover>
             </div>
             <div>
-              <Label>Type *</Label>
+              <Label htmlFor={`${fieldId}-type`}>Type *</Label>
               <Select
                 value={draft.uomType}
                 onValueChange={(value) => {
@@ -283,21 +266,20 @@ export function BuildVariantSelector({
                     ...current,
                     uomType,
                     unitsPerVariant: isSingleUnitVariantUomType(uomType) ? "1" : current.unitsPerVariant,
-                    parentVariantId: isSingleUnitVariantUomType(uomType) ? null : current.parentVariantId,
-                    isBaseUnit: isSingleUnitVariantUomType(uomType),
                     name: isSingleUnitVariantUomType(uomType) ? getVariantUomDefinition(uomType).label : current.name,
                   }));
                 }}
               >
-                <SelectTrigger className="bg-background"><SelectValue /></SelectTrigger>
+                <SelectTrigger id={`${fieldId}-type`} className="bg-background"><SelectValue /></SelectTrigger>
                 <SelectContent>{VARIANT_UOM_DEFINITIONS.map((definition) => (
                   <SelectItem key={definition.type} value={definition.type}>{definition.label}</SelectItem>
                 ))}</SelectContent>
               </Select>
             </div>
             <div>
-              <Label>Units per variant *</Label>
+              <Label htmlFor={`${fieldId}-units`}>Units per variant *</Label>
               <Input
+                id={`${fieldId}-units`}
                 className="bg-background"
                 type="number"
                 min="1"
@@ -308,46 +290,18 @@ export function BuildVariantSelector({
               />
             </div>
             <div>
-              <Label>SKU *</Label>
-              <Input className="bg-background font-mono" value={draft.sku} onChange={(event) => setDraft((current) => ({ ...current, sku: event.target.value }))} />
+              <Label htmlFor={`${fieldId}-sku`}>SKU *</Label>
+              <Input id={`${fieldId}-sku`} className="bg-background font-mono" value={draft.sku} onChange={(event) => setDraft((current) => ({ ...current, sku: event.target.value }))} />
             </div>
             <div>
-              <Label>Display name *</Label>
-              <Input className="bg-background" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
+              <Label htmlFor={`${fieldId}-name`}>Display name *</Label>
+              <Input id={`${fieldId}-name`} className="bg-background" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
             </div>
             <div>
               <Label>Barcode</Label>
               <Input className="bg-background" value={draft.barcode} onChange={(event) => setDraft((current) => ({ ...current, barcode: event.target.value }))} />
             </div>
-            {!isSingleUnitVariantUomType(draft.uomType) && (
-              <div className="space-y-2 md:col-span-2">
-                <div className="flex items-center gap-2">
-                  <Checkbox
-                    id={`${label.replace(/\s+/g, "-").toLowerCase()}-base-unit`}
-                    checked={draft.isBaseUnit}
-                    onCheckedChange={(checked) => setDraft((current) => ({
-                      ...current,
-                      isBaseUnit: checked === true,
-                      parentVariantId: checked === true ? null : current.parentVariantId,
-                    }))}
-                  />
-                  <Label htmlFor={`${label.replace(/\s+/g, "-").toLowerCase()}-base-unit`} className="font-normal">
-                    This is the smallest inventory unit and does not break down further
-                  </Label>
-                </div>
-                {!draft.isBaseUnit && (
-                  <div>
-                    <Label>Breaks into *</Label>
-                    <Select value={draft.parentVariantId == null ? "" : String(draft.parentVariantId)} onValueChange={(value) => setDraft((current) => ({ ...current, parentVariantId: Number(value) }))} disabled={!draft.productId}>
-                      <SelectTrigger className="bg-background"><SelectValue placeholder="Select smaller variant" /></SelectTrigger>
-                      <SelectContent>{productVariants
-                        .filter((variant) => variant.isActive !== false && variant.isActive !== 0 && variant.unitsPerVariant < unitsPerVariant)
-                        .map((variant) => <SelectItem key={variant.id} value={String(variant.id)}>{variant.sku ?? variant.name} ({variant.unitsPerVariant})</SelectItem>)}</SelectContent>
-                    </Select>
-                  </div>
-                )}
-              </div>
-            )}
+            <p className="text-xs text-muted-foreground md:col-span-2">This creates the physical SKU only. Set allowed directions and recipes in the product's Inventory behavior.</p>
           </div>
 
           <Button type="button" variant="ghost" className="px-0" onClick={() => setShowPackage((current) => !current)}>

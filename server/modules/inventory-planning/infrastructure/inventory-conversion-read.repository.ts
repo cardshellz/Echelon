@@ -1,9 +1,8 @@
-import type { Pool, PoolClient } from "pg";
+import type { Pool } from "pg";
 import { pool } from "../../../db";
 import type { AllowedConversion, InventoryConversionReader } from "../application/inventory-conversion-read.port";
 import { inventoryBehaviorSchema, permitsPackagePath } from "@shared/inventory/inventory-behavior";
-
-type QueryClient = Pick<PoolClient, "query" | "release">;
+import { allowedInventoryConversionSchema } from "@shared/types/inventory-conversions";
 
 /** Read-only adapter for the planning module's published conversion interface. */
 export class PostgresInventoryConversionReader implements InventoryConversionReader {
@@ -33,7 +32,7 @@ export class PostgresInventoryConversionReader implements InventoryConversionRea
       return result.rows.filter(row => permitsPackagePath(
         row.inventory_behavior == null ? undefined : inventoryBehaviorSchema.parse(row.inventory_behavior),
         row.operation_type, row.transformation_recipe_binding_id != null,
-      )).map((row) => ({
+      )).map((row) => allowedInventoryConversionSchema.parse({
         sourceVariantId: Number(row.source_variant_id), destinationVariantId: Number(row.destination_variant_id),
         operationType: row.operation_type, inputQty: Number(row.input_qty), outputQty: Number(row.output_qty),
       }));

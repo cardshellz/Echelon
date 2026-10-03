@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 
 import { projectInventoryLevels } from "../../application/inventory-levels.query";
 
+const conversions = { getAllowedConversions: async () => [] };
+
 function row(input: {
   variantId: number;
   sku: string;
@@ -37,6 +39,29 @@ function row(input: {
 }
 
 describe("projectInventoryLevels", () => {
+  it("exposes only the active reader's paths and ignores contradictory parent links", async () => {
+    const path = { sourceVariantId: 300, destinationVariantId: 200, operationType: "break_pack" as const, inputQty: 1, outputQty: 5 };
+    const reader = { getAllowedConversions: vi.fn(async () => [path]) };
+    const result = await projectInventoryLevels({
+      conversions: reader,
+      atp: { getAtpPerVariant: async () => [], getAtpPerVariantByWarehouse: async () => [] },
+      rows: [
+        { ...row({ variantId: 200, sku: "P5", unitsPerVariant: 5, variantQty: 0, reservedQty: 0, inventoryStrategy: "physical_only" }), hierarchy_level: 2 },
+        row({ variantId: 300, sku: "C25", unitsPerVariant: 25, variantQty: 10, reservedQty: 0, inventoryStrategy: "physical_only", parentVariantId: 999 }),
+      ],
+    });
+    expect(reader.getAllowedConversions).toHaveBeenCalledOnce();
+    expect(result[0]).toMatchObject({ allowedConversions: [path], noCaseBreak: false });
+    expect(result[1]?.allowedConversions).toEqual([]);
+  });
+
+  it("does not substitute parent links when the authority read fails", async () => {
+    await expect(projectInventoryLevels({
+      rows: [row({ variantId: 200, sku: "P5", unitsPerVariant: 5, variantQty: 1, reservedQty: 0, inventoryStrategy: "physical_fungible", parentVariantId: 300 })],
+      atp: { getAtpPerVariant: async () => [], getAtpPerVariantByWarehouse: async () => [] },
+      conversions: { getAllowedConversions: async () => { throw new Error("Model unavailable"); } },
+    })).rejects.toThrow("Model unavailable");
+  });
   it("does not hide zero-physical warehouse rows based on the retired Catalog strategy", () => {
     const source = readFileSync(new URL("../../infrastructure/inventory.repository.ts", import.meta.url), "utf8");
     const query = source.slice(source.indexOf("async getInventoryLevelsSummary("), source.indexOf("async getInventoryByBin("));
@@ -60,6 +85,7 @@ describe("projectInventoryLevels", () => {
         row({ variantId: 300, sku: "QUAD-BOX-TOP-C25", unitsPerVariant: 25, variantQty: 87, reservedQty: 3, inventoryStrategy: "recipe_managed" }),
       ],
       atp,
+      conversions,
     });
 
     expect(result.map(({ sku, variantQty, reservedQty, unreservedQty, atpUnits, available }) => (
@@ -85,6 +111,7 @@ describe("projectInventoryLevels", () => {
     const result = await projectInventoryLevels({
       rows: [row({ variantId: 100, sku: "QUAD-BOX-TOP-EA", unitsPerVariant: 1, variantQty: 0, reservedQty: 0, inventoryStrategy: "recipe_managed" })],
       atp,
+      conversions,
       warehouseId: 7,
     });
 
@@ -104,6 +131,7 @@ describe("projectInventoryLevels", () => {
     const result = await projectInventoryLevels({
       rows: [row({ variantId: 200, sku: "LEGACY-P5", unitsPerVariant: 5, variantQty: 5, reservedQty: 3, inventoryStrategy: "physical_fungible" })],
       atp,
+      conversions,
     });
 
     expect(result[0]).toMatchObject({
@@ -133,6 +161,7 @@ describe("projectInventoryLevels", () => {
         row({ variantId: 200, sku: "B-P5", unitsPerVariant: 5, variantQty: 3, reservedQty: 0, inventoryStrategy: "physical_only", productId: 20 }),
       ],
       atp,
+      conversions,
     });
 
     expect(result.map(({ variantId, atpUnits, available }) => ({ variantId, atpUnits, available }))).toEqual([

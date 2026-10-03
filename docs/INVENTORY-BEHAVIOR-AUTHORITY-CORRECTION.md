@@ -1,13 +1,16 @@
 # Product inventory behavior: authority correction
 
-Date: 2026-10-02. Source baseline: `origin/main` at
-`f3480b7ba67fab6ad58be9a7ebdacd769c86ba74` (PR #1643).
+Date: 2026-10-02. Final source baseline: `origin/main` at
+`62e80322f` (PR #1645), fetched again after implementation.
 Implementation branch: `codex/product-inventory-behavior-authority`.
 
-Final main refresh: `dede4daf2` (PR #1644) contains nine Dropship-only file changes
-since this branch's base, with no overlapping changed files or migrations. The
-implementation/tests reported here remain based on `f3480b7ba`; migration prefix
-0718 is still unclaimed on the refreshed main.
+The initial behavior correction was checkpointed as `dba14c3f5`, current main was
+merged locally, and the automatic pick conversion fix from PR #1642
+(`955ef9cb0699ea1f78e90e4a5bdb835d538ee1d8`) was integrated as `d3d4e32e0`.
+They are one coordinated branch for review. This is not a claim that PR #1642
+was merged, or that this branch was pushed, merged, deployed or activated.
+Migration prefix 0718 remains unclaimed on the refreshed main.
+The original diagnosis below used baseline `f3480b7ba` (PR #1643).
 
 ## What the code definitely does
 
@@ -67,13 +70,13 @@ Line references below are to this branch's corrected files.
 | Database constraints | `inventory.guard_model_inventory_behavior`, `migrations/0718_inventory_model_behavior.sql:17` | Deferred final-state checks reject validated definitions whose mode contradicts allowed paths or bindings. Existing sealed-definition guards protect the added field. |
 | Review / Apply | `PostgresProductDefinitionStore.apply:23`, `captureReview:88`, `captureDefinitionImpact:129` in `server/modules/inventory-planning/infrastructure/inventory-product-definition.repository.ts` | Existing reviewed, hash-bound, idempotent promotion. Recalculates warehouse ATP and channel quantities using the same planner and enqueues publication atomically. No global cutover or physical movement. |
 | ATP and new claims | `buildContext:628`, `projectCanonicalAtp:1073`, `planCanonicalClaim:1210` in `server/modules/inventory-planning/domain/inventory-availability-planner.ts` | Both calculations share the same mode restrictions. Incompatible paths/bindings produce blockers and are not used; eligible exact stock remains usable. |
-| Conversion readers | `PostgresInventoryConversionReader.getAllowedConversions`, `server/modules/inventory-planning/infrastructure/inventory-conversion-read.repository.ts:12` | Read only the active sealed valid model, then apply mode restrictions. No legacy parent/ratio fallback. |
+| Conversion readers | `PostgresInventoryConversionReader.getAllowedConversions`, `server/modules/inventory-planning/infrastructure/inventory-conversion-read.repository.ts:11` | Read only the active sealed valid model, then apply mode restrictions and validate the returned DTO. No legacy parent/ratio fallback. |
 | Manual break / assemble | `authorizePackageConversionDefinition:304` and `assertBehaviorPermission:209` in `server/modules/inventory/domain/transformation-execution-authority.ts`; callers `breakVariant:157,209`, `assembleVariant:296,333` in `server/modules/inventory/application/break-assembly.use-cases.ts` | Reject operations forbidden by the model mode; authorize and re-pin the exact path inside the movement transaction. |
 | Replenishment | `planCanonicalTaskExecution:1226`, authorization at `1278`, execution pin at `1363`, in `server/modules/inventory/application/replenishment.use-cases.ts` | The existing replenishment executor uses the same transformation authority. A picker action cannot invent a conversion. |
 | Component inventory changes | `PostgresInventorySupplyDependencyReader.getAffectedProductIds:21` in `server/modules/inventory-planning/infrastructure/inventory-supply-dependency-read.repository.ts`; `queueVariantInventorySync:522` in `server/services/index.ts` | A repeatable-read, runtime-pinned read follows the transitive sealed binding graph, including dependent package siblings. It queues the existing publication/replenishment mechanism; it does not calculate or authorize ATP. Cycles deduplicate, invalid identities fail, and an oversized graph is rejected rather than truncated. |
 | Warehouse inventory rows | `getInventoryLevelsSummary:862,904` in `server/modules/inventory/infrastructure/inventory.repository.ts`; `projectInventoryLevels:55` in `server/modules/inventory/application/inventory-levels.query.ts` | Zero-physical active tracked SKUs remain available to canonical ATP projection regardless of the retired flag, matching the all-warehouses query. Physical quantities are unchanged. |
 | Component builds | `authorizeBuildBindingDefinition:503` in `server/modules/inventory/domain/transformation-execution-authority.ts`; `PostgresCanonicalClaimBuildRepository.handoffOperation:106,144`, `executeOperation:528,644` in `server/modules/inventory/infrastructure/canonical-claim-build.repository.ts` | Build-managed mode plus the exact sealed recipe binding is required. Retained claims use their recorded model, not a new Catalog flag. |
-| Pick operation execution | `assertOperationMatchesPlan:2205` and `executeLockedPackageOperation:6522` in `server/modules/inventory-planning/infrastructure/inventory-availability-claim.repository.ts` | Execute only the operation recorded in the hashed claim plan. This correction does not retroactively rewrite historical claims or add a reverse operation. |
+| Pick operation execution | `materializePickPackageConversions:6480` and `executeLockedPackageOperation:6531` in `server/modules/inventory-planning/infrastructure/inventory-availability-claim.repository.ts`; `isClaimPickRepackaging:86` in `domain/claim-pick-package-conversions.ts` | Execute approved, outstanding package operations recorded in the claim before its pick, including recipe-backed same-product repackaging. Conversion and pick share the transaction. Cross-product component assembly still uses assembly work; no inferred reverse operation or rewriting of historical claims. |
 | Runtime composition | `server/services/index.ts:205,248-289`; `PostgresInventoryAvailabilityRuntimeClaimExecutor.execute:85` in `server/modules/inventory-planning/infrastructure/inventory-availability-runtime-claim.repository.ts` | Production composition injects the authority-aware ATP, claim and transformation services. Legacy paths remain isolated for legacy runtime compatibility. |
 
 ### Catalog workflow
@@ -90,6 +93,22 @@ draft reason was added. The automatic audit note records the action. See
 The obsolete read-only `ProductBuildRelationships` component was removed and
 replaced by `ProductRecipeRules`; it remains recoverable from Git. Overview links
 to the Variants authority editor. No new standalone configuration page was added.
+
+### Additional audit gaps closed in this coordinated branch
+
+| Gap | Corrected code and reasoning | Regression evidence |
+|---|---|---|
+| Mutable legacy recipes were still loaded into operational snapshots. | `captureGraphInsideTransaction`, `server/modules/inventory-planning/infrastructure/inventory-availability-shadow.repository.ts:434`, now loads them only for an explicitly requested legacy shadow comparison. Active ATP, active claims and reviewed product/safety snapshots use sealed definitions only. The default at `captureInsideTransaction:706` is false; only `PostgresInventoryAvailabilityShadowRepository.captureSupplySnapshot:1124` opts in. Stored old snapshots and hashes are not rewritten. | `inventory-availability-shadow.repository.test.ts:29` throws on any legacy recipe query and proves the operational readers still work; `:51` retains explicit comparison coverage. |
+| Summary endpoints calculated legacy ATP before overwriting its numbers. | `AuthorityAwareInventoryAtpService.getProductSummary:199` and `getInventoryItemSummary:232`, `server/modules/inventory-planning/application/inventory-availability-runtime-atp.service.ts`, now branch before invoking any legacy summary. Canonical mode reads physical facts with `readInventoryProductBalances`, `infrastructure/inventory-product-balances.reader.ts:5`, and uses the existing canonical planner for availability. Picked is not subtracted again from physical stock. Legacy strategy remains compatibility metadata only. | `inventory-availability-runtime-atp.service.test.ts:102` rejects every legacy summary call; `inventory-cutover-composition.integration.test.ts:197` exercises the real SQL read, including missing product behavior. `inventory-product-balances.test.ts` covers integer validation and overflow. |
+| Inventory actions and warnings still inferred conversions from parent pointers. | `projectInventoryLevels`, `server/modules/inventory/application/inventory-levels.query.ts:60`, supplies `allowedConversions` from the read port. `allowedCaseBreakSources`, `client/src/features/inventory/allowed-case-breaks.ts:13`, permits only an explicit direct break path, never a transitive shortcut. `AuthorizedCaseBreakLocationRows`, `client/src/pages/Inventory.tsx:381`, passes the saved integer batch quantities to the command dialog. Missing/failed authority never falls back to parent inference. | `inventory-levels.query.test.ts`, `allowed-case-breaks.test.ts`, and `test/browser/inventory-availability.spec.ts:166,217` cover contradictory old parents, missing permission, whole batches and fractional-quantity rejection. |
+| Catalog and contextual recipe SKU creation exposed retired parent controls. | `BuildVariantSelector`, `client/src/features/inventory-builds/BuildVariantSelector.tsx:56,304`, creates a physical SKU without a parent or any conversion grant. ProductDetail removes the old parent column/editor and directs configuration to Inventory behavior (`client/src/pages/ProductDetail.tsx:4303`). Receiving's missing-parent detector was removed from `evaluateReceiveWarnings`, `server/modules/procurement/receive-validation.service.ts:94`; unrelated quantity/cost warnings remain. | `inventory-builds-ui.test.ts`, `receive-validation.service.test.ts`, and the desktop/mobile creation flow at `test/browser/catalog-conversions.spec.ts:111` prove a P5 can be created without inventing an EA or parent permission. |
+| Duplication silently copied legacy flags/parents but no active model. | `duplicateProduct`, `server/modules/catalog/product-duplicate.service.ts:61`, now requires a draft, resets legacy strategy to physical-only compatibility metadata (`:127`), and drops copied parent links (`:142`). It does **not** clone any model, path or recipe permission. `ProductDetail.tsx:1808,2717` explains this and opens the new copy's Variants tab for explicit setup. | `product-duplicate.service.test.ts` verifies draft-only input, no parent writes and reset metadata. This is explicit setup, not automatic model cloning. |
+
+All relative test filenames in the first two rows are under
+`server/modules/inventory-planning/__tests__/unit/`, except the explicitly named
+composition integration test under `__tests__/integration/`. Inventory tests are
+under their owning module/feature. No new ATP engine or production cutover is
+introduced by these changes.
 
 ## What is likely happening — historical Quad Box limitation
 
@@ -129,6 +148,16 @@ not a fresh production stock assertion.
 - Deploy the additive migration with the application change. New queries read
   the added column. Do not activate product successors during a mixed-version
   rollout where an older application instance could ignore the explicit mode.
+- Automatic pick conversion follows the configured inline/queued replenishment
+  policy. It performs only an approved package operation; it does not assert that
+  physical component assembly happened. Existing component-work handoffs remain.
+- A duplicate's setup is explicit rather than automatically remapping recipes.
+  It starts as a draft with no active model. This does not add a universal guard
+  to every later Catalog status-edit endpoint, nor redesign the existing
+  multi-step catalog duplication transaction. No inventory movement occurs there.
+- Inventory action hints and ATP are separate read requests; an intervening model
+  change may make a displayed action stale. The movement transaction reauthorizes
+  the exact operation and rejects it rather than trusting the browser's hint.
 - Warehouse-specific inventory views now retain zero-physical active tracked
   SKUs, like the all-warehouses view, so valid conversion/build ATP is not hidden.
   The existing per-product ATP read pattern remains; this is not a pagination or
@@ -153,47 +182,38 @@ not a fresh production stock assertion.
 
 - TypeScript application and both test-project checks passed with incremental
   output disabled because this isolated worktree shares a dependency junction.
-- Final focused regression batch: **197 passed in 13 files**, including the
-  migration-prefix collision guard, Catalog controls, mode-sensitive planner,
-  transformation execution authority and recipe authoring.
-- After the dependency-refresh and warehouse-view corrections, the complete
-  affected inventory/planning unit and Catalog batch passed: **3,297 tests in
-  238 files**, with no failures or skips. Application and server-test TypeScript
-  checks were rerun successfully after those corrections.
-- Browser: **28 passed**, desktop and mobile. Tests cover all three modes,
-  recipe selection, active/draft separation, permissions, stale saves, unchanged
-  retry identity, and Review/Apply.
-- Disposable local PostgreSQL: **116 distinct tests passed** — foundation 51,
-  transformation execution authority 7, cutover composition 58. These exercise the real migration,
-  sealed immutability, invalid mode rollback, stale head rollback, idempotent draft
-  writes, active/retained execution authority and transitive canonical refresh
-  without mutable recipe/Catalog tables. The dedicated clusters were stopped.
-- Unit/contract coverage includes mode-sensitive ATP/claims, exact recipe direction,
-  old hash compatibility, reference/permission validation and legacy-independent
-  canonical recipe authoring. Broader repository run before the final dependency
-  refresh additions: **20,698 passed, 1 failed, 2,141
-  pending/skipped**. The one failure was a local `fetch failed` in the unrelated
-  `purchasing-admin.routes.test.ts`; that suite and the final Catalog render suite
-  passed separately (**31 tests**). This is not a claim of a fully green full-suite
-  run. Environment-gated integration suites are not claimed as executed.
-- Initial full runs exposed unrelated CRLF-sensitive source-text assertions and
-  two local HTTP fetch failures. LF normalization of unchanged files was verified
-  to preserve Git blob identity; HTTP suites passed separately (87 tests). No
-  Dropship feature change belongs to this correction. The temporary line-ending
-  normalization was reversed after testing, with all 14 files matching their
-  original Git blob identities.
+- Coordinated inventory/planning unit, Catalog, receiving and UI-contract batch:
+  **3,610 passed in 273 files**, with 118 environment-gated tests skipped across
+  four files, zero failures. The final run includes the added balance validation
+  and runtime-summary regressions. Its JSON evidence is retained locally at
+  `.codex-audits/final-gap-regressions.json` (not committed).
+- Browser: **34 passed** — Catalog 30, inventory availability 4 — desktop and
+  mobile. Includes all three modes, recipe selection, active/draft separation,
+  permissions, stale/retried commands, Review/Apply, recipe SKU creation without
+  legacy parents, authoritative case-break hints and exact integer batches.
+  Mobile recipe creation and desktop mode controls were also visually inspected.
+- Disposable local PostgreSQL: **135 distinct tests passed** — foundation 51,
+  transformation execution authority 7, cutover composition 59, automatic pick
+  conversion 18. Covers real migration, sealed immutability, contradictory mode
+  rollback, stale heads, idempotency, retained execution authority, summary SQL,
+  conversion/pick rollback, insufficient input and recipe-backed package picks.
+  Dedicated clusters were stopped. An initial runner invocation used an incorrect
+  authority-test path (no tests found); the correct seven-test suite was then run
+  successfully. No skipped database test is counted as a pass.
+- Migration prefix collision guard passed. Final refreshed main has no 0718
+  migration. Whitespace checks passed. No full-repository or GitHub CI green
+  claim is made here; earlier exploratory full-suite environment failures are
+  not silently represented as resolved by this targeted verification.
 
 ## What is not proven / next checks
 
 1. This branch is not merged or deployed. Local verification is not production
    acceptance. Review the complete diff and CI before deployment.
-2. The automatic recipe-backed package operation needed by order 63662 is a
-   separate existing fix: [PR #1642](https://github.com/cardshellz/Echelon/pull/1642),
-   verified open/unmerged during this investigation. Current main's
-   `materializePickCaseBreaks` (`inventory-availability-claim.repository.ts:6479`)
-   still selects only `break_pack`, not `directed_conversion`. Do not claim this
-   behavior-selector correction alone clears that order. Coordinate the two fixes
-   without introducing C25 → P5 authority.
+2. The automatic recipe-backed package fix from
+   [PR #1642](https://github.com/cardshellz/Echelon/pull/1642) is now integrated and
+   tested on this branch. Order 63662 has **not** been retried or recovered here;
+   its current claim, operation inputs and physical assembly remain a separate
+   production verification. Passing fixture tests does not prove it is cleared.
 3. After deployment, verify the Catalog controls and the saved active Quad Box
    model. Any mode/path/recipe change requires a reviewed successor; no blanket
    production rewrite is included here.
