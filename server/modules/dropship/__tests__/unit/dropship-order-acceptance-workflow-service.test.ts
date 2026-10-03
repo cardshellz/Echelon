@@ -249,6 +249,50 @@ describe("DropshipOrderAcceptanceWorkflowService", () => {
     expect(acceptanceService.lastInput).toBeNull();
   });
 
+  // A vendor may press Accept on a failed, held or processing order, which
+  // acceptance may already have staged with its own quote; each click sends a
+  // new key, so pricing a new quote would have the stage refuse the order.
+  it("replays the staged quote when acceptance already staged the intake", async () => {
+    const repository = new FakeWorkflowRepository();
+    repository.context = { ...repository.context, stagedShippingQuoteSnapshotId: 3652 };
+    const shippingQuoteService = new FakeShippingQuoteService();
+    const acceptanceService = new FakeAcceptanceService();
+    const service = new DropshipOrderAcceptanceWorkflowService({
+      vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
+      repository,
+      shippingQuoteService,
+      acceptanceService,
+      logger: noopLogger,
+    });
+
+    const result = await service.acceptOrderForMember("member-1", {
+      intakeId: 7,
+      idempotencyKey: "accept-order-007-second-click",
+    });
+
+    expect(shippingQuoteService.replayInputs).toEqual([{ vendorId: 10, storeConnectionId: 22, quoteSnapshotId: 3652 }]);
+    expect(shippingQuoteService.lastInput).toBeNull();
+    expect(acceptanceService.lastInput).toMatchObject({ intakeId: 7, shippingQuoteSnapshotId: 3652 });
+    expect(result.quote).toMatchObject({ quoteSnapshotId: 3652, idempotentReplay: true });
+  });
+
+  it("does not need the store's default warehouse to replay a staged quote", async () => {
+    const repository = new FakeWorkflowRepository();
+    repository.context = { ...repository.context, defaultWarehouseId: null, stagedShippingQuoteSnapshotId: 3652 };
+    const shippingQuoteService = new FakeShippingQuoteService();
+    const service = new DropshipOrderAcceptanceWorkflowService({
+      vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
+      repository,
+      shippingQuoteService,
+      acceptanceService: new FakeAcceptanceService(),
+      logger: noopLogger,
+    });
+
+    await service.acceptOrderForMember("member-1", { intakeId: 7, idempotencyKey: "accept-order-007" });
+
+    expect(shippingQuoteService.replayInputs).toHaveLength(1);
+  });
+
   it("keeps derived quote idempotency keys inside the accepted length range", () => {
     const longKey = "accept-order-" + "x".repeat(220);
 
@@ -263,6 +307,7 @@ class FakeWorkflowRepository implements DropshipOrderAcceptanceWorkflowRepositor
     storeConnectionId: 22,
     defaultWarehouseId: 3,
     normalizedPayload: makeNormalizedPayload(),
+    stagedShippingQuoteSnapshotId: null,
   };
   lastInput: { vendorId: number; intakeId: number } | null = null;
 
@@ -287,9 +332,19 @@ class FakeVendorProvisioningService {
 
 class FakeShippingQuoteService {
   lastInput: unknown = null;
+  replayInputs: unknown[] = [];
+
+  async replayQuoteSnapshot(input: { quoteSnapshotId: number }): Promise<DropshipShippingQuoteResult> {
+    this.replayInputs.push(input);
+    return { ...this.quoteResult(), quoteSnapshotId: input.quoteSnapshotId, idempotentReplay: true };
+  }
 
   async quote(input: unknown): Promise<DropshipShippingQuoteResult> {
     this.lastInput = input;
+    return this.quoteResult();
+  }
+
+  private quoteResult(): DropshipShippingQuoteResult {
     return {
       quoteSnapshotId: 44,
       idempotentReplay: false,

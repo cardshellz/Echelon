@@ -147,6 +147,23 @@ describe("WmsSyncService required dropship acceptance claim", () => {
     );
   });
 
+  // Order 22039: staging filtered on OMS authority, which an unpaid dropship
+  // line does not have yet, so it materialized nothing and acceptance failed
+  // with "Dropship acceptance staging did not materialize a WMS order."
+  it("chooses every new WMS item quantity by sync mode, so staging uses the ordered quantity", () => {
+    const implementation = readWmsSyncSource();
+    const syncBody = implementation.slice(
+      implementation.indexOf("private async syncOmsOrderToWmsInternal("),
+      implementation.indexOf("private determineWarehouseStatus("),
+    );
+
+    expect(syncBody).toContain("omsLineQuantityToMaterialize(line, mode) > 0");
+    expect(syncBody).toContain("omsLineRemainingQuantityToMaterialize(line, mode) > 0");
+    expect(syncBody).toMatch(/buildWmsLineItemFromOmsLine\(\s*tx,\s*line,\s*omsLineRemainingQuantityToMaterialize\(line, mode\)/);
+    // Authority-only reads remain only on the residual-recovery path.
+    expect(syncBody).not.toMatch(/getOmsLineMaterializableQuantity\(/);
+  });
+
   it("keeps staged replay fail-closed for every operational WMS status", () => {
     const source = WmsSyncService.prototype.stageOmsOrderAndClaimInventory.toString();
     const implementation = readWmsSyncSource();

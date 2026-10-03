@@ -3,6 +3,7 @@ import { DropshipError } from "../../domain/errors";
 import {
   DATABASE_CONSTRAINT_VIOLATION_CODE,
   DATABASE_QUERY_INVALID_CODE,
+  DROPSHIP_OMS_LINE_AUTHORITY_REFUSED_CODE,
   DropshipOrderProcessingService,
   aggregateQuoteItems,
   classifyOrderProcessingError,
@@ -71,6 +72,67 @@ describe("DropshipOrderProcessingService", () => {
     expect(logs).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: "DROPSHIP_ORDER_PROCESSING_COMPLETED" }),
     ]));
+  });
+
+  // Order 22039 (intake 43): acceptance staged it with quote 3652; a later pass
+  // with a new request key (an ops "Process" click) priced a new quote, and the
+  // stage refused it as DROPSHIP_ORDER_ACCEPTANCE_IDEMPOTENCY_CONFLICT.
+  it.each([
+    { label: "the processing job's key", idempotencyKey: "dropship-order-processing:intake:1" },
+    { label: "an ops Process click's new key", idempotencyKey: "admin-order-process-1-a1b2c3d4" },
+  ])("replays the staged quote for a staged intake under $label", async ({ idempotencyKey }) => {
+    const repository = new FakeProcessingRepository(makeClaim({ stagedShippingQuoteSnapshotId: 3652 }));
+    const quoteService = new FakeShippingQuoteService();
+    const acceptanceService = new FakeAcceptanceService();
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: quoteService,
+      orderAcceptance: acceptanceService,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    const result = await service.processIntake({ intakeId: 1, workerId: "worker-1", idempotencyKey });
+
+    expect(quoteService.replayInputs).toEqual([{ vendorId: 10, storeConnectionId: 22, quoteSnapshotId: 3652 }]);
+    expect(quoteService.lastInput).toBeNull();
+    expect(repository.resolveQuoteItemsCalls).toBe(0);
+    expect(acceptanceService.lastInput).toMatchObject({ intakeId: 1, shippingQuoteSnapshotId: 3652 });
+    expect(result.outcome).toBe("accepted");
+  });
+
+  it("fails the pass without accepting when the staged quote cannot be loaded", async () => {
+    const repository = new FakeProcessingRepository(makeClaim({ stagedShippingQuoteSnapshotId: 3652 }));
+    const acceptanceService = new FakeAcceptanceService();
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: {
+        replayQuoteSnapshot: async () => {
+          throw new DropshipError(
+            "DROPSHIP_SHIPPING_QUOTE_SNAPSHOT_NOT_FOUND",
+            "The saved shipping quote was not found for this vendor and store.",
+            { vendorId: 10, storeConnectionId: 22, quoteSnapshotId: 3652 },
+          );
+        },
+        quote: async () => {
+          throw new Error("A staged intake must not be quoted again.");
+        },
+      },
+      orderAcceptance: acceptanceService,
+      notificationSender: new FakeNotificationSender(),
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    const result = await service.processIntake({ intakeId: 1, workerId: "worker-1", idempotencyKey: "process-intake-1" });
+
+    expect(result).toMatchObject({
+      outcome: "failed",
+      failureCode: "DROPSHIP_SHIPPING_QUOTE_SNAPSHOT_NOT_FOUND",
+      retryable: false,
+    });
+    expect(repository.failure).toMatchObject({ status: "failed", retryable: false });
+    expect(acceptanceService.lastInput).toBeNull();
   });
 
   it("continues to acceptance when the quote carries packaging warnings", async () => {
@@ -277,6 +339,7 @@ describe("DropshipOrderProcessingService", () => {
     const service = new DropshipOrderProcessingService({
       repository,
       shippingQuote: {
+        replayQuoteSnapshot: unexpectedQuoteReplay,
         quote: async () => {
           throw new DropshipError(
             "DROPSHIP_CARRIER_RATE_PROVIDER_UNAVAILABLE",
@@ -331,6 +394,7 @@ describe("DropshipOrderProcessingService", () => {
     const service = new DropshipOrderProcessingService({
       repository,
       shippingQuote: {
+        replayQuoteSnapshot: unexpectedQuoteReplay,
         quote: async () => {
           throw constraintError;
         },
@@ -408,11 +472,47 @@ describe("DropshipOrderProcessingService", () => {
     expect(JSON.stringify(notificationSender.sent[0])).not.toContain("p.tier");
   });
 
+  it("leaves the intake failed, and tells the vendor only that staff can retry, when OMS refuses line authority", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const notificationSender = new FakeNotificationSender();
+    const acceptanceService = new FakeAcceptanceService();
+    acceptanceService.acceptOrder = async () => {
+      throw new DropshipError(
+        DROPSHIP_OMS_LINE_AUTHORITY_REFUSED_CODE,
+        "OMS refused fulfillment authority for the accepted order's lines: A dropship OMS line was cancelled or refunded before its order was paid.",
+        { intakeId: 1, omsOrderId: 1001, omsErrorCode: "OMS_LINE_AUTHORITY_GRANT_LINE_ADJUSTED" },
+      );
+    };
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: new FakeShippingQuoteService(),
+      orderAcceptance: acceptanceService,
+      notificationSender,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    const result = await service.processIntake({ intakeId: 1, workerId: "worker-1", idempotencyKey: "process-intake-1" });
+
+    expect(result).toMatchObject({
+      outcome: "failed",
+      failureCode: DROPSHIP_OMS_LINE_AUTHORITY_REFUSED_CODE,
+      retryable: false,
+    });
+    expect(repository.failure).toMatchObject({ status: "failed", retryable: false });
+    expect(notificationSender.sent[0]).toMatchObject({
+      eventType: "dropship_order_processing_failed",
+      message: "Order intake 1 could not be processed: an internal Card Shellz error stopped it; the order is saved and Card Shellz staff can retry it.",
+    });
+    expect(JSON.stringify(notificationSender.sent[0])).not.toContain("OMS refused");
+  });
+
   it("keeps an unexpected error that is not a constraint violation retryable", async () => {
     const repository = new FakeProcessingRepository(makeClaim());
     const service = new DropshipOrderProcessingService({
       repository,
       shippingQuote: {
+        replayQuoteSnapshot: unexpectedQuoteReplay,
         quote: async () => {
           throw Object.assign(new Error("Connection terminated unexpectedly"), { code: "ECONNRESET" });
         },
@@ -992,6 +1092,8 @@ class FakeProcessingRepository implements DropshipOrderProcessingRepository {
   failure: Parameters<DropshipOrderProcessingRepository["markIntakeFailure"]>[0] | null = null;
   expiredHold: Parameters<DropshipOrderProcessingRepository["markPaymentHoldExpired"]>[0] | null = null;
 
+  resolveQuoteItemsCalls = 0;
+
   constructor(private readonly claim: DropshipOrderProcessingClaim) {}
 
   async claimIntake(): Promise<DropshipOrderProcessingClaim> {
@@ -999,6 +1101,7 @@ class FakeProcessingRepository implements DropshipOrderProcessingRepository {
   }
 
   async resolveQuoteItems(): Promise<DropshipOrderProcessingQuoteItem[]> {
+    this.resolveQuoteItemsCalls += 1;
     return this.claim.intake.normalizedPayload.lines.map((line, lineIndex) => ({
       lineIndex,
       productVariantId: line.productVariantId ?? 101,
@@ -1020,11 +1123,25 @@ class FakeProcessingRepository implements DropshipOrderProcessingRepository {
   }
 }
 
+async function unexpectedQuoteReplay(): Promise<DropshipShippingQuoteResult> {
+  throw new Error("This test's intake has no acceptance stage; its quote must not be replayed.");
+}
+
 class FakeShippingQuoteService {
   lastInput: unknown = null;
+  replayInputs: unknown[] = [];
+
+  async replayQuoteSnapshot(input: { quoteSnapshotId: number }): Promise<DropshipShippingQuoteResult> {
+    this.replayInputs.push(input);
+    return { ...(await this.quoteResult()), quoteSnapshotId: input.quoteSnapshotId, idempotentReplay: true };
+  }
 
   async quote(input: unknown): Promise<DropshipShippingQuoteResult> {
     this.lastInput = input;
+    return this.quoteResult();
+  }
+
+  private async quoteResult(): Promise<DropshipShippingQuoteResult> {
     return {
       quoteSnapshotId: 33,
       idempotentReplay: false,
@@ -1050,6 +1167,8 @@ class FakeShippingQuoteService {
 }
 
 class FakePackagingWarningQuoteService {
+  replayQuoteSnapshot = unexpectedQuoteReplay;
+
   async quote(): Promise<DropshipShippingQuoteResult> {
     return {
       quoteSnapshotId: 34,
@@ -1248,6 +1367,7 @@ function makeClaim(overrides: Partial<DropshipOrderProcessingClaim> = {}): Drops
     skipReason: null,
     intake: baseIntake(),
     config: { defaultWarehouseId: 3, warehouseConfigError: null },
+    stagedShippingQuoteSnapshotId: null,
     ...overrides,
   };
 }
