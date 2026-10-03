@@ -820,37 +820,47 @@ function parseProcessInput(input: unknown): ProcessDropshipOrderIntakeInput {
 }
 
 export const DATABASE_CONSTRAINT_VIOLATION_CODE = "DROPSHIP_ORDER_PROCESSING_DATABASE_CONSTRAINT_VIOLATION";
+export const DATABASE_QUERY_INVALID_CODE = "DROPSHIP_ORDER_PROCESSING_DATABASE_QUERY_INVALID";
 
 /**
- * PostgreSQL SQLSTATE class 23, "integrity constraint violation": a foreign key,
- * unique, not-null, check or exclusion constraint refused the write. The same
- * order hits the same constraint on every attempt until code or data changes,
- * so the error is permanent. Retrying it each pass never succeeds; it only
- * fills the audit trail (an order looping on a foreign key was claimed 356
- * times an hour). The intake is left failed for review instead, where ops can
- * Retry it once the cause is fixed.
+ * PostgreSQL errors that fail the same way on every attempt until code, schema
+ * or data changes, keyed by SQLSTATE class (the code's first two characters):
+ * - 23, "integrity constraint violation": a foreign key, unique, not-null,
+ *   check or exclusion constraint refused the write.
+ * - 42, "syntax error or access rule violation": the query names a column,
+ *   table or function the database does not have, is malformed, or lacks a
+ *   permission. That is a code or schema defect, which only a deploy fixes.
+ * Retrying them each pass never succeeds; it only fills the audit trail (order
+ * 22039 was claimed 356 times an hour on a foreign key, then 192 times in half
+ * an hour on a missing column). The intake is left failed for review instead,
+ * where ops can Retry it once the cause is fixed.
  */
-const POSTGRES_INTEGRITY_CONSTRAINT_VIOLATION_SQLSTATE = /^23[0-9A-Z]{3}$/;
+const PERMANENT_DATABASE_ERROR_CODE_BY_SQLSTATE_CLASS: ReadonlyMap<string, string> = new Map([
+  ["23", DATABASE_CONSTRAINT_VIOLATION_CODE],
+  ["42", DATABASE_QUERY_INVALID_CODE],
+]);
+const POSTGRES_SQLSTATE = /^[0-9A-Z]{5}$/;
 
-export function isDatabaseConstraintViolation(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  const code = (error as { code?: unknown }).code;
-  return typeof code === "string" && POSTGRES_INTEGRITY_CONSTRAINT_VIOLATION_SQLSTATE.test(code);
+/** The failure code for a PostgreSQL error that retrying cannot fix, or null for any other error. */
+export function permanentDatabaseErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const sqlstate = (error as { code?: unknown }).code;
+  if (typeof sqlstate !== "string" || !POSTGRES_SQLSTATE.test(sqlstate)) return null;
+  return PERMANENT_DATABASE_ERROR_CODE_BY_SQLSTATE_CLASS.get(sqlstate.slice(0, 2)) ?? null;
 }
 
 /**
- * A database constraint error names internal tables and constraints, which the
+ * A database error names internal tables, columns and constraints, which the
  * vendor cannot act on and should not be shown. The vendor is told the error is
  * on the Card Shellz side; the full error stays on the intake (rejection_reason)
  * and its audit event, for staff.
  */
-const DATABASE_CONSTRAINT_VIOLATION_VENDOR_MESSAGE =
+const INTERNAL_ERROR_VENDOR_MESSAGE =
   "an internal Card Shellz error stopped it; the order is saved and Card Shellz staff can retry it";
+const INTERNAL_ERROR_CODES: ReadonlySet<string> = new Set(PERMANENT_DATABASE_ERROR_CODE_BY_SQLSTATE_CLASS.values());
 
 function vendorFacingFailureMessage(classified: { code: string; message: string }): string {
-  return classified.code === DATABASE_CONSTRAINT_VIOLATION_CODE
-    ? DATABASE_CONSTRAINT_VIOLATION_VENDOR_MESSAGE
-    : classified.message;
+  return INTERNAL_ERROR_CODES.has(classified.code) ? INTERNAL_ERROR_VENDOR_MESSAGE : classified.message;
 }
 
 export function classifyOrderProcessingError(error: unknown): {
@@ -866,8 +876,9 @@ export function classifyOrderProcessingError(error: unknown): {
     };
   }
   const message = error instanceof Error ? error.message : String(error);
-  if (isDatabaseConstraintViolation(error)) {
-    return { code: DATABASE_CONSTRAINT_VIOLATION_CODE, message, retryable: false };
+  const permanentCode = permanentDatabaseErrorCode(error);
+  if (permanentCode) {
+    return { code: permanentCode, message, retryable: false };
   }
   return {
     code: "DROPSHIP_ORDER_PROCESSING_UNEXPECTED_ERROR",
