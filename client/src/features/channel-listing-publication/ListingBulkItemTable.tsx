@@ -68,7 +68,7 @@ interface Props {
     value: string | null,
     replaceOverrides: boolean,
   ): boolean;
-  onValidityChange(error: string | null): void;
+  onValidityChange(error: string | null, hasPendingDefaults: boolean): void;
 }
 type Column =
   | { kind: "core"; key: string; field: BulkGridColumn }
@@ -241,9 +241,8 @@ export function ListingBulkItemTable({
     onValidityChange(
       errors.length
         ? "Correct or discard invalid cell values before saving."
-        : pending.length
-          ? "Apply or discard pending column defaults before saving."
-          : null,
+        : null,
+      pending.length > 0,
     );
   }, [errors.length, pending.length, onValidityChange]);
   useEffect(() => {
@@ -794,16 +793,14 @@ export function ListingBulkItemTable({
           replace those too.
         </p>
       )}
-      {(errors.length > 0 || pending.length > 0) && (
+      {errors.length > 0 && (
         <div className="shrink-0 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs dark:bg-amber-950/20">
           <p role="alert">
-            {errors.length > 0
-              ? `${errors.length} invalid values. Correct or discard before saving.`
-              : `${pending.length} column defaults need Apply or Discard before saving.`}{" "}
+            {errors.length} invalid values. Correct or discard before saving.{" "}
             You can continue editing other fields.
           </p>
           <div className="mt-1 flex flex-wrap gap-3">
-            {(errors.length ? errors : pending).slice(0, 3).map(([key]) => (
+            {errors.slice(0, 3).map(([key]) => (
               <button
                 key={key}
                 type="button"
@@ -818,17 +815,13 @@ export function ListingBulkItemTable({
               className="underline"
               onClick={() =>
                 setBuffers((previous) =>
-                  discardBulkGridBuffers(previous, (key, value) =>
-                    errors.length
-                      ? Boolean(value.error)
-                      : key.startsWith("shared:"),
+                  discardBulkGridBuffers(previous, (_key, value) =>
+                    Boolean(value.error),
                   ),
                 )
               }
             >
-              {errors.length
-                ? "Discard all invalid cell values"
-                : "Discard pending column defaults"}
+              Discard all invalid cell values
             </button>
           </div>
         </div>

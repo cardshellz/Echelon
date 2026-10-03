@@ -52,7 +52,7 @@ export interface CustomerReturnSubmissionDependencies {
   intake: CustomerReturnIntakeStore;
   live: Pick<CustomerReturnLiveService, "inspectForIntake"> & Partial<Pick<CustomerReturnLiveService, "inspectCanonicalForIntake">>;
   settings: Pick<CustomerReturnLabelSettingsService, "requireEnabled">;
-  labels: Pick<CustomerReturnLabelsService, "status">;
+  labels: Pick<CustomerReturnLabelsService, "status"> & Partial<Pick<CustomerReturnLabelsService, "preflight">>;
   authorizeChannel: (channelId: number) => Promise<void>;
   now: () => Date;
   newToken: () => string;
@@ -143,6 +143,11 @@ export class CustomerReturnSubmissionService {
         command.leaseToken,
         command.omsOrderId ?? undefined,
       );
+      if (settings.parcelGuardrails != null) {
+        if (!this.dependencies.labels.preflight) throw new CustomerReturnIntakeError(
+          "RETURN_RATE_UNAVAILABLE", "Prepaid shipping could not be verified before creating this return.", 503);
+        await this.dependencies.labels.preflight(prepared, settings);
+      }
       const result = await this.dependencies.intake.persist({
         ...prepared,
         now: this.dependencies.now(),

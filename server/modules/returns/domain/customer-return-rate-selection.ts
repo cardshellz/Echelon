@@ -2,17 +2,20 @@ import {
   customerReturnCarrierPolicySchema,
   isReturnCarrierServiceAllowed,
   returnCarrierRuleAllowsWeight,
-  type CustomerReturnCarrierPolicy,
 } from "@shared/returns/customer-return-carrier-policy";
+import { customerReturnPackingIssue, customerReturnPackingLimits, customerReturnShippingGuardrailsSchema,
+  type CustomerReturnShippingPolicy } from "@shared/returns/customer-return-shipping-guardrails";
+import { customerReturnQuotedCostCeiling, returnShipmentDimensionsMm, type CustomerReturnCostReference } from "./customer-return-cost-guard";
 import {
   returnRateResultSchema,
   type ReturnRateCandidate,
   type ReturnRateResult,
+  returnRateShipmentSchema, type ReturnRateInput,
 } from "../../shipping-engine/application/return-rate-provider.port";
 
 export class CustomerReturnRateSelectionError extends Error {
   constructor(
-    readonly code: "RETURN_RATE_INPUT_INVALID" | "RETURN_RATE_NONE_ELIGIBLE",
+    readonly code: "RETURN_RATE_INPUT_INVALID" | "RETURN_RATE_NONE_ELIGIBLE" | "RETURN_RATE_COST_LIMIT" | "RETURN_RATE_COST_UNVERIFIED",
   ) {
     super(
       code === "RETURN_RATE_NONE_ELIGIBLE"
@@ -29,7 +32,7 @@ export interface CustomerReturnRateSelection {
   excludedRates: {
     carrierId: string;
     serviceCode: string;
-    reason: "not_allowed" | "weight_limit";
+    reason: "not_allowed" | "weight_limit" | "size_limit" | "cost_limit";
   }[];
 }
 
@@ -38,9 +41,11 @@ export interface CustomerReturnRateSelection {
  * complete USD totals from services admitted by the current administrator policy.
  */
 export function selectCustomerReturnRate(input: {
-  policy: CustomerReturnCarrierPolicy;
+  policy: CustomerReturnShippingPolicy;
   weightGrams: number;
   result: ReturnRateResult;
+  shipment?: ReturnRateInput["shipment"];
+  costReferences?: readonly CustomerReturnCostReference[];
 }): CustomerReturnRateSelection {
   if (!input || !input.policy)
     throw new CustomerReturnRateSelectionError("RETURN_RATE_INPUT_INVALID");
@@ -52,41 +57,63 @@ export function selectCustomerReturnRate(input: {
     carrierRules: input.policy.carrierRules,
   });
   const result = returnRateResultSchema.safeParse(input.result);
+  const guardrails = input.policy.parcelGuardrails == null ? null : customerReturnShippingGuardrailsSchema.safeParse(input.policy.parcelGuardrails);
+  const shipment = input.shipment === undefined ? null : returnRateShipmentSchema.safeParse(input.shipment);
   if (
     !policy.success ||
     !result.success ||
     !Number.isSafeInteger(input.weightGrams) ||
     input.weightGrams <= 0
+    || (guardrails !== null && (!guardrails.success || !shipment?.success || shipment.data.parcel.weightGrams !== input.weightGrams))
   ) {
     throw new CustomerReturnRateSelectionError("RETURN_RATE_INPUT_INVALID");
   }
+  const shippingPolicy = { ...policy.data, parcelGuardrails: guardrails?.success ? guardrails.data : null };
+  const packingLimits = customerReturnPackingLimits(shippingPolicy);
+  const dimensions = shipment?.success ? returnShipmentDimensionsMm(shipment.data) : null;
   const eligibleRates: ReturnRateCandidate[] = [];
   const excludedRates: CustomerReturnRateSelection["excludedRates"] = [];
   for (const candidate of result.data.rates) {
+    const rule = policy.data.carrierRules.find(row => row.carrierId === candidate.carrierId
+      && row.serviceCodes.includes(candidate.serviceCode));
+    const serviceAllowed = policy.data.selectionMode === "fixed_service"
+      ? policy.data.carrierId === candidate.carrierId && policy.data.serviceCode === candidate.serviceCode
+      : rule !== undefined;
+    const packingIssue = packingLimits === null ? null : customerReturnPackingIssue(
+      packingLimits.filter(limit => limit.serviceCode === candidate.serviceCode), input.weightGrams, dimensions!);
     if (
       isReturnCarrierServiceAllowed(
         policy.data,
         candidate.carrierId,
         candidate.serviceCode,
         input.weightGrams,
-      )
+      ) && packingIssue === null
     ) {
       eligibleRates.push(candidate);
     } else {
-      const rule = policy.data.carrierRules.find(
-        (row) =>
-          row.carrierId === candidate.carrierId &&
-          row.serviceCodes.includes(candidate.serviceCode),
-      );
       excludedRates.push({
         carrierId: candidate.carrierId,
         serviceCode: candidate.serviceCode,
         reason:
-          rule && !returnCarrierRuleAllowsWeight(rule, input.weightGrams)
+          !serviceAllowed || packingIssue === "unsupported" ? "not_allowed"
+            : packingIssue === "weight" || (rule && !returnCarrierRuleAllowsWeight(rule, input.weightGrams))
             ? "weight_limit"
-            : "not_allowed",
+            : "size_limit",
       });
     }
+  }
+  if (eligibleRates.length && shippingPolicy.parcelGuardrails?.costProtection) {
+    if (!shipment?.success) throw new CustomerReturnRateSelectionError("RETURN_RATE_INPUT_INVALID");
+    const ceiling = customerReturnQuotedCostCeiling(shippingPolicy, shipment.data, eligibleRates, input.costReferences ?? []);
+    if (ceiling === null) throw new CustomerReturnRateSelectionError("RETURN_RATE_COST_UNVERIFIED");
+    for (let index = eligibleRates.length - 1; index >= 0; index--) {
+      const candidate = eligibleRates[index];
+      if (candidate.amountCents > ceiling) {
+        excludedRates.push({ carrierId: candidate.carrierId, serviceCode: candidate.serviceCode, reason: "cost_limit" });
+        eligibleRates.splice(index, 1);
+      }
+    }
+    if (!eligibleRates.length) throw new CustomerReturnRateSelectionError("RETURN_RATE_COST_LIMIT");
   }
   eligibleRates.sort(
     (left, right) =>

@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { X } from "lucide-react";
 import type {
   ListingCatalogItem,
   ListingDraftItem,
@@ -215,7 +216,14 @@ export function ListingBulkItemInspector({
             {contentField?.label ?? column?.pathLabel ?? "Item details"}
           </p>
         </div>
-        <Button type="button" variant="ghost" size="sm" onClick={onClose}>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="min-h-9 shrink-0 border-foreground/40 bg-muted font-semibold text-foreground shadow-sm hover:bg-accent"
+          onClick={onClose}
+        >
+          <X aria-hidden="true" />
           Close details
         </Button>
       </div>

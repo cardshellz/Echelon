@@ -21,6 +21,14 @@ test("policy editor saves rules and shipping as one version and removes the sepa
   await expect(
     dialog.getByText("Return shipping", { exact: true }),
   ).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Prepaid return guardrails", exact: true })).toBeVisible();
+  await expect(dialog.getByLabel("USPS Maximum product weight (lb)", { exact: true })).toHaveValue("20");
+  await expect(dialog.getByLabel("UPS Maximum product weight (lb)", { exact: true })).toHaveValue("50");
+  await expect(dialog.getByLabel("FEDEX Maximum product weight (lb)", { exact: true })).toHaveValue("50");
+  await expect(dialog.getByLabel("USPS Length + girth limit (in)", { exact: true })).toHaveValue("130");
+  await expect(dialog.getByLabel("UPS Length + girth limit (in)", { exact: true })).toHaveValue("165");
+  await dialog.getByRole("heading", { name: "Prepaid return guardrails", exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath("policy-parcel-guardrails.png"), animations: "disabled" });
   await expect(
     dialog.getByLabel("Return warehouse", { exact: true }),
   ).toHaveValue("1");
@@ -55,6 +63,9 @@ test("policy editor saves rules and shipping as one version and removes the sepa
       warehouseId: 2,
       contactName: "Updated receiving desk",
       enabled: true,
+      parcelGuardrails: { geography: "us_domestic", costProtection: true,
+        usps: { maxWeightLb: "20", maxLengthPlusGirthInches: "130" },
+        ups: { maxWeightLb: "50", maxLengthInches: "108", maxLengthPlusGirthInches: "165" } },
     },
   });
   expect(policies.writes[0].shipping).not.toHaveProperty("destinationAddress");
@@ -102,6 +113,14 @@ test("policy shipping validates allowed services and weight limits before the co
   await weight.fill("20.0001");
   await expect(save).toBeDisabled();
   await weight.fill("20");
+  const girth = dialog.getByLabel("USPS Length + girth limit (in)", { exact: true });
+  await girth.fill("131");
+  await expect(save).toBeDisabled();
+  await girth.fill("130");
+  const parcelWeight = dialog.getByLabel("UPS Maximum product weight (lb)", { exact: true });
+  await parcelWeight.fill("51");
+  await expect(save).toBeDisabled();
+  await parcelWeight.fill("50");
   await expect(save).toBeEnabled();
   await save.click();
   await expect(dialog).toHaveCount(0);

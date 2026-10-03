@@ -1,4 +1,5 @@
 import { customerReturnFlowReviewInputSchema } from "../../../../shared/returns/customer-return-flow.contract";
+import { customerReturnPackingIssue, type CustomerReturnPackingLimit } from "@shared/returns/customer-return-shipping-guardrails";
 import {
   calculateCustomerReturnProductWeight, sameCustomerReturnDimensions,
   type CustomerReturnBoxOption,
@@ -17,6 +18,7 @@ export function validateCustomerReturnBoxPlan(
   lines: ReadonlyArray<{ id: string; title: string; eligibleQuantity: number; unitWeightGrams: number | null }>,
   raw: unknown,
   boxOptions: readonly CustomerReturnBoxOption[] = [],
+  packingLimits?: readonly CustomerReturnPackingLimit[] | null,
 ) {
   const parsed = planSchema.safeParse(raw);
   if (!parsed.success) throw new CustomerReturnBoxPlanError("selection", "Choose valid items and quantities.");
@@ -67,6 +69,11 @@ export function validateCustomerReturnBoxPlan(
     if (weightGrams === null) {
       throw new CustomerReturnBoxPlanError("weight", `The product weight for box ${index + 1} needs verification. Contact us for help with your return.`);
     }
+    const issue = customerReturnPackingIssue(packingLimits, weightGrams, parcel.dimensions);
+    if (issue !== null) throw new CustomerReturnBoxPlanError(issue === "weight" ? "weight" : "parcels",
+      issue === "weight" ? `Box ${index + 1} is too heavy for a prepaid return. Split its items into separate boxes, or contact us if a single item needs help.`
+        : issue === "size" ? `Box ${index + 1} is too large for a prepaid return. Use a smaller box or contact us for help.`
+        : "Prepaid shipping is unavailable for these items. Contact us for help with your return.");
     return { number: index + 1, items, dimensions: { ...parcel.dimensions }, weightGrams };
   });
   for (const [lineId, selection] of selections) {

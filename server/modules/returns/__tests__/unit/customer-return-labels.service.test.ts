@@ -7,6 +7,8 @@ import {
   type StoredReturnLabels,
 } from "../../application/customer-return-labels.service";
 import { labelSettings } from "../support/label-fixtures";
+import { defaultCustomerReturnShippingGuardrails } from "@shared/returns/customer-return-shipping-guardrails";
+import { preparedIntake } from "../support/customer-return-intake-database";
 import type { ReturnLabelInput } from "../../../shipping-engine/application/return-label-provider.port";
 import {
   returnRateShipmentSchema,
@@ -216,6 +218,36 @@ describe("durable private return label execution", () => {
     });
     return s;
   }
+  it("checks every guarded fixed-service box before any purchase, including a later oversize box", async () => {
+    const s = setup(2);
+    const guardrails = defaultCustomerReturnShippingGuardrails(); guardrails.costProtection = false;
+    s.requirePurchaseConfiguration.mockResolvedValue({ ...labelSettings, carrierId: "se-3", parcelGuardrails: guardrails });
+    s.quote.mockResolvedValue({ status: "completed", rates: [rate("se-3", "ups_ground", 500)], exclusions: [] });
+    s.stored.parcels[1].shipment.parcel.dimensionsInches.length = 109;
+    await expect(s.service.progress(36, 1, "admin")).rejects.toMatchObject({ code: "RETURN_RATE_NONE_ELIGIBLE" });
+    expect(s.recordQuote).toHaveBeenCalledTimes(1);
+    expect(s.recordQuote.mock.calls[0][2]).toBe(s.stored.parcels[1].id);
+    expect(s.begin).not.toHaveBeenCalled();
+    expect(s.purchase).not.toHaveBeenCalled();
+    expect(s.stored.parcels.map(parcel => parcel.attempt)).toEqual([null, null]);
+  });
+  it("persists fixed-service cost evidence before its purchase and retains one purchase per box", async () => {
+    const s = setup();
+    s.requirePurchaseConfiguration.mockResolvedValue({ ...labelSettings, carrierId: "se-3", parcelGuardrails: defaultCustomerReturnShippingGuardrails() });
+    s.quote.mockResolvedValue({ status: "completed", rates: [rate("se-3", "ups_ground", 500)], exclusions: [] });
+    await Promise.all([s.service.progress(36, 1, "a"), s.service.progress(36, 1, "b")]);
+    expect(s.purchase).toHaveBeenCalledTimes(1);
+    expect(s.quoteDecisions[0].costReferences).toHaveLength(1);
+    expect(s.begin.mock.calls[0][5]).toBeGreaterThan(0);
+  });
+  it("rejects a cost before intake without creating any purchase intent", async () => {
+    const s = setup();
+    const settings = { ...labelSettings, carrierId: "se-3", parcelGuardrails: defaultCustomerReturnShippingGuardrails() };
+    s.quote.mockResolvedValue({ status: "completed", rates: [rate("se-3", "ups_ground", 400)], exclusions: [] });
+    s.quote.mockResolvedValueOnce({ status: "completed", rates: [rate("se-3", "ups_ground", 401)], exclusions: [] });
+    await expect(s.service.preflight(preparedIntake(), settings)).rejects.toMatchObject({ code: "RETURN_RATE_COST_LIMIT" });
+    expect(s.begin).not.toHaveBeenCalled(); expect(s.purchase).not.toHaveBeenCalled(); expect(s.recordQuote).not.toHaveBeenCalled();
+  });
   it("quotes each automatic box independently and buys the persisted selected service", async () => {
     const s = automatic(2);
     s.stored.parcels[1].shipment.parcel.weightGrams = 10000;

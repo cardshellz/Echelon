@@ -31,6 +31,7 @@ import {
   type PreviewPackingMoveResult,
 } from "@/lib/customer-return-packing";
 import { CustomerReturnBoxContents } from "./CustomerReturnBoxContents";
+import { previewPackingGuardrailIssue, splitPreviewPackingBox } from "@/lib/customer-return-packing-guardrails";
 import { CustomerReturnPackingSummary } from "./CustomerReturnPackingSummary";
 import { CustomerReturnParcelDetails } from "./CustomerReturnParcelDetails";
 import {
@@ -101,6 +102,16 @@ export function CustomerReturnPacking({
     (parcel) =>
       previewParcelProductWeight(order, parcel).status === "unverified",
   );
+  const guardrailIssues = parcels.map(parcel => previewPackingGuardrailIssue(order, parcel));
+  function splitToFit(parcel: PreviewParcelDraft) {
+    if (busy) return;
+    const result = splitPreviewPackingBox(order, parcels, parcel.key);
+    if (!result.ok) { setNotice({ text: result.message, after: parcels }); return; }
+    setNotice({ text: "Items separated into boxes for prepaid shipping. Check each box size before continuing.",
+      before: parcels, after: result.parcels });
+    onChange(result.parcels);
+    pendingBoxFocus.current = parcel.key;
+  }
   const boxNumber = (key: number) =>
     parcels.findIndex((parcel) => parcel.key === key) + 1;
   const unitsInBox = (key: number) =>
@@ -557,6 +568,20 @@ export function CustomerReturnPacking({
               }
               onDragEnd={clearDrag}
             />
+            {guardrailIssues[index] && (
+              <div role="alert" className="mt-3 space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+                <p>{guardrailIssues[index] === "weight"
+                  ? "This box is too heavy for prepaid shipping. Separate the items into more boxes. If one item cannot be split, contact us for help."
+                  : guardrailIssues[index] === "size"
+                    ? "This box is too large for prepaid shipping. Choose a smaller box, split the items, or contact us for help."
+                    : "Prepaid shipping is unavailable for these items. Contact us for help with your return."}</p>
+                {guardrailIssues[index] === "weight" && unitsInBox(parcel.key) > 1 && (
+                  <Button variant="outline" className="min-h-11" disabled={busy} onClick={() => splitToFit(parcel)}>
+                    <Split aria-hidden="true" className="mr-2 h-4 w-4" /> Split to fit
+                  </Button>
+                )}
+              </div>
+            )}
           </section>
         ))}
         {dragging && canSplit(dragging.sourceParcelKey) && (
@@ -580,7 +605,7 @@ export function CustomerReturnPacking({
         <Button
           className="min-h-11"
           onClick={onContinue}
-          disabled={busy || weightNeedsVerification || !summary.ready}
+          disabled={busy || weightNeedsVerification || !summary.ready || guardrailIssues.some(issue => issue !== null)}
         >
           {busy ? (
             <>
