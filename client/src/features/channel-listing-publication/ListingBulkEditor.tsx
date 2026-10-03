@@ -83,6 +83,9 @@ export function ListingBulkEditor({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [tableError, setTableError] = useState<string | null>(null);
+  // Pending defaults use field-local Apply/Discard controls, not error alerts.
+  const [hasPendingDefaults, setHasPendingDefaults] = useState(false);
+  const tableBlocked = Boolean(tableError) || hasPendingDefaults;
   const [savedRevision, setSavedRevision] = useState(0);
   const [showCategory, setShowCategory] = useState(false);
   const [categoryVariantId, setCategoryVariantId] = useState<number | null>(
@@ -121,10 +124,13 @@ export function ListingBulkEditor({
   const hasEdits =
     Object.keys(command.shared).length > 0 || command.itemChanges.length > 0;
   useEffect(() => {
-    onDirtyChange(hasEdits || Boolean(tableError));
-  }, [hasEdits, tableError, onDirtyChange]);
+    onDirtyChange(hasEdits || tableBlocked);
+  }, [hasEdits, tableBlocked, onDirtyChange]);
   const tableValidity = useCallback(
-    (failure: string | null) => setTableError(failure),
+    (failure: string | null, pendingDefaults: boolean) => {
+      setTableError(failure);
+      setHasPendingDefaults(pendingDefaults);
+    },
     [],
   );
   const attributeTitles = useMemo(() => {
@@ -201,7 +207,7 @@ export function ListingBulkEditor({
       requirements.byVariant.get(item.variantId)?.status !== "ready",
   );
   async function save() {
-    if (!canEdit || saving || tableError || prepared.error || schemaUnavailable)
+    if (!canEdit || saving || tableBlocked || prepared.error || schemaUnavailable)
       return;
     setError("");
     setNotice("");
@@ -210,6 +216,7 @@ export function ListingBulkEditor({
       commandRef.current = EMPTY_COMMAND;
       setCommand(EMPTY_COMMAND);
       setTableError(null);
+      setHasPendingDefaults(false);
       setSavedRevision((revision) => revision + 1);
       onDirtyChange(false);
       setNotice("Draft saved. Nothing has been published to Walmart.");
@@ -268,7 +275,7 @@ export function ListingBulkEditor({
               !canEdit ||
               saving ||
               (!prepared.preview?.changedCount && !hasDraftChanges) ||
-              Boolean(tableError) ||
+              tableBlocked ||
               Boolean(prepared.error) ||
               schemaUnavailable
             }
@@ -287,7 +294,7 @@ export function ListingBulkEditor({
               id={`${prefix}-method`}
               aria-label="Bulk listing method"
               className="h-9 max-w-64 rounded-md border bg-background px-2 text-sm"
-              disabled={!canEdit || saving || Boolean(tableError)}
+              disabled={!canEdit || saving || tableBlocked}
               value={
                 command.shared.method ??
                 (method.status === "common" ? method.value : "")
@@ -313,7 +320,7 @@ export function ListingBulkEditor({
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={!canEdit || saving || Boolean(tableError)}
+                disabled={!canEdit || saving || tableBlocked}
                 onClick={() => changeContext("method", undefined)}
               >
                 Undo method
@@ -344,7 +351,7 @@ export function ListingBulkEditor({
               <Button
                 variant="ghost"
                 size="sm"
-                disabled={!canEdit || saving || Boolean(tableError)}
+                disabled={!canEdit || saving || tableBlocked}
                 onClick={() => changeContext("productType", undefined)}
               >
                 Undo category
@@ -368,7 +375,7 @@ export function ListingBulkEditor({
               taxonomy={taxonomy.data}
               loading={taxonomy.isFetching}
               error={taxonomy.error ? errorMessage(taxonomy.error) : undefined}
-              disabled={!canEdit || saving || Boolean(tableError)}
+              disabled={!canEdit || saving || tableBlocked}
               onRetry={() => void taxonomy.refetch()}
               onSelect={(value) => {
                 if (categoryItem) {
