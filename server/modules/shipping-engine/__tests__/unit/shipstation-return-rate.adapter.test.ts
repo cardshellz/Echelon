@@ -97,7 +97,7 @@ function fixture(body: unknown = response()) {
 afterEach(() => vi.useRealTimers());
 
 describe("return-rate requests", () => {
-  it("requests nonpersisted return quotes for every account and exact purchase addresses, dimensions and whole grams", async () => {
+  it("requests nonpersisted return quotes for every account and exact purchase addresses, dimensions and fractional pounds", async () => {
     const before = JSON.stringify(INPUT);
     const { provider, fetchFn } = fixture();
     const result = await provider.quote(INPUT);
@@ -149,10 +149,31 @@ describe("return-rate requests", () => {
       ship_to: purchaseShipment.ship_to,
       packages: purchaseShipment.packages,
     });
+    expect(purchaseShipment.packages).toEqual([{
+      package_code: "package",
+      weight: { value: 1.10231132, unit: "pound" },
+      dimensions: { unit: "inch", length: 12.125, width: 8.001, height: 4 },
+    }]);
     expect(JSON.stringify(request)).not.toMatch(
       /rate_id|is_return_label|external_shipment_id/,
     );
     expect(JSON.stringify(INPUT)).toBe(before);
+  });
+  it("sends the regression parcel's 850 g as 1.87392923 pounds for both quoting and buying", async () => {
+    const shipment = {
+      ...INPUT.shipment,
+      parcel: { weightGrams: 850, dimensionsInches: { length: 16, width: 14, height: 4 } },
+    };
+    const before = JSON.stringify(shipment);
+    const { provider, fetchFn } = fixture();
+    await provider.quote({ ...INPUT, shipment });
+    const quote = JSON.parse(String(fetchFn.mock.calls[0][1]?.body));
+    const purchase = buildReturnLabelRequest({ ...shipment, carrierId: "se-101", serviceCode: "ups_ground" });
+    const packages = [{ package_code: "package", weight: { value: 1.87392923, unit: "pound" },
+      dimensions: { unit: "inch", length: 16, width: 14, height: 4 } }];
+    expect(quote.shipment.packages).toEqual(packages);
+    expect(purchase.shipment).toMatchObject({ packages });
+    expect(JSON.stringify(shipment)).toBe(before);
   });
   it.each([
     { carrierIds: [] },
@@ -178,8 +199,9 @@ describe("return-rate requests", () => {
     1.5,
     Number.NaN,
     Number.POSITIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER,
     Number.MAX_SAFE_INTEGER + 1,
-  ])("rejects invalid grams %s before transport", async (weightGrams) => {
+  ])("rejects invalid or unrepresentable grams %s before transport", async (weightGrams) => {
     const { provider, fetchFn } = fixture();
     await expect(
       provider.quote({
