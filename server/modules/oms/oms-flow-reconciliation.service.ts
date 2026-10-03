@@ -60,6 +60,8 @@ const AUTO_RESERVATION_REPAIR_LIMIT = 25;
 const SHORT_CLAIM_REFRESH_LIMIT = 25;
 /** Confirmed pick corrections retried per run; each is a few short transactions. */
 const CONFIRMED_PICK_RETRY_LIMIT = 50;
+/** Exception orders re-checked per run; each is a few reads, one write if released. */
+const PICK_EXCEPTION_RECHECK_LIMIT = 100;
 
 /**
  * Reservation service handle for release-on-cancel and the
@@ -89,6 +91,16 @@ export interface FlowReconciliationReservation {
 export interface FlowReconciliationPickCorrections {
   retryConfirmedPicks(limit: number): Promise<{ resolved: number; waiting: number }>;
 }
+/** Moves exception orders whose ready-to-ship blockers all cleared. */
+export interface FlowReconciliationPickExceptions {
+  releaseClearedPickExceptions(limit: number): Promise<PickExceptionRecheckTotals>;
+}
+export interface PickExceptionRecheckTotals {
+  checked: number;
+  released: number;
+  stillBlocked: number;
+  failed: number;
+}
 
 export interface OmsFlowReconciliationDependencies {
   reservation: FlowReconciliationReservation | null;
@@ -96,6 +108,7 @@ export interface OmsFlowReconciliationDependencies {
   reviewRetry?: ChannelFulfillmentReviewRetryService;
   receiptRetry?: ChannelFulfillmentReceiptRetryService;
   pickCorrections?: FlowReconciliationPickCorrections;
+  pickExceptions?: FlowReconciliationPickExceptions;
 }
 
 function requireFlowFulfillmentAuthority(
@@ -886,6 +899,9 @@ export async function runOmsFlowReconciliation(
     }
   };
 
+  // Before detection, so an order released here gets its missing shipment
+  // (WMS_READY_WITHOUT_SHIPMENT) in this same run.
+  await step("releaseClearedPickExceptions", () => releaseClearedPickExceptions(dependencies), undefined);
   const issues = await step("collect", () => collectOmsFlowReconciliationIssues(dbArg), [] as OmsOpsIssue[]);
   if (issues.length > 0) {
     const summary = issues.map((issue) => `${issue.code}=${issue.count}`).join(", ");
@@ -1074,6 +1090,26 @@ export async function retryConfirmedPickCorrections(
   const totals = await dependencies.pickCorrections.retryConfirmedPicks(CONFIRMED_PICK_RETRY_LIMIT);
   if (totals.resolved > 0) {
     console.log(`${LOG_PREFIX} confirmed pick corrections posted: resolved=${totals.resolved} waiting=${totals.waiting}`);
+  }
+  return totals;
+}
+
+/**
+ * Only a pick re-evaluates an exception order, so one whose blockers cleared
+ * some other way sat in exception with no shipment, out of ShipStation's
+ * reach. It moves on here exactly as its next pick would have moved it.
+ */
+export async function releaseClearedPickExceptions(
+  dependencies: OmsFlowReconciliationDependencies,
+): Promise<PickExceptionRecheckTotals> {
+  if (!dependencies.pickExceptions) return { checked: 0, released: 0, stillBlocked: 0, failed: 0 };
+  const totals = await dependencies.pickExceptions.releaseClearedPickExceptions(PICK_EXCEPTION_RECHECK_LIMIT);
+  if (totals.released > 0) {
+    console.log(`${LOG_PREFIX} exception orders with no blocker left moved to ready_to_ship: released=${totals.released} stillBlocked=${totals.stillBlocked}`);
+  }
+  if (totals.failed > 0) {
+    // Surfaces on the scheduler heartbeat; the other orders were still processed.
+    throw new Error(`exception re-check failed for ${totals.failed} order(s)`);
   }
   return totals;
 }

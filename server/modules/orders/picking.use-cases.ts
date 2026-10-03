@@ -1,4 +1,4 @@
-import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
+import { isUnmappedOrderLine, UNMAPPED_ORDER_LINE_SKU } from "@shared/unmapped-order-line";
 import { createHash } from "node:crypto";
 import { eq, and, sql } from "drizzle-orm";
 import { IntegrityError, NotFoundError, ValidationError } from "../../../shared/errors";
@@ -12,6 +12,7 @@ import {
   orders,
   allocationExceptions,
   itemStatusEnum,
+  pickingLogs,
 } from "@shared/schema";
 import type {
   InventoryLevel,
@@ -47,6 +48,7 @@ import { requireCorrectivePick, PickCorrectionError, recordCorrectionEvent, corr
 import { planConfirmedPickShipment, type ConfirmedPickShipmentPlan } from "./confirmed-pick-shipment";
 import type { PickingAssignmentSnapshot } from "@shared/types/picking-assignment-release";
 import { releasePickingAssignment } from "./picking-assignment-release.service";
+import { transitionOrderStatus } from "./order-status-core";
 import { createPickingAssignmentReleaseRepository } from "./picking-assignment-release.repository";
 
 type DrizzleDb = {
@@ -492,6 +494,40 @@ interface CartonizationLike {
 }
 
 const PACKING_HANDOFF_STATUSES = new Set(["ready_to_ship", "picked", "staged"]);
+
+/**
+ * A "missing_variant" allocation exception on a line with no catalog identity
+ * (isUnmappedOrderLine) is that line's expected state since #1657: it is
+ * confirmed, never picked from stock, and ORDER_LINE_UNMAPPED keeps it visible
+ * for mapping. It is raised when a picker tries to give such a line a bin, and
+ * must not block the order from shipping. Alias `blocking` = allocation_exceptions.
+ */
+const UNMAPPED_LINE_MISSING_VARIANT = sql`(
+  blocking.exception_type = 'missing_variant'
+  AND EXISTS (
+    SELECT 1 FROM wms.order_items unmapped
+    WHERE unmapped.id = blocking.order_item_id
+      AND unmapped.catalog_product_id IS NULL
+      AND unmapped.product_id IS NULL
+      AND upper(btrim(COALESCE(unmapped.sku, ''))) IN ('', ${UNMAPPED_ORDER_LINE_SKU})
+  )
+)`;
+
+/** Upper bound on one exception re-check pass; each order is a few short queries. */
+const MAX_PICK_EXCEPTION_RECHECK_BATCH = 500;
+const PICK_EXCEPTION_RECHECK_ACTOR = "system:pick-exception-recheck";
+const PICK_EXCEPTION_RECHECK_REASON = "ready_to_ship_blockers_cleared";
+
+export interface ClearedPickExceptionTotals {
+  /** Exception orders that passed the pre-filter and were evaluated. */
+  checked: number;
+  /** Moved to ready_to_ship. */
+  released: number;
+  /** A blocker remains; left in exception for a lead. */
+  stillBlocked: number;
+  /** Errored; retried on the next pass. */
+  failed: number;
+}
 
 export class PickingUseCases {
   constructor(
@@ -3720,6 +3756,131 @@ export class PickingUseCases {
     return order;
   }
 
+  /**
+   * An order lands in "exception" when its last pick still had a ready-to-ship
+   * blocker, and only another pick re-evaluates it. A blocker that clears
+   * without a pick (a resolved allocation exception, a finished replen task, a
+   * corrected blocker rule) left the order in exception for good: it never got
+   * a shipment and never reached ShipStation (#63721, 2026-10-03).
+   *
+   * This does what markReadyToShip does, but only where no person is involved:
+   * no lead decision, not held, every shippable line completed and fully
+   * picked, and no blocker left. Anything else stays in exception for a lead.
+   */
+  async releaseClearedPickExceptions(
+    limit: number,
+    clock: () => Date = () => new Date(),
+  ): Promise<ClearedPickExceptionTotals> {
+    if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_PICK_EXCEPTION_RECHECK_BATCH) {
+      throw new ValidationError(`limit must be an integer from 1 to ${MAX_PICK_EXCEPTION_RECHECK_BATCH}`);
+    }
+    // Pre-filter only; getReadyToShipBlockers stays the rule. Excluding orders
+    // with an open blocker keeps a backlog of blocked orders from filling the batch.
+    const candidates = await this.db.execute(sql`
+      SELECT wo.id
+      FROM wms.orders wo
+      WHERE wo.warehouse_status = 'exception'
+        AND wo.exception_resolution IS NULL
+        AND wo.on_hold = 0
+        AND wo.cancelled_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM wms.order_items shippable
+          WHERE shippable.order_id = wo.id AND shippable.requires_shipping = 1
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM wms.order_items open_line
+          WHERE open_line.order_id = wo.id
+            AND open_line.requires_shipping = 1
+            AND (COALESCE(open_line.status, '') <> 'completed'
+              OR COALESCE(open_line.picked_quantity, 0) <> COALESCE(open_line.quantity, 0))
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM wms.allocation_exceptions blocking
+          WHERE blocking.order_id = wo.id
+            AND blocking.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+            AND (blocking.status = 'blocked' OR COALESCE(blocking.metadata->>'shipmentBlocking', 'false') = 'true')
+            AND NOT ${UNMAPPED_LINE_MISSING_VARIANT}
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM inventory.replen_tasks replen
+          WHERE replen.order_id = wo.id
+            AND replen.blocks_shipment = TRUE
+            AND replen.status NOT IN ('completed', 'cancelled')
+        )
+      ORDER BY wo.id ASC
+      LIMIT ${limit}
+    `);
+    const orderIds = (candidates.rows ?? []).map((row: { id: unknown }) => Number(row.id));
+    const totals: ClearedPickExceptionTotals = { checked: orderIds.length, released: 0, stillBlocked: 0, failed: 0 };
+
+    for (const orderId of orderIds) {
+      try {
+        const outcome = await this.releaseClearedPickException(orderId, clock);
+        if (outcome === "released") totals.released++;
+        if (outcome === "blocked") totals.stillBlocked++;
+      } catch (error: any) {
+        // One order's failure must not stop the others; the caller surfaces the
+        // count, and the next pass retries it.
+        totals.failed++;
+        console.error(JSON.stringify({ level: "error", action: "pick_exception_recheck", outcome: "failed",
+          wms_order_id: orderId, error_code: error?.code ?? null, error: error?.message ?? String(error) }));
+      }
+    }
+
+    if (orderIds.length === limit) {
+      // Visible, not silent: a full batch can delay orders behind it.
+      console.warn(JSON.stringify({ level: "warn", action: "pick_exception_recheck", outcome: "batch_full",
+        limit, released: totals.released, still_blocked: totals.stillBlocked }));
+    }
+    return totals;
+  }
+
+  private async releaseClearedPickException(
+    orderId: number,
+    clock: () => Date,
+  ): Promise<"released" | "blocked" | "changed"> {
+    if ((await this.getReadyToShipBlockers(orderId)).length > 0) return "blocked";
+    const released = await this.db.transaction(async (tx: any) => {
+      // Re-read under the row lock: a lead's decision or a hold placed since
+      // the scan wins, and nothing is written.
+      const locked = await tx.execute(sql`
+        SELECT order_number FROM wms.orders
+        WHERE id = ${orderId}
+          AND warehouse_status = 'exception'
+          AND exception_resolution IS NULL
+          AND on_hold = 0
+          AND cancelled_at IS NULL
+        FOR UPDATE
+      `);
+      const order = locked.rows?.[0] as { order_number: string | null } | undefined;
+      if (!order) return false;
+      const transition = await transitionOrderStatus(tx, orderId, {
+        from: ["exception"],
+        to: "ready_to_ship",
+        reason: PICK_EXCEPTION_RECHECK_REASON,
+      }, clock);
+      if (!transition.transitioned) return false;
+      await tx.insert(pickingLogs).values({
+        timestamp: clock(),
+        actionType: "exception_auto_cleared",
+        pickerId: PICK_EXCEPTION_RECHECK_ACTOR,
+        orderId,
+        orderNumber: order.order_number,
+        orderStatusBefore: "exception",
+        orderStatusAfter: "ready_to_ship",
+        reason: PICK_EXCEPTION_RECHECK_REASON,
+        notes: "No ready-to-ship blocker remains; released as the order's next pick would have.",
+        deviceType: "system",
+      });
+      return true;
+    });
+    if (!released) return "changed";
+    this.triggerCartonizationShadow(orderId);
+    console.log(JSON.stringify({ level: "info", action: "pick_exception_recheck", outcome: "released",
+      wms_order_id: orderId, before: "exception", after: "ready_to_ship" }));
+    return "released";
+  }
+
   async closeResolvedShipmentBlockers(orderId: number, params: {
     resolution: string;
     userId?: string;
@@ -3804,21 +3965,26 @@ export class PickingUseCases {
       if ((item.pickedQuantity || 0) !== item.quantity) {
         blockers.push(`${item.sku} picked ${item.pickedQuantity || 0}/${item.quantity}`);
       }
-      if (!(item.inventoryTracking === false && item.catalogProductId != null) && (!item.location || item.location === "UNASSIGNED")) {
+      // A line with no catalog identity is confirmed, never picked from a bin
+      // (isUnmappedOrderLine). Requiring one parked #63721 in exception for good.
+      const needsPickBin = !isUnmappedOrderLine(item)
+        && !(item.inventoryTracking === false && item.catalogProductId != null);
+      if (needsPickBin && (!item.location || item.location === "UNASSIGNED")) {
         blockers.push(`${item.sku} has no pick bin`);
       }
     }
 
     const exceptionRows = await this.db.execute(sql`
-      SELECT id, sku, exception_type, status, review_reason
-      FROM wms.allocation_exceptions
-      WHERE order_id = ${orderId}
-        AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+      SELECT blocking.id, blocking.sku, blocking.exception_type, blocking.status, blocking.review_reason
+      FROM wms.allocation_exceptions blocking
+      WHERE blocking.order_id = ${orderId}
+        AND blocking.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
         AND (
-          status = 'blocked'
-          OR COALESCE(metadata->>'shipmentBlocking', 'false') = 'true'
+          blocking.status = 'blocked'
+          OR COALESCE(blocking.metadata->>'shipmentBlocking', 'false') = 'true'
         )
-      ORDER BY created_at DESC
+        AND NOT ${UNMAPPED_LINE_MISSING_VARIANT}
+      ORDER BY blocking.created_at DESC
     `);
 
     for (const row of exceptionRows.rows ?? []) {
