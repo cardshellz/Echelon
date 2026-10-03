@@ -35,8 +35,7 @@ describe("pick-floor line hold", () => {
   });
 
   it("holds in one tap and refreshes the queue, with no reason prompt", () => {
-    // Holds only happen for out of stock / not received / delayed, and the
-    // reason was never read by anything downstream. One tap on the gun.
+    // Picking uses the held state, without asking the picker to classify why.
     expect(PICKING).toContain("holdLineItemMutation.mutate({ wmsOrderId: item.wmsOrderId, itemId: item.id })");
     expect(PICKING).not.toContain("HOLD_LINE_REASONS");
     expect(PICKING).not.toContain("holdLineReason");
@@ -73,5 +72,19 @@ describe("pick-floor line hold", () => {
     // Not pickable, but still readable so the Hold tab can show it.
     expect(queueGuard).toContain("COALESCE(oi.on_hold, false) = false");
     expect(queueGuard).toContain("COALESCE(oi.on_hold, false) = true");
+  });
+
+  it("names hold removal separately from releasing an active picking assignment", () => {
+    expect(PICKING).not.toContain("Release hold");
+    expect(PICKING).toContain("Remove hold");
+    expect(PICKING).toContain("Release picking assignment");
+    expect(PICKING).not.toContain("Release order");
+    expect(PICKING).toContain('title: "Picking assignment released"');
+    expect(PICKING).toContain('title: "Couldn\'t release picking assignment"');
+    expect(PICKING).toContain("Recover stuck order");
+    expect(PICKING).toContain('activeOrder?.status === "in_progress"');
+    expect(PICKING).toContain("Picking assignment ended. Pick progress and holds are preserved.");
+    expect(PICKING).toContain('title: "Hold removed"');
+    expect(PICKING).toContain('title: "Couldn\'t remove hold"');
   });
 });
