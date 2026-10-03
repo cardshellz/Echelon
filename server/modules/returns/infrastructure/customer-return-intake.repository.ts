@@ -7,6 +7,7 @@ import {
   type CustomerReturnIntakeStore, type PreparedCustomerReturnIntake
 } from "../application/customer-return-intake.ports";
 import { validatePreparedCustomerReturnIntake } from "../application/customer-return-intake.service";
+import { customerReturnPackingIssue, customerReturnPackingLimits } from "@shared/returns/customer-return-shipping-guardrails";
 import { portalInventoryReturnMirrorSql } from "./customer-return-inventory-mirror";
 import { acquireReturnPolicyCatalogLock } from "./return-policy-lock";
 import { readCustomerReturnPolicyCandidates } from "./customer-return-policy.reader";
@@ -134,6 +135,11 @@ async function verifyConfiguration(tx: Executor, input: PreparedCustomerReturnIn
       || parcel.carrierId !== settings.carrierId || parcel.serviceCode !== settings.serviceCode
       || canonical(parcel.destinationAddress) !== canonical(settings.destinationAddress))) configurationChanged();
   const warehouse = rows(await tx.execute(sql`SELECT is_active,country FROM warehouse.warehouses WHERE id=${settings.warehouseId} FOR SHARE`))[0];
+  const limits = customerReturnPackingLimits(settings);
+  if (input.parcels.some(parcel => parcel.originAddress.countryCode !== "US"
+    || customerReturnPackingIssue(limits, parcel.weightGrams, parcel.dimensions) !== null)) {
+    throw new CustomerReturnIntakeError("RETURN_LABEL_PARCEL_NOT_ELIGIBLE", "Review your box sizes and split heavy items into separate boxes before submitting your return.");
+  }
   if (!warehouse || warehouse.is_active !== 1 || warehouse.country !== "US") configurationChanged();
   const resolved = resolveCustomerReturnPortalPolicy(await readCustomerReturnPolicyCandidates(tx, input.channelId), input.channelId);
   const policy = resolved.policy;

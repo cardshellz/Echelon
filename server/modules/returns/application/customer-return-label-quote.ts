@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { customerReturnCostReferencesSchema } from "../domain/customer-return-cost-guard";
 import { customerReturnLabelSettingsSchema } from "@shared/returns/customer-return-label.contract";
 import {
   returnRateCandidateSchema,
@@ -16,6 +17,7 @@ export const customerReturnQuoteDecisionSchema = z
     shipment: returnRateShipmentSchema,
     shipmentHash: z.string().regex(/^[a-f0-9]{64}$/),
     result: returnRateResultSchema.nullable(),
+    costReferences: customerReturnCostReferencesSchema.optional(),
     selected: returnRateCandidateSchema.nullable(),
     errorCode: z
       .string()
@@ -44,6 +46,20 @@ export const customerReturnQuoteDecisionSchema = z
 export type CustomerReturnQuoteDecision = z.infer<
   typeof customerReturnQuoteDecisionSchema
 >;
+
+/** Extend the existing immutable JSON evidence rather than changing old rows.
+ * Older quote results contain no comparison manifests and remain readable.
+ */
+export function storedCustomerReturnQuoteResult(decision: CustomerReturnQuoteDecision) {
+  return decision.result === null ? null : { ...decision.result,
+    ...(decision.costReferences?.length ? { costReferences: decision.costReferences } : {}) };
+}
+export function readStoredCustomerReturnQuoteResult(raw: unknown) {
+  if (raw === null) return { result: null, costReferences: undefined };
+  const value = returnRateResultSchema.innerType().extend({ costReferences: customerReturnCostReferencesSchema.optional() }).strict().parse(raw);
+  const { costReferences, ...result } = value;
+  return { result: returnRateResultSchema.parse(result), costReferences };
+}
 
 export function customerReturnShipmentHash(
   shipment: z.infer<typeof returnRateShipmentSchema>,

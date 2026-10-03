@@ -52,6 +52,8 @@ import {
 import { CustomerReturnLabelsService } from "../../application/customer-return-labels.service";
 import { CustomerReturnLabelSettingsService } from "../../application/customer-return-label-settings.service";
 import { selectCustomerReturnRate } from "../../domain/customer-return-rate-selection";
+import { defaultCustomerReturnShippingGuardrails } from "@shared/returns/customer-return-shipping-guardrails";
+import { quoteCustomerReturnShipment } from "../../application/customer-return-shipping-quote";
 
 const connectionString = resolveReturnsTestDatabase(process.env, "intake");
 const integration = connectionString ? describe.sequential : describe.skip;
@@ -307,6 +309,65 @@ integration(
       });
       return { service, quote, purchase, recover };
     }
+    async function authorizeGuarded() {
+      const current = await publishIntakeTestPolicyShipping(pool, { parcelGuardrails: defaultCustomerReturnShippingGuardrails() });
+      const prepared = preparedIntake();
+      await bindIntakeTestPolicy(pool, prepared, current);
+      return intake.persist(prepared);
+    }
+    it("requires fresh persisted cost evidence for guarded fixed services and purchases each box once", async () => {
+      const saved = await authorizeGuarded();
+      await expect(labels.begin(36, saved.authorizationId, saved.parcels[0].parcelId, "admin", INTAKE_NOW))
+        .rejects.toMatchObject({ code: "RETURN_LABEL_QUOTE_CHANGED" });
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM returns.customer_return_label_attempts")).rows[0].count).toBe(0);
+      const w = worker();
+      await Promise.all([w.service.progress(36, saved.authorizationId, "admin:a"), w.service.progress(36, saved.authorizationId, "admin:b")]);
+      await w.service.progress(36, saved.authorizationId, "admin:c");
+      expect(w.purchase).toHaveBeenCalledTimes(2);
+      const quotes = (await pool.query("SELECT quote_result FROM returns.customer_return_quote_decisions WHERE status='selected'")).rows;
+      expect(quotes.length).toBeGreaterThanOrEqual(2);
+      for (const row of quotes) expect(row.quote_result.costReferences).toHaveLength(1);
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM returns.customer_return_label_attempts")).rows[0].count).toBe(2);
+      expect((await w.service.status(36, saved.authorizationId)).parcels.map(parcel => parcel.status)).toEqual(["ready", "ready"]);
+    });
+    it("rejects missing or substituted cost evidence and expired decisions before committing purchase intent", async () => {
+      const saved = await authorizeGuarded();
+      const parcel = (await labels.read(36, saved.authorizationId)).parcels[0];
+      const current = (await settings.readAccepted(36, saved.authorizationId))!;
+      const w = worker();
+      const evidence = await quoteCustomerReturnShipment({ quote: w.quote }, current, parcel.shipment);
+      const decision: CustomerReturnQuoteDecision = { ...evidence, settings: current, shipment: parcel.shipment,
+        shipmentHash: customerReturnShipmentHash(parcel.shipment), quotedAt: INTAKE_NOW.toISOString(),
+        expiresAt: new Date(INTAKE_NOW.getTime() + RETURN_RATE_QUOTE_MAX_AGE_MS).toISOString() };
+      expect(decision.errorCode).toBeNull();
+      await expect(labels.recordQuote(36, saved.authorizationId, parcel.id, { ...decision, costReferences: [] }, "admin", INTAKE_NOW))
+        .rejects.toMatchObject({ code: "RETURN_RATE_COST_UNVERIFIED" });
+      const changed = structuredClone(decision);
+      changed.costReferences![0].input.shipment.shipFrom.postalCode = "99501";
+      await expect(labels.recordQuote(36, saved.authorizationId, parcel.id, changed, "admin", INTAKE_NOW))
+        .rejects.toMatchObject({ code: "RETURN_RATE_COST_UNVERIFIED" });
+      const quoteId = await labels.recordQuote(36, saved.authorizationId, parcel.id, decision, "admin", INTAKE_NOW);
+      clockInstant = new Date(INTAKE_NOW.getTime() + RETURN_RATE_QUOTE_MAX_AGE_MS + 1);
+      await expect(labels.begin(36, saved.authorizationId, parcel.id, "admin", clockInstant, quoteId))
+        .rejects.toMatchObject({ code: "RETURN_LABEL_QUOTE_CHANGED" });
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM returns.customer_return_label_attempts")).rows[0].count).toBe(0);
+      expect(w.purchase).not.toHaveBeenCalled();
+    });
+    it("records a cost rejection without buying any box of the return", async () => {
+      const saved = await authorizeGuarded();
+      const w = worker();
+      const normalQuote = w.quote.getMockImplementation()!;
+      w.quote.mockImplementation(async input => {
+        const quoted = await normalQuote(input);
+        const amountCents = input.shipment.parcel.weightGrams < 9072 ? 1000 : 400;
+        return { ...quoted, rates: quoted.rates.map(rate => ({ ...rate, amountCents, amounts: { ...rate.amounts, shippingCents: amountCents } })) };
+      });
+      await expect(w.service.progress(36, saved.authorizationId, "admin")).rejects.toMatchObject({ code: "RETURN_RATE_COST_LIMIT" });
+      expect(w.purchase).not.toHaveBeenCalled();
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM returns.customer_return_label_attempts")).rows[0].count).toBe(0);
+      expect((await pool.query("SELECT status,error_code,quote_result FROM returns.customer_return_quote_decisions")).rows[0])
+        .toMatchObject({ status: "failed", error_code: "RETURN_RATE_COST_LIMIT", quote_result: { costReferences: expect.any(Array) } });
+    });
     it("migrates already committed fixed settings, manifests and uncertain attempts without changing their original request", async () => {
       await createIntakeTestSchema(pool, { carrierSelection: false });
       await seedIntakeTestSchema(pool);

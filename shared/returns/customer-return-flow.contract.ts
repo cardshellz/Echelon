@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { customerReturnPackingLimitsSchema } from "./customer-return-shipping-guardrails";
 import {
   MAX_RETURN_ORIGINAL_BOXES, customerReturnBoxOptionSchema, customerReturnDimensionsSchema,
   customerReturnParcelWeightSchema, customerReturnUnitWeightSchema,
@@ -39,6 +40,7 @@ export const customerReturnFlowOrderSchema = z
     returnWindowEndsAt: z.string().datetime(),
     message: z.string().max(500).nullable(),
     boxOptions: z.array(customerReturnBoxOptionSchema).max(MAX_RETURN_ORIGINAL_BOXES),
+    packingLimits: customerReturnPackingLimitsSchema.nullable().optional(),
     lines: z
       .array(
         z
