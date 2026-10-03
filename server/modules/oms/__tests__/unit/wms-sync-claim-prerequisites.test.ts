@@ -114,6 +114,28 @@ describe("WMS shipment inventory prerequisites", () => {
       });
   });
 
+  it("lets an order whose line has bad catalog data reach ShipStation instead of retrying forever", async () => {
+    // 2026-10-02: an unmapped graded-card line failed the whole-order claim on
+    // every retry, so the order never got a ShipStation shipment.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const dataError = Object.assign(new Error("A physical open order item SKU does not resolve to one active catalog variant."), {
+      code: "ORDER_ITEM_VARIANT_MISSING",
+    });
+    const service = reservationHarness(vi.fn(async () => { throw dataError; }));
+
+    await expect(service.reserveBeforeShipmentProcessing(9904, null, "post_create")).resolves.toBeUndefined();
+    expect(String(warn.mock.calls[0]?.[0])).toContain("ORDER_ITEM_VARIANT_MISSING");
+  });
+
+  it("recognizes a bad-line error wrapped by the runtime boundary", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const wrapped = Object.assign(new Error("reservation failed"), {
+      cause: Object.assign(new Error("identity conflict"), { code: "ORDER_ITEM_VARIANT_IDENTITY_CONFLICT" }),
+    });
+    const service = reservationHarness(vi.fn(async () => { throw wrapped; }));
+    await expect(service.reserveBeforeShipmentProcessing(9905, null, "post_create")).resolves.toBeUndefined();
+  });
+
   it("persists provider work only after inventory authority resolves", async () => {
     const order: string[] = [];
     const result = await admitInitialProviderShipmentAfterInventoryAuthority(

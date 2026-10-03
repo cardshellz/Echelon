@@ -9,6 +9,7 @@
  * 4. Creates WMS order for pick queue
  */
 
+import { isPermanentOrderReservationDataError, reservationErrorCode } from "./reservation-error-classification";
 import { db } from "../../db";
 import { sql, eq, and, notInArray } from "drizzle-orm";
 import { CountryCodeValidationError, parseCountryCode } from "@shared/country-code";
@@ -1823,6 +1824,14 @@ export class WmsSyncService {
     try {
       reserveResult = await this.services.reservation.reserveOrder(wmsOrderId);
     } catch (err: any) {
+      if (isPermanentOrderReservationDataError(err)) {
+        // A bad order line fails the same way on every retry. Record it where it
+        // is visible and let the order reach ShipStation; a pick reserves the
+        // order on the spot once the line is fixed, and picks of the bad line fail
+        // with its own reason instead of silently stranding the whole order.
+        await this.recordReservationBlocked(wmsOrderId, omsOrderId, context, err);
+        return;
+      }
       console.error(
         `[WMS Sync] Reservation authority failed for WMS order ${wmsOrderId} (${context}): ${err?.message ?? String(err)} — aborting shipment processing so the sync can retry`,
       );
@@ -1861,6 +1870,33 @@ export class WmsSyncService {
           { cause: err },
         );
       }
+    }
+  }
+
+  private async recordReservationBlocked(
+    wmsOrderId: number,
+    omsOrderId: number | null,
+    context: string,
+    err: unknown,
+  ): Promise<void> {
+    const code = reservationErrorCode(err);
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(JSON.stringify({ level: "warn", action: "reserve_before_shipment", outcome: "blocked_by_order_data",
+      wms_order_id: wmsOrderId, oms_order_id: omsOrderId, error_code: code, error: message, context }));
+    if (!omsOrderId) return;
+    try {
+      await db.insert(omsOrderEvents).values({
+        orderId: omsOrderId,
+        eventType: "reservation_blocked",
+        details: { wmsOrderId, context, code, message },
+      });
+    } catch (recordError: any) {
+      // Same rule as a shortfall: never continue toward the provider unrecorded.
+      throw new WmsShipmentPrerequisiteError(
+        "The blocked reservation was not durably recorded before shipment processing.",
+        { wmsOrderId, omsOrderId, context, causeCode: recordError?.code ?? null },
+        { cause: recordError },
+      );
     }
   }
 

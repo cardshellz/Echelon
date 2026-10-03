@@ -194,6 +194,26 @@ export async function displaceClaimsForConfirmedShipment(
 }
 
 /**
+ * Claim an order that has never been reserved, so a live pick can proceed.
+ * Keyed by order: a retry replays the same claim. Returns the claim id, or
+ * null when the order has nothing to reserve.
+ */
+export async function claimCanonicalOrderForPick(
+  context: InventoryAvailabilityRuntimeClaimContext,
+  input: { orderId: number; actor: string; reason: string },
+): Promise<string | null> {
+  const result = await context.canonical.claimOrder({
+    orderId: input.orderId,
+    idempotencyKey: commandKey("claim-before-pick", { orderId: input.orderId }),
+    actor: input.actor,
+    reason: input.reason,
+  });
+  if (result.outcome === "no_claim_required") return null;
+  if (result.outcome !== "claimed") throw invalidCanonicalResult("claim_order_before_pick", result, context);
+  return result.claimId;
+}
+
+/**
  * Claim an order that has no active claim so a picker's confirmation that its
  * units already shipped can be recorded. A shipped order is claimed only for
  * its shipped-but-unrecorded units. Keyed by the last claim the order had (if
