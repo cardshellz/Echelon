@@ -29,6 +29,7 @@ describe("listing publication HTTP boundary", () => {
   const service = {
     workspace: vi.fn(),
     saveDraft: vi.fn(),
+    review: vi.fn(),
     submit: vi.fn(),
     reconcile: vi.fn(),
   };
@@ -74,6 +75,32 @@ describe("listing publication HTTP boundary", () => {
     });
     expect(response.status).toBe(200);
     expect(service.saveDraft).toHaveBeenCalledWith(104, body, "operator-1");
+  });
+  it("passes the exact selected review scope and authenticated actor to the owner", async () => {
+    service.review.mockResolvedValue({ id: "review-1" });
+    const body = { expectedRevision: 4, variantIds: [33] };
+    const response = await fetch(`${base}/review`, {
+      method: "POST",
+      headers: {
+        "x-permission": "channels:edit",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    expect(response.status).toBe(200);
+    expect(service.review).toHaveBeenCalledWith(104, body, "operator-1");
+  });
+  it("requires edit permission before preparing a selected review", async () => {
+    const response = await fetch(`${base}/review`, {
+      method: "POST",
+      headers: {
+        "x-permission": "channels:view",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ expectedRevision: 4, variantIds: [33] }),
+    });
+    expect(response.status).toBe(403);
+    expect(service.review).not.toHaveBeenCalled();
   });
   it("rejects invalid channel IDs before calling any owner", async () => {
     const response = await fetch(base.replace("/104/", "/NaN/"), {

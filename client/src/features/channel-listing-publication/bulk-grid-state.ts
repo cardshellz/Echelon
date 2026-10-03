@@ -29,7 +29,7 @@ export const BULK_GRID_CORE_COLUMNS: readonly BulkGridColumn[] = [
     key: "description",
     label: "Description",
     group: "Listing content",
-    width: 200,
+    width: 300,
     long: true,
   },
   {
@@ -52,6 +52,43 @@ export const BULK_GRID_CORE_COLUMNS: readonly BulkGridColumn[] = [
     width: 150,
   },
 ];
+
+export function bulkGridCoreFieldRequired(
+  field: BulkGridField,
+  method: ListingDraftItem["method"],
+): boolean {
+  return (
+    field === "identifier" ||
+    field === "priceOverrideCents" ||
+    method === "create"
+  );
+}
+
+/** Bounded plain-text preview only. The full original value remains the edit source. */
+export function bulkDescriptionPreview(raw: string): string {
+  const text = raw
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+    .replace(/<!--[^]*?-->/g, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(
+      /&(?:amp|quot|apos|lt|gt|nbsp);/gi,
+      (entity) =>
+        ({
+          "&amp;": "&",
+          "&quot;": '"',
+          "&apos;": "'",
+          "&lt;": "<",
+          "&gt;": ">",
+          "&nbsp;": " ",
+        })[entity.toLowerCase()] ?? entity,
+    )
+    .replace(/\s+/g, " ")
+    .trim();
+  const maximum = 240;
+  return text.length > maximum
+    ? text.slice(0, maximum - 1).trimEnd() + "…"
+    : text;
+}
 
 export function bulkGridBufferKey(
   variantId: number | "shared",
@@ -124,7 +161,8 @@ export function reconcileBulkGridControls(
   let changed = false;
   for (const [key, value] of buffers) {
     if (!value.controlSignature) continue;
-    const signature = controls.get(key.slice(key.indexOf(":") + 1));
+    const signature =
+      controls.get(key) ?? controls.get(key.slice(key.indexOf(":") + 1));
     // Hidden conditional fields retain their edit until shown or explicitly discarded.
     if (signature === undefined || signature === value.controlSignature)
       continue;

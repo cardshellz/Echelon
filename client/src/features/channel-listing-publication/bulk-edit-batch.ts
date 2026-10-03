@@ -249,6 +249,52 @@ function withAttributeChanges<T extends BulkItemPatch>(
   ) as T;
 }
 
+/** A shared context edit resets provider edits only on rows whose final context changes. */
+export function setBulkSharedContext(
+  items: readonly ListingDraftItem[],
+  input: BulkEditCommand,
+  field: "method" | "productType",
+  value: string | undefined,
+): BulkEditCommand {
+  z.enum(["method", "productType"]).parse(field);
+  const command = bulkEditCommandSchema.parse(input);
+  const selected = prepareBulkEdit(items, {}).next;
+  const candidate: Record<string, unknown> = { ...command.shared };
+  if (value === undefined) delete candidate[field];
+  else candidate[field] = value;
+  const shared = bulkEditPatchSchema.parse(candidate);
+  const patches = new Map(
+    command.itemChanges.map((change) => [change.variantId, change.patch]),
+  );
+  const changed = new Set(
+    selected
+      .filter((item) => {
+        const row = patches.get(item.variantId);
+        return (
+          (row?.method ?? command.shared.method ?? item.method) !==
+            (row?.method ?? shared.method ?? item.method) ||
+          (row?.productType ??
+            command.shared.productType ??
+            item.productType) !==
+            (row?.productType ?? shared.productType ?? item.productType)
+        );
+      })
+      .map((item) => item.variantId),
+  );
+  const next = bulkEditCommandSchema.parse({
+    shared: changed.size ? withAttributeChanges(shared, []) : shared,
+    itemChanges: command.itemChanges
+      .map((change) =>
+        changed.has(change.variantId)
+          ? { ...change, patch: withAttributeChanges(change.patch, []) }
+          : change,
+      )
+      .filter((change) => Object.keys(change.patch).length > 0),
+  });
+  previewBulkEditBatch(selected, next);
+  return next;
+}
+
 /** An explicit Apply to all replaces older row overrides for this field, preserving other fields. */
 export function setBulkSharedAttribute(
   input: BulkEditCommand,

@@ -617,6 +617,7 @@ export class DropshipOrderProcessingService {
     claim: DropshipOrderProcessingClaim,
     classified: { code: string; message: string; retryable: boolean },
   ): Promise<void> {
+    const vendorFailureMessage = vendorFacingFailureMessage(classified);
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: claim.intake.vendorId,
       eventType: classified.retryable
@@ -626,8 +627,8 @@ export class DropshipOrderProcessingService {
       channels: ["email", "in_app"],
       title: classified.retryable ? "Dropship order processing retrying" : "Dropship order processing failed",
       message: classified.retryable
-        ? `Order intake ${claim.intake.intakeId} processing hit a retryable issue: ${classified.message}.`
-        : `Order intake ${claim.intake.intakeId} could not be processed: ${classified.message}.`,
+        ? `Order intake ${claim.intake.intakeId} processing hit a retryable issue: ${vendorFailureMessage}.`
+        : `Order intake ${claim.intake.intakeId} could not be processed: ${vendorFailureMessage}.`,
       payload: {
         intakeId: claim.intake.intakeId,
         vendorId: claim.intake.vendorId,
@@ -636,7 +637,7 @@ export class DropshipOrderProcessingService {
         externalOrderId: claim.intake.externalOrderId,
         status: claim.intake.status,
         failureCode: classified.code,
-        failureMessage: classified.message,
+        failureMessage: vendorFailureMessage,
         retryable: classified.retryable,
       },
       idempotencyKey: `order-processing:${claim.intake.intakeId}:${classified.code}`,
@@ -818,7 +819,41 @@ function parseProcessInput(input: unknown): ProcessDropshipOrderIntakeInput {
   return result.data;
 }
 
-function classifyOrderProcessingError(error: unknown): {
+export const DATABASE_CONSTRAINT_VIOLATION_CODE = "DROPSHIP_ORDER_PROCESSING_DATABASE_CONSTRAINT_VIOLATION";
+
+/**
+ * PostgreSQL SQLSTATE class 23, "integrity constraint violation": a foreign key,
+ * unique, not-null, check or exclusion constraint refused the write. The same
+ * order hits the same constraint on every attempt until code or data changes,
+ * so the error is permanent. Retrying it each pass never succeeds; it only
+ * fills the audit trail (an order looping on a foreign key was claimed 356
+ * times an hour). The intake is left failed for review instead, where ops can
+ * Retry it once the cause is fixed.
+ */
+const POSTGRES_INTEGRITY_CONSTRAINT_VIOLATION_SQLSTATE = /^23[0-9A-Z]{3}$/;
+
+export function isDatabaseConstraintViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && POSTGRES_INTEGRITY_CONSTRAINT_VIOLATION_SQLSTATE.test(code);
+}
+
+/**
+ * A database constraint error names internal tables and constraints, which the
+ * vendor cannot act on and should not be shown. The vendor is told the error is
+ * on the Card Shellz side; the full error stays on the intake (rejection_reason)
+ * and its audit event, for staff.
+ */
+const DATABASE_CONSTRAINT_VIOLATION_VENDOR_MESSAGE =
+  "an internal Card Shellz error stopped it; the order is saved and Card Shellz staff can retry it";
+
+function vendorFacingFailureMessage(classified: { code: string; message: string }): string {
+  return classified.code === DATABASE_CONSTRAINT_VIOLATION_CODE
+    ? DATABASE_CONSTRAINT_VIOLATION_VENDOR_MESSAGE
+    : classified.message;
+}
+
+export function classifyOrderProcessingError(error: unknown): {
   code: string;
   message: string;
   retryable: boolean;
@@ -830,9 +865,13 @@ function classifyOrderProcessingError(error: unknown): {
       retryable: error.context?.retryable === true,
     };
   }
+  const message = error instanceof Error ? error.message : String(error);
+  if (isDatabaseConstraintViolation(error)) {
+    return { code: DATABASE_CONSTRAINT_VIOLATION_CODE, message, retryable: false };
+  }
   return {
     code: "DROPSHIP_ORDER_PROCESSING_UNEXPECTED_ERROR",
-    message: error instanceof Error ? error.message : String(error),
+    message,
     retryable: true,
   };
 }

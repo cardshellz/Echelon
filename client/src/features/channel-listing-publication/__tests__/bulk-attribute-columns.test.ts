@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildBulkAttributeColumns,
+  buildBulkAttributeColumnsForRows,
   BULK_ATTRIBUTE_COLUMN_LIMITS,
   parseBulkAttributeCellInput,
   type BulkAttributeColumn,
@@ -322,6 +323,7 @@ describe("provider-derived bulk attribute columns", () => {
     };
     const result = buildBulkAttributeColumns(input, [{}]);
     expect(result.columns).toHaveLength(30);
+    expect(result.columns[0].key).toBe(key("Visible", "field29"));
     expect(result.defaultColumnKeys).toHaveLength(30);
     expect(result.defaultColumnKeys).toEqual(
       result.columns.map((column) => column.key),
@@ -379,7 +381,7 @@ describe("provider-derived bulk attribute columns", () => {
         Visible: {
           type: "object",
           properties: Object.fromEntries(
-            Array.from({ length: 300 }, (_, index) => [
+            Array.from({ length: 600 }, (_, index) => [
               "field" + index,
               { type: "string" },
             ]),
@@ -387,13 +389,36 @@ describe("provider-derived bulk attribute columns", () => {
         },
       },
     };
-    const result = buildBulkAttributeColumns(input, [{}]);
+    const second = {
+      type: "object",
+      required: ["Visible"],
+      properties: {
+        Visible: {
+          type: "object",
+          required: ["lastRequired"],
+          properties: {
+            ...Object.fromEntries(
+              Array.from({ length: 600 }, (_, index) => [
+                "other" + index,
+                { type: "string" },
+              ]),
+            ),
+            lastRequired: { type: "string" },
+          },
+        },
+      },
+    };
+    const result = buildBulkAttributeColumnsForRows([
+      { schema: input, value: {} },
+      { schema: second, value: {} },
+    ]);
     expect(result.columns).toHaveLength(BULK_ATTRIBUTE_COLUMN_LIMITS.total);
     expect(result.defaultColumnKeys).toHaveLength(
       BULK_ATTRIBUTE_COLUMN_LIMITS.total,
     );
     expect(result.hasRowDetails).toBe(true);
     expect(result.warnings.length).toBeGreaterThan(0);
+    expect(result.columns[0].key).toBe(key("Visible", "lastRequired"));
     const complex = {
       ...column(["Orderable", "weight"]),
       type: "complex" as const,
@@ -402,6 +427,79 @@ describe("provider-derived bulk attribute columns", () => {
     expect(parseBulkAttributeCellInput(complex, "1").error).toContain(
       "details panel",
     );
+  });
+  it("keeps required columns for a typed row when other selected rows have no product type", () => {
+    const result = buildBulkAttributeColumnsForRows([
+      { schema, value: {} },
+      { value: {} },
+    ]);
+    const weight = result.columns.find(
+      (entry) => entry.key === key("Orderable", "weight"),
+    );
+    expect(weight).toMatchObject({
+      required: true,
+      requiredForSome: true,
+      appliesToAll: false,
+    });
+    expect(result.columns[0]).toBe(weight);
+    expect(result.requiredKeysByRow[0]).toContain(weight!.key);
+    expect(result.requiredKeysByRow[1]).toEqual([]);
+    expect(result.columnsByRow[1].size).toBe(0);
+    expect(result.applicableKeysByRow[1]).toEqual([]);
+  });
+  it("keeps each category's control and validation when paths have incompatible types", () => {
+    const text = {
+      type: "object",
+      properties: {
+        Visible: {
+          type: "object",
+          properties: {
+            size: { type: "string", enum: ["Small", "Large"] },
+          },
+        },
+      },
+    };
+    const number = {
+      type: "object",
+      properties: {
+        Visible: {
+          type: "object",
+          properties: {
+            size: { type: "number", minimum: 1 },
+          },
+        },
+      },
+    };
+    const rows = [
+      { schema: text, value: {} },
+      { schema: number, value: {} },
+    ];
+    const before = structuredClone(rows);
+    const result = buildBulkAttributeColumnsForRows(rows);
+    const sizeKey = key("Visible", "size");
+    expect(result.columns[0]).toMatchObject({
+      kind: "complex",
+      appliesToAll: true,
+    });
+    expect(result.columnsByRow[0].get(sizeKey)).toMatchObject({
+      type: "string",
+      kind: "scalar",
+    });
+    expect(result.columnsByRow[1].get(sizeKey)).toMatchObject({
+      type: "number",
+      kind: "scalar",
+    });
+    expect(
+      parseBulkAttributeCellInput(
+        result.columnsByRow[0].get(sizeKey)!,
+        "choice:1",
+      ).value,
+    ).toBe("Large");
+    expect(
+      parseBulkAttributeCellInput(result.columnsByRow[1].get(sizeKey)!, "0")
+        .error,
+    ).not.toBeNull();
+    expect(rows).toEqual(before);
   });
 });
 

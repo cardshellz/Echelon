@@ -97,6 +97,25 @@ export const listingDraftItemSchema = z
   })
   .strict();
 export type ListingDraftItem = z.infer<typeof listingDraftItemSchema>;
+export const reviewListingDraftSchema = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    // Omission preserves the existing all-draft request contract.
+    variantIds: z.array(publicationIdSchema).min(1).max(100).optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      value.variantIds &&
+      new Set(value.variantIds).size !== value.variantIds.length
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["variantIds"],
+        message: "Select each variant once",
+      });
+  });
+export type ReviewListingDraft = z.infer<typeof reviewListingDraftSchema>;
 export const saveListingDraftSchema = z
   .object({
     expectedRevision: z.number().int().nonnegative(),
@@ -181,7 +200,9 @@ const listingTaxonomyNameSchema = z
 export const listingTaxonomyEntrySchema = z.object({
   productType: listingTaxonomyNameSchema,
   // Provider ancestors only; the selected product type is the separate leaf.
-  path: z.array(listingTaxonomyNameSchema).max(LISTING_TAXONOMY_LIMITS.pathDepth),
+  path: z
+    .array(listingTaxonomyNameSchema)
+    .max(LISTING_TAXONOMY_LIMITS.pathDepth),
   description: z
     .string()
     .trim()
@@ -194,20 +215,37 @@ export type ListingTaxonomyEntry = z.infer<typeof listingTaxonomyEntrySchema>;
 export const listingTaxonomySchema = z
   .object({
     // Retained for older clients; a response without entries remains a valid flat taxonomy.
-    productTypes: z.array(listingTaxonomyNameSchema).max(LISTING_TAXONOMY_LIMITS.productTypes),
-    entries: z.array(listingTaxonomyEntrySchema).max(LISTING_TAXONOMY_LIMITS.entries).default([]),
+    productTypes: z
+      .array(listingTaxonomyNameSchema)
+      .max(LISTING_TAXONOMY_LIMITS.productTypes),
+    entries: z
+      .array(listingTaxonomyEntrySchema)
+      .max(LISTING_TAXONOMY_LIMITS.entries)
+      .default([]),
   })
   .superRefine((value, context) => {
     const types = new Set(value.productTypes);
     if (types.size !== value.productTypes.length)
-      context.addIssue({ code: "custom", path: ["productTypes"], message: "Taxonomy product types must be unique" });
+      context.addIssue({
+        code: "custom",
+        path: ["productTypes"],
+        message: "Taxonomy product types must be unique",
+      });
     const paths = new Set<string>();
     for (const [index, entry] of value.entries.entries()) {
       if (!types.has(entry.productType))
-        context.addIssue({ code: "custom", path: ["entries", index, "productType"], message: "Taxonomy paths must refer to a listed product type" });
+        context.addIssue({
+          code: "custom",
+          path: ["entries", index, "productType"],
+          message: "Taxonomy paths must refer to a listed product type",
+        });
       const key = JSON.stringify([entry.path, entry.productType]);
       if (paths.has(key))
-        context.addIssue({ code: "custom", path: ["entries", index], message: "Taxonomy paths must be unique" });
+        context.addIssue({
+          code: "custom",
+          path: ["entries", index],
+          message: "Taxonomy paths must be unique",
+        });
       paths.add(key);
     }
   });
