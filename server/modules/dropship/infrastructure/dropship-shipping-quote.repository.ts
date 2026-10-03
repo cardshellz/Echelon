@@ -56,8 +56,32 @@ interface QuoteSnapshotRow {
   created_at: Date;
 }
 
+const QUOTE_SNAPSHOT_COLUMNS = `id, vendor_id, store_connection_id, warehouse_id, rate_table_id,
+            destination_country, destination_postal_code, currency,
+            idempotency_key, request_hash, package_count, base_rate_cents,
+            markup_cents, insurance_pool_cents, dunnage_cents,
+            total_shipping_cents, quote_payload, warnings, created_at`;
+
 export class PgDropshipShippingQuoteRepository implements DropshipShippingQuoteRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
+
+  async findQuoteSnapshotById(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    quoteSnapshotId: number;
+  }): Promise<DropshipShippingQuoteSnapshotRecord | null> {
+    const result = await this.dbPool.query<QuoteSnapshotRow>(
+      `SELECT ${QUOTE_SNAPSHOT_COLUMNS}
+       FROM dropship.dropship_shipping_quote_snapshots
+       WHERE id = $1
+         AND vendor_id = $2
+         AND store_connection_id = $3
+       LIMIT 1`,
+      [input.quoteSnapshotId, input.vendorId, input.storeConnectionId],
+    );
+    const row = result.rows[0];
+    return row ? mapQuoteSnapshotRow(row) : null;
+  }
 
   async findQuoteSnapshotByIdempotencyKey(input: {
     vendorId: number;
@@ -270,11 +294,7 @@ async function findQuoteSnapshotByIdempotencyKeyWithClient(
   },
 ): Promise<DropshipShippingQuoteSnapshotRecord | null> {
   const result = await client.query<QuoteSnapshotRow>(
-    `SELECT id, vendor_id, store_connection_id, warehouse_id, rate_table_id,
-            destination_country, destination_postal_code, currency,
-            idempotency_key, request_hash, package_count, base_rate_cents,
-            markup_cents, insurance_pool_cents, dunnage_cents,
-            total_shipping_cents, quote_payload, warnings, created_at
+    `SELECT ${QUOTE_SNAPSHOT_COLUMNS}
      FROM dropship.dropship_shipping_quote_snapshots
      WHERE vendor_id = $1
        AND idempotency_key = $2

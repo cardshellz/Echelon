@@ -13,10 +13,11 @@ import type {
   DropshipOmsFulfillmentSync,
   DropshipOmsFulfillmentSyncRetryQueue,
 } from "./dropship-ports";
-import type {
-  DropshipAcceptanceReloadContext,
-  DropshipOrderAcceptanceResult,
-  DropshipOrderAcceptanceService,
+import {
+  DROPSHIP_OMS_LINE_AUTHORITY_REFUSED_CODE,
+  type DropshipAcceptanceReloadContext,
+  type DropshipOrderAcceptanceResult,
+  type DropshipOrderAcceptanceService,
 } from "./dropship-order-acceptance-service";
 import type {
   DropshipOrderIntakeStatus,
@@ -71,6 +72,8 @@ export interface DropshipOrderProcessingClaim {
   skipReason: string | null;
   intake: DropshipOrderProcessingIntakeRecord;
   config: DropshipOrderProcessingConfig;
+  /** The quote acceptance froze when it staged this intake; null before staging (and on a skipped claim). */
+  stagedShippingQuoteSnapshotId: number | null;
 }
 
 export interface DropshipOrderProcessingQuoteItem {
@@ -129,7 +132,7 @@ export interface DropshipOrderProcessingResult {
 
 export interface DropshipOrderProcessingServiceDependencies {
   repository: DropshipOrderProcessingRepository;
-  shippingQuote: Pick<DropshipShippingQuoteService, "quote">;
+  shippingQuote: Pick<DropshipShippingQuoteService, "quote" | "replayQuoteSnapshot">;
   orderAcceptance: Pick<DropshipOrderAcceptanceService, "acceptOrder" | "notifyAcceptanceOutcome">;
   walletAutoReload?: Pick<DropshipWalletService, "handleAutoReload">;
   /** Pauses the vendor when the backstop card charge is declined outright. */
@@ -170,22 +173,7 @@ export class DropshipOrderProcessingService {
     }
 
     try {
-      const destination = buildQuoteDestination(claim.intake);
-      const items = aggregateQuoteItems(await this.deps.repository.resolveQuoteItems({
-        intake: claim.intake,
-        now: this.deps.clock.now(),
-      }));
-      const quote = await this.deps.shippingQuote.quote({
-        vendorId: claim.intake.vendorId,
-        storeConnectionId: claim.intake.storeConnectionId,
-        warehouseId: requireDefaultWarehouseId(claim),
-        destination,
-        items: items.map((item) => ({
-          productVariantId: item.productVariantId,
-          quantity: item.quantity,
-        })),
-        idempotencyKey: deriveOrderProcessingIdempotencyKey("quote", parsed),
-      });
+      const quote = await this.quoteForPass(parsed, claim);
       // Notices are deferred: a pass can hold, top up and re-accept, and the
       // vendor hears about its one final outcome (notifyPassOutcome).
       const acceptance = await this.deps.orderAcceptance.acceptOrder({
@@ -613,6 +601,45 @@ export class DropshipOrderProcessingService {
     });
   }
 
+  /**
+   * The shipping quote this pass hands to acceptance.
+   *
+   * Once acceptance has staged the intake, its stage is the price: acceptance
+   * resumes only with the staged quote and refuses any other as
+   * DROPSHIP_ORDER_ACCEPTANCE_IDEMPOTENCY_CONFLICT. The pass's quote key comes
+   * from its request key, so a pass with a new key (ops "Process" sends one per
+   * click) would price a new quote; a staged intake replays its staged quote
+   * instead. Before staging, the pass quotes as before.
+   */
+  private async quoteForPass(
+    parsed: ProcessDropshipOrderIntakeInput,
+    claim: DropshipOrderProcessingClaim,
+  ): Promise<DropshipShippingQuoteResult> {
+    if (claim.stagedShippingQuoteSnapshotId !== null) {
+      return this.deps.shippingQuote.replayQuoteSnapshot({
+        vendorId: claim.intake.vendorId,
+        storeConnectionId: claim.intake.storeConnectionId,
+        quoteSnapshotId: claim.stagedShippingQuoteSnapshotId,
+      });
+    }
+    const destination = buildQuoteDestination(claim.intake);
+    const items = aggregateQuoteItems(await this.deps.repository.resolveQuoteItems({
+      intake: claim.intake,
+      now: this.deps.clock.now(),
+    }));
+    return this.deps.shippingQuote.quote({
+      vendorId: claim.intake.vendorId,
+      storeConnectionId: claim.intake.storeConnectionId,
+      warehouseId: requireDefaultWarehouseId(claim),
+      destination,
+      items: items.map((item) => ({
+        productVariantId: item.productVariantId,
+        quantity: item.quantity,
+      })),
+      idempotencyKey: deriveOrderProcessingIdempotencyKey("quote", parsed),
+    });
+  }
+
   private async notifyProcessingFailure(
     claim: DropshipOrderProcessingClaim,
     classified: { code: string; message: string; retryable: boolean },
@@ -857,7 +884,10 @@ export function permanentDatabaseErrorCode(error: unknown): string | null {
  */
 const INTERNAL_ERROR_VENDOR_MESSAGE =
   "an internal Card Shellz error stopped it; the order is saved and Card Shellz staff can retry it";
-const INTERNAL_ERROR_CODES: ReadonlySet<string> = new Set(PERMANENT_DATABASE_ERROR_CODE_BY_SQLSTATE_CLASS.values());
+const INTERNAL_ERROR_CODES: ReadonlySet<string> = new Set([
+  ...PERMANENT_DATABASE_ERROR_CODE_BY_SQLSTATE_CLASS.values(),
+  DROPSHIP_OMS_LINE_AUTHORITY_REFUSED_CODE,
+]);
 
 function vendorFacingFailureMessage(classified: { code: string; message: string }): string {
   return INTERNAL_ERROR_CODES.has(classified.code) ? INTERNAL_ERROR_VENDOR_MESSAGE : classified.message;

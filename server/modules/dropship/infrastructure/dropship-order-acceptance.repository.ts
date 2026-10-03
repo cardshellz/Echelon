@@ -28,6 +28,13 @@ import type { DropshipProductCostReader } from "../application/dropship-product-
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 import { isWarehouseEnabledForChannelWithClient } from "./dropship-oms-warehouse-assignments.reader";
 import {
+  dropshipAcceptanceAuthorityEventId,
+  grantDropshipAcceptanceLineAuthorityWithClient,
+  OmsLineAuthorityGrantError,
+  type GrantedOmsLineAuthority,
+} from "../../oms/oms-line-authority-grant.repository";
+import {
+  DROPSHIP_OMS_LINE_AUTHORITY_REFUSED_CODE,
   buildDropshipOrderAcceptancePlan,
   assertDropshipQuoteDestinationMatchesShipTo,
   requireDropshipAcceptanceShipTo,
@@ -457,6 +464,13 @@ async function acceptOrderWithClient(
     vendor,
     omsOrderId,
   });
+  // The legacy path creates its OMS order already paid, so the grant follows
+  // the wallet debit in this same transaction.
+  const omsLineAuthority = await grantOmsLineAuthorityWithClient(client, {
+    intakeId: plan.intakeId,
+    omsOrderId,
+    acceptedAt: input.acceptedAt,
+  });
   await markIntakeAcceptedWithClient(client, {
     intakeId: plan.intakeId,
     omsOrderId,
@@ -474,6 +488,7 @@ async function acceptOrderWithClient(
       totalDebitCents: plan.totalDebitCents,
       advance: debit.advance,
       requestHash: input.requestHash,
+      omsLineAuthority: summarizeOmsLineAuthority(omsLineAuthority),
     },
   });
 
@@ -887,6 +902,11 @@ async function finalizeCanonicalOrderWithClient(
     omsOrderId: Number(stage.oms_order_id),
   });
   await markOmsOrderAcceptedWithClient(client, Number(stage.oms_order_id), input.acceptedAt);
+  const omsLineAuthority = await grantOmsLineAuthorityWithClient(client, {
+    intakeId: plan.intakeId,
+    omsOrderId: Number(stage.oms_order_id),
+    acceptedAt: input.acceptedAt,
+  });
   await markIntakeAcceptedWithClient(client, {
     intakeId: plan.intakeId,
     omsOrderId: Number(stage.oms_order_id),
@@ -918,6 +938,7 @@ async function finalizeCanonicalOrderWithClient(
       advance: debit.advance,
       requestHash: input.requestHash,
       inventoryAuthority: "canonical",
+      omsLineAuthority: summarizeOmsLineAuthority(omsLineAuthority),
     },
   });
   return {
@@ -3226,6 +3247,48 @@ async function markOmsOrderAcceptedWithClient(
       { omsOrderId },
     );
   }
+}
+
+/**
+ * Lets the paid order's OMS lines be fulfilled, in the transaction that debits
+ * the wallet and marks the OMS order paid. Acceptance creates its OMS lines with
+ * no authority, so without this no WMS sync can fulfill them. OMS's refusal is
+ * permanent and becomes a non-retryable error that rolls the acceptance back.
+ */
+async function grantOmsLineAuthorityWithClient(
+  client: PoolClient,
+  input: { intakeId: number; omsOrderId: number; acceptedAt: Date },
+): Promise<GrantedOmsLineAuthority[]> {
+  try {
+    return await grantDropshipAcceptanceLineAuthorityWithClient(client, {
+      omsOrderId: input.omsOrderId,
+      sourceEventId: dropshipAcceptanceAuthorityEventId(input.intakeId),
+      authorizedAt: input.acceptedAt,
+    });
+  } catch (error) {
+    if (error instanceof OmsLineAuthorityGrantError) {
+      throw new DropshipError(
+        DROPSHIP_OMS_LINE_AUTHORITY_REFUSED_CODE,
+        `OMS refused fulfillment authority for the accepted order's lines: ${error.message}`,
+        {
+          intakeId: input.intakeId,
+          omsOrderId: input.omsOrderId,
+          omsErrorCode: error.code,
+          omsContext: error.context,
+        },
+      );
+    }
+    throw error;
+  }
+}
+
+function summarizeOmsLineAuthority(
+  granted: readonly GrantedOmsLineAuthority[],
+): Array<{ omsOrderLineId: number; authorityFulfillableQuantity: number }> {
+  return granted.map((line) => ({
+    omsOrderLineId: line.omsOrderLineId,
+    authorityFulfillableQuantity: line.authorityFulfillableQuantity,
+  }));
 }
 
 function financialPlanFromCanonicalStage(

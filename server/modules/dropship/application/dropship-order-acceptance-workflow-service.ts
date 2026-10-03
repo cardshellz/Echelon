@@ -36,6 +36,8 @@ export interface DropshipOrderAcceptanceWorkflowContext {
   storeConnectionId: number;
   defaultWarehouseId: number | null;
   normalizedPayload: NormalizedDropshipOrderPayload;
+  /** The quote acceptance froze when it staged this intake; null before staging. */
+  stagedShippingQuoteSnapshotId: number | null;
 }
 
 export interface DropshipOrderAcceptanceWorkflowRepository {
@@ -53,7 +55,7 @@ export interface DropshipOrderAcceptanceWorkflowResult {
 export interface DropshipOrderAcceptanceWorkflowDependencies {
   vendorProvisioning: DropshipVendorProvisioningService;
   repository: DropshipOrderAcceptanceWorkflowRepository;
-  shippingQuoteService: Pick<DropshipShippingQuoteService, "quote">;
+  shippingQuoteService: Pick<DropshipShippingQuoteService, "quote" | "replayQuoteSnapshot">;
   acceptanceService: Pick<DropshipOrderAcceptanceService, "acceptOrder">;
   fulfillmentSync?: DropshipOmsFulfillmentSync;
   fulfillmentSyncRetryQueue?: DropshipOmsFulfillmentSyncRetryQueue;
@@ -82,17 +84,7 @@ export class DropshipOrderAcceptanceWorkflowService {
       );
     }
 
-    const warehouseId = requireDefaultWarehouse(context);
-    const destination = quoteDestinationFromOrder(context.normalizedPayload, context.intakeId);
-    const items = quoteItemsFromOrder(context.normalizedPayload, context.intakeId);
-    const quote = await this.deps.shippingQuoteService.quote({
-      vendorId,
-      storeConnectionId: context.storeConnectionId,
-      warehouseId,
-      destination,
-      items,
-      idempotencyKey: deriveShippingQuoteIdempotencyKey(parsed.idempotencyKey),
-    });
+    const quote = await this.quoteForAcceptance(vendorId, context, parsed.idempotencyKey);
     const acceptance = await this.deps.acceptanceService.acceptOrder({
       intakeId: context.intakeId,
       vendorId,
@@ -124,6 +116,34 @@ export class DropshipOrderAcceptanceWorkflowService {
     });
 
     return { quote, acceptance };
+  }
+
+  /**
+   * A staged intake replays the quote its stage froze, the only one acceptance
+   * resumes with (DropshipShippingQuoteService.replayQuoteSnapshot). Each Accept
+   * click sends a new key, so quoting again would price a new quote and the
+   * stage would refuse it. Before staging, the click quotes as before.
+   */
+  private async quoteForAcceptance(
+    vendorId: number,
+    context: DropshipOrderAcceptanceWorkflowContext,
+    idempotencyKey: string,
+  ): Promise<DropshipShippingQuoteResult> {
+    if (context.stagedShippingQuoteSnapshotId !== null) {
+      return this.deps.shippingQuoteService.replayQuoteSnapshot({
+        vendorId,
+        storeConnectionId: context.storeConnectionId,
+        quoteSnapshotId: context.stagedShippingQuoteSnapshotId,
+      });
+    }
+    return this.deps.shippingQuoteService.quote({
+      vendorId,
+      storeConnectionId: context.storeConnectionId,
+      warehouseId: requireDefaultWarehouse(context),
+      destination: quoteDestinationFromOrder(context.normalizedPayload, context.intakeId),
+      items: quoteItemsFromOrder(context.normalizedPayload, context.intakeId),
+      idempotencyKey: deriveShippingQuoteIdempotencyKey(idempotencyKey),
+    });
   }
 }
 

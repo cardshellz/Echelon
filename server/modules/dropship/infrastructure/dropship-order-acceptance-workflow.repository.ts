@@ -13,6 +13,7 @@ interface OrderAcceptanceContextRow {
   store_connection_id: number;
   normalized_payload: NormalizedDropshipOrderPayload | null;
   config: Record<string, unknown> | null;
+  staged_shipping_quote_snapshot_id: number | string | null;
 }
 
 export class PgDropshipOrderAcceptanceWorkflowRepository implements DropshipOrderAcceptanceWorkflowRepository {
@@ -28,11 +29,14 @@ export class PgDropshipOrderAcceptanceWorkflowRepository implements DropshipOrde
          oi.vendor_id,
          oi.store_connection_id,
          oi.normalized_payload,
-         sc.config
+         sc.config,
+         st.shipping_quote_snapshot_id AS staged_shipping_quote_snapshot_id
        FROM dropship.dropship_order_intake oi
        INNER JOIN dropship.dropship_store_connections sc
          ON sc.id = oi.store_connection_id
         AND sc.vendor_id = oi.vendor_id
+       LEFT JOIN dropship.dropship_order_acceptance_stages st
+         ON st.intake_id = oi.id
        WHERE oi.id = $1
          AND oi.vendor_id = $2
        LIMIT 1`,
@@ -55,8 +59,23 @@ export class PgDropshipOrderAcceptanceWorkflowRepository implements DropshipOrde
       storeConnectionId: row.store_connection_id,
       defaultWarehouseId: readOrderProcessingDefaultWarehouseId(row.config ?? {}),
       normalizedPayload: row.normalized_payload,
+      stagedShippingQuoteSnapshotId: readStagedShippingQuoteSnapshotId(row),
     };
   }
+}
+
+// The stage's quote id never changes once written (migration 0667's update guard).
+function readStagedShippingQuoteSnapshotId(row: OrderAcceptanceContextRow): number | null {
+  if (row.staged_shipping_quote_snapshot_id === null) return null;
+  const quoteSnapshotId = Number(row.staged_shipping_quote_snapshot_id);
+  if (!Number.isSafeInteger(quoteSnapshotId) || quoteSnapshotId <= 0) {
+    throw new DropshipError(
+      "DROPSHIP_ORDER_ACCEPTANCE_STAGED_QUOTE_INVALID",
+      "The acceptance stage for this intake names an invalid shipping quote.",
+      { intakeId: row.id, shippingQuoteSnapshotId: String(row.staged_shipping_quote_snapshot_id) },
+    );
+  }
+  return quoteSnapshotId;
 }
 
 function readOrderProcessingDefaultWarehouseId(config: Record<string, unknown>): number | null {
