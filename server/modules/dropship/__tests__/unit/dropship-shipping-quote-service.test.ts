@@ -418,7 +418,9 @@ describe("DropshipShippingQuoteService", () => {
       markupCents: 100,
       insurancePoolCents: 22,
       dunnageCents: 0,
+      rateTableId: 33,
     });
+    expect(repository.snapshots[0]?.rateTableId).toBe(33);
     expect(repository.snapshots[0]?.quotePayload).toMatchObject({
       version: 2,
       policies: {
@@ -516,6 +518,10 @@ describe("DropshipShippingQuoteService", () => {
     },{ vendorId: 10,storeConnectionId: 22,warehouseId: 3,destination: { country: 'US',region: 'PA',postalCode: '16046' },items: [{ productVariantId: 101,quantity: 2 }],quotedAt: now });
     expect(calculated.totalShippingCents).toBe(824);
     expect(calculated.quotePayload).toMatchObject({ version: 4,pricing: { programCharges: { revision: 3,totalCents: 824 } } });
+    // shipping.rate_tables id 44 is not a Dropship rate table, so it stays out of the
+    // snapshot's rate_table_id column (foreign key to dropship.dropship_rate_tables).
+    expect(calculated.rateTableId).toBeNull();
+    expect(calculated.quotePayload).toMatchObject({ pricing: { rateTableId: 44, selectedRate: { rateTableId: 44 } } });
     expect(rateProvider.requests).toHaveLength(0);
   });
 
@@ -561,10 +567,13 @@ describe("DropshipShippingQuoteService", () => {
         baseRateCents: 800,
         markupCents: 80,
         insurancePoolCents: 17,
-        rateTableId: 44,
+        rateTableId: null,
       },
     });
     expect(repository.snapshots).toHaveLength(1);
+    // The shared engine's rate table (shipping.rate_tables id 44) is kept in the
+    // payload below; the rate_table_id column only takes Dropship rate tables.
+    expect(repository.snapshots[0]?.rateTableId).toBeNull();
     expect(repository.snapshots[0]?.quotePayload).toMatchObject({
       version: 3,
       providers: {

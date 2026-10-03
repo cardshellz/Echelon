@@ -349,6 +349,10 @@ export interface DropshipShippingCalculationResult {
   cartonization: DropshipCartonizationResult;
   pricing: DropshipShippingPricingResult;
   currency: string;
+  /**
+   * The Dropship rate table (dropship.dropship_rate_tables) a legacy quote
+   * priced from; null for a shared-engine quote. See snapshotRateTableId.
+   */
   rateTableId: number | null;
   baseRateCents: number;
   markupCents: number;
@@ -389,7 +393,7 @@ export async function calculateDropshipShippingQuote(
       || BigInt(charge.baseCents) + BigInt(charge.markupCents) + BigInt(charge.insuranceCents) !== BigInt(charge.totalCents)) {
       throw new DropshipError('DROPSHIP_SHIPPING_RATE_INVALID', 'Shared shipping charge evidence is invalid.');
     }
-    return { ...totals, cartonization, pricing, currency: pricing.currency, rateTableId: pricing.rateTableId,
+    return { ...totals, cartonization, pricing, currency: pricing.currency, rateTableId: snapshotRateTableId(pricing),
       quotePayload: { version: 4, destination: input.destination, items: input.items,
         packages: cartonization.packages, packaging: cartonization.packaging ?? null,
         providers: { cartonization: cartonization.engine, rates: pricing.quote.rateProvider },
@@ -431,7 +435,7 @@ export async function calculateDropshipShippingQuote(
     cartonization,
     pricing,
     currency: pricing.currency,
-    rateTableId: pricing.rateTableId,
+    rateTableId: snapshotRateTableId(pricing),
     quotePayload: buildQuotePayload({
       destination: input.destination,
       items: input.items,
@@ -493,6 +497,18 @@ function requireActiveInsurancePoolPolicy(
     "Active dropship shipping insurance pool policy is required before quoting shipping.",
     context,
   );
+}
+
+/**
+ * The quote snapshot's rate_table_id column references dropship.dropship_rate_tables,
+ * the legacy Dropship rate tables. A shared-engine quote prices from
+ * shipping.rate_tables, a different table, so its id must not go in that column:
+ * the foreign key refuses it, and the order could never be quoted. The shared
+ * engine's rate book, rate table and selected rate stay on the snapshot in
+ * quotePayload.pricing.
+ */
+function snapshotRateTableId(pricing: DropshipShippingPricingResult): number | null {
+  return pricing.source === "legacy" ? pricing.rateTableId : null;
 }
 
 function buildQuotePayload(input: {
