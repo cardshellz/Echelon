@@ -1,5 +1,4 @@
 import type { Pool, PoolClient } from "pg";
-import Decimal from "decimal.js";
 import { z } from "zod";
 import { customerReturnDimensionsSchema } from "@shared/returns/customer-return-parcel";
 import { customerReturnLabelSettingsSchema } from "@shared/returns/customer-return-label.contract";
@@ -10,11 +9,10 @@ import {
   customerReturnQuoteDecisionSchema,
   customerReturnShipmentHash,
   type CustomerReturnQuoteDecision,
+  storedCustomerReturnQuoteResult,
+  readStoredCustomerReturnQuoteResult,
 } from "../application/customer-return-label-quote";
-import {
-  DIMENSION_INCH_DECIMAL_PLACES,
-  MILLIMETERS_PER_INCH,
-} from "@shared/shipping/dimensions";
+import { customerReturnProviderDimensions } from "../application/customer-return-shipping-plan";
 import {
   returnLabelInputSchema,
   returnLabelRecordSchema,
@@ -28,7 +26,6 @@ import { CustomerReturnIntakeError } from "../application/customer-return-intake
 import { RETURN_LABEL_CONTROL_LOCK_NAMESPACE } from "./customer-return-label-settings.repository";
 
 const id = z.coerce.number().int().positive().safe();
-const Exact = Decimal.clone({ precision: 40 });
 export class PostgresCustomerReturnLabelStore
   implements CustomerReturnLabelStore
 {
@@ -82,11 +79,7 @@ export class PostgresCustomerReturnLabelStore
           shipTo: row.destination_address,
           parcel: {
             weightGrams: id.parse(row.weight_grams),
-            dimensionsInches: {
-              length: providerInches(dims.lengthMm),
-              width: providerInches(dims.widthMm),
-              height: providerInches(dims.heightMm),
-            },
+            dimensionsInches: customerReturnProviderDimensions(dims),
           },
         });
         const preparedInput =
@@ -159,7 +152,8 @@ export class PostgresCustomerReturnLabelStore
     );
     if (
       !parcel ||
-      parcel.selectionMode !== "cheapest_eligible" ||
+      parcel.selectionMode !== decision.settings.selectionMode ||
+      (parcel.selectionMode !== "cheapest_eligible" && decision.settings.parcelGuardrails == null) ||
       customerReturnShipmentHash(parcel.shipment) !== decision.shipmentHash ||
       Date.parse(decision.quotedAt) > now.getTime()
     )
@@ -171,6 +165,8 @@ export class PostgresCustomerReturnLabelStore
           policy: decision.settings,
           weightGrams: parcel.shipment.parcel.weightGrams,
           result: decision.result!,
+          shipment: parcel.shipment,
+          costReferences: decision.costReferences,
         }).selected,
       ) !== JSON.stringify(decision.selected)
     )
@@ -185,7 +181,7 @@ export class PostgresCustomerReturnLabelStore
         JSON.stringify(decision.settings),
         JSON.stringify(decision.shipment),
         decision.shipmentHash,
-        decision.result === null ? null : JSON.stringify(decision.result),
+        decision.result === null ? null : JSON.stringify(storedCustomerReturnQuoteResult(decision)),
         decision.selected === null ? null : JSON.stringify(decision.selected),
         decision.selected === null ? "failed" : "selected",
         decision.errorCode,
@@ -256,7 +252,7 @@ export class PostgresCustomerReturnLabelStore
       // The execution/recovery window starts after acquiring the purchase locks,
       // including fixed-service requests that did not need a fresh rate quote.
       let purchaseNow = z.date().parse(this.clock());
-      if (storedParcel.selectionMode === "fixed_service") {
+      if (storedParcel.selectionMode === "fixed_service" && current.parcelGuardrails == null) {
         if (
           quoteDecisionId !== undefined ||
           !input ||
@@ -286,7 +282,7 @@ export class PostgresCustomerReturnLabelStore
           settings: row.settings_snapshot,
           shipment: row.shipment_snapshot,
           shipmentHash: row.shipment_hash,
-          result: row.quote_result,
+          ...readStoredCustomerReturnQuoteResult(row.quote_result),
           selected: row.selected_rate,
           errorCode: row.error_code,
           quotedAt: z.coerce.date().parse(row.quoted_at).toISOString(),
@@ -307,6 +303,8 @@ export class PostgresCustomerReturnLabelStore
           policy: current,
           weightGrams: storedParcel.shipment.parcel.weightGrams,
           result: decision.result!,
+          shipment: storedParcel.shipment,
+          costReferences: decision.costReferences,
         }).selected;
         if (JSON.stringify(selected) !== JSON.stringify(decision.selected))
           throw quoteChanged();
@@ -464,11 +462,4 @@ function equalJson(
     keys.length === Object.keys(right).length &&
     keys.every((key) => left[key] === right[key])
   );
-}
-function providerInches(millimeters: number): number {
-  // Match the editor's three-decimal precision without understating the carton.
-  return new Exact(millimeters)
-    .div(MILLIMETERS_PER_INCH)
-    .toDecimalPlaces(DIMENSION_INCH_DECIMAL_PLACES, Decimal.ROUND_CEIL)
-    .toNumber();
 }

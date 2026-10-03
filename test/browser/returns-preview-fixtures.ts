@@ -8,6 +8,7 @@ import {
   customerReturnLiveLookupInputSchema,
   customerReturnLiveReviewInputSchema,
 } from "../../shared/returns/customer-return-live.contract";
+import type { CustomerReturnPackingLimit } from "../../shared/returns/customer-return-shipping-guardrails";
 
 export const PREVIEW_API = CUSTOMER_RETURN_PREVIEW_API_PATH;
 
@@ -15,6 +16,8 @@ interface ReturnPreviewFixtureOptions {
   role?: string | null;
   loginRole?: string | null;
   shops?: { channelId: number; name: string }[];
+  packingLimits?: CustomerReturnPackingLimit[];
+  unitWeightGrams?: number;
 }
 
 /** Browser rendering/interaction adapter only. Every API request is intercepted;
@@ -56,6 +59,9 @@ export async function installReturnPreviewFixtures(
     });
     return {
       ...fields,
+      ...(configured.packingLimits ? { packingLimits: configured.packingLimits } : {}),
+      lines: fields.lines.map(line => ({ ...line,
+        ...(configured.unitWeightGrams === undefined ? {} : { unitWeightGrams: configured.unitWeightGrams }) })),
       mode: "admin_live",
       orderReference: "#LIVE-1001",
       sourceRevision: String(channelId).padStart(64, "0"),

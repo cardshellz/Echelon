@@ -16,7 +16,10 @@ import {
   INTAKE_KEY,
   INTAKE_LEASE,
   INTAKE_NOW,
+  publishIntakeTestPolicyShipping,
+  bindIntakeTestPolicy,
 } from "../support/customer-return-intake-database";
+import { defaultCustomerReturnShippingGuardrails } from "@shared/returns/customer-return-shipping-guardrails";
 
 const connectionString = resolveReturnsTestDatabase(process.env, "intake");
 const integration = connectionString ? describe.sequential : describe.skip;
@@ -73,6 +76,20 @@ integration("private return intake on migration-defined PostgreSQL", () => {
       ],
     };
   }
+  it.each(["weight", "girth", "international"])("rolls back all receiving claims when a caller bypasses the %s guardrail", async failure => {
+    const current = await publishIntakeTestPolicyShipping(pool, { parcelGuardrails: defaultCustomerReturnShippingGuardrails() });
+    const prepared = preparedIntake();
+    await bindIntakeTestPolicy(pool, prepared, current);
+    if (failure === "weight") prepared.parcels[0].weightGrams = 9073;
+    if (failure === "girth") prepared.parcels[0].dimensions = { lengthMm: 2000, widthMm: 1000, heightMm: 1000 };
+    if (failure === "international") prepared.parcels[0].originAddress.countryCode = "CA" as "US";
+    await expect(store.persist(prepared)).rejects.toMatchObject({
+      code: failure === "international" ? "RETURN_INTAKE_INPUT_INVALID" : "RETURN_LABEL_PARCEL_NOT_ELIGIBLE",
+    });
+    expect(await counts()).toEqual({ roots: 0, cases: 0, items: 0, parcels: 0 });
+    expect((await pool.query("SELECT status FROM returns.customer_return_submission_commands WHERE idempotency_key=$1", [INTAKE_KEY])).rows[0].status)
+      .toBe("preparing");
+  });
   async function recordProvenRestock(caseId: number): Promise<number> {
     const item = (
       await pool.query(

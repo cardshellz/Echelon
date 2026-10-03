@@ -10,6 +10,7 @@ import {
 } from "../../shared/returns/customer-return-portal-paths";
 import { customerReturnLiveReviewInputSchema } from "../../shared/returns/customer-return-live.contract";
 import { MAX_RETURN_FLOW_PARCELS } from "../../shared/returns/customer-return-flow.contract";
+import { customerReturnPackingLimits, defaultCustomerReturnShippingGuardrails } from "../../shared/returns/customer-return-shipping-guardrails";
 import {
   installReturnLabelFixtures,
   installReturnPolicyFixtures,
@@ -2685,6 +2686,34 @@ test("the full maximum available quantity remains readable without horizontal ov
       () => document.documentElement.scrollWidth <= window.innerWidth,
     ),
   ).toBe(true);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("two heavy units start in separate boxes and an overweight move can be repaired with one split action", async ({ page }, testInfo) => {
+  const fixture = await installReturnPreviewFixtures(page, { unitWeightGrams: 13607.7711,
+    packingLimits: customerReturnPackingLimits({ selectionMode: "fixed_service", carrierId: "se-ups", serviceCode: "ups_ground",
+      carrierRules: [], parcelGuardrails: defaultCustomerReturnShippingGuardrails() })! });
+  await page.goto(PORTAL_PATH);
+  await page.getByLabel("Order number", { exact: true }).fill("LIVE-1001");
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  await page.getByTestId("preview-line-sample-line-1").getByRole("spinbutton").fill("2");
+  await page.getByRole("button", { name: "Continue to packing", exact: true }).click();
+  await expectBoxQuantity(page, 1, "sample-line-1", 1, 2);
+  await expectBoxQuantity(page, 2, "sample-line-1", 1, 2);
+  await moveLine(page, 2, "sample-line-1", 1, 1);
+  const review = page.getByRole("button", { name: "Review return", exact: true });
+  await expect(review).toBeDisabled();
+  await expect(page.getByTestId("preview-box-1").getByRole("alert")).toContainText("too heavy");
+  await page.getByRole("button", { name: "Split to fit", exact: true }).click();
+  await expectBoxQuantity(page, 1, "sample-line-1", 1, 2);
+  await expectBoxQuantity(page, 2, "sample-line-1", 1, 2);
+  await enterCustomBoxDimensions(page, 1, "12", "8", "4");
+  await enterCustomBoxDimensions(page, 2, "12", "8", "4");
+  await expect(page.getByTestId("packing-summary-total")).toContainText("2");
+  await expect(review).toBeEnabled();
+  await expectNoCustomerWeights(page);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.getByTestId("preview-canvas").screenshot({ path: testInfo.outputPath("packing-heavy-split.png"), animations: "disabled" });
   expect(fixture.failures).toEqual([]);
 });
 

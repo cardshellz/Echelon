@@ -44,6 +44,7 @@ export class CustomerReturnRequestError extends Error {
 async function responseBody<T extends z.ZodTypeAny>(
   response: Response,
   schema: T,
+  canRepack = false,
 ): Promise<z.output<T>> {
   if (response.status === 401 || response.status === 403)
     throw new PreviewAccessError(
@@ -67,7 +68,17 @@ async function responseBody<T extends z.ZodTypeAny>(
     }
     throw new CustomerReturnRequestError(
       code,
-      code === "RETURN_LABEL_SUBMISSION_REJECTED"
+      code === "RETURN_RATE_COST_LIMIT"
+        ? canRepack
+          ? "Prepaid shipping could not be approved for this box. Use a smaller box, split the items, or contact us for help. No label was purchased."
+          : "Your return is saved, but prepaid shipping for this box needs our team's help. No new label was purchased."
+        : code === "RETURN_RATE_COST_UNVERIFIED"
+          ? "The prepaid shipping price could not be verified. No label was purchased. Try again or contact us for help."
+        : code === "RETURN_RATE_NONE_ELIGIBLE" || code === "RETURN_LABEL_PARCEL_NOT_ELIGIBLE"
+          ? canRepack
+            ? "Review your box sizes and separate heavy items into more boxes, or contact us for help. No label was purchased."
+            : "Your return is saved, but no allowed prepaid service is available for this box. Contact us for help."
+        : code === "RETURN_LABEL_SUBMISSION_REJECTED"
         ? "This request was not accepted. Choose the order again to review its availability."
         : code === "RETURN_LABEL_SUBMISSION_PROCESSING"
           ? "Your request is still being checked. Check its status again shortly."
@@ -146,6 +157,7 @@ export function createCustomerReturnTransport(
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       }),
       schema,
+      path.endsWith("/review"),
     );
   }
   return {

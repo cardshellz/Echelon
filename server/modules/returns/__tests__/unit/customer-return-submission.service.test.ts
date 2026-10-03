@@ -19,6 +19,8 @@ import {
 import { LIVE_NOW } from "../support/live-inspection-fixtures";
 import type { CustomerReturnLabelStatus } from "@shared/returns/customer-return-label.contract";
 import { customerReturnSubmissionHash } from "../../application/customer-return-intake-preparation";
+import { defaultCustomerReturnShippingGuardrails } from "@shared/returns/customer-return-shipping-guardrails";
+import type { CustomerReturnLabelsService } from "../../application/customer-return-labels.service";
 
 const customerScope = { channelId: 36, omsOrderId: 100, externalOrderId: "1001", externalCustomerId: "customer-1" };
 
@@ -66,7 +68,7 @@ async function setup() {
   const inspectCanonicalForIntake = vi.fn(async () => structuredClone(fixture.inspection));
   const live = { inspectForIntake, inspectCanonicalForIntake };
   const requireEnabled = vi.fn(async () => ({
-    settings: labelSettings,
+    settings: structuredClone(labelSettings),
     operationalPolicy: { id: 1, version: 1, snapshot: labelPolicy },
   }));
   const status = vi.fn(
@@ -87,12 +89,13 @@ async function setup() {
     }),
   );
   const authorizeChannel = vi.fn(async () => {});
+  const preflight = vi.fn<CustomerReturnLabelsService["preflight"]>(async () => {});
   const service = new CustomerReturnSubmissionService({
     commands: { read, acquire, reject },
     intake: { persist, find: vi.fn() },
     live,
     settings: { requireEnabled },
-    labels: { status },
+    labels: { status, preflight },
     authorizeChannel,
     now: () => new Date(LIVE_NOW),
     newToken: () => LABEL_LEASE,
@@ -111,9 +114,35 @@ async function setup() {
     requireEnabled,
     status,
     authorizeChannel,
+    preflight,
   };
 }
 describe("private return submission and exact-intent recovery", () => {
+  it("rejects an excessive quoted price before reserving return quantities", async () => {
+    const s = await setup();
+    s.requireEnabled.mockResolvedValue({ settings: { ...labelSettings, parcelGuardrails: defaultCustomerReturnShippingGuardrails() },
+      operationalPolicy: { id: 1, version: 1, snapshot: labelPolicy } });
+    s.preflight.mockRejectedValue(new CustomerReturnIntakeError("RETURN_RATE_COST_LIMIT", "Repack this box.", 409));
+    await expect(s.service.submit(s.input, "admin")).rejects.toMatchObject({ code: "RETURN_LABEL_SUBMISSION_REJECTED", message: "Repack this box." });
+    expect(s.preflight).toHaveBeenCalledTimes(1);
+    expect(s.persist).not.toHaveBeenCalled();
+    expect(s.status).not.toHaveBeenCalled();
+    expect(s.reject).toHaveBeenCalledExactlyOnceWith(36, LABEL_KEY, LABEL_LEASE, "RETURN_RATE_COST_LIMIT", new Date(LIVE_NOW));
+  });
+  it("retains the exact intent after an unavailable reference quote and resumes before intake", async () => {
+    const s = await setup();
+    s.requireEnabled.mockResolvedValue({ settings: { ...labelSettings, parcelGuardrails: defaultCustomerReturnShippingGuardrails() },
+      operationalPolicy: { id: 1, version: 1, snapshot: labelPolicy } });
+    s.preflight.mockRejectedValueOnce(new CustomerReturnIntakeError("RETURN_RATE_COST_UNVERIFIED", "Try again.", 503));
+    await expect(s.service.submit(s.input, "admin")).rejects.toMatchObject({ code: "RETURN_LABEL_SUBMISSION_PROCESSING" });
+    expect(s.persist).not.toHaveBeenCalled();
+    expect(s.reject).not.toHaveBeenCalled();
+    expect(s.command.status).toBe("preparing");
+    await s.service.resume(36, LABEL_KEY, "admin");
+    expect(s.preflight).toHaveBeenCalledTimes(2);
+    expect(s.persist).toHaveBeenCalledTimes(1);
+    expect(s.persist).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: LABEL_KEY }));
+  });
   it("binds customer intent before inspection and only inspects the verified canonical scope", async () => {
     const s = await setup();
     s.command.omsOrderId = 100;

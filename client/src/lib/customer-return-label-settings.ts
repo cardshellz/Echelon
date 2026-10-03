@@ -1,8 +1,11 @@
+import { z } from "zod";
 import {
   customerReturnLabelSettingsInputSchema,
   type CustomerReturnLabelSettingsInput,
   type CustomerReturnLabelSettingsState,
 } from "@shared/returns/customer-return-label.contract";
+import { createReturnShippingGuardrailsDraft, returnShippingGuardrailsDraftSchema,
+  type ReturnShippingGuardrailsDraft } from "./customer-return-guardrails-draft";
 
 export type ReturnShippingCatalog = Pick<
   CustomerReturnLabelSettingsState,
@@ -28,6 +31,7 @@ export interface ReturnLabelSettingsDraft {
   contactName: string;
   contactPhone: string;
   enabled: boolean;
+  parcelGuardrails?: ReturnShippingGuardrailsDraft;
 }
 
 export type ReturnLabelSettingsField =
@@ -36,7 +40,8 @@ export type ReturnLabelSettingsField =
   | "contactPhone"
   | "carrierId"
   | "serviceCode"
-  | "carrierRules";
+  | "carrierRules"
+  | "parcelGuardrails";
 
 export interface ReturnLabelSettingsIssue {
   field: ReturnLabelSettingsField | null;
@@ -78,14 +83,18 @@ export function createReturnLabelSettingsDraft(
     contactName: settings?.contactName ?? "",
     contactPhone: settings?.contactPhone ?? "",
     enabled: settings?.enabled ?? false,
+    parcelGuardrails: createReturnShippingGuardrailsDraft(settings?.parcelGuardrails),
   };
 }
 
 export function parseReturnLabelSettingsDraft(
   draft: ReturnLabelSettingsDraft,
   expectedVersion: number,
-) {
+): ReturnType<typeof customerReturnLabelSettingsInputSchema.safeParse> {
   const automatic = draft.selectionMode === "cheapest_eligible";
+  const guardrails = draft.parcelGuardrails ? returnShippingGuardrailsDraftSchema.safeParse(draft.parcelGuardrails) : null;
+  if (guardrails && !guardrails.success) return { success: false, error: new z.ZodError(
+    guardrails.error.issues.map(issue => ({ ...issue, path: ["parcelGuardrails", ...issue.path] }))) };
   return customerReturnLabelSettingsInputSchema.safeParse({
     expectedVersion,
     enabled: draft.enabled,
@@ -104,6 +113,7 @@ export function parseReturnLabelSettingsDraft(
       : [],
     contactName: draft.contactName,
     contactPhone: draft.contactPhone.trim() || null,
+    parcelGuardrails: guardrails?.success ? guardrails.data : null,
   });
 }
 
@@ -211,7 +221,10 @@ export function returnLabelSettingsReadiness(
   if (!parsed.success) {
     for (const issue of parsed.error.issues) {
       const field = issue.path[0];
-      if (field === "contactName")
+      if (field === "parcelGuardrails") {
+        add("parcelGuardrails", "Check the box weight, length, girth and reference size limits. USPS allows at most 20 lb and 130 inches; UPS/FedEx allow at most 50 lb, 108 inches on the longest side and 165 inches with girth.");
+      }
+      else if (field === "contactName")
         add(
           "contactName",
           draft.contactName.trim()

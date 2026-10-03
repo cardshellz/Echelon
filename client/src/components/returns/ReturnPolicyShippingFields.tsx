@@ -8,6 +8,7 @@ import type {
 } from "@/lib/customer-return-label-settings";
 import { previewSelectClass } from "./CustomerReturnPreviewSteps";
 import { ReturnLabelCarrierRules } from "./ReturnLabelCarrierRules";
+import { ReturnShippingGuardrailsFields } from "./ReturnShippingGuardrailsFields";
 
 export const returnShippingFieldIds: Record<ReturnLabelSettingsField, string> =
   {
@@ -17,6 +18,7 @@ export const returnShippingFieldIds: Record<ReturnLabelSettingsField, string> =
     carrierId: "return-label-carrier",
     serviceCode: "return-label-service",
     carrierRules: "return-label-carrier-rules",
+    parcelGuardrails: "return-label-parcel-guardrails",
   };
 
 /** Controlled fields only. The containing editor owns loading, conflicts and save. */
@@ -237,6 +239,11 @@ export function ReturnPolicyShippingFields({
           {fieldErrors("carrierRules")}
         </div>
       )}
+      {draft.parcelGuardrails && <div id={fieldIds.parcelGuardrails} tabIndex={-1} className="space-y-2"
+        aria-describedby={description("parcelGuardrails")}>
+        <ReturnShippingGuardrailsFields draft={draft.parcelGuardrails} onChange={parcelGuardrails => onChange({ parcelGuardrails })} />
+        {fieldErrors("parcelGuardrails")}
+      </div>}
     </>
   );
 }
