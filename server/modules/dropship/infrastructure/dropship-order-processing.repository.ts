@@ -1,6 +1,11 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
+import {
+  decideDropshipCatalogOrderAvailability,
+  type DropshipCatalogExposureRule,
+} from "../domain/catalog-exposure";
+import { listActiveDropshipCatalogRules } from "./dropship-catalog-exposure.repository";
 import type {
   DropshipOrderProcessingClaim,
   DropshipOrderProcessingConfig,
@@ -27,7 +32,10 @@ interface ProcessingIntakeRow {
 
 interface ListingCandidateRow {
   listing_id: number;
+  product_id: number;
   product_variant_id: number;
+  product_line_ids: number[] | null;
+  category: string | null;
   listing_status: string;
   external_listing_id: string | null;
   external_offer_id: string | null;
@@ -36,7 +44,6 @@ interface ListingCandidateRow {
   product_is_active: boolean;
   variant_is_active: boolean;
   sales_eligibility: "sellable" | "internal_only";
-  dropship_eligible: boolean | null;
 }
 
 const QUOTABLE_LISTING_STATUSES = new Set(["active", "drift_detected", "paused"]);
@@ -113,6 +120,7 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
 
   async resolveQuoteItems(input: {
     intake: DropshipOrderProcessingIntakeRecord;
+    now: Date;
   }): Promise<DropshipOrderProcessingQuoteItem[]> {
     const rawLines = input.intake.normalizedPayload.lines;
     if (rawLines.length === 0) {
@@ -133,7 +141,10 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
     const result = await this.dbPool.query<ListingCandidateRow>(
       `SELECT
          dl.id AS listing_id,
+         p.id AS product_id,
          dl.product_variant_id,
+         ARRAY_REMOVE(ARRAY_AGG(DISTINCT plp.product_line_id), NULL) AS product_line_ids,
+         p.category,
          dl.status AS listing_status,
          dl.external_listing_id,
          dl.external_offer_id,
@@ -141,11 +152,11 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
          pv.sku AS variant_sku,
          p.is_active AS product_is_active,
          pv.is_active AS variant_is_active,
-         pv.sales_eligibility,
-         pv.dropship_eligible
+         pv.sales_eligibility
        FROM dropship.dropship_vendor_listings dl
        INNER JOIN catalog.product_variants pv ON pv.id = dl.product_variant_id
        INNER JOIN catalog.products p ON p.id = pv.product_id
+       LEFT JOIN catalog.product_line_products plp ON plp.product_id = p.id
        WHERE dl.vendor_id = $1
          AND dl.store_connection_id = $2
          AND (
@@ -154,7 +165,8 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
            OR dl.external_offer_id = ANY($5::text[])
            OR UPPER(pv.sku) = ANY($6::text[])
            OR UPPER(p.sku) = ANY($6::text[])
-         )`,
+         )
+       GROUP BY dl.id, p.id, pv.id`,
       [
         input.intake.vendorId,
         input.intake.storeConnectionId,
@@ -165,6 +177,7 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
       ],
     );
     const candidates = result.rows;
+    const catalogRules = await listActiveDropshipCatalogRules(this.dbPool);
 
     return rawLines.map((line, lineIndex) => {
       const candidate = findCandidateForOrderLine(candidates, line);
@@ -182,7 +195,12 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
           },
         );
       }
-      assertCandidateCanQuote(candidate, input.intake.intakeId, lineIndex);
+      assertCandidateCanQuote(candidate, {
+        intakeId: input.intake.intakeId,
+        lineIndex,
+        catalogRules,
+        now: input.now,
+      });
       return {
         lineIndex,
         productVariantId: candidate.product_variant_id,
@@ -457,9 +475,14 @@ function findCandidateForOrderLine(
 
 function assertCandidateCanQuote(
   candidate: ListingCandidateRow,
-  intakeId: number,
-  lineIndex: number,
+  input: {
+    intakeId: number;
+    lineIndex: number;
+    catalogRules: readonly DropshipCatalogExposureRule[];
+    now: Date;
+  },
 ): void {
+  const { intakeId, lineIndex } = input;
   if (!QUOTABLE_LISTING_STATUSES.has(candidate.listing_status)) {
     throw new DropshipError(
       "DROPSHIP_ORDER_PROCESSING_LISTING_NOT_QUOTABLE",
@@ -472,15 +495,25 @@ function assertCandidateCanQuote(
       },
     );
   }
-  if (
-    !candidate.product_is_active
-    || !candidate.variant_is_active
-    || candidate.sales_eligibility !== "sellable"
-    || candidate.dropship_eligible !== true
-  ) {
+  // The rule vendors list under, and nothing else: see
+  // decideDropshipCatalogOrderAvailability.
+  const availability = decideDropshipCatalogOrderAvailability({
+    subject: {
+      productId: candidate.product_id,
+      productVariantId: candidate.product_variant_id,
+      productLineIds: candidate.product_line_ids ?? [],
+      category: candidate.category,
+      productIsActive: candidate.product_is_active,
+      variantIsActive: candidate.variant_is_active,
+    },
+    customerSellable: candidate.sales_eligibility === "sellable",
+    rules: input.catalogRules,
+    now: input.now,
+  });
+  if (!availability.available) {
     throw new DropshipError(
       "DROPSHIP_ORDER_PROCESSING_VARIANT_NOT_ELIGIBLE",
-      "Dropship order line variant is not eligible for shipping quote generation.",
+      "Dropship order line variant is not in the dropship catalog vendors list from.",
       {
         intakeId,
         lineIndex,
@@ -488,7 +521,7 @@ function assertCandidateCanQuote(
         productIsActive: candidate.product_is_active,
         variantIsActive: candidate.variant_is_active,
         customerSellable: candidate.sales_eligibility === "sellable",
-        dropshipEligible: candidate.dropship_eligible === true,
+        catalogReason: availability.reason,
       },
     );
   }

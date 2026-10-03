@@ -33,6 +33,12 @@ export interface DropshipCatalogVariantCandidate {
   variantUomType: VariantUomType;
 }
 
+/** The fields an exposure decision reads; any full candidate satisfies it. */
+export type DropshipCatalogExposureSubject = Pick<
+  DropshipCatalogVariantCandidate,
+  "productId" | "productVariantId" | "productLineIds" | "category" | "productIsActive" | "variantIsActive"
+>;
+
 export type DropshipCatalogExposureDecisionReason =
   | "exposed"
   | "inactive_product_or_variant"
@@ -47,7 +53,7 @@ export interface DropshipCatalogExposureDecision {
 }
 
 export function evaluateDropshipCatalogExposure(
-  candidate: DropshipCatalogVariantCandidate,
+  candidate: DropshipCatalogExposureSubject,
   rules: readonly DropshipCatalogExposureRule[],
   now: Date,
 ): DropshipCatalogExposureDecision {
@@ -102,7 +108,7 @@ export function evaluateDropshipCatalogExposure(
 
 export function dropshipCatalogRuleMatchesVariant(
   rule: DropshipCatalogExposureRule,
-  candidate: DropshipCatalogVariantCandidate,
+  candidate: DropshipCatalogExposureSubject,
 ): boolean {
   switch (rule.scopeType) {
     case "catalog":
@@ -120,6 +126,30 @@ export function dropshipCatalogRuleMatchesVariant(
     default:
       return false;
   }
+}
+
+export type DropshipCatalogOrderAvailabilityReason =
+  | DropshipCatalogExposureDecisionReason
+  | "not_customer_sellable";
+
+/**
+ * Whether a dropship order may be processed and accepted for a variant. It is
+ * the rule that decides what vendors may list: the variant is customer-sellable
+ * (the catalog query keeps only sellable variants) and the admin catalog rules
+ * expose it. There is no separate order-side switch, so an order for anything a
+ * vendor could list is never refused for a reason the vendor could not see.
+ */
+export function decideDropshipCatalogOrderAvailability(input: {
+  subject: DropshipCatalogExposureSubject;
+  customerSellable: boolean;
+  rules: readonly DropshipCatalogExposureRule[];
+  now: Date;
+}): { available: boolean; reason: DropshipCatalogOrderAvailabilityReason } {
+  if (!input.customerSellable) {
+    return { available: false, reason: "not_customer_sellable" };
+  }
+  const exposure = evaluateDropshipCatalogExposure(input.subject, input.rules, input.now);
+  return { available: exposure.exposed, reason: exposure.reason };
 }
 
 export function isDropshipCatalogExposureRuleEffective(

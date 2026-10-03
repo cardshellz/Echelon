@@ -64,6 +64,33 @@ describe("PgDropshipOrderProcessingRepository", () => {
     expect(client.release).toHaveBeenCalledTimes(1);
   });
 
+  it("quotes a listed variant the dropship catalog offers, with no separate dropship switch", async () => {
+    const { repository, query } = makeQuoteRepository({ catalogRules: [catalogRuleRow()] });
+
+    await expect(repository.resolveQuoteItems({ intake: makeQuoteIntake(), now })).resolves.toEqual([
+      expect.objectContaining({ productVariantId: 101 }),
+    ]);
+    const statements = query.mock.calls.map((call) => String(call[0]));
+    expect(statements.some((sql) => sql.includes("dropship_eligible"))).toBe(false);
+    expect(statements.some((sql) => sql.includes("FROM dropship.dropship_catalog_rules"))).toBe(true);
+  });
+
+  it.each([
+    {
+      label: "a variant the catalog rules exclude",
+      catalogRules: [catalogRuleRow(), catalogRuleRow({ id: 2, scope_type: "product", action: "exclude", product_id: 7 })],
+      catalogReason: "excluded_by_admin_rule",
+    },
+    { label: "a variant no catalog rule includes", catalogRules: [], catalogReason: "missing_include_rule" },
+  ])("refuses $label, as the catalog would", async ({ catalogRules, catalogReason }) => {
+    const { repository } = makeQuoteRepository({ catalogRules });
+
+    await expect(repository.resolveQuoteItems({ intake: makeQuoteIntake(), now })).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_PROCESSING_VARIANT_NOT_ELIGIBLE",
+      context: expect.objectContaining({ catalogReason }),
+    });
+  });
+
   it("rejects an internal-only listing before generating a shipping quote", async () => {
     const query = vi.fn(async (statement: string) => ({
       rows: String(statement).includes("FROM dropship.dropship_vendor_listings")
@@ -78,7 +105,6 @@ describe("PgDropshipOrderProcessingRepository", () => {
           product_is_active: true,
           variant_is_active: true,
           sales_eligibility: "internal_only",
-          dropship_eligible: true,
         }]
         : [],
     }));
@@ -95,13 +121,78 @@ describe("PgDropshipOrderProcessingRepository", () => {
       normalizedPayload: source.normalized_payload,
     };
 
-    await expect(repository.resolveQuoteItems({ intake })).rejects.toMatchObject({
+    await expect(repository.resolveQuoteItems({ intake, now })).rejects.toMatchObject({
       code: "DROPSHIP_ORDER_PROCESSING_VARIANT_NOT_ELIGIBLE",
-      context: expect.objectContaining({ customerSellable: false }),
+      context: expect.objectContaining({ customerSellable: false, catalogReason: "not_customer_sellable" }),
     });
     expect(String(query.mock.calls[0]?.[0])).toContain("pv.sales_eligibility");
   });
 });
+
+function makeQuoteRepository(input: { catalogRules: Array<ReturnType<typeof catalogRuleRow>> }) {
+  const query = vi.fn(async (statement: string) => {
+    if (String(statement).includes("FROM dropship.dropship_vendor_listings")) {
+      return {
+        rows: [{
+          listing_id: 44,
+          product_id: 7,
+          product_variant_id: 101,
+          product_line_ids: [],
+          category: "supplies",
+          listing_status: "active",
+          external_listing_id: "listing-44",
+          external_offer_id: "offer-44",
+          product_sku: "PRODUCT-101",
+          variant_sku: "SKU-101",
+          product_is_active: true,
+          variant_is_active: true,
+          sales_eligibility: "sellable",
+        }],
+      };
+    }
+    if (String(statement).includes("FROM dropship.dropship_catalog_rules")) {
+      return { rows: input.catalogRules };
+    }
+    return { rows: [] };
+  });
+  return { repository: new PgDropshipOrderProcessingRepository({ query } as unknown as Pool), query };
+}
+
+function makeQuoteIntake(): DropshipOrderProcessingIntakeRecord {
+  const source = makeProcessingIntakeRow();
+  return {
+    intakeId: source.id,
+    vendorId: source.vendor_id,
+    storeConnectionId: source.store_connection_id,
+    platform: source.platform,
+    externalOrderId: source.external_order_id,
+    status: "processing",
+    paymentHoldExpiresAt: source.payment_hold_expires_at,
+    normalizedPayload: source.normalized_payload,
+  };
+}
+
+function catalogRuleRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 1,
+    revision_id: 1,
+    scope_type: "catalog",
+    action: "include",
+    product_line_id: null,
+    product_id: null,
+    product_variant_id: null,
+    category: null,
+    priority: 0,
+    is_active: true,
+    starts_at: null,
+    ends_at: null,
+    notes: null,
+    metadata: null,
+    created_at: new Date("2026-01-01T00:00:00.000Z"),
+    updated_at: new Date("2026-01-01T00:00:00.000Z"),
+    ...overrides,
+  };
+}
 
 function makePool(client: PoolClient): Pool {
   return {

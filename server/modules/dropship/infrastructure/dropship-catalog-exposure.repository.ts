@@ -236,8 +236,20 @@ export class PgDropshipCatalogExposureRepository implements DropshipCatalogExpos
   }
 }
 
+/**
+ * The active admin catalog rules, in the order every catalog decision reads
+ * them: evaluateDropshipCatalogExposure lets the last matching rule win, so a
+ * caller must not reorder them. Order processing and acceptance read the rules
+ * through this, so they decide exactly as the catalog vendors list from.
+ */
+export async function listActiveDropshipCatalogRules(
+  queryable: Pick<PoolClient, "query">,
+): Promise<DropshipCatalogExposureRuleRecord[]> {
+  return listRulesWithClient(queryable, { includeInactive: false });
+}
+
 async function listRulesWithClient(
-  client: PoolClient,
+  client: Pick<PoolClient, "query">,
   input: ListDropshipCatalogExposureRulesInput,
 ): Promise<DropshipCatalogExposureRuleRecord[]> {
   const result = await client.query<CatalogRuleRow>(
