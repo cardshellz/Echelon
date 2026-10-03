@@ -51,7 +51,7 @@ function listing(ids: string[], total = ids.length, page = 1) {
 afterEach(() => { vi.useRealTimers(); });
 
 describe("ShipStation return-label request", () => {
-  it("uses the return-only purchase endpoint, reverse addresses and one product-only measured parcel", async () => {
+  it("uses the return-only purchase endpoint, customer-to-warehouse addresses and one product-only measured parcel", async () => {
     const frozen = JSON.stringify(INPUT);
     const { provider, fetchFn } = fixture();
     await expect(provider.purchase(INPUT)).resolves.toEqual({
@@ -67,7 +67,8 @@ describe("ShipStation return-label request", () => {
     expect(JSON.parse(String(init?.body))).toEqual({
       is_return_label: true, rma_number: "RMA-42", charge_event: "carrier_default",
       label_format: "pdf", label_layout: "4x6", label_download_type: "url",
-      shipment: { validate_address: "no_validation", external_shipment_id: INPUT.externalShipmentId,
+      validate_address: "no_validation",
+      shipment: { external_shipment_id: INPUT.externalShipmentId,
         carrier_id: "se-101", service_code: "ups_ground",
         ship_from: { name: "Fictional Customer", address_line1: "100 Sample Street", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US" },
         ship_to: { name: "Fictional Returns", company_name: "Sample Warehouse", phone: "5550101000", address_line1: "200 Example Road", address_line2: "Suite 2", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US" },
@@ -157,6 +158,26 @@ describe("purchase outcomes", () => {
 });
 
 describe("exact provider evidence", () => {
+  it("requires the purchased label's destination to match the saved return warehouse when supplied", async () => {
+    const destination = {
+      name: "Fictional Returns", company_name: "Sample Warehouse", phone: "5550101000",
+      address_line1: "200 Example Road", address_line2: "Suite 2", city_locality: "Albany",
+      state_province: "NY", postal_code: "12207", country_code: "US",
+    };
+    const { provider } = fixture([json({ ...label(), ship_to: destination }), json(shipment())]);
+    await expect(provider.purchase(INPUT)).resolves.toMatchObject({ labelId: "se-201" });
+  });
+
+  it.each([
+    { name: "Fictional Customer", address_line1: "100 Sample Street", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US" },
+    { name: "Fictional Returns", company_name: "Sample Warehouse", phone: "5550101000", address_line1: "201 Example Road", address_line2: "Suite 2", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US" },
+  ])("does not release a conflicting label destination or retry its purchase", async destination => {
+    const { provider, fetchFn } = fixture([json({ ...label(), ship_to: destination }), json(shipment())]);
+    await expect(provider.purchase(INPUT)).rejects.toMatchObject({ code: "RETURN_LABEL_ADDRESS_MISMATCH", outcome: "unknown" });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(fetchFn.mock.calls[0][1]?.method).toBe("POST");
+  });
+
   it.each([
     { is_return_label: false }, { is_international: true }, { trackable: false }, { voided: true },
     { voided_at: "2026-09-26T12:01:00Z" }, { external_shipment_id: "wrong" }, { rma_number: "wrong" },
