@@ -684,6 +684,14 @@ const BASE_ISSUES: FlowIssueDef[] = [
     sample: () => sql`SELECT os.id AS shipment_id, wo.order_number, os.on_hold_reason, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.held = true AND COALESCE(os.source, '') <> 'line_item_hold' ORDER BY os.created_at DESC LIMIT 50`,
   },
   {
+    code: "ORDER_LINE_UNMAPPED", kind: "stuck", stage: "wms_fulfill", severity: "warning",
+    message: "Open orders have a line with no catalog product",
+    why: "The channel SKU did not map to the catalog (shown as UNKNOWN). The rest of the order is reserved and picked normally; this line is picked as a confirmation and moves no stock. Map the SKU so its inventory is tracked.",
+    remediation: "MANUAL_REVIEW", replaySafe: false,
+    count: () => sql`SELECT COUNT(DISTINCT oi.id)::int AS count FROM wms.order_items oi JOIN wms.orders wo ON wo.id = oi.order_id WHERE wo.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship') AND oi.status <> 'cancelled' AND COALESCE(oi.requires_shipping, 1) <> 0 AND oi.catalog_product_id IS NULL AND oi.product_id IS NULL AND upper(btrim(COALESCE(oi.sku, ''))) IN ('', 'UNKNOWN')`,
+    sample: () => sql`SELECT oi.id AS order_item_id, wo.order_number, oi.name, oi.sku, wo.created_at AS at FROM wms.order_items oi JOIN wms.orders wo ON wo.id = oi.order_id WHERE wo.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship') AND oi.status <> 'cancelled' AND COALESCE(oi.requires_shipping, 1) <> 0 AND oi.catalog_product_id IS NULL AND oi.product_id IS NULL AND upper(btrim(COALESCE(oi.sku, ''))) IN ('', 'UNKNOWN') ORDER BY wo.created_at ASC LIMIT 50`,
+  },
+  {
     code: "PICK_CORRECTION_INVENTORY_BLOCKED", kind: "stuck", stage: "wms_fulfill", severity: "warning",
     message: "Picks confirmed as shipped are waiting on inventory",
     why: "A picker confirmed these items shipped, but the inventory record could not post yet. The system retries every 30 minutes; the saved reason says what the books need, such as receiving the purchase order or counting the bin.",
