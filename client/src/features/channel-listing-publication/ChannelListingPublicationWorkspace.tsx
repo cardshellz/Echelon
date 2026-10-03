@@ -10,6 +10,7 @@ import {
   listingPriceRuleSchema,
   listingReviewSchema,
   listingWorkspaceSchema,
+  reviewListingDraftSchema,
   saveListingDraftSchema,
   submitListingReviewSchema,
   type ListingCatalogItem,
@@ -98,8 +99,8 @@ export function ChannelListingPublicationWorkspace({
   }, [search]);
   const bulkSelectionMatchesUrl = Boolean(
     requestedBulkIds &&
-      bulkItems?.length === requestedBulkIds.length &&
-      bulkItems.every((item) => requestedBulkIds.includes(item.variantId)),
+    bulkItems?.length === requestedBulkIds.length &&
+    bulkItems.every((item) => requestedBulkIds.includes(item.variantId)),
   );
   const saveInFlight = useRef(false);
   const [busy, setBusy] = useState<
@@ -374,17 +375,54 @@ export function ChannelListingPublicationWorkspace({
     }
   }
   async function reviewDraft() {
+    if (!canEdit || busy !== null || saveInFlight.current) return;
+    if (bulkDirty) {
+      setError(
+        "Save your bulk edits before reviewing. Resume unsaved listing edits to continue.",
+      );
+      return;
+    }
+    // Capture the exact checked identities before saving. Never fall back to
+    // reviewing the whole draft when the selection is empty or has gone stale.
+    const variantIds = [...activeBulkSelection];
+    if (variantIds.length === 0) {
+      setError("Select at least one draft item to review.");
+      return;
+    }
     setBusy("review");
     setError("");
     setNotice("");
     try {
       const saved = await persistDraft();
+      if (
+        variantIds.some(
+          (id) => !saved.items.some((item) => item.variantId === id),
+        )
+      )
+        throw new Error(
+          "The selected draft items changed. Select them again before reviewing.",
+        );
       const next = await publicationRequest(
         "POST",
         `${base}/review`,
         listingReviewSchema,
-        { expectedRevision: saved.revision },
+        reviewListingDraftSchema.parse({
+          expectedRevision: saved.revision,
+          variantIds,
+        }),
       );
+      if (
+        next.account.channelId !== channelId ||
+        next.account.connectionId !== connectionId ||
+        next.draftRevision !== saved.revision ||
+        next.items.length !== variantIds.length ||
+        new Set(next.items.map((item) => item.variantId)).size !==
+          variantIds.length ||
+        next.items.some((item) => !variantIds.includes(item.variantId))
+      )
+        throw new Error(
+          "The review did not match your selected items. Review the selected items again before publishing.",
+        );
       setReview(next);
       setSubmitError("");
       command.current = { reviewId: next.id, key: crypto.randomUUID() };
@@ -539,9 +577,14 @@ export function ChannelListingPublicationWorkspace({
       )}
       <div hidden={workbench} className="space-y-4">
         {bulkItems && bulkDirty && (
-          <Button variant="outline" onClick={openBulkEditor}>
-            Resume unsaved listing edits
-          </Button>
+          <div className="space-y-2 rounded-md border p-3">
+            <p role="status" className="text-sm">
+              Save your bulk edits before reviewing these listings.
+            </p>
+            <Button variant="outline" onClick={openBulkEditor}>
+              Resume unsaved listing edits
+            </Button>
+          </div>
         )}
         {workspace.error && (
           <p role="alert" className="text-sm text-destructive">
@@ -598,6 +641,7 @@ export function ChannelListingPublicationWorkspace({
               operations={workspace.data.operations}
               busy={busy !== null}
               dirty={dirty}
+              reviewBlocked={bulkDirty}
               selectedDraftIds={activeBulkSelection}
               onDraftSelectionChange={setBulkSelectedIds}
               onBulkEdit={openBulkEditor}

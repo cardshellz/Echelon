@@ -3,19 +3,17 @@ import { canonicalDraftValue } from "./draft-item-snapshot";
 import { MAX_DRAFT_ITEMS } from "./model";
 import {
   buildSchemaFieldModel,
+  SCHEMA_FIELD_LIMITS,
   type FieldSchema,
   type SchemaFieldNode,
   type SchemaFieldModel,
 } from "./schema-field-model";
 
 export const BULK_ATTRIBUTE_COLUMN_LIMITS = {
-  total: 250,
+  total: SCHEMA_FIELD_LIMITS.fields,
 } as const;
 export type BulkAttributeScalarType =
-  | "string"
-  | "number"
-  | "integer"
-  | "boolean";
+  "string" | "number" | "integer" | "boolean";
 export interface BulkAttributeHelp {
   path: string[];
   label: string;
@@ -42,6 +40,7 @@ export interface BulkAttributeColumns {
   defaultColumnKeys: string[];
   requiredKeysByRow: string[][];
   applicableKeysByRow: string[][];
+  columnsByRow: ReadonlyMap<string, BulkAttributeColumn>[];
   hasRowDetails: boolean;
   warnings: string[];
 }
@@ -125,7 +124,27 @@ export function buildBulkAttributeColumns(
   schema: FieldSchema,
   values: readonly FieldSchema[],
 ): BulkAttributeColumns {
-  if (values.length > MAX_DRAFT_ITEMS)
+  const result = buildBulkAttributeColumnsForRows(
+    (values.length ? values : [EMPTY_ATTRIBUTES]).map((value) => ({
+      schema,
+      value,
+    })),
+  );
+  return values.length
+    ? result
+    : {
+        ...result,
+        requiredKeysByRow: [],
+        applicableKeysByRow: [],
+        columnsByRow: [],
+      };
+}
+
+/** Missing or different product types must not hide another row's requirements. */
+export function buildBulkAttributeColumnsForRows(
+  rows: readonly { schema?: FieldSchema; value: FieldSchema }[],
+): BulkAttributeColumns {
+  if (rows.length > MAX_DRAFT_ITEMS)
     throw new Error("Too many draft rows for bulk editing.");
   const candidates = new Map<
     string,
@@ -139,15 +158,19 @@ export function buildBulkAttributeColumns(
   const warnings = new Set<string>();
   const requiredKeysByRow: string[][] = [];
   const applicableKeysByRow: string[][] = [];
+  const columnsByRow: Map<string, BulkAttributeColumn>[] = [];
   const writablePaths = new Map<string, boolean>();
   let hasRowDetails = false;
-  // With no rows, discover columns without pretending there are selected items.
-  const rows = values.length ? values : [EMPTY_ATTRIBUTES];
-  rows.forEach((value, rowIndex) => {
-    const model = rowModel(schema, value);
-    model.warnings.forEach((warning) => warnings.add(warning));
+  rows.forEach(({ schema, value }, rowIndex) => {
     const requiredKeys: string[] = [];
     const applicableKeys: string[] = [];
+    const rowColumns = new Map<string, BulkAttributeColumn>();
+    requiredKeysByRow.push(requiredKeys);
+    applicableKeysByRow.push(applicableKeys);
+    columnsByRow.push(rowColumns);
+    if (!schema) return;
+    const model = rowModel(schema, value);
+    model.warnings.forEach((warning) => warnings.add(warning));
     function visit(
       node: SchemaFieldNode,
       ancestors: SchemaFieldNode[],
@@ -202,6 +225,32 @@ export function buildBulkAttributeColumns(
       if (node.required) requiredKeys.push(key);
       applicableKeys.push(key);
       const signature = controlSignature(node);
+      const column: BulkAttributeColumn = {
+        key,
+        path: [...node.path],
+        label: node.label,
+        pathLabel: [...ancestors, node].map((field) => field.label).join(" › "),
+        group: ancestors.map((field) => field.label).join(" › "),
+        help: [...ancestors, node].flatMap((field) =>
+          field.description?.trim()
+            ? [
+                {
+                  path: [...field.path],
+                  label: field.label,
+                  description: field.description,
+                },
+              ]
+            : [],
+        ),
+        type,
+        kind: scalar ? "scalar" : "complex",
+        complexReason,
+        schema: node.schema,
+        required: node.required,
+        requiredForSome: false,
+        appliesToAll: true,
+      };
+      rowColumns.set(key, column);
       const previous = candidates.get(key);
       if (previous) {
         if (previous.signature !== signature || previous.column.type !== type) {
@@ -212,60 +261,44 @@ export function buildBulkAttributeColumns(
         }
         previous.present.add(rowIndex);
         if (node.required) previous.required.add(rowIndex);
-      } else if (candidates.size < BULK_ATTRIBUTE_COLUMN_LIMITS.total) {
+      } else {
         candidates.set(key, {
-          column: {
-            key,
-            path: [...node.path],
-            label: node.label,
-            pathLabel: [...ancestors, node]
-              .map((field) => field.label)
-              .join(" › "),
-            group: ancestors.map((field) => field.label).join(" › "),
-            help: [...ancestors, node].flatMap((field) =>
-              field.description?.trim()
-                ? [
-                    {
-                      path: [...field.path],
-                      label: field.label,
-                      description: field.description,
-                    },
-                  ]
-                : [],
-            ),
-            type,
-            kind: scalar ? "scalar" : "complex",
-            complexReason,
-            schema: node.schema,
-            required: false,
-            requiredForSome: false,
-            appliesToAll: false,
-          },
+          // The union may fall back to a complex control; row controls retain
+          // their exact schema and must not share this mutable union object.
+          column: { ...column },
           signature,
           present: new Set([rowIndex]),
           required: new Set(node.required ? [rowIndex] : []),
         });
-      } else hasRowDetails = true;
+      }
     }
     visit(model.root, [], false);
-    requiredKeysByRow.push(requiredKeys);
-    applicableKeysByRow.push(applicableKeys);
   });
-  const columns = [...candidates.values()].map(
-    ({ column, required, present }) => ({
+  const discovered = [...candidates.values()]
+    .map(({ column, required, present }) => ({
       ...column,
       required: required.size > 0,
       requiredForSome: required.size > 0 && required.size < rows.length,
       appliesToAll: present.size === rows.length,
-    }),
-  );
+    }))
+    .sort((left, right) => Number(right.required) - Number(left.required));
+  // Bound extreme multi-category unions only after prioritizing required fields.
+  // The schema model also reports any per-schema traversal limit explicitly.
+  const columns = discovered.slice(0, BULK_ATTRIBUTE_COLUMN_LIMITS.total);
+  if (discovered.length > columns.length) {
+    hasRowDetails = true;
+    warnings.add(
+      `Showing ${columns.length} of ${discovered.length} attribute columns. Narrow the selected product types to see every column; remaining fields are available in item details.`,
+    );
+  }
   const defaults = columns.map((column) => column.key);
   if (hasRowDetails) warnings.add(DETAIL_WARNING);
   return {
     columns,
     defaultColumnKeys: defaults,
-    requiredKeysByRow: values.length ? requiredKeysByRow : [],
-    applicableKeysByRow: values.length ? applicableKeysByRow : [],
+    requiredKeysByRow,
+    applicableKeysByRow,
+    columnsByRow,
     hasRowDetails,
     warnings: [...warnings],
   };

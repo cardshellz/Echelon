@@ -6,6 +6,7 @@ import {
   CANONICAL_VISIBLE_FIELDS,
 } from "../../adapters/walmart/walmart-listing-schema";
 import { buildSchemaFieldModel } from "../../../../../client/src/features/channel-listing-publication/schema-field-model";
+import { buildBulkAttributeColumnsForRows } from "../../../../../client/src/features/channel-listing-publication/bulk-attribute-columns";
 import createSchema from "../fixtures/walmart-listing-sleeves.schema.json";
 import matchSchema from "../fixtures/walmart-listing-match.schema.json";
 
@@ -62,6 +63,40 @@ const syntheticFeed = (visible: Schema, extra: Schema = {}): Schema => ({
 });
 
 describe("Walmart writable listing requirements", () => {
+  it("shows real required listing columns before optional fields even beside an untyped row", () => {
+    const projected = editorSchema(createSchema, "MP_ITEM", productType);
+    const result = buildBulkAttributeColumnsForRows([
+      { schema: projected, value: {} },
+      { value: {} },
+    ]);
+    const required = result.columns.filter((column) => column.required);
+    expect(required.map((column) => column.path)).toEqual(
+      expect.arrayContaining([
+        ["Orderable", "ShippingWeight"],
+        ["Orderable", "country_of_origin_substantial_transformation"],
+        ["Visible", "condition"],
+        ["Visible", "keyFeatures"],
+        ["Visible", "countPerPack"],
+        ["Visible", "multipackQuantity"],
+        ["Visible", "isProp65WarningRequired"],
+        ["Visible", "has_written_warranty"],
+        ["Visible", "netContent", "productNetContentUnit"],
+        ["Visible", "netContent", "productNetContentMeasure"],
+        ["Visible", "pieceCount"],
+      ]),
+    );
+    expect(result.columns.slice(0, required.length)).toEqual(required);
+    expect(
+      result.columns.slice(required.length).every((column) => !column.required),
+    ).toBe(true);
+    expect(result.requiredKeysByRow[1]).toEqual([]);
+    expect(result.columnsByRow[1].size).toBe(0);
+    expect(
+      required.every(
+        (column) => column.requiredForSome && !column.appliesToAll,
+      ),
+    ).toBe(true);
+  });
   it("preserves all six real writable sleeves conditions and excludes protected orderable conditions", () => {
     const projected = editorSchema(createSchema, "MP_ITEM", productType);
     expect(section(projected, "Visible").allOf).toHaveLength(6);

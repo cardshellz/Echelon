@@ -4,11 +4,13 @@ import {
   listingAccountSchema,
   listingCatalogItemSchema,
   listingDraftSchema,
+  listingDraftItemSchema,
   listingIssueSchema,
   listingOperationItemSchema,
   listingReviewSchema,
   type ListingAccount,
   type ListingIssue,
+  type ListingDraftItem,
   type ListingOperation,
 } from "@shared/types/channel-listing-publication";
 
@@ -73,6 +75,44 @@ export const listingSnapshotSchema = z.object({
   prepared: z.array(preparedListingItemSchema),
 });
 export type ListingSnapshot = z.infer<typeof listingSnapshotSchema>;
+
+/** Validate the exact saved selection before retaining every unreviewed draft item. */
+export function remainingDraftAfterReview(
+  currentItems: unknown,
+  snapshot: ListingSnapshot,
+): ListingDraftItem[] {
+  const current = z.array(listingDraftItemSchema).max(100).parse(currentItems);
+  const selected = snapshot.draft.items;
+  const ids = new Set(selected.map((item) => item.variantId));
+  const sameIds = (items: readonly { variantId: number }[]) =>
+    items.length === ids.size &&
+    new Set(items.map((item) => item.variantId)).size === ids.size &&
+    items.every((item) => ids.has(item.variantId));
+  const currentById = new Map(current.map((item) => [item.variantId, item]));
+  const selectedItemsChanged = selected.some((item) => {
+    const saved = currentById.get(item.variantId);
+    return !saved || listingHash(saved) !== listingHash(item);
+  });
+  const preparedIds = new Set(snapshot.prepared.map((item) => item.variantId));
+  const preparedScopeInvalid =
+    preparedIds.size !== snapshot.prepared.length ||
+    snapshot.prepared.some((item) => !ids.has(item.variantId)) ||
+    (snapshot.review.canSubmit && !sameIds(snapshot.prepared));
+  if (
+    !ids.size ||
+    ids.size !== selected.length ||
+    currentById.size !== current.length ||
+    !sameIds(snapshot.review.items) ||
+    !sameIds(snapshot.catalog) ||
+    preparedScopeInvalid ||
+    selectedItemsChanged
+  )
+    throw new ListingPublicationError(
+      "LISTING_REVIEW_STALE",
+      "The reviewed selection no longer matches the saved draft. Review the items again.",
+    );
+  return current.filter((item) => !ids.has(item.variantId));
+}
 export const listingBatchSchema = z.object({
   key: z.string(),
   correlationId: z.string().uuid(),

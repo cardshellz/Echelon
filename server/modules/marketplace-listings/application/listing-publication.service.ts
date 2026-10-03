@@ -6,6 +6,7 @@ import {
   listingPriceRuleSchema,
   listingReviewSchema,
   listingTaxonomySchema,
+  reviewListingDraftSchema,
   saveListingDraftSchema,
   submitListingReviewSchema,
   type ListingAccount,
@@ -169,12 +170,28 @@ export class ListingPublicationService {
     input: unknown,
     actor: string,
   ): Promise<ListingReview> {
-    const command = z
-      .object({ expectedRevision: z.number().int().positive() })
-      .strict()
-      .parse(input);
-    const draft = await this.dependencies.store.draft(channelId);
-    if (draft.revision !== command.expectedRevision) stale();
+    const command = reviewListingDraftSchema.parse(input);
+    const savedDraft = await this.dependencies.store.draft(channelId);
+    if (savedDraft.revision !== command.expectedRevision) stale();
+    const selectedIds = command.variantIds ? new Set(command.variantIds) : null;
+    if (
+      selectedIds &&
+      command.variantIds?.some(
+        (id) => !savedDraft.items.some((item) => item.variantId === id),
+      )
+    )
+      throw new ListingPublicationError(
+        "LISTING_SELECTION_STALE",
+        "A selected item is no longer in the saved draft. Refresh the draft and select the items again.",
+      );
+    // The immutable snapshot contains only this reviewed scope. The revision
+    // still belongs to the whole saved draft and fences every concurrent edit.
+    const draft = {
+      ...savedDraft,
+      items: savedDraft.items.filter(
+        (item) => !selectedIds || selectedIds.has(item.variantId),
+      ),
+    };
     if (draft.items.length === 0)
       throw new ListingPublicationError(
         "LISTING_SELECTION_EMPTY",

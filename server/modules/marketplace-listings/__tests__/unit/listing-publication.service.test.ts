@@ -27,7 +27,10 @@ function setup(snapshot = publicationSnapshot()) {
     account: vi.fn<ListingPublicationProvider["account"]>(async () =>
       structuredClone(snapshot.account),
     ),
-    taxonomy: vi.fn<ListingPublicationProvider["taxonomy"]>(async () => ({ productTypes: [], entries: [] })),
+    taxonomy: vi.fn<ListingPublicationProvider["taxonomy"]>(async () => ({
+      productTypes: [],
+      entries: [],
+    })),
     requirements: vi.fn(),
     prepare: vi.fn<ListingPublicationProvider["prepare"]>(
       async (_account, input) =>
@@ -214,18 +217,238 @@ function setupMixedFeeds() {
 }
 
 describe("ListingPublicationService exact reviewed intent", () => {
+  it("passes edited identifier and product type unchanged through draft saving", async () => {
+    const snapshot = publicationSnapshot();
+    const edited = {
+      ...snapshot.draft.items[0],
+      identifier: { type: "GTIN" as const, value: "00036000291452" },
+      productType: "Exact updated provider type",
+    };
+    const h = setup(snapshot);
+    h.store.saveDraft.mockResolvedValue({
+      ...snapshot.draft,
+      revision: 2,
+      items: [edited],
+    });
+    expect(
+      await h.service.saveDraft(
+        104,
+        { expectedRevision: 1, items: [edited] },
+        "admin",
+      ),
+    ).toMatchObject({ items: [edited] });
+    expect(h.store.saveDraft).toHaveBeenCalledExactlyOnceWith(
+      snapshot.account,
+      {
+        channelId: 104,
+        revision: 1,
+        updatedAt: null,
+        items: [edited],
+      },
+      "admin",
+      fixedNow,
+    );
+    expect(h.provider.prepare).not.toHaveBeenCalled();
+    expect(h.provider.submit).not.toHaveBeenCalled();
+  });
+  it("does not include an unselected item's price or availability blocker in review", async () => {
+    const snapshot = publicationSnapshot([10, 11]);
+    const h = setup(snapshot);
+    snapshot.catalog[0].priceCents = 0;
+    snapshot.catalog[0].eligible = false;
+    const review = await h.service.review(
+      104,
+      { expectedRevision: 1, variantIds: [11] },
+      "admin",
+    );
+    expect(review.canSubmit).toBe(true);
+    expect(review.items.map((item) => item.variantId)).toEqual([11]);
+  });
+  it("snapshots only selected saved items including their exact identifier and product type", async () => {
+    const snapshot = publicationSnapshot([10, 11]);
+    Object.assign(snapshot.draft.items[1], {
+      productType: "Exact updated provider type",
+      identifier: { type: "GTIN", value: "00036000291452" },
+      priceOverrideCents: 1450,
+      attributes: { Visible: { numberOfPieces: 200 } },
+    });
+    const h = setup(snapshot);
+    h.provider.prepare.mockImplementation(async (_account, input) => ({
+      ...snapshot.prepared[1],
+      payload: {
+        productType: input.draft.productType,
+        identifier: input.draft.identifier,
+        attributes: input.draft.attributes,
+      },
+    }));
+    const review = await h.service.review(
+      104,
+      { expectedRevision: 1, variantIds: [11] },
+      "admin",
+    );
+    expect(review.items).toHaveLength(1);
+    expect(review.items[0]).toMatchObject({
+      variantId: 11,
+      productType: "Exact updated provider type",
+      priceCents: 1450,
+    });
+    expect(h.catalog.catalog).toHaveBeenCalledWith(
+      104,
+      expect.objectContaining({ variantIds: "11" }),
+    );
+    expect(h.provider.prepare).toHaveBeenCalledExactlyOnceWith(
+      snapshot.account,
+      {
+        catalog: snapshot.catalog[1],
+        draft: snapshot.draft.items[1],
+        priceCents: 1450,
+      },
+    );
+    expect(h.inventory.inspect).toHaveBeenCalledExactlyOnceWith(
+      snapshot.account,
+      [snapshot.catalog[1]],
+    );
+    const saved = h.store.saveReview.mock.calls[0][0];
+    expect(saved.draft).toEqual({
+      ...snapshot.draft,
+      items: [snapshot.draft.items[1]],
+    });
+    expect(saved.catalog).toEqual([snapshot.catalog[1]]);
+    expect(saved.prepared).toHaveLength(1);
+    expect(saved.prepared[0].payload).toEqual({
+      productType: "Exact updated provider type",
+      identifier: { type: "GTIN", value: "00036000291452" },
+      attributes: { Visible: { numberOfPieces: 200 } },
+    });
+    h.store.review.mockResolvedValue(saved);
+    h.catalog.catalog.mockClear();
+    h.inventory.inspect.mockClear();
+    const operation = await h.service.submit(104, command(saved), "admin");
+    expect(operation.items.map((item) => item.variantId)).toEqual([11]);
+    expect(h.store.createOperation.mock.calls[0][0]).toMatchObject({
+      snapshot: saved,
+      progress: { batches: [expect.objectContaining({ variantIds: [11] })] },
+    });
+    expect(h.catalog.catalog).toHaveBeenCalledWith(
+      104,
+      expect.objectContaining({ variantIds: "11" }),
+    );
+    expect(h.inventory.inspect).toHaveBeenCalledExactlyOnceWith(
+      snapshot.account,
+      [snapshot.catalog[1]],
+    );
+    expect(h.provider.submit).not.toHaveBeenCalled();
+    expect(h.inventory.submitZero).not.toHaveBeenCalled();
+    expect(snapshot.draft.items.map((item) => item.variantId)).toEqual([
+      10, 11,
+    ]);
+  });
+  it.each([undefined, [11, 10]])(
+    "preserves saved draft order for legacy or explicit review scope %j",
+    async (variantIds) => {
+      const h = setup(publicationSnapshot([10, 11]));
+      const review = await h.service.review(
+        104,
+        { expectedRevision: 1, ...(variantIds ? { variantIds } : {}) },
+        "admin",
+      );
+      expect(review.items.map((item) => item.variantId)).toEqual([10, 11]);
+      expect(
+        h.store.saveReview.mock.calls[0][0].draft.items.map(
+          (item) => item.variantId,
+        ),
+      ).toEqual([10, 11]);
+    },
+  );
+  it.each([
+    [],
+    [10, 10],
+    [0],
+    [-1],
+    [1.5],
+    ["10"],
+    [2_147_483_648],
+    Array.from({ length: 101 }, (_, index) => index + 1),
+    null,
+  ])(
+    "rejects malformed explicit review scope %j before reading providers",
+    async (variantIds) => {
+      const h = setup();
+      await expect(
+        h.service.review(104, { expectedRevision: 1, variantIds }, "admin"),
+      ).rejects.toMatchObject({ name: "ZodError" });
+      expect(h.store.draft).not.toHaveBeenCalled();
+      expect(h.dependencies.provider).not.toHaveBeenCalled();
+      expect(h.store.saveReview).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    {
+      expectedRevision: 1,
+      variantIds: [10, 99],
+      code: "LISTING_SELECTION_STALE",
+    },
+    { expectedRevision: 2, variantIds: [10], code: "LISTING_REVIEW_STALE" },
+  ])(
+    "rejects stale scope without widening to the entire saved draft: $code",
+    async ({ code, ...input }) => {
+      const h = setup(publicationSnapshot([10, 11]));
+      await expect(h.service.review(104, input, "admin")).rejects.toMatchObject(
+        { code },
+      );
+      expect(h.dependencies.provider).not.toHaveBeenCalled();
+      expect(h.catalog.catalog).not.toHaveBeenCalled();
+      expect(h.inventory.inspect).not.toHaveBeenCalled();
+      expect(h.store.saveReview).not.toHaveBeenCalled();
+    },
+  );
+  it("passes only the immutable selected scope to the worker and zero-stock admission", async () => {
+    const h = setup(publicationSnapshot([11]));
+    await h.run();
+    expect(h.inventory.submitZero).toHaveBeenCalledExactlyOnceWith(
+      h.operation.snapshot.account,
+      h.operation.progress.batches[0].correlationId,
+      h.operation.snapshot.prepared,
+      h.operation.snapshot.review.inventory,
+      expect.any(Function),
+    );
+    expect(h.provider.submit.mock.calls[0][1].zeroStockAdmission.items).toEqual(
+      [{ productVariantId: 11, sku: "SKU-11", quantity: 0 }],
+    );
+    expect(
+      h.provider.submit.mock.calls[0][1].items.map((item) => item.variantId),
+    ).toEqual([11]);
+  });
   it("returns provider taxonomy ancestry with the compatible flat product type list", async () => {
     const h = setup();
-    const taxonomy = { productTypes: ["Exact Type"], entries: [{ productType: "Exact Type", path: ["Category", "Group"], description: null }] };
+    const taxonomy = {
+      productTypes: ["Exact Type"],
+      entries: [
+        {
+          productType: "Exact Type",
+          path: ["Category", "Group"],
+          description: null,
+        },
+      ],
+    };
     h.provider.taxonomy.mockResolvedValue(taxonomy);
     await expect(h.service.taxonomy(104)).resolves.toEqual(taxonomy);
-    expect(h.provider.taxonomy).toHaveBeenCalledWith(await h.provider.account(104));
+    expect(h.provider.taxonomy).toHaveBeenCalledWith(
+      await h.provider.account(104),
+    );
     expect(h.provider.submit).not.toHaveBeenCalled();
   });
   it("rejects a provider taxonomy path whose leaf is absent from the allowed product type list", async () => {
     const h = setup();
-    h.provider.taxonomy.mockResolvedValue({ productTypes: ["Allowed"], entries: [{ productType: "Unproven", path: ["Category"], description: null }] });
-    await expect(h.service.taxonomy(104)).rejects.toThrow("Taxonomy paths must refer to a listed product type");
+    h.provider.taxonomy.mockResolvedValue({
+      productTypes: ["Allowed"],
+      entries: [
+        { productType: "Unproven", path: ["Category"], description: null },
+      ],
+    });
+    await expect(h.service.taxonomy(104)).rejects.toThrow(
+      "Taxonomy paths must refer to a listed product type",
+    );
     expect(h.provider.submit).not.toHaveBeenCalled();
   });
   it("returns the original operation on a lost acknowledgement before reading changed provider state", async () => {

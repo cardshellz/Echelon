@@ -9,7 +9,6 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Loader2 } from "lucide-react";
 import {
-  listingRequirementsSchema,
   listingTaxonomySchema,
   type ListingCatalogItem,
   type ListingDraftItem,
@@ -20,6 +19,7 @@ import { publicationRequest } from "./api";
 import { errorMessage, labelForKey, money } from "./model";
 import { ListingProductTypePicker } from "./ListingProductTypePicker";
 import { ListingBulkItemTable } from "./ListingBulkItemTable";
+import { useBulkRowRequirements } from "./use-bulk-row-requirements";
 import {
   buildSchemaFieldModel,
   type SchemaFieldNode,
@@ -28,7 +28,7 @@ import { commonBulkContext } from "./bulk-edit-model";
 import { buildBulkFieldPatch, projectBulkField } from "./bulk-field-state";
 import {
   previewBulkEditBatch,
-  resetBulkAttributeEdits,
+  setBulkSharedContext,
   setBulkItemAttribute,
   setBulkSharedAttribute,
   undoBulkItemAttribute,
@@ -83,26 +83,17 @@ export function ListingBulkEditor({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [tableError, setTableError] = useState<string | null>(null);
-  const [attributeResetRevision, setAttributeResetRevision] = useState(0);
   const [savedRevision, setSavedRevision] = useState(0);
   const [showCategory, setShowCategory] = useState(false);
+  const [categoryVariantId, setCategoryVariantId] = useState<number | null>(
+    null,
+  );
   const [showChanges, setShowChanges] = useState(false);
-  const context = commonBulkContext(items, command.shared);
   const taxonomy = useQuery({
     queryKey: [base, "taxonomy"],
     enabled: active,
     queryFn: () =>
       publicationRequest("GET", `${base}/taxonomy`, listingTaxonomySchema),
-  });
-  const requirements = useQuery({
-    queryKey: [base, "requirements", context?.productType, context?.method],
-    enabled: active && context !== null,
-    queryFn: () =>
-      publicationRequest(
-        "GET",
-        `${base}/requirements?${new URLSearchParams({ productType: context!.productType, method: context!.method })}`,
-        listingRequirementsSchema,
-      ),
   });
   const prepared = useMemo(() => {
     try {
@@ -115,6 +106,18 @@ export function ListingBulkEditor({
       };
     }
   }, [items, command]);
+  const context = commonBulkContext(prepared.effectiveItems);
+  const requirements = useBulkRowRequirements(
+    base,
+    prepared.effectiveItems,
+    active,
+  );
+  const categoryItem =
+    categoryVariantId === null
+      ? undefined
+      : prepared.effectiveItems.find(
+          (item) => item.variantId === categoryVariantId,
+        );
   const hasEdits =
     Object.keys(command.shared).length > 0 || command.itemChanges.length > 0;
   useEffect(() => {
@@ -125,17 +128,22 @@ export function ListingBulkEditor({
     [],
   );
   const attributeTitles = useMemo(() => {
-    const titles = new Map<string, string>();
-    if (!requirements.data) return titles;
-    const visit = (node: SchemaFieldNode) => {
-      if (typeof node.schema.title === "string" && node.schema.title.trim())
-        titles.set(JSON.stringify(node.path), node.schema.title);
-      node.children.forEach(visit);
-    };
-    visit(buildSchemaFieldModel(requirements.data.schema, {}).root);
-    return titles;
-  }, [requirements.data]);
-  function pathLabel(path: readonly string[]): string {
+    const allTitles = new Map<number, Map<string, string>>();
+    for (const item of prepared.effectiveItems) {
+      const schema = requirements.byVariant.get(item.variantId)?.schema;
+      if (!schema) continue;
+      const titles = new Map<string, string>();
+      const visit = (node: SchemaFieldNode) => {
+        if (typeof node.schema.title === "string" && node.schema.title.trim())
+          titles.set(JSON.stringify(node.path), node.schema.title);
+        node.children.forEach(visit);
+      };
+      visit(buildSchemaFieldModel(schema, item.attributes).root);
+      allTitles.set(item.variantId, titles);
+    }
+    return allTitles;
+  }, [requirements.byVariant, prepared.effectiveItems]);
+  function pathLabel(path: readonly string[], variantId: number): string {
     if (path[0] !== "attributes")
       return path
         .map((key) => FIELD_LABELS[key] ?? labelForKey(key))
@@ -144,7 +152,9 @@ export function ListingBulkEditor({
     return attributes
       .map(
         (key, index) =>
-          attributeTitles.get(JSON.stringify(attributes.slice(0, index + 1))) ??
+          attributeTitles
+            .get(variantId)
+            ?.get(JSON.stringify(attributes.slice(0, index + 1))) ??
           labelForKey(key),
       )
       .join(" › ");
@@ -178,33 +188,18 @@ export function ListingBulkEditor({
     field: "method" | "productType",
     value: string | undefined,
   ) {
-    let resetsAttributes = false;
-    const accepted = edit((previous) => {
-      const shared = { ...previous.shared };
-      if (value === undefined) delete shared[field];
-      else if (field === "method")
-        shared.method = value as ListingDraftItem["method"];
-      else shared.productType = value;
-      const next = { ...previous, shared };
-      const nextContext = commonBulkContext(items, shared);
-      if (
-        context?.method !== nextContext?.method ||
-        context?.productType !== nextContext?.productType
-      ) {
-        resetsAttributes = true;
-        return resetBulkAttributeEdits(next);
-      }
-      return next;
-    });
-    if (accepted && resetsAttributes)
-      setAttributeResetRevision((revision) => revision + 1);
+    edit((previous) => setBulkSharedContext(items, previous, field, value));
   }
-  const attributeEdits = Boolean(
-    command.shared.attributeChanges?.length ||
-      command.itemChanges.some((item) => item.patch.attributeChanges?.length),
+  const schemaUnavailable = prepared.effectiveItems.some(
+    (item) =>
+      (Boolean(command.shared.attributeChanges?.length) ||
+        command.itemChanges.some(
+          (change) =>
+            change.variantId === item.variantId &&
+            Boolean(change.patch.attributeChanges?.length),
+        )) &&
+      requirements.byVariant.get(item.variantId)?.status !== "ready",
   );
-  const schemaUnavailable =
-    attributeEdits && (requirements.isFetching || Boolean(requirements.error));
   async function save() {
     if (!canEdit || saving || tableError || prepared.error || schemaUnavailable)
       return;
@@ -224,6 +219,14 @@ export function ListingBulkEditor({
   }
   const method = projectBulkField(items, metadata, "method");
   const type = projectBulkField(items, metadata, "productType");
+  const effectiveType = projectBulkField(
+    prepared.effectiveItems,
+    metadata,
+    "productType",
+  );
+  const missingCategoryCount = prepared.effectiveItems.filter(
+    (item) => item.method === "create" && !item.productType,
+  ).length;
   return (
     <section
       aria-label="Bulk listing workspace"
@@ -320,16 +323,20 @@ export function ListingBulkEditor({
           <div className="flex min-w-0 items-center gap-2 text-sm">
             <span className="font-medium">Category</span>
             <span className="max-w-80 truncate">
-              {command.shared.productType ??
-                (type.status === "common" && type.value
-                  ? type.value
-                  : "Choose a shared category")}
+              {effectiveType.status === "common" && effectiveType.value
+                ? effectiveType.value
+                : missingCategoryCount
+                  ? `${missingCategoryCount} ${missingCategoryCount === 1 ? "item needs" : "items need"} a category`
+                  : "Mixed product types"}
             </span>
             <Button
               variant="outline"
               size="sm"
               aria-expanded={showCategory}
-              onClick={() => setShowCategory((value) => !value)}
+              onClick={() => {
+                setCategoryVariantId(null);
+                setShowCategory((value) => !value);
+              }}
             >
               {showCategory ? "Close category browser" : "Choose category"}
             </Button>
@@ -348,8 +355,13 @@ export function ListingBulkEditor({
         {showCategory && (
           <div className="max-h-[40dvh] overflow-auto">
             <ListingProductTypePicker
-              label="Shared Walmart product type"
+              label={
+                categoryItem
+                  ? `Product type for ${metadata.get(categoryItem.variantId)?.sku ?? `Variant ${categoryItem.variantId}`}`
+                  : "Shared Walmart product type"
+              }
               value={
+                categoryItem?.productType ??
                 command.shared.productType ??
                 (type.status === "common" ? type.value : "")
               }
@@ -359,10 +371,30 @@ export function ListingBulkEditor({
               disabled={!canEdit || saving || Boolean(tableError)}
               onRetry={() => void taxonomy.refetch()}
               onSelect={(value) => {
-                changeContext(
-                  "productType",
-                  value === type.value ? undefined : value,
-                );
+                if (categoryItem) {
+                  if (
+                    value !== categoryItem.productType &&
+                    command.shared.attributeChanges?.length
+                  ) {
+                    setError(
+                      "Save the current draft before changing one item's category. This preserves the attribute values already applied to all selected items.",
+                    );
+                    return;
+                  }
+                  if (value !== categoryItem.productType)
+                    edit((current) =>
+                      setBulkItemField(
+                        current,
+                        categoryItem.variantId,
+                        "productType",
+                        value,
+                      ),
+                    );
+                } else
+                  changeContext(
+                    "productType",
+                    value === type.value ? undefined : value,
+                  );
                 setShowCategory(false);
               }}
             />
@@ -377,27 +409,27 @@ export function ListingBulkEditor({
         )}
         {!context && (
           <p className="text-xs text-muted-foreground">
-            Edit product fields now. Choose a common category and method to load
-            Walmart-specific columns.
+            Each item's category determines its attributes. Choose a category
+            for any untyped items, or set one shared category above.
           </p>
         )}
-        {requirements.isFetching && (
+        {requirements.loadingCount > 0 && (
           <p role="status" className="text-xs text-muted-foreground">
             Loading Walmart requirements…
           </p>
         )}
-        {requirements.error && (
-          <p role="alert" className="text-xs text-destructive">
-            {errorMessage(requirements.error)}{" "}
-            <Button
-              variant="link"
-              size="sm"
-              onClick={() => void requirements.refetch()}
-            >
+        {requirements.errors.map((failure) => (
+          <p
+            key={failure.key}
+            role="alert"
+            className="text-xs text-destructive"
+          >
+            {failure.label}: {failure.message}{" "}
+            <Button variant="link" size="sm" onClick={failure.retry}>
               Retry requirements
             </Button>
           </p>
-        )}
+        ))}
         {(error || prepared.error || tableError) && (
           <p role="alert" className="text-sm text-destructive">
             {error || prepared.error || tableError}
@@ -416,13 +448,21 @@ export function ListingBulkEditor({
             items={prepared.effectiveItems}
             originalItems={items}
             metadata={metadata}
-            schema={context ? requirements.data?.schema : undefined}
-            providerFieldsDisabled={
-              requirements.isFetching || Boolean(requirements.error)
+            requirementsByVariant={requirements.byVariant}
+            sharedAttributesAllowed={
+              commonBulkContext(prepared.effectiveItems) !== null &&
+              prepared.effectiveItems.every(
+                (item) =>
+                  requirements.byVariant.get(item.variantId)?.status ===
+                  "ready",
+              )
             }
+            onChooseCategory={(id) => {
+              setCategoryVariantId(id);
+              setShowCategory(true);
+            }}
             sharedPatch={command.shared}
             itemChanges={command.itemChanges}
-            attributeResetRevision={attributeResetRevision}
             canEdit={canEdit && !saving}
             onItemAttribute={(id, path, value) =>
               edit((current) => setBulkItemAttribute(current, id, path, value))
@@ -495,7 +535,7 @@ export function ListingBulkEditor({
                           key={JSON.stringify(change.path)}
                           className="break-words"
                         >
-                          {pathLabel(change.path)}:{" "}
+                          {pathLabel(change.path, item.variantId)}:{" "}
                           {valueLabel(change.before, change.path)} →{" "}
                           {valueLabel(change.after, change.path)}
                         </li>

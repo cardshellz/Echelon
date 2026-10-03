@@ -76,6 +76,48 @@ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY, product_id integer
       await repository.saveReview(next, "admin", fixedNow);
       return next;
     }
+    async function saveSelectedReview(selectedIds = [10]) {
+      const full = publicationSnapshot([10, 11]);
+      Object.assign(full.draft.items[1], {
+        identifier: { type: "GTIN", value: "00036000291452" },
+        productType: "Exact provider product type",
+        title: "Saved custom title",
+        priceOverrideCents: 1550,
+        attributes: { Visible: { numberOfPieces: 200 } },
+      });
+      const draft = await repository.saveDraft(
+        full.account,
+        { ...full.draft, revision: 0 },
+        "admin",
+        fixedNow,
+      );
+      const selected = structuredClone(full);
+      selected.draft = {
+        ...draft,
+        items: draft.items.filter((item) =>
+          selectedIds.includes(item.variantId),
+        ),
+      };
+      selected.catalog = selected.catalog.filter((item) =>
+        selectedIds.includes(item.variantId),
+      );
+      selected.prepared = selected.prepared.filter((item) =>
+        selectedIds.includes(item.variantId),
+      );
+      selected.review.items = selected.review.items.filter((item) =>
+        selectedIds.includes(item.variantId),
+      );
+      selected.review.draftRevision = draft.revision;
+      selected.review.reviewHash = listingHash({
+        account: selected.account,
+        draft: selected.draft,
+        catalog: selected.catalog,
+        prepared: selected.prepared,
+        inventory: selected.review.inventory,
+      });
+      await repository.saveReview(selected, "admin", fixedNow);
+      return { full: draft, selected };
+    }
     function input(snapshot: ListingSnapshot, id = 3, key = 50) {
       return {
         id: testId(id),
@@ -119,6 +161,191 @@ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY, product_id integer
         ).rows[0].n,
       ).toBe(1);
     });
+
+    it("consumes only the immutable reviewed selection and replays without consuming remaining saved fields", async () => {
+      const { full, selected } = await saveSelectedReview();
+      const created = await repository.createOperation(input(selected));
+      expect(
+        created.snapshot.draft.items.map((item) => item.variantId),
+      ).toEqual([10]);
+      expect(created.progress.items.map((item) => item.variantId)).toEqual([
+        10,
+      ]);
+      expect(
+        created.progress.batches.flatMap((batch) => batch.variantIds),
+      ).toEqual([10]);
+      expect(
+        (
+          await database.pool.query(
+            "SELECT product_variant_id FROM marketplace.channel_listing_item_claims",
+          )
+        ).rows,
+      ).toEqual([{ product_variant_id: 10 }]);
+      const remaining = await repository.draft(104);
+      expect(remaining).toMatchObject({
+        revision: full.revision + 1,
+        items: [full.items[1]],
+      });
+      const audit = (
+        await database.pool.query(
+          "SELECT before_state,after_state FROM marketplace.channel_listing_publication_events WHERE action='draft_submitted'",
+        )
+      ).rows[0];
+      expect(audit.before_state).toEqual(full.items);
+      expect(audit.after_state).toEqual({
+        items: [full.items[1]],
+        submittedVariantIds: [10],
+        operationId: created.id,
+        revision: 2,
+      });
+      expect((await repository.createOperation(input(selected, 30))).id).toBe(
+        created.id,
+      );
+      expect(await repository.draft(104)).toEqual(remaining);
+      expect(await counts()).toEqual({
+        operations: 1,
+        claims: 1,
+        queued: 1,
+        consumed: 1,
+      });
+    });
+
+    it("fences competing disjoint selections at the full draft revision and preserves the losing selection", async () => {
+      const { full, selected: first } = await saveSelectedReview();
+      const second = publicationSnapshot([11], testAccount, testId(20));
+      second.draft = { ...full, items: [full.items[1]] };
+      await repository.saveReview(second, "other-admin", fixedNow);
+      const outcomes = await Promise.allSettled([
+        repository.createOperation(input(first)),
+        repository.createOperation(input(second, 30, 51)),
+      ]);
+      expect(
+        outcomes.filter((outcome) => outcome.status === "fulfilled"),
+      ).toHaveLength(1);
+      const rejected = outcomes.find(
+        (outcome) => outcome.status === "rejected",
+      ) as PromiseRejectedResult;
+      expect(rejected.reason).toMatchObject({ code: "LISTING_REVIEW_STALE" });
+      const losingItem =
+        outcomes[0].status === "rejected" ? full.items[0] : full.items[1];
+      expect(await repository.draft(104)).toMatchObject({
+        revision: 2,
+        items: [losingItem],
+      });
+      expect(await counts()).toEqual({
+        operations: 1,
+        claims: 1,
+        queued: 1,
+        consumed: 1,
+      });
+    });
+
+    it("rejects a widened durable review snapshot without consuming unselected rows", async () => {
+      const { full, selected } = await saveSelectedReview();
+      const widened = publicationSnapshot([10, 11]);
+      widened.draft = full;
+      widened.review.reviewHash = selected.review.reviewHash;
+      await expect(
+        repository.createOperation(input(widened)),
+      ).rejects.toMatchObject({ code: "LISTING_REVIEW_STALE" });
+      expect(await repository.draft(104)).toEqual(full);
+      expect(await counts()).toEqual({
+        operations: 0,
+        claims: 0,
+        queued: 0,
+        consumed: 0,
+      });
+    });
+
+    it("invalidates a selected review when an unselected saved row changes", async () => {
+      const { full, selected } = await saveSelectedReview();
+      const updated = structuredClone(full);
+      updated.items[1].title = "Another administrator's edit";
+      const saved = await repository.saveDraft(
+        selected.account,
+        updated,
+        "other-admin",
+        fixedNow,
+      );
+      await expect(
+        repository.createOperation(input(selected)),
+      ).rejects.toMatchObject({ code: "LISTING_REVIEW_STALE" });
+      expect(await repository.draft(104)).toEqual(saved);
+      expect(await counts()).toEqual({
+        operations: 0,
+        claims: 0,
+        queued: 0,
+        consumed: 0,
+      });
+    });
+
+    it("rolls back selected consumption and keeps both reviewed and unreviewed rows after audit failure", async () => {
+      const { full, selected } = await saveSelectedReview();
+      await database.pool
+        .query(`CREATE OR REPLACE FUNCTION marketplace.test_fail_event() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.action='publication_queued' THEN RAISE EXCEPTION 'forced audit outage'; END IF; RETURN NEW; END; $$;
+        CREATE TRIGGER test_reject_event BEFORE INSERT ON marketplace.channel_listing_publication_events FOR EACH ROW EXECUTE FUNCTION marketplace.test_fail_event();`);
+      await expect(repository.createOperation(input(selected))).rejects.toThrow(
+        "forced audit outage",
+      );
+      expect(await repository.draft(104)).toEqual(full);
+      expect(await counts()).toEqual({
+        operations: 0,
+        claims: 0,
+        queued: 0,
+        consumed: 0,
+      });
+    });
+
+    it("persists blocked all-draft reviews with a prepared subset without consuming any item", async () => {
+      const blocked = publicationSnapshot([10, 11]);
+      blocked.review.canSubmit = false;
+      blocked.review.items[1].issues.push({
+        code: "LISTING_PRICE_REQUIRED",
+        message: "Set a price",
+        field: null,
+      });
+      blocked.prepared = blocked.prepared.slice(0, 1);
+      const saved = await saveReview(blocked);
+      expect(await repository.review(104, saved.review.id)).toEqual(saved);
+      await expect(
+        repository.createOperation(input(saved)),
+      ).rejects.toMatchObject({ code: "LISTING_REVIEW_BLOCKED" });
+      expect((await repository.draft(104)).items).toEqual(saved.draft.items);
+      expect(await counts()).toEqual({
+        operations: 0,
+        claims: 0,
+        queued: 0,
+        consumed: 0,
+      });
+    });
+
+    it.each(["missing", "changed", "duplicate", "catalog", "prepared"])(
+      "rejects invalid selected snapshot identity: %s",
+      async (kind) => {
+        const { full, selected } = await saveSelectedReview();
+        const invalid = structuredClone(selected);
+        invalid.review.id = testId(25);
+        if (kind === "missing") invalid.draft.items[0].variantId = 99;
+        if (kind === "changed")
+          invalid.draft.items[0].identifier = { type: "UPC", value: "changed" };
+        if (kind === "duplicate")
+          invalid.draft.items.push(structuredClone(invalid.draft.items[0]));
+        if (kind === "catalog") invalid.catalog = [];
+        if (kind === "prepared") invalid.prepared = [];
+        await expect(
+          repository.saveReview(invalid, "admin", fixedNow),
+        ).rejects.toMatchObject({ code: "LISTING_REVIEW_STALE" });
+        expect(await repository.draft(104)).toEqual(full);
+        expect(
+          (
+            await database.pool.query(
+              "SELECT count(*)::int n FROM marketplace.channel_listing_reviews",
+            )
+          ).rows[0].n,
+        ).toBe(1);
+      },
+    );
 
     it("atomically consumes a draft and replays competing identical commands once", async () => {
       const snapshot = await saveReview(publicationSnapshot([10, 11]));

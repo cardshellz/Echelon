@@ -4,6 +4,7 @@ import {
   listingDraftSchema,
   listingOperationSchema,
   listingReviewSchema,
+  reviewListingDraftSchema,
   type ListingDraft,
   type ListingCatalogItem,
   type ListingDraftItem,
@@ -44,11 +45,14 @@ export interface PublicationMock {
   pricingRule: ListingPriceRule | null;
   operations: ListingOperation[];
   blockedReview: boolean;
+  reviewIncludesUnselected: boolean;
   staleDraft: boolean;
   loseSubmissionResponse: boolean;
   submittedItems: ListingDraftItem[];
   writes: { path: string; body: unknown }[];
   reviews: ListingReview[];
+  reviewedItems: Record<string, ListingDraftItem[]>;
+  submissionCommands: Record<string, { body: string; operationId: string }>;
   taxonomy: {
     productTypes: string[];
     entries?: { productType: string; path: string[]; description: string | null }[];
@@ -70,10 +74,13 @@ export function createPublicationMock(): PublicationMock {
     operations: [],
     submittedItems: [],
     blockedReview: false,
+    reviewIncludesUnselected: false,
     staleDraft: false,
     loseSubmissionResponse: false,
     writes: [],
     reviews: [],
+    reviewedItems: {},
+    submissionCommands: {},
     taxonomy: {
       productTypes: ["Trading Card Accessories", "Trading Card Storage", "Office Folders"],
       // Synthetic categories exercise the picker; they are not Walmart assignments.
@@ -146,7 +153,7 @@ export async function handlePublicationRequest(
         : reply(state.taxonomy);
     if (path.endsWith("/requirements"))
       return state.requirementsError ? reply({ message: "Requirements temporarily unavailable" }, 503) : reply({
-        productType: "Trading Card Accessories",
+        productType: url.searchParams.get("productType") ?? "",
         method: url.searchParams.get("method") ?? "create",
         version: "5.0",
         schemaHash: "b".repeat(64),
@@ -199,8 +206,17 @@ export async function handlePublicationRequest(
     return reply(input);
   }
   if (method === "POST" && path.endsWith("/review")) {
+    const command = reviewListingDraftSchema.safeParse(input);
+    if (!command.success) return reply({ message: command.error.message }, 400);
+    if (command.data.expectedRevision !== state.draft.revision)
+      return reply({ message: "The draft changed. Reload its saved revision." }, 409);
+    const requested = command.data.variantIds ?? state.draft.items.map(item => item.variantId);
+    if (!requested.length) return reply({ message: "Select draft variants before reviewing." }, 400);
+    const selectedItems = state.draft.items.filter(item => requested.includes(item.variantId));
+    if (selectedItems.length !== requested.length)
+      return reply({ message: "A selected variant is no longer in the saved draft." }, 409);
     const review = listingReviewSchema.parse({
-        id: "11111111-1111-4111-8111-111111111111",
+        id: `11111111-1111-4111-8111-${String(state.reviews.length + 1).padStart(12, "0")}`,
         draftRevision: state.draft.revision,
         reviewHash: "c".repeat(64),
         account: {
@@ -213,7 +229,7 @@ export async function handlePublicationRequest(
           scopeId: "10002558022",
           revision: 1,
         },
-        items: state.draft.items.map((item) => {
+        items: (state.reviewIncludesUnselected ? state.draft.items : selectedItems).map((item) => {
           const catalog = state.catalogItems.find(
             (candidate) => candidate.variantId === item.variantId,
           )!;
@@ -251,11 +267,23 @@ export async function handlePublicationRequest(
         },
       });
     state.reviews.push(review);
+    state.reviewedItems[review.id] = structuredClone(selectedItems);
     return reply(review);
   }
   if (method === "POST" && path.endsWith("/operations")) {
-    if (state.draft.items.length === 0 && state.operations.length)
-      return reply(state.operations[state.operations.length - 1]);
+    const commandKey = typeof input.commandKey === "string" ? input.commandKey : "";
+    const replay = state.submissionCommands[commandKey];
+    if (replay) {
+      if (replay.body !== JSON.stringify(input))
+        return reply({ message: "The submission command changed." }, 409);
+      return reply(state.operations.find(operation => operation.id === replay.operationId));
+    }
+    const review = state.reviews.find(candidate => candidate.id === input.reviewId);
+    if (!commandKey || !review || review.reviewHash !== input.reviewHash ||
+      review.draftRevision !== state.draft.revision || !review.canSubmit)
+      return reply({ message: "Create a current successful review before publishing." }, 409);
+    const reviewedItems = state.reviewedItems[review.id];
+    const reviewedIds = new Set(reviewedItems.map(item => item.variantId));
     const operation = listingOperationSchema.parse({
       id:
         state.operations.length === 0
@@ -264,7 +292,7 @@ export async function handlePublicationRequest(
       channelId: 77,
       state: "processing",
       submissionId: "feed-1",
-      items: state.draft.items.map((item) => ({
+      items: reviewedItems.map((item) => ({
         variantId: item.variantId,
         sku: state.catalogItems.find(
           (candidate) => candidate.variantId === item.variantId,
@@ -279,12 +307,13 @@ export async function handlePublicationRequest(
       updatedAt: new Date().toISOString(),
       error: null,
     });
-    state.submittedItems.push(...state.draft.items);
+    state.submittedItems.push(...structuredClone(reviewedItems));
     state.operations.push(operation);
+    state.submissionCommands[commandKey] = { body: JSON.stringify(input), operationId: operation.id };
     state.draft = {
       ...state.draft,
       revision: state.draft.revision + 1,
-      items: [],
+      items: state.draft.items.filter(item => !reviewedIds.has(item.variantId)),
     };
     if (state.loseSubmissionResponse) {
       state.loseSubmissionResponse = false;

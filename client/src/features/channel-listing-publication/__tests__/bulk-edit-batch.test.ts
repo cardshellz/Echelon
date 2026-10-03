@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   listingDraftItemSchema,
+  saveListingDraftSchema,
   type ListingDraftItem,
 } from "@shared/types/channel-listing-publication";
 import {
@@ -15,8 +16,10 @@ import {
   setBulkItemField,
   undoBulkItemField,
   setBulkSharedField,
+  setBulkSharedContext,
   type BulkEditCommand,
 } from "../bulk-edit-batch";
+import { parseBulkGridField } from "../bulk-grid-state";
 
 const empty = (): BulkEditCommand => ({ shared: {}, itemChanges: [] });
 const weight = ["Orderable", "shippingWeight"];
@@ -41,6 +44,119 @@ const item = (variantId: number, overrides: Partial<ListingDraftItem> = {}) =>
   });
 
 describe("bulk listing table edit batches", () => {
+  it("keeps pending attributes on an unchanged typed row when a shared category fills missing rows", () => {
+    const rows = [item(1), item(2, { productType: "", attributes: {} })];
+    const original = setBulkItemAttribute(empty(), 1, weight, 0.25);
+    const command = setBulkSharedContext(
+      rows,
+      original,
+      "productType",
+      "Card Protection",
+    );
+    const result = previewBulkEditBatch(rows, command);
+    expect(result.effectiveItems[0].attributes).toEqual({
+      ...rows[0].attributes,
+      Orderable: { shippingWeight: 0.25 },
+    });
+    expect(result.effectiveItems[1]).toMatchObject({
+      productType: "Card Protection",
+      attributes: {},
+    });
+    expect(original.itemChanges[0].patch.attributeChanges).toHaveLength(1);
+    expect(
+      setBulkSharedContext(rows, command, "productType", "Card Protection"),
+    ).toEqual(command);
+  });
+  it("clears only changed row contexts and shared attributes when switching a shared category", () => {
+    const rows = [item(1), item(2)];
+    let command = setBulkSharedAttribute(empty(), weight, 1.5);
+    command = setBulkItemField(command, 1, "productType", "Card Protection");
+    command = setBulkItemAttribute(command, 1, width, 9);
+    command = setBulkItemAttribute(command, 2, width, 8);
+    const next = setBulkSharedContext(
+      rows,
+      command,
+      "productType",
+      "Card Storage",
+    );
+    expect(next.shared.attributeChanges).toBeUndefined();
+    expect(
+      next.itemChanges.find((change) => change.variantId === 1)?.patch
+        .attributeChanges,
+    ).toHaveLength(1);
+    expect(
+      next.itemChanges.find((change) => change.variantId === 2),
+    ).toBeUndefined();
+    expect(
+      previewBulkEditBatch(rows, next).effectiveItems.map(
+        (row) => row.productType,
+      ),
+    ).toEqual(["Card Protection", "Card Storage"]);
+  });
+  it.each(["identifier first", "category first"])(
+    "retains a selected row's GTIN and category through the save payload (%s)",
+    (order) => {
+      const selected = item(1, {
+        productType: "",
+        identifier: null,
+        attributes: {},
+      });
+      const unselected = item(2, {
+        productType: "",
+        identifier: null,
+        attributes: {},
+      });
+      const current = [selected, unselected];
+      const identifier = parseBulkGridField(
+        "identifier",
+        "00012345678905",
+        "GTIN",
+      );
+      let command = empty();
+      const chooseCategory = (previous: BulkEditCommand) =>
+        resetBulkAttributeEdits({
+          ...previous,
+          shared: { ...previous.shared, productType: "Card Protection" },
+        });
+      if (order === "identifier first") {
+        command = setBulkItemField(
+          command,
+          selected.variantId,
+          "identifier",
+          identifier,
+        );
+        command = chooseCategory(command);
+      } else {
+        command = chooseCategory(command);
+        command = setBulkItemField(
+          command,
+          selected.variantId,
+          "identifier",
+          identifier,
+        );
+      }
+      const next = applyBulkEditBatch(
+        current,
+        [structuredClone(selected)],
+        command,
+      );
+      const savedInput = saveListingDraftSchema.parse({
+        expectedRevision: 4,
+        items: next,
+      });
+      expect(savedInput.items[0]).toMatchObject({
+        variantId: 1,
+        productType: "Card Protection",
+        identifier: { type: "GTIN", value: "00012345678905" },
+      });
+      expect(savedInput.items[1]).toEqual(unselected);
+      expect(current).toEqual([selected, unselected]);
+      // A successful editor rebase clears the command, not the saved row values.
+      expect(
+        previewBulkEditBatch([savedInput.items[0]], empty()).effectiveItems[0],
+      ).toEqual(savedInput.items[0]);
+    },
+  );
   it("changes shared category and applies different row characteristics after clearing old attributes", () => {
     const original = [item(1), item(2)];
     let command: BulkEditCommand = {
