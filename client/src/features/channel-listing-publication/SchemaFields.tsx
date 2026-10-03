@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { AlertCircle, CheckCircle2, Info, Plus, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -38,6 +39,46 @@ interface Props {
 const pathKey = (path: readonly string[]) => JSON.stringify(path);
 const isPrimary = (field: SchemaFieldNode): boolean =>
   field.required || field.present || field.children.some(isPrimary);
+
+interface SharedGuidance {
+  id: string;
+  descriptions: ReadonlySet<string>;
+}
+
+function FieldGuidance({
+  id,
+  label,
+  descriptions,
+}: {
+  id: string;
+  label: string;
+  descriptions: readonly string[];
+}) {
+  if (!descriptions.length) return null;
+  return (
+    <details
+      aria-label={`${label} guidance`}
+      className="group rounded-md open:border open:border-primary/20 open:bg-primary/5"
+    >
+      <summary className="w-fit cursor-pointer py-1 text-xs font-medium text-primary group-open:px-3 group-open:py-2">
+        <span className="ml-1 inline-flex items-center gap-2 align-middle">
+          <Info aria-hidden="true" className="h-4 w-4" />
+          Field guidance
+        </span>
+      </summary>
+      <div id={id} className="space-y-3 border-t border-primary/10 px-3 py-3">
+        {descriptions.map((description, index) => (
+          <p
+            key={index}
+            className="whitespace-pre-wrap break-words text-sm leading-relaxed"
+          >
+            {description}
+          </p>
+        ))}
+      </div>
+    </details>
+  );
+}
 
 export function SchemaFields({
   schema,
@@ -133,7 +174,7 @@ export function SchemaFields({
               });
             }}
           >
-            <summary className="cursor-pointer rounded-md bg-muted/50 px-3 py-2 text-sm font-medium">
+            <summary className="cursor-pointer rounded-md border bg-muted/30 px-3 py-2 text-sm font-semibold">
               Optional fields ({optional.length})
             </summary>
             {open && (
@@ -150,12 +191,24 @@ export function SchemaFields({
   function renderField(
     node: SchemaFieldNode,
     showAll = false,
+    presentation?: {
+      label?: string;
+      sharedGuidance?: SharedGuidance;
+      hasRowAction?: boolean;
+    },
   ): React.ReactNode {
     const key = pathKey(node.path);
     const id = prefix + "-" + encodeURIComponent(key);
+    const fieldLabel = presentation?.label ?? node.label;
     const label = (
-      <>
-        {node.label}
+      <span
+        className={
+          presentation?.hasRowAction
+            ? "inline-flex min-h-9 max-w-full items-center pr-10"
+            : undefined
+        }
+      >
+        {fieldLabel}
         {node.required ? (
           <span className="ml-1 text-destructive" aria-label="required">
             *
@@ -165,12 +218,23 @@ export function SchemaFields({
             {node.requiredWhenProvided ? "(required if used)" : "(optional)"}
           </span>
         )}
-      </>
+      </span>
     );
-    const description = node.description && (
-      <p id={id + "-help"} className="text-xs text-muted-foreground">
-        {node.description}
-      </p>
+    const usesSharedGuidance = Boolean(
+      node.description &&
+        presentation?.sharedGuidance?.descriptions.has(node.description),
+    );
+    const describedBy = usesSharedGuidance
+      ? presentation?.sharedGuidance?.id
+      : node.description
+        ? id + "-help"
+        : undefined;
+    const description = node.description && !usesSharedGuidance && (
+      <FieldGuidance
+        id={id + "-help"}
+        label={fieldLabel}
+        descriptions={[node.description]}
+      />
     );
     const ref = (element: HTMLElement | null) => {
       if (element) elements.current.set(key, element);
@@ -189,7 +253,7 @@ export function SchemaFields({
           key={key}
           ref={ref}
           tabIndex={-1}
-          className="min-w-0 space-y-4 rounded-md border p-4"
+          className="min-w-0 space-y-4 rounded-lg border bg-background p-3 sm:p-4"
           disabled={disabled}
         >
           <legend className="px-1 text-sm font-semibold">{label}</legend>
@@ -205,8 +269,10 @@ export function SchemaFields({
               type="button"
               variant="ghost"
               size="sm"
+              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
               onClick={() => update(node.path, undefined)}
             >
+              <Trash2 aria-hidden="true" />
               Clear {node.label}
             </Button>
           )}
@@ -222,70 +288,124 @@ export function SchemaFields({
         SCHEMA_FIELD_LIMITS.arrayItems,
       );
       const childSchema = resolveFieldSchema(node.schema.items, schema);
+      // Item descriptions are provider guidance for the list, not new guidance
+      // for every repeated row. Keep distinct conditional descriptions intact.
+      const guidance = [
+        ...new Set(
+          [
+            node.description,
+            typeof childSchema.description === "string"
+              ? childSchema.description
+              : null,
+          ].filter((text): text is string => Boolean(text)),
+        ),
+      ];
+      const sharedGuidance: SharedGuidance = {
+        id: id + "-help",
+        descriptions: new Set(guidance),
+      };
       return (
         <fieldset
           key={key}
           ref={ref}
           tabIndex={-1}
-          className="min-w-0 space-y-3 rounded-md border p-3"
+          className="min-w-0 space-y-3 rounded-lg border bg-background p-3 sm:p-4"
           disabled={disabled}
         >
-          <legend className="px-1 text-sm font-medium">{label}</legend>
-          {description}
-          {typeof node.schema.minItems === "number" &&
-            node.schema.minItems > 0 && (
-              <p className="text-xs text-muted-foreground">
-                At least {node.schema.minItems} item(s) when provided.
-              </p>
-            )}
+          <legend className="px-1 text-sm font-semibold">{label}</legend>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+            <span>
+              {values.length} {values.length === 1 ? "item" : "items"}
+            </span>
+            <span>
+              {typeof node.schema.minItems === "number" &&
+              node.schema.minItems > 0
+                ? `At least ${node.schema.minItems} when provided · `
+                : ""}
+              Up to {maximum}
+            </span>
+          </div>
+          <FieldGuidance
+            id={sharedGuidance.id}
+            label={fieldLabel}
+            descriptions={guidance}
+          />
           {node.children.map((child, index) => (
-            <div key={pathKey(child.path)} className="space-y-2 border-b pb-3">
-              {renderField(child, true)}
+            <div
+              key={pathKey(child.path)}
+              className="relative rounded-md border bg-muted/10 p-3"
+            >
+              {renderField(child, true, {
+                label: `${node.label} ${index + 1}`,
+                sharedGuidance,
+                hasRowAction: true,
+              })}
               <Button
                 type="button"
                 variant="outline"
-                size="sm"
-                onClick={() =>
-                  update(
-                    node.path,
-                    values.filter((_, itemIndex) => itemIndex !== index),
-                  )
-                }
+                size="icon"
+                className="absolute right-2 top-2 border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                aria-label={`Remove ${node.label} ${index + 1}`}
+                onClick={() => {
+                  if (
+                    update(
+                      node.path,
+                      values.filter((_, itemIndex) => itemIndex !== index),
+                    )
+                  ) {
+                    const remainingIndex = Math.min(index, values.length - 2);
+                    setFocusPath(
+                      pathKey(
+                        remainingIndex < 0
+                          ? node.path
+                          : [...node.path, String(remainingIndex)],
+                      ),
+                    );
+                  }
+                }}
               >
-                Remove {node.label} {index + 1}
+                <X aria-hidden="true" />
               </Button>
             </div>
           ))}
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={
-              disabled ||
-              values.length >= maximum ||
-              Array.isArray(node.schema.items)
-            }
-            onClick={() =>
-              update(node.path, [
-                ...values,
-                childSchema.type === "object" || childSchema.properties
-                  ? {}
-                  : "",
-              ])
-            }
-          >
-            Add {node.label}
-          </Button>
-          {node.present && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-3">
             <Button
               type="button"
-              variant="ghost"
               size="sm"
-              onClick={() => update(node.path, undefined)}
+              disabled={
+                disabled ||
+                values.length >= maximum ||
+                Array.isArray(node.schema.items)
+              }
+              onClick={() => {
+                if (
+                  update(node.path, [
+                    ...values,
+                    childSchema.type === "object" || childSchema.properties
+                      ? {}
+                      : "",
+                  ])
+                ) {
+                  setFocusPath(pathKey([...node.path, String(values.length)]));
+                }
+              }}
             >
-              Clear {node.label}
+              <Plus aria-hidden="true" />
+              Add {node.label}
             </Button>
-          )}
+            {node.present && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                onClick={() => update(node.path, undefined)}
+              >
+                <Trash2 aria-hidden="true" />
+                Clear all {node.label}
+              </Button>
+            )}
+          </div>
         </fieldset>
       );
     }
@@ -298,7 +418,7 @@ export function SchemaFields({
       id,
       disabled,
       "aria-invalid": (mode === "item" && node.missing) || undefined,
-      "aria-describedby": description ? id + "-help" : undefined,
+      "aria-describedby": describedBy,
     };
     const controlClass =
       "min-h-10 w-full rounded-md border bg-background px-3 py-2 text-sm";
@@ -372,6 +492,7 @@ export function SchemaFields({
           node.schema.maxLength > 300 ? (
           <Textarea
             {...common}
+            className="min-h-24 resize-y leading-relaxed"
             value={typeof node.value === "string" ? node.value : ""}
             maxLength={node.schema.maxLength}
             onChange={(event) =>
@@ -401,22 +522,40 @@ export function SchemaFields({
     <div className="space-y-4">
       <section
         aria-label="Required fields summary"
-        className="rounded-md border bg-muted/30 p-3"
+        className={`rounded-lg border p-3 ${mode === "item" && model.missing.length ? "border-destructive/25 bg-destructive/5" : "border-primary/20 bg-primary/5"}`}
       >
-        <p className="text-sm font-medium">
-          {mode === "patch"
-            ? "Only fields you change here are applied. Required labels describe listing requirements; Review checks each item."
-            : model.missing.length
-              ? model.missing.length + " required fields need attention"
-              : "Required fields shown here are filled. Review checks the complete listing."}
+        <p className="flex items-start gap-2 text-sm font-medium">
+          {mode === "patch" ? (
+            <Info
+              aria-hidden="true"
+              className="mt-0.5 h-4 w-4 shrink-0 text-primary"
+            />
+          ) : model.missing.length ? (
+            <AlertCircle
+              aria-hidden="true"
+              className="mt-0.5 h-4 w-4 shrink-0 text-destructive"
+            />
+          ) : (
+            <CheckCircle2
+              aria-hidden="true"
+              className="mt-0.5 h-4 w-4 shrink-0 text-primary"
+            />
+          )}
+          <span>
+            {mode === "patch"
+              ? "Only fields you change here are applied. Required labels describe listing requirements; Review checks each item."
+              : model.missing.length
+                ? model.missing.length + " required fields need attention"
+                : "Required fields shown here are filled. Review checks the complete listing."}
+          </span>
         </p>
         {mode === "item" && model.missing.length > 0 && (
-          <ul className="mt-2 space-y-1">
+          <ul className="mt-3 flex flex-wrap gap-2">
             {model.missing.map((item) => (
               <li key={pathKey(item.path)}>
                 <button
                   type="button"
-                  className="text-left text-sm text-primary underline underline-offset-2"
+                  className="rounded-md border border-destructive/20 bg-background px-2 py-1 text-left text-xs font-medium text-destructive hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   aria-label={"Go to " + item.label}
                   onClick={() => jump(item.path)}
                 >
