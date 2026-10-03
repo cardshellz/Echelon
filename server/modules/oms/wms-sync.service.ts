@@ -29,6 +29,13 @@ import {
   hasDropshipAcceptanceStamp,
   isDropshipOmsOrder,
 } from "./dropship-order-warehouse";
+import {
+  decidePickPriorityPlanSource,
+  NO_PICK_PRIORITY_PLAN,
+  toPickPriorityPlan,
+  type PickPriorityPlan,
+  type PickPriorityPlanSource,
+} from "./dropship-order-priority";
 import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import { omsOrderEvents } from "@shared/schema/oms.schema";
 import type { ServiceRegistry } from "../../services";
@@ -3026,6 +3033,25 @@ export class WmsSyncService {
     const level = (((omsOrder as any).shippingServiceLevel as string | null) || "standard") as ShippingServiceLevel;
     const base = await getShippingBase(level, db);
 
+    // A Dropship order belongs to the vendor's membership, never the buyer's:
+    // the buyer is the vendor's marketplace customer.
+    const planSource = decidePickPriorityPlanSource({
+      identity: {
+        omsOrderChannelId: omsOrder.channelId ?? null,
+        dropshipOmsChannelId: await this.resolveDropshipOmsChannelId(),
+        hasDropshipAcceptanceStamp: hasDropshipAcceptanceStamp(omsOrder.rawPayload),
+      },
+      rawPayload: omsOrder.rawPayload,
+    });
+    if (planSource.kind !== "customer_membership") {
+      const vendorPlan = await this.loadDropshipVendorPickPriorityPlan(omsOrder, planSource);
+      return {
+        priority: base + vendorPlan.modifier,
+        memberPlanName: vendorPlan.name,
+        memberPlanColor: vendorPlan.color,
+      };
+    }
+
     // 2. Dynamic Tier Modifier + plan metadata snapshot.
     //    Fetches priority_modifier for sort math AND plan name/primary_color
     //    so the picker can render the membership badge without re-joining
@@ -3092,6 +3118,71 @@ export class WmsSyncService {
       memberPlanName,
       memberPlanColor,
     };
+  }
+
+  /**
+   * The vendor's plan for a Dropship order's pick priority, as acceptance
+   * recorded it. A missing, unknown or unreadable plan scores as no plan, the
+   * same as an order from a non-member: priority only orders the pick queue, so
+   * it never blocks the sync, but each gap is logged for review.
+   */
+  private async loadDropshipVendorPickPriorityPlan(
+    omsOrder: typeof omsOrders.$inferSelect,
+    source: Exclude<PickPriorityPlanSource, { kind: "customer_membership" }>,
+  ): Promise<PickPriorityPlan> {
+    const context = {
+      oms_order_id: omsOrder.id,
+      channel_id: omsOrder.channelId ?? null,
+    };
+    if (source.kind === "dropship_vendor_plan_unavailable") {
+      logger.warn("wms_sync_dropship_pick_priority", {
+        ...context,
+        outcome: "vendor_plan_unavailable",
+        reason: source.reason,
+        error_code: "WMS_SYNC_DROPSHIP_VENDOR_PLAN_UNAVAILABLE",
+      });
+      return NO_PICK_PRIORITY_PLAN;
+    }
+
+    let rows: Array<Record<string, unknown>>;
+    try {
+      const result = await db.execute(sql`
+        SELECT priority_modifier, name, primary_color
+        FROM membership.plans
+        WHERE id = ${source.planId}
+        LIMIT 1
+      `);
+      rows = result.rows as Array<Record<string, unknown>>;
+    } catch (err: unknown) {
+      logger.warn("wms_sync_dropship_pick_priority", {
+        ...context,
+        outcome: "vendor_plan_lookup_failed",
+        plan_id: source.planId,
+        error_code: "WMS_SYNC_DROPSHIP_VENDOR_PLAN_LOOKUP_FAILED",
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return NO_PICK_PRIORITY_PLAN;
+    }
+
+    const plan = rows.length > 0 ? toPickPriorityPlan(rows[0]) : null;
+    if (!plan) {
+      logger.warn("wms_sync_dropship_pick_priority", {
+        ...context,
+        outcome: rows.length > 0 ? "vendor_plan_invalid" : "vendor_plan_not_found",
+        plan_id: source.planId,
+        error_code: rows.length > 0
+          ? "WMS_SYNC_DROPSHIP_VENDOR_PLAN_INVALID"
+          : "WMS_SYNC_DROPSHIP_VENDOR_PLAN_NOT_FOUND",
+      });
+      return NO_PICK_PRIORITY_PLAN;
+    }
+    logger.info("wms_sync_dropship_pick_priority", {
+      ...context,
+      outcome: "vendor_plan_applied",
+      plan_id: source.planId,
+      priority_modifier: plan.modifier,
+    });
+    return plan;
   }
 
   /**

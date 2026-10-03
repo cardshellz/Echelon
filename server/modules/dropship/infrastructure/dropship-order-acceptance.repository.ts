@@ -435,7 +435,7 @@ async function acceptOrderWithClient(
     return paymentHoldResult(plan, plan.funding.rewardsCents);
   }
 
-  const omsOrderId = await createOmsOrderWithClient(client, plan, intake);
+  const omsOrderId = await createOmsOrderWithClient(client, plan, intake, vendor);
   const omsLines = await createOmsOrderLinesWithClient(client, {
     omsOrderId,
     plan,
@@ -655,7 +655,7 @@ async function prepareCanonicalOrderWithClient(
     return paymentHoldResult(plan, plan.funding.rewardsCents);
   }
 
-  const omsOrderId = await createOmsOrderWithClient(client, plan, intake, {
+  const omsOrderId = await createOmsOrderWithClient(client, plan, intake, vendor, {
     stagedForCanonicalAcceptance: true,
   });
   await createOmsOrderLinesWithClient(client, { omsOrderId, plan });
@@ -2166,6 +2166,7 @@ async function createOmsOrderWithClient(
   client: PoolClient,
   plan: DropshipOrderAcceptancePlan,
   intake: DropshipAcceptanceIntakeRecord,
+  vendor: Pick<DropshipAcceptanceVendorContext, "membershipPlanId" | "currentPlanId">,
   options: { stagedForCanonicalAcceptance?: boolean } = {},
 ): Promise<number> {
   const country = requireDropshipOrderCountry(plan.shipTo.country);
@@ -2212,6 +2213,10 @@ async function createOmsOrderWithClient(
           intakeId: plan.intakeId,
           vendorId: plan.vendorId,
           storeConnectionId: plan.storeConnectionId,
+          // On a Dropship order the Card Shellz member is the vendor, not the
+          // marketplace buyer, so WMS sync scores pick priority from this plan
+          // (decidePickPriorityPlanSource, server/modules/oms).
+          vendorMembershipPlanId: acceptanceMembershipPlanId(vendor),
           externalOrderId: intake.externalOrderId,
           ...(options.stagedForCanonicalAcceptance
             ? { acceptanceState: "inventory_claim_required" }
@@ -2712,7 +2717,7 @@ async function createEconomicsSnapshotWithClient(
       input.plan.vendorId,
       input.plan.storeConnectionId,
       input.vendor.memberId,
-      input.vendor.membershipPlanId ?? input.vendor.currentPlanId,
+      acceptanceMembershipPlanId(input.vendor),
       input.plan.shippingQuoteSnapshotId,
       input.plan.warehouseId,
       input.plan.currency,
@@ -3194,7 +3199,7 @@ async function insertCanonicalAcceptanceStageWithClient(
       input.input.actor.actorType,
       input.input.actor.actorId ?? null,
       input.vendor.memberId,
-      input.vendor.membershipPlanId ?? input.vendor.currentPlanId,
+      acceptanceMembershipPlanId(input.vendor),
       input.plan.currency,
       input.plan.retailSubtotalCents,
       input.plan.wholesaleSubtotalCents,
@@ -3479,6 +3484,17 @@ function aggregatePlanQuantityByVariant(
 function buildWalletLedgerIdempotencyKey(intakeId: number, submittedIdempotencyKey: string): string {
   const digest = createHash("sha256").update(submittedIdempotencyKey).digest("hex").slice(0, 32);
   return `order:${intakeId}:${digest}`;
+}
+
+/**
+ * The vendor's membership plan as acceptance records it: the plan row's id when
+ * the plan exists, else the id the vendor carries. The acceptance stage, the
+ * economics snapshot and the OMS order's acceptance stamp all record this id.
+ */
+function acceptanceMembershipPlanId(
+  vendor: Pick<DropshipAcceptanceVendorContext, "membershipPlanId" | "currentPlanId">,
+): string | null {
+  return vendor.membershipPlanId ?? vendor.currentPlanId;
 }
 
 function readOrderedAt(payload: NormalizedDropshipOrderPayload): Date | null {
