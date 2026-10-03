@@ -1,3 +1,4 @@
+import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
 import { isClaimPackageConversionInline } from "../../inventory/infrastructure/replenishment-policy.reader";
 import { isClaimPickRepackaging, selectClaimPickPackageConversions } from "../domain/claim-pick-package-conversions";
@@ -743,6 +744,12 @@ async function loadOrder(client: PoolClient, orderId: number, lock: boolean): Pr
       );
     }
     if (itemRequiresShipping === 0 || (row.inventory_tracking === false && row.catalog_product_id != null)) continue;
+    // No catalog identity at all: Echelon tracks no stock for this line, so it is
+    // neither reserved nor allowed to block the order's other lines. It is picked
+    // as a confirmation (see isUnmappedOrderLine) and surfaced for mapping.
+    if (isUnmappedOrderLine({ sku: row.sku == null ? null : String(row.sku),
+      catalogProductId: row.catalog_product_id == null ? null : Number(row.catalog_product_id),
+      productId: row.stored_product_id == null ? null : Number(row.stored_product_id) })) continue;
     if (row.target_variant_id == null || row.root_product_id == null) {
       throw new InventoryAvailabilityClaimRepositoryError(
         "ORDER_ITEM_VARIANT_MISSING",
