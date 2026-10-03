@@ -1,3 +1,4 @@
+import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 import { createHash } from "node:crypto";
 import { eq, and, sql } from "drizzle-orm";
 import { IntegrityError, NotFoundError, ValidationError } from "../../../shared/errors";
@@ -37,6 +38,7 @@ import type {
 } from "../inventory-planning/application/inventory-availability-runtime-claim.service";
 import {
   claimCanonicalOrderForConfirmedShipment,
+  claimCanonicalOrderForPick,
   displaceClaimsForConfirmedShipment,
   refreshCanonicalClaimSupply,
 } from "../inventory-planning/application/inventory-availability-runtime-claim.service";
@@ -1166,7 +1168,21 @@ export class PickingUseCases {
   }
 
   private async recordConfirmationOnlyPick(tx: any, before: OrderItem, after: OrderItem, userId?: string): Promise<void> {
-    if (before.inventoryTracking !== false || before.catalogProductId == null || before.pickedQuantity === after.pickedQuantity) return;
+    if (before.pickedQuantity === after.pickedQuantity) return;
+    if (isUnmappedOrderLine(before)) {
+      // Picked with no catalog product behind it: no stock moved. The audit row
+      // and Control Tower (UNMAPPED_ORDER_LINE) keep it visible until mapped.
+      await persistAuditEvent(tx, {
+        actor: userId ? `user:${userId}` : "system:picking",
+        action: after.pickedQuantity > before.pickedQuantity ? "wms.unmapped_item_pick_confirmed" : "wms.unmapped_item_pick_reversed",
+        target: `wms.order_item:${before.id}`,
+        changes: { before: { pickedQuantity: before.pickedQuantity, status: before.status },
+          after: { pickedQuantity: after.pickedQuantity, status: after.status } },
+        context: { orderId: before.orderId, sku: before.sku, name: before.name, catalogProductId: null },
+      });
+      return;
+    }
+    if (before.inventoryTracking !== false || before.catalogProductId == null) return;
     await persistAuditEvent(tx, {
       actor: userId ? `user:${userId}` : "system:picking",
       action: after.pickedQuantity > before.pickedQuantity ? "wms.non_inventory_pick_confirmed" : "wms.non_inventory_pick_reversed",
@@ -1459,6 +1475,8 @@ export class PickingUseCases {
     options: { warehouseLocationId?: number; warehouseId?: number | null },
   ): Promise<{ target: CanonicalPickTarget | null; nonInventory: boolean }> {
     if (item.inventoryTracking === false && item.catalogProductId != null) return { target: null, nonInventory: true };
+    // A line with no catalog identity has no stock to move: confirm it, never block on it.
+    if (isUnmappedOrderLine(item)) return { target: null, nonInventory: true };
     const productVariant = item.catalogProductId != null && item.productId != null
       ? await this.storage.getProductVariantById(item.productId)
       : await this.storage.getProductVariantBySku(item.sku);
@@ -1601,6 +1619,16 @@ export class PickingUseCases {
           priorClaimId: latest?.claimId ?? null,
           actor: canonicalPickerActor(input.userId),
           reason: `Claim order ${input.beforeItem.orderId} to record shipped item ${input.itemId}`,
+        });
+        if (claimed !== null) latest = await context.getLatestClaim(input.beforeItem.orderId);
+      } else if (!latest) {
+        // Never reserved (its claim failed at intake, e.g. on an unmapped line):
+        // reserve it now rather than refusing the pick. A released claim is not
+        // re-created here; whatever released it decided the order owes nothing.
+        const claimed = await claimCanonicalOrderForPick(context, {
+          orderId: input.beforeItem.orderId,
+          actor: canonicalPickerActor(input.userId),
+          reason: `Reserve order ${input.beforeItem.orderId} before picking item ${input.itemId}`,
         });
         if (claimed !== null) latest = await context.getLatestClaim(input.beforeItem.orderId);
       }
