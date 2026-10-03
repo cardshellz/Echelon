@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { DropshipError } from "../../domain/errors";
 import {
+  DATABASE_CONSTRAINT_VIOLATION_CODE,
   DropshipOrderProcessingService,
   aggregateQuoteItems,
+  classifyOrderProcessingError,
   buildQuoteDestination,
   deriveOrderProcessingIdempotencyKey,
   type DropshipNotificationSenderInput,
@@ -312,6 +314,88 @@ describe("DropshipOrderProcessingService", () => {
         retryable: true,
       },
     });
+  });
+
+  it("leaves the intake failed, not retrying, when a database constraint refuses a write", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const acceptanceService = new FakeAcceptanceService();
+    const notificationSender = new FakeNotificationSender();
+    // The error order 22039 hit on every pass (intake 43), as node-postgres raises it.
+    const constraintError = Object.assign(
+      new Error(
+        'insert or update on table "dropship_shipping_quote_snapshots" violates foreign key constraint "dropship_shipping_quote_snapshots_rate_table_id_fkey"',
+      ),
+      { code: "23503" },
+    );
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: {
+        quote: async () => {
+          throw constraintError;
+        },
+      },
+      orderAcceptance: acceptanceService,
+      notificationSender,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    const result = await service.processIntake({
+      intakeId: 1,
+      workerId: "worker-1",
+      idempotencyKey: "process-intake-1",
+    });
+
+    expect(result).toMatchObject({
+      outcome: "failed",
+      failureCode: DATABASE_CONSTRAINT_VIOLATION_CODE,
+      retryable: false,
+    });
+    expect(repository.failure).toMatchObject({
+      status: "failed",
+      errorCode: DATABASE_CONSTRAINT_VIOLATION_CODE,
+      errorMessage: constraintError.message,
+      retryable: false,
+    });
+    expect(acceptanceService.lastInput).toBeNull();
+    // Staff keep the database error on the intake; the vendor is not shown table names.
+    const notice = notificationSender.sent[0];
+    expect(notice).toMatchObject({
+      eventType: "dropship_order_processing_failed",
+      critical: true,
+      message: "Order intake 1 could not be processed: an internal Card Shellz error stopped it; the order is saved and Card Shellz staff can retry it.",
+      payload: { failureCode: DATABASE_CONSTRAINT_VIOLATION_CODE },
+    });
+    expect(JSON.stringify(notice)).not.toContain("dropship_shipping_quote_snapshots");
+  });
+
+  it("keeps an unexpected error that is not a constraint violation retryable", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: {
+        quote: async () => {
+          throw Object.assign(new Error("Connection terminated unexpectedly"), { code: "ECONNRESET" });
+        },
+      },
+      orderAcceptance: new FakeAcceptanceService(),
+      notificationSender: new FakeNotificationSender(),
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    const result = await service.processIntake({
+      intakeId: 1,
+      workerId: "worker-1",
+      idempotencyKey: "process-intake-1",
+    });
+
+    expect(result).toMatchObject({
+      outcome: "failed",
+      failureCode: "DROPSHIP_ORDER_PROCESSING_UNEXPECTED_ERROR",
+      retryable: true,
+    });
+    expect(repository.failure).toMatchObject({ status: "retrying", retryable: true });
   });
 
   it("returns skipped without side effects when the intake is not claimable", async () => {
@@ -790,6 +874,45 @@ describe("DropshipOrderProcessingService", () => {
 });
 
 describe("dropship order processing helpers", () => {
+  it.each(["23000", "23502", "23503", "23505", "23514", "23P01"])(
+    "classifies SQLSTATE %s, an integrity constraint violation, as permanent",
+    (code) => {
+      expect(classifyOrderProcessingError(Object.assign(new Error("refused"), { code }))).toEqual({
+        code: DATABASE_CONSTRAINT_VIOLATION_CODE,
+        message: "refused",
+        retryable: false,
+      });
+    },
+  );
+
+  it.each<{ code: string | number | undefined; reason: string }>([
+    { code: "40001", reason: "serialization failure" },
+    { code: "40P01", reason: "deadlock" },
+    { code: "57014", reason: "statement timeout" },
+    { code: "08006", reason: "connection failure" },
+    { code: "ECONNRESET", reason: "socket reset" },
+    { code: 23503, reason: "a numeric code, which no PostgreSQL error carries" },
+    { code: undefined, reason: "no code" },
+  ])("keeps code $code ($reason) retryable", ({ code }) => {
+    expect(classifyOrderProcessingError(Object.assign(new Error("try again"), { code }))).toEqual({
+      code: "DROPSHIP_ORDER_PROCESSING_UNEXPECTED_ERROR",
+      message: "try again",
+      retryable: true,
+    });
+  });
+
+  it("leaves a DropshipError's own retryable flag in charge, and classifies non-Error throws", () => {
+    expect(classifyOrderProcessingError(
+      new DropshipError("DROPSHIP_X", "Refused.", { retryable: false, code: "40001" }),
+    )).toEqual({ code: "DROPSHIP_X", message: "Refused.", retryable: false });
+    expect(classifyOrderProcessingError("boom")).toEqual({
+      code: "DROPSHIP_ORDER_PROCESSING_UNEXPECTED_ERROR",
+      message: "boom",
+      retryable: true,
+    });
+    expect(classifyOrderProcessingError(null)).toMatchObject({ retryable: true });
+  });
+
   it("builds quote destination from intake ship-to", () => {
     expect(buildQuoteDestination(baseIntake())).toEqual({
       country: "US",
