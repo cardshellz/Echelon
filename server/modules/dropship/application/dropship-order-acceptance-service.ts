@@ -311,6 +311,14 @@ export interface DropshipOrderAcceptancePlan {
 /** 3: each wholesale line records the live cost, the schedule entry charged and the policy (C3 price protection). */
 export const DROPSHIP_PRICING_SNAPSHOT_VERSION = 3;
 
+/**
+ * OMS refused to let an accepted order's lines be fulfilled
+ * (grantDropshipAcceptanceLineAuthorityWithClient). The acceptance transaction,
+ * wallet debit included, rolled back. Retrying meets the same rows, so the
+ * intake is left failed for staff.
+ */
+export const DROPSHIP_OMS_LINE_AUTHORITY_REFUSED_CODE = "DROPSHIP_ORDER_OMS_LINE_AUTHORITY_REFUSED";
+
 export class DropshipOrderAcceptanceService {
   constructor(
     private readonly deps: {

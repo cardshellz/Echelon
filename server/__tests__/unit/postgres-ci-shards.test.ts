@@ -105,6 +105,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/dropship/__tests__/integration/dropship-cost-schedule.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-failure-cleanup.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/canonical-pick-case-break.integration.test.ts",
+      "server/modules/oms/__tests__/integration/oms-line-authority-grant.integration.test.ts",
       "server/modules/orders/__tests__/integration/picking-assignment-release.integration.test.ts",
     ];
     const priorSuiteCount = 70;

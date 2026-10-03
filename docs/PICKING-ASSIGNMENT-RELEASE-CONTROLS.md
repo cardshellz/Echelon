@@ -1,6 +1,6 @@
 # Picking assignment and hold controls
 
-Implementation branch: `codex/picking-release-permissions`, based on `ae4f64ba6` after merged PR #1651. This is a code change, not a production order recovery or inventory adjustment.
+Implementation branch: `codex/picking-release-permissions`, initially based on `ae4f64ba6` after merged PR #1651 and refreshed against `edd1812f9` before publication. This is a code change, not a production order recovery or inventory adjustment.
 
 ## Operator behavior
 
@@ -37,7 +37,7 @@ Implementation: `server/modules/orders/domain/picking-assignment-release.ts`, `p
 
 ## Verification and remaining limits
 
-Local checks passed: 632 unit/regression checks, 12 PostgreSQL integration checks, and 28 desktop/mobile browser checks. Application, server-test and client-test TypeScript checks passed; `git diff --check` passed. The disposable PostgreSQL cluster was stopped and removed after verification.
+Local checks passed: 644 unit/regression checks, 12 PostgreSQL integration checks, and 28 desktop/mobile browser checks. Application, server-test and client-test TypeScript checks passed; `git diff --check` passed. The disposable PostgreSQL cluster was stopped and removed after verification.
 
 Automated coverage includes owner/override permissions, invalid input, separate hold controls, combined groups, absent and terminal orders, stale assignments, duplicate commands, concurrent SQL writers, atomic audit rollback, and preservation of the complete order and its lines except the three assignment fields. PostgreSQL tests use a uniquely created disposable local database and current-column fixtures; they are not a full production migration test. Browser tests exercise desktop and mobile screens with mocked APIs.
 

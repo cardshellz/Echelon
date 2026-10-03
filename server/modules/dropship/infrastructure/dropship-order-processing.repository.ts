@@ -77,6 +77,7 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
           skipReason,
           intake: mapProcessingIntakeRow(row),
           config: mapProcessingConfig(row.store_config),
+          stagedShippingQuoteSnapshotId: null,
         };
       }
 
@@ -95,12 +96,13 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
         [input.intakeId, input.now],
       );
       const claimed = requiredRow(updated.rows[0], "Dropship order intake claim did not return a row.");
+      const stagedShippingQuoteSnapshotId = await loadStagedShippingQuoteSnapshotId(client, input.intakeId);
       await recordProcessingAuditEvent(client, {
         intake: claimed,
         eventType: "order_processing_claimed",
         severity: "info",
         workerId: input.workerId,
-        payload: { previousStatus: row.status },
+        payload: { previousStatus: row.status, stagedShippingQuoteSnapshotId },
         occurredAt: input.now,
       });
       await client.query("COMMIT");
@@ -109,6 +111,7 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
         skipReason: null,
         intake: mapProcessingIntakeRow(claimed),
         config: mapProcessingConfig(claimed.store_config),
+        stagedShippingQuoteSnapshotId,
       };
     } catch (error) {
       await rollbackQuietly(client);
@@ -348,6 +351,35 @@ async function loadIntakeForUpdate(
     [intakeId],
   );
   return result.rows[0] ?? null;
+}
+
+/**
+ * The shipping quote that acceptance froze when it staged this intake, or null
+ * before acceptance has staged it. The stage's quote id never changes once
+ * written (guard_dropship_order_acceptance_stage_update, migration 0667).
+ */
+async function loadStagedShippingQuoteSnapshotId(
+  client: PoolClient,
+  intakeId: number,
+): Promise<number | null> {
+  const result = await client.query<{ shipping_quote_snapshot_id: number | string }>(
+    `SELECT shipping_quote_snapshot_id
+     FROM dropship.dropship_order_acceptance_stages
+     WHERE intake_id = $1
+     LIMIT 1`,
+    [intakeId],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  const quoteSnapshotId = Number(row.shipping_quote_snapshot_id);
+  if (!Number.isSafeInteger(quoteSnapshotId) || quoteSnapshotId <= 0) {
+    throw new DropshipError(
+      "DROPSHIP_ORDER_PROCESSING_STAGED_QUOTE_INVALID",
+      "The acceptance stage for this intake names an invalid shipping quote.",
+      { intakeId, shippingQuoteSnapshotId: String(row.shipping_quote_snapshot_id) },
+    );
+  }
+  return quoteSnapshotId;
 }
 
 function claimSkipReason(row: ProcessingIntakeRow, _now: Date): string | null {

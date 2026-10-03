@@ -233,6 +233,21 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
       }],
     },
     omsPromote: { match: "UPDATE oms.oms_orders", rows: [{ id: 1001 }] },
+    // The OMS line authority grant (oms-line-authority-grant.repository.ts):
+    // the paid OMS order and its line as acceptance created them, still at the
+    // migration 106 authority defaults.
+    omsOrderLock: { match: "FROM oms.oms_orders", rows: [{ id: "1001", financial_status: "paid" }] },
+    omsLineLock: {
+      match: "FROM oms.oms_order_lines",
+      rows: [{
+        id: "2001", quantity: 2, fulfillable_quantity: 2, channel_observed_quantity: 0, paid_quantity: 0,
+        authority_fulfillable_quantity: 0, cancelled_quantity: 0, refunded_quantity: 0,
+        authorization_status: "authorized", authorized_at: null, authorized_by_event_id: null,
+        authority_source_topic: null,
+      }],
+    },
+    omsLineAuthority: { match: "UPDATE oms.oms_order_lines", rows: [{ id: "2001" }] },
+    omsAuthorityEvent: { match: "INSERT INTO oms.oms_order_line_authority_events", rows: [] },
     existingSnapshot: { match: "FROM dropship.dropship_order_economics_snapshots", rows: [] },
     existingLedger: { match: "FROM dropship.dropship_wallet_ledger", rows: [] },
   };
@@ -459,6 +474,22 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     expect(omsLine.params[8]).toBe(UNIT_COST_CENTS * 2);
 
     expect(db.calls.at(-1)?.sql).toBe("COMMIT");
+  });
+
+  it("grants the OMS line authority after the debit on the legacy path, in the same transaction", async () => {
+    const db = createFakeDb(baseHandlers());
+    const { repository } = createRepository(db, availableCost());
+
+    await repository.acceptOrder(acceptanceInput());
+
+    const order = db.calls.map((call) => call.sql);
+    const debit = order.findIndex((sql) => sql.includes("INSERT INTO dropship.dropship_wallet_ledger"));
+    const authority = order.findIndex((sql) => sql.includes("UPDATE oms.oms_order_lines"));
+    const accepted = order.findIndex((sql) => sql.includes("UPDATE dropship.dropship_order_intake"));
+    expect(authority).toBeGreaterThan(debit);
+    expect(accepted).toBeGreaterThan(authority);
+    expect(db.statements("INSERT INTO oms.oms_order_line_authority_events")).toHaveLength(1);
+    expect(order.at(-1)).toBe("COMMIT");
   });
 
   it("starts the vendor's cost schedule under its lock before reading the cost, and records the baseline as taken at acceptance", async () => {
@@ -880,6 +911,84 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     expect(db.statements("UPDATE oms.oms_orders")).toHaveLength(1);
     expect(db.statements("UPDATE dropship.dropship_order_acceptance_stages")).toHaveLength(1);
     expect(db.calls.at(-1)?.sql).toBe("COMMIT");
+  });
+
+  // Order 22039: acceptance created its OMS line with no authority to fulfill
+  // (migration 106 defaults), so no WMS sync could ever fulfill it.
+  it("grants the paid order's OMS line authority between marking it paid and accepting the intake", async () => {
+    const db = createFakeDb(baseHandlers({
+      intake: {
+        match: "FROM dropship.dropship_order_intake",
+        rows: [intakeRow({ status: "processing", oms_order_id: 1001 })],
+      },
+      stageSelect: {
+        match: "FROM dropship.dropship_order_acceptance_stages",
+        rows: [canonicalStageRow()],
+      },
+    }));
+    const { repository } = createRepository(db, availableCost());
+
+    await repository.finalizeCanonicalOrder(acceptanceInput());
+
+    const order = db.calls.map((call) => call.sql);
+    const paid = order.findIndex((sql) => sql.includes("UPDATE oms.oms_orders"));
+    const authority = order.findIndex((sql) => sql.includes("UPDATE oms.oms_order_lines"));
+    const ledger = order.findIndex((sql) => sql.includes("INSERT INTO oms.oms_order_line_authority_events"));
+    const accepted = order.findIndex((sql) => sql.includes("UPDATE dropship.dropship_order_intake"));
+    expect(paid).toBeGreaterThan(order.findIndex((sql) => sql.includes("INSERT INTO dropship.dropship_wallet_ledger")));
+    expect(authority).toBeGreaterThan(paid);
+    expect(ledger).toBeGreaterThan(authority);
+    expect(accepted).toBeGreaterThan(ledger);
+    expect(order.at(-1)).toBe("COMMIT");
+    expect(db.statements("UPDATE oms.oms_order_lines")[0].params).toEqual([
+      2001, 2, 2, 2, "authorized", ACCEPTED_AT, "dropship-acceptance:intake:1", "dropship/acceptance", null,
+    ]);
+    const acceptedAudit = db.statements("INSERT INTO dropship.dropship_audit_events")
+      .map((call) => call.params.find((param) => typeof param === "string" && param.includes("omsLineAuthority")))
+      .find(Boolean);
+    expect(JSON.parse(String(acceptedAudit))).toMatchObject({
+      omsLineAuthority: [{ omsOrderLineId: 2001, authorityFulfillableQuantity: 2 }],
+    });
+  });
+
+  it("rolls the whole finalization back, wallet debit included, when OMS refuses the authority", async () => {
+    const db = createFakeDb(baseHandlers({
+      intake: {
+        match: "FROM dropship.dropship_order_intake",
+        rows: [intakeRow({ status: "processing", oms_order_id: 1001 })],
+      },
+      stageSelect: {
+        match: "FROM dropship.dropship_order_acceptance_stages",
+        rows: [canonicalStageRow()],
+      },
+      omsLineLock: {
+        match: "FROM oms.oms_order_lines",
+        rows: [{
+          id: "2001", quantity: 2, fulfillable_quantity: 2, channel_observed_quantity: 2, paid_quantity: 0,
+          authority_fulfillable_quantity: 0, cancelled_quantity: 1, refunded_quantity: 0,
+          authorization_status: "partially_cancelled", authorized_at: null, authorized_by_event_id: null,
+          authority_source_topic: null,
+        }],
+      },
+    }));
+    const { repository } = createRepository(db, availableCost());
+
+    const error = await repository.finalizeCanonicalOrder(acceptanceInput()).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: "DROPSHIP_ORDER_OMS_LINE_AUTHORITY_REFUSED",
+      context: {
+        intakeId: 1,
+        omsOrderId: 1001,
+        omsErrorCode: "OMS_LINE_AUTHORITY_GRANT_LINE_ADJUSTED",
+      },
+    });
+    // Not retryable: the processing pass leaves the intake failed for staff.
+    expect((error as { context?: { retryable?: unknown } }).context?.retryable).toBeUndefined();
+    expect(db.statements("UPDATE oms.oms_order_lines")).toEqual([]);
+    expect(db.statements("UPDATE dropship.dropship_order_intake")).toEqual([]);
+    expect(db.calls.at(-1)?.sql).toBe("ROLLBACK");
+    expect(db.calls.some((call) => call.sql === "COMMIT")).toBe(false);
   });
 
   it("reuses a prepared canonical stage on retry without creating another OMS order", async () => {
