@@ -69,7 +69,6 @@ interface VendorContextRow {
   member_id: string;
   current_plan_id: string | null;
   membership_plan_id: string | null;
-  membership_plan_tier: string | null;
   vendor_status: string;
   vendor_standing_reason: string | null;
   entitlement_status: string;
@@ -1628,13 +1627,14 @@ async function loadVendorContextForUpdate(
 ): Promise<DropshipAcceptanceVendorContext | null> {
   // No partner-profile discount here: the wholesale basis is the `.ops` product
   // cost read inside this transaction (see resolveAcceptanceLinesWithClient).
+  // membership.plans belongs to the membership system and has no tier column;
+  // only its id is read here.
   const result = await client.query<VendorContextRow>(
     `SELECT
        v.id AS vendor_id,
        v.member_id,
        v.current_plan_id,
        p.id AS membership_plan_id,
-       p.tier AS membership_plan_tier,
        v.status AS vendor_status,
         v.standing_reason AS vendor_standing_reason,
         v.entitlement_status,
@@ -1660,7 +1660,6 @@ async function loadVendorContextForUpdate(
     memberId: row.member_id,
     currentPlanId: row.current_plan_id,
     membershipPlanId: row.membership_plan_id,
-    membershipPlanTier: row.membership_plan_tier,
     vendorStatus: row.vendor_status,
     vendorStandingReason: row.vendor_standing_reason ?? null,
     entitlementStatus: row.entitlement_status,

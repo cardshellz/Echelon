@@ -523,7 +523,7 @@ describe("buildDropshipOrderAcceptancePlan", () => {
       paymentHoldExpiresAt: null,
     });
     expect(plan.pricingSnapshot).toMatchObject({
-      membership: { memberId: "member-1", planId: "ops", tier: "ops" },
+      membership: { memberId: "member-1", planId: "ops" },
       totals: { totalDebitCents: 2722 },
     });
   });
@@ -1010,7 +1010,6 @@ function makePlanningInput(
       memberId: "member-1",
       currentPlanId: "ops",
       membershipPlanId: "ops",
-      membershipPlanTier: "ops",
       vendorStatus: "active",
       vendorStandingReason: null,
       entitlementStatus: "active",
