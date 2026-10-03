@@ -137,7 +137,7 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
       match: "FROM dropship.dropship_vendors v",
       rows: [{
         vendor_id: 10, member_id: "member-1", current_plan_id: "plan-ops", membership_plan_id: "plan-ops",
-        membership_plan_tier: "ops", vendor_status: "active", vendor_standing_reason: null, entitlement_status: "active",
+        vendor_status: "active", vendor_standing_reason: null, entitlement_status: "active",
         store_connection_id: 22, store_platform: "ebay", store_status: "connected", setup_status: "ready",
         access_token_ref: "vault:access", refresh_token_ref: "vault:refresh",
       }],
@@ -708,6 +708,8 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
 
     expect(db.statements("FROM dropship.dropship_catalog_rules")).toHaveLength(1);
     expect(db.calls.some((call) => call.sql.includes("dropship_eligible"))).toBe(false);
+    // membership.plans has no tier column; reading one failed every acceptance (order 22039).
+    expect(db.calls.some((call) => /\bp\.tier\b/.test(call.sql))).toBe(false);
     expect(db.statements("UPDATE dropship.dropship_wallet_accounts")).toHaveLength(1);
   });
 

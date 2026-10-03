@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DropshipError } from "../../domain/errors";
 import {
   DATABASE_CONSTRAINT_VIOLATION_CODE,
+  DATABASE_QUERY_INVALID_CODE,
   DropshipOrderProcessingService,
   aggregateQuoteItems,
   classifyOrderProcessingError,
@@ -367,6 +368,44 @@ describe("DropshipOrderProcessingService", () => {
       payload: { failureCode: DATABASE_CONSTRAINT_VIOLATION_CODE },
     });
     expect(JSON.stringify(notice)).not.toContain("dropship_shipping_quote_snapshots");
+  });
+
+  it("leaves the intake failed, not retrying, when a query names a column the database does not have", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const notificationSender = new FakeNotificationSender();
+    // The error order 22039 hit at acceptance once its quote saved (intake 43).
+    const missingColumn = Object.assign(new Error("column p.tier does not exist"), { code: "42703" });
+    const acceptanceService = new FakeAcceptanceService();
+    acceptanceService.acceptOrder = async () => {
+      throw missingColumn;
+    };
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: new FakeShippingQuoteService(),
+      orderAcceptance: acceptanceService,
+      notificationSender,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    const result = await service.processIntake({
+      intakeId: 1,
+      workerId: "worker-1",
+      idempotencyKey: "process-intake-1",
+    });
+
+    expect(result).toMatchObject({ outcome: "failed", failureCode: DATABASE_QUERY_INVALID_CODE, retryable: false });
+    expect(repository.failure).toMatchObject({
+      status: "failed",
+      errorCode: DATABASE_QUERY_INVALID_CODE,
+      errorMessage: "column p.tier does not exist",
+      retryable: false,
+    });
+    expect(notificationSender.sent[0]).toMatchObject({
+      eventType: "dropship_order_processing_failed",
+      message: "Order intake 1 could not be processed: an internal Card Shellz error stopped it; the order is saved and Card Shellz staff can retry it.",
+    });
+    expect(JSON.stringify(notificationSender.sent[0])).not.toContain("p.tier");
   });
 
   it("keeps an unexpected error that is not a constraint violation retryable", async () => {
@@ -885,12 +924,24 @@ describe("dropship order processing helpers", () => {
     },
   );
 
+  it.each(["42501", "42601", "42703", "42883", "42P01"])(
+    "classifies SQLSTATE %s, a query the database cannot run, as permanent",
+    (code) => {
+      expect(classifyOrderProcessingError(Object.assign(new Error("refused"), { code }))).toEqual({
+        code: DATABASE_QUERY_INVALID_CODE,
+        message: "refused",
+        retryable: false,
+      });
+    },
+  );
+
   it.each<{ code: string | number | undefined; reason: string }>([
     { code: "40001", reason: "serialization failure" },
     { code: "40P01", reason: "deadlock" },
     { code: "57014", reason: "statement timeout" },
     { code: "08006", reason: "connection failure" },
     { code: "ECONNRESET", reason: "socket reset" },
+    { code: "EPIPE", reason: "a five-letter Node error code, not a SQLSTATE class 23 or 42" },
     { code: 23503, reason: "a numeric code, which no PostgreSQL error carries" },
     { code: undefined, reason: "no code" },
   ])("keeps code $code ($reason) retryable", ({ code }) => {

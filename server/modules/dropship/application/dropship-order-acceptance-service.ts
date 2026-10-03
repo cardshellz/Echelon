@@ -184,7 +184,6 @@ export interface DropshipAcceptanceVendorContext {
   memberId: string;
   currentPlanId: string | null;
   membershipPlanId: string | null;
-  membershipPlanTier: string | null;
   vendorStatus: string;
   /** Why the vendor is paused; null unless vendorStatus is `paused`. */
   vendorStandingReason: string | null;
@@ -670,7 +669,6 @@ export function buildDropshipOrderAcceptancePlan(
       membership: {
         memberId: input.vendor.memberId,
         planId: input.vendor.membershipPlanId ?? input.vendor.currentPlanId,
-        tier: input.vendor.membershipPlanTier,
       },
       wholesale: {
         authority: ACCEPTANCE_COST_AUTHORITY,
