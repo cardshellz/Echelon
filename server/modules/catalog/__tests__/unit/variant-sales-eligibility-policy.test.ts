@@ -12,7 +12,6 @@ const existing = {
   salesEligibility: "sellable" as const,
   shopifyVariantId: null,
   shopifyInventoryItemId: null,
-  dropshipEligible: false,
 };
 
 describe("catalog variant sales eligibility policy", () => {
@@ -27,13 +26,41 @@ describe("catalog variant sales eligibility policy", () => {
       .toThrow("salesEligibility must be either sellable or internal_only");
   });
 
-  it("rejects internal-only identity when a direct Shopify or dropship identity remains", () => {
+  it("rejects internal-only identity while a direct Shopify identity remains", () => {
     expect(() => assertVariantSalesIdentityCompatible({
       salesEligibility: "internal_only",
       shopifyVariantId: "123",
       shopifyInventoryItemId: null,
-      dropshipEligible: true,
     })).toThrow(VariantSalesEligibilityError);
+  });
+
+  it("needs no dropship flag: a variant without a direct identity may be internal-only", () => {
+    expect(() => assertVariantSalesIdentityCompatible({
+      salesEligibility: "internal_only",
+      shopifyVariantId: null,
+      shopifyInventoryItemId: null,
+    })).not.toThrow();
+  });
+
+  it("still refuses internal-only for a variant that has a dropship listing", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ pg_advisory_xact_lock: null }] })
+      .mockResolvedValueOnce({ rows: [{
+        active_channel_feed: false,
+        channel_listing: false,
+        channel_allocation_configuration: false,
+        active_channel_availability: false,
+        dropship_listing: true,
+        active_marketplace_publication: false,
+        pending_inventory_publication: false,
+        open_customer_order: false,
+      }] });
+
+    const failure = await assertVariantSalesEligibilityTransitionAllowed({ execute }, existing, "internal_only")
+      .then(() => null, (error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(VariantSalesEligibilityError);
+    expect((failure as VariantSalesEligibilityError).blockers).toEqual(["dropship_listing"]);
   });
 
   it("serializes and permits a clean transition", async () => {
