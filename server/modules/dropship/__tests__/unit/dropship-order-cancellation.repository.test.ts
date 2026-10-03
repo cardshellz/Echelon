@@ -22,6 +22,7 @@ describe("PgDropshipOrderCancellationRepository", () => {
       ordered_at: "2026-05-04T20:40:00.000Z",
       rejection_reason: "Store connection status needs_reauth does not allow new dropship order intake.",
       cancellation_status: "order_intake_rejected",
+      only_dropship_lines: null,
     }]);
     const pool = makePool(client);
     const repository = new PgDropshipOrderCancellationRepository(pool);
@@ -43,6 +44,7 @@ describe("PgDropshipOrderCancellationRepository", () => {
       orderedAt: "2026-05-04T20:40:00.000Z",
       rejectionReason: "Store connection status needs_reauth does not allow new dropship order intake.",
       cancellationStatus: "order_intake_rejected",
+      onlyDropshipLines: null,
     }]);
 
     const claimQuery = client.query.mock.calls.find((call) => String(call[0]).includes("WITH candidates"));
@@ -58,6 +60,32 @@ describe("PgDropshipOrderCancellationRepository", () => {
       "15 minutes",
       25,
     ]);
+  });
+
+  it("reports, for each eBay order it claims, whether every line is one of the store's dropship listings", async () => {
+    const client = makeClient([{
+      id: 2,
+      vendor_id: 10,
+      store_connection_id: 22,
+      platform: "ebay",
+      external_order_id: "05-12345-67890",
+      external_order_number: "22030",
+      source_order_id: null,
+      ordered_at: "2026-09-30T20:40:00.000Z",
+      rejection_reason: "Store connection is not launch-ready for dropship order intake.",
+      cancellation_status: "order_intake_rejected",
+      only_dropship_lines: false,
+    }]);
+    const repository = new PgDropshipOrderCancellationRepository(makePool(client));
+
+    const [candidate] = await repository.claimPendingCancellations({ now, limit: 25, workerId: "worker-1" });
+
+    expect(candidate).toMatchObject({ intakeId: 2, platform: "ebay", onlyDropshipLines: false });
+    const claimSql = String(client.query.mock.calls.find((call) => String(call[0]).includes("WITH candidates"))?.[0]);
+    expect(claimSql).toContain("WHEN oi.platform <> 'ebay' THEN NULL");
+    expect(claimSql).toContain("jsonb_array_elements(oi.raw_payload->'lineItems')");
+    expect(claimSql).toContain("dl.external_listing_id = line_item->>'legacyItemId'");
+    expect(claimSql).toContain("candidates.only_dropship_lines");
   });
 });
 

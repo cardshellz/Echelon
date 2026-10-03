@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
+import { DropshipError } from "../domain/errors";
 import type {
   DropshipEbayOrderIntakeImmutableConflictInput,
   DropshipEbayOrderIntakeRepository,
@@ -11,6 +12,7 @@ interface StoreConnectionRow {
   vendor_id: number;
   platform: "ebay";
   last_order_sync_at: Date | null;
+  dropship_listing_ids: unknown;
 }
 
 const IMMUTABLE_CONFLICT_AUDIT_EVENT_TYPE = "order_intake_immutable_payload_conflict";
@@ -22,15 +24,27 @@ export class PgDropshipEbayOrderIntakeRepository implements DropshipEbayOrderInt
   async listPollableStoreConnections(input: {
     limit: number;
   }): Promise<DropshipEbayOrderIntakeStoreConnection[]> {
+    // Only launch-ready stores: an order recorded for any other store is
+    // rejected. Every listing the store ever published counts, whatever its
+    // status now: an ended listing can still have a paid order waiting to ship.
     const result = await this.dbPool.query<StoreConnectionRow>(
-      `SELECT id, vendor_id, platform, last_order_sync_at
-       FROM dropship.dropship_store_connections
-       WHERE platform = 'ebay'
-         AND status = 'connected'
-         AND setup_status = 'ready'
-         AND access_token_ref IS NOT NULL
-         AND refresh_token_ref IS NOT NULL
-       ORDER BY last_order_sync_at ASC NULLS FIRST, id ASC
+      `SELECT sc.id, sc.vendor_id, sc.platform, sc.last_order_sync_at,
+              ARRAY(
+                SELECT DISTINCT dl.external_listing_id
+                FROM dropship.dropship_vendor_listings dl
+                WHERE dl.store_connection_id = sc.id
+                  AND dl.vendor_id = sc.vendor_id
+                  AND dl.external_listing_id IS NOT NULL
+                  AND btrim(dl.external_listing_id) <> ''
+                ORDER BY dl.external_listing_id
+              )::text[] AS dropship_listing_ids
+       FROM dropship.dropship_store_connections sc
+       WHERE sc.platform = 'ebay'
+         AND sc.status = 'connected'
+         AND sc.setup_status = 'ready'
+         AND sc.access_token_ref IS NOT NULL
+         AND sc.refresh_token_ref IS NOT NULL
+       ORDER BY sc.last_order_sync_at ASC NULLS FIRST, sc.id ASC
        LIMIT $1`,
       [input.limit],
     );
@@ -39,6 +53,7 @@ export class PgDropshipEbayOrderIntakeRepository implements DropshipEbayOrderInt
       storeConnectionId: row.id,
       platform: row.platform,
       lastOrderSyncAt: row.last_order_sync_at,
+      dropshipListingIds: readListingIds(row),
     }));
   }
 
@@ -89,6 +104,18 @@ export class PgDropshipEbayOrderIntakeRepository implements DropshipEbayOrderInt
       client.release();
     }
   }
+}
+
+function readListingIds(row: StoreConnectionRow): string[] {
+  const value = row.dropship_listing_ids;
+  if (!Array.isArray(value) || !value.every((id) => typeof id === "string")) {
+    throw new DropshipError(
+      "DROPSHIP_EBAY_ORDER_INTAKE_LISTING_IDS_INVALID",
+      "Dropship store connection returned invalid dropship listing ids.",
+      { storeConnectionId: row.id, retryable: false },
+    );
+  }
+  return value;
 }
 
 async function rollbackQuietly(client: PoolClient): Promise<void> {

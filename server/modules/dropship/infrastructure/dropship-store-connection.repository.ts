@@ -17,6 +17,7 @@ import {
 } from "../domain/store-connection";
 import { DropshipError } from "../domain/errors";
 import { ensureDefaultListingConfigWithClient } from "./dropship-listing-config.repository";
+import { hasOpenStoreSetupBlockers } from "./dropship-store-setup-blockers";
 
 interface StoreConnectionRow {
   id: number;
@@ -1167,22 +1168,6 @@ async function upsertPostConnectSetupCheck(
       input.resolvedAt,
     ],
   );
-}
-
-async function hasOpenStoreSetupBlockers(
-  client: PoolClient,
-  storeConnectionId: number,
-): Promise<boolean> {
-  const result = await client.query<CountRow>(
-    `SELECT COUNT(*) AS count
-     FROM dropship.dropship_store_setup_checks
-     WHERE store_connection_id = $1
-       AND resolved_at IS NULL
-       AND status <> 'passed'
-       AND severity IN ('blocker','error')`,
-    [storeConnectionId],
-  );
-  return Number(result.rows[0]?.count ?? 0) > 0;
 }
 
 async function replaceTokenRecords(

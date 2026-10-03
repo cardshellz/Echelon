@@ -16,6 +16,10 @@ import {
   type DropshipOrderIntakeHealthTransition,
   type DropshipOrderIntakeMode,
 } from "../domain/dropship-order-intake-health";
+import {
+  openStoreSetupBlockerCondition,
+  ORDER_INTAKE_HEALTH_SETUP_CHECK_KEY,
+} from "./dropship-store-setup-blockers";
 
 interface StoreConnectionRow {
   id: number;
@@ -46,7 +50,32 @@ interface HealthRow {
 }
 
 const HEALTH_LOCK_NAMESPACE = "dropship_order_intake_health";
-const HEALTH_SETUP_CHECK_KEY = "order_intake_health";
+const HEALTH_SETUP_CHECK_KEY = ORDER_INTAKE_HEALTH_SETUP_CHECK_KEY;
+const SETUP_STATUS_RESTORED_EVENT_TYPE = "store_setup_status_restored";
+/** Audit actor for setup-status changes this ledger makes on its own. */
+const HEALTH_SYSTEM_ACTOR_ID = "dropship_order_intake_health";
+
+/**
+ * SQL condition: the store (`storeIdExpr`) is blocked by its open order-intake
+ * health check and by nothing else. Bind the check key at `$2`.
+ */
+function heldOnlyByOrderIntakeHealthCondition(storeIdExpr: string): string {
+  return `EXISTS (
+           SELECT 1
+           FROM dropship.dropship_store_setup_checks health_check
+           WHERE health_check.store_connection_id = ${storeIdExpr}
+             AND health_check.check_key = $2
+             AND health_check.resolved_at IS NULL
+             AND health_check.status <> 'passed'
+             AND health_check.severity IN ('blocker','error')
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM dropship.dropship_store_setup_checks ssc
+           WHERE ssc.store_connection_id = ${storeIdExpr}
+             AND ${openStoreSetupBlockerCondition("ssc", "$2")}
+         )`;
+}
 
 export class PgDropshipOrderIntakeHealthRepository implements DropshipOrderIntakeHealthRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
@@ -185,6 +214,58 @@ export class PgDropshipOrderIntakeHealthRepository implements DropshipOrderIntak
       await auditTransition(client, transition);
       return makeResult(connection, transition);
     });
+  }
+
+  /**
+   * Puts back to "ready" each connected store whose only open setup blocker is
+   * its order-intake health check, and returns the stores it changed.
+   *
+   * That check used to block a store, so a store whose intake had stopped was
+   * set to "attention_required"; polls skip such stores, so the check could
+   * never clear and the store stayed stopped. The check no longer blocks (see
+   * openStoreSetupBlockerCondition); this undoes the setup status it left.
+   * Run it before polling, so the store's orders are recorded while it is
+   * launch-ready rather than rejected. Each store is re-checked under its lock
+   * before it changes, and every change is audited.
+   */
+  async restoreStoresHeldOnlyByOrderIntakeHealth(input: {
+    platform: string;
+    limit: number;
+    now: Date;
+  }): Promise<DropshipOrderIntakeHealthConnectionIdentity[]> {
+    const candidates = await this.dbPool.query<{ id: number }>(
+      `SELECT sc.id
+       FROM dropship.dropship_store_connections sc
+       WHERE sc.platform = $1
+         AND sc.status = 'connected'
+         AND sc.setup_status = 'attention_required'
+         AND ${heldOnlyByOrderIntakeHealthCondition("sc.id")}
+       ORDER BY sc.id ASC
+       LIMIT $3`,
+      [input.platform, HEALTH_SETUP_CHECK_KEY, input.limit],
+    );
+
+    const restored: DropshipOrderIntakeHealthConnectionIdentity[] = [];
+    for (const candidate of candidates.rows) {
+      const identity = await this.withLockedHealth(candidate.id, async (client, connection, current) => {
+        if (connection.platform !== input.platform) return null;
+        const updated = await client.query(
+          `UPDATE dropship.dropship_store_connections sc
+           SET setup_status = 'ready',
+               updated_at = $3
+           WHERE sc.id = $1
+             AND sc.status = 'connected'
+             AND sc.setup_status = 'attention_required'
+             AND ${heldOnlyByOrderIntakeHealthCondition("sc.id")}`,
+          [connection.id, HEALTH_SETUP_CHECK_KEY, input.now],
+        );
+        if (updated.rowCount !== 1) return null;
+        await auditSetupStatusRestored(client, connection, current, input.now);
+        return toConnectionIdentity(connection);
+      });
+      if (identity) restored.push(identity);
+    }
+    return restored;
   }
 
   private async withLockedHealth<T>(
@@ -355,6 +436,37 @@ async function auditTransition(
   );
 }
 
+async function auditSetupStatusRestored(
+  client: PoolClient,
+  connection: StoreConnectionRow,
+  health: DropshipOrderIntakeHealthRecord | null,
+  now: Date,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO dropship.dropship_audit_events
+      (vendor_id, store_connection_id, entity_type, entity_id, event_type,
+       actor_type, actor_id, severity, payload, created_at)
+     VALUES ($1, $2, 'dropship_store_connection', $3, $4,
+             'system', $5, 'info', $6::jsonb, $7)`,
+    [
+      connection.vendor_id,
+      connection.id,
+      String(connection.id),
+      SETUP_STATUS_RESTORED_EVENT_TYPE,
+      HEALTH_SYSTEM_ACTOR_ID,
+      JSON.stringify({
+        previousSetupStatus: connection.setup_status,
+        setupStatus: "ready",
+        reason: "order_intake_health_does_not_block",
+        healthStatus: health?.status ?? null,
+        consecutiveFailures: health?.consecutiveFailures ?? null,
+        lastFailureCode: health?.lastFailureCode ?? null,
+      }),
+      now,
+    ],
+  );
+}
+
 function healthPresentation(current: DropshipOrderIntakeHealthRecord): {
   status: "passed" | "failed";
   severity: "info" | "warning" | "error" | "blocker";
@@ -405,14 +517,17 @@ function makeResult(
   connection: StoreConnectionRow,
   transition: DropshipOrderIntakeHealthTransition,
 ): DropshipOrderIntakeHealthRepositoryResult {
-  const identity: DropshipOrderIntakeHealthConnectionIdentity = {
+  return { connection: toConnectionIdentity(connection), transition };
+}
+
+function toConnectionIdentity(connection: StoreConnectionRow): DropshipOrderIntakeHealthConnectionIdentity {
+  return {
     vendorId: connection.vendor_id,
     storeConnectionId: connection.id,
     platform: connection.platform,
     externalDisplayName: connection.external_display_name,
     shopDomain: connection.shop_domain,
   };
-  return { connection: identity, transition };
 }
 
 function mapHealthRow(

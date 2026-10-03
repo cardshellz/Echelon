@@ -54,6 +54,13 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
     since: Date;
     until: Date;
   }): Promise<DropshipEbayOrderIntakeFetchResult> {
+    // A store with no dropship listing can have no dropship order: the vendor's
+    // own sales on it are none of intake's business, so eBay is not even asked.
+    const dropshipListingIds = new Set(input.connection.dropshipListingIds);
+    if (dropshipListingIds.size === 0) {
+      return { orders: [], ignored: 0 };
+    }
+
     const credential = await this.tokenOwner.loadFreshForStoreConnection({
       vendorId: input.connection.vendorId,
       storeConnectionId: input.connection.storeConnectionId,
@@ -72,19 +79,20 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
 
     const result: DropshipEbayOrderIntakeFetchResult = { orders: [], ignored: 0 };
     for (const order of orders) {
-      const decision = shouldRecordEbayDropshipOrder({ order });
+      const decision = shouldRecordEbayDropshipOrder({ order, dropshipListingIds });
       if (!decision.record) {
         result.ignored += 1;
         continue;
       }
       result.orders.push({
         externalOrderId: order.orderId,
-        input: buildEbayDropshipOrderIntakeInput({
+        input: buildDropshipOrderInputNamingTheOrder({
           store: {
             vendorId: input.connection.vendorId,
             storeConnectionId: input.connection.storeConnectionId,
           },
           order,
+          lineItems: decision.lineItems,
         }),
       });
     }
@@ -243,4 +251,25 @@ function resolveRetryDelayMs(response: Response | null, attempt: number): number
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Builds the intake input, and when the order cannot be read names the order and
+ * the field in the error: the message is what the store's intake health records,
+ * so it must be enough to find the order without the raw payload.
+ */
+function buildDropshipOrderInputNamingTheOrder(
+  input: Parameters<typeof buildEbayDropshipOrderIntakeInput>[0],
+): ReturnType<typeof buildEbayDropshipOrderIntakeInput> {
+  try {
+    return buildEbayDropshipOrderIntakeInput(input);
+  } catch (error) {
+    if (!(error instanceof DropshipError)) throw error;
+    const field = typeof error.context?.field === "string" ? `, field ${error.context.field}` : "";
+    throw new DropshipError(
+      error.code,
+      `${error.message} (eBay order ${String(input.order.orderId)}${field})`,
+      { ...error.context, externalOrderId: input.order.orderId },
+    );
+  }
 }

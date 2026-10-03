@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { DropshipError } from "../../domain/errors";
 import {
   DropshipOrderCancellationService,
+  NON_DROPSHIP_LINES_CANCELLATION_CODE,
+  assertCancellationCoversOnlyDropshipLines,
   buildCancellationRequest,
   deriveOrderCancellationIdempotencyKey,
   type DropshipLogEvent,
@@ -141,6 +143,65 @@ describe("DropshipOrderCancellationService", () => {
     });
   });
 
+  it("never asks eBay to cancel an order that also sells the vendor's own items", async () => {
+    const candidate = makeCandidate({
+      platform: "ebay",
+      cancellationStatus: "order_intake_rejected",
+      rejectionReason: "Store connection is not launch-ready for dropship order intake.",
+      onlyDropshipLines: false,
+    });
+    const repository = new FakeOrderCancellationRepository([candidate]);
+    const marketplaceCancellation = new FakeMarketplaceCancellationProvider({
+      status: "cancelled",
+      externalCancellationId: "cancel-should-not-happen",
+      rawResult: {},
+    });
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderCancellationService({
+      repository,
+      marketplaceCancellation,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.processPendingCancellations({ workerId: "worker-1" });
+
+    expect(marketplaceCancellation.lastInput).toBeNull();
+    expect(result).toMatchObject({ claimed: 1, succeeded: 0, retrying: 0, failed: 1 });
+    expect(repository.successes).toHaveLength(0);
+    // Permanent: left for review, never retried.
+    expect(repository.failures).toEqual([expect.objectContaining({
+      candidate,
+      errorCode: NON_DROPSHIP_LINES_CANCELLATION_CODE,
+      retryable: false,
+    })]);
+    expect(logs).toEqual([expect.objectContaining({
+      code: "DROPSHIP_MARKETPLACE_ORDER_CANCELLATION_FAILED",
+      context: expect.objectContaining({ errorCode: NON_DROPSHIP_LINES_CANCELLATION_CODE, retryable: false }),
+    })]);
+  });
+
+  it("still cancels an eBay order whose every line is a dropship listing", async () => {
+    const candidate = makeCandidate({ platform: "ebay", onlyDropshipLines: true });
+    const repository = new FakeOrderCancellationRepository([candidate]);
+    const marketplaceCancellation = new FakeMarketplaceCancellationProvider({
+      status: "cancelled",
+      externalCancellationId: "cancel-3",
+      rawResult: { provider: "ebay" },
+    });
+    const service = new DropshipOrderCancellationService({
+      repository,
+      marketplaceCancellation,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    const result = await service.processPendingCancellations({ workerId: "worker-1" });
+
+    expect(result).toMatchObject({ succeeded: 1, failed: 0 });
+    expect(marketplaceCancellation.lastInput).toMatchObject({ intakeId: 1, platform: "ebay" });
+  });
+
   it("rejects invalid input before repository calls", async () => {
     const repository = new FakeOrderCancellationRepository([]);
     const service = new DropshipOrderCancellationService({
@@ -163,6 +224,20 @@ describe("DropshipOrderCancellationService", () => {
 });
 
 describe("dropship order cancellation helpers", () => {
+  it("refuses only an order known to have non-dropship lines", () => {
+    expect(() => assertCancellationCoversOnlyDropshipLines(makeCandidate({ onlyDropshipLines: true }))).not.toThrow();
+    // Platforms without the line check keep their behaviour.
+    expect(() => assertCancellationCoversOnlyDropshipLines(makeCandidate({ onlyDropshipLines: null }))).not.toThrow();
+    expect(() => assertCancellationCoversOnlyDropshipLines(makeCandidate({
+      platform: "ebay",
+      externalOrderId: "05-12345-67890",
+      onlyDropshipLines: false,
+    }))).toThrowError(expect.objectContaining({
+      code: NON_DROPSHIP_LINES_CANCELLATION_CODE,
+      context: { intakeId: 1, storeConnectionId: 22, externalOrderId: "05-12345-67890", retryable: false },
+    }));
+  });
+
   it("builds marketplace cancellation requests from claimed candidates", () => {
     expect(buildCancellationRequest(makeCandidate())).toMatchObject({
       intakeId: 1,
@@ -240,6 +315,7 @@ function makeCandidate(
     orderedAt: "2026-05-02T17:55:00.000Z",
     rejectionReason: "Payment hold expired before wallet funds were available.",
     cancellationStatus: "payment_hold_expired",
+    onlyDropshipLines: null,
     ...overrides,
   };
 }
