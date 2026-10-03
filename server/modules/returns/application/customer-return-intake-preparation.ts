@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
+import { customerReturnPackingLimits } from "@shared/returns/customer-return-shipping-guardrails";
 import {
-  customerReturnLabelAddressSchema,
   customerReturnLabelSubmitInputSchema,
   type CustomerReturnLabelSettings,
   type CustomerReturnLabelSubmitInput,
@@ -10,6 +10,7 @@ import { projectCustomerReturnLiveWmsAllocations } from "./customer-return-live-
 import { customerReturnPublicLineId } from "./customer-return-live-packaging";
 import { customerReturnProviderGid as gid } from "./customer-return-live-identity";
 import { validateCustomerReturnBoxPlan } from "./customer-return-box-plan";
+import { customerReturnOriginAddress } from "./customer-return-shipping-plan";
 import {
   CustomerReturnIntakeError,
   type PreparedCustomerReturnIntake,
@@ -77,30 +78,9 @@ export function prepareCustomerReturnIntake(
     order.lines,
     { selections: input.selections, parcels: input.parcels },
     order.boxOptions,
+    customerReturnPackingLimits(settings),
   );
-  const sourceAddress = provider.order.shippingAddress;
-  const origin = customerReturnLabelAddressSchema.safeParse(
-    sourceAddress && {
-      name: sourceAddress.name,
-      ...(sourceAddress.phone?.trim() ? { phone: sourceAddress.phone } : {}),
-      ...(sourceAddress.company?.trim()
-        ? { companyName: sourceAddress.company }
-        : {}),
-      addressLine1: sourceAddress.address1,
-      ...(sourceAddress.address2?.trim()
-        ? { addressLine2: sourceAddress.address2 }
-        : {}),
-      city: sourceAddress.city,
-      state: sourceAddress.provinceCode,
-      postalCode: sourceAddress.zip,
-      countryCode: sourceAddress.countryCodeV2,
-    },
-  );
-  if (!origin.success)
-    throw new CustomerReturnIntakeError(
-      "RETURN_LABEL_ORIGIN_UNVERIFIED",
-      "The order's return shipping address needs verification before labels can be created.",
-    );
+  const origin = customerReturnOriginAddress(provider.order.shippingAddress);
   const mappings = projectCustomerReturnLiveWmsAllocations({
     local,
     shopify: provider,
@@ -252,7 +232,7 @@ export function prepareCustomerReturnIntake(
       parcelKey: String(parcel.number),
       dimensions: parcel.dimensions,
       weightGrams: parcel.weightGrams,
-      originAddress: origin.data,
+      originAddress: origin,
       destinationAddress: settings.destinationAddress,
       selectionMode: settings.selectionMode,
       carrierId: settings.carrierId,

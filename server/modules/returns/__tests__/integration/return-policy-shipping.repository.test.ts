@@ -23,6 +23,8 @@ import {
   seedIntakeTestSchema,
   INTAKE_NOW,
 } from "../support/customer-return-intake-database";
+import { defaultCustomerReturnShippingGuardrails } from "@shared/returns/customer-return-shipping-guardrails";
+import { PostgresCustomerReturnPortalPolicyReader } from "../../infrastructure/customer-return-policy.reader";
 
 const connectionString = resolveReturnsTestDatabase(process.env, "policy");
 const integration = connectionString ? describe.sequential : describe.skip;
@@ -164,6 +166,25 @@ integration("atomic return policy and shipping versions on PostgreSQL", () => {
       paused: false,
       version: 1,
     });
+  });
+
+  it("saves guardrails immutably with the policy, resolves them by channel and audits their exact values", async () => {
+    const input = command();
+    input.shipping = { ...input.shipping!, parcelGuardrails: defaultCustomerReturnShippingGuardrails() };
+    const result = await service.createVersion(input);
+    expect(result.policy).toMatchObject({ shipping: { parcelGuardrails: input.shipping.parcelGuardrails } });
+    expect((await settings.read(36))?.parcelGuardrails).toEqual(input.shipping.parcelGuardrails);
+    const reader = new PostgresCustomerReturnPortalPolicyReader(drizzle(pool, { schema }));
+    expect((await reader.read(36)).find(policy => policy.id === result.policy.id)?.shipping?.parcelGuardrails)
+      .toEqual(input.shipping.parcelGuardrails);
+    expect((await pool.query("SELECT changes FROM public.audit_events")).rows[0].changes.after.shipping.parcelGuardrails)
+      .toEqual(input.shipping.parcelGuardrails);
+    const changed = structuredClone(input);
+    changed.shipping!.parcelGuardrails!.costProtection = false;
+    await expect(service.createVersion(changed)).rejects.toMatchObject({ code: "RETURN_POLICY_IDEMPOTENCY_CONFLICT" });
+    await expect(pool.query("UPDATE returns.return_policy_shipping SET configuration=configuration - 'parcelGuardrails' WHERE policy_id=$1", [result.policy.id]))
+      .rejects.toThrow();
+    expect((await counts()).commands).toBe(1);
   });
 
   it("replays an identical combined command without rereading a carrier and rejects changed intent", async () => {

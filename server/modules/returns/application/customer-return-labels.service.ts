@@ -12,16 +12,12 @@ import {
   type ReturnLabelRecord,
 } from "../../shipping-engine/application/return-label-provider.port";
 import {
-  ReturnRateProviderError,
-  returnRateResultSchema,
   type ReturnRateProvider,
   type ReturnRateInput,
 } from "../../shipping-engine/application/return-rate-provider.port";
-import {
-  CustomerReturnRateSelectionError,
-  selectCustomerReturnRate,
-} from "../domain/customer-return-rate-selection";
-import { returnCarrierRuleAllowsWeight } from "@shared/returns/customer-return-carrier-policy";
+import { quoteCustomerReturnShipment, customerReturnShippingQuoteError } from "./customer-return-shipping-quote";
+import { customerReturnPreflightShipments } from "./customer-return-shipping-plan";
+import type { PreparedCustomerReturnIntake } from "./customer-return-intake.ports";
 import {
   customerReturnShipmentHash,
   RETURN_RATE_QUOTE_MAX_AGE_MS,
@@ -99,6 +95,15 @@ export class CustomerReturnLabelsService {
     private readonly dependencies: CustomerReturnLabelsDependencies,
   ) {}
 
+  async preflight(prepared: PreparedCustomerReturnIntake, settings: CustomerReturnLabelSettings): Promise<void> {
+    // Run before intake reserves return quantities. A rejected price must leave
+    // the customer free to repack and submit a different plan.
+    for (const shipment of customerReturnPreflightShipments(prepared.parcels[0].originAddress, settings, prepared.parcels)) {
+      const evidence = await quoteCustomerReturnShipment(this.dependencies.rates, settings, shipment);
+      if (evidence.errorCode) throw customerReturnShippingQuoteError(evidence.errorCode, true);
+    }
+  }
+
   async status(
     channelId: number,
     authorizationId: number,
@@ -133,10 +138,18 @@ export class CustomerReturnLabelsService {
     if (!parcel) return this.present(stored);
     const settings =
       await this.dependencies.requirePurchaseConfiguration(channelId, authorizationId);
-    const quoteDecisionId =
-      parcel.selectionMode === "cheapest_eligible"
-        ? await this.quote(stored, parcel, settings, actor)
-        : undefined;
+    let quoteDecisionId: number | undefined;
+    if (settings.parcelGuardrails != null) {
+      // Verify every unpurchased box before buying any of them. A cost or size
+      // failure in a later box must not purchase the first box of an invalid plan.
+      const otherPending = stored.parcels.filter(row => row.attempt === null && row.id !== parcel.id);
+      // Quote the purchase target last so a large plan does not age its decision
+      // while other boxes are being checked. The repository still fences the TTL.
+      for (const pendingParcel of [...otherPending, parcel]) {
+        const decisionId = await this.quote(stored, pendingParcel, settings, actor);
+        if (pendingParcel.id === parcel.id) quoteDecisionId = decisionId;
+      }
+    } else if (parcel.selectionMode === "cheapest_eligible") quoteDecisionId = await this.quote(stored, parcel, settings, actor);
     const attempt = await this.dependencies.store.begin(
       channelId,
       authorizationId,
@@ -189,6 +202,7 @@ export class CustomerReturnLabelsService {
       shipment: parcel.shipment,
       shipmentHash: customerReturnShipmentHash(parcel.shipment),
       result: null,
+      costReferences: [],
       selected: null,
       errorCode: null,
       quotedAt: quotedAt.toISOString(),
@@ -196,38 +210,11 @@ export class CustomerReturnLabelsService {
         quotedAt.getTime() + RETURN_RATE_QUOTE_MAX_AGE_MS,
       ).toISOString(),
     };
-    try {
-      const carrierIds =
-        settings.selectionMode === "fixed_service"
-          ? [settings.carrierId!]
-          : settings.carrierRules
-              .filter((rule) =>
-                returnCarrierRuleAllowsWeight(
-                  rule,
-                  parcel.shipment.parcel.weightGrams,
-                ),
-              )
-              .map((rule) => rule.carrierId);
-      if (carrierIds.length === 0)
-        throw new CustomerReturnRateSelectionError("RETURN_RATE_NONE_ELIGIBLE");
-      decision.result = returnRateResultSchema.parse(
-        await this.dependencies.rates.quote({
-          shipment: parcel.shipment,
-          carrierIds,
-        }),
-      );
-      decision.selected = selectCustomerReturnRate({
-        policy: settings,
-        weightGrams: parcel.shipment.parcel.weightGrams,
-        result: decision.result,
-      }).selected;
-    } catch (error) {
-      decision.errorCode =
-        error instanceof ReturnRateProviderError ||
-        error instanceof CustomerReturnRateSelectionError
-          ? error.code
-          : "RETURN_RATE_UNAVAILABLE";
-    }
+    const evidence = await quoteCustomerReturnShipment(this.dependencies.rates, settings, parcel.shipment);
+    decision.result = evidence.result;
+    decision.costReferences = evidence.costReferences;
+    decision.selected = evidence.selected;
+    decision.errorCode = evidence.errorCode;
     const id = await this.dependencies.store.recordQuote(
       stored.channelId,
       stored.authorizationId,
@@ -236,14 +223,7 @@ export class CustomerReturnLabelsService {
       actor,
       this.dependencies.now(),
     );
-    if (decision.errorCode)
-      throw new CustomerReturnIntakeError(
-        decision.errorCode,
-        decision.errorCode === "RETURN_RATE_NONE_ELIGIBLE"
-          ? "No allowed return service is available for this box. Review the carrier rules before continuing."
-          : "Return rates could not be verified. No label was purchased; try again.",
-        decision.errorCode === "RETURN_RATE_NONE_ELIGIBLE" ? 409 : 503,
-      );
+    if (decision.errorCode) throw customerReturnShippingQuoteError(decision.errorCode);
     return id;
   }
 

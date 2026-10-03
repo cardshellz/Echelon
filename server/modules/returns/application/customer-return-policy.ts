@@ -7,6 +7,7 @@ import { customerReturnPortalPolicyIssues } from "@shared/returns/customer-retur
 import {
   customerReturnResolvedPolicySchema,
   customerReturnPolicyIssueSchema,
+  type CustomerReturnLabelSettings,
 } from "@shared/returns/customer-return-label.contract";
 import {
   resolveReturnPolicy,
@@ -17,13 +18,13 @@ import { snapshotReturnPolicy } from "../domain/return-case";
 import { parseReturnPolicySnapshot } from "../domain/return-case-actions";
 
 export interface CustomerReturnPortalPolicyReader {
-  read(channelId: number): Promise<ReturnPolicy[]>;
+  read(channelId: number): Promise<(ReturnPolicy & { shipping?: CustomerReturnLabelSettings | null })[]>;
 }
 
 /** Resolve first. An unsupported channel winner must never disappear and allow
  * a less-specific policy to authorize the same customer return. */
 export function resolveCustomerReturnPortalPolicy(
-  policies: readonly ReturnPolicy[],
+  policies: readonly (ReturnPolicy & { shipping?: CustomerReturnLabelSettings | null })[],
   channelId: number,
 ) {
   try {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { customerReturnShippingGuardrailsSchema } from "./customer-return-shipping-guardrails";
 import { customerReturnLiveReviewInputSchema } from "./customer-return-live.contract";
 import {
   customerReturnCarrierPolicyFields,
@@ -34,6 +35,7 @@ export const customerReturnLabelSettingsFieldsSchema = z
     enabled: z.boolean(),
     warehouseId: id,
     ...customerReturnCarrierPolicyFields,
+    parcelGuardrails: customerReturnShippingGuardrailsSchema.nullable().optional(),
     contactName: text(200),
     contactPhone: text(50).nullable(),
   })

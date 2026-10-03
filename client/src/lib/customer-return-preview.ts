@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { MAX_RETURN_FLOW_PARCELS } from "@shared/returns/customer-return-flow.contract";
+import { customerReturnPackingIssue } from "@shared/returns/customer-return-shipping-guardrails";
+import { splitCustomerReturnItemsByWeight } from "@shared/returns/customer-return-weight-split";
 import {
   customerReturnFlowReviewInputSchema,
   type CustomerReturnFlowOrder,
@@ -114,6 +117,16 @@ export function singlePreviewParcel(
     lineId: item.lineId,
     quantity: String(item.quantity),
   }));
+  const limits = order.packingLimits;
+  if (limits?.length) {
+    const split = splitCustomerReturnItemsByWeight(selections.map(selection => ({ ...selection,
+      unitWeightGrams: order.lines.find(line => line.id === selection.lineId)?.unitWeightGrams ?? null })),
+      Math.max(...limits.map(limit => limit.maxWeightGrams)), MAX_RETURN_FLOW_PARCELS);
+    if (split.ok && split.boxes.length > 1) return split.boxes.map((box, index) => {
+      const contents = box.map(item => ({ lineId: item.lineId, quantity: String(item.quantity) }));
+      return { key: index + 1, items: contents, size: initialPreviewParcelSize(order, contents) };
+    });
+  }
   return [
     {
       key: 1,
@@ -158,9 +171,15 @@ export function buildPreviewReviewInput(
       );
     }
     try {
+      const measured = readPreviewParcelDimensions(order, parcel);
+      const weight = previewParcelProductWeight(order, parcel);
+      const issue = weight.status === "ready" ? customerReturnPackingIssue(order.packingLimits, weight.weightGrams, measured.dimensions) : null;
+      if (issue !== null) return invalid(issue === "weight"
+        ? `Box ${index + 1} is too heavy. Split its items into separate boxes or contact us for help.`
+        : `Box ${index + 1} cannot use prepaid shipping with this size. Use a smaller box or contact us for help.`);
       parcelInputs.push({
         items,
-        ...readPreviewParcelDimensions(order, parcel),
+        ...measured,
       });
     } catch (cause) {
       return invalid(

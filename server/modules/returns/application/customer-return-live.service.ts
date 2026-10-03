@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { customerReturnPackingLimits } from "@shared/returns/customer-return-shipping-guardrails";
 import { z } from "zod";
 import { normalizeCountryToIso2 } from "@shared/country-code";
 import {
@@ -11,6 +12,11 @@ import { evaluateCustomerReturnEligibility,
 import { CustomerReturnOrderReferenceError, normalizeCustomerReturnOrderReference } from "../domain/customer-return-order-reference";
 import { CustomerReturnBoxPlanError, validateCustomerReturnBoxPlan } from "./customer-return-box-plan";
 import { CustomerReturnLiveError } from "./customer-return-live-error";
+import { CustomerReturnIntakeError } from "./customer-return-intake.ports";
+import { customerReturnOriginAddress, customerReturnPreflightShipments } from "./customer-return-shipping-plan";
+import { quoteCustomerReturnShipment, customerReturnShippingQuoteError } from "./customer-return-shipping-quote";
+import type { ReturnRateProvider } from "../../shipping-engine/application/return-rate-provider.port";
+import type { CustomerReturnLabelSettings } from "@shared/returns/customer-return-label.contract";
 import { resolveCustomerReturnPortalPolicy, type CustomerReturnPortalPolicyReader } from "./customer-return-policy";
 import { snapshotReturnPolicy } from "../domain/return-case";
 import type { PreparedCustomerReturnIntake } from "./customer-return-intake.ports";
@@ -32,6 +38,7 @@ export interface CustomerReturnLiveDependencies {
   dimensions: CustomerReturnPackageDimensionsReader;
   policies: CustomerReturnPortalPolicyReader;
   reportBoxDiagnostic?: ReturnBoxReporter;
+  rates?: ReturnRateProvider;
   now: () => Date;
 }
 
@@ -43,6 +50,7 @@ export interface CustomerReturnIntakeInspection {
   facts: CustomerReturnEligibilityInput;
   eligibility: CustomerReturnEligibilityOutput;
   operationalPolicy: PreparedCustomerReturnIntake["operationalPolicy"];
+  shippingSettings?: CustomerReturnLabelSettings | null;
 }
 
 /** Read-only evidence inspection. Customer entry points require trusted canonical
@@ -79,10 +87,12 @@ export class CustomerReturnLiveService {
       const input = parseInput(customerReturnLiveReviewInputSchema, raw);
       const owned = parseInput(customerReturnCanonicalOrderScopeSchema, scope);
       if (input.channelId !== owned.channelId) throw changed();
-      const { order } = await this.load(owned);
+      const inspection = await this.load(owned);
+      const { order } = inspection;
       if (order.sourceRevision !== input.sourceRevision
         || normalizeCustomerReturnOrderReference(input.orderReference) !== order.orderReference) throw changed();
-      const plan = validateCustomerReturnBoxPlan(order.lines, { selections: input.selections, parcels: input.parcels }, order.boxOptions);
+      const plan = validateCustomerReturnBoxPlan(order.lines, { selections: input.selections, parcels: input.parcels }, order.boxOptions, order.packingLimits);
+      await this.verifyReviewShipping(inspection, plan);
       return customerReturnLiveReviewSchema.parse({ mode: "admin_live", sourceRevision: order.sourceRevision,
         effects: "none", orderReference: order.orderReference, ...plan, refundMethod: "manual_shopify" });
     });
@@ -91,9 +101,11 @@ export class CustomerReturnLiveService {
   async review(raw: unknown): Promise<CustomerReturnLiveReview> {
     return this.boundary(async () => {
       const input = parseInput(customerReturnLiveReviewInputSchema, raw);
-      const { order } = await this.load({ channelId: input.channelId, orderReference: input.orderReference });
+      const inspection = await this.load({ channelId: input.channelId, orderReference: input.orderReference });
+      const { order } = inspection;
       if (order.sourceRevision !== input.sourceRevision) throw changed();
-      const plan = validateCustomerReturnBoxPlan(order.lines, { selections: input.selections, parcels: input.parcels }, order.boxOptions);
+      const plan = validateCustomerReturnBoxPlan(order.lines, { selections: input.selections, parcels: input.parcels }, order.boxOptions, order.packingLimits);
+      await this.verifyReviewShipping(inspection, plan);
       return customerReturnLiveReviewSchema.parse({ mode: "admin_live", sourceRevision: order.sourceRevision,
         effects: "none", orderReference: order.orderReference, ...plan, refundMethod: "manual_shopify" });
     });
@@ -191,21 +203,38 @@ export class CustomerReturnLiveService {
     // freshly read IDs and exact dimensions in validateCustomerReturnBoxPlan.
     const sourceRevision = createHash("sha256").update(canonical({ policy, operationalPolicy, local, provider, lines, message })).digest("hex");
     const order = customerReturnLiveOrderSchema.parse({ mode: "admin_live", sourceRevision, orderReference: reference,
+      packingLimits: operationalPolicy.packingLimits,
       purchasedAt: provider.order.createdAt, evaluatedAt: eligibility.evaluatedAt,
       returnWindowEndsAt: eligibility.returnWindowEndsAt, message, lines, boxOptions });
-    return { order, local, provider, facts, eligibility, operationalPolicy };
+    return { order, local, provider, facts, eligibility, shippingSettings: operationalPolicy.shippingSettings, operationalPolicy: {
+      id: operationalPolicy.id, version: operationalPolicy.version, snapshot: operationalPolicy.snapshot,
+    } };
   }
 
   private async readPolicy(channelId: number) {
     const resolved = resolveCustomerReturnPortalPolicy(await this.dependencies.policies.read(channelId), channelId);
     if (resolved.policyIssue || !resolved.policy) throw new CustomerReturnLiveError(
       resolved.policyIssue?.code ?? "RETURN_PORTAL_POLICY_MISSING", resolved.policyIssue?.message ?? "No return policy applies to this shop.", 409);
-    return { id: resolved.policy.id, version: resolved.policy.version, snapshot: snapshotReturnPolicy(resolved.policy) };
+    return { id: resolved.policy.id, version: resolved.policy.version, snapshot: snapshotReturnPolicy(resolved.policy),
+      packingLimits: resolved.policy.shipping ? customerReturnPackingLimits(resolved.policy.shipping) : null,
+      shippingSettings: resolved.policy.shipping ?? null };
+  }
+
+  private async verifyReviewShipping(inspection: CustomerReturnIntakeInspection, plan: ReturnType<typeof validateCustomerReturnBoxPlan>): Promise<void> {
+    const settings = inspection.shippingSettings;
+    if (!settings?.parcelGuardrails?.costProtection) return;
+    if (!this.dependencies.rates) throw unavailable();
+    const origin = customerReturnOriginAddress(inspection.provider.order.shippingAddress);
+    for (const shipment of customerReturnPreflightShipments(origin, settings, plan.parcels)) {
+      const evidence = await quoteCustomerReturnShipment(this.dependencies.rates, settings, shipment);
+      if (evidence.errorCode) throw customerReturnShippingQuoteError(evidence.errorCode, true);
+    }
   }
 
   private async boundary<T>(work: () => Promise<T>): Promise<T> {
     try { return await work(); } catch (error) {
       if (error instanceof CustomerReturnLiveError) throw error;
+      if (error instanceof CustomerReturnIntakeError) throw new CustomerReturnLiveError(error.code, error.message, error.status);
       if (error instanceof CustomerReturnOrderReferenceError) {
         throw new CustomerReturnLiveError("RETURN_LIVE_INPUT_INVALID", "Enter a valid order reference.", 400);
       }
