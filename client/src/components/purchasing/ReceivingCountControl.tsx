@@ -7,6 +7,7 @@ interface ReceivingCountControlProps {
   value: string;
   hasDraft: boolean;
   showSave: boolean;
+  confirmed: boolean;
   disabled: boolean;
   discardDisabled: boolean;
   compact: boolean;
@@ -16,15 +17,15 @@ interface ReceivingCountControlProps {
   onDiscard: () => void;
 }
 
-/** Keep count entry and its explicit save/discard actions together in both layouts. */
+/** Keep count entry and its confirmation state together in both layouts. */
 export function ReceivingCountControl({
-  lineId, value, hasDraft, showSave, disabled, discardDisabled, compact,
+  lineId, value, hasDraft, showSave, confirmed, disabled, discardDisabled, compact,
   saveTestId, onChange, onSave, onDiscard,
 }: ReceivingCountControlProps) {
   const draftDescriptionId = `received-count-draft-${compact ? "desktop" : "mobile"}-${lineId}`;
 
   return (
-    <div className={compact ? "w-32 space-y-2" : "mt-1 space-y-2"}>
+    <div className={compact ? "w-36 space-y-2" : "mt-1 space-y-2"}>
       <Input
         type="number"
         aria-label={`Received count for line ${lineId}`}
@@ -48,17 +49,26 @@ export function ReceivingCountControl({
       )}
       {showSave && (
         <Button
-          variant="outline"
           size="sm"
-          className="h-auto min-h-[44px] w-full whitespace-normal"
+          className="h-auto min-h-[44px] w-full whitespace-normal border-green-700 bg-green-700 text-sm font-semibold text-white hover:bg-green-800 focus-visible:ring-green-600"
           onClick={onSave}
           disabled={disabled}
-          aria-label={`Save received count for line ${lineId}`}
+          aria-label={`Confirm received count for line ${lineId}`}
           data-testid={saveTestId}
         >
-          <Check className="h-4 w-4 shrink-0" />
-          Save count
+          <Check aria-hidden="true" className="h-4 w-4 shrink-0" />
+          Confirm count
         </Button>
+      )}
+      {confirmed && !hasDraft && (
+        <div
+          role="status"
+          aria-label={`Received count confirmed for line ${lineId}`}
+          className="flex items-center justify-center gap-1 rounded-md border border-green-200 bg-green-50 px-2 py-2 text-xs font-medium text-green-800 dark:border-green-800 dark:bg-green-950 dark:text-green-200"
+        >
+          <Check aria-hidden="true" className="h-4 w-4 shrink-0" />
+          Count confirmed
+        </div>
       )}
       {hasDraft && (
         <Button

@@ -124,6 +124,7 @@ const done = (page: Page) => page.locator('[data-testid="btn-complete-line-7"]:v
 // Exact text keeps the toast's screen-reader announcement ("Notification Count
 // saved") out of the match.
 const expectCountSaved = (page: Page) => expect(page.getByText("Count saved", { exact: true })).toBeVisible();
+const confirmedCount = (page: Page) => page.getByRole("status", { name: "Received count confirmed for line 7" }).filter({ visible: true });
 const refreshLine = (page: Page) => page.getByRole("button", { name: "Load latest line and discard count draft" }).filter({ visible: true });
 
 test("a shipment count can be saved beside its field without horizontal scrolling", async ({ page }, testInfo) => {
@@ -139,9 +140,13 @@ test("a shipment count can be saved beside its field without horizontal scrollin
   await expect(count(page)).toBeInViewport({ ratio: 1 });
   await page.screenshot({ path: testInfo.outputPath("shipment-count-draft.png"), fullPage: true, animations: "disabled" });
   await expect(done(page)).toBeInViewport({ ratio: 1 });
-  await expect(done(page)).toHaveText("Save count");
+  await expect(done(page)).toHaveText("Confirm count");
+  await expect(done(page)).toHaveAccessibleName("Confirm received count for line 7");
+  const confirmBounds = await done(page).boundingBox();
+  expect(confirmBounds!.height).toBeGreaterThanOrEqual(44);
+  await expect(confirmedCount(page)).toHaveCount(0);
   await expect(page.getByText("Unsaved count", { exact: true }).filter({ visible: true })).toBeVisible();
-  await expect(page.getByText(/Use Save count beside each Received field/)).toBeVisible();
+  await expect(page.getByText(/Use Confirm count beside each Received field/)).toBeVisible();
   await done(page).click();
   await expectCountSaved(page);
   await expect(control(page)).toContainText("received: 525,000 pieces");
@@ -150,6 +155,9 @@ test("a shipment count can be saved beside its field without horizontal scrollin
     { path: "/api/receiving/31/open", body: {} },
     { path: "/api/receiving/lines/7", body: { receivedQty: 525, expectedUnitVersion: version } },
   ]);
+  await expect(confirmedCount(page)).toHaveText("Count confirmed");
+  await expect(confirmedCount(page)).toBeInViewport({ ratio: 1 });
+  await expect(done(page)).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("shipment-count-saved.png"), fullPage: true, animations: "disabled" });
   expect(failures).toEqual([]);
 });
@@ -163,12 +171,14 @@ test("Enter saves actual shipment counts, including a zero edit to a completed l
   await expect(control(page)).toContainText("received: 525,000 pieces");
   await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
   await expect(done(page)).toHaveCount(0);
+  await expect(confirmedCount(page)).toHaveText("Count confirmed");
   expect(state.commands).toEqual([
     { path: "/api/receiving/lines/7", body: { receivedQty: 525, expectedUnitVersion: version } },
   ]);
 
   await count(page).fill("0");
-  await expect(done(page)).toHaveText("Save count");
+  await expect(done(page)).toHaveText("Confirm count");
+  await expect(confirmedCount(page)).toHaveCount(0);
   await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
   await count(page).press("Enter");
   await expect(control(page)).toContainText("received: 0 pieces");
@@ -180,6 +190,40 @@ test("Enter saves actual shipment counts, including a zero edit to a completed l
   ]);
   expect(state.line.receivedQty).toBe(0);
   expect(state.line.expectedQty).toBe(525);
+  expect(failures).toEqual([]);
+});
+
+test("a failed edit hides the previous count confirmation until a verified receipt reload", async ({ page }) => {
+  const { state, failures } = await setup(page, { shipmentCase: true });
+  await count(page).fill("525");
+  await done(page).click();
+  await expect(confirmedCount(page)).toHaveText("Count confirmed");
+
+  // Keep the recorded count at 525, but reject the next edit so the UI must
+  // preserve its draft and verify the source before showing confirmation again.
+  await page.route("**/api/receiving/lines/7", async (route) => {
+    if (route.request().method() !== "PATCH") return route.fallback();
+    return route.fulfill({ status: 409, json: { error: "The count changed. Load the latest receipt before continuing." } });
+  });
+  await count(page).fill("524");
+  await expect(confirmedCount(page)).toHaveCount(0);
+  await done(page).click();
+  await expect(refreshLine(page)).toBeVisible();
+  await expect(count(page)).toHaveValue("524");
+  await expect(done(page)).toBeDisabled();
+  await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
+  await page.getByRole("button", { name: "Discard count draft", exact: true }).filter({ visible: true }).click();
+  await expect(count(page)).toHaveValue("525");
+  await expect(confirmedCount(page)).toHaveCount(0);
+  await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
+
+  await refreshLine(page).click();
+  await expect(confirmedCount(page)).toHaveText("Count confirmed");
+  await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
+  expect(state.commands).toEqual([
+    { path: "/api/receiving/lines/7", body: { receivedQty: 525, expectedUnitVersion: version } },
+  ]);
+  expect(state.line.receivedQty).toBe(525);
   expect(failures).toEqual([]);
 });
 
@@ -269,7 +313,7 @@ async function expectModalFits(page: Page, dialog: Locator) {
   expect(heading!.x + heading!.width).toBeLessThanOrEqual(box!.x + box!.width);
 }
 
-test("opening a receipt does not mutate units; Save count preserves partial counts and saved zero", async ({ page }, testInfo) => {
+test("opening a receipt does not mutate units; Confirm count preserves partial counts and saved zero", async ({ page }, testInfo) => {
   const { state, failures } = await setup(page);
   await expect(control(page)).toContainText("Expected: 501 pieces; received: 401 pieces; damaged: 3 pieces");
   expect(state.commands).toEqual([]);

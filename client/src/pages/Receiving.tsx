@@ -908,6 +908,9 @@ DEF-456,25,,,5.00,,Location TBD`;
       value={draft?.value ?? String(line.receivedQty)}
       hasDraft={!!draft}
       showSave={line.status !== "complete" || !!draft}
+      // A stale or ambiguous response must not leave a green confirmation on
+      // the previous count after its draft is discarded; verify the source first.
+      confirmed={line.status === "complete" && !draft && hasReceivingUnitVersion(line) && recordedReceivingFactor(line) !== null && !unitErrors[line.id]}
       disabled={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
       discardDisabled={updateLineMutation.isPending}
       compact={layout === "desktop"}
@@ -2060,7 +2063,7 @@ DEF-456,25,,,5.00,,Location TBD`;
 
                 {selectedReceipt.status !== "closed" && (receiveUnitsNeedReview || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0) && (
                   <div className="space-y-2 rounded border border-amber-400/50 p-3 text-sm text-amber-800 dark:text-amber-200">
-                    {Object.keys(countDrafts).length > 0 && <p>You have unsaved received counts. Use Save count beside each Received field, or press Enter in the field, before finalizing.</p>}
+                    {Object.keys(countDrafts).length > 0 && <p>You have unsaved received counts. Use Confirm count beside each Received field, or press Enter in the field, before finalizing.</p>}
                     {(receiveUnitsNeedReview || Object.keys(unitErrors).length > 0) && <p>Confirm receive units and resolve line errors before finalizing. Load the latest receipt when a line requires refresh.</p>}
                   </div>
                 )}
@@ -2285,9 +2288,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                     )}
                                   </div>
                                 </div>
-                                {line.status === "complete" && (
-                                  <Check className="h-5 w-5 text-green-600" />
-                                )}
+
                                 {selectedReceipt.status === "closed" &&
                                   ((line.receivedQty ?? 0) - (line.reversedQty ?? 0)) > 0 && (
                                   <Button
