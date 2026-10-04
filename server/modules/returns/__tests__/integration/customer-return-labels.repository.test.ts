@@ -54,6 +54,7 @@ import { CustomerReturnLabelSettingsService } from "../../application/customer-r
 import { selectCustomerReturnRate } from "../../domain/customer-return-rate-selection";
 import { defaultCustomerReturnShippingGuardrails } from "@shared/returns/customer-return-shipping-guardrails";
 import { quoteCustomerReturnShipment } from "../../application/customer-return-shipping-quote";
+import { buildReturnLabelRequest, createShipStationReturnLabelAdapter } from "../../../shipping-engine/infrastructure/shipstation-return-label.adapter";
 
 const connectionString = resolveReturnsTestDatabase(process.env, "intake");
 const integration = connectionString ? describe.sequential : describe.skip;
@@ -98,6 +99,55 @@ integration(
     async function authorize() {
       return intake.persist(preparedIntake());
     }
+    it.each(["purchase", "recover"] as const)("makes a rounded-down USPS label downloadable with one durable attempt during %s", async operation => {
+      const prepared = preparedIntake();
+      prepared.parcels[0].weightGrams = 850;
+      prepared.parcels[0].dimensions = { lengthMm: 406.4, widthMm: 355.6, heightMm: 101.6 };
+      const accepted = await intake.persist(prepared);
+      const input = (await labels.read(36, accepted.authorizationId)).parcels[0].input!;
+      if (operation === "recover") {
+        const attempt = (await labels.begin(36, accepted.authorizationId, accepted.parcels[0].parcelId, "admin", INTAKE_NOW))!;
+        await labels.finish(attempt.id, { status: "uncertain", code: "RETURN_LABEL_MEASUREMENTS_MISMATCH" }, "admin", INTAKE_NOW);
+      }
+      const packageReadback = { package_code: "package", weight: { value: 1.87, unit: "pound" },
+        dimensions: { unit: "inch", length: 16, width: 14, height: 4 }, tracking_number: "TESTTRACK" };
+      const labelReadback = { label_id: "se-rounded-label", shipment_id: "se-rounded-shipment",
+        external_shipment_id: input.externalShipmentId, status: "completed", is_return_label: true,
+        is_international: false, rma_number: input.rmaNumber, carrier_id: input.carrierId, service_code: input.serviceCode,
+        tracking_number: "TESTTRACK", trackable: true, voided: false, voided_at: null, label_format: "pdf", label_layout: "4x6",
+        charge_event: "carrier_default", created_at: INTAKE_NOW.toISOString(), shipment_cost: { currency: "usd", amount: "5.93" },
+        insurance_cost: { currency: "usd", amount: 0 }, label_download: { href: record(input.externalShipmentId).downloadUrl }, packages: [packageReadback] };
+      const shipmentReadback = { ...buildReturnLabelRequest(input).shipment as Record<string, unknown>,
+        shipment_id: "se-rounded-shipment", packages: [packageReadback] };
+      const responses: unknown[] = [labelReadback, shipmentReadback];
+      if (operation === "recover") responses.unshift({ labels: [{ label_id: "se-rounded-label", external_shipment_id: input.externalShipmentId }], total: 1, page: 1, pages: 1 });
+      const fetchFn = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), { status: 200 }));
+      const provider = createShipStationReturnLabelAdapter({ apiKey: "fixture-key", fetchFn });
+      const w = worker();
+      w.purchase.mockImplementation((request, signal) => provider.purchase(request, signal));
+      w.recover.mockImplementation((request, signal) => provider.recover(request, signal));
+      const status = await w.service.progress(36, accepted.authorizationId, "admin");
+      expect(status.parcels[0]).toMatchObject({ status: "ready", trackingNumber: "TESTTRACK", downloadPath: expect.stringContaining("/download") });
+      expect(await w.service.artifact(36, accepted.authorizationId, accepted.parcels[0].parcelId))
+        .toMatchObject({ labelId: "se-rounded-label", amountCents: 593 });
+      if (operation === "recover") {
+        expect(w.purchase).not.toHaveBeenCalled();
+        expect(w.quote).not.toHaveBeenCalled();
+        expect(fetchFn.mock.calls.map(([, init]) => init?.method)).toEqual(["GET", "GET", "GET"]);
+      } else {
+        expect(w.purchase).toHaveBeenCalledTimes(1);
+        expect(fetchFn.mock.calls.map(([, init]) => init?.method)).toEqual(["POST", "GET"]);
+        expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body)).shipment.packages[0].weight)
+          .toEqual({ value: 1.87, unit: "pound" });
+      }
+      expect((await pool.query("SELECT COUNT(*)::int AS n FROM returns.customer_return_label_attempts")).rows[0].n).toBe(1);
+      expect((await pool.query("SELECT before_status,after_status FROM returns.customer_return_label_events ORDER BY id DESC LIMIT 1")).rows[0])
+        .toEqual({ before_status: operation === "recover" ? "uncertain" : "executing", after_status: "succeeded" });
+      const saved = (await pool.query(`SELECT p.weight_grams,t.request_snapshot FROM returns.customer_return_parcels p
+        JOIN returns.customer_return_label_attempts t ON t.parcel_id=p.id WHERE p.id=$1`, [accepted.parcels[0].parcelId])).rows[0];
+      expect(saved.weight_grams).toBe("850");
+      expect(saved.request_snapshot.parcel.weightGrams).toBe(850);
+    });
     it.each(["commercial", "residential"] as const)("keeps the accepted %s warehouse classification through quotes, policy changes and one durable purchase", async warehouseAddressType => {
       const current = await publishIntakeTestPolicyShipping(pool, {
         warehouseAddressType, selectionMode: "cheapest_eligible", carrierId: null, serviceCode: null,
