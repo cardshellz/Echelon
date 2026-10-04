@@ -50,6 +50,20 @@ async function setup(page: Page, canEdit = true) {
 }
 
 async function imageOrder(page: Page) { return page.locator("[data-catalog-image]").evaluateAll(elements => elements.map(element => Number((element as HTMLElement).dataset.catalogImage))); }
+
+async function expectPageFitsViewport(page: Page) {
+  const layout = await page.evaluate(() => ({
+    viewport: window.innerWidth,
+    page: document.documentElement.scrollWidth,
+    headerActions: ["Duplicate", "Archive", "Delete"].map(label => {
+      const button = [...document.querySelectorAll("button")].find(element => element.textContent?.trim() === label);
+      const bounds = button?.getBoundingClientRect();
+      return { label, left: bounds?.left, right: bounds?.right };
+    }),
+  }));
+  expect(layout.page, JSON.stringify(layout)).toBeLessThanOrEqual(layout.viewport);
+}
+
 async function dragSecondFirst(page: Page, cancel = false) {
   const source = page.getByRole("button", { name: "Drag image 2 to reorder", exact: true });
   await expect(source).toBeEnabled();
@@ -72,7 +86,22 @@ test("dragging persists order through refresh and preserves the primary photo", 
   await expect.poll(() => imageOrder(page)).toEqual([2, 1, 3, 4]);
   await expect(page.locator('[data-catalog-image="2"]').getByText("Primary", { exact: true })).toBeVisible();
   await page.screenshot({ path: info.outputPath("catalog-images.png"), fullPage: true });
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expectPageFitsViewport(page);
+  expect(state.errors).toEqual([]);
+});
+
+test("catalog controls fit narrow screens without hiding header actions", async ({ page }, info) => {
+  const state = await setup(page);
+  for (const width of [320, 360, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.getByTestId("btn-back").scrollIntoViewIfNeeded();
+    await expectPageFitsViewport(page);
+    for (const name of ["Duplicate", "Archive", "Delete"]) {
+      await expect(page.getByRole("button", { name, exact: true })).toBeInViewport({ ratio: 1 });
+    }
+    await expect(page.getByRole("button", { name: "Download image 1", exact: true })).toBeVisible();
+    await page.screenshot({ path: info.outputPath(`catalog-images-${width}px.png`), fullPage: true });
+  }
   expect(state.errors).toEqual([]);
 });
 

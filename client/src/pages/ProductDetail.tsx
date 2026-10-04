@@ -2620,7 +2620,7 @@ export default function ProductDetail() {
           </h1>
           <p className="text-sm text-muted-foreground font-mono">{product.sku}</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
           {(isDirty || contentDirty) && (
             <Button
               onClick={() => saveProductMutation.mutate()}
