@@ -133,6 +133,9 @@ export function ChannelListingFeedRow({
         {row.issue && (
           <p className="break-words text-xs text-destructive">{row.issue}</p>
         )}
+        {draft?.images === null && catalog?.imageIssues?.length ? (
+          <p className="break-words text-xs text-destructive">A catalog photo needs attention. Open details to review it.</p>
+        ) : null}
       </TableCell>
       <TableCell className="min-w-40 max-w-64">
         {variantId !== undefined && (

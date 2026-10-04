@@ -24,8 +24,8 @@ describe("public catalog photo HTTP boundary", () => {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   });
-  it("serves the exact bytes without cookies or credentials, with safe image headers", async () => {
-    const response = await fetch(`${base}/api/catalog/images/42/${hash}`);
+  it.each(["", ".png"])("serves the exact bytes anonymously with safe headers for the %s suffix", async suffix => {
+    const response = await fetch(`${base}/api/catalog/images/42/${hash}${suffix}`);
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("image/png");
     expect(response.headers.get("content-disposition")).toBe('inline; filename="catalog-image-42.png"');
@@ -35,12 +35,18 @@ describe("public catalog photo HTTP boundary", () => {
     expect(Buffer.from(await response.arrayBuffer())).toEqual(data);
     expect(read).toHaveBeenCalledExactlyOnceWith(42, hash);
   });
-  it.each([`0/${hash}`, `1.5/${hash}`, `2147483648/${hash}`, `1/no`, `1/${"A".repeat(64)}`])("rejects malformed identities without reading storage: %s", path => {
+  it.each([`0/${hash}`, `1.5/${hash}`, `2147483648/${hash}`, `1/no`, `1/${"A".repeat(64)}`, `1/${hash}.svg`, `1/${hash}.png.exe`])("rejects malformed identities without reading storage: %s", path => {
     return fetch(`${base}/api/catalog/images/${path}`).then(async response => {
       expect(response.status).toBe(404);
       expect(response.headers.get("cache-control")).toBe("no-store");
       expect(read).not.toHaveBeenCalled();
     });
+  });
+  it("rejects an extension that does not match the stored content", async () => {
+    const response = await fetch(`${base}/api/catalog/images/42/${hash}.jpg`);
+    expect(response.status).toBe(404);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(read).toHaveBeenCalledExactlyOnceWith(42, hash);
   });
   it("returns the same uncached 404 for absent files and mismatched fingerprints", async () => {
     read.mockResolvedValue(null);
@@ -49,10 +55,10 @@ describe("public catalog photo HTTP boundary", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.text()).toBe("Not Found");
   });
-  it("supports conditional GET and HEAD without changing the file", async () => {
-    const response = await fetch(`${base}/api/catalog/images/42/${hash}`, { headers: { "If-None-Match": `"${hash}"`, "Cache-Control": "max-age=0" } });
+  it.each(["", ".png"])("supports conditional GET and HEAD for the %s suffix without changing the file", async suffix => {
+    const response = await fetch(`${base}/api/catalog/images/42/${hash}${suffix}`, { headers: { "If-None-Match": `"${hash}"`, "Cache-Control": "max-age=0" } });
     expect(response.status).toBe(304);
-    const head = await fetch(`${base}/api/catalog/images/42/${hash}`, { method: "HEAD" });
+    const head = await fetch(`${base}/api/catalog/images/42/${hash}${suffix}`, { method: "HEAD" });
     expect(head.status).toBe(200);
     expect(head.headers.get("content-length")).toBe(String(data.length));
     expect(await head.text()).toBe("");

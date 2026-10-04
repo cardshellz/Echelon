@@ -16,8 +16,11 @@ import { useToast } from "@/hooks/use-toast";
 import { describeError, normalizeNote, setUpChannelDestinations } from "../api";
 import { invalidateChannelInventory, useCommandKey } from "../hooks";
 import {
+  PUBLISHING_ADAPTERS,
   PUBLISHER_LABELS,
   destinationOptionsFor,
+  isSupportedProvider,
+  providerLabel,
   type Channel,
   type PublisherKey,
   type View,
@@ -134,8 +137,16 @@ export function SetUpDestinationsDialog({ open, onOpenChange, view, channel, onC
             ) : (
               <ul className="divide-y rounded-md border text-sm">
                 {pending.slice(0, 8).map((option) => (
-                  <li key={`${option.kind}:${option.id}`} className="px-3 py-2">
-                    {option.label}
+                  <li key={`${option.kind}:${option.id}`} className="space-y-1 break-words px-3 py-2">
+                    <p className="font-medium">
+                      {option.label}
+                      {option.kind === "channel_connection" && ` — ${providerLabel(option.provider)}`}
+                    </p>
+                    {option.suggestedLocationId && isSupportedProvider(option.provider) && (
+                      <p className="text-xs text-muted-foreground">
+                        {PUBLISHING_ADAPTERS[option.provider].scopeNoun}: {option.suggestedLocationId}
+                      </p>
+                    )}
                   </li>
                 ))}
                 {pending.length > 8 && (

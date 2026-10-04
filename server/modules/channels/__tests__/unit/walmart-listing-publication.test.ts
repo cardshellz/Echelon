@@ -166,7 +166,7 @@ function setup() {
 describe("Walmart listing provider", () => {
   it("includes an uploaded catalog photo as the third secondary image and preserves explicit listing overrides", async () => {
     const { provider } = setup();
-    const uploaded = createCatalogPublicImageUrl({ CATALOG_PUBLIC_BASE_URL: "https://catalog.example.com" })(42, "ab".repeat(32));
+    const uploaded = createCatalogPublicImageUrl({ CATALOG_PUBLIC_BASE_URL: "https://catalog.example.com" })(42, "ab".repeat(32), "image/jpeg");
     const images = ["https://cdn.example.com/main.jpg", "https://cdn.example.com/second.jpg", "https://cdn.example.com/third.jpg", uploaded];
     const prepared = await provider.prepare(account, { catalog: { ...catalog, images }, draft: draft(), priceCents: 1299 });
     expect(prepared.issues).toEqual([]);

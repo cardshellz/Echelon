@@ -125,12 +125,12 @@ function describeDefinition(value: Record<string, unknown> | null, view: View): 
   const parts: string[] = [];
   const nodes = value.source_fulfillment_node_ids ?? value.nodes;
   if (Array.isArray(nodes)) parts.push(`Warehouses: ${nodes.map(id => view.fulfillmentNodes.find(node => node.id===id)?.name ?? `#${id}`).join(", ")}`);
-  if (value.eligible != null) parts.push(value.eligible ? "Sell on channel" : "Show zero");
-  if (typeof value.share_bps === "number") parts.push(`Offer ${formatPercent(value.share_bps)}`);
-  if (value.holdback_sellable_units != null) parts.push(`Keep back ${value.holdback_sellable_units} SKU units`);
+  if (value.eligible != null) parts.push(value.eligible ? "Available to sell" : "Show as out of stock");
+  if (typeof value.share_bps === "number") parts.push(`Stock percentage ${formatPercent(value.share_bps)}`);
+  if (value.holdback_sellable_units != null) parts.push(`Stock buffer ${value.holdback_sellable_units} SKU units`);
   if (value.max_publish_mode != null) parts.push(value.max_publish_mode === "unlimited" ? "No maximum" : `Maximum ${value.max_publish_sellable_units} SKU units`);
-  if (value.min_publish_sellable_units != null) parts.push(`Show zero below ${value.min_publish_sellable_units}`);
-  if (value.allocation_semantics != null) parts.push(value.allocation_semantics === "exposure" ? "Shared stock pool" : "Partitioned shares");
+  if (value.min_publish_sellable_units != null) parts.push(`Out-of-stock cutoff ${value.min_publish_sellable_units}`);
+  if (value.allocation_semantics != null) parts.push(value.allocation_semantics === "exposure" ? "Share available stock" : "Limit combined channel percentages");
   if (value.external_inventory_item_id != null) parts.push(`Marketplace item ${value.external_inventory_item_id}${value.external_sku ? ` · ${value.external_sku}` : ""}`);
   return parts.join(" · ") || "Inherit broader settings";
 }

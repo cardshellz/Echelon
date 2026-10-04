@@ -164,8 +164,14 @@ implements InventoryChannelExposureAdminStore {
         AND external_account_verified_at IS NOT NULL
     `));
     const walmartRows = channelRows.some(row => row.provider === "walmart")
-      ? rows(await this.database.execute(sql`SELECT connection_id,ship_node_id FROM channels.walmart_connections`)) : [];
-    const walmartLocations = new Map(walmartRows.map(row => [Number(row.connection_id), String(row.ship_node_id)]));
+      ? rows(await this.database.execute(sql`
+        SELECT connection_id, partner_id, partner_name, ship_node_id
+        FROM channels.walmart_connections
+      `)) : [];
+    const walmartAccounts = new Map(walmartRows.map(row => [Number(row.connection_id), {
+      label: nullableText(row.partner_name) ?? nullableText(row.partner_id),
+      locationId: nullableText(row.ship_node_id),
+    }]));
     const dropshipStoreRows = rows(await this.database.execute(sql`
       SELECT connection.id, connection.vendor_id, vendor.business_name AS vendor_name,
              connection.platform, connection.status,
@@ -303,11 +309,13 @@ implements InventoryChannelExposureAdminStore {
           status: String(row.status),
           connections: (connectionsByChannel.get(channelId) ?? []).map((connection) => ({
             id: positiveInteger(connection.id, "connection.id"),
-            externalAccountLabel: nullableText(connection.shop_domain),
+            externalAccountLabel: String(row.provider) === "walmart"
+              ? walmartAccounts.get(Number(connection.id))?.label ?? null
+              : nullableText(connection.shop_domain),
             shopifyLocationId: String(row.provider) === "shopify"
               ? nullableText(connection.shopify_location_id)
               : null,
-            providerLocationId: walmartLocations.get(Number(connection.id)) ?? null,
+            providerLocationId: walmartAccounts.get(Number(connection.id))?.locationId ?? null,
             providerAccount: String(row.provider) === "ebay"
               ? ebayAccountsByChannelEnvironment.get(`${channelId}:${String(connection.environment)}`)
                 ?? null
