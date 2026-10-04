@@ -17,7 +17,7 @@ const INPUT: ReturnLabelInput = {
 };
 const PDF = "https://api.shipstation.com/v2/downloads/account/token/label-1.pdf";
 function parcel() {
-  return { package_code: "package", weight: { value: 1.10231132, unit: "pound" },
+  return { package_code: "package", weight: { value: 1.1, unit: "pound" },
     dimensions: { unit: "inch", length: 12.125, width: 8, height: 4 }, tracking_number: "TRACK-42" };
 }
 function label() {
@@ -71,13 +71,13 @@ describe("ShipStation return-label request", () => {
         carrier_id: "se-101", service_code: "ups_ground",
         ship_from: { name: "Fictional Customer", address_line1: "100 Sample Street", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US", address_residential_indicator: "unknown" },
         ship_to: { name: "Fictional Returns", company_name: "Sample Warehouse", phone: "5550101000", address_line1: "200 Example Road", address_line2: "Suite 2", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US", address_residential_indicator: "unknown" },
-        packages: [{ package_code: "package", weight: { value: 1.10231132, unit: "pound" }, dimensions: { unit: "inch", length: 12.125, width: 8, height: 4 } }],
+        packages: [{ package_code: "package", weight: { value: 1.1, unit: "pound" }, dimensions: { unit: "inch", length: 12.125, width: 8, height: 4 } }],
       },
     });
     expect(fetchFn.mock.calls[1][0]).toBe("https://api.shipstation.com/v2/shipments/se-301");
   });
 
-  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1])("rejects invalid or unrepresentable parcel grams %s before transport", async weightGrams => {
+  it.each([0, 1, 4, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])("rejects invalid, zero-normalized or unrepresentable parcel grams %s before transport", async weightGrams => {
     const { provider, fetchFn } = fixture();
     await expect(provider.purchase({ ...INPUT, parcel: { ...INPUT.parcel, weightGrams } })).rejects.toMatchObject({ code: "RETURN_LABEL_INPUT_INVALID", outcome: "rejected" });
     expect(fetchFn).not.toHaveBeenCalled();
@@ -200,7 +200,7 @@ describe("purchase outcomes", () => {
 
 describe("exact provider evidence", () => {
   it("accepts the exact declared fractional pounds returned as decimal strings", async () => {
-    const converted = { ...parcel(), weight: { value: "1.102311320", unit: "pound" } };
+    const converted = { ...parcel(), weight: { value: "1.10", unit: "pound" } };
     const { provider } = fixture([json({ ...label(), packages: [converted] }), json({ ...shipment(), packages: [converted] })]);
     await expect(provider.purchase(INPUT)).resolves.toMatchObject({ labelId: "se-201" });
   });
@@ -221,10 +221,10 @@ describe("exact provider evidence", () => {
     if (operation === "recover") expect(fetchFn.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
     else {
       expect(fetchFn.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
-      expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body)).shipment.packages[0].weight).toEqual({ value: 1.87392923, unit: "pound" });
+      expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body)).shipment.packages[0].weight).toEqual({ value: 1.87, unit: "pound" });
     }
   });
-  it.each(["1.10231131", "1.10231133", "1.1023113201"])("refuses a changed pound weight %s in either label or stored shipment without repeating the purchase", async value => {
+  it.each(["1.09", "1.11", "1.10231132", "1.10231131", "1.10231133", "1.1023113201"])("refuses a changed pound weight %s in either label or stored shipment without repeating the purchase", async value => {
     const changed = { ...parcel(), weight: { value, unit: "pound" } };
     for (const evidence of [
       [json({ ...label(), packages: [changed] })],
@@ -259,7 +259,7 @@ describe("exact provider evidence", () => {
     await expect(provider.purchase(INPUT)).rejects.toMatchObject({ code: "RETURN_LABEL_IDENTITY_MISMATCH", outcome: "unknown" });
   });
   it("accepts exact equivalent supported measurement units", async () => {
-    const converted = { ...parcel(), weight: { value: "0.5", unit: "kilogram" }, dimensions: { unit: "centimeter", length: "30.7975", width: "20.32", height: "10.16" } };
+    const converted = { ...parcel(), weight: { value: "0.498951607", unit: "kilogram" }, dimensions: { unit: "centimeter", length: "30.7975", width: "20.32", height: "10.16" } };
     const { provider } = fixture([json({ ...label(), packages: [converted] }), json({ ...shipment(), packages: [converted] })]);
     await expect(provider.purchase(INPUT)).resolves.toMatchObject({ amountCents: 435 });
   });
@@ -285,8 +285,12 @@ describe("exact provider evidence", () => {
 });
 
 describe("read-only uncertain-purchase recovery", () => {
-  it("continues to recover historical labels and shipments created in grams without a purchase", async () => {
-    const historical = { ...parcel(), weight: { value: 500, unit: "gram" } };
+  it.each([
+    { value: 500, unit: "gram" },
+    { value: "1.10231132", unit: "pound" },
+    { value: "17.63698112", unit: "ounce" },
+  ])("continues to recover historical labels and shipments in %j without a purchase", async weight => {
+    const historical = { ...parcel(), weight };
     const { provider, fetchFn } = fixture([
       json(listing(["se-201"])),
       json({ ...label(), packages: [historical] }),

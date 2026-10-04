@@ -174,7 +174,7 @@ describe("return-rate requests", () => {
     });
     expect(purchaseShipment.packages).toEqual([{
       package_code: "package",
-      weight: { value: 1.10231132, unit: "pound" },
+      weight: { value: 1.1, unit: "pound" },
       dimensions: { unit: "inch", length: 12.125, width: 8.001, height: 4 },
     }]);
     expect(JSON.stringify(request)).not.toMatch(
@@ -182,17 +182,17 @@ describe("return-rate requests", () => {
     );
     expect(JSON.stringify(INPUT)).toBe(before);
   });
-  it("sends the regression parcel's 850 g as 1.87392923 pounds for both quoting and buying", async () => {
+  it.each([[850, 1.87], [907, 1.99], [22_679, 49.99]] as const)("sends %s g as the same rounded-down %s pounds for quoting and buying", async (weightGrams, weightPounds) => {
     const shipment = {
       ...INPUT.shipment,
-      parcel: { weightGrams: 850, dimensionsInches: { length: 16, width: 14, height: 4 } },
+      parcel: { weightGrams, dimensionsInches: { length: 16, width: 14, height: 4 } },
     };
     const before = JSON.stringify(shipment);
     const { provider, fetchFn } = fixture();
     await provider.quote({ ...INPUT, shipment });
     const quote = JSON.parse(String(fetchFn.mock.calls[0][1]?.body));
     const purchase = buildReturnLabelRequest({ ...shipment, carrierId: "se-101", serviceCode: "ups_ground" });
-    const packages = [{ package_code: "package", weight: { value: 1.87392923, unit: "pound" },
+    const packages = [{ package_code: "package", weight: { value: weightPounds, unit: "pound" },
       dimensions: { unit: "inch", length: 16, width: 14, height: 4 } }];
     expect(quote.shipment.packages).toEqual(packages);
     expect(purchase.shipment).toMatchObject({ packages });
@@ -218,11 +218,12 @@ describe("return-rate requests", () => {
   );
   it.each([
     0,
+    1,
+    4,
     -1,
     1.5,
     Number.NaN,
     Number.POSITIVE_INFINITY,
-    Number.MAX_SAFE_INTEGER,
     Number.MAX_SAFE_INTEGER + 1,
   ])("rejects invalid or unrepresentable grams %s before transport", async (weightGrams) => {
     const { provider, fetchFn } = fixture();
