@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { logger } from "../../../../platform/observability/logger";
 import {
   recoverStaleChannelFulfillmentReceipts,
   resolveRecoveredShopifyWritebackDebt,
+  runDropshipWritebackCatchUp,
   runFulfillmentSweep,
   runShipStationProviderLabelRecoverySweep,
 } from "../../fulfillment-sweeper.scheduler";
@@ -461,5 +463,133 @@ describe("fulfillment-sweeper.scheduler", () => {
       /shipmentId must be a positive integer/,
     );
     expect(execute).not.toHaveBeenCalled();
+  });
+});
+
+describe("dropship writeback catch-up", () => {
+  const DROPSHIP_CANDIDATES = "FROM oms.channel_fulfillment_pushes push";
+
+  function dropshipCandidateDb(rows: Array<Record<string, unknown>>) {
+    return {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes(DROPSHIP_CANDIDATES) && text.includes("jsonb_build_array(os.id)")) {
+          return { rows };
+        }
+        return { rows: [] };
+      }),
+    };
+  }
+
+  function captureLogs() {
+    const spies = {
+      info: vi.spyOn(logger, "info").mockImplementation(() => undefined),
+      debug: vi.spyOn(logger, "debug").mockImplementation(() => undefined),
+      error: vi.spyOn(logger, "error").mockImplementation(() => undefined),
+      // The Shopify/eBay scan still logs through console.
+      consoleLog: vi.spyOn(console, "log").mockImplementation(() => undefined),
+      consoleError: vi.spyOn(console, "error").mockImplementation(() => undefined),
+    };
+    return {
+      ...spies,
+      restore: () => Object.values(spies).forEach((spy) => spy.mockRestore()),
+    };
+  }
+
+  it("materializes each shipped dropship package once with the sweep's repair source", async () => {
+    const logs = captureLogs();
+    try {
+      const ensureLegacyShipment = vi.fn()
+        .mockResolvedValueOnce(canonicalHandoffResult())
+        .mockResolvedValueOnce({
+          ...canonicalHandoffResult(),
+          materialized: { ...canonicalHandoffResult().materialized, channelCommands: [] },
+        })
+        .mockRejectedValueOnce(Object.assign(new Error("lineage missing"), { code: "OMS_LINEAGE_MISSING" }));
+      const db = dropshipCandidateDb([
+        { shipment_id: 5501, wms_order_id: 3301, oms_order_id: 1013417, order_number: "22039" },
+        { shipment_id: 5502, wms_order_id: 3302, oms_order_id: 1013418, order_number: "22040" },
+        { shipment_id: 5503, wms_order_id: 3303, oms_order_id: 1013419, order_number: "22041" },
+      ]);
+
+      const result = await runDropshipWritebackCatchUp(db, canonicalAuthority(ensureLegacyShipment) as any);
+
+      expect(result).toEqual({ candidates: 3, commandsCreated: 1, noCommand: 1, failed: 1 });
+      expect(ensureLegacyShipment.mock.calls).toEqual([
+        [5501, { executeImmediately: true, source: "fulfillment_sweeper" }],
+        [5502, { executeImmediately: true, source: "fulfillment_sweeper" }],
+        [5503, { executeImmediately: true, source: "fulfillment_sweeper" }],
+      ]);
+      const action = "fulfillment_sweep_dropship_writeback_catch_up";
+      expect(logs.info.mock.calls).toEqual([[action, expect.objectContaining({
+        outcome: "commanded", wms_shipment_id: 5501, oms_order_id: 1013417, channel_command_ids: [70001],
+      })]]);
+      expect(logs.debug.mock.calls).toEqual([[action, expect.objectContaining({
+        outcome: "no_command", wms_shipment_id: 5502, channel_command_ids: [],
+      })]]);
+      expect(logs.error.mock.calls).toEqual([[action, expect.objectContaining({
+        outcome: "failed", wms_shipment_id: 5503, oms_order_id: 1013419, error_code: "OMS_LINEAGE_MISSING",
+      })]]);
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it("runs in the hourly sweep even when no Shopify or eBay writeback is missing", async () => {
+    const logs = captureLogs();
+    try {
+      const ensureLegacyShipment = vi.fn(async () => canonicalHandoffResult());
+      const db = dropshipCandidateDb([
+        { shipment_id: 5501, wms_order_id: 3301, oms_order_id: 1013417, order_number: "22039" },
+      ]);
+
+      await runFulfillmentSweep(db, canonicalAuthority(ensureLegacyShipment) as any);
+
+      expect(ensureLegacyShipment).toHaveBeenCalledTimes(1);
+      expect(ensureLegacyShipment).toHaveBeenCalledWith(5501, {
+        executeImmediately: true,
+        source: "fulfillment_sweeper",
+      });
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it("keeps the Shopify and eBay sweep running when the dropship catch-up fails", async () => {
+    const logs = captureLogs();
+    try {
+      const ensureLegacyShipment = vi.fn(async () => canonicalHandoffResult());
+      const execute = vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("jsonb_build_array(os.id)")) throw new Error("catch-up read failed");
+        if (text.includes("FROM shipped_channel_shipments")) {
+          return {
+            rows: [{
+              shipment_id: 101,
+              order_number: "#shopify",
+              oms_order_id: 201,
+              provider: "shopify",
+              pending_retry: false,
+              dead_retry: false,
+            }],
+          };
+        }
+        return { rows: [] };
+      });
+
+      await runFulfillmentSweep({ execute }, canonicalAuthority(ensureLegacyShipment) as any);
+
+      expect(ensureLegacyShipment).toHaveBeenCalledWith(101, {
+        executeImmediately: true,
+        source: "fulfillment_sweeper",
+      });
+      expect(logs.error).toHaveBeenCalledWith("fulfillment_sweep_dropship_writeback_catch_up", expect.objectContaining({
+        outcome: "failed",
+        error_code: "DROPSHIP_WRITEBACK_CATCH_UP_FAILED",
+        error_message: "catch-up read failed",
+      }));
+    } finally {
+      logs.restore();
+    }
   });
 });

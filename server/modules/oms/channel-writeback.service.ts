@@ -1,5 +1,10 @@
 import { sql } from "drizzle-orm";
 import { wmsOmsOrderLinkSql } from "./oms-wms-order-link.sql";
+import {
+  DROPSHIP_LINE_FULFILLMENT_PROVIDER,
+  DROPSHIP_ORDER_CHANNEL_PROVIDER,
+  DROPSHIP_WRITEBACK_PROVIDER,
+} from "./channel-fulfillment-authority.policy";
 
 const DEFAULT_WINDOW_DAYS = 30;
 const MAX_WINDOW_DAYS = 365;
@@ -440,4 +445,94 @@ export async function findChannelWritebackCandidates(
   `);
 
   return rows(result) as ChannelWritebackException[];
+}
+
+export interface DropshipWritebackCandidate {
+  shipment_id: number;
+  wms_order_id: number;
+  oms_order_id: number;
+  order_number: string | null;
+  shipped_at: string | Date | null;
+}
+
+export interface DropshipWritebackCandidateOptions {
+  minAgeMinutes?: number;
+  maxAgeDays?: number;
+  limit?: number;
+}
+
+/**
+ * Shipped dropship packages that have no dropship writeback command at all,
+ * e.g. packages that shipped before dropship lines were written back to the
+ * vendor's store. A package with any dropship command, whatever its status,
+ * belongs to the command worker and is never picked up here, so a command in
+ * review or dead-lettered is not retried by the sweep.
+ *
+ * The match mirrors resolveChannelWritebackProvider: an order on the internal
+ * Dropship OMS channel ('manual') with a 'dropship' customer line in the
+ * package. The writeback policy still decides every line when the package is
+ * materialized.
+ */
+export async function findDropshipWritebackCandidates(
+  db: any,
+  options: DropshipWritebackCandidateOptions = {},
+): Promise<DropshipWritebackCandidate[]> {
+  const minAgeMinutes = positiveBound(options.minAgeMinutes, 60, 7 * 24 * 60);
+  const maxAgeDays = normalizedWindowDays(options.maxAgeDays);
+  const limit = normalizedLimit(options.limit);
+
+  const result = await db.execute(sql`
+    SELECT
+      os.id AS shipment_id,
+      os.order_id AS wms_order_id,
+      oo.id AS oms_order_id,
+      wo.order_number,
+      os.shipped_at
+    FROM wms.outbound_shipments os
+    JOIN wms.orders wo ON wo.id = os.order_id
+    JOIN oms.oms_orders oo ON ${wmsOmsOrderLinkSql(sql`oo.id`, {
+      source: sql`wo.source`,
+      omsFulfillmentOrderId: sql`wo.oms_fulfillment_order_id`,
+      legacySourceTableId: sql`wo.source_table_id`,
+    })}
+    JOIN channels.channels c ON c.id = oo.channel_id
+    WHERE os.status = 'shipped'
+      AND os.shipped_at IS NOT NULL
+      AND os.shipped_at < NOW() - (${minAgeMinutes} * INTERVAL '1 minute')
+      AND os.shipped_at > NOW() - make_interval(days => ${maxAgeDays})
+      AND NULLIF(BTRIM(os.tracking_number), '') IS NOT NULL
+      AND NULLIF(BTRIM(os.carrier), '') IS NOT NULL
+      AND LOWER(BTRIM(c.provider)) = ${DROPSHIP_ORDER_CHANNEL_PROVIDER}
+      AND EXISTS (
+        SELECT 1
+        FROM wms.outbound_shipment_items osi
+        JOIN wms.order_items oi ON oi.id = osi.order_item_id
+        JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+        WHERE osi.shipment_id = os.id
+          AND osi.shipment_item_purpose = 'customer_fulfillment'
+          AND osi.qty > 0
+          AND COALESCE(oi.status, 'pending') <> 'cancelled'
+          AND ol.order_id = oo.id
+          AND LOWER(BTRIM(ol.fulfillment_provider)) = ${DROPSHIP_LINE_FULFILLMENT_PROVIDER}
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM oms.channel_fulfillment_pushes push
+        WHERE push.oms_order_id = oo.id
+          AND push.channel_provider = ${DROPSHIP_WRITEBACK_PROVIDER}
+          AND push.metadata->'legacyWmsShipmentIds' @> jsonb_build_array(os.id)
+      )
+    ORDER BY os.shipped_at ASC, os.id ASC
+    LIMIT ${limit}
+  `);
+
+  return rows(result)
+    .filter((row) => Number.isSafeInteger(Number(row.shipment_id)) && Number(row.shipment_id) > 0)
+    .map((row) => ({
+      shipment_id: Number(row.shipment_id),
+      wms_order_id: Number(row.wms_order_id),
+      oms_order_id: Number(row.oms_order_id),
+      order_number: row.order_number ?? null,
+      shipped_at: row.shipped_at ?? null,
+    }));
 }

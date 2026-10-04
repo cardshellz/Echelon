@@ -12,6 +12,7 @@ import {
 } from "./channel-fulfillment-notification.policy";
 
 import { EBAY_FULFILLMENT_IDEMPOTENCY_CONFLICT } from "../channels/adapters/ebay/ebay-api.client";
+import { DROPSHIP_WRITEBACK_PROVIDER } from "./channel-fulfillment-authority.policy";
 import { isEbayTrackingConflictError } from "./channel-fulfillment-conflict";
 import {
   FulfillmentAuthorityError,
@@ -329,6 +330,36 @@ export function createCompatibilityChannelFulfillmentProviderExecutor(
           outcome: "success",
           providerResponseId: responseId,
           metadata: Object.freeze({ legacyWmsShipmentIds: shipmentIds }),
+        };
+      }
+
+      if (command.channelProvider === DROPSHIP_WRITEBACK_PROVIDER) {
+        if (typeof fulfillmentPush?.pushDropshipTrackingForShipmentCommand !== "function") {
+          throw Object.assign(new Error("Dropship tracking provider is not initialized"), {
+            code: "CHANNEL_PROVIDER_NOT_READY",
+          });
+        }
+        const pushed = await fulfillmentPush.pushDropshipTrackingForShipmentCommand(providerInput);
+        if (
+          (pushed?.outcome !== "success" && pushed?.outcome !== "ignored")
+          || !Number.isSafeInteger(pushed.dropshipTrackingPushId)
+          || pushed.dropshipTrackingPushId <= 0
+        ) {
+          throw Object.assign(
+            new Error(`Dropship tracking writeback is incomplete for physical shipment ${command.physicalShipmentId}`),
+            { code: "DROPSHIP_WRITEBACK_INCOMPLETE" },
+          );
+        }
+        return {
+          outcome: pushed.outcome,
+          providerResponseId: typeof pushed.externalFulfillmentId === "string" && pushed.externalFulfillmentId
+            ? pushed.externalFulfillmentId
+            : null,
+          metadata: Object.freeze({
+            legacyWmsShipmentIds: shipmentIds,
+            dropshipTrackingPushId: pushed.dropshipTrackingPushId,
+            alreadySatisfied: pushed.alreadySatisfied === true,
+          }),
         };
       }
 

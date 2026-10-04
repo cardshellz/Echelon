@@ -7137,4 +7137,162 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     );
     expect(counts.effectOutbox).toBe(counts.intents);
   }, CONCURRENCY_TEST_TIMEOUT_MS);
+
+  it("writes a shipped dropship package back to the vendor's store once, through its channel command", async () => {
+    const sourceId = await seedCommercialFulfillmentAuthoritySource(pool, "DROPSHIP-RAILS-1", 2);
+    // The internal Dropship OMS channel and a line written by dropship acceptance.
+    await pool.query("UPDATE channels.channels SET provider = 'manual', name = 'Dropship OMS'");
+    await pool.query("UPDATE oms.oms_orders SET external_order_id = 'dropship:12:16-14215-38371'");
+    await pool.query("UPDATE oms.oms_order_lines SET fulfillment_provider = 'dropship', external_line_item_id = '110588014781-0'");
+    await seedCanonicalRequestForSource(pool, sourceId);
+    // The catch-up joins WMS to OMS orders the way production does.
+    await pool.query("ALTER TABLE wms.orders ADD COLUMN IF NOT EXISTS source_table_id VARCHAR(100)");
+    await pool.query("UPDATE wms.orders SET source = 'oms'");
+    const { shipment_id: shipmentId, oms_order_id: omsOrderId } = (await pool.query<{
+      shipment_id: number; oms_order_id: number;
+    }>(`SELECT item.shipment_id, line.order_id::int AS oms_order_id
+      FROM wms.outbound_shipment_items item
+      JOIN wms.order_items order_item ON order_item.id = item.order_item_id
+      JOIN oms.oms_order_lines line ON line.id = order_item.oms_order_line_id
+      WHERE item.id = $1`, [sourceId])).rows[0];
+    await pool.query(
+      "UPDATE wms.outbound_shipments SET status = 'shipped', shipped_at = NOW() - INTERVAL '2 hours' WHERE id = $1",
+      [shipmentId],
+    );
+    const repository = createChannelFulfillmentAuthorityRepository(getTestDb());
+    const { findDropshipWritebackCandidates } = await import("../../../oms/channel-writeback.service");
+    const catchUpCandidates = () => findDropshipWritebackCandidates(getTestDb(), {
+      minAgeMinutes: 1, maxAgeDays: 30, limit: 10,
+    });
+
+    // As for order 22039: the package was recorded before dropship lines had a
+    // writeback route, so it has no channel command.
+    const recorded = await repository.materializePhysicalPackage({
+      ...await repository.resolveLegacyPhysicalPackage(shipmentId),
+      source: "live_shipping_event",
+      suppressChannelWriteback: true,
+    });
+    expect(recorded.channelCommands).toEqual([]);
+    expect(await catchUpCandidates()).toEqual([expect.objectContaining({ shipment_id: shipmentId, oms_order_id: omsOrderId })]);
+    // An ordinary manual-channel line is never a dropship catch-up candidate.
+    await pool.query("UPDATE oms.oms_order_lines SET fulfillment_provider = NULL");
+    expect(await catchUpCandidates()).toEqual([]);
+    await pool.query("UPDATE oms.oms_order_lines SET fulfillment_provider = 'dropship'");
+
+    const tracking = {
+      pushForOmsOrder: vi.fn(async (_input: Record<string, unknown>) => ({
+        status: "succeeded" as const,
+        push: { pushId: 31, storeConnectionId: 12, platform: "ebay", externalFulfillmentId: "ebay-fulfillment-31" },
+      })),
+    };
+    const push = createFulfillmentPushService(getTestDb(), null, {});
+    push.setDropshipMarketplaceTrackingService(tracking);
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    // Commands are due at database NOW(); the worker clock runs ahead of it.
+    const service = createChannelFulfillmentAuthorityService({
+      repository,
+      projector: { projectPhysicalShipment: vi.fn() },
+      providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor(push),
+      clock: { now: () => new Date(Date.now() + 5 * 60_000) },
+      logger,
+    });
+
+    const caughtUp = await service.ensureLegacyShipment(shipmentId, {
+      executeImmediately: true,
+      source: CHANNEL_FULFILLMENT_REPAIR_SOURCES.outboundSweep,
+    });
+
+    expect(caughtUp.materialized.physicalShipmentId).toBe(recorded.physicalShipmentId);
+    expect(caughtUp.materialized.channelCommands).toEqual([expect.objectContaining({ replayed: false })]);
+    expect(caughtUp.dispatch).toMatchObject({ claimed: 1, succeeded: 1, retryScheduled: 0, reviewRequired: 0 });
+    const commandId = caughtUp.materialized.channelCommands[0].id;
+    const command = (await pool.query(`SELECT push.channel_provider, push.push_status, push.metadata,
+        item.channel_order_line_id, item.quantity_pushed
+      FROM oms.channel_fulfillment_pushes push
+      JOIN oms.channel_fulfillment_push_items item ON item.channel_fulfillment_push_id = push.id
+      WHERE push.id = $1`, [commandId])).rows;
+    expect(command).toEqual([expect.objectContaining({
+      channel_provider: "dropship",
+      push_status: "success",
+      channel_order_line_id: "110588014781-0",
+      quantity_pushed: 2,
+      metadata: expect.objectContaining({
+        source: "fulfillment_sweeper",
+        notifyCustomer: true,
+        legacyWmsShipmentIds: [shipmentId],
+      }),
+    })]);
+    expect(tracking.pushForOmsOrder).toHaveBeenCalledTimes(1);
+    // The rails store the carrier canonicalized; the vendor store adapters map it.
+    expect(tracking.pushForOmsOrder).toHaveBeenCalledWith({
+      omsOrderId,
+      wmsShipmentId: shipmentId,
+      carrier: "UPS",
+      trackingNumber: "1Z0000000000044010",
+      shippedAt: expect.any(Date),
+      idempotencyKey: `channel-fulfillment-command:${commandId}`,
+      lineItems: [{ externalLineItemId: "110588014781-0", quantity: 2 }],
+    });
+    // The dropship service rejects anything but a valid Date.
+    const pushedShippedAt = tracking.pushForOmsOrder.mock.calls[0][0].shippedAt;
+    expect(pushedShippedAt).toBeInstanceOf(Date);
+    expect(Number.isNaN((pushedShippedAt as Date).getTime())).toBe(false);
+    const events = (await pool.query<{ details: Record<string, unknown> }>(`SELECT details FROM oms.oms_order_events
+      WHERE order_id = $1 AND event_type = 'tracking_pushed'`, [omsOrderId])).rows;
+    expect(events).toEqual([{ details: expect.objectContaining({
+      provider: "dropship",
+      dropshipTrackingPushId: 31,
+      channelFulfillmentCommandId: commandId,
+      fulfillmentId: "ebay-fulfillment-31",
+    }) }]);
+
+    // Settled: the catch-up no longer sees it, and another sweep pushes nothing.
+    expect(await catchUpCandidates()).toEqual([]);
+    const replay = await service.ensureLegacyShipment(shipmentId, {
+      executeImmediately: true,
+      source: CHANNEL_FULFILLMENT_REPAIR_SOURCES.outboundSweep,
+    });
+    expect(replay.materialized.channelCommands).toEqual([expect.objectContaining({ id: commandId, replayed: true })]);
+    expect(replay.dispatch.claimed).toBe(0);
+    expect(tracking.pushForOmsOrder).toHaveBeenCalledTimes(1);
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it("holds a dropship command for a voided label instead of sending its tracking", async () => {
+    const sourceId = await seedCommercialFulfillmentAuthoritySource(pool, "DROPSHIP-RAILS-VOID", 1);
+    await pool.query("UPDATE channels.channels SET provider = 'manual', name = 'Dropship OMS'");
+    await pool.query("UPDATE oms.oms_order_lines SET fulfillment_provider = 'dropship', external_line_item_id = '110588014782-0'");
+    await seedCanonicalRequestForSource(pool, sourceId);
+    const { shipment_id: shipmentId } = (await pool.query<{ shipment_id: number }>(
+      "SELECT shipment_id FROM wms.outbound_shipment_items WHERE id = $1", [sourceId],
+    )).rows[0];
+    await pool.query("UPDATE wms.outbound_shipments SET status = 'shipped', shipped_at = NOW() WHERE id = $1", [shipmentId]);
+    const repository = createChannelFulfillmentAuthorityRepository(getTestDb());
+    const materialized = await repository.materializePhysicalPackage({
+      ...await repository.resolveLegacyPhysicalPackage(shipmentId),
+      source: "live_shipping_event",
+    });
+    expect(materialized.channelCommands).toHaveLength(1);
+    const commandId = materialized.channelCommands[0].id;
+    const due = new Date(Date.now() + 5 * 60_000);
+    const pkg = (await pool.query<{ provider_physical_shipment_id: string; tracking_number: string }>(
+      "SELECT provider_physical_shipment_id, tracking_number FROM wms.physical_shipments WHERE id = $1",
+      [materialized.physicalShipmentId],
+    )).rows[0];
+    await seedOutboundBusinessShipmentLabel(pool, {
+      providerPhysicalShipmentId: pkg.provider_physical_shipment_id,
+      trackingNumber: pkg.tracking_number,
+      labelStatus: "voided",
+      ordinal: 1,
+    });
+
+    await expect(repository.claimCommands({
+      commandIds: [commandId], limit: 1, now: due, leaseDurationMs: 60_000, leaseToken: "voided-dropship",
+    })).resolves.toEqual([]);
+
+    await pool.query("UPDATE wms.shipping_provider_labels SET label_status = 'active'");
+    await expect(repository.claimCommands({
+      commandIds: [commandId], limit: 1, now: due, leaseDurationMs: 60_000, leaseToken: "active-dropship",
+    })).resolves.toEqual([expect.objectContaining({ id: commandId, channelProvider: "dropship" })]);
+  });
 });
