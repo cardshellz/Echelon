@@ -1,6 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { request } from "node:https";
-import { isIPv4 } from "node:net";
+import { isPublicIpv4Address } from "../../infrastructure/public-network-address";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { COST_REPORT_ACK_MAX_BYTES, COST_REPORT_MAX_BYTES, costReportEnvelopeSchema, type CostReportAcknowledgement, type CostReportEnvelope } from "@shared/procurement/cost-report-delivery";
 import { COST_REPORT_TIMEOUT_MS, CostReportingError, verifyReportAcknowledgement, type ReportTransportConfiguration } from "./cost-reporting.domain";
@@ -8,14 +8,7 @@ import { COST_REPORT_TIMEOUT_MS, CostReportingError, verifyReportAcknowledgement
 /** Deliberately IPv4-only until an equally strict IPv6 policy is supported.
  * DNS is resolved once and the selected public address is pinned to this TLS
  * request; checking DNS and then allowing the HTTP client to resolve again is unsafe. */
-export function isPublicReportAddress(address: string): boolean {
-  if (!isIPv4(address)) return false;
-  const [a,b,c] = address.split(".").map(Number);
-  return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127)
-    || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
-    || (a === 192 && (b === 168 || (b === 0 && (c === 0 || c === 2)) || (b === 88 && c === 99)))
-    || (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) || (a === 203 && b === 0 && c === 113));
-}
+export const isPublicReportAddress = isPublicIpv4Address;
 export interface CostReportHttpDependencies {
   resolve: (hostname: string) => Promise<Array<{address: string; family: number}>>;
   request: typeof request;

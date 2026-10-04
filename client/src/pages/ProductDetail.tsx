@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useInventoryCommand } from "@/lib/inventory-command";
 import { InventoryTrackingHistory } from "@/components/catalog/InventoryTrackingHistory";
+import { ProductImageGallery } from "@/components/catalog/ProductImageGallery";
+import type { CatalogGalleryAsset, ReorderProductAssets } from "@shared/catalog/product-assets";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -26,10 +28,7 @@ import {
   Plus,
   Pencil,
   FileText,
-  Star,
   X,
-  ChevronUp,
-  ChevronDown,
   Globe,
   CheckCircle2,
   AlertCircle,
@@ -382,15 +381,7 @@ interface ProductDetailData {
   safetyStockDays: number;
   shopifyProductId: string | null;
   variants: ProductVariantRow[];
-  assets: Array<{
-    id: number;
-    url: string;
-    altText: string | null;
-    assetType: string;
-    isPrimary: number;
-    position: number;
-    productVariantId: number | null;
-  }>;
+  assets: CatalogGalleryAsset[];
 }
 
 interface Settings {
@@ -1938,9 +1929,12 @@ export default function ProductDetail() {
       const res = await fetch(`/api/product-assets/${assetId}`, { method: "DELETE" });
       if (!res.ok) throw new Error("Failed to delete image");
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
       toast({ title: "Image removed" });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Could not remove image", description: error.message, variant: "destructive" });
     },
   });
 
@@ -1953,23 +1947,29 @@ export default function ProductDetail() {
       });
       if (!res.ok) throw new Error("Failed to set primary");
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
       toast({ title: "Primary image updated" });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Could not update primary image", description: error.message, variant: "destructive" });
     },
   });
 
   const reorderMutation = useMutation({
-    mutationFn: async (orderedIds: number[]) => {
+    mutationFn: async (command: ReorderProductAssets) => {
       const res = await fetch(`/api/products/${product?.productId}/assets/reorder`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderedIds }),
+        body: JSON.stringify(command),
       });
-      if (!res.ok) throw new Error("Failed to reorder");
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(typeof body?.error === "string" ? body.error : "Refresh the gallery and try again.");
+      }
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
     },
   });
 
@@ -2614,7 +2614,7 @@ export default function ProductDetail() {
         >
           <ArrowLeft className="h-5 w-5" />
         </Button>
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 max-w-full">
           <h1 className="text-lg md:text-2xl font-bold truncate">
             {product.title || product.name}
           </h1>
@@ -3205,86 +3205,13 @@ export default function ProductDetail() {
 
                   {/* Image gallery */}
                   {product.assets && product.assets.length > 0 ? (
-                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-                      {[...product.assets].sort((a, b) => a.position - b.position).map((asset, idx) => (
-                        <div
-                          key={asset.id}
-                          className="relative group border rounded-lg overflow-hidden"
-                        >
-                          <div className="aspect-square bg-muted">
-                            <img
-                              src={(asset as any).storageType === "file" || (asset as any).storageType === "both"
-                                ? `/api/product-assets/${asset.id}/file`
-                                : asset.url}
-                              alt={asset.altText || "Product image"}
-                              className="w-full h-full object-cover"
-                            />
-                          </div>
-                          {asset.isPrimary === 1 && (
-                            <Badge className="absolute top-1 left-1 text-[10px] px-1.5 py-0">
-                              Primary
-                            </Badge>
-                          )}
-                          <div className="absolute top-1 right-1 flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                            {asset.isPrimary !== 1 && (
-                              <Button
-                                variant="secondary"
-                                size="icon"
-                                className="h-7 w-7"
-                                onClick={() => setPrimaryMutation.mutate(asset.id)}
-                                title="Set as primary"
-                              >
-                                <Star className="h-3.5 w-3.5" />
-                              </Button>
-                            )}
-                            {idx > 0 && (
-                              <Button
-                                variant="secondary"
-                                size="icon"
-                                className="h-7 w-7"
-                                onClick={() => {
-                                  const sorted = [...product.assets].sort((a, b) => a.position - b.position);
-                                  const ids = sorted.map((a) => a.id);
-                                  [ids[idx - 1], ids[idx]] = [ids[idx], ids[idx - 1]];
-                                  reorderMutation.mutate(ids);
-                                }}
-                                title="Move up"
-                              >
-                                <ChevronUp className="h-3.5 w-3.5" />
-                              </Button>
-                            )}
-                            {idx < product.assets.length - 1 && (
-                              <Button
-                                variant="secondary"
-                                size="icon"
-                                className="h-7 w-7"
-                                onClick={() => {
-                                  const sorted = [...product.assets].sort((a, b) => a.position - b.position);
-                                  const ids = sorted.map((a) => a.id);
-                                  [ids[idx], ids[idx + 1]] = [ids[idx + 1], ids[idx]];
-                                  reorderMutation.mutate(ids);
-                                }}
-                                title="Move down"
-                              >
-                                <ChevronDown className="h-3.5 w-3.5" />
-                              </Button>
-                            )}
-                            <Button
-                              variant="destructive"
-                              size="icon"
-                              className="h-7 w-7"
-                              onClick={() => {
-                                if (window.confirm("Remove this image?")) {
-                                  deleteAssetMutation.mutate(asset.id);
-                                }
-                              }}
-                            >
-                              <X className="h-3.5 w-3.5" />
-                            </Button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
+                    <ProductImageGallery
+                      assets={product.assets}
+                      busy={reorderMutation.isPending || deleteAssetMutation.isPending || setPrimaryMutation.isPending || uploadFileMutation.isPending || addAssetMutation.isPending}
+                      onReorder={command => reorderMutation.mutateAsync(command)}
+                      onSetPrimary={assetId => setPrimaryMutation.mutate(assetId)}
+                      onRemove={assetId => deleteAssetMutation.mutate(assetId)}
+                    />
                   ) : (
                     <div className="text-center py-8 text-muted-foreground">
                       <ImageIcon className="h-10 w-10 md:h-12 md:w-12 mx-auto mb-2 opacity-50" />
@@ -3975,9 +3902,9 @@ export default function ProductDetail() {
                   const primaryAsset = product.assets?.find((a) => a.isPrimary === 1) || product.assets?.[0];
                   return primaryAsset ? (
                     <img
-                      src={(primaryAsset as any).storageType === "file" || (primaryAsset as any).storageType === "both"
+                      src={primaryAsset.storageType === "file" || primaryAsset.storageType === "both"
                         ? `/api/product-assets/${primaryAsset.id}/file`
-                        : primaryAsset.url}
+                        : primaryAsset.url ?? undefined}
                       alt={primaryAsset.altText || product.name}
                       className="w-full h-full object-cover"
                     />

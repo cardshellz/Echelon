@@ -24,6 +24,7 @@ import {
 import { OPEN_SHIPMENT_STATUSES } from "@shared/enums/order-status";
 import { prepareVariantInventoryTracking, updateProductInventoryTracking, InventoryTrackingPolicyError } from "./inventory-tracking-policy.repository";
 import { renameWmsOrderItemSku } from "../wms/order-item-commands";
+import { reorderCatalogAssets } from "./product-asset-order.repository";
 import type {
   Product,
   InsertProduct,
@@ -343,11 +344,7 @@ export const productMethods: IProductStorage = {
   },
 
   async reorderProductAssets(productId: number, orderedIds: number[]): Promise<void> {
-    for (let i = 0; i < orderedIds.length; i++) {
-      await db.update(productAssets)
-        .set({ position: i })
-        .where(and(eq(productAssets.id, orderedIds[i]), eq(productAssets.productId, productId)));
-    }
+    await reorderCatalogAssets(db, productId, { orderedIds });
   },
 
   async setPrimaryProductAsset(productId: number, assetId: number): Promise<void> {
