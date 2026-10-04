@@ -15,6 +15,10 @@ import {
   requireDropshipAuth,
   requireDropshipSensitiveActionProof,
 } from "./dropship-auth.routes";
+import {
+  dropshipVendorOrderDetailResponseSchema,
+  type DropshipVendorOrderDetailResponseInput,
+} from "../../../../../shared/dropship/vendor-order-detail";
 
 export function registerDropshipOrderRoutes(
   app: Express,
@@ -69,7 +73,33 @@ export function registerDropshipOrderRoutes(
         intakeId: parsePositiveIntegerPath(req.params.intakeId, "intakeId"),
         vendorId: provisioned.vendor.vendorId,
       });
-      return res.json({ order: result });
+      // The vendor contract names everything a vendor may see and drops the
+      // rest, so shipping goes out as one amount and its parts stay internal
+      // (shared/dropship/vendor-order-detail.ts). The typed binding is a
+      // compile-time check that the internal detail fits the contract.
+      const contractInput: DropshipVendorOrderDetailResponseInput = { order: result };
+      const response = dropshipVendorOrderDetailResponseSchema.safeParse(contractInput);
+      if (!response.success) {
+        // Fail closed: a detail that does not fit is never sent. This needs a
+        // human (data or code drifted from the contract), so it logs at error.
+        console.error(JSON.stringify({
+          level: "error",
+          code: "DROPSHIP_VENDOR_ORDER_DETAIL_CONTRACT_INVALID",
+          message: "Order detail did not fit the vendor contract; nothing was sent.",
+          context: {
+            intakeId: result.intakeId,
+            vendorId: provisioned.vendor.vendorId,
+            issues: response.error.issues.map((issue) => ({ path: issue.path.join("."), code: issue.code })),
+          },
+        }));
+        return res.status(500).json({
+          error: {
+            code: "DROPSHIP_ORDER_INTERNAL_ERROR",
+            message: "Dropship order request failed.",
+          },
+        });
+      }
+      return res.json(response.data);
     } catch (error) {
       return sendDropshipOrderError(res, error);
     }

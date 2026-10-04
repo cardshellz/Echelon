@@ -47,6 +47,23 @@ describe("DropshipPortalOrders contract", () => {
     expect(source).not.toContain("function orderAcceptanceMessage");
   });
 
+  it("shows the vendor shipping as one amount: no insurance pool line, read through the vendor order type", () => {
+    const economics = source.slice(source.indexOf('title="Acceptance Economics"'), source.indexOf('title="Shipping Quote"'));
+    expect(economics).toContain('<DetailField label="Shipping" value={formatCents(order.economicsSnapshot.shippingCents)} />');
+    expect(economics).toContain('<DetailField label="Total debit" value={formatCents(order.economicsSnapshot.totalDebitCents)} />');
+    for (const internal of ["insurancePoolCents", "Insurance pool", "baseRateCents", "markupCents", "dunnageCents", "quotePayload", "pricingSnapshot"]) {
+      expect(source).not.toContain(internal);
+    }
+    expect(source).toContain("fetchJson<DropshipVendorOrderDetailResponse>(`/api/dropship/orders/${selectedIntakeId}`)");
+    expect(source).toContain('from "@shared/dropship/vendor-order-detail";');
+    expect(source).not.toContain("DropshipOrderDetailResponse");
+  });
+
+  it("shows the audit keys the vendor contract sends, from the contract's own list", () => {
+    expect(source).toContain("const parts = VENDOR_ORDER_AUDIT_PAYLOAD_KEYS.flatMap((key) => {");
+    expect(source).not.toMatch(/const keys = \[\s*"errorCode"/);
+  });
+
   it("opens filtered to waiting orders when linked with ?status=, and only for statuses it offers", () => {
     expect(source).toContain("ordersStatusFilterFromSearch(window.location.search, statusOptions)");
   });

@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "playwright/test";
 import { resolve } from "node:path";
+import { dropshipVendorOrderDetailResponseSchema } from "../../shared/dropship/vendor-order-detail";
+import { makeDropshipOrderOpsDetail } from "../../server/modules/dropship/__tests__/fixtures/order-ops-detail.fixture";
 
 // Playwright's serviceWorkers:block init script reads navigator.serviceWorker in
 // every frame, which throws in an opaque sandbox. This local-only harness
@@ -71,6 +73,13 @@ async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNES
       return route.fulfill({ json: { summary: { heldCount: state.heldCount, totalDebitCents: 19_000, availableBalanceCents: state.availableBalanceCents,
         shortfallCents: state.shortfallCents, earliestExpiresAt: state.heldCount > 0 ? firstDeadline : null, currency: "USD" } } });
     }
+    if (url.pathname === "/api/dropship/orders/3" && method === "GET") {
+      // The accepted order's detail exactly as the server sends it: the
+      // internal detail (with the shipping parts) run through the vendor contract.
+      return route.fulfill({ json: dropshipVendorOrderDetailResponseSchema.parse({
+        order: makeDropshipOrderOpsDetail({ intakeId: 3, externalOrderNumber: "10-03" }),
+      }) });
+    }
     if (url.pathname === "/api/dropship/orders" && method === "GET") {
       state.orderRequests.push(url.search);
       const statuses = url.searchParams.get("statuses");
@@ -140,4 +149,21 @@ test("nothing is announced when no order is waiting", async ({ page }) => {
   await expect(page.getByText("10-03")).toBeVisible();
   await expect(page.getByTestId("orders-payment-hold-banner")).toHaveCount(0);
   expect(state.errors).toEqual([]);
+});
+
+test("an accepted order's detail shows shipping as one amount, with no insurance pool line", async ({ page }) => {
+  const state = await setup(page);
+  await page.getByRole("row", { name: /10-03/ }).getByRole("button", { name: "Details" }).click();
+
+  const sheet = page.getByRole("dialog");
+  const economics = sheet.locator("section").filter({ has: page.getByRole("heading", { name: "Acceptance Economics" }) });
+  await expect(economics).toContainText("Wholesale");
+  await expect(economics).toContainText("$6.99");
+  await expect(economics).toContainText("Shipping");
+  await expect(economics).toContainText("$9.25");
+  await expect(economics).toContainText("Total debit");
+  await expect(economics).toContainText("$16.24");
+  await expect(sheet).not.toContainText("Insurance pool");
+  await expect(sheet).not.toContainText("$0.18");
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });

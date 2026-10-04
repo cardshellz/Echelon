@@ -383,7 +383,10 @@ export const LEDGER_REASON_LABELS: Readonly<Record<WalletLedgerReason, string>> 
   rewards_expired: "Rewards expired",
   return_fee: "Return fee",
   return_credit: "Return credit",
-  insurance_pool_credit: "Insurance pool credit",
+  // Paid from the insurance pool for a carrier-fault or lost return. The
+  // pool is internal (vendors see shipping as one amount), so the label names
+  // the shipping claim, not the pool.
+  insurance_pool_credit: "Shipping claim credit",
   other: "Other",
 });
 

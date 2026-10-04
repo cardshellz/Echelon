@@ -59,15 +59,18 @@ import {
   postJson,
   queryErrorMessage,
   type DropshipOrderAcceptResponse,
-  type DropshipOrderDetail,
   type DropshipOnboardingState,
-  type DropshipOrderDetailResponse,
   type DropshipOrderListItem,
   type DropshipOrderListResponse,
   type DropshipOrderRejectResponse,
   type DropshipOrderTrackingLineItemSummary,
   type DropshipPaymentHoldSummaryResponse,
 } from "@/lib/dropship-ops-surface";
+import {
+  VENDOR_ORDER_AUDIT_PAYLOAD_KEYS,
+  type DropshipVendorOrderDetail,
+  type DropshipVendorOrderDetailResponse,
+} from "@shared/dropship/vendor-order-detail";
 import { describeHeldOrderNeed, describeOrderAcceptance, describeOrderPayment } from "@/lib/dropship-order-payment";
 import {
   dropshipPortalPath,
@@ -139,9 +142,9 @@ export default function DropshipPortalOrders() {
     queryKey: [ordersUrl],
     queryFn: () => fetchJson<DropshipOrderListResponse>(ordersUrl),
   });
-  const orderDetailQuery = useQuery<DropshipOrderDetailResponse>({
+  const orderDetailQuery = useQuery<DropshipVendorOrderDetailResponse>({
     queryKey: ["dropship-order-detail", selectedIntakeId],
-    queryFn: () => fetchJson<DropshipOrderDetailResponse>(`/api/dropship/orders/${selectedIntakeId}`),
+    queryFn: () => fetchJson<DropshipVendorOrderDetailResponse>(`/api/dropship/orders/${selectedIntakeId}`),
     enabled: selectedIntakeId !== null,
   });
   const holdSummaryQuery = useQuery<DropshipPaymentHoldSummaryResponse>({
@@ -501,7 +504,7 @@ function OrderDetailSheet({
   isLoading: boolean;
   onOpenChange: (open: boolean) => void;
   open: boolean;
-  order: DropshipOrderDetail | null;
+  order: DropshipVendorOrderDetail | null;
 }) {
   // The two ledger rows behind an accepted order (cash and rewards) are read
   // into the page's words once per detail load, never added up in the JSX.
@@ -597,7 +600,6 @@ function OrderDetailSheet({
                 <div className="grid gap-2 text-sm sm:grid-cols-2">
                   <DetailField label="Wholesale" value={formatCents(order.economicsSnapshot.wholesaleSubtotalCents)} />
                   <DetailField label="Shipping" value={formatCents(order.economicsSnapshot.shippingCents)} />
-                  <DetailField label="Insurance pool" value={formatCents(order.economicsSnapshot.insurancePoolCents)} />
                   <DetailField label="Total debit" value={formatCents(order.economicsSnapshot.totalDebitCents)} />
                 </div>
               ) : (
@@ -946,7 +948,7 @@ function trackingLineLabel(line: DropshipOrderTrackingLineItemSummary): string {
   return "Marketplace line";
 }
 
-function shipToAddressLines(order: DropshipOrderDetail): string[] {
+function shipToAddressLines(order: DropshipVendorOrderDetail): string[] {
   const shipTo = order.shipTo;
   if (!shipTo) return ["No ship-to address recorded."];
   const lines = [
@@ -966,19 +968,10 @@ function formatNullableCents(value: number | null | undefined): string {
   return typeof value === "number" ? formatCents(value) : "Not recorded";
 }
 
+// The server sends only these audit keys (the vendor order contract), so the
+// page shows every key it receives, in the contract's order.
 function auditPayloadSummary(payload: Record<string, unknown>): string {
-  const keys = [
-    "errorCode",
-    "errorMessage",
-    "reason",
-    "shippingQuoteSnapshotId",
-    "omsOrderId",
-    "walletLedgerEntryId",
-    "totalDebitCents",
-    "availableBalanceCents",
-    "paymentHoldExpiresAt",
-  ];
-  const parts = keys.flatMap((key) => {
+  const parts = VENDOR_ORDER_AUDIT_PAYLOAD_KEYS.flatMap((key) => {
     const value = payload[key];
     if (value === null || value === undefined || value === "") return [];
     if (key.endsWith("Cents") && typeof value === "number") {
