@@ -1,6 +1,6 @@
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { CustomerReturnLabelSettingsState } from "@shared/returns/customer-return-label.contract";
+import { DEFAULT_RETURN_WAREHOUSE_ADDRESS_TYPE, type CustomerReturnLabelSettingsState } from "@shared/returns/customer-return-label.contract";
 import type {
   ReturnLabelSettingsDraft,
   ReturnLabelSettingsField,
@@ -13,6 +13,7 @@ import { ReturnShippingGuardrailsFields } from "./ReturnShippingGuardrailsFields
 export const returnShippingFieldIds: Record<ReturnLabelSettingsField, string> =
   {
     warehouseId: "return-label-warehouse",
+    warehouseAddressType: "return-label-warehouse-address-type",
     contactName: "return-label-contact",
     contactPhone: "return-label-phone",
     carrierId: "return-label-carrier",
@@ -86,6 +87,28 @@ export function ReturnPolicyShippingFields({
             ))}
           </select>
           {fieldErrors("warehouseId")}
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor={fieldIds.warehouseAddressType}>Warehouse address type</Label>
+          <select
+            id={fieldIds.warehouseAddressType}
+            className={previewSelectClass}
+            value={draft.warehouseAddressType ?? DEFAULT_RETURN_WAREHOUSE_ADDRESS_TYPE}
+            aria-invalid={hasIssue("warehouseAddressType")}
+            aria-describedby={description("warehouseAddressType", "return-label-warehouse-address-type-help")}
+            onChange={(event) => {
+              const warehouseAddressType = event.target.value;
+              if (warehouseAddressType === "commercial" || warehouseAddressType === "residential")
+                onChange({ warehouseAddressType });
+            }}
+          >
+            <option value="commercial">Commercial</option>
+            <option value="residential">Residential</option>
+          </select>
+          <p id="return-label-warehouse-address-type-help" className="text-xs text-muted-foreground">
+            Used for carrier rates and labels at the return destination.
+          </p>
+          {fieldErrors("warehouseAddressType")}
         </div>
         <div className="space-y-1 sm:col-span-2">
           <Label htmlFor="return-label-selection-mode">Service selection</Label>

@@ -186,6 +186,23 @@ integration("atomic return policy and shipping versions on PostgreSQL", () => {
       .rejects.toThrow();
     expect((await counts()).commands).toBe(1);
   });
+  it("persists the administrator's warehouse classification in the policy, resolver and audit with idempotent replay", async () => {
+    const input = command();
+    input.shipping = { ...input.shipping!, warehouseAddressType: "residential" };
+    const result = await service.createVersion(input);
+    expect(result.policy).toMatchObject({ shipping: { warehouseAddressType: "residential" } });
+    expect((await settings.read(36))?.warehouseAddressType).toBe("residential");
+    const reader = new PostgresCustomerReturnPortalPolicyReader(drizzle(pool, { schema }));
+    expect((await reader.read(36)).find(policy => policy.id === result.policy.id)?.shipping?.warehouseAddressType).toBe("residential");
+    expect((await pool.query("SELECT changes FROM public.audit_events")).rows[0].changes.after.shipping.warehouseAddressType).toBe("residential");
+    expect((await service.createVersion(input)).replayed).toBe(true);
+    expect((await counts()).commands).toBe(1);
+    const changed = structuredClone(input);
+    changed.shipping!.warehouseAddressType = "commercial";
+    await expect(service.createVersion(changed)).rejects.toMatchObject({ code: "RETURN_POLICY_IDEMPOTENCY_CONFLICT" });
+    await expect(pool.query("UPDATE returns.return_policy_shipping SET configuration=configuration - 'warehouseAddressType' WHERE policy_id=$1", [result.policy.id]))
+      .rejects.toThrow();
+  });
 
   it("replays an identical combined command without rereading a carrier and rejects changed intent", async () => {
     const input = command();

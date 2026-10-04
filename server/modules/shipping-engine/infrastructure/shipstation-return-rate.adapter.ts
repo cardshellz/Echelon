@@ -2,7 +2,6 @@ import Decimal from "decimal.js";
 import { z } from "zod";
 import {
   returnLabelProviderIdSchema,
-  type ReturnLabelAddress,
 } from "../application/return-label-provider.port";
 import {
   MAX_RETURN_RATE_CANDIDATES,
@@ -16,6 +15,7 @@ import {
   type ReturnRateResult,
 } from "../application/return-rate-provider.port";
 import { shipStationReturnWeightPounds } from "./shipstation-return-weight";
+import { shipStationReturnAddress } from "./shipstation-return-address";
 
 const RATES_URL = "https://api.shipstation.com/v2/rates";
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -190,8 +190,8 @@ export function buildReturnRateRequest(
     },
     shipment: {
       validate_address: "no_validation",
-      ship_from: addressBody(shipment.shipFrom),
-      ship_to: addressBody(shipment.shipTo),
+      ship_from: shipStationReturnAddress(shipment.shipFrom),
+      ship_to: shipStationReturnAddress(shipment.shipTo),
       packages: [
         {
           package_code: "package",
@@ -319,21 +319,6 @@ function moneyCents(money: z.infer<typeof moneySchema>): number {
     fail("RETURN_RATE_AMOUNT_INVALID", "invalid_response");
   }
   return amount.toNumber();
-}
-
-function addressBody(address: ReturnLabelAddress): Record<string, unknown> {
-  return {
-    name: address.name,
-    ...(address.phone ? { phone: address.phone } : {}),
-    ...(address.companyName ? { company_name: address.companyName } : {}),
-    address_line1: address.addressLine1,
-    ...(address.addressLine2 ? { address_line2: address.addressLine2 } : {}),
-    ...(address.addressLine3 ? { address_line3: address.addressLine3 } : {}),
-    city_locality: address.city,
-    state_province: address.state,
-    postal_code: address.postalCode,
-    country_code: address.countryCode,
-  };
 }
 
 async function readJson(

@@ -69,8 +69,8 @@ describe("ShipStation return-label request", () => {
       label_format: "pdf", label_layout: "4x6", label_download_type: "url",
       shipment: { validate_address: "no_validation", external_shipment_id: INPUT.externalShipmentId,
         carrier_id: "se-101", service_code: "ups_ground",
-        ship_from: { name: "Fictional Customer", address_line1: "100 Sample Street", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US" },
-        ship_to: { name: "Fictional Returns", company_name: "Sample Warehouse", phone: "5550101000", address_line1: "200 Example Road", address_line2: "Suite 2", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US" },
+        ship_from: { name: "Fictional Customer", address_line1: "100 Sample Street", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US", address_residential_indicator: "unknown" },
+        ship_to: { name: "Fictional Returns", company_name: "Sample Warehouse", phone: "5550101000", address_line1: "200 Example Road", address_line2: "Suite 2", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US", address_residential_indicator: "unknown" },
         packages: [{ package_code: "package", weight: { value: 1.10231132, unit: "pound" }, dimensions: { unit: "inch", length: 12.125, width: 8, height: 4 } }],
       },
     });
@@ -95,6 +95,48 @@ describe("ShipStation return-label request", () => {
 });
 
 describe("purchase outcomes", () => {
+  it("sends the explicit customer and warehouse classifications on the only purchase POST", async () => {
+    const input = { ...INPUT, shipFrom: { ...INPUT.shipFrom, addressType: "residential" as const },
+      shipTo: { ...INPUT.shipTo, addressType: "commercial" as const } };
+    const responseShipment = shipment();
+    (responseShipment.ship_from as Record<string, unknown>).address_residential_indicator = "yes";
+    (responseShipment.ship_to as Record<string, unknown>).address_residential_indicator = "no";
+    const { provider, fetchFn } = fixture([json(label()), json(responseShipment)]);
+    await expect(provider.purchase(input)).resolves.toMatchObject({ labelId: "se-201" });
+    expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body)).shipment).toMatchObject({
+      ship_from: { address_line1: "100 Sample Street", address_residential_indicator: "yes" },
+      ship_to: { address_line1: "200 Example Road", address_residential_indicator: "no" },
+    });
+    expect(fetchFn.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+  it.each(["ship_from", "ship_to"] as const)("rejects an explicitly opposite %s classification without repeating a purchase", async side => {
+    const input = { ...INPUT, shipFrom: { ...INPUT.shipFrom, addressType: "residential" as const },
+      shipTo: { ...INPUT.shipTo, addressType: "commercial" as const } };
+    const responseShipment = shipment();
+    (responseShipment[side] as Record<string, unknown>).address_residential_indicator = side === "ship_from" ? "no" : "yes";
+    const { provider, fetchFn } = fixture([json(label()), json(responseShipment)]);
+    await expect(provider.purchase(input)).rejects.toMatchObject({ code: "RETURN_LABEL_IDENTITY_MISMATCH", outcome: "unknown" });
+    expect(fetchFn.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+  it("recovers a historical request and physical readback without classification using only GETs", async () => {
+    const responseShipment = shipment();
+    delete (responseShipment.ship_from as Record<string, unknown>).address_residential_indicator;
+    delete (responseShipment.ship_to as Record<string, unknown>).address_residential_indicator;
+    const { provider, fetchFn } = fixture([json(listing(["se-201"])), json(label()), json(responseShipment)]);
+    await expect(provider.recover(INPUT)).resolves.toMatchObject({ labelId: "se-201" });
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+    expect(fetchFn.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+  });
+  it("accepts an omitted provider classification while still verifying an explicitly classified request's physical addresses", async () => {
+    const input = { ...INPUT, shipTo: { ...INPUT.shipTo, addressType: "commercial" as const } };
+    const responseShipment = shipment();
+    delete (responseShipment.ship_to as Record<string, unknown>).address_residential_indicator;
+    const { provider } = fixture([json(listing(["se-201"])), json(label()), json(responseShipment)]);
+    await expect(provider.recover(input)).resolves.toMatchObject({ labelId: "se-201" });
+    (responseShipment.ship_to as Record<string, unknown>).address_line1 = "Wrong destination";
+    const changed = fixture([json(listing(["se-201"])), json(label()), json(responseShipment)]);
+    await expect(changed.provider.recover(input)).rejects.toMatchObject({ code: "RETURN_LABEL_IDENTITY_MISMATCH", outcome: "unknown" });
+  });
   it.each([400, 401, 403, 404, 405, 422, 429])("classifies HTTP %s as a definitive rejection without automatic retries or raw errors", async status => {
     const response = new Response("private provider message fixture-key", { status });
     const text = vi.spyOn(response, "text");

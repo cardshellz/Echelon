@@ -12,11 +12,12 @@ import {
   storedCustomerReturnQuoteResult,
   readStoredCustomerReturnQuoteResult,
 } from "../application/customer-return-label-quote";
-import { customerReturnProviderDimensions } from "../application/customer-return-shipping-plan";
+import { customerReturnProviderDimensions, customerReturnWarehouseAddressType } from "../application/customer-return-shipping-plan";
 import {
   returnLabelInputSchema,
   returnLabelRecordSchema,
   type ReturnLabelInput,
+  type ReturnLabelAddress,
 } from "../../shipping-engine/application/return-label-provider.port";
 import type {
   CustomerReturnLabelStore,
@@ -26,6 +27,14 @@ import { CustomerReturnIntakeError } from "../application/customer-return-intake
 import { RETURN_LABEL_CONTROL_LOCK_NAMESPACE } from "./customer-return-label-settings.repository";
 
 const id = z.coerce.number().int().positive().safe();
+function matchesSavedRequestAddress(saved: ReturnLabelAddress, expected: ReturnLabelAddress): boolean {
+  const { addressType: savedType, ...savedPhysical } = saved;
+  const { addressType: expectedType, ...expectedPhysical } = expected;
+  // Pre-classification durable attempts must retain their original input for
+  // GET-only recovery. New explicit classifications must agree with the manifest.
+  return equalJson(savedPhysical, expectedPhysical)
+    && (savedType === undefined || savedType === (expectedType ?? "unknown"));
+}
 export class PostgresCustomerReturnLabelStore
   implements CustomerReturnLabelStore
 {
@@ -46,7 +55,7 @@ export class PostgresCustomerReturnLabelStore
     authorizationId: number,
   ): Promise<StoredReturnLabels> {
     const { rows } = await connection.query(
-      `SELECT a.authorization_number,p.*,t.id AS attempt_id,t.status AS attempt_status,
+      `SELECT a.authorization_number,a.warehouse_snapshot,p.*,t.id AS attempt_id,t.status AS attempt_status,
       t.started_at,t.result_snapshot,t.request_snapshot FROM returns.customer_return_authorizations a
       JOIN returns.customer_return_parcels p ON p.authorization_id=a.id
       LEFT JOIN LATERAL (SELECT * FROM returns.customer_return_label_attempts WHERE parcel_id=p.id ORDER BY attempt_number DESC LIMIT 1) t ON true
@@ -76,7 +85,7 @@ export class PostgresCustomerReturnLabelStore
           externalShipmentId: row.provider_external_shipment_id,
           rmaNumber: row.authorization_number,
           shipFrom: row.origin_address,
-          shipTo: row.destination_address,
+          shipTo: { ...row.destination_address, addressType: customerReturnWarehouseAddressType(row.warehouse_snapshot.addressType) },
           parcel: {
             weightGrams: id.parse(row.weight_grams),
             dimensionsInches: customerReturnProviderDimensions(dims),
@@ -104,8 +113,8 @@ export class PostgresCustomerReturnLabelStore
               (input.carrierId !== preparedInput.carrierId ||
                 input.serviceCode !== preparedInput.serviceCode)) ||
             input.parcel.weightGrams !== shipment.parcel.weightGrams ||
-            !equalJson(input.shipFrom, shipment.shipFrom) ||
-            !equalJson(input.shipTo, shipment.shipTo))
+            !matchesSavedRequestAddress(input.shipFrom, shipment.shipFrom) ||
+            !matchesSavedRequestAddress(input.shipTo, shipment.shipTo))
         )
           throw new CustomerReturnIntakeError(
             "RETURN_LABEL_ATTEMPT_UNVERIFIED",
@@ -238,6 +247,7 @@ export class PostgresCustomerReturnLabelStore
       if (
         control?.paused === true || !current?.enabled ||
         current.warehouseId !== parcel.warehouse_snapshot.warehouseId ||
+        customerReturnWarehouseAddressType(current.warehouseAddressType) !== customerReturnWarehouseAddressType(parcel.warehouse_snapshot.addressType) ||
         !equalJson(current.destinationAddress, parcel.destination_address)
       )
         throw new CustomerReturnIntakeError(

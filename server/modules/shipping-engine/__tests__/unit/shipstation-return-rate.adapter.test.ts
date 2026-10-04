@@ -97,6 +97,29 @@ function fixture(body: unknown = response()) {
 afterEach(() => vi.useRealTimers());
 
 describe("return-rate requests", () => {
+  it.each([
+    [undefined, "unknown"], ["unknown", "unknown"], ["residential", "yes"], ["commercial", "no"],
+  ] as const)("uses %s classification identically in quotes and purchases without guessing from names", (addressType, expectedIndicator) => {
+    const input = structuredClone(INPUT);
+    input.shipment.shipFrom.addressType = addressType;
+    input.shipment.shipTo.addressType = addressType;
+    const before = structuredClone(input);
+    const quote = buildReturnRateRequest(input).shipment as Record<string, unknown>;
+    const purchase = buildReturnLabelRequest({ ...input.shipment, carrierId: "se-101", serviceCode: "ups_ground" }).shipment as Record<string, unknown>;
+    for (const side of ["ship_from", "ship_to"]) {
+      expect(quote[side]).toEqual(purchase[side]);
+      expect(quote[side]).toMatchObject({ address_residential_indicator: expectedIndicator });
+    }
+    expect(input).toEqual(before);
+  });
+  it.each(["business", "yes", "no", "", null])("rejects invalid address classification %s before either transport", async addressType => {
+    const input = { ...INPUT, shipment: { ...INPUT.shipment, shipTo: { ...INPUT.shipment.shipTo, addressType } } } as unknown as ReturnRateInput;
+    const { provider, fetchFn } = fixture();
+    await expect(provider.quote(input)).rejects.toMatchObject({ code: "RETURN_RATE_INPUT_INVALID", failureClass: "rejected" });
+    expect(() => buildReturnLabelRequest({ ...input.shipment, carrierId: "se-101", serviceCode: "ups_ground" }))
+      .toThrowError(expect.objectContaining({ code: "RETURN_LABEL_INPUT_INVALID" }));
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
   it("requests nonpersisted return quotes for every account and exact purchase addresses, dimensions and fractional pounds", async () => {
     const before = JSON.stringify(INPUT);
     const { provider, fetchFn } = fixture();

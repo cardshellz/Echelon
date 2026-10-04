@@ -11,6 +11,7 @@ import {
   type ReturnLabelRecord,
 } from "../application/return-label-provider.port";
 import { matchesShipStationReturnWeight, shipStationReturnWeightPounds } from "./shipstation-return-weight";
+import { shipStationReturnAddress } from "./shipstation-return-address";
 
 const API_ORIGIN = "https://api.shipstation.com";
 const API_PATH = "/v2";
@@ -58,6 +59,7 @@ const addressSchema = z.object({
   name: z.string(), phone: z.string().nullish(), company_name: z.string().nullish(),
   address_line1: z.string(), address_line2: z.string().nullish(), address_line3: z.string().nullish(),
   city_locality: z.string(), state_province: z.string(), postal_code: z.string(), country_code: z.string(),
+  address_residential_indicator: z.enum(["yes", "no", "unknown"]).nullish(),
 });
 const shipmentSchema = z.object({
   shipment_id: returnLabelProviderIdSchema,
@@ -230,25 +232,23 @@ export function buildReturnLabelRequest(rawInput: ReturnLabelInput): Record<stri
     shipment: {
       validate_address: "no_validation", external_shipment_id: input.externalShipmentId,
       carrier_id: input.carrierId, service_code: input.serviceCode,
-      ship_from: addressBody(input.shipFrom), ship_to: addressBody(input.shipTo),
+      ship_from: shipStationReturnAddress(input.shipFrom), ship_to: shipStationReturnAddress(input.shipTo),
       packages: [{ package_code: "package", weight: { value: weightPounds, unit: "pound" },
         dimensions: { ...input.parcel.dimensionsInches, unit: "inch" } }],
     },
   };
 }
 
-function addressBody(address: ReturnLabelAddress) {
-  return {
-    name: address.name, phone: address.phone, company_name: address.companyName,
-    address_line1: address.addressLine1, address_line2: address.addressLine2, address_line3: address.addressLine3,
-    city_locality: address.city, state_province: address.state, postal_code: address.postalCode, country_code: address.countryCode,
-  };
-}
-
 function sameAddress(actual: z.infer<typeof addressSchema>, expected: ReturnLabelAddress): boolean {
   const canonical = (value: string | null | undefined) => (value ?? "").trim().replace(/\s+/g, " ").toUpperCase();
-  const body = addressBody(expected);
-  return Object.entries(body).every(([key, value]) => canonical(actual[key as keyof typeof actual]) === canonical(value));
+  const { address_residential_indicator: requestedType, ...physicalAddress } = shipStationReturnAddress(expected);
+  // Older saved requests and provider readbacks may not contain classification.
+  // Always verify the physical address; an explicit opposite classification is
+  // an ambiguous result requiring reconciliation, never a second purchase.
+  const actualType = actual.address_residential_indicator;
+  const classificationMatches = requestedType === "unknown" || actualType == null || actualType === "unknown" || actualType === requestedType;
+  return classificationMatches && Object.entries(physicalAddress)
+    .every(([key, value]) => canonical(actual[key as keyof typeof actual]) === canonical(value));
 }
 
 function assertPackage(actual: z.infer<typeof packageSchema>, input: ReturnLabelInput): void {
