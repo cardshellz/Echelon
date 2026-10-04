@@ -29,6 +29,7 @@ import {
 // https://developer.walmart.com/file/mp/us/MP_ITEM_MATCH_Consolidated_Schema.zip
 import createSchema from "../fixtures/walmart-listing-sleeves.schema.json";
 import matchSchema from "../fixtures/walmart-listing-match.schema.json";
+import { createCatalogPublicImageUrl } from "../../../catalog/catalog-public-image";
 
 const account: ListingAccount = {
   channelId: 104,
@@ -163,6 +164,20 @@ function setup() {
 }
 
 describe("Walmart listing provider", () => {
+  it("includes an uploaded catalog photo as the third secondary image and preserves explicit listing overrides", async () => {
+    const { provider } = setup();
+    const uploaded = createCatalogPublicImageUrl({ CATALOG_PUBLIC_BASE_URL: "https://catalog.example.com" })(42, "ab".repeat(32));
+    const images = ["https://cdn.example.com/main.jpg", "https://cdn.example.com/second.jpg", "https://cdn.example.com/third.jpg", uploaded];
+    const prepared = await provider.prepare(account, { catalog: { ...catalog, images }, draft: draft(), priceCents: 1299 });
+    expect(prepared.issues).toEqual([]);
+    expect(prepared.payload.Visible).toMatchObject({ [type]: { mainImageUrl: images[0], productSecondaryImageURL: images.slice(1) } });
+
+    const override = ["https://cdn.example.com/custom.jpg"];
+    const custom = await provider.prepare(account, { catalog: { ...catalog, images }, draft: { ...draft(), images: override }, priceCents: 1299 });
+    expect(custom.issues).toEqual([]);
+    expect(custom.payload.Visible).toMatchObject({ [type]: { mainImageUrl: override[0] } });
+    expect(JSON.stringify(custom.payload)).not.toContain(uploaded);
+  });
   it("validates a new exact-unit listing against the current real product-type schema", async () => {
     const { provider } = setup();
     const prepared = await provider.prepare(account, {
