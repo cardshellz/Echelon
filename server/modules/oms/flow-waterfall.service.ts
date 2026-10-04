@@ -23,7 +23,14 @@
 
 import { sql } from "drizzle-orm";
 import { schedulerIsDisabled } from "../../infrastructure/scheduler-config";
-import { getChannelWritebackHealth, type ChannelWritebackHealth } from "./channel-writeback.service";
+import {
+  DROPSHIP_PACKAGE_WRITTEN_BACK,
+  SHIPPED_DROPSHIP_PACKAGE,
+  dropshipTrackingNotSentCountSql,
+  dropshipTrackingNotSentSampleSql,
+  getChannelWritebackHealth,
+  type ChannelWritebackHealth,
+} from "./channel-writeback.service";
 import {
   HELD_LINE_AGING_DAYS,
   allLinesHeldCountQuery,
@@ -1002,6 +1009,16 @@ const BASE_ISSUES: FlowIssueDef[] = [
     `,
   },
   {
+    // Dropship sales live in the vendor's own marketplace store, so the check
+    // above (Shopify and eBay orders) never sees them.
+    code: "DROPSHIP_TRACKING_NOT_SENT", kind: "stuck", stage: "writeback", severity: "critical",
+    message: "Shipped, but tracking not sent to the vendor's store",
+    why: "These dropship packages shipped over an hour ago, but the vendor's marketplace store has no tracking yet, so their buyer sees no shipping update. The command status says where each stands: none means no update was created yet (the hourly sweep creates it); pending or retry means it is being retried; review or dead means it stopped and needs a person. Read the last error; the vendor can also add the tracking in their store by hand.",
+    remediation: "MANUAL_REVIEW", replaySafe: false,
+    count: (win: any) => dropshipTrackingNotSentCountSql(win),
+    sample: (win: any) => dropshipTrackingNotSentSampleSql(win, 50),
+  },
+  {
     // Catches a channel push that is tied to a physical shipment but carries a
     // different tracking number than the shipment currently marked shipped.
     // This is intentionally shipment-scoped: an order-level last push cannot
@@ -1409,6 +1426,27 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
       WHERE all_shipments_written
     `));
 
+    // Dropship orders are written back to the vendor's store by the same
+    // channel commands; one counts once every shipped dropship package is done.
+    // The count above covers Shopify and eBay orders only, so none is counted twice.
+    const dropshipTrackingConfirmed = num(await tx.execute(sql`
+      WITH shipped_dropship_orders AS (
+        SELECT oo.id, BOOL_AND(${DROPSHIP_PACKAGE_WRITTEN_BACK}) AS all_packages_written
+        FROM oms.oms_orders oo
+        JOIN channels.channels c ON c.id = oo.channel_id
+        JOIN wms.orders wo ON ${LINK}
+        JOIN wms.outbound_shipments os ON os.order_id = wo.id
+        WHERE oo.ordered_at > ${win}
+          AND ${PHYSICAL_OMS_ORDER}
+          AND oo.status IN ('shipped', 'partially_shipped')
+          AND ${SHIPPED_DROPSHIP_PACKAGE}
+        GROUP BY oo.id
+      )
+      SELECT COUNT(*)::int AS count
+      FROM shipped_dropship_orders
+      WHERE all_packages_written
+    `));
+
     const channels = rows(await tx.execute(sql`SELECT COALESCE(c.provider,'unknown') AS provider, COUNT(*)::int AS entered FROM oms.oms_orders oo LEFT JOIN channels.channels c ON c.id = oo.channel_id WHERE oo.ordered_at > ${win} AND ${PHYSICAL_OMS_ORDER} GROUP BY 1 ORDER BY 2 DESC`)).map((r) => ({ provider: String(r.provider), entered: Number(r.entered) || 0 }));
     const channelIntake = rows(await tx.execute(sql`
       SELECT intake.channel_id AS "channelId",
@@ -1518,7 +1556,10 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
     return {
       generatedAt: new Date().toISOString(),
       windowDays,
-      funnel: { sourceObserved, entered, reachedWms, hasShipment, shipped, trackingConfirmed },
+      funnel: {
+        sourceObserved, entered, reachedWms, hasShipment, shipped,
+        trackingConfirmed: trackingConfirmed + dropshipTrackingConfirmed,
+      },
       channels,
       channelIntake,
       volumePerDay,

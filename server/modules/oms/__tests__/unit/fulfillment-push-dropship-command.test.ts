@@ -158,6 +158,7 @@ describe("pushDropshipTrackingForShipmentCommand", () => {
       shippedAt: SHIPPED_AT,
       idempotencyKey: "channel-fulfillment-command:9001",
       lineItems: [{ externalLineItemId: "110588014781-0", quantity: 2 }],
+      lastAttempt: false,
     });
     expect(events).toEqual([{
       orderId: 1013417,
@@ -176,6 +177,14 @@ describe("pushDropshipTrackingForShipmentCommand", () => {
         lineItems: [{ externalLineItemId: "110588014781-0", quantity: 2 }],
       },
     }]);
+  });
+
+  it("passes the worker's last attempt to the dropship push", async () => {
+    const { input, service, tracking } = setup();
+
+    await service.pushDropshipTrackingForShipmentCommand(input, { lastAttempt: true });
+
+    expect(tracking.pushForOmsOrder).toHaveBeenCalledWith(expect.objectContaining({ lastAttempt: true }));
   });
 
   it("sums items per marketplace line, sorts the lines, and names no single shipment for a multi-shipment package", async () => {

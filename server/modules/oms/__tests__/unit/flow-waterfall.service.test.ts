@@ -1,7 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { getFlowBucketSamples, getFlowWaterfall } from "../../flow-waterfall.service";
+import { sql } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
+import {
+  dropshipTrackingNotSentCountSql,
+  dropshipTrackingNotSentSampleSql,
+} from "../../channel-writeback.service";
+import { FLOW_ISSUES, getFlowBucketSamples, getFlowWaterfall } from "../../flow-waterfall.service";
 
 const FLOW_WATERFALL_SRC = readFileSync(
   resolve(__dirname, "../../flow-waterfall.service.ts"),
@@ -324,5 +330,93 @@ describe("getFlowWaterfall", () => {
     expect(groupedPassBlock).toContain("dead_retry_scopes");
     expect(groupedPassBlock).toContain("GROUP BY 1, 2");
     expect(groupedPassBlock).toContain("FROM dead_retry_scopes");
+  });
+});
+
+describe("dropship tracking on the Flow Monitor", () => {
+  const dialect = new PgDialect();
+  const render = (query: any) => {
+    const { sql: text, params } = dialect.sqlToQuery(query);
+    return JSON.stringify({ text, params });
+  };
+  // The same window expression getFlowWaterfall and getFlowBucketSamples build.
+  const windowOf = (days: number) => sql`NOW() - make_interval(days => ${days})`;
+  const notSentIssue = () => {
+    const issue = FLOW_ISSUES.find((entry) => entry.code === "DROPSHIP_TRACKING_NOT_SENT");
+    if (!issue) throw new Error("DROPSHIP_TRACKING_NOT_SENT is not registered");
+    return issue;
+  };
+
+  it("lists shipped dropship packages without vendor-store tracking under Channel updated, with no replay", () => {
+    const issue = notSentIssue();
+
+    expect(issue).toMatchObject({
+      kind: "stuck",
+      stage: "writeback",
+      severity: "critical",
+      remediation: "MANUAL_REVIEW",
+      replaySafe: false,
+    });
+    // One query shape for the Flow Monitor and ops health: the registry entry
+    // runs the shared builders, the sample capped at 50 like its neighbours.
+    expect(render(issue.count(windowOf(30)))).toBe(render(dropshipTrackingNotSentCountSql(windowOf(30))));
+    expect(render(issue.sample(windowOf(30)))).toBe(render(dropshipTrackingNotSentSampleSql(windowOf(30), 50)));
+  });
+
+  it("surfaces the issue count and adds written-back dropship orders to tracking confirmed", async () => {
+    const notSentCount = render(dropshipTrackingNotSentCountSql(windowOf(14)));
+    const execute = vi.fn(async (query: any) => {
+      const rendered = render(query);
+      if (rendered === notSentCount) return { rows: [{ count: 4 }] };
+      if (rendered.includes("shipped_dropship_orders")) return { rows: [{ count: 2 }] };
+      if (rendered.includes("WITH shipped_orders AS") && rendered.includes("all_shipments_written")) {
+        return { rows: [{ count: 3 }] };
+      }
+      return { rows: [{ count: 0 }] };
+    });
+    const db = { transaction: async (fn: (tx: any) => any) => fn({ execute }) };
+
+    const result = await getFlowWaterfall(db, { windowDays: 14 });
+
+    // 3 Shopify/eBay orders + 2 dropship orders; neither query counts the other's channel.
+    expect(result.funnel.trackingConfirmed).toBe(5);
+    expect(result.issues).toContainEqual(expect.objectContaining({
+      code: "DROPSHIP_TRACKING_NOT_SENT",
+      stage: "writeback",
+      severity: "critical",
+      count: 4,
+      replaySafe: false,
+    }));
+  });
+
+  it("counts a dropship order as confirmed only once every shipped dropship package is written back", () => {
+    const start = FLOW_WATERFALL_SRC.indexOf("const dropshipTrackingConfirmed");
+    const block = FLOW_WATERFALL_SRC.slice(start, FLOW_WATERFALL_SRC.indexOf("`));", start));
+
+    expect(block).toContain("BOOL_AND(${DROPSHIP_PACKAGE_WRITTEN_BACK}) AS all_packages_written");
+    expect(block).toContain("AND ${SHIPPED_DROPSHIP_PACKAGE}");
+    expect(block).toContain("oo.ordered_at > ${win}");
+    expect(block).toContain("${PHYSICAL_OMS_ORDER}");
+    expect(block).toContain("WHERE all_packages_written");
+  });
+
+  it("returns the evidence rows from the shared sample query", async () => {
+    const sampleQuery = render(dropshipTrackingNotSentSampleSql(windowOf(30), 50));
+    const row = {
+      shipment_id: 18582,
+      oms_order_id: 1013417,
+      order_number: "11-11111-11111",
+      wms_order_number: "22039",
+      command_status: "none",
+    };
+    const execute = vi.fn(async (query: any) => (
+      render(query) === sampleQuery ? { rows: [row] } : { rows: [] }
+    ));
+    const db = { transaction: async (fn: (tx: any) => any) => fn({ execute }) };
+
+    const result = await getFlowBucketSamples(db, "DROPSHIP_TRACKING_NOT_SENT");
+
+    expect(result.rows).toEqual([row]);
+    expect(result.replayActivity).toEqual([]);
   });
 });

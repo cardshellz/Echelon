@@ -157,6 +157,13 @@ function isReviewRequired(error: unknown): boolean {
     || errorCode(error) === EBAY_FULFILLMENT_IDEMPOTENCY_CONFLICT;
 }
 
+/** After this attempt the worker gives up: a retryable failure is dead-lettered. */
+export function isFinalChannelFulfillmentAttempt(
+  command: Pick<ClaimedChannelFulfillmentCommand, "attemptNumber" | "maxAttempts">,
+): boolean {
+  return command.attemptNumber >= command.maxAttempts;
+}
+
 export function calculateChannelFulfillmentRetryAt(
   completedAt: Date,
   attemptNumber: number,
@@ -339,7 +346,11 @@ export function createCompatibilityChannelFulfillmentProviderExecutor(
             code: "CHANNEL_PROVIDER_NOT_READY",
           });
         }
-        const pushed = await fulfillmentPush.pushDropshipTrackingForShipmentCommand(providerInput);
+        // The vendor is told about a failure only the first time and the last
+        // time, so the push needs to know when the worker will stop retrying.
+        const pushed = await fulfillmentPush.pushDropshipTrackingForShipmentCommand(providerInput, {
+          lastAttempt: isFinalChannelFulfillmentAttempt(command),
+        });
         if (
           (pushed?.outcome !== "success" && pushed?.outcome !== "ignored")
           || !Number.isSafeInteger(pushed.dropshipTrackingPushId)
@@ -478,7 +489,7 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
           continue;
         }
 
-        const exhausted = command.attemptNumber >= command.maxAttempts;
+        const exhausted = isFinalChannelFulfillmentAttempt(command);
         await dependencies.repository.completeAttempt({
           commandId: command.id,
           leaseToken: command.leaseToken,

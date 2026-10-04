@@ -7160,10 +7160,22 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       [shipmentId],
     );
     const repository = createChannelFulfillmentAuthorityRepository(getTestDb());
-    const { findDropshipWritebackCandidates } = await import("../../../oms/channel-writeback.service");
+    const {
+      dropshipTrackingNotSentCountSql,
+      dropshipTrackingNotSentSampleSql,
+      findDropshipWritebackCandidates,
+    } = await import("../../../oms/channel-writeback.service");
+    const { sql } = await import("drizzle-orm");
     const catchUpCandidates = () => findDropshipWritebackCandidates(getTestDb(), {
       minAgeMinutes: 1, maxAgeDays: 30, limit: 10,
     });
+    // The ops-health window; the Flow Monitor runs the same queries.
+    const healthWindow = sql`NOW() - INTERVAL '14 days'`;
+    const healthCheck = async () => ({
+      count: (await getTestDb().execute(dropshipTrackingNotSentCountSql(healthWindow))).rows[0]?.count,
+      sample: (await getTestDb().execute(dropshipTrackingNotSentSampleSql(healthWindow, 10))).rows,
+    });
+    await pool.query("UPDATE oms.oms_orders SET status = 'shipped' WHERE id = $1", [omsOrderId]);
 
     // As for order 22039: the package was recorded before dropship lines had a
     // writeback route, so it has no channel command.
@@ -7174,6 +7186,17 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     });
     expect(recorded.channelCommands).toEqual([]);
     expect(await catchUpCandidates()).toEqual([expect.objectContaining({ shipment_id: shipmentId, oms_order_id: omsOrderId })]);
+    // The health checks show it as not sent, with no command yet. (oms_order_id
+    // is a bigint, so node-postgres returns it as a string.)
+    expect(await healthCheck()).toEqual({
+      count: 1,
+      sample: [expect.objectContaining({
+        shipment_id: shipmentId,
+        oms_order_id: String(omsOrderId),
+        tracking_number: "1Z0000000000044010",
+        command_status: "none",
+      })],
+    });
     // An ordinary manual-channel line is never a dropship catch-up candidate.
     await pool.query("UPDATE oms.oms_order_lines SET fulfillment_provider = NULL");
     expect(await catchUpCandidates()).toEqual([]);
@@ -7232,6 +7255,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       shippedAt: expect.any(Date),
       idempotencyKey: `channel-fulfillment-command:${commandId}`,
       lineItems: [{ externalLineItemId: "110588014781-0", quantity: 2 }],
+      lastAttempt: false,
     });
     // The dropship service rejects anything but a valid Date.
     const pushedShippedAt = tracking.pushForOmsOrder.mock.calls[0][0].shippedAt;
@@ -7246,8 +7270,10 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       fulfillmentId: "ebay-fulfillment-31",
     }) }]);
 
-    // Settled: the catch-up no longer sees it, and another sweep pushes nothing.
+    // Settled: the catch-up and the health checks no longer see it, and
+    // another sweep pushes nothing.
     expect(await catchUpCandidates()).toEqual([]);
+    expect(await healthCheck()).toEqual({ count: 0, sample: [] });
     const replay = await service.ensureLegacyShipment(shipmentId, {
       executeImmediately: true,
       source: CHANNEL_FULFILLMENT_REPAIR_SOURCES.outboundSweep,

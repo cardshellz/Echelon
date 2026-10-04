@@ -187,6 +187,88 @@ describe("DropshipMarketplaceTrackingService", () => {
   });
 });
 
+describe("DropshipMarketplaceTrackingService failure notices", () => {
+  const retryableError = () => new DropshipError(
+    "DROPSHIP_EBAY_TRACKING_HTTP_ERROR",
+    "eBay tracking push failed with HTTP 503.",
+    { retryable: true },
+  );
+
+  async function failOnce(input: {
+    error: Error;
+    failedAttemptCount: number;
+    lastAttempt?: boolean;
+  }) {
+    const repository = new FakeTrackingRepository({
+      status: "claimed",
+      push: makePush({ status: "processing", attemptCount: input.failedAttemptCount }),
+      request: makeRequest(),
+    }, input.failedAttemptCount);
+    const notificationSender = new FakeNotificationSender();
+    const service = newService({
+      repository,
+      provider: new FakeTrackingProvider(input.error),
+      notificationSender,
+    });
+    await expect(service.pushForOmsOrder({
+      ...makeInput(),
+      ...(input.lastAttempt === undefined ? {} : { lastAttempt: input.lastAttempt }),
+    })).rejects.toBe(input.error);
+    return { repository, sent: notificationSender.sent };
+  }
+
+  it("tells the vendor once that a first retryable failure will be retried", async () => {
+    const { repository, sent } = await failOnce({ error: retryableError(), failedAttemptCount: 1 });
+
+    expect(repository.failInput).toMatchObject({ retryable: true });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      critical: false,
+      title: "Dropship tracking push retrying",
+      payload: { retryable: true, failureCode: "DROPSHIP_EBAY_TRACKING_HTTP_ERROR" },
+    });
+  });
+
+  it("records a later retryable failure without telling the vendor again", async () => {
+    const { repository, sent } = await failOnce({ error: retryableError(), failedAttemptCount: 2 });
+
+    expect(repository.failInput).toMatchObject({
+      pushId: 40,
+      code: "DROPSHIP_EBAY_TRACKING_HTTP_ERROR",
+      retryable: true,
+    });
+    expect(sent).toEqual([]);
+  });
+
+  it("tells the vendor the push failed for good on the caller's last attempt", async () => {
+    const { repository, sent } = await failOnce({
+      error: retryableError(),
+      failedAttemptCount: 12,
+      lastAttempt: true,
+    });
+
+    // The push row keeps the error's own class; only the notice is final.
+    expect(repository.failInput).toMatchObject({ retryable: true });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      critical: true,
+      title: "Dropship tracking push failed",
+      idempotencyKey: "tracking-push-failed:40:12:DROPSHIP_EBAY_TRACKING_HTTP_ERROR",
+      payload: { retryable: false },
+    });
+  });
+
+  it("tells the vendor about a failure that can never succeed, whatever the attempt", async () => {
+    const { sent } = await failOnce({
+      error: new DropshipError("DROPSHIP_EBAY_TRACKING_HTTP_ERROR", "HTTP 400", { retryable: false }),
+      failedAttemptCount: 4,
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ critical: true, title: "Dropship tracking push failed" });
+  });
+});
+
 describe("DropshipMarketplaceTrackingService shipped lines", () => {
   it("passes caller-named shipped lines to the claim unchanged", async () => {
     const repository = new FakeTrackingRepository({
@@ -302,7 +384,10 @@ class FakeTrackingRepository implements DropshipMarketplaceTrackingRepository {
   completeInput: Parameters<DropshipMarketplaceTrackingRepository["completePush"]>[0] | null = null;
   failInput: Parameters<DropshipMarketplaceTrackingRepository["failPush"]>[0] | null = null;
 
-  constructor(private readonly claim: DropshipMarketplaceTrackingClaim) {}
+  constructor(
+    private readonly claim: DropshipMarketplaceTrackingClaim,
+    private readonly failedAttemptCount = 1,
+  ) {}
 
   async claimForOmsOrder(
     input: Parameters<DropshipMarketplaceTrackingRepository["claimForOmsOrder"]>[0],
@@ -325,7 +410,7 @@ class FakeTrackingRepository implements DropshipMarketplaceTrackingRepository {
     input: Parameters<DropshipMarketplaceTrackingRepository["failPush"]>[0],
   ): Promise<DropshipMarketplaceTrackingPushRecord> {
     this.failInput = input;
-    return makePush({ status: "failed", attemptCount: 1 });
+    return makePush({ status: "failed", attemptCount: this.failedAttemptCount });
   }
 }
 

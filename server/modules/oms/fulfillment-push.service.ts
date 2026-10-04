@@ -410,6 +410,7 @@ interface DropshipMarketplaceTrackingServiceHandle {
     shippedAt: Date;
     idempotencyKey?: string;
     lineItems?: readonly { externalLineItemId: string; quantity: number }[];
+    lastAttempt?: boolean;
   }): Promise<{
     status: DropshipMarketplaceTrackingPushStatus;
     push?: {
@@ -1901,13 +1902,14 @@ export function createFulfillmentPushService(
    */
   async function pushDropshipTrackingForShipmentCommand(
     input: ChannelFulfillmentProviderCommandInput,
+    options: { readonly lastAttempt?: boolean } = {},
   ): Promise<DropshipTrackingCommandPushResult> {
     const command = normalizeChannelCommandInput(input);
     // Every channel write for an order shares this lock, as in the eBay and
     // Shopify command adapters.
     const result = await runExclusive(
       shopifyOrderFulfillmentLockId(command.omsOrderId),
-      () => pushDropshipCommandExclusive(command),
+      () => pushDropshipCommandExclusive(command, options.lastAttempt === true),
     );
     if (result === null) {
       throw new ChannelFulfillmentProviderError(
@@ -1921,6 +1923,7 @@ export function createFulfillmentPushService(
 
   async function pushDropshipCommandExclusive(
     command: ChannelFulfillmentProviderCommandInput,
+    lastAttempt: boolean,
   ): Promise<DropshipTrackingCommandPushResult> {
     // The vendor's store has no way to swap one tracking number for another.
     if (command.trackingReplacement === true) {
@@ -1958,6 +1961,7 @@ export function createFulfillmentPushService(
         shippedAt: command.shippedAt,
         idempotencyKey: buildChannelFulfillmentTrackingIdempotencyKey(command.commandId),
         lineItems,
+        lastAttempt,
       });
     } catch (error) {
       throw toDropshipTrackingProviderError(error);

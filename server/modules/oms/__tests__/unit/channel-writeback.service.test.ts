@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import {
+  dropshipTrackingNotSentCountSql,
+  dropshipTrackingNotSentSampleSql,
   findChannelWritebackCandidates,
   findDropshipWritebackCandidates,
   getChannelWritebackHealth,
@@ -191,7 +194,7 @@ describe("findDropshipWritebackCandidates", () => {
     expect(text).toContain("push.metadata->'legacyWmsShipmentIds' @> jsonb_build_array(os.id)");
     expect(text).not.toContain("push_status");
     expect(text).toContain("ORDER BY os.shipped_at ASC, os.id ASC");
-    expect(params).toEqual([60, 30, "manual", "dropship", "dropship", 100]);
+    expect(params).toEqual(["manual", "dropship", 60, 30, "dropship", 100]);
   });
 
   it("bounds its inputs and drops malformed rows", async () => {
@@ -218,6 +221,42 @@ describe("findDropshipWritebackCandidates", () => {
     }]);
     const { params } = dialect.sqlToQuery(execute.mock.calls[0]![0] as any);
     // Defaults for invalid bounds; the window is capped at a year.
-    expect(params).toEqual([60, 365, "manual", "dropship", "dropship", 50]);
+    expect(params).toEqual(["manual", "dropship", 60, 365, "dropship", 50]);
+  });
+});
+
+describe("dropship tracking-not-sent check", () => {
+  it("counts shipped dropship packages over an hour old with no finished dropship command", () => {
+    const { sql: text, params } = dialect.sqlToQuery(
+      dropshipTrackingNotSentCountSql(sql`NOW() - INTERVAL '14 days'`) as any,
+    );
+
+    expect(text).toContain("SELECT COUNT(*)::int AS count");
+    expect(text).toContain("LOWER(BTRIM(c.provider)) = $");
+    expect(text).toContain("oo.status IN ('shipped', 'partially_shipped')");
+    expect(text).toContain("os.shipped_at < NOW() - INTERVAL '1 hour'");
+    expect(text).toContain("os.shipped_at > NOW() - INTERVAL '14 days'");
+    expect(text).toContain("AND NOT");
+    expect(text).toContain("push.push_status IN ('success', 'ignored')");
+    expect(params).toEqual(["manual", "dropship", "dropship"]);
+  });
+
+  it("shows each package's latest command status and last error", () => {
+    const { sql: text, params } = dialect.sqlToQuery(
+      dropshipTrackingNotSentSampleSql(sql`NOW() - INTERVAL '14 days'`, 10) as any,
+    );
+
+    expect(text).toContain("COALESCE(latest_command.push_status, 'none') AS command_status");
+    expect(text).toContain("LEFT(latest_command.last_error, 300) AS last_error");
+    expect(text).toContain("ORDER BY push.id DESC");
+    expect(text).toContain("ORDER BY os.shipped_at ASC, os.id ASC");
+    expect(params).toEqual(["dropship", "manual", "dropship", "dropship", 10]);
+  });
+
+  it("bounds the sample size", () => {
+    const { params } = dialect.sqlToQuery(
+      dropshipTrackingNotSentSampleSql(sql`NOW()`, 100_000) as any,
+    );
+    expect(params[params.length - 1]).toBe(500);
   });
 });

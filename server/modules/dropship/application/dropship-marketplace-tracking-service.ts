@@ -1,4 +1,5 @@
 import { DropshipError } from "../domain/errors";
+import { decideTrackingFailureNotice } from "../domain/tracking-failure-notice";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type {
@@ -121,6 +122,11 @@ export interface PushDropshipTrackingForOmsOrderInput {
    * their command lines here; without it, lines are read from the WMS shipment.
    */
   lineItems?: readonly DropshipTrackingShippedLine[];
+  /**
+   * The caller will not try this push again, so a retryable failure is
+   * reported to the vendor as final.
+   */
+  lastAttempt?: boolean;
 }
 
 export type PushDropshipTrackingForOmsOrderResult =
@@ -214,11 +220,18 @@ export class DropshipMarketplaceTrackingService {
         retryable,
         now: this.deps.clock.now(),
       });
-      await this.notifyTrackingFailed(failedPush, {
-        code,
-        message: error?.message ?? String(error),
+      const notice = decideTrackingFailureNotice({
         retryable,
+        attemptCount: failedPush.attemptCount,
+        lastAttempt: input.lastAttempt === true,
       });
+      if (notice !== "none") {
+        await this.notifyTrackingFailed(failedPush, {
+          code,
+          message: error?.message ?? String(error),
+          willRetry: notice === "retrying",
+        });
+      }
       throw error;
     }
   }
@@ -248,26 +261,27 @@ export class DropshipMarketplaceTrackingService {
     });
   }
 
+  /** willRetry is false when this is the final failure the vendor will hear about. */
   private async notifyTrackingFailed(
     push: DropshipMarketplaceTrackingPushRecord,
     failure: {
       code: string;
       message: string;
-      retryable: boolean;
+      willRetry: boolean;
     },
   ): Promise<void> {
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: push.vendorId,
       eventType: DROPSHIP_NOTIFICATION_EVENTS.TRACKING_PUSH_FAILED,
-      critical: !failure.retryable,
+      critical: !failure.willRetry,
       channels: ["email", "in_app"],
-      title: failure.retryable ? "Dropship tracking push retrying" : "Dropship tracking push failed",
+      title: failure.willRetry ? "Dropship tracking push retrying" : "Dropship tracking push failed",
       message: `Tracking ${push.trackingNumber} could not be pushed to ${push.platform} for order ${push.externalOrderId}: ${failure.message}`,
       payload: {
         ...buildTrackingNotificationPayload(push),
         failureCode: failure.code,
         failureMessage: failure.message,
-        retryable: failure.retryable,
+        retryable: failure.willRetry,
       },
       idempotencyKey: `tracking-push-failed:${push.pushId}:${push.attemptCount}:${failure.code}`,
     }, {

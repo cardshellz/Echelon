@@ -645,7 +645,7 @@ describe("channel fulfillment authority service", () => {
           channelOrderLineId: "110588014781-0",
           quantity: 2,
         })],
-      }));
+      }), { lastAttempt: false });
       expect(result).toEqual({
         outcome: "success",
         providerResponseId: "ebay-fulfillment-1",
@@ -655,6 +655,23 @@ describe("channel fulfillment authority service", () => {
           alreadySatisfied: false,
         },
       });
+    });
+
+    it("tells the dropship push when this is the worker's last attempt", async () => {
+      const pushDropshipTrackingForShipmentCommand = vi.fn().mockResolvedValue({
+        outcome: "success", dropshipTrackingPushId: 77, externalFulfillmentId: null, alreadySatisfied: false,
+      });
+      const executor = createCompatibilityChannelFulfillmentProviderExecutor({ pushDropshipTrackingForShipmentCommand });
+
+      await executor.execute(dropshipCommand({ attemptNumber: 1, maxAttempts: 12 }));
+      await executor.execute(dropshipCommand({ attemptNumber: 11, maxAttempts: 12 }));
+      await executor.execute(dropshipCommand({ attemptNumber: 12, maxAttempts: 12 }));
+
+      expect(pushDropshipTrackingForShipmentCommand.mock.calls.map(([, options]) => options)).toEqual([
+        { lastAttempt: false },
+        { lastAttempt: false },
+        { lastAttempt: true },
+      ]);
     });
 
     it("records a replayed push as ignored, never as a second success", async () => {

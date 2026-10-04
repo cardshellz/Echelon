@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { logger } from "../../../../platform/observability/logger";
 import {
   recoverStaleChannelFulfillmentReceipts,
@@ -12,6 +13,13 @@ function queryText(query: any): string {
   return (query?.queryChunks ?? [])
     .flatMap((chunk: any) => chunk?.value ?? [])
     .join(" ");
+}
+
+const dialect = new PgDialect();
+
+/** The full statement text, including SQL fragments nested in the query. */
+function renderedText(query: any): string {
+  return dialect.sqlToQuery(query).sql;
 }
 
 function canonicalHandoffResult(options: { retryScheduled?: number } = {}) {
@@ -472,7 +480,7 @@ describe("dropship writeback catch-up", () => {
   function dropshipCandidateDb(rows: Array<Record<string, unknown>>) {
     return {
       execute: vi.fn(async (query: any) => {
-        const text = queryText(query);
+        const text = renderedText(query);
         if (text.includes(DROPSHIP_CANDIDATES) && text.includes("jsonb_build_array(os.id)")) {
           return { rows };
         }
@@ -561,7 +569,7 @@ describe("dropship writeback catch-up", () => {
       const ensureLegacyShipment = vi.fn(async () => canonicalHandoffResult());
       const execute = vi.fn(async (query: any) => {
         const text = queryText(query);
-        if (text.includes("jsonb_build_array(os.id)")) throw new Error("catch-up read failed");
+        if (renderedText(query).includes("jsonb_build_array(os.id)")) throw new Error("catch-up read failed");
         if (text.includes("FROM shipped_channel_shipments")) {
           return {
             rows: [{

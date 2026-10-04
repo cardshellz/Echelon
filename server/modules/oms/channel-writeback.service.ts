@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { wmsOmsOrderLinkSql } from "./oms-wms-order-link.sql";
 import {
   DROPSHIP_LINE_FULFILLMENT_PROVIDER,
@@ -461,17 +461,74 @@ export interface DropshipWritebackCandidateOptions {
   limit?: number;
 }
 
+/** One WMS package and its orders. Aliases: os, wo, oo, c. */
+const PACKAGE_ORDER_JOINS = sql`
+  FROM wms.outbound_shipments os
+  JOIN wms.orders wo ON wo.id = os.order_id
+  JOIN oms.oms_orders oo ON ${wmsOmsOrderLinkSql(sql`oo.id`, {
+    source: sql`wo.source`,
+    omsFulfillmentOrderId: sql`wo.oms_fulfillment_order_id`,
+    legacySourceTableId: sql`wo.source_table_id`,
+  })}
+  JOIN channels.channels c ON c.id = oo.channel_id
+`;
+
+/**
+ * A shipped dropship package, using the PACKAGE_ORDER_JOINS aliases: an order
+ * on the internal Dropship OMS channel ('manual') with a live 'dropship'
+ * customer line in the package, and tracking and carrier recorded. This
+ * mirrors resolveChannelWritebackProvider; the writeback policy still decides
+ * each line when the package is materialized.
+ */
+export const SHIPPED_DROPSHIP_PACKAGE = sql`
+  os.status = 'shipped'
+  AND os.shipped_at IS NOT NULL
+  AND NULLIF(BTRIM(os.tracking_number), '') IS NOT NULL
+  AND NULLIF(BTRIM(os.carrier), '') IS NOT NULL
+  AND LOWER(BTRIM(c.provider)) = ${DROPSHIP_ORDER_CHANNEL_PROVIDER}
+  AND EXISTS (
+    SELECT 1
+    FROM wms.outbound_shipment_items osi
+    JOIN wms.order_items oi ON oi.id = osi.order_item_id
+    JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+    WHERE osi.shipment_id = os.id
+      AND osi.shipment_item_purpose = 'customer_fulfillment'
+      AND osi.qty > 0
+      AND COALESCE(oi.status, 'pending') <> 'cancelled'
+      AND ol.order_id = oo.id
+      AND LOWER(BTRIM(ol.fulfillment_provider)) = ${DROPSHIP_LINE_FULFILLMENT_PROVIDER}
+  )
+`;
+
+/** Any dropship writeback command for the package, whatever its status. */
+const DROPSHIP_COMMAND_EXISTS = sql`
+  EXISTS (
+    SELECT 1
+    FROM oms.channel_fulfillment_pushes push
+    WHERE push.oms_order_id = oo.id
+      AND push.channel_provider = ${DROPSHIP_WRITEBACK_PROVIDER}
+      AND push.metadata->'legacyWmsShipmentIds' @> jsonb_build_array(os.id)
+  )
+`;
+
+/** The vendor's store was updated for the package: its dropship command finished. */
+export const DROPSHIP_PACKAGE_WRITTEN_BACK = sql`
+  EXISTS (
+    SELECT 1
+    FROM oms.channel_fulfillment_pushes push
+    WHERE push.oms_order_id = oo.id
+      AND push.channel_provider = ${DROPSHIP_WRITEBACK_PROVIDER}
+      AND push.metadata->'legacyWmsShipmentIds' @> jsonb_build_array(os.id)
+      AND push.push_status IN ('success', 'ignored')
+  )
+`;
+
 /**
  * Shipped dropship packages that have no dropship writeback command at all,
  * e.g. packages that shipped before dropship lines were written back to the
  * vendor's store. A package with any dropship command, whatever its status,
  * belongs to the command worker and is never picked up here, so a command in
  * review or dead-lettered is not retried by the sweep.
- *
- * The match mirrors resolveChannelWritebackProvider: an order on the internal
- * Dropship OMS channel ('manual') with a 'dropship' customer line in the
- * package. The writeback policy still decides every line when the package is
- * materialized.
  */
 export async function findDropshipWritebackCandidates(
   db: any,
@@ -488,40 +545,11 @@ export async function findDropshipWritebackCandidates(
       oo.id AS oms_order_id,
       wo.order_number,
       os.shipped_at
-    FROM wms.outbound_shipments os
-    JOIN wms.orders wo ON wo.id = os.order_id
-    JOIN oms.oms_orders oo ON ${wmsOmsOrderLinkSql(sql`oo.id`, {
-      source: sql`wo.source`,
-      omsFulfillmentOrderId: sql`wo.oms_fulfillment_order_id`,
-      legacySourceTableId: sql`wo.source_table_id`,
-    })}
-    JOIN channels.channels c ON c.id = oo.channel_id
-    WHERE os.status = 'shipped'
-      AND os.shipped_at IS NOT NULL
+    ${PACKAGE_ORDER_JOINS}
+    WHERE ${SHIPPED_DROPSHIP_PACKAGE}
       AND os.shipped_at < NOW() - (${minAgeMinutes} * INTERVAL '1 minute')
       AND os.shipped_at > NOW() - make_interval(days => ${maxAgeDays})
-      AND NULLIF(BTRIM(os.tracking_number), '') IS NOT NULL
-      AND NULLIF(BTRIM(os.carrier), '') IS NOT NULL
-      AND LOWER(BTRIM(c.provider)) = ${DROPSHIP_ORDER_CHANNEL_PROVIDER}
-      AND EXISTS (
-        SELECT 1
-        FROM wms.outbound_shipment_items osi
-        JOIN wms.order_items oi ON oi.id = osi.order_item_id
-        JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
-        WHERE osi.shipment_id = os.id
-          AND osi.shipment_item_purpose = 'customer_fulfillment'
-          AND osi.qty > 0
-          AND COALESCE(oi.status, 'pending') <> 'cancelled'
-          AND ol.order_id = oo.id
-          AND LOWER(BTRIM(ol.fulfillment_provider)) = ${DROPSHIP_LINE_FULFILLMENT_PROVIDER}
-      )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM oms.channel_fulfillment_pushes push
-        WHERE push.oms_order_id = oo.id
-          AND push.channel_provider = ${DROPSHIP_WRITEBACK_PROVIDER}
-          AND push.metadata->'legacyWmsShipmentIds' @> jsonb_build_array(os.id)
-      )
+      AND NOT ${DROPSHIP_COMMAND_EXISTS}
     ORDER BY os.shipped_at ASC, os.id ASC
     LIMIT ${limit}
   `);
@@ -535,4 +563,62 @@ export async function findDropshipWritebackCandidates(
       order_number: row.order_number ?? null,
       shipped_at: row.shipped_at ?? null,
     }));
+}
+
+/**
+ * Shipped dropship packages, shipped after `since` and over an hour ago (the
+ * same grace as the Shopify and eBay check), whose vendor store has not been
+ * updated. Cancelled and refunded orders are left out, as in that check.
+ */
+function dropshipTrackingNotSentWhere(since: SQL): SQL {
+  return sql`
+    ${SHIPPED_DROPSHIP_PACKAGE}
+    AND oo.status IN ('shipped', 'partially_shipped')
+    AND os.shipped_at < NOW() - INTERVAL '1 hour'
+    AND os.shipped_at > ${since}
+    AND NOT ${DROPSHIP_PACKAGE_WRITTEN_BACK}
+  `;
+}
+
+export function dropshipTrackingNotSentCountSql(since: SQL): SQL {
+  return sql`
+    SELECT COUNT(*)::int AS count
+    ${PACKAGE_ORDER_JOINS}
+    WHERE ${dropshipTrackingNotSentWhere(since)}
+  `;
+}
+
+/**
+ * The same packages with where each one stands: command_status is 'none'
+ * before the catch-up creates a command, otherwise the latest command's status
+ * (pending, retry, processing, review or dead) and its last error. order_number
+ * is the vendor's marketplace order number; wms_order_number is the warehouse's.
+ */
+export function dropshipTrackingNotSentSampleSql(since: SQL, limit: number): SQL {
+  return sql`
+    SELECT
+      os.id AS shipment_id,
+      oo.id AS oms_order_id,
+      oo.external_order_number AS order_number,
+      wo.order_number AS wms_order_number,
+      os.tracking_number,
+      os.shipped_at AS at,
+      COALESCE(latest_command.push_status, 'none') AS command_status,
+      latest_command.attempt_count AS command_attempts,
+      latest_command.last_error_code,
+      LEFT(latest_command.last_error, 300) AS last_error
+    ${PACKAGE_ORDER_JOINS}
+    LEFT JOIN LATERAL (
+      SELECT push.push_status, push.attempt_count, push.last_error_code, push.last_error
+      FROM oms.channel_fulfillment_pushes push
+      WHERE push.oms_order_id = oo.id
+        AND push.channel_provider = ${DROPSHIP_WRITEBACK_PROVIDER}
+        AND push.metadata->'legacyWmsShipmentIds' @> jsonb_build_array(os.id)
+      ORDER BY push.id DESC
+      LIMIT 1
+    ) latest_command ON TRUE
+    WHERE ${dropshipTrackingNotSentWhere(since)}
+    ORDER BY os.shipped_at ASC, os.id ASC
+    LIMIT ${normalizedLimit(limit)}
+  `;
 }
