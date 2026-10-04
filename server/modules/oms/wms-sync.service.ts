@@ -15,6 +15,7 @@ import { sql, eq, and, notInArray } from "drizzle-orm";
 import { CountryCodeValidationError, parseCountryCode } from "@shared/country-code";
 import { omsOrders, omsOrderLines } from "@shared/schema/oms.schema";
 import {
+  channels,
   channelWarehouseAssignments,
   outboundShipments,
   productLocations,
@@ -37,6 +38,19 @@ import {
   type PickPriorityPlan,
   type PickPriorityPlanSource,
 } from "./dropship-order-priority";
+import {
+  buildMemberResolverDryRunRecord,
+  legacyMatchSource,
+  MEMBER_RESOLVER_DRY_RUN_METADATA_KEY,
+  type DryRunResolverResult,
+  type LegacyMemberMatch,
+  type MemberResolverDryRunRecord,
+} from "./member-resolver-dry-run";
+import {
+  memberKeyForChannelOrder,
+  MembershipResolverError,
+  type MemberResolver,
+} from "../membership";
 import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import { omsOrderEvents } from "@shared/schema/oms.schema";
 import type { ServiceRegistry } from "../../services";
@@ -474,6 +488,11 @@ interface WmsSyncServices {
   fulfillmentRouter: any;
   /** Resolves the static internal Dropship OMS channel; Dropship orders bypass the router. */
   dropshipOmsChannel: { resolveChannelId(): Promise<number> };
+  /**
+   * The shared member resolver (server/modules/membership). Runs only as a dry
+   * run beside the pick score for now; absent means no dry run is recorded.
+   */
+  memberResolver?: Pick<MemberResolver, "resolve">;
   slaMonitor?: any;
   shippingEngine?: import("../shipping/engine").ShippingEngine;
   shipStation?: any;
@@ -1020,7 +1039,12 @@ export class WmsSyncService {
           : isTerminalResidualRecovery
             ? this.determineResidualRecoveryWarehouseStatus(omsOrder)
             : this.determineWarehouseStatus(omsOrder);
-      const { priority, memberPlanName, memberPlanColor } = await this.determinePriority(omsOrder);
+      const { priority, memberPlanName, memberPlanColor, legacyMember } = await this.determinePriority(omsOrder);
+      // Changes nothing about the order; kept on it so the owner can compare
+      // the shared resolver with today's lookup (member-resolver-dry-run.ts).
+      const memberResolverDryRun = legacyMember
+        ? await this.runMemberResolverDryRun(omsOrder, legacyMember)
+        : null;
       // Compute SLA due date at sync time so sort_rank includes urgency
       // from the start. Priority: platform ship-by-date -> channel SLA ->
       // partner-profile SLA -> global default.
@@ -1075,6 +1099,12 @@ export class WmsSyncService {
         unitCount: materializableOmsLines.reduce((sum, line) => sum + omsLineQuantityToMaterialize(line, mode), 0),
         orderPlacedAt: omsOrder.orderedAt,
         ...orderFinancialSnapshot,
+        // Set only when the WMS order is created, so it never replaces
+        // metadata another writer stored. Read by the owner's SQL check;
+        // nothing in the app acts on it.
+        ...(memberResolverDryRun
+          ? { metadata: { [MEMBER_RESOLVER_DRY_RUN_METADATA_KEY]: memberResolverDryRun } }
+          : {}),
       };
 
       // Phase one commits only WMS order/item materialization. Inventory
@@ -3059,6 +3089,12 @@ export class WmsSyncService {
     priority: number;
     memberPlanName: string | null;
     memberPlanColor: string | null;
+    /**
+     * What today's customer lookup matched, for the shared-resolver dry run.
+     * Null on the Dropship path: those orders join the comparison once the
+     * vendor is recorded as their customer (resolver plan step 4).
+     */
+    legacyMember: LegacyMemberMatch | null;
   }> {
     // 1. Shipping Service Level Base — higher base = picked sooner.
     //    Reads the normalized service_level field, NOT the customer-facing
@@ -3085,6 +3121,7 @@ export class WmsSyncService {
         priority: base + vendorPlan.modifier,
         memberPlanName: vendorPlan.name,
         memberPlanColor: vendorPlan.color,
+        legacyMember: null,
       };
     }
 
@@ -3095,6 +3132,7 @@ export class WmsSyncService {
     let modifier = 0;
     let memberPlanName: string | null = null;
     let memberPlanColor: string | null = null;
+    let legacyMember: LegacyMemberMatch = { outcome: "no_member" };
 
     try {
       // A member is still entitled to their CURRENT plan's priority modifier
@@ -3109,18 +3147,24 @@ export class WmsSyncService {
       // getActiveMemberSubscription(). ORDER BY created_at DESC mirrors the
       // view's "most recent subscription wins" rule so a member with both an
       // active and a pending row resolves deterministically to the latest.
+      // The plan id, member id and match flags are read only for the
+      // shared-resolver dry run; the WHERE, ORDER BY and modifier are unchanged.
+      const customerEmail = omsOrder.customerEmail ?? null;
+      const rawShopifyCustomerId = omsOrder.rawPayload
+        ? (omsOrder.rawPayload as any).customer?.id ?? null
+        : null;
       const result = await db.execute(sql`
-        SELECT p.priority_modifier, p.name, p.primary_color
+        SELECT p.priority_modifier, p.name, p.primary_color,
+               p.id::text AS plan_id,
+               m.id::text AS member_id,
+               COALESCE(m.email = ${customerEmail}, false) AS matched_by_email,
+               COALESCE(m.shopify_customer_id = ${rawShopifyCustomerId}, false) AS matched_by_shopify_customer_id
         FROM membership.plans p
         INNER JOIN membership.member_subscriptions ms ON p.id = ms.plan_id
         INNER JOIN membership.members m ON ms.member_id = m.id
         WHERE (
-          m.email = ${omsOrder.customerEmail ?? null}
-          OR m.shopify_customer_id = ${
-            omsOrder.rawPayload
-              ? (omsOrder.rawPayload as any).customer?.id ?? null
-              : null
-          }
+          m.email = ${customerEmail}
+          OR m.shopify_customer_id = ${rawShopifyCustomerId}
         )
           AND ms.status IN ('active', 'pending_downgrade', 'pending_cancellation')
         ORDER BY ms.created_at DESC
@@ -3131,9 +3175,19 @@ export class WmsSyncService {
         modifier = Number(result.rows[0].priority_modifier);
         memberPlanName = (result.rows[0].name as string) || null;
         memberPlanColor = (result.rows[0].primary_color as string) || null;
+        legacyMember = {
+          outcome: "member",
+          memberId: (result.rows[0].member_id as string | null) ?? null,
+          planId: (result.rows[0].plan_id as string | null) ?? null,
+          modifier,
+          matchedBy: legacyMatchSource({
+            matchedByEmail: result.rows[0].matched_by_email === true,
+            matchedByShopifyCustomerId: result.rows[0].matched_by_shopify_customer_id === true,
+          }),
+        };
       } else if (omsOrder.memberTier) {
         const planResult = await db.execute(sql`
-          SELECT priority_modifier, name, primary_color FROM membership.plans
+          SELECT priority_modifier, name, primary_color, id::text AS plan_id FROM membership.plans
           WHERE LOWER(name) = LOWER(${omsOrder.memberTier})
              OR id = ${omsOrder.memberTier}
           LIMIT 1
@@ -3142,10 +3196,18 @@ export class WmsSyncService {
           modifier = Number(planResult.rows[0].priority_modifier);
           memberPlanName = (planResult.rows[0].name as string) || null;
           memberPlanColor = (planResult.rows[0].primary_color as string) || null;
+          legacyMember = {
+            outcome: "member",
+            memberId: null,
+            planId: (planResult.rows[0].plan_id as string | null) ?? null,
+            modifier,
+            matchedBy: "member_tier",
+          };
         }
       }
     } catch (err) {
       console.warn(`[WMS Sync] Failed to fetch priority modifier for order ${omsOrder.id}:`, err);
+      legacyMember = { outcome: "lookup_failed" };
     }
 
     // Higher = Better: base + modifier. Leads can manually set 9999 (Bump) or -1 (Hold).
@@ -3153,7 +3215,78 @@ export class WmsSyncService {
       priority: base + modifier,
       memberPlanName,
       memberPlanColor,
+      legacyMember,
     };
+  }
+
+  /**
+   * Runs the shared member resolver beside today's lookup and returns the
+   * comparison to keep on the new WMS order. Never changes the score and never
+   * throws: a dry run that fails is logged and recorded as failed, or skipped.
+   */
+  private async runMemberResolverDryRun(
+    omsOrder: typeof omsOrders.$inferSelect,
+    legacy: LegacyMemberMatch,
+  ): Promise<MemberResolverDryRunRecord | null> {
+    const resolver = this.services.memberResolver;
+    if (!resolver) return null;
+    const context = { oms_order_id: omsOrder.id, channel_id: omsOrder.channelId ?? null };
+    try {
+      const channelProvider = await this.loadChannelProvider(omsOrder.channelId ?? null);
+      const key = memberKeyForChannelOrder({
+        channelProvider,
+        externalCustomerId: omsOrder.externalCustomerId ?? null,
+      });
+      let result: DryRunResolverResult;
+      try {
+        result = { kind: "resolved", resolution: await resolver.resolve(key) };
+      } catch (err: unknown) {
+        const errorCode = err instanceof MembershipResolverError ? err.code : "MEMBERSHIP_LOOKUP_FAILED";
+        logger.warn("oms_member_resolver_dry_run", {
+          ...context,
+          outcome: "resolver_failed",
+          error_code: errorCode,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        result = { kind: "failed", errorCode };
+      }
+      const record = buildMemberResolverDryRunRecord({
+        channelId: omsOrder.channelId ?? null,
+        channelProvider,
+        key,
+        legacy,
+        resolver: result,
+      });
+      // DEBUG, not INFO: a dry-run difference changes no state, and the
+      // durable record is the metadata on the order.
+      if (record.agrees === false) {
+        logger.debug("oms_member_resolver_dry_run", {
+          ...context,
+          outcome: "disagreed",
+          before: record.legacy,
+          after: record.resolver,
+        });
+      }
+      return record;
+    } catch (err: unknown) {
+      logger.warn("oms_member_resolver_dry_run", {
+        ...context,
+        outcome: "dry_run_failed",
+        error_code: "OMS_MEMBER_RESOLVER_DRY_RUN_FAILED",
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  private async loadChannelProvider(channelId: number | null): Promise<string | null> {
+    if (channelId === null) return null;
+    const [channel] = await db
+      .select({ provider: channels.provider })
+      .from(channels)
+      .where(eq(channels.id, channelId))
+      .limit(1);
+    return channel?.provider ?? null;
   }
 
   /**

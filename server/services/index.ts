@@ -166,6 +166,7 @@ import { PostgresInventoryPublicationReadbackRepository } from "../modules/inven
 import { InventoryPublicationTransportRegistry } from "../modules/inventory-planning/application/inventory-publication-transport";
 import { createEbayDropshipInventoryPublicationTransportAdapterFromEnv } from "../modules/dropship/infrastructure/dropship-ebay-inventory-publication.adapter";
 import { createDropshipOmsChannelResolver } from "../modules/dropship/infrastructure/dropship-oms-warehouse-assignments.reader";
+import { createMemberResolver } from "../modules/membership";
 import { InventoryAvailabilityClaimService } from "../modules/inventory-planning/application/inventory-availability-claim.service";
 import { PostgresInventoryAvailabilityClaimRepository } from "../modules/inventory-planning/infrastructure/inventory-availability-claim.repository";
 import { AssemblyWorkOwner } from "../modules/warehouse/work/application/assembly-work-owner";
@@ -700,6 +701,8 @@ export function createServices(
     fulfillmentRouter,
     // Dropship orders ship from the warehouse acceptance pinned, never the router.
     dropshipOmsChannel: createDropshipOmsChannelResolver(databasePool),
+    // Shared member resolver; a dry run beside the pick score for now.
+    memberResolver: createMemberResolver(databasePool),
     shippingEngine,
     shipStation,
     omsService: oms,

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DROPSHIP_WRITEBACK_PROVIDER,
   evaluateChannelFulfillmentWritebackPolicy,
+  resolveChannelWritebackProvider,
   type ChannelFulfillmentWritebackPolicyInput,
 } from "../../channel-fulfillment-authority.policy";
 
@@ -128,4 +130,69 @@ describe("channel fulfillment writeback authority policy", () => {
       })).reasons).toContain("invalid_quantity_authority");
     },
   );
+});
+
+describe("channel writeback provider resolution", () => {
+  it("routes a dropship line on the internal Dropship channel to the vendor's store", () => {
+    expect(resolveChannelWritebackProvider({
+      channelProvider: "manual",
+      lineFulfillmentProvider: "dropship",
+    })).toBe(DROPSHIP_WRITEBACK_PROVIDER);
+    expect(resolveChannelWritebackProvider({
+      channelProvider: " MANUAL ",
+      lineFulfillmentProvider: " Dropship ",
+    })).toBe("dropship");
+  });
+
+  it("keeps the order's channel for every other line", () => {
+    const cases: Array<[string | null, string | null, string | null]> = [
+      ["manual", "manual", "manual"],
+      ["manual", null, "manual"],
+      ["manual", "", "manual"],
+      ["shopify", "shopify", "shopify"],
+      ["ebay", "ebay", "ebay"],
+      // Only the internal Dropship channel is rerouted. A dropship line on a
+      // real sales channel keeps that channel and stays a provider mismatch.
+      ["shopify", "dropship", "shopify"],
+      ["ebay", "dropship", "ebay"],
+      [" EBAY ", null, "ebay"],
+    ];
+    for (const [channelProvider, lineFulfillmentProvider, expected] of cases) {
+      expect(resolveChannelWritebackProvider({ channelProvider, lineFulfillmentProvider }))
+        .toBe(expected);
+    }
+  });
+
+  it("never invents a destination for an order without a channel provider", () => {
+    expect(resolveChannelWritebackProvider({ channelProvider: null, lineFulfillmentProvider: "dropship" }))
+      .toBeNull();
+    expect(resolveChannelWritebackProvider({ channelProvider: "  ", lineFulfillmentProvider: "dropship" }))
+      .toBeNull();
+  });
+
+  it("lets the writeback policy allow a dropship line once it is routed to the vendor's store", () => {
+    // Before routing, the line was a provider mismatch against the 'manual' channel.
+    expect(evaluateChannelFulfillmentWritebackPolicy(input({
+      channelProvider: "manual",
+      lineFulfillmentProvider: "dropship",
+    })).reasons).toEqual(["fulfillment_provider_mismatch"]);
+
+    const channelProvider = resolveChannelWritebackProvider({
+      channelProvider: "manual",
+      lineFulfillmentProvider: "dropship",
+    });
+    expect(evaluateChannelFulfillmentWritebackPolicy(input({
+      channelProvider: channelProvider!,
+      lineFulfillmentProvider: "dropship",
+    }))).toEqual({ allowed: true, reasons: [] });
+  });
+
+  it("still blocks a routed dropship line on a cancelled or refunded order", () => {
+    expect(evaluateChannelFulfillmentWritebackPolicy(input({
+      channelProvider: DROPSHIP_WRITEBACK_PROVIDER,
+      lineFulfillmentProvider: "dropship",
+      omsOrderStatus: "cancelled",
+      omsFinancialStatus: "refunded",
+    })).reasons).toEqual(["terminal_commercial_order", "terminal_financial_order"]);
+  });
 });

@@ -190,6 +190,8 @@ class CoordinatedCredentialRepository implements DropshipMarketplaceCredentialRe
 }
 
 function makeFetch(repo: CoordinatedCredentialRepository) {
+  // The order's eBay shipments: tracking reads them before and after it adds one.
+  const shipments: Array<Record<string, unknown>> = [];
   return vi.fn<typeof fetch>(async (url, init) => {
     const parsed = new URL(String(url));
     expect(parsed.origin).toBe("https://api.ebay.com");
@@ -202,8 +204,13 @@ function makeFetch(repo: CoordinatedCredentialRepository) {
     expect(new Headers(init?.headers).get("Authorization")).toBe(expectedAuthorization + repo.current.accessToken);
     if (parsed.pathname === "/sell/fulfillment/v1/order") return jsonResponse({ orders: [], total: 0 });
     if (parsed.pathname === "/post-order/v2/return/search") return jsonResponse({ returns: [], total: 0 });
-    if (parsed.pathname.endsWith("/shipping_fulfillment")) {
+    if (parsed.pathname.endsWith("/shipping_fulfillment") && init?.method === "POST") {
+      const shipment = JSON.parse(String(init.body));
+      shipments.push({ fulfillmentId: "fulfillment-1", shipmentTrackingNumber: shipment.trackingNumber, lineItems: shipment.lineItems });
       return new Response(null, { status: 201, headers: { Location: "https://api.ebay.com/fulfillment/fulfillment-1" } });
+    }
+    if (parsed.pathname.endsWith("/shipping_fulfillment")) {
+      return jsonResponse({ total: shipments.length, fulfillments: shipments });
     }
     if (parsed.pathname === "/post-order/v2/cancellation") return jsonResponse({ cancelId: "cancel-1" });
     if (parsed.pathname === "/sell/inventory/v1/offer" && init?.method === "GET") return jsonResponse({ offers: [] });

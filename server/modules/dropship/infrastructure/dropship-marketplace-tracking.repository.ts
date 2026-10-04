@@ -6,6 +6,7 @@ import type {
   DropshipMarketplaceTrackingClaim,
   DropshipMarketplaceTrackingPushRecord,
   DropshipMarketplaceTrackingRepository,
+  DropshipTrackingShippedLine,
 } from "../application/dropship-marketplace-tracking-service";
 import type {
   DropshipMarketplaceTrackingLineItem,
@@ -51,6 +52,11 @@ interface LineItemRow {
   quantity: number;
 }
 
+interface OrderedLineRow {
+  external_line_item_id: string;
+  ordered_quantity: number;
+}
+
 const STALE_TRACKING_PUSH_PROCESSING_MINUTES = 30;
 
 export class PgDropshipMarketplaceTrackingRepository implements DropshipMarketplaceTrackingRepository {
@@ -63,6 +69,7 @@ export class PgDropshipMarketplaceTrackingRepository implements DropshipMarketpl
     trackingNumber: string;
     shippedAt: Date;
     idempotencyKey: string;
+    lineItems?: readonly DropshipTrackingShippedLine[];
     now: Date;
   }): Promise<DropshipMarketplaceTrackingClaim> {
     const client = await this.dbPool.connect();
@@ -74,10 +81,12 @@ export class PgDropshipMarketplaceTrackingRepository implements DropshipMarketpl
         return { status: "not_dropship" };
       }
 
-      const lineItems = await loadLineItemsForOmsOrder(client, {
-        omsOrderId: input.omsOrderId,
-        wmsShipmentId: input.wmsShipmentId ?? null,
-      });
+      const lineItems = input.lineItems
+        ? await requireShippedLinesOnOrder(client, input.omsOrderId, input.lineItems)
+        : await loadLineItemsForOmsOrder(client, {
+          omsOrderId: input.omsOrderId,
+          wmsShipmentId: input.wmsShipmentId ?? null,
+        });
       const request = buildTrackingRequest({ input, intake, lineItems });
       const requestHash = hashRequest(request);
       const row = await insertOrLoadPush(client, request, requestHash, input.now);
@@ -327,6 +336,57 @@ async function loadLineItemsForOmsOrder(
   return result.rows.map((row) => ({
     externalLineItemId: row.external_line_item_id,
     quantity: Number(row.quantity),
+  }));
+}
+
+/**
+ * Checks caller-named shipped lines against the order before they reach the
+ * marketplace: each must be a dropship line of this OMS order, and no line may
+ * claim more units than were ordered. Returns them unchanged, in caller order.
+ */
+async function requireShippedLinesOnOrder(
+  client: PoolClient,
+  omsOrderId: number,
+  shippedLines: readonly DropshipTrackingShippedLine[],
+): Promise<DropshipMarketplaceTrackingLineItem[]> {
+  const result = await client.query<OrderedLineRow>(
+    `SELECT external_line_item_id, SUM(COALESCE(quantity, 0))::int AS ordered_quantity
+     FROM oms.oms_order_lines
+     WHERE order_id = $1
+       AND external_line_item_id = ANY($2::text[])
+       AND COALESCE(LOWER(NULLIF(BTRIM(fulfillment_provider), '')), 'dropship') = 'dropship'
+     GROUP BY external_line_item_id`,
+    [omsOrderId, shippedLines.map((line) => line.externalLineItemId)],
+  );
+  const orderedQuantityByLine = new Map(
+    result.rows.map((row) => [row.external_line_item_id, Number(row.ordered_quantity)]),
+  );
+  for (const line of shippedLines) {
+    const orderedQuantity = orderedQuantityByLine.get(line.externalLineItemId);
+    if (orderedQuantity === undefined) {
+      throw new DropshipError(
+        "DROPSHIP_TRACKING_LINE_ITEM_NOT_ON_ORDER",
+        "A shipped line is not a dropship line of this order.",
+        { omsOrderId, externalLineItemId: line.externalLineItemId, retryable: false },
+      );
+    }
+    if (line.quantity > orderedQuantity) {
+      throw new DropshipError(
+        "DROPSHIP_TRACKING_LINE_QUANTITY_EXCEEDS_ORDER",
+        "A shipped line claims more units than were ordered.",
+        {
+          omsOrderId,
+          externalLineItemId: line.externalLineItemId,
+          quantity: line.quantity,
+          orderedQuantity,
+          retryable: false,
+        },
+      );
+    }
+  }
+  return shippedLines.map((line) => ({
+    externalLineItemId: line.externalLineItemId,
+    quantity: line.quantity,
   }));
 }
 

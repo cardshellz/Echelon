@@ -4,6 +4,8 @@ import {
   getOmsFlowReconciliationSchedulerHeartbeat,
 } from "./oms-flow-reconciliation.service";
 import {
+  dropshipTrackingNotSentCountSql,
+  dropshipTrackingNotSentSampleSql,
   getChannelWritebackHealth,
   type ChannelWritebackHealth,
 } from "./channel-writeback.service";
@@ -140,6 +142,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     shippedTrackingNotPushed,
     heldLineAging,
     allLinesHeldOrders,
+    dropshipTrackingNotSent,
   ] = await Promise.all([
     collectOmsFlowReconciliationIssues(db),
     countAndSample(
@@ -837,6 +840,13 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       allLinesHeldCountQuery(),
       allLinesHeldSampleQuery(10),
     ),
+    // Dropship packages are written back to the vendor's store, which the
+    // Shopify/eBay check above never looks at. Same 14-day window.
+    countAndSample(
+      db,
+      dropshipTrackingNotSentCountSql(sql`NOW() - INTERVAL '14 days'`),
+      dropshipTrackingNotSentSampleSql(sql`NOW() - INTERVAL '14 days'`, 10),
+    ),
   ]);
   const channelWriteback = await getChannelWritebackHealth(db, {
     windowDays: 14,
@@ -1051,6 +1061,13 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       count: shippedTrackingNotPushed.count,
       message: "Shipped WMS shipments do not have a tracking/fulfillment push success event.",
       sample: shippedTrackingNotPushed.sample,
+    }),
+    issue({
+      code: "DROPSHIP_TRACKING_NOT_SENT",
+      severity: "critical",
+      count: dropshipTrackingNotSent.count,
+      message: "Shipped dropship packages have no tracking in the vendor's store.",
+      sample: dropshipTrackingNotSent.sample,
     }),
     issue({
       code: "CHANNEL_WRITEBACK_MASKED_SPLIT",
