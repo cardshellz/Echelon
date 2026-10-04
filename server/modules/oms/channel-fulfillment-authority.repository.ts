@@ -19,6 +19,7 @@ import {
 } from "./channel-fulfillment-command-reconciliation";
 import {
   evaluateChannelFulfillmentWritebackPolicy,
+  resolveChannelWritebackProvider,
   type ChannelFulfillmentWritebackPolicyDecision,
 } from "./channel-fulfillment-authority.policy";
 import { PROVIDER_ORDER_IDENTITY_POLICIES, resolveProviderOrderId } from "./shipping-engine-order-identity";
@@ -628,12 +629,18 @@ function normalizeCustomerItems(rows: readonly LegacyPackageRow[]): {
     const omsOrderLineId = asPositiveInteger(row.oms_order_line_id);
     const quantityShipped = asPositiveInteger(row.quantity_shipped);
     const quantityPlanned = asPositiveInteger(row.max_authorized_quantity);
-    const channelProvider = normalizedNullable(row.channel_provider)?.toLowerCase() ?? null;
+    const orderChannelProvider = normalizedNullable(row.channel_provider)?.toLowerCase() ?? null;
     const channelOrderLineId = normalizedNullable(row.channel_order_line_id);
     const lineFulfillmentProvider = (
       normalizedNullable(row.line_fulfillment_provider)?.toLowerCase()
-      ?? channelProvider
+      ?? orderChannelProvider
     );
+    // Where this line is written back: the order's channel, or the vendor's
+    // own store for a dropship line on the internal Dropship OMS channel.
+    const channelProvider = resolveChannelWritebackProvider({
+      channelProvider: orderChannelProvider,
+      lineFulfillmentProvider,
+    });
     const sku = normalizedNullable(row.sku);
     const reviewReason = normalizedNullable(row.review_reason);
 
@@ -4390,6 +4397,8 @@ export function createChannelFulfillmentAuthorityRepository(
       const idFilter = commandIds.length > 0
         ? sql`AND command.id IN (${buildIdList(commandIds)})`
         : sql``;
+      // A voided or superseded label's tracking is never sent to a store. A
+      // dropship command is held too: the vendor's store has no replacement flow.
       const dueRows = rowsOf<{ id: number }>(await tx.execute(sql`
         SELECT command.id
         FROM oms.channel_fulfillment_pushes AS command
@@ -4397,7 +4406,7 @@ export function createChannelFulfillmentAuthorityRepository(
           AND NOT EXISTS (SELECT 1 FROM wms.physical_shipments package
             JOIN wms.shipping_provider_labels label ON label.provider = package.provider
               AND label.provider_label_id = package.provider_physical_shipment_id
-            WHERE package.id = command.physical_shipment_id AND command.channel_provider IN ('ebay', 'shopify')
+            WHERE package.id = command.physical_shipment_id AND command.channel_provider IN ('ebay', 'shopify', 'dropship')
               AND label.label_status IN ('voided', 'superseded'))
           AND NOT EXISTS (SELECT 1 FROM wms.ebay_label_replacement_work replacement
             WHERE replacement.physical_shipment_id = command.physical_shipment_id AND replacement.projected_at IS NULL)

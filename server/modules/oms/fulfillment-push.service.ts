@@ -25,6 +25,13 @@ import {
 import type { EbayApiClient } from "../channels/adapters/ebay/ebay-api.client";
 import type { ChannelFulfillmentProviderClients, ShopifyFulfillmentAccount } from "../channels/channel-fulfillment-provider-clients.service";
 import { ChannelFulfillmentProviderError } from "../channels/channel-fulfillment-provider.error";
+import { DropshipError } from "../dropship/domain/errors";
+import { buildChannelFulfillmentTrackingIdempotencyKey } from "../dropship/application/dropship-marketplace-tracking-service";
+import {
+  DROPSHIP_LINE_FULFILLMENT_PROVIDER,
+  DROPSHIP_ORDER_CHANNEL_PROVIDER,
+  DROPSHIP_WRITEBACK_PROVIDER,
+} from "./channel-fulfillment-authority.policy";
 import { resolveChannelFulfillmentNotifyCustomer } from "./channel-fulfillment-notification.policy";
 import { shopifyOrderFulfillmentLockId } from "./shopify-fulfillment-lock";
 import { assertShopifyCommandLabelActive } from "./shopify-label-command-guard.repository";
@@ -402,7 +409,65 @@ interface DropshipMarketplaceTrackingServiceHandle {
     trackingNumber: string;
     shippedAt: Date;
     idempotencyKey?: string;
-  }): Promise<{ status: DropshipMarketplaceTrackingPushStatus }>;
+    lineItems?: readonly { externalLineItemId: string; quantity: number }[];
+    lastAttempt?: boolean;
+  }): Promise<{
+    status: DropshipMarketplaceTrackingPushStatus;
+    push?: {
+      pushId: number;
+      storeConnectionId: number;
+      platform: string;
+      externalFulfillmentId: string | null;
+    };
+  }>;
+}
+
+/** Writeback providers whose commands carry exact, persisted line lineage. */
+type CanonicalCommandChannelProvider = "shopify" | "ebay" | "walmart" | typeof DROPSHIP_WRITEBACK_PROVIDER;
+
+/** What the channel fulfillment worker records for one dropship command attempt. */
+export interface DropshipTrackingCommandPushResult {
+  readonly outcome: "success" | "ignored";
+  readonly dropshipTrackingPushId: number;
+  readonly externalFulfillmentId: string | null;
+  readonly alreadySatisfied: boolean;
+}
+
+/**
+ * Sums command items per channel line, sorted by line id. This is exactly
+ * what a store is told shipped in the package.
+ */
+function aggregateCommandLineQuantities(
+  items: readonly ChannelFulfillmentProviderCommandItem[],
+): Array<{ channelOrderLineId: string; quantity: number }> {
+  const quantityByLine = new Map<string, number>();
+  for (const item of items) {
+    quantityByLine.set(
+      item.channelOrderLineId,
+      (quantityByLine.get(item.channelOrderLineId) ?? 0) + item.quantity,
+    );
+  }
+  return [...quantityByLine.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([channelOrderLineId, quantity]) => ({ channelOrderLineId, quantity }));
+}
+
+/**
+ * Maps a dropship tracking failure to the rails' failure classes with the
+ * dropship service's own rule: a DropshipError is retryable unless its context
+ * says `retryable: false`; any other failure is retryable.
+ */
+function toDropshipTrackingProviderError(error: unknown): ChannelFulfillmentProviderError {
+  if (error instanceof ChannelFulfillmentProviderError) return error;
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof DropshipError) {
+    return new ChannelFulfillmentProviderError(
+      error.code,
+      message,
+      error.context?.retryable === false ? "permanent" : "transient",
+    );
+  }
+  return new ChannelFulfillmentProviderError("DROPSHIP_TRACKING_PUSH_FAILED", message, "transient");
 }
 
 function isDropshipOmsOrder(order: any): boolean {
@@ -945,7 +1010,10 @@ export function createFulfillmentPushService(
   const runExclusive: FulfillmentPushExclusiveRunner =
     options.runExclusive ?? (async (_lockId, fn) => fn());
 
-  async function loadCanonicalFulfillmentOrder(command: ChannelFulfillmentProviderCommandInput, provider: "shopify" | "ebay" | "walmart") {
+  async function loadCanonicalFulfillmentOrder(
+    command: ChannelFulfillmentProviderCommandInput,
+    provider: "shopify" | "ebay" | "walmart" | typeof DROPSHIP_ORDER_CHANNEL_PROVIDER,
+  ) {
     const result = await db.execute(sql`
       SELECT oms_order.id AS oms_order_id, oms_order.channel_id, oms_order.external_order_id,
              oms_order.ordered_at, oms_order.created_at AS oms_created_at,
@@ -975,7 +1043,7 @@ export function createFulfillmentPushService(
   async function projectCanonicalCommandQuantities<T extends LegacyShipmentLineSnapshot>(
     command: ChannelFulfillmentProviderCommandInput,
     rows: readonly T[],
-    provider: "shopify" | "ebay" | "walmart",
+    provider: CanonicalCommandChannelProvider,
   ): Promise<T[]> {
     const allocationItems = command.items.filter((item) => item.packageAllocationEntryId != null);
     if ((provider === "shopify" || provider === "ebay") && command.trackingReplacement === true) {
@@ -1052,7 +1120,7 @@ export function createFulfillmentPushService(
     const persistedItems: Array<Record<string, unknown>> = result?.rows ?? [];
     const evidence = persistedItems.filter((row) => row.package_allocation_entry_id != null || row.package_allocation_effect_intent_id != null);
     if (allocationItems.length === 0 && evidence.length === 0) {
-      assertExactChannelCommandLineage(command, rows, provider === "shopify" ? isShopifyFulfillmentProvider : provider === "ebay" ? isEbayFulfillmentProvider : (value) => value === "walmart");
+      assertExactChannelCommandLineage(command, rows, channelLineOwner(provider));
       return [...rows];
     }
     const fail = (shipmentItemId?: number): never => {
@@ -1112,7 +1180,7 @@ export function createFulfillmentPushService(
     }));
     // Retain every original source/order/provider identity check. Only a proven
     // allocated row changes quantity; non-allocation legacy rows stay exact.
-    assertExactChannelCommandLineage(command, projected, provider === "shopify" ? isShopifyFulfillmentProvider : provider === "ebay" ? isEbayFulfillmentProvider : (value) => value === "walmart");
+    assertExactChannelCommandLineage(command, projected, channelLineOwner(provider));
     return projected;
   }
 
@@ -1677,24 +1745,14 @@ export function createFulfillmentPushService(
     return order;
   }
 
-  async function pushTrackingForShipmentCommand(
-    input: ChannelFulfillmentProviderCommandInput,
-  ): Promise<boolean | { fulfillmentId: string; writebackComplete: true }> {
-    const validated = normalizeChannelCommandInput(input);
-    // All eBay writes for an order share the same lock, including ordinary
-    // packages. Two repack commands must not race each other's read/modify/write.
-    const result = await runExclusive(shopifyOrderFulfillmentLockId(validated.omsOrderId), () => pushEbayCommandExclusive(validated));
-    if (result === null) throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_IN_PROGRESS", "Another fulfillment update owns this order", "transient");
-    return result;
-  }
-
-  async function pushEbayCommandExclusive(
-    input: ChannelFulfillmentProviderCommandInput,
-  ): Promise<boolean | { fulfillmentId: string; writebackComplete: true }> {
-    const command = normalizeChannelCommandInput(input);
-    const order = await loadCanonicalFulfillmentOrder(command, "ebay");
-    const externalOrderId = order.externalOrderId;
-
+  /**
+   * The command's own WMS shipment items, read live so the adapter can prove
+   * the package still matches the command before any store is told.
+   * Cancelled order items are excluded.
+   */
+  async function loadCommandShipmentLines(
+    command: ChannelFulfillmentProviderCommandInput,
+  ): Promise<LegacyShipmentLineSnapshot[]> {
     const shipmentItemIds = command.items.map((item) => item.legacyWmsShipmentItemId);
     const lineResult: any = await db.execute(sql`
       SELECT
@@ -1714,21 +1772,34 @@ export function createFulfillmentPushService(
         AND COALESCE(order_item.status, 'pending') <> 'cancelled'
       ORDER BY shipment_item.id
     `);
-    const rawLineItems: LegacyShipmentLineSnapshot[] = lineResult?.rows ?? [];
+    return lineResult?.rows ?? [];
+  }
+
+  async function pushTrackingForShipmentCommand(
+    input: ChannelFulfillmentProviderCommandInput,
+  ): Promise<boolean | { fulfillmentId: string; writebackComplete: true }> {
+    const validated = normalizeChannelCommandInput(input);
+    // All eBay writes for an order share the same lock, including ordinary
+    // packages. Two repack commands must not race each other's read/modify/write.
+    const result = await runExclusive(shopifyOrderFulfillmentLockId(validated.omsOrderId), () => pushEbayCommandExclusive(validated));
+    if (result === null) throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_IN_PROGRESS", "Another fulfillment update owns this order", "transient");
+    return result;
+  }
+
+  async function pushEbayCommandExclusive(
+    input: ChannelFulfillmentProviderCommandInput,
+  ): Promise<boolean | { fulfillmentId: string; writebackComplete: true }> {
+    const command = normalizeChannelCommandInput(input);
+    const order = await loadCanonicalFulfillmentOrder(command, "ebay");
+    const externalOrderId = order.externalOrderId;
+
+    const rawLineItems = await loadCommandShipmentLines(command);
     await projectCanonicalCommandQuantities(command, rawLineItems, "ebay");
     const account = await requireProviderClients().ebay(order.channelId);
     if (account.channelId !== order.channelId) throw new ChannelFulfillmentProviderError("FULFILLMENT_ACCOUNT_CHANNEL_MISMATCH", "Resolved eBay account belongs to another channel");
 
-    const quantityByLine = new Map<string, number>();
-    for (const item of command.items) {
-      quantityByLine.set(
-        item.channelOrderLineId,
-        (quantityByLine.get(item.channelOrderLineId) ?? 0) + item.quantity,
-      );
-    }
-    const lineItems = [...quantityByLine.entries()]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([lineItemId, quantity]) => ({ lineItemId, quantity }));
+    const lineItems = aggregateCommandLineQuantities(command.items)
+      .map(({ channelOrderLineId, quantity }) => ({ lineItemId: channelOrderLineId, quantity }));
     const shippedAt = resolveEbayFulfillmentShippedDate(
       command.shippedAt,
       [order.ordered_at, order.oms_created_at],
@@ -1820,6 +1891,143 @@ export function createFulfillmentPushService(
       },
     });
     return command.trackingReplacement === true ? { fulfillmentId, writebackComplete: true } : true;
+  }
+
+  /**
+   * Channel command adapter for dropship lines. The sale lives in the vendor's
+   * own marketplace store, so the update goes through the dropship tracking
+   * service, which holds that store's connection. It sends exactly the
+   * command's lines, keyed by the command id: a retried command replays its
+   * own push row, and the vendor's store is never told twice.
+   */
+  async function pushDropshipTrackingForShipmentCommand(
+    input: ChannelFulfillmentProviderCommandInput,
+    options: { readonly lastAttempt?: boolean } = {},
+  ): Promise<DropshipTrackingCommandPushResult> {
+    const command = normalizeChannelCommandInput(input);
+    // Every channel write for an order shares this lock, as in the eBay and
+    // Shopify command adapters.
+    const result = await runExclusive(
+      shopifyOrderFulfillmentLockId(command.omsOrderId),
+      () => pushDropshipCommandExclusive(command, options.lastAttempt === true),
+    );
+    if (result === null) {
+      throw new ChannelFulfillmentProviderError(
+        "DROPSHIP_FULFILLMENT_IN_PROGRESS",
+        "Another fulfillment update owns this order",
+        "transient",
+      );
+    }
+    return result;
+  }
+
+  async function pushDropshipCommandExclusive(
+    command: ChannelFulfillmentProviderCommandInput,
+    lastAttempt: boolean,
+  ): Promise<DropshipTrackingCommandPushResult> {
+    // The vendor's store has no way to swap one tracking number for another.
+    if (command.trackingReplacement === true) {
+      throw new ChannelFulfillmentProviderError(
+        "DROPSHIP_TRACKING_REPLACEMENT_UNSUPPORTED",
+        `Command ${command.commandId} replaces a label; the vendor's store must be corrected by hand`,
+        "permanent",
+      );
+    }
+    await loadCanonicalFulfillmentOrder(command, DROPSHIP_ORDER_CHANNEL_PROVIDER);
+    const rawLineItems = await loadCommandShipmentLines(command);
+    await projectCanonicalCommandQuantities(command, rawLineItems, DROPSHIP_WRITEBACK_PROVIDER);
+    if (!command.shippedAt) {
+      throw new ChannelFulfillmentProviderError(
+        "DROPSHIP_TRACKING_SHIPPED_AT_REQUIRED",
+        `Command ${command.commandId} has no ship date for the vendor's store`,
+        "permanent",
+      );
+    }
+
+    const lineItems = aggregateCommandLineQuantities(command.items)
+      .map(({ channelOrderLineId, quantity }) => ({ externalLineItemId: channelOrderLineId, quantity }));
+    // The push row records one WMS shipment; a package built from several has none.
+    const wmsShipmentId = command.legacyWmsShipmentIds.length === 1
+      ? command.legacyWmsShipmentIds[0]
+      : null;
+    let pushed: Awaited<ReturnType<DropshipMarketplaceTrackingServiceHandle["pushForOmsOrder"]>>;
+    try {
+      const service = await resolveDropshipMarketplaceTrackingService();
+      pushed = await service.pushForOmsOrder({
+        omsOrderId: command.omsOrderId,
+        wmsShipmentId,
+        carrier: command.carrier,
+        trackingNumber: command.trackingNumber,
+        shippedAt: command.shippedAt,
+        idempotencyKey: buildChannelFulfillmentTrackingIdempotencyKey(command.commandId),
+        lineItems,
+        lastAttempt,
+      });
+    } catch (error) {
+      throw toDropshipTrackingProviderError(error);
+    }
+
+    switch (pushed.status) {
+      case "succeeded":
+      case "already_succeeded": {
+        const push = pushed.push;
+        if (!push || !Number.isSafeInteger(push.pushId) || push.pushId <= 0) {
+          throw new ChannelFulfillmentProviderError(
+            "DROPSHIP_TRACKING_RESULT_INVALID",
+            `Dropship tracking returned no push record for command ${command.commandId}`,
+            "permanent",
+          );
+        }
+        const alreadySatisfied = pushed.status === "already_succeeded";
+        // Recorded only by the attempt that told the store, so a replay never
+        // adds a second event. If this insert fails, the retry finds the push
+        // done and completes the command; the push row, its dropship audit
+        // event and the command row still record the update.
+        if (!alreadySatisfied) {
+          await db.insert(omsOrderEvents).values({
+            orderId: command.omsOrderId,
+            eventType: "tracking_pushed",
+            details: {
+              provider: DROPSHIP_WRITEBACK_PROVIDER,
+              platform: push.platform,
+              storeConnectionId: push.storeConnectionId,
+              dropshipTrackingPushId: push.pushId,
+              fulfillmentId: push.externalFulfillmentId,
+              channelFulfillmentCommandId: command.commandId,
+              physicalShipmentId: command.physicalShipmentId,
+              wmsShipmentIds: command.legacyWmsShipmentIds,
+              trackingNumber: command.trackingNumber,
+              carrier: command.carrier,
+              lineItems,
+            },
+          });
+        }
+        return Object.freeze({
+          outcome: alreadySatisfied ? "ignored" : "success",
+          dropshipTrackingPushId: push.pushId,
+          externalFulfillmentId: push.externalFulfillmentId,
+          alreadySatisfied,
+        });
+      }
+      case "already_processing":
+        throw new ChannelFulfillmentProviderError(
+          "DROPSHIP_TRACKING_PUSH_IN_PROGRESS",
+          `Dropship tracking for command ${command.commandId} is still being pushed`,
+          "transient",
+        );
+      case "not_dropship":
+        throw new ChannelFulfillmentProviderError(
+          "DROPSHIP_ORDER_INTAKE_NOT_FOUND",
+          `OMS order ${command.omsOrderId} has no dropship intake to push tracking to`,
+          "permanent",
+        );
+      default:
+        throw new ChannelFulfillmentProviderError(
+          "DROPSHIP_TRACKING_RESULT_INVALID",
+          `Unexpected dropship tracking status for command ${command.commandId}`,
+          "permanent",
+        );
+    }
   }
 
 
@@ -3742,6 +3950,7 @@ export function createFulfillmentPushService(
     pushTracking,
     pushTrackingForShipment,
     pushTrackingForShipmentCommand,
+    pushDropshipTrackingForShipmentCommand,
     prepareWalmartFulfillmentCommand,
     setEbayClient,
     setShopifyClient,
@@ -4422,6 +4631,23 @@ function isShopifyFulfillmentProvider(provider: string | null | undefined): bool
 function isEbayFulfillmentProvider(provider: string | null | undefined): boolean {
   const normalized = String(provider ?? "").trim().toLowerCase();
   return normalized.length === 0 || normalized === "ebay";
+}
+
+/** Dropship acceptance always writes the provider, so a blank line is never a dropship line. */
+function isDropshipFulfillmentProvider(provider: string | null | undefined): boolean {
+  return String(provider ?? "").trim().toLowerCase() === DROPSHIP_LINE_FULFILLMENT_PROVIDER;
+}
+
+/** Which order lines a command for this writeback provider may carry. */
+function channelLineOwner(
+  provider: CanonicalCommandChannelProvider,
+): (lineProvider: string | null | undefined) => boolean {
+  switch (provider) {
+    case "shopify": return isShopifyFulfillmentProvider;
+    case "ebay": return isEbayFulfillmentProvider;
+    case "walmart": return (value) => value === "walmart";
+    case DROPSHIP_WRITEBACK_PROVIDER: return isDropshipFulfillmentProvider;
+  }
 }
 
 export type FulfillmentPushService = ReturnType<typeof createFulfillmentPushService>;

@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { sql } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
+import {
+  dropshipTrackingNotSentCountSql,
+  dropshipTrackingNotSentSampleSql,
+} from "../../channel-writeback.service";
 import { getOmsOpsHealth } from "../../ops-health.service";
 
 const OPS_HEALTH_SRC = readFileSync(
@@ -324,5 +330,65 @@ describe("ops-health.service :: issue mapping", () => {
         process.env.DISABLE_SCHEDULERS = previousDisableSchedulers;
       }
     }
+  });
+});
+
+describe("ops-health.service :: dropship tracking not sent", () => {
+  const dialect = new PgDialect();
+  const render = (query: any) => {
+    const { sql: text, params } = dialect.sqlToQuery(query);
+    return JSON.stringify({ text, params });
+  };
+  const opsWindow = sql`NOW() - INTERVAL '14 days'`;
+  const countQuery = render(dropshipTrackingNotSentCountSql(opsWindow));
+  const sampleQuery = render(dropshipTrackingNotSentSampleSql(opsWindow, 10));
+  const sampleRow = {
+    shipment_id: 18582,
+    oms_order_id: 1013417,
+    order_number: "11-11111-11111",
+    wms_order_number: "22039",
+    command_status: "retry",
+    command_attempts: 3,
+  };
+
+  async function healthWith(notSentCount: number) {
+    const previousDisableSchedulers = process.env.DISABLE_SCHEDULERS;
+    process.env.DISABLE_SCHEDULERS = "true";
+    const execute = vi.fn(async (query: any) => {
+      const rendered = render(query);
+      if (rendered === countQuery) return { rows: [{ count: notSentCount }] };
+      if (rendered === sampleQuery) return { rows: notSentCount > 0 ? [sampleRow] : [] };
+      return { rows: [{ count: 0 }] };
+    });
+    try {
+      return { health: await getOmsOpsHealth({ execute }), execute };
+    } finally {
+      if (previousDisableSchedulers === undefined) {
+        delete process.env.DISABLE_SCHEDULERS;
+      } else {
+        process.env.DISABLE_SCHEDULERS = previousDisableSchedulers;
+      }
+    }
+  }
+
+  it("reports shipped dropship packages missing vendor-store tracking as critical, with where each stands", async () => {
+    const { health, execute } = await healthWith(2);
+
+    const renderedQueries = execute.mock.calls.map(([query]) => render(query));
+    expect(renderedQueries).toContain(countQuery);
+    expect(renderedQueries).toContain(sampleQuery);
+    expect(health.issues.find((issue) => issue.code === "DROPSHIP_TRACKING_NOT_SENT")).toEqual({
+      code: "DROPSHIP_TRACKING_NOT_SENT",
+      severity: "critical",
+      count: 2,
+      message: "Shipped dropship packages have no tracking in the vendor's store.",
+      sample: [sampleRow],
+    });
+  });
+
+  it("raises nothing when every shipped dropship package reached the vendor's store", async () => {
+    const { health } = await healthWith(0);
+
+    expect(health.issues.some((issue) => issue.code === "DROPSHIP_TRACKING_NOT_SENT")).toBe(false);
   });
 });

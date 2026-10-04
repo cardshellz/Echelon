@@ -12,6 +12,7 @@ import {
 } from "./channel-fulfillment-notification.policy";
 
 import { EBAY_FULFILLMENT_IDEMPOTENCY_CONFLICT } from "../channels/adapters/ebay/ebay-api.client";
+import { DROPSHIP_WRITEBACK_PROVIDER } from "./channel-fulfillment-authority.policy";
 import { isEbayTrackingConflictError } from "./channel-fulfillment-conflict";
 import {
   FulfillmentAuthorityError,
@@ -154,6 +155,13 @@ function isReviewRequired(error: unknown): boolean {
     || errorCode(error) === SHOPIFY_PUSH_INVALID_INPUT
     || errorCode(error) === SHOPIFY_PUSH_PACKAGE_STATE_CONFLICT
     || errorCode(error) === EBAY_FULFILLMENT_IDEMPOTENCY_CONFLICT;
+}
+
+/** After this attempt the worker gives up: a retryable failure is dead-lettered. */
+export function isFinalChannelFulfillmentAttempt(
+  command: Pick<ClaimedChannelFulfillmentCommand, "attemptNumber" | "maxAttempts">,
+): boolean {
+  return command.attemptNumber >= command.maxAttempts;
 }
 
 export function calculateChannelFulfillmentRetryAt(
@@ -332,6 +340,40 @@ export function createCompatibilityChannelFulfillmentProviderExecutor(
         };
       }
 
+      if (command.channelProvider === DROPSHIP_WRITEBACK_PROVIDER) {
+        if (typeof fulfillmentPush?.pushDropshipTrackingForShipmentCommand !== "function") {
+          throw Object.assign(new Error("Dropship tracking provider is not initialized"), {
+            code: "CHANNEL_PROVIDER_NOT_READY",
+          });
+        }
+        // The vendor is told about a failure only the first time and the last
+        // time, so the push needs to know when the worker will stop retrying.
+        const pushed = await fulfillmentPush.pushDropshipTrackingForShipmentCommand(providerInput, {
+          lastAttempt: isFinalChannelFulfillmentAttempt(command),
+        });
+        if (
+          (pushed?.outcome !== "success" && pushed?.outcome !== "ignored")
+          || !Number.isSafeInteger(pushed.dropshipTrackingPushId)
+          || pushed.dropshipTrackingPushId <= 0
+        ) {
+          throw Object.assign(
+            new Error(`Dropship tracking writeback is incomplete for physical shipment ${command.physicalShipmentId}`),
+            { code: "DROPSHIP_WRITEBACK_INCOMPLETE" },
+          );
+        }
+        return {
+          outcome: pushed.outcome,
+          providerResponseId: typeof pushed.externalFulfillmentId === "string" && pushed.externalFulfillmentId
+            ? pushed.externalFulfillmentId
+            : null,
+          metadata: Object.freeze({
+            legacyWmsShipmentIds: shipmentIds,
+            dropshipTrackingPushId: pushed.dropshipTrackingPushId,
+            alreadySatisfied: pushed.alreadySatisfied === true,
+          }),
+        };
+      }
+
       throw new UnsupportedChannelProviderError(command.channelProvider);
     },
   };
@@ -447,7 +489,7 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
           continue;
         }
 
-        const exhausted = command.attemptNumber >= command.maxAttempts;
+        const exhausted = isFinalChannelFulfillmentAttempt(command);
         await dependencies.repository.completeAttempt({
           commandId: command.id,
           leaseToken: command.leaseToken,

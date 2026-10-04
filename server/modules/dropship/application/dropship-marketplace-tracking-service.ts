@@ -1,4 +1,5 @@
 import { DropshipError } from "../domain/errors";
+import { decideTrackingFailureNotice } from "../domain/tracking-failure-notice";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type {
@@ -7,10 +8,47 @@ import type {
   DropshipNotificationSender,
 } from "./dropship-ports";
 import type {
+  DropshipMarketplaceTrackingLineItem,
   DropshipMarketplaceTrackingProvider,
   DropshipMarketplaceTrackingRequest,
   DropshipMarketplaceTrackingResult,
 } from "./dropship-marketplace-tracking-provider";
+
+/** Longest marketplace line item id accepted: oms.oms_order_lines.external_line_item_id is varchar(100). */
+const MAX_EXTERNAL_LINE_ITEM_ID_LENGTH = 100;
+
+/** A shipped line named by the caller, e.g. the channel fulfillment rails' exact command lines. */
+export interface DropshipTrackingShippedLine {
+  externalLineItemId: string;
+  quantity: number;
+}
+
+/**
+ * Pushes made by the channel fulfillment rails (oms.channel_fulfillment_pushes)
+ * carry this key prefix plus the command id. One command maps to one push row,
+ * so each command attempt replays the same row instead of pushing again.
+ */
+const CHANNEL_FULFILLMENT_TRACKING_KEY_PREFIX = "channel-fulfillment-command:";
+
+export function buildChannelFulfillmentTrackingIdempotencyKey(commandId: number): string {
+  if (!Number.isSafeInteger(commandId) || commandId <= 0) {
+    throw new DropshipError(
+      "DROPSHIP_TRACKING_COMMAND_ID_INVALID",
+      "Channel fulfillment command id must be a positive integer.",
+      { commandId, retryable: false },
+    );
+  }
+  return `${CHANNEL_FULFILLMENT_TRACKING_KEY_PREFIX}${commandId}`;
+}
+
+/** The owning channel fulfillment command, or null for a push made outside the rails. */
+export function channelFulfillmentCommandIdFromTrackingKey(idempotencyKey: string): number | null {
+  if (!idempotencyKey.startsWith(CHANNEL_FULFILLMENT_TRACKING_KEY_PREFIX)) return null;
+  const digits = idempotencyKey.slice(CHANNEL_FULFILLMENT_TRACKING_KEY_PREFIX.length);
+  if (!/^[1-9][0-9]*$/.test(digits)) return null;
+  const commandId = Number(digits);
+  return Number.isSafeInteger(commandId) ? commandId : null;
+}
 
 export interface DropshipMarketplaceTrackingPushRecord {
   pushId: number;
@@ -46,6 +84,8 @@ export interface DropshipMarketplaceTrackingRepository {
     trackingNumber: string;
     shippedAt: Date;
     idempotencyKey: string;
+    /** When given, exactly these lines are pushed instead of lines read from the WMS shipment. */
+    lineItems?: readonly DropshipTrackingShippedLine[];
     now: Date;
   }): Promise<DropshipMarketplaceTrackingClaim>;
   completePush(input: {
@@ -77,6 +117,16 @@ export interface PushDropshipTrackingForOmsOrderInput {
   trackingNumber: string;
   shippedAt: Date;
   idempotencyKey?: string;
+  /**
+   * The exact shipped lines and quantities. The channel fulfillment rails pass
+   * their command lines here; without it, lines are read from the WMS shipment.
+   */
+  lineItems?: readonly DropshipTrackingShippedLine[];
+  /**
+   * The caller will not try this push again, so a retryable failure is
+   * reported to the vendor as final.
+   */
+  lastAttempt?: boolean;
 }
 
 export type PushDropshipTrackingForOmsOrderResult =
@@ -108,6 +158,7 @@ export class DropshipMarketplaceTrackingService {
       trackingNumber: input.trackingNumber.trim(),
       shippedAt: input.shippedAt,
       idempotencyKey,
+      ...(input.lineItems ? { lineItems: input.lineItems } : {}),
       now,
     });
     if (claim.status === "not_dropship") {
@@ -169,11 +220,18 @@ export class DropshipMarketplaceTrackingService {
         retryable,
         now: this.deps.clock.now(),
       });
-      await this.notifyTrackingFailed(failedPush, {
-        code,
-        message: error?.message ?? String(error),
+      const notice = decideTrackingFailureNotice({
         retryable,
+        attemptCount: failedPush.attemptCount,
+        lastAttempt: input.lastAttempt === true,
       });
+      if (notice !== "none") {
+        await this.notifyTrackingFailed(failedPush, {
+          code,
+          message: error?.message ?? String(error),
+          willRetry: notice === "retrying",
+        });
+      }
       throw error;
     }
   }
@@ -203,26 +261,27 @@ export class DropshipMarketplaceTrackingService {
     });
   }
 
+  /** willRetry is false when this is the final failure the vendor will hear about. */
   private async notifyTrackingFailed(
     push: DropshipMarketplaceTrackingPushRecord,
     failure: {
       code: string;
       message: string;
-      retryable: boolean;
+      willRetry: boolean;
     },
   ): Promise<void> {
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: push.vendorId,
       eventType: DROPSHIP_NOTIFICATION_EVENTS.TRACKING_PUSH_FAILED,
-      critical: !failure.retryable,
+      critical: !failure.willRetry,
       channels: ["email", "in_app"],
-      title: failure.retryable ? "Dropship tracking push retrying" : "Dropship tracking push failed",
+      title: failure.willRetry ? "Dropship tracking push retrying" : "Dropship tracking push failed",
       message: `Tracking ${push.trackingNumber} could not be pushed to ${push.platform} for order ${push.externalOrderId}: ${failure.message}`,
       payload: {
         ...buildTrackingNotificationPayload(push),
         failureCode: failure.code,
         failureMessage: failure.message,
-        retryable: failure.retryable,
+        retryable: failure.willRetry,
       },
       idempotencyKey: `tracking-push-failed:${push.pushId}:${push.attemptCount}:${failure.code}`,
     }, {
@@ -313,6 +372,36 @@ function validatePushInput(input: PushDropshipTrackingForOmsOrderInput): void {
       omsOrderId: input.omsOrderId,
       retryable: false,
     });
+  }
+  if (input.lineItems !== undefined) {
+    validateShippedLines(input.omsOrderId, input.lineItems);
+  }
+}
+
+function validateShippedLines(
+  omsOrderId: number,
+  lineItems: readonly DropshipMarketplaceTrackingLineItem[],
+): void {
+  const invalid = (reason: string): DropshipError => new DropshipError(
+    "DROPSHIP_TRACKING_LINE_ITEMS_INVALID",
+    "Tracking push line items must be distinct marketplace lines with positive whole quantities.",
+    { omsOrderId, reason, retryable: false },
+  );
+  if (!Array.isArray(lineItems) || lineItems.length === 0) throw invalid("empty");
+  const seen = new Set<string>();
+  for (const item of lineItems) {
+    const id = item.externalLineItemId;
+    if (
+      typeof id !== "string"
+      || id.length === 0
+      || id.length > MAX_EXTERNAL_LINE_ITEM_ID_LENGTH
+      || id.trim() !== id
+    ) {
+      throw invalid("line_id");
+    }
+    if (!Number.isSafeInteger(item.quantity) || item.quantity <= 0) throw invalid("quantity");
+    if (seen.has(id)) throw invalid("duplicate_line");
+    seen.add(id);
   }
 }
 
