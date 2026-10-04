@@ -10,7 +10,7 @@ import {
   type ReturnLabelProvider,
   type ReturnLabelRecord,
 } from "../application/return-label-provider.port";
-import { matchesShipStationReturnWeight, shipStationReturnWeightPounds } from "./shipstation-return-weight";
+import { matchesShipStationReturnWeight, shipStationReturnWeightPounds, type ShipStationReturnWeightVerificationMode } from "./shipstation-return-weight";
 import { shipStationReturnAddress } from "./shipstation-return-address";
 
 const API_ORIGIN = "https://api.shipstation.com";
@@ -83,6 +83,8 @@ export interface ShipStationReturnLabelAdapterConfig {
   timeoutMs?: number;
 }
 
+type LabelVerification = { kind: "purchase" } | { kind: "recover"; labelId: string };
+
 /** Dedicated effect adapter. No global credentials, database imports or automatic POST retries.
  * https://docs.shipstation.com/return-labels restricts is_return_label to POST /v2/labels.
  */
@@ -141,18 +143,18 @@ export function createShipStationReturnLabelAdapter(config: ShipStationReturnLab
     }
   }
 
-  async function verify(raw: unknown, input: ReturnLabelInput, signal?: AbortSignal, expectedLabelId?: string): Promise<ReturnLabelRecord> {
+  async function verify(raw: unknown, input: ReturnLabelInput, verification: LabelVerification, signal?: AbortSignal): Promise<ReturnLabelRecord> {
     const parsed = labelSchema.safeParse(raw);
     if (!parsed.success) fail("RETURN_LABEL_RESPONSE_INVALID", "unknown");
     const label = parsed.data;
-    if (expectedLabelId && label.label_id !== expectedLabelId) fail("RETURN_LABEL_IDENTITY_MISMATCH", "unknown");
+    if (verification.kind === "recover" && label.label_id !== verification.labelId) fail("RETURN_LABEL_IDENTITY_MISMATCH", "unknown");
     if (label.status !== "completed") fail("RETURN_LABEL_NOT_COMPLETED", "unknown", label.status === "processing");
     if (!label.is_return_label || label.is_international || !label.trackable || label.voided || label.voided_at
       || label.rma_number !== input.rmaNumber || label.carrier_id !== input.carrierId || label.service_code !== input.serviceCode
       || label.label_format !== "pdf" || label.label_layout !== "4x6" || label.charge_event !== "carrier_default"
       || (label.external_shipment_id != null && label.external_shipment_id !== input.externalShipmentId)
       || label.packages[0].tracking_number !== label.tracking_number) fail("RETURN_LABEL_IDENTITY_MISMATCH", "unknown");
-    assertPackage(label.packages[0], input);
+    assertPackage(label.packages[0], input, verification.kind);
     const shipmentResult = shipmentSchema.safeParse(await request("GET", `/shipments/${encodeURIComponent(label.shipment_id)}`, undefined, signal));
     if (!shipmentResult.success) fail("RETURN_LABEL_SHIPMENT_INVALID", "unknown");
     const shipment = shipmentResult.data;
@@ -161,7 +163,7 @@ export function createShipStationReturnLabelAdapter(config: ShipStationReturnLab
       || !sameAddress(shipment.ship_from, input.shipFrom) || !sameAddress(shipment.ship_to, input.shipTo)) {
       fail("RETURN_LABEL_IDENTITY_MISMATCH", "unknown");
     }
-    assertPackage(shipment.packages[0], input);
+    assertPackage(shipment.packages[0], input, verification.kind);
     const cost = moneyCents(label.shipment_cost).plus(moneyCents(label.insurance_cost));
     if (!cost.isInteger() || cost.greaterThan(Number.MAX_SAFE_INTEGER)) fail("RETURN_LABEL_AMOUNT_INVALID", "unknown");
     const result = returnLabelRecordSchema.safeParse({
@@ -178,7 +180,7 @@ export function createShipStationReturnLabelAdapter(config: ShipStationReturnLab
     async purchase(rawInput, signal) {
       const input = parseInput(rawInput);
       const response = await request("POST", "/labels", buildReturnLabelRequest(input), signal);
-      return verify(response, input, signal);
+      return verify(response, input, { kind: "purchase" }, signal);
     },
     async recover(rawInput, signal) {
       const input = parseInput(rawInput, "unknown");
@@ -211,7 +213,7 @@ export function createShipStationReturnLabelAdapter(config: ShipStationReturnLab
       if (ids.size > 1) fail("RETURN_LABEL_RECOVERY_AMBIGUOUS", "unknown");
       const [id] = ids;
       if (!id) return null;
-      return verify(await request("GET", `/labels/${encodeURIComponent(id)}`, undefined, signal), input, signal, id);
+      return verify(await request("GET", `/labels/${encodeURIComponent(id)}`, undefined, signal), input, { kind: "recover", labelId: id }, signal);
     },
   };
 }
@@ -251,8 +253,8 @@ function sameAddress(actual: z.infer<typeof addressSchema>, expected: ReturnLabe
     .every(([key, value]) => canonical(actual[key as keyof typeof actual]) === canonical(value));
 }
 
-function assertPackage(actual: z.infer<typeof packageSchema>, input: ReturnLabelInput): void {
-  if (!matchesShipStationReturnWeight(actual.weight, input.parcel.weightGrams)) {
+function assertPackage(actual: z.infer<typeof packageSchema>, input: ReturnLabelInput, mode: ShipStationReturnWeightVerificationMode): void {
+  if (!matchesShipStationReturnWeight(actual.weight, input.parcel.weightGrams, mode)) {
     fail("RETURN_LABEL_MEASUREMENTS_MISMATCH", "unknown");
   }
   for (const axis of ["length", "width", "height"] as const) {
