@@ -1123,14 +1123,14 @@ export class ReceivingService {
       const opened = await this.storage.updateReceivingOrder(orderId, {
         status: "open",
         receivedBy: userId,
-        receivedDate: new Date(),
+        receivedDate: this.clock(),
       }, tx);
       return { order: lockedOrder, updated: opened };
     });
 
     const lines = await this.storage.getReceivingLines(orderId);
     const vendor = order.vendorId ? await this.storage.getVendorById(order.vendorId) : null;
-    return { ...updated, lines, vendor };
+    return { ...updated, lines: lines.map(withReceivingUnitVersion), vendor };
   }
 
   // ─── Close ────────────────────────────────────────────────────
