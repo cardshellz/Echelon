@@ -148,6 +148,20 @@ async function reviewSelectedDrafts(page: Page, skus: readonly string[]) {
   await page.getByRole("button", { name: `Review selected (${skus.length})`, exact: true }).click();
 }
 
+async function expectPinnedListingEditor(dialog: Locator) {
+  await expect.poll(() => dialog.evaluate(element => element.scrollTop)).toBe(0);
+  await expect(dialog.getByRole("heading", { level: 2 })).toBeInViewport({ ratio: 1 });
+  await expect(dialog.getByRole("navigation", { name: "Listing editor sections", exact: true })).toBeInViewport({ ratio: 1 });
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeInViewport({ ratio: 1 });
+  const footerGap = await dialog.evaluate(element => {
+    const button = Array.from(element.querySelectorAll("button")).find(node => node.textContent?.trim() === "Update draft item");
+    return element.getBoundingClientRect().bottom - button!.getBoundingClientRect().bottom;
+  });
+  // Mobile includes one explanatory line below the actions; a larger gap means
+  // a hidden outer scroll container shifted the fixed header/footer out of place.
+  expect(footerGap).toBeLessThan(70);
+}
+
 function seedTwoDrafts(state: Awaited<ReturnType<typeof setup>>) {
   state.publication.draft = { ...state.publication.draft, revision: 1, items: [
     listingDraftItemSchema.parse({ variantId: 1, productType: "Trading Card Accessories", brand: "First brand", priceOverrideCents: 549,
@@ -155,6 +169,28 @@ function seedTwoDrafts(state: Awaited<ReturnType<typeof setup>>) {
     listingDraftItemSchema.parse({ variantId: 26, productType: "Trading Card Accessories", brand: "Second brand", priceOverrideCents: 749,
       identifier: { type: "UPC", value: "036000291452" }, attributes: { Orderable: { shippingWeight: 0.4 }, Visible: { countryOfOrigin: "CN", color: "Blue" } } }),
   ] };
+}
+
+const SLEEVES_TYPE = "Trading Card Sleeves & Holders";
+const KEY_FEATURE_GUIDANCE = "Describe one clear product benefit per entry. Explain the material, fit, and intended use in plain language so buyers can compare the item. Keep the features accurate for this exact selling unit and avoid repeating the same claim across entries.";
+function seedSleevesDetails(state: Awaited<ReturnType<typeof setup>>) {
+  seedTwoDrafts(state);
+  const providerSchema = JSON.parse(readFileSync(resolve("server/modules/channels/__tests__/fixtures/walmart-listing-sleeves.schema.json"), "utf8"));
+  const schema = editorSchema(providerSchema, "MP_ITEM", SLEEVES_TYPE);
+  const sections = schema.properties as Record<string, Record<string, unknown>>;
+  const fields = sections.Visible.properties as Record<string, Record<string, unknown>>;
+  // The checked-in provider fixture omits descriptions. Add identical list/item
+  // guidance solely to exercise repeated-help presentation; retain its real bounds.
+  fields.keyFeatures = { ...fields.keyFeatures, description: KEY_FEATURE_GUIDANCE,
+    items: { ...(fields.keyFeatures.items as object), description: KEY_FEATURE_GUIDANCE } };
+  state.publication.requirementsSchema = schema;
+  state.publication.taxonomy = { productTypes: [SLEEVES_TYPE], entries: [{ productType: SLEEVES_TYPE, path: ["Collectibles", "Card Protection"], description: null }] };
+  state.publication.draft.items[0] = { ...state.publication.draft.items[0], productType: SLEEVES_TYPE, attributes: {
+    Orderable: { ShippingWeight: 0.125, country_of_origin_substantial_transformation: "United States" },
+    Visible: { condition: "New", keyFeatures: ["Clear front keeps the card visible", "Precise fit for standard cards", "Archival material protects the surface"],
+      countPerPack: 100, multipackQuantity: 1, isProp65WarningRequired: "No", has_written_warranty: "No",
+      netContent: { productNetContentUnit: "Each", productNetContentMeasure: 100 }, pieceCount: 100 },
+  } };
 }
 
 function seedAttributeTable(state: Awaited<ReturnType<typeof setup>>, count: number) {
@@ -511,12 +547,24 @@ test("product-type loading is explicit and does not select or publish an item", 
 
 test("read-only item details cannot change product type", async ({ page }) => {
   const state = await setup(page, { readOnly: true });
-  state.publication.draft = { ...state.publication.draft, revision: 1,
-    items: [listingDraftItemSchema.parse({ variantId: 1, productType: "Trading Card Accessories" })] };
+  seedSleevesDetails(state);
+  const original = structuredClone(state.publication.draft.items);
   await page.reload();
   await page.getByRole("button", { name: "View CARD-1", exact: true }).click();
-  await expect(page.getByRole("dialog").getByText("Trading Card Accessories", { exact: true })).toBeVisible();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText(SLEEVES_TYPE, { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Change product type", exact: true })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Jump to required details", exact: true }).click();
+  await expect(dialog.getByLabel(/^Key Features 1/)).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Remove Key Features 2", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Add Key Features", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Clear all Key Features", exact: true })).toBeDisabled();
+  const guidance = dialog.locator('details[aria-label="Key Features guidance"]');
+  await guidance.locator("summary").click();
+  await expect(guidance.getByText(KEY_FEATURE_GUIDANCE, { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Update draft item", exact: true })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(state.publication.draft.items).toEqual(original);
   expect(state.publication.writes).toEqual([]);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
@@ -1092,6 +1140,132 @@ test("bulk Save includes products added in the feed even when no bulk fields cha
   expect(state.publication.draft.items.map(item => item.variantId)).toEqual([1]);
   expect(state.publication.writes).toHaveLength(1); expect(state.publication.operations).toEqual([]);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("actual sleeves details show one guidance block and preserve other fields when removing and adding a feature", async ({ page }, info) => {
+  const state = await setup(page, { catalogEmpty: true }); seedSleevesDetails(state);
+  const original = structuredClone(state.publication.draft.items);
+  await page.reload(); await page.getByRole("button", { name: "Edit CARD-1", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText(SLEEVES_TYPE, { exact: true })).toBeVisible();
+  await dialog.screenshot({ path: info.outputPath("sku-details-modal.png") });
+  await dialog.getByRole("button", { name: "Jump to required details", exact: true }).click();
+  await expectPinnedListingEditor(dialog);
+  await dialog.getByLabel("Search listing fields", { exact: true }).fill("Key Features");
+  const guidance = dialog.locator('details[aria-label="Key Features guidance"]');
+  await expect(guidance).toHaveCount(1);
+  await expect(guidance).not.toHaveAttribute("open", "");
+  await expect(dialog.getByText(KEY_FEATURE_GUIDANCE, { exact: true })).toHaveCount(1);
+  await expect(dialog.getByText(KEY_FEATURE_GUIDANCE, { exact: true })).not.toBeVisible();
+  for (const [index, feature] of (original[0].attributes.Visible as { keyFeatures: string[] }).keyFeatures.entries())
+    await expect(dialog.getByLabel(new RegExp(`^Key Features ${index + 1}`))).toHaveValue(feature);
+  const remove = dialog.getByRole("button", { name: "Remove Key Features 2", exact: true });
+  await expect(remove).toHaveText("");
+  await expect(remove.locator("svg")).toHaveAttribute("aria-hidden", "true");
+  const rowWidth = await remove.evaluate(element => element.parentElement!.getBoundingClientRect().width);
+  const fieldWidth = await dialog.getByLabel(/^Key Features 2/).evaluate(element => element.getBoundingClientRect().width);
+  expect(rowWidth - fieldWidth).toBeLessThanOrEqual(27);
+  await expect(dialog.getByRole("button", { name: "Add Key Features", exact: true })).toHaveText("Add Key Features");
+  await guidance.locator("summary").click();
+  await expect(guidance.getByText(KEY_FEATURE_GUIDANCE, { exact: true })).toBeVisible();
+  const descriptionId = await dialog.getByLabel(/^Key Features 1/).getAttribute("aria-describedby");
+  expect(descriptionId).toBeTruthy();
+  for (const index of [2, 3]) await expect(dialog.getByLabel(new RegExp(`^Key Features ${index}`))).toHaveAttribute("aria-describedby", descriptionId!);
+  await guidance.locator("summary").click();
+  await dialog.getByLabel(/^Key Features 1/).evaluate(element => element.closest("fieldset")!.scrollIntoView({ block: "start" }));
+  await expectPinnedListingEditor(dialog);
+  await page.screenshot({ path: info.outputPath("sku-details-key-features-viewport.png") });
+  await dialog.screenshot({ path: info.outputPath("sku-details-key-features.png") });
+  // Center the action group before requiring full visibility. Nearest-edge
+  // scrolling can leave a fractional pixel outside the scrollport in Chromium.
+  await dialog.getByRole("button", { name: "Add Key Features", exact: true }).evaluate(element => element.parentElement!.scrollIntoView({ block: "center" }));
+  await expectPinnedListingEditor(dialog);
+  const clearFeatures = dialog.getByRole("button", { name: "Clear all Key Features", exact: true });
+  await expect(clearFeatures).toBeInViewport({ ratio: 1 });
+  await clearFeatures.click({ trial: true });
+  await dialog.screenshot({ path: info.outputPath("sku-details-key-features-actions.png") });
+  await remove.click();
+  await expect(dialog.getByLabel(/^Key Features 2/)).toHaveValue("Archival material protects the surface");
+  await expect(dialog.getByLabel(/^Key Features 2/)).toBeFocused();
+  await expect(dialog.getByLabel(/^Key Features 3/)).toHaveCount(0);
+  await expect(dialog.getByRole("region", { name: "Required fields summary", exact: true })).toContainText("required fields need attention");
+  await dialog.getByRole("button", { name: "Add Key Features", exact: true }).click();
+  await expect(dialog.getByLabel(/^Key Features 3/)).toBeFocused();
+  await dialog.getByLabel(/^Key Features 3/).fill("Smooth edges help with repeated handling");
+  await expectPinnedListingEditor(dialog);
+  await expect(dialog.getByRole("region", { name: "Required fields summary", exact: true })).toContainText("Required fields shown here are filled");
+  await dialog.getByRole("button", { name: "Jump to content", exact: true }).click();
+  await expectPinnedListingEditor(dialog);
+  await expect(dialog.getByLabel("Walmart title", { exact: true })).toHaveValue("Trading card protection");
+  await expect(dialog.getByLabel("Brand", { exact: true })).toHaveValue("First brand");
+  await dialog.getByLabel("Brand", { exact: true }).scrollIntoViewIfNeeded();
+  await expectPinnedListingEditor(dialog);
+  await dialog.screenshot({ path: info.outputPath("sku-details-content.png") });
+  await dialog.getByRole("button", { name: "Update draft item", exact: true }).click();
+  expect(state.publication.writes).toEqual([]);
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect(page.getByText("Draft saved. No listing has been submitted.", { exact: true })).toBeVisible();
+  expect(state.publication.draft.items).toEqual([{ ...original[0], attributes: { ...original[0].attributes,
+    Visible: { ...(original[0].attributes.Visible as object), keyFeatures: ["Clear front keeps the card visible", "Archival material protects the surface", "Smooth edges help with repeated handling"] } } }, original[1]]);
+  expect(state.publication.writes).toHaveLength(1); expect(state.publication.operations).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("bulk sleeves inspector shares array guidance and applies only the edited item's feature list", async ({ page }, info) => {
+  const state = await setup(page, { catalogEmpty: true }); seedSleevesDetails(state);
+  const original = structuredClone(state.publication.draft.items);
+  await page.reload(); await page.getByLabel("Select all actionable rows on this page", { exact: true }).check();
+  const bulk = await openBulkWorkspace(page, 2);
+  await bulk.getByRole("button", { name: "Edit attributes for CARD-1", exact: true }).click();
+  const details = bulk.getByRole("complementary", { name: "Item details", exact: true });
+  await details.getByLabel("Search listing fields", { exact: true }).fill("Key Features");
+  const guidance = details.locator('details[aria-label="Key Features guidance"]');
+  await expect(guidance).toHaveCount(1);
+  await expect(details.getByText(KEY_FEATURE_GUIDANCE, { exact: true })).toHaveCount(1);
+  await guidance.locator("summary").click();
+  await expect(guidance.getByText(KEY_FEATURE_GUIDANCE, { exact: true })).toBeVisible();
+  await guidance.locator("summary").click();
+  await details.getByRole("button", { name: "Remove Key Features 2", exact: true }).click();
+  await expect(details.getByLabel(/^Key Features 2/)).toHaveValue("Archival material protects the surface");
+  await details.getByRole("button", { name: "Add Key Features", exact: true }).click();
+  await details.getByLabel(/^Key Features 3/).fill("Replacement for this item only");
+  await page.screenshot({ path: info.outputPath("bulk-sleeves-key-features.png"), fullPage: true });
+  await details.getByRole("button", { name: "Close details", exact: true }).click();
+  await saveBulkWorkspace(page);
+  expect(state.publication.draft.items).toEqual([{ ...original[0], attributes: { ...original[0].attributes,
+    Visible: { ...(original[0].attributes.Visible as object), keyFeatures: ["Clear front keeps the card visible", "Archival material protects the surface", "Replacement for this item only"] } } }, original[1]]);
+  expect(state.publication.writes).toHaveLength(1); expect(state.publication.operations).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("optional list controls enforce the schema maximum and clearing preserves unrelated values", async ({ page }) => {
+  const state = await setup(page, { catalogEmpty: true }); seedTwoDrafts(state);
+  const original = structuredClone(state.publication.draft.items);
+  // Synthetic bounds isolate the shared array-control contract, not Walmart policy.
+  state.publication.requirementsSchema = { type: "object", properties: { Visible: { type: "object", properties: {
+    notes: { type: "array", title: "Notes", minItems: 1, maxItems: 2, items: { type: "string" } },
+  } } } };
+  await page.reload(); await page.getByRole("button", { name: "Edit CARD-1", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "Jump to required details", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Add Notes", exact: true })).toBeHidden();
+  await dialog.getByLabel("Search listing fields", { exact: true }).fill("Notes");
+  const add = dialog.getByRole("button", { name: "Add Notes", exact: true });
+  await add.click(); await expect(dialog.getByLabel(/^Notes 1/)).toBeFocused();
+  await dialog.getByLabel(/^Notes 1/).fill("First note");
+  await add.click(); await dialog.getByLabel(/^Notes 2/).fill("Second note");
+  await expect(add).toBeDisabled();
+  await dialog.getByRole("button", { name: "Remove Notes 1", exact: true }).click();
+  await expect(dialog.getByLabel(/^Notes 1/)).toHaveValue("Second note");
+  await expect(dialog.getByLabel(/^Notes 1/)).toBeFocused(); await expect(add).toBeEnabled();
+  await dialog.getByRole("button", { name: "Clear all Notes", exact: true }).click();
+  await expect(dialog.getByLabel(/^Notes 1/)).toHaveCount(0); await expect(add).toBeEnabled();
+  await dialog.getByRole("button", { name: "Update draft item", exact: true }).click();
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect(page.getByText("Draft saved. No listing has been submitted.", { exact: true })).toBeVisible();
+  expect(state.publication.draft.items).toEqual(original);
+  expect(state.publication.operations).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
 test("required fields stay visible, conditional choices reveal requirements and optional search preserves missing context", async ({ page }, info) => {
