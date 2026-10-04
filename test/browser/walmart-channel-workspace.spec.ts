@@ -270,6 +270,34 @@ test("catalog content is displayed as actual inherited values and saving untouch
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
+test("returning to an open editor refreshes catalog images without replacing custom values", async ({ page }) => {
+  const state = await setup(page);
+  await selectFirstProduct(page);
+  await page.getByRole("button", { name: "Edit CARD-1", exact: true }).click();
+  const images = page.getByLabel("Image URLs", { exact: true });
+  await expect(images).toHaveValue("https://example.com/product.png");
+  await page.getByLabel("Walmart title", { exact: true }).fill("My edited title");
+  const updated = ["https://example.com/new.jpg", "https://example.com/product.png"];
+  state.publication.catalogItems[0].images = updated;
+  // Same event emitted when staff return from editing the catalog in another tab.
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange", { bubbles: true })));
+  await expect(images).toHaveValue(updated.join("\n"));
+  await expect(page.getByLabel("Walmart title", { exact: true })).toHaveValue("My edited title");
+  await images.fill("https://example.com/custom.jpg");
+  state.publication.catalogItems[0].images = [updated[1]];
+  const readsBefore = state.reads.filter(path => path.includes("/catalog?variantIds=")).length;
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange", { bubbles: true })));
+  await expect.poll(() => state.reads.filter(path => path.includes("/catalog?variantIds=")).length).toBeGreaterThan(readsBefore);
+  await expect(images).toHaveValue("https://example.com/custom.jpg");
+  await page.getByRole("button", { name: "Use catalog images", exact: true }).click();
+  await expect(images).toHaveValue(updated[1]);
+  await page.getByRole("button", { name: "Update draft item", exact: true }).click();
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect(page.getByText("Draft saved. No listing has been submitted.", { exact: true })).toBeVisible();
+  expect(state.publication.draft.items[0]).toMatchObject({ title: "My edited title", images: null });
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
 test("content overrides and reset-to-catalog are explicit without changing other item fields", async ({ page }) => {
   const state = await setup(page);
   await selectFirstProduct(page);

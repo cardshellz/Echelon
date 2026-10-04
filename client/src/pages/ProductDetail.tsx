@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useInventoryCommand } from "@/lib/inventory-command";
 import { InventoryTrackingHistory } from "@/components/catalog/InventoryTrackingHistory";
 import { ProductImageGallery } from "@/components/catalog/ProductImageGallery";
+import { invalidateCatalogImages } from "@/lib/catalog-image-queries";
 import type { CatalogGalleryAsset, ReorderProductAssets } from "@shared/catalog/product-assets";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation, useSearch } from "wouter";
@@ -1880,6 +1881,7 @@ export default function ProductDetail() {
   });
 
   // --- Asset mutations ---
+  const refreshImageReferences = () => invalidateCatalogImages(queryClient, productId);
   const addAssetMutation = useMutation({
     mutationFn: async ({ url, altText }: { url: string; altText: string }) => {
       const res = await fetch(`/api/products/${product?.productId}/assets`, {
@@ -1890,8 +1892,8 @@ export default function ProductDetail() {
       if (!res.ok) throw new Error("Failed to add image");
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+    onSuccess: async () => {
+      await refreshImageReferences();
       setAddImageUrl("");
       setAddImageAlt("");
       toast({ title: "Image added" });
@@ -1914,8 +1916,8 @@ export default function ProductDetail() {
       if (!res.ok) throw new Error("Failed to upload image");
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+    onSuccess: async () => {
+      await refreshImageReferences();
       toast({ title: "Image uploaded" });
       if (fileInputRef.current) fileInputRef.current.value = "";
     },
@@ -1930,7 +1932,7 @@ export default function ProductDetail() {
       if (!res.ok) throw new Error("Failed to delete image");
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+      await refreshImageReferences();
       toast({ title: "Image removed" });
     },
     onError: (error: Error) => {
@@ -1948,7 +1950,7 @@ export default function ProductDetail() {
       if (!res.ok) throw new Error("Failed to set primary");
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+      await refreshImageReferences();
       toast({ title: "Primary image updated" });
     },
     onError: (error: Error) => {
@@ -1969,7 +1971,7 @@ export default function ProductDetail() {
       }
     },
     onSettled: async () => {
-      await queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+      await refreshImageReferences();
     },
   });
 
@@ -2052,8 +2054,8 @@ export default function ProductDetail() {
       if (!res.ok) throw new Error(`Failed to pull images from ${source}`);
       return res.json();
     },
-    onSuccess: (data: any, source: string) => {
-      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+    onSuccess: async (data: any, source: string) => {
+      await refreshImageReferences();
       const added = data?.summary?.imagesAdded ?? 0;
       toast({ title: `Pulled ${added} image${added !== 1 ? "s" : ""} from ${source}` });
     },
