@@ -46,6 +46,7 @@ import {
 import { updateProductInventoryTracking, InventoryTrackingPolicyError } from "./inventory-tracking-policy.repository";
 import { registerBulkInventoryTrackingRoutes } from "./bulk-inventory-tracking.routes";
 import { registerInventoryTrackingHistoryRoutes } from "./inventory-tracking-history.routes";
+import { registerProductAssetRoutes } from "./product-asset.routes";
 import { parseInventoryTrackingWrite } from "@shared/catalog/inventory-tracking-policy";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
@@ -394,6 +395,7 @@ export async function registerProductRoutes(app: Express) {
   registerShopifyProductMappingReconciliationRoutes(app);
   registerBulkInventoryTrackingRoutes(app);
   registerInventoryTrackingHistoryRoutes(app);
+  registerProductAssetRoutes(app);
   // ============================================================================
   // Products API (Master Catalog)
   // ============================================================================
@@ -1542,22 +1544,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
     }
   });
 
-  app.put("/api/products/:id/assets/reorder", requirePermission("inventory", "update"), async (req, res) => {
-    try {
-      const productId = parseInt(req.params.id);
-      const { orderedIds } = req.body;
-      if (!Array.isArray(orderedIds)) {
-        return res.status(400).json({ error: "orderedIds array required" });
-      }
-      await storage.reorderProductAssets(productId, orderedIds);
-      res.json({ success: true });
-    } catch (error) {
-      console.error("Error reordering product assets:", error);
-      res.status(500).json({ error: "Failed to reorder assets" });
-    }
-  });
-
-  app.put("/api/product-assets/:id/primary", requirePermission("inventory", "update"), async (req, res) => {
+  app.put("/api/product-assets/:id/primary", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const assetId = parseInt(req.params.id);
       const { productId } = req.body;
