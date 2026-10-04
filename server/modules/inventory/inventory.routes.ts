@@ -130,61 +130,8 @@ export function registerInventoryRoutes(app: Express) {
   
   app.post("/api/inventory/transfer", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     try {
-      const { inventoryCore } = req.app.locals.services;
-      const parsed = inventoryTransferRequestSchema.safeParse(req.body);
-      if (!parsed.success) {
-        return res.status(400).json({ code: "TRANSFER_INPUT_INVALID", error: "Invalid inventory transfer", details: parsed.error.flatten() });
-      }
-      const { fromLocationId: fromLocId, toLocationId: toLocId, variantId: varId, quantity: qty,
-        commandKey, notes, moveReserved, crossWarehouseArrivalConfirmed } = parsed.data;
-
-      // Validate locations exist
-      const fromLoc = await storage.getWarehouseLocationById(fromLocId);
-      const toLoc = await storage.getWarehouseLocationById(toLocId);
-      if (!fromLoc) {
-        return res.status(400).json({ error: "Source location not found" });
-      }
-      if (!toLoc) {
-        return res.status(400).json({ error: "Destination location not found" });
-      }
-
-      const userId = req.session.user?.id || "system";
-
-      const variant = await storage.getProductVariantById(varId);
-      if (!variant) {
-        return res.status(400).json({ error: "Variant not found" });
-      }
-
-      const transferResult = await inventoryCore.transfer({
-        commandKey,
-        productVariantId: varId,
-        fromLocationId: fromLocId,
-        toLocationId: toLocId,
-        qty,
-        userId,
-        notes: typeof notes === "string" ? notes : undefined,
-        moveReserved: moveReserved === true,
-        ...(crossWarehouseArrivalConfirmed !== undefined ? { crossWarehouseArrivalConfirmed } : {}),
-      });
-
-      // Sync to sales channels after transfer (fire-and-forget)
-      const { channelSync: xfrSync, replenishment: xfrReplen } = req.app.locals.services;
-      if (xfrSync) {
-        xfrSync.queueSyncAfterInventoryChange(varId).catch((err: any) =>
-          console.warn(`[ChannelSync] Post-transfer sync failed for variant ${varId}:`, err)
-        );
-      }
-      // Auto-complete matching replen tasks fulfilled by this transfer (fire-and-forget)
-      if (xfrReplen) {
-        xfrReplen.completeMatchingTransferTask(fromLocId, toLocId, varId, userId).catch((err: any) =>
-          console.warn(`[Replen] Auto-complete matching task failed for variant ${varId}:`, err)
-        );
-        xfrReplen.checkReplenForLocation(fromLocId).catch((err: any) =>
-          console.warn(`[Replen] Post-transfer replen check failed for loc ${fromLocId}:`, err)
-        );
-      }
-
-      res.json({ success: true, ...transferResult });
+      const result = await req.app.locals.services.inventoryTransfers.transfer(req.body, req.session.user?.id || "system");
+      res.json(result);
     } catch (error: any) {
       // Reserved stock stands in the way: return a structured 409 so the client
       // can offer to move the reservation with the stock (Option A confirm flow),

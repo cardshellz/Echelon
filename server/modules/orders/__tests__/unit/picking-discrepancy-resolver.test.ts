@@ -7,8 +7,8 @@ function makeService(
   replenishmentOverrides?: Record<string, unknown>,
 ) {
   const locations = locationOverrides ?? [
-    { id: 1, code: "A-01", isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" },
-    { id: 2, code: "B-01", isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" },
+    { id: 1, code: "A-01", warehouseId: 1, isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" },
+    { id: 2, code: "B-01", warehouseId: 1, isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" },
   ];
 
   const storage = {
@@ -79,19 +79,10 @@ function makeItem(overrides: Record<string, unknown> = {}) {
     location: "A-01",
     status: "pending",
     shortReason: null,
+    productId: null, catalogProductId: null, inventoryTracking: null,
+    requiresShipping: 1, fulfilledQuantity: 0, onHold: false, pickedAt: null,
     ...overrides,
   } as any;
-}
-
-function makeReadyToShipDb(params: {
-  exceptions?: Array<Record<string, unknown>>;
-  replenTasks?: Array<Record<string, unknown>>;
-} = {}) {
-  return {
-    execute: vi.fn()
-      .mockResolvedValueOnce({ rows: params.exceptions ?? [] })
-      .mockResolvedValueOnce({ rows: params.replenTasks ?? [] }),
-  };
 }
 
 function makePickItemHarness(replenResult: { task: any; moved: number } | null) {
@@ -99,7 +90,7 @@ function makePickItemHarness(replenResult: { task: any; moved: number } | null) 
     { warehouseLocationId: 1, variantQty: 3 },
   ];
   const locations = [
-    { id: 1, code: "A-01", isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" },
+    { id: 1, code: "A-01", warehouseId: 1, isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" },
   ];
   const beforeItem = makeItem({ status: "pending", pickedQuantity: 0, quantity: 1 });
   const updatedItem = {
@@ -840,7 +831,7 @@ describe("PickingUseCases inventory discrepancy resolution", () => {
     }));
   });
 
-  it("uses the stock-bearing active pick bin when duplicate codes lack order warehouse scope", async () => {
+  it("rejects ambiguous bin codes when the order has no warehouse scope", async () => {
     const { service, inventoryCore } = makeService(
       [
         { warehouseLocationId: 10, variantQty: 0 },
@@ -853,152 +844,16 @@ describe("PickingUseCases inventory discrepancy resolution", () => {
     );
 
     const item = makeItem({ location: "FLOOR-01" });
-    const result = await (service as any)._deductInventory(item, item, {
+    await expect((service as any)._deductInventory(item, item, {
       pickMethod: "manual",
       userId: "picker-1",
-    });
-
-    expect(result).toMatchObject({
-      success: true,
-      locationId: 20,
-      locationCode: "FLOOR-01",
-      systemQtyAfter: 4,
-    });
-    expect(inventoryCore.pickItem).toHaveBeenCalledWith(expect.objectContaining({
-      warehouseLocationId: 20,
-      qty: 1,
-    }));
+    })).rejects.toMatchObject({context:{reason:"pick_location_ambiguous"}});
+    expect(inventoryCore.pickItem).not.toHaveBeenCalled();
   });
 });
 
-describe("PickingUseCases ready-to-ship guard", () => {
-  it("blocks ready-to-ship when a shipment-blocking exception is open", async () => {
-    const db = makeReadyToShipDb({
-      exceptions: [{
-        id: 77,
-        sku: "SKU-1",
-        exception_type: "inventory_deduction_failed",
-        status: "blocked",
-        review_reason: "System inventory did not match picker observation",
-      }],
-    });
-    const storage = {
-      getOrderById: vi.fn(async () => ({ id: 900, orderNumber: "#900", warehouseStatus: "completed" })),
-      getOrderItems: vi.fn(async () => [{
-        id: 500,
-        orderId: 900,
-        sku: "SKU-1",
-        quantity: 1,
-        pickedQuantity: 1,
-        status: "completed",
-        requiresShipping: 1,
-        location: "A-01",
-      }]),
-      updateOrderStatus: vi.fn(),
-      getUser: vi.fn(),
-      createPickingLog: vi.fn(),
-    };
-
-    const service = new PickingUseCases(db as any, {} as any, {} as any, storage as any);
-
-    await expect(service.markReadyToShip(900, "lead-1")).rejects.toMatchObject({
-      name: "ValidationError",
-    });
-    expect(storage.updateOrderStatus).not.toHaveBeenCalled();
-  });
-
-  it("allows ready-to-ship when completed shippable items have no shipment blockers", async () => {
-    const db = makeReadyToShipDb();
-    const storage = {
-      getOrderById: vi.fn(async () => ({ id: 900, orderNumber: "#900", warehouseStatus: "completed", assignedPickerId: "picker-1" })),
-      getOrderItems: vi.fn(async () => [{
-        id: 500,
-        orderId: 900,
-        sku: "SKU-1",
-        quantity: 1,
-        pickedQuantity: 1,
-        status: "completed",
-        requiresShipping: 1,
-        location: "A-01",
-      }]),
-      updateOrderStatus: vi.fn(async () => ({ id: 900, orderNumber: "#900", warehouseStatus: "ready_to_ship", assignedPickerId: "picker-1" })),
-      getUser: vi.fn(async () => ({ id: "picker-1", username: "picker" })),
-      createPickingLog: vi.fn(async () => ({})),
-    };
-
-    const service = new PickingUseCases(db as any, {} as any, {} as any, storage as any);
-    const order = await service.markReadyToShip(900, "lead-1");
-
-    expect(order).toMatchObject({ warehouseStatus: "ready_to_ship" });
-    expect(storage.updateOrderStatus).toHaveBeenCalledWith(900, "ready_to_ship");
-    expect(storage.createPickingLog).toHaveBeenCalledWith(expect.objectContaining({
-      actionType: "order_completed",
-      orderId: 900,
-    }));
-  });
-
-  it("forces auto progress to exception when a shipment-blocking review exists", async () => {
-    const db = makeReadyToShipDb({
-      exceptions: [{
-        id: 88,
-        sku: "SKU-1",
-        exception_type: "inventory_deduction_failed",
-        status: "blocked",
-        review_reason: "Inventory deduction failed",
-      }],
-    });
-    const storage = {
-      getOrderItems: vi.fn(async () => [{
-        id: 500,
-        orderId: 900,
-        sku: "SKU-1",
-        quantity: 1,
-        pickedQuantity: 1,
-        status: "completed",
-        requiresShipping: 1,
-        location: "A-01",
-      }]),
-    };
-
-    const service = new PickingUseCases(db as any, {} as any, {} as any, storage as any);
-    await expect((service as any).resolvePostPickStatusForOrder(900, "ready_to_ship")).resolves.toBe("exception");
-  });
-
-  it("blocks ready-to-ship when an order-linked replen task blocks shipment", async () => {
-    const db = makeReadyToShipDb({
-      replenTasks: [{
-        id: 121,
-        sku: "SKU-1",
-        status: "blocked",
-        exception_reason: "source_empty",
-        notes: "No source stock",
-      }],
-    });
-    const storage = {
-      getOrderById: vi.fn(async () => ({ id: 900, orderNumber: "#900", warehouseStatus: "completed" })),
-      getOrderItems: vi.fn(async () => [{
-        id: 500,
-        orderId: 900,
-        sku: "SKU-1",
-        quantity: 1,
-        pickedQuantity: 1,
-        status: "completed",
-        requiresShipping: 1,
-        location: "A-01",
-      }]),
-      updateOrderStatus: vi.fn(),
-      getUser: vi.fn(),
-      createPickingLog: vi.fn(),
-    };
-
-    const service = new PickingUseCases(db as any, {} as any, {} as any, storage as any);
-
-    await expect(service.markReadyToShip(900, "lead-1")).rejects.toMatchObject({
-      name: "ValidationError",
-    });
-    expect(storage.updateOrderStatus).not.toHaveBeenCalled();
-  });
-});
+// Ready-to-ship guards now run against the common PostgreSQL owner in
+// picking-progress-owner.integration.test.ts, rather than a second algorithm.
 
 describe("PickingUseCases replen source-empty reporting", () => {
   it("records an order-linked shipment-blocking replen task without changing the item", async () => {
@@ -1318,15 +1173,11 @@ describe("PickingUseCases pick queue replen prediction", () => {
     };
     const service = new PickingUseCases({} as any, {} as any, replenishment as any, storage as any);
 
-    const predictions = await (service as any)._buildReplenPredictions(
-      [{ id: 501, sku: "SKU-1", quantity: 3, location: "OLD-01" }],
-      new Map([[
-        "SKU-1",
-        { location: "A-01", zone: "A", barcode: null, imageUrl: null },
-      ]]),
-    );
-
-    expect(replenishment.predictReplenAfterPick).toHaveBeenCalledWith(100, 1, 3);
+    const predictions = await (service as any)._buildReplenPredictions([
+      { id: 501, sku: "SKU-1", quantity: 3, pickedQuantity: 1, requiresShipping: 1, status: "pending", location: "A-01",
+        sourcePlan: { status: "ready", productVariantId: 100, warehouseLocationId: 1, warehouseId: 1, locationCode: "A-01" } },
+    ]);
+    expect(replenishment.predictReplenAfterPick).toHaveBeenCalledWith(100, 1, 2);
     expect(predictions.get(501)).toMatchObject({
       replenNeeded: true,
       replenMethod: "case_break",

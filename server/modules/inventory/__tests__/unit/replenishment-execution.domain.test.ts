@@ -2,8 +2,33 @@ import { describe, expect, it } from "vitest";
 
 import {
   planReplenishmentExecution,
+  planReplenishmentDemand,
   ReplenishmentExecutionDomainError,
 } from "../../domain/replenishment-execution.domain";
+
+describe("replenishment destination demand", () => {
+  it("keeps exact-SKU counts when the source and destination are packages of ten", () => {
+    expect(planReplenishmentDemand({ destinationVariantQuantity: 20, destinationUnitsPerVariant: 10,
+      sourceUnitsPerVariant: 10, sourceBatchQuantity: 1 }))
+      .toEqual({ qtySourceUnits: 20, qtyTargetUnits: 200, qtyPickUnits: 20 });
+  });
+
+  it("rounds once to whole authorized source batches and reports whole destination output", () => {
+    expect(planReplenishmentDemand({ destinationVariantQuantity: 11, destinationUnitsPerVariant: 5,
+      sourceUnitsPerVariant: 25, sourceBatchQuantity: 2 }))
+      .toEqual({ qtySourceUnits: 4, qtyTargetUnits: 100, qtyPickUnits: 20 });
+  });
+
+  it("rejects unsafe arithmetic and a source batch that cannot produce whole destination units", () => {
+    const input = { destinationVariantQuantity: 1, destinationUnitsPerVariant: 5,
+      sourceUnitsPerVariant: 12, sourceBatchQuantity: 1 };
+    expect(() => planReplenishmentDemand(input)).toThrowError(expect.objectContaining({ code: "REPLENISHMENT_DEMAND_NOT_DIVISIBLE" }));
+    expect(() => planReplenishmentDemand({ ...input, destinationVariantQuantity: Number.MAX_SAFE_INTEGER }))
+      .toThrowError(expect.objectContaining({ code: "REPLENISHMENT_QUANTITY_OVERFLOW" }));
+    expect(() => planReplenishmentDemand({ ...input, destinationVariantQuantity: 0 }))
+      .toThrowError(expect.objectContaining({ code: "INVALID_REPLENISHMENT_EXECUTION_INPUT" }));
+  });
+});
 
 describe("planReplenishmentExecution", () => {
   it("plans a same-variant transfer without changing variant identity", () => {
