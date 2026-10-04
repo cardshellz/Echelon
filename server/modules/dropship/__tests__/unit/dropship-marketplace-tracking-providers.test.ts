@@ -13,6 +13,8 @@ const ORIGINAL_ENV = { ...process.env };
 describe("EbayDropshipMarketplaceTrackingProvider", () => {
   beforeEach(() => {
     process.env = { ...ORIGINAL_ENV, DROPSHIP_EBAY_CLIENT_ID: "client", DROPSHIP_EBAY_CLIENT_SECRET: "secret" };
+    // The eBay client skips every call in dry-run mode.
+    delete process.env.DRY_RUN;
   });
 
   afterEach(() => {
@@ -20,53 +22,109 @@ describe("EbayDropshipMarketplaceTrackingProvider", () => {
     vi.restoreAllMocks();
   });
 
-  it("posts eBay fulfillment tracking with store-connection credentials and marketplace", async () => {
-    const credential = makeCredential({ marketplaceId: "EBAY_GB" });
-    const repo = makeCredentialRepo(credential);
-    const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
-      expect(url).toBe("https://api.ebay.com/sell/fulfillment/v1/order/ORDER!1/shipping_fulfillment");
-      expect(init.headers).toMatchObject({
-        Authorization: "Bearer access-token",
-        "X-EBAY-C-MARKETPLACE-ID": "EBAY_GB",
-      });
-      expect(JSON.parse(String(init.body))).toEqual({
-        lineItems: [{ lineItemId: "LINE-1", quantity: 1 }],
-        shippedDate: "2026-05-02T10:00:00.000Z",
-        shippingCarrierCode: "USPS",
-        trackingNumber: "94001111",
-      });
-      return new Response("", {
-        status: 201,
-        headers: { Location: "https://api.ebay.com/sell/fulfillment/v1/order/ORDER%211/shipping_fulfillment/FT-1" },
-      });
-    });
-    const provider = new EbayDropshipMarketplaceTrackingProvider(repo, fetchImpl as any);
+  it("reads the order's shipments, adds this one on the vendor's marketplace, and confirms it", async () => {
+    const ebay = fakeEbayOrder({ orderPath: "ORDER!1", createdFulfillmentId: "FT-1" });
+    const provider = new EbayDropshipMarketplaceTrackingProvider(
+      makeCredentialRepo(makeCredential({ marketplaceId: "EBAY_GB" })),
+      ebay.fetch as any,
+    );
 
-    const result = await provider.pushTracking({
-      intakeId: 10,
-      omsOrderId: 20,
-      wmsShipmentId: null,
-      vendorId: 30,
-      storeConnectionId: 40,
-      platform: "ebay",
+    const result = await provider.pushTracking(ebayTrackingRequest({
       externalOrderId: "ORDER!1",
-      externalOrderNumber: null,
-      sourceOrderId: null,
-      carrier: "USPS",
       trackingNumber: "9400 1111",
-      shippedAt: new Date("2026-05-02T10:00:00.000Z"),
-      lineItems: [{ externalLineItemId: "LINE-1", quantity: 1 }],
-      idempotencyKey: "tracking-key",
-    });
+    }));
 
     expect(result).toMatchObject({
       status: "succeeded",
       externalFulfillmentId: "FT-1",
-      rawResult: {
-        marketplaceId: "EBAY_GB",
-      },
+      rawResult: { marketplaceId: "EBAY_GB", shipmentAdded: true },
     });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(ebay.calls.map((call) => call.method)).toEqual(["GET", "POST", "GET"]);
+    for (const call of ebay.calls) {
+      expect(call.url).toBe("https://api.ebay.com/sell/fulfillment/v1/order/ORDER!1/shipping_fulfillment");
+      expect(call.headers.get("Authorization")).toBe("Bearer access-token");
+      expect(call.headers.get("X-EBAY-C-MARKETPLACE-ID")).toBe("EBAY_GB");
+    }
+    expect(ebay.posts()).toEqual([{
+      lineItems: [{ lineItemId: "LINE-1", quantity: 1 }],
+      shippedDate: "2026-05-02T10:00:00.000Z",
+      shippingCarrierCode: "USPS",
+      trackingNumber: "94001111",
+    }]);
+  });
+
+  it("does not add a shipment eBay already has, such as one whose answer was lost", async () => {
+    const ebay = fakeEbayOrder({
+      existing: [{ fulfillmentId: "FT-EARLIER", shipmentTrackingNumber: "94001111", lineItems: [{ lineItemId: "LINE-1", quantity: 1 }] }],
+    });
+    const provider = new EbayDropshipMarketplaceTrackingProvider(makeCredentialRepo(makeCredential()), ebay.fetch as any);
+
+    const result = await provider.pushTracking(ebayTrackingRequest());
+
+    expect(result).toMatchObject({
+      status: "succeeded",
+      externalFulfillmentId: "FT-EARLIER",
+      rawResult: { shipmentAdded: false },
+    });
+    expect(ebay.posts()).toEqual([]);
+  });
+
+  it("reports a lost answer on the add as retryable, and the next attempt finds the shipment instead of adding it again", async () => {
+    // eBay records the shipment but the connection drops before it answers.
+    const ebay = fakeEbayOrder({ createdFulfillmentId: "FT-3", dropFirstPostAnswer: true });
+    const provider = new EbayDropshipMarketplaceTrackingProvider(makeCredentialRepo(makeCredential()), ebay.fetch as any);
+
+    await expect(provider.pushTracking(ebayTrackingRequest())).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_TRACKING_NETWORK_ERROR",
+      context: expect.objectContaining({ retryable: true, method: "POST" }),
+    } satisfies Partial<DropshipError>);
+    const retried = await provider.pushTracking(ebayTrackingRequest());
+
+    expect(retried).toMatchObject({ externalFulfillmentId: "FT-3", rawResult: { shipmentAdded: false } });
+    expect(ebay.posts()).toHaveLength(1);
+  });
+
+  it("reports an eBay server error on the add as retryable without sending it again", async () => {
+    const ebay = fakeEbayOrder({ postResponse: () => new Response("temporary", { status: 500 }) });
+    const provider = new EbayDropshipMarketplaceTrackingProvider(makeCredentialRepo(makeCredential()), ebay.fetch as any);
+
+    await expect(provider.pushTracking(ebayTrackingRequest())).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_TRACKING_HTTP_ERROR",
+      context: expect.objectContaining({ retryable: true, status: 500, method: "POST", body: "temporary" }),
+    } satisfies Partial<DropshipError>);
+    expect(ebay.posts()).toHaveLength(1);
+  });
+
+  it("adds nothing when eBay's shipment list cannot be read", async () => {
+    const unavailable = fakeEbayOrder({ readResponse: () => new Response("busy", { status: 503 }) });
+    const malformed = fakeEbayOrder({ readResponse: () => jsonResponse({ total: 0 }) });
+
+    await expect(new EbayDropshipMarketplaceTrackingProvider(makeCredentialRepo(makeCredential()), unavailable.fetch as any)
+      .pushTracking(ebayTrackingRequest())).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_TRACKING_HTTP_ERROR",
+      context: expect.objectContaining({ retryable: true, status: 503, method: "GET" }),
+    } satisfies Partial<DropshipError>);
+    await expect(new EbayDropshipMarketplaceTrackingProvider(makeCredentialRepo(makeCredential()), malformed.fetch as any)
+      .pushTracking(ebayTrackingRequest())).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_TRACKING_SHIPMENTS_UNREADABLE",
+      context: expect.objectContaining({ retryable: true }),
+    } satisfies Partial<DropshipError>);
+    expect(unavailable.posts()).toEqual([]);
+    expect(malformed.posts()).toEqual([]);
+  });
+
+  it("stops for a person when eBay lists this tracking for different items", async () => {
+    const ebay = fakeEbayOrder({
+      existing: [{ fulfillmentId: "FT-HAND", shipmentTrackingNumber: "94001111", lineItems: [{ lineItemId: "LINE-2", quantity: 1 }] }],
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const provider = new EbayDropshipMarketplaceTrackingProvider(makeCredentialRepo(makeCredential()), ebay.fetch as any);
+
+    await expect(provider.pushTracking(ebayTrackingRequest())).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_TRACKING_SHIPMENT_CONFLICT",
+      context: expect.objectContaining({ retryable: false, trackingNumber: "94001111" }),
+    } satisfies Partial<DropshipError>);
+    expect(ebay.posts()).toEqual([]);
   });
 
   it("rejects requests with no marketplace line item ids before calling eBay", async () => {
@@ -74,118 +132,116 @@ describe("EbayDropshipMarketplaceTrackingProvider", () => {
     const fetchImpl = vi.fn();
     const provider = new EbayDropshipMarketplaceTrackingProvider(repo, fetchImpl as any);
 
-    await expect(provider.pushTracking({
-      intakeId: 10,
-      omsOrderId: 20,
-      wmsShipmentId: null,
-      vendorId: 30,
-      storeConnectionId: 40,
-      platform: "ebay",
-      externalOrderId: "ORDER-1",
-      externalOrderNumber: null,
-      sourceOrderId: null,
-      carrier: "USPS",
-      trackingNumber: "94001111",
-      shippedAt: new Date("2026-05-02T10:00:00.000Z"),
+    await expect(provider.pushTracking(ebayTrackingRequest({
       lineItems: [{ externalLineItemId: null, quantity: 1 }],
-      idempotencyKey: "tracking-key",
-    })).rejects.toMatchObject({
+    }))).rejects.toMatchObject({
       code: "DROPSHIP_EBAY_TRACKING_LINE_ITEM_IDS_REQUIRED",
     } satisfies Partial<DropshipError>);
 
     expect(fetchImpl).not.toHaveBeenCalled();
+    expect(repo.loadForStoreConnection).not.toHaveBeenCalled();
   });
 
-  it("retries transient eBay tracking failures", async () => {
-    const repo = makeCredentialRepo(makeCredential());
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValueOnce(new Response("temporary", { status: 500 }))
-      .mockResolvedValueOnce(new Response("", {
-        status: 201,
-        headers: { Location: "https://api.ebay.com/sell/fulfillment/v1/order/ORDER-1/shipping_fulfillment/FT-2" },
-      }));
-    const provider = new EbayDropshipMarketplaceTrackingProvider(repo, fetchImpl as any);
+  it("rejects a tracking number eBay cannot take, for good, before calling eBay", async () => {
+    const fetchImpl = vi.fn();
+    const provider = new EbayDropshipMarketplaceTrackingProvider(makeCredentialRepo(makeCredential()), fetchImpl as any);
 
-    const result = await provider.pushTracking({
-      intakeId: 10,
-      omsOrderId: 20,
-      wmsShipmentId: null,
-      vendorId: 30,
-      storeConnectionId: 40,
-      platform: "ebay",
-      externalOrderId: "ORDER-1",
-      externalOrderNumber: null,
-      sourceOrderId: null,
-      carrier: "USPS",
-      trackingNumber: "94001111",
-      shippedAt: new Date("2026-05-02T10:00:00.000Z"),
-      lineItems: [{ externalLineItemId: "LINE-1", quantity: 1 }],
-      idempotencyKey: "tracking-key",
-    });
-
-    expect(result.externalFulfillmentId).toBe("FT-2");
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-  });
-
-  it("retries transient eBay network failures", async () => {
-    const repo = makeCredentialRepo(makeCredential());
-    const fetchImpl = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("fetch failed"))
-      .mockResolvedValueOnce(new Response("", {
-        status: 201,
-        headers: { Location: "https://api.ebay.com/sell/fulfillment/v1/order/ORDER-1/shipping_fulfillment/FT-3" },
-      }));
-    const provider = new EbayDropshipMarketplaceTrackingProvider(repo, fetchImpl as any);
-
-    const result = await provider.pushTracking({
-      intakeId: 10,
-      omsOrderId: 20,
-      wmsShipmentId: null,
-      vendorId: 30,
-      storeConnectionId: 40,
-      platform: "ebay",
-      externalOrderId: "ORDER-1",
-      externalOrderNumber: null,
-      sourceOrderId: null,
-      carrier: "USPS",
-      trackingNumber: "94001111",
-      shippedAt: new Date("2026-05-02T10:00:00.000Z"),
-      lineItems: [{ externalLineItemId: "LINE-1", quantity: 1 }],
-      idempotencyKey: "tracking-key",
-    });
-
-    expect(result.externalFulfillmentId).toBe("FT-3");
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    await expect(provider.pushTracking(ebayTrackingRequest({ trackingNumber: "9400/1111" }))).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_TRACKING_NUMBER_INVALID",
+      context: expect.objectContaining({ retryable: false }),
+    } satisfies Partial<DropshipError>);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("does not invalidate store credentials for an ordinary eBay tracking API 400", async () => {
     const repo = makeCredentialRepo(makeCredential());
-    const fetchImpl = vi.fn(async () => new Response("invalid tracking payload", { status: 400 }));
-    const provider = new EbayDropshipMarketplaceTrackingProvider(repo, fetchImpl as any);
+    const ebay = fakeEbayOrder({ postResponse: () => new Response("invalid tracking payload", { status: 400 }) });
+    const provider = new EbayDropshipMarketplaceTrackingProvider(repo, ebay.fetch as any);
 
-    await expect(provider.pushTracking({
-      intakeId: 10,
-      omsOrderId: 20,
-      wmsShipmentId: null,
-      vendorId: 30,
-      storeConnectionId: 40,
-      platform: "ebay",
-      externalOrderId: "ORDER-1",
-      externalOrderNumber: null,
-      sourceOrderId: null,
-      carrier: "USPS",
-      trackingNumber: "94001111",
-      shippedAt: new Date("2026-05-02T10:00:00.000Z"),
-      lineItems: [{ externalLineItemId: "LINE-1", quantity: 1 }],
-      idempotencyKey: "tracking-key",
-    })).rejects.toMatchObject({ code: "DROPSHIP_EBAY_TRACKING_HTTP_ERROR" });
+    await expect(provider.pushTracking(ebayTrackingRequest())).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_TRACKING_HTTP_ERROR",
+      context: expect.objectContaining({ retryable: false, status: 400 }),
+    } satisfies Partial<DropshipError>);
 
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(ebay.posts()).toHaveLength(1);
     expect(repo.recordAuthFailure).not.toHaveBeenCalled();
   });
 });
+
+interface FakeEbayShipment {
+  fulfillmentId: string;
+  shipmentTrackingNumber: string;
+  lineItems: Array<{ lineItemId: string; quantity: number }>;
+}
+
+/**
+ * One eBay order's shipment list. GET returns the full list; POST records the
+ * shipment and answers 201 with its Location, as eBay does.
+ */
+function fakeEbayOrder(options: {
+  orderPath?: string;
+  existing?: FakeEbayShipment[];
+  createdFulfillmentId?: string;
+  readResponse?: () => Response;
+  postResponse?: () => Response;
+  dropFirstPostAnswer?: boolean;
+} = {}) {
+  const orderPath = options.orderPath ?? "ORDER-1";
+  const shipments: FakeEbayShipment[] = [...(options.existing ?? [])];
+  const calls: Array<{ method: string; url: string; headers: Headers; body: unknown }> = [];
+  let answerDropped = false;
+  const fetch = vi.fn(async (url: string, init: RequestInit = {}) => {
+    const method = String(init.method ?? "GET").toUpperCase();
+    const body = init.body ? JSON.parse(String(init.body)) : null;
+    calls.push({ method, url, headers: new Headers(init.headers), body });
+    expect(url).toBe(`https://api.ebay.com/sell/fulfillment/v1/order/${orderPath}/shipping_fulfillment`);
+    if (method === "GET") {
+      return options.readResponse?.() ?? jsonResponse({ total: shipments.length, fulfillments: shipments });
+    }
+    if (options.postResponse) return options.postResponse();
+    const fulfillmentId = options.createdFulfillmentId ?? "FT-NEW";
+    shipments.push({
+      fulfillmentId,
+      shipmentTrackingNumber: body.trackingNumber,
+      lineItems: body.lineItems,
+    });
+    if (options.dropFirstPostAnswer && !answerDropped) {
+      answerDropped = true;
+      throw new TypeError("fetch failed");
+    }
+    return new Response("", {
+      status: 201,
+      headers: { Location: `https://api.ebay.com/sell/fulfillment/v1/order/${encodeURIComponent(orderPath)}/shipping_fulfillment/${fulfillmentId}` },
+    });
+  });
+  return {
+    fetch,
+    calls,
+    posts: () => calls.filter((call) => call.method === "POST").map((call) => call.body),
+  };
+}
+
+function ebayTrackingRequest(
+  overrides: Partial<Parameters<EbayDropshipMarketplaceTrackingProvider["pushTracking"]>[0]> = {},
+): Parameters<EbayDropshipMarketplaceTrackingProvider["pushTracking"]>[0] {
+  return {
+    intakeId: 10,
+    omsOrderId: 20,
+    wmsShipmentId: null,
+    vendorId: 30,
+    storeConnectionId: 40,
+    platform: "ebay",
+    externalOrderId: "ORDER-1",
+    externalOrderNumber: null,
+    sourceOrderId: null,
+    carrier: "USPS",
+    trackingNumber: "94001111",
+    shippedAt: new Date("2026-05-02T10:00:00.000Z"),
+    lineItems: [{ externalLineItemId: "LINE-1", quantity: 1 }],
+    idempotencyKey: "tracking-key",
+    ...overrides,
+  };
+}
 
 describe("ShopifyDropshipMarketplaceTrackingProvider", () => {
   afterEach(() => {
