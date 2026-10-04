@@ -3,13 +3,20 @@ import { expect, test, type Page } from "@playwright/test";
 import { view, policyHead, policyValue, previewRow, target, HASH_A, HASH_B } from "../../client/src/features/channel-inventory/__tests__/fixtures";
 import type { ChannelPublicationStatus } from "../../shared/types/inventory-channel-publication-status";
 import type { ChannelDefinitionProgress, ChannelDefinitionReview } from "../../shared/types/inventory-channel-definition";
+import type { InventoryChannelExposureAdminView } from "../../shared/types/inventory-channel-exposure";
 
 const BASE = "/api/inventory-planning/admin/channel-exposure";
 const AT = "2026-09-20T14:00:00.000Z";
 const defaults = policyValue({ allocationSemantics: "exposure", eligible: true, shareBps: 5000,
   holdbackSellableUnits: "0", maxPublish: { mode: "unlimited" }, minPublishSellableUnits: "0" });
 
-async function setup(page: Page, options: { permission?: "none" | "view" | "edit"; query?: string; pending?: boolean; legacy?: boolean } = {}) {
+async function setup(page: Page, options: {
+  permission?: "none" | "view" | "edit";
+  query?: string;
+  pending?: boolean;
+  legacy?: boolean;
+  viewOverrides?: Partial<InventoryChannelExposureAdminView>;
+} = {}) {
   const data = view({
     publicationTargets: [target(), target({ id: 6, channelId: 4, channelConnectionId: 44, providerScopeType: "account", externalScopeId: "ebay-user-9" })],
     policyHeads: [policyHead({ scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 }, active: defaults,
@@ -22,6 +29,7 @@ async function setup(page: Page, options: { permission?: "none" | "view" | "edit
       activeMapping: { mappingId: 20, publicationTargetId: 5, productVariantId: 101, version: 1, lifecycleStatus: "sealed",
         externalInventoryItemId: "test-item", externalSku: "CARD-P5", definitionHash: HASH_A,
         changeReason: null, createdBy: "operator-1", createdAt: AT, updatedAt: AT } }],
+    ...options.viewOverrides,
   });
   const state = { data, writes: [] as Array<{ path: string; body: Record<string, unknown>; raw: string }>,
     applyLostResponse: false, applyConflict: false, reviewBlocked: false, progress: null as ChannelDefinitionProgress | null,
@@ -111,6 +119,35 @@ async function setup(page: Page, options: { permission?: "none" | "view" | "edit
   await page.goto(`/__channel-inventory-workspace-test${options.query ?? "?channel=3&destination=5&tab=rules"}`);
   return state;
 }
+
+test("Walmart destination setup shows the seller name and fulfillment center instead of an internal connection id", async ({ page }) => {
+  const state = await setup(page, {
+    query: "?channel=104&tab=supply",
+    viewOverrides: {
+      channels: [{
+        id: 104, name: "Walmart", provider: "walmart", status: "active",
+        connections: [{
+          id: 67, externalAccountLabel: "Card Shellz", shopifyLocationId: null,
+          providerLocationId: "10002558022", providerAccount: null,
+        }],
+      }],
+      publicationTargets: [], policyHeads: [], sourceBindingHeads: [], variantMappingHeads: [],
+    },
+  });
+  await page.getByRole("button", { name: "Set up destinations", exact: true }).first().click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("Card Shellz — Walmart US", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Walmart fulfillment center: 10002558022", { exact: true })).toBeVisible();
+  await expect(dialog).not.toContainText("Connection #67");
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  state.data.publicationTargets = [target({ channelId: 104, channelConnectionId: 67, externalScopeId: "10002558022" })];
+  await page.evaluate(() => window.dispatchEvent(new Event("channel-inventory-test-refresh")));
+  await expect(page.getByRole("group", { name: "Destinations", exact: true }).getByRole("button", { name: /Card Shellz/ })).toBeVisible();
+  expect(state.writes).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
 
 test("channel default saves without a written reason or any activation call", async ({ page }) => {
   const state = await setup(page);
