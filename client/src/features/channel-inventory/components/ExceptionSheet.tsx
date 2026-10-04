@@ -27,6 +27,7 @@ import {
   policyValueToForm,
   productLabel,
   resolveSavedFields,
+  resolveInheritedPolicyForm,
   samePolicyForm,
   savedPolicy,
   sellableVariants,
@@ -200,6 +201,7 @@ function RuleEditor({ view, channel, scope, unitNoun, canEdit, onSaved, onReload
   const saved = savedPolicy(head);
   const savedForm = useMemo(() => policyValueToForm(saved?.value ?? null), [saved?.value]);
   const inherited = useMemo(() => resolveSavedFields(view.policyHeads, scope), [view.policyHeads, scope]);
+  const inheritedForm = useMemo(() => resolveInheritedPolicyForm(view.policyHeads, scope), [view.policyHeads, scope]);
   const [errors, setErrors] = useState<PolicyFormError[]>([]);
   const fingerprint = `${head?.revision ?? "0"}:${head?.draftPolicy?.definitionHash ?? ""}:${head?.activePolicy?.definitionHash ?? ""}`;
   const editor = useDraftEditor({
@@ -249,6 +251,7 @@ function RuleEditor({ view, channel, scope, unitNoun, canEdit, onSaved, onReload
         onChange={(patch) => editor.setValue(current => ({ ...current, form: { ...current.form, ...patch } }))}
         scopeType={scope.scopeType}
         inherited={inherited}
+        inheritedForm={inheritedForm}
         errors={errors}
         disabled={!canEdit || editor.locked || reloading}
         unitNoun={unitNoun}
@@ -269,8 +272,8 @@ function RuleEditor({ view, channel, scope, unitNoun, canEdit, onSaved, onReload
       </fieldset>
       {formError && <Callout tone="warning">{formError}</Callout>}
       <EvidenceNote>
-        Setting a field back to Inherit follows future changes to the broader rule. Restoring
-        all inheritance is saved as a draft and takes effect only after Review and Apply.
+        Use default removes a field's override so it follows future changes to its product or channel settings.
+        Saved changes take effect after Review and Apply.
       </EvidenceNote>
       {canEdit && saved && <Button type="button" variant="outline" disabled={editor.locked || reloading}
         onClick={() => editor.setValue(current => ({ ...current, form: EMPTY_POLICY_FORM, sources: null }))}>

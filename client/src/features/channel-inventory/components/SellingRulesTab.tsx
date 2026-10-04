@@ -14,10 +14,10 @@ import { useDraftNavigation } from "../DraftNavigation";
 import { DraftSaveFeedback } from "./DraftSaveFeedback";
 import {
   findPolicyHead,
+  channelDefaultValueToForm,
   listExceptions,
   missingChannelDefaultFields,
   policyFormToValue,
-  policyValueToForm,
   samePolicyForm,
   savedPolicy,
   type Channel,
@@ -27,6 +27,7 @@ import {
 } from "../model";
 import { ExceptionSheet, type ExceptionSubject } from "./ExceptionSheet";
 import { PolicyFields } from "./PolicyFields";
+import { PolicyQuantityExample } from "./PolicyQuantityExample";
 import { ActivePill, Callout, EvidenceNote, NoteField, PendingPill, SectionCard, StatePill } from "./primitives";
 
 /** Channel default plus the product/SKU exceptions that override it. */
@@ -80,7 +81,7 @@ function ChannelDefaultCard({ view, channel, canEdit, onReload, reloading }: {
   const scope = useMemo(() => ({ scopeType: "channel" as const, channelId: channel.id }), [channel.id]);
   const head = findPolicyHead(view.policyHeads, scope);
   const saved = savedPolicy(head);
-  const savedForm = useMemo(() => policyValueToForm(saved?.value ?? null), [saved?.value]);
+  const savedForm = useMemo(() => channelDefaultValueToForm(saved?.value ?? null), [saved?.value]);
   const [errors, setErrors] = useState<PolicyFormError[]>([]);
   const fingerprint = `${head?.revision ?? "0"}:${head?.draftPolicy?.definitionHash ?? ""}:${head?.activePolicy?.definitionHash ?? ""}`;
   const editor = useDraftEditor({
@@ -105,8 +106,8 @@ function ChannelDefaultCard({ view, channel, canEdit, onReload, reloading }: {
     onSaved: async () => {
       await invalidateChannelInventory(queryClient);
       toast({
-        title: `Channel default saved for ${channel.name}`,
-        description: "Pending activation. Items with their own rule keep their explicit values.",
+        title: `Inventory settings saved for ${channel.name}`,
+        description: "Draft saved. Review and apply it when ready.",
       });
     },
   });
@@ -116,8 +117,8 @@ function ChannelDefaultCard({ view, channel, canEdit, onReload, reloading }: {
 
   return (
     <SectionCard
-      title={`Channel default for ${channel.name}`}
-      description="The starting point for every product on this channel. A product or SKU exception replaces a field outright; percentages never multiply, and a channel default is not an emergency stop."
+      title={`Inventory settings for ${channel.name}`}
+      description="Choose how much available stock this channel can advertise. Products and SKUs can have their own settings below."
       actions={(
         <>
           {head?.activePolicy && <ActivePill>Active v{head.activePolicy.version}</ActivePill>}
@@ -126,14 +127,14 @@ function ChannelDefaultCard({ view, channel, canEdit, onReload, reloading }: {
       )}
     >
       {saved && missing.length > 0 && (
-        <Callout tone="warning" title="Incomplete channel default">
-          {missing.join(", ")} {missing.length === 1 ? "is" : "are"} not set. A channel default must set
-          every field before it can be activated.
+        <Callout title="Finish the saved draft before applying it">
+          Still needed: {missing.join(", ")}. You can continue editing and saving this draft.
         </Callout>
       )}
       {!saved && (
-        <Callout title="No channel default saved yet">
-          Until a complete default exists, nothing on {channel.name} can be published.
+        <Callout title="Suggested settings — not saved">
+          Start with all available stock, no stock buffer or quantity limits, and shared inventory.
+          Adjust the values below, then save your draft.
         </Callout>
       )}
       <DraftSaveFeedback {...editor} onReload={() => { editor.reset(); setErrors([]); onReload(); }} reloading={reloading} />
@@ -147,19 +148,23 @@ function ChannelDefaultCard({ view, channel, canEdit, onReload, reloading }: {
         disabled={!canEdit || editor.locked || reloading}
         unitNoun="units of each SKU"
       />
+      <PolicyQuantityExample form={form} />
       {formError && <Callout tone="warning">{formError}</Callout>}
       {canEdit && (
         <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-end sm:justify-between">
           <NoteField id={`channel-default-note-${channel.id}`} value={note} onChange={note => editor.setValue(current => ({ ...current, note }))} disabled={editor.locked} />
           <div className="flex items-center gap-3">
             {editor.dirty && !editor.pending && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
-            <Button type="button" disabled={editor.pending || (!editor.uncertain && (!editor.dirty || editor.conflict || reloading))} onClick={() => void editor.save()}>
-              {editor.pending ? "Saving…" : editor.uncertain ? "Retry same save" : "Save channel default"}
+            <Button type="button" disabled={editor.pending || (!editor.uncertain && ((!editor.dirty && saved !== null) || editor.conflict || reloading))} onClick={() => void editor.save()}>
+              {editor.pending ? "Saving…" : editor.uncertain ? "Retry same save" : "Save draft"}
             </Button>
           </div>
         </div>
       )}
-      <EvidenceNote>Applies to every destination of {channel.name}. Quantity fields are counted in units of each exact SKU (a pack of five is one unit).</EvidenceNote>
+      <EvidenceNote>
+        Saving creates a draft. Review and apply it before marketplace quantities change.
+        A quantity of 10 for a pack-of-100 SKU means 10 packs.
+      </EvidenceNote>
     </SectionCard>
   );
 }
@@ -178,8 +183,8 @@ function ExceptionsCard({ view, channel, canEdit, onOpen }: {
     : rows.filter((row) => `${row.title} ${row.subtitle}`.toLowerCase().includes(needle));
   return (
     <SectionCard
-      title="Exceptions"
-      description="Products or individual SKUs that need different settings on this channel. Only the fields set here change; the rest keep inheriting."
+      title="Product and SKU exceptions"
+      description="Give an item different inventory settings. Fields you leave alone follow the defaults above."
       actions={canEdit ? (
         <Button type="button" size="sm" onClick={() => onOpen(null)}>
           <Plus className="mr-1 h-4 w-4" aria-hidden="true" />
