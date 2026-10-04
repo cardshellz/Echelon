@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { catalogImageQueryOptions } from "@/lib/catalog-image-queries";
 import {
   listingCatalogPageSchema,
   type ListingCatalogItem,
@@ -41,6 +42,7 @@ export function ListingCatalogPicker({
     new Map(),
   );
   const catalog = useQuery({
+    ...catalogImageQueryOptions,
     queryKey: [base, "catalog", search, offset],
     queryFn: () =>
       publicationRequest(

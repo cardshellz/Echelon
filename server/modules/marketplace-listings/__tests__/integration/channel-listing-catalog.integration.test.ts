@@ -12,6 +12,10 @@ import {
   type InventoryCutoverTestDatabase,
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { ChannelListingCatalogRepository } from "../../../channels/channel-listing-catalog.repository";
+import { createHash } from "node:crypto";
+import { createCatalogPublicImageUrl } from "../../../catalog/catalog-public-image";
+import { readPublicCatalogImage } from "../../../catalog/catalog-publication-images.reader";
+import { MAX_PRODUCT_IMAGE_BYTES } from "../../../catalog/product-image-download.service";
 
 vi.mock("../../../../db", () => ({ db: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -23,7 +27,8 @@ const ddl = `CREATE SCHEMA catalog; CREATE SCHEMA channels;
 CREATE TABLE catalog.products(id integer PRIMARY KEY,name text,title text,description text,brand text,base_unit varchar(20),product_type text,is_active boolean,status text);
 CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer,sku text,name text,uom_type varchar(20),units_per_variant integer,gtin text,barcode text,
  is_active boolean,requires_shipping boolean,track_inventory boolean,sales_eligibility text,position integer,price_cents bigint,shopify_variant_id varchar(100));
-CREATE TABLE catalog.product_assets(id integer PRIMARY KEY,product_id integer,product_variant_id integer,asset_type varchar(20),url text,position integer);
+CREATE TABLE catalog.product_assets(id integer PRIMARY KEY,product_id integer,product_variant_id integer,asset_type varchar(20),url text,position integer,
+ storage_type varchar(20) NOT NULL DEFAULT 'url',mime_type text,file_data bytea);
 CREATE TABLE channels.channel_product_overrides(channel_id integer,product_id integer,title_override text,description_override text,is_listed integer,PRIMARY KEY(channel_id,product_id));
 CREATE TABLE channels.channel_variant_overrides(channel_id integer,product_variant_id integer,sku_override text,name_override text,barcode_override text,is_listed integer,PRIMARY KEY(channel_id,product_variant_id));
 CREATE TABLE channels.channel_asset_overrides(channel_id integer,product_asset_id integer,url_override text,position_override integer,is_included integer,PRIMARY KEY(channel_id,product_asset_id));
@@ -39,7 +44,7 @@ CREATE TABLE public.shopify_variants(id varchar(100) PRIMARY KEY,sku text,price 
     let repository: ChannelListingCatalogRepository;
     beforeAll(async () => {
       database = await createInventoryCutoverTestDatabase(url, disposable, ddl);
-      repository = new ChannelListingCatalogRepository(database.pool);
+      repository = new ChannelListingCatalogRepository(database.pool, createCatalogPublicImageUrl({ CATALOG_PUBLIC_BASE_URL: "https://catalog.example.com" }));
     });
     afterAll(async () => {
       await database?.close();
@@ -50,7 +55,7 @@ CREATE TABLE public.shopify_variants(id varchar(100) PRIMARY KEY,sku text,price 
       channels.channel_asset_overrides,channels.channel_listings,channels.channel_pricing,channels.channel_pricing_rules,public.shopify_variants;
       INSERT INTO catalog.products VALUES (20,'Sleeves','Catalog title','Catalog description','Card Shellz','piece','Sleeves',true,'active');
       INSERT INTO catalog.product_variants VALUES (10,20,'SKU-10','100 sleeves','pack',100,'00036000291452','036000291452',true,true,true,'sellable',0,999,NULL);
-      INSERT INTO catalog.product_assets VALUES (1,20,NULL,'image',NULL,0),(2,20,NULL,'image','https://example.com/base.jpg',1),
+      INSERT INTO catalog.product_assets(id,product_id,product_variant_id,asset_type,url,position) VALUES (1,20,NULL,'image',NULL,0),(2,20,NULL,'image','https://example.com/base.jpg',1),
         (3,20,11,'image','https://example.com/other-variant.jpg',2),(4,20,10,'image','https://example.com/excluded.jpg',3),(5,20,NULL,'video','https://example.com/video.mp4',4);
       INSERT INTO channels.channel_asset_overrides VALUES (104,4,NULL,NULL,0);`);
     });
@@ -143,6 +148,79 @@ CREATE TABLE public.shopify_variants(id varchar(100) PRIMARY KEY,sku text,price 
       await expect(repository.catalog(104, {})).rejects.toMatchObject({
         code: "LISTING_CURRENCY_UNSUPPORTED",
       });
+    });
+
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j4ioAAAAASUVORK5CYII=", "base64");
+    const fingerprint = (data: Buffer) => createHash("sha256").update(data).digest("hex");
+    async function upload(data = png, mime = "image/png", variantId: number | null = null): Promise<void> {
+      await database.pool.query(`INSERT INTO catalog.product_assets(id,product_id,product_variant_id,asset_type,position,storage_type,mime_type,file_data)
+        VALUES (8,20,$1,'image',8,'file',$2,$3)`, [variantId, mime, data]);
+    }
+    it("adds the uploaded fourth photo to inherited images and invalidates the review source after reorder, replacement and deletion", async () => {
+      await database.pool.query(`INSERT INTO catalog.product_assets(id,product_id,asset_type,url,position) VALUES
+        (6,20,'image','https://example.com/second.jpg',6),(7,20,'image','https://example.com/third.jpg',7)`);
+      const before = (await repository.catalog(104, { variantIds: "10" })).items[0];
+      expect(before.images).toHaveLength(3);
+      await upload();
+      const added = (await repository.catalog(104, { variantIds: "10" })).items[0];
+      const publicUrl = `https://catalog.example.com/api/catalog/images/8/${fingerprint(png)}`;
+      expect(added.images).toEqual([...before.images, publicUrl]);
+      expect(added.sourceHash).not.toBe(before.sourceHash);
+      expect((await repository.catalog(104, {})).items[0].sourceHash).toBe(added.sourceHash);
+      expect(await readPublicCatalogImage(database.pool, 8, fingerprint(png))).toEqual({ data: png, mimeType: "image/png" });
+      expect(await readPublicCatalogImage(database.pool, 8, "f".repeat(64))).toBeNull();
+      expect(await readPublicCatalogImage(database.pool, 999, fingerprint(png))).toBeNull();
+      // A predictable ID cannot read an external-only image, even with another file's hash.
+      expect(await readPublicCatalogImage(database.pool, 2, fingerprint(png))).toBeNull();
+
+      await database.pool.query("UPDATE catalog.product_assets SET position=-1 WHERE id=8");
+      const reordered = (await repository.catalog(104, {})).items[0];
+      expect(reordered.images).toEqual([publicUrl, ...before.images]);
+      expect(reordered.sourceHash).not.toBe(added.sourceHash);
+
+      const replacement = Buffer.from("GIF89a0102030405");
+      await database.pool.query("UPDATE catalog.product_assets SET file_data=$1,mime_type='image/gif' WHERE id=8", [replacement]);
+      const replaced = (await repository.catalog(104, {})).items[0];
+      expect(replaced.images[0]).toContain(fingerprint(replacement));
+      expect(replaced.sourceHash).not.toBe(reordered.sourceHash);
+      expect(await readPublicCatalogImage(database.pool, 8, fingerprint(png))).toBeNull();
+      expect(await readPublicCatalogImage(database.pool, 8, fingerprint(replacement))).toEqual({ data: replacement, mimeType: "image/gif" });
+
+      await database.pool.query("DELETE FROM catalog.product_assets WHERE id=8");
+      expect(await readPublicCatalogImage(database.pool, 8, fingerprint(replacement))).toBeNull();
+      expect((await repository.catalog(104, {})).items[0].images).toEqual(before.images);
+    });
+    it("retains exact variant scope, channel exclusions, URL overrides and override order for uploaded photos", async () => {
+      await upload(png, "image/png", 11);
+      expect((await repository.catalog(104, {})).items[0].images).toEqual(["https://example.com/base.jpg"]);
+      await database.pool.query("UPDATE catalog.product_assets SET product_variant_id=10 WHERE id=8");
+      expect((await repository.catalog(104, {})).items[0].images).toHaveLength(2);
+      await database.pool.query("INSERT INTO channels.channel_asset_overrides VALUES (104,8,NULL,-1,0)");
+      const noPublicOrigin = new ChannelListingCatalogRepository(database.pool, createCatalogPublicImageUrl({}));
+      expect((await noPublicOrigin.catalog(104, {})).items[0].images).toEqual(["https://example.com/base.jpg"]);
+      await database.pool.query("UPDATE channels.channel_asset_overrides SET is_included=1,url_override='https://example.com/custom.jpg' WHERE product_asset_id=8");
+      expect((await noPublicOrigin.catalog(104, {})).items[0].images).toEqual(["https://example.com/custom.jpg", "https://example.com/base.jpg"]);
+      await database.pool.query("UPDATE channels.channel_asset_overrides SET url_override=NULL WHERE product_asset_id=8");
+      await expect(noPublicOrigin.catalog(104, {})).rejects.toMatchObject({ code: "CATALOG_PUBLIC_URL_REQUIRED", status: 503 });
+      // The rejected read rolled back and released its connection; a configured read still works.
+      expect((await repository.catalog(104, {})).items[0].images[0]).toContain(`/8/${fingerprint(png)}`);
+    });
+    it.each([
+      ["mislabeled document", Buffer.from("<html>not a photo</html>"), "image/png"],
+      ["SVG document", Buffer.from("<svg/>"), "image/svg+xml"],
+      ["empty file", Buffer.alloc(0), "image/png"],
+      ["oversized file", Buffer.alloc(MAX_PRODUCT_IMAGE_BYTES + 1), "image/png"],
+    ])("does not serve or publish a %s", async (_name, data, mime) => {
+      await upload(data, mime);
+      expect(await readPublicCatalogImage(database.pool, 8, fingerprint(data))).toBeNull();
+      await expect(repository.catalog(104, {})).rejects.toMatchObject({ status: 422 });
+    });
+    it("never serves a non-image asset or a URL-only record's retained blob", async () => {
+      await upload();
+      await database.pool.query("UPDATE catalog.product_assets SET asset_type='document' WHERE id=8");
+      expect(await readPublicCatalogImage(database.pool, 8, fingerprint(png))).toBeNull();
+      await database.pool.query("UPDATE catalog.product_assets SET asset_type='image',storage_type='url' WHERE id=8");
+      expect(await readPublicCatalogImage(database.pool, 8, fingerprint(png))).toBeNull();
     });
   },
 );
