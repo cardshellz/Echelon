@@ -742,6 +742,9 @@
   "inventory.quantity_publication_reconciliations": [
     "modules/inventory-planning"
   ],
+  "inventory.replen_followups": [
+    "modules/inventory"
+  ],
   "inventory.replen_rules": [
     "modules/catalog",
     "modules/inventory"
@@ -754,10 +757,19 @@
   "inventory.replen_tier_defaults": [
     "modules/inventory"
   ],
+  "inventory.replen_transfer_credits": [
+    "modules/inventory"
+  ],
+  "inventory.replen_trigger_receipts": [
+    "modules/inventory"
+  ],
   "inventory.safety_definition_applications": [
     "modules/inventory-planning"
   ],
   "inventory.tracking_stop_history": [
+    "modules/inventory"
+  ],
+  "inventory.transfer_followups": [
     "modules/inventory"
   ],
   "inventory.transformation_model_heads": [
@@ -1595,9 +1607,13 @@
   "wms.pick_corrections": [
     "modules/wms"
   ],
+  "wms.picking_commands": [
+    "modules/wms"
+  ],
   "wms.picking_logs": [
     "modules/catalog",
-    "modules/orders"
+    "modules/orders",
+    "modules/wms"
   ],
   "wms.reconciliation_exceptions": [
     "modules/oms",

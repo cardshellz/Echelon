@@ -1,12 +1,13 @@
 /**
- * Structural tests: orders with no pending shippable items must not stay
- * in active warehouse_status. Verifies the pick-queue EXISTS guard and
- * updateOrderProgress both handle zero-item / all-terminal-items cases.
+ * Queue reads retain held demand and exclude terminal/empty pick work without
+ * changing lifecycle state. The shared progress owner decides cancellation
+ * and readiness from recorded lines; startup cleanup remains separately covered.
  */
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { deriveWmsPickingProgress, type WmsPickingProgressLine } from "@shared/wms-picking-progress";
 
 const STORAGE_SRC = readFileSync(
   resolve(__dirname, "../../orders.storage.ts"),
@@ -45,13 +46,11 @@ describe("Zombie order prevention", () => {
   // paths must keep counting it as outstanding work, or an order whose only
   // remaining line is held would be completed and the held line lost.
   describe("held lines still block terminal transitions", () => {
-    it("the pick-queue self-heal counts held lines as pending shippable", () => {
-      const selfHeal = STORAGE_SRC.slice(
-        STORAGE_SRC.indexOf("Self-heal: auto-complete orders with zero shippable items remaining"),
-        STORAGE_SRC.indexOf("Shipping transitions belong to shipment processing"),
-      );
-      expect(selfHeal).toContain("const pendingShippable");
-      expect(selfHeal).not.toMatch(/onHold|on_hold/);
+    it("pick queue reads preserve held work without changing lifecycle state", () => {
+      const read = STORAGE_SRC.slice(STORAGE_SRC.indexOf("async getPickQueueOrders("),
+        STORAGE_SRC.indexOf("async createOrderWithItems("));
+      expect(read).toContain("COALESCE(oi.on_hold, false) = true");
+      expect(read).not.toMatch(/completeOrder\(|cancelOrder\(|transitionOrderStatus\(|UPDATE wms\.orders/);
     });
 
     it("the startup zombie repair counts held lines as pending shippable", () => {
@@ -71,13 +70,22 @@ describe("Zombie order prevention", () => {
       STORAGE_SRC.indexOf("async holdOrder("),
     );
 
-    it("treats zero shippable items as allShippableDone", () => {
-      expect(progressSection).toContain("shippableItems.length === 0");
+    const project = (lines: WmsPickingProgressLine[]) => deriveWmsPickingProgress({
+      currentStatus: "in_progress", postPickStatus: "ready_to_ship", lines, additionalBlockers: [],
+    });
+    const item: WmsPickingProgressLine = { id: 1, sku: "SKU", quantity: 2, pickedQuantity: 0,
+      requiresShipping: true, onHold: false, status: "pending", inventoryTracking: true,
+      catalogProductId: 1, productId: 10, location: "A1" };
+
+    it("delegates to the transaction-owned projection without fabricating completion for empty or held-only demand", () => {
+      expect(progressSection).toContain("db.transaction(tx => reconcileWmsPickingProgress(tx, orderId,");
+      expect(project([])).toMatchObject({ pickedCount: 0, completeNonShipping: false });
+      expect(project([{ ...item, onHold: true }])).toMatchObject({ status: "in_progress", completeNonShipping: false });
     });
 
-    it("transitions to cancelled when all items are cancelled", () => {
-      expect(progressSection).toContain("allItemsCancelled");
-      expect(progressSection).toContain('"cancelled"');
+    it("transitions to cancelled only when every recorded item is cancelled", () => {
+      expect(project([{ ...item, status: "cancelled" }])).toMatchObject({ status: "cancelled" });
+      expect(project([{ ...item, status: "cancelled" }, { ...item, id: 2 }])).toMatchObject({ status: "in_progress" });
     });
   });
 });

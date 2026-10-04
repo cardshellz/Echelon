@@ -28,6 +28,7 @@ function makeHarness(opts: { frozen?: boolean } = {}) {
     where: vi.fn().mockReturnThis(),
     limit: vi.fn().mockResolvedValue([{
       id: 1,
+      unitsPerVariant: 1,
       cycleCountFreezeId: frozenId,
       code: "A-01",
       isActive: 1,

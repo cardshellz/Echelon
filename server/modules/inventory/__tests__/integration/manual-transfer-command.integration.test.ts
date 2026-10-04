@@ -13,6 +13,8 @@ import { ManualInventoryTransferService } from "../../application/manual-invento
 import { createInventoryMethods } from "../../infrastructure/inventory.repository";
 import { createInventoryLotService } from "../../lots.service";
 import { creditTransferToReplenishment } from "../../infrastructure/replenishment-transfer-credit.repository";
+import { InventoryQuantityError } from "../../domain/quantity-ledger";
+import { AppError } from "@shared/errors";
 
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -116,6 +118,42 @@ suite(
           )
         ).rows,
       ).toHaveLength(0);
+    });
+
+    it("records a quantity conflict as a stable rejection and replays it without retrying physical movement", async () => {
+      const effects = { deliver: vi.fn() };
+      const core = { withTx: vi.fn() };
+      const transfer = vi.fn(async () => { throw new InventoryQuantityError("TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED",
+        "Confirm arrival", { fromWarehouseId: 2, toWarehouseId: 1 }); });
+      core.withTx.mockReturnValue({ transfer });
+      const service = new ManualInventoryTransferService(orm, core as unknown as InventoryUseCases, effects, clock);
+      const input = request();
+      const before = await context.state();
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(service.transfer(input, "picker")).rejects.toMatchObject({ statusCode: 409,
+          code: "TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED", context: { fromWarehouseId: 2, toWarehouseId: 1 } });
+      }
+      expect(transfer).toHaveBeenCalledTimes(1);
+      expect(effects.deliver).not.toHaveBeenCalled();
+      expect(await context.state()).toEqual(before);
+      expect(await receipts()).toHaveLength(0);
+      expect((await context.pool.query("SELECT status,http_status,last_error_code FROM public.financial_command_results")).rows)
+        .toEqual([{ status: "rejected", http_status: 409, last_error_code: "TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED" }]);
+    });
+
+    it("keeps a server-side application failure retryable rather than recording an invalid terminal response", async () => {
+      const effects = { deliver: vi.fn() };
+      const core = { withTx: vi.fn() };
+      const failure = new AppError("Inventory service unavailable", "TRANSFER_OWNER_UNAVAILABLE", 503);
+      core.withTx.mockReturnValue({ transfer: vi.fn(async () => { throw failure; }) });
+      const service = new ManualInventoryTransferService(orm, core as unknown as InventoryUseCases, effects, clock);
+      const before = await context.state();
+      await expect(service.transfer(request(), "picker")).rejects.toBe(failure);
+      expect(await context.state()).toEqual(before);
+      expect(await receipts()).toHaveLength(0);
+      expect(effects.deliver).not.toHaveBeenCalled();
+      expect((await context.pool.query("SELECT status,http_status,last_error_code FROM public.financial_command_results")).rows)
+        .toEqual([{ status: "retryable", http_status: null, last_error_code: "TRANSFER_OWNER_UNAVAILABLE" }]);
     });
 
     it("replays after response loss and publication failure without repeating movement or task credit", async () => {

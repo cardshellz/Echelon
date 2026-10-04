@@ -14,12 +14,6 @@ import { runTransactionalFinancialCommand } from "../../../platform/commands/tra
 import type { db } from "../../../db";
 
 type Database = Pick<typeof db, "transaction">;
-const taskResultSchema = createSelectSchema(replenTasks).extend({
-  createdAt: z.coerce.date(),
-  assignedAt: z.coerce.date().nullable(),
-  startedAt: z.coerce.date().nullable(),
-  completedAt: z.coerce.date().nullable(),
-});
 
 /** Persist state changes and their replay result together using the existing command owner. */
 export async function changeReplenishmentTask(
@@ -32,6 +26,14 @@ export async function changeReplenishmentTask(
   z.number().int().positive().max(2_147_483_647).parse(taskId);
   z.string().trim().min(1).max(100).parse(actor);
   const command = replenishmentTaskPatchSchema.parse(rawCommand);
+  // The result contract needs table metadata only at this command boundary.
+  // Importing the public Inventory module does not need to construct it.
+  const taskResultSchema = createSelectSchema(replenTasks).extend({
+    createdAt: z.coerce.date(),
+    assignedAt: z.coerce.date().nullable(),
+    startedAt: z.coerce.date().nullable(),
+    completedAt: z.coerce.date().nullable(),
+  });
   const routeTemplate = "/api/replen/tasks/:id";
   const resourceKey = `inventory.replen_task:${taskId}`;
   const result = await runTransactionalFinancialCommand({

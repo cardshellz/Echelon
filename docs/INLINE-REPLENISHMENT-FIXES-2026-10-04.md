@@ -36,3 +36,5 @@ Older explicitly queued plans retain their frozen mode. Historical keyless and a
 ## Next checks
 
 Review the updated draft PR and its CI at the actual published head. The next batch is lot/cost review/remediation; F11's unresolved-cost physical-admission policy still needs explicit user agreement before a code change. No incident recovery, merge, deployment or activation was performed.
+
+The subsequent full-suite CI correction and wider validation are recorded separately in [Operation-owner CI corrections](INVENTORY-OPERATION-OWNERS-CI-FIXES-2026-10-04.md). The historical focused counts above are not added to its full-suite totals.

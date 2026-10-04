@@ -25,7 +25,9 @@ import { sendInventoryLegacyAdminControlError } from "../inventory-planning/inte
 import { projectCanonicalVariantsInsideRuntimeTransaction } from "../inventory-planning/application/inventory-availability-runtime-atp.service";
 import type { InventoryAvailabilityRuntimeAtpContext } from "../inventory-planning/application/inventory-availability-runtime-atp.service";
 import { createChannelSyncService } from "../channels/sync.service";
-import { inventoryTransferRequestSchema } from "@shared/types/inventory-transfer";
+import { AppError } from "@shared/errors";
+import { ZodError } from "zod";
+import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
 
 type InventoryRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
@@ -145,7 +147,17 @@ export function registerInventoryRoutes(app: Express) {
       }
       console.error("Transfer error:", error);
       if (sendInventoryQuantityError(res, error)) return;
-      res.status(400).json({ error: String(error) });
+      if (error instanceof AppError) {
+        return res.status(error.statusCode).json({ code: error.code, error: error.message, context: error.context });
+      }
+      if (error instanceof FinancialCommandError) {
+        for (const [header, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(header, value);
+        return res.status(error.statusCode).json({ code: error.code, error: error.message, context: error.details });
+      }
+      if (error instanceof ZodError) {
+        return res.status(400).json({ code: "TRANSFER_INPUT_INVALID", error: "Invalid transfer request", issues: error.issues });
+      }
+      res.status(500).json({ code: "INVENTORY_TRANSFER_FAILED", error: "Failed to transfer inventory" });
     }
   });
 

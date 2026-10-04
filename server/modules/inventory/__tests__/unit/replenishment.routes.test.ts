@@ -35,6 +35,7 @@ vi.mock("../../../../modules/catalog", () => ({ catalogStorage: mocks.catalog })
 vi.mock("../../../../modules/warehouse", () => ({ warehouseStorage: mocks.warehouse }));
 
 import { registerReplenishmentRoutes } from "../../replenishment.routes";
+import { replenishmentTaskPatchSchema } from "@shared/types/replenishment-task-command";
 
 function buildApp(services: Record<string, any> = {}): Express {
   const app = express();
@@ -110,42 +111,22 @@ describe("replenishment routes", () => {
     ]);
   });
 
-  it("creates replenishment tasks using the unified auto-execute decision when omitted", async () => {
-    mocks.warehouse.getWarehouseLocationById.mockResolvedValue({ id: 20, warehouseId: 1 });
-    mocks.inventory.createReplenTask.mockResolvedValue({ id: 77, status: "pending" });
-    const replenishment = {
-      getSettingsForWarehouse: vi.fn().mockResolvedValue({ warehouseId: 1 }),
-      resolveAutoExecute: vi.fn().mockReturnValue({ shouldAutoExecute: false, executionMode: "queue" }),
-    };
+  it("forwards manual planning intent to the application owner without inserting another task", async () => {
+    const task = { id: 77, status: "pending", executionMode: "inline" };
+    const replenishment = { createManualTask: vi.fn().mockResolvedValue(task) };
     server = await startServer(buildApp({ replenishment }));
-
-    const { status, body } = await requestJson(server.url, "POST", "/api/replen/tasks", {
-      fromLocationId: 10,
-      toLocationId: 20,
-      qtyTargetUnits: 5,
-      pickVariantId: 31,
-      sourceVariantId: 32,
-    });
-
+    const input = { commandId: "e26f53ae-6fb2-4cf6-8517-e46cb979af04", fromLocationId: 10,
+      toLocationId: 20, qtySourceUnits: 1, pickVariantId: 31, sourceVariantId: 32, replenMethod: "case_break" };
+    const { status, body } = await requestJson(server.url, "POST", "/api/replen/tasks", input);
     expect(status).toBe(201);
-    expect(replenishment.getSettingsForWarehouse).toHaveBeenCalledWith(1);
-    expect(replenishment.resolveAutoExecute).toHaveBeenCalledWith(null, null, { warehouseId: 1 }, 5);
-    expect(mocks.inventory.createReplenTask).toHaveBeenCalledWith(
-      expect.objectContaining({
-        fromLocationId: 10,
-        toLocationId: 20,
-        pickProductVariantId: 31,
-        sourceProductVariantId: 32,
-        qtyTargetUnits: 5,
-        executionMode: "queue",
-        status: "pending",
-      }),
-    );
-    expect(body).toEqual({ id: 77, status: "pending" });
+    expect(replenishment.createManualTask).toHaveBeenCalledExactlyOnceWith(input, "test-user");
+    expect(mocks.inventory.createReplenTask).not.toHaveBeenCalled();
+    expect(body).toEqual(task);
   });
 
   it("blocks manual completed status updates so inventory must move through execute", async () => {
-    server = await startServer(buildApp());
+    const changeTask = vi.fn(async (_id, input) => replenishmentTaskPatchSchema.parse(input));
+    server = await startServer(buildApp({ replenishment: { changeTask } }));
 
     const { status, body } = await requestJson(server.url, "PATCH", "/api/replen/tasks/77", {
       status: "completed",
@@ -153,6 +134,7 @@ describe("replenishment routes", () => {
 
     expect(status).toBe(400);
     expect(mocks.inventory.updateReplenTask).not.toHaveBeenCalled();
-    expect(body).toEqual({ error: "Use the /execute endpoint to complete tasks (ensures inventory is moved)" });
+    expect(changeTask).toHaveBeenCalledExactlyOnceWith(77, { status: "completed" }, "test-user");
+    expect(body.error).toContain("completed");
   });
 });

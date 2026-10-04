@@ -2,6 +2,8 @@ import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { inventoryTransferRequestSchema } from "@shared/types/inventory-transfer";
 import { AppError, IntegrityError } from "@shared/errors";
+import { InventoryQuantityError } from "../domain/quantity-ledger";
+import { inventoryQuantityErrorStatus } from "./inventory-quantity-error-status";
 import { createDrizzleFinancialCommandRepository } from "../../../platform/commands/command-results.repository";
 import { hashHttpFinancialCommand } from "../../../platform/commands/http-command";
 import { runTransactionalFinancialCommand } from "../../../platform/commands/transactional-command.service";
@@ -92,10 +94,16 @@ export class ManualInventoryTransferService {
         };
       },
       classifyFailure: (error) =>
-        error instanceof AppError
+        error instanceof InventoryQuantityError ||
+        (error instanceof AppError &&
+          error.statusCode >= 400 &&
+          error.statusCode < 500)
           ? {
               kind: "rejected",
-              httpStatus: error.statusCode,
+              httpStatus:
+                error instanceof InventoryQuantityError
+                  ? inventoryQuantityErrorStatus(error)
+                  : error.statusCode,
               errorCode: error.code,
               errorMessage: error.message,
               body: {
@@ -106,7 +114,10 @@ export class ManualInventoryTransferService {
             }
           : {
               kind: "retryable",
-              errorCode: "INVENTORY_TRANSFER_FAILED",
+              errorCode:
+                error instanceof AppError
+                  ? error.code
+                  : "INVENTORY_TRANSFER_FAILED",
               errorMessage:
                 error instanceof Error ? error.message : String(error),
             },
