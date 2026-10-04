@@ -28,7 +28,7 @@ async function setup(page: Page, options: { legacy?: boolean; unresolved?: boole
   const state = { line: { ...makeLine(), ...(options.exact ? { expectedQty: 500, receivedQty: 400, damagedQty: 50 } : {}),
     ...(options.legacy ? { unitsPerVariantSnapshot: null } : {}), ...(options.unresolved ? { productVariantId: null } : {}),
     ...(options.drift ? { unitsPerVariantSnapshot: 50, expectedQty: 10, receivedQty: 8, damagedQty: 1 } : {}),
-    ...(options.shipmentCase ? { productVariantId: 3, unitsPerVariantSnapshot: 1000, expectedQty: 525, receivedQty: 0, damagedQty: 0 } : {}) },
+    ...(options.shipmentCase ? { sku: "TEST-TOP-STD-SLV-CLR", productName: "Toploader Essentials Clear and Easy Glide Combo Pack", productVariantId: 3, unitsPerVariantSnapshot: 1000, expectedQty: 525, receivedQty: 0, damagedQty: 0, status: "pending" } : {}) },
     commands: [] as Command[], opened: !options.draft, conflictUsed: false, reads: 0, committed: false, manualConflictUsed: false, catalogConflictUsed: false };
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -102,7 +102,12 @@ async function setup(page: Page, options: { legacy?: boolean; unresolved?: boole
       }
       state.line.productVariantId = body.productVariantId; state.line.unitsPerVariantSnapshot = factor;
     }
-    if ("receivedQty" in body) state.line.receivedQty = body.receivedQty;
+    if ("receivedQty" in body) {
+      state.line.receivedQty = body.receivedQty;
+      state.line.status = body.receivedQty === 0 ? "pending"
+        : body.receivedQty < state.line.expectedQty ? "partial"
+        : body.receivedQty === state.line.expectedQty ? "complete" : "overage";
+    }
     state.line.unitVersion = nextVersion; state.committed = true;
     if (options.lost) return route.abort("connectionreset");
     return route.fulfill({ json: state.line });
@@ -120,6 +125,63 @@ const done = (page: Page) => page.locator('[data-testid="btn-complete-line-7"]:v
 // saved") out of the match.
 const expectCountSaved = (page: Page) => expect(page.getByText("Count saved", { exact: true })).toBeVisible();
 const refreshLine = (page: Page) => page.getByRole("button", { name: "Load latest line and discard count draft" }).filter({ visible: true });
+
+test("a shipment count can be saved beside its field without horizontal scrolling", async ({ page }, testInfo) => {
+  if (testInfo.project.name === "desktop") await page.setViewportSize({ width: 935, height: 867 });
+  const { state, failures } = await setup(page, { draft: true, shipmentCase: true });
+  await page.getByTestId("btn-open-receipt").click();
+  await count(page).fill("525");
+  await expect(page.getByTestId("btn-complete-all")).toBeDisabled();
+  await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
+  // Mobile cards require vertical scrolling to reach the count field.
+  // Keep the desktop table at its original horizontal position.
+  if (testInfo.project.name === "mobile") await count(page).scrollIntoViewIfNeeded();
+  await expect(count(page)).toBeInViewport({ ratio: 1 });
+  await page.screenshot({ path: testInfo.outputPath("shipment-count-draft.png"), fullPage: true, animations: "disabled" });
+  await expect(done(page)).toBeInViewport({ ratio: 1 });
+  await expect(done(page)).toHaveText("Save count");
+  await expect(page.getByText("Unsaved count", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByText(/Use Save count beside each Received field/)).toBeVisible();
+  await done(page).click();
+  await expectCountSaved(page);
+  await expect(control(page)).toContainText("received: 525,000 pieces");
+  await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
+  expect(state.commands).toEqual([
+    { path: "/api/receiving/31/open", body: {} },
+    { path: "/api/receiving/lines/7", body: { receivedQty: 525, expectedUnitVersion: version } },
+  ]);
+  await page.screenshot({ path: testInfo.outputPath("shipment-count-saved.png"), fullPage: true, animations: "disabled" });
+  expect(failures).toEqual([]);
+});
+
+test("Enter saves actual shipment counts, including a zero edit to a completed line", async ({ page }) => {
+  const { state, failures } = await setup(page, { shipmentCase: true });
+  await count(page).fill("525");
+  await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
+  await count(page).press("Enter");
+  await expectCountSaved(page);
+  await expect(control(page)).toContainText("received: 525,000 pieces");
+  await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
+  await expect(done(page)).toHaveCount(0);
+  expect(state.commands).toEqual([
+    { path: "/api/receiving/lines/7", body: { receivedQty: 525, expectedUnitVersion: version } },
+  ]);
+
+  await count(page).fill("0");
+  await expect(done(page)).toHaveText("Save count");
+  await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
+  await count(page).press("Enter");
+  await expect(control(page)).toContainText("received: 0 pieces");
+  await expect(page.getByText("Unsaved count", { exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
+  expect(state.commands).toEqual([
+    { path: "/api/receiving/lines/7", body: { receivedQty: 525, expectedUnitVersion: version } },
+    { path: "/api/receiving/lines/7", body: { receivedQty: 0, expectedUnitVersion: nextVersion } },
+  ]);
+  expect(state.line.receivedQty).toBe(0);
+  expect(state.line.expectedQty).toBe(525);
+  expect(failures).toEqual([]);
+});
 
 test("starting a shipment receipt retains its version and saves 525 cases before finalizing", async ({ page }) => {
   const { state, failures } = await setup(page, { draft: true, shipmentCase: true });
