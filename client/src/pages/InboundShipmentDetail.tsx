@@ -17,8 +17,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -40,6 +38,8 @@ import {
   type ShipmentCostForm,
 } from "@/lib/shipment-cost-command";
 import { AddInvoiceFromCostsModal } from "@/components/shipment/AddInvoiceFromCostsModal";
+import { ShipmentCostVendorSelect } from "@/components/shipment/ShipmentCostVendorSelect";
+import { shipmentCostVendorListSchema, type ShipmentCostVendorOption } from "@/lib/shipment-cost-vendors";
 import {
   ShipmentReceiptPackResolutionDialog,
   type ShipmentReceiptPackResolution,
@@ -55,8 +55,6 @@ import {
   Package,
   Plus,
   Trash2,
-  ChevronsUpDown,
-  Check,
   AlertTriangle,
   Ban,
   Clock,
@@ -377,11 +375,10 @@ export default function InboundShipmentDetail() {
     allocationMethod: "default",
     vendorName: "",
     vendorId: null as number | null,
+    performedByVendorId: null,
     performedByName: "",
     costDate: "",
   });
-  const [costVendorOpen, setCostVendorOpen] = useState(false);
-  const [costVendorSearch, setCostVendorSearch] = useState("");
 
   // Edit cost form
   const [editingCost, setEditingCost] = useState<ShipmentCostEditor | null>(null);
@@ -394,8 +391,6 @@ export default function InboundShipmentDetail() {
   const costCommands = useMemo(() => createShipmentCostCommandClient(
     () => `shipment-cost-${crypto.randomUUID()}`, costRecoveryStore ?? undefined,
   ), [costRecoveryStore]);
-  const [editCostVendorOpen, setEditCostVendorOpen] = useState(false);
-  const [editCostVendorSearch, setEditCostVendorSearch] = useState("");
 
   const refreshCreateRecovery = () => {
     if (!shipmentId || !costRecoveryStore) return;
@@ -420,7 +415,7 @@ export default function InboundShipmentDetail() {
     setReloadingCost(false);
     setCostCreateRecovery(null);
     setCostCreateRecoveryError(null);
-    setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "", vendorId: null, performedByName: "", costDate: "" });
+    setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "", vendorId: null, performedByVendorId: null, performedByName: "", costDate: "" });
     refreshCreateRecovery();
   }, [shipmentId, costRecoveryStore]);
   // Add Invoice modal (multi-step: vendor picker → invoice preview)
@@ -428,7 +423,26 @@ export default function InboundShipmentDetail() {
 
   // Quick-add vendor
   const [showNewVendorDialog, setShowNewVendorDialog] = useState(false);
+  const [newVendorTarget, setNewVendorTarget] = useState<{
+    role: "provider" | "performer";
+  } & ({ form: "create"; costId: null } | { form: "edit"; costId: number }) | null>(null);
   const [newVendor, setNewVendor] = useState({ code: "", name: "", contactName: "", email: "", phone: "", address: "", notes: "" });
+  const openNewCostVendor = (form: "create" | "edit", role: "provider" | "performer") => {
+    if (createVendorMutation.isPending) {
+      toast({ title: "Vendor creation in progress", description: "Wait for the current vendor to finish saving." });
+      return;
+    }
+    if (form === "edit") {
+      if (!editingCost) {
+        toast({ title: "Cost is no longer open", description: "Open the cost again before adding a vendor.", variant: "destructive" });
+        return;
+      }
+      setNewVendorTarget({ form, role, costId: editingCost.id });
+    } else {
+      setNewVendorTarget({ form, role, costId: null });
+    }
+    setShowNewVendorDialog(true);
+  };
 
   // ── Queries ──
 
@@ -449,8 +463,12 @@ export default function InboundShipmentDetail() {
     enabled: !!shipmentId,
   });
 
-  const { data: vendorsData } = useQuery<any[]>({
+  const { data: vendorsData = [], isPending: vendorsLoading, isError: vendorsError, refetch: refetchVendors } = useQuery({
     queryKey: ["/api/vendors"],
+    queryFn: async () => {
+      const response = await apiRequest("GET", "/api/vendors");
+      return shipmentCostVendorListSchema.parse(await response.json());
+    },
     enabled: showAddCostDialog || !!editingCost,
   });
   const { data: invoicesData } = useQuery<any>({
@@ -821,8 +839,7 @@ export default function InboundShipmentDetail() {
       if (!context?.isCurrent()) return;
       setShowAddCostDialog(false);
       setCostCreateRecovery(null);
-      setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "", vendorId: null, performedByName: "", costDate: "" });
-      setCostVendorSearch("");
+      setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "", vendorId: null, performedByVendorId: null, performedByName: "", costDate: "" });
       toast({ title: "Cost added", description: refreshed ? undefined : "The cost was saved, but the view could not refresh. Refresh the shipment to see current details." });
     },
     onError: (error: Error, variables, context) => {
@@ -870,20 +887,27 @@ export default function InboundShipmentDetail() {
 
 
   const createVendorMutation = useMutation({
-    mutationFn: async (data: any) => {
+    mutationFn: async ({ data, target }: { data: typeof newVendor; target: typeof newVendorTarget }) => {
+      if (!target) throw new Error("Select the cost field before adding a vendor.");
       const res = await apiRequest("POST", "/api/vendors", data);
-      return res.json();
+      return shipmentCostVendorListSchema.element.parse(await res.json());
     },
-    onSuccess: (vendor: any) => {
+    onMutate: () => captureNavigation(),
+    onSuccess: (vendor: ShipmentCostVendorOption, variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/vendors"] });
+      if (!context?.isCurrent()) return;
       setShowNewVendorDialog(false);
       setNewVendor({ code: "", name: "", contactName: "", email: "", phone: "", address: "", notes: "" });
-      // Auto-select the new vendor in whichever dropdown is active
-      if (showAddCostDialog) {
-        setNewCost((prev) => ({ ...prev, vendorId: vendor.id, vendorName: vendor.name }));
-      } else if (editingCost) {
-        setEditingCost((prev: any) => ({ ...prev, vendorId: vendor.id, vendorName: vendor.name }));
+      const selection = variables.target?.role === "performer"
+        ? { performedByVendorId: vendor.id, performedByName: vendor.name }
+        : { vendorId: vendor.id, vendorName: vendor.name };
+      if (variables.target?.form === "create") {
+        if (showAddCostDialog) setNewCost((prev) => ({ ...prev, ...selection }));
+      } else if (variables.target?.form === "edit") {
+        const targetCostId = variables.target.costId;
+        setEditingCost((prev) => prev?.id === targetCostId ? { ...prev, ...selection } : prev);
       }
+      setNewVendorTarget(null);
       toast({ title: "Vendor created", description: vendor.name });
     },
     onError: (err: Error) => {
@@ -2423,58 +2447,24 @@ export default function InboundShipmentDetail() {
                 />
               </div>
               <div className="space-y-2">
-                <Label>Service Provider</Label>
-                <Popover open={costVendorOpen} onOpenChange={setCostVendorOpen}>
-                  <PopoverTrigger asChild>
-                    <Button variant="outline" role="combobox" className="w-full justify-between h-10 font-normal">
-                      {newCost.vendorName || "Select vendor..."}
-                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
-                    <Command shouldFilter={false}>
-                      <CommandInput placeholder="Search vendors..." value={costVendorSearch} onValueChange={setCostVendorSearch} />
-                      <CommandList>
-                        <CommandEmpty>No vendors found</CommandEmpty>
-                        <CommandGroup>
-                          {(vendorsData ?? [])
-                            .filter((v: any) => !costVendorSearch || v.name?.toLowerCase().includes(costVendorSearch.toLowerCase()))
-                            .slice(0, 50)
-                            .map((v: any) => (
-                              <CommandItem
-                                key={v.id}
-                                onSelect={() => {
-                                  setNewCost((prev) => ({ ...prev, vendorId: v.id, vendorName: v.name }));
-                                  setCostVendorOpen(false);
-                                  setCostVendorSearch("");
-                                }}
-                              >
-                                <Check className={`mr-2 h-4 w-4 ${newCost.vendorId === v.id ? "opacity-100" : "opacity-0"}`} />
-                                {v.name}
-                              </CommandItem>
-                            ))}
-                        </CommandGroup>
-                        <CommandGroup>
-                          <CommandItem onSelect={() => { setCostVendorOpen(false); setShowNewVendorDialog(true); }} className="text-primary">
-                            <Plus className="mr-2 h-4 w-4" />
-                            Add New Vendor
-                          </CommandItem>
-                        </CommandGroup>
-                      </CommandList>
-                    </Command>
-                  </PopoverContent>
-                </Popover>
+                <Label htmlFor="new-cost-provider">Service Provider</Label>
+                <ShipmentCostVendorSelect id="new-cost-provider" label="Service Provider"
+                  vendorId={newCost.vendorId} recordedName={newCost.vendorName} vendors={vendorsData}
+                  loading={vendorsLoading} error={vendorsError} onRetry={() => { void refetchVendors(); }}
+                  disabled={addCostMutation.isPending || !!costCreateRecovery || !!costCreateRecoveryError}
+                  onSelect={(vendor) => setNewCost((prev) => ({ ...prev, vendorId: vendor?.id ?? null, vendorName: vendor?.name ?? "" }))}
+                  onAddVendor={() => openNewCostVendor("create", "provider")} />
               </div>
             </div>
 
             <div className="space-y-2">
-              <Label>Performed By</Label>
-              <Input
-                value={newCost.performedByName}
-                onChange={(e) => setNewCost((prev) => ({ ...prev, performedByName: e.target.value }))}
-                placeholder="Service performer (e.g. ExFreight Zeta)"
-                className="h-10"
-              />
+              <Label htmlFor="new-cost-performer">Performed By</Label>
+              <ShipmentCostVendorSelect id="new-cost-performer" label="Performed By" allowClear
+                vendorId={newCost.performedByVendorId} recordedName={newCost.performedByName} vendors={vendorsData}
+                loading={vendorsLoading} error={vendorsError} onRetry={() => { void refetchVendors(); }}
+                disabled={addCostMutation.isPending || !!costCreateRecovery || !!costCreateRecoveryError}
+                onSelect={(vendor) => setNewCost((prev) => ({ ...prev, performedByVendorId: vendor?.id ?? null, performedByName: vendor?.name ?? "" }))}
+                onAddVendor={() => openNewCostVendor("create", "performer")} />
             </div>
 
             <div className="space-y-2">
@@ -2578,58 +2568,24 @@ export default function InboundShipmentDetail() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label>Service Provider</Label>
-                  <Popover open={editCostVendorOpen} onOpenChange={setEditCostVendorOpen}>
-                    <PopoverTrigger asChild>
-                      <Button disabled={editingCost.economicFieldsLocked} variant="outline" role="combobox" className="w-full justify-between h-10 font-normal">
-                        {editingCost.vendorName || "Select vendor..."}
-                        <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
-                      <Command shouldFilter={false}>
-                        <CommandInput placeholder="Search vendors..." value={editCostVendorSearch} onValueChange={setEditCostVendorSearch} />
-                        <CommandList>
-                          <CommandEmpty>No vendors found</CommandEmpty>
-                          <CommandGroup>
-                            {(vendorsData ?? [])
-                              .filter((v: any) => !editCostVendorSearch || v.name?.toLowerCase().includes(editCostVendorSearch.toLowerCase()))
-                              .slice(0, 50)
-                              .map((v: any) => (
-                                <CommandItem
-                                  key={v.id}
-                                  onSelect={() => {
-                                    setEditingCost((prev: any) => ({ ...prev, vendorId: v.id, vendorName: v.name }));
-                                    setEditCostVendorOpen(false);
-                                    setEditCostVendorSearch("");
-                                  }}
-                                >
-                                  <Check className={`mr-2 h-4 w-4 ${editingCost.vendorId === v.id ? "opacity-100" : "opacity-0"}`} />
-                                  {v.name}
-                                </CommandItem>
-                              ))}
-                          </CommandGroup>
-                          <CommandGroup>
-                            <CommandItem onSelect={() => { setEditCostVendorOpen(false); setShowNewVendorDialog(true); }} className="text-primary">
-                              <Plus className="mr-2 h-4 w-4" />
-                              Add New Vendor
-                            </CommandItem>
-                          </CommandGroup>
-                        </CommandList>
-                      </Command>
-                    </PopoverContent>
-                  </Popover>
+                  <Label htmlFor="edit-cost-provider">Service Provider</Label>
+                  <ShipmentCostVendorSelect id="edit-cost-provider" label="Service Provider"
+                    vendorId={editingCost.vendorId} recordedName={editingCost.vendorName} vendors={vendorsData}
+                    loading={vendorsLoading} error={vendorsError} onRetry={() => { void refetchVendors(); }}
+                    disabled={editingCost.economicFieldsLocked || updateCostMutation.isPending || reloadingCost || costEditConflict}
+                    onSelect={(vendor) => setEditingCost((prev) => prev ? { ...prev, vendorId: vendor?.id ?? null, vendorName: vendor?.name ?? "" } : null)}
+                    onAddVendor={() => openNewCostVendor("edit", "provider")} />
                 </div>
               </div>
 
               <div className="space-y-2">
-                <Label>Performed By</Label>
-                <Input
-                  value={editingCost.performedByName || ""}
-                  onChange={(e) => setEditingCost((prev: any) => ({ ...prev, performedByName: e.target.value }))}
-                  placeholder="Service performer (e.g. ExFreight Zeta)"
-                  className="h-10"
-                />
+                <Label htmlFor="edit-cost-performer">Performed By</Label>
+                <ShipmentCostVendorSelect id="edit-cost-performer" label="Performed By" allowClear
+                  vendorId={editingCost.performedByVendorId} recordedName={editingCost.performedByName} vendors={vendorsData}
+                  loading={vendorsLoading} error={vendorsError} onRetry={() => { void refetchVendors(); }}
+                  disabled={updateCostMutation.isPending || reloadingCost || costEditConflict}
+                  onSelect={(vendor) => setEditingCost((prev) => prev ? { ...prev, performedByVendorId: vendor?.id ?? null, performedByName: vendor?.name ?? "" } : null)}
+                  onAddVendor={() => openNewCostVendor("edit", "performer")} />
               </div>
 
               <div className="space-y-2">
@@ -2767,7 +2723,7 @@ export default function InboundShipmentDetail() {
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowNewVendorDialog(false)}>Cancel</Button>
               <Button
-                onClick={() => createVendorMutation.mutate(newVendor)}
+                onClick={() => createVendorMutation.mutate({ data: newVendor, target: newVendorTarget })}
                 disabled={!newVendor.code || !newVendor.name || createVendorMutation.isPending}
               >
                 {createVendorMutation.isPending ? "Creating..." : "Create Vendor"}

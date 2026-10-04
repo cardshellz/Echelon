@@ -7,7 +7,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 const VERSION_FIELDS = [
   "id", "inboundShipmentId", "costType", "description", "estimatedCents", "actualCents",
   "currency", "exchangeRate", "allocationMethod", "costStatus", "invoiceNumber", "invoiceDate",
-  "dueDate", "paidDate", "performedByName", "vendorId", "vendorInvoiceId", "notes", "createdAt", "updatedAt",
+  "dueDate", "paidDate", "performedByName", "performedByVendorId", "vendorId", "vendorInvoiceId", "notes", "createdAt", "updatedAt",
 ] as const satisfies readonly (keyof InboundFreightCost)[];
 
 export function shipmentCostVersion(cost: InboundFreightCost): string {

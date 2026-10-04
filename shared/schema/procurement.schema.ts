@@ -1675,13 +1675,17 @@ export const inboundFreightCosts = procurementSchema.table("inbound_freight_cost
   invoiceDate: timestamp("invoice_date"),
   dueDate: timestamp("due_date"),
   paidDate: timestamp("paid_date"),
+  // Retain the recorded name for historical text entries and vendor renames/deletions.
   performedByName: text("performed_by_name"),
+  performedByVendorId: integer("performed_by_vendor_id").references(() => vendors.id, { onDelete: "set null" }),
   vendorId: integer("vendor_id").references(() => vendors.id, { onDelete: "set null" }),
   vendorInvoiceId: integer("vendor_invoice_id").references(() => vendorInvoices.id, { onDelete: "set null" }),
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  index("inbound_freight_costs_performed_by_vendor_idx").on(table.performedByVendorId),
+]);
 
 export const insertInboundFreightCostSchema = createInsertSchema(inboundFreightCosts).omit({
   id: true,
