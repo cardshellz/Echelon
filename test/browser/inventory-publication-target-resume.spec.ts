@@ -121,17 +121,17 @@ const REASON_LABEL = "Reason (required for this publishing command)";
 
 test("reviews immutable readiness evidence before resuming one exact destination", async ({ page }) => {
   const state = await setup(page);
-  await page.getByRole("tab", { name: "Publishing", exact: true }).click();
-  await expect(page.getByText("Calculating only", { exact: true }).first()).toBeVisible();
+  await page.getByRole("tab", { name: "Stock updates", exact: true }).click();
+  await expect(page.getByText("Setup pending", { exact: true }).first()).toBeVisible();
 
   // Routine tabs never ask for a reason; the sensitive publishing command does, at the moment of the action.
-  await page.getByRole("button", { name: "Check readiness to resume", exact: true }).click();
+  await page.getByRole("button", { name: "Check before resuming", exact: true }).click();
   const reviewDialog = page.getByRole("alertdialog");
   await reviewDialog.getByLabel(REASON_LABEL).fill(REASON);
-  await reviewDialog.getByRole("button", { name: "Run readiness check", exact: true }).click();
+  await reviewDialog.getByRole("button", { name: "Check account", exact: true }).click();
 
-  await expect(page.getByText("Readiness check #71", { exact: false })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Resume publishing", exact: true })).toBeEnabled();
+  await expect(page.getByText("Account checked — ready to resume", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Resume stock updates", exact: true })).toBeEnabled();
   expect(state.writes).toHaveLength(1);
   expect(state.writes[0]).toMatchObject({
     method: "POST",
@@ -143,11 +143,11 @@ test("reviews immutable readiness evidence before resuming one exact destination
     },
   });
 
-  await page.getByRole("button", { name: "Resume publishing", exact: true }).click();
+  await page.getByRole("button", { name: "Resume stock updates", exact: true }).click();
   const resumeDialog = page.getByRole("alertdialog");
   await resumeDialog.getByLabel(REASON_LABEL).fill(REASON);
-  await resumeDialog.getByRole("button", { name: "Resume publishing", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Stop publishing", exact: true })).toBeVisible();
+  await resumeDialog.getByRole("button", { name: "Resume stock updates", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Pause stock updates", exact: true })).toBeVisible();
   expect(state.writes).toHaveLength(2);
   expect(state.writes[1]).toMatchObject({
     method: "POST",
@@ -196,6 +196,7 @@ function adminView(state: "preview" | "live", revision: string) {
     dropshipDestinationChannelId: null,
     dropshipStores: [],
     publicationTargets: [{
+      hasPriorLiveStop: true,
       id: 5,
       destinationKind: "channel_connection",
       channelId: 3,

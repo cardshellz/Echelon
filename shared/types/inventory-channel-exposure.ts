@@ -178,6 +178,9 @@ export const inventoryPublicationTargetAdminSchema = z.object({
   state: z.enum(["disabled", "preview", "live"]),
   revision: postgresBigintString,
   hold: inventoryPublicationTargetHoldSchema.nullable(),
+  // Resume requires the audited prior-live stop, not merely a disabled or
+  // preview state. Omitted by older servers means unknown, not never started.
+  hasPriorLiveStop: z.boolean().optional(),
 }).strict().superRefine(validatePublicationDestination);
 
 export const legacyPublicationMappingCandidateSchema = z.object({

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useSearch } from "wouter";
 
-import { InventoryRuntimeAuthorityBadge } from "@/components/inventory/InventoryRuntimeAuthorityBadge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -147,14 +146,12 @@ function AuthorizedChannelInventoryPage() {
         <div className="space-y-1">
           <h1 className="text-2xl font-semibold tracking-tight">Channel Inventory</h1>
           <p className="max-w-3xl text-sm text-muted-foreground">
-            Choose which warehouses supply each sales channel, how much of the available stock it
-            may offer, and which products need different rules. Saves are recorded immediately;
-            nothing publishes until it is activated.
+            Choose the warehouses and stock limits for each sales channel. Preview the quantities,
+            then review saved changes before using them for stock updates.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <GlobalPublishingControl canActivate={canActivate} now={now} />
-          <InventoryRuntimeAuthorityBadge />
         </div>
       </header>
 
@@ -186,7 +183,7 @@ function AuthorizedChannelInventoryPage() {
                     <h2 className="text-lg font-semibold leading-tight">{channel.name}</h2>
                     <p className="text-xs text-muted-foreground">
                       {providerLabel(channel.provider)} · {channel.status}
-                      {pending && pending.total > 0 ? ` · ${pending.total} saved change${pending.total === 1 ? "" : "s"} pending activation` : ""}
+                      {pending && pending.total > 0 ? ` · ${pending.total} saved change${pending.total === 1 ? "" : "s"} to review` : ""}
                     </p>
                   </div>
                 </div>
@@ -202,11 +199,11 @@ function AuthorizedChannelInventoryPage() {
               />
 
               <Tabs value={selection.tab} onValueChange={(value) => requestNavigation(() => setSelection((current) => ({ ...current, tab: value as Tab })))}>
-                <TabsList className="w-full justify-start overflow-x-auto sm:w-auto">
-                  <TabsTrigger value="supply">Supply</TabsTrigger>
-                  <TabsTrigger value="rules">Selling rules</TabsTrigger>
-                  <TabsTrigger value="quantities">Quantities</TabsTrigger>
-                  <TabsTrigger value="publishing">Publishing</TabsTrigger>
+                <TabsList className="grid h-auto w-full grid-cols-2 gap-1 sm:inline-flex sm:w-auto">
+                  <TabsTrigger value="supply">Warehouses</TabsTrigger>
+                  <TabsTrigger value="rules">Stock rules</TabsTrigger>
+                  <TabsTrigger value="quantities">Stock preview</TabsTrigger>
+                  <TabsTrigger value="publishing">Stock updates</TabsTrigger>
                 </TabsList>
                 <TabsContent value="supply" className="mt-4">
                   <SupplyTab
@@ -238,6 +235,7 @@ function AuthorizedChannelInventoryPage() {
                     canEdit={canEdit}
                     productId={selection.productId}
                     onProductChange={id => requestNavigation(() => focusProduct(id))}
+                    onManagePublishing={() => requestNavigation(() => setSelection(current => ({ ...current, tab: "publishing" })))}
                     onAddDestination={() => setAddingDestination(true)}
                     onReload={reload}
                     reloading={viewQuery.isFetching}
@@ -252,6 +250,7 @@ function AuthorizedChannelInventoryPage() {
                     canEdit={canEdit}
                     canActivate={canActivate}
                     onAddDestination={() => setAddingDestination(true)}
+                    onOpenTab={tab => requestNavigation(() => setSelection(current => ({ ...current, tab })))}
                   />
                 </TabsContent>
               </Tabs>

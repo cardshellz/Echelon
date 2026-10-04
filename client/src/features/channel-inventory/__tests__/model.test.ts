@@ -258,7 +258,7 @@ describe("destinations and publishing state", () => {
 
   it("reads publishing state in operator terms and lets an external publisher win over the state column", () => {
     expect(describePublishing(target({ state: "live" }))).toMatchObject({ label: "Publishing", tone: "live" });
-    expect(describePublishing(target({ state: "preview" }))).toMatchObject({ label: "Calculating only", tone: "preview" });
+    expect(describePublishing(target({ state: "preview" }))).toMatchObject({ label: "Setup pending", tone: "preview" });
     expect(describePublishing(target({ state: "disabled" }))).toMatchObject({ label: "Not publishing", tone: "off" });
     expect(describePublishing(target({ state: "live", publicationAuthority: "external_provider" })))
       .toMatchObject({ label: "Externally managed", tone: "external" });

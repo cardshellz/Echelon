@@ -30,25 +30,25 @@ const SWEEP_INTERVAL_OPTIONS_MINUTES = [5, 10, 15, 30, 60] as const;
  * command (activate permission, required reason), so it opens a dialog rather
  * than flipping in place. Pausing publishing does not publish zero.
  */
-export function GlobalPublishingControl({ canActivate, now }: { canActivate: boolean; now: () => Date }) {
+export function GlobalPublishingControl({ canActivate, now, triggerLabel }: { canActivate: boolean; now: () => Date; triggerLabel?: string }) {
   const status = usePublishingStatus();
   const [open, setOpen] = useState(false);
   const global = status.data?.global ?? null;
 
   if (status.isLoading) {
-    return <StatePill tone="neutral">Reading publishing switch…</StatePill>;
+    return <StatePill tone="neutral">Reading stock-update control…</StatePill>;
   }
   if (status.error || !global) {
     return (
       <StatePill tone="blocked" title={status.error ? describeError(status.error).message : undefined}>
-        Publishing switch unknown
+        Stock-update status unavailable
       </StatePill>
     );
   }
   const lastSweep = global.lastSweepAt ? formatRelativeTime(global.lastSweepAt, now()) : "never";
   const summary = global.globalEnabled
-    ? `Publishing on · every ${global.sweepIntervalMinutes} min · last run ${lastSweep}`
-    : "Publishing off for every channel";
+    ? `All-channel control on · every ${global.sweepIntervalMinutes} min · last run ${lastSweep}`
+    : "Stock updates off for all channels";
   return (
     <>
       <button
@@ -56,11 +56,11 @@ export function GlobalPublishingControl({ canActivate, now }: { canActivate: boo
         onClick={() => setOpen(true)}
         className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         aria-haspopup="dialog"
-        title={canActivate ? "Open the global publishing switch" : "View the global publishing switch"}
+        title="Stock-update controls for all channels"
       >
         <StatePill tone={global.globalEnabled ? "live" : "off"}>
           <Power className="h-3 w-3" aria-hidden="true" />
-          {summary}
+          {triggerLabel ?? summary}
         </StatePill>
       </button>
       {open && (
@@ -129,7 +129,7 @@ function GlobalPublishingDialog(props: {
     <Dialog open={props.open} onOpenChange={(next) => { if (!change.isPending) props.onOpenChange(next); }}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Global publishing switch</DialogTitle>
+          <DialogTitle>Stock updates for all channels</DialogTitle>
           <DialogDescription>
             One switch for every channel and destination. Turning it off stops new quantity
             updates; it does not set marketplace stock to zero.

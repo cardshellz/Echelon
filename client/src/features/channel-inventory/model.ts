@@ -186,17 +186,16 @@ export function describePublishing(target: Target): PublishingStatus {
       };
     case "preview":
       return {
-        label: "Calculating only",
+        label: "Setup pending",
         tone: "preview",
-        explanation: "Quantities are calculated and recorded for readiness review. Nothing is sent "
-          + "to the provider.",
+        explanation: "This account is included in setup checks. Stock updates are off.",
       };
     default:
       return {
         label: "Not publishing",
         tone: "off",
-        explanation: "No quantities are calculated or sent for this destination. Stock the "
-          + "marketplace already shows is unchanged.",
+        explanation: "Stock updates are off for this account. Quantities can still be previewed, "
+          + "and stock already shown in the marketplace is unchanged.",
       };
   }
 }
@@ -674,6 +673,18 @@ export interface QuantityExplanation {
  */
 export function explainQuantity(row: PreviewRow): QuantityExplanation {
   const policy = row.policy;
+  // Held rows retain available stock but the server zeroes the rule breakdown.
+  // Those zeroes are a hold, not the result of each individual stock rule.
+  if (row.hold) {
+    return {
+      steps: [
+        { label: "Available", units: row.canonicalAtpUnits, detail: "Available stock in the selected warehouses." },
+        { label: "Stock hold", units: row.publishedUnits, detail: row.hold.reason },
+      ],
+      proposedUnits: row.publishedUnits,
+      zeroReason: `Stock is held at zero: ${row.hold.reason}.`,
+    };
+  }
   if (!policy) {
     return {
       steps: [{ label: "Available", units: row.canonicalAtpUnits, detail: "Canonical availability across the eligible warehouses." }],

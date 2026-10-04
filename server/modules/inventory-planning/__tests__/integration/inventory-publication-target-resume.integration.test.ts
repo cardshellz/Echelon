@@ -1,10 +1,14 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { drizzle } from "drizzle-orm/node-postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import * as databaseSchema from "@shared/schema";
 
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { InventoryPublicationTargetResumeService } from "../../application/inventory-publication-target-resume.service";
 import { PostgresInventoryPublicationTargetResumeStore } from "../../infrastructure/inventory-publication-target-resume.repository";
+import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
+import { PostgresInventoryPublicationTargetStopStore } from "../../infrastructure/inventory-publication-target-stop.repository";
 import {
   cutoverCompositionBaseSql,
   cutoverCompositionChannelSeedSql,
@@ -614,4 +618,64 @@ dbDescribe.sequential("scoped inventory publication target resume composition", 
       "SELECT count(*)::int AS count FROM public.audit_events WHERE action='inventory_availability.publication_target.resumed'",
     )).rows[0].count).toBe(1);
   }, 20_000);
+
+  it("projects prior-live stop history only from this destination's audited stop", async () => {
+    // The composition fixture has the real inventory migrations. Add the
+    // unrelated connection-label columns needed by the full admin projection.
+    await database.pool.query(`
+      ALTER TABLE channels.channel_connections ADD COLUMN shop_domain text,
+        ADD COLUMN shopify_location_id text, ADD COLUMN metadata jsonb;
+      ALTER TABLE dropship.dropship_store_connections ADD COLUMN external_account_identity_scheme text;
+      CREATE SCHEMA ebay;
+      CREATE TABLE ebay.ebay_oauth_tokens (
+        channel_id integer, environment text, external_account_id text,
+        external_account_display_name text, external_account_verified_at timestamptz,
+        external_account_identity_scheme text
+      );
+    `);
+    const admin = new PostgresInventoryChannelExposureAdminStore(drizzle(database.pool, { schema: databaseSchema }));
+    const created = await admin.createPublicationTarget({
+      destinationKind: "channel_connection", channelId: 36, channelConnectionId: 7,
+      dropshipStoreConnectionId: null, legacyFulfillmentNodeId: 1,
+      providerScopeType: "location", externalScopeId: "new-admin-history-location",
+      publicationAuthority: "echelon", changeReason: "Test new destination history",
+      idempotencyKey: "admin-history-create", actorId: "operator-7", requestHash: HASH, occurredAt: NOW,
+    });
+    const readTarget = async () => (await admin.getAdminView(null)).publicationTargets
+      .find(target => target.id === created.publicationTargetId);
+    expect(await readTarget()).toMatchObject({ state: "disabled", hasPriorLiveStop: false });
+
+    const previewed = await admin.setPublicationTargetPreviewState({
+      publicationTargetId: created.publicationTargetId, expectedRevision: created.revision,
+      state: "preview", changeReason: "Include new destination for review only",
+      idempotencyKey: "admin-history-preview", actorId: "operator-7", requestHash: HASH, occurredAt: NOW,
+    });
+    // A stop audit for another destination and this one's preview inclusion
+    // must not qualify it for the existing resume command.
+    expect((await database.pool.query(`SELECT count(*)::int AS count FROM public.audit_events
+      WHERE action='inventory_availability.publication_target.stopped' AND target=$1`,
+    [`inventory.inventory_publication_target:${publicationTargetId}`])).rows[0].count).toBe(1);
+    expect(await readTarget()).toMatchObject({ state: "preview", revision: previewed.revision, hasPriorLiveStop: false });
+
+    // Seed the previously-live condition in this disposable fixture, then use
+    // the real stop command to produce the exact evidence the resume path uses.
+    const live = (await database.pool.query<{ revision: string }>(`UPDATE inventory.inventory_publication_targets
+      SET state='live', revision=revision+1 WHERE id=$1 RETURNING revision::text`,
+    [created.publicationTargetId])).rows[0]!;
+    const stopped = await new PostgresInventoryPublicationTargetStopStore(database.pool).stop({
+      publicationTargetId: created.publicationTargetId, expectedRevision: live.revision,
+      changeReason: "Pause fixture destination after it was live", idempotencyKey: "admin-history-stop",
+      actorId: "operator-7", requestHash: HASH, occurredAt: NOW,
+    });
+    expect(await readTarget()).toMatchObject({ state: "disabled", hasPriorLiveStop: true });
+
+    await admin.setPublicationTargetPreviewState({
+      publicationTargetId: created.publicationTargetId, expectedRevision: stopped.revision,
+      state: "preview", changeReason: "Prepare the previously stopped destination for resume",
+      idempotencyKey: "admin-history-preview-again", actorId: "operator-7", requestHash: HASH, occurredAt: NOW,
+    });
+    expect(await readTarget()).toMatchObject({ state: "preview", hasPriorLiveStop: true });
+    expect((await database.pool.query(`SELECT count(*)::int AS count FROM inventory.inventory_publication_outbox
+      WHERE publication_target_id=$1`, [created.publicationTargetId])).rows[0].count).toBe(0);
+  });
 });
