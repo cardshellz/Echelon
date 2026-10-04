@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ReceivingUnitControl } from "@/components/purchasing/ReceivingUnitControl";
-import { parseReceivingLineMutation, receivingCompleteAllCommand, recordedReceivingFactor, receivingBaseQuantity, receivingVariantChange, receivingCountChange, receivingSelectedFactor, receivingAddQuantity } from "../../receiving-units";
+import { hasReceivingUnitVersion, ReceivingUnitVersionError, parseReceivingUnitRefresh, parseReceivingLineMutation, receivingCompleteAllCommand, recordedReceivingFactor, receivingBaseQuantity, receivingVariantChange, receivingCountChange, receivingSelectedFactor, receivingAddQuantity } from "../../receiving-units";
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "../../shipment-receipt-units";
 
 const version = "a".repeat(64);
@@ -69,6 +69,41 @@ describe("shipment receive plan preflight", () => {
 });
 
 describe("receipt command boundaries", () => {
+  it.each([undefined, "", "invalid", "A".repeat(64), "a".repeat(63)])("requires a source refresh for missing or invalid version %s", (unitVersion) => {
+    const incomplete = { ...line, unitVersion };
+    expect(hasReceivingUnitVersion(incomplete)).toBe(false);
+    try {
+      receivingCountChange(incomplete, "525");
+      expect.fail("An unversioned line must never produce a count command");
+    } catch (cause) {
+      expect(cause).toBeInstanceOf(ReceivingUnitVersionError);
+      expect(cause).toMatchObject({ code: "RECEIVING_UNIT_VERSION_MISSING", needsRefresh: true });
+    }
+  });
+
+  it("verifies refreshed line versions and identity before discarding a draft", () => {
+    const saved = { ...line, status: "partial", sku: "SKU", productName: "Product", putawayLocationId: 5,
+      putawayComplete: 0, unitCost: 25, notes: null, purchaseOrderLineId: 9 };
+    const receipt = { id: 31, receiptNumber: "TEST-31", status: "open", lines: [saved], sourceType: "shipment",
+      poNumber: "TEST-PO", asnNumber: null, vendorId: null, warehouseId: 1, receivingLocationId: 5,
+      purchaseOrderId: 9, inboundShipmentId: 17, expectedDate: null, receivedDate: null, closedDate: null,
+      expectedLineCount: 1, receivedLineCount: 0, expectedTotalUnits: 501, receivedTotalUnits: 401,
+      notes: null, createdBy: "fixture-user", createdAt: "2026-10-04T12:00:00.000Z", vendor: null };
+    const before = structuredClone(receipt);
+    expect(hasReceivingUnitVersion(saved)).toBe(true);
+    expect(parseReceivingUnitRefresh(receipt, { receiptId: 31, lineId: 7 })).toEqual(receipt);
+    expect(receipt).toEqual(before);
+    for (const invalid of [null, { ...receipt, id: 32 }, { ...receipt, lines: [] },
+      { ...receipt, lines: [saved, saved] }, { ...receipt, lines: [{ ...saved, id: 8 }] },
+      { ...receipt, lines: [{ ...saved, receivingOrderId: 32 }] },
+      { ...receipt, lines: [{ ...saved, unitVersion: undefined }] },
+      { ...receipt, lines: [saved, { ...saved, id: 8, unitVersion: "invalid" }] },
+      { ...receipt, warehouseId: "1" }, { ...receipt, sourceType: undefined },
+      { ...receipt, createdAt: "invalid" }, { ...receipt, vendor: { name: "Incomplete" } }]) {
+      expect(() => parseReceivingUnitRefresh(invalid, { receiptId: 31, lineId: 7 })).toThrow(/draft is still preserved/);
+    }
+  });
+
   it("requires complete line versions and a confirmed basis for bulk counts", () => {
     expect(receivingCompleteAllCommand([line])).toEqual({ expectedUnitVersions: [{ lineId: 7, unitVersion: version }] });
     expect(() => receivingCompleteAllCommand([])).toThrow();
