@@ -701,7 +701,7 @@ suite("warehouse command owners with actual PostgreSQL migrations", () => {
       tasks.every(
         (task) =>
           task.replenMethod === "full_case" &&
-          task.executionMode === "queue" &&
+          task.executionMode === "inline" &&
           task.qtyTargetUnits === 10,
       ),
     ).toBe(true);

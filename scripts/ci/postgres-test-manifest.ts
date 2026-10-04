@@ -132,5 +132,6 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/orders/__tests__/integration/picking-progress-owner.integration.test.ts",
   "server/modules/orders/__tests__/integration/warehouse-operation-commands.integration.test.ts",
   "server/modules/inventory/__tests__/integration/manual-transfer-command.integration.test.ts",
+  "server/modules/inventory/__tests__/integration/inline-replenishment.integration.test.ts",
   "server/modules/membership/__tests__/integration/member-directory.integration.test.ts",
 ]);

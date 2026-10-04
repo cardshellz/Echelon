@@ -99,16 +99,16 @@ F11–F15 form the cost/lineage batch after that decision. Wider lifecycle produ
 
 [source]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/shared/picking-source-plan.ts#L54
 [resolver]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/orders/picking.use-cases.ts#L1456
-[queue]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/orders/picking.use-cases.ts#L4065
+[queue]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/orders/picking.use-cases.ts#L4059
 [dto]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/shared/types/picker-order.ts#L72
 [mapping]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/orders/orders.storage.ts#L537
 [client]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/client/src/lib/picking-command.ts#L11
-[browser]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/test/browser/picking-hold-controls.spec.ts#L302
+[browser]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/test/browser/picking-hold-controls.spec.ts#L307
 [prepare]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/wms/picking-command.repository.ts#L86
 [freeze]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/wms/picking-command.repository.ts#L137
 [refresh]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/orders/picking.use-cases.ts#L1659
 [migration]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/migrations/0719_warehouse_operation_owners.sql#L23
-[unpick]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/orders/picking.use-cases.ts#L3231
+[unpick]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/orders/picking.use-cases.ts#L3225
 [receipt]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/wms/picking-command.repository.ts#L289
 [exact]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/inventory.use-cases.ts#L786
 [canonical-tests]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory-planning/__tests__/integration/canonical-pick-case-break.integration.test.ts#L125
@@ -121,26 +121,28 @@ F11–F15 form the cost/lineage batch after that decision. Wider lifecycle produ
 [storage]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/orders/orders.storage.ts#L985
 [shipment]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/wms/channel-fulfillment-projection.repository.ts#L24
 [monitor]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/scripts/monitor-pick-replen-health.ts#L249
-[factory]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/replenishment.use-cases.ts#L3895
+[factory]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/replenishment.use-cases.ts#L3934
 [break]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/break-assembly.use-cases.ts#L753
 [demand]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/domain/replenishment-execution.domain.ts#L51
-[capacity]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/replenishment.use-cases.ts#L3797
-[execute]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/replenishment.use-cases.ts#L1401
-[create-task]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/replenishment.use-cases.ts#L341
+[capacity]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/replenishment.use-cases.ts#L3836
+[execute]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/replenishment.use-cases.ts#L1425
+[create-task]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/replenishment.use-cases.ts#L343
 [trigger]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/infrastructure/replenishment-trigger.repository.ts#L42
 [manual]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/create-manual-replenishment-task.ts#L44
 [transition]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/replenishment-task-command.ts#L25
 [exception]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/report-replenishment-exception.ts#L39
 [revision]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/migrations/0719_warehouse_operation_owners.sql#L49
-[maintenance]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/replenishment.use-cases.ts#L2024
+[maintenance]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/replenishment.use-cases.ts#L2065
 [transfer]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/manual-inventory-transfer.service.ts#L35
 [unit-basis]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/inventory.use-cases.ts#L2160
 [credit]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/infrastructure/replenishment-transfer-credit.repository.ts#L15
-[wake]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/replenishment.use-cases.ts#L1553
-[recovery]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/replenishment.use-cases.ts#L2803
+[wake]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/replenishment.use-cases.ts#L1594
+[recovery]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/replenishment.use-cases.ts#L2844
 [contribution]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/infrastructure/cost-evidence.repository.ts#L106
 [return]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/application/return-restock.use-case.ts#L138
 [money]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/infrastructure/build.repository.ts#L137
 [valuation]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/lots.service.ts#L1250
 [cogs]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/cogs.service.ts#L757
 [confidence]: https://github.com/cardshellz/Echelon/blob/codex/picking-replenishment-operation-owners/server/modules/inventory/infrastructure/canonical-claim-inventory.repository.ts#L2127
+
+The approved Inline replenishment continuation and its current evidence are recorded separately in [INLINE-REPLENISHMENT-FIXES-2026-10-04.md](./INLINE-REPLENISHMENT-FIXES-2026-10-04.md). The validation counts above describe the earlier operation-owner batch.

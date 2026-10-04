@@ -2400,14 +2400,6 @@ export class PickingUseCases {
         inventoryCtx.locationId = deductResult.locationId;
         inventoryCtx.locationCode = deductResult.locationCode;
 
-        // The authority-specific inventory/WMS transaction has returned and
-        // committed at this point. Queue publication only from this shared
-        // post-commit path so neither a rollback nor authority selection can
-        // expose inventory progress that was not durably recorded.
-        if (this.channelSync) {
-          await this.channelSync.queueSyncAfterInventoryChange(deductResult.productVariantId);
-        }
-
         if (deductResult.autoResolved) {
           inventoryCtx.resolution = {
             autoResolved: true,
@@ -2434,9 +2426,9 @@ export class PickingUseCases {
           }
         }
 
-        // Auto-execute replen in background — no picker confirmation needed.
-        // The result is captured so the UI can show a dismissible notification;
-        // a replenishment failure does not roll back an already completed pick.
+        // Execute rule-owned inline replenishment before channel publication.
+        // Capture committed movement for picker feedback; a failure retains
+        // durable follow-up intent without reversing an already recorded pick.
         try {
           const replenResult = deductResult.prePickReplen ?? await this.replenishment.createAndExecuteReplen(
             deductResult.productVariantId,
@@ -2518,8 +2510,11 @@ export class PickingUseCases {
           }).catch((err: any) => console.warn("[PickingLog] replen failure log failed:", err.message));
         }
 
-        // binCountNeeded is only set for inventory discrepancies (deduction failure path).
-        // When replen triggers, the UI shows the simple replen-confirm toggle instead.
+        // The pick and required replenishment have committed. Publication failure
+        // retains the receipt-backed follow-up without preventing the bin refill.
+        if (this.channelSync) {
+          await this.channelSync.queueSyncAfterInventoryChange(deductResult.productVariantId);
+        }
 
       } else if (!deductResult.success) {
         // The inventory movement failed, so the guarded legacy transaction kept
@@ -2923,7 +2918,7 @@ export class PickingUseCases {
         !pickLocation?.cycleCountFreezeId;
 
       if (canTrustLocation && locationIsPickerSafe) {
-        prePickReplen = await this.tryInlineCaseBreakReplenBeforePick({
+        prePickReplen = await this.tryInlineReplenBeforePick({
           productVariantId: productVariant.id,
           locationId: pickLocationId,
           item,
@@ -3024,7 +3019,7 @@ export class PickingUseCases {
     };
   }
 
-  private async tryInlineCaseBreakReplenBeforePick(params: {
+  private async tryInlineReplenBeforePick(params: {
     productVariantId: number;
     locationId: number;
     item: OrderItem;
@@ -3041,7 +3036,6 @@ export class PickingUseCases {
     if (
       !guidance?.needed ||
       guidance.stockout ||
-      guidance.replenMethod !== "case_break" ||
       guidance.executionMode !== "inline" ||
       !guidance.sourceLocationCode
     ) {
@@ -3058,7 +3052,7 @@ export class PickingUseCases {
         orderNumber: params.order?.orderNumber ?? null,
         blocksShipment: false,
         forceWhenAtOrBelowZero: true,
-        triggeredBy: "pick_shortage_case_break",
+        triggeredBy: `pick_shortage_${guidance.replenMethod}`,
       },
     );
 

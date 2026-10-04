@@ -91,7 +91,7 @@ function makeDb() {
       values: vi.fn((value: any) => {
         inserts.push({ table, value });
         const inserted = table === replenTasks
-          ? { id: 121, ...value }
+          ? { id: 121, revision: 0, ...value }
           : table === cycleCounts
             ? { id: 333, ...value }
             : { id: 444, ...value };
@@ -105,7 +105,12 @@ function makeDb() {
     update: vi.fn((table: unknown) => ({
       set: vi.fn((value: any) => {
         updates.push({ table, value });
-        return { where: vi.fn(async () => []) };
+        return { where: vi.fn(() => {
+          const rows = table === replenTasks && state.insertedReplenTask
+            ? [{...state.insertedReplenTask,...value,revision:state.insertedReplenTask.revision+1}] : [];
+          if (rows[0]) state.insertedReplenTask=rows[0];
+          return {returning: async()=>rows,then:(resolve:(rows:unknown[])=>unknown)=>Promise.resolve(rows).then(resolve)};
+        }) };
       }),
     })),
     delete: vi.fn(),
@@ -581,8 +586,8 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     });
   });
 
-  it("queues full-case replenishment even when stale guidance asks for inline execution", async () => {
-    const { db, inserts } = makeDb();
+  it("executes full-case replenishment using the rule-owned inline decision", async () => {
+    const { db, inserts, state } = makeDb();
     const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     vi.spyOn(service, "checkReplenNeeded").mockResolvedValue({
       needed: true, observedVariantQty: 0,
@@ -602,21 +607,18 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       autoReplen: 1,
       evaluatedQty: 1,
     });
-    const executeTask = vi.spyOn(service, "executeTask");
+    const executeTask = vi.spyOn(service, "executeTask").mockImplementation(async () => {
+      state.insertedReplenTask = {...state.insertedReplenTask,status:"completed",qtyCompleted:4};
+      return {moved:4};
+    });
 
     const result = await service.createAndExecuteReplen(100, 1, "picker-1");
 
-    expect(executeTask).not.toHaveBeenCalled();
-    expect(result).toMatchObject({
-      moved: 0,
-      task: {
-        id: 121,
-        status: "pending",
-      },
-    });
+    expect(executeTask).toHaveBeenCalledWith(121,"picker-1");
+    expect(result).toMatchObject({ moved:4,task:{id:121,status:"completed"} });
     expect(inserts.find(insert => insert.table === replenTasks)?.value).toMatchObject({
       status: "pending",
-      executionMode: "queue",
+      executionMode: "inline",
       replenMethod: "full_case",
     });
   });
@@ -1403,5 +1405,23 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
         }),
       ],
     });
+  });
+});
+
+
+describe("concurrent replenishment creation",()=>{
+  it("retains the existing task's queue mode when creation loses to a frozen queued plan",async()=>{
+    const {db,state}=makeDb();
+    const service=new ReplenishmentUseCases(db as any,{} as any,()=>new Date(0),legacyTransformationExecutionAuthority);
+    vi.spyOn(service,"checkReplenNeeded").mockResolvedValue({needed:true,observedVariantQty:0,stockout:false,sourceLocationId:2,
+      sourceLocationCode:"B-01",sourceVariantId:100,sourceVariantSku:"SKU-1",sourceVariantName:"Each",pickVariantId:100,
+      qtySourceUnits:4,qtyTargetUnits:4,replenMethod:"full_case",executionMode:"inline",taskNotes:"Below threshold",triggerValue:2,autoReplen:1,evaluatedQty:0});
+    vi.spyOn(service as any,"insertTriggeredTask").mockImplementation(async()=>{
+      state.insertedReplenTask={id:222,status:"pending",executionMode:"queue",replenMethod:"full_case"};
+      return state.insertedReplenTask;
+    });
+    const execution=vi.spyOn(service,"executeTask");
+    expect(await service.createAndExecuteReplen(100,1,"picker")).toMatchObject({moved:0,task:{id:222,executionMode:"queue",status:"pending"}});
+    expect(execution).not.toHaveBeenCalled();
   });
 });

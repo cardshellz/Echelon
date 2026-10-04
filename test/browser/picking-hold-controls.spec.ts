@@ -33,7 +33,7 @@ async function mount(page: Page, warehouseStatus: "ready" | "in_progress", optio
   permissions?: string[];
   combinedPickerId?: string;
   failChildReleaseOnce?: boolean;
-  operationCase?: "claim_source" | "unpick_retry";
+  operationCase?: "claim_source" | "unpick_retry" | "inline_case";
 } = {}) {
   const order = heldOrder(warehouseStatus, options.orderHold ? 1 : 0);
   if (options.operationCase) order.items[1].onHold=false;
@@ -103,7 +103,7 @@ async function mount(page: Page, warehouseStatus: "ready" | "in_progress", optio
         return route.fulfill({ json: released });
       }
       if (path === "/api/picking/orders/101/claim") {
-        if (options.operationCase === "claim_source") {
+        if (options.operationCase === "claim_source" || options.operationCase === "inline_case") {
           order.warehouseStatus="in_progress"; order.assignedPickerId="picker"; order.startedAt="2026-10-04T12:00:00.000Z";
           order.items[1].location="B-09";
           order.items[1].sourcePlan={status:"ready",productVariantId:102,warehouseLocationId:902,warehouseId:1,locationCode:"B-09"};
@@ -117,6 +117,11 @@ async function mount(page: Page, warehouseStatus: "ready" | "in_progress", optio
         }
         return route.fulfill({json:{success:true,item:order.items[1],inventory:null}});
       }
+      if (path === "/api/picking/items/202" && options.operationCase === "inline_case") {
+        order.items[1].pickedQuantity=2; order.items[1].status="completed";
+        return route.fulfill({json:{success:true,item:order.items[1],inventory:{deducted:true,systemQtyAfter:0,binCountNeeded:false,
+          replen:{triggered:true,taskId:700,taskStatus:"completed",autoExecuted:true,autoExecutedMoved:2,autoExecutedMovedBaseUnits:2000,autoExecutedMovedUom:"case",autoExecutedFailed:false}}}});
+      }
       if (path === "/api/picking/items/202" && options.operationCase === "claim_source") {
         order.items[1].pickedQuantity=2; order.items[1].status="completed";
         return route.fulfill({json:{success:true,item:order.items[1],inventory:{deducted:true,systemQtyAfter:null},
@@ -127,7 +132,7 @@ async function mount(page: Page, warehouseStatus: "ready" | "in_progress", optio
     return route.fulfill({ status: 500, json: { error: `Unexpected test request: ${path}` } });
   });
   await page.goto(harnessPath);
-  await page.getByRole("button", { name: options.operationCase === "claim_source" ? /^1 Ready$/ : options.operationCase === "unpick_retry" ? /^1 Active$/ : /^1 Hold$/ }).click();
+  await page.getByRole("button", { name: options.operationCase === "claim_source" || options.operationCase === "inline_case" ? /^1 Ready$/ : options.operationCase === "unpick_retry" ? /^1 Active$/ : /^1 Hold$/ }).click();
   await expect(page.getByTestId(child ? "card-order-combined-7" : "card-order-101")).toBeVisible();
   return { order, child, writes, unexpected };
 }
@@ -328,5 +333,20 @@ test("reuses the unpick command after response loss, refreshed progress and page
   expect(attempts[1].body).toEqual(attempts[0].body);
   expect(attempts[0].body).toMatchObject({qty:1});
   expect(state.order.items[1].pickedQuantity).toBe(1);
+  expect(state.unexpected).toEqual([]);
+});
+
+
+test("completed inline case replenishment lets the picker continue without a replen task screen",async({page})=>{
+  const state=await mount(page,"ready",{operationCase:"inline_case"});
+  await page.getByRole("button",{name:"Resume",exact:true}).click();
+  await page.getByTestId("button-pick-202").click();
+  await expect(page.getByText("Replen completed",{exact:true})).toBeVisible();
+  await expect(page.getByText("Replen queued",{exact:true})).toHaveCount(0);
+  await expect(page.getByText("Replen needs review",{exact:true})).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.writes.filter(write=>write.path.includes("replen"))).toEqual([]);
+  expect(state.writes.find(write=>write.path==="/api/picking/items/202")?.body).toMatchObject({pickedQuantity:2,status:"completed",warehouseLocationId:902});
+  await page.screenshot({path:test.info().outputPath("inline-case-replenishment-completed.png"),animations:"disabled"});
   expect(state.unexpected).toEqual([]);
 });

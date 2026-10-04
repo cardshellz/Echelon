@@ -751,7 +751,7 @@ describe("PickingUseCases inventory discrepancy resolution", () => {
     }));
   });
 
-  it("executes inline case-break replen before picker-confirmed variance correction", async () => {
+  it.each(["case_break","full_case"])("executes rule-owned inline %s before picker-confirmed variance correction", async (method) => {
     const levels = [
       { warehouseLocationId: 1, variantQty: 0 },
     ];
@@ -766,12 +766,12 @@ describe("PickingUseCases inventory discrepancy resolution", () => {
           sourceVariantSku: "SKU-CASE",
           sourceVariantName: "Case",
           qtyTargetUnits: 12,
-          replenMethod: "case_break",
+          replenMethod: method,
           executionMode: "inline",
         })),
         createAndExecuteReplen: vi.fn(async () => {
           levels[0].variantQty += 12;
-          return { task: { id: 300, status: "completed", replenMethod: "case_break" }, moved: 12 };
+          return { task: { id: 300, status: "completed", replenMethod: method }, moved: 12 };
         }),
       },
     );
@@ -792,7 +792,7 @@ describe("PickingUseCases inventory discrepancy resolution", () => {
     expect(replenishment.createAndExecuteReplen).toHaveBeenCalledWith(100, 1, "picker-1", expect.objectContaining({
       blocksShipment: false,
       forceWhenAtOrBelowZero: true,
-      triggeredBy: "pick_shortage_case_break",
+      triggeredBy: `pick_shortage_${method}`,
     }));
     expect(inventoryCore.adjustInventory).not.toHaveBeenCalled();
     expect(inventoryCore.pickItem).toHaveBeenCalledWith(expect.objectContaining({
@@ -1373,5 +1373,19 @@ describe("PickingUseCases shipment blocker cleanup", () => {
       replenTasksClosed: 2,
     });
     expect(db.execute).toHaveBeenCalledTimes(2);
+  });
+});
+
+
+describe("post-commit replenishment before publication", () => {
+  it("refills the bin before channel publication rejects the durable follow-up", async () => {
+    const {service,replenishment,inventoryCore} = makePickItemHarness({task:{id:300,status:"completed",replenMethod:"full_case",qtySourceUnits:2,qtyTargetUnits:10},moved:10});
+    const effects:string[]=[];
+    replenishment.createAndExecuteReplen.mockImplementation(async()=>{effects.push("replen");return {task:{id:300,status:"completed",replenMethod:"full_case",qtySourceUnits:2},moved:10};});
+    (service as any).channelSync={queueSyncAfterInventoryChange:vi.fn(async()=>{effects.push("publication");throw new Error("publication offline");})};
+    await expect((service as any).finishCommittedPick({beforeItem:makeItem({pickedQuantity:0}),item:makeItem({pickedQuantity:1,status:"completed"}),
+      pickDeductResult:{success:true,productVariantId:100,locationId:1,locationCode:"A-01",systemQtyAfter:0},params:{userId:"picker-1"}})).rejects.toThrow("publication offline");
+    expect(effects).toEqual(["replen","publication"]);
+    expect(inventoryCore.pickItem).not.toHaveBeenCalled();
   });
 });

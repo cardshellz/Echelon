@@ -14,7 +14,10 @@ const newColumns = [
 ];
 /** Add missing metadata to reduced legacy fixtures; preserve existing movement
  * tables, constraints and guards, then install the actual operation-owner DDL. */
-export async function installWarehouseOperationMigration(pool: Pool) {
+export async function installWarehouseOperationMigration(
+  pool: Pool,
+  additionalTables: readonly PgTable[] = [],
+) {
   for (const table of [
     schema.orders,
     schema.orderItems,
@@ -23,6 +26,7 @@ export async function installWarehouseOperationMigration(pool: Pool) {
     schema.pickingLogs,
     schema.auditEvents,
     schema.allocationExceptions,
+    ...additionalTables,
   ] as PgTable[]) {
     const config = getTableConfig(table);
     const qualified = `${config.schema ?? "public"}.${config.name}`;

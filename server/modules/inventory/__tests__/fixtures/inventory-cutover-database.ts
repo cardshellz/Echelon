@@ -46,6 +46,8 @@ export const inventoryCutoverOwnerFixtureSql = `
 `;
 
 export interface InventoryCutoverTestDatabase {
+  /** Connection only to this uniquely named disposable database. */
+  connectionString: string;
   pool: pg.Pool;
   close(): Promise<void>;
 }
@@ -79,7 +81,7 @@ export async function createInventoryCutoverTestDatabase(
     dedicatedUrl.pathname = `/${databaseName}`;
     pool = new pg.Pool({ connectionString: dedicatedUrl.toString(), max: 4 });
     await pool.query(fixtureSql);
-    return { pool, close };
+    return { pool, close, connectionString: dedicatedUrl.toString() };
   } catch (error) {
     try { await close(); }
     catch (cleanupError) { throw new AggregateError([error, cleanupError], "Cutover fixture setup and cleanup failed."); }

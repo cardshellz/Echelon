@@ -501,8 +501,8 @@ export function createServices(
   const inventoryTransfers = new ManualInventoryTransferService(db, inventoryCore, {
     deliver: async transfer => {
       await replenishment.completeMatchingTransferTask(transfer.transferId, transfer.actor);
-      await inventoryCore.publishInventoryChange(transfer.productVariantId, "transfer");
       await replenishment.checkReplenForLocation(transfer.fromLocationId, `transfer:${transfer.transferId}`);
+      await inventoryCore.publishInventoryChange(transfer.productVariantId, "transfer");
     },
   }, () => new Date());
 
