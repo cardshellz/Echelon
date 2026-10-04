@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { sendInventoryQuantityError, validateInventoryCommandKey } from "../inventory/interfaces/quantity-command.middleware";
 import { CatalogInventoryCommandError } from "./application/catalog-inventory-command.service";
 import { createCatalogInventoryCommandService } from "./infrastructure/catalog-inventory-command.repository";
-import { db } from "../../db";
+import { db, pool } from "../../db";
 import { and, asc, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   channelConnections,
@@ -47,6 +47,8 @@ import { updateProductInventoryTracking, InventoryTrackingPolicyError } from "./
 import { registerBulkInventoryTrackingRoutes } from "./bulk-inventory-tracking.routes";
 import { registerInventoryTrackingHistoryRoutes } from "./inventory-tracking-history.routes";
 import { registerProductAssetRoutes } from "./product-asset.routes";
+import { registerCatalogPublicImageRoutes } from "./catalog-public-image.routes";
+import { readPublicCatalogImage } from "./catalog-publication-images.reader";
 import { parseInventoryTrackingWrite } from "@shared/catalog/inventory-tracking-policy";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
@@ -396,6 +398,7 @@ export async function registerProductRoutes(app: Express) {
   registerBulkInventoryTrackingRoutes(app);
   registerInventoryTrackingHistoryRoutes(app);
   registerProductAssetRoutes(app);
+  registerCatalogPublicImageRoutes(app, (assetId, hash) => readPublicCatalogImage(pool, assetId, hash));
   // ============================================================================
   // Products API (Master Catalog)
   // ============================================================================

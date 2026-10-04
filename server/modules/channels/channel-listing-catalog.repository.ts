@@ -10,6 +10,9 @@ import {
 } from "@shared/types/channel-listing-publication";
 import { resolveChannelListingPrice } from "./channel-pricing-resolver";
 import { persistAuditEvent } from "../../infrastructure/auditLogger";
+import type { CatalogPublicImageUrl } from "../catalog/catalog-public-image";
+import { readCatalogPublicationImages, resolveCatalogPublicationImage } from "../catalog/catalog-publication-images.reader";
+import { ProductAssetError } from "../catalog/product-asset-errors";
 import {
   ListingPublicationError,
   listingHash,
@@ -17,7 +20,10 @@ import {
 
 /** Channels owns catalog projection and its existing shared price rule tables. */
 export class ChannelListingCatalogRepository {
-  constructor(private readonly pool: Pick<Pool, "connect">) {}
+  constructor(
+    private readonly pool: Pick<Pool, "connect">,
+    private readonly publicImageUrl: CatalogPublicImageUrl,
+  ) {}
 
   async catalog(
     channelId: number,
@@ -66,11 +72,7 @@ export class ChannelListingCatalogRepository {
         (p.is_active AND p.status='active' AND v.is_active AND v.requires_shipping AND v.track_inventory IS TRUE
           AND v.sales_eligibility='sellable' AND coalesce(po.is_listed,1)=1 AND coalesce(vo.is_listed,1)=1) AS eligible,
         EXISTS(SELECT 1 FROM channels.channel_listings l WHERE l.channel_id=$1 AND l.product_variant_id=v.id) AS already_linked,
-        (SELECT currency FROM channels.channel_pricing cp WHERE cp.channel_id=$1 AND cp.product_variant_id=v.id LIMIT 1) AS channel_price_currency,
-        coalesce((SELECT jsonb_agg(coalesce(ao.url_override,a.url) ORDER BY coalesce(ao.position_override,a.position),a.id)
-          FROM catalog.product_assets a LEFT JOIN channels.channel_asset_overrides ao ON ao.product_asset_id=a.id AND ao.channel_id=$1
-          WHERE a.product_id=p.id AND (a.product_variant_id IS NULL OR a.product_variant_id=v.id)
-            AND a.asset_type='image' AND coalesce(ao.is_included,1)=1 AND coalesce(ao.url_override,a.url) IS NOT NULL), '[]'::jsonb) AS images
+        (SELECT currency FROM channels.channel_pricing cp WHERE cp.channel_id=$1 AND cp.product_variant_id=v.id LIMIT 1) AS channel_price_currency
         FROM catalog.product_variants v JOIN catalog.products p ON p.id=v.product_id
         LEFT JOIN channels.channel_product_overrides po ON po.product_id=p.id AND po.channel_id=$1
         LEFT JOIN channels.channel_variant_overrides vo ON vo.product_variant_id=v.id AND vo.channel_id=$1
@@ -82,6 +84,13 @@ export class ChannelListingCatalogRepository {
           ],
         )
       ).rows;
+      const images = await readCatalogPublicationImages(client, [...new Set<number>(rows.map(row => row.product_id))]);
+      const overrides = images.length ? (await client.query<{
+        product_asset_id: number; url_override: string | null; position_override: number | null; is_included: number;
+      }>(`SELECT product_asset_id, url_override, position_override, is_included
+        FROM channels.channel_asset_overrides WHERE channel_id=$1 AND product_asset_id=ANY($2::int[])`,
+      [channelId, images.map(image => image.id)])).rows : [];
+      const overridesByAsset = new Map(overrides.map(override => [override.product_asset_id, override]));
       const items: ListingCatalogItem[] = [];
       const database = drizzle(client, { schema });
       for (const row of rows) {
@@ -115,7 +124,15 @@ export class ChannelListingCatalogRepository {
           title: row.title,
           description: row.description,
           brand: row.brand,
-          images: row.images,
+          images: images
+            .filter(image => image.productId === row.product_id
+              && (image.productVariantId === null || image.productVariantId === row.variant_id)
+              && (overridesByAsset.get(image.id)?.is_included ?? 1) === 1)
+            .sort((a, b) => (overridesByAsset.get(a.id)?.position_override ?? a.position)
+              - (overridesByAsset.get(b.id)?.position_override ?? b.position) || a.id - b.id)
+            .map(image => overridesByAsset.get(image.id)?.url_override
+              ?? resolveCatalogPublicationImage(image, this.publicImageUrl))
+            .filter((url): url is string => url !== null),
           identifier: identifier
             ? {
                 type:
@@ -156,6 +173,9 @@ export class ChannelListingCatalogRepository {
       };
     } catch (error) {
       await client.query("ROLLBACK");
+      if (error instanceof ProductAssetError) {
+        throw new ListingPublicationError(error.code, error.message, error.status);
+      }
       throw error;
     } finally {
       client.release();
