@@ -204,6 +204,26 @@ describe("exact provider evidence", () => {
     const { provider } = fixture([json({ ...label(), packages: [converted] }), json({ ...shipment(), packages: [converted] })]);
     await expect(provider.purchase(INPUT)).resolves.toMatchObject({ labelId: "se-201" });
   });
+  it.each(["purchase", "recover"] as const)("verifies the live RMA-2 two-decimal label and shipment weights during %s", async operation => {
+    const input: ReturnLabelInput = { ...INPUT, externalShipmentId: "ecr-2-2", rmaNumber: "RMA-2",
+      carrierId: "se-342199", serviceCode: "usps_ground_advantage",
+      shipTo: { ...INPUT.shipTo, addressType: "commercial" },
+      parcel: { weightGrams: 850, dimensionsInches: { length: 16, width: 14, height: 4 } } };
+    const packageReadback = { ...parcel(), weight: { value: 1.87, unit: "pound" },
+      dimensions: { unit: "inch", length: 16, width: 14, height: 4 } };
+    const labelReadback = { ...label(), external_shipment_id: input.externalShipmentId, rma_number: input.rmaNumber,
+      carrier_id: input.carrierId, service_code: input.serviceCode, packages: [packageReadback] };
+    const shipmentReadback = { ...shipment(), ...buildReturnLabelRequest(input).shipment as Record<string, unknown>, packages: [packageReadback] };
+    const responses = [json(labelReadback), json(shipmentReadback)];
+    if (operation === "recover") responses.unshift(json({ ...listing(["se-201"]), labels: [{ label_id: "se-201", external_shipment_id: input.externalShipmentId }] }));
+    const { provider, fetchFn } = fixture(responses);
+    await expect(provider[operation](input)).resolves.toMatchObject({ externalShipmentId: input.externalShipmentId, labelId: "se-201" });
+    if (operation === "recover") expect(fetchFn.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+    else {
+      expect(fetchFn.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+      expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body)).shipment.packages[0].weight).toEqual({ value: 1.87392923, unit: "pound" });
+    }
+  });
   it.each(["1.10231131", "1.10231133", "1.1023113201"])("refuses a changed pound weight %s in either label or stored shipment without repeating the purchase", async value => {
     const changed = { ...parcel(), weight: { value, unit: "pound" } };
     for (const evidence of [

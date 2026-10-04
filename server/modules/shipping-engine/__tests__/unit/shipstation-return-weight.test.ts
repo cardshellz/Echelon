@@ -36,6 +36,24 @@ describe("ShipStation return weight conversion", () => {
 });
 
 describe("ShipStation return weight verification", () => {
+  it.each([[500, "1.10"], [850, 1.87], [907, "2.00"], [22679, 50]] as const)(
+    "accepts only the two-decimal pound representation of %s grams as %s", (grams, value) => {
+      expect(matchesShipStationReturnWeight({ value, unit: "pound" }, grams)).toBe(true);
+    },
+  );
+  it.each([
+    { value: 1.86, unit: "pound" as const },
+    { value: 1.88, unit: "pound" as const },
+    { value: "1.870001", unit: "pound" as const },
+    { value: "848.2177319", unit: "gram" as const },
+    { value: "29.92", unit: "ounce" as const },
+    { value: "0.8482177319", unit: "kilogram" as const },
+  ])("does not turn pound readback rounding into a tolerance for changed weights %j", actual => {
+    expect(matchesShipStationReturnWeight(actual, 850)).toBe(false);
+  });
+  it.each([0, "0", "0.00", "-0.00"])("does not accept rounded zero %s for a positive tiny parcel", value => {
+    expect(matchesShipStationReturnWeight({ value, unit: "pound" }, 1)).toBe(false);
+  });
   it.each([
     { value: 500, unit: "gram" as const },
     { value: "0.5", unit: "kilogram" as const },
