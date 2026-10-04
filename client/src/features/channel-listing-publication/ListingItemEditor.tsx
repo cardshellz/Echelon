@@ -433,6 +433,13 @@ export function ListingItemEditor({
                 />
               </section>
             )}
+            {images === null && catalog?.imageIssues?.length ? (
+              <ul className="space-y-1 text-sm text-destructive" aria-label="Catalog photo issues">
+                {[...new Set(catalog.imageIssues.map(issue => issue.message))].map(message => (
+                  <li key={message}>{message}</li>
+                ))}
+              </ul>
+            ) : null}
             <section
               className="space-y-4 rounded-lg border bg-background p-3 sm:p-5"
               aria-labelledby={sectionId("Pricing")}

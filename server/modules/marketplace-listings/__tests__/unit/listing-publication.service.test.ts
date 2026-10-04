@@ -217,6 +217,33 @@ function setupMixedFeeds() {
 }
 
 describe("ListingPublicationService exact reviewed intent", () => {
+  it("blocks only inherited unavailable photos while preserving catalog identity and the other selected item", async () => {
+    const snapshot = publicationSnapshot([10, 11]);
+    const photoIssue = { code: "CATALOG_PUBLIC_URL_REQUIRED", message: "The public image address needs to be configured.", field: "images" };
+    snapshot.catalog[0].imageIssues = [photoIssue];
+    const h = setup(snapshot);
+    const review = await h.service.review(104, { expectedRevision: snapshot.draft.revision, variantIds: [10, 11] }, "admin");
+    expect(review.canSubmit).toBe(false);
+    expect(review.items[0]).toMatchObject({ sku: "SKU-10", title: "Card sleeves 10", priceCents: 1299, issues: [photoIssue] });
+    expect(review.items[1]).toMatchObject({ sku: "SKU-11", issues: [] });
+    expect(h.provider.prepare).toHaveBeenCalledTimes(1);
+    expect(h.provider.prepare.mock.calls[0][1].catalog.variantId).toBe(11);
+    const unaffected = await h.service.review(104, { expectedRevision: snapshot.draft.revision, variantIds: [11] }, "admin");
+    expect(unaffected.canSubmit).toBe(true);
+    expect(unaffected.items).toHaveLength(1);
+    expect(h.provider.submit).not.toHaveBeenCalled();
+  });
+  it("accepts explicit listing photos without inheriting a catalog photo issue", async () => {
+    const snapshot = publicationSnapshot();
+    snapshot.catalog[0].imageIssues = [{ code: "CATALOG_IMAGE_UNAVAILABLE", message: "Replace the catalog photo.", field: "images" }];
+    snapshot.draft.items[0].images = ["https://cdn.example.com/listing-override.jpg"];
+    const h = setup(snapshot);
+    const review = await h.service.review(104, { expectedRevision: snapshot.draft.revision, variantIds: [10] }, "admin");
+    expect(review.canSubmit).toBe(true);
+    expect(review.items[0].issues).toEqual([]);
+    expect(h.provider.prepare.mock.calls[0][1].draft.images).toEqual(snapshot.draft.items[0].images);
+    expect(h.provider.submit).not.toHaveBeenCalled();
+  });
   it("passes edited identifier and product type unchanged through draft saving", async () => {
     const snapshot = publicationSnapshot();
     const edited = {

@@ -9,8 +9,8 @@ import {
   type ResolvedChannelExposurePolicy,
 } from "@shared/types/inventory-channel-exposure";
 import { canonicalJson } from "@shared/utils/canonical-json";
-
-const BASIS_POINTS_DENOMINATOR = BigInt(10_000);
+import type { ChannelExposureCalculation } from "@shared/inventory/channel-exposure-calculation";
+export { calculateChannelExposure, type ChannelExposureCalculation } from "@shared/inventory/channel-exposure-calculation";
 
 export interface ChannelExposurePolicyCandidate {
   scopeKey: string;
@@ -28,14 +28,6 @@ export interface ChannelExposureResolutionInput {
 export interface ChannelExposureResolutionResult {
   policy: ResolvedChannelExposurePolicy | null;
   missingFields: Array<keyof ChannelExposurePolicyValue>;
-}
-
-export interface ChannelExposureCalculation {
-  canonicalAtpUnits: bigint;
-  sharedUnits: bigint;
-  afterHoldbackUnits: bigint;
-  cappedUnits: bigint;
-  publishedUnits: bigint;
 }
 
 /**
@@ -176,42 +168,6 @@ export function resolveChannelSourceOverride(input: ChannelExposureResolutionInp
   return null;
 }
 
-export function calculateChannelExposure(
-  canonicalAtpUnits: bigint,
-  policy: ResolvedChannelExposurePolicy,
-): ChannelExposureCalculation {
-  if (canonicalAtpUnits < BigInt(0)) {
-    throw new RangeError("canonicalAtpUnits must be nonnegative");
-  }
-  const holdback = parseNonnegativeQuantity(policy.holdbackSellableUnits, "holdbackSellableUnits");
-  const maximum = policy.maxPublishSellableUnits === null
-    ? null
-    : parseNonnegativeQuantity(policy.maxPublishSellableUnits, "maxPublishSellableUnits");
-  const minimum = parseNonnegativeQuantity(policy.minPublishSellableUnits, "minPublishSellableUnits");
-  if (!Number.isInteger(policy.shareBps) || policy.shareBps < 0 || policy.shareBps > 10_000) {
-    throw new RangeError("shareBps must be an integer between 0 and 10000");
-  }
-  if (!policy.eligible) {
-    return {
-      canonicalAtpUnits,
-      sharedUnits: BigInt(0),
-      afterHoldbackUnits: BigInt(0),
-      cappedUnits: BigInt(0),
-      publishedUnits: BigInt(0),
-    };
-  }
-  const sharedUnits = canonicalAtpUnits * BigInt(policy.shareBps) / BASIS_POINTS_DENOMINATOR;
-  const afterHoldbackUnits = sharedUnits > holdback ? sharedUnits - holdback : BigInt(0);
-  const cappedUnits = maximum === null || afterHoldbackUnits <= maximum
-    ? afterHoldbackUnits
-    : maximum;
-  const publishedUnits = cappedUnits < minimum ? BigInt(0) : cappedUnits;
-  if (publishedUnits < BigInt(0) || publishedUnits > canonicalAtpUnits) {
-    throw new Error("Channel exposure invariant failed: published quantity is outside canonical ATP");
-  }
-  return { canonicalAtpUnits, sharedUnits, afterHoldbackUnits, cappedUnits, publishedUnits };
-}
-
 export function findPartitionedShareOverages(
   rows: readonly {
     productVariantId: number;
@@ -233,16 +189,6 @@ export function findPartitionedShareOverages(
     return [{ productVariantId: productVariantId!, warehouseId: warehouseId!, totalShareBps }];
   }).sort((left, right) => left.productVariantId - right.productVariantId
     || left.warehouseId - right.warehouseId);
-}
-
-function parseNonnegativeQuantity(value: string, field: string): bigint {
-  try {
-    const parsed = BigInt(value);
-    if (parsed < BigInt(0)) throw new Error("negative");
-    return parsed;
-  } catch {
-    throw new RangeError(`${field} must be a nonnegative integer quantity`);
-  }
 }
 
 // ---------------------------------------------------------------------------

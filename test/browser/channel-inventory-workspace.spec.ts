@@ -3,13 +3,20 @@ import { expect, test, type Page } from "@playwright/test";
 import { view, policyHead, policyValue, previewRow, target, HASH_A, HASH_B } from "../../client/src/features/channel-inventory/__tests__/fixtures";
 import type { ChannelPublicationStatus } from "../../shared/types/inventory-channel-publication-status";
 import type { ChannelDefinitionProgress, ChannelDefinitionReview } from "../../shared/types/inventory-channel-definition";
+import type { InventoryChannelExposureAdminView } from "../../shared/types/inventory-channel-exposure";
 
 const BASE = "/api/inventory-planning/admin/channel-exposure";
 const AT = "2026-09-20T14:00:00.000Z";
 const defaults = policyValue({ allocationSemantics: "exposure", eligible: true, shareBps: 5000,
   holdbackSellableUnits: "0", maxPublish: { mode: "unlimited" }, minPublishSellableUnits: "0" });
 
-async function setup(page: Page, options: { permission?: "none" | "view" | "edit"; query?: string; pending?: boolean; legacy?: boolean } = {}) {
+async function setup(page: Page, options: {
+  permission?: "none" | "view" | "edit";
+  query?: string;
+  pending?: boolean;
+  legacy?: boolean;
+  viewOverrides?: Partial<InventoryChannelExposureAdminView>;
+} = {}) {
   const data = view({
     publicationTargets: [target(), target({ id: 6, channelId: 4, channelConnectionId: 44, providerScopeType: "account", externalScopeId: "ebay-user-9" })],
     policyHeads: [policyHead({ scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 }, active: defaults,
@@ -22,6 +29,7 @@ async function setup(page: Page, options: { permission?: "none" | "view" | "edit
       activeMapping: { mappingId: 20, publicationTargetId: 5, productVariantId: 101, version: 1, lifecycleStatus: "sealed",
         externalInventoryItemId: "test-item", externalSku: "CARD-P5", definitionHash: HASH_A,
         changeReason: null, createdBy: "operator-1", createdAt: AT, updatedAt: AT } }],
+    ...options.viewOverrides,
   });
   const state = { data, writes: [] as Array<{ path: string; body: Record<string, unknown>; raw: string }>,
     applyLostResponse: false, applyConflict: false, reviewBlocked: false, progress: null as ChannelDefinitionProgress | null,
@@ -112,31 +120,169 @@ async function setup(page: Page, options: { permission?: "none" | "view" | "edit
   return state;
 }
 
+test("Walmart destination setup shows the seller name and fulfillment center instead of an internal connection id", async ({ page }) => {
+  const state = await setup(page, {
+    query: "?channel=104&tab=supply",
+    viewOverrides: {
+      channels: [{
+        id: 104, name: "Walmart", provider: "walmart", status: "active",
+        connections: [{
+          id: 67, externalAccountLabel: "Card Shellz", shopifyLocationId: null,
+          providerLocationId: "10002558022", providerAccount: null,
+        }],
+      }],
+      publicationTargets: [], policyHeads: [], sourceBindingHeads: [], variantMappingHeads: [],
+    },
+  });
+  await page.getByRole("button", { name: "Set up destinations", exact: true }).first().click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("Card Shellz — Walmart US", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Walmart fulfillment center: 10002558022", { exact: true })).toBeVisible();
+  await expect(dialog).not.toContainText("Connection #67");
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  state.data.publicationTargets = [target({ channelId: 104, channelConnectionId: 67, externalScopeId: "10002558022" })];
+  await page.evaluate(() => window.dispatchEvent(new Event("channel-inventory-test-refresh")));
+  await expect(page.getByRole("group", { name: "Destinations", exact: true }).getByRole("button", { name: /Card Shellz/ })).toBeVisible();
+  expect(state.writes).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
 test("channel default saves without a written reason or any activation call", async ({ page }) => {
   const state = await setup(page);
-  await page.getByLabel("Offer percentage", { exact: true }).fill("80");
-  await page.getByRole("button", { name: "Save channel default", exact: true }).click();
+  await page.getByLabel("Stock percentage", { exact: true }).fill("80");
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
   await expect(page.getByText("Draft v2 pending activation", { exact: true })).toBeVisible();
   expect(state.writes).toHaveLength(1);
   expect(state.writes[0].body).toMatchObject({ expectedHeadRevision: "1", changeReason: null, value: { shareBps: 8000 } });
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
+test("new channels show editable suggestions and save them only after the operator chooses Save", async ({ page }, testInfo) => {
+  const state = await setup(page, { viewOverrides: { policyHeads: [] } });
+  await expect(page.getByRole("radio", { name: "Available to sell", exact: true })).toBeChecked();
+  await expect(page.getByLabel("Stock percentage", { exact: true })).toHaveValue("100");
+  await expect(page.getByRole("radio", { name: "Not set", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("radio", { name: "Set", exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Stock buffer", { exact: true })).not.toBeVisible();
+  await expect(page.getByRole("button", { name: "Save draft", exact: true })).toBeEnabled();
+  expect(state.writes).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("channel-stock-rules-basic.png"), fullPage: true });
+
+  await page.locator("summary").filter({ hasText: "Advanced stock rules" }).click();
+  await expect(page.getByLabel("Stock buffer", { exact: true })).toHaveValue("0");
+  await expect(page.getByRole("radio", { name: "No maximum", exact: true })).toBeChecked();
+  await expect(page.getByLabel("Out-of-stock cutoff", { exact: true })).toHaveValue("0");
+  await expect(page.getByRole("radio", { name: "Share available stock", exact: true })).toBeChecked();
+  expect(state.writes).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("channel-stock-rules-advanced.png"), fullPage: true });
+
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(1);
+  expect(state.writes[0].path).toBe(`${BASE}/policy-draft`);
+  expect(state.writes[0].body).toMatchObject({
+    expectedHeadRevision: "0", expectedDraftPolicyId: null, expectedDraftDefinitionHash: null,
+    changeReason: null,
+    value: {
+      eligible: true, shareBps: 10000, holdbackSellableUnits: "0", maxPublish: { mode: "unlimited" },
+      minPublishSellableUnits: "0", allocationSemantics: "exposure",
+    },
+  });
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("saved out-of-stock, zero and partitioned settings survive an unrelated edit", async ({ page }) => {
+  const existing = policyValue({
+    eligible: false, shareBps: 0, holdbackSellableUnits: "0", maxPublish: { mode: "units", units: "0" },
+    minPublishSellableUnits: "0", allocationSemantics: "partitioned",
+  });
+  const state = await setup(page, { viewOverrides: { policyHeads: [policyHead({
+    scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 }, active: existing,
+  })] } });
+  await expect(page.getByRole("radio", { name: "Show as out of stock", exact: true })).toBeChecked();
+  await expect(page.getByLabel("Stock percentage", { exact: true })).toHaveValue("0");
+  await expect(page.getByLabel("Stock buffer", { exact: true })).toHaveValue("0");
+  await expect(page.getByRole("radio", { name: "Limit quantity", exact: true })).toBeChecked();
+  await expect(page.getByRole("textbox", { name: "Maximum displayed quantity", exact: true })).toHaveValue("0");
+  await expect(page.getByLabel("Out-of-stock cutoff", { exact: true })).toHaveValue("0");
+  await expect(page.getByRole("radio", { name: "Limit combined channel percentages", exact: true })).toBeChecked();
+  expect(state.writes).toEqual([]);
+
+  await page.getByLabel("Stock buffer", { exact: true }).fill("2");
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(1);
+  expect(state.writes[0].body.value).toEqual({ ...existing, holdbackSellableUnits: "2" });
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("partial saved drafts retain missing values instead of silently adopting suggested defaults", async ({ page }) => {
+  const partial = policyValue({ eligible: false, shareBps: 2500 });
+  const state = await setup(page, { viewOverrides: { policyHeads: [policyHead({
+    scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 },
+    active: defaults, draft: partial, revision: "2",
+  })] } });
+  await expect(page.getByRole("radio", { name: "Show as out of stock", exact: true })).toBeChecked();
+  await expect(page.getByLabel("Stock percentage", { exact: true })).toHaveValue("25");
+  await expect(page.getByLabel("Stock buffer", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("Out-of-stock cutoff", { exact: true })).toHaveValue("");
+  await expect(page.getByRole("radio", { name: "No maximum", exact: true })).not.toBeChecked();
+  await expect(page.getByRole("radio", { name: "Limit quantity", exact: true })).not.toBeChecked();
+  await expect(page.getByRole("radio", { name: "Share available stock", exact: true })).not.toBeChecked();
+  await expect(page.getByRole("radio", { name: "Limit combined channel percentages", exact: true })).not.toBeChecked();
+  expect(state.writes).toEqual([]);
+
+  await page.getByLabel("Stock percentage", { exact: true }).fill("35");
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(1);
+  expect(state.writes[0].body).toMatchObject({ expectedHeadRevision: "2", expectedDraftPolicyId: 2 });
+  expect(state.writes[0].body.value).toEqual({ ...partial, shareBps: 3500 });
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("advanced stock rules edit the buffer and cutoff independently without enable-field controls", async ({ page }) => {
+  const state = await setup(page);
+  await page.locator("summary").filter({ hasText: "Advanced stock rules" }).click();
+  await page.getByLabel("Stock buffer", { exact: true }).fill("5");
+  await page.getByLabel("Out-of-stock cutoff", { exact: true }).fill("3");
+  await page.getByRole("radio", { name: "Limit quantity", exact: true }).click();
+  await page.getByRole("textbox", { name: "Maximum displayed quantity", exact: true }).fill("20");
+  await page.getByRole("radio", { name: "Limit combined channel percentages", exact: true }).click();
+  await expect(page.getByLabel("Stock buffer", { exact: true })).toHaveValue("5");
+  await expect(page.getByLabel("Out-of-stock cutoff", { exact: true })).toHaveValue("3");
+  await expect(page.getByRole("radio", { name: "Set", exact: true })).toHaveCount(0);
+  await expect(page.getByText("20 units shown", { exact: true })).toBeVisible();
+  await page.getByLabel("Example available stock", { exact: true }).fill("30");
+  await expect(page.getByText("10 units shown", { exact: true })).toBeVisible();
+  await page.getByLabel("Example available stock", { exact: true }).fill("14");
+  await expect(page.getByText("0 units shown", { exact: true })).toBeVisible();
+  await page.getByLabel("Example available stock", { exact: true }).fill("16");
+  await expect(page.getByText("3 units shown", { exact: true })).toBeVisible();
+  expect(state.writes).toEqual([]);
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(1);
+  expect(state.writes[0].body.value).toEqual({ ...defaults, holdbackSellableUnits: "5", minPublishSellableUnits: "3",
+    maxPublish: { mode: "units", units: "20" }, allocationSemantics: "partitioned" });
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
 test("background revision changes preserve edits and require explicit reload", async ({ page }) => {
   const state = await setup(page);
-  const offer = page.getByLabel("Offer percentage", { exact: true });
+  const offer = page.getByLabel("Stock percentage", { exact: true });
   await offer.fill("80");
   state.data.policyHeads[0] = policyHead({ scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 },
     active: defaults, draft: { ...defaults, shareBps: 3000 }, revision: "2" });
   await page.evaluate(() => window.dispatchEvent(new Event("channel-inventory-test-refresh")));
   await expect(page.getByText("Saved settings changed while you were editing", { exact: true })).toBeVisible();
   await expect(offer).toHaveValue("80");
-  await expect(page.getByRole("button", { name: "Save channel default", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Save draft", exact: true })).toBeDisabled();
   expect(state.writes).toHaveLength(0);
   await page.getByRole("button", { name: "Discard edits and reload", exact: true }).click();
   await expect(offer).toHaveValue("30");
   await offer.fill("70");
-  await page.getByRole("button", { name: "Save channel default", exact: true }).click();
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
   await expect.poll(() => state.writes.length).toBe(1);
   expect(state.writes[0].body.expectedHeadRevision).toBe("2");
   expect(state.errors).toEqual([]);
@@ -144,8 +290,8 @@ test("background revision changes preserve edits and require explicit reload", a
 
 test("lost responses freeze edits, block leaving and retry the identical command after refresh", async ({ page }) => {
   const state = await setup(page); state.loseResponse = true;
-  const offer = page.getByLabel("Offer percentage", { exact: true });
-  await offer.fill("80"); await page.getByRole("button", { name: "Save channel default", exact: true }).click();
+  const offer = page.getByLabel("Stock percentage", { exact: true });
+  await offer.fill("80"); await page.getByRole("button", { name: "Save draft", exact: true }).click();
   await expect(page.getByText("Save outcome unknown", { exact: true })).toBeVisible();
   await expect(offer).toBeDisabled();
   state.data.policyHeads[0] = policyHead({ scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 }, active: defaults,
@@ -163,11 +309,11 @@ test("lost responses freeze edits, block leaving and retry the identical command
 
 test("switching tabs asks before discarding unsaved rules", async ({ page }) => {
   const state = await setup(page);
-  await page.getByLabel("Offer percentage", { exact: true }).fill("80");
+  await page.getByLabel("Stock percentage", { exact: true }).fill("80");
   await page.getByRole("tab", { name: "Supply", exact: true }).click();
   await expect(page.getByRole("alertdialog")).toContainText("Discard unsaved changes?");
   await page.getByRole("button", { name: "Keep editing", exact: true }).click();
-  await expect(page.getByLabel("Offer percentage", { exact: true })).toHaveValue("80");
+  await expect(page.getByLabel("Stock percentage", { exact: true })).toHaveValue("80");
   await page.getByRole("tab", { name: "Supply", exact: true }).click();
   await page.getByRole("button", { name: "Discard changes", exact: true }).click();
   await expect(page.getByRole("tab", { name: "Supply", exact: true })).toHaveAttribute("data-state", "active");
@@ -183,8 +329,14 @@ test("no view permission means no inventory query or cached settings", async ({ 
 
 test("view-only access has no draft save controls", async ({ page }) => {
   const state = await setup(page, { permission: "view" });
-  await expect(page.getByLabel("Offer percentage", { exact: true })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Save channel default", exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Stock percentage", { exact: true })).toBeDisabled();
+  await expect(page.getByRole("radio", { name: "Available to sell", exact: true })).toBeDisabled();
+  await page.locator("summary").filter({ hasText: "Advanced stock rules" }).click();
+  await expect(page.getByLabel("Stock buffer", { exact: true })).toBeDisabled();
+  await expect(page.getByLabel("Out-of-stock cutoff", { exact: true })).toBeDisabled();
+  await expect(page.getByRole("radio", { name: "No maximum", exact: true })).toBeDisabled();
+  await expect(page.getByRole("radio", { name: "Share available stock", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Save draft", exact: true })).toHaveCount(0);
   expect(state.writes).toEqual([]);
 });
 
@@ -275,8 +427,7 @@ test("SKU exceptions keep inherited fields and retry the same command after a lo
   await sheet.getByRole("combobox").click();
   await page.getByRole("option", { name: /Card Shell/ }).click();
   await sheet.getByRole("radio", { name: "CARD-P5", exact: true }).click();
-  await sheet.getByRole("group", { name: "Offer: inherit or set", exact: true }).getByRole("radio", { name: "Set", exact: true }).click();
-  await sheet.getByLabel("Offer percentage", { exact: true }).fill("25");
+  await sheet.getByLabel("Stock percentage", { exact: true }).fill("25");
   state.loseResponse = true;
   await sheet.getByRole("button", { name: "Save exception", exact: true }).click();
   await expect(sheet.getByText("Save outcome unknown", { exact: true })).toBeVisible();
@@ -285,6 +436,30 @@ test("SKU exceptions keep inherited fields and retry the same command after a lo
   expect(state.writes[1].raw).toBe(state.writes[0].raw);
   expect(state.writes[0].body).toMatchObject({ scope: { scopeType: "variant", channelId: 3, productId: 10, productVariantId: 101 },
     value: { shareBps: 2500, eligible: null, holdbackSellableUnits: null, maxPublish: null }, changeReason: null });
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("a single exception field returns to its inherited value without copying the defaults into the rule", async ({ page }) => {
+  const state = await setup(page, { viewOverrides: { policyHeads: [
+    policyHead({ scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 }, active: defaults }),
+    policyHead({ scopeKey: "channel:3:variant:101", channelId: 3,
+      scope: { scopeType: "variant", channelId: 3, productId: 10, productVariantId: 101 },
+      active: policyValue({ shareBps: 2500, holdbackSellableUnits: "5" }) }),
+  ] } });
+  await page.getByRole("button", { name: "Add exception", exact: true }).click();
+  const sheet = page.getByRole("dialog");
+  await sheet.getByRole("combobox").click();
+  await page.getByRole("option", { name: /Card Shell/ }).click();
+  await sheet.getByRole("radio", { name: "CARD-P5", exact: true }).click();
+  await expect(sheet.getByLabel("Stock percentage", { exact: true })).toHaveValue("25");
+  await expect(sheet.getByLabel("Stock buffer", { exact: true })).toHaveValue("5");
+  await sheet.getByRole("button", { name: "Use default for Stock percentage", exact: true }).click();
+  await expect(sheet.getByLabel("Stock percentage", { exact: true })).toHaveValue("50");
+  await expect(sheet.getByLabel("Stock percentage", { exact: true })).toBeEnabled();
+  await expect(sheet.getByRole("button", { name: "Use default for Stock percentage", exact: true })).toHaveCount(0);
+  await sheet.getByRole("button", { name: "Save exception", exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(1);
+  expect(state.writes[0].body.value).toEqual(policyValue({ holdbackSellableUnits: "5" }));
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
@@ -387,7 +562,7 @@ test("an existing SKU exception can restore complete inheritance as an audited d
   const sheet = page.getByRole("dialog");
   await sheet.getByRole("combobox").click(); await page.getByRole("option", { name: /Card Shell/ }).click();
   await sheet.getByRole("radio", { name: "CARD-P5", exact: true }).click();
-  await expect(sheet.getByLabel("Offer percentage", { exact: true })).toHaveValue("25");
+  await expect(sheet.getByLabel("Stock percentage", { exact: true })).toHaveValue("25");
   await sheet.getByRole("button", { name: "Restore all inheritance", exact: true }).click();
   await expect(sheet.getByRole("checkbox", { name: "Use inherited warehouses", exact: true })).toBeChecked();
   await sheet.getByRole("button", { name: "Save exception", exact: true }).click();

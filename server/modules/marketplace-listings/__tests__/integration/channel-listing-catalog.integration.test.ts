@@ -163,7 +163,7 @@ CREATE TABLE public.shopify_variants(id varchar(100) PRIMARY KEY,sku text,price 
       expect(before.images).toHaveLength(3);
       await upload();
       const added = (await repository.catalog(104, { variantIds: "10" })).items[0];
-      const publicUrl = `https://catalog.example.com/api/catalog/images/8/${fingerprint(png)}`;
+      const publicUrl = `https://catalog.example.com/api/catalog/images/8/${fingerprint(png)}.png`;
       expect(added.images).toEqual([...before.images, publicUrl]);
       expect(added.sourceHash).not.toBe(before.sourceHash);
       expect((await repository.catalog(104, {})).items[0].sourceHash).toBe(added.sourceHash);
@@ -201,9 +201,38 @@ CREATE TABLE public.shopify_variants(id varchar(100) PRIMARY KEY,sku text,price 
       await database.pool.query("UPDATE channels.channel_asset_overrides SET is_included=1,url_override='https://example.com/custom.jpg' WHERE product_asset_id=8");
       expect((await noPublicOrigin.catalog(104, {})).items[0].images).toEqual(["https://example.com/custom.jpg", "https://example.com/base.jpg"]);
       await database.pool.query("UPDATE channels.channel_asset_overrides SET url_override=NULL WHERE product_asset_id=8");
-      await expect(noPublicOrigin.catalog(104, {})).rejects.toMatchObject({ code: "CATALOG_PUBLIC_URL_REQUIRED", status: 503 });
-      // The rejected read rolled back and released its connection; a configured read still works.
-      expect((await repository.catalog(104, {})).items[0].images[0]).toContain(`/8/${fingerprint(png)}`);
+      const unavailable = (await noPublicOrigin.catalog(104, {})).items[0];
+      expect(unavailable).toMatchObject({ sku: "SKU-10", title: "Catalog title", priceCents: 999,
+        images: ["https://example.com/base.jpg"],
+        imageIssues: [{ code: "CATALOG_PUBLIC_URL_REQUIRED", field: "images" }],
+      });
+      const configured = (await repository.catalog(104, {})).items[0];
+      expect(configured.images[0]).toBe(`https://catalog.example.com/api/catalog/images/8/${fingerprint(png)}.png`);
+      expect(configured.imageIssues).toBeUndefined();
+      expect(configured.sourceHash).not.toBe(unavailable.sourceHash);
+    });
+    it("keeps every selected SKU and price readable when one variant's photo needs configuration", async () => {
+      await database.pool.query(`INSERT INTO catalog.product_variants VALUES
+        (11,20,'SKU-11','Single sleeve','piece',1,NULL,NULL,true,true,true,'sellable',1,99,NULL);`);
+      await upload(png, "image/png", 10);
+      const log = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        const noPublicOrigin = new ChannelListingCatalogRepository(database.pool, createCatalogPublicImageUrl({}));
+        const page = await noPublicOrigin.catalog(104, { variantIds: "10,11" });
+        expect(page.items).toHaveLength(2);
+        expect(page.items.find(item => item.variantId === 10)).toMatchObject({
+          name: "Sleeves", title: "Catalog title", sku: "SKU-10", variantName: "100 sleeves",
+          unitLabel: "1 pack = 100 pieces", priceCents: 999, imageIssues: [{ code: "CATALOG_PUBLIC_URL_REQUIRED", field: "images" }],
+        });
+        expect(page.items.find(item => item.variantId === 11)).toMatchObject({
+          name: "Sleeves", title: "Catalog title", sku: "SKU-11", variantName: "Single sleeve", priceCents: 99,
+        });
+        expect(page.items.find(item => item.variantId === 11)?.imageIssues).toBeUndefined();
+        expect(log).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+          event: "channel_listing.catalog_image_unavailable", channelId: 104, variantId: 10,
+          images: [{ assetId: 8, code: "CATALOG_PUBLIC_URL_REQUIRED" }],
+        }));
+      } finally { log.mockRestore(); }
     });
     it.each([
       ["mislabeled document", Buffer.from("<html>not a photo</html>"), "image/png"],
@@ -213,7 +242,9 @@ CREATE TABLE public.shopify_variants(id varchar(100) PRIMARY KEY,sku text,price 
     ])("does not serve or publish a %s", async (_name, data, mime) => {
       await upload(data, mime);
       expect(await readPublicCatalogImage(database.pool, 8, fingerprint(data))).toBeNull();
-      await expect(repository.catalog(104, {})).rejects.toMatchObject({ status: 422 });
+      const item = (await repository.catalog(104, {})).items[0];
+      expect(item).toMatchObject({ sku: "SKU-10", title: "Catalog title", priceCents: 999, images: ["https://example.com/base.jpg"] });
+      expect(item.imageIssues).toEqual([expect.objectContaining({ field: "images", code: expect.stringMatching(/CATALOG_IMAGE_UNAVAILABLE|IMAGE_FORMAT_UNSUPPORTED/) })]);
     });
     it("never serves a non-image asset or a URL-only record's retained blob", async () => {
       await upload();
