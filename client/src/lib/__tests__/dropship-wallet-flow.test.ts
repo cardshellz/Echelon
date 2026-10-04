@@ -640,6 +640,9 @@ describe("copy", () => {
     expect(LEDGER_REASON_LABELS.advance_fee).toBe("Fee for paying an order from money on its way");
     expect(LEDGER_REASON_LABELS.funding_reversed).toBe("Payment reversed by your bank");
     expect(LEDGER_REASON_LABELS.funding_reinstated).toBe("Reversed payment returned");
+    // A credit paid from the insurance pool names the shipping claim; the pool is internal.
+    expect(LEDGER_REASON_LABELS.insurance_pool_credit).toBe("Shipping claim credit");
+    expect(Object.values(LEDGER_REASON_LABELS).filter((label) => /insurance|pool/i.test(label))).toEqual([]);
   });
 });
 
