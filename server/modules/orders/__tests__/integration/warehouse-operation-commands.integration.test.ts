@@ -746,6 +746,15 @@ suite("warehouse command owners with actual PostgreSQL migrations", () => {
     let committed = false;
     let cancellation: Promise<number[]> | undefined;
     try {
+      const backend = await locker.query<{ pid: number }>(
+        "SELECT pg_backend_pid() AS pid",
+      );
+      const lockerPid = backend.rows[0]?.pid;
+      if (!Number.isSafeInteger(lockerPid) || !lockerPid || lockerPid < 1) {
+        throw new Error(
+          "The row-lock owner must have a valid PostgreSQL backend identity",
+        );
+      }
       await locker.query("BEGIN");
       await locker.query(
         "SELECT id FROM inventory.replen_tasks WHERE id=1 FOR UPDATE",
@@ -755,7 +764,7 @@ suite("warehouse command owners with actual PostgreSQL migrations", () => {
       for (let attempt = 0; attempt < 100; attempt++) {
         const waiting = await database.pool.query(
           "SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))",
-          [locker.processID],
+          [lockerPid],
         );
         if (waiting.rows.length > 0) {
           blocked = true;

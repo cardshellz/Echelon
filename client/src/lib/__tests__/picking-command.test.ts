@@ -3,6 +3,7 @@ import {
   sendPickingCommand,
   PickingCommandRejectedError,
 } from "../picking-command";
+type PickingCommandSender = Parameters<typeof sendPickingCommand>[3];
 const uuid = "123e4567-e89b-42d3-a456-426614174000";
 function memoryStorage(): Storage {
   const values = new Map<string, string>();
@@ -25,7 +26,7 @@ describe("retained warehouse command intent", () => {
   it("retains one UUID/body through response loss and page restart", async () => {
     const storage = memoryStorage();
     const send = vi
-      .fn()
+      .fn<PickingCommandSender>()
       .mockRejectedValueOnce(new Error("response lost"))
       .mockResolvedValueOnce({ pickedQuantity: 3 });
     await expect(
@@ -52,7 +53,7 @@ describe("retained warehouse command intent", () => {
         () => uuid,
       ),
     ).rejects.toThrow("lost");
-    const send = vi.fn(async () => ({ accepted: true }));
+    const send = vi.fn<PickingCommandSender>(async () => ({ accepted: true }));
     await expect(
       sendPickingCommand(
         "replenishment_update",
