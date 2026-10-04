@@ -62,6 +62,23 @@ function draft() {
 }
 
 describe("return label settings draft", () => {
+  it("defaults the warehouse to commercial and saves the administrator's residential override", () => {
+    const value = draft();
+    expect(value.warehouseAddressType).toBe("commercial");
+    value.carrierRules[0].enabled = true;
+    value.carrierRules[0].serviceCodes = ["ground"];
+    expect(parseReturnLabelSettingsDraft(value, 0)).toMatchObject({ success: true, data: { warehouseAddressType: "commercial" } });
+    value.warehouseAddressType = "residential";
+    expect(parseReturnLabelSettingsDraft(value, 0)).toMatchObject({ success: true, data: { warehouseAddressType: "residential" } });
+    expect(refreshReturnLabelSettingsDraft(value, state()).warehouseAddressType).toBe("residential");
+    const current = state();
+    const parsed = parseReturnLabelSettingsDraft(value, 0);
+    if (!parsed.success) throw parsed.error;
+    const { expectedVersion: _version, ...saved } = parsed.data;
+    current.settings = customerReturnLabelSettingsStateSchema.parse({ ...current,
+      settings: { ...saved, version: 1, destinationAddress: current.warehouses[0].address } }).settings;
+    expect(createReturnLabelSettingsDraft(current).warehouseAddressType).toBe("residential");
+  });
   it("starts new settings in automatic mode but allows no service until explicitly selected", () => {
     const value = draft();
     expect(value.selectionMode).toBe("cheapest_eligible");
@@ -82,6 +99,14 @@ describe("return label settings draft", () => {
     expect(parseReturnLabelSettingsDraft(value, 0).success).toBe(false);
     value.carrierRules[0].enabled = true;
     expect(parseReturnLabelSettingsDraft(value, 0).success).toBe(false);
+  });
+  it("explains an invalid warehouse address type and prevents saving it", () => {
+    const value = draft();
+    value.carrierRules[0].enabled = true;
+    value.carrierRules[0].serviceCodes = ["ground"];
+    Object.assign(value, { warehouseAddressType: "unknown" });
+    expect(returnLabelSettingsReadiness(value, state())).toMatchObject({ canSave: false,
+      issues: [expect.objectContaining({ field: "warehouseAddressType" })] });
   });
 
   it("sends only explicit allowed services, exact decimal business caps, and the optimistic version", () => {

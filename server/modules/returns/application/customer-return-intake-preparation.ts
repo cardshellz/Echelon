@@ -10,7 +10,7 @@ import { projectCustomerReturnLiveWmsAllocations } from "./customer-return-live-
 import { customerReturnPublicLineId } from "./customer-return-live-packaging";
 import { customerReturnProviderGid as gid } from "./customer-return-live-identity";
 import { validateCustomerReturnBoxPlan } from "./customer-return-box-plan";
-import { customerReturnOriginAddress } from "./customer-return-shipping-plan";
+import { customerReturnOriginAddress, customerReturnWarehouseAddressType } from "./customer-return-shipping-plan";
 import {
   CustomerReturnIntakeError,
   type PreparedCustomerReturnIntake,
@@ -201,6 +201,7 @@ export function prepareCustomerReturnIntake(
     },
     warehouseSnapshot: {
       warehouseId: settings.warehouseId,
+      addressType: customerReturnWarehouseAddressType(settings.warehouseAddressType),
       version: settings.version,
       address: {
         name: settings.destinationAddress.name,

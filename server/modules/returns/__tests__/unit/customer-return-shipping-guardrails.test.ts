@@ -122,7 +122,7 @@ describe("return quote cost protection", () => {
     await expect(s.service.review(s.input)).resolves.toMatchObject({ effects: "none" });
     expect(s.quote).toHaveBeenCalledTimes(2);
     expect(s.quote.mock.calls[0][0].shipment.shipFrom.name).toBe("Synthetic Customer");
-    expect(s.quote.mock.calls[0][0].shipment.shipTo).toEqual(s.policy.shipping.destinationAddress);
+    expect(s.quote.mock.calls[0][0].shipment.shipTo).toEqual({ ...s.policy.shipping.destinationAddress, addressType: "commercial" });
   });
   it("stops a high price at review while keeping the same box plan editable", async () => {
     const s = await guardedReview(501, 500);

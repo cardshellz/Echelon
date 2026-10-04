@@ -1,4 +1,5 @@
 import type { ChangeEvent } from "react";
+import { RotateCcw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,6 +34,17 @@ export function InheritedContentField({
 }: Props) {
   const source = inheritedContentState(value, catalogValue);
   const custom = source === "custom";
+  const sourceLabel = custom
+    ? "Custom"
+    : source === "catalog_unavailable"
+      ? "Catalog unavailable"
+      : source === "catalog_empty"
+        ? "Catalog empty"
+        : "Using catalog";
+  const showSourceNotice =
+    source === "catalog_unavailable" ||
+    source === "catalog_empty" ||
+    (value !== null && !custom);
   const message =
     source === "catalog_unavailable"
       ? "Catalog details are unavailable. An inherited value cannot be shown."
@@ -48,7 +60,7 @@ export function InheritedContentField({
     maxLength,
     disabled,
     value: value ?? catalogValue ?? "",
-    "aria-describedby": `${id}-source`,
+    "aria-describedby": `${id}-source${help ? ` ${id}-help` : ""}`,
     onChange: (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
       if (!disabled) onChange(event.target.value);
     },
@@ -58,8 +70,17 @@ export function InheritedContentField({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <Label htmlFor={id}>{label}</Label>
-          <Badge variant={custom ? "secondary" : "outline"}>
-            {custom ? "Custom" : "Using catalog"}
+          <Badge
+            variant="outline"
+            className={
+              custom
+                ? "border-primary/20 bg-primary/10 text-primary"
+                : source === "catalog_unavailable"
+                  ? "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200"
+                  : "bg-muted/50 text-muted-foreground"
+            }
+          >
+            {sourceLabel}
           </Badge>
         </div>
         {value !== null && (
@@ -70,6 +91,7 @@ export function InheritedContentField({
             disabled={disabled}
             onClick={() => onChange(null)}
           >
+            <RotateCcw aria-hidden="true" />
             {resetLabel}
           </Button>
         )}
@@ -79,10 +101,19 @@ export function InheritedContentField({
       ) : (
         <Input {...inputProps} className="text-foreground" />
       )}
-      <p id={`${id}-source`} className="text-xs text-muted-foreground">
+      <p
+        id={`${id}-source`}
+        className={
+          showSourceNotice ? "text-xs text-muted-foreground" : "sr-only"
+        }
+      >
         {message}
       </p>
-      {help && <p className="text-xs text-muted-foreground">{help}</p>}
+      {help && (
+        <p id={`${id}-help`} className="text-xs text-muted-foreground">
+          {help}
+        </p>
+      )}
     </div>
   );
 }

@@ -10,6 +10,8 @@ import {
   type ReturnLabelProvider,
   type ReturnLabelRecord,
 } from "../application/return-label-provider.port";
+import { matchesShipStationReturnWeight, shipStationReturnWeightPounds } from "./shipstation-return-weight";
+import { shipStationReturnAddress } from "./shipstation-return-address";
 
 const API_ORIGIN = "https://api.shipstation.com";
 const API_PATH = "/v2";
@@ -57,6 +59,7 @@ const addressSchema = z.object({
   name: z.string(), phone: z.string().nullish(), company_name: z.string().nullish(),
   address_line1: z.string(), address_line2: z.string().nullish(), address_line3: z.string().nullish(),
   city_locality: z.string(), state_province: z.string(), postal_code: z.string(), country_code: z.string(),
+  address_residential_indicator: z.enum(["yes", "no", "unknown"]).nullish(),
 });
 const shipmentSchema = z.object({
   shipment_id: returnLabelProviderIdSchema,
@@ -221,36 +224,35 @@ function parseInput(input: unknown, outcome: "rejected" | "unknown" = "rejected"
 
 export function buildReturnLabelRequest(rawInput: ReturnLabelInput): Record<string, unknown> {
   const input = parseInput(rawInput);
+  const weightPounds = shipStationReturnWeightPounds(input.parcel.weightGrams);
+  if (weightPounds === null) fail("RETURN_LABEL_INPUT_INVALID", "rejected");
   return {
     is_return_label: true, rma_number: input.rmaNumber, charge_event: "carrier_default",
     label_format: "pdf", label_layout: "4x6", label_download_type: "url",
     shipment: {
       validate_address: "no_validation", external_shipment_id: input.externalShipmentId,
       carrier_id: input.carrierId, service_code: input.serviceCode,
-      ship_from: addressBody(input.shipFrom), ship_to: addressBody(input.shipTo),
-      packages: [{ package_code: "package", weight: { value: input.parcel.weightGrams, unit: "gram" },
+      ship_from: shipStationReturnAddress(input.shipFrom), ship_to: shipStationReturnAddress(input.shipTo),
+      packages: [{ package_code: "package", weight: { value: weightPounds, unit: "pound" },
         dimensions: { ...input.parcel.dimensionsInches, unit: "inch" } }],
     },
   };
 }
 
-function addressBody(address: ReturnLabelAddress) {
-  return {
-    name: address.name, phone: address.phone, company_name: address.companyName,
-    address_line1: address.addressLine1, address_line2: address.addressLine2, address_line3: address.addressLine3,
-    city_locality: address.city, state_province: address.state, postal_code: address.postalCode, country_code: address.countryCode,
-  };
-}
-
 function sameAddress(actual: z.infer<typeof addressSchema>, expected: ReturnLabelAddress): boolean {
   const canonical = (value: string | null | undefined) => (value ?? "").trim().replace(/\s+/g, " ").toUpperCase();
-  const body = addressBody(expected);
-  return Object.entries(body).every(([key, value]) => canonical(actual[key as keyof typeof actual]) === canonical(value));
+  const { address_residential_indicator: requestedType, ...physicalAddress } = shipStationReturnAddress(expected);
+  // Older saved requests and provider readbacks may not contain classification.
+  // Always verify the physical address; an explicit opposite classification is
+  // an ambiguous result requiring reconciliation, never a second purchase.
+  const actualType = actual.address_residential_indicator;
+  const classificationMatches = requestedType === "unknown" || actualType == null || actualType === "unknown" || actualType === requestedType;
+  return classificationMatches && Object.entries(physicalAddress)
+    .every(([key, value]) => canonical(actual[key as keyof typeof actual]) === canonical(value));
 }
 
 function assertPackage(actual: z.infer<typeof packageSchema>, input: ReturnLabelInput): void {
-  const gramsPerUnit = { gram: "1", kilogram: "1000", ounce: "28.349523125", pound: "453.59237" };
-  if (!new Exact(actual.weight.value).times(gramsPerUnit[actual.weight.unit]).eq(input.parcel.weightGrams)) {
+  if (!matchesShipStationReturnWeight(actual.weight, input.parcel.weightGrams)) {
     fail("RETURN_LABEL_MEASUREMENTS_MISMATCH", "unknown");
   }
   for (const axis of ["length", "width", "height"] as const) {

@@ -98,6 +98,61 @@ integration(
     async function authorize() {
       return intake.persist(preparedIntake());
     }
+    it.each(["commercial", "residential"] as const)("keeps the accepted %s warehouse classification through quotes, policy changes and one durable purchase", async warehouseAddressType => {
+      const current = await publishIntakeTestPolicyShipping(pool, {
+        warehouseAddressType, selectionMode: "cheapest_eligible", carrierId: null, serviceCode: null,
+        carrierRules: [{ carrierId: "se-123", serviceCodes: ["usps_ground_advantage"], maxWeightLb: "20" }],
+      });
+      const prepared = preparedIntake();
+      await bindIntakeTestPolicy(pool, prepared, current);
+      prepared.warehouseSnapshot = { ...prepared.warehouseSnapshot, addressType: warehouseAddressType };
+      prepared.parcels = prepared.parcels.map(parcel => ({ ...parcel,
+        selectionMode: "cheapest_eligible", carrierId: null, serviceCode: null }));
+      const accepted = await intake.persist(prepared);
+      await publishIntakeTestPolicyShipping(pool, { warehouseAddressType: warehouseAddressType === "commercial" ? "residential" : "commercial" });
+      expect((await settings.readAccepted(36, accepted.authorizationId))?.warehouseAddressType).toBe(warehouseAddressType);
+      const w = worker();
+      await w.service.progress(36, accepted.authorizationId, "admin");
+      expect(w.quote).toHaveBeenCalledTimes(1);
+      expect(w.quote.mock.calls[0][0].shipment.shipTo.addressType).toBe(warehouseAddressType);
+      expect(w.purchase).toHaveBeenCalledTimes(1);
+      expect(w.purchase.mock.calls[0][0].shipTo).toEqual(w.quote.mock.calls[0][0].shipment.shipTo);
+      const saved = (await labels.read(36, accepted.authorizationId)).parcels[0];
+      expect(saved.input?.shipTo.addressType).toBe(warehouseAddressType);
+      const rows = (await pool.query(`SELECT request_snapshot FROM returns.customer_return_label_attempts WHERE parcel_id=$1`, [saved.id])).rows;
+      expect(rows).toHaveLength(1);
+      expect(rows[0].request_snapshot.shipTo.addressType).toBe(warehouseAddressType);
+    });
+    it("defaults a legacy pending return to commercial without changing its stored physical address", async () => {
+      const accepted = await authorize();
+      const stored = (await labels.read(36, accepted.authorizationId)).parcels[0];
+      expect(stored.shipment.shipTo).toEqual({ ...preparedIntake().parcels[0].destinationAddress, addressType: "commercial" });
+      const attempt = await labels.begin(36, accepted.authorizationId, stored.id, "admin", INTAKE_NOW);
+      expect(attempt?.input.shipTo).toEqual(stored.shipment.shipTo);
+      const manifest = (await pool.query(`SELECT destination_address FROM returns.customer_return_parcels WHERE id=$1`, [stored.id])).rows[0];
+      expect(manifest.destination_address).toEqual(preparedIntake().parcels[0].destinationAddress);
+    });
+    it("blocks a fresh purchase when the frozen warehouse classification disagrees with its accepted policy", async () => {
+      const prepared = preparedIntake();
+      prepared.warehouseSnapshot = { ...prepared.warehouseSnapshot, addressType: "residential" };
+      const accepted = await intake.persist(prepared);
+      await expect(labels.begin(36, accepted.authorizationId, accepted.parcels[0].parcelId, "admin", INTAKE_NOW))
+        .rejects.toMatchObject({ code: "RETURN_LABEL_SETTINGS_CHANGED" });
+      expect((await pool.query("SELECT COUNT(*)::int AS n FROM returns.customer_return_label_attempts")).rows[0].n).toBe(0);
+    });
+    it("rejects a saved explicit classification that disagrees with the manifest without contacting the provider", async () => {
+      const accepted = await authorize();
+      const parcel = (await labels.read(36, accepted.authorizationId)).parcels[0];
+      const inconsistent = { ...parcel.input!, shipTo: { ...parcel.input!.shipTo, addressType: "residential" } };
+      await pool.query(`INSERT INTO returns.customer_return_label_attempts
+        (parcel_id,attempt_number,idempotency_key,status,request_snapshot,actor,started_at)
+        VALUES($1,1,$2,'uncertain',$3,'test',$4)`, [parcel.id, INTAKE_KEY, JSON.stringify(inconsistent), INTAKE_NOW]);
+      const w = worker();
+      await expect(w.service.progress(36, accepted.authorizationId, "admin"))
+        .rejects.toMatchObject({ code: "RETURN_LABEL_ATTEMPT_UNVERIFIED" });
+      expect(w.purchase).not.toHaveBeenCalled();
+      expect(w.recover).not.toHaveBeenCalled();
+    });
     async function enableAutomatic() {
       return publishIntakeTestPolicyShipping(pool, {
         selectionMode: "cheapest_eligible",
@@ -1146,7 +1201,7 @@ integration(
         "admin",
         INTAKE_NOW,
       );
-      expect(attempt?.input.shipTo).toEqual(original!.destinationAddress);
+      expect(attempt?.input.shipTo).toEqual({ ...original!.destinationAddress, addressType: "commercial" });
     });
     it("enforces shop/return/parcel ownership at read and write boundaries", async () => {
       const saved = await authorize();
