@@ -99,6 +99,54 @@ integration(
     async function authorize() {
       return intake.persist(preparedIntake());
     }
+    it("uses the authorization's exact channel order for both boxes while keeping separate recovery keys", async () => {
+      const accepted = await authorize();
+      // A display-number collision in another channel must not select that order.
+      expect((await pool.query("SELECT external_order_number FROM oms.oms_orders WHERE id=200")).rows[0].external_order_number)
+        .toBe("#TEST-1");
+      const stored = await labels.read(36, accepted.authorizationId);
+      expect(stored.parcels).toHaveLength(2);
+      expect(stored.parcels.map(parcel => parcel.input?.orderNumber)).toEqual(["#TEST-1", "#TEST-1"]);
+      expect(new Set(stored.parcels.map(parcel => parcel.input?.externalShipmentId)).size).toBe(2);
+      expect(stored.parcels.map(parcel => (buildReturnLabelRequest(parcel.input!).shipment as Record<string, unknown>).shipment_number))
+        .toEqual(["#TEST-1", "#TEST-1"]);
+      expect(await labels.read(37, accepted.authorizationId).catch(error => error))
+        .toMatchObject({ code: "RETURN_LABEL_NOT_FOUND" });
+      for (const parcel of stored.parcels) {
+        const intent = await labels.begin(36, accepted.authorizationId, parcel.id, "admin", INTAKE_NOW);
+        expect(intent?.input).toMatchObject({ orderNumber: "#TEST-1", externalShipmentId: parcel.input!.externalShipmentId });
+      }
+      const snapshots = (await pool.query("SELECT request_snapshot FROM returns.customer_return_label_attempts ORDER BY parcel_id")).rows;
+      expect(snapshots.map(row => row.request_snapshot.orderNumber)).toEqual(["#TEST-1", "#TEST-1"]);
+    });
+
+    it.each([null, "", " ", "#TEST-1\nINJECTED"])("blocks a new intent when its original order number is invalid: %j", async orderNumber => {
+      const accepted = await authorize();
+      await pool.query("UPDATE oms.oms_orders SET external_order_number=$1 WHERE id=100", [orderNumber]);
+      await expect(labels.begin(36, accepted.authorizationId, accepted.parcels[0].parcelId, "admin", INTAKE_NOW))
+        .rejects.toMatchObject({ code: "RETURN_LABEL_ORDER_REFERENCE_UNAVAILABLE" });
+      expect((await pool.query("SELECT COUNT(*)::int AS n FROM returns.customer_return_label_attempts")).rows[0].n).toBe(0);
+      expect((await pool.query("SELECT COUNT(*)::int AS n FROM returns.customer_return_label_events")).rows[0].n).toBe(0);
+    });
+
+    it.each(["current", "legacy"] as const)("preserves the immutable %s attempt after the source order number changes", async version => {
+      const accepted = await authorize();
+      const parcel = (await labels.read(36, accepted.authorizationId)).parcels[0];
+      const { orderNumber, ...legacyInput } = parcel.input!;
+      const input = version === "current" ? parcel.input! : legacyInput;
+      await pool.query(`INSERT INTO returns.customer_return_label_attempts
+        (parcel_id,attempt_number,idempotency_key,status,request_snapshot,error_code,actor,started_at,completed_at)
+        VALUES($1,1,$2,'uncertain',$3::jsonb,'RETURN_LABEL_TIMEOUT','admin',$4,$4)`,
+        [parcel.id, `reference-test:${parcel.id}`, JSON.stringify(input), INTAKE_NOW]);
+      await pool.query("UPDATE oms.oms_orders SET external_order_number='#RENAMED' WHERE id=100");
+      const stored = (await labels.read(36, accepted.authorizationId)).parcels[0];
+      expect(stored.input).toEqual(input);
+      expect(stored.shipment.orderNumber).toBe(version === "current" ? orderNumber : undefined);
+      expect((await pool.query("SELECT request_snapshot FROM returns.customer_return_label_attempts WHERE parcel_id=$1", [parcel.id])).rows[0].request_snapshot)
+        .toEqual(input);
+      expect(await labels.begin(36, accepted.authorizationId, parcel.id, "admin", INTAKE_NOW)).toBeNull();
+    });
+
     it.each(["purchase", "recover"] as const)("makes a rounded-down USPS label downloadable with one durable attempt during %s", async operation => {
       const prepared = preparedIntake();
       prepared.parcels[0].weightGrams = 850;

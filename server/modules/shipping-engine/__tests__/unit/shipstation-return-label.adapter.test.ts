@@ -51,6 +51,39 @@ function listing(ids: string[], total = ids.length, page = 1) {
 afterEach(() => { vi.useRealTimers(); });
 
 describe("ShipStation return-label request", () => {
+  it("sends the original order number separately from the unique box reference and verifies readback", async () => {
+    const input = { ...INPUT, orderNumber: "#63210" };
+    const responseShipment = { ...shipment(), shipment_number: input.orderNumber };
+    const { provider, fetchFn } = fixture([json(label()), json(responseShipment)]);
+    await expect(provider.purchase(input)).resolves.toMatchObject({ externalShipmentId: INPUT.externalShipmentId });
+    expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body)).shipment).toMatchObject({
+      external_shipment_id: INPUT.externalShipmentId, shipment_number: "#63210",
+    });
+    expect(fetchFn.mock.calls.map(([, init]) => init?.method)).toEqual(["POST", "GET"]);
+  });
+
+  it.each(["", " ", "x".repeat(51), "#63210\nINJECTED", "#63210\u0000", null])("rejects invalid source order numbers %j before transport", async orderNumber => {
+    const { provider, fetchFn } = fixture();
+    await expect(provider.purchase({ ...INPUT, orderNumber } as ReturnLabelInput))
+      .rejects.toMatchObject({ code: "RETURN_LABEL_INPUT_INVALID", outcome: "rejected" });
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it.each(["#OTHER-ORDER", INPUT.externalShipmentId, null, undefined])("retains an uncertain outcome when the provider returns a different or missing order number %j", async shipmentNumber => {
+    const input = { ...INPUT, orderNumber: "#63210" };
+    const { provider, fetchFn } = fixture([json(label()), json({ ...shipment(), shipment_number: shipmentNumber })]);
+    await expect(provider.purchase(input)).rejects.toMatchObject({ code: "RETURN_LABEL_ORDER_REFERENCE_MISMATCH", outcome: "unknown" });
+    expect(fetchFn.mock.calls.map(([, init]) => init?.method)).toEqual(["POST", "GET"]);
+  });
+
+  it("recovers the original order number with GETs only and keeps the box reference as its lookup key", async () => {
+    const input = { ...INPUT, orderNumber: "#63210" };
+    const { provider, fetchFn } = fixture([json(listing(["se-201"])), json(label()), json({ ...shipment(), shipment_number: input.orderNumber })]);
+    await expect(provider.recover(input)).resolves.toMatchObject({ labelId: "se-201" });
+    expect(new URL(String(fetchFn.mock.calls[0][0])).searchParams.get("external_shipment_id")).toBe(INPUT.externalShipmentId);
+    expect(fetchFn.mock.calls.map(([, init]) => init?.method)).toEqual(["GET", "GET", "GET"]);
+  });
+
   it("uses the return-only purchase endpoint, reverse addresses and one product-only measured parcel", async () => {
     const frozen = JSON.stringify(INPUT);
     const { provider, fetchFn } = fixture();
