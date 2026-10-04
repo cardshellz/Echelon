@@ -5,7 +5,7 @@ import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { parseProcurementRecord } from "@/lib/procurement-navigation";
 import { createReceivingNavigationSession } from "@/lib/receiving-navigation-session";
 import { ReceivingUnitControl } from "@/components/purchasing/ReceivingUnitControl";
-import { parseReceivingLineMutation, receivingSelectedFactor, receivingVariantChange, receivingCompleteAllCommand, receivingCountChange, receivingAddQuantity, recordedReceivingFactor, type ReceivingUnitLine } from "@/lib/receiving-units";
+import { hasReceivingUnitVersion, ReceivingUnitVersionError, parseReceivingUnitRefresh, parseReceivingLineMutation, receivingSelectedFactor, receivingVariantChange, receivingCompleteAllCommand, receivingCountChange, receivingAddQuantity, recordedReceivingFactor, type ReceivingUnitLine } from "@/lib/receiving-units";
 import { ProcurementContext } from "@/components/procurement-context";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -842,7 +842,7 @@ DEF-456,25,,,5.00,,Location TBD`;
 
   function reportUnitError(lineId: number, cause: unknown, needsRefresh = false) {
     const message = cause instanceof Error ? cause.message : "The receive unit could not be changed.";
-    setUnitErrors((current) => ({ ...current, [lineId]: { message, needsRefresh } }));
+    setUnitErrors((current) => ({ ...current, [lineId]: { message, needsRefresh: needsRefresh || cause instanceof ReceivingUnitVersionError } }));
     toast({ title: "Line change needs review", description: message, variant: "destructive" });
   }
 
@@ -880,17 +880,15 @@ DEF-456,25,,,5.00,,Location TBD`;
     try {
       const [res, catalogResponse] = await Promise.all([fetch("/api/receiving/" + id), fetch("/api/product-variants")]);
       if (!res.ok || !catalogResponse.ok) throw new Error("Latest receipt and catalog units could not be loaded. Your count draft is still preserved.");
-      const [current, catalog]: [unknown, unknown] = await Promise.all([res.json(), catalogResponse.json()]);
+      const [receipt, catalog]: [unknown, unknown] = await Promise.all([res.json(), catalogResponse.json()]);
       if (!Array.isArray(catalog)) throw new Error("The latest catalog units could not be verified. Your count draft is still preserved.");
-      if (!current || typeof current !== "object" || !("id" in current) || current.id !== id || !("lines" in current) || !Array.isArray(current.lines)) {
-        throw new Error("The latest receipt response was incomplete. Your draft is still preserved.");
-      }
+      const current = parseReceivingUnitRefresh(receipt, { receiptId: id, lineId });
       if (!isCurrentReceiptNavigation(context)) return;
       queryClient.setQueryData(["/api/product-variants"], catalog);
-      setSelectedReceipt(current as ReceivingOrder);
+      setSelectedReceipt(current);
       setCountDrafts((drafts) => { const next = { ...drafts }; delete next[lineId]; return next; });
       setUnitErrors((errors) => { const next = { ...errors }; delete next[lineId]; return next; });
-      setResolvingLine((line) => line?.id === lineId ? (current.lines as ReceivingLine[]).find((item) => item.id === lineId) ?? null : line);
+      setResolvingLine((line) => line?.id === lineId ? current.lines.find((item) => item.id === lineId) ?? null : line);
       setLegacyResolveVariant(null);
     } catch (cause) {
       if (isCurrentReceiptNavigation(context)) reportUnitError(lineId, cause, true);
@@ -898,17 +896,20 @@ DEF-456,25,,,5.00,,Location TBD`;
   }
 
   function renderUnitControl(line: ReceivingLine) {
+    const mutable = !!selectedReceipt && !["closed", "cancelled"].includes(selectedReceipt.status);
+    // Older or incomplete command responses need a source read, not a guessed version.
+    const error = unitErrors[line.id] ?? (mutable && !hasReceivingUnitVersion(line) ? new ReceivingUnitVersionError() : null);
     return <div className="space-y-2">
       <ReceivingUnitControl
         line={line}
         variants={variants}
-        mutable={!!selectedReceipt && !["closed", "cancelled"].includes(selectedReceipt.status)}
+        mutable={mutable}
         pending={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || !!countDrafts[line.id] || !!unitErrors[line.id]?.needsRefresh}
         onChange={(variantId, confirm, factor) => applyVariant(line, variantId, confirm, factor)}
       />
-      {unitErrors[line.id] && <div role="alert" className="rounded border border-destructive/40 p-2 text-xs text-destructive">
-        <p>{unitErrors[line.id].message}</p>
-        {unitErrors[line.id].needsRefresh && <Button size="sm" variant="outline" className="mt-2 h-auto min-h-10 whitespace-normal" disabled={reloadingUnits || updateLineMutation.isPending} onClick={() => void reloadReceiptUnits(line.id)}>Load latest line and discard count draft</Button>}
+      {error && <div role="alert" className="rounded border border-destructive/40 p-2 text-xs text-destructive">
+        <p>{error.message}</p>
+        {error.needsRefresh && <Button size="sm" variant="outline" className="mt-2 h-auto min-h-10 whitespace-normal" disabled={reloadingUnits || updateLineMutation.isPending} onClick={() => void reloadReceiptUnits(line.id)}>Load latest line and discard count draft</Button>}
       </div>}
       {countDrafts[line.id] && <Button size="sm" variant="ghost" disabled={updateLineMutation.isPending} onClick={() => setCountDrafts((current) => { const next = { ...current }; delete next[line.id]; return next; })}>Discard count draft</Button>}
     </div>;
@@ -1115,7 +1116,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   const receiveUnitsNeedReview = selectedReceipt?.lines?.some((line) => {
     const factor = recordedReceivingFactor(line);
     const catalog = variants.find((variant) => variant.id === line.productVariantId);
-    return factor === null || !line.unitVersion || !line.productVariantId || !!catalog && catalog.unitsPerVariant !== factor;
+    return factor === null || !hasReceivingUnitVersion(line) || !line.productVariantId || !!catalog && catalog.unitsPerVariant !== factor;
   }) ?? false;
   const issueLines = selectedReceipt?.lines?.filter(l => l.receivedQty > 0 && (!l.productVariantId || !l.putawayLocationId)) || [];
   const skuIssueCount = issueLines.filter(l => !l.productVariantId).length;
@@ -1996,7 +1997,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         variant="outline"
                         className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                         onClick={() => completeAllMutation.mutate({ orderId: selectedReceipt.id, lines: selectedReceipt.lines ?? [] })}
-                        disabled={completeAllMutation.isPending || updateLineMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || !selectedReceipt.lines?.length || selectedReceipt.lines.some((line) => recordedReceivingFactor(line) === null || !line.unitVersion)}
+                        disabled={completeAllMutation.isPending || updateLineMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || !selectedReceipt.lines?.length || selectedReceipt.lines.some((line) => recordedReceivingFactor(line) === null || !hasReceivingUnitVersion(line))}
                         data-testid="btn-complete-all"
                       >
                         <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
