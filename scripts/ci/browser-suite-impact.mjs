@@ -19,13 +19,13 @@ export const BROWSER_SUITES = {
   dropship: {
     config: "playwright.dropship-pricing.config.ts",
     workflow: ".github/workflows/dropship-pricing.yml",
-    tests: /^test\/browser\/(?:dropship-(?:pricing|content|policy)-.*\.ts|dropship-shipping-estimate\.spec\.ts|dropship-wallet\.spec\.ts|dropship-orders\.spec\.ts|dropship-onboarding\.spec\.ts|shared-shipping-configuration\.spec\.ts|bounded-page-loading\.spec\.ts)$/,
+    tests: /^test\/browser\/(?:dropship-(?:pricing|content|policy)-.*\.ts|dropship-shipping-estimate\.spec\.ts|dropship-wallet\.spec\.ts|dropship-orders\.spec\.ts|dropship-finance\.spec\.ts|dropship-onboarding\.spec\.ts|shared-shipping-configuration\.spec\.ts|bounded-page-loading\.spec\.ts)$/,
     // These modules are injected by mocked HTML, not imported by the specs.
     roots: [
       "dropship-pricing", "dropship-content", "dropship-policy", "dropship-catalog", "dropship-cost-change-policy",
       "dropship-ebay-categories",
       "dropship-cost-changes",
-      "dropship-shipping-estimate", "dropship-wallet", "dropship-orders", "dropship-onboarding",
+      "dropship-shipping-estimate", "dropship-wallet", "dropship-orders", "dropship-finance", "dropship-onboarding",
       "shared-shipping-configuration", "bounded-page-loading",
     ].map((harness) => `test/browser/fixtures/${harness}-harness.tsx`),
     ownedPrefixes: ["client/src/pages/dropship/", "client/src/components/shipping/", "server/modules/dropship/"],
