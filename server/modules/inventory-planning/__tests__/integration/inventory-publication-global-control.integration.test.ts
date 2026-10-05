@@ -55,6 +55,10 @@ dbDescribe.sequential("audited global publication control", () => {
       process.cwd(),
       "migrations/0669_inventory_publication_global_control_singleton.sql",
     ), "utf8"));
+    const original = (await database.pool.query("SELECT changed_by, change_reason FROM channels.sync_settings")).rows;
+    await database.pool.query(readFileSync(resolve(process.cwd(),
+      "migrations/0720_inventory_publication_pause_optional_reason.sql"), "utf8"));
+    expect((await database.pool.query("SELECT changed_by, change_reason FROM channels.sync_settings")).rows).toEqual(original);
     const store = new PostgresInventoryPublicationGlobalControlStore(
       drizzle(database.pool) as never,
     );
@@ -104,6 +108,35 @@ dbDescribe.sequential("audited global publication control", () => {
     }]);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM public.audit_events")).rows[0].count).toBe(1);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM public.idempotency_keys")).rows[0].count).toBe(1);
+  });
+
+  it("pauses without an operator reason and atomically audits and replays the normalized command", async () => {
+    await database.pool.query("UPDATE channels.sync_settings SET global_enabled=TRUE");
+    const request = { globalEnabled: false, expectedRevision: "1", idempotencyKey: "global-pause-no-reason" };
+    const first = await service.change(request, "operator-7");
+    expect(first).toMatchObject({ globalEnabled: false, revision: "2", changeReason: null, changedAt: NOW.toISOString() });
+    expect(await service.change({ ...request, changeReason: " " }, "operator-7"))
+      .toEqual({ ...first, alreadyApplied: true });
+    expect((await database.pool.query("SELECT global_enabled,change_reason,changed_by,updated_at AT TIME ZONE 'UTC' AS updated_at FROM channels.sync_settings")).rows)
+      .toEqual([{ global_enabled: false, change_reason: null, changed_by: "operator-7", updated_at: NOW }]);
+    const audits = (await database.pool.query("SELECT timestamp,actor,action,changes,context FROM public.audit_events")).rows;
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ timestamp: NOW, actor: "operator-7",
+      action: "inventory_availability.publication_global_control.changed",
+      changes: { before: { globalEnabled: true }, after: { globalEnabled: false, revision: "2" } },
+      context: { reason: null, idempotencyKey: request.idempotencyKey } });
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM public.idempotency_keys")).rows[0].count).toBe(1);
+    await expect(service.change({ ...request, expectedRevision: "2", changeReason: "Different request" }, "operator-7"))
+      .rejects.toMatchObject({ code: "PUBLICATION_GLOBAL_CONTROL_IDEMPOTENCY_CONFLICT" });
+  });
+
+  it("keeps the database reason constraint for enabled controls and rejects blank notes", async () => {
+    await expect(database.pool.query("UPDATE channels.sync_settings SET global_enabled=TRUE, change_reason=NULL"))
+      .rejects.toMatchObject({ constraint: "sync_settings_change_reason_chk" });
+    await expect(database.pool.query("UPDATE channels.sync_settings SET change_reason=''"))
+      .rejects.toMatchObject({ constraint: "sync_settings_change_reason_chk" });
+    await expect(database.pool.query("UPDATE channels.sync_settings SET change_reason=' padded '"))
+      .rejects.toMatchObject({ constraint: "sync_settings_change_reason_chk" });
   });
 
   it("rejects stale revisions and idempotency-key reuse without changing control", async () => {

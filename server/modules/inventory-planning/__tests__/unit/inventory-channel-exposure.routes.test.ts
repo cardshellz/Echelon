@@ -175,7 +175,7 @@ describe("inventory channel exposure routes", () => {
     );
   });
 
-  it("still requires a written reason for readiness, stop, and resume commands", async () => {
+  it("still requires a written reason for readiness and resume commands", async () => {
     const previewState = await jsonRequest(
       `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-preview-state`,
       { method: "PUT", body: {
@@ -183,13 +183,6 @@ describe("inventory channel exposure routes", () => {
       } },
     );
     expect(previewState.status).toBe(400);
-    const stop = await jsonRequest(
-      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-stop`,
-      { method: "PUT", body: {
-        publicationTargetId: 5, expectedRevision: "1", changeReason: "", idempotencyKey: "no-reason-2",
-      } },
-    );
-    expect(stop.status).toBe(400);
     const review = await jsonRequest(
       `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-resume-review`,
       { method: "POST", body: { publicationTargetId: 5, expectedRevision: "3", idempotencyKey: "no-reason-3" } },
@@ -198,6 +191,27 @@ describe("inventory channel exposure routes", () => {
     expect(service.setPublicationTargetPreviewState).not.toHaveBeenCalled();
     expect(targetStopService.stop).not.toHaveBeenCalled();
     expect(targetResumeService.review).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "", "   ", null])("accepts an unreasoned pause (%s) and passes the authenticated actor", async changeReason => {
+    const response = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-stop`,
+      { method: "PUT", body: { publicationTargetId: 5, expectedRevision: "3",
+        idempotencyKey: "pause-without-reason", ...(changeReason === undefined ? {} : { changeReason }) } },
+    );
+    expect(response.status).toBe(200);
+    expect(targetStopService.stop).toHaveBeenCalledWith({ publicationTargetId: 5, expectedRevision: "3",
+      idempotencyKey: "pause-without-reason", changeReason: null }, "operator-1");
+  });
+
+  it.each([42, "x".repeat(1001)])("rejects malformed optional pause notes", async changeReason => {
+    const response = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-stop`,
+      { method: "PUT", body: { publicationTargetId: 5, expectedRevision: "3",
+        idempotencyKey: "invalid-pause-note", changeReason } },
+    );
+    expect(response.status).toBe(400);
+    expect(targetStopService.stop).not.toHaveBeenCalled();
   });
 
   it("rejects malformed source-binding inputs before the service", async () => {
