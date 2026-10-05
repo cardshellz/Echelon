@@ -91,6 +91,13 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(typecheck).not.toContain("needs: unit-tests");
   });
 
+  it("gives the server test typecheck a heap above Node's ~4 GB default", () => {
+    const typecheck = job(workflow, "typecheck");
+    const step = typecheck.slice(typecheck.indexOf("- name: Server test types"), typecheck.indexOf("- name: Client test types"));
+    expect(step).toContain("NODE_OPTIONS: --max-old-space-size=6144");
+    expect(step).toContain("run: npx tsc -p tsconfig.tests.server.json");
+  });
+
   it("partitions the unchanged unit selection into four complete, isolated shards", () => {
     const unit = job(workflow, "unit-tests");
     expect(unit).toContain("shard: [1, 2, 3, 4]");
