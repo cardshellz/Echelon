@@ -173,13 +173,23 @@ interface Harness {
 
 /** Chromium logs every non-2xx response as a console error; the journeys that ask for one expect it. */
 const FAILED_RESOURCE_LOG = /^Failed to load resource: the server responded with a status of \d{3}/;
+/**
+ * Vite's dev client (not the page) opens a hot-reload socket to the test server. The Chromium
+ * on CI blocks it under its local network access checks and logs these two lines; nothing on
+ * the page depends on that socket.
+ */
+const VITE_HMR_SOCKET_LOG = /^(?:WebSocket connection to 'ws:\/\/127\.0\.0\.1:\d+\/\?token=[^']*' failed: |\[vite\] failed to connect to websocket\.)/;
+
+function isPageError(text: string): boolean {
+  return !FAILED_RESOURCE_LOG.test(text) && !VITE_HMR_SOCKET_LOG.test(text);
+}
 
 async function setup(page: Page, options: { respond?: Responder; search?: string } = {}): Promise<Harness> {
   const harness: Harness = { requests: [], unexpected: [], errors: [] };
   const respond = options.respond ?? programResponder;
   page.on("pageerror", (error) => harness.errors.push(error.message));
   page.on("console", (message) => {
-    if (message.type() === "error" && !FAILED_RESOURCE_LOG.test(message.text())) harness.errors.push(message.text());
+    if (message.type() === "error" && isPageError(message.text())) harness.errors.push(message.text());
   });
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
   await page.route("**/api/**", async (route) => {
