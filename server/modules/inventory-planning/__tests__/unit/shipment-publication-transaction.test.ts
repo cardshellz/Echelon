@@ -21,7 +21,7 @@ function setup(options: { authority?: "legacy" | "canonical"; state?: string; bu
       return { rows: [{ state: options.state ?? "active" }] };
     }
     if (sql.includes("pg_try_advisory_xact_lock")) return { rows: [{ acquired: !options.busy }] };
-    if (sql.includes("ORDER BY desired_revision DESC")) return { rows: [] };
+    if (sql.includes("ORDER BY outbox.desired_revision DESC")) return { rows: [] };
     if (sql.includes("INSERT INTO inventory.inventory_publication_outbox")) return { rows: [{ id: "1" }], rowCount: 1 };
     if (sql.trim().startsWith("UPDATE")) return { rows: [], rowCount: 1 };
     throw new Error(`Unexpected SQL: ${sql}`);
