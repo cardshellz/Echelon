@@ -28,13 +28,13 @@ import {
 import { IdentityCell } from "./IdentityEditor";
 import { ProductPicker } from "./ProductPicker";
 import { PublicationStatus } from "./PublicationStatus";
-import { Callout, EvidenceNote, SectionCard, SourceTag, StatePill } from "./primitives";
+import { Callout, SectionCard, SourceTag, StatePill } from "./primitives";
 import { NoDestinationYet } from "./SupplyTab";
 
 const NO_SNAPSHOT_CODE = "INVENTORY_CHANNEL_EXPOSURE_SHADOW_NOT_FOUND";
 
 /** What quantity results for each SKU of a product at one destination, and why. */
-export function QuantitiesTab({ view, channel, target, canEdit, productId, onProductChange, onAddDestination, onReload, reloading, now }: {
+export function QuantitiesTab({ view, channel, target, canEdit, productId, onProductChange, onAddDestination, onManagePublishing, onReload, reloading, now }: {
   view: View;
   channel: Channel;
   target: Target | null;
@@ -42,6 +42,7 @@ export function QuantitiesTab({ view, channel, target, canEdit, productId, onPro
   productId: number | null;
   onProductChange(productId: number): void;
   onAddDestination(): void;
+  onManagePublishing(): void;
   onReload(): void;
   reloading: boolean;
   now: () => Date;
@@ -58,8 +59,8 @@ export function QuantitiesTab({ view, channel, target, canEdit, productId, onPro
       command.clear();
       await queryClient.invalidateQueries({ queryKey: PREVIEW_QUERY_KEY });
       toast({
-        title: run.status === "blocked" ? "Snapshot captured with blockers" : "Availability snapshot captured",
-        description: "Calculated only. No quantity was sent to any provider.",
+        title: run.status === "blocked" ? "Stock calculation needs attention" : "Stock calculation updated",
+        description: "This updates the preview only. No marketplace quantities were changed.",
       });
     },
     onError: (error) => {
@@ -71,18 +72,34 @@ export function QuantitiesTab({ view, channel, target, canEdit, productId, onPro
   if (!target) return <NoDestinationYet canEdit={canEdit} onAdd={onAddDestination} />;
   const identity = describeDestination(target, view);
   const noSnapshot = preview.error instanceof ChannelInventoryApiError && preview.error.code === NO_SNAPSHOT_CODE;
+  const currentPreview = preview.error ? undefined : preview.data;
 
   return (
     <SectionCard
-      title={`Quantities for ${identity.title}`}
-      description="Each SKU's proposed quantity from the saved rules and the latest availability snapshot. Proposed is what would be sent; it is not what the marketplace currently shows."
+      title={`Stock preview for ${identity.title}`}
+      description="See available stock and the quantity after your saved stock rules. This preview does not send an update."
       actions={canEdit && productId !== null ? (
         <Button type="button" variant="outline" size="sm" disabled={snapshot.isPending} onClick={() => snapshot.mutate()}>
           <RefreshCw className={cn("mr-1 h-3.5 w-3.5", snapshot.isPending && "animate-spin")} aria-hidden="true" />
-          {snapshot.isPending ? "Calculating…" : "Refresh availability"}
+          {snapshot.isPending ? "Calculating…" : "Recalculate stock"}
         </Button>
       ) : undefined}
     >
+      {target.publicationAuthority === "echelon" && (target.state !== "live" || view.runtimeAuthority !== "canonical") && (
+        <Callout title={view.runtimeAuthority === "canonical" ? "Automatic stock updates are off" : "These stock settings are not active"} action={(
+          <Button type="button" size="sm" onClick={onManagePublishing}>Set up stock updates</Button>
+        )}>
+          {view.runtimeAuthority === "canonical"
+            ? `Review the setup and next steps before Echelon can send quantities to ${channel.name}.`
+            : "The existing inventory setup still controls stock updates. View the setup to see what is needed before these settings can take over."}
+        </Callout>
+      )}
+      {target.publicationAuthority !== "echelon" && (
+        <p className="text-sm text-muted-foreground">
+          Stock for this account is managed {target.publicationAuthority === "manual" ? "manually" : "by another system"}.
+          Echelon does not send stock updates for it.
+        </p>
+      )}
       <div className="max-w-lg space-y-1.5">
         <Label htmlFor="quantities-product">Product</Label>
         <ProductPicker id="quantities-product" products={view.products} value={productId} onChange={onProductChange} />
@@ -99,28 +116,35 @@ export function QuantitiesTab({ view, channel, target, canEdit, productId, onPro
 
       {productId !== null && noSnapshot && (
         <Callout
-          title="No availability snapshot for this product yet"
+          title="Calculate stock for this product"
           action={canEdit ? (
             <Button type="button" size="sm" disabled={snapshot.isPending} onClick={() => snapshot.mutate()}>
-              {snapshot.isPending ? "Calculating…" : "Calculate availability"}
+              {snapshot.isPending ? "Calculating…" : "Calculate stock"}
             </Button>
           ) : undefined}
         >
-          Quantities are calculated from a captured availability snapshot. Capture one to see what
-          these rules would propose; nothing is sent to the provider.
+          There is no stock calculation to preview yet. Calculate it using the selected warehouses and saved rules.
         </Callout>
       )}
 
       {productId !== null && preview.error && !noSnapshot && (
-        <Callout tone="danger" title={describeError(preview.error).title}>{describeError(preview.error).message}</Callout>
+        <Callout tone="danger" title="Stock preview unavailable" action={(
+          <Button type="button" variant="outline" size="sm" disabled={preview.isFetching} onClick={() => { void preview.refetch(); }}>Try again</Button>
+        )}>
+          <p>The stock calculation could not be loaded.</p>
+          <details className="mt-2">
+            <summary className="cursor-pointer text-xs font-medium">Technical details</summary>
+            <p className="mt-2 break-words text-xs">{describeError(preview.error).message}</p>
+          </details>
+        </Callout>
       )}
 
-      {preview.data && (
+      {currentPreview && (
         <PreviewTable
           view={view}
           channel={channel}
           target={target}
-          preview={preview.data}
+          preview={currentPreview}
           canEdit={canEdit}
           onReload={onReload}
           reloading={reloading}
@@ -146,48 +170,52 @@ function PreviewTable({ view, channel, target, preview, canEdit, onReload, reloa
   const mobile = useIsMobile();
   const draftPolicies = preview.selectedPolicies.filter((policy) => policy.authority === "draft").length;
   const provider = describeDestination(target, view).provider;
+  const usesDraft = preview.sourceBindingAuthority === "draft" || draftPolicies > 0
+    || preview.rows.some((row) => row.mapping?.authority === "draft");
+  const issues = describePreviewIssues(preview);
+  const emptyPreview = describeEmptyPreview(preview);
+  const hasSupply = preview.sourceBindingAuthority !== "missing";
   return (
     <div className="space-y-3">
-      <EvidenceNote>
-        Availability snapshot captured {formatRelativeTime(preview.shadowCapturedAt, now())} ({formatAbsoluteTime(preview.shadowCapturedAt)}).
-        {" "}Supply: {preview.sourceBindingAuthority === "missing" ? "not configured" : `${preview.sourceBindingAuthority === "draft" ? "saved draft" : "active"} (${pluralize(preview.warehouseIds.length, "warehouse")})`}.
-        {" "}Rules: {pluralize(preview.selectedPolicies.length, "saved definition")}{draftPolicies > 0 ? `, ${draftPolicies} pending activation` : ""}.
-        {" "}No quantity was sent to the provider.
-      </EvidenceNote>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        Stock captured <time dateTime={preview.shadowCapturedAt} title={formatAbsoluteTime(preview.shadowCapturedAt)}>{formatRelativeTime(preview.shadowCapturedAt, now())}</time>.
+        {" "}{preview.publicationAuthority !== "echelon" ? "Stock is managed outside this setup."
+          : !hasSupply ? "Supply warehouses have not been selected."
+          : usesDraft ? "Includes saved changes that are not applied yet." : "Uses applied settings."}
+      </p>
 
       {preview.hold && (
-        <Callout tone="warning" title="Held at zero">
-          Every quantity this destination publishes is zero while the hold stands.
-          {" "}Held by {preview.hold.heldBy}: {preview.hold.reason}. The canonical ATP below is what would publish once released.
+        <Callout title="Stock is held at zero">
+          This preview includes the hold. Reason: {preview.hold.reason}.
         </Callout>
       )}
 
-      {preview.blockers.length > 0 && (
-        <Callout tone="warning" title={`${pluralize(preview.blockers.length, "blocker")} in the availability snapshot`}>
+      {issues.length > 0 && (
+        <Callout tone="warning" title="Stock setup needs attention">
           <ul className="list-disc space-y-1 pl-4">
-            {preview.blockers.map((blocker) => (
-              <li key={`${blocker.code}:${JSON.stringify(blocker.context)}`}>
-                <span className="font-mono text-xs">{blocker.code}</span> — {blocker.message}
-              </li>
-            ))}
+            {issues.map((message) => <li key={message}>{message}</li>)}
           </ul>
         </Callout>
       )}
 
       {preview.rows.length === 0 ? (
-        <Callout>This product has no sellable, tracked SKUs to calculate.</Callout>
+        <div className="rounded-md border bg-muted/20 p-4">
+          <p className="text-sm font-medium">{emptyPreview.title}</p>
+          <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{emptyPreview.description}</p>
+        </div>
       ) : mobile ? (
         <div className="space-y-3">{preview.rows.map(row => {
           const isOpen = expanded === row.productVariantId;
-          return <article key={row.productVariantId} className="overflow-hidden rounded-lg border" aria-label={`${row.sku ?? row.productVariantId} proposed quantity`}>
+          return <article key={row.productVariantId} className="overflow-hidden rounded-lg border" aria-label={`${row.sku ?? row.productVariantId} stock preview`}>
             <div className="space-y-3 p-4">
               <div><p className="break-all font-medium">{row.sku ?? `SKU #${row.productVariantId}`}</p>
                 <p className="text-xs text-muted-foreground">{describePackUnit(row.unitsPerVariant)}</p></div>
               <dl className="grid grid-cols-2 gap-3">
-                <div><dt className="text-xs text-muted-foreground">Available</dt><dd className="text-lg tabular-nums">{formatUnits(row.canonicalAtpUnits)}</dd></div>
-                <div><dt className="text-xs text-muted-foreground">Proposed</dt><dd className="text-lg font-semibold tabular-nums">{formatUnits(row.publishedUnits)}</dd></div>
+                <div><dt className="text-xs text-muted-foreground">Available stock</dt><dd className="text-lg tabular-nums">{hasSupply ? formatUnits(row.canonicalAtpUnits) : "Not calculated"}</dd></div>
+                <div><dt className="text-xs text-muted-foreground">After stock rules</dt><dd className="text-lg font-semibold tabular-nums">{hasSupply && row.policy ? formatUnits(row.publishedUnits) : "Not calculated"}</dd></div>
               </dl>
-              {!row.policy && <StatePill tone="blocked">No complete rule</StatePill>}
+              {!row.policy && <StatePill tone="blocked">Complete stock rules</StatePill>}
+              {row.hold && <StatePill tone="held">Held at zero</StatePill>}
               <IdentityCell view={view} target={target}
                 variant={{ id: row.productVariantId, sku: row.sku, name: row.sku ?? `SKU #${row.productVariantId}` }}
                 provider={provider} canEdit={canEdit} onReload={onReload} reloading={reloading} />
@@ -196,7 +224,7 @@ function PreviewTable({ view, channel, target, preview, canEdit, onReload, reloa
                 {isOpen ? "Hide calculation" : "Explain quantity"}<ChevronDown className={cn("ml-2 h-4 w-4", isOpen && "rotate-180")} aria-hidden="true" />
               </Button>
             </div>
-            {isOpen && <div className="border-t bg-muted/30"><RowExplanation row={row} view={view} explanation={explainQuantity(row)} /></div>}
+            {isOpen && <div className="border-t bg-muted/30"><RowExplanation row={row} view={view} hasSupply={hasSupply} explanation={explainQuantity(row)} /></div>}
           </article>;
         })}</div>
       ) : (
@@ -206,9 +234,9 @@ function PreviewTable({ view, channel, target, preview, canEdit, onReload, reloa
               <TableRow>
                 <TableHead className="w-8" />
                 <TableHead>SKU</TableHead>
-                <TableHead className="text-right">Available</TableHead>
-                <TableHead className="text-right">Proposed</TableHead>
-                <TableHead>Identity at {channel.name}</TableHead>
+                <TableHead className="text-right">Available stock</TableHead>
+                <TableHead className="text-right">After stock rules</TableHead>
+                <TableHead>Listing at {channel.name}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -227,10 +255,11 @@ function PreviewTable({ view, channel, target, preview, canEdit, onReload, reloa
                         <div className="font-medium">{row.sku ?? `SKU #${row.productVariantId}`}</div>
                         <div className="text-xs text-muted-foreground">{describePackUnit(row.unitsPerVariant)}</div>
                       </TableCell>
-                      <TableCell className="text-right tabular-nums">{formatUnits(row.canonicalAtpUnits)}</TableCell>
+                      <TableCell className="text-right tabular-nums">{hasSupply ? formatUnits(row.canonicalAtpUnits) : "Not calculated"}</TableCell>
                       <TableCell className="text-right">
-                        <span className="text-base font-semibold tabular-nums">{formatUnits(row.publishedUnits)}</span>
-                        {!row.policy && <div><StatePill tone="blocked">No complete rule</StatePill></div>}
+                        <span className="text-base font-semibold tabular-nums">{hasSupply && row.policy ? formatUnits(row.publishedUnits) : "Not calculated"}</span>
+                        {!row.policy && <div><StatePill tone="blocked">Complete stock rules</StatePill></div>}
+                        {row.hold && <div><StatePill tone="held">Held at zero</StatePill></div>}
                       </TableCell>
                       <TableCell onClick={(event) => event.stopPropagation()}>
                         <IdentityCell
@@ -247,7 +276,7 @@ function PreviewTable({ view, channel, target, preview, canEdit, onReload, reloa
                     {isOpen && (
                       <TableRow className="bg-muted/30 hover:bg-muted/30">
                         <TableCell colSpan={5} className="p-0">
-                          <RowExplanation row={row} view={view} explanation={explanation} />
+                          <RowExplanation row={row} view={view} hasSupply={hasSupply} explanation={explanation} />
                         </TableCell>
                       </TableRow>
                     )}
@@ -258,29 +287,43 @@ function PreviewTable({ view, channel, target, preview, canEdit, onReload, reloa
           </Table>
         </div>
       )}
-      <EvidenceNote>
-        Available counts only the warehouses chosen for this destination. These proposed quantities
-        are calculations, not provider delivery confirmations.
-      </EvidenceNote>
+      <details className="rounded-md border px-3 py-2 text-xs">
+        <summary className="cursor-pointer font-medium">Technical details</summary>
+        <div className="mt-3 space-y-3 text-muted-foreground">
+          <p>Stock captured {formatAbsoluteTime(preview.shadowCapturedAt)}. {pluralize(preview.warehouseIds.length, "selected warehouse")}.
+            {" "}Warehouse settings: {preview.sourceBindingAuthority}. {pluralize(preview.selectedPolicies.length, "saved rule")}; {draftPolicies} not applied.</p>
+          {preview.membership && <p>SKU selection: {preview.membership.mode === "explicit"
+            ? `${preview.membership.includedVariantIds.length} selected for this product`
+            : "All eligible SKUs in this product"}.</p>}
+          {preview.hold && <p>Hold entered by {preview.hold.heldBy} on {formatAbsoluteTime(preview.hold.heldAt)}.</p>}
+          {preview.blockers.length > 0 && <ul className="space-y-2">
+            {preview.blockers.map((blocker) => (
+              <li key={`${blocker.code}:${JSON.stringify(blocker.context)}`} className="break-words">
+                <span className="font-mono">{blocker.code}</span>: {blocker.message}
+              </li>
+            ))}
+          </ul>}
+        </div>
+      </details>
     </div>
   );
 }
 
-function RowExplanation({ row, view, explanation }: { row: PreviewRow; view: View; explanation: ReturnType<typeof explainQuantity> }) {
+function RowExplanation({ row, view, hasSupply, explanation }: { row: PreviewRow; view: View; hasSupply: boolean; explanation: ReturnType<typeof explainQuantity> }) {
   const contributions = describeWarehouseContributions(row, view.fulfillmentNodes);
   return (
     <div className="grid gap-4 p-4 md:grid-cols-3">
       <div className="space-y-2">
         <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Calculation</p>
-        <ol className="space-y-1.5 text-sm">
+        {!hasSupply ? <p className="text-sm text-muted-foreground">Choose supply warehouses before calculating this SKU.</p> : <ol className="space-y-1.5 text-sm">
           {explanation.steps.map((step, index) => (
             <li key={step.label} className="flex items-baseline justify-between gap-3">
               <span className="text-muted-foreground">{index === 0 ? "" : "→ "}{step.label}</span>
               <span className="tabular-nums font-medium">{formatUnits(step.units)}</span>
             </li>
           ))}
-        </ol>
-        {explanation.zeroReason && <p className="text-xs text-amber-700 dark:text-amber-300">{explanation.zeroReason}</p>}
+        </ol>}
+        {hasSupply && explanation.zeroReason && <p className="text-xs text-amber-700 dark:text-amber-300">{explanation.zeroReason}</p>}
       </div>
       <div className="space-y-2">
         <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Where the stock is</p>
@@ -316,4 +359,57 @@ function RowExplanation({ row, view, explanation }: { row: PreviewRow; view: Vie
       </div>
     </div>
   );
+}
+
+/** Explain only conditions the preview explicitly reports; keep raw errors available below. */
+function describePreviewIssues(preview: Preview): string[] {
+  const labels: Readonly<Record<string, string>> = {
+    CHANNEL_EXPOSURE_POLICY_INCOMPLETE: "Complete the stock rules for the affected SKUs.",
+    PUBLICATION_TARGET_VARIANT_MAPPING_MISSING: "Link the affected SKUs to their channel listings below.",
+    CHANNEL_SOURCE_BINDING_MISSING: "Choose the warehouses that supply this account.",
+    CHANNEL_SOURCE_WAREHOUSE_MISSING_FROM_SHADOW: "Some selected warehouses are missing from this stock calculation. Recalculate stock after checking the warehouse selection.",
+    CHANNEL_SOURCE_OVERRIDE_UNAVAILABLE: "A product or SKU uses a warehouse that is unavailable in this stock calculation.",
+    PUBLICATION_MEMBER_VARIANT_UNAVAILABLE: "A selected SKU is no longer available for stock updates. Check its catalog status and listing selection.",
+    CHANNEL_EXPOSURE_SKU_MISSING_FROM_SHADOW: "Some selected SKUs are missing from this stock calculation. Recalculate stock to check them again.",
+    SHADOW_MODEL_STALE: "The product setup changed after this stock calculation. Recalculate stock to use the latest setup.",
+    CANONICAL_SHADOW_BLOCKED: "The latest stock calculation did not complete successfully. Check the inventory issue in Technical details.",
+  };
+  const messages = new Set<string>();
+  for (const blocker of preview.blockers) {
+    // The account status and setup action already explain this state above.
+    if (blocker.code === "PUBLICATION_TARGET_NOT_IN_PREVIEW") continue;
+    messages.add(labels[blocker.code] ?? "Another inventory check failed. Open Technical details for the returned error.");
+  }
+  return [...messages];
+}
+
+function describeEmptyPreview(preview: Preview): { title: string; description: string } {
+  if (preview.publicationAuthority !== "echelon") {
+    return {
+      title: "Stock is managed outside Echelon",
+      description: "This account does not use Echelon's calculated stock quantities.",
+    };
+  }
+  if (preview.membership?.mode === "explicit" && preview.membership.includedVariantIds.length === 0) {
+    return {
+      title: "No SKUs selected for stock updates",
+      description: "This preview includes only SKUs selected for this account. None are selected for this product yet.",
+    };
+  }
+  if (preview.blockers.some((blocker) => blocker.code !== "PUBLICATION_TARGET_NOT_IN_PREVIEW")) {
+    return {
+      title: "Stock could not be calculated",
+      description: "Resolve the setup issues above, then recalculate stock.",
+    };
+  }
+  if (preview.membership?.mode === "whole_product") {
+    return {
+      title: "No eligible SKUs to preview",
+      description: "This product has no active, sellable SKUs that ship and track inventory.",
+    };
+  }
+  return {
+    title: "No stock quantities returned",
+    description: "No SKU quantities are available for this product in the current preview.",
+  };
 }

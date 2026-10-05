@@ -5,6 +5,7 @@
  * persisted provider identities, with account ids used when names are empty.
  */
 import { describe, expect, it, vi } from "vitest";
+import { inventoryPublicationTargetAdminSchema } from "@shared/types/inventory-channel-exposure";
 import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
 
 /** Flattens a drizzle `sql` template into text so a fake can route by statement. */
@@ -107,5 +108,66 @@ describe("PostgresInventoryChannelExposureAdminStore.getAdminView connection lab
       id: 69, externalAccountLabel: null, shopifyLocationId: null, providerLocationId: null,
       providerAccount: { externalAccountId: "ebay-user-69", displayName: "cardshellz", verifiedAt: "2026-10-04T12:00:00.000Z" },
     }]);
+  });
+});
+
+describe("publication target prior live-stop evidence", () => {
+  const wireTarget = {
+    id: 5,
+    destinationKind: "channel_connection",
+    channelId: 3,
+    channelConnectionId: 33,
+    dropshipStoreConnectionId: null,
+    legacyFulfillmentNodeId: 7,
+    providerScopeType: "location",
+    externalScopeId: "location-1",
+    publicationAuthority: "echelon",
+    state: "preview",
+    revision: "3",
+    hold: null,
+  };
+
+  it("preserves unknown prior-stop history from an older response", () => {
+    const target = inventoryPublicationTargetAdminSchema.parse(wireTarget);
+    expect(target).not.toHaveProperty("hasPriorLiveStop");
+  });
+
+  it.each([false, true])("preserves explicit prior-stop evidence %s", (hasPriorLiveStop) => {
+    expect(inventoryPublicationTargetAdminSchema.parse({ ...wireTarget, hasPriorLiveStop }))
+      .toMatchObject({ hasPriorLiveStop });
+  });
+
+  it.each([null, "false", "true", 0, 1])("rejects non-boolean stop evidence %j", (hasPriorLiveStop) => {
+    expect(inventoryPublicationTargetAdminSchema.safeParse({ ...wireTarget, hasPriorLiveStop }).success).toBe(false);
+  });
+
+  it.each([
+    { state: "disabled", hasPriorLiveStop: false },
+    { state: "preview", hasPriorLiveStop: false },
+    { state: "disabled", hasPriorLiveStop: true },
+    { state: "preview", hasPriorLiveStop: true },
+    { state: "live", hasPriorLiveStop: true },
+  ])("projects audited history without deriving it from $state ($hasPriorLiveStop)", async ({ state, hasPriorLiveStop }) => {
+    const { store, execute } = createStore([{ authority: "canonical", revision: "12" }], {
+      "inventory.inventory_publication_targets": [{
+        id: 5, destination_kind: "channel_connection", channel_id: 3,
+        channel_connection_id: 33, dropship_store_connection_id: null,
+        fulfillment_node_id: 7, provider_scope_type: "location", external_scope_id: "location-1",
+        publication_authority: "echelon", state, revision: "3",
+        hold_reason: null, held_at: null, held_by: null,
+        has_prior_live_stop: hasPriorLiveStop,
+      }],
+    });
+
+    const view = await store.getAdminView(null);
+
+    expect(view.publicationTargets).toEqual([{ ...wireTarget, state, hasPriorLiveStop }]);
+    const statements = execute.mock.calls.map(([query]) => sqlText(query));
+    const targetQuery = statements.find(text => text.includes("FROM inventory.inventory_publication_targets"))!;
+    expect(targetQuery).toContain("EXISTS (");
+    expect(targetQuery).toContain("audit.action = 'inventory_availability.publication_target.stopped'");
+    expect(targetQuery).toContain("audit.target = 'inventory.inventory_publication_target:' || target.id::text");
+    expect(targetQuery).not.toContain("publication_target.preview_state_changed");
+    expect(statements.every(text => /^\s*SELECT\b/.test(text))).toBe(true);
   });
 });

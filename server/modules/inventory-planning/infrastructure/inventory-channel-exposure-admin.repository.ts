@@ -182,12 +182,19 @@ implements InventoryChannelExposureAdminStore {
       JOIN dropship.dropship_vendors AS vendor ON vendor.id = connection.vendor_id
       ORDER BY vendor.business_name, connection.platform, connection.id
     `));
+    // Keep this evidence predicate aligned with assertPreviouslyStopped in the
+    // resume repository. Preview inclusion alone is not a prior live stop.
     const targetRows = rows(await this.database.execute(sql`
       SELECT id, destination_kind, channel_id, channel_connection_id,
              dropship_store_connection_id, fulfillment_node_id,
              provider_scope_type, external_scope_id, publication_authority, state, revision,
-             hold_reason, held_at, held_by
-      FROM inventory.inventory_publication_targets
+             hold_reason, held_at, held_by,
+             EXISTS (
+               SELECT 1 FROM public.audit_events AS audit
+               WHERE audit.action = 'inventory_availability.publication_target.stopped'
+                 AND audit.target = 'inventory.inventory_publication_target:' || target.id::text
+             ) AS has_prior_live_stop
+      FROM inventory.inventory_publication_targets AS target
       ORDER BY channel_id, destination_kind, channel_connection_id,
                dropship_store_connection_id, external_scope_id, id
     `));
@@ -354,6 +361,7 @@ implements InventoryChannelExposureAdminStore {
         state: String(row.state),
         revision: String(row.revision),
         hold: publicationHold(row),
+        hasPriorLiveStop: row.has_prior_live_stop,
       })),
       fulfillmentNodes: nodeRows.map((row) => ({
         id: positiveInteger(row.id, "node.id"),

@@ -26,8 +26,8 @@ const routes = readFileSync(
 );
 const registry = readFileSync("server/routes.ts", "utf8");
 const page = readFileSync("client/src/features/channel-inventory/ChannelInventoryPage.tsx", "utf8");
-const publishingTab = readFileSync(
-  "client/src/features/channel-inventory/components/PublishingTab.tsx",
+const stockUpdatesControl = readFileSync(
+  "client/src/features/channel-inventory/components/StockUpdatesControl.tsx",
   "utf8",
 );
 
@@ -118,14 +118,19 @@ describe("inventory channel exposure inactive foundation", () => {
     expect(routes).toContain("publication-target-resume");
     expect(routes).toContain("publication-target-stop");
     expect(registry).toContain("registerInventoryChannelExposureRoutes(app)");
-    // The live allocator is read from the runtime-authority singleton, never asserted.
-    expect(page).toContain("<InventoryRuntimeAuthorityBadge />");
+    // Account controls use the authority supplied by the workspace read model.
+    expect(stockUpdatesControl).toContain("describeStockUpdates(target, view.runtimeAuthority, globalOn)");
     expect(page).not.toContain("Legacy runtime retained");
-    // Readiness inclusion stays a reviewed, reason-gated step; nothing publishes on demand.
-    expect(publishingTab).toContain("Include in readiness review");
-    expect(publishingTab).toContain("setReadinessInclusion");
+    // Check command wiring instead of labels: inclusion still needs a reason
+    // and requests preview, while the switch reflects persisted target state.
+    expect(stockUpdatesControl).toContain('checked={target.state === "live"} disabled={!canActivate || busy}');
+    expect(stockUpdatesControl).toContain("setReadinessInclusion({");
+    expect(stockUpdatesControl).toContain("changeReason: input.reason");
+    expect(stockUpdatesControl).toMatch(
+      /dialog === "include" && <ReasonDialog[\s\S]*?onConfirm=\{reason => inclusion\.mutate\(\{ state: "preview", reason \}\)\}/,
+    );
     expect(page).not.toMatch(/publish now/i);
-    expect(publishingTab).not.toMatch(/publish now/i);
+    expect(stockUpdatesControl).not.toMatch(/publish now/i);
   });
 
   it("adds append-only exact-revision readiness evidence without seeding or activating targets", () => {

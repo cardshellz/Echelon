@@ -73,7 +73,7 @@ function railStatusLabel(entry: ChannelRailEntry): string {
   const parts: string[] = [];
   if (entry.liveCount > 0) parts.push(`${entry.liveCount} publishing`);
   if (entry.heldCount > 0) parts.push(`${entry.heldCount} held at zero`);
-  if (entry.previewCount > 0) parts.push(`${entry.previewCount} calculating only`);
+  if (entry.previewCount > 0) parts.push(`${entry.previewCount} awaiting setup`);
   if (entry.externalCount > 0) parts.push(`${entry.externalCount} externally managed`);
   if (entry.offCount > 0) parts.push(`${entry.offCount} not publishing`);
   return parts.length === 0 ? "No destinations" : parts.join(", ");
