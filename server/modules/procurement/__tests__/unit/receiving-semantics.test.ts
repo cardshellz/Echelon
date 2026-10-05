@@ -53,6 +53,51 @@ function makeZeroPostVoidTx(input: {
   };
 }
 
+describe("ReceivingService - open receipt unit contract", () => {
+  it.each([1000, null])("returns usable versions with recorded factor %s and unchanged counts", async (factor) => {
+    const now = new Date("2026-10-04T14:00:00.000Z");
+    const order = { id: 42, status: "draft", vendorId: 5 };
+    const lines = [{ id: 7, receivingOrderId: 42, productId: 10, productVariantId: 20,
+      purchaseOrderLineId: 21, inboundShipmentLineId: 145, unitsPerVariantSnapshot: factor,
+      expectedQty: 525, receivedQty: 0, damagedQty: 0, updatedAt: now }];
+    const before = structuredClone(lines);
+    const vendor = { id: 5, name: "Fixture vendor" };
+    const tx = { execute: vi.fn().mockResolvedValue({ rows: [{ id: 42 }] }) };
+    const storage = {
+      getReceivingOrderById: vi.fn().mockResolvedValue(order),
+      updateReceivingOrder: vi.fn(async (_id, patch) => ({ ...order, ...patch })),
+      getReceivingLines: vi.fn().mockResolvedValue(lines),
+      getVendorById: vi.fn().mockResolvedValue(vendor),
+    };
+    const db = { transaction: vi.fn(async (callback) => callback(tx)) };
+    const service = new ReceivingService(db as any, {} as any, {} as any, storage as any,
+      null, null, null, null, null, null, () => now);
+
+    const result = await service.open(42, "user-1");
+
+    expect(result).toEqual({ ...order, status: "open", receivedBy: "user-1", receivedDate: now,
+      lines: [{ ...lines[0], unitVersion: receivingUnitVersion(lines[0]) }], vendor });
+    expect(lines).toEqual(before);
+    expect(storage.updateReceivingOrder).toHaveBeenCalledWith(42, {
+      status: "open", receivedBy: "user-1", receivedDate: now,
+    }, tx);
+  });
+
+  it.each(["open", "receiving", "closed", "cancelled"])("does not reopen a %s receipt or change counts", async (status) => {
+    const tx = { execute: vi.fn().mockResolvedValue({ rows: [{ id: 42 }] }) };
+    const storage = {
+      getReceivingOrderById: vi.fn().mockResolvedValue({ id: 42, status }),
+      updateReceivingOrder: vi.fn(), getReceivingLines: vi.fn(),
+    };
+    const db = { transaction: vi.fn(async (callback) => callback(tx)) };
+    const service = new ReceivingService(db as any, {} as any, {} as any, storage as any);
+
+    await expect(service.open(42, "user-1")).rejects.toThrow("Can only open orders in draft status");
+    expect(storage.updateReceivingOrder).not.toHaveBeenCalled();
+    expect(storage.getReceivingLines).not.toHaveBeenCalled();
+  });
+});
+
 describe("ReceivingService - completeAllLines semantics", () => {
   it("preserves positive partial entries and fills untouched zero counts using confirmed units", async () => {
     const now = new Date("2026-09-06T12:00:00.000Z");

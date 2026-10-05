@@ -1,3 +1,5 @@
+import { sendPickingCommand, PickingCommandRejectedError } from "@/lib/picking-command";
+import { pickingSourcePlanSchema, type PickingSourcePlan } from "@shared/picking-source-plan";
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { QueryLoadError } from "@/components/query-load-error";
@@ -84,6 +86,7 @@ type ReplenPrediction = {
 };
 
 type OrderItemWithReplen = OrderItem & {
+  sourcePlan?: PickingSourcePlan;
   replenPrediction?: ReplenPrediction | null;
 };
 
@@ -145,11 +148,12 @@ async function releaseOrder(orderId: number, expectedAssignment: PickingAssignme
 }
 
 async function unpickItem(itemId: number, qty: number, reason: string = "Picker unpick"): Promise<PickResponse> {
+  return sendPickingCommand("unpick", itemId, { qty, reason }, async ({ commandId, payload }) => {
   const res = await fetch(`/api/picking/items/${itemId}/unpick`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ qty, reason }),
+    body: JSON.stringify({ ...payload, commandId }),
   });
   if (!res.ok) {
     let message = "Failed to unpick item";
@@ -159,9 +163,10 @@ async function unpickItem(itemId: number, qty: number, reason: string = "Picker 
     } catch {
       // Non-JSON error body.
     }
-    throw new Error(message);
+    throw res.status < 500 && res.status !== 409 ? new PickingCommandRejectedError(message) : new Error(message);
   }
   return res.json();
+  });
 }
 
 async function holdOrder(orderId: number): Promise<Order> {
@@ -197,7 +202,7 @@ async function setOrderPriority(orderId: number, priority: number | "reset"): Pr
 
 type PickInventoryContext = {
   deducted: boolean;
-  systemQtyAfter: number;
+  systemQtyAfter: number | null;
   locationId: number | null;
   locationCode: string | null;
   sku: string;
@@ -231,6 +236,8 @@ type PickInventoryContext = {
 type PickResponse = {
   item: OrderItem;
   inventory: PickInventoryContext;
+  followupPending?: boolean;
+  message?: string;
 };
 
 type ResolveAllocationResponse = {
@@ -260,18 +267,22 @@ async function updateOrderItem(
   status: ItemStatus,
   pickedQuantity?: number,
   shortReason?: string,
-  pickMethod?: "scan" | "manual" | "pick_all" | "button" | "short"
+  pickMethod?: "scan" | "manual" | "pick_all" | "button" | "short",
+  warehouseLocationId?: number
 ): Promise<PickResponse> {
+  return sendPickingCommand("pick", itemId, { status, pickedQuantity, shortReason, pickMethod, warehouseLocationId }, async ({ commandId, payload }) => {
   const res = await fetch(`/api/picking/items/${itemId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status, pickedQuantity, shortReason, pickMethod }),
+    body: JSON.stringify({ ...payload, commandId }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: "Unknown error" }));
-    throw new Error(err.message || err.error || `Failed to update item (${res.status})`);
+    const message = err.message || err.error || `Failed to update item (${res.status})`;
+    throw res.status < 500 && res.status !== 409 ? new PickingCommandRejectedError(message) : new Error(message);
   }
   return res.json();
+  });
 }
 
 async function resolveAllocationBin(itemId: number, locationCode: string): Promise<ResolveAllocationResponse> {
@@ -551,6 +562,7 @@ import {
 
 // Types
 interface PickItem {
+  sourcePlan?: PickingSourcePlan;
   id: number;
   sku: string;
   name: string;
@@ -866,7 +878,7 @@ function PickingWorkspace() {
   }, []);
   
   // First, map all API orders to SingleOrder format
-  const allOrdersMapped = useMemo<SingleOrder[]>(() => apiOrders.map((order): SingleOrder => ({
+  const mapPickerOrder = useCallback((order: OrderWithItems): SingleOrder => ({
     id: String(order.id),
     orderNumber: order.orderNumber,
     customer: order.customerName,
@@ -900,6 +912,7 @@ function PickingWorkspace() {
           sku: item.sku,
           name: item.name,
           location: item.location,
+          sourcePlan: item.sourcePlan ? pickingSourcePlanSchema.parse(item.sourcePlan) : undefined,
           qty: progress.targetQuantity,
           picked: progress.pickedQuantity,
           status: progress.status,
@@ -912,7 +925,8 @@ function PickingWorkspace() {
         };
       })
       .filter((item) => item.qty > 0 || item.status === "short"),
-  })), [apiOrders, formatOrderDate]);
+  }), [formatOrderDate]);
+  const allOrdersMapped = useMemo<SingleOrder[]>(() => apiOrders.map(mapPickerOrder), [apiOrders, mapPickerOrder]);
 
   // Group combined orders into single entries
   const ordersFromApi = useMemo<SingleOrder[]>(() => {
@@ -1226,7 +1240,13 @@ function PickingWorkspace() {
       pickedQuantity?: number;
       shortReason?: string;
       pickMethod?: "scan" | "manual" | "pick_all" | "button" | "short";
-    }) => updateOrderItem(itemId, status, pickedQuantity, shortReason, pickMethod),
+    }) => {
+      const item = singleQueue.flatMap(order => order.items).find(item => item.id === itemId)
+        ?? queue.flatMap(batch => batch.items).find(item => item.id === itemId);
+      if (item?.sourcePlan?.status === "blocked") throw new Error(item.sourcePlan.message);
+      const source = item?.sourcePlan?.status === "ready" ? item.sourcePlan.warehouseLocationId : undefined;
+      return updateOrderItem(itemId, status, pickedQuantity, shortReason, pickMethod, source);
+    },
     onSuccess: (data: PickResponse) => {
       const { item: updatedItem, inventory } = data;
       queryClient.setQueryData<OrderWithItems[]>(["picking-queue"], (oldData) => {
@@ -1240,6 +1260,12 @@ function PickingWorkspace() {
       });
       applyServerItemToLocalQueues(updatedItem);
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+
+      if (data.followupPending) {
+        orderCompletedPendingRef.current = false;
+        toast({ title: "Pick recorded; follow-up pending", description: data.message, duration: 8000 });
+        return;
+      }
 
       if (inventory?.resolution?.reviewRequired && !inventory.resolution.autoResolved) {
         orderCompletedPendingRef.current = false;
@@ -1323,6 +1349,7 @@ function PickingWorkspace() {
       unpickItem(itemId, qty, reason),
     onSuccess: (data: PickResponse) => {
       const { item: updatedItem } = data;
+      if (data.followupPending) toast({ title: "Unpick recorded; follow-up pending", description: data.message, duration: 8000 });
       queryClient.setQueryData<OrderWithItems[]>(["picking-queue"], (oldData) => {
         if (!oldData) return oldData;
         return oldData.map(order => ({
@@ -1870,23 +1897,26 @@ function PickingWorkspace() {
           }
 
           // Claim all orders in the combined group
+          const claimedItems = new Map<number, PickItem>();
           for (const subOrder of combinedOrder.combinedOrders) {
             const subOrderId = parseInt(subOrder.id);
             if (!isNaN(subOrderId)) {
-              await claimMutation.mutateAsync({
+              const claimed = await claimMutation.mutateAsync({
                 orderId: subOrderId,
                 claimSource: options.claimSource || "combined_group",
               });
+              for (const item of mapPickerOrder(claimed).items) claimedItems.set(item.id, item);
             }
           }
           
+          const claimedCombinedOrder = { ...combinedOrder, items: combinedOrder.items.map(item => claimedItems.get(item.id) ?? item) };
           // Success - copy the combined order to local state
           setLocalSingleQueue(prev => {
             const existing = prev.find(o => o.id === id);
             if (existing) {
-              return prev.map(o => o.id === id ? { ...combinedOrder, status: "in_progress" as const, assignee: "You" } : o);
+              return prev.map(o => o.id === id ? { ...claimedCombinedOrder, status: "in_progress" as const, assignee: "You" } : o);
             } else {
-              return [...prev, { ...combinedOrder, status: "in_progress" as const, assignee: "You" }];
+              return [...prev, { ...claimedCombinedOrder, status: "in_progress" as const, assignee: "You" }];
             }
           });
           
@@ -1921,17 +1951,18 @@ function PickingWorkspace() {
           return;
         }
 
-        await claimMutation.mutateAsync({
+        const claimed = await claimMutation.mutateAsync({
           orderId: numericId,
           claimSource: options.claimSource || "card_click",
         });
-        if (orderToPick) {
+        const claimedOrder = mapPickerOrder({ ...apiOrders.find(order => order.id === numericId), ...claimed });
+        if (claimedOrder) {
           setLocalSingleQueue(prev => {
             const existing = prev.find(o => o.id === id);
             if (existing) {
-              return prev.map(o => o.id === id ? { ...orderToPick, status: "in_progress" as const, assignee: "You" } : o);
+              return prev.map(o => o.id === id ? { ...claimedOrder, status: "in_progress" as const, assignee: "You" } : o);
             } else {
-              return [...prev, { ...orderToPick, status: "in_progress" as const, assignee: "You" }];
+              return [...prev, { ...claimedOrder, status: "in_progress" as const, assignee: "You" }];
             }
           });
         }
@@ -2202,7 +2233,7 @@ function PickingWorkspace() {
       const resp = await fetch("/api/picking/replen-guidance", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sku: item.sku, locationCode: item.location }),
+        body: JSON.stringify({ orderItemId: item.id }),
       });
       const guidance = await resp.json();
 
@@ -3955,6 +3986,7 @@ function PickingWorkspace() {
           sku: item.sku,
           name: item.name,
           location: item.location,
+          sourcePlan: item.sourcePlan ? pickingSourcePlanSchema.parse(item.sourcePlan) : undefined,
           qty: item.quantity,
           picked: item.pickedQuantity,
           status,

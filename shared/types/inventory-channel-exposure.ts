@@ -25,8 +25,8 @@ const postgresBigintString = z.string().regex(/^(0|[1-9]\d*)$/);
  * Blank or whitespace-only notes normalize to null so no fabricated reason is
  * ever persisted on the operator's behalf.
  *
- * Sensitive publication commands (readiness inclusion, stop, resume, global
- * control, cutover) keep their required reasons in their own contracts.
+ * Pausing stock updates is also audited without requiring a written reason.
+ * Readiness, resume, and cutover retain their own required-reason contracts.
  */
 const optionalChangeNote = z.string().trim().max(1000).nullable().optional()
   .transform((value) => (value ? value : null));
@@ -178,6 +178,9 @@ export const inventoryPublicationTargetAdminSchema = z.object({
   state: z.enum(["disabled", "preview", "live"]),
   revision: postgresBigintString,
   hold: inventoryPublicationTargetHoldSchema.nullable(),
+  // Resume requires the audited prior-live stop, not merely a disabled or
+  // preview state. Omitted by older servers means unknown, not never started.
+  hasPriorLiveStop: z.boolean().optional(),
 }).strict().superRefine(validatePublicationDestination);
 
 export const legacyPublicationMappingCandidateSchema = z.object({
@@ -465,7 +468,7 @@ export const setInventoryPublicationTargetPreviewStateRequestSchema = z.object({
 export const stopInventoryPublicationTargetRequestSchema = z.object({
   publicationTargetId: positiveInteger,
   expectedRevision: postgresBigintString,
-  changeReason: nonblank(1000),
+  changeReason: optionalChangeNote,
   idempotencyKey: nonblank(120),
 }).strict();
 
@@ -869,7 +872,7 @@ export type PublicationSourceBindingHead = z.infer<typeof publicationSourceBindi
 export type PublicationVariantMappingVersion = z.infer<typeof publicationVariantMappingVersionSchema>;
 export type PublicationVariantMappingHead = z.infer<typeof publicationVariantMappingHeadSchema>;
 export type InventoryPublicationTargetAdmin = z.infer<typeof inventoryPublicationTargetAdminSchema>;
-export type StopInventoryPublicationTargetRequest = z.infer<
+export type StopInventoryPublicationTargetRequest = z.input<
   typeof stopInventoryPublicationTargetRequestSchema
 >;
 export type LegacyPublicationMappingCandidate = z.infer<typeof legacyPublicationMappingCandidateSchema>;

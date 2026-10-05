@@ -21,6 +21,7 @@ import Papa from "papaparse";
 import { registerPickingHistoryRoutes } from "./picking-history.routes";
 import { registerPickCorrectionRoutes } from "./pick-correction.routes";
 import { registerPickingAssignmentReleaseRoutes } from "./picking-assignment-release.routes";
+import { pickingCommandSchema, unpickingCommandSchema } from "@shared/types/picking-command";
 
 export function registerPickingRoutes(app: Express) {
   registerPickingHistoryRoutes(app);
@@ -146,50 +147,14 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  // Fix stale item_count/unit_count on all orders
-  app.post("/api/picking/fix-order-counts", requireAuth, async (req, res) => {
-    try {
-      const rowsUpdated = await storage.fixOrderCounts();
-      res.json({ message: "Order counts recalculated", rowsUpdated });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
+  app.post("/api/picking/fix-order-counts", requirePermission("warehouse", "manage"), async (req, res) => {
+    try { res.json(await req.app.locals.services.picking.repairPickingProgress("counts", req.session.user?.id || "system:repair")); }
+    catch (error: any) { res.status(500).json({ error: error.message }); }
   });
-
-  // Diagnostic endpoint to fix stuck orders (considers only shippable items)
-  app.post("/api/picking/fix-stuck-orders", requireAuth, async (req, res) => {
-    try {
-      const stuckOrders = await storage.getStuckInProgressOrders();
-      const fixed: string[] = [];
-
-      for (const row of stuckOrders) {
-        const shippableCount = Number(row.shippable_count);
-        const shippableDoneCount = Number(row.shippable_done_count);
-        if (shippableCount > 0 && shippableDoneCount === shippableCount) {
-          const hasShort = Number(row.short_count) > 0;
-          const newStatus = hasShort ? 'exception' : 'completed';
-          await storage.transitionStuckOrder(row.id, newStatus);
-          await storage.completeNonShippableItems(row.id);
-          fixed.push(`${row.order_number}: in_progress → ${newStatus} (${shippableDoneCount}/${shippableCount} shippable items done)`);
-        }
-      }
-      
-      res.json({ 
-        inProgressOrders: stuckOrders.map(r => ({
-          orderNumber: r.order_number,
-          itemCount: r.item_count,
-          shippableCount: r.shippable_count,
-          shippableDoneCount: r.shippable_done_count,
-          shortCount: r.short_count,
-        })),
-        fixed 
-      });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
+  app.post("/api/picking/fix-stuck-orders", requirePermission("warehouse", "manage"), async (req, res) => {
+    try { res.json(await req.app.locals.services.picking.repairPickingProgress("stuck", req.session.user?.id || "system:repair")); }
+    catch (error: any) { res.status(500).json({ error: error.message }); }
   });
-
-  // ===== PICKING ROUTES (thin adapters → PickingService) =====
 
   app.get("/api/picking/queue", requireAuth, limitPageRead(async (req, res) => {
     try {
@@ -210,11 +175,7 @@ export function registerPickingRoutes(app: Express) {
   app.get("/api/picking/orders/:id", requireAuth, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const order = await storage.getOrderById(id);
-      if (!order) return res.status(404).json({ error: "Order not found" });
-      const allItems = await storage.getOrderItems(id);
-      const shippableItems = allItems.filter(item => item.requiresShipping === 1);
-      res.json({ ...order, items: shippableItems });
+      res.json(await req.app.locals.services.picking.getPickerOrder(id));
     } catch (error: any) {
       console.error("Error fetching order:", error);
       res.status(500).json({ error: "Failed to fetch order" });
@@ -237,47 +198,7 @@ export function registerPickingRoutes(app: Express) {
         .slice(0, 100);
       if (itemIds.length === 0) return res.json(empty);
 
-      const { replenishment } = req.app.locals.services as any;
-      if (!replenishment?.resolveDedicatedReplenBin) return res.json(empty);
-
-      // Resolve each item's pick variant + pick bin. order_items carries the
-      // picker-facing location CODE and the sku; map both to ids. DISTINCT ON
-      // guards against duplicate-SKU variants (prefer lowest active variant id).
-      const rows: any = await db.execute(sql`
-        SELECT DISTINCT ON (oi.id)
-          oi.id AS order_item_id,
-          pv.id AS variant_id,
-          wl.id AS location_id
-        FROM wms.order_items oi
-        JOIN wms.orders o ON o.id = oi.order_id
-        JOIN catalog.product_variants pv
-          ON UPPER(pv.sku) = UPPER(oi.sku)
-         AND pv.is_active = true
-        JOIN warehouse.warehouse_locations wl
-          ON wl.code = oi.location
-         AND (o.warehouse_id IS NULL OR wl.warehouse_id = o.warehouse_id)
-        WHERE oi.id = ANY(ARRAY[${sql.join(itemIds, sql`, `)}]::integer[])
-          AND oi.location IS NOT NULL
-          AND oi.location NOT IN ('UNASSIGNED', 'U')
-        ORDER BY oi.id, pv.id
-      `);
-
-      const replenBins: Record<string, { locationCode: string }> = {};
-      for (const row of rows?.rows ?? []) {
-        try {
-          const bin = await replenishment.resolveDedicatedReplenBin(
-            Number(row.variant_id),
-            Number(row.location_id),
-          );
-          // Don't echo the pick bin back as its own backup.
-          if (bin && bin.locationId !== Number(row.location_id)) {
-            replenBins[String(row.order_item_id)] = { locationCode: bin.locationCode };
-          }
-        } catch {
-          // Informational only — skip this item, never fail the request.
-        }
-      }
-      res.json({ replenBins });
+      res.json(await req.app.locals.services.picking.getDedicatedReplenBins(itemIds));
     } catch (error: any) {
       console.error("Error resolving pick replen bins:", error?.message ?? error);
       res.json(empty);
@@ -319,13 +240,11 @@ export function registerPickingRoutes(app: Express) {
 
   app.patch("/api/picking/items/:id", requireAuth, async (req, res) => {
     try {
+      const command = pickingCommandSchema.safeParse(req.body);
+      if (!command.success) return res.status(400).json({ code: "PICK_COMMAND_INVALID", error: "Invalid picking command", details: command.error.flatten() });
       const { picking } = req.app.locals.services;
-      const result = await picking.pickItem(parseInt(req.params.id), {
-        status: req.body.status,
-        pickedQuantity: req.body.pickedQuantity,
-        shortReason: req.body.shortReason,
-        pickMethod: req.body.pickMethod,
-        warehouseLocationId: req.body.warehouseLocationId,
+      const result = await picking.pickItem(Number(req.params.id), {
+        ...command.data,
         userId: req.session.user?.id,
         deviceType: req.headers["x-device-type"] as string,
         sessionId: req.sessionID,
@@ -335,22 +254,23 @@ export function registerPickingRoutes(app: Express) {
         return res.status(400).json(result);
       }
       
-      res.json({ item: result.item, inventory: result.inventory });
+      res.json(result);
     } catch (error: any) {
       console.error("Error updating item:", error);
       const status = error?.isOperational && typeof error.statusCode === "number"
         ? error.statusCode
         : error?.name === "ValidationError" ? 400 : 500;
-      res.status(status).json({ error: error.message || "Failed to update item" });
+      res.status(status).json({ error: error.message || "Failed to update item", code: error.code });
     }
   });
 
   app.post("/api/picking/items/:id/unpick", requireAuth, async (req, res) => {
     try {
+      const command = unpickingCommandSchema.safeParse(req.body);
+      if (!command.success) return res.status(400).json({ code: "UNPICK_COMMAND_INVALID", error: "Invalid unpick command", details: command.error.flatten() });
       const { picking } = req.app.locals.services;
-      const result = await picking.unpickItem(parseInt(req.params.id), {
-        qty: req.body.qty,
-        reason: req.body.reason,
+      const result = await picking.unpickItem(Number(req.params.id), {
+        ...command.data,
         userId: req.session.user?.id,
         deviceType: req.headers["x-device-type"] as string,
         sessionId: req.sessionID,
@@ -360,13 +280,13 @@ export function registerPickingRoutes(app: Express) {
         return res.status(409).json(result);
       }
 
-      res.json({ item: result.item, inventory: result.inventory });
+      res.json(result);
     } catch (error: any) {
       console.error("Error unpicking item:", error);
       const status = error?.isOperational && typeof error.statusCode === "number"
         ? error.statusCode
         : error?.name === "ValidationError" ? 400 : 500;
-      res.status(status).json({ error: error.message || "Failed to unpick item" });
+      res.status(status).json({ error: error.message || "Failed to unpick item", code: error.code });
     }
   });
 
@@ -448,12 +368,7 @@ export function registerPickingRoutes(app: Express) {
 
   app.post("/api/picking/replen-guidance", requireAuth, async (req, res) => {
     try {
-      const { replenishment } = req.app.locals.services;
-      const { sku, locationCode } = req.body;
-      if (!sku || !locationCode) {
-        return res.status(400).json({ error: "sku and locationCode are required" });
-      }
-      const guidance = await replenishment.getReplenGuidance(sku, locationCode);
+      const guidance = await req.app.locals.services.picking.getReplenGuidance(req.body?.orderItemId);
       res.json(guidance);
     } catch (error: any) {
       console.error("Error getting replen guidance:", error);

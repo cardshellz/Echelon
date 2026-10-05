@@ -2,6 +2,24 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { InventoryAvailabilityRuntimeClaimContext } from "../../../inventory-planning/application/inventory-availability-runtime-claim.service";
 import { PickingUseCases } from "../../picking.use-cases";
+import { orders, warehouseLocations } from "@shared/schema";
+
+function configureProgressFixture(tx: any, line: any, updates: Array<Record<string,unknown>>, recordSet?: (value: unknown) => unknown) {
+  const order={id:line.orderId,warehouseStatus:"in_progress",pickedCount:0,itemCount:1,unitCount:line.quantity};
+  tx.execute.mockResolvedValue({rows:[]});
+  tx.select.mockImplementation(() => ({from: (table: unknown) => ({where: () => {
+    const rows = table === orders ? [order] : table === warehouseLocations
+      ? [{ id: 1, code: "A-01", warehouseId: null, isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" }]
+      : [{...line,inventoryTracking:true,catalogProductId:null,productId:null}];
+    return {for: async () => rows, limit: async () => rows, then: (resolve: (value: unknown) => unknown) => Promise.resolve(rows).then(resolve)};
+  }})}));
+  tx.update.mockImplementation((table: unknown) => ({set: (value: Record<string,unknown>) => {
+    updates.push(value);
+    recordSet?.(value);
+    return {where: () => ({returning: async () => [table === orders ? {...order,...value} : line]})};
+  }}));
+  tx.insert=vi.fn(() => ({values:vi.fn(async () => [])}));
+}
 
 function item(overrides: Record<string, unknown> = {}) {
   return {
@@ -886,6 +904,7 @@ describe("PickingUseCases canonical authority routing", () => {
         })),
       })),
     };
+    configureProgressFixture(legacyDb,updatedItem,[],set);
     const context = {
       ...canonicalContext({ pickClaimLine: vi.fn(), unpickClaimLine: vi.fn() }),
       authority: "legacy" as const,
@@ -951,7 +970,7 @@ describe("PickingUseCases canonical authority routing", () => {
         productVariantId: 105,
         warehouseLocationId: 1,
       }));
-      expect(storage.getAllWarehouseLocations).toHaveBeenCalledOnce();
+      expect(storage.getAllWarehouseLocations).not.toHaveBeenCalled();
     } else {
       expect(txInventoryCore.unpickItem).not.toHaveBeenCalled();
       expect(storage.getAllWarehouseLocations).not.toHaveBeenCalled();
@@ -1069,6 +1088,7 @@ describe("PickingUseCases canonical authority routing", () => {
         })),
       })),
     };
+    configureProgressFixture(tx,updatedItem,updateCalls);
     const db = {
       transaction: vi.fn(async (work: (selected: typeof tx) => Promise<unknown>) => work(tx)),
     };

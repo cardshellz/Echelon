@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
 import type { DropshipTrackingPushStatus } from "../application/dropship-tracking-push-ops-dtos";
+import { channelFulfillmentCommandIdFromTrackingKey } from "../application/dropship-marketplace-tracking-service";
 import type {
   DropshipTrackingPushOpsListResult,
   DropshipTrackingPushOpsRecord,
@@ -130,6 +131,19 @@ export class PgDropshipTrackingPushOpsRepository implements DropshipTrackingPush
           "DROPSHIP_TRACKING_PUSH_OPS_PUSH_NOT_FOUND",
           "Dropship tracking push was not found.",
           { pushId: input.pushId },
+        );
+      }
+      // A rails push is retried by its channel fulfillment command, which holds
+      // the exact shipped lines. A retry from here would rebuild the lines from
+      // the WMS shipment, so it is refused before anything changes.
+      const channelFulfillmentCommandId = channelFulfillmentCommandIdFromTrackingKey(
+        existing.idempotency_key,
+      );
+      if (channelFulfillmentCommandId !== null) {
+        throw new DropshipError(
+          "DROPSHIP_TRACKING_PUSH_OPS_RETRIED_BY_CHANNEL_FULFILLMENT",
+          `This tracking push is retried by channel fulfillment command ${channelFulfillmentCommandId}, not from here.`,
+          { pushId: input.pushId, channelFulfillmentCommandId },
         );
       }
 

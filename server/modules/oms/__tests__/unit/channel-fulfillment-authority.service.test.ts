@@ -596,6 +596,179 @@ describe("channel fulfillment authority service", () => {
     });
   });
 
+  describe("dropship writeback through the vendor's store", () => {
+    function dropshipCommand(overrides: Partial<ClaimedChannelFulfillmentCommand> = {}) {
+      return command({
+        commandKey: "fulfillment:v1:dropship:100:200:order",
+        channelProvider: "dropship",
+        items: Object.freeze([{
+          physicalShipmentItemId: 300,
+          packageAllocationEntryId: null,
+          shipmentRequestItemId: 250,
+          legacyWmsShipmentId: 501,
+          legacyWmsShipmentItemId: 700,
+          omsOrderLineId: 101,
+          channelOrderLineId: "110588014781-0",
+          quantity: 2,
+        }]),
+        ...overrides,
+      });
+    }
+
+    it("sends a dropship command to the dropship adapter with the exact command lines", async () => {
+      const pushDropshipTrackingForShipmentCommand = vi.fn().mockResolvedValue({
+        outcome: "success",
+        dropshipTrackingPushId: 77,
+        externalFulfillmentId: "ebay-fulfillment-1",
+        alreadySatisfied: false,
+      });
+      const pushTrackingForShipmentCommand = vi.fn();
+      const executor = createCompatibilityChannelFulfillmentProviderExecutor({
+        pushDropshipTrackingForShipmentCommand,
+        pushTrackingForShipmentCommand,
+      });
+
+      const result = await executor.execute(dropshipCommand());
+
+      expect(pushTrackingForShipmentCommand).not.toHaveBeenCalled();
+      expect(pushDropshipTrackingForShipmentCommand).toHaveBeenCalledTimes(1);
+      expect(pushDropshipTrackingForShipmentCommand).toHaveBeenCalledWith(expect.objectContaining({
+        commandId: 41,
+        omsOrderId: 100,
+        physicalShipmentId: 200,
+        legacyWmsShipmentIds: [501],
+        trackingNumber: "1ZTEST",
+        carrier: "UPS",
+        notifyCustomer: true,
+        items: [expect.objectContaining({
+          legacyWmsShipmentItemId: 700,
+          channelOrderLineId: "110588014781-0",
+          quantity: 2,
+        })],
+      }), { lastAttempt: false });
+      expect(result).toEqual({
+        outcome: "success",
+        providerResponseId: "ebay-fulfillment-1",
+        metadata: {
+          legacyWmsShipmentIds: [501],
+          dropshipTrackingPushId: 77,
+          alreadySatisfied: false,
+        },
+      });
+    });
+
+    it("tells the dropship push when this is the worker's last attempt", async () => {
+      const pushDropshipTrackingForShipmentCommand = vi.fn().mockResolvedValue({
+        outcome: "success", dropshipTrackingPushId: 77, externalFulfillmentId: null, alreadySatisfied: false,
+      });
+      const executor = createCompatibilityChannelFulfillmentProviderExecutor({ pushDropshipTrackingForShipmentCommand });
+
+      await executor.execute(dropshipCommand({ attemptNumber: 1, maxAttempts: 12 }));
+      await executor.execute(dropshipCommand({ attemptNumber: 11, maxAttempts: 12 }));
+      await executor.execute(dropshipCommand({ attemptNumber: 12, maxAttempts: 12 }));
+
+      expect(pushDropshipTrackingForShipmentCommand.mock.calls.map(([, options]) => options)).toEqual([
+        { lastAttempt: false },
+        { lastAttempt: false },
+        { lastAttempt: true },
+      ]);
+    });
+
+    it("records a replayed push as ignored, never as a second success", async () => {
+      const executor = createCompatibilityChannelFulfillmentProviderExecutor({
+        pushDropshipTrackingForShipmentCommand: vi.fn().mockResolvedValue({
+          outcome: "ignored",
+          dropshipTrackingPushId: 77,
+          externalFulfillmentId: null,
+          alreadySatisfied: true,
+        }),
+      });
+
+      await expect(executor.execute(dropshipCommand())).resolves.toEqual({
+        outcome: "ignored",
+        providerResponseId: null,
+        metadata: { legacyWmsShipmentIds: [501], dropshipTrackingPushId: 77, alreadySatisfied: true },
+      });
+    });
+
+    it("fails as not ready, not as unsupported, when the dropship adapter is missing", async () => {
+      const executor = createCompatibilityChannelFulfillmentProviderExecutor({
+        pushTrackingForShipmentCommand: vi.fn(),
+      });
+
+      await expect(executor.execute(dropshipCommand())).rejects.toMatchObject({
+        code: "CHANNEL_PROVIDER_NOT_READY",
+      });
+    });
+
+    it("refuses an incomplete adapter result", async () => {
+      for (const pushed of [
+        undefined,
+        { outcome: "success", dropshipTrackingPushId: 0, externalFulfillmentId: null },
+        { outcome: "partial", dropshipTrackingPushId: 77, externalFulfillmentId: null },
+      ]) {
+        const executor = createCompatibilityChannelFulfillmentProviderExecutor({
+          pushDropshipTrackingForShipmentCommand: vi.fn().mockResolvedValue(pushed),
+        });
+        await expect(executor.execute(dropshipCommand())).rejects.toMatchObject({
+          code: "DROPSHIP_WRITEBACK_INCOMPLETE",
+        });
+      }
+    });
+
+    it("never sends a silent dropship command", async () => {
+      const pushDropshipTrackingForShipmentCommand = vi.fn();
+      const executor = createCompatibilityChannelFulfillmentProviderExecutor({
+        pushDropshipTrackingForShipmentCommand,
+      });
+
+      await expect(executor.execute(dropshipCommand({
+        metadata: Object.freeze({ legacyWmsShipmentIds: [501], notifyCustomer: false }),
+      }))).rejects.toMatchObject({ code: "UNSUPPORTED_SILENT_FULFILLMENT" });
+      expect(pushDropshipTrackingForShipmentCommand).not.toHaveBeenCalled();
+    });
+
+    it("moves a permanent vendor-store failure to review and retries a transient one", async () => {
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const permanentRepository = repositoryMock([dropshipCommand()]);
+      const permanent = createChannelFulfillmentAuthorityService({
+        repository: permanentRepository,
+        providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor({
+          pushDropshipTrackingForShipmentCommand: vi.fn().mockRejectedValue(
+            new ChannelFulfillmentProviderError("DROPSHIP_EBAY_TRACKING_HTTP_ERROR", "HTTP 400", "permanent"),
+          ),
+        }),
+        createLeaseToken: () => "lease-1",
+        logger,
+      });
+      await expect(permanent.runDueBatch({ limit: 1 })).resolves.toMatchObject({ reviewRequired: 1 });
+      expect(permanentRepository.completeAttempt).toHaveBeenCalledWith(expect.objectContaining({
+        outcome: "review_required",
+        errorCode: "DROPSHIP_EBAY_TRACKING_HTTP_ERROR",
+      }));
+
+      const now = new Date("2026-07-22T12:00:00.000Z");
+      const transientRepository = repositoryMock([dropshipCommand()]);
+      const transient = createChannelFulfillmentAuthorityService({
+        repository: transientRepository,
+        providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor({
+          pushDropshipTrackingForShipmentCommand: vi.fn().mockRejectedValue(
+            new ChannelFulfillmentProviderError("DROPSHIP_TRACKING_PUSH_IN_PROGRESS", "busy", "transient"),
+          ),
+        }),
+        clock: { now: () => now },
+        createLeaseToken: () => "lease-1",
+        logger,
+      });
+      await expect(transient.runDueBatch({ limit: 1 })).resolves.toMatchObject({ retryScheduled: 1 });
+      expect(transientRepository.completeAttempt).toHaveBeenCalledWith(expect.objectContaining({
+        outcome: "retry_scheduled",
+        errorCode: "DROPSHIP_TRACKING_PUSH_IN_PROGRESS",
+        nextAttemptAt: new Date("2026-07-22T12:01:00.000Z"),
+      }));
+    });
+  });
+
   it("caps retry delay at six hours", () => {
     const completedAt = new Date("2026-07-22T12:00:00.000Z");
     expect(calculateChannelFulfillmentRetryAt(completedAt, 20)).toEqual(

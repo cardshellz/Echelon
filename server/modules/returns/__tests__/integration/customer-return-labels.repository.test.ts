@@ -54,6 +54,7 @@ import { CustomerReturnLabelSettingsService } from "../../application/customer-r
 import { selectCustomerReturnRate } from "../../domain/customer-return-rate-selection";
 import { defaultCustomerReturnShippingGuardrails } from "@shared/returns/customer-return-shipping-guardrails";
 import { quoteCustomerReturnShipment } from "../../application/customer-return-shipping-quote";
+import { buildReturnLabelRequest, createShipStationReturnLabelAdapter } from "../../../shipping-engine/infrastructure/shipstation-return-label.adapter";
 
 const connectionString = resolveReturnsTestDatabase(process.env, "intake");
 const integration = connectionString ? describe.sequential : describe.skip;
@@ -98,6 +99,158 @@ integration(
     async function authorize() {
       return intake.persist(preparedIntake());
     }
+    it("uses the authorization's exact channel order for both boxes while keeping separate recovery keys", async () => {
+      const accepted = await authorize();
+      // A display-number collision in another channel must not select that order.
+      expect((await pool.query("SELECT external_order_number FROM oms.oms_orders WHERE id=200")).rows[0].external_order_number)
+        .toBe("#TEST-1");
+      const stored = await labels.read(36, accepted.authorizationId);
+      expect(stored.parcels).toHaveLength(2);
+      expect(stored.parcels.map(parcel => parcel.input?.orderNumber)).toEqual(["#TEST-1", "#TEST-1"]);
+      expect(new Set(stored.parcels.map(parcel => parcel.input?.externalShipmentId)).size).toBe(2);
+      expect(stored.parcels.map(parcel => (buildReturnLabelRequest(parcel.input!).shipment as Record<string, unknown>).shipment_number))
+        .toEqual(["#TEST-1", "#TEST-1"]);
+      expect(await labels.read(37, accepted.authorizationId).catch(error => error))
+        .toMatchObject({ code: "RETURN_LABEL_NOT_FOUND" });
+      for (const parcel of stored.parcels) {
+        const intent = await labels.begin(36, accepted.authorizationId, parcel.id, "admin", INTAKE_NOW);
+        expect(intent?.input).toMatchObject({ orderNumber: "#TEST-1", externalShipmentId: parcel.input!.externalShipmentId });
+      }
+      const snapshots = (await pool.query("SELECT request_snapshot FROM returns.customer_return_label_attempts ORDER BY parcel_id")).rows;
+      expect(snapshots.map(row => row.request_snapshot.orderNumber)).toEqual(["#TEST-1", "#TEST-1"]);
+    });
+
+    it.each([null, "", " ", "#TEST-1\nINJECTED"])("blocks a new intent when its original order number is invalid: %j", async orderNumber => {
+      const accepted = await authorize();
+      await pool.query("UPDATE oms.oms_orders SET external_order_number=$1 WHERE id=100", [orderNumber]);
+      await expect(labels.begin(36, accepted.authorizationId, accepted.parcels[0].parcelId, "admin", INTAKE_NOW))
+        .rejects.toMatchObject({ code: "RETURN_LABEL_ORDER_REFERENCE_UNAVAILABLE" });
+      expect((await pool.query("SELECT COUNT(*)::int AS n FROM returns.customer_return_label_attempts")).rows[0].n).toBe(0);
+      expect((await pool.query("SELECT COUNT(*)::int AS n FROM returns.customer_return_label_events")).rows[0].n).toBe(0);
+    });
+
+    it.each(["current", "legacy"] as const)("preserves the immutable %s attempt after the source order number changes", async version => {
+      const accepted = await authorize();
+      const parcel = (await labels.read(36, accepted.authorizationId)).parcels[0];
+      const { orderNumber, ...legacyInput } = parcel.input!;
+      const input = version === "current" ? parcel.input! : legacyInput;
+      await pool.query(`INSERT INTO returns.customer_return_label_attempts
+        (parcel_id,attempt_number,idempotency_key,status,request_snapshot,error_code,actor,started_at,completed_at)
+        VALUES($1,1,$2,'uncertain',$3::jsonb,'RETURN_LABEL_TIMEOUT','admin',$4,$4)`,
+        [parcel.id, `reference-test:${parcel.id}`, JSON.stringify(input), INTAKE_NOW]);
+      await pool.query("UPDATE oms.oms_orders SET external_order_number='#RENAMED' WHERE id=100");
+      const stored = (await labels.read(36, accepted.authorizationId)).parcels[0];
+      expect(stored.input).toEqual(input);
+      expect(stored.shipment.orderNumber).toBe(version === "current" ? orderNumber : undefined);
+      expect((await pool.query("SELECT request_snapshot FROM returns.customer_return_label_attempts WHERE parcel_id=$1", [parcel.id])).rows[0].request_snapshot)
+        .toEqual(input);
+      expect(await labels.begin(36, accepted.authorizationId, parcel.id, "admin", INTAKE_NOW)).toBeNull();
+    });
+
+    it.each(["purchase", "recover"] as const)("makes a rounded-down USPS label downloadable with one durable attempt during %s", async operation => {
+      const prepared = preparedIntake();
+      prepared.parcels[0].weightGrams = 850;
+      prepared.parcels[0].dimensions = { lengthMm: 406.4, widthMm: 355.6, heightMm: 101.6 };
+      const accepted = await intake.persist(prepared);
+      const input = (await labels.read(36, accepted.authorizationId)).parcels[0].input!;
+      if (operation === "recover") {
+        const attempt = (await labels.begin(36, accepted.authorizationId, accepted.parcels[0].parcelId, "admin", INTAKE_NOW))!;
+        await labels.finish(attempt.id, { status: "uncertain", code: "RETURN_LABEL_MEASUREMENTS_MISMATCH" }, "admin", INTAKE_NOW);
+      }
+      const packageReadback = { package_code: "package", weight: { value: 1.87, unit: "pound" },
+        dimensions: { unit: "inch", length: 16, width: 14, height: 4 }, tracking_number: "TESTTRACK" };
+      const labelReadback = { label_id: "se-rounded-label", shipment_id: "se-rounded-shipment",
+        external_shipment_id: input.externalShipmentId, status: "completed", is_return_label: true,
+        is_international: false, rma_number: input.rmaNumber, carrier_id: input.carrierId, service_code: input.serviceCode,
+        tracking_number: "TESTTRACK", trackable: true, voided: false, voided_at: null, label_format: "pdf", label_layout: "4x6",
+        charge_event: "carrier_default", created_at: INTAKE_NOW.toISOString(), shipment_cost: { currency: "usd", amount: "5.93" },
+        insurance_cost: { currency: "usd", amount: 0 }, label_download: { href: record(input.externalShipmentId).downloadUrl }, packages: [packageReadback] };
+      const shipmentReadback = { ...buildReturnLabelRequest(input).shipment as Record<string, unknown>,
+        shipment_id: "se-rounded-shipment", packages: [packageReadback] };
+      const responses: unknown[] = [labelReadback, shipmentReadback];
+      if (operation === "recover") responses.unshift({ labels: [{ label_id: "se-rounded-label", external_shipment_id: input.externalShipmentId }], total: 1, page: 1, pages: 1 });
+      const fetchFn = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), { status: 200 }));
+      const provider = createShipStationReturnLabelAdapter({ apiKey: "fixture-key", fetchFn });
+      const w = worker();
+      w.purchase.mockImplementation((request, signal) => provider.purchase(request, signal));
+      w.recover.mockImplementation((request, signal) => provider.recover(request, signal));
+      const status = await w.service.progress(36, accepted.authorizationId, "admin");
+      expect(status.parcels[0]).toMatchObject({ status: "ready", trackingNumber: "TESTTRACK", downloadPath: expect.stringContaining("/download") });
+      expect(await w.service.artifact(36, accepted.authorizationId, accepted.parcels[0].parcelId))
+        .toMatchObject({ labelId: "se-rounded-label", amountCents: 593 });
+      if (operation === "recover") {
+        expect(w.purchase).not.toHaveBeenCalled();
+        expect(w.quote).not.toHaveBeenCalled();
+        expect(fetchFn.mock.calls.map(([, init]) => init?.method)).toEqual(["GET", "GET", "GET"]);
+      } else {
+        expect(w.purchase).toHaveBeenCalledTimes(1);
+        expect(fetchFn.mock.calls.map(([, init]) => init?.method)).toEqual(["POST", "GET"]);
+        expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body)).shipment.packages[0].weight)
+          .toEqual({ value: 1.87, unit: "pound" });
+      }
+      expect((await pool.query("SELECT COUNT(*)::int AS n FROM returns.customer_return_label_attempts")).rows[0].n).toBe(1);
+      expect((await pool.query("SELECT before_status,after_status FROM returns.customer_return_label_events ORDER BY id DESC LIMIT 1")).rows[0])
+        .toEqual({ before_status: operation === "recover" ? "uncertain" : "executing", after_status: "succeeded" });
+      const saved = (await pool.query(`SELECT p.weight_grams,t.request_snapshot FROM returns.customer_return_parcels p
+        JOIN returns.customer_return_label_attempts t ON t.parcel_id=p.id WHERE p.id=$1`, [accepted.parcels[0].parcelId])).rows[0];
+      expect(saved.weight_grams).toBe("850");
+      expect(saved.request_snapshot.parcel.weightGrams).toBe(850);
+    });
+    it.each(["commercial", "residential"] as const)("keeps the accepted %s warehouse classification through quotes, policy changes and one durable purchase", async warehouseAddressType => {
+      const current = await publishIntakeTestPolicyShipping(pool, {
+        warehouseAddressType, selectionMode: "cheapest_eligible", carrierId: null, serviceCode: null,
+        carrierRules: [{ carrierId: "se-123", serviceCodes: ["usps_ground_advantage"], maxWeightLb: "20" }],
+      });
+      const prepared = preparedIntake();
+      await bindIntakeTestPolicy(pool, prepared, current);
+      prepared.warehouseSnapshot = { ...prepared.warehouseSnapshot, addressType: warehouseAddressType };
+      prepared.parcels = prepared.parcels.map(parcel => ({ ...parcel,
+        selectionMode: "cheapest_eligible", carrierId: null, serviceCode: null }));
+      const accepted = await intake.persist(prepared);
+      await publishIntakeTestPolicyShipping(pool, { warehouseAddressType: warehouseAddressType === "commercial" ? "residential" : "commercial" });
+      expect((await settings.readAccepted(36, accepted.authorizationId))?.warehouseAddressType).toBe(warehouseAddressType);
+      const w = worker();
+      await w.service.progress(36, accepted.authorizationId, "admin");
+      expect(w.quote).toHaveBeenCalledTimes(1);
+      expect(w.quote.mock.calls[0][0].shipment.shipTo.addressType).toBe(warehouseAddressType);
+      expect(w.purchase).toHaveBeenCalledTimes(1);
+      expect(w.purchase.mock.calls[0][0].shipTo).toEqual(w.quote.mock.calls[0][0].shipment.shipTo);
+      const saved = (await labels.read(36, accepted.authorizationId)).parcels[0];
+      expect(saved.input?.shipTo.addressType).toBe(warehouseAddressType);
+      const rows = (await pool.query(`SELECT request_snapshot FROM returns.customer_return_label_attempts WHERE parcel_id=$1`, [saved.id])).rows;
+      expect(rows).toHaveLength(1);
+      expect(rows[0].request_snapshot.shipTo.addressType).toBe(warehouseAddressType);
+    });
+    it("defaults a legacy pending return to commercial without changing its stored physical address", async () => {
+      const accepted = await authorize();
+      const stored = (await labels.read(36, accepted.authorizationId)).parcels[0];
+      expect(stored.shipment.shipTo).toEqual({ ...preparedIntake().parcels[0].destinationAddress, addressType: "commercial" });
+      const attempt = await labels.begin(36, accepted.authorizationId, stored.id, "admin", INTAKE_NOW);
+      expect(attempt?.input.shipTo).toEqual(stored.shipment.shipTo);
+      const manifest = (await pool.query(`SELECT destination_address FROM returns.customer_return_parcels WHERE id=$1`, [stored.id])).rows[0];
+      expect(manifest.destination_address).toEqual(preparedIntake().parcels[0].destinationAddress);
+    });
+    it("blocks a fresh purchase when the frozen warehouse classification disagrees with its accepted policy", async () => {
+      const prepared = preparedIntake();
+      prepared.warehouseSnapshot = { ...prepared.warehouseSnapshot, addressType: "residential" };
+      const accepted = await intake.persist(prepared);
+      await expect(labels.begin(36, accepted.authorizationId, accepted.parcels[0].parcelId, "admin", INTAKE_NOW))
+        .rejects.toMatchObject({ code: "RETURN_LABEL_SETTINGS_CHANGED" });
+      expect((await pool.query("SELECT COUNT(*)::int AS n FROM returns.customer_return_label_attempts")).rows[0].n).toBe(0);
+    });
+    it("rejects a saved explicit classification that disagrees with the manifest without contacting the provider", async () => {
+      const accepted = await authorize();
+      const parcel = (await labels.read(36, accepted.authorizationId)).parcels[0];
+      const inconsistent = { ...parcel.input!, shipTo: { ...parcel.input!.shipTo, addressType: "residential" } };
+      await pool.query(`INSERT INTO returns.customer_return_label_attempts
+        (parcel_id,attempt_number,idempotency_key,status,request_snapshot,actor,started_at)
+        VALUES($1,1,$2,'uncertain',$3,'test',$4)`, [parcel.id, INTAKE_KEY, JSON.stringify(inconsistent), INTAKE_NOW]);
+      const w = worker();
+      await expect(w.service.progress(36, accepted.authorizationId, "admin"))
+        .rejects.toMatchObject({ code: "RETURN_LABEL_ATTEMPT_UNVERIFIED" });
+      expect(w.purchase).not.toHaveBeenCalled();
+      expect(w.recover).not.toHaveBeenCalled();
+    });
     async function enableAutomatic() {
       return publishIntakeTestPolicyShipping(pool, {
         selectionMode: "cheapest_eligible",
@@ -1146,7 +1299,7 @@ integration(
         "admin",
         INTAKE_NOW,
       );
-      expect(attempt?.input.shipTo).toEqual(original!.destinationAddress);
+      expect(attempt?.input.shipTo).toEqual({ ...original!.destinationAddress, addressType: "commercial" });
     });
     it("enforces shop/return/parcel ownership at read and write boundaries", async () => {
       const saved = await authorize();

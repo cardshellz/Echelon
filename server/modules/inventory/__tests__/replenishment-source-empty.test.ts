@@ -1,3 +1,4 @@
+import { legacyTransformationExecutionAuthority } from "../application/transformation-execution-authority.port";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../notifications/notifications.service", () => ({
@@ -90,7 +91,7 @@ function makeDb() {
       values: vi.fn((value: any) => {
         inserts.push({ table, value });
         const inserted = table === replenTasks
-          ? { id: 121, ...value }
+          ? { id: 121, revision: 0, ...value }
           : table === cycleCounts
             ? { id: 333, ...value }
             : { id: 444, ...value };
@@ -104,7 +105,12 @@ function makeDb() {
     update: vi.fn((table: unknown) => ({
       set: vi.fn((value: any) => {
         updates.push({ table, value });
-        return { where: vi.fn(async () => []) };
+        return { where: vi.fn(() => {
+          const rows = table === replenTasks && state.insertedReplenTask
+            ? [{...state.insertedReplenTask,...value,revision:state.insertedReplenTask.revision+1}] : [];
+          if (rows[0]) state.insertedReplenTask=rows[0];
+          return {returning: async()=>rows,then:(resolve:(rows:unknown[])=>unknown)=>Promise.resolve(rows).then(resolve)};
+        }) };
       }),
     })),
     delete: vi.fn(),
@@ -232,7 +238,7 @@ function makeSourceResolutionDb(options?: { explicitSourceRule?: boolean; noSour
 describe("ReplenishmentUseCases source-empty blockers", () => {
   it("selects a stocked source variant instead of an unstocked active sibling from tier defaults", async () => {
     const { db, sourceLocation } = makeSourceResolutionDb();
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const findSourceLocation = vi.spyOn(service as any, "findSourceLocation")
       .mockImplementation(async (variantId: number) => variantId === 67 ? sourceLocation : null);
     vi.spyOn(service as any, "getSourceSlotRank").mockResolvedValue(0);
@@ -241,8 +247,8 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       currentQtyOverride: 0,
     });
 
-    expect(findSourceLocation).toHaveBeenCalledWith(67, 7, "pick", null, "fifo");
-    expect(findSourceLocation).toHaveBeenCalledWith(438, 7, "pick", null, "fifo");
+    expect(findSourceLocation).toHaveBeenCalledWith(67, 7, "pick", null, "fifo",1);
+    expect(findSourceLocation).toHaveBeenCalledWith(438, 7, "pick", null, "fifo",1);
     expect(guidance).toMatchObject({
       needed: true,
       stockout: false,
@@ -256,7 +262,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
 
   it("treats an assigned pick bin without an inventory level as zero on hand", async () => {
     const { db, sourceLocation } = makeSourceResolutionDb({ missingPickLevel: true });
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     vi.spyOn(service as any, "findSourceLocation")
       .mockImplementation(async (variantId: number) => variantId === 67 ? sourceLocation : null);
     vi.spyOn(service as any, "getSourceSlotRank").mockResolvedValue(0);
@@ -264,7 +270,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     const guidance = await service.checkReplenNeeded(66, 1);
 
     expect(guidance).toMatchObject({
-      needed: true,
+      needed: true, observedVariantQty: 0,
       stockout: false,
       evaluatedQty: 0,
       sourceLocationId: 2,
@@ -276,7 +282,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
 
   it("honors an explicit source rule and reports stockout instead of falling back silently", async () => {
     const { db, sourceLocation } = makeSourceResolutionDb({ explicitSourceRule: true });
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const findSourceLocation = vi.spyOn(service as any, "findSourceLocation")
       .mockImplementation(async (variantId: number) => variantId === 67 ? sourceLocation : null);
 
@@ -285,9 +291,9 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     });
 
     expect(findSourceLocation).toHaveBeenCalledTimes(1);
-    expect(findSourceLocation).toHaveBeenCalledWith(438, 7, "pick", null, "fifo");
+    expect(findSourceLocation).toHaveBeenCalledWith(438, 7, "pick", null, "fifo",1);
     expect(guidance).toMatchObject({
-      needed: true,
+      needed: true, observedVariantQty: 0,
       stockout: true,
       sourceLocationId: null,
       sourceVariantId: null,
@@ -298,7 +304,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
 
   it("falls back to same-variant source stock when no higher source UOM exists", async () => {
     const { db, sourceLocation } = makeSourceResolutionDb({ noSourceVariants: true });
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     vi.spyOn(service as any, "findSourceLocation")
       .mockImplementation(async (variantId: number) => variantId === 66 ? sourceLocation : null);
 
@@ -307,7 +313,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     });
 
     expect(guidance).toMatchObject({
-      needed: true,
+      needed: true, observedVariantQty: 0,
       stockout: false,
       sourceLocationId: 2,
       sourceVariantId: 66,
@@ -333,7 +339,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       notes: "Blocked: no source stock found in pick locations",
     };
     const { db, sourceLocation } = makeSourceResolutionDb({ activeTask: staleTask });
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     vi.spyOn(service as any, "findSourceLocation")
       .mockImplementation(async (variantId: number) => variantId === 67 ? sourceLocation : null);
     vi.spyOn(service as any, "getSourceSlotRank").mockResolvedValue(0);
@@ -344,7 +350,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     });
 
     expect(guidance).toMatchObject({
-      needed: true,
+      needed: true, observedVariantQty: 0,
       stockout: false,
       sourceLocationId: 2,
       sourceVariantId: 67,
@@ -369,7 +375,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       notes: "Blocked: no source stock found in pick locations",
     };
     const { db, sourceLocation } = makeSourceResolutionDb({ activeTask: reviewOnlyTask });
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const findSourceLocation = vi.spyOn(service as any, "findSourceLocation")
       .mockImplementation(async (variantId: number) => variantId === 67 ? sourceLocation : null);
     vi.spyOn(service as any, "getSourceSlotRank").mockResolvedValue(0);
@@ -380,7 +386,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
 
     expect(findSourceLocation).toHaveBeenCalled();
     expect(guidance).toMatchObject({
-      needed: true,
+      needed: true, observedVariantQty: 0,
       stockout: false,
       sourceLocationId: 2,
       sourceVariantId: 67,
@@ -391,7 +397,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
 
   it("does not create fake no-source replen tasks for non-shipment event checks", async () => {
     const { db } = makeSourceResolutionDb({ explicitSourceRule: true });
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     vi.spyOn(service as any, "findSourceLocation").mockResolvedValue(null);
     vi.spyOn(service as any, "tryCascadeReplen").mockResolvedValue(null);
 
@@ -403,7 +409,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
 
   it("keeps shipment-blocking no-source checks as blocked review tasks", async () => {
     const { db, inserts } = makeSourceResolutionDb({ explicitSourceRule: true });
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     vi.spyOn(service as any, "findSourceLocation").mockResolvedValue(null);
     vi.spyOn(service as any, "tryCascadeReplen").mockResolvedValue(null);
 
@@ -449,9 +455,9 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       })),
       update: vi.fn(),
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
 
-    await expect(service.markTaskDone(977, "admin")).rejects.toThrow("no valid source stock");
+    await expect(service.markTaskDone(977, "admin")).rejects.toThrow("committed transfer receipt");
     expect(db.update).not.toHaveBeenCalled();
   });
 
@@ -477,15 +483,15 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       update: vi.fn(),
       execute: vi.fn(async () => ({ rows: [{ active_pending_lines: 2 }] })),
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
 
-    await expect(service.markTaskDone(858, "admin")).rejects.toThrow("complete the replen so inventory moves");
+    await expect(service.markTaskDone(858, "admin")).rejects.toThrow("committed transfer receipt");
     expect(db.update).not.toHaveBeenCalled();
   });
 
   it("creates a linked cycle count for picker-reported source-empty replen blockers", async () => {
     const { db, inserts, updates } = makeDb();
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
 
     const task = await service.recordSourceEmptyBlocker({
       pickVariantId: 100,
@@ -532,9 +538,9 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
 
   it("executes inline case-break replen through the replenishment service", async () => {
     const { db, inserts, state } = makeDb();
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     vi.spyOn(service, "checkReplenNeeded").mockResolvedValue({
-      needed: true,
+      needed: true, observedVariantQty: 0,
       stockout: false,
       sourceLocationId: 2,
       sourceLocationCode: "B-01",
@@ -580,11 +586,11 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     });
   });
 
-  it("queues full-case replenishment even when stale guidance asks for inline execution", async () => {
-    const { db, inserts } = makeDb();
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+  it("executes full-case replenishment using the rule-owned inline decision", async () => {
+    const { db, inserts, state } = makeDb();
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     vi.spyOn(service, "checkReplenNeeded").mockResolvedValue({
-      needed: true,
+      needed: true, observedVariantQty: 0,
       stockout: false,
       sourceLocationId: 2,
       sourceLocationCode: "B-01",
@@ -601,21 +607,18 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       autoReplen: 1,
       evaluatedQty: 1,
     });
-    const executeTask = vi.spyOn(service, "executeTask");
+    const executeTask = vi.spyOn(service, "executeTask").mockImplementation(async () => {
+      state.insertedReplenTask = {...state.insertedReplenTask,status:"completed",qtyCompleted:4};
+      return {moved:4};
+    });
 
     const result = await service.createAndExecuteReplen(100, 1, "picker-1");
 
-    expect(executeTask).not.toHaveBeenCalled();
-    expect(result).toMatchObject({
-      moved: 0,
-      task: {
-        id: 121,
-        status: "pending",
-      },
-    });
+    expect(executeTask).toHaveBeenCalledWith(121,"picker-1");
+    expect(result).toMatchObject({ moved:4,task:{id:121,status:"completed"} });
     expect(inserts.find(insert => insert.table === replenTasks)?.value).toMatchObject({
       status: "pending",
-      executionMode: "queue",
+      executionMode: "inline",
       replenMethod: "full_case",
     });
   });
@@ -634,7 +637,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       qtyTargetUnits: 4,
       qtyCompleted: 0,
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const guidanceSpy = vi.spyOn(service, "checkReplenNeeded");
     const executeSpy = vi.spyOn(service, "executeTask");
 
@@ -648,8 +651,8 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
         executionMode: "queue",
       },
     });
-    expect(db.transaction).toHaveBeenCalledTimes(1);
-    expect(db.execute).toHaveBeenCalledTimes(1);
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(db.execute).not.toHaveBeenCalled();
     expect(inserts.filter(insert => insert.table === replenTasks)).toHaveLength(0);
     expect(guidanceSpy).not.toHaveBeenCalled();
     expect(executeSpy).not.toHaveBeenCalled();
@@ -672,7 +675,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       autoReplen: 0,
       blocksShipment: false,
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
 
     const guidance = await service.checkReplenNeeded(100, 1, {
       currentQtyOverride: 20,
@@ -697,9 +700,9 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
 
   it("routes short-pick replen guidance through shared replen guidance", async () => {
     const { db } = makeDb();
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const guidanceSpy = vi.spyOn(service, "checkReplenNeeded").mockResolvedValue({
-      needed: true,
+      needed: true, observedVariantQty: 0,
       stockout: false,
       sourceLocationId: 2,
       sourceLocationCode: "B-01",
@@ -717,7 +720,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       evaluatedQty: 0,
     });
 
-    const guidance = await service.getReplenGuidance("SKU-1", "A-01");
+    const guidance = await service.getReplenGuidance(100, 1);
 
     expect(guidanceSpy).toHaveBeenCalledWith(100, 1, {
       currentQtyOverride: 0,
@@ -728,9 +731,9 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
   it("queues reserve replen from a confirmed short pick without inline execution", async () => {
     const { db, inserts, selectCounts } = makeDb();
     selectCounts.set(warehouseLocations, 1);
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     vi.spyOn(service, "checkReplenNeeded").mockResolvedValue({
-      needed: true,
+      needed: true, observedVariantQty: 0,
       stockout: false,
       sourceLocationId: 2,
       sourceLocationCode: "B-01",
@@ -801,7 +804,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       qtyTargetUnits: 4,
       qtyCompleted: 0,
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const guidanceSpy = vi.spyOn(service, "checkReplenNeeded");
     const executeTask = vi.spyOn(service, "executeTask").mockImplementation(async () => {
       state.insertedReplenTask = {
@@ -838,9 +841,9 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
         }),
       })),
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     vi.spyOn(service, "checkReplenNeeded").mockResolvedValue({
-      needed: true,
+      needed: true, observedVariantQty: 0,
       stockout: false,
       sourceLocationId: 2,
       sourceLocationCode: "B-01",
@@ -877,6 +880,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     const updates: Array<{ table: unknown; value: any }> = [];
     const blockedTask = {
       id: 765,
+      revision:0,qtyCompleted:0,
       productId: null,
       fromLocationId: 1,
       toLocationId: 1,
@@ -910,12 +914,12 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       update: vi.fn((table: unknown) => ({
         set: vi.fn((value: any) => {
           updates.push({ table, value });
-          return { where: vi.fn(async () => []) };
+          return { where: vi.fn(() => ({returning: async () => [{...task,...value,revision:task.revision+1}]})) };
         }),
       })),
       execute: vi.fn(async () => ({ rows: [{ is_pickable: 1, location_type: "pick" }] })),
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const checkSpy = vi.spyOn(service, "checkReplenForLocation").mockResolvedValue(undefined);
 
     await service.reevaluateReplenForProduct(10);
@@ -974,7 +978,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       })),
       execute: vi.fn(async () => ({ rows: [] })),
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const checkSpy = vi.spyOn(service, "checkReplenForLocation").mockResolvedValue(undefined);
 
     await service.reevaluateReplenForProduct(10);
@@ -991,6 +995,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     const updates: Array<{ table: unknown; value: any }> = [];
     const task = {
       id: 765,
+      revision:0,qtyCompleted:0,
       fromLocationId: 111,
       toLocationId: 1331,
       pickProductVariantId: 66,
@@ -1004,11 +1009,11 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       update: vi.fn((table: unknown) => ({
         set: vi.fn((value: any) => {
           updates.push({ table, value });
-          return { where: vi.fn(async () => []) };
+          return { where: vi.fn(() => ({returning: async () => [{...task,...value,revision:task.revision+1}]})) };
         }),
       })),
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const serviceAny = service as any;
     vi.spyOn(serviceAny, "getAvailableInventoryQty").mockImplementation(async (variantId: number, locationId: number) => {
       if (variantId === 438 && locationId === 111) return 0;
@@ -1016,7 +1021,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       return 0;
     });
     vi.spyOn(serviceAny, "evaluateReplenNeed").mockResolvedValue({
-      status: "needed_with_source",
+      status: "needed_with_source", level: {variantQty:0},
       sourceLocation: { id: 1232, code: "F-02" },
       sourceVariant: { id: 67, sku: "ARM-ENV-SGL-C700" },
       resolvedSourceVariantId: 67,
@@ -1051,7 +1056,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     const db = {
       execute: vi.fn(async () => ({ rows: [{ id: 977 }, { id: 962 }] })),
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
 
     const result = await service.cleanupHealthIssues({
       mode: "stale_no_demand",
@@ -1072,9 +1077,9 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
 
   it("system-executes health-triggered inline replen instead of leaving it pending", async () => {
     const { db, inserts, state } = makeDb();
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     vi.spyOn(service as any, "evaluateReplenNeed").mockResolvedValue({
-      status: "needed_with_source",
+      status: "needed_with_source", level: {variantQty:0},
       location: { id: 1, code: "A-01", warehouseId: 7 },
       variant: { id: 100, sku: "SKU-1", name: "Each", productId: 10 },
       whSettings: null,
@@ -1126,7 +1131,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
         .mockResolvedValueOnce({ rows: [] })
         .mockResolvedValueOnce({ rows: [{ id: 933 }] }),
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
 
     const result = await service.cleanupHealthIssues({
       mode: "stale_no_demand",
@@ -1154,7 +1159,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
         ],
       })),
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
 
     const result = await service.cleanupHealthIssues({
       mode: "duplicates",
@@ -1177,6 +1182,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
   it("recovers pending inline replen tasks through health cleanup", async () => {
     const inlineTask = {
       id: 993,
+      revision:0,qtyCompleted:0,
       status: "pending",
       executionMode: "inline",
       dependsOnTaskId: null,
@@ -1201,15 +1207,15 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       update: vi.fn((table: unknown) => ({
         set: vi.fn((value: any) => {
           updates.push({ table, value });
-          return { where: vi.fn(async () => []) };
+          return { where: vi.fn(() => ({returning: async () => [{...inlineTask,...value,revision:inlineTask.revision+1}]})) };
         }),
       })),
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const serviceAny = service as any;
     vi.spyOn(serviceAny, "countActivePendingDemandLines").mockResolvedValue(8);
     vi.spyOn(serviceAny, "evaluateReplenNeed").mockResolvedValue({
-      status: "needed_with_source",
+      status: "needed_with_source", level: {variantQty:0},
       location: { id: 1163, code: "B-09", warehouseId: 1 },
       variant: { id: 232, sku: "SHLZ-TOP-35PT-BLU-P25", productId: 1 },
       whSettings: null,
@@ -1284,7 +1290,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
         }),
       })),
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const serviceAny = service as any;
     vi.spyOn(serviceAny, "countActivePendingDemandLines").mockResolvedValue(0);
     vi.spyOn(serviceAny, "evaluateReplenNeed").mockResolvedValue({
@@ -1323,7 +1329,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
         }],
       })),
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const serviceAny = service as any;
     vi.spyOn(serviceAny, "findActiveTaskForPickBin")
       .mockResolvedValueOnce(null);
@@ -1372,7 +1378,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
         ],
       })),
     };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const serviceAny = service as any;
     vi.spyOn(serviceAny, "findActiveTaskForPickBin").mockResolvedValue(null);
     vi.spyOn(service, "createAndExecuteReplen")
@@ -1399,5 +1405,23 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
         }),
       ],
     });
+  });
+});
+
+
+describe("concurrent replenishment creation",()=>{
+  it("retains the existing task's queue mode when creation loses to a frozen queued plan",async()=>{
+    const {db,state}=makeDb();
+    const service=new ReplenishmentUseCases(db as any,{} as any,()=>new Date(0),legacyTransformationExecutionAuthority);
+    vi.spyOn(service,"checkReplenNeeded").mockResolvedValue({needed:true,observedVariantQty:0,stockout:false,sourceLocationId:2,
+      sourceLocationCode:"B-01",sourceVariantId:100,sourceVariantSku:"SKU-1",sourceVariantName:"Each",pickVariantId:100,
+      qtySourceUnits:4,qtyTargetUnits:4,replenMethod:"full_case",executionMode:"inline",taskNotes:"Below threshold",triggerValue:2,autoReplen:1,evaluatedQty:0});
+    vi.spyOn(service as any,"insertTriggeredTask").mockImplementation(async()=>{
+      state.insertedReplenTask={id:222,status:"pending",executionMode:"queue",replenMethod:"full_case"};
+      return state.insertedReplenTask;
+    });
+    const execution=vi.spyOn(service,"executeTask");
+    expect(await service.createAndExecuteReplen(100,1,"picker")).toMatchObject({moved:0,task:{id:222,executionMode:"queue",status:"pending"}});
+    expect(execution).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,7 @@
 import type { RequestHandler, Response } from "express";
 import { readInventoryQuantityCapabilities } from "../infrastructure/quantity-authority.query";
 import { InventoryQuantityError } from "../domain/quantity-ledger";
+import { inventoryQuantityErrorStatus } from "../application/inventory-quantity-error-status";
 
 /** Transport validation only. The transaction-owning inventory application
  * validates the semantic payload and persists replay evidence atomically.
@@ -16,8 +17,7 @@ export const validateInventoryCommandKey: RequestHandler = (req, res, next) => {
 
 export function sendInventoryQuantityError(res: Response, error: unknown): boolean {
   if (!(error instanceof InventoryQuantityError)) return false;
-  const invalid = error.code === "QUANTITY_COMMAND_KEY_REQUIRED" || error.code === "QUANTITY_COMMAND_INVALID";
-  res.status(invalid ? 400 : 409).json({ code: error.code, error: error.message, context: error.context });
+  res.status(inventoryQuantityErrorStatus(error)).json({ code: error.code, error: error.message, context: error.context });
   return true;
 }
 

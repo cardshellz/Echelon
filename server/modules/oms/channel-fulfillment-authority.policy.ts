@@ -39,6 +39,38 @@ function normalized(value: string | null): string {
 }
 
 /**
+ * Provider of the internal channel that carries vendor dropship orders
+ * (migrations/0106_dropship_internal_channel_seed.sql).
+ */
+export const DROPSHIP_ORDER_CHANNEL_PROVIDER = "manual";
+/** Fulfillment provider dropship acceptance writes on every order line it creates. */
+export const DROPSHIP_LINE_FULFILLMENT_PROVIDER = "dropship";
+/** Writeback destination for dropship lines: the vendor's own store, through the dropship module. */
+export const DROPSHIP_WRITEBACK_PROVIDER = "dropship";
+
+/**
+ * The store a shipped line is written back to. Normally that is the order's
+ * own channel. A dropship order sits on the internal Dropship OMS channel,
+ * but its sale lives in the vendor's marketplace store, so its lines go to
+ * that store instead. Both facts are required, so an ordinary manual order
+ * never gains a writeback destination. Pure.
+ */
+export function resolveChannelWritebackProvider(input: {
+  readonly channelProvider: string | null;
+  readonly lineFulfillmentProvider: string | null;
+}): string | null {
+  const channelProvider = normalized(input.channelProvider);
+  const lineFulfillmentProvider = normalized(input.lineFulfillmentProvider);
+  if (
+    channelProvider === DROPSHIP_ORDER_CHANNEL_PROVIDER
+    && lineFulfillmentProvider === DROPSHIP_LINE_FULFILLMENT_PROVIDER
+  ) {
+    return DROPSHIP_WRITEBACK_PROVIDER;
+  }
+  return channelProvider || null;
+}
+
+/**
  * Decides whether one canonical physical-package line may be written back to
  * its sales channel. This is intentionally pure so every webhook, sweeper,
  * replay, and future shipping adapter applies the same commercial authority.

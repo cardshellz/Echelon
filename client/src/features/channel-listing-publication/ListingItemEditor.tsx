@@ -1,4 +1,5 @@
 import { useId, useRef, useState } from "react";
+import { Check } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import {
   listingDraftItemSchema,
@@ -129,15 +130,23 @@ export function ListingItemEditor({
   }
   function sectionHeading(label: string, help: string) {
     return (
-      <div className="space-y-1">
-        <h3
-          id={sectionId(label)}
-          tabIndex={-1}
-          className="scroll-mt-4 text-base font-semibold outline-none"
+      <div className="flex items-start gap-3 border-b pb-4">
+        <span
+          aria-hidden="true"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-semibold text-primary"
         >
-          {label}
-        </h3>
-        <p className="text-sm text-muted-foreground">{help}</p>
+          {sections.indexOf(label) + 1}
+        </span>
+        <div className="space-y-1">
+          <h3
+            id={sectionId(label)}
+            tabIndex={-1}
+            className="scroll-mt-4 text-base font-semibold outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {label}
+          </h3>
+          <p className="text-sm text-muted-foreground">{help}</p>
+        </div>
       </div>
     );
   }
@@ -148,8 +157,10 @@ export function ListingItemEditor({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="flex max-h-[90vh] max-w-4xl flex-col gap-0 overflow-hidden p-0">
-        <DialogHeader className="shrink-0 px-5 pb-3 pt-5 pr-12">
+      {/* Clip without a second scroll container so field jumps keep the header
+          and footer in place. Only the form body should scroll. */}
+      <DialogContent className="flex max-h-[94dvh] max-w-4xl flex-col gap-0 overflow-clip p-0">
+        <DialogHeader className="shrink-0 px-4 pb-3 pt-4 pr-12 text-left sm:px-5 sm:pt-5 sm:pr-12">
           <DialogTitle>
             {catalog?.name ?? `Variant ${item.variantId}`}
           </DialogTitle>
@@ -161,24 +172,31 @@ export function ListingItemEditor({
         </DialogHeader>
         <nav
           aria-label="Listing editor sections"
-          className="flex shrink-0 flex-wrap gap-2 border-b px-5 pb-3"
+          className="flex shrink-0 gap-2 overflow-x-auto border-b px-4 pb-3 sm:px-5"
         >
-          {sections.map((section) => (
+          {sections.map((section, index) => (
             <Button
               key={section}
               type="button"
               variant="outline"
               size="sm"
+              className="shrink-0 gap-1.5"
               aria-label={`Jump to ${section.toLowerCase()}`}
               onClick={() => jumpTo(section)}
             >
+              <span aria-hidden="true" className="text-primary">
+                {index + 1}.
+              </span>
               {section}
             </Button>
           ))}
         </nav>
-        <div className="min-h-0 overflow-y-auto px-5 py-5">
-          <fieldset disabled={!canEdit} className="min-w-0 space-y-8">
-            <section className="space-y-5" aria-labelledby={sectionId("Setup")}>
+        <div className="min-h-0 overflow-y-auto bg-muted/20 p-3 sm:p-5">
+          <fieldset disabled={!canEdit} className="min-w-0 space-y-5">
+            <section
+              className="space-y-4 rounded-lg border bg-background p-3 sm:p-5"
+              aria-labelledby={sectionId("Setup")}
+            >
               {sectionHeading(
                 "Setup",
                 "Choose the listing method, product type, and exact selling-unit identifier.",
@@ -301,12 +319,12 @@ export function ListingItemEditor({
               </p>
             </section>
             <section
-              className="space-y-3 border-t pt-6"
+              className="space-y-4 rounded-lg border bg-background p-3 sm:p-5"
               aria-labelledby={sectionId("Required details")}
             >
               {sectionHeading(
                 "Required details",
-                "Complete the required and conditional fields for this product type.",
+                "Required fields stay visible. Expand optional fields or field guidance when needed.",
               )}
               {requirements.isFetching && (
                 <p role="status" className="text-sm text-muted-foreground">
@@ -342,16 +360,12 @@ export function ListingItemEditor({
                     onChange={attributes}
                     disabled={!canEdit}
                   />
-                  <p className="text-xs text-muted-foreground">
-                    Walmart schema {requirements.data.version}. Publication
-                    review checks all conditional requirements.
-                  </p>
                 </>
               )}
             </section>
             {draft.method === "create" && (
               <section
-                className="space-y-5 border-t pt-6"
+                className="space-y-5 rounded-lg border bg-background p-3 sm:p-5"
                 aria-labelledby={sectionId("Content")}
               >
                 {sectionHeading(
@@ -419,8 +433,15 @@ export function ListingItemEditor({
                 />
               </section>
             )}
+            {images === null && catalog?.imageIssues?.length ? (
+              <ul className="space-y-1 text-sm text-destructive" aria-label="Catalog photo issues">
+                {[...new Set(catalog.imageIssues.map(issue => issue.message))].map(message => (
+                  <li key={message}>{message}</li>
+                ))}
+              </ul>
+            ) : null}
             <section
-              className="space-y-3 border-t pt-6"
+              className="space-y-4 rounded-lg border bg-background p-3 sm:p-5"
               aria-labelledby={sectionId("Pricing")}
             >
               {sectionHeading(
@@ -445,7 +466,7 @@ export function ListingItemEditor({
               </div>
             </section>
             <section
-              className="space-y-3 border-t pt-6"
+              className="space-y-4 rounded-lg border bg-background p-3 sm:p-5"
               aria-labelledby={sectionId("Advanced")}
             >
               {sectionHeading(
@@ -453,7 +474,7 @@ export function ListingItemEditor({
                 "Edit provider attributes as JSON when needed.",
               )}
               <details className="rounded-md border p-3">
-                <summary className="cursor-pointer text-sm">
+                <summary className="cursor-pointer text-sm font-medium">
                   Advanced attributes
                 </summary>
                 <div className="mt-3 space-y-3">
@@ -492,17 +513,29 @@ export function ListingItemEditor({
             </section>
           </fieldset>
         </div>
-        <div className="shrink-0 space-y-3 border-t bg-background p-4">
+        <div className="shrink-0 space-y-3 border-t bg-background p-3 sm:p-4">
           {error && (
             <p role="alert" className="text-sm text-destructive">
               {error}
             </p>
           )}
-          <DialogFooter>
-            <Button variant="outline" onClick={onClose}>
-              Cancel
-            </Button>
-            {canEdit && <Button onClick={save}>Update draft item</Button>}
+          <DialogFooter className="items-center gap-3 sm:justify-between">
+            <p className="text-xs text-muted-foreground">
+              {canEdit
+                ? "Updates this item in your draft."
+                : "Viewing this draft item."}
+            </p>
+            <div className="flex w-full items-center justify-end gap-2 sm:w-auto">
+              <Button variant="outline" onClick={onClose}>
+                Cancel
+              </Button>
+              {canEdit && (
+                <Button onClick={save}>
+                  <Check aria-hidden="true" />
+                  Update draft item
+                </Button>
+              )}
+            </div>
           </DialogFooter>
         </div>
       </DialogContent>

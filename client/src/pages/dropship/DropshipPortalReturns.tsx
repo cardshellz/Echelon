@@ -31,9 +31,7 @@ import {
   formatStatus,
   postJson,
   queryErrorMessage,
-  type DropshipOrderDetail,
   type DropshipOrderDetailLine,
-  type DropshipOrderDetailResponse,
   type DropshipOrderListItem,
   type DropshipOrderListResponse,
   type DropshipPortalReturnCreateResponse,
@@ -43,6 +41,10 @@ import {
   type DropshipReturnListItem,
   type DropshipReturnListResponse,
 } from "@/lib/dropship-ops-surface";
+import type {
+  DropshipVendorOrderDetail,
+  DropshipVendorOrderDetailResponse,
+} from "@shared/dropship/vendor-order-detail";
 import { Textarea } from "@/components/ui/textarea";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
@@ -132,11 +134,11 @@ export default function DropshipPortalReturns() {
     queryFn: () => fetchJson<DropshipOrderListResponse>(orderPickerUrl),
     enabled: createOpen,
   });
-  const createOrderDetailQuery = useQuery<DropshipOrderDetailResponse>({
+  const createOrderDetailQuery = useQuery<DropshipVendorOrderDetailResponse>({
     queryKey: ["dropship-return-order-detail", selectedCreateIntakeId],
     queryFn: () => {
       if (selectedCreateIntakeId === null) throw new Error("Missing selected order.");
-      return fetchJson<DropshipOrderDetailResponse>(`/api/dropship/orders/${selectedCreateIntakeId}`);
+      return fetchJson<DropshipVendorOrderDetailResponse>(`/api/dropship/orders/${selectedCreateIntakeId}`);
     },
     enabled: createOpen && selectedCreateIntakeId !== null,
   });
@@ -412,7 +414,7 @@ function CreateReturnSheet({
   onRemoveItem: (clientId: string) => void;
   onResetItems: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-  orderDetail: DropshipOrderDetail | null;
+  orderDetail: DropshipVendorOrderDetail | null;
   orderDetailError: unknown;
   orders: DropshipOrderListItem[];
   ordersError: unknown;

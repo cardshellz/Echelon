@@ -24,17 +24,28 @@ vi.mock("../../../../platform/observability/logger", () => ({
 }));
 
 import { WmsSyncService } from "../../wms-sync.service";
+import type { LegacyMemberMatch } from "../../member-resolver-dry-run";
 
 const DROPSHIP_OMS_CHANNEL_ID = 103;
 const SHOPIFY_CHANNEL_ID = 36;
 const OPS_PLAN_ID = "14d8698f-09d8-4dea-8089-fa9a1ec0fb28";
 const OPS_PLAN_ROW = { priority_modifier: 100, name: ".ops", primary_color: "#C060E0" };
-const CLUB_PLAN_ROW = { priority_modifier: 50, name: ".club", primary_color: "#2E86DE" };
+const CLUB_PLAN_ID = "5f966934-9ff2-4966-9e8f-d4292ca3290e";
+const CLUB_PLAN_ROW = {
+  priority_modifier: 50,
+  name: ".club",
+  primary_color: "#2E86DE",
+  plan_id: CLUB_PLAN_ID,
+  member_id: "member-club",
+  matched_by_email: false,
+  matched_by_shopify_customer_id: true,
+};
 
 interface PriorityResult {
   priority: number;
   memberPlanName: string | null;
   memberPlanColor: string | null;
+  legacyMember: LegacyMemberMatch | null;
 }
 
 interface Statement {
@@ -153,7 +164,7 @@ describe("WmsSyncService pick priority for Dropship orders", () => {
 
     const result = await determinePriority(createService(), dropshipOrder());
 
-    expect(result).toEqual({ priority: 200, memberPlanName: ".ops", memberPlanColor: "#C060E0" });
+    expect(result).toEqual({ priority: 200, memberPlanName: ".ops", memberPlanColor: "#C060E0", legacyMember: null });
     const planQueries = executed().filter(isPlanByIdQuery);
     expect(planQueries).toHaveLength(1);
     expect(planQueries[0].params).toEqual([OPS_PLAN_ID]);
@@ -196,7 +207,7 @@ describe("WmsSyncService pick priority for Dropship orders", () => {
 
     const result = await determinePriority(createService(), dropshipOrder({ rawPayload: legacyStamp }));
 
-    expect(result).toEqual({ priority: 100, memberPlanName: null, memberPlanColor: null });
+    expect(result).toEqual({ priority: 100, memberPlanName: null, memberPlanColor: null, legacyMember: null });
     // No plan lookup and, above all, no fallback to the buyer.
     expect(executed().filter((s) => s.text.includes("membership."))).toEqual([]);
     expect(warnings()).toEqual([{
@@ -224,7 +235,7 @@ describe("WmsSyncService pick priority for Dropship orders", () => {
 
     const result = await determinePriority(createService(), dropshipOrder());
 
-    expect(result).toEqual({ priority: 100, memberPlanName: null, memberPlanColor: null });
+    expect(result).toEqual({ priority: 100, memberPlanName: null, memberPlanColor: null, legacyMember: null });
     expect(warnings()).toEqual([{
       oms_order_id: 1013417,
       channel_id: DROPSHIP_OMS_CHANNEL_ID,
@@ -239,7 +250,7 @@ describe("WmsSyncService pick priority for Dropship orders", () => {
 
     const result = await determinePriority(createService(), dropshipOrder());
 
-    expect(result).toEqual({ priority: 100, memberPlanName: null, memberPlanColor: null });
+    expect(result).toEqual({ priority: 100, memberPlanName: null, memberPlanColor: null, legacyMember: null });
     expect(warnings()).toEqual([expect.objectContaining({
       outcome: "vendor_plan_invalid",
       error_code: "WMS_SYNC_DROPSHIP_VENDOR_PLAN_INVALID",
@@ -251,7 +262,7 @@ describe("WmsSyncService pick priority for Dropship orders", () => {
 
     const result = await determinePriority(createService(), dropshipOrder());
 
-    expect(result).toEqual({ priority: 100, memberPlanName: null, memberPlanColor: null });
+    expect(result).toEqual({ priority: 100, memberPlanName: null, memberPlanColor: null, legacyMember: null });
     expect(warnings()).toEqual([{
       oms_order_id: 1013417,
       channel_id: DROPSHIP_OMS_CHANNEL_ID,
@@ -269,9 +280,21 @@ describe("WmsSyncService pick priority for other orders (unchanged)", () => {
 
     const result = await determinePriority(createService(), shopifyOrder());
 
-    expect(result).toEqual({ priority: 150, memberPlanName: ".club", memberPlanColor: "#2E86DE" });
+    expect(result).toEqual({
+      priority: 150,
+      memberPlanName: ".club",
+      memberPlanColor: "#2E86DE",
+      legacyMember: {
+        outcome: "member",
+        memberId: "member-club",
+        planId: CLUB_PLAN_ID,
+        modifier: 50,
+        matchedBy: "shopify_customer_id",
+      },
+    });
     const [buyerQuery] = executed().filter(isBuyerMembershipQuery);
-    expect(buyerQuery.params).toEqual(["member@example.com", 555]);
+    // The match flags reuse the WHERE values: email and Shopify id, twice.
+    expect(buyerQuery.params).toEqual(["member@example.com", 555, "member@example.com", 555]);
     expect(executed().filter(isPlanByIdQuery)).toEqual([]);
   });
 
@@ -282,6 +305,45 @@ describe("WmsSyncService pick priority for other orders (unchanged)", () => {
 
     expect(result.priority).toBe(150);
     expect(result.memberPlanName).toBe(".club");
+    // For the dry run: a plan matched by its saved name has no member behind it.
+    expect(result.legacyMember).toEqual({
+      outcome: "member",
+      memberId: null,
+      planId: CLUB_PLAN_ID,
+      modifier: 50,
+      matchedBy: "member_tier",
+    });
+  });
+
+  it("records which of today's conditions matched the member, for the dry run", async () => {
+    for (const [flags, matchedBy] of [
+      [{ matched_by_email: true, matched_by_shopify_customer_id: false }, "email"],
+      [{ matched_by_email: true, matched_by_shopify_customer_id: true }, "email_and_shopify_customer_id"],
+      [{ matched_by_email: false, matched_by_shopify_customer_id: false }, "unknown"],
+    ] as const) {
+      answer({ buyerMembership: [{ ...CLUB_PLAN_ROW, ...flags }] });
+
+      const result = await determinePriority(createService(), shopifyOrder());
+
+      expect(result.priority).toBe(150);
+      expect(result.legacyMember).toMatchObject({ outcome: "member", matchedBy });
+    }
+  });
+
+  it("scores the shipping base alone and records a failed lookup when the membership read fails", async () => {
+    harness.execute.mockRejectedValue(new Error("connection terminated"));
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = await determinePriority(createService(), shopifyOrder());
+
+    expect(result).toEqual({
+      priority: 100,
+      memberPlanName: null,
+      memberPlanColor: null,
+      legacyMember: { outcome: "lookup_failed" },
+    });
+    expect(consoleWarn).toHaveBeenCalledOnce();
+    consoleWarn.mockRestore();
   });
 
   it("scores a non-member with the shipping base alone", async () => {
@@ -289,7 +351,12 @@ describe("WmsSyncService pick priority for other orders (unchanged)", () => {
 
     const result = await determinePriority(createService(), shopifyOrder());
 
-    expect(result).toEqual({ priority: 100, memberPlanName: null, memberPlanColor: null });
+    expect(result).toEqual({
+      priority: 100,
+      memberPlanName: null,
+      memberPlanColor: null,
+      legacyMember: { outcome: "no_member" },
+    });
     expect(warnings()).toEqual([]);
   });
 });

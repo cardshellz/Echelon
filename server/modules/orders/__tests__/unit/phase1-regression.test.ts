@@ -479,33 +479,34 @@ describe("Migrated writers use C4 functions", () => {
     expect(block).not.toMatch(/SET warehouse_status\s*=\s*CASE/);
   });
 
-  it("self-heal writers in orders.storage.ts use C4 (not raw UPDATE warehouse_status)", async () => {
+  it("pick queue reads no longer perform lifecycle self-heal writes", async () => {
     const { readFileSync } = await import("fs");
     const { resolve } = await import("path");
     const src = readFileSync(
       resolve(__dirname, "../../orders.storage.ts"),
       "utf-8",
     );
-    const selfHealStart = src.indexOf("Self-heal: auto-complete orders with zero shippable");
-    const selfHealEnd = src.indexOf("Shipping transitions belong to shipment processing", selfHealStart);
-    const block = src.slice(selfHealStart, selfHealEnd);
+    const start = src.indexOf("async getPickQueueOrders(");
+    const end = src.indexOf("async createOrderWithItems(", start);
+    const block = src.slice(start, end);
 
-    expect(block).toContain("completeOrder(db,");
-    expect(block).not.toContain("SET warehouse_status = 'completed'");
+    expect(block).not.toMatch(/completeOrder\(|transitionOrderStatus\(|UPDATE wms\.orders/);
+    expect(src).not.toContain("Self-heal: auto-complete orders with zero shippable");
   });
 
-  it("transitionStuckOrder uses transitionOrderStatus (not raw UPDATE)", async () => {
+  it("stuck-order repair uses the same transaction-owned picking projection", async () => {
     const { readFileSync } = await import("fs");
     const { resolve } = await import("path");
     const src = readFileSync(
       resolve(__dirname, "../../orders.storage.ts"),
       "utf-8",
     );
-    const methodStart = src.indexOf("async transitionStuckOrder");
-    const methodEnd = src.indexOf("},", methodStart);
-    const block = src.slice(methodStart, methodEnd);
-
-    expect(block).toContain("transitionOrderStatus(db,");
+    const picking = readFileSync(resolve(__dirname, "../../picking.use-cases.ts"), "utf-8");
+    const start = picking.indexOf("async repairPickingProgress(");
+    const end = picking.indexOf("async getReplenGuidanceForItem(", start);
+    const block = picking.slice(start, end);
+    expect(src).not.toContain("async transitionStuckOrder");
+    expect(block).toContain("this.db.transaction(tx => reconcileWmsPickingProgress(tx, candidate.id,");
     expect(block).not.toContain("UPDATE wms.orders");
   });
 });

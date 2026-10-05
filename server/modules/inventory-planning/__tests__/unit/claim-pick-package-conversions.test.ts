@@ -88,11 +88,12 @@ describe("shared replenishment execution policy", () => {
     expect(resolveReplenishmentAutoExecution(null, 1, null, 1000).shouldAutoExecute).toBe(true);
     expect(resolveReplenishmentAutoExecution(null, null, null, 1).shouldAutoExecute).toBe(false);
   });
-  it("uses base units for hybrid thresholds and never auto-executes transfers", () => {
+  it("uses base units for hybrid thresholds and honors inline for same-SKU full-case replenishment", () => {
     const settings = { replenMode: "hybrid", inlineReplenMaxUnits: 50 };
     expect(resolveReplenishmentAutoExecution(0, 0, settings, 50).shouldAutoExecute).toBe(true);
     expect(resolveReplenishmentAutoExecution(0, 0, settings, 51).shouldAutoExecute).toBe(false);
-    expect(resolveReplenishmentAutoExecution(1, 1, settings, 1, "full_case").shouldAutoExecute).toBe(false);
+    expect(resolveReplenishmentAutoExecution(1, 1, settings, 1, "full_case").shouldAutoExecute).toBe(true);
+    expect(resolveReplenishmentAutoExecution(1, 1, settings, 1, "pallet_drop").shouldAutoExecute).toBe(false);
   });
   it("applies the same SKU, tier and warehouse controls to proven package conversions, never component builds", () => {
     expect(resolveReplenishmentAutoExecution(2,1,{ replenMode:"inline",inlineReplenMaxUnits:50 },5,"package_conversion").shouldAutoExecute).toBe(false);

@@ -14,7 +14,7 @@ import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availa
 const actorSchema = z.string().trim().min(1).max(100);
 
 export interface InventoryPublicationTargetStopCommand
-extends StopInventoryPublicationTargetRequest {
+extends z.output<typeof stopInventoryPublicationTargetRequestSchema> {
   actorId: string;
   requestHash: string;
   occurredAt: Date;

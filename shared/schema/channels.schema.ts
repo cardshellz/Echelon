@@ -589,7 +589,7 @@ export const syncSettings = channelsSchema.table("sync_settings", {
   sweepIntervalMinutes: integer("sweep_interval_minutes").notNull().default(15),
   revision: bigint("revision", { mode: "bigint" }).notNull().default(BigInt(1)),
   changedBy: varchar("changed_by", { length: 100 }).notNull().default("system:uninitialized"),
-  changeReason: varchar("change_reason", { length: 1000 }).notNull()
+  changeReason: varchar("change_reason", { length: 1000 })
     .default("Created disabled pending an explicit operator command."),
   lastSweepAt: timestamp("last_sweep_at"),
   lastSweepDurationMs: integer("last_sweep_duration_ms"),
@@ -604,7 +604,8 @@ export const syncSettings = channelsSchema.table("sync_settings", {
   ),
   reasonValid: check(
     "sync_settings_change_reason_chk",
-    sql`${table.changeReason} = btrim(${table.changeReason}) AND ${table.changeReason} <> ''`,
+    sql`(${table.globalEnabled} = false AND ${table.changeReason} IS NULL) OR
+      (${table.changeReason} IS NOT NULL AND ${table.changeReason} = btrim(${table.changeReason}) AND ${table.changeReason} <> '')`,
   ),
 }));
 

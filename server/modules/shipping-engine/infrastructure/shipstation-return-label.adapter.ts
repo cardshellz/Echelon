@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   ReturnLabelProviderError,
   returnLabelInputSchema,
+  returnLabelOrderNumberSchema,
   returnLabelProviderIdSchema,
   returnLabelRecordSchema,
   type ReturnLabelAddress,
@@ -10,6 +11,8 @@ import {
   type ReturnLabelProvider,
   type ReturnLabelRecord,
 } from "../application/return-label-provider.port";
+import { matchesShipStationReturnWeight, shipStationReturnWeightPounds, type ShipStationReturnWeightVerificationMode } from "./shipstation-return-weight";
+import { shipStationReturnAddress } from "./shipstation-return-address";
 
 const API_ORIGIN = "https://api.shipstation.com";
 const API_PATH = "/v2";
@@ -57,10 +60,12 @@ const addressSchema = z.object({
   name: z.string(), phone: z.string().nullish(), company_name: z.string().nullish(),
   address_line1: z.string(), address_line2: z.string().nullish(), address_line3: z.string().nullish(),
   city_locality: z.string(), state_province: z.string(), postal_code: z.string(), country_code: z.string(),
+  address_residential_indicator: z.enum(["yes", "no", "unknown"]).nullish(),
 });
 const shipmentSchema = z.object({
   shipment_id: returnLabelProviderIdSchema,
   external_shipment_id: z.string(),
+  shipment_number: returnLabelOrderNumberSchema.nullish(),
   carrier_id: returnLabelProviderIdSchema,
   service_code: nonempty,
   ship_from: addressSchema,
@@ -79,6 +84,8 @@ export interface ShipStationReturnLabelAdapterConfig {
   fetchFn?: typeof fetch;
   timeoutMs?: number;
 }
+
+type LabelVerification = { kind: "purchase" } | { kind: "recover"; labelId: string };
 
 /** Dedicated effect adapter. No global credentials, database imports or automatic POST retries.
  * https://docs.shipstation.com/return-labels restricts is_return_label to POST /v2/labels.
@@ -138,27 +145,30 @@ export function createShipStationReturnLabelAdapter(config: ShipStationReturnLab
     }
   }
 
-  async function verify(raw: unknown, input: ReturnLabelInput, signal?: AbortSignal, expectedLabelId?: string): Promise<ReturnLabelRecord> {
+  async function verify(raw: unknown, input: ReturnLabelInput, verification: LabelVerification, signal?: AbortSignal): Promise<ReturnLabelRecord> {
     const parsed = labelSchema.safeParse(raw);
     if (!parsed.success) fail("RETURN_LABEL_RESPONSE_INVALID", "unknown");
     const label = parsed.data;
-    if (expectedLabelId && label.label_id !== expectedLabelId) fail("RETURN_LABEL_IDENTITY_MISMATCH", "unknown");
+    if (verification.kind === "recover" && label.label_id !== verification.labelId) fail("RETURN_LABEL_IDENTITY_MISMATCH", "unknown");
     if (label.status !== "completed") fail("RETURN_LABEL_NOT_COMPLETED", "unknown", label.status === "processing");
     if (!label.is_return_label || label.is_international || !label.trackable || label.voided || label.voided_at
       || label.rma_number !== input.rmaNumber || label.carrier_id !== input.carrierId || label.service_code !== input.serviceCode
       || label.label_format !== "pdf" || label.label_layout !== "4x6" || label.charge_event !== "carrier_default"
       || (label.external_shipment_id != null && label.external_shipment_id !== input.externalShipmentId)
       || label.packages[0].tracking_number !== label.tracking_number) fail("RETURN_LABEL_IDENTITY_MISMATCH", "unknown");
-    assertPackage(label.packages[0], input);
+    assertPackage(label.packages[0], input, verification.kind);
     const shipmentResult = shipmentSchema.safeParse(await request("GET", `/shipments/${encodeURIComponent(label.shipment_id)}`, undefined, signal));
     if (!shipmentResult.success) fail("RETURN_LABEL_SHIPMENT_INVALID", "unknown");
     const shipment = shipmentResult.data;
+    if (input.orderNumber !== undefined && shipment.shipment_number !== input.orderNumber) {
+      fail("RETURN_LABEL_ORDER_REFERENCE_MISMATCH", "unknown");
+    }
     if (shipment.shipment_id !== label.shipment_id || shipment.external_shipment_id !== input.externalShipmentId
       || shipment.carrier_id !== input.carrierId || shipment.service_code !== input.serviceCode
       || !sameAddress(shipment.ship_from, input.shipFrom) || !sameAddress(shipment.ship_to, input.shipTo)) {
       fail("RETURN_LABEL_IDENTITY_MISMATCH", "unknown");
     }
-    assertPackage(shipment.packages[0], input);
+    assertPackage(shipment.packages[0], input, verification.kind);
     const cost = moneyCents(label.shipment_cost).plus(moneyCents(label.insurance_cost));
     if (!cost.isInteger() || cost.greaterThan(Number.MAX_SAFE_INTEGER)) fail("RETURN_LABEL_AMOUNT_INVALID", "unknown");
     const result = returnLabelRecordSchema.safeParse({
@@ -175,7 +185,7 @@ export function createShipStationReturnLabelAdapter(config: ShipStationReturnLab
     async purchase(rawInput, signal) {
       const input = parseInput(rawInput);
       const response = await request("POST", "/labels", buildReturnLabelRequest(input), signal);
-      return verify(response, input, signal);
+      return verify(response, input, { kind: "purchase" }, signal);
     },
     async recover(rawInput, signal) {
       const input = parseInput(rawInput, "unknown");
@@ -208,7 +218,7 @@ export function createShipStationReturnLabelAdapter(config: ShipStationReturnLab
       if (ids.size > 1) fail("RETURN_LABEL_RECOVERY_AMBIGUOUS", "unknown");
       const [id] = ids;
       if (!id) return null;
-      return verify(await request("GET", `/labels/${encodeURIComponent(id)}`, undefined, signal), input, signal, id);
+      return verify(await request("GET", `/labels/${encodeURIComponent(id)}`, undefined, signal), input, { kind: "recover", labelId: id }, signal);
     },
   };
 }
@@ -221,36 +231,36 @@ function parseInput(input: unknown, outcome: "rejected" | "unknown" = "rejected"
 
 export function buildReturnLabelRequest(rawInput: ReturnLabelInput): Record<string, unknown> {
   const input = parseInput(rawInput);
+  const weightPounds = shipStationReturnWeightPounds(input.parcel.weightGrams);
+  if (weightPounds === null) fail("RETURN_LABEL_INPUT_INVALID", "rejected");
   return {
     is_return_label: true, rma_number: input.rmaNumber, charge_event: "carrier_default",
     label_format: "pdf", label_layout: "4x6", label_download_type: "url",
     shipment: {
       validate_address: "no_validation", external_shipment_id: input.externalShipmentId,
+      ...(input.orderNumber === undefined ? {} : { shipment_number: input.orderNumber }),
       carrier_id: input.carrierId, service_code: input.serviceCode,
-      ship_from: addressBody(input.shipFrom), ship_to: addressBody(input.shipTo),
-      packages: [{ package_code: "package", weight: { value: input.parcel.weightGrams, unit: "gram" },
+      ship_from: shipStationReturnAddress(input.shipFrom), ship_to: shipStationReturnAddress(input.shipTo),
+      packages: [{ package_code: "package", weight: { value: weightPounds, unit: "pound" },
         dimensions: { ...input.parcel.dimensionsInches, unit: "inch" } }],
     },
   };
 }
 
-function addressBody(address: ReturnLabelAddress) {
-  return {
-    name: address.name, phone: address.phone, company_name: address.companyName,
-    address_line1: address.addressLine1, address_line2: address.addressLine2, address_line3: address.addressLine3,
-    city_locality: address.city, state_province: address.state, postal_code: address.postalCode, country_code: address.countryCode,
-  };
-}
-
 function sameAddress(actual: z.infer<typeof addressSchema>, expected: ReturnLabelAddress): boolean {
   const canonical = (value: string | null | undefined) => (value ?? "").trim().replace(/\s+/g, " ").toUpperCase();
-  const body = addressBody(expected);
-  return Object.entries(body).every(([key, value]) => canonical(actual[key as keyof typeof actual]) === canonical(value));
+  const { address_residential_indicator: requestedType, ...physicalAddress } = shipStationReturnAddress(expected);
+  // Older saved requests and provider readbacks may not contain classification.
+  // Always verify the physical address; an explicit opposite classification is
+  // an ambiguous result requiring reconciliation, never a second purchase.
+  const actualType = actual.address_residential_indicator;
+  const classificationMatches = requestedType === "unknown" || actualType == null || actualType === "unknown" || actualType === requestedType;
+  return classificationMatches && Object.entries(physicalAddress)
+    .every(([key, value]) => canonical(actual[key as keyof typeof actual]) === canonical(value));
 }
 
-function assertPackage(actual: z.infer<typeof packageSchema>, input: ReturnLabelInput): void {
-  const gramsPerUnit = { gram: "1", kilogram: "1000", ounce: "28.349523125", pound: "453.59237" };
-  if (!new Exact(actual.weight.value).times(gramsPerUnit[actual.weight.unit]).eq(input.parcel.weightGrams)) {
+function assertPackage(actual: z.infer<typeof packageSchema>, input: ReturnLabelInput, mode: ShipStationReturnWeightVerificationMode): void {
+  if (!matchesShipStationReturnWeight(actual.weight, input.parcel.weightGrams, mode)) {
     fail("RETURN_LABEL_MEASUREMENTS_MISMATCH", "unknown");
   }
   for (const axis of ["length", "width", "height"] as const) {

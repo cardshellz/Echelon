@@ -13,13 +13,10 @@ import { bpsToPercentText, formatPercent, formatUnits, parseWholeUnits, percentT
 /**
  * Pure view-model for the Channel Inventory workspace.
  *
- * Everything here is a deterministic function of server evidence. Nothing in
- * this module computes availability or a channel quantity: the server's
- * preview rows are the only source of proposed quantities. The one "resolver"
- * below (`resolveSavedFields`) only reports which *saved* rule supplies each
- * field for display next to an "Inherit" choice; it mirrors the server's
- * documented order (SKU → product → channel, draft preferred) and is never
- * used to calculate a number.
+ * Saved definitions supply form values and inheritance captions; no function
+ * here computes inventory availability. The server's preview rows remain the
+ * source of actual proposed quantities. Inherited display values are kept
+ * separate from the edited form so displaying a default cannot create an override.
  */
 
 export type View = InventoryChannelExposureAdminView;
@@ -189,17 +186,16 @@ export function describePublishing(target: Target): PublishingStatus {
       };
     case "preview":
       return {
-        label: "Calculating only",
+        label: "Setup pending",
         tone: "preview",
-        explanation: "Quantities are calculated and recorded for readiness review. Nothing is sent "
-          + "to the provider.",
+        explanation: "This account is included in setup checks. Stock updates are off.",
       };
     default:
       return {
         label: "Not publishing",
         tone: "off",
-        explanation: "No quantities are calculated or sent for this destination. Stock the "
-          + "marketplace already shows is unchanged.",
+        explanation: "Stock updates are off for this account. Quantities can still be previewed, "
+          + "and stock already shown in the marketplace is unchanged.",
       };
   }
 }
@@ -276,49 +272,45 @@ export interface PolicyFieldMeta {
 export const POLICY_FIELDS: readonly PolicyFieldMeta[] = [
   {
     key: "eligible",
-    label: "Sell on this channel",
-    help: "When off, this channel shows zero regardless of the settings below.",
+    label: "Default availability",
+    help: "Choose whether this rule sends available stock or marks items as out of stock.",
     sourceKey: "eligible",
   },
   {
     key: "shareBps",
-    label: "Offer",
-    help: "Share of available stock this channel may offer. A narrower rule replaces this "
-      + "value; percentages never multiply.",
+    label: "Stock percentage",
+    help: "100% uses all available stock before applying any stock buffer or quantity limits.",
     sourceKey: "shareBps",
   },
   {
     key: "holdbackSellableUnits",
-    label: "Keep back",
-    help: "Units subtracted after the offer percentage. This is a selling choice for this "
-      + "channel, not warehouse safety stock.",
+    label: "Stock buffer",
+    help: "Subtract this many sellable units after the percentage. For example, 10 minus a buffer of 2 shows 8. Use 0 for no buffer.",
     sourceKey: "holdbackSellableUnits",
   },
   {
     key: "maxPublish",
-    label: "Maximum to show",
-    help: "Cap on the quantity shown. \"No limit\" is an explicit choice.",
+    label: "Maximum displayed quantity",
+    help: "Limit the quantity advertised for each SKU, even when more stock is available.",
     sourceKey: "maxPublishSellableUnits",
   },
   {
     key: "minPublishSellableUnits",
-    label: "Show zero below",
-    help: "If the remaining quantity is smaller than this, the channel shows zero. Never "
-      + "increases a quantity.",
+    label: "Out-of-stock cutoff",
+    help: "After the other adjustments, show zero below this quantity. A cutoff of 3 changes 2 to zero; 3 stays 3. Use 0 to disable.",
     sourceKey: "minPublishSellableUnits",
   },
   {
     key: "allocationSemantics",
-    label: "Stock sharing",
-    help: "Shared pool: channels advertise from the same stock and orders compete for it. "
-      + "Partitioned: overlapping shares are checked against the common budget before publishing.",
+    label: "Sharing across channels",
+    help: "Choose how this channel shares available inventory with other channels.",
     sourceKey: "allocationSemantics",
   },
 ];
 
 export const SEMANTICS_LABELS = {
-  exposure: "Shared pool",
-  partitioned: "Partitioned",
+  exposure: "Share available stock",
+  partitioned: "Limit combined channel percentages",
 } as const;
 
 /** One editable field: inherit (null) or an explicit value in text form. */
@@ -364,6 +356,16 @@ export function policyValueToForm(value: ChannelExposurePolicyValue | null): Pol
   };
 }
 
+/** Suggestions exist only in a new, unsaved channel form. Never fill gaps in a saved rule. */
+export function channelDefaultValueToForm(value: ChannelExposurePolicyValue | null): PolicyForm {
+  if (value !== null) return policyValueToForm(value);
+  return {
+    eligible: "yes", shareMode: "set", sharePercent: "100",
+    holdbackMode: "set", holdbackUnits: "0", maxMode: "unlimited", maxUnits: "",
+    minMode: "set", minUnits: "0", semantics: "exposure",
+  };
+}
+
 export interface PolicyFormError {
   field: PolicyFieldKey | "form";
   message: string;
@@ -379,7 +381,7 @@ export type PolicyFormResult =
  * all inheritance with a versioned tombstone instead of deleting the rule.
  */
 export function policyFormToValue(form: PolicyForm, options: {
-  allowInheritAll?: boolean; sourceFulfillmentNodeIds?: number[] | null;
+  allowInheritAll?: boolean; requireComplete?: boolean; sourceFulfillmentNodeIds?: number[] | null;
 } = {}): PolicyFormResult {
   const errors: PolicyFormError[] = [];
   let shareBps: number | null = null;
@@ -390,20 +392,20 @@ export function policyFormToValue(form: PolicyForm, options: {
   }
   let holdback: string | null = null;
   if (form.holdbackMode === "set") {
-    const parsed = parseWholeUnits(form.holdbackUnits, "Keep back");
+    const parsed = parseWholeUnits(form.holdbackUnits, "Stock buffer");
     if (parsed.ok) holdback = parsed.value;
     else errors.push({ field: "holdbackSellableUnits", message: parsed.message });
   }
   let maxPublish: ChannelExposurePolicyValue["maxPublish"] = null;
   if (form.maxMode === "unlimited") maxPublish = { mode: "unlimited" };
   if (form.maxMode === "units") {
-    const parsed = parseWholeUnits(form.maxUnits, "Maximum to show");
+    const parsed = parseWholeUnits(form.maxUnits, "Maximum displayed quantity");
     if (parsed.ok) maxPublish = { mode: "units", units: parsed.value };
     else errors.push({ field: "maxPublish", message: parsed.message });
   }
   let min: string | null = null;
   if (form.minMode === "set") {
-    const parsed = parseWholeUnits(form.minUnits, "Show zero below");
+    const parsed = parseWholeUnits(form.minUnits, "Out-of-stock cutoff");
     if (parsed.ok) min = parsed.value;
     else errors.push({ field: "minPublishSellableUnits", message: parsed.message });
   }
@@ -417,6 +419,13 @@ export function policyFormToValue(form: PolicyForm, options: {
     ...(options.sourceFulfillmentNodeIds == null ? {} : { sourceFulfillmentNodeIds: [...options.sourceFulfillmentNodeIds].sort((a,b) => a-b) }),
   };
   if (options.sourceFulfillmentNodeIds?.length === 0) errors.push({ field: "form", message: "Select at least one supply warehouse, or use inherited supply." });
+  if (options.requireComplete) {
+    for (const field of POLICY_FIELDS) {
+      if (value[field.key] === null && !errors.some(error => error.field === field.key)) {
+        errors.push({ field: field.key, message: `Choose a value for ${field.label.toLowerCase()}.` });
+      }
+    }
+  }
   if (errors.length === 0 && Object.values(value).every((field) => field === null)) {
     if (options.allowInheritAll) value.inheritAll = true;
     else errors.push({
@@ -435,7 +444,7 @@ export function samePolicyForm(left: PolicyForm, right: PolicyForm): boolean {
 export function formatFieldValue(field: PolicyFieldKey, value: ChannelExposurePolicyValue): string | null {
   switch (field) {
     case "eligible":
-      return value.eligible === null ? null : value.eligible ? "Yes" : "No";
+      return value.eligible === null ? null : value.eligible ? "Available to sell" : "Out of stock";
     case "shareBps":
       return value.shareBps === null ? null : formatPercent(value.shareBps);
     case "holdbackSellableUnits":
@@ -499,6 +508,38 @@ export function resolveSavedFields(
   heads: readonly ChannelExposurePolicyHead[],
   scope: ChannelExposurePolicyScope,
 ): SavedFieldSources {
+  const parents = savedParentPolicies(heads, scope);
+  const result = {} as SavedFieldSources;
+  for (const field of POLICY_FIELDS) {
+    let found: SavedFieldSource = { kind: "unset" };
+    for (const parent of parents) {
+      const display = formatFieldValue(field.key, parent.value);
+      if (display !== null) {
+        found = { kind: parent.kind, display, authority: parent.authority, scopeKey: parent.scopeKey };
+        break;
+      }
+    }
+    result[field.key] = found;
+  }
+  return result;
+}
+
+/** Typed saved defaults for editable inherited inputs; formatted display text is never parsed. */
+export function resolveInheritedPolicyForm(
+  heads: readonly ChannelExposurePolicyHead[],
+  scope: ChannelExposurePolicyScope,
+): PolicyForm {
+  const parents = savedParentPolicies(heads, scope);
+  const field = <Key extends PolicyFieldKey>(key: Key): ChannelExposurePolicyValue[Key] =>
+    parents.find(parent => parent.value[key] !== null)?.value[key] ?? null;
+  return policyValueToForm({
+    eligible: field("eligible"), shareBps: field("shareBps"),
+    holdbackSellableUnits: field("holdbackSellableUnits"), maxPublish: field("maxPublish"),
+    minPublishSellableUnits: field("minPublishSellableUnits"), allocationSemantics: field("allocationSemantics"),
+  });
+}
+
+function savedParentPolicies(heads: readonly ChannelExposurePolicyHead[], scope: ChannelExposurePolicyScope) {
   const chain: Array<{ kind: "sku" | "product" | "channel"; scope: ChannelExposurePolicyScope }> = [];
   if (scope.scopeType === "variant") {
     chain.push({ kind: "product", scope: { scopeType: "product", channelId: scope.channelId, productId: scope.productId } });
@@ -506,20 +547,12 @@ export function resolveSavedFields(
   if (scope.scopeType !== "channel") {
     chain.push({ kind: "channel", scope: { scopeType: "channel", channelId: scope.channelId } });
   }
-  const result = {} as SavedFieldSources;
-  for (const field of POLICY_FIELDS) {
-    let found: SavedFieldSource = { kind: "unset" };
-    for (const link of chain) {
-      const saved = savedPolicy(findPolicyHead(heads, link.scope));
-      const display = saved ? formatFieldValue(field.key, saved.value) : null;
-      if (saved && display !== null) {
-        found = { kind: link.kind, display, authority: saved.authority, scopeKey: scopeKeyFor(link.scope) };
-        break;
-      }
-    }
-    result[field.key] = found;
-  }
-  return result;
+  return chain.flatMap(link => {
+    const saved = savedPolicy(findPolicyHead(heads, link.scope));
+    return saved && !saved.value.inheritAll
+      ? [{ ...saved, kind: link.kind, scopeKey: scopeKeyFor(link.scope) }]
+      : [];
+  });
 }
 
 export const SOURCE_KIND_LABELS = {
@@ -640,6 +673,18 @@ export interface QuantityExplanation {
  */
 export function explainQuantity(row: PreviewRow): QuantityExplanation {
   const policy = row.policy;
+  // Held rows retain available stock but the server zeroes the rule breakdown.
+  // Those zeroes are a hold, not the result of each individual stock rule.
+  if (row.hold) {
+    return {
+      steps: [
+        { label: "Available", units: row.canonicalAtpUnits, detail: "Available stock in the selected warehouses." },
+        { label: "Stock hold", units: row.publishedUnits, detail: row.hold.reason },
+      ],
+      proposedUnits: row.publishedUnits,
+      zeroReason: `Stock is held at zero: ${row.hold.reason}.`,
+    };
+  }
   if (!policy) {
     return {
       steps: [{ label: "Available", units: row.canonicalAtpUnits, detail: "Canonical availability across the eligible warehouses." }],
@@ -649,15 +694,15 @@ export function explainQuantity(row: PreviewRow): QuantityExplanation {
   }
   const steps: QuantityStep[] = [
     { label: "Available", units: row.canonicalAtpUnits, detail: "Canonical availability across the eligible warehouses." },
-    { label: `Offer ${formatPercent(policy.shareBps)}`, units: row.sharedUnits, detail: "Share of availability this channel may offer." },
-    { label: `Keep back ${formatUnits(policy.holdbackSellableUnits)}`, units: row.afterHoldbackUnits, detail: "Units held off this channel after the offer percentage." },
+    { label: `Stock percentage ${formatPercent(policy.shareBps)}`, units: row.sharedUnits, detail: "Percentage of available stock this channel may advertise." },
+    { label: `Stock buffer ${formatUnits(policy.holdbackSellableUnits)}`, units: row.afterHoldbackUnits, detail: "Sellable units subtracted after the percentage." },
     {
       label: policy.maxPublishSellableUnits === null ? "No maximum" : `Maximum ${formatUnits(policy.maxPublishSellableUnits)}`,
       units: row.cappedUnits,
       detail: "Cap on the quantity shown.",
     },
     {
-      label: `Show zero below ${formatUnits(policy.minPublishSellableUnits)}`,
+      label: `Out-of-stock cutoff ${formatUnits(policy.minPublishSellableUnits)}`,
       units: row.publishedUnits,
       detail: "Quantities under the threshold are shown as zero.",
     },
@@ -665,7 +710,7 @@ export function explainQuantity(row: PreviewRow): QuantityExplanation {
   let zeroReason: string | null = null;
   if (!policy.eligible) zeroReason = "This SKU is not eligible for the channel, so zero is proposed.";
   else if (row.publishedUnits === "0" && row.cappedUnits !== "0") {
-    zeroReason = `Remaining ${formatUnits(row.cappedUnits)} is below the show-zero threshold of `
+    zeroReason = `Remaining ${formatUnits(row.cappedUnits)} is below the out-of-stock cutoff of `
       + `${formatUnits(policy.minPublishSellableUnits)}.`;
   } else if (row.publishedUnits === "0" && row.canonicalAtpUnits === "0") {
     zeroReason = "No availability in the eligible warehouses.";

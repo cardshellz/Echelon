@@ -1,10 +1,14 @@
 import { z } from "zod";
 import { MAX_DIMENSION_MM, MILLIMETERS_PER_INCH } from "@shared/shipping/dimensions";
+import { shippingAddressTypeSchema } from "@shared/shipping/address-type";
 
 const text = (maximum: number) => z.string().trim().min(1).max(maximum).regex(/^[^\u0000-\u001f\u007f]+$/);
 export const returnLabelProviderIdSchema = z.string().regex(/^se(?:-[a-z0-9]+)+$/).max(80);
 const externalId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,49}$/);
 const dimension = z.number().finite().positive().max(MAX_DIMENSION_MM / MILLIMETERS_PER_INCH);
+// ShipStation truncates shipment_number beyond 50 characters. Reject instead
+// of allowing two different source orders to acquire the same display number.
+export const returnLabelOrderNumberSchema = text(50);
 
 export const returnLabelAddressSchema = z.object({
   name: text(200),
@@ -17,11 +21,14 @@ export const returnLabelAddressSchema = z.object({
   state: text(50),
   postalCode: text(20),
   countryCode: z.string().regex(/^[A-Z]{2}$/),
+  addressType: shippingAddressTypeSchema.optional(),
 }).strict();
 export type ReturnLabelAddress = z.infer<typeof returnLabelAddressSchema>;
 
 export const returnLabelInputSchema = z.object({
   externalShipmentId: externalId,
+  // Optional only for recovery of immutable attempts created before this field.
+  orderNumber: returnLabelOrderNumberSchema.optional(),
   rmaNumber: text(50),
   carrierId: returnLabelProviderIdSchema,
   serviceCode: z.string().regex(/^[a-z0-9]+(?:_[a-z0-9]+)*$/).max(100),

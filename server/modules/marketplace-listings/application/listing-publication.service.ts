@@ -219,6 +219,7 @@ export class ListingPublicationService {
         );
       const price = item.priceOverrideCents ?? source.priceCents;
       const issues = [];
+      if (item.images === null) issues.push(...(source.imageIssues ?? []));
       if (!source.eligible || !source.sku.trim())
         issues.push(
           listingIssue(

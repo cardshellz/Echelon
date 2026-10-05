@@ -2,6 +2,7 @@ import { db } from "../../db";
 import { sql, eq, and, gt, lt, inArray } from "drizzle-orm";
 import { omsOrders, channels } from "@shared/schema";
 import { withAdvisoryLock } from "../../infrastructure/scheduler-lock";
+import { logger } from "../../platform/observability/logger";
 import {
   recordRunCompleted,
   runBootCatchUpIfBehind,
@@ -13,7 +14,10 @@ import type { FulfillmentReconciler } from "./reconcilers/reconciler.interface";
 import type { ChannelFulfillmentIngressService } from "./channel-fulfillment-ingress.service";
 import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-authority.service";
 import type { ShipStationPhysicalRecoveryService } from "./shipstation-physical-recovery.service";
-import { findChannelWritebackCandidates } from "./channel-writeback.service";
+import {
+  findChannelWritebackCandidates,
+  findDropshipWritebackCandidates,
+} from "./channel-writeback.service";
 import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
 import { processShopifyFulfillmentIngress } from "./shopify-fulfillment-ingress.adapter";
 import { processEbayFulfillmentIngress } from "./ebay-fulfillment-ingress.adapter";
@@ -34,6 +38,9 @@ const LOG_PREFIX = "[Fulfillment Sweeper]";
 const OUTBOUND_SWEEP_LIMIT = 500;
 const OUTBOUND_RECENT_SWEEP_LIMIT = 400;
 const OUTBOUND_RECENT_WINDOW_DAYS = 30;
+// Dropship packages are few; this bounds the vendor-store calls one sweep makes.
+const DROPSHIP_WRITEBACK_CATCH_UP_LIMIT = 100;
+const DROPSHIP_WRITEBACK_CATCH_UP_ACTION = "fulfillment_sweep_dropship_writeback_catch_up";
 const INBOUND_RECEIPT_RECOVERY_LIMIT = 100;
 const INBOUND_RECEIPT_RECOVERY_MIN_AGE_MINUTES = 5;
 const INBOUND_RECEIPT_RECOVERY_MAX_FAILURES = 5;
@@ -439,6 +446,72 @@ function getReconciler(
   return null;
 }
 
+export interface DropshipWritebackCatchUpResult {
+  readonly candidates: number;
+  readonly commandsCreated: number;
+  readonly noCommand: number;
+  readonly failed: number;
+}
+
+/**
+ * Gives a shipped dropship package its writeback command when it has none,
+ * e.g. one that shipped before dropship lines were written back to the
+ * vendor's store. Materialization is find-or-create and the command is keyed
+ * by package, so a repeated sweep never creates a second command or push.
+ */
+export async function runDropshipWritebackCatchUp(
+  dbArg: any,
+  fulfillmentAuthority: ChannelFulfillmentAuthorityService,
+): Promise<DropshipWritebackCatchUpResult> {
+  const candidates = await findDropshipWritebackCandidates(dbArg, {
+    minAgeMinutes: 60,
+    maxAgeDays: OUTBOUND_RECENT_WINDOW_DAYS,
+    limit: DROPSHIP_WRITEBACK_CATCH_UP_LIMIT,
+  });
+  let commandsCreated = 0;
+  let noCommand = 0;
+  let failed = 0;
+  for (const candidate of candidates) {
+    const context = {
+      wms_shipment_id: candidate.shipment_id,
+      wms_order_id: candidate.wms_order_id,
+      oms_order_id: candidate.oms_order_id,
+      order_number: candidate.order_number,
+    };
+    try {
+      const result = await fulfillmentAuthority.ensureLegacyShipment(
+        candidate.shipment_id,
+        { executeImmediately: true, source: CHANNEL_FULFILLMENT_REPAIR_SOURCES.outboundSweep },
+      );
+      const commandIds = result.materialized.channelCommands.map((command) => command.id);
+      const details = {
+        ...context,
+        physical_shipment_id: result.materialized.physicalShipmentId,
+        channel_command_ids: commandIds,
+        dispatch: result.dispatch,
+      };
+      if (commandIds.length > 0) {
+        commandsCreated++;
+        logger.info(DROPSHIP_WRITEBACK_CATCH_UP_ACTION, { outcome: "commanded", ...details });
+      } else {
+        // The writeback policy blocked every line (for example a cancelled
+        // order). Expected and re-checked each sweep, so DEBUG, not WARN.
+        noCommand++;
+        logger.debug(DROPSHIP_WRITEBACK_CATCH_UP_ACTION, { outcome: "no_command", ...details });
+      }
+    } catch (error: any) {
+      failed++;
+      logger.error(DROPSHIP_WRITEBACK_CATCH_UP_ACTION, {
+        outcome: "failed",
+        ...context,
+        error_code: typeof error?.code === "string" ? error.code : "DROPSHIP_WRITEBACK_CATCH_UP_SHIPMENT_FAILED",
+        error_message: error?.message ?? String(error),
+      });
+    }
+  }
+  return Object.freeze({ candidates: candidates.length, commandsCreated, noCommand, failed });
+}
+
 export async function runFulfillmentSweep(
   dbArg: any,
   fulfillmentAuthority: ChannelFulfillmentAuthorityService,
@@ -476,6 +549,17 @@ export async function runFulfillmentSweep(
           `${LOG_PREFIX} ShipStation provider-label recovery failed: ${error?.message ?? String(error)}`,
         );
       }
+    }
+
+    // Runs before the scan below, which returns early when it finds nothing.
+    try {
+      await runDropshipWritebackCatchUp(dbArg, fulfillmentAuthority);
+    } catch (error: any) {
+      logger.error(DROPSHIP_WRITEBACK_CATCH_UP_ACTION, {
+        outcome: "failed",
+        error_code: "DROPSHIP_WRITEBACK_CATCH_UP_FAILED",
+        error_message: error?.message ?? String(error),
+      });
     }
 
     // Shipment scope is required here: an order can be partially shipped, and

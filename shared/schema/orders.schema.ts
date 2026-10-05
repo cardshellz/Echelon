@@ -313,6 +313,7 @@ export type AllocationException = typeof allocationExceptions.$inferSelect;
 
 // Picking logs table for full audit trail
 export const pickingLogs = wmsSchema.table("picking_logs", {
+  operationKey: text("operation_key"),
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
 
   // When

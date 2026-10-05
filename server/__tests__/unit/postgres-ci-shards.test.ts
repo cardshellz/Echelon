@@ -75,9 +75,11 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/dropship/__tests__/integration/dropship-canonical-acceptance-stage.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-global-control.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-resume.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-enable.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/transformation-execution-authority.integration.test.ts",
       "server/modules/inventory/__tests__/integration/build-order-transformation-authority.integration.test.ts",
       "server/modules/catalog/__tests__/integration/piece-variant-backfill.integration.test.ts",
+      "server/modules/catalog/__tests__/integration/product-asset-order.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-channel-publication-status.integration.test.ts",
       "server/modules/shipping/__tests__/integration/carrier-tracking-recovery.integration.test.ts",
       "server/modules/channels/__tests__/integration/walmart-connection.integration.test.ts",
@@ -107,6 +109,11 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/inventory-planning/__tests__/integration/canonical-pick-case-break.integration.test.ts",
       "server/modules/oms/__tests__/integration/oms-line-authority-grant.integration.test.ts",
       "server/modules/orders/__tests__/integration/picking-assignment-release.integration.test.ts",
+      "server/modules/orders/__tests__/integration/picking-progress-owner.integration.test.ts",
+      "server/modules/orders/__tests__/integration/warehouse-operation-commands.integration.test.ts",
+      "server/modules/inventory/__tests__/integration/manual-transfer-command.integration.test.ts",
+      "server/modules/inventory/__tests__/integration/inline-replenishment.integration.test.ts",
+      "server/modules/membership/__tests__/integration/member-directory.integration.test.ts",
     ];
     const priorSuiteCount = 70;
     // Derive the total from the protected baseline and this independent review list,

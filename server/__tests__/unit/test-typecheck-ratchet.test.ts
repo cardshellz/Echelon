@@ -18,7 +18,7 @@ import { describe, expect, it } from "vitest";
  * If this fails because the count went UP, remove the entry you added and fix
  * the file. If it went DOWN, lower BASELINE — that is the ratchet working.
  */
-const BASELINE_EXCLUDED_TEST_FILES = 259;
+const BASELINE_EXCLUDED_TEST_FILES = 258;
 
 const FIXED_EXCLUSIONS = ["node_modules", "build", "dist"];
 const HALVES = ["tsconfig.tests.server.json", "tsconfig.tests.client.json"];

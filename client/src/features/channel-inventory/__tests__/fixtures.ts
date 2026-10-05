@@ -63,6 +63,7 @@ export function target(overrides: Partial<Target> = {}): Target {
     externalScopeId: "gid://shopify/Location/1",
     publicationAuthority: "echelon",
     state: "preview",
+    hasPriorLiveStop: true,
     revision: "3",
     hold: null,
     ...overrides,

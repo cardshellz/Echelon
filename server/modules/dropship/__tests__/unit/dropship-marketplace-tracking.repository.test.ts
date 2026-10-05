@@ -318,6 +318,147 @@ describe("PgDropshipMarketplaceTrackingRepository", () => {
   });
 });
 
+describe("PgDropshipMarketplaceTrackingRepository caller-named lines", () => {
+  const RAILS_KEY = "channel-fulfillment-command:9001";
+
+  function railsClaimInput(lineItems: Array<{ externalLineItemId: string; quantity: number }>) {
+    return {
+      omsOrderId: 500,
+      wmsShipmentId: 55,
+      carrier: "USPS",
+      trackingNumber: "94001111",
+      shippedAt,
+      idempotencyKey: RAILS_KEY,
+      lineItems,
+      now,
+    };
+  }
+
+  function harness(orderedLines: Array<{ external_line_item_id: string; ordered_quantity: number }>) {
+    const insertedHashes: string[] = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      if (sqlText === "BEGIN" || sqlText === "COMMIT" || sqlText === "ROLLBACK") {
+        return { rows: [] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_order_intake")) {
+        return { rows: [makeIntakeRow()] };
+      }
+      if (sqlText.includes("SUM(COALESCE(quantity, 0))::int AS ordered_quantity")) {
+        return { rows: orderedLines };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_marketplace_tracking_pushes")) {
+        insertedHashes.push(String(params?.[9]));
+        return {
+          rows: [makeTrackingPushRow({ idempotency_key: RAILS_KEY, request_hash: String(params?.[9]) })],
+        };
+      }
+      if (sqlText.includes("UPDATE dropship.dropship_marketplace_tracking_pushes")) {
+        return {
+          rows: [makeTrackingPushRow({
+            idempotency_key: RAILS_KEY,
+            status: "processing",
+            request_hash: "unused-after-claim",
+            attempt_count: 1,
+          })],
+        };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_audit_events")) {
+        return { rows: [] };
+      }
+      throw new Error(`Unexpected SQL in test: ${sqlText}`);
+    });
+    const client = { query, release: vi.fn() } as unknown as PoolClient & { release: ReturnType<typeof vi.fn> };
+    const pool = { connect: vi.fn(async () => client) } as unknown as Pool;
+    return { repository: new PgDropshipMarketplaceTrackingRepository(pool), query, client, insertedHashes };
+  }
+
+  it("pushes exactly the named lines after checking them against the order", async () => {
+    const { repository, query } = harness([
+      { external_line_item_id: "LINE-A", ordered_quantity: 2 },
+      { external_line_item_id: "LINE-B", ordered_quantity: 1 },
+    ]);
+    const lineItems = [
+      { externalLineItemId: "LINE-B", quantity: 1 },
+      { externalLineItemId: "LINE-A", quantity: 2 },
+    ];
+
+    const result = await repository.claimForOmsOrder(railsClaimInput(lineItems));
+
+    expect(result.status).toBe("claimed");
+    if (result.status !== "claimed") throw new Error("Expected a claimed tracking push.");
+    expect(result.request.lineItems).toEqual(lineItems);
+    expect(result.request.idempotencyKey).toBe(RAILS_KEY);
+
+    const checkQuery = query.mock.calls.find((call) =>
+      String(call[0]).includes("AS ordered_quantity"),
+    );
+    expect(String(checkQuery?.[0])).toContain("WHERE order_id = $1");
+    expect(String(checkQuery?.[0])).toContain("AND external_line_item_id = ANY($2::text[])");
+    expect(String(checkQuery?.[0])).toContain(
+      "COALESCE(LOWER(NULLIF(BTRIM(fulfillment_provider), '')), 'dropship') = 'dropship'",
+    );
+    expect(checkQuery?.[1]).toEqual([500, ["LINE-B", "LINE-A"]]);
+    // The shipment is not re-read for lines when the caller names them.
+    expect(query.mock.calls.some((call) => String(call[0]).includes("FROM wms.outbound_shipment_items"))).toBe(false);
+  });
+
+  it("hashes the same named lines to the same request every attempt", async () => {
+    const first = harness([{ external_line_item_id: "LINE-A", ordered_quantity: 2 }]);
+    const second = harness([{ external_line_item_id: "LINE-A", ordered_quantity: 2 }]);
+    const changed = harness([{ external_line_item_id: "LINE-A", ordered_quantity: 2 }]);
+
+    await first.repository.claimForOmsOrder(railsClaimInput([{ externalLineItemId: "LINE-A", quantity: 2 }]));
+    await second.repository.claimForOmsOrder(railsClaimInput([{ externalLineItemId: "LINE-A", quantity: 2 }]));
+    await changed.repository.claimForOmsOrder(railsClaimInput([{ externalLineItemId: "LINE-A", quantity: 1 }]));
+
+    expect(first.insertedHashes[0]).toMatch(/^[0-9a-f]{64}$/);
+    expect(second.insertedHashes[0]).toBe(first.insertedHashes[0]);
+    expect(changed.insertedHashes[0]).not.toBe(first.insertedHashes[0]);
+  });
+
+  it("refuses a line that is not a dropship line of the order and writes nothing", async () => {
+    const { repository, query, client } = harness([
+      { external_line_item_id: "LINE-A", ordered_quantity: 2 },
+    ]);
+
+    const error = await repository.claimForOmsOrder(railsClaimInput([
+      { externalLineItemId: "LINE-A", quantity: 1 },
+      { externalLineItemId: "LINE-OTHER", quantity: 1 },
+    ])).catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      code: "DROPSHIP_TRACKING_LINE_ITEM_NOT_ON_ORDER",
+      context: { omsOrderId: 500, externalLineItemId: "LINE-OTHER", retryable: false },
+    });
+    expect(query.mock.calls.some((call) => String(call[0]).includes("INSERT INTO"))).toBe(false);
+    expect(query.mock.calls.some((call) => call[0] === "ROLLBACK")).toBe(true);
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a line that claims more units than were ordered", async () => {
+    const { repository, query } = harness([
+      { external_line_item_id: "LINE-A", ordered_quantity: 2 },
+    ]);
+
+    const error = await repository.claimForOmsOrder(railsClaimInput([
+      { externalLineItemId: "LINE-A", quantity: 3 },
+    ])).catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      code: "DROPSHIP_TRACKING_LINE_QUANTITY_EXCEEDS_ORDER",
+      context: {
+        omsOrderId: 500,
+        externalLineItemId: "LINE-A",
+        quantity: 3,
+        orderedQuantity: 2,
+        retryable: false,
+      },
+    });
+    expect(query.mock.calls.some((call) => String(call[0]).includes("INSERT INTO"))).toBe(false);
+  });
+});
+
 function makeIntakeRow(overrides: Record<string, unknown> = {}) {
   return {
     id: 10,

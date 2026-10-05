@@ -17,7 +17,7 @@ const INPUT: ReturnLabelInput = {
 };
 const PDF = "https://api.shipstation.com/v2/downloads/account/token/label-1.pdf";
 function parcel() {
-  return { package_code: "package", weight: { value: 500, unit: "gram" },
+  return { package_code: "package", weight: { value: 1.1, unit: "pound" },
     dimensions: { unit: "inch", length: 12.125, width: 8, height: 4 }, tracking_number: "TRACK-42" };
 }
 function label() {
@@ -51,6 +51,39 @@ function listing(ids: string[], total = ids.length, page = 1) {
 afterEach(() => { vi.useRealTimers(); });
 
 describe("ShipStation return-label request", () => {
+  it("sends the original order number separately from the unique box reference and verifies readback", async () => {
+    const input = { ...INPUT, orderNumber: "#63210" };
+    const responseShipment = { ...shipment(), shipment_number: input.orderNumber };
+    const { provider, fetchFn } = fixture([json(label()), json(responseShipment)]);
+    await expect(provider.purchase(input)).resolves.toMatchObject({ externalShipmentId: INPUT.externalShipmentId });
+    expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body)).shipment).toMatchObject({
+      external_shipment_id: INPUT.externalShipmentId, shipment_number: "#63210",
+    });
+    expect(fetchFn.mock.calls.map(([, init]) => init?.method)).toEqual(["POST", "GET"]);
+  });
+
+  it.each(["", " ", "x".repeat(51), "#63210\nINJECTED", "#63210\u0000", null])("rejects invalid source order numbers %j before transport", async orderNumber => {
+    const { provider, fetchFn } = fixture();
+    await expect(provider.purchase({ ...INPUT, orderNumber } as ReturnLabelInput))
+      .rejects.toMatchObject({ code: "RETURN_LABEL_INPUT_INVALID", outcome: "rejected" });
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it.each(["#OTHER-ORDER", INPUT.externalShipmentId, null, undefined])("retains an uncertain outcome when the provider returns a different or missing order number %j", async shipmentNumber => {
+    const input = { ...INPUT, orderNumber: "#63210" };
+    const { provider, fetchFn } = fixture([json(label()), json({ ...shipment(), shipment_number: shipmentNumber })]);
+    await expect(provider.purchase(input)).rejects.toMatchObject({ code: "RETURN_LABEL_ORDER_REFERENCE_MISMATCH", outcome: "unknown" });
+    expect(fetchFn.mock.calls.map(([, init]) => init?.method)).toEqual(["POST", "GET"]);
+  });
+
+  it("recovers the original order number with GETs only and keeps the box reference as its lookup key", async () => {
+    const input = { ...INPUT, orderNumber: "#63210" };
+    const { provider, fetchFn } = fixture([json(listing(["se-201"])), json(label()), json({ ...shipment(), shipment_number: input.orderNumber })]);
+    await expect(provider.recover(input)).resolves.toMatchObject({ labelId: "se-201" });
+    expect(new URL(String(fetchFn.mock.calls[0][0])).searchParams.get("external_shipment_id")).toBe(INPUT.externalShipmentId);
+    expect(fetchFn.mock.calls.map(([, init]) => init?.method)).toEqual(["GET", "GET", "GET"]);
+  });
+
   it("uses the return-only purchase endpoint, reverse addresses and one product-only measured parcel", async () => {
     const frozen = JSON.stringify(INPUT);
     const { provider, fetchFn } = fixture();
@@ -69,15 +102,15 @@ describe("ShipStation return-label request", () => {
       label_format: "pdf", label_layout: "4x6", label_download_type: "url",
       shipment: { validate_address: "no_validation", external_shipment_id: INPUT.externalShipmentId,
         carrier_id: "se-101", service_code: "ups_ground",
-        ship_from: { name: "Fictional Customer", address_line1: "100 Sample Street", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US" },
-        ship_to: { name: "Fictional Returns", company_name: "Sample Warehouse", phone: "5550101000", address_line1: "200 Example Road", address_line2: "Suite 2", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US" },
-        packages: [{ package_code: "package", weight: { value: 500, unit: "gram" }, dimensions: { unit: "inch", length: 12.125, width: 8, height: 4 } }],
+        ship_from: { name: "Fictional Customer", address_line1: "100 Sample Street", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US", address_residential_indicator: "unknown" },
+        ship_to: { name: "Fictional Returns", company_name: "Sample Warehouse", phone: "5550101000", address_line1: "200 Example Road", address_line2: "Suite 2", city_locality: "Albany", state_province: "NY", postal_code: "12207", country_code: "US", address_residential_indicator: "unknown" },
+        packages: [{ package_code: "package", weight: { value: 1.1, unit: "pound" }, dimensions: { unit: "inch", length: 12.125, width: 8, height: 4 } }],
       },
     });
     expect(fetchFn.mock.calls[1][0]).toBe("https://api.shipstation.com/v2/shipments/se-301");
   });
 
-  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])("rejects invalid whole parcel grams %s before transport", async weightGrams => {
+  it.each([0, 1, 4, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])("rejects invalid, zero-normalized or unrepresentable parcel grams %s before transport", async weightGrams => {
     const { provider, fetchFn } = fixture();
     await expect(provider.purchase({ ...INPUT, parcel: { ...INPUT.parcel, weightGrams } })).rejects.toMatchObject({ code: "RETURN_LABEL_INPUT_INVALID", outcome: "rejected" });
     expect(fetchFn).not.toHaveBeenCalled();
@@ -95,6 +128,48 @@ describe("ShipStation return-label request", () => {
 });
 
 describe("purchase outcomes", () => {
+  it("sends the explicit customer and warehouse classifications on the only purchase POST", async () => {
+    const input = { ...INPUT, shipFrom: { ...INPUT.shipFrom, addressType: "residential" as const },
+      shipTo: { ...INPUT.shipTo, addressType: "commercial" as const } };
+    const responseShipment = shipment();
+    (responseShipment.ship_from as Record<string, unknown>).address_residential_indicator = "yes";
+    (responseShipment.ship_to as Record<string, unknown>).address_residential_indicator = "no";
+    const { provider, fetchFn } = fixture([json(label()), json(responseShipment)]);
+    await expect(provider.purchase(input)).resolves.toMatchObject({ labelId: "se-201" });
+    expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body)).shipment).toMatchObject({
+      ship_from: { address_line1: "100 Sample Street", address_residential_indicator: "yes" },
+      ship_to: { address_line1: "200 Example Road", address_residential_indicator: "no" },
+    });
+    expect(fetchFn.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+  it.each(["ship_from", "ship_to"] as const)("rejects an explicitly opposite %s classification without repeating a purchase", async side => {
+    const input = { ...INPUT, shipFrom: { ...INPUT.shipFrom, addressType: "residential" as const },
+      shipTo: { ...INPUT.shipTo, addressType: "commercial" as const } };
+    const responseShipment = shipment();
+    (responseShipment[side] as Record<string, unknown>).address_residential_indicator = side === "ship_from" ? "no" : "yes";
+    const { provider, fetchFn } = fixture([json(label()), json(responseShipment)]);
+    await expect(provider.purchase(input)).rejects.toMatchObject({ code: "RETURN_LABEL_IDENTITY_MISMATCH", outcome: "unknown" });
+    expect(fetchFn.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+  it("recovers a historical request and physical readback without classification using only GETs", async () => {
+    const responseShipment = shipment();
+    delete (responseShipment.ship_from as Record<string, unknown>).address_residential_indicator;
+    delete (responseShipment.ship_to as Record<string, unknown>).address_residential_indicator;
+    const { provider, fetchFn } = fixture([json(listing(["se-201"])), json(label()), json(responseShipment)]);
+    await expect(provider.recover(INPUT)).resolves.toMatchObject({ labelId: "se-201" });
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+    expect(fetchFn.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+  });
+  it("accepts an omitted provider classification while still verifying an explicitly classified request's physical addresses", async () => {
+    const input = { ...INPUT, shipTo: { ...INPUT.shipTo, addressType: "commercial" as const } };
+    const responseShipment = shipment();
+    delete (responseShipment.ship_to as Record<string, unknown>).address_residential_indicator;
+    const { provider } = fixture([json(listing(["se-201"])), json(label()), json(responseShipment)]);
+    await expect(provider.recover(input)).resolves.toMatchObject({ labelId: "se-201" });
+    (responseShipment.ship_to as Record<string, unknown>).address_line1 = "Wrong destination";
+    const changed = fixture([json(listing(["se-201"])), json(label()), json(responseShipment)]);
+    await expect(changed.provider.recover(input)).rejects.toMatchObject({ code: "RETURN_LABEL_IDENTITY_MISMATCH", outcome: "unknown" });
+  });
   it.each([400, 401, 403, 404, 405, 422, 429])("classifies HTTP %s as a definitive rejection without automatic retries or raw errors", async status => {
     const response = new Response("private provider message fixture-key", { status });
     const text = vi.spyOn(response, "text");
@@ -157,6 +232,42 @@ describe("purchase outcomes", () => {
 });
 
 describe("exact provider evidence", () => {
+  it("accepts the exact declared fractional pounds returned as decimal strings", async () => {
+    const converted = { ...parcel(), weight: { value: "1.10", unit: "pound" } };
+    const { provider } = fixture([json({ ...label(), packages: [converted] }), json({ ...shipment(), packages: [converted] })]);
+    await expect(provider.purchase(INPUT)).resolves.toMatchObject({ labelId: "se-201" });
+  });
+  it.each(["purchase", "recover"] as const)("verifies the live RMA-2 two-decimal label and shipment weights during %s", async operation => {
+    const input: ReturnLabelInput = { ...INPUT, externalShipmentId: "ecr-2-2", rmaNumber: "RMA-2",
+      carrierId: "se-342199", serviceCode: "usps_ground_advantage",
+      shipTo: { ...INPUT.shipTo, addressType: "commercial" },
+      parcel: { weightGrams: 850, dimensionsInches: { length: 16, width: 14, height: 4 } } };
+    const packageReadback = { ...parcel(), weight: { value: 1.87, unit: "pound" },
+      dimensions: { unit: "inch", length: 16, width: 14, height: 4 } };
+    const labelReadback = { ...label(), external_shipment_id: input.externalShipmentId, rma_number: input.rmaNumber,
+      carrier_id: input.carrierId, service_code: input.serviceCode, packages: [packageReadback] };
+    const shipmentReadback = { ...shipment(), ...buildReturnLabelRequest(input).shipment as Record<string, unknown>, packages: [packageReadback] };
+    const responses = [json(labelReadback), json(shipmentReadback)];
+    if (operation === "recover") responses.unshift(json({ ...listing(["se-201"]), labels: [{ label_id: "se-201", external_shipment_id: input.externalShipmentId }] }));
+    const { provider, fetchFn } = fixture(responses);
+    await expect(provider[operation](input)).resolves.toMatchObject({ externalShipmentId: input.externalShipmentId, labelId: "se-201" });
+    if (operation === "recover") expect(fetchFn.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+    else {
+      expect(fetchFn.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+      expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body)).shipment.packages[0].weight).toEqual({ value: 1.87, unit: "pound" });
+    }
+  });
+  it.each(["1.09", "1.11", "1.10231132", "1.10231131", "1.10231133", "1.1023113201"])("refuses a changed pound weight %s in either label or stored shipment without repeating the purchase", async value => {
+    const changed = { ...parcel(), weight: { value, unit: "pound" } };
+    for (const evidence of [
+      [json({ ...label(), packages: [changed] })],
+      [json(label()), json({ ...shipment(), packages: [changed] })],
+    ]) {
+      const { provider, fetchFn } = fixture(evidence);
+      await expect(provider.purchase(INPUT)).rejects.toMatchObject({ code: "RETURN_LABEL_MEASUREMENTS_MISMATCH", outcome: "unknown" });
+      expect(fetchFn.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    }
+  });
   it.each([
     { is_return_label: false }, { is_international: true }, { trackable: false }, { voided: true },
     { voided_at: "2026-09-26T12:01:00Z" }, { external_shipment_id: "wrong" }, { rma_number: "wrong" },
@@ -181,7 +292,7 @@ describe("exact provider evidence", () => {
     await expect(provider.purchase(INPUT)).rejects.toMatchObject({ code: "RETURN_LABEL_IDENTITY_MISMATCH", outcome: "unknown" });
   });
   it("accepts exact equivalent supported measurement units", async () => {
-    const converted = { ...parcel(), weight: { value: "0.5", unit: "kilogram" }, dimensions: { unit: "centimeter", length: "30.7975", width: "20.32", height: "10.16" } };
+    const converted = { ...parcel(), weight: { value: "0.498951607", unit: "kilogram" }, dimensions: { unit: "centimeter", length: "30.7975", width: "20.32", height: "10.16" } };
     const { provider } = fixture([json({ ...label(), packages: [converted] }), json({ ...shipment(), packages: [converted] })]);
     await expect(provider.purchase(INPUT)).resolves.toMatchObject({ amountCents: 435 });
   });
@@ -207,6 +318,20 @@ describe("exact provider evidence", () => {
 });
 
 describe("read-only uncertain-purchase recovery", () => {
+  it.each([
+    { value: 500, unit: "gram" },
+    { value: "1.10231132", unit: "pound" },
+    { value: "17.63698112", unit: "ounce" },
+  ])("continues to recover historical labels and shipments in %j without a purchase", async weight => {
+    const historical = { ...parcel(), weight };
+    const { provider, fetchFn } = fixture([
+      json(listing(["se-201"])),
+      json({ ...label(), packages: [historical] }),
+      json({ ...shipment(), packages: [historical] }),
+    ]);
+    await expect(provider.recover(INPUT)).resolves.toMatchObject({ labelId: "se-201" });
+    expect(fetchFn.mock.calls.map(([, init]) => init?.method)).toEqual(["GET", "GET", "GET"]);
+  });
   it("returns not-found without issuing another purchase", async () => {
     const { provider, fetchFn } = fixture([json({ labels: [], total: 0, page: 1, pages: 0 })]);
     await expect(provider.recover(INPUT)).resolves.toBeNull();

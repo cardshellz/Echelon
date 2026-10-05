@@ -1,13 +1,13 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { ChevronDown } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { cn } from "@/lib/utils";
 
 import {
   POLICY_FIELDS,
-  SEMANTICS_LABELS,
   type PolicyFieldKey,
   type PolicyForm,
   type PolicyFormError,
@@ -17,276 +17,346 @@ import { InlineError, SourceTag } from "./primitives";
 
 type ScopeType = "channel" | "product" | "variant";
 
+const ADVANCED_FIELDS: readonly PolicyFieldKey[] = [
+  "holdbackSellableUnits", "maxPublish", "minPublishSellableUnits", "allocationSemantics",
+];
+
 /**
- * The six selling controls, edited the same way at every scope. Each field
- * chooses between inheriting the broader rule and setting an explicit value;
- * "Inherit" is a distinct choice from an explicit zero or "No limit".
+ * Editing a field creates its explicit value. Inherited values remain display
+ * values until edited; restoring a default writes null through the form mode.
  */
-export function PolicyFields({ form, onChange, scopeType, inherited, errors, disabled, idPrefix, unitNoun }: {
+export function PolicyFields({ form, onChange, scopeType, inherited, inheritedForm, errors, disabled, idPrefix, unitNoun }: {
   form: PolicyForm;
   onChange(patch: Partial<PolicyForm>): void;
   scopeType: ScopeType;
   inherited: SavedFieldSources | null;
+  inheritedForm?: PolicyForm;
   errors: readonly PolicyFormError[];
   disabled?: boolean;
   idPrefix: string;
   /** Exact sellable unit for quantity fields, e.g. "units (1 unit = 5 pieces)". */
   unitNoun: string;
 }) {
+  const displayed = displayPolicyForm(form, scopeType === "channel" ? undefined : inheritedForm);
   const errorFor = (field: PolicyFieldKey) => errors.find((error) => error.field === field)?.message ?? null;
-  const inheritLabel = scopeType === "channel" ? "Not set" : "Inherit";
+  const needsAdvanced = needsAdvancedFields(displayed);
+  const [advancedOpen, setAdvancedOpen] = useState(needsAdvanced);
+  const advancedError = errors.filter((error) => error.field !== "form" && ADVANCED_FIELDS.includes(error.field))
+    .map((error) => `${error.field}:${error.message}`).join("|");
+
+  useEffect(() => {
+    if (advancedError) setAdvancedOpen(true);
+  }, [advancedError]);
+
+  useEffect(() => {
+    if (needsAdvanced) setAdvancedOpen(true);
+  }, [needsAdvanced]);
+
+  const fieldProps = (field: PolicyFieldKey, usesDefault: boolean, onReset: () => void) => ({
+    field, usesDefault, onReset, scopeType, disabled, idPrefix,
+    source: inherited?.[field] ?? null,
+    error: errorFor(field),
+  });
+  const controlProps = (field: PolicyFieldKey) => ({
+    id: `${idPrefix}-${field}`,
+    "aria-labelledby": `${idPrefix}-${field}-label`,
+    "aria-describedby": [
+      `${idPrefix}-${field}-help`,
+      scopeType === "channel" ? null : `${idPrefix}-${field}-source`,
+      errorFor(field) ? `${idPrefix}-${field}-error` : null,
+    ].filter(Boolean).join(" "),
+    "aria-invalid": errorFor(field) ? true : undefined,
+  });
 
   return (
-    <div className="divide-y">
-      <FieldRow
-        field="eligible"
-        scopeType={scopeType}
-        inherited={inherited}
-        mode={form.eligible === "inherit" ? "inherit" : "set"}
-        modeOptions={[[ "inherit", inheritLabel ], ["set", "Set"]]}
-        onMode={(mode) => onChange({ eligible: mode === "inherit" ? "inherit" : "yes" })}
-        disabled={disabled}
-        idPrefix={idPrefix}
-        error={errorFor("eligible")}
-      >
-        {form.eligible !== "inherit" && (
-          <ToggleGroup
-            type="single"
-            variant="outline"
-            size="sm"
-            value={form.eligible}
+    <div className="space-y-6">
+      <div className="grid min-w-0 gap-6 lg:grid-cols-2">
+        <FieldRow {...fieldProps("eligible", form.eligible === "inherit", () => onChange({ eligible: "inherit" }))}>
+          <RadioGroup
+            {...controlProps("eligible")}
+            value={displayed.eligible === "inherit" ? "" : displayed.eligible}
             disabled={disabled}
-            aria-label="Sell on this channel"
-            onValueChange={(value) => { if (value === "yes" || value === "no") onChange({ eligible: value }); }}
+            onValueChange={(value) => {
+              if (value === "yes" || value === "no") onChange({ eligible: value });
+            }}
           >
-            <ToggleGroupItem value="yes">Yes</ToggleGroupItem>
-            <ToggleGroupItem value="no">No, show zero</ToggleGroupItem>
-          </ToggleGroup>
-        )}
-      </FieldRow>
+            <RadioChoice id={`${idPrefix}-eligible-yes`} value="yes" selected={displayed.eligible === "yes"} disabled={disabled}
+              onSelectCurrent={form.eligible === "inherit" ? () => onChange({ eligible: "yes" }) : undefined}>
+              Available to sell
+            </RadioChoice>
+            <RadioChoice id={`${idPrefix}-eligible-no`} value="no" selected={displayed.eligible === "no"} disabled={disabled}
+              onSelectCurrent={form.eligible === "inherit" ? () => onChange({ eligible: "no" }) : undefined}>
+              Show as out of stock
+            </RadioChoice>
+          </RadioGroup>
+        </FieldRow>
 
-      <FieldRow
-        field="shareBps"
-        scopeType={scopeType}
-        inherited={inherited}
-        mode={form.shareMode}
-        modeOptions={[["inherit", inheritLabel], ["set", "Set"]]}
-        onMode={(mode) => onChange({ shareMode: mode === "inherit" ? "inherit" : "set" })}
-        disabled={disabled}
-        idPrefix={idPrefix}
-        error={errorFor("shareBps")}
-      >
-        {form.shareMode === "set" && (
+        <FieldRow {...fieldProps("shareBps", form.shareMode === "inherit", () => onChange({ shareMode: "inherit", sharePercent: "" }))}>
           <UnitInput
-            id={`${idPrefix}-share`}
-            label="Offer percentage"
-            value={form.sharePercent}
+            {...controlProps("shareBps")}
+            value={displayed.sharePercent}
             suffix="%"
-            placeholder="0–100"
+            inputMode="decimal"
+            placeholder="Enter percentage"
             disabled={disabled}
-            invalid={errorFor("shareBps") !== null}
-            onChange={(value) => onChange({ sharePercent: value })}
+            onChange={(value) => onChange({ shareMode: "set", sharePercent: value })}
           />
-        )}
-      </FieldRow>
+        </FieldRow>
+      </div>
 
-      <FieldRow
-        field="holdbackSellableUnits"
-        scopeType={scopeType}
-        inherited={inherited}
-        mode={form.holdbackMode}
-        modeOptions={[["inherit", inheritLabel], ["set", "Set"]]}
-        onMode={(mode) => onChange({ holdbackMode: mode === "inherit" ? "inherit" : "set" })}
-        disabled={disabled}
-        idPrefix={idPrefix}
-        error={errorFor("holdbackSellableUnits")}
+      <details
+        className="group min-w-0 rounded-lg border"
+        open={advancedOpen}
+        onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
       >
-        {form.holdbackMode === "set" && (
-          <UnitInput
-            id={`${idPrefix}-holdback`}
-            label="Keep back"
-            value={form.holdbackUnits}
-            suffix={unitNoun}
-            placeholder="0"
-            disabled={disabled}
-            invalid={errorFor("holdbackSellableUnits") !== null}
-            onChange={(value) => onChange({ holdbackUnits: value })}
-          />
-        )}
-      </FieldRow>
+        <summary className="flex cursor-pointer list-none items-start gap-3 rounded-lg px-4 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+          <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 transition-transform group-open:rotate-180" aria-hidden="true" />
+          <span className="min-w-0 space-y-1">
+            <span className="block text-sm font-medium">Advanced stock rules</span>
+            <span className="block text-xs leading-relaxed text-muted-foreground">{advancedSummary(displayed)}</span>
+          </span>
+        </summary>
+        <div className="space-y-6 border-t p-4">
+          <div className="grid min-w-0 gap-6 md:grid-cols-2">
+            <FieldRow {...fieldProps("holdbackSellableUnits", form.holdbackMode === "inherit", () => onChange({ holdbackMode: "inherit", holdbackUnits: "" }))}>
+              <UnitInput
+                {...controlProps("holdbackSellableUnits")}
+                value={displayed.holdbackUnits}
+                suffix={unitNoun}
+                placeholder="Enter units"
+                disabled={disabled}
+                onChange={(value) => onChange({ holdbackMode: "set", holdbackUnits: value })}
+              />
+            </FieldRow>
 
-      <FieldRow
-        field="maxPublish"
-        scopeType={scopeType}
-        inherited={inherited}
-        mode={form.maxMode}
-        modeOptions={[["inherit", inheritLabel], ["unlimited", "No limit"], ["units", "Up to"]]}
-        onMode={(mode) => onChange({ maxMode: mode as PolicyForm["maxMode"] })}
-        disabled={disabled}
-        idPrefix={idPrefix}
-        error={errorFor("maxPublish")}
-      >
-        {form.maxMode === "units" && (
-          <UnitInput
-            id={`${idPrefix}-max`}
-            label="Maximum to show"
-            value={form.maxUnits}
-            suffix={unitNoun}
-            placeholder="e.g. 60"
-            disabled={disabled}
-            invalid={errorFor("maxPublish") !== null}
-            onChange={(value) => onChange({ maxUnits: value })}
-          />
-        )}
-      </FieldRow>
+            <FieldRow {...fieldProps("maxPublish", form.maxMode === "inherit", () => onChange({ maxMode: "inherit", maxUnits: "" }))}>
+              <RadioGroup
+                {...controlProps("maxPublish")}
+                id={`${idPrefix}-maxPublish-options`}
+                value={displayed.maxMode === "inherit" ? "" : displayed.maxMode}
+                disabled={disabled}
+                onValueChange={(value) => {
+                  if (value === "unlimited") onChange({ maxMode: "unlimited" });
+                  if (value === "units") onChange({ maxMode: "units", maxUnits: displayed.maxUnits });
+                }}
+                className="grid gap-2 sm:grid-cols-2"
+              >
+                <RadioChoice id={`${idPrefix}-max-unlimited`} value="unlimited" selected={displayed.maxMode === "unlimited"} disabled={disabled}
+                  onSelectCurrent={form.maxMode === "inherit" ? () => onChange({ maxMode: "unlimited" }) : undefined}>
+                  No maximum
+                </RadioChoice>
+                <RadioChoice id={`${idPrefix}-max-units`} value="units" selected={displayed.maxMode === "units"} disabled={disabled}
+                  onSelectCurrent={form.maxMode === "inherit" ? () => onChange({ maxMode: "units", maxUnits: displayed.maxUnits }) : undefined}>
+                  Limit quantity
+                </RadioChoice>
+              </RadioGroup>
+              {displayed.maxMode === "units" && (
+                <UnitInput
+                  {...controlProps("maxPublish")}
+                  value={displayed.maxUnits}
+                  suffix={unitNoun}
+                  placeholder="Enter maximum"
+                  disabled={disabled}
+                  onChange={(value) => onChange({ maxMode: "units", maxUnits: value })}
+                />
+              )}
+            </FieldRow>
 
-      <FieldRow
-        field="minPublishSellableUnits"
-        scopeType={scopeType}
-        inherited={inherited}
-        mode={form.minMode}
-        modeOptions={[["inherit", inheritLabel], ["set", "Set"]]}
-        onMode={(mode) => onChange({ minMode: mode === "inherit" ? "inherit" : "set" })}
-        disabled={disabled}
-        idPrefix={idPrefix}
-        error={errorFor("minPublishSellableUnits")}
-      >
-        {form.minMode === "set" && (
-          <UnitInput
-            id={`${idPrefix}-min`}
-            label="Show zero below"
-            value={form.minUnits}
-            suffix={unitNoun}
-            placeholder="0"
-            disabled={disabled}
-            invalid={errorFor("minPublishSellableUnits") !== null}
-            onChange={(value) => onChange({ minUnits: value })}
-          />
-        )}
-      </FieldRow>
+            <FieldRow {...fieldProps("minPublishSellableUnits", form.minMode === "inherit", () => onChange({ minMode: "inherit", minUnits: "" }))}>
+              <UnitInput
+                {...controlProps("minPublishSellableUnits")}
+                value={displayed.minUnits}
+                suffix={unitNoun}
+                placeholder="Enter units"
+                disabled={disabled}
+                onChange={(value) => onChange({ minMode: "set", minUnits: value })}
+              />
+            </FieldRow>
+          </div>
 
-      <FieldRow
-        field="allocationSemantics"
-        scopeType={scopeType}
-        inherited={inherited}
-        mode={form.semantics === "inherit" ? "inherit" : "set"}
-        modeOptions={[["inherit", inheritLabel], ["set", "Set"]]}
-        onMode={(mode) => onChange({ semantics: mode === "inherit" ? "inherit" : "exposure" })}
-        disabled={disabled}
-        idPrefix={idPrefix}
-        error={errorFor("allocationSemantics")}
-      >
-        {form.semantics !== "inherit" && (
-          <ToggleGroup
-            type="single"
-            variant="outline"
-            size="sm"
-            value={form.semantics}
-            disabled={disabled}
-            aria-label="Stock sharing"
-            onValueChange={(value) => { if (value === "exposure" || value === "partitioned") onChange({ semantics: value }); }}
-          >
-            <ToggleGroupItem value="exposure">{SEMANTICS_LABELS.exposure}</ToggleGroupItem>
-            <ToggleGroupItem value="partitioned">{SEMANTICS_LABELS.partitioned}</ToggleGroupItem>
-          </ToggleGroup>
-        )}
-      </FieldRow>
+          <div className="border-t pt-6">
+            <FieldRow {...fieldProps("allocationSemantics", form.semantics === "inherit", () => onChange({ semantics: "inherit" }))}>
+              <RadioGroup
+                {...controlProps("allocationSemantics")}
+                value={displayed.semantics === "inherit" ? "" : displayed.semantics}
+                disabled={disabled}
+                onValueChange={(value) => {
+                  if (value === "exposure" || value === "partitioned") onChange({ semantics: value });
+                }}
+                className="grid gap-3 md:grid-cols-2"
+              >
+                <RadioChoice
+                  id={`${idPrefix}-sharing-exposure`}
+                  value="exposure"
+                  selected={displayed.semantics === "exposure"}
+                  disabled={disabled}
+                  onSelectCurrent={form.semantics === "inherit" ? () => onChange({ semantics: "exposure" }) : undefined}
+                  description="Channels can offer the same available inventory. Orders use that shared stock."
+                >
+                  Share available stock
+                </RadioChoice>
+                <RadioChoice
+                  id={`${idPrefix}-sharing-partitioned`}
+                  value="partitioned"
+                  selected={displayed.semantics === "partitioned"}
+                  disabled={disabled}
+                  onSelectCurrent={form.semantics === "inherit" ? () => onChange({ semantics: "partitioned" }) : undefined}
+                  description="For channels using this option, percentages for overlapping stock must total 100% or less. This does not reserve physical stock."
+                >
+                  Limit combined channel percentages
+                </RadioChoice>
+              </RadioGroup>
+            </FieldRow>
+          </div>
+        </div>
+      </details>
     </div>
   );
 }
 
-function FieldRow({ field, scopeType, inherited, mode, modeOptions, onMode, disabled, idPrefix, error, children }: {
+function FieldRow({ field, scopeType, source, usesDefault, onReset, disabled, idPrefix, error, children }: {
   field: PolicyFieldKey;
   scopeType: ScopeType;
-  inherited: SavedFieldSources | null;
-  mode: string;
-  modeOptions: ReadonlyArray<readonly [string, string]>;
-  onMode(mode: string): void;
+  source: SavedFieldSources[PolicyFieldKey] | null;
+  usesDefault: boolean;
+  onReset(): void;
   disabled?: boolean;
   idPrefix: string;
   error: string | null;
   children: ReactNode;
 }) {
   const meta = POLICY_FIELDS.find((item) => item.key === field)!;
-  const source = inherited?.[field] ?? null;
-  const errorId = `${idPrefix}-${field}-error`;
   return (
-    <div className="grid gap-3 py-4 first:pt-0 last:pb-0 md:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)] md:gap-6">
-      <div className="space-y-1">
-        <p className="text-sm font-medium">{meta.label}</p>
-        <p className="text-xs leading-relaxed text-muted-foreground">{meta.help}</p>
-      </div>
-      <div className="space-y-2">
-        <ToggleGroup
-          type="single"
-          variant="outline"
-          size="sm"
-          value={mode}
-          disabled={disabled}
-          aria-label={`${meta.label}: inherit or set`}
-          onValueChange={(value) => { if (value) onMode(value); }}
-        >
-          {modeOptions.map(([value, label]) => (
-            <ToggleGroupItem key={value} value={value}>{label}</ToggleGroupItem>
-          ))}
-        </ToggleGroup>
-        {mode === "inherit" && (
-          <InheritedReadout scopeType={scopeType} source={source} />
+    <div className="min-w-0 space-y-3" data-policy-field={field}>
+      <div className="flex min-h-8 flex-wrap items-center justify-between gap-2">
+        <p id={`${idPrefix}-${field}-label`} className="text-sm font-medium">{meta.label}</p>
+        {scopeType !== "channel" && !usesDefault && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="text-primary"
+            disabled={disabled}
+            aria-label={`Use default for ${meta.label}`}
+            onClick={onReset}
+          >
+            Use default
+          </Button>
         )}
-        {mode !== "inherit" && <div aria-describedby={error ? errorId : undefined}>{children}</div>}
-        {error && <InlineError id={errorId}>{error}</InlineError>}
       </div>
+      <p id={`${idPrefix}-${field}-help`} className="text-xs leading-relaxed text-muted-foreground">{meta.help}</p>
+      {children}
+      {scopeType !== "channel" && (
+        <p id={`${idPrefix}-${field}-source`} className="text-xs leading-relaxed text-muted-foreground">
+          {!usesDefault ? `Custom setting for this ${scopeType === "variant" ? "SKU" : "product"}.`
+            : !source || source.kind === "unset" ? "No default saved yet. Enter a value for this item."
+            : <>Uses <span className="font-medium text-foreground">{source.display}</span> from the <SourceTag kind={source.kind} authority={source.authority} />.</>}
+        </p>
+      )}
+      {error && <InlineError id={`${idPrefix}-${field}-error`}>{error}</InlineError>}
     </div>
   );
 }
 
-function InheritedReadout({ scopeType, source }: { scopeType: ScopeType; source: SavedFieldSources[PolicyFieldKey] | null }) {
-  if (scopeType === "channel") {
-    return (
-      <p className="text-xs text-amber-700 dark:text-amber-300">
-        A channel default must set this before it can be activated. Until then, publishing stays blocked.
-      </p>
-    );
-  }
-  if (!source || source.kind === "unset") {
-    return (
-      <p className="text-xs text-amber-700 dark:text-amber-300">
-        Not set by any broader rule yet; publishing for this item stays blocked until one provides it.
-      </p>
-    );
-  }
+function RadioChoice({ id, value, selected, disabled, description, onSelectCurrent, children }: {
+  id: string;
+  value: string;
+  selected: boolean;
+  disabled?: boolean;
+  description?: string;
+  /** Choosing an inherited option explicitly can keep that value as an override. */
+  onSelectCurrent?(): void;
+  children: ReactNode;
+}) {
   return (
-    <p className="text-xs text-muted-foreground">
-      Uses <span className="font-medium text-foreground">{source.display}</span> from the{" "}
-      <SourceTag kind={source.kind} authority={source.authority} />
-    </p>
+    <label
+      htmlFor={id}
+      className={cn(
+        "flex min-w-0 cursor-pointer items-start gap-3 rounded-md border px-3 py-3 transition-colors",
+        selected ? "border-primary/50 bg-primary/5" : "border-border",
+        disabled && "cursor-not-allowed opacity-60",
+      )}
+    >
+      <RadioGroupItem
+        id={id}
+        value={value}
+        className="mt-0.5 shrink-0"
+        disabled={disabled}
+        aria-labelledby={`${id}-label`}
+        aria-describedby={description ? `${id}-description` : undefined}
+        onClick={selected ? onSelectCurrent : undefined}
+      />
+      <span className="min-w-0 space-y-1">
+        <span id={`${id}-label`} className="block text-sm font-medium">{children}</span>
+        {description && <span id={`${id}-description`} className="block text-xs leading-relaxed text-muted-foreground">{description}</span>}
+      </span>
+    </label>
   );
 }
 
-function UnitInput({ id, label, value, suffix, placeholder, disabled, invalid, onChange }: {
+function UnitInput({ id, value, suffix, placeholder, disabled, inputMode = "numeric", onChange, ...accessibility }: {
   id: string;
-  label: string;
   value: string;
   suffix: string;
-  placeholder?: string;
+  placeholder: string;
   disabled?: boolean;
-  invalid?: boolean;
+  inputMode?: "numeric" | "decimal";
   onChange(value: string): void;
+  "aria-labelledby": string;
+  "aria-describedby": string;
+  "aria-invalid"?: boolean;
 }) {
   return (
-    <div className="flex items-center gap-2">
-      <Label htmlFor={id} className="sr-only">{label}</Label>
+    <div className="grid min-w-0 grid-cols-[minmax(0,9rem)_minmax(0,1fr)] items-center gap-2">
       <Input
+        {...accessibility}
         id={id}
-        inputMode="decimal"
+        inputMode={inputMode}
         value={value}
         placeholder={placeholder}
         disabled={disabled}
-        aria-invalid={invalid || undefined}
+        autoComplete="off"
         onChange={(event) => onChange(event.target.value)}
-        className={cn("w-32 tabular-nums", invalid && "border-destructive")}
+        className={cn("min-w-0 w-full tabular-nums", accessibility["aria-invalid"] && "border-destructive")}
       />
-      <span className="text-xs text-muted-foreground">{suffix}</span>
+      <span className="min-w-0 text-xs leading-relaxed text-muted-foreground">{suffix}</span>
     </div>
   );
+}
+
+/** Keep inherited display values separate from the form that is persisted. */
+function displayPolicyForm(form: PolicyForm, inherited?: PolicyForm): PolicyForm {
+  if (!inherited) return form;
+  return {
+    eligible: form.eligible === "inherit" ? inherited.eligible : form.eligible,
+    shareMode: form.shareMode === "inherit" ? inherited.shareMode : form.shareMode,
+    sharePercent: form.shareMode === "inherit" ? inherited.sharePercent : form.sharePercent,
+    holdbackMode: form.holdbackMode === "inherit" ? inherited.holdbackMode : form.holdbackMode,
+    holdbackUnits: form.holdbackMode === "inherit" ? inherited.holdbackUnits : form.holdbackUnits,
+    maxMode: form.maxMode === "inherit" ? inherited.maxMode : form.maxMode,
+    maxUnits: form.maxMode === "inherit" ? inherited.maxUnits : form.maxUnits,
+    minMode: form.minMode === "inherit" ? inherited.minMode : form.minMode,
+    minUnits: form.minMode === "inherit" ? inherited.minUnits : form.minUnits,
+    semantics: form.semantics === "inherit" ? inherited.semantics : form.semantics,
+  };
+}
+
+function needsAdvancedFields(form: PolicyForm): boolean {
+  return form.holdbackMode !== "set" || form.holdbackUnits.trim() !== "0"
+    || form.maxMode !== "unlimited"
+    || form.minMode !== "set" || form.minUnits.trim() !== "0"
+    || form.semantics !== "exposure";
+}
+
+function advancedSummary(form: PolicyForm): string {
+  const buffer = form.holdbackMode === "inherit" || !form.holdbackUnits.trim()
+    ? "Buffer needs a value" : form.holdbackUnits.trim() === "0" ? "No stock buffer" : `Buffer: ${form.holdbackUnits} units`;
+  const maximum = form.maxMode === "inherit" ? "Choose a maximum"
+    : form.maxMode === "unlimited" ? "No maximum"
+    : !form.maxUnits.trim() ? "Maximum needs a value" : `Maximum: ${form.maxUnits} units`;
+  const cutoff = form.minMode === "inherit" || !form.minUnits.trim()
+    ? "Cutoff needs a value" : form.minUnits.trim() === "0" ? "No cutoff" : `Cutoff: ${form.minUnits} units`;
+  const sharing = form.semantics === "inherit" ? "Choose stock sharing"
+    : form.semantics === "exposure" ? "Shared stock" : "Combined percentages limited";
+  return [buffer, maximum, cutoff, sharing].join(" · ");
 }

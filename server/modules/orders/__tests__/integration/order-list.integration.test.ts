@@ -7,6 +7,9 @@ import { buildWmsOrderBucketCounts, orderMatchesBucket, WMS_ORDER_BUCKETS } from
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { OrderListRepository, ORDER_LIST_STATEMENT_TIMEOUT_MS } from "../../order-list.repository";
 import { PickingHistoryRepository } from "../../picking-history.repository";
+import express, { type Request } from "express";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -51,6 +54,7 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
   let orm: ReturnType<typeof drizzle<typeof schema>>;
   let repository: OrderListRepository;
   let history: typeof import("../../order-history.storage").orderHistoryMethods;
+  let orderStorage: typeof import("../../orders.storage").orderMethods;
   const queries: { query: string; parameters: unknown[] }[] = [];
 
   beforeAll(async () => {
@@ -61,12 +65,14 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
       ...await importOriginal<typeof import("../../../../storage/base")>(), db: orm,
     }));
     history = (await import("../../order-history.storage")).orderHistoryMethods;
+    vi.doMock("../../../../db", () => ({ db: orm, pool: database.pool }));
+    orderStorage = (await import("../../orders.storage")).orderMethods;
   });
   beforeEach(async () => {
     await database.pool.query("TRUNCATE wms.order_items, wms.orders, wms.picking_logs, oms.oms_orders, oms.oms_order_lines, channels.channels RESTART IDENTITY");
     queries.length = 0;
   });
-  afterAll(async () => { vi.doUnmock("../../../../storage/base"); await database?.close(); });
+  afterAll(async () => { vi.doUnmock("../../../../storage/base"); vi.doUnmock("../../../../db"); await database?.close(); });
 
   async function seed(status: string, overrides: Partial<typeof schema.wmsOrders.$inferInsert> = {}) {
     const [order] = await orm.insert(schema.wmsOrders).values({
@@ -78,6 +84,75 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
     });
     return order;
   }
+
+  it.each([
+    { status: "pending", omsShipped: false }, { status: "in_progress", omsShipped: false },
+    { status: "pending", omsShipped: true }, { status: "in_progress", omsShipped: true },
+  ])("never requeues picked or overpicked lines with a stale $status label (OMS shipped=$omsShipped)", async ({ status, omsShipped }) => {
+    const [parent] = await orm.insert(schema.omsOrders).values({ channelId: 1,
+      externalOrderId: "forward-only", orderedAt: new Date("2026-10-04T12:00:00Z"), status: omsShipped ? "shipped" : "processing" }).returning();
+    const expectedVisible: number[] = [];
+    for (const pickedQuantity of [2, 3, 4]) {
+      const order = await seed("in_progress", { omsFulfillmentOrderId: String(parent.id) });
+      await orm.update(schema.wmsOrderItems).set({ status, pickedQuantity, barcode: "123", imageUrl: "/fixture.png" })
+        .where(eq(schema.wmsOrderItems.orderId, order.id));
+      if (pickedQuantity < 3) expectedVisible.push(order.id);
+    }
+    const before = (await database.pool.query("SELECT * FROM wms.orders ORDER BY id")).rows;
+    const linesBefore = (await database.pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows;
+    const queue = await orderStorage.getPickQueueOrders();
+    expect(queue.map(order => order.id)).toEqual(expectedVisible);
+    expect((await database.pool.query("SELECT * FROM wms.orders ORDER BY id")).rows).toEqual(before);
+    expect((await database.pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows).toEqual(linesBefore);
+  });
+
+  it.each([
+    { status: "ready", startedAt: null, pickerId: null },
+    { status: "in_progress", startedAt: new Date("2026-10-05T05:14:15.123-04:00"), pickerId: "fixture-picker" },
+  ])("serves the actual HTTP queue from PostgreSQL for a $status order without changing recorded work", async ({ status, startedAt, pickerId }) => {
+    const { PickingUseCases } = await import("../../picking.use-cases");
+    const { registerPickingRoutes } = await import("../../picking.routes");
+    const order = await seed(status, { startedAt, assignedPickerId: pickerId, channelId: null });
+    await orm.update(schema.wmsOrderItems).set({ catalogProductId: 33, inventoryTracking: false,
+      productId: null, barcode: "FIXTURE", imageUrl: "/fixture.png" }).where(eq(schema.wmsOrderItems.orderId, order.id));
+    const before = (await database.pool.query("SELECT * FROM wms.orders ORDER BY id")).rows;
+    const linesBefore = (await database.pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows;
+    // Picker/channel display and replenishment prediction are controlled.
+    // The HTTP route, response validator and SQL timestamp mapping are real.
+    const picking = new PickingUseCases(orm as never, {} as never,
+      { predictReplenAfterPick: async () => null } as never, { ...orderStorage,
+        getUser: async (id: string) => ({ id, username: "Fixture picker" }),
+        getChannelById: async () => undefined,
+      } as never);
+    const app = express();
+    app.use((req, _res, next) => {
+      req.session = { user: req.headers.authorization === "fixture-session" ? { id: "fixture-operator" } : undefined } as Request["session"];
+      next();
+    });
+    app.locals.services = { picking } as unknown as typeof app.locals.services;
+    registerPickingRoutes(app);
+    const server: Server = createServer(app);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/picking/queue`;
+    const logging = vi.spyOn(console, "error");
+    try {
+      expect((await fetch(url)).status).toBe(401);
+      const response = await fetch(url, { headers: { authorization: "fixture-session" } });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toContain("no-store");
+      expect(await response.json()).toMatchObject([{ id: order.id, warehouseStatus: status,
+        startedAt: startedAt?.toISOString() ?? null, assignedPickerId: pickerId,
+        items: [{ quantity: 3, pickedQuantity: 2, fulfilledQuantity: 0,
+          inventoryTracking: false, sourcePlan: { status: "confirmation_only" } }],
+      }]);
+      expect(logging).not.toHaveBeenCalled();
+      expect((await database.pool.query("SELECT * FROM wms.orders ORDER BY id")).rows).toEqual(before);
+      expect((await database.pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows).toEqual(linesBefore);
+    } finally {
+      logging.mockRestore();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  });
 
   it("matches every operational bucket including held/unknown statuses and scoped counts", async () => {
     const rows = [];

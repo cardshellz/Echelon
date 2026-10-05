@@ -218,8 +218,8 @@ export function InlineError({ children, id }: { children: ReactNode; id?: string
 }
 
 /**
- * Sensitive publication commands keep their required reason (owner decision:
- * the routine-edit exemption does not rescind activation/readiness gates).
+ * Activation and readiness commands keep their required reason. Routine saves
+ * and pausing updates do not use this dialog.
  * The reason is asked for at the moment of the action, never as a permanent
  * field on the page.
  */

@@ -29,7 +29,7 @@ function makeHarness(opts: {
   const txns: any[] = [];
 
   // tx.select().from().where().limit() -> resolves to [location] in call order.
-  const locationQueue = [[FROM_LOC], [TO_LOC]];
+  const locationQueue = [[{id:10,unitsPerVariant:5}], [FROM_LOC], [TO_LOC]];
   const makeSelectChain = () => {
     const chain: any = {
       from: () => chain,
@@ -41,6 +41,7 @@ function makeHarness(opts: {
 
   // tx.execute is used for (1) the mid-pick conflict probe, then (2) re-point.
   const executeQueue = [
+    { rows: [] }, // Pin the SKU unit basis before recording the physical receipt.
     { rows: opts.conflictRows ?? [] },
     { rows: opts.repointRows ?? [] },
   ];
@@ -63,7 +64,7 @@ function makeHarness(opts: {
     }),
     createInventoryTransaction: vi.fn((t: any) => {
       txns.push(t);
-      return Promise.resolve(t);
+      return Promise.resolve({ ...t,id:555 });
     }),
   };
 
@@ -81,7 +82,7 @@ describe("transfer() — Option A move-reserved", () => {
       toLocationId: 4,
       qty: 50,
     });
-    expect(res).toEqual({ reservedMoved: 0, orderItemsRepointed: 0 });
+    expect(res).toEqual({ reservedMoved: 0, orderItemsRepointed: 0, transferReceiptId:555 });
     // Both adjust calls move only variantQty, no reservedQty key.
     for (const c of h.adjustCalls) {
       expect(c.adj.reservedQty).toBeUndefined();
@@ -117,7 +118,7 @@ describe("transfer() — Option A move-reserved", () => {
       qty: 64,
       moveReserved: true,
     });
-    expect(res).toEqual({ reservedMoved: 3, orderItemsRepointed: 2 });
+    expect(res).toEqual({ reservedMoved: 3, orderItemsRepointed: 2, transferReceiptId:555 });
 
     // Source adjust: -64 on-hand AND -3 reserved together.
     expect(h.adjustCalls[0]).toEqual({ id: 1, adj: { variantQty: -64, reservedQty: -3 } });

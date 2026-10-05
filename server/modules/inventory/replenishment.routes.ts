@@ -697,100 +697,22 @@ export function registerReplenishmentRoutes(app: Express) {
   
   app.post("/api/replen/tasks", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { replenRuleId, fromLocationId, toLocationId, productId, sourceVariantId, pickVariantId, qtySourceUnits, qtyTargetUnits, priority, triggeredBy, assignedTo, notes, replenMethod, autoExecute } = req.body;
-
-      if (!fromLocationId || !toLocationId || !qtyTargetUnits) {
-        return res.status(400).json({ error: "fromLocationId, toLocationId, and qtyTargetUnits are required" });
-      }
-
-      // Resolve execution mode via unified decision when not explicitly set
-      const { replenishment } = req.app.locals.services;
-      let shouldAutoExecute = !!autoExecute;
-      let executionMode = autoExecute ? "inline" : "queue";
-
-      if (autoExecute === undefined && replenishment) {
-        // Caller didn't specify — use warehouse settings to decide
-        const destLoc = await storage.getWarehouseLocationById(toLocationId);
-        const whSettings = await replenishment.getSettingsForWarehouse(destLoc?.warehouseId ?? undefined);
-        const decision = replenishment.resolveAutoExecute(null, null, whSettings, qtyTargetUnits);
-        shouldAutoExecute = decision.shouldAutoExecute;
-        executionMode = decision.executionMode;
-      }
-
-      const task = await storage.createReplenTask({
-        replenRuleId: replenRuleId || null,
-        fromLocationId,
-        toLocationId,
-        productId: productId || null,
-        sourceProductVariantId: sourceVariantId || null,
-        pickProductVariantId: pickVariantId || null,
-        qtySourceUnits: qtySourceUnits || 1,
-        qtyTargetUnits,
-        qtyCompleted: 0,
-        status: "pending",
-        priority: priority || 5,
-        triggeredBy: triggeredBy || "manual",
-        executionMode,
-        assignedTo: assignedTo || null,
-        notes: notes || null,
-        replenMethod: replenMethod || "full_case",
-      });
-
-      // Auto-execute immediately if resolved decision says so
-      if (shouldAutoExecute && replenishment) {
-        try {
-          const result = await replenishment.executeTask(task.id, req.session.user?.id);
-          return res.status(201).json({ ...task, ...result, autoExecuted: true });
-        } catch (execErr: any) {
-          console.error("Auto-execute failed for task", task.id, execErr);
-          // Task was created but execution failed — return 207 (multi-status) so caller knows
-          return res.status(207).json({ ...task, autoExecuted: false, autoExecuteError: execErr.message });
-        }
-      }
-
+      const task = await req.app.locals.services.replenishment.createManualTask(req.body, req.session.user!.id);
       res.status(201).json(task);
     } catch (error: any) {
       console.error("Error creating replen task:", error);
-      res.status(500).json({ error: error.message || "Failed to create replen task" });
+      res.status(error.statusCode ?? (error.name === "ZodError" ? 400 : 500)).json({ error: error.message || "Failed to create replen task", code: error.code });
     }
   });
   
   app.patch("/api/replen/tasks/:id", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      const updates = req.body;
-
-      // Block manual completion — must use /execute endpoint to move inventory
-      if (updates.status === "completed") {
-        return res.status(400).json({ error: "Use the /execute endpoint to complete tasks (ensures inventory is moved)" });
-      }
-
-      // Validate status transitions if status is being changed
-      if (updates.status) {
-        const VALID_TRANSITIONS: Record<string, string[]> = {
-          pending: ["assigned", "in_progress", "cancelled"],
-          assigned: ["in_progress", "pending", "cancelled"],
-          in_progress: ["pending", "cancelled", "blocked"],
-          blocked: ["pending", "cancelled"],
-        };
-        const existing = await storage.getReplenTaskById(id);
-        if (!existing) {
-          return res.status(404).json({ error: "Replen task not found" });
-        }
-        const allowed = VALID_TRANSITIONS[existing.status];
-        if (!allowed || !allowed.includes(updates.status)) {
-          return res.status(400).json({ error: `Cannot transition from '${existing.status}' to '${updates.status}'` });
-        }
-      }
-
-      const task = await storage.updateReplenTask(id, updates);
-      if (!task) {
-        return res.status(404).json({ error: "Replen task not found" });
-      }
+      const id = Number(req.params.id);
+      const task = await req.app.locals.services.replenishment.changeTask(id, req.body, req.session.user!.id);
       res.json(task);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error updating replen task:", error);
-      res.status(500).json({ error: "Failed to update replen task" });
+      res.status(error.statusCode ?? (error.name === "ZodError" ? 400 : 500)).json({ error: error.message || "Failed to update replen task", code: error.code });
     }
   });
   
@@ -814,20 +736,11 @@ export function registerReplenishmentRoutes(app: Express) {
       if (!replenishment) {
         return res.status(500).json({ error: "Replenishment service not available" });
       }
-      const id = parseInt(req.params.id);
-      const { reason, actualQty, actualSku, notes } = req.body;
-      const result = await replenishment.reportException({
-        taskId: id,
-        reason,
-        userId: req.session.user?.id,
-        actualQty,
-        actualSku,
-        notes,
-      });
+      const result = await replenishment.reportException(Number(req.params.id), req.body, req.session.user!.id);
       res.json(result);
     } catch (error: any) {
       console.error("Error reporting replen exception:", error);
-      res.status(500).json({ error: error.message || "Failed to report exception" });
+      res.status(error.statusCode ?? (error.name === "ZodError" ? 400 : 500)).json({ error: error.message || "Failed to report exception", code: error.code });
     }
   });
 
@@ -837,7 +750,7 @@ export function registerReplenishmentRoutes(app: Express) {
       const id = parseInt(req.params.id);
       const { replenishment } = req.app.locals.services;
       const { notes } = req.body || {};
-      const result = await replenishment.markTaskDone(id, req.session.user?.id, notes);
+      const result = await replenishment.markTaskDone(id, req.session.user?.id, notes, req.body?.transferReceiptId);
       res.json(result);
     } catch (error: any) {
       console.error("Error marking replen task done:", error);
@@ -847,11 +760,8 @@ export function registerReplenishmentRoutes(app: Express) {
 
   app.delete("/api/replen/tasks/:id", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      const deleted = await storage.deleteReplenTask(id);
-      if (!deleted) {
-        return res.status(404).json({ error: "Replen task not found" });
-      }
+      const id = Number(req.params.id);
+      await req.app.locals.services.replenishment.changeTask(id, { ...req.body, status: "cancelled" }, req.session.user!.id);
       res.json({ success: true });
     } catch (error) {
       console.error("Error deleting replen task:", error);

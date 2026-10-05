@@ -47,6 +47,45 @@ describe("PgDropshipTrackingPushOpsRepository", () => {
     )).toBe(false);
   });
 
+  it("refuses to retry a push owned by a channel fulfillment command and changes nothing", async () => {
+    for (const status of ["failed", "processing"]) {
+      const query = vi.fn(async (sql: string, _params?: unknown[]) => {
+        const sqlText = String(sql);
+        if (sqlText === "BEGIN" || sqlText === "ROLLBACK") {
+          return { rows: [] };
+        }
+        if (sqlText.includes("FROM dropship.dropship_marketplace_tracking_pushes")) {
+          return {
+            rows: [
+              makeRetryRow({
+                status,
+                idempotency_key: "channel-fulfillment-command:9001",
+                // A retryable failure or a stale claim would otherwise be retried here.
+                updated_at: new Date("2026-05-03T11:00:00.000Z"),
+              }),
+            ],
+          };
+        }
+        throw new Error(`Unexpected SQL in test: ${sqlText}`);
+      });
+      const client = makeClient(query);
+      const repository = new PgDropshipTrackingPushOpsRepository(makePool(client));
+
+      await expect(repository.prepareRetry(makeRetryInput())).rejects.toMatchObject({
+        code: "DROPSHIP_TRACKING_PUSH_OPS_RETRIED_BY_CHANNEL_FULFILLMENT",
+        context: { pushId: 42, channelFulfillmentCommandId: 9001 },
+      });
+      expect(query.mock.calls.some((call) =>
+        String(call[0]).includes("UPDATE dropship.dropship_marketplace_tracking_pushes"),
+      )).toBe(false);
+      expect(query.mock.calls.some((call) =>
+        String(call[0]).includes("INSERT INTO dropship.dropship_audit_events"),
+      )).toBe(false);
+      expect(query.mock.calls.some((call) => call[0] === "ROLLBACK")).toBe(true);
+      expect(client.release).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it("queues stale processing tracking pushes for ops retry with audit context", async () => {
     const staleUpdatedAt = new Date("2026-05-03T11:20:00.000Z");
     const query = vi.fn(async (sql: string, _params?: unknown[]) => {

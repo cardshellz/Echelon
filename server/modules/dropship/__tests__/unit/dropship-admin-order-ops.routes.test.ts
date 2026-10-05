@@ -4,6 +4,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DropshipOrderOpsService } from "../../application";
 import { registerDropshipAdminOrderOpsRoutes } from "../../interfaces/http/dropship-admin-order-ops.routes";
+import { makeDropshipOrderOpsDetail } from "../fixtures/order-ops-detail.fixture";
 
 vi.mock("../../../../db", () => ({
   pool: {},
@@ -54,6 +55,28 @@ describe("dropship admin order ops routes", () => {
     });
   });
 
+  it("keeps shipping's parts for staff, including the insurance pool fee", async () => {
+    service.detail = makeDropshipOrderOpsDetail();
+
+    const response = await jsonRequest(`${server.url}/api/dropship/admin/order-intake/42`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.order.economicsSnapshot).toMatchObject({
+      shippingCents: 925,
+      insurancePoolCents: 18,
+      totalDebitCents: 1624,
+      pricingSnapshot: { shipping: { insurancePoolCents: 18 } },
+    });
+    expect(response.body.order.shippingQuoteSnapshot).toMatchObject({
+      baseRateCents: 807,
+      markupCents: 100,
+      dunnageCents: 0,
+      insurancePoolCents: 18,
+      totalShippingCents: 925,
+      quotePayload: { totals: { insurancePoolCents: 18 } },
+    });
+  });
+
   it("rejects invalid admin intake detail ids before service access", async () => {
     const response = await jsonRequest(`${server.url}/api/dropship/admin/order-intake/not-a-number`);
 
@@ -96,10 +119,11 @@ describe("dropship admin order ops routes", () => {
 class FakeDropshipOrderOpsService {
   lastDetailInput: unknown = null;
   lastWmsSyncInput: unknown = null;
+  detail: unknown = null;
 
   async getIntakeDetail(input: unknown) {
     this.lastDetailInput = input;
-    return makeOrderDetail();
+    return this.detail ?? makeOrderDetail();
   }
 
   async retryWmsSync(input: unknown) {
