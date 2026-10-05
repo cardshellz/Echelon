@@ -24,7 +24,7 @@ const describeDatabase =
   url && disposable ? describe.sequential : describe.skip;
 const fixture = `CREATE SCHEMA wms; CREATE SCHEMA inventory; CREATE SCHEMA catalog;
   ${[schema.orders, schema.orderItems, schema.auditEvents].map((table) => operationOwnerTableFixture(table)).join("\n")}
-  CREATE TABLE wms.allocation_exceptions (id integer, order_id integer, sku text, exception_type text, status text, review_reason text, metadata jsonb, created_at timestamp);
+  CREATE TABLE wms.allocation_exceptions (id integer, order_id integer, sku text, exception_type text, status text, review_reason text, metadata jsonb, created_at timestamp, order_item_id integer);
   CREATE TABLE inventory.replen_tasks (id integer, order_id integer, pick_product_variant_id integer, status text, exception_reason text, blocks_shipment boolean, created_at timestamp);
   CREATE TABLE catalog.product_variants (id integer, sku text);
   CREATE TABLE wms.picking_commands (command_key text,order_id integer,physical_receipt jsonb,completed_at timestamptz);`;
@@ -110,6 +110,24 @@ describeDatabase("picking progress PostgreSQL owner", () => {
       "UPDATE inventory.replen_tasks SET status='completed'",
     );
     expect((await project()).warehouseStatus).toBe("ready_to_ship");
+  });
+  it("does not hold an order back for a missing_variant exception on its unmapped line (#63721)", async () => {
+    // A picker who tried to give the UNKNOWN card a bin raised it. The line is
+    // confirmed without stock, so the exception records its expected state.
+    await database.pool.query(
+      `INSERT INTO wms.order_items (order_id,sku,name,quantity,picked_quantity,status,location)
+         VALUES (1,'UNKNOWN','Graded card',1,1,'completed','UNASSIGNED');
+       INSERT INTO wms.allocation_exceptions (id,order_id,sku,exception_type,status,review_reason,metadata,created_at,order_item_id)
+         VALUES (9,1,'UNKNOWN','missing_variant','blocked','No variant for UNKNOWN','{}',now(),2);`,
+    );
+    expect((await project()).warehouseStatus).toBe("ready_to_ship");
+  });
+  it("still holds an order back for a missing_variant exception on a real SKU", async () => {
+    await database.pool.query(
+      `INSERT INTO wms.allocation_exceptions (id,order_id,sku,exception_type,status,review_reason,metadata,created_at,order_item_id)
+         VALUES (9,1,'P10','missing_variant','blocked','No variant for P10','{}',now(),1);`,
+    );
+    expect((await project()).warehouseStatus).toBe("exception");
   });
   it("uses the same transaction owner for manual handoff and rolls rejected handoff back", async () => {
     await database.pool.query(
