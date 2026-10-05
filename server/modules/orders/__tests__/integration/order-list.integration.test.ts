@@ -7,6 +7,9 @@ import { buildWmsOrderBucketCounts, orderMatchesBucket, WMS_ORDER_BUCKETS } from
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { OrderListRepository, ORDER_LIST_STATEMENT_TIMEOUT_MS } from "../../order-list.repository";
 import { PickingHistoryRepository } from "../../picking-history.repository";
+import express, { type Request } from "express";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -101,6 +104,54 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
     expect(queue.map(order => order.id)).toEqual(expectedVisible);
     expect((await database.pool.query("SELECT * FROM wms.orders ORDER BY id")).rows).toEqual(before);
     expect((await database.pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows).toEqual(linesBefore);
+  });
+
+  it.each([
+    { status: "ready", startedAt: null, pickerId: null },
+    { status: "in_progress", startedAt: new Date("2026-10-05T05:14:15.123-04:00"), pickerId: "fixture-picker" },
+  ])("serves the actual HTTP queue from PostgreSQL for a $status order without changing recorded work", async ({ status, startedAt, pickerId }) => {
+    const { PickingUseCases } = await import("../../picking.use-cases");
+    const { registerPickingRoutes } = await import("../../picking.routes");
+    const order = await seed(status, { startedAt, assignedPickerId: pickerId, channelId: null });
+    await orm.update(schema.wmsOrderItems).set({ catalogProductId: 33, inventoryTracking: false,
+      productId: null, barcode: "FIXTURE", imageUrl: "/fixture.png" }).where(eq(schema.wmsOrderItems.orderId, order.id));
+    const before = (await database.pool.query("SELECT * FROM wms.orders ORDER BY id")).rows;
+    const linesBefore = (await database.pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows;
+    // Picker/channel display and replenishment prediction are controlled.
+    // The HTTP route, response validator and SQL timestamp mapping are real.
+    const picking = new PickingUseCases(orm as never, {} as never,
+      { predictReplenAfterPick: async () => null } as never, { ...orderStorage,
+        getUser: async (id: string) => ({ id, username: "Fixture picker" }),
+        getChannelById: async () => undefined,
+      } as never);
+    const app = express();
+    app.use((req, _res, next) => {
+      req.session = { user: req.headers.authorization === "fixture-session" ? { id: "fixture-operator" } : undefined } as Request["session"];
+      next();
+    });
+    app.locals.services = { picking } as unknown as typeof app.locals.services;
+    registerPickingRoutes(app);
+    const server: Server = createServer(app);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/picking/queue`;
+    const logging = vi.spyOn(console, "error");
+    try {
+      expect((await fetch(url)).status).toBe(401);
+      const response = await fetch(url, { headers: { authorization: "fixture-session" } });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toContain("no-store");
+      expect(await response.json()).toMatchObject([{ id: order.id, warehouseStatus: status,
+        startedAt: startedAt?.toISOString() ?? null, assignedPickerId: pickerId,
+        items: [{ quantity: 3, pickedQuantity: 2, fulfilledQuantity: 0,
+          inventoryTracking: false, sourcePlan: { status: "confirmation_only" } }],
+      }]);
+      expect(logging).not.toHaveBeenCalled();
+      expect((await database.pool.query("SELECT * FROM wms.orders ORDER BY id")).rows).toEqual(before);
+      expect((await database.pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows).toEqual(linesBefore);
+    } finally {
+      logging.mockRestore();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
   });
 
   it("matches every operational bucket including held/unknown statuses and scoped counts", async () => {

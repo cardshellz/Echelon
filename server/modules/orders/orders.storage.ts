@@ -534,7 +534,9 @@ export const orderMethods: IOrderStorage = {
       heldAt: row.held_at,
       assignedPickerId: row.assigned_picker_id,
       claimedAt: row.claimed_at,
-      startedAt: row.claimed_at,
+      // Raw SQL preserves PostgreSQL timestamp text; use the column's UTC
+      // decoder before this claim timestamp reaches the picker API contract.
+      startedAt: row.claimed_at === null ? null : orders.startedAt.mapFromDriverValue(row.claimed_at),
       warehouseId: row.warehouse_id,
       completedAt: row.completed_at,
       exceptionAt: row.exception_at,
