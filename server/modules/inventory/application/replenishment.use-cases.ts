@@ -1,8 +1,17 @@
+import { IntegrityError } from "@shared/errors";
+import { classifyReplenishmentExecutionFailure } from "../infrastructure/replenishment-execution-failure";
+import { reportReplenishmentException } from "./report-replenishment-exception";
+import { changeReplenishmentTask } from "./replenishment-task-command";
+import { createManualReplenishmentTask } from "./create-manual-replenishment-task";
+import { creditTransferToReplenishment, recordReplenishmentFollowup } from "../infrastructure/replenishment-transfer-credit.repository";
 import { eq, and, or, sql, inArray, isNull, asc } from "drizzle-orm";
 import { logger } from "../../../platform/observability/logger";
 import { validateReplenishmentTrigger } from "../domain/replenishment-trigger";
-import { resolveReplenishmentAutoExecution } from "../domain/replenishment-auto-execution";
+import { supportsInlineReplenishment, resolveReplenishmentAutoExecution } from "../domain/replenishment-auto-execution";
+import { planReplenishmentDemand, ReplenishmentExecutionDomainError } from "../domain/replenishment-execution.domain";
 import { readReplenishmentRule, readReplenishmentTierDefault } from "../infrastructure/replenishment-policy.reader";
+import { assertReplenishmentTaskTransition } from "@shared/types/replenishment-task-command";
+import { persistAuditEvent } from "../../../infrastructure/auditLogger";
 import {
   replenRules,
   replenTasks,
@@ -59,6 +68,7 @@ export type ReplenGuidance = {
   triggerValue: number | null;
   autoReplen: number;
   evaluatedQty: number | null;
+  observedVariantQty?: number;
   existingTaskId?: number | null;
   existingTaskStatus?: string | null;
   existingTaskExecutionMode?: string | null;
@@ -85,6 +95,7 @@ export type ReplenPickPrediction = {
 };
 
 export type ReplenOrderContext = {
+  operationKey?: string;
   orderId?: number | null;
   orderItemId?: number | null;
   orderNumber?: string | null;
@@ -244,7 +255,8 @@ const RECOVERABLE_BLOCKED_REPLEN_REASONS = new Set<string | null>([
   null,
   "no_source_stock",
   "no_source_variant",
-  "execute_failed",
+  // Execution failures now carry a classified retry decision. Permanent or
+  // unclassified failures must not be replaced by an inventory-change event.
 ]);
 
 type InventoryCore = {
@@ -293,14 +305,12 @@ type InventoryCore = {
     userId?: string;
   }) => Promise<void>;
   logTransaction: (txn: any) => Promise<void>;
+  triggerNotifyChange?: (variantId: number, trigger: string) => void | Promise<void>;
   withTx: (tx: any) => InventoryCore;
 };
 
 import { InventoryUseCases } from "./inventory.use-cases";
-import {
-  legacyTransformationExecutionAuthority,
-  type TransformationExecutionAuthorityPort,
-} from "./transformation-execution-authority.port";
+import type { TransformationExecutionAuthorityPort } from "./transformation-execution-authority.port";
 import {
   assertAuthorizedPackageConversionQuantity,
   TransformationExecutionAuthorityError,
@@ -308,6 +318,7 @@ import {
   type PackageConversionAuthorizationRequest,
   type TransformationRuntimeEvidence,
 } from "../domain/transformation-execution-authority";
+import { readReplenishmentTrigger, recordReplenishmentTrigger } from "../infrastructure/replenishment-trigger.repository";
 
 /**
  * Replenishment use cases for the Echelon WMS.
@@ -322,34 +333,88 @@ export class ReplenishmentUseCases {
     private readonly db: DrizzleDb,
     private readonly inventoryUseCases: InventoryUseCases,
     private readonly clock: () => Date = () => new Date(),
-    private readonly transformationAuthority: TransformationExecutionAuthorityPort = legacyTransformationExecutionAuthority,
-  ) {}
+    private readonly transformationAuthority: TransformationExecutionAuthorityPort,
+  ) {
+    if (!transformationAuthority) throw new Error("Replenishment requires an explicit runtime transformation authority.");
+  }
 
-  private async withPickBinTaskLock<T>(
-    pickVariantId: number,
-    toLocationId: number,
-    action: () => Promise<T>,
-  ): Promise<T> {
-    // Serialize cooperating replen creation paths for the same pick bin/SKU.
-    // The action continues through the service's normal DB handle so existing
-    // task execution/rollback behavior is unchanged; this transaction only
-    // holds the advisory lock until the create/reuse decision completes.
-    return this.db.transaction(async (tx: any) => {
-      await tx.execute(sql`
-        SELECT pg_advisory_xact_lock(
-          hashtext('inventory.replen_tasks.pick_bin'),
-          hashtext(${`${pickVariantId}:${toLocationId}`})
-        )
-      `);
-      return action();
-    });
+  /** Lock only the create/reuse decision. All queries under this lock use the
+   * same transaction; execution and publication retain their own owners. */
+  private async lockPickBinTaskCreation(tx: DrizzleDb, variantId: number, locationId: number): Promise<void> {
+    if (!Number.isSafeInteger(variantId) || variantId < 1 || !Number.isSafeInteger(locationId) || locationId < 1) throw new Error("Invalid replenishment destination identity");
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('inventory.replen_tasks.pick_bin'),hashtext(${`${variantId}:${locationId}`}))`);
+  }
+
+  /** Optimistic admission of a resolver decision: a task that completed while
+   * planning was outside the lock cannot cause a stale second refill. */
+  private async assertObservedPickQuantity(tx: DrizzleDb, variantId: number, locationId: number, observed: number): Promise<void> {
+    if (!Number.isSafeInteger(observed) || observed < 0) throw new IntegrityError("Replenishment plan has no valid observed physical quantity");
+    const current=await tx.execute(sql`SELECT variant_qty FROM inventory.inventory_levels WHERE product_variant_id=${variantId} AND warehouse_location_id=${locationId} FOR SHARE`);
+    const quantity=current.rows[0]?.variant_qty ?? 0; // Same declared implicit-zero read as the resolver.
+    if (quantity !== observed) throw new IntegrityError("Replenishment stock changed before the task decision; retry the same operation",{reason:"replenishment_plan_changed",variantId,locationId,observed,current:quantity});
+  }
+
+  private async priorTriggeredTask(variantId: number, locationId: number, context?: ReplenOrderContext,
+    database: DrizzleDb = this.db): Promise<{ task: ReplenTask | null } | undefined> {
+    if (!context?.operationKey) return undefined;
+    const decision = await readReplenishmentTrigger(database, variantId, locationId, context);
+    if (!decision) return undefined;
+    if (decision.taskId === null) return { task: null };
+    const [task] = await database.select().from(replenTasks).where(eq(replenTasks.id, decision.taskId)).limit(1);
+    if (!task || task.pickProductVariantId !== variantId || task.toLocationId !== locationId) {
+      throw new Error("Recorded replenishment trigger has no matching task");
+    }
+    return { task };
+  }
+
+  private async rememberTriggeredTask(variantId: number, locationId: number, task: ReplenTask | null,
+    context?: ReplenOrderContext, tx: DrizzleDb = this.db): Promise<void> {
+    if (context?.operationKey) await recordReplenishmentTrigger(tx, variantId, locationId, context, task?.id ?? null, this.clock());
+  }
+
+  private async persistAutomaticTask(owner: DrizzleDb, values: InsertReplenTask): Promise<ReplenTask> {
+    const [task] = await owner.insert(replenTasks).values(values).returning();
+    if (!task) throw new IntegrityError("Replenishment task insertion returned no task");
+    if (task.executionMode !== "inline" || task.operationKey) return task;
+    // Persist identity before physical work, including commandless automatic
+    // triggers. This affects new plans only; historical keyless tasks stay out
+    // of automatic recovery. The primary key supplies a stable replay identity.
+    const [keyed] = await owner.update(replenTasks).set({ operationKey: `replen:auto:${task.id}` })
+      .where(and(eq(replenTasks.id, task.id), eq(replenTasks.revision, task.revision), isNull(replenTasks.operationKey))).returning();
+    if (!keyed) throw new IntegrityError("Automatic replenishment task could not retain its recovery identity", { taskId: task.id });
+    return keyed;
+  }
+
+  private async insertTriggeredTask(values: InsertReplenTask, observedVariantQty: number, context?: ReplenOrderContext): Promise<ReplenTask> {
+    const insert = async (tx: DrizzleDb) => {
+      await this.lockPickBinTaskCreation(tx, values.pickProductVariantId!, values.toLocationId!);
+      const prior = await this.priorTriggeredTask(values.pickProductVariantId!, values.toLocationId!, context, tx);
+      if (prior) {
+        if (!prior.task) throw new IntegrityError("Replenishment trigger already has a recorded no-work decision");
+        return prior.task;
+      }
+      const existing = await this.findActiveTaskForPickBin(values.pickProductVariantId!, values.toLocationId!, tx);
+      if (existing) {
+        await this.rememberTriggeredTask(existing.pickProductVariantId!, existing.toLocationId, existing, context, tx);
+        return existing;
+      }
+      await this.assertObservedPickQuantity(tx,values.pickProductVariantId!,values.toLocationId!,observedVariantQty);
+      const task = await this.persistAutomaticTask(tx, values);
+      if (task.pickProductVariantId == null || task.toLocationId == null) {
+        throw new IntegrityError("Created replenishment task has no exact pick-bin identity", { taskId: task.id });
+      }
+      await this.rememberTriggeredTask(task.pickProductVariantId, task.toLocationId, task, context, tx);
+      return task as ReplenTask;
+    };
+    return this.db.transaction(insert);
   }
 
   private async findActiveTaskForPickBin(
     pickVariantId: number,
     toLocationId: number,
+    database: DrizzleDb = this.db,
   ): Promise<ReplenTask | null> {
-    const [task] = await this.db
+    const [task] = await database
       .select()
       .from(replenTasks)
       .where(and(
@@ -481,13 +546,26 @@ export class ReplenishmentUseCases {
     }));
   }
 
-  private async blockTaskExecutionFailure(task: ReplenTask, error: any): Promise<void> {
-    const message = error?.message || String(error || "unknown_error");
-    await this.db.update(replenTasks).set({
-      status: "blocked",
-      exceptionReason: "execute_failed",
-      notes: `${task.notes || ""}\nExecute failed: ${message}`.trim(),
-    }).where(eq(replenTasks.id, task.id));
+  private async recordTaskExecutionFailure(task: ReplenTask, error: unknown, actor: string): Promise<void> {
+    const failure = classifyReplenishmentExecutionFailure(error);
+    const message = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
+    await this.db.transaction(async tx => {
+      const [updated] = await tx.update(replenTasks).set({
+        // Temporary failures leave the frozen plan executable. Permanent and
+        // unclassified failures require review; no cost/identity guard is waived.
+        status: failure.retryable ? task.status : "blocked",
+        exceptionReason: failure.retryable ? "execution_retry_pending" : "execute_failed",
+      }).where(and(eq(replenTasks.id, task.id), eq(replenTasks.status, task.status),
+        eq(replenTasks.revision, task.revision), inArray(replenTasks.status, EXECUTABLE_REPLEN_TASK_STATUSES))).returning();
+      // A concurrent completion, source replan or operator transition wins.
+      if (!updated) return;
+      await persistAuditEvent(tx, { actor, action: "inventory.replen_execution_failed",
+        target: `inventory.replen_task:${task.id}`,
+        changes: { before: { status: task.status, revision: task.revision, exceptionReason: task.exceptionReason },
+          after: { status: updated.status, revision: updated.revision, exceptionReason: updated.exceptionReason } },
+        context: { code: failure.code, retryable: failure.retryable, message } }, { timestamp: this.clock() });
+    });
+    logger.error(JSON.stringify({ event: "replen_execution_failed", taskId: task.id, actor, ...failure, message }));
   }
 
   private async getAvailableInventoryQty(
@@ -512,7 +590,12 @@ export class ReplenishmentUseCases {
   }
 
   private requiredSourceUnits(task: ReplenTask): number {
-    return Math.max(1, Number(task.qtySourceUnits ?? 0));
+    const source = Number(task.qtySourceUnits);
+    const target = Number(task.qtyTargetUnits);
+    const completed = Number(task.qtyCompleted ?? 0);
+    if (!Number.isSafeInteger(source) || source <= 0 || !Number.isSafeInteger(target) || target <= 0
+      || target % source !== 0 || completed < 0 || completed > target || completed % (target/source) !== 0) throw new Error("Task quantities have no exact remaining source-unit basis");
+    return source - completed/(target/source);
   }
 
   private async blockTaskNoCurrentSource(task: ReplenTask, reason: string): Promise<void> {
@@ -520,7 +603,7 @@ export class ReplenishmentUseCases {
       status: "blocked",
       exceptionReason: "no_source_stock",
       notes: `${task.notes || ""}\nBlocked before execution: ${reason}`.trim(),
-    }).where(eq(replenTasks.id, task.id));
+    }).where(and(eq(replenTasks.id, task.id), eq(replenTasks.status, task.status), eq(replenTasks.revision, task.revision), inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"])));
   }
 
   private async reResolveTaskSourceBeforeExecute(task: ReplenTask, userId?: string): Promise<ReplenTask> {
@@ -528,6 +611,10 @@ export class ReplenishmentUseCases {
     const requiredSourceUnits = this.requiredSourceUnits(task);
     const currentSourceQty = await this.getAvailableInventoryQty(sourceVariantId, task.fromLocationId);
     if (currentSourceQty >= requiredSourceUnits) return task;
+    if (task.triggeredBy === "manual" || task.qtyCompleted > 0) {
+      await this.blockTaskNoCurrentSource(task, "The frozen source cannot supply the remaining physical work");
+      throw new Error("source_stock_unavailable: the frozen task plan requires review before changing its source");
+    }
 
     if (!task.pickProductVariantId || !task.toLocationId) {
       const reason = `current source has ${currentSourceQty}, needs ${requiredSourceUnits}, and task has no pick bin to re-resolve`;
@@ -545,7 +632,7 @@ export class ReplenishmentUseCases {
         status: "cancelled",
         completedAt: new Date(),
         notes: `${task.notes || ""}\nCancelled before execution: ${reason}`.trim(),
-      }).where(eq(replenTasks.id, task.id));
+      }).where(and(eq(replenTasks.id, task.id), eq(replenTasks.status, task.status), eq(replenTasks.revision, task.revision), inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"])));
       throw new Error(`replen_no_longer_needed: ${reason}`);
     }
 
@@ -555,7 +642,7 @@ export class ReplenishmentUseCases {
         status: "cancelled",
         completedAt: new Date(),
         notes: `${task.notes || ""}\nCancelled before execution: ${reason}`.trim(),
-      }).where(eq(replenTasks.id, task.id));
+      }).where(and(eq(replenTasks.id, task.id), eq(replenTasks.status, task.status), eq(replenTasks.revision, task.revision), inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"])));
       throw new Error(`replen_superseded: ${reason}`);
     }
 
@@ -581,7 +668,7 @@ export class ReplenishmentUseCases {
         `to ${eval_.sourceLocation.code} / ${eval_.sourceVariant.sku ?? `#${resolvedSourceVariantId}`}.`,
     ].filter(Boolean).join("\n");
 
-    await this.db.update(replenTasks).set({
+    const [replanned] = await this.db.update(replenTasks).set({
       fromLocationId: eval_.sourceLocation.id,
       sourceProductVariantId: resolvedSourceVariantId,
       qtySourceUnits: eval_.qtySourceUnits,
@@ -589,18 +676,10 @@ export class ReplenishmentUseCases {
       replenMethod: eval_.params.replenMethod,
       exceptionReason: null,
       notes,
-    }).where(eq(replenTasks.id, task.id));
+    }).where(and(eq(replenTasks.id, task.id), eq(replenTasks.status, task.status), eq(replenTasks.revision, task.revision), inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"]))).returning();
 
-    return await this.getTaskById(task.id) ?? {
-      ...task,
-      fromLocationId: eval_.sourceLocation.id,
-      sourceProductVariantId: resolvedSourceVariantId,
-      qtySourceUnits: eval_.qtySourceUnits,
-      qtyTargetUnits: eval_.qtyTargetUnits,
-      replenMethod: eval_.params.replenMethod,
-      exceptionReason: null,
-      notes,
-    };
+    if (!replanned) throw new Error("replen_task_changed: source re-planning lost its revision guard");
+    return replanned;
   }
 
   private async executeInlineTaskAutomatically(
@@ -608,16 +687,10 @@ export class ReplenishmentUseCases {
     userId: string | undefined,
     tag: string,
   ): Promise<{ task: ReplenTask; moved: number }> {
-    try {
-      const result = await this.executeTask(task.id, userId ?? "system:auto-replen");
-      const finalTask = await this.getTaskById(task.id);
-      console.log(`${tag} task ${task.id} executed, moved ${result.moved} units`);
-      return { task: finalTask ?? task, moved: result.moved };
-    } catch (err: any) {
-      console.error(`${tag} executeTask failed for task ${task.id}:`, err?.message);
-      await this.blockTaskExecutionFailure(task, err);
-      throw err;
-    }
+    const result = await this.executeTask(task.id, userId ?? "system:auto-replen");
+    const finalTask = await this.getTaskById(task.id);
+    console.log(`${tag} task ${task.id} executed, moved ${result.moved} units`);
+    return { task: finalTask ?? task, moved: result.moved };
   }
 
   private replenOrderTaskFields(context?: ReplenOrderContext): Pick<InsertReplenTask, "orderId" | "orderItemId" | "blocksShipment"> {
@@ -644,15 +717,16 @@ export class ReplenishmentUseCases {
   async loadLocationConfig(
     warehouseLocationId: number,
     productVariantId: number,
+    database: DrizzleDb = this.db,
   ) {
-    const locConfigVariant = await this.db
+    const locConfigVariant = await database
       .select().from(locationReplenConfig)
       .where(and(
         eq(locationReplenConfig.warehouseLocationId, warehouseLocationId),
         eq(locationReplenConfig.productVariantId, productVariantId),
         eq(locationReplenConfig.isActive, 1),
       )).limit(1);
-    const locConfigWide = locConfigVariant.length > 0 ? null : (await this.db
+    const locConfigWide = locConfigVariant.length > 0 ? null : (await database
       .select().from(locationReplenConfig)
       .where(and(
         eq(locationReplenConfig.warehouseLocationId, warehouseLocationId),
@@ -667,11 +741,13 @@ export class ReplenishmentUseCases {
     variant: ProductVariant,
     warehouseId: number | undefined,
     locConfig: any,
+    database: DrizzleDb = this.db,
   ): Promise<ResolvedReplenParams> {
-    const rule = await this.findRuleForVariant(productVariantId);
+    const rule = await this.findRuleForVariant(productVariantId, database);
     const tierDefault = await this.findTierDefaultForVariant(
       variant.hierarchyLevel,
       warehouseId,
+      database,
     );
 
     const triggerValue = (locConfig?.triggerValue != null ? parseFloat(locConfig.triggerValue) : null)
@@ -811,6 +887,19 @@ export class ReplenishmentUseCases {
     };
   }
 
+  private async demandForSource(pickVariant: ProductVariant, sourceVariant: ProductVariant,
+    destinationQuantity: number, runtime: TransformationRuntimeEvidence) {
+    const authorization = runtime.authority === "canonical" && sourceVariant.id !== pickVariant.id
+      ? await this.transformationAuthority.authorizePackageConversion(this.caseBreakAuthorizationRequest(sourceVariant, pickVariant), runtime)
+      : null;
+    return planReplenishmentDemand({
+      destinationVariantQuantity: Math.max(1, destinationQuantity),
+      destinationUnitsPerVariant: this.variantUnits(pickVariant),
+      sourceUnitsPerVariant: this.variantUnits(sourceVariant),
+      sourceBatchQuantity: authorization ? Number(authorization.inputQty) : 1,
+    });
+  }
+
   private async resolveReplenSourceForNeed(args: {
     tag: string;
     pickVariant: ProductVariant;
@@ -858,6 +947,7 @@ export class ReplenishmentUseCases {
           args.sourceLocationType,
           args.parentLocationId,
           args.sourcePriority,
+          (await this.demandForSource(args.pickVariant, configuredSource, args.qtyNeeded, runtime)).qtySourceUnits,
         );
       }
     }
@@ -866,12 +956,18 @@ export class ReplenishmentUseCases {
     // behavior: strategy/direct-parent rules remain the authority and a missing
     // variant is reported through the existing no-stock path below.
     if (resolvedSourceVariantId != null && runtime.authority === "legacy") {
+      const [configuredSource] = await this.db.select().from(productVariants)
+        .where(eq(productVariants.id, resolvedSourceVariantId)).limit(1);
+      if (!configuredSource) return { sourceResolutionIssue: { reason: "no_source_variant",
+        note: `Configured source variant #${resolvedSourceVariantId} does not exist` }, sourceLocation: null,
+        resolvedSourceVariantId, resolvedReplenMethod, conversionAuthorization: null };
       sourceLocation = await this.findSourceLocation(
         resolvedSourceVariantId,
         args.warehouseId,
         args.sourceLocationType,
         args.parentLocationId,
         args.sourcePriority,
+        (await this.demandForSource(args.pickVariant, configuredSource, args.qtyNeeded, runtime)).qtySourceUnits,
       );
     }
 
@@ -1043,12 +1139,15 @@ export class ReplenishmentUseCases {
       };
     }
 
-    const initiallyRequiredSourceUnits = Math.max(1, Math.ceil(qtyNeeded / sourceVariant.unitsPerVariant));
     const pathInputQty = conversionAuthorization?.runtime.authority === "canonical"
       ? Number(conversionAuthorization.inputQty)
       : 1;
-    const qtySourceUnits = Math.ceil(initiallyRequiredSourceUnits / pathInputQty) * pathInputQty;
-    const qtyTargetUnits = qtySourceUnits * sourceVariant.unitsPerVariant;
+    const { qtySourceUnits, qtyTargetUnits } = planReplenishmentDemand({
+      destinationVariantQuantity: Math.max(1, qtyNeeded),
+      destinationUnitsPerVariant: this.variantUnits(variant as ProductVariant),
+      sourceUnitsPerVariant: this.variantUnits(sourceVariant as ProductVariant),
+      sourceBatchQuantity: pathInputQty,
+    });
     if (conversionAuthorization) {
       assertAuthorizedPackageConversionQuantity(
         conversionAuthorization,
@@ -1082,7 +1181,7 @@ export class ReplenishmentUseCases {
   // EVENT-DRIVEN REPLEN CHECK — call after any inventory change on a pickable bin
   // ---------------------------------------------------------------------------
 
-  async checkReplenForLocation(warehouseLocationId: number): Promise<void> {
+  async checkReplenForLocation(warehouseLocationId: number, operationKey?: string): Promise<void> {
     const [location] = await this.db
       .select()
       .from(warehouseLocations)
@@ -1101,8 +1200,10 @@ export class ReplenishmentUseCases {
           productVariantId,
           warehouseLocationId,
           "event_driven",
+          operationKey ? { operationKey: `${operationKey}:source:${warehouseLocationId}:${productVariantId}` } : undefined,
         );
       } catch (err: any) {
+        if (operationKey) throw err;
         console.warn(`[Replen] checkReplenForLocation: variant=${productVariantId} loc=${warehouseLocationId} error:`, err?.message);
       }
     }
@@ -1167,7 +1268,7 @@ export class ReplenishmentUseCases {
               exceptionReason: "no_source_stock",
               notes: `${task.notes || ""}\nClassified during replen re-evaluation: still no source stock.`.trim(),
             })
-            .where(eq(replenTasks.id, task.id));
+            .where(and(eq(replenTasks.id, task.id), eq(replenTasks.status, task.status), eq(replenTasks.revision, task.revision), inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"])));
         }
         continue;
       }
@@ -1179,7 +1280,7 @@ export class ReplenishmentUseCases {
           exceptionReason: task.exceptionReason ?? "no_source_stock",
           notes: `${task.notes || ""}\nCancelled to re-evaluate due to inventory change.`.trim()
         })
-        .where(eq(replenTasks.id, task.id));
+        .where(and(eq(replenTasks.id, task.id), eq(replenTasks.status, task.status), eq(replenTasks.revision, task.revision), inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"])));
       
       // Also call checkReplenForLocation on the target destination, because we just cancelled a task for it
       try {
@@ -1210,17 +1311,9 @@ export class ReplenishmentUseCases {
   // 2. EXECUTE TASK -- move stock from bulk to pick location
   // ---------------------------------------------------------------------------
 
-  private async resolveTaskExecutionMethod(owner: DrizzleDb, task: ReplenTask): Promise<string> {
-    let replenMethod = task.replenMethod || "full_case";
-    if (replenMethod === "full_case" && task.replenRuleId) {
-      const [rule] = await owner
-        .select()
-        .from(replenRules)
-        .where(eq(replenRules.id, task.replenRuleId))
-        .limit(1);
-      if (rule?.replenMethod) replenMethod = rule.replenMethod;
-    }
-    return replenMethod;
+  private async resolveTaskExecutionMethod(_owner: DrizzleDb, task: ReplenTask): Promise<string> {
+    if (!["case_break", "full_case", "pallet_drop"].includes(task.replenMethod)) throw new Error("Replenishment task has no supported frozen method");
+    return task.replenMethod;
   }
 
   private async planCanonicalTaskExecution(
@@ -1294,6 +1387,9 @@ export class ReplenishmentUseCases {
       "toLocationId",
       "qtySourceUnits",
       "qtyTargetUnits",
+      "qtyCompleted",
+      "executionMode",
+      "revision",
       "warehouseId",
     ];
     const changedFields = fields.filter((field) => current[field] !== planned[field]);
@@ -1341,135 +1437,154 @@ export class ReplenishmentUseCases {
       throw new Error(`Replen task ${taskId} not found`);
     }
 
+    if (task.status === "completed") {
+      await this.recoverReplenishmentFollowup(taskId);
+      return { moved: Number(task.executionMovedBaseUnits ?? 0) };
+    }
     if (!["pending", "assigned", "in_progress"].includes(task.status)) {
       throw new Error(
         `Replen task ${taskId} cannot be executed (status: ${task.status})`,
       );
     }
 
-    const resolvedTask = await this.reResolveTaskSourceBeforeExecute(task as ReplenTask, userId);
-    const plannedRuntime = await this.transformationAuthority.readRuntime();
-    const canonicalPlan = plannedRuntime.authority === "canonical"
-      ? await this.planCanonicalTaskExecution(resolvedTask, plannedRuntime)
-      : null;
+    let executionSnapshot = task as ReplenTask;
+    try {
+      const resolvedTask = await this.reResolveTaskSourceBeforeExecute(executionSnapshot, userId);
+      executionSnapshot = resolvedTask;
+      const plannedRuntime = await this.transformationAuthority.readRuntime();
+      const canonicalPlan = plannedRuntime.authority === "canonical"
+        ? await this.planCanonicalTaskExecution(resolvedTask, plannedRuntime)
+        : null;
 
-    const postCommitEffects: Array<() => Promise<void>> = [];
-    const movedBaseUnits = await this.db.transaction(async (tx: any) => {
-      // Canonical ordering is authority -> active head/model/path -> catalog
-      // variant snapshots -> operational task -> inventory/cost/lot rows.
-      // Legacy pins only the runtime singleton and otherwise keeps its existing
-      // task/rule execution behavior.
-      if (canonicalPlan?.request && canonicalPlan.authorization) {
-        await this.transformationAuthority.pinPackageConversion(
-          tx,
-          canonicalPlan.request,
-          canonicalPlan.authorization,
-        );
-      } else {
-        await this.transformationAuthority.pinRuntime(tx, plannedRuntime);
-      }
+      const movedBaseUnits = await this.db.transaction(async (tx: any) => {
+        // Canonical ordering is authority -> active head/model/path -> catalog
+        // variant snapshots -> operational task -> inventory/cost/lot rows.
+        // Legacy pins only the runtime singleton and otherwise keeps its existing
+        // task/rule execution behavior.
+        if (canonicalPlan?.request && canonicalPlan.authorization) {
+          await this.transformationAuthority.pinPackageConversion(
+            tx,
+            canonicalPlan.request,
+            canonicalPlan.authorization,
+          );
+        } else {
+          await this.transformationAuthority.pinRuntime(tx, plannedRuntime);
+        }
 
-      const lockedTaskResult = await tx.execute(sql`
-        SELECT *
-        FROM inventory.replen_tasks
-        WHERE id = ${taskId}
-        FOR UPDATE
-      `);
+        const lockedTaskResult = await tx.execute(sql`
+          SELECT *
+          FROM inventory.replen_tasks
+          WHERE id = ${taskId}
+          FOR UPDATE
+        `);
 
-      const lockedTask = lockedTaskResult.rows?.[0];
-      if (!lockedTask) {
-        throw new Error(`Replen task ${taskId} not found`);
-      }
+        const lockedTask = lockedTaskResult.rows?.[0];
+        if (!lockedTask) {
+          throw new Error(`Replen task ${taskId} not found`);
+        }
 
-      if (!["pending", "assigned", "in_progress"].includes(lockedTask.status)) {
-        throw new Error(
-          `Replen task ${taskId} cannot be executed (status: ${lockedTask.status})`,
-        );
-      }
+        if (lockedTask.status === "completed") return Number(lockedTask.execution_moved_base_units ?? 0);
+        if (!["pending", "assigned", "in_progress"].includes(lockedTask.status)) {
+          throw new Error(
+            `Replen task ${taskId} cannot be executed (status: ${lockedTask.status})`,
+          );
+        }
 
-      const [currentTask] = await tx
-        .select()
-        .from(replenTasks)
-        .where(eq(replenTasks.id, taskId))
-        .limit(1);
-      if (!currentTask) throw new Error(`Replen task ${taskId} not found after lock acquisition`);
+        const [currentTask] = await tx
+          .select()
+          .from(replenTasks)
+          .where(eq(replenTasks.id, taskId))
+          .limit(1);
+        if (!currentTask) throw new Error(`Replen task ${taskId} not found after lock acquisition`);
 
-      const replenMethod = await this.resolveTaskExecutionMethod(tx, currentTask as ReplenTask);
-      if (canonicalPlan) {
-        this.assertCanonicalTaskSnapshotUnchanged(
-          resolvedTask,
-          currentTask as ReplenTask,
-          canonicalPlan.replenMethod,
+        const replenMethod = await this.resolveTaskExecutionMethod(tx, currentTask as ReplenTask);
+        this.assertCanonicalTaskSnapshotUnchanged(resolvedTask, currentTask as ReplenTask,
+          canonicalPlan?.replenMethod ?? resolvedTask.replenMethod, replenMethod);
+
+        const [sourceVariant] = currentTask.sourceProductVariantId
+          ? await tx
+              .select()
+              .from(productVariants)
+              .where(eq(productVariants.id, currentTask.sourceProductVariantId))
+              .limit(1)
+          : [null];
+        const [pickVariant] = currentTask.pickProductVariantId
+          ? await tx
+              .select()
+              .from(productVariants)
+              .where(eq(productVariants.id, currentTask.pickProductVariantId))
+              .limit(1)
+          : [null];
+
+        let moved = 0;
+        const invTx = this.inventoryUseCases.withTx(tx);
+        if (!sourceVariant || !pickVariant || !currentTask.fromLocationId || !currentTask.toLocationId) {
+          throw new Error(`Replen task ${taskId} is missing its frozen source, destination, or variant identity`);
+        }
+        const occurredAt = this.clock();
+        if (!(occurredAt instanceof Date) || Number.isNaN(occurredAt.getTime())) {
+          throw new Error("Replenishment execution clock returned an invalid timestamp");
+        }
+        const completedBase = Number(currentTask.qtyCompleted ?? 0);
+        const remainingBase = Number(currentTask.qtyTargetUnits) - completedBase;
+        if (remainingBase <= 0 || completedBase < 0 || completedBase % sourceVariant.unitsPerVariant !== 0) throw new Error("Replenishment completion quantity is inconsistent with its frozen source units");
+        const remainingSource = Number(currentTask.qtySourceUnits) - completedBase / sourceVariant.unitsPerVariant;
+        const movement = await invTx.executeReplenishmentMove({
+          taskId,
           replenMethod,
-        );
-      }
+          sourceVariant: {
+            id: sourceVariant.id,
+            productId: sourceVariant.productId ?? null,
+            unitsPerVariant: sourceVariant.unitsPerVariant,
+          },
+          pickVariant: {
+            id: pickVariant.id,
+            productId: pickVariant.productId ?? null,
+            unitsPerVariant: pickVariant.unitsPerVariant,
+          },
+          fromLocationId: currentTask.fromLocationId,
+          toLocationId: currentTask.toLocationId,
+          qtySourceUnits: remainingSource,
+          qtyTargetUnits: remainingBase,
+          userId,
+          occurredAt,
+          notes: `Replen task #${taskId} (${replenMethod})`,
+          deferUntilCommit: () => { /* The receipt-backed follow-up below owns these effects. */ },
+        });
+        moved = movement.movedBaseUnits;
 
-      const [sourceVariant] = currentTask.sourceProductVariantId
-        ? await tx
-            .select()
-            .from(productVariants)
-            .where(eq(productVariants.id, currentTask.sourceProductVariantId))
-            .limit(1)
-        : [null];
-      const [pickVariant] = currentTask.pickProductVariantId
-        ? await tx
-            .select()
-            .from(productVariants)
-            .where(eq(productVariants.id, currentTask.pickProductVariantId))
-            .limit(1)
-        : [null];
+        await tx
+          .update(replenTasks)
+          .set({
+            status: "completed",
+            qtyCompleted: completedBase + moved,
+            executionMovedBaseUnits: moved,
+            exceptionReason: null,
+            completedAt: occurredAt,
+            assignedTo: userId ?? currentTask.assignedTo,
+          })
+          .where(eq(replenTasks.id, taskId));
 
-      let moved = 0;
-      const invTx = this.inventoryUseCases.withTx(tx);
-      if (!sourceVariant || !pickVariant || !currentTask.fromLocationId || !currentTask.toLocationId) {
-        throw new Error(`Replen task ${taskId} is missing its frozen source, destination, or variant identity`);
-      }
-      const occurredAt = this.clock();
-      if (!(occurredAt instanceof Date) || Number.isNaN(occurredAt.getTime())) {
-        throw new Error("Replenishment execution clock returned an invalid timestamp");
-      }
-      const movement = await invTx.executeReplenishmentMove({
-        taskId,
-        replenMethod,
-        sourceVariant: {
-          id: sourceVariant.id,
-          productId: sourceVariant.productId ?? null,
-          unitsPerVariant: sourceVariant.unitsPerVariant,
-        },
-        pickVariant: {
-          id: pickVariant.id,
-          productId: pickVariant.productId ?? null,
-          unitsPerVariant: pickVariant.unitsPerVariant,
-        },
-        fromLocationId: currentTask.fromLocationId,
-        toLocationId: currentTask.toLocationId,
-        qtySourceUnits: currentTask.qtySourceUnits,
-        qtyTargetUnits: currentTask.qtyTargetUnits,
-        userId,
-        occurredAt,
-        notes: `Replen task #${taskId} (${replenMethod})`,
-        deferUntilCommit: (effect) => postCommitEffects.push(effect),
+        await recordReplenishmentFollowup(tx, taskId, userId ?? "system:auto-replen", occurredAt);
+        return moved;
       });
-      moved = movement.movedBaseUnits;
 
-      await tx
-        .update(replenTasks)
-        .set({
-          status: "completed",
-          qtyCompleted: moved,
-          completedAt: occurredAt,
-          assignedTo: userId ?? currentTask.assignedTo,
-        })
-        .where(eq(replenTasks.id, taskId));
+      await this.recoverReplenishmentFollowup(taskId);
 
-      return moved;
-    });
-
-    for (const effect of postCommitEffects) await effect();
-
-    await this.unblockDependentTasks(taskId, userId);
-
-    return { moved: movedBaseUnits };
+      return { moved: movedBaseUnits };
+    } catch (error) {
+      if (executionSnapshot.executionMode === "inline") {
+        try {
+          await this.recordTaskExecutionFailure(executionSnapshot, error, userId ?? "system:auto-replen");
+        } catch (persistenceError) {
+          // The original task intent already survives. A DB outage must not hide
+          // the movement failure or overwrite an uncertain committed outcome.
+          logger.error(JSON.stringify({ event: "replen_failure_record_pending", taskId,
+            message: persistenceError instanceof Error ? persistenceError.message : String(persistenceError) }));
+        }
+      }
+      throw error;
+    }
   }
 
   /**
@@ -1483,27 +1598,30 @@ export class ReplenishmentUseCases {
       .where(
         and(
           eq(replenTasks.dependsOnTaskId, completedTaskId),
-          eq(replenTasks.status, "blocked"),
+          inArray(replenTasks.status, ["blocked", "pending"]),
         ),
       );
 
     for (const dep of dependents) {
-      await this.db
-        .update(replenTasks)
-        .set({
-          status: "pending",
-          dependsOnTaskId: null,
-          notes: `${dep.notes || ""}\nUnblocked by completed task #${completedTaskId}`,
-        })
-        .where(eq(replenTasks.id, dep.id));
+      if (dep.status === "blocked" && dep.exceptionReason === "execute_failed") continue;
+      if (dep.status === "blocked") {
+        assertReplenishmentTaskTransition(dep.status, "pending");
+        await this.db.transaction(async tx => {
+          const [updated] = await tx.update(replenTasks).set({ status: "pending",
+            notes: `${dep.notes || ""}\nUnblocked by completed task #${completedTaskId}` })
+            .where(and(eq(replenTasks.id, dep.id), eq(replenTasks.status, "blocked"),
+              eq(replenTasks.revision, dep.revision), eq(replenTasks.dependsOnTaskId, completedTaskId))).returning();
+          if (!updated) throw new IntegrityError("Dependent replenishment task changed before wake-up", { taskId: dep.id, completedTaskId });
+          await persistAuditEvent(tx, { actor: userId ?? "system:auto-replen", action: "inventory.replen_dependency_unblocked",
+            target: `inventory.replen_task:${dep.id}`, changes: { before: { status: dep.status, revision: dep.revision },
+              after: { status: updated.status, revision: updated.revision } }, context: { completedTaskId } }, { timestamp: this.clock() });
+        });
+      }
 
-      // Auto-execute if the dependent task has autoReplen=1
-      if (dep.autoReplen === 1) {
-        try {
-          await this.executeTask(dep.id, userId ?? "system:auto-replen");
-        } catch (err: any) {
-          console.warn(`[Replen] Auto-execute of unblocked task ${dep.id} failed:`, err?.message);
-        }
+      // Resume the execution mode frozen by the rule/resolver owner.
+      if (dep.executionMode === "inline" && supportsInlineReplenishment(dep.replenMethod)) {
+        // Failure retains the parent follow-up; a pending child survives restart.
+        await this.executeTask(dep.id, userId ?? "system:auto-replen");
       }
     }
   }
@@ -1546,48 +1664,6 @@ export class ReplenishmentUseCases {
           .orderBy(replenTasks.priority, replenTasks.createdAt);
 
     return query;
-  }
-
-  // ---------------------------------------------------------------------------
-  // 4. CANCEL TASK
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Cancel a replen task by setting its status to "cancelled".
-   *
-   * Only tasks that are not already completed or cancelled can be cancelled.
-   *
-   * @param taskId  Primary key of the replen task.
-   * @param userId  Optional -- who cancelled the task (for audit trail).
-   * @throws If the task is not found or is already completed/cancelled.
-   */
-  async cancelTask(taskId: number, userId?: string): Promise<void> {
-    const [task] = await this.db
-      .select()
-      .from(replenTasks)
-      .where(eq(replenTasks.id, taskId))
-      .limit(1);
-
-    if (!task) {
-      throw new Error(`Replen task ${taskId} not found`);
-    }
-
-    if (task.status === "completed" || task.status === "cancelled") {
-      throw new Error(
-        `Replen task ${taskId} cannot be cancelled (status: ${task.status})`,
-      );
-    }
-
-    await this.db
-      .update(replenTasks)
-      .set({
-        status: "cancelled",
-        completedAt: new Date(),
-        notes: task.notes
-          ? `${task.notes}\nCancelled${userId ? ` by ${userId}` : ""}`
-          : `Cancelled${userId ? ` by ${userId}` : ""}`,
-      })
-      .where(eq(replenTasks.id, taskId));
   }
 
   async cleanupHealthIssues(params: {
@@ -1706,6 +1782,9 @@ export class ReplenishmentUseCases {
     userId: string,
   ): Promise<ReplenTask | null> {
     if (!task.pickProductVariantId || !task.toLocationId) return null;
+    // A manual plan or partially recorded physical work must keep its original
+    // source and unit basis. Health cleanup cannot replace that evidence.
+    if (task.operationRequestHash || task.qtyCompleted > 0) return null;
 
     const activeDemandLines = await this.countActivePendingDemandLines(task);
     const eval_ = await this.evaluateReplenNeed(task.pickProductVariantId, task.toLocationId, {
@@ -1734,7 +1813,7 @@ export class ReplenishmentUseCases {
         `source ${eval_.sourceLocation.code}, qty ${eval_.qtySourceUnits}.`,
     ].filter(Boolean).join("\n");
 
-    await this.db.update(replenTasks).set({
+    const [replanned] = await this.db.update(replenTasks).set({
       fromLocationId: eval_.sourceLocation.id,
       sourceProductVariantId: resolvedSourceVariantId,
       qtySourceUnits: eval_.qtySourceUnits,
@@ -1742,18 +1821,10 @@ export class ReplenishmentUseCases {
       replenMethod: eval_.params.replenMethod,
       exceptionReason: null,
       notes,
-    }).where(eq(replenTasks.id, task.id));
+    }).where(and(eq(replenTasks.id, task.id), eq(replenTasks.status, task.status), eq(replenTasks.revision, task.revision), inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"]))).returning();
 
-    return await this.getTaskById(task.id) ?? {
-      ...task,
-      fromLocationId: eval_.sourceLocation.id,
-      sourceProductVariantId: resolvedSourceVariantId,
-      qtySourceUnits: eval_.qtySourceUnits,
-      qtyTargetUnits: eval_.qtyTargetUnits,
-      replenMethod: eval_.params.replenMethod,
-      exceptionReason: null,
-      notes,
-    };
+    if (!replanned) throw new Error("replen_task_changed: source re-planning lost its revision guard");
+    return replanned;
   }
 
   async queueMissingPickBinReplen(params: {
@@ -1986,11 +2057,12 @@ export class ReplenishmentUseCases {
 
     const result = await this.db.execute(sql`
       WITH candidates AS (
-        SELECT rt.id
+        SELECT rt.id, rt.revision, rt.status
         FROM inventory.replen_tasks rt
         LEFT JOIN catalog.product_variants pv ON pv.id = rt.pick_product_variant_id
         WHERE rt.status = 'blocked'
           AND rt.blocks_shipment = false
+          AND rt.qty_completed = 0 AND rt.operation_request_hash IS NULL
           AND rt.depends_on_task_id IS NULL
           AND COALESCE(rt.qty_source_units, 0) = 0
           AND COALESCE(rt.qty_target_units, 0) = 0
@@ -2026,7 +2098,7 @@ export class ReplenishmentUseCases {
           completed_at = NOW(),
           notes = trim(both E'\n' from COALESCE(rt.notes, '') || E'\n' || ${auditNote})
       FROM candidates c
-      WHERE rt.id = c.id
+      WHERE rt.id = c.id AND rt.revision = c.revision AND rt.status = c.status
       RETURNING rt.id
     `);
 
@@ -2045,11 +2117,12 @@ export class ReplenishmentUseCases {
 
     const result = await this.db.execute(sql`
       WITH candidates AS (
-        SELECT rt.id
+        SELECT rt.id, rt.revision, rt.status
         FROM inventory.replen_tasks rt
         LEFT JOIN catalog.product_variants pv ON pv.id = rt.pick_product_variant_id
         WHERE rt.status IN ('pending', 'assigned')
           AND rt.blocks_shipment = false
+          AND rt.qty_completed = 0 AND rt.operation_request_hash IS NULL
           AND rt.depends_on_task_id IS NULL
           ${taskFilter}
           ${ageFilter}
@@ -2083,7 +2156,7 @@ export class ReplenishmentUseCases {
           completed_at = NOW(),
           notes = trim(both E'\n' from COALESCE(rt.notes, '') || E'\n' || ${auditNote})
       FROM candidates c
-      WHERE rt.id = c.id
+      WHERE rt.id = c.id AND rt.revision = c.revision AND rt.status = c.status
       RETURNING rt.id
     `);
 
@@ -2112,6 +2185,7 @@ export class ReplenishmentUseCases {
         SELECT
           rt.id,
           rt.status,
+          rt.revision,
           first_value(rt.id) OVER task_group AS kept_id,
           row_number() OVER task_group AS row_num,
           count(*) OVER (
@@ -2121,6 +2195,7 @@ export class ReplenishmentUseCases {
         ${taskJoin}
         WHERE rt.status IN ('pending', 'assigned', 'in_progress', 'blocked')
           AND rt.blocks_shipment = false
+          AND rt.qty_completed = 0 AND rt.operation_request_hash IS NULL
           AND rt.pick_product_variant_id IS NOT NULL
           AND rt.to_location_id IS NOT NULL
           AND NOT (
@@ -2145,7 +2220,7 @@ export class ReplenishmentUseCases {
         )
       ),
       candidates AS (
-        SELECT id, kept_id
+        SELECT id, kept_id, revision, status
         FROM active_tasks
         WHERE active_count > 1
           AND row_num > 1
@@ -2158,7 +2233,7 @@ export class ReplenishmentUseCases {
           completed_at = NOW(),
           notes = trim(both E'\n' from COALESCE(rt.notes, '') || E'\n' || ${auditNote} || ' kept #' || c.kept_id::text)
       FROM candidates c
-      WHERE rt.id = c.id
+      WHERE rt.id = c.id AND rt.revision = c.revision AND rt.status = c.status
       RETURNING rt.id, c.kept_id
     `);
 
@@ -2180,18 +2255,15 @@ export class ReplenishmentUseCases {
     context?: ReplenOrderContext,
   ): Promise<ReplenTask | null> {
     validateReplenishmentTrigger(triggeredBy);
-    return this.withPickBinTaskLock(productVariantId, warehouseLocationId, () =>
-      this.checkAndTriggerAfterPickLocked(productVariantId, warehouseLocationId, triggeredBy, context),
-    );
-  }
-
-  private async checkAndTriggerAfterPickLocked(
-    productVariantId: number,
-    warehouseLocationId: number,
-    triggeredBy: string = "inline_pick",
-    context?: ReplenOrderContext,
-  ): Promise<ReplenTask | null> {
     const _tag = `[Replen checkAndTrigger] variant=${productVariantId} loc=${warehouseLocationId}`;
+    const prior = await this.priorTriggeredTask(productVariantId, warehouseLocationId, context);
+    if (prior) {
+      if (prior.task?.executionMode === "inline" && supportsInlineReplenishment(prior.task.replenMethod)
+        && EXECUTABLE_REPLEN_TASK_STATUSES.includes(prior.task.status)) {
+        return (await this.executeInlineTaskAutomatically(prior.task, "system:auto-replen", _tag)).task;
+      }
+      return prior.task;
+    }
 
     const eval_ = await this.evaluateReplenNeed(productVariantId, warehouseLocationId, {
       forceWhenAtOrBelowZero: context?.forceWhenAtOrBelowZero === true,
@@ -2199,13 +2271,15 @@ export class ReplenishmentUseCases {
 
     if (eval_.status === "skip") {
       console.log(`${_tag} EXIT: ${eval_.skipReason}`);
+      await this.rememberTriggeredTask(productVariantId, warehouseLocationId, null, context);
       return null;
     }
     if (eval_.status === "dedup") {
       console.log(`${_tag} EXIT: dedup — existing task #${eval_.existingTaskId}`);
+      await this.rememberTriggeredTask(productVariantId, warehouseLocationId, eval_.existingTask, context);
       if (
         eval_.existingTask.executionMode === "inline" &&
-        eval_.existingTask.replenMethod === "case_break" &&
+        supportsInlineReplenishment(eval_.existingTask.replenMethod) &&
         EXECUTABLE_REPLEN_TASK_STATUSES.includes(eval_.existingTask.status)
       ) {
         return (await this.executeInlineTaskAutomatically(eval_.existingTask, "system:auto-replen", _tag)).task;
@@ -2221,6 +2295,7 @@ export class ReplenishmentUseCases {
       if (resolvedSourceVariantId) {
         const cascadeResult = await this.tryCascadeReplen({
           sourceVariantId: resolvedSourceVariantId,
+          observedPickQuantity: eval_.level.variantQty,
           pickVariantId: productVariantId,
           pickLocationId: warehouseLocationId,
           warehouseId: location.warehouseId ?? undefined,
@@ -2248,12 +2323,11 @@ export class ReplenishmentUseCases {
       if (context?.blocksShipment !== true) {
         notify("stockout", notification).catch(() => {});
         console.log(`${_tag} EXIT: no source stock; routed to review notification without creating a fake replen task`);
+        await this.rememberTriggeredTask(productVariantId, warehouseLocationId, null, context);
         return null;
       }
 
-      const [blockedTask] = await this.db
-        .insert(replenTasks)
-        .values({
+      const blockedTask = await this.insertTriggeredTask({ operationKey: context?.operationKey ?? null,
           replenRuleId: rule?.id ?? null,
           fromLocationId: warehouseLocationId,
           toLocationId: warehouseLocationId,
@@ -2276,8 +2350,7 @@ export class ReplenishmentUseCases {
             `${taskNotes}\nBlocked: ${sourceResolutionIssue?.note ?? `no source stock found in ${sourceLocationType} locations`}`,
             context,
           ),
-        } satisfies InsertReplenTask)
-        .returning();
+        } satisfies InsertReplenTask, eval_.level.variantQty, context);
       console.log(`${_tag} EXIT: created BLOCKED task — no source stock in ${sourceLocationType} locations`);
       notify("stockout", {
         ...notification,
@@ -2289,9 +2362,7 @@ export class ReplenishmentUseCases {
     const { sourceLocation, sourceVariant, qtySourceUnits, qtyTargetUnits, executionMode } = eval_;
 
     console.log(`${_tag} CREATING TASK: from=${sourceLocation!.code}(id=${sourceLocation!.id}) to=${location.code} qty=${qtySourceUnits}x${sourceVariant.unitsPerVariant}=${qtyTargetUnits} method=${replenMethod}`);
-    const [task] = await this.db
-      .insert(replenTasks)
-      .values({
+    const task = await this.insertTriggeredTask({ operationKey: context?.operationKey ?? null,
         replenRuleId: rule?.id ?? null,
         fromLocationId: sourceLocation!.id,
         toLocationId: warehouseLocationId,
@@ -2310,8 +2381,7 @@ export class ReplenishmentUseCases {
         ...this.replenOrderTaskFields(context),
         warehouseId: location.warehouseId ?? undefined,
         notes: this.appendOrderContextNote(taskNotes, context),
-      } satisfies InsertReplenTask)
-      .returning();
+      } satisfies InsertReplenTask, eval_.level.variantQty, context);
 
     if (replenMethod === "pallet_drop" || replenMethod === "case_break") {
       const typeKey = replenMethod === "pallet_drop" ? "pallet_drop_needed" : "case_break_needed";
@@ -2322,7 +2392,7 @@ export class ReplenishmentUseCases {
       }).catch(() => {});
     }
 
-    if ((eval_.shouldAutoExecute || executionMode === "inline") && replenMethod === "case_break") {
+    if (task.executionMode === "inline" && supportsInlineReplenishment(task.replenMethod)) {
       return (await this.executeInlineTaskAutomatically(task as ReplenTask, "system:auto-replen", _tag)).task;
     }
 
@@ -2376,7 +2446,7 @@ export class ReplenishmentUseCases {
         taskNotes: sourceResolutionIssue?.note ? `${taskNotes}\n${sourceResolutionIssue.note}` : taskNotes,
         triggerValue,
         autoReplen: params.autoReplen,
-        evaluatedQty,
+        evaluatedQty, observedVariantQty: eval_.level.variantQty,
         skipReason: sourceResolutionIssue?.reason ?? "no_source_stock",
       };
     }
@@ -2395,7 +2465,7 @@ export class ReplenishmentUseCases {
       taskNotes,
       triggerValue,
       autoReplen: params.autoReplen,
-      evaluatedQty,
+      evaluatedQty, observedVariantQty: eval_.level.variantQty,
     };
   }
 
@@ -2526,28 +2596,25 @@ export class ReplenishmentUseCases {
     context?: ReplenOrderContext,
   ): Promise<{ task: ReplenTask; moved: number } | null> {
     validateReplenishmentTrigger(context?.triggeredBy ?? "inline_pick");
-    return this.withPickBinTaskLock(pickVariantId, toLocationId, () =>
-      this.createAndExecuteReplenLocked(pickVariantId, toLocationId, userId, context),
-    );
-  }
-
-  private async createAndExecuteReplenLocked(
-    pickVariantId: number,
-    toLocationId: number,
-    userId?: string,
-    context?: ReplenOrderContext,
-  ): Promise<{ task: ReplenTask; moved: number } | null> {
     const _tag = `[Replen createAndExecute] variant=${pickVariantId} loc=${toLocationId}`;
 
+    const prior = await this.priorTriggeredTask(pickVariantId, toLocationId, context);
+    if (prior) {
+      if (!prior.task) return null;
+      if (prior.task.status === "completed") return { task: prior.task, moved: Number(prior.task.executionMovedBaseUnits ?? 0) };
+      if (prior.task.executionMode === "inline" && supportsInlineReplenishment(prior.task.replenMethod) && EXECUTABLE_REPLEN_TASK_STATUSES.includes(prior.task.status)) return this.executeInlineTaskAutomatically(prior.task, userId, _tag);
+      return { task: prior.task, moved: 0 };
+    }
     const existingTask = await this.findActiveTaskForPickBin(pickVariantId, toLocationId);
     if (existingTask) {
+      await this.rememberTriggeredTask(pickVariantId, toLocationId, existingTask, context);
       const currentTask = EXECUTABLE_REPLEN_TASK_STATUSES.includes(existingTask.status)
         ? await this.reResolveTaskSourceBeforeExecute(existingTask, userId)
         : existingTask;
       console.log(`${_tag} reusing active task ${currentTask.id} status=${currentTask.status}`);
       if (
         currentTask.executionMode === "inline" &&
-        currentTask.replenMethod === "case_break" &&
+        supportsInlineReplenishment(currentTask.replenMethod) &&
         EXECUTABLE_REPLEN_TASK_STATUSES.includes(currentTask.status)
       ) {
         return this.executeInlineTaskAutomatically(currentTask, userId, _tag);
@@ -2571,10 +2638,11 @@ export class ReplenishmentUseCases {
     }
     if (!guidance.needed || guidance.stockout || !guidance.sourceLocationId) {
       console.log(`${_tag} guidance says no replen needed or stockout — skipping`);
+      await this.rememberTriggeredTask(pickVariantId, toLocationId, null, context);
       return null;
     }
 
-    const executionMode = guidance.replenMethod === "case_break" ? guidance.executionMode : "queue";
+    const executionMode = guidance.executionMode;
 
     // Load required data for movement
     const [variant] = await this.db.select().from(productVariants).where(eq(productVariants.id, pickVariantId)).limit(1);
@@ -2592,7 +2660,8 @@ export class ReplenishmentUseCases {
     const autoReplen = rule?.autoReplen ?? 0;
 
     // Create the task, then let the replenishment service post the movement.
-    const [task] = await this.db.insert(replenTasks).values({
+    const task = await this.insertTriggeredTask({
+      operationKey: context?.operationKey ?? null,
       replenRuleId: rule?.id ?? null,
       fromLocationId: guidance.sourceLocationId,
       toLocationId,
@@ -2616,10 +2685,10 @@ export class ReplenishmentUseCases {
           : `${guidance.taskNotes}\nSystem queued replen; ${guidance.replenMethod} requires warehouse movement.`,
         context,
       ),
-    } satisfies InsertReplenTask).returning();
+    } satisfies InsertReplenTask, guidance.observedVariantQty!, context);
 
     let moved = 0;
-    if (executionMode === "inline") {
+    if (task.executionMode === "inline") {
       console.log(`${_tag} created task ${task.id}, executing immediately...`);
       return this.executeInlineTaskAutomatically(task as ReplenTask, userId, _tag);
     } else {
@@ -2627,8 +2696,9 @@ export class ReplenishmentUseCases {
     }
 
     // Re-read task to get final state
-    const [finalTask] = await this.db.select().from(replenTasks).where(eq(replenTasks.id, task.id)).limit(1);
-    return { task: finalTask as ReplenTask, moved };
+    const finalTask = await this.getTaskById(task.id);
+    if (!finalTask) throw new Error("Created replenishment task disappeared");
+    return { task: finalTask, moved };
   }
 
   async ensureQueuedReplenForShortPick(
@@ -2637,21 +2707,16 @@ export class ReplenishmentUseCases {
     userId?: string,
     context?: ReplenOrderContext,
   ): Promise<{ task: ReplenTask; moved: number; guidance?: ReplenGuidance } | null> {
-    return this.withPickBinTaskLock(pickVariantId, toLocationId, () =>
-      this.ensureQueuedReplenForShortPickLocked(pickVariantId, toLocationId, userId, context),
-    );
-  }
-
-  private async ensureQueuedReplenForShortPickLocked(
-    pickVariantId: number,
-    toLocationId: number,
-    userId?: string,
-    context?: ReplenOrderContext,
-  ): Promise<{ task: ReplenTask; moved: number; guidance?: ReplenGuidance } | null> {
     const _tag = `[Replen shortPickQueue] variant=${pickVariantId} loc=${toLocationId}`;
 
+    const prior = await this.priorTriggeredTask(pickVariantId, toLocationId, context);
+    if (prior) {
+      if (!prior.task) return null;
+      return { task: prior.task, moved: Number(prior.task.executionMovedBaseUnits ?? 0) };
+    }
     const existingTask = await this.findActiveTaskForPickBin(pickVariantId, toLocationId);
     if (existingTask) {
+      await this.rememberTriggeredTask(pickVariantId, toLocationId, existingTask, context);
       const currentTask = EXECUTABLE_REPLEN_TASK_STATUSES.includes(existingTask.status)
         ? await this.reResolveTaskSourceBeforeExecute(existingTask, userId)
         : existingTask;
@@ -2664,6 +2729,7 @@ export class ReplenishmentUseCases {
     });
     if (!guidance.needed || guidance.stockout || !guidance.sourceLocationId) {
       console.log(`${_tag} no queueable source found`);
+      await this.rememberTriggeredTask(pickVariantId, toLocationId, null, context);
       return null;
     }
 
@@ -2692,7 +2758,8 @@ export class ReplenishmentUseCases {
     if (!location) return null;
 
     const rule = await this.findRuleForVariant(pickVariantId);
-    const [task] = await this.db.insert(replenTasks).values({
+    const task = await this.insertTriggeredTask({
+      operationKey: context?.operationKey ?? null,
       replenRuleId: rule?.id ?? null,
       fromLocationId: guidance.sourceLocationId,
       toLocationId,
@@ -2715,7 +2782,7 @@ export class ReplenishmentUseCases {
         `${guidance.taskNotes}\nQueued from confirmed short pick; picker continues without inline replen.`,
         context,
       ),
-    } satisfies InsertReplenTask).returning();
+    } satisfies InsertReplenTask, guidance.observedVariantQty!, context);
 
     console.log(`${_tag} created queued task ${task.id} from short-pick report`);
     return { task: task as ReplenTask, moved: 0, guidance };
@@ -2733,145 +2800,107 @@ export class ReplenishmentUseCases {
    * Partial matches (same variant+dest but different source) are also handled
    * since the destination is fulfilled regardless of which source was used.
    */
-  async completeMatchingTransferTask(
-    fromLocationId: number,
-    toLocationId: number,
-    variantId: number,
-    userId?: string,
-  ): Promise<{ completedTaskIds: number[] }> {
-    // Find pending/assigned/in_progress replen tasks that match this transfer
-    const matchingTasks = await this.db
-      .select()
-      .from(replenTasks)
-      .where(
-        and(
-          eq(replenTasks.toLocationId, toLocationId),
-          eq(replenTasks.pickProductVariantId, variantId),
-          inArray(replenTasks.status, ["pending", "assigned", "in_progress"]),
-        ),
-      );
-
-    const completedIds: number[] = [];
-
-    for (const task of matchingTasks) {
-      // Mark completed without moving inventory
-      await this.db
-        .update(replenTasks)
-        .set({
-          status: "completed",
-          qtyCompleted: task.qtyTargetUnits,
-          completedAt: new Date(),
-          assignedTo: userId ?? task.assignedTo,
-          notes: `${task.notes || ""}\nAuto-completed: manual transfer from loc ${fromLocationId} to loc ${toLocationId} fulfilled this task`.trim(),
-        })
-        .where(eq(replenTasks.id, task.id));
-
-      // Unblock any dependent cascade tasks
-      await this.unblockDependentTasks(task.id, userId);
-      completedIds.push(task.id);
-
-      console.log(`[Replen] Auto-completed task #${task.id} — manual transfer matched (variant ${variantId}, to loc ${toLocationId})`);
-    }
-
-    return { completedTaskIds: completedIds };
+  async completeMatchingTransferTask(transferReceiptId: number, userId?: string): Promise<{ completedTaskIds: number[] }> {
+    const completedTaskIds = await this.db.transaction(tx => creditTransferToReplenishment(tx, transferReceiptId,
+      userId ?? "system:transfer-credit", this.clock()));
+    for (const id of completedTaskIds) await this.recoverReplenishmentFollowup(id);
+    return { completedTaskIds };
   }
 
-  /**
-   * Mark a replen task as done WITHOUT moving inventory.
-   * For manual reconciliation when the physical work was already done
-   * but the system didn't capture it (e.g. transfer done outside replen flow).
-   */
-  async markTaskDone(
-    taskId: number,
-    userId?: string,
-    notes?: string,
-  ): Promise<ReplenTask> {
-    const [task] = await this.db
-      .select()
-      .from(replenTasks)
-      .where(eq(replenTasks.id, taskId))
-      .limit(1);
+  async markTaskDone(taskId: number, userId?: string, _notes?: string, transferReceiptId?: number): Promise<ReplenTask> {
+    if (!transferReceiptId) throw new Error("Link the committed transfer receipt that performed this task before marking it done");
+    const task = await this.db.transaction(async tx => {
+      await creditTransferToReplenishment(tx, transferReceiptId, userId ?? "system:transfer-credit", this.clock(), taskId);
+      const [task] = await tx.select().from(replenTasks).where(eq(replenTasks.id, taskId)).limit(1);
+      if (!task || task.status !== "completed") throw new Error("The linked transfer does not supply the task's exact source, SKU, destination and remaining quantity");
+      return task as ReplenTask;
+    });
+    await this.recoverReplenishmentFollowup(taskId);
+    return task;
+  }
 
-    if (!task) {
-      throw new Error(`Replen task ${taskId} not found`);
+  async changeTask(taskId: number, command: unknown, actor: string) {
+    return changeReplenishmentTask(this.db as any, taskId, command, actor, this.clock);
+  }
+
+  async createManualTask(input: unknown, actor: string) {
+    const task = await createManualReplenishmentTask({ database: this.db as any, authority: this.transformationAuthority,
+      settings: (warehouseId, tx) => this.getSettingsForWarehouse(warehouseId, tx as unknown as DrizzleDb),
+      decide: async (settings, quantity, method, variant, locationId, tx) => {
+        const owner = tx as unknown as DrizzleDb;
+        const [location] = await owner.select().from(warehouseLocations).where(eq(warehouseLocations.id, locationId)).limit(1);
+        const resolved = await this.resolveReplenParams(variant.id, variant, location.warehouseId ?? undefined,
+          await this.loadLocationConfig(locationId, variant.id, owner), owner);
+        return this.resolveAutoExecute(resolved.autoReplen, null, settings, quantity, method);
+      } }, input, actor, this.clock);
+    if (task.executionMode === "inline") {
+      try { await this.executeTask(task.id, actor); }
+      catch (error) { logger.error(JSON.stringify({ event: "manual_replen_execution_pending", taskId: task.id,
+        message: error instanceof Error ? error.message : String(error) })); }
     }
+    return await this.getTaskById(task.id) ?? task;
+  }
 
-    if (!["pending", "assigned", "in_progress", "blocked"].includes(task.status)) {
-      throw new Error(`Task ${taskId} is ${task.status}, cannot mark done`);
+  async recoverReplenishmentFollowups(): Promise<void> {
+    // New tasks retain a key before execution. Historical keyless tasks are
+    // outside this worker's scope; dependencies require a completed parent.
+    const pending = await this.db.execute(sql`SELECT id,created_by FROM inventory.replen_tasks
+      WHERE operation_key IS NOT NULL AND execution_mode='inline' AND status IN ('pending','assigned','in_progress')
+        AND (depends_on_task_id IS NULL OR EXISTS (SELECT 1 FROM inventory.replen_tasks parent
+          WHERE parent.id=replen_tasks.depends_on_task_id AND parent.status='completed'))
+      ORDER BY created_at,id LIMIT 20`);
+    for (const task of pending.rows) {
+      try { await this.executeTask(Number(task.id), String(task.created_by || "system:auto-replen")); }
+      catch (error) { logger.error(JSON.stringify({ event: "replen_execution_pending", taskId: task.id, message: error instanceof Error ? error.message : String(error) })); }
     }
+    const rows = await this.db.execute(sql`SELECT task_id FROM inventory.replen_followups WHERE completed_at IS NULL ORDER BY created_at,task_id LIMIT 20`);
+    for (const row of rows.rows) await this.recoverReplenishmentFollowup(Number(row.task_id));
+  }
 
-    if (this.isNoSourceReviewOnlyTask(task as ReplenTask)) {
-      throw new Error(`Task ${taskId} has no valid source stock and no replen quantity; cancel or resolve source stock instead of marking done`);
+  private async recoverReplenishmentFollowup(taskId: number): Promise<void> {
+    try {
+      const rows = await this.db.execute(sql`SELECT * FROM inventory.replen_followups WHERE task_id=${taskId} AND completed_at IS NULL`);
+      const followup = rows.rows[0];
+      if (!followup) return;
+      const task = await this.getTaskById(taskId);
+      if (!task || task.status !== "completed") throw new Error("Replenishment follow-up requires completed physical work");
+      // Warehouse dependencies must advance even when channel delivery is down.
+      await this.unblockDependentTasks(taskId, followup.actor);
+      if (task.sourceProductVariantId) await this.inventoryUseCases.publishInventoryChange(task.sourceProductVariantId, "replen");
+      if (task.pickProductVariantId && task.pickProductVariantId !== task.sourceProductVariantId) await this.inventoryUseCases.publishInventoryChange(task.pickProductVariantId, "replen");
+      await this.db.transaction(async tx => {
+        const current = await tx.execute(sql`SELECT task_id FROM inventory.replen_followups WHERE task_id=${taskId} AND completed_at IS NULL FOR UPDATE`);
+        if (current.rows.length === 0) return;
+        await tx.execute(sql`UPDATE inventory.replen_followups SET completed_at=${this.clock()},last_error=NULL WHERE task_id=${taskId}`);
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.db.execute(sql`UPDATE inventory.replen_followups SET last_error=${message.slice(0,2000)} WHERE task_id=${taskId} AND completed_at IS NULL`);
+      logger.error(JSON.stringify({ event: "replen_followup_pending", taskId, message }));
     }
-
-    if (["pending", "assigned", "in_progress"].includes(task.status)) {
-      const activeDemandLines = await this.countActivePendingDemandLines(task as ReplenTask);
-      if (activeDemandLines > 0) {
-        throw new Error(
-          `Task ${taskId} has ${activeDemandLines} active demand line${activeDemandLines === 1 ? "" : "s"}; complete the replen so inventory moves instead of marking done`,
-        );
-      }
-    }
-
-    await this.db
-      .update(replenTasks)
-      .set({
-        status: "completed",
-        qtyCompleted: task.qtyTargetUnits,
-        completedAt: new Date(),
-        assignedTo: userId ?? task.assignedTo,
-        notes: `${task.notes || ""}\nManually marked done${notes ? `: ${notes}` : ""} — inventory not re-moved`.trim(),
-      })
-      .where(eq(replenTasks.id, taskId));
-
-    // Unblock dependent tasks
-    await this.unblockDependentTasks(taskId, userId);
-
-    const [updated] = await this.db
-      .select()
-      .from(replenTasks)
-      .where(eq(replenTasks.id, taskId))
-      .limit(1);
-
-    console.log(`[Replen] Task #${taskId} manually marked done by ${userId || "unknown"}`);
-    return updated as ReplenTask;
   }
 
   private async countActivePendingDemandLines(task: ReplenTask): Promise<number> {
     if (!task.pickProductVariantId) return 0;
-
     const result = await this.db.execute(sql`
       SELECT COUNT(*)::int AS active_pending_lines
       FROM (
         SELECT oi.id::text AS demand_id
         FROM wms.order_items oi
-        JOIN wms.orders o
-          ON o.id = oi.order_id
-         AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
-        JOIN catalog.product_variants pv
-          ON pv.id = ${task.pickProductVariantId}
-        WHERE oi.sku = pv.sku
-          AND oi.status = 'pending'
-          AND oi.requires_shipping = 1
-
+        JOIN wms.orders o ON o.id = oi.order_id
+          AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+        JOIN catalog.product_variants pv ON pv.id = ${task.pickProductVariantId}
+        WHERE oi.sku = pv.sku AND oi.status = 'pending' AND oi.requires_shipping = 1
         UNION ALL
-
         SELECT 'allocation_exception:' || ae.id::text AS demand_id
         FROM wms.allocation_exceptions ae
-        JOIN wms.orders o
-          ON o.id = ae.order_id
-         AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
-        JOIN catalog.product_variants pv
-          ON pv.id = ${task.pickProductVariantId}
-        WHERE ae.sku = pv.sku
-          AND ae.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
-          AND (
-            ae.status = 'blocked'
-            OR LOWER(COALESCE(ae.metadata->>'shipmentBlocking', 'false')) = 'true'
-          )
+        JOIN wms.orders o ON o.id = ae.order_id
+          AND COALESCE(o.warehouse_status, '') NOT IN ('shipped', 'cancelled')
+        JOIN catalog.product_variants pv ON pv.id = ${task.pickProductVariantId}
+        WHERE ae.sku = pv.sku AND ae.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+          AND (ae.status = 'blocked' OR LOWER(COALESCE(ae.metadata->>'shipmentBlocking', 'false')) = 'true')
       ) demand_line
     `);
-
     return Number(result.rows?.[0]?.active_pending_lines ?? 0);
   }
 
@@ -2889,20 +2918,20 @@ export class ReplenishmentUseCases {
    * - true_short_pick: no stock anywhere → short pick, order to exception queue
    */
   async getReplenGuidance(
-    sku: string,
-    locationCode: string,
+    productVariantId: number,
+    warehouseLocationId: number,
   ): Promise<{
     action: "replen_inline" | "short_pick_with_replen" | "true_short_pick";
     source?: { locationCode: string; availableQty: number; variantSku: string; variantName: string };
   }> {
     const [variant] = await this.db
       .select().from(productVariants)
-      .where(eq(productVariants.sku, sku)).limit(1);
+      .where(eq(productVariants.id, productVariantId)).limit(1);
     if (!variant) return { action: "true_short_pick" };
 
     const [location] = await this.db
       .select().from(warehouseLocations)
-      .where(eq(warehouseLocations.code, locationCode)).limit(1);
+      .where(eq(warehouseLocations.id, warehouseLocationId)).limit(1);
     if (!location || location.isPickable !== 1) return { action: "true_short_pick" };
 
     const guidance = await this.checkReplenNeeded(variant.id, location.id, {
@@ -3071,7 +3100,7 @@ export class ReplenishmentUseCases {
         await this.db.update(replenTasks).set({
           linkedCycleCountId,
           notes: `${task.notes || ""}\nLinked source-empty cycle count #${linkedCycleCountId}`,
-        }).where(eq(replenTasks.id, task.id));
+        }).where(and(eq(replenTasks.id, task.id), eq(replenTasks.status, task.status), eq(replenTasks.revision, task.revision), inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"])));
       }
     }
 
@@ -3165,85 +3194,8 @@ export class ReplenishmentUseCases {
    * @param notes      Optional freeform notes.
    * @returns Object with taskId, cycleCountId, status, and reason.
    */
-  async reportException(params: {
-    taskId: number;
-    reason: string;
-    userId?: string;
-    actualQty?: number;
-    actualSku?: string;
-    notes?: string;
-  }): Promise<{ taskId: number; cycleCountId: number; status: string; exceptionReason: string }> {
-    const { taskId, reason, userId, actualQty, actualSku, notes } = params;
-
-    if (!["short", "wrong_product", "empty", "other"].includes(reason)) {
-      throw new Error("Invalid exception reason. Must be: short, wrong_product, empty, or other");
-    }
-
-    // Get task
-    const [task] = await this.db.select().from(replenTasks)
-      .where(eq(replenTasks.id, taskId)).limit(1);
-    if (!task) throw new Error(`Replen task ${taskId} not found`);
-    if (!["pending", "assigned", "in_progress"].includes(task.status)) {
-      throw new Error(`Cannot report exception on task with status '${task.status}'`);
-    }
-
-    // Get source variant info
-    const sourceVariant = task.sourceProductVariantId
-      ? (await this.db.select().from(productVariants)
-          .where(eq(productVariants.id, task.sourceProductVariantId)).limit(1))[0]
-      : null;
-
-    // Get current inventory at source location
-    const inventoryLevel = sourceVariant
-      ? (await this.db.select().from(inventoryLevels)
-          .where(and(
-            eq(inventoryLevels.warehouseLocationId, task.fromLocationId),
-            eq(inventoryLevels.productVariantId, sourceVariant.id),
-          )).limit(1))[0]
-      : null;
-
-    // Create spot cycle count for the source location
-    const [cycleCount] = await this.db.insert(cycleCounts).values({
-      name: `Replen Exception - Task #${taskId}`,
-      description: `Auto-created from replen task #${taskId} exception: ${reason}${notes ? ` - ${notes}` : ""}`,
-      status: "in_progress",
-      warehouseId: task.warehouseId,
-      totalBins: 1,
-      countedBins: 0,
-      varianceCount: 0,
-      approvedVariances: 0,
-      createdBy: userId || "system",
-    }).returning();
-
-    // Create cycle count item for the expected product at source location
-    await this.db.insert(cycleCountItems).values({
-      cycleCountId: cycleCount.id,
-      warehouseLocationId: task.fromLocationId,
-      productVariantId: sourceVariant?.id || null,
-      productId: task.productId,
-      expectedSku: sourceVariant?.sku || null,
-      expectedQty: inventoryLevel?.variantQty ?? 0,
-      countedSku: reason === "wrong_product" ? (actualSku || null) : (sourceVariant?.sku || null),
-      countedQty: reason === "empty" ? 0 : (actualQty ?? null),
-      status: "pending",
-      countedBy: userId || "system",
-    });
-
-    // Block the task and link the cycle count
-    const exceptionNote = `[Exception: ${reason}${notes ? ` - ${notes}` : ""}]`;
-    await this.db.update(replenTasks).set({
-      status: "blocked",
-      exceptionReason: reason,
-      linkedCycleCountId: cycleCount.id,
-      notes: task.notes ? `${task.notes}\n${exceptionNote}` : exceptionNote,
-    }).where(eq(replenTasks.id, taskId));
-
-    return {
-      taskId,
-      cycleCountId: cycleCount.id,
-      status: "blocked",
-      exceptionReason: reason,
-    };
+  async reportException(taskId: number, command: unknown, actor: string) {
+    return reportReplenishmentException(this.db as any, taskId, command, actor, this.clock);
   }
 
   /**
@@ -3272,8 +3224,9 @@ export class ReplenishmentUseCases {
    */
   private async findRuleForVariant(
     pickProductVariantId: number,
+    database: DrizzleDb = this.db,
   ): Promise<ReplenRule | null> {
-    return readReplenishmentRule(this.db, pickProductVariantId);
+    return readReplenishmentRule(database, pickProductVariantId);
   }
 
   /**
@@ -3282,8 +3235,9 @@ export class ReplenishmentUseCases {
   private async findTierDefaultForVariant(
     hierarchyLevel: number,
     warehouseId?: number,
+    database: DrizzleDb = this.db,
   ): Promise<ReplenTierDefault | null> {
-    return readReplenishmentTierDefault(this.db, hierarchyLevel, warehouseId);
+    return readReplenishmentTierDefault(database, hierarchyLevel, warehouseId);
   }
 
   /**
@@ -3296,6 +3250,7 @@ export class ReplenishmentUseCases {
    */
   private async tryCascadeReplen(opts: {
     sourceVariantId: number;
+    observedPickQuantity: number;
     pickVariantId: number;
     pickLocationId: number;
     warehouseId: number | undefined;
@@ -3430,35 +3385,6 @@ export class ReplenishmentUseCases {
       cascadeReplenMethod,
     );
 
-    // --- Create Task A: upstream (grandparent → intermediate) at source location (in-place break) ---
-    const [upstreamTask] = await this.db
-      .insert(replenTasks)
-      .values({
-        replenRuleId: null,
-        fromLocationId: cascadeSourceLocation.id,
-        toLocationId: cascadeSourceLocation.id, // in-place break at reserve
-        productId: opts.productId,
-        sourceProductVariantId: grandparentVariantId,
-        pickProductVariantId: opts.sourceVariantId, // intermediate variant
-        qtySourceUnits: cascadeQtySource,
-        qtyTargetUnits: normalizedCascadeQtyTarget,
-        qtyCompleted: 0,
-        status: "pending",
-        priority: cascadePriority,
-        triggeredBy: "cascade",
-        executionMode: cascadeExec.executionMode,
-        replenMethod: cascadeReplenMethod,
-        autoReplen: cascadeAutoReplen,
-        ...this.replenOrderTaskFields(opts.context ? { ...opts.context, blocksShipment: false } : undefined),
-        warehouseId: opts.warehouseId,
-        notes: this.appendOrderContextNote(
-          `Cascade: break ${grandparentVariant.sku || grandparentVariant.name} into ${intermediateVariant.sku || intermediateVariant.name}`,
-          opts.context,
-        ),
-      } satisfies InsertReplenTask)
-      .returning();
-
-    // --- Create Task B: downstream (intermediate → pick) blocked until Task A completes ---
     const downstreamExec = this.resolveAutoExecute(
       opts.autoReplen === 1 ? 1 : opts.autoReplen === 2 ? 2 : null,
       null,
@@ -3467,33 +3393,110 @@ export class ReplenishmentUseCases {
       downstreamReplenMethod,
     );
 
-    const [downstreamTask] = await this.db
-      .insert(replenTasks)
-      .values({
-        replenRuleId: opts.ruleId,
-        fromLocationId: cascadeSourceLocation.id, // boxes will appear here after Task A
-        toLocationId: opts.pickLocationId,
-        productId: opts.productId,
-        sourceProductVariantId: opts.sourceVariantId, // intermediate variant
-        pickProductVariantId: opts.pickVariantId,
-        qtySourceUnits: downstreamQtySource,
-        qtyTargetUnits: downstreamQtyTarget,
-        qtyCompleted: 0,
-        status: "blocked",
-        priority: opts.priority,
-        triggeredBy: opts.triggeredBy,
-        executionMode: downstreamExec.executionMode,
-        replenMethod: downstreamReplenMethod,
-        autoReplen: opts.autoReplen,
-        ...this.replenOrderTaskFields(opts.context),
-        warehouseId: opts.warehouseId,
-        dependsOnTaskId: upstreamTask.id,
-        notes: `${opts.taskNotes}\nBlocked: waiting on cascade task #${upstreamTask.id} (${grandparentVariant.sku} → ${intermediateVariant.sku})`,
-      } satisfies InsertReplenTask)
-      .returning();
+    // Both dependency rows and their trigger association are one transaction.
+    // A failed downstream insert cannot strand an unowned upstream operation.
+    const { upstreamTask, downstreamTask } = await this.db.transaction(
+      async (tx: DrizzleDb) => {
+        await this.lockPickBinTaskCreation(
+          tx,
+          opts.pickVariantId,
+          opts.pickLocationId,
+        );
+        const prior = await this.priorTriggeredTask(
+          opts.pickVariantId,
+          opts.pickLocationId,
+          opts.context,
+          tx,
+        );
+        if (prior) return { upstreamTask: null, downstreamTask: prior.task };
+        const existing = await this.findActiveTaskForPickBin(
+          opts.pickVariantId,
+          opts.pickLocationId,
+          tx,
+        );
+        if (existing) {
+          await this.rememberTriggeredTask(
+            opts.pickVariantId,
+            opts.pickLocationId,
+            existing,
+            opts.context,
+            tx,
+          );
+          return { upstreamTask: null, downstreamTask: existing };
+        }
+        await this.assertObservedPickQuantity(
+          tx,
+          opts.pickVariantId,
+          opts.pickLocationId,
+          opts.observedPickQuantity,
+        );
+        const upstreamTask = await this.persistAutomaticTask(tx, {
+            operationKey: opts.context?.operationKey
+              ? `${opts.context.operationKey}:cascade`
+              : null,
+            replenRuleId: null,
+            fromLocationId: cascadeSourceLocation.id,
+            toLocationId: cascadeSourceLocation.id, // in-place break at reserve
+            productId: opts.productId,
+            sourceProductVariantId: grandparentVariantId,
+            pickProductVariantId: opts.sourceVariantId, // intermediate variant
+            qtySourceUnits: cascadeQtySource,
+            qtyTargetUnits: normalizedCascadeQtyTarget,
+            qtyCompleted: 0,
+            status: "pending",
+            priority: cascadePriority,
+            triggeredBy: "cascade",
+            executionMode: cascadeExec.executionMode,
+            replenMethod: cascadeReplenMethod,
+            autoReplen: cascadeAutoReplen,
+            ...this.replenOrderTaskFields(
+              opts.context
+                ? { ...opts.context, blocksShipment: false }
+                : undefined,
+            ),
+            warehouseId: opts.warehouseId,
+            notes: this.appendOrderContextNote(
+              `Cascade: break ${grandparentVariant.sku || grandparentVariant.name} into ${intermediateVariant.sku || intermediateVariant.name}`,
+              opts.context,
+            ),
+          } satisfies InsertReplenTask);
+
+        // --- Create Task B: downstream (intermediate → pick) blocked until Task A completes ---
+        const downstreamTask = await this.persistAutomaticTask(tx, {
+            operationKey: opts.context?.operationKey ?? null,
+            replenRuleId: opts.ruleId,
+            fromLocationId: cascadeSourceLocation.id, // boxes will appear here after Task A
+            toLocationId: opts.pickLocationId,
+            productId: opts.productId,
+            sourceProductVariantId: opts.sourceVariantId, // intermediate variant
+            pickProductVariantId: opts.pickVariantId,
+            qtySourceUnits: downstreamQtySource,
+            qtyTargetUnits: downstreamQtyTarget,
+            qtyCompleted: 0,
+            status: "blocked",
+            priority: opts.priority,
+            triggeredBy: opts.triggeredBy,
+            executionMode: downstreamExec.executionMode,
+            replenMethod: downstreamReplenMethod,
+            autoReplen: opts.autoReplen,
+            ...this.replenOrderTaskFields(opts.context),
+            warehouseId: opts.warehouseId,
+            dependsOnTaskId: upstreamTask.id,
+            notes: `${opts.taskNotes}\nBlocked: waiting on cascade task #${upstreamTask.id} (${grandparentVariant.sku} → ${intermediateVariant.sku})`,
+          } satisfies InsertReplenTask);
+        await this.rememberTriggeredTask(
+          opts.pickVariantId,
+          opts.pickLocationId,
+          downstreamTask,
+          opts.context,
+          tx,
+        );
+        return { upstreamTask, downstreamTask };
+      },
+    );
 
     // Auto-execute Task A if configured
-    if (cascadeExec.shouldAutoExecute) {
+    if (upstreamTask && cascadeExec.shouldAutoExecute) {
       try {
         await this.executeTask(upstreamTask.id, "system:auto-replen");
       } catch (autoErr: any) {
@@ -3501,7 +3504,7 @@ export class ReplenishmentUseCases {
       }
     }
 
-    return downstreamTask as ReplenTask;
+    return downstreamTask;
   }
 
   private isActiveVariant(variant: ProductVariant): boolean {
@@ -3619,6 +3622,7 @@ export class ReplenishmentUseCases {
         sourceLocationType,
         parentLocationId,
         sourcePriority,
+        (await this.demandForSource(pickVariant, pickVariant, qtyNeeded, runtime)).qtySourceUnits,
       );
       if (location) {
         return {
@@ -3694,6 +3698,7 @@ export class ReplenishmentUseCases {
         sourceLocationType,
         parentLocationId,
         sourcePriority,
+        (await this.demandForSource(pickVariant, pickVariant, qtyNeeded, runtime)).qtySourceUnits,
       );
       if (sameVariantLocation) {
         return {
@@ -3725,21 +3730,22 @@ export class ReplenishmentUseCases {
     }> = [];
 
     for (const sourceVariant of sourceVariants) {
+      const demand = await this.demandForSource(pickVariant, sourceVariant, qtyNeeded, runtime);
       const location = await this.findSourceLocation(
         sourceVariant.id,
         warehouseId,
         sourceLocationType,
         parentLocationId,
         sourcePriority,
+        demand.qtySourceUnits,
       );
       if (!location) continue;
 
-      const sourceUnits = this.variantUnits(sourceVariant);
       eligible.push({
         variant: sourceVariant,
         location,
         slotRank: await this.getSourceSlotRank(sourceVariant.id, location.id),
-        overfillUnits: (Math.ceil(Math.max(1, qtyNeeded) / sourceUnits) * sourceUnits) - Math.max(1, qtyNeeded),
+        overfillUnits: demand.qtyTargetUnits - Math.max(1, qtyNeeded) * this.variantUnits(pickVariant),
       });
     }
 
@@ -3784,10 +3790,10 @@ export class ReplenishmentUseCases {
    * Get warehouse settings for a given warehouse ID.
    * Falls back to the DEFAULT row if no warehouse-specific settings exist.
    */
-  async getSettingsForWarehouse(warehouseId?: number): Promise<WarehouseSettings | null> {
+  async getSettingsForWarehouse(warehouseId?: number, database: DrizzleDb = this.db): Promise<WarehouseSettings | null> {
     // Delegates to the shared resolver so every service gets identical
     // fallback behavior. See server/modules/warehouse/settings.resolver.ts.
-    return sharedGetSettingsForWarehouse(warehouseId, this.db as any);
+    return sharedGetSettingsForWarehouse(warehouseId, database as any);
   }
 
   /**
@@ -3811,7 +3817,7 @@ export class ReplenishmentUseCases {
     autoReplenFromTierDefault: number | null | undefined,
     settings: WarehouseSettings | null,
     qtyTargetUnits: number,
-    replenMethod: string = "case_break",
+    replenMethod: string,
   ): { shouldAutoExecute: boolean; executionMode: "inline" | "queue" } {
     return resolveReplenishmentAutoExecution(
       autoReplenFromRule, autoReplenFromTierDefault, settings, qtyTargetUnits, replenMethod,
@@ -3833,7 +3839,12 @@ export class ReplenishmentUseCases {
     sourceLocationType: string,
     parentLocationId?: number | null,
     sourcePriority?: string,
+    requiredSourceQuantity: number = 1,
   ): Promise<WarehouseLocation | null> {
+    if (!Number.isSafeInteger(requiredSourceQuantity) || requiredSourceQuantity <= 0) {
+      throw new ReplenishmentExecutionDomainError("INVALID_REPLENISHMENT_SOURCE_QUANTITY",
+        "Source selection requires a positive exact SKU quantity.", { requiredSourceQuantity });
+    }
     // --- 1. Try dedicated parent location first ---
     if (parentLocationId) {
       const [parentLevel] = await this.db.select().from(inventoryLevels).where(
@@ -3842,14 +3853,14 @@ export class ReplenishmentUseCases {
           eq(inventoryLevels.warehouseLocationId, parentLocationId)
         )
       ).limit(1);
-      if (parentLevel && parentLevel.variantQty - parentLevel.reservedQty > 0) {
+      if (parentLevel && parentLevel.variantQty - parentLevel.reservedQty >= requiredSourceQuantity) {
         const [parentLoc] = await this.db
           .select()
           .from(warehouseLocations)
           .where(eq(warehouseLocations.id, parentLocationId))
           .limit(1);
         if (
-          parentLoc &&
+          parentLoc && (warehouseId == null || parentLoc.warehouseId === warehouseId) &&
           parentLoc.locationType === sourceLocationType &&
           parentLoc.isActive === 1 &&
           parentLoc.cycleCountFreezeId == null
@@ -3882,7 +3893,7 @@ export class ReplenishmentUseCases {
           eq(warehouseLocations.locationType, sourceLocationType),
           eq(warehouseLocations.isActive, 1),
           isNull(warehouseLocations.cycleCountFreezeId),
-          sql`${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty} > 0`,
+          sql`${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty} >= ${requiredSourceQuantity}`,
           ...(warehouseId != null
             ? [eq(warehouseLocations.warehouseId, warehouseId)]
             : []),
@@ -3916,7 +3927,7 @@ export class ReplenishmentUseCases {
  * import { createReplenishmentService } from "./replenishment";
  *
  * const inventoryCore = createInventoryCoreService(db);
- * const replen = createReplenishmentService(db, inventoryCore);
+ * const replen = createReplenishmentService(db, inventoryCore, clock, transformationAuthority);
  * await replen.checkReplenNeeded(variantId, locationId);
  * ```
  */
@@ -3924,7 +3935,7 @@ export function createReplenishmentService(
   db: any,
   inventoryUseCases: any,
   clock: () => Date = () => new Date(),
-  transformationAuthority: TransformationExecutionAuthorityPort = legacyTransformationExecutionAuthority,
+  transformationAuthority: TransformationExecutionAuthorityPort,
 ) {
   return new ReplenishmentUseCases(db, inventoryUseCases, clock, transformationAuthority);
 }

@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { PickingUseCases } from "../../picking.use-cases";
 import { createPickingAssignmentReleaseRepository } from "../../picking-assignment-release.repository";
+import { warehouseLocations } from "@shared/schema";
+const progressOwner = vi.hoisted(() => vi.fn());
+vi.mock("../../../wms/picking-progress.repository", () => ({ reconcileWmsPickingProgress: progressOwner }));
 
 vi.mock("../../picking-assignment-release.repository", () => ({ createPickingAssignmentReleaseRepository: vi.fn() }));
 
@@ -116,8 +119,11 @@ describe("picking phase 1 mutation lockdown", () => {
         }),
       })),
       select: vi.fn(() => ({
-        from: vi.fn(() => ({
-          where: vi.fn(async () => [updatedItem]),
+        from: vi.fn((table) => ({
+          where: vi.fn(() => table === warehouseLocations
+            ? { for: async () => [{ id: 1, code: "A-01", warehouseId: null, isPickable: 1, isActive: 1,
+              cycleCountFreezeId: null, locationType: "pick" }] }
+            : Promise.resolve([updatedItem])),
         })),
       })),
     };
@@ -169,8 +175,8 @@ describe("picking phase 1 mutation lockdown", () => {
     });
     expect(updateCalls).toEqual(expect.arrayContaining([
       expect.objectContaining({ pickedQuantity: 1, status: "in_progress" }),
-      expect.objectContaining({ pickedCount: 1, warehouseStatus: "in_progress", completedAt: null }),
     ]));
+    expect(progressOwner).toHaveBeenCalledWith(tx,beforeItem.orderId,"ready_to_ship","picker-1",expect.any(Function));
     expect(storage.createPickingLog).toHaveBeenCalledWith(expect.objectContaining({
       actionType: "item_unpicked",
       qtyBefore: 2,

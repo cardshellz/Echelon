@@ -7,8 +7,18 @@ export const inventoryPublicationGlobalControlRequestSchema = z.object({
   sweepIntervalMinutes: z.number().int().min(1).max(1_440).optional(),
   expectedRevision: positiveRevision,
   idempotencyKey: z.string().trim().min(1).max(120),
-  changeReason: z.string().trim().min(1).max(1_000),
+  changeReason: z.string().trim().max(1_000).nullable().optional()
+    .transform(value => value || null),
 }).strict().superRefine((request, context) => {
+  // A pause needs no justification. Enabling or changing the schedule still does.
+  const pauseOnly = request.globalEnabled === false && request.sweepIntervalMinutes === undefined;
+  if (!pauseOnly && !request.changeReason) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["changeReason"],
+      message: "A reason is required when enabling updates or changing the schedule.",
+    });
+  }
   if (request.globalEnabled === undefined && request.sweepIntervalMinutes === undefined) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -23,12 +33,12 @@ export const inventoryPublicationGlobalControlResultSchema = z.object({
   sweepIntervalMinutes: z.number().int().min(1).max(1_440),
   revision: positiveRevision,
   changedBy: z.string().trim().min(1).max(100),
-  changeReason: z.string().trim().min(1).max(1_000),
+  changeReason: z.string().trim().min(1).max(1_000).nullable(),
   changedAt: z.string().datetime({ offset: true }),
   alreadyApplied: z.boolean(),
 }).strict();
 
-export type InventoryPublicationGlobalControlRequest = z.infer<
+export type InventoryPublicationGlobalControlRequest = z.input<
   typeof inventoryPublicationGlobalControlRequestSchema
 >;
 export type InventoryPublicationGlobalControlResult = z.infer<

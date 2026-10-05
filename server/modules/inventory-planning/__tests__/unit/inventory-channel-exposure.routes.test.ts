@@ -27,6 +27,7 @@ describe("inventory channel exposure routes", () => {
     setPublicationTargetPreviewState: ReturnType<typeof vi.fn>;
     saveVariantMappingDraft: ReturnType<typeof vi.fn>;
   };
+  let targetEnableService: { enable: ReturnType<typeof vi.fn> };
   let targetStopService: { stop: ReturnType<typeof vi.fn> };
   let publicationStatusService: { read: ReturnType<typeof vi.fn> };
   let targetResumeService: {
@@ -55,6 +56,8 @@ describe("inventory channel exposure routes", () => {
       setPublicationTargetPreviewState: vi.fn(async () => targetResult("preview", "2")),
       saveVariantMappingDraft: vi.fn(async () => saveResult()),
     };
+    targetEnableService = { enable: vi.fn(async () => ({ publicationTargetId: 5, revision: "4", state: "live",
+      publicationRows: 0, initialDefinitionsApplied: 0, alreadyApplied: false, runtimeAuthorityChanged: false, providerWriteAttempted: false })) };
     targetStopService = { stop: vi.fn(async () => targetResult("disabled", "4")) };
     publicationStatusService = { read: vi.fn(async () => ({ publicationTargetId: 5, productId: 10,
       capturedAt: "2026-09-20T00:00:00.000Z", runtimeAuthority: "legacy", targetRevision: "1", rows: [] })) };
@@ -72,11 +75,23 @@ describe("inventory channel exposure routes", () => {
       Object.defineProperty(req, "session", { value: { user: { id: "operator-1" } } });
       next();
     });
-    registerInventoryChannelExposureRoutes(app, { service, targetStopService, targetResumeService, targetHoldService, publicationStatusService });
+    registerInventoryChannelExposureRoutes(app, { service, targetEnableService, targetStopService, targetResumeService, targetHoldService, publicationStatusService });
     server = await startServer(app);
   });
 
   afterEach(async () => server.close());
+
+  it("enables using the session actor and activation permission, without a reason or resume review", async () => {
+    const request = { publicationTargetId: 5, expectedRevision: "3", idempotencyKey: "enable-5" };
+    const result = await jsonRequest(server.url + "/api/inventory-planning/admin/channel-exposure/publication-target-enable", { method: "PUT", body: request });
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ state: "live", publicationRows: 0 });
+    expect(targetEnableService.enable).toHaveBeenCalledWith(request, "operator-1");
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "activate");
+    targetEnableService.enable.mockClear();
+    const bad = await jsonRequest(server.url + "/api/inventory-planning/admin/channel-exposure/publication-target-enable", { method: "PUT", body: { ...request, publicationTargetId: 0 } });
+    expect(bad.status).toBe(400); expect(targetEnableService.enable).not.toHaveBeenCalled();
+  });
 
   it("reads delivery evidence with view permission and validates both identifiers", async () => {
     const result = await jsonRequest(`${server.url}/api/inventory-planning/admin/channel-exposure/publication-status?publicationTargetId=5&productId=10`);
@@ -175,7 +190,7 @@ describe("inventory channel exposure routes", () => {
     );
   });
 
-  it("still requires a written reason for readiness, stop, and resume commands", async () => {
+  it("still requires a written reason for readiness and resume commands", async () => {
     const previewState = await jsonRequest(
       `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-preview-state`,
       { method: "PUT", body: {
@@ -183,13 +198,6 @@ describe("inventory channel exposure routes", () => {
       } },
     );
     expect(previewState.status).toBe(400);
-    const stop = await jsonRequest(
-      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-stop`,
-      { method: "PUT", body: {
-        publicationTargetId: 5, expectedRevision: "1", changeReason: "", idempotencyKey: "no-reason-2",
-      } },
-    );
-    expect(stop.status).toBe(400);
     const review = await jsonRequest(
       `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-resume-review`,
       { method: "POST", body: { publicationTargetId: 5, expectedRevision: "3", idempotencyKey: "no-reason-3" } },
@@ -198,6 +206,27 @@ describe("inventory channel exposure routes", () => {
     expect(service.setPublicationTargetPreviewState).not.toHaveBeenCalled();
     expect(targetStopService.stop).not.toHaveBeenCalled();
     expect(targetResumeService.review).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "", "   ", null])("accepts an unreasoned pause (%s) and passes the authenticated actor", async changeReason => {
+    const response = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-stop`,
+      { method: "PUT", body: { publicationTargetId: 5, expectedRevision: "3",
+        idempotencyKey: "pause-without-reason", ...(changeReason === undefined ? {} : { changeReason }) } },
+    );
+    expect(response.status).toBe(200);
+    expect(targetStopService.stop).toHaveBeenCalledWith({ publicationTargetId: 5, expectedRevision: "3",
+      idempotencyKey: "pause-without-reason", changeReason: null }, "operator-1");
+  });
+
+  it.each([42, "x".repeat(1001)])("rejects malformed optional pause notes", async changeReason => {
+    const response = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-stop`,
+      { method: "PUT", body: { publicationTargetId: 5, expectedRevision: "3",
+        idempotencyKey: "invalid-pause-note", changeReason } },
+    );
+    expect(response.status).toBe(400);
+    expect(targetStopService.stop).not.toHaveBeenCalled();
   });
 
   it("rejects malformed source-binding inputs before the service", async () => {

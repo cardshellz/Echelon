@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { catalogImageQueryOptions } from "@/lib/catalog-image-queries";
 import { useLocation, useSearch } from "wouter";
 import { z } from "zod";
 import {
@@ -218,6 +219,7 @@ export function ChannelListingPublicationWorkspace({
   );
   const ids = [...selectedIds].sort((a, b) => a - b).join(",");
   const catalog = useQuery({
+    ...catalogImageQueryOptions,
     queryKey: [base, "selected-catalog", ids],
     enabled: active && ids.length > 0,
     queryFn: () =>

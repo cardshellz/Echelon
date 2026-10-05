@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   EMPTY_POLICY_FORM,
   buildChannelRail,
+  channelDefaultValueToForm,
   describeDestination,
   describeDropshipStore,
   describeIdentity,
@@ -17,6 +18,7 @@ import {
   policyValueToForm,
   reconcileSelection,
   resolveSavedFields,
+  resolveInheritedPolicyForm,
   summarizePendingChanges,
 } from "../model";
 import { HASH_A, policyHead, policyValue, previewRow, target, view } from "./fixtures";
@@ -94,7 +96,7 @@ describe("policy form ↔ value", () => {
 
   it("lists which fields a saved rule sets explicitly", () => {
     expect(explicitFieldLabels(policyValue({ shareBps: 5_000, maxPublish: { mode: "unlimited" } })))
-      .toEqual(["Offer", "Maximum to show"]);
+      .toEqual(["Stock percentage", "Maximum displayed quantity"]);
   });
 
   it("names every field a channel default still needs before activation", () => {
@@ -103,7 +105,33 @@ describe("policy form ↔ value", () => {
       allocationSemantics: "exposure", eligible: true, shareBps: 5_000,
       holdbackSellableUnits: "0", maxPublish: { mode: "unlimited" }, minPublishSellableUnits: "0",
     }))).toEqual([]);
-    expect(missingChannelDefaultFields(policyValue({ shareBps: 5_000 }))).toContain("Keep back");
+    expect(missingChannelDefaultFields(policyValue({ shareBps: 5_000 }))).toContain("Stock buffer");
+  });
+
+  it("suggests complete values only for a new unsaved channel, never for exceptions or saved gaps", () => {
+    expect(policyFormToValue(channelDefaultValueToForm(null))).toEqual({
+      ok: true,
+      value: policyValue({
+        eligible: true, shareBps: 10_000, holdbackSellableUnits: "0",
+        maxPublish: { mode: "unlimited" }, minPublishSellableUnits: "0", allocationSemantics: "exposure",
+      }),
+    });
+    expect(policyValueToForm(null)).toEqual(EMPTY_POLICY_FORM);
+    const partial = policyValue({ eligible: false, shareBps: 0, allocationSemantics: "partitioned" });
+    expect(channelDefaultValueToForm(partial)).toEqual(policyValueToForm(partial));
+    expect(policyFormToValue(channelDefaultValueToForm(partial))).toEqual({ ok: true, value: partial });
+    expect(channelDefaultValueToForm(policyValue())).toEqual(EMPTY_POLICY_FORM);
+  });
+
+  it("requires completeness only for callers requesting it, while partial draft saves stay valid", () => {
+    const partial = policyValueToForm(policyValue({ shareBps: 0 }));
+    expect(policyFormToValue(partial).ok).toBe(true);
+    const example = policyFormToValue(partial, { requireComplete: true });
+    expect(example.ok).toBe(false);
+    if (!example.ok) expect(example.errors.map(error => error.field)).toEqual([
+      "eligible", "holdbackSellableUnits", "maxPublish", "minPublishSellableUnits", "allocationSemantics",
+    ]);
+    expect(policyFormToValue(channelDefaultValueToForm(null), { requireComplete: true }).ok).toBe(true);
   });
 });
 
@@ -140,6 +168,37 @@ describe("inheritance readout (display only)", () => {
   it("never lets a channel default inherit from anything", () => {
     const sources = resolveSavedFields(heads, { scopeType: "channel", channelId: 3 });
     expect(Object.values(sources).every((source) => source.kind === "unset")).toBe(true);
+  });
+
+  it("provides typed parent display values without adding the edited SKU's own overrides", () => {
+    const scope = { scopeType: "variant" as const, channelId: 3, productId: 10, productVariantId: 101 };
+    const withOwn = [...heads, policyHead({
+      scopeKey: "channel:3:variant:101", channelId: 3, scope,
+      draft: policyValue({ shareBps: 1_000, holdbackSellableUnits: "8" }),
+    })];
+    expect(resolveInheritedPolicyForm(withOwn, scope)).toEqual(policyValueToForm(policyValue({
+      allocationSemantics: "exposure", eligible: true, shareBps: 4_000,
+      holdbackSellableUnits: "5", maxPublish: { mode: "unlimited" }, minPublishSellableUnits: "0",
+    })));
+    expect(resolveInheritedPolicyForm(heads, { scopeType: "product", channelId: 3, productId: 10 }).holdbackUnits).toBe("0");
+    expect(resolveInheritedPolicyForm(heads, { scopeType: "channel", channelId: 3 })).toEqual(EMPTY_POLICY_FORM);
+  });
+
+  it("preserves zero and false parents, skips an inheritance tombstone, and leaves absent defaults blank", () => {
+    const scope = { scopeType: "variant" as const, channelId: 3, productId: 10, productVariantId: 101 };
+    const inherited = [
+      policyHead({ scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 },
+        active: policyValue({ eligible: false, shareBps: 0, holdbackSellableUnits: "0", maxPublish: { mode: "units", units: "0" } }) }),
+      policyHead({ scopeKey: "channel:3:product:10", channelId: 3, scope: { scopeType: "product", channelId: 3, productId: 10 },
+        active: policyValue({ eligible: true, shareBps: 5_000 }), draft: policyValue({ inheritAll: true }) }),
+    ];
+    const before = structuredClone(inherited);
+    expect(resolveInheritedPolicyForm(inherited, scope)).toMatchObject({
+      eligible: "no", shareMode: "set", sharePercent: "0", holdbackMode: "set", holdbackUnits: "0",
+      maxMode: "units", maxUnits: "0", minMode: "inherit", minUnits: "", semantics: "inherit",
+    });
+    expect(resolveInheritedPolicyForm([], scope)).toEqual(EMPTY_POLICY_FORM);
+    expect(inherited).toEqual(before);
   });
 });
 
@@ -199,7 +258,7 @@ describe("destinations and publishing state", () => {
 
   it("reads publishing state in operator terms and lets an external publisher win over the state column", () => {
     expect(describePublishing(target({ state: "live" }))).toMatchObject({ label: "Publishing", tone: "live" });
-    expect(describePublishing(target({ state: "preview" }))).toMatchObject({ label: "Calculating only", tone: "preview" });
+    expect(describePublishing(target({ state: "preview" }))).toMatchObject({ label: "Setup pending", tone: "preview" });
     expect(describePublishing(target({ state: "disabled" }))).toMatchObject({ label: "Not publishing", tone: "off" });
     expect(describePublishing(target({ state: "live", publicationAuthority: "external_provider" })))
       .toMatchObject({ label: "Externally managed", tone: "external" });
@@ -265,8 +324,8 @@ describe("exceptions and pending changes", () => {
   it("lists only this channel's product and SKU rules with catalog labels and status", () => {
     const rows = listExceptions(richView, 3);
     expect(rows.map((row) => row.scopeKey)).toEqual(["channel:3:product:10", "channel:3:variant:101"]);
-    expect(rows[0]).toMatchObject({ title: "CARD · Card Shell", subtitle: "Whole product", explicitFields: ["Keep back"], pending: false, active: true });
-    expect(rows[1]).toMatchObject({ title: "CARD-P5", subtitle: "CARD · Card Shell · SKU rule", explicitFields: ["Offer", "Maximum to show"], pending: true, active: true, productVariantId: 101 });
+    expect(rows[0]).toMatchObject({ title: "CARD · Card Shell", subtitle: "Whole product", explicitFields: ["Stock buffer"], pending: false, active: true });
+    expect(rows[1]).toMatchObject({ title: "CARD-P5", subtitle: "CARD · Card Shell · SKU rule", explicitFields: ["Stock percentage", "Maximum displayed quantity"], pending: true, active: true, productVariantId: 101 });
   });
 
   it("falls back to ids when a subject label is missing instead of hiding the rule", () => {
@@ -284,19 +343,19 @@ describe("quantity explanation", () => {
     const explanation = explainQuantity(previewRow());
     expect(explanation.steps.map((step) => [step.label, step.units])).toEqual([
       ["Available", "100"],
-      ["Offer 80%", "80"],
-      ["Keep back 5", "75"],
+      ["Stock percentage 80%", "80"],
+      ["Stock buffer 5", "75"],
       ["Maximum 60", "60"],
-      ["Show zero below 0", "60"],
+      ["Out-of-stock cutoff 0", "60"],
     ]);
     expect(explanation.proposedUnits).toBe("60");
     expect(explanation.zeroReason).toBeNull();
   });
 
-  it("explains zero from ineligibility, the show-zero threshold, or empty availability", () => {
+  it("explains zero from ineligibility, the out-of-stock cutoff, or empty availability", () => {
     const row = previewRow();
     expect(explainQuantity({ ...row, policy: { ...row.policy!, eligible: false }, publishedUnits: "0" }).zeroReason).toMatch(/not eligible/);
-    expect(explainQuantity({ ...row, policy: { ...row.policy!, minPublishSellableUnits: "70" }, publishedUnits: "0" }).zeroReason).toMatch(/below the show-zero threshold of 70/);
+    expect(explainQuantity({ ...row, policy: { ...row.policy!, minPublishSellableUnits: "70" }, publishedUnits: "0" }).zeroReason).toMatch(/below the out-of-stock cutoff of 70/);
     expect(explainQuantity({ ...row, canonicalAtpUnits: "0", sharedUnits: "0", afterHoldbackUnits: "0", cappedUnits: "0", publishedUnits: "0", sourceWarehouseBreakdown: [] }).zeroReason).toMatch(/No availability/);
   });
 

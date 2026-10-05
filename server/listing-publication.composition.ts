@@ -8,6 +8,7 @@ import { WalmartListingProvider } from "./modules/channels/adapters/walmart/walm
 import type { WalmartChannelService } from "./modules/channels/adapters/walmart/walmart-channel.service";
 import type { ChannelCatalogDirectory } from "./modules/channels/channel-catalog.routes";
 import type { QuantityPublicationAdmission } from "./modules/inventory-planning/application/quantity-publication-admission.port";
+import { createCatalogPublicImageUrl } from "./modules/catalog/catalog-public-image";
 
 /** The composition root connects existing owners; none owns another module's tables. */
 export function createListingPublicationService(input: {
@@ -19,7 +20,7 @@ export function createListingPublicationService(input: {
   const provider = new WalmartListingProvider(input.walmart);
   return new ListingPublicationService({
     store: new PostgresListingPublicationRepository(input.pool),
-    catalog: new ChannelListingCatalogRepository(input.pool),
+    catalog: new ChannelListingCatalogRepository(input.pool, createCatalogPublicImageUrl(process.env)),
     provider: async (channelId) => {
       await provider.account(channelId);
       return provider;

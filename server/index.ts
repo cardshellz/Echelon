@@ -59,7 +59,7 @@ import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
 import { eq, and, sql } from "drizzle-orm";
 import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
 import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "./modules/orders/cancel-wms-order";
-import { setPickQueueReservationService } from "./modules/orders/orders.storage";
+import { startPickingFollowupWorker } from "./modules/wms/picking-followup.worker";
 import { engineRefFromRow, toEngineRef } from "./modules/shipping";
 import { startCarrierTrackingReconciliationScheduler } from "./modules/shipping/carrier-tracking-reconciliation.scheduler";
 import { startShipStationLabelReconciliationScheduler } from "./modules/oms/shipstation-label-reconciliation.scheduler";
@@ -801,6 +801,17 @@ function startEchelonSyncScheduler(
         );
       }
 
+      if (!schedulersDisabled("WAREHOUSE_OPERATION_FOLLOWUP_WORKER_DISABLED")) {
+        const worker = startPickingFollowupWorker({
+          recoverPendingPickingCommands: () => services.picking.recoverPendingPickingCommands(),
+          recoverReplenishmentFollowups: () => services.replenishment.recoverReplenishmentFollowups(),
+          recoverInventoryTransfers: () => services.inventoryTransfers.recoverPending(),
+        });
+        httpServer.once("close", () => worker.stop());
+      } else {
+        logSchedulerDisabled("scheduler", "Warehouse operation follow-up worker", "WAREHOUSE_OPERATION_FOLLOWUP_WORKER_DISABLED");
+      }
+
       if (!schedulersDisabled("VARIANT_AVAILABILITY_SYNC_WORKER_DISABLED")) {
         startVariantAvailabilitySyncWorker(services.variantAvailabilitySync);
       } else {
@@ -883,13 +894,13 @@ function startEchelonSyncScheduler(
 
       // 'completed'-status fix: the pick-queue self-heal completes orders and
       // must release their leftover reservations (storage can't reach services).
-      setPickQueueReservationService(services.reservation);
 
       if (!schedulersDisabled("OMS_FLOW_RECONCILIATION_SCHEDULER_DISABLED")) {
         startOmsFlowReconciliationScheduler(db, {
           reservation: services.reservation,
           fulfillmentAuthority: services.channelFulfillmentAuthority,
           pickCorrections: services.pickCorrections,
+          pickExceptions: services.picking,
         });
       } else {
         logSchedulerDisabled("scheduler", "OMS flow reconciliation scheduler", "OMS_FLOW_RECONCILIATION_SCHEDULER_DISABLED");

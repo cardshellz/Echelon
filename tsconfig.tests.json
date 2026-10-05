@@ -219,7 +219,6 @@
     "server/modules/procurement/__tests__/audit/receiving-cost-application.audit.test.ts",
     "server/modules/procurement/__tests__/integration/invoice-cost-review.integration.test.ts",
     "server/modules/procurement/__tests__/integration/purchase-approval-authority.integration.test.ts",
-    "server/modules/procurement/__tests__/integration/receiving-unit-integrity.integration.test.ts",
     "server/modules/procurement/__tests__/integration/shipment-cost-commands.integration.test.ts",
     "server/modules/procurement/__tests__/integration/shipment-line-commands.integration.test.ts",
     "server/modules/procurement/__tests__/unit/demand-events.routes.test.ts",

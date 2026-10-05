@@ -9,30 +9,54 @@ const variants = [
 const makeLine = () => ({ id: 7, receivingOrderId: 31, sku: "TEST-PC1", productName: "Partial carton product", productId: 10, productVariantId: 2 as number | null,
   unitsPerVariantSnapshot: 1 as number | null, unitVersion: version, inboundShipmentLineId: 17, expectedQty: 501, receivedQty: 401, damagedQty: 3,
   status: "partial", putawayLocationId: 5, putawayComplete: 0, unitCost: 25, notes: null, purchaseOrderLineId: 9 });
+
+function receiptWithLines(id: number, lines: ReturnType<typeof makeLine>[], status = "receiving") {
+  return { ...receipt(id), status, sourceType: "shipment", warehouseId: 1, receivingLocationId: 5,
+    poNumber: "TEST-PO-99", asnNumber: null, expectedDate: null, receivedDate: null, closedDate: null,
+    expectedLineCount: lines.length, receivedLineCount: lines.filter((line) => line.receivedQty > 0).length,
+    expectedTotalUnits: lines.reduce((total, line) => total + line.expectedQty, 0),
+    receivedTotalUnits: lines.reduce((total, line) => total + line.receivedQty, 0),
+    notes: null, createdBy: "fixture-user", lines };
+}
+
 type Command = { path: string; body: Record<string, any> };
 
-async function setup(page: Page, options: { legacy?: boolean; unresolved?: boolean; conflict?: boolean; failRefresh?: boolean; delay?: boolean; exact?: boolean; lost?: boolean; drift?: boolean; manualConflict?: boolean; legacyFactorDrift?: boolean } = {}) {
+async function setup(page: Page, options: { legacy?: boolean; unresolved?: boolean; conflict?: boolean; failRefresh?: boolean; delay?: boolean; exact?: boolean; lost?: boolean; drift?: boolean; manualConflict?: boolean; legacyFactorDrift?: boolean; draft?: boolean; unversionedOpen?: boolean; missingRefreshVersion?: boolean; shipmentCase?: boolean } = {}) {
   const failures = await installFixtures(page);
   const catalog = variants.map((variant) => ({ ...variant }));
+  if (options.shipmentCase) { catalog[1].unitsPerVariant = 1000; catalog[1].name = "Case of 1000"; }
   const state = { line: { ...makeLine(), ...(options.exact ? { expectedQty: 500, receivedQty: 400, damagedQty: 50 } : {}),
     ...(options.legacy ? { unitsPerVariantSnapshot: null } : {}), ...(options.unresolved ? { productVariantId: null } : {}),
-    ...(options.drift ? { unitsPerVariantSnapshot: 50, expectedQty: 10, receivedQty: 8, damagedQty: 1 } : {}) }, commands: [] as Command[], conflictUsed: false, reads: 0, committed: false, manualConflictUsed: false, catalogConflictUsed: false };
+    ...(options.drift ? { unitsPerVariantSnapshot: 50, expectedQty: 10, receivedQty: 8, damagedQty: 1 } : {}),
+    ...(options.shipmentCase ? { sku: "TEST-TOP-STD-SLV-CLR", productName: "Toploader Essentials Clear and Easy Glide Combo Pack", productVariantId: 3, unitsPerVariantSnapshot: 1000, expectedQty: 525, receivedQty: 0, damagedQty: 0, status: "pending" } : {}) },
+    commands: [] as Command[], opened: !options.draft, conflictUsed: false, reads: 0, committed: false, manualConflictUsed: false, catalogConflictUsed: false };
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   await page.route("**/api/**", async (route) => {
     const req = route.request(), path = new URL(req.url()).pathname;
-    const order = (id: number) => ({ ...receipt(id), status: "receiving", sourceType: "shipment", warehouseId: 1, receivingLocationId: 5,
-      lines: [{ ...state.line, ...(id === 32 ? { id: 8, receivingOrderId: 32, sku: "OTHER-RECEIPT", receivedQty: 12 } : {}) }] });
+    const order = (id: number) => receiptWithLines(id,
+      [{ ...state.line, ...(id === 32 ? { id: 8, receivingOrderId: 32, sku: "OTHER-RECEIPT", receivedQty: 12 } : {}) }],
+      options.draft ? (state.opened ? "open" : "draft") : "receiving");
     if (req.method() === "GET") {
       if (path === "/api/product-variants") return route.fulfill({ json: catalog });
       if (path === "/api/warehouse/locations") return route.fulfill({ json: [{ id: 5, code: "RCV-01", name: "Receiving", warehouseId: 1, isActive: 1, locationType: "receiving" }] });
       if (/^\/api\/receiving\/(31|32)$/.test(path)) {
         state.reads++;
         if (options.failRefresh && state.commands.length) return route.fulfill({ status: 503, json: { error: "Unavailable" } });
+        if (options.missingRefreshVersion && state.reads > 1) return route.fulfill({ json: { ...order(31), lines: [{ ...state.line, unitVersion: undefined }] } });
         return route.fulfill({ json: order(Number(path.split("/").at(-1))) });
       }
       if (path.includes("search") && path.includes("sku")) return route.fulfill({ json: catalog.map((variant) => ({ ...variant, productVariantId: variant.id })) });
       return route.fallback();
+    }
+    if (path === "/api/receiving/31/open") {
+      state.commands.push({ path, body: {} }); state.opened = true;
+      const current = order(31);
+      return route.fulfill({ json: { ...current, lines: options.unversionedOpen ? [{ ...state.line, unitVersion: undefined }] : current.lines } });
+    }
+    if (path === "/api/receiving/31/close") {
+      state.commands.push({ path, body: req.postDataJSON() });
+      return route.fulfill({ json: { success: true, linesProcessed: 1, unitsReceived: state.line.receivedQty } });
     }
     if (path === "/api/receiving/31/lines") {
       const body = req.postDataJSON(); state.commands.push({ path, body });
@@ -78,7 +102,12 @@ async function setup(page: Page, options: { legacy?: boolean; unresolved?: boole
       }
       state.line.productVariantId = body.productVariantId; state.line.unitsPerVariantSnapshot = factor;
     }
-    if ("receivedQty" in body) state.line.receivedQty = body.receivedQty;
+    if ("receivedQty" in body) {
+      state.line.receivedQty = body.receivedQty;
+      state.line.status = body.receivedQty === 0 ? "pending"
+        : body.receivedQty < state.line.expectedQty ? "partial"
+        : body.receivedQty === state.line.expectedQty ? "complete" : "overage";
+    }
     state.line.unitVersion = nextVersion; state.committed = true;
     if (options.lost) return route.abort("connectionreset");
     return route.fulfill({ json: state.line });
@@ -95,6 +124,180 @@ const done = (page: Page) => page.locator('[data-testid="btn-complete-line-7"]:v
 // Exact text keeps the toast's screen-reader announcement ("Notification Count
 // saved") out of the match.
 const expectCountSaved = (page: Page) => expect(page.getByText("Count saved", { exact: true })).toBeVisible();
+const confirmedCount = (page: Page) => page.getByRole("status", { name: "Received count confirmed for line 7" }).filter({ visible: true });
+const refreshLine = (page: Page) => page.getByRole("button", { name: "Load latest line and discard count draft" }).filter({ visible: true });
+
+test("a shipment count can be saved beside its field without horizontal scrolling", async ({ page }, testInfo) => {
+  if (testInfo.project.name === "desktop") await page.setViewportSize({ width: 935, height: 867 });
+  const { state, failures } = await setup(page, { draft: true, shipmentCase: true });
+  await page.getByTestId("btn-open-receipt").click();
+  await count(page).fill("525");
+  await expect(page.getByTestId("btn-complete-all")).toBeDisabled();
+  await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
+  // Mobile cards require vertical scrolling to reach the count field.
+  // Keep the desktop table at its original horizontal position.
+  if (testInfo.project.name === "mobile") await count(page).scrollIntoViewIfNeeded();
+  await expect(count(page)).toBeInViewport({ ratio: 1 });
+  await page.screenshot({ path: testInfo.outputPath("shipment-count-draft.png"), fullPage: true, animations: "disabled" });
+  await expect(done(page)).toBeInViewport({ ratio: 1 });
+  await expect(done(page)).toHaveText("Confirm count");
+  await expect(done(page)).toHaveAccessibleName("Confirm received count for line 7");
+  const confirmBounds = await done(page).boundingBox();
+  expect(confirmBounds!.height).toBeGreaterThanOrEqual(44);
+  await expect(confirmedCount(page)).toHaveCount(0);
+  await expect(page.getByText("Unsaved count", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByText(/Use Confirm count beside each Received field/)).toBeVisible();
+  await done(page).click();
+  await expectCountSaved(page);
+  await expect(control(page)).toContainText("received: 525,000 pieces");
+  await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
+  expect(state.commands).toEqual([
+    { path: "/api/receiving/31/open", body: {} },
+    { path: "/api/receiving/lines/7", body: { receivedQty: 525, expectedUnitVersion: version } },
+  ]);
+  await expect(confirmedCount(page)).toHaveText("Count confirmed");
+  await expect(confirmedCount(page)).toBeInViewport({ ratio: 1 });
+  await expect(done(page)).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("shipment-count-saved.png"), fullPage: true, animations: "disabled" });
+  expect(failures).toEqual([]);
+});
+
+test("Enter saves actual shipment counts, including a zero edit to a completed line", async ({ page }) => {
+  const { state, failures } = await setup(page, { shipmentCase: true });
+  await count(page).fill("525");
+  await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
+  await count(page).press("Enter");
+  await expectCountSaved(page);
+  await expect(control(page)).toContainText("received: 525,000 pieces");
+  await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
+  await expect(done(page)).toHaveCount(0);
+  await expect(confirmedCount(page)).toHaveText("Count confirmed");
+  expect(state.commands).toEqual([
+    { path: "/api/receiving/lines/7", body: { receivedQty: 525, expectedUnitVersion: version } },
+  ]);
+
+  await count(page).fill("0");
+  await expect(done(page)).toHaveText("Confirm count");
+  await expect(confirmedCount(page)).toHaveCount(0);
+  await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
+  await count(page).press("Enter");
+  await expect(control(page)).toContainText("received: 0 pieces");
+  await expect(page.getByText("Unsaved count", { exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
+  expect(state.commands).toEqual([
+    { path: "/api/receiving/lines/7", body: { receivedQty: 525, expectedUnitVersion: version } },
+    { path: "/api/receiving/lines/7", body: { receivedQty: 0, expectedUnitVersion: nextVersion } },
+  ]);
+  expect(state.line.receivedQty).toBe(0);
+  expect(state.line.expectedQty).toBe(525);
+  expect(failures).toEqual([]);
+});
+
+test("a failed edit hides the previous count confirmation until a verified receipt reload", async ({ page }) => {
+  const { state, failures } = await setup(page, { shipmentCase: true });
+  await count(page).fill("525");
+  await done(page).click();
+  await expect(confirmedCount(page)).toHaveText("Count confirmed");
+
+  // Keep the recorded count at 525, but reject the next edit so the UI must
+  // preserve its draft and verify the source before showing confirmation again.
+  await page.route("**/api/receiving/lines/7", async (route) => {
+    if (route.request().method() !== "PATCH") return route.fallback();
+    return route.fulfill({ status: 409, json: { error: "The count changed. Load the latest receipt before continuing." } });
+  });
+  await count(page).fill("524");
+  await expect(confirmedCount(page)).toHaveCount(0);
+  await done(page).click();
+  await expect(refreshLine(page)).toBeVisible();
+  await expect(count(page)).toHaveValue("524");
+  await expect(done(page)).toBeDisabled();
+  await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
+  await page.getByRole("button", { name: "Discard count draft", exact: true }).filter({ visible: true }).click();
+  await expect(count(page)).toHaveValue("525");
+  await expect(confirmedCount(page)).toHaveCount(0);
+  await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
+
+  await refreshLine(page).click();
+  await expect(confirmedCount(page)).toHaveText("Count confirmed");
+  await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
+  expect(state.commands).toEqual([
+    { path: "/api/receiving/lines/7", body: { receivedQty: 525, expectedUnitVersion: version } },
+  ]);
+  expect(state.line.receivedQty).toBe(525);
+  expect(failures).toEqual([]);
+});
+
+test("starting a shipment receipt retains its version and saves 525 cases before finalizing", async ({ page }) => {
+  const { state, failures } = await setup(page, { draft: true, shipmentCase: true });
+  await page.getByTestId("btn-open-receipt").click();
+  await expect(page.getByTestId("btn-complete-all")).toBeEnabled();
+  await expect(control(page)).toContainText("Expected: 525,000 pieces; received: 0 pieces");
+  await count(page).fill("525"); await done(page).click();
+  await expectCountSaved(page);
+  expect(state.commands).toEqual([
+    { path: "/api/receiving/31/open", body: {} },
+    { path: "/api/receiving/lines/7", body: { receivedQty: 525, expectedUnitVersion: version } },
+  ]);
+  await expect(control(page)).toContainText("received: 525,000 pieces");
+  await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
+  await page.getByTestId("btn-close-receipt").click();
+  await expect(page.getByText("Receipt closed — inventory updated", { exact: true })).toBeVisible();
+  expect(state.commands.at(-1)?.path).toBe("/api/receiving/31/close");
+  expect(failures).toEqual([]);
+});
+
+test("an unversioned open response offers a verified reload without sending an unsafe count", async ({ page }, testInfo) => {
+  const { state, failures } = await setup(page, { draft: true, shipmentCase: true, unversionedOpen: true });
+  await page.getByTestId("btn-open-receipt").click();
+  await expect(refreshLine(page)).toBeVisible();
+  await count(page).fill("525"); await done(page).click();
+  await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
+  expect(state.commands).toHaveLength(1);
+  await expect(count(page)).toHaveValue("525");
+  await page.screenshot({ path: testInfo.outputPath("missing-version-recovery.png"), fullPage: true, animations: "disabled" });
+  await refreshLine(page).click();
+  await expect(refreshLine(page)).toHaveCount(0);
+  await expect(count(page)).toHaveValue("0");
+  expect(state.commands).toHaveLength(1);
+  await count(page).fill("525"); await done(page).click();
+  await expectCountSaved(page);
+  expect(state.commands[1].body).toEqual({ receivedQty: 525, expectedUnitVersion: version });
+  expect(failures).toEqual([]);
+});
+
+test("reopening the same receipt reloads the missing version through its detail endpoint", async ({ page }) => {
+  const { state, failures } = await setup(page, { draft: true, shipmentCase: true, unversionedOpen: true });
+  await page.getByTestId("btn-open-receipt").click();
+  await expect(refreshLine(page)).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.goto("/receiving?open=31");
+  await expect(page.getByTestId("btn-complete-all")).toBeEnabled();
+  await expect(refreshLine(page)).toHaveCount(0);
+  expect(state.reads).toBe(2);
+  expect(state.commands).toHaveLength(1);
+  await count(page).fill("525"); await done(page).click();
+  await expectCountSaved(page);
+  expect(state.commands[1].body).toEqual({ receivedQty: 525, expectedUnitVersion: version });
+  expect(failures).toEqual([]);
+});
+
+for (const failure of ["unavailable", "missing-version"] as const) {
+  test(`${failure} refresh preserves the unsaved count and keeps posting blocked`, async ({ page }) => {
+    const { state, failures } = await setup(page, { draft: true, shipmentCase: true, unversionedOpen: true,
+      failRefresh: failure === "unavailable", missingRefreshVersion: failure === "missing-version" });
+    await page.getByTestId("btn-open-receipt").click();
+    await expect(refreshLine(page)).toBeVisible();
+    await count(page).fill("525");
+    await refreshLine(page).click();
+    await expect(page.getByRole("alert").filter({ visible: true })).toContainText("draft is still preserved");
+    await expect(count(page)).toHaveValue("525");
+    await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
+    await expect(page.getByTestId("btn-complete-all")).toBeDisabled();
+    expect(state.commands).toHaveLength(1);
+    expect(failures).toEqual([]);
+  });
+}
 
 async function expectModalFits(page: Page, dialog: Locator) {
   await expect(dialog).toHaveCSS("opacity", "1");
@@ -110,7 +313,7 @@ async function expectModalFits(page: Page, dialog: Locator) {
   expect(heading!.x + heading!.width).toBeLessThanOrEqual(box!.x + box!.width);
 }
 
-test("opening a receipt does not mutate units; Save count preserves partial counts and saved zero", async ({ page }, testInfo) => {
+test("opening a receipt does not mutate units; Confirm count preserves partial counts and saved zero", async ({ page }, testInfo) => {
   const { state, failures } = await setup(page);
   await expect(control(page)).toContainText("Expected: 501 pieces; received: 401 pieces; damaged: 3 pieces");
   expect(state.commands).toEqual([]);
@@ -376,7 +579,7 @@ test("a delayed receipt A reload cannot block receipt B or clear B's newer reloa
       const id = isA ? 31 : 32;
       const lines = [{ ...makeLine(), id: isA ? 7 : 8, receivingOrderId: id, receivedQty: counts[key] }];
       if (!isA) lines.push({ ...makeLine(), id: 9, receivingOrderId: 32, receivedQty: 21 });
-      const snapshot = { ...receipt(id), status: "receiving", sourceType: "shipment", lines };
+      const snapshot = receiptWithLines(id, lines);
       if (reads[key] > 1) await (isA ? gateA : gateB);
       return route.fulfill({ json: snapshot });
     }

@@ -159,7 +159,10 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
         updateReceivingOrder: (id, patch, tx = database) => methods.updateReceivingOrder(id, patch, tx),
         getPurchaseOrderLineById: (id, tx = database) => methods.getPurchaseOrderLineById(id, tx),
       };
-      inventory = new inventoryModule.InventoryUseCases(database, repositoryModule.createInventoryMethods(database), new lotsModule.InventoryLotService(database));
+      // The legacy inventory port permits caller-selected generic rows. Supply
+      // the real Drizzle executor; the PostgreSQL tests never substitute results.
+      const inventoryDatabase = database as unknown as ConstructorParameters<typeof inventoryModule.InventoryUseCases>[0];
+      inventory = new inventoryModule.InventoryUseCases(inventoryDatabase, repositoryModule.createInventoryMethods(database), new lotsModule.InventoryLotService(database));
       service = createService();
       reversal = new Reversal(database, inventory);
     } finally {
@@ -215,6 +218,35 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
     expect(result).toMatchObject({ expectedQty: 1000, receivedQty: 500, damagedQty: 250, unitsPerVariantSnapshot: 1, unitCost: 4, unitCostMills: 375, updatedAt: NOW });
     const audit = (await pool.query("SELECT timestamp,actor,changes FROM public.audit_events WHERE actor=$1", [actorId])).rows;
     expect(audit).toEqual([{ timestamp: NOW, actor: actorId, changes: { before: expect.objectContaining({ receivedQty: 2, unitsPerVariantSnapshot: 250 }), after: expect.objectContaining({ receivedQty: 500, unitsPerVariantSnapshot: 1 }) } }]);
+  });
+
+  it("opens a 525-case receipt with usable frozen versions and posts 525,000 pieces exactly once", async () => {
+    await pool.query(`UPDATE catalog.product_variants SET units_per_variant=1000 WHERE id=200;
+      UPDATE procurement.receiving_orders SET status='draft' WHERE id=50;
+      UPDATE procurement.receiving_lines SET expected_qty=525,received_qty=0,damaged_qty=0,units_per_variant_snapshot=1000 WHERE id=51`);
+    const original = await line();
+
+    const opened = await service.open(50, actorId);
+
+    expect(opened).toMatchObject({ status: "open", receivedBy: actorId, receivedDate: NOW,
+      lines: [{ ...original, unitVersion: receivingUnitVersion(original) }] });
+    expect(await line()).toEqual(original);
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions")).rows[0].count).toBe(0);
+    const saved = await service.updateLine(51, { receivedQty: 525, expectedUnitVersion: opened.lines[0].unitVersion }, actorId);
+    expect(saved).toMatchObject({ receivedQty: 525, unitsPerVariantSnapshot: 1000, status: "complete" });
+    const afterSave = await state();
+    await expect(service.updateLine(51, { receivedQty: 524, expectedUnitVersion: opened.lines[0].unitVersion }, actorId))
+      .rejects.toMatchObject({ details: { code: "RECEIVING_UNIT_VERSION_CONFLICT" } });
+    expect(await state()).toEqual(afterSave);
+
+    await service.close(50, actorId);
+    await service.close(50, actorId);
+    expect((await pool.query("SELECT variant_qty FROM inventory.inventory_levels")).rows).toEqual([{ variant_qty: 525 }]);
+    expect((await pool.query("SELECT qty_received,qty_on_hand,unit_cost_mills FROM inventory.inventory_lots")).rows)
+      .toEqual([{ qty_received: 525, qty_on_hand: 525, unit_cost_mills: "375000" }]);
+    expect((await pool.query("SELECT receiving_line_id,variant_qty_delta FROM inventory.inventory_transactions")).rows)
+      .toEqual([{ receiving_line_id: 51, variant_qty_delta: 525 }]);
+    expect((await line()).receivedQty * (await line()).unitsPerVariantSnapshot!).toBe(525000);
   });
 
   it.each(["update", "complete-all"])("rolls back %s line/header writes when its audit insert fails", async (operation) => {

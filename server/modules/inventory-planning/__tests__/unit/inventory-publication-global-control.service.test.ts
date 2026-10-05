@@ -46,6 +46,29 @@ describe("InventoryPublicationGlobalControlService", () => {
     });
   });
 
+  it.each([undefined, "", "   ", null])("pauses all channels without a reason (%s)", async changeReason => {
+    const change = vi.fn(async (command) => ({ globalEnabled: false, sweepIntervalMinutes: 15,
+      revision: "4", changedBy: command.actorId, changeReason: command.changeReason,
+      changedAt: command.occurredAt.toISOString(), alreadyApplied: false }));
+    const service = new InventoryPublicationGlobalControlService({ change }, { now: () => NOW });
+    const request = { globalEnabled: false, expectedRevision: "3", idempotencyKey: "pause-global" };
+    await expect(service.change({ ...request, ...(changeReason === undefined ? {} : { changeReason }) }, "operator-7"))
+      .resolves.toMatchObject({ globalEnabled: false, changeReason: null });
+    expect(change).toHaveBeenCalledWith({ ...request, changeReason: null, actorId: "operator-7", occurredAt: NOW,
+      requestHash: createHash("sha256").update(canonicalJson({ commandType: "inventory_publication_global_control_change",
+        actorId: "operator-7", request: { ...request, changeReason: null } }), "utf8").digest("hex") });
+  });
+
+  it.each([{ globalEnabled: true }, { sweepIntervalMinutes: 10 }, { globalEnabled: false, sweepIntervalMinutes: 10 }])(
+    "still requires a reason for enabling or schedule changes: %j", async settings => {
+      const change = vi.fn();
+      const service = new InventoryPublicationGlobalControlService({ change }, { now: () => NOW });
+      await expect(service.change({ ...settings, expectedRevision: "3", idempotencyKey: "no-note" }, "operator-7"))
+        .rejects.toMatchObject({ code: "INVENTORY_PUBLICATION_GLOBAL_CONTROL_INVALID_REQUEST" });
+      expect(change).not.toHaveBeenCalled();
+    },
+  );
+
   it("rejects empty changes and invalid revisions before calling the store", async () => {
     const change = vi.fn();
     const service = new InventoryPublicationGlobalControlService({ change });

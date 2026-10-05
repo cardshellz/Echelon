@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   ReturnLabelProviderError,
   returnLabelInputSchema,
+  returnLabelOrderNumberSchema,
   returnLabelProviderIdSchema,
   returnLabelRecordSchema,
   type ReturnLabelAddress,
@@ -64,6 +65,7 @@ const addressSchema = z.object({
 const shipmentSchema = z.object({
   shipment_id: returnLabelProviderIdSchema,
   external_shipment_id: z.string(),
+  shipment_number: returnLabelOrderNumberSchema.nullish(),
   carrier_id: returnLabelProviderIdSchema,
   service_code: nonempty,
   ship_from: addressSchema,
@@ -158,6 +160,9 @@ export function createShipStationReturnLabelAdapter(config: ShipStationReturnLab
     const shipmentResult = shipmentSchema.safeParse(await request("GET", `/shipments/${encodeURIComponent(label.shipment_id)}`, undefined, signal));
     if (!shipmentResult.success) fail("RETURN_LABEL_SHIPMENT_INVALID", "unknown");
     const shipment = shipmentResult.data;
+    if (input.orderNumber !== undefined && shipment.shipment_number !== input.orderNumber) {
+      fail("RETURN_LABEL_ORDER_REFERENCE_MISMATCH", "unknown");
+    }
     if (shipment.shipment_id !== label.shipment_id || shipment.external_shipment_id !== input.externalShipmentId
       || shipment.carrier_id !== input.carrierId || shipment.service_code !== input.serviceCode
       || !sameAddress(shipment.ship_from, input.shipFrom) || !sameAddress(shipment.ship_to, input.shipTo)) {
@@ -233,6 +238,7 @@ export function buildReturnLabelRequest(rawInput: ReturnLabelInput): Record<stri
     label_format: "pdf", label_layout: "4x6", label_download_type: "url",
     shipment: {
       validate_address: "no_validation", external_shipment_id: input.externalShipmentId,
+      ...(input.orderNumber === undefined ? {} : { shipment_number: input.orderNumber }),
       carrier_id: input.carrierId, service_code: input.serviceCode,
       ship_from: shipStationReturnAddress(input.shipFrom), ship_to: shipStationReturnAddress(input.shipTo),
       packages: [{ package_code: "package", weight: { value: weightPounds, unit: "pound" },

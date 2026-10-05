@@ -7,6 +7,7 @@ function heldOrder(warehouseStatus: "ready" | "in_progress", onHold = 0) {
   return {
     id: 101, orderNumber: "#HOLD-TEST", customerName: "Test order", warehouseStatus,
     onHold, assignedPickerId: warehouseStatus === "in_progress" ? "picker" : null,
+    warehouseId: 1,
     startedAt: warehouseStatus === "in_progress" ? "2026-10-03T10:00:00.000Z" : null,
     combinedGroupId: null as number | null, combinedRole: null as string | null,
     priority: 100, itemCount: 2, unitCount: 3, pickedCount: 1,
@@ -17,7 +18,8 @@ function heldOrder(warehouseStatus: "ready" | "in_progress", onHold = 0) {
         requiresShipping: 1, location: "A-01", barcode: "PICKED-P1" },
       { id: 202, orderId: 101, sku: "HELD-C1000", name: "Held cases", quantity: 2,
         pickedQuantity: 0, fulfilledQuantity: 0, status: "pending", onHold: true,
-        requiresShipping: 1, location: "F-03", barcode: "HELD-C1000" },
+        requiresShipping: 1, location: "F-03", barcode: "HELD-C1000",
+        sourcePlan: {status:"ready" as const,productVariantId:102,warehouseLocationId:503,warehouseId:1,locationCode:"F-03"} },
     ],
   };
 }
@@ -31,8 +33,14 @@ async function mount(page: Page, warehouseStatus: "ready" | "in_progress", optio
   permissions?: string[];
   combinedPickerId?: string;
   failChildReleaseOnce?: boolean;
+  operationCase?: "claim_source" | "unpick_retry" | "inline_case";
 } = {}) {
   const order = heldOrder(warehouseStatus, options.orderHold ? 1 : 0);
+  if (options.operationCase) order.items[1].onHold=false;
+  if (options.operationCase === "unpick_retry") {
+    order.items[1].quantity=3; order.items[1].pickedQuantity=2; order.items[1].status="in_progress";
+  }
+  let unpickAttempts=0;
   const child: ReturnType<typeof heldOrder> | null = options.combinedPickerId ? {
     ...heldOrder("in_progress"), id: 102, orderNumber: "#COMBINED-CHILD",
     assignedPickerId: options.combinedPickerId, combinedGroupId: 7, combinedRole: "child",
@@ -94,13 +102,37 @@ async function mount(page: Page, warehouseStatus: "ready" | "in_progress", optio
         released.startedAt = null;
         return route.fulfill({ json: released });
       }
-      if (path === "/api/picking/orders/101/claim") return route.fulfill({ json: order });
+      if (path === "/api/picking/orders/101/claim") {
+        if (options.operationCase === "claim_source" || options.operationCase === "inline_case") {
+          order.warehouseStatus="in_progress"; order.assignedPickerId="picker"; order.startedAt="2026-10-04T12:00:00.000Z";
+          order.items[1].location="B-09";
+          order.items[1].sourcePlan={status:"ready",productVariantId:102,warehouseLocationId:902,warehouseId:1,locationCode:"B-09"};
+        }
+        return route.fulfill({ json: order });
+      }
+      if (path === "/api/picking/items/202/unpick" && options.operationCase === "unpick_retry") {
+        if (++unpickAttempts === 1) {
+          order.items[1].pickedQuantity=1;
+          return route.fulfill({status:500,json:{error:"Response lost after recorded physical work"}});
+        }
+        return route.fulfill({json:{success:true,item:order.items[1],inventory:null}});
+      }
+      if (path === "/api/picking/items/202" && options.operationCase === "inline_case") {
+        order.items[1].pickedQuantity=2; order.items[1].status="completed";
+        return route.fulfill({json:{success:true,item:order.items[1],inventory:{deducted:true,systemQtyAfter:0,binCountNeeded:false,
+          replen:{triggered:true,taskId:700,taskStatus:"completed",autoExecuted:true,autoExecutedMoved:2,autoExecutedMovedBaseUnits:2000,autoExecutedMovedUom:"case",autoExecutedFailed:false}}}});
+      }
+      if (path === "/api/picking/items/202" && options.operationCase === "claim_source") {
+        order.items[1].pickedQuantity=2; order.items[1].status="completed";
+        return route.fulfill({json:{success:true,item:order.items[1],inventory:{deducted:true,systemQtyAfter:null},
+          followupPending:true,message:"Physical work is recorded. Operational follow-up is pending and will retry automatically."}});
+      }
     }
     unexpected.push(`${request.method()} ${path}`);
     return route.fulfill({ status: 500, json: { error: `Unexpected test request: ${path}` } });
   });
   await page.goto(harnessPath);
-  await page.getByRole("button", { name: /^1 Hold$/ }).click();
+  await page.getByRole("button", { name: options.operationCase === "claim_source" || options.operationCase === "inline_case" ? /^1 Ready$/ : options.operationCase === "unpick_retry" ? /^1 Active$/ : /^1 Hold$/ }).click();
   await expect(page.getByTestId(child ? "card-order-combined-7" : "card-order-101")).toBeVisible();
   return { order, child, writes, unexpected };
 }
@@ -269,5 +301,52 @@ test("the active pick screen distinguishes Release picking assignment from a lin
   ]);
   expect(state.order.warehouseStatus).toBe("in_progress");
   expect(state.order.items[0]).toMatchObject({ pickedQuantity: 1, fulfilledQuantity: 1 });
+  expect(state.unexpected).toEqual([]);
+});
+
+test("uses the claimed source snapshot and shows pending follow-up honestly", async ({page}) => {
+  const state=await mount(page,"ready",{operationCase:"claim_source"});
+  await page.getByRole("button",{name:"Resume",exact:true}).click();
+  await expect(page.getByTestId("button-pick-202")).toBeVisible();
+  await page.getByTestId("button-pick-202").click();
+  await expect(page.getByText("Pick recorded; follow-up pending",{exact:true})).toBeVisible();
+  const command=state.writes.find(write=>write.path==="/api/picking/items/202")?.body as Record<string,unknown>;
+  expect(command).toMatchObject({warehouseLocationId:902,status:"completed",pickedQuantity:2});
+  expect(command.commandId).toMatch(/^[a-f0-9-]{36}$/i);
+  await page.screenshot({path:test.info().outputPath("recorded-pick-followup-pending.png"),animations:"disabled"});
+  expect(state.unexpected).toEqual([]);
+});
+
+test("reuses the unpick command after response loss, refreshed progress and page reload", async ({page}) => {
+  const state=await mount(page,"in_progress",{operationCase:"unpick_retry"});
+  await page.getByTestId("card-order-101").click();
+  await page.getByTestId("button-more-202").click();
+  await page.getByRole("menuitem",{name:"Unpick one (−1)",exact:true}).click();
+  await expect(page.getByText("Unpick failed",{exact:true})).toBeVisible();
+  await page.reload();
+  await page.getByRole("button",{name:/^1 Active$/}).click();
+  await page.getByTestId("card-order-101").click();
+  await page.getByTestId("button-more-202").click();
+  await page.getByRole("menuitem",{name:"Unpick one (−1)",exact:true}).click();
+  await expect.poll(()=>state.writes.filter(write=>write.path==="/api/picking/items/202/unpick").length).toBe(2);
+  const attempts=state.writes.filter(write=>write.path==="/api/picking/items/202/unpick");
+  expect(attempts[1].body).toEqual(attempts[0].body);
+  expect(attempts[0].body).toMatchObject({qty:1});
+  expect(state.order.items[1].pickedQuantity).toBe(1);
+  expect(state.unexpected).toEqual([]);
+});
+
+
+test("completed inline case replenishment lets the picker continue without a replen task screen",async({page})=>{
+  const state=await mount(page,"ready",{operationCase:"inline_case"});
+  await page.getByRole("button",{name:"Resume",exact:true}).click();
+  await page.getByTestId("button-pick-202").click();
+  await expect(page.getByText("Replen completed",{exact:true})).toBeVisible();
+  await expect(page.getByText("Replen queued",{exact:true})).toHaveCount(0);
+  await expect(page.getByText("Replen needs review",{exact:true})).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.writes.filter(write=>write.path.includes("replen"))).toEqual([]);
+  expect(state.writes.find(write=>write.path==="/api/picking/items/202")?.body).toMatchObject({pickedQuantity:2,status:"completed",warehouseLocationId:902});
+  await page.screenshot({path:test.info().outputPath("inline-case-replenishment-completed.png"),animations:"disabled"});
   expect(state.unexpected).toEqual([]);
 });

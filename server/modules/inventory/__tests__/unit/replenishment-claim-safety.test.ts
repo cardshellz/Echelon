@@ -125,6 +125,7 @@ describe("InventoryUseCases claim-safe replenishment", () => {
     const transfer = vi.spyOn(inventory, "transfer").mockResolvedValue({
       reservedMoved: 0,
       orderItemsRepointed: 0,
+      transferReceiptId: 1,
     });
 
     await expect(inventory.executeReplenishmentMove({

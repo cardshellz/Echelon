@@ -418,10 +418,11 @@ async function getLatestClaim(
   orderId: number,
 ): Promise<CanonicalClaimCursor | null> {
   const result = await client.query<ClaimCursorRow>(
+    // Qualified: unqualified "id" is the text alias, which sorts "99" above "100".
     `SELECT id::text AS id, revision, status, plan_payload
-     FROM inventory.availability_claims
-     WHERE order_id = $1
-     ORDER BY revision DESC, id DESC
+     FROM inventory.availability_claims claim
+     WHERE claim.order_id = $1
+     ORDER BY claim.revision DESC, claim.id DESC
      LIMIT 1`,
     [orderId],
   );

@@ -15,6 +15,7 @@ import {
 import { customerReturnProviderDimensions, customerReturnWarehouseAddressType } from "../application/customer-return-shipping-plan";
 import {
   returnLabelInputSchema,
+  returnLabelOrderNumberSchema,
   returnLabelRecordSchema,
   type ReturnLabelInput,
   type ReturnLabelAddress,
@@ -55,8 +56,10 @@ export class PostgresCustomerReturnLabelStore
     authorizationId: number,
   ): Promise<StoredReturnLabels> {
     const { rows } = await connection.query(
-      `SELECT a.authorization_number,a.warehouse_snapshot,p.*,t.id AS attempt_id,t.status AS attempt_status,
+      `SELECT a.authorization_number,a.warehouse_snapshot,o.external_order_number AS source_order_number,
+      p.*,t.id AS attempt_id,t.status AS attempt_status,
       t.started_at,t.result_snapshot,t.request_snapshot FROM returns.customer_return_authorizations a
+      JOIN oms.oms_orders o ON o.id=a.oms_order_id AND o.channel_id=a.channel_id
       JOIN returns.customer_return_parcels p ON p.authorization_id=a.id
       LEFT JOIN LATERAL (SELECT * FROM returns.customer_return_label_attempts WHERE parcel_id=p.id ORDER BY attempt_number DESC LIMIT 1) t ON true
       WHERE a.channel_id=$1 AND a.id=$2 ORDER BY p.parcel_key::integer,p.id`,
@@ -77,12 +80,21 @@ export class PostgresCustomerReturnLabelStore
         .max(32)
         .parse(rows[0].authorization_number),
       parcels: rows.map((row) => {
+        // An existing purchase must recover against its original snapshot, even
+        // if its source order's display number has subsequently been changed.
+        const savedInput = row.attempt_id === null
+          ? null
+          : returnLabelInputSchema.parse(row.request_snapshot);
+        const orderNumber = savedInput === null
+          ? sourceOrderNumber(row.source_order_number)
+          : savedInput.orderNumber;
         const dims = customerReturnDimensionsSchema.parse(row.dimensions);
         const selectionMode = z
           .enum(["fixed_service", "cheapest_eligible"])
           .parse(row.selection_mode);
         const shipment = returnRateShipmentSchema.parse({
           externalShipmentId: row.provider_external_shipment_id,
+          ...(orderNumber === undefined ? {} : { orderNumber }),
           rmaNumber: row.authorization_number,
           shipFrom: row.origin_address,
           shipTo: { ...row.destination_address, addressType: customerReturnWarehouseAddressType(row.warehouse_snapshot.addressType) },
@@ -104,7 +116,7 @@ export class PostgresCustomerReturnLabelStore
         const input =
           row.attempt_id === null
             ? preparedInput
-            : returnLabelInputSchema.parse(row.request_snapshot);
+            : savedInput;
         if (
           input &&
           (input.externalShipmentId !== shipment.externalShipmentId ||
@@ -421,6 +433,15 @@ export class PostgresCustomerReturnLabelStore
       client.release();
     }
   }
+}
+function sourceOrderNumber(raw: unknown): string {
+  const parsed = returnLabelOrderNumberSchema.safeParse(raw);
+  if (!parsed.success) throw new CustomerReturnIntakeError(
+    "RETURN_LABEL_ORDER_REFERENCE_UNAVAILABLE",
+    "The original order number needs administrator verification before a label can be created.",
+    409,
+  );
+  return parsed.data;
 }
 function legacyAcceptedSettingsFromRow(row: Record<string, unknown>) {
   return customerReturnLabelSettingsSchema.parse({

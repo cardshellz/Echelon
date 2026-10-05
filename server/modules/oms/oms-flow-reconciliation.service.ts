@@ -60,6 +60,8 @@ const AUTO_RESERVATION_REPAIR_LIMIT = 25;
 const SHORT_CLAIM_REFRESH_LIMIT = 25;
 /** Confirmed pick corrections retried per run; each is a few short transactions. */
 const CONFIRMED_PICK_RETRY_LIMIT = 50;
+/** Exception orders re-checked per run; each is a few reads, one write if released. */
+const PICK_EXCEPTION_RECHECK_LIMIT = 100;
 
 /**
  * Reservation service handle for release-on-cancel and the
@@ -89,6 +91,16 @@ export interface FlowReconciliationReservation {
 export interface FlowReconciliationPickCorrections {
   retryConfirmedPicks(limit: number): Promise<{ resolved: number; waiting: number }>;
 }
+/** Moves exception orders whose ready-to-ship blockers all cleared. */
+export interface FlowReconciliationPickExceptions {
+  releaseClearedPickExceptions(limit: number): Promise<PickExceptionRecheckTotals>;
+}
+export interface PickExceptionRecheckTotals {
+  checked: number;
+  released: number;
+  stillBlocked: number;
+  failed: number;
+}
 
 export interface OmsFlowReconciliationDependencies {
   reservation: FlowReconciliationReservation | null;
@@ -96,6 +108,7 @@ export interface OmsFlowReconciliationDependencies {
   reviewRetry?: ChannelFulfillmentReviewRetryService;
   receiptRetry?: ChannelFulfillmentReceiptRetryService;
   pickCorrections?: FlowReconciliationPickCorrections;
+  pickExceptions?: FlowReconciliationPickExceptions;
 }
 
 function requireFlowFulfillmentAuthority(
@@ -216,21 +229,54 @@ async function countAndSample(
   };
 }
 
+type FlowCheckCode =
+  | "OMS_FINAL_WMS_ACTIVE"
+  | "WMS_FINAL_OMS_OPEN"
+  | "SHIPMENT_SHIPPED_OMS_OPEN"
+  | "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED"
+  | "OMS_PAID_WITHOUT_WMS"
+  | "WMS_READY_WITHOUT_SHIPMENT"
+  | "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION"
+  | "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED"
+  | "WMS_PARTITION_DUPLICATE_LINE_COVERAGE"
+  | "OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT"
+  | "CHANNEL_FULFILLMENT_RECEIPT_STALLED";
+
+type FlowCheckOutcome =
+  | { code: FlowCheckCode; ok: true; count: number; sample: unknown[] }
+  | { code: FlowCheckCode; ok: false; error: string };
+
+/** Reported when a check's query fails, so what it looks for is visibly unchecked. */
+export const FLOW_CHECK_FAILED_CODE = "OMS_FLOW_CHECK_FAILED";
+
+/**
+ * Tags a check's result with its own code, and turns a failed query into a
+ * reported outcome instead of a rejection.
+ *
+ * Results used to be matched to codes by array position. 0142f220
+ * (2026-05-08) added two checks with their names in one place and their
+ * queries in another, so five checks reported, and were auto-repaired as,
+ * each other's rows for five months. Ready orders with no shipment (#63772,
+ * #63775) were filed as shipped packages, and the repair skipped them. One
+ * failing query also rejected the whole batch, so no check reached repair.
+ */
+function flowCheck(
+  code: FlowCheckCode,
+  run: Promise<{ count: number; sample: unknown[] }>,
+): Promise<FlowCheckOutcome> {
+  return run.then(
+    (found) => ({ code, ok: true as const, count: found.count, sample: found.sample }),
+    (error: unknown) => ({
+      code,
+      ok: false as const,
+      error: error instanceof Error ? error.message : String(error),
+    }),
+  );
+}
+
 export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOpsIssue[]> {
-  const [
-    omsFinalWmsActive,
-    wmsFinalOmsOpen,
-    shipmentShippedOmsOpen,
-    wmsShippedNoTrackingPush,
-    omsPaidWithoutWms,
-    wmsReadyWithoutShipment,
-    unpushedShipStationShipments,
-    shopifyShipmentFulfillmentMissing,
-    partitionDuplicateLineCoverage,
-    providerFulfillmentReferenceDrift,
-    stalledChannelFulfillmentReceipts,
-  ] = await Promise.all([
-    countAndSample(
+  const outcomes = await Promise.all([
+    flowCheck("OMS_FINAL_WMS_ACTIVE", countAndSample(
       db,
       sql`
         SELECT COUNT(*)::int AS count
@@ -264,8 +310,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         ORDER BY oo.updated_at ASC
         LIMIT 10
       `,
-    ),
-    countAndSample(
+    )),
+    flowCheck("OMS_PAID_WITHOUT_WMS", countAndSample(
       db,
       sql`
         SELECT COUNT(*)::int AS count
@@ -296,8 +342,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         ORDER BY oo.created_at DESC
         LIMIT 10
       `,
-    ),
-    countAndSample(
+    )),
+    flowCheck("WMS_READY_WITHOUT_SHIPMENT", countAndSample(
       db,
       sql`
         SELECT COUNT(*)::int AS count
@@ -364,8 +410,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         ORDER BY wo.created_at DESC
         LIMIT 10
       `,
-    ),
-    countAndSample(
+    )),
+    flowCheck("WMS_FINAL_OMS_OPEN", countAndSample(
       db,
       sql`
         SELECT COUNT(*)::int AS count
@@ -393,8 +439,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         ORDER BY wo.updated_at ASC
         LIMIT 10
       `,
-    ),
-    countAndSample(
+    )),
+    flowCheck("SHIPMENT_SHIPPED_OMS_OPEN", countAndSample(
       db,
       sql`
         SELECT COUNT(*)::int AS count
@@ -426,8 +472,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         ORDER BY os.updated_at ASC
         LIMIT 10
       `,
-    ),
-    countAndSample(
+    )),
+    flowCheck("WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED", countAndSample(
       db,
       sql`
         SELECT COUNT(*)::int AS count
@@ -493,8 +539,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         ORDER BY os.shipped_at ASC
         LIMIT 10
       `,
-    ),
-    countAndSample(
+    )),
+    flowCheck("SHIPMENT_NOT_PUSHED_TO_SHIPSTATION", countAndSample(
       db,
       sql`
         SELECT COUNT(*)::int AS count
@@ -562,8 +608,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         ORDER BY os.created_at ASC
         LIMIT 10
       `,
-    ),
-    (async () => {
+    )),
+    flowCheck("SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED", (async () => {
       const health = await getChannelWritebackHealth(
         db,
         { windowDays: 14, sampleLimit: 500 },
@@ -575,8 +621,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           .filter((entry) => entry.provider === "shopify")
           .slice(0, 10),
       };
-    })(),
-    countAndSample(
+    })()),
+    flowCheck("WMS_PARTITION_DUPLICATE_LINE_COVERAGE", countAndSample(
       db,
       sql`
         WITH duplicate_line_coverage AS (
@@ -631,8 +677,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         ORDER BY wms_order_count DESC, oms_order_line_id DESC
         LIMIT 10
       `,
-    ),
-    countAndSample(
+    )),
+    flowCheck("OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT", countAndSample(
       db,
       sql`
         WITH provider_reference_rows AS (
@@ -720,8 +766,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         ORDER BY oms_order_id DESC, oms_order_line_id DESC
         LIMIT 10
       `,
-    ),
-    countAndSample(
+    )),
+    flowCheck("CHANNEL_FULFILLMENT_RECEIPT_STALLED", countAndSample(
       db,
       sql`
         SELECT COUNT(*)::int AS count
@@ -777,88 +823,114 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         ORDER BY COALESCE(receipt.last_attempt_at, receipt.created_at) ASC
         LIMIT 10
       `,
-    ),
+    )),
   ]);
+
+  const byCode = new Map(outcomes.map((outcome) => [outcome.code, outcome]));
+  const result = (code: FlowCheckCode): { count: number; sample: unknown[] } => {
+    const outcome = byCode.get(code);
+    if (!outcome) throw new Error(`OMS flow check ${code} has no query`);
+    return outcome.ok ? outcome : { count: 0, sample: [] };
+  };
+  const failedChecks = outcomes.filter(
+    (outcome): outcome is Extract<FlowCheckOutcome, { ok: false }> => !outcome.ok,
+  );
+  for (const failure of failedChecks) {
+    console.error(JSON.stringify({
+      level: "error", action: "oms_flow_check", outcome: "failed",
+      error_code: failure.code, error: failure.error,
+    }));
+  }
 
   const issues: OmsOpsIssue[] = [
     {
       code: "OMS_FINAL_WMS_ACTIVE",
       severity: "critical" as const,
-      count: omsFinalWmsActive.count,
+      count: result("OMS_FINAL_WMS_ACTIVE").count,
       message: "OMS orders are final but linked WMS orders are still active.",
-      sample: omsFinalWmsActive.sample,
+      sample: result("OMS_FINAL_WMS_ACTIVE").sample,
     },
     {
       code: "WMS_FINAL_OMS_OPEN",
       severity: "critical" as const,
-      count: wmsFinalOmsOpen.count,
+      count: result("WMS_FINAL_OMS_OPEN").count,
       message: "WMS orders are final but linked OMS orders are still open.",
-      sample: wmsFinalOmsOpen.sample,
+      sample: result("WMS_FINAL_OMS_OPEN").sample,
     },
     {
       code: "SHIPMENT_SHIPPED_OMS_OPEN",
       severity: "critical" as const,
-      count: shipmentShippedOmsOpen.count,
+      count: result("SHIPMENT_SHIPPED_OMS_OPEN").count,
       message: "WMS shipments are shipped but linked OMS orders are not shipped.",
-      sample: shipmentShippedOmsOpen.sample,
+      sample: result("SHIPMENT_SHIPPED_OMS_OPEN").sample,
     },
     {
       code: "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
       severity: "critical" as const,
-      count: wmsShippedNoTrackingPush.count,
+      count: result("WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED").count,
       message: "Shipped WMS shipments do not have a channel tracking push success event.",
-      sample: wmsShippedNoTrackingPush.sample,
+      sample: result("WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED").sample,
     },
     {
       code: "OMS_PAID_WITHOUT_WMS",
       severity: "critical" as const,
-      count: omsPaidWithoutWms.count,
+      count: result("OMS_PAID_WITHOUT_WMS").count,
       message: "Paid OMS orders have not reached WMS.",
-      sample: omsPaidWithoutWms.sample,
+      sample: result("OMS_PAID_WITHOUT_WMS").sample,
     },
     {
       code: "WMS_READY_WITHOUT_SHIPMENT",
       severity: "critical" as const,
-      count: wmsReadyWithoutShipment.count,
+      count: result("WMS_READY_WITHOUT_SHIPMENT").count,
       message: "Ready WMS orders have no outbound shipment row.",
-      sample: wmsReadyWithoutShipment.sample,
+      sample: result("WMS_READY_WITHOUT_SHIPMENT").sample,
     },
     {
       code: "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION",
       severity: "critical" as const,
-      count: unpushedShipStationShipments.count,
+      count: result("SHIPMENT_NOT_PUSHED_TO_SHIPSTATION").count,
       message: "Outbound shipments are old enough to have been pushed but have no ShipStation id.",
-      sample: unpushedShipStationShipments.sample,
+      sample: result("SHIPMENT_NOT_PUSHED_TO_SHIPSTATION").sample,
     },
     {
       code: "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED",
       severity: "critical" as const,
-      count: shopifyShipmentFulfillmentMissing.count,
+      count: result("SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED").count,
       message: "Shipped Shopify packages have no exact terminal channel-writeback evidence.",
-      sample: shopifyShipmentFulfillmentMissing.sample,
+      sample: result("SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED").sample,
     },
     {
       code: "WMS_PARTITION_DUPLICATE_LINE_COVERAGE",
       severity: "critical" as const,
-      count: partitionDuplicateLineCoverage.count,
+      count: result("WMS_PARTITION_DUPLICATE_LINE_COVERAGE").count,
       message: "Active WMS fulfillment partitions cover the same OMS order line.",
-      sample: partitionDuplicateLineCoverage.sample,
+      sample: result("WMS_PARTITION_DUPLICATE_LINE_COVERAGE").sample,
     },
     {
       code: "OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT",
       severity: "warning" as const,
-      count: providerFulfillmentReferenceDrift.count,
+      count: result("OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT").count,
       message: "Shopify OMS line fulfillment references differ from provider-neutral references.",
-      sample: providerFulfillmentReferenceDrift.sample,
+      sample: result("OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT").sample,
     },
     {
       code: "CHANNEL_FULFILLMENT_RECEIPT_STALLED",
       severity: "critical" as const,
-      count: stalledChannelFulfillmentReceipts.count,
+      count: result("CHANNEL_FULFILLMENT_RECEIPT_STALLED").count,
       message: "Inbound channel fulfillment receipts exceeded the automatic recovery window.",
-      sample: stalledChannelFulfillmentReceipts.sample,
+      sample: result("CHANNEL_FULFILLMENT_RECEIPT_STALLED").sample,
     },
   ];
+
+  if (failedChecks.length > 0) {
+    issues.push({
+      code: FLOW_CHECK_FAILED_CODE,
+      severity: "critical" as const,
+      count: failedChecks.length,
+      message: "Flow checks failed to run, so the problems they look for are neither detected nor repaired.",
+      sample: failedChecks.map((failure) => ({ check: failure.code, error: failure.error })),
+    });
+  }
 
   return issues.filter((entry) => entry.count > 0);
 }
@@ -886,7 +958,16 @@ export async function runOmsFlowReconciliation(
     }
   };
 
+  // Before detection, so an order released here gets its missing shipment
+  // (WMS_READY_WITHOUT_SHIPMENT) in this same run.
+  await step("releaseClearedPickExceptions", () => releaseClearedPickExceptions(dependencies), undefined);
   const issues = await step("collect", () => collectOmsFlowReconciliationIssues(dbArg), [] as OmsOpsIssue[]);
+  const failedChecks = issues.find((issue) => issue.code === FLOW_CHECK_FAILED_CODE);
+  if (failedChecks) {
+    // The other checks still ran and still repair; surface the gap on the heartbeat.
+    stepErrors.push(`collect: ${(failedChecks.sample as Array<{ check: string; error: string }>)
+      .map((failure) => `${failure.check}: ${failure.error}`).join(" | ")}`);
+  }
   if (issues.length > 0) {
     const summary = issues.map((issue) => `${issue.code}=${issue.count}`).join(", ");
     console.warn(`${LOG_PREFIX} detected flow issues: ${summary}`);
@@ -1078,6 +1159,26 @@ export async function retryConfirmedPickCorrections(
   return totals;
 }
 
+/**
+ * Only a pick re-evaluates an exception order, so one whose blockers cleared
+ * some other way sat in exception with no shipment, out of ShipStation's
+ * reach. It moves on here exactly as its next pick would have moved it.
+ */
+export async function releaseClearedPickExceptions(
+  dependencies: OmsFlowReconciliationDependencies,
+): Promise<PickExceptionRecheckTotals> {
+  if (!dependencies.pickExceptions) return { checked: 0, released: 0, stillBlocked: 0, failed: 0 };
+  const totals = await dependencies.pickExceptions.releaseClearedPickExceptions(PICK_EXCEPTION_RECHECK_LIMIT);
+  if (totals.released > 0) {
+    console.log(`${LOG_PREFIX} exception orders with no blocker left moved to ready_to_ship: released=${totals.released} stillBlocked=${totals.stillBlocked}`);
+  }
+  if (totals.failed > 0) {
+    // Surfaces on the scheduler heartbeat; the other orders were still processed.
+    throw new Error(`exception re-check failed for ${totals.failed} order(s)`);
+  }
+  return totals;
+}
+
 export async function autoCloseResolvedDeadFulfillmentRetries(db: any): Promise<number> {
   const result = await db.execute(sql`
     WITH candidates AS (
@@ -1218,37 +1319,11 @@ async function autoRemediateCriticalFlowIssues(
           : null;
       },
     },
-    {
-      code: "WMS_FINAL_OMS_OPEN",
-      inputFromSample: (sample) => {
-        const omsOrderId = Number(sample.oms_order_id);
-        const wmsOrderId = Number(sample.wms_order_id);
-        return Number.isInteger(omsOrderId) && omsOrderId > 0 &&
-          Number.isInteger(wmsOrderId) && wmsOrderId > 0
-          ? { code: "WMS_FINAL_OMS_OPEN", omsOrderId, wmsOrderId }
-          : null;
-      },
-    },
-    {
-      code: "SHIPMENT_SHIPPED_OMS_OPEN",
-      inputFromSample: (sample) => {
-        const omsOrderId = Number(sample.oms_order_id);
-        const shipmentId = Number(sample.shipment_id);
-        return Number.isInteger(omsOrderId) && omsOrderId > 0 &&
-          Number.isInteger(shipmentId) && shipmentId > 0
-          ? { code: "SHIPMENT_SHIPPED_OMS_OPEN", omsOrderId, shipmentId }
-          : null;
-      },
-    },
-    {
-      code: "WMS_READY_WITHOUT_SHIPMENT",
-      inputFromSample: (sample) => {
-        const wmsOrderId = Number(sample.wms_order_id ?? sample.id);
-        return Number.isInteger(wmsOrderId) && wmsOrderId > 0
-          ? { code: "WMS_READY_WITHOUT_SHIPMENT", wmsOrderId }
-          : null;
-      },
-    },
+    // WMS_FINAL_OMS_OPEN and SHIPMENT_SHIPPED_OMS_OPEN stay manual (Control
+    // Tower). Their checks were mislabelled from 0142f220 until 2026-10-05, so
+    // they never once ran automatically. Both push fulfillments to the channel
+    // immediately, oldest first with no age limit, so switching them on would
+    // send months-old shipping notices: an operator decision, not a side effect.
   ];
 
   for (const mapping of mappings) {

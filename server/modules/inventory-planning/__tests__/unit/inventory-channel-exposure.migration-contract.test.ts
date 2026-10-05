@@ -26,8 +26,8 @@ const routes = readFileSync(
 );
 const registry = readFileSync("server/routes.ts", "utf8");
 const page = readFileSync("client/src/features/channel-inventory/ChannelInventoryPage.tsx", "utf8");
-const publishingTab = readFileSync(
-  "client/src/features/channel-inventory/components/PublishingTab.tsx",
+const stockUpdatesControl = readFileSync(
+  "client/src/features/channel-inventory/components/StockUpdatesControl.tsx",
   "utf8",
 );
 
@@ -106,8 +106,8 @@ describe("inventory channel exposure inactive foundation", () => {
     // target toward publishing stays activate-gated.
     expect(routes.match(/requirePermission\("inventory_planning", "edit"\)/g)).toHaveLength(5);
     // Stop, resume review, resume, and the hold/release pair: each changes what
-    // a marketplace sells, so all six carry the activation permission.
-    expect(routes.match(/requirePermission\("inventory_planning", "activate"\)/g)).toHaveLength(6);
+    // a marketplace sells, so all seven carry the activation permission.
+    expect(routes.match(/requirePermission\("inventory_planning", "activate"\)/g)).toHaveLength(7);
     // Bulk setup creates disabled targets only, so it must never be activate-gated
     // nor slip into the activation surface.
     expect(routes).toContain("channel-destinations");
@@ -118,14 +118,17 @@ describe("inventory channel exposure inactive foundation", () => {
     expect(routes).toContain("publication-target-resume");
     expect(routes).toContain("publication-target-stop");
     expect(registry).toContain("registerInventoryChannelExposureRoutes(app)");
-    // The live allocator is read from the runtime-authority singleton, never asserted.
-    expect(page).toContain("<InventoryRuntimeAuthorityBadge />");
+    // Account controls use the authority supplied by the workspace read model.
+    expect(stockUpdatesControl).toContain("describeStockUpdates(target, view.runtimeAuthority, globalOn)");
     expect(page).not.toContain("Legacy runtime retained");
-    // Readiness inclusion stays a reviewed, reason-gated step; nothing publishes on demand.
-    expect(publishingTab).toContain("Include in readiness review");
-    expect(publishingTab).toContain("setReadinessInclusion");
+    // The on-switch is a direct actor-audited enable, independent of pause history.
+    expect(stockUpdatesControl).toContain('checked={target.state === "live"} disabled={!canActivate || busy || enableOutcomeUnknown}');
+    expect(stockUpdatesControl).toContain("enableDestination(enableRequest.current)");
+    expect(stockUpdatesControl).not.toContain("hasPriorLiveStop");
+    expect(stockUpdatesControl).not.toContain("setReadinessInclusion");
+    expect(routes).toMatch(/publication-target-enable"[\s\S]{0,200}?requirePermission\("inventory_planning", "activate"\)/);
     expect(page).not.toMatch(/publish now/i);
-    expect(publishingTab).not.toMatch(/publish now/i);
+    expect(stockUpdatesControl).not.toMatch(/publish now/i);
   });
 
   it("adds append-only exact-revision readiness evidence without seeding or activating targets", () => {

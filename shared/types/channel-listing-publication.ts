@@ -143,6 +143,12 @@ export const listingCatalogQuerySchema = z.object({
     .regex(/^\d+(,\d+){0,99}$/)
     .optional(),
 });
+export const listingIssueSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+  field: z.string().nullable().default(null),
+});
+export type ListingIssue = z.infer<typeof listingIssueSchema>;
 export const listingCatalogItemSchema = z.object({
   variantId: publicationIdSchema,
   productId: publicationIdSchema,
@@ -155,6 +161,8 @@ export const listingCatalogItemSchema = z.object({
   description: z.string().nullable(),
   brand: z.string().nullable(),
   images: z.array(z.string()),
+  // Optional for persisted reviews and older clients. Issues block inherited-image publication, not catalog reads.
+  imageIssues: z.array(listingIssueSchema).optional(),
   identifier: listingDraftItemSchema.shape.identifier,
   priceCents: z.number().int().nonnegative().nullable(),
   basePriceCents: z.number().int().nonnegative().nullable(),
@@ -168,12 +176,6 @@ export const listingCatalogItemSchema = z.object({
   sourceHash: z.string().length(64),
 });
 export type ListingCatalogItem = z.infer<typeof listingCatalogItemSchema>;
-export const listingIssueSchema = z.object({
-  code: z.string(),
-  message: z.string(),
-  field: z.string().nullable().default(null),
-});
-export type ListingIssue = z.infer<typeof listingIssueSchema>;
 export const listingAccountSchema = z.object({
   channelId: publicationIdSchema,
   connectionId: publicationIdSchema,

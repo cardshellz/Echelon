@@ -1,3 +1,4 @@
+import { legacyTransformationExecutionAuthority } from "../../application/transformation-execution-authority.port";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { sql } from "drizzle-orm";
@@ -22,8 +23,9 @@ import { createReplenishmentService } from "../../application/replenishment.use-
 import { createInventoryMethods } from "../../infrastructure/inventory.repository";
 import { createInventoryLotService } from "../../lots.service";
 import { PickingUseCases } from "../../../orders/picking.use-cases";
+import { installWarehouseOperationMigration } from "../../../orders/__tests__/fixtures/install-warehouse-operation-migration";
 
-vi.mock("../../../../db", () => ({ pool: {} }));
+vi.mock("../../../../db", () => ({ pool: {}, db:{} }));
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const dbDescribe = databaseUrl && disposable ? describe : describe.skip;
@@ -49,6 +51,7 @@ dbDescribe("Replenishment canonical-claim safety / legacy compatibility", () => 
       (from_location_id,to_location_id,qty_target_units,status,triggered_by,notes)
       VALUES(100,100,1,'cancelled','legacy_reason','Preserve historical provenance') RETURNING *`)).rows[0];
     await context.pool.query(readFileSync(resolve(process.cwd(), "migrations/0700_replenishment_trigger_text.sql"), "utf8"));
+    await installWarehouseOperationMigration(context.pool);
     for (const column of ["variant_qty", "reserved_qty", "picked_qty", "packed_qty", "backorder_qty"]) {
       await context.pool.query(`ALTER TABLE inventory.inventory_levels ALTER COLUMN ${column} SET DEFAULT 0`);
     }
@@ -70,7 +73,9 @@ dbDescribe("Replenishment canonical-claim safety / legacy compatibility", () => 
   it("preserves history, defaults and nullability when the migration is reapplied", async () => {
     await context.pool.query(readFileSync(resolve(process.cwd(), "migrations/0700_replenishment_trigger_text.sql"), "utf8"));
     expect((await context.pool.query("SELECT * FROM inventory.replen_tasks WHERE id=$1", [legacyTask.id])).rows)
-      .toEqual([legacyTask]);
+      .toMatchObject([legacyTask]);
+    expect((await context.pool.query("SELECT operation_key,operation_request_hash,revision,execution_moved_base_units FROM inventory.replen_tasks WHERE id=$1",[legacyTask.id])).rows[0])
+      .toEqual({operation_key:null,operation_request_hash:null,revision:0,execution_moved_base_units:null});
     expect((await context.pool.query(`SELECT data_type,character_maximum_length,is_nullable
       FROM information_schema.columns WHERE table_schema='inventory' AND table_name='replen_tasks' AND column_name='triggered_by'`)).rows)
       .toEqual([{ data_type: "text", character_maximum_length: null, is_nullable: "NO" }]);
@@ -83,9 +88,9 @@ dbDescribe("Replenishment canonical-claim safety / legacy compatibility", () => 
   it("persists a long future reason intact and reuses one task across concurrent requests and retry", async () => {
     const [destination] = await db.insert(warehouseLocations).values({ warehouseId: 1, code: "LONG-REASON", name: "Destination",
       locationType: "pick", isActive: 1, isPickable: 1 }).returning();
-    const replenishment = createReplenishmentService(db, {} as any);
+    const replenishment = createReplenishmentService(db, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     vi.spyOn(replenishment, "checkReplenNeeded").mockResolvedValue({
-      needed: true, stockout: false, sourceLocationId: 100, sourceLocationCode: "PICK",
+      needed: true, stockout: false, observedVariantQty: 0, sourceLocationId: 100, sourceLocationCode: "PICK",
       sourceVariantId: 101, sourceVariantSku: "P5", sourceVariantName: "Pack", pickVariantId: 101,
       qtySourceUnits: 1, qtyTargetUnits: 1, replenMethod: "full_case", executionMode: "queue",
       taskNotes: "Queued movement", triggerValue: 1, autoReplen: 0, evaluatedQty: 0,
@@ -206,13 +211,23 @@ dbDescribe("Replenishment canonical-claim safety / legacy compatibility", () => 
       createInventoryMethods(db),
       createInventoryLotService(db),
     );
-    const replenishment = createReplenishmentService(db, inventory, () => executionAt);
+    const replenishment = createReplenishmentService(db, inventory, () => executionAt, legacyTransformationExecutionAuthority);
 
     let task: typeof replenTasks.$inferSelect;
     if (entryPoint === "existing task") {
       [task] = await db.insert(replenTasks).values(taskInput).returning();
+      const publish=vi.spyOn(inventory,"publishInventoryChange").mockRejectedValueOnce(new Error("publication unavailable after movement"));
       await expect(replenishment.executeTask(task.id, "system:test"))
         .resolves.toEqual({ moved: 10 });
+      expect((await context.pool.query("SELECT completed_at,last_error FROM inventory.replen_followups WHERE task_id=$1",[task.id])).rows[0])
+        .toEqual({completed_at:null,last_error:"publication unavailable after movement"});
+      const committed=await context.state();
+      publish.mockRestore();
+      const restarted=createReplenishmentService(db,inventory,()=>executionAt,legacyTransformationExecutionAuthority);
+      await expect(restarted.executeTask(task.id,"system:test")).resolves.toEqual({moved:10});
+      expect(await context.state()).toEqual(committed);
+      expect((await context.pool.query("SELECT completed_at,last_error FROM inventory.replen_followups WHERE task_id=$1",[task.id])).rows[0])
+        .toEqual({completed_at:executionAt,last_error:null});
     } else {
       await context.pool.query(`INSERT INTO wms.orders(id,warehouse_id,warehouse_status,on_hold) VALUES(10000,$1,'picking',0);
       `, [warehouse.id]);
@@ -221,7 +236,7 @@ dbDescribe("Replenishment canonical-claim safety / legacy compatibility", () => 
       // Only source discovery is controlled; task insertion, case break, FIFO
       // costs and the subsequent pick all use the real application and database.
       vi.spyOn(replenishment, "checkReplenNeeded").mockResolvedValue({
-        needed: true, stockout: false, sourceLocationId: sourceLocation.id,
+        needed: true, stockout: false, observedVariantQty: 0, sourceLocationId: sourceLocation.id,
         sourceLocationCode: sourceLocation.code, sourceVariantId: sourceVariant.id,
         sourceVariantSku: sourceVariant.sku, sourceVariantName: sourceVariant.name,
         pickVariantId: pickVariant.id, qtySourceUnits: 1, qtyTargetUnits: 10,

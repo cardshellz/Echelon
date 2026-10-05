@@ -18,10 +18,7 @@ import {
   allowsDirectPackageConversion,
   type ProductInventoryStrategy,
 } from "@shared/catalog/inventory-strategy";
-import {
-  legacyTransformationExecutionAuthority,
-  type TransformationExecutionAuthorityPort,
-} from "./transformation-execution-authority.port";
+import type { TransformationExecutionAuthorityPort } from "./transformation-execution-authority.port";
 import {
   assertAuthorizedPackageConversionQuantity,
   TransformationExecutionAuthorityError,
@@ -97,28 +94,14 @@ interface BreakableVariantInfo {
  * pair of inventory transactions sharing the same batchId.
  */
 export class BreakAssemblyUseCases {
-  private onChangeCallback: ((variantId: number, trigger: string) => void) | null = null;
 
   constructor(
     private db: any,
     private inventoryUseCases: InventoryUseCases,
     private readonly clock: () => Date = () => new Date(),
-    private readonly transformationAuthority: TransformationExecutionAuthorityPort = legacyTransformationExecutionAuthority,
-  ) { }
-
-  /** Register a callback to fire after break/assembly changes inventory */
-  onInventoryChange(cb: (variantId: number, trigger: string) => void): void {
-    this.onChangeCallback = cb;
-  }
-
-  private notifyChange(variantId: number, trigger: string): void {
-    if (this.onChangeCallback) {
-      try {
-        this.onChangeCallback(variantId, trigger);
-      } catch (err: any) {
-        console.warn(`[BreakAssembly] onChange callback error: ${err.message}`);
-      }
-    }
+    private readonly transformationAuthority: TransformationExecutionAuthorityPort,
+  ) {
+    if (!transformationAuthority) throw new Error("Break/assembly requires an explicit runtime transformation authority.");
   }
 
   // --------------------------------------------------------------------------
@@ -835,7 +818,7 @@ const packageConversionResultSchema = z.object({
 export function createBreakAssemblyService(
   db: any,
   inventoryUseCases: any,
-  transformationAuthority: TransformationExecutionAuthorityPort = legacyTransformationExecutionAuthority,
+  transformationAuthority: TransformationExecutionAuthorityPort,
 ) {
   return new BreakAssemblyUseCases(db, inventoryUseCases, () => new Date(), transformationAuthority);
 }

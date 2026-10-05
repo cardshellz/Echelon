@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { legacyTransformationExecutionAuthority } from "../../application/transformation-execution-authority.port";
 import { createQuantityLedgerTestContext, prepareQuantityLotCreationMetadata, type QuantityLedgerTestContext } from "../fixtures/quantity-ledger-database";
 import { PostgresInventoryQuantityLedger } from "../../infrastructure/quantity-ledger.repository";
 import type { QuantityCommand, QuantityMovement } from "../../domain/quantity-ledger";
@@ -587,8 +588,10 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
 
   function packageOwner() {
     const db = drizzle(pool, { schema: inventorySchema });
+    // Isolate the quantity journal with an explicit legacy authority fake.
+    // Real runtime/model authorization is covered by its own integration suite.
     return new BreakAssemblyUseCases(db, new InventoryUseCases(db as InventoryUseCaseDatabase, createInventoryMethods(db as any), new InventoryLotService(db),
-      null, () => new Date(NOW)), () => new Date(NOW));
+      null, () => new Date(NOW)), () => new Date(NOW), legacyTransformationExecutionAuthority);
   }
 
   it("posts manual break as one cost-preserving command and replays before physical checks", async () => {

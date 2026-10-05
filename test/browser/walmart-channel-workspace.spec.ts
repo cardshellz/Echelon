@@ -270,6 +270,78 @@ test("catalog content is displayed as actual inherited values and saving untouch
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
+test("an unavailable catalog photo preserves product identity and shows an item-scoped issue", async ({ page }) => {
+  const state = await setup(page);
+  seedTwoDrafts(state);
+  const issue = "An uploaded catalog photo is not available to the marketplace yet. The public image address needs to be configured.";
+  state.publication.catalogItems[0].imageIssues = [{ code: "CATALOG_PUBLIC_URL_REQUIRED", message: issue, field: "images" }];
+  await page.reload();
+  const row = page.getByRole("row").filter({ has: page.getByRole("checkbox", { name: "Select CARD-1", exact: true }) });
+  await expect(row.getByText("Clear card sleeves", { exact: true })).toBeVisible();
+  await expect(row.getByText("$5.49", { exact: true })).toBeVisible();
+  await expect(row.getByText("A catalog photo needs attention. Open details to review it.", { exact: true })).toBeVisible();
+  await expect(page.getByText("SKU unavailable", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Standard toploaders", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Edit CARD-1", exact: true }).click();
+  await expect(page.getByLabel("Walmart title", { exact: true })).toHaveValue("Trading card protection");
+  await page.getByRole("button", { name: "Jump to content", exact: true }).click();
+  const issues = page.getByRole("list", { name: "Catalog photo issues", exact: true });
+  await expect(issues).toHaveText(issue);
+  await page.getByLabel("Image URLs", { exact: true }).fill("https://example.com/custom.jpg");
+  await expect(issues).toHaveCount(0);
+  await page.getByRole("button", { name: "Update draft item", exact: true }).click();
+  await expect(row.getByText("A catalog photo needs attention. Open details to review it.", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect(page.getByText("Draft saved. No listing has been submitted.", { exact: true })).toBeVisible();
+  expect(state.publication.draft.items[0].images).toEqual(["https://example.com/custom.jpg"]);
+  expect(state.publication.operations).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("the current uploaded fourth photo is inherited alongside the three external photos", async ({ page }) => {
+  const state = await setup(page);
+  seedTwoDrafts(state);
+  const urls = ["https://example.com/primary.jpg", "https://example.com/second.jpg", "https://example.com/third.jpg",
+    `https://catalog.example.com/api/catalog/images/42/${"ab".repeat(32)}.jpg`];
+  state.publication.catalogItems[0].images = urls;
+  await page.reload();
+  await page.getByRole("button", { name: "Edit CARD-1", exact: true }).click();
+  await expect(page.getByLabel("Image URLs", { exact: true })).toHaveValue(urls.join("\n"));
+  await expect(page.getByRole("list", { name: "Catalog photo issues", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Update draft item", exact: true }).click();
+  expect(state.publication.draft.items[0].images).toBeNull();
+  expect(state.publication.operations).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("returning to an open editor refreshes catalog images without replacing custom values", async ({ page }) => {
+  const state = await setup(page);
+  await selectFirstProduct(page);
+  await page.getByRole("button", { name: "Edit CARD-1", exact: true }).click();
+  const images = page.getByLabel("Image URLs", { exact: true });
+  await expect(images).toHaveValue("https://example.com/product.png");
+  await page.getByLabel("Walmart title", { exact: true }).fill("My edited title");
+  const updated = ["https://example.com/new.jpg", "https://example.com/product.png"];
+  state.publication.catalogItems[0].images = updated;
+  // Same event emitted when staff return from editing the catalog in another tab.
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange", { bubbles: true })));
+  await expect(images).toHaveValue(updated.join("\n"));
+  await expect(page.getByLabel("Walmart title", { exact: true })).toHaveValue("My edited title");
+  await images.fill("https://example.com/custom.jpg");
+  state.publication.catalogItems[0].images = [updated[1]];
+  const readsBefore = state.reads.filter(path => path.includes("/catalog?variantIds=")).length;
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange", { bubbles: true })));
+  await expect.poll(() => state.reads.filter(path => path.includes("/catalog?variantIds=")).length).toBeGreaterThan(readsBefore);
+  await expect(images).toHaveValue("https://example.com/custom.jpg");
+  await page.getByRole("button", { name: "Use catalog images", exact: true }).click();
+  await expect(images).toHaveValue(updated[1]);
+  await page.getByRole("button", { name: "Update draft item", exact: true }).click();
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect(page.getByText("Draft saved. No listing has been submitted.", { exact: true })).toBeVisible();
+  expect(state.publication.draft.items[0]).toMatchObject({ title: "My edited title", images: null });
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
 test("content overrides and reset-to-catalog are explicit without changing other item fields", async ({ page }) => {
   const state = await setup(page);
   await selectFirstProduct(page);

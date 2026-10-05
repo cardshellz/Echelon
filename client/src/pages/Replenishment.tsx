@@ -1,3 +1,4 @@
+import { sendPickingCommand, PickingCommandRejectedError } from "@/lib/picking-command";
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
@@ -20,6 +21,7 @@ import {
   DialogHeader,
   DialogTitle,
   DialogDescription,
+  DialogFooter,
 } from "@/components/ui/dialog";
 import {
   Select,
@@ -151,6 +153,7 @@ interface ReplenRule {
 
 interface ReplenTask {
   id: number;
+  revision: number;
   replenRuleId: number | null;
   fromLocationId: number;
   toLocationId: number;
@@ -333,6 +336,8 @@ export default function Replenishment() {
   const [showLocCsvDialog, setShowLocCsvDialog] = useState(false);
   const [editingLocConfig, setEditingLocConfig] = useState<LocationReplenConfig | null>(null);
   const [showExceptionDialog, setShowExceptionDialog] = useState(false);
+  const [markDoneTaskId, setMarkDoneTaskId] = useState<number | null>(null);
+  const [transferReceiptId, setTransferReceiptId] = useState("");
   const [exceptionTaskId, setExceptionTaskId] = useState<number | null>(null);
   const [exceptionForm, setExceptionForm] = useState({ reason: "", notes: "" });
   const [locConfigSearch, setLocConfigSearch] = useState("");
@@ -769,47 +774,42 @@ export default function Replenishment() {
         qtySource = parseInt(data.qtySourceUnits) || 1;
       } else {
         pickVariantId = sourceVariantId;
+        qtySource = qtyTarget;
       }
 
-      const res = await fetch("/api/replen/tasks", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
+      return sendPickingCommand("replenishment_create", 0, {
           fromLocationId: parseInt(data.fromLocationId),
           toLocationId: parseInt(data.toLocationId),
           productId: data.productId ? parseInt(data.productId) : null,
-          sourceVariantId: sourceVariantId,
-          pickVariantId: pickVariantId,
+          sourceVariantId,
+          pickVariantId,
           qtySourceUnits: qtySource,
-          qtyTargetUnits: qtyTarget,
           priority: parseInt(data.priority),
           triggeredBy: "manual",
           notes: data.notes || null,
           replenMethod: isCaseBreak ? "case_break" : "full_case",
-          autoExecute: isCaseBreak, // Case breaks execute immediately, transfers go to queue
-        }),
+        }, async ({ commandId, payload }) => {
+      const res = await fetch("/api/replen/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ ...payload, commandId }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: "Failed to create task" }));
-        throw new Error(err.error || "Failed to create task");
+        const message = err.error || "Failed to create task";
+        throw res.status < 500 && res.status !== 409 ? new PickingCommandRejectedError(message) : new Error(message);
       }
       return res.json();
+      });
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });
-      if (data.autoExecuteError) {
-        toast({ title: "Task created but execution failed", description: data.autoExecuteError, variant: "destructive", duration: 8000 });
-        // Don't close the dialog so the user sees something went wrong with the stock
-      } else {
-        setShowTaskDialog(false);
-        resetTaskForm();
-        if (data.autoExecuted) {
-          toast({ title: "Case break completed", description: `Moved ${data.moved} units` });
-        } else {
-          toast({ title: "Replen task created" });
-        }
-      }
+      setShowTaskDialog(false);
+      resetTaskForm();
+      if (data.status === "completed") toast({ title: "Replenishment completed", description: `Task #${data.id} moved ${data.executionMovedBaseUnits} base units` });
+      else toast({ title: data.executionMode === "inline" ? "Task recorded; execution pending" : "Replen task created",
+        description: `Task #${data.id}`, duration: 8000 });
     },
     onError: (err: Error) => {
       console.error("Mutation Error:", err);
@@ -819,14 +819,21 @@ export default function Replenishment() {
 
   const reportExceptionMutation = useMutation({
     mutationFn: async ({ taskId, reason, notes }: { taskId: number; reason: string; notes: string }) => {
+      return sendPickingCommand("replenishment_exception", taskId, { reason, notes: notes || null,
+        expectedStatus: tasks.find(task => task.id === taskId)?.status,
+        expectedRevision: tasks.find(task => task.id === taskId)?.revision }, async ({ commandId, payload }) => {
       const res = await fetch(`/api/replen/tasks/${taskId}/exception`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ reason, notes: notes || null }),
+        body: JSON.stringify({ ...payload, commandId }),
       });
-      if (!res.ok) throw new Error("Failed to report exception");
+      if (!res.ok) {
+        const error = await res.json().catch(() => ({ error: "Failed to report exception" }));
+        throw res.status < 500 && error.code !== "FINANCIAL_COMMAND_IN_PROGRESS" ? new PickingCommandRejectedError(error.error) : new Error(error.error);
+      }
       return res.json();
+      });
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });
@@ -846,17 +853,22 @@ export default function Replenishment() {
 
   const updateTaskMutation = useMutation({
     mutationFn: async ({ id, data }: { id: number; data: Partial<ReplenTask> }) => {
+      return sendPickingCommand("replenishment_update", id, { ...data,
+        expectedStatus: tasks.find(task => task.id === id)?.status,
+        expectedRevision: tasks.find(task => task.id === id)?.revision }, async ({ commandId, payload }) => {
       const res = await fetch(`/api/replen/tasks/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify(data),
+        body: JSON.stringify({ ...payload, commandId }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: "Failed to update task" }));
-        throw new Error(err.error || "Failed to update task");
+        const message = err.error || "Failed to update task";
+        throw res.status < 500 && err.code !== "FINANCIAL_COMMAND_IN_PROGRESS" ? new PickingCommandRejectedError(message) : new Error(message);
       }
       return res.json();
+      });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });
@@ -891,12 +903,12 @@ export default function Replenishment() {
   });
 
   const markDoneMutation = useMutation({
-    mutationFn: async (id: number) => {
+    mutationFn: async ({ id, receiptId }: { id: number; receiptId: number }) => {
       const res = await fetch(`/api/replen/tasks/${id}/mark-done`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ notes: "Manually marked done — inventory already moved" }),
+        body: JSON.stringify({ transferReceiptId: receiptId }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: "Failed to mark done" }));
@@ -908,7 +920,9 @@ export default function Replenishment() {
       queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });
       queryClient.invalidateQueries({ queryKey: ["/api/operations/action-queue"] });
       queryClient.invalidateQueries({ queryKey: ["/api/operations/location-health"] });
-      toast({ title: "Task marked done", description: "Inventory was already moved — task closed" });
+      setMarkDoneTaskId(null);
+      setTransferReceiptId("");
+      toast({ title: "Task completed", description: "Linked transfer supplies the task quantity." });
     },
     onError: (err: Error) => {
       toast({ title: "Mark done failed", description: err.message, variant: "destructive" });
@@ -1763,15 +1777,15 @@ export default function Replenishment() {
                                     variant="outline"
                                     className="min-h-[36px] text-xs text-amber-700 border-amber-300 hover:bg-amber-50 dark:text-amber-400 dark:border-amber-700 dark:hover:bg-amber-950/30"
                                     disabled={markDoneMutation.isPending}
-                                    onClick={() => markDoneMutation.mutate(task.id)}
-                                    title="Mark as done without moving inventory (already moved manually)"
+                                    onClick={() => { setMarkDoneTaskId(task.id); setTransferReceiptId(""); }}
+                                    title="Link the recorded transfer that performed this task"
                                   >
                                     {markDoneMutation.isPending ? (
                                       <Loader2 className="w-3 h-3 animate-spin sm:mr-1" />
                                     ) : (
                                       <CheckCircle className="w-3 h-3 sm:mr-1" />
                                     )}
-                                    <span className="hidden sm:inline">Mark done</span>
+                                    <span className="hidden sm:inline">Link transfer</span>
                                   </Button>
                                 ) : null}
                                 {hasActiveDemand && !canExecuteTask && !noSourceReviewTask && (
@@ -3484,6 +3498,16 @@ export default function Replenishment() {
       </Dialog>
 
       {/* Exception Dialog */}
+      <Dialog open={markDoneTaskId !== null} onOpenChange={open => { if (!open) setMarkDoneTaskId(null); }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Link completed transfer</DialogTitle>
+            <DialogDescription>Enter the transfer receipt that moved this task's exact SKU from its source to its destination.</DialogDescription></DialogHeader>
+          <Label htmlFor="replen-transfer-receipt">Transfer receipt ID</Label>
+          <Input id="replen-transfer-receipt" type="number" min={1} value={transferReceiptId} onChange={event => setTransferReceiptId(event.target.value)} />
+          <DialogFooter><Button disabled={markDoneMutation.isPending || !Number.isSafeInteger(Number(transferReceiptId)) || Number(transferReceiptId) <= 0}
+            onClick={() => { if (markDoneTaskId !== null) markDoneMutation.mutate({ id: markDoneTaskId, receiptId: Number(transferReceiptId) }); }}>Link transfer</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={showExceptionDialog} onOpenChange={setShowExceptionDialog}>
         <DialogContent className="max-w-sm p-4">
           <DialogHeader>

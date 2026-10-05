@@ -73,7 +73,7 @@ describe("PickingUseCases._deductInventory :: line with no assigned bin", () => 
     storage.getProductVariantBySku.mockResolvedValue(undefined as never);
     const item = { ...unassignedLine(1), requiresShipping: 1 };
     await expect(deduct(service, item)).rejects.toMatchObject({
-      context: { reason: "picker_inventory_identity_missing" },
+      context: { reason: "canonical_picker_variant_missing" },
     });
     expect(await deduct(service, { ...item, catalogProductId: 10, inventoryTracking: false }))
       .toMatchObject({ success: true, noVariant: true });

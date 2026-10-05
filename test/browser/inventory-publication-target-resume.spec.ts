@@ -75,32 +75,11 @@ async function setup(page: Page) {
       && path === "/api/inventory-planning/admin/channel-exposure/preview") {
       return route.fulfill({ json: exposurePreview(state.targetState, state.targetRevision) });
     }
-    if (request.method() === "POST"
-      && path === "/api/inventory-planning/admin/channel-exposure/publication-target-resume-review") {
-      const body = request.postDataJSON() as Record<string, unknown>;
-      state.writes.push({ method: request.method(), path, body });
-      return route.fulfill({ status: 201, json: readyReview() });
-    }
-    if (request.method() === "POST"
-      && path === "/api/inventory-planning/admin/channel-exposure/publication-target-resume") {
-      const body = request.postDataJSON() as Record<string, unknown>;
-      state.writes.push({ method: request.method(), path, body });
-      state.targetState = "live";
-      state.targetRevision = "4";
-      return route.fulfill({ json: {
-        publicationTargetId: 5,
-        revision: "4",
-        state: "live",
-        activationRunId: "44",
-        authorityRevision: "9",
-        resumeReviewId: "71",
-        evidenceHash: HASH_B,
-        publicationRows: 1,
-        alreadyApplied: false,
-        runtimeAuthorityChanged: false,
-        providerWriteAttempted: false,
-        outboxEnqueued: true,
-      } });
+    if (request.method() === "PUT" && path === "/api/inventory-planning/admin/channel-exposure/publication-target-enable") {
+      state.writes.push({ method: request.method(), path, body: request.postDataJSON() });
+      state.targetState = "live"; state.targetRevision = "4";
+      return route.fulfill({ json: { publicationTargetId: 5, revision: "4", state: "live", publicationRows: 1,
+        initialDefinitionsApplied: 0, alreadyApplied: false, runtimeAuthorityChanged: false, providerWriteAttempted: false } });
     }
     state.unexpected.push(`${request.method()} ${path}`);
     return route.fulfill({ status: 500, json: { error: { message: "Unexpected request" } } });
@@ -116,53 +95,16 @@ async function setup(page: Page) {
   return state;
 }
 
-const REASON = "Restore after exact provider readback and incident resolution";
-const REASON_LABEL = "Reason (required for this publishing command)";
-
-test("reviews immutable readiness evidence before resuming one exact destination", async ({ page }) => {
+test("preview account switches on through the inventory page route", async ({ page }) => {
   const state = await setup(page);
-  await page.getByRole("tab", { name: "Publishing", exact: true }).click();
-  await expect(page.getByText("Calculating only", { exact: true }).first()).toBeVisible();
-
-  // Routine tabs never ask for a reason; the sensitive publishing command does, at the moment of the action.
-  await page.getByRole("button", { name: "Check readiness to resume", exact: true }).click();
-  const reviewDialog = page.getByRole("alertdialog");
-  await reviewDialog.getByLabel(REASON_LABEL).fill(REASON);
-  await reviewDialog.getByRole("button", { name: "Run readiness check", exact: true }).click();
-
-  await expect(page.getByText("Readiness check #71", { exact: false })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Resume publishing", exact: true })).toBeEnabled();
+  const toggle = page.getByRole("switch", { name: /^Automatic stock updates for US store,/ });
+  await expect(toggle).not.toBeChecked();
+  await toggle.click(); await expect(toggle).toBeChecked();
   expect(state.writes).toHaveLength(1);
-  expect(state.writes[0]).toMatchObject({
-    method: "POST",
-    path: "/api/inventory-planning/admin/channel-exposure/publication-target-resume-review",
-    body: {
-      publicationTargetId: 5,
-      expectedRevision: "3",
-      reason: REASON,
-    },
-  });
-
-  await page.getByRole("button", { name: "Resume publishing", exact: true }).click();
-  const resumeDialog = page.getByRole("alertdialog");
-  await resumeDialog.getByLabel(REASON_LABEL).fill(REASON);
-  await resumeDialog.getByRole("button", { name: "Resume publishing", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Stop publishing", exact: true })).toBeVisible();
-  expect(state.writes).toHaveLength(2);
-  expect(state.writes[1]).toMatchObject({
-    method: "POST",
-    path: "/api/inventory-planning/admin/channel-exposure/publication-target-resume",
-    body: {
-      publicationTargetId: 5,
-      expectedRevision: "3",
-      resumeReviewId: "71",
-      expectedEvidenceHash: HASH_B,
-      reason: REASON,
-    },
-  });
-  expect(state.writes.every((write) => write.path.includes("channel-exposure"))).toBe(true);
-  expect(state.unexpected).toEqual([]);
-  expect(state.errors).toEqual([]);
+  expect(state.writes[0]).toMatchObject({ method: "PUT", path: "/api/inventory-planning/admin/channel-exposure/publication-target-enable",
+    body: { publicationTargetId: 5, expectedRevision: "3" } });
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
 function adminView(state: "preview" | "live", revision: string) {
@@ -196,6 +138,7 @@ function adminView(state: "preview" | "live", revision: string) {
     dropshipDestinationChannelId: null,
     dropshipStores: [],
     publicationTargets: [{
+      hasPriorLiveStop: true,
       id: 5,
       destinationKind: "channel_connection",
       channelId: 3,
@@ -270,72 +213,6 @@ function exposurePreview(state: "preview" | "live", revision: string) {
     runtimeAuthorityChanged: false,
     providerWriteAttempted: false,
     outboxEnqueued: false,
-  };
-}
-
-function readyReview() {
-  return {
-    resumeReviewId: "71",
-    publicationTargetId: 5,
-    publicationTargetRevision: "3",
-    authorityRevision: "9",
-    activationRunId: "44",
-    state: "ready",
-    configurationHash: HASH_A,
-    readinessHash: HASH_A,
-    evidenceHash: HASH_B,
-    requestedBy: "operator-1",
-    reason: "Restore after exact provider readback and incident resolution",
-    capturedAt: NOW,
-    identityCensus: [{
-      productVariantId: 101,
-      productId: 10,
-      externalInventoryItemId: "inventory-item-101",
-      evidenceSources: ["active_mapping", "outbox", "readback"],
-      coveredByCurrentMapping: true,
-    }],
-    products: [{
-      productId: 10,
-      snapshotFingerprint: HASH_A,
-      target: {
-        publicationTargetId: 5,
-        publicationTargetRevision: "3",
-        destinationKind: "channel_connection",
-        channelId: 3,
-        channelName: "Shopify US",
-        channelProvider: "shopify",
-        channelConnectionId: 33,
-        dropshipStoreConnectionId: null,
-        providerScopeType: "location",
-        externalScopeId: "gid://shopify/Location/1",
-        publicationAuthority: "echelon",
-        publicationTargetState: "live",
-        hold: null,
-        sourceBinding: {
-          bindingId: 8,
-          version: 1,
-          definitionHash: HASH_A,
-          fulfillmentNodeIds: [7],
-          warehouseIds: [1],
-        },
-        selectedPolicies: [{ scopeKey: "channel:3", policyId: 9, version: 1, definitionHash: HASH_A }],
-        rows: [runtimeRow()],
-        blockers: [],
-        publishable: true,
-      },
-      readbacks: [{
-        productVariantId: 101,
-        externalInventoryItemId: "inventory-item-101",
-        observedQuantity: "4",
-        observedAt: NOW,
-        evidenceHash: HASH_A,
-      }],
-    }],
-    blockers: [],
-    runtimeAuthorityChanged: false,
-    providerWriteAttempted: false,
-    outboxEnqueued: false,
-    alreadyApplied: false,
   };
 }
 

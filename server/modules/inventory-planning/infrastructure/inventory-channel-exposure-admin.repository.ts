@@ -164,8 +164,14 @@ implements InventoryChannelExposureAdminStore {
         AND external_account_verified_at IS NOT NULL
     `));
     const walmartRows = channelRows.some(row => row.provider === "walmart")
-      ? rows(await this.database.execute(sql`SELECT connection_id,ship_node_id FROM channels.walmart_connections`)) : [];
-    const walmartLocations = new Map(walmartRows.map(row => [Number(row.connection_id), String(row.ship_node_id)]));
+      ? rows(await this.database.execute(sql`
+        SELECT connection_id, partner_id, partner_name, ship_node_id
+        FROM channels.walmart_connections
+      `)) : [];
+    const walmartAccounts = new Map(walmartRows.map(row => [Number(row.connection_id), {
+      label: nullableText(row.partner_name) ?? nullableText(row.partner_id),
+      locationId: nullableText(row.ship_node_id),
+    }]));
     const dropshipStoreRows = rows(await this.database.execute(sql`
       SELECT connection.id, connection.vendor_id, vendor.business_name AS vendor_name,
              connection.platform, connection.status,
@@ -176,12 +182,19 @@ implements InventoryChannelExposureAdminStore {
       JOIN dropship.dropship_vendors AS vendor ON vendor.id = connection.vendor_id
       ORDER BY vendor.business_name, connection.platform, connection.id
     `));
+    // Keep this evidence predicate aligned with assertPreviouslyStopped in the
+    // resume repository. Preview inclusion alone is not a prior live stop.
     const targetRows = rows(await this.database.execute(sql`
       SELECT id, destination_kind, channel_id, channel_connection_id,
              dropship_store_connection_id, fulfillment_node_id,
              provider_scope_type, external_scope_id, publication_authority, state, revision,
-             hold_reason, held_at, held_by
-      FROM inventory.inventory_publication_targets
+             hold_reason, held_at, held_by,
+             EXISTS (
+               SELECT 1 FROM public.audit_events AS audit
+               WHERE audit.action = 'inventory_availability.publication_target.stopped'
+                 AND audit.target = 'inventory.inventory_publication_target:' || target.id::text
+             ) AS has_prior_live_stop
+      FROM inventory.inventory_publication_targets AS target
       ORDER BY channel_id, destination_kind, channel_connection_id,
                dropship_store_connection_id, external_scope_id, id
     `));
@@ -303,11 +316,13 @@ implements InventoryChannelExposureAdminStore {
           status: String(row.status),
           connections: (connectionsByChannel.get(channelId) ?? []).map((connection) => ({
             id: positiveInteger(connection.id, "connection.id"),
-            externalAccountLabel: nullableText(connection.shop_domain),
+            externalAccountLabel: String(row.provider) === "walmart"
+              ? walmartAccounts.get(Number(connection.id))?.label ?? null
+              : nullableText(connection.shop_domain),
             shopifyLocationId: String(row.provider) === "shopify"
               ? nullableText(connection.shopify_location_id)
               : null,
-            providerLocationId: walmartLocations.get(Number(connection.id)) ?? null,
+            providerLocationId: walmartAccounts.get(Number(connection.id))?.locationId ?? null,
             providerAccount: String(row.provider) === "ebay"
               ? ebayAccountsByChannelEnvironment.get(`${channelId}:${String(connection.environment)}`)
                 ?? null
@@ -346,6 +361,7 @@ implements InventoryChannelExposureAdminStore {
         state: String(row.state),
         revision: String(row.revision),
         hold: publicationHold(row),
+        hasPriorLiveStop: row.has_prior_live_stop,
       })),
       fulfillmentNodes: nodeRows.map((row) => ({
         id: positiveInteger(row.id, "node.id"),
