@@ -12,6 +12,7 @@
 
 import { eq, and, sql } from "drizzle-orm";
 import { CountryCodeValidationError, requireCountryCode } from "@shared/country-code";
+import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 // Preserve existing callers while sharing the pure normalizer with returns.
 export { normalizeCountryToIso2 } from "@shared/country-code";
 import { omsOrderEvents, outboundShipments, wmsOrders, outboundShipmentItems, wmsOrderItems } from "@shared/schema";
@@ -2184,6 +2185,21 @@ export function createShipStationService(
     );
   }
 
+  /** A customer line with no catalog identity and no variant: nothing to dispatch. */
+  function isUnmappedLineWithoutStock(item: any): boolean {
+    return item.shipment_purpose !== "replacement"
+      && item.shipment_item_purpose === "customer_fulfillment"
+      && item.product_variant_id == null
+      // The order line must exist: a missing row reads as all-null, not unmapped.
+      && item.order_item_id != null
+      && item.order_item_row_id != null
+      && isUnmappedOrderLine({
+        sku: item.order_item_sku ?? null,
+        catalogProductId: item.order_item_catalog_product_id ?? null,
+        productId: item.order_item_product_id ?? null,
+      });
+  }
+
   async function loadValidatedInventoryShipmentItems(
     shipmentId: number,
   ): Promise<any[]> {
@@ -2215,6 +2231,10 @@ export function createShipStationService(
               || ':shipment-item:' || osi.id::text
         ) AS historical_customer_inventory_deferred,
         target_order.warehouse_id,
+        line_item.id AS order_item_row_id,
+        line_item.sku AS order_item_sku,
+        line_item.catalog_product_id AS order_item_catalog_product_id,
+        line_item.product_id AS order_item_product_id,
         -- Pick-derived source bin: the shipment item's own bin, or the pick
         -- ledger backstop for legacy planned rows created before source-bin
         -- backfill existed.
@@ -2267,6 +2287,8 @@ export function createShipStationService(
         ON target_shipment.id = osi.shipment_id
       JOIN wms.orders target_order
         ON target_order.id = target_shipment.order_id
+      LEFT JOIN wms.order_items line_item
+        ON line_item.id = osi.order_item_id
       WHERE osi.shipment_id = ${shipmentId}
         AND osi.qty > 0
         -- An omission correction points back to inventory already consumed by
@@ -2274,7 +2296,24 @@ export function createShipStationService(
         -- evidence only and must never post a second inventory movement.
         AND osi.shipment_item_purpose <> 'omission_correction'
     `);
-    const rows = (itemsResult.rows as any[]).map((item) => {
+    const stockRows: any[] = [];
+    for (const item of itemsResult.rows as any[]) {
+      if (!isUnmappedLineWithoutStock(item)) {
+        stockRows.push(item);
+        continue;
+      }
+      // Since #1657 a line with no catalog identity is confirmed at pick, never
+      // claimed or picked from stock, so shipping it moves no stock either. Its
+      // variant-less row used to send the whole package to review for good, so
+      // a package like #63721's could never post its mapped lines. Judged now,
+      // not at pick: a line mapped since then still fails closed below.
+      console.log(JSON.stringify({
+        level: "info", component: "shipstation", action: "ship_unmapped_line", outcome: "no_stock_movement",
+        shipmentId, shipmentItemId: Number(item.id), orderItemId: Number(item.order_item_id),
+        sku: item.order_item_sku ?? null, qty: Number(item.qty),
+      }));
+    }
+    const rows = stockRows.map((item) => {
       const pickLoc = item.pick_location_id ?? null;
       const reservedLoc = item.reserved_location_id ?? null;
       const fromLoc = pickLoc ?? reservedLoc;

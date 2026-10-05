@@ -12,8 +12,28 @@ import { persistAuditEvent } from "../../infrastructure/auditLogger";
 import { persistWmsOrderItemPickProgress } from "./order-item-commands";
 import { IntegrityError } from "@shared/errors";
 import type { PickingCommandTransaction } from "./picking-command.repository";
+import { UNMAPPED_ORDER_LINE_SKU } from "@shared/unmapped-order-line";
 
 type Transaction = PickingCommandTransaction;
+
+/**
+ * A "missing_variant" allocation exception on a line with no catalog identity
+ * (isUnmappedOrderLine) records that line's expected state since #1657: it is
+ * confirmed, never picked from stock, and ORDER_LINE_UNMAPPED keeps it visible
+ * for mapping. A picker who tries to give such a line a bin raises one; it must
+ * not hold the order back from shipping (#63721). A real SKU without a variant
+ * still blocks. Alias `blocking` = wms.allocation_exceptions.
+ */
+export const UNMAPPED_LINE_MISSING_VARIANT = sql`(
+  blocking.exception_type = 'missing_variant'
+  AND EXISTS (
+    SELECT 1 FROM wms.order_items unmapped
+    WHERE unmapped.id = blocking.order_item_id
+      AND unmapped.catalog_product_id IS NULL
+      AND unmapped.product_id IS NULL
+      AND upper(btrim(COALESCE(unmapped.sku, ''))) IN ('', ${UNMAPPED_ORDER_LINE_SKU})
+  )
+)`;
 
 function progressLine(item: OrderItem): WmsPickingProgressLine {
   return wmsPickingProgressLineSchema.parse({
@@ -58,9 +78,11 @@ async function readDependencyBlockers(
       `Picking command ${command.command_key} has pending operational follow-up`,
     );
   const exceptions =
-    await tx.execute(sql`SELECT id,sku,exception_type,status,review_reason FROM wms.allocation_exceptions
-    WHERE order_id=${orderId} AND status NOT IN ('resolved','resolved_inline','cancelled')
-      AND (status='blocked' OR COALESCE(metadata->>'shipmentBlocking','false')='true') ORDER BY created_at DESC`);
+    await tx.execute(sql`SELECT blocking.id,blocking.sku,blocking.exception_type,blocking.status,blocking.review_reason
+    FROM wms.allocation_exceptions blocking
+    WHERE blocking.order_id=${orderId} AND blocking.status NOT IN ('resolved','resolved_inline','cancelled')
+      AND (blocking.status='blocked' OR COALESCE(blocking.metadata->>'shipmentBlocking','false')='true')
+      AND NOT ${UNMAPPED_LINE_MISSING_VARIANT} ORDER BY blocking.created_at DESC`);
   for (const row of exceptions.rows)
     blockers.push(
       `${row.sku || "item"} has ${row.exception_type || "exception"} #${row.id}: ${row.review_reason || row.status}`,
