@@ -11,8 +11,7 @@ import {
 import { resolveChannelListingPrice } from "./channel-pricing-resolver";
 import { persistAuditEvent } from "../../infrastructure/auditLogger";
 import type { CatalogPublicImageUrl } from "../catalog/catalog-public-image";
-import { readCatalogPublicationImages, resolveCatalogPublicationImage } from "../catalog/catalog-publication-images.reader";
-import { ProductAssetError } from "../catalog/product-asset-errors";
+import { readCatalogPublicationImages, resolveCatalogPublicationImages } from "../catalog/catalog-publication-images.reader";
 import {
   ListingPublicationError,
   listingHash,
@@ -94,6 +93,20 @@ export class ChannelListingCatalogRepository {
       const items: ListingCatalogItem[] = [];
       const database = drizzle(client, { schema });
       for (const row of rows) {
+        const publicationImages = resolveCatalogPublicationImages(
+          images
+            .filter(image => image.productId === row.product_id
+              && (image.productVariantId === null || image.productVariantId === row.variant_id)
+              && (overridesByAsset.get(image.id)?.is_included ?? 1) === 1)
+            .sort((a, b) => (overridesByAsset.get(a.id)?.position_override ?? a.position)
+              - (overridesByAsset.get(b.id)?.position_override ?? b.position) || a.id - b.id)
+            .map(image => ({ ...image, url: overridesByAsset.get(image.id)?.url_override ?? image.url })),
+          this.publicImageUrl,
+        );
+        if (publicationImages.issues.length) {
+          console.warn(JSON.stringify({ event: "channel_listing.catalog_image_unavailable", channelId,
+            variantId: row.variant_id, images: publicationImages.issues.map(({ assetId, code }) => ({ assetId, code })) }));
+        }
         const resolved = await resolveChannelListingPrice(database, {
           channelId,
           productId: row.product_id,
@@ -124,15 +137,11 @@ export class ChannelListingCatalogRepository {
           title: row.title,
           description: row.description,
           brand: row.brand,
-          images: images
-            .filter(image => image.productId === row.product_id
-              && (image.productVariantId === null || image.productVariantId === row.variant_id)
-              && (overridesByAsset.get(image.id)?.is_included ?? 1) === 1)
-            .sort((a, b) => (overridesByAsset.get(a.id)?.position_override ?? a.position)
-              - (overridesByAsset.get(b.id)?.position_override ?? b.position) || a.id - b.id)
-            .map(image => overridesByAsset.get(image.id)?.url_override
-              ?? resolveCatalogPublicationImage(image, this.publicImageUrl))
-            .filter((url): url is string => url !== null),
+          images: publicationImages.images,
+          // Omit empty issues to preserve hashes of existing healthy catalog snapshots.
+          ...(publicationImages.issues.length ? { imageIssues: publicationImages.issues.map(issue => ({
+            code: issue.code, message: issue.message, field: "images",
+          })) } : {}),
           identifier: identifier
             ? {
                 type:
@@ -173,9 +182,6 @@ export class ChannelListingCatalogRepository {
       };
     } catch (error) {
       await client.query("ROLLBACK");
-      if (error instanceof ProductAssetError) {
-        throw new ListingPublicationError(error.code, error.message, error.status);
-      }
       throw error;
     } finally {
       client.release();

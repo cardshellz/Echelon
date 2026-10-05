@@ -42,11 +42,13 @@ Prices use safe integer cents with integer half-up markup rounding. Explicit cha
 ### Uploaded catalog photos
 
 The shared listing catalog resolves uploaded JPEG, PNG, WebP and GIF files to
-`/api/catalog/images/<asset-id>/<sha256-of-file>` URLs, alongside existing external
+`/api/catalog/images/<asset-id>/<sha256-of-file>.<extension>` URLs, alongside existing external
 image URLs. The exact image URL can be fetched without a staff session; product
 records, asset metadata, upload, download-by-ID and editing keep their existing
 authentication. Only the raster file is returned. No database migration or
-re-upload is needed for existing stored photos.
+re-upload is needed for existing stored photos. The extension matches the stored
+image's MIME type; the reader also accepts previously generated extensionless
+URLs. A mismatched extension returns 404.
 
 Set `CATALOG_PUBLIC_BASE_URL` to the public HTTPS origin that serves this Echelon
 deployment (for example, `https://catalog.example.com`, without a path). If unset,
@@ -54,8 +56,11 @@ the resolver uses `PUBLIC_APP_URL`, then `APP_BASE_URL`, then
 `https://${HEROKU_APP_DEFAULT_DOMAIN}`. An explicitly invalid setting is an error,
 not a reason to fall through to another origin. The host is configuration, never
 an incoming request header. A missing or unsuitable origin reports
-`CATALOG_PUBLIC_URL_REQUIRED` when a selected photo needs public hosting, instead
-of silently dropping that photo. The configured domain must route the image path
+`CATALOG_PUBLIC_URL_REQUIRED` as an image issue on the affected catalog item when
+a selected photo needs public hosting. Names, SKUs, pricing and other items remain
+readable. The issue is shown in listing details and blocks review when the draft
+inherits catalog images; explicit listing image overrides use their own photos.
+The configured domain must route the image path
 to this application without an external login/proxy challenge.
 
 Channel image exclusions, URL overrides, order and exact variant scope remain in
@@ -65,7 +70,9 @@ replacement changes affect the listing source hash, so a previous review must be
 refreshed. File replacement changes the public URL. Deleted or mismatched files
 return 404 at the origin; successful responses may be cached for five minutes.
 Readers reject missing, empty, oversized (over 10 MB), unsupported or mislabeled
-files. This path reads stored bytes and does not fetch arbitrary URLs.
+files. These failures are item-scoped image issues, not failures of the entire
+catalog read. Unexpected storage/query errors still fail normally. This path
+reads stored bytes and does not fetch arbitrary URLs.
 
 Deployment verification: open a fresh listing review, copy the newly uploaded
 image's URL, and GET it without cookies or authorization. Confirm HTTP 200, an

@@ -54,8 +54,33 @@ export function resolveCatalogPublicationImage(
     throw new ProductAssetError("CATALOG_IMAGE_UNAVAILABLE", `Replace uploaded catalog image ${image.id}: its file is missing, empty or larger than 10 MB.`, 422);
   }
   // Check the same signature as the public read boundary without loading the full blob.
-  validateProductImage({ data: image.fileHeader, mimeType: image.mimeType ?? "" });
-  return publicUrl(image.id, image.fileHash);
+  const validated = validateProductImage({ data: image.fileHeader, mimeType: image.mimeType ?? "" });
+  return publicUrl(image.id, image.fileHash, validated.mimeType);
+}
+
+export interface CatalogPublicationImageIssue {
+  assetId: number;
+  code: string;
+  message: string;
+}
+
+/** Keep catalog metadata usable while reporting photos that cannot be published. */
+export function resolveCatalogPublicationImages(
+  images: readonly CatalogPublicationImage[],
+  publicUrl: CatalogPublicImageUrl,
+): { images: string[]; issues: CatalogPublicationImageIssue[] } {
+  const urls: string[] = [];
+  const issues: CatalogPublicationImageIssue[] = [];
+  for (const image of images) {
+    try {
+      const url = resolveCatalogPublicationImage(image, publicUrl);
+      if (url !== null) urls.push(url);
+    } catch (error) {
+      if (!(error instanceof ProductAssetError)) throw error;
+      issues.push({ assetId: image.id, code: error.code, message: error.message });
+    }
+  }
+  return { images: urls, issues };
 }
 
 /** The full content fingerprint is required; numeric asset IDs alone disclose nothing. */

@@ -17,6 +17,20 @@ const positiveId = z.number().int().positive().max(2_147_483_647);
 const countSchema = z.number().int().nonnegative().max(2_147_483_647);
 const unitVersionSchema = z.string().regex(/^[a-f0-9]{64}$/);
 
+export class ReceivingUnitVersionError extends Error {
+  readonly code = "RECEIVING_UNIT_VERSION_MISSING";
+  readonly needsRefresh = true;
+
+  constructor() {
+    super("The receipt unit version is missing. Load the latest receipt before changing this line.");
+    this.name = "ReceivingUnitVersionError";
+  }
+}
+
+export function hasReceivingUnitVersion(line: Pick<ReceivingUnitLine, "unitVersion">): boolean {
+  return unitVersionSchema.safeParse(line.unitVersion).success;
+}
+
 export function recordedReceivingFactor(line: ReceivingUnitLine): number | null {
   const result = positiveId.safeParse(line.unitsPerVariantSnapshot);
   return result.success ? result.data : null;
@@ -34,7 +48,7 @@ export function receivingUnitDescription(line: ReceivingUnitLine): string {
 
 function expectedVersion(line: ReceivingUnitLine): string {
   const result = unitVersionSchema.safeParse(line.unitVersion);
-  if (!result.success) throw new Error("The receipt unit version is missing. Load the latest receipt before changing this line.");
+  if (!result.success) throw new ReceivingUnitVersionError();
   return result.data;
 }
 
@@ -89,6 +103,52 @@ const mutationLineSchema = z.object({
   putawayLocationId: positiveId.nullable(), putawayComplete: z.number().int(),
   unitCost: z.number().int().safe().nullable(), notes: z.string().nullable(), purchaseOrderLineId: positiveId.nullable(),
 }).passthrough();
+
+const unitRefreshSchema = z.object({
+  id: positiveId,
+  receiptNumber: z.string(),
+  poNumber: z.string().nullable(),
+  asnNumber: z.string().nullable(),
+  sourceType: z.string().min(1),
+  vendorId: positiveId.nullable(),
+  warehouseId: positiveId.nullable(),
+  receivingLocationId: positiveId.nullable(),
+  purchaseOrderId: positiveId.nullable(),
+  inboundShipmentId: positiveId.nullable(),
+  status: z.string(),
+  expectedDate: z.string().datetime({ offset: true }).nullable(),
+  receivedDate: z.string().datetime({ offset: true }).nullable(),
+  closedDate: z.string().datetime({ offset: true }).nullable(),
+  expectedLineCount: countSchema.nullable(),
+  receivedLineCount: countSchema.nullable(),
+  expectedTotalUnits: countSchema.nullable(),
+  receivedTotalUnits: countSchema.nullable(),
+  notes: z.string().nullable(),
+  createdBy: z.string().nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+  vendor: z.object({
+    id: positiveId, code: z.string(), name: z.string(), contactName: z.string().nullable(),
+    email: z.string().nullable(), phone: z.string().nullable(), address: z.string().nullable(),
+    notes: z.string().nullable(), active: countSchema,
+  }).passthrough().nullish(),
+  lines: z.array(mutationLineSchema),
+}).passthrough();
+
+export type ReceivingUnitRefresh = z.infer<typeof unitRefreshSchema>;
+
+/** Discard a draft only after verifying its parent, line identity and versions.
+ * An incomplete read must not erase the operator's unsaved count.
+ */
+export function parseReceivingUnitRefresh(value: unknown, expected: { receiptId: number; lineId: number }): ReceivingUnitRefresh {
+  const result = unitRefreshSchema.safeParse(value);
+  if (!result.success || result.data.id !== expected.receiptId ||
+      !result.data.lines.some((line) => line.id === expected.lineId) ||
+      result.data.lines.some((line) => line.receivingOrderId !== expected.receiptId) ||
+      new Set(result.data.lines.map((line) => line.id)).size !== result.data.lines.length) {
+    throw new Error("The latest receipt response could not be verified. Your count draft is still preserved.");
+  }
+  return result.data;
+}
 
 export function parseReceivingLineMutation(value: unknown, expected: { id: number; receivingOrderId: number; updates: Record<string, unknown> }) {
   const result = mutationLineSchema.safeParse(value);

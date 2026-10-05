@@ -1,11 +1,12 @@
 import type { Express } from "express";
 import { z } from "zod";
-import { CATALOG_IMAGE_HASH_PATTERN, CATALOG_PUBLIC_IMAGE_ROUTE } from "./catalog-public-image";
+import { CATALOG_PUBLIC_IMAGE_ROUTE } from "./catalog-public-image";
 import { PRODUCT_IMAGE_EXTENSIONS, type DownloadableProductImage } from "./product-image-download.service";
 
 const paramsSchema = z.object({
   id: z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().positive().max(2_147_483_647)),
-  hash: z.string().regex(CATALOG_IMAGE_HASH_PATTERN),
+  // Existing links remain valid; new marketplace links include the real image extension.
+  hash: z.string().regex(/^[a-f0-9]{64}(?:\.(?:jpg|png|webp|gif))?$/),
 });
 
 export function registerCatalogPublicImageRoutes(
@@ -19,10 +20,12 @@ export function registerCatalogPublicImageRoutes(
     const params = paramsSchema.safeParse(req.params);
     if (!params.success) return res.sendStatus(404);
     try {
-      const image = await read(params.data.id, params.data.hash);
+      const [hash, extension] = params.data.hash.split(".");
+      const image = await read(params.data.id, hash);
       if (!image) return res.sendStatus(404);
+      if (extension && extension !== PRODUCT_IMAGE_EXTENSIONS[image.mimeType]) return res.sendStatus(404);
       res.setHeader("Cache-Control", "public, max-age=300, must-revalidate");
-      res.setHeader("ETag", `"${params.data.hash}"`);
+      res.setHeader("ETag", `"${hash}"`);
       res.setHeader("Content-Disposition", `inline; filename="catalog-image-${params.data.id}.${PRODUCT_IMAGE_EXTENSIONS[image.mimeType]}"`);
       return res.type(image.mimeType).send(image.data);
     } catch {
