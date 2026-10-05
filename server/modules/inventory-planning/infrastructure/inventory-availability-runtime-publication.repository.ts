@@ -655,20 +655,7 @@ async function enqueueFullPublications(
       );
     }
     const latest = (await client.query<LatestPublicationRow>(
-      `SELECT activation_run_id::text AS activation_run_id, state, publication_phase,
-              desired_revision::text AS desired_revision,
-              desired_quantity::text AS desired_quantity,
-              publication_target_revision_snapshot::text AS publication_target_revision_snapshot,
-              channel_id_snapshot, destination_kind_snapshot,
-              channel_connection_id_snapshot, dropship_store_connection_id_snapshot,
-              provider_key_snapshot, provider_scope_type_snapshot,
-              external_scope_id_snapshot, external_inventory_item_id_snapshot,
-              external_sku_snapshot
-       FROM inventory.inventory_publication_outbox
-       WHERE publication_target_id = $1 AND product_variant_id = $2
-       ORDER BY desired_revision DESC
-       LIMIT 1
-       FOR UPDATE`,
+      LATEST_PUBLICATION_ROW_SQL,
       [intent.publicationTargetId, intent.productVariantId],
     )).rows[0];
     if (latest && reusablePublicationState(latest.state)
@@ -766,6 +753,29 @@ async function enqueueFullPublications(
     coalescedPublicationKeys,
   };
 }
+
+/**
+ * The newest outbox row for one target/variant pair. The ORDER BY names the
+ * table column: unqualified, Postgres resolved it to the text alias of the same
+ * name, so "9" sorted above "10". Every pair that reached revision 10 then
+ * re-inserted 10 and the outbox guard refused it forever (2026-10-05: pick
+ * follow-ups, replen and carrier dispatch failed with "publication revision must
+ * be greater than existing revision 10").
+ */
+export const LATEST_PUBLICATION_ROW_SQL = `SELECT activation_run_id::text AS activation_run_id, state, publication_phase,
+       desired_revision::text AS desired_revision,
+       desired_quantity::text AS desired_quantity,
+       publication_target_revision_snapshot::text AS publication_target_revision_snapshot,
+       channel_id_snapshot, destination_kind_snapshot,
+       channel_connection_id_snapshot, dropship_store_connection_id_snapshot,
+       provider_key_snapshot, provider_scope_type_snapshot,
+       external_scope_id_snapshot, external_inventory_item_id_snapshot,
+       external_sku_snapshot
+FROM inventory.inventory_publication_outbox outbox
+WHERE outbox.publication_target_id = $1 AND outbox.product_variant_id = $2
+ORDER BY outbox.desired_revision DESC
+LIMIT 1
+FOR UPDATE`;
 
 function publicationKey(intent: Pick<
   CanonicalInventoryPublicationIntent,

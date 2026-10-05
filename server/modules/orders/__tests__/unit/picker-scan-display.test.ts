@@ -29,9 +29,9 @@ function fixture() {
     getAllWarehouseLocations: vi.fn(async () => [C11]),
     getUser: vi.fn(async () => null),
     getChannelById: vi.fn(async () => undefined),
-    getBinLocationFromInventoryBySku: vi.fn(async () => ({
-      location: "Z-99", zone: "Z", barcode: "0850041234567", imageUrl: "https://cdn.example/sleeves.jpg",
-    })),
+    getBinLocationFromInventoryBySku: vi.fn(),
+    getScanDisplayBySkus: vi.fn(async (skus: readonly string[]) => new Map(skus.map((sku) =>
+      [sku.toUpperCase(), { barcode: "0850041234567", imageUrl: "https://cdn.example/sleeves.jpg" }]))),
   };
   const replenishment = { predictReplenAfterPick: vi.fn(async () => null) };
   const service = new PickingUseCases({} as any, {} as any, replenishment as any, storage as any);
@@ -74,8 +74,10 @@ describe("picker payloads carry barcode and photo", () => {
         sourcePlan: { status: "ready", locationCode: "C-11", warehouseLocationId: 11 },
       });
     }
-    expect(storage.getBinLocationFromInventoryBySku).toHaveBeenCalledTimes(1);
-    expect(storage.getBinLocationFromInventoryBySku).toHaveBeenCalledWith("EG-SLV-PF-P100");
+    // One set-based read for the whole queue, never a lookup per SKU.
+    expect(storage.getScanDisplayBySkus).toHaveBeenCalledTimes(1);
+    expect(storage.getScanDisplayBySkus).toHaveBeenCalledWith(["EG-SLV-PF-P100"]);
+    expect(storage.getBinLocationFromInventoryBySku).not.toHaveBeenCalled();
   });
 
   it("adds them to a single picker order", async () => {
@@ -88,7 +90,26 @@ describe("picker payloads carry barcode and photo", () => {
     const { service, storage } = fixture();
     storage.getOrderItems.mockResolvedValue([line({ sku: "UNKNOWN", location: "UNASSIGNED" })]);
     await service.getPickerOrder(63776);
-    expect(storage.getBinLocationFromInventoryBySku).not.toHaveBeenCalled();
+    expect(storage.getScanDisplayBySkus).not.toHaveBeenCalled();
+  });
+
+  it("still serves the queue, without photos, when the photo read fails", async () => {
+    const { service, storage } = fixture();
+    storage.getPickQueueOrders.mockResolvedValue([{ id: 63776, orderNumber: "#63776", warehouseId: 1,
+      warehouseStatus: "ready", onHold: 0, assignedPickerId: null, startedAt: null, items: [line()] }]);
+    storage.getScanDisplayBySkus.mockRejectedValueOnce(new Error("statement timeout"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const queue = await service.getPickQueue();
+    expect((queue as any[])[0].items[0]).toMatchObject({ location: "C-11", barcode: null, imageUrl: null });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("\"action\":\"picker_scan_display\""));
+    warn.mockRestore();
+  });
+
+  it("matches catalog SKUs case-insensitively", async () => {
+    const { service, storage } = fixture();
+    storage.getOrderItems.mockResolvedValue([line({ sku: "eg-slv-pf-p100" })]);
+    const order = await service.getPickerOrder(63776);
+    expect(order.items[0]).toMatchObject({ barcode: "0850041234567" });
   });
 
   it("adds them to the claim response the gun builds its picking screen from", () => {
