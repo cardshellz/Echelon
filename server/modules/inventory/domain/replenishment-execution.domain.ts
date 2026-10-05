@@ -47,6 +47,30 @@ function safeMultiply(left: number, right: number, field: string): number {
   return result;
 }
 
+/** Demand is counted in destination SKU units; task targets are base units. */
+export function planReplenishmentDemand(input: {
+  destinationVariantQuantity: number;
+  destinationUnitsPerVariant: number;
+  sourceUnitsPerVariant: number;
+  sourceBatchQuantity: number;
+}): { qtySourceUnits: number; qtyTargetUnits: number; qtyPickUnits: number } {
+  const destinationQuantity = positiveInteger(input.destinationVariantQuantity, "destinationVariantQuantity");
+  const destinationUnits = positiveInteger(input.destinationUnitsPerVariant, "destinationUnitsPerVariant");
+  const sourceUnits = positiveInteger(input.sourceUnitsPerVariant, "sourceUnitsPerVariant");
+  const sourceBatch = positiveInteger(input.sourceBatchQuantity, "sourceBatchQuantity");
+  const requiredBase = safeMultiply(destinationQuantity, destinationUnits, "requiredBaseUnits");
+  const batchBase = safeMultiply(sourceBatch, sourceUnits, "sourceBatchBaseUnits");
+  // Integer division avoids an unsafe intermediate sum near the integer bound.
+  const batches = Number((BigInt(requiredBase) + BigInt(batchBase) - BigInt(1)) / BigInt(batchBase));
+  const qtySourceUnits = safeMultiply(batches, sourceBatch, "qtySourceUnits");
+  const qtyTargetUnits = safeMultiply(qtySourceUnits, sourceUnits, "qtyTargetUnits");
+  if (qtyTargetUnits % destinationUnits !== 0) {
+    throw new ReplenishmentExecutionDomainError("REPLENISHMENT_DEMAND_NOT_DIVISIBLE",
+      "A source batch does not produce whole destination SKU units.", { qtyTargetUnits, destinationUnits });
+  }
+  return { qtySourceUnits, qtyTargetUnits, qtyPickUnits: qtyTargetUnits / destinationUnits };
+}
+
 /**
  * Freezes the physical movement implied by a persisted replenishment task.
  * `qtyTargetUnits` is the task's base-unit audit quantity, not the number of

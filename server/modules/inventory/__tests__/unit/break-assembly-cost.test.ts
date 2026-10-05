@@ -1,3 +1,4 @@
+import { legacyTransformationExecutionAuthority } from "../../application/transformation-execution-authority.port";
 import { describe, expect, it, vi } from "vitest";
 // Explicit pre-opening compatibility fixture; real active package postings are
 // exercised by quantity-ledger.integration.test.ts.
@@ -74,7 +75,7 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
 
     const db = makeVariantDb([sourceVariant, targetVariant, { inventoryStrategy: "physical_fungible" }]);
 
-    const svc = new BreakAssemblyUseCases(db, inventoryUseCases as any);
+    const svc = new BreakAssemblyUseCases(db, inventoryUseCases as any, () => new Date(0), legacyTransformationExecutionAuthority);
 
     await svc.breakVariant({
       sourceVariantId: 1,
@@ -121,7 +122,7 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
 
     const db = makeVariantDb([sourceVariant, targetVariant, { inventoryStrategy: "physical_fungible" }]);
 
-    const svc = new BreakAssemblyUseCases(db, inventoryUseCases as any);
+    const svc = new BreakAssemblyUseCases(db, inventoryUseCases as any, () => new Date(0), legacyTransformationExecutionAuthority);
 
     await svc.assembleVariant({
       sourceVariantId: 2,
@@ -159,7 +160,7 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
         withTx: vi.fn(function () { return this; }),
       };
       const db = makeVariantDb([sourceVariant, targetVariant, { inventoryStrategy }]);
-      const svc = new BreakAssemblyUseCases(db, inventoryUseCases as any);
+      const svc = new BreakAssemblyUseCases(db, inventoryUseCases as any, () => new Date(0), legacyTransformationExecutionAuthority);
 
       await expect(svc.breakVariant({
         sourceVariantId: 1,

@@ -34,6 +34,18 @@ describe("writer-ratchet (P2.1)", () => {
     roots: ["server", "scripts"],
   });
 
+  it.each([
+    ["wms.picking_commands", "modules/wms"],
+    ["inventory.replen_followups", "modules/inventory"],
+    ["inventory.replen_transfer_credits", "modules/inventory"],
+    ["inventory.replen_trigger_receipts", "modules/inventory"],
+    ["inventory.transfer_followups", "modules/inventory"],
+  ])("%s has only its warehouse operation owner, including scripts", (table, owner) => {
+    expect(current[table]).toEqual([owner]);
+    expect(currentIncludingScripts[table]).toEqual([owner]);
+    expect(baseline[table]).toEqual([owner]);
+  });
+
   it("wms.order_items has exactly one owning writer across runtime and operational scripts", () => {
     expect(current["wms.order_items"]).toEqual(["modules/wms"]);
     expect(currentIncludingScripts["wms.order_items"]).toEqual(["modules/wms"]);

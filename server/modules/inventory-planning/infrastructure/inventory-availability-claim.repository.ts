@@ -1,3 +1,4 @@
+import { commitCanonicalPickingReceipt } from "../../wms/picking-command.repository";
 import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
 import { isClaimPackageConversionInline } from "../../inventory/infrastructure/replenishment-policy.reader";
@@ -3697,6 +3698,8 @@ async function persistPickCommandAndEvent(
       input.command.reason, input.occurredAt,
     ],
   ))[0];
+  await commitCanonicalPickingReceipt(client, input.command.idempotencyKey,
+    { canonicalRequest: input.command, canonicalResult: input.result, productVariantId: input.line.targetVariantId }, input.occurredAt);
   const commandId = positiveBigInt(commandRow?.id, "claimCommand.id");
   for (const movement of input.movements) {
     await client.query(

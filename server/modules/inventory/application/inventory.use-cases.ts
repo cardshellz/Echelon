@@ -10,6 +10,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { IInventoryStorage } from "../infrastructure/inventory.repository";
 import type { InventoryLotService } from "../lots.service";
 import type { COGSService } from "../cogs.service";
+import { productVariants } from "@shared/schema";
 import { warehouses, warehouseLocations, channelConnections } from "../../../storage/base";
 import { eq, and } from "drizzle-orm";
 import type { InventoryLevel, InsertInventoryTransaction, InventoryTransaction } from "../../../../shared/schema";
@@ -237,7 +238,7 @@ async function requireLegacyShipmentAuthority(tx: InventoryShipmentTransaction):
 }
 
 export class InventoryUseCases {
-  private onChangeCallbacks: ((productVariantId: number, triggeredBy: string) => void)[] = [];
+  private onChangeCallbacks: ((productVariantId: number, triggeredBy: string) => void | Promise<void>)[] = [];
 
   constructor(
     private readonly db: DrizzleDb,
@@ -259,18 +260,19 @@ export class InventoryUseCases {
     }
   }
 
-  onInventoryChange(cb: (productVariantId: number, triggeredBy: string) => void): void {
+  onInventoryChange(cb: (productVariantId: number, triggeredBy: string) => void | Promise<void>): void {
     this.onChangeCallbacks.push(cb);
   }
 
+  async publishInventoryChange(productVariantId: number, triggeredBy: string): Promise<void> {
+    for (const callback of this.onChangeCallbacks) await callback(productVariantId, triggeredBy);
+  }
+
   triggerNotifyChange(productVariantId: number, triggeredBy: string): void {
-    for (const cb of this.onChangeCallbacks) {
-      try {
-        cb(productVariantId, triggeredBy);
-      } catch (err: any) {
-        console.warn(`[InventoryUseCases] onChange callback error: ${err.message}`);
-      }
-    }
+    void this.publishInventoryChange(productVariantId, triggeredBy).catch(error => {
+      console.error(JSON.stringify({ event: "inventory_change_notification_failed", productVariantId, triggeredBy,
+        message: error instanceof Error ? error.message : String(error) }));
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -781,8 +783,18 @@ export class InventoryUseCases {
 
       if (!level) return false;
 
-      const actualUnpick = Math.min(level.pickedQty, params.qty);
-      if (actualUnpick <= 0) return false;
+      // The caller records this exact quantity on the order item. A partial
+      // physical reversal would leave WMS progress and inventory custody apart.
+      if (!Number.isSafeInteger(level.pickedQty) || level.pickedQty < params.qty) {
+        throw new IntegrityError("Exact picked location cannot supply the requested unpick", {
+          reason: "unpick_physical_custody_shortfall",
+          productVariantId: params.productVariantId,
+          warehouseLocationId: params.warehouseLocationId,
+          requestedQuantity: params.qty,
+          availableQuantity: level.pickedQty,
+        });
+      }
+      const actualUnpick = params.qty;
 
       let lotSvc: ReturnType<InventoryLotService["withTx"]> | null = null;
       if (this.lotService && params.orderItemId) {
@@ -1942,7 +1954,7 @@ export class InventoryUseCases {
     /** Explicit completed physical move, not dispatch/in-transit work. Automated
      * replenishment and other callers remain same-warehouse unless they opt in. */
     crossWarehouseArrivalConfirmed?: boolean;
-  }): Promise<{ reservedMoved: number; orderItemsRepointed: number }> {
+  }): Promise<{ reservedMoved: number; orderItemsRepointed: number; transferReceiptId: number | null }> {
     for (const field of ["productVariantId", "fromLocationId", "toLocationId", "qty"] as const) {
       if (!Number.isSafeInteger(params[field]) || params[field] <= 0 || params[field] > 2_147_483_647) {
         throw new ValidationError(`${field} must be a positive safe integer within PostgreSQL bounds`);
@@ -1956,6 +1968,7 @@ export class InventoryUseCases {
     let reservedMoved = 0;
     let orderItemsRepointed = 0;
     let replayed = false;
+    let transferReceiptId: number | null = null;
 
     await this.db.transaction(async (tx) => {
       const quantityPosting = await openOperationalQuantityPosting(tx);
@@ -1963,10 +1976,13 @@ export class InventoryUseCases {
       const quantityKey = params.commandKey ?? (params.referenceId ? `${params.referenceType ?? "internal"}:${params.referenceId}` : undefined);
       const replay = quantityPosting && await quantityPosting.beginOperation(quantityKey, { operation: "transfer", ...params });
       if (replay) {
-        const result = z.object({ reservedMoved: z.number().int().nonnegative(), orderItemsRepointed: z.number().int().nonnegative() }).parse(replay.result);
-        reservedMoved = result.reservedMoved; orderItemsRepointed = result.orderItemsRepointed; replayed = true; return;
+        const result = z.object({ reservedMoved: z.number().int().nonnegative(), orderItemsRepointed: z.number().int().nonnegative(), transferReceiptId: z.number().int().positive().nullable().optional() }).parse(replay.result);
+        transferReceiptId = result.transferReceiptId ?? null; reservedMoved = result.reservedMoved; orderItemsRepointed = result.orderItemsRepointed; replayed = true; return;
       }
       await lockInventoryCostGraph(tx);
+      await tx.execute(sql`SELECT id FROM catalog.product_variants WHERE id=${params.productVariantId} FOR SHARE`);
+      const [transferVariant] = await tx.select().from(productVariants).where(eq(productVariants.id, params.productVariantId)).limit(1);
+      if (!transferVariant || !Number.isSafeInteger(transferVariant.unitsPerVariant) || transferVariant.unitsPerVariant <= 0) throw new IntegrityError("Transfer variant has no valid unit basis", { productVariantId: params.productVariantId });
       if (params.crossWarehouseArrivalConfirmed) {
         // Pin location identity/freeze state until both sides of the move commit.
         await tx.execute(sql`SELECT id FROM warehouse.warehouse_locations
@@ -2141,6 +2157,7 @@ export class InventoryUseCases {
         fromLocationId: params.fromLocationId,
         toLocationId: params.toLocationId,
         transactionType: "transfer",
+        unitsPerVariantSnapshot: transferVariant.unitsPerVariant,
         variantQtyDelta: params.qty,
         variantQtyBefore: sourceLevel.variantQty,
         variantQtyAfter: sourceLevel.variantQty - params.qty,
@@ -2151,6 +2168,7 @@ export class InventoryUseCases {
         notes: params.notes ?? null,
         userId: params.userId ?? null,
       }, tx);
+      transferReceiptId = transferReceipt.id;
       if (quantityPosting) await quantityPosting.post({
         idempotencyKey: quantityKey!, kind: "transfer",
         actor: params.userId || "system:inventory_transfer", reason: params.notes || "Warehouse stock transfer",
@@ -2180,7 +2198,7 @@ export class InventoryUseCases {
         }, tx);
         reservedMoved = reservedToMove;
       }
-      if (quantityPosting) await quantityPosting.finishOperation({ reservedMoved, orderItemsRepointed });
+      if (quantityPosting) await quantityPosting.finishOperation({ reservedMoved, orderItemsRepointed, transferReceiptId });
     });
 
     const notifyAfterCommit = async () => this.triggerNotifyChange(params.productVariantId, "transfer");
@@ -2188,7 +2206,7 @@ export class InventoryUseCases {
       if (params.deferUntilCommit) params.deferUntilCommit(notifyAfterCommit);
       else await notifyAfterCommit();
     }
-    return { reservedMoved, orderItemsRepointed };
+    return { reservedMoved, orderItemsRepointed, transferReceiptId };
   }
 
   // ---------------------------------------------------------------------------

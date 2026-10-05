@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { pickingReadinessBlockers, type WmsPickingProgressLine } from "@shared/wms-picking-progress";
 
 const ROUTES_SRC = readFileSync(resolve(__dirname, "../../picking.routes.ts"), "utf8");
 const STORAGE_SRC = readFileSync(resolve(__dirname, "../../orders.storage.ts"), "utf8");
@@ -105,7 +106,14 @@ describe("line-item hold (P2a fix — held shipment excluded from active-per-ord
 // P2b: held shipments/lines must not look like stuck work or block the rest.
 describe("line-item hold (P2b — held-aware readers)", () => {
   it("the ready-to-ship gate ignores held lines (so the rest of the order can ship)", () => {
-    expect(PICKING_SRC).toMatch(/requiresShipping === 1 && !item\.onHold/);
+    const complete: WmsPickingProgressLine = { id: 1, sku: "READY", quantity: 2, pickedQuantity: 2,
+      requiresShipping: true, onHold: false, status: "completed", inventoryTracking: true,
+      catalogProductId: 1, productId: 10, location: "A1" };
+    const held: WmsPickingProgressLine = { ...complete, id: 2, sku: "HELD", onHold: true,
+      pickedQuantity: 0, status: "pending", location: "UNASSIGNED" };
+    expect(pickingReadinessBlockers([complete, held])).toEqual([]);
+    expect(pickingReadinessBlockers([complete, { ...held, onHold: false }])).toContain("HELD is pending");
+    expect(held).toMatchObject({ onHold: true, pickedQuantity: 0, status: "pending" });
   });
 
   it("a held line cannot be picked", () => {

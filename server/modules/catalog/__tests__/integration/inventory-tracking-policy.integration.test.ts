@@ -26,6 +26,7 @@ import { decideChannelFulfillmentInventoryPosting } from "../../../oms/domain/ch
 import { listTrackingStopHistory, exportTrackingStopHistory } from "../../../inventory/infrastructure/tracking-stop.repository";
 
 import { COGSService } from "../../../inventory/cogs.service";
+import { installWarehouseOperationMigration } from "../../../orders/__tests__/fixtures/install-warehouse-operation-migration";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -52,11 +53,12 @@ describeDatabase.sequential("product inventory policy migration and transactions
     }
     expect((await database.pool.query("SELECT inventory_tracking_override FROM catalog.product_variants ORDER BY id")).rows)
       .toEqual([{ inventory_tracking_override: null }, { inventory_tracking_override: false }, { inventory_tracking_override: null }]);
+    await installWarehouseOperationMigration(database.pool);
     orm = drizzle(database.pool, { schema });
   });
   beforeEach(async () => {
     await database.pool.query(`ALTER TABLE inventory.tracking_stop_history DISABLE TRIGGER tracking_stop_history_no_truncate;
-      TRUNCATE inventory.tracking_stop_history, inventory.build_component_reservations, inventory.quantity_ledger_opening, inventory.replen_tasks;
+      TRUNCATE inventory.tracking_stop_history, inventory.build_component_reservations, inventory.quantity_ledger_opening, inventory.replen_tasks CASCADE;
       TRUNCATE catalog.products, catalog.product_variants, channels.channels,
       channels.channel_product_identities, channels.channel_listings, channels.channel_feeds,
       oms.oms_orders, oms.oms_order_lines, oms.oms_order_events, oms.oms_order_line_authority_events,

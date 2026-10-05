@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PickingUseCases } from "../../picking.use-cases";
+const progressOwner = vi.hoisted(() => vi.fn());
+vi.mock("../../../wms/picking-progress.repository", () => ({reconcileWmsPickingProgress:progressOwner}));
 
 function buildService(
   planResult: { complete: boolean } | null | Promise<{ complete: boolean } | null>,
@@ -8,6 +10,7 @@ function buildService(
   const ensurePackPlan = vi.fn(async () => planResult);
   const db = {
     execute: vi.fn(async () => ({ rows: [] })),
+    transaction: async (work: (tx: object) => Promise<unknown>) => work({}),
   };
   const order = {
     id: 42,
@@ -15,6 +18,7 @@ function buildService(
     assignedPickerId: null,
     warehouseStatus: "in_progress",
   };
+  progressOwner.mockReset().mockImplementation(async (_tx, _id, status) => ({...order,warehouseStatus:status}));
   const storage = {
     getOrderById: vi.fn(async () => order),
     getOrderItems: vi.fn(async () => [{
@@ -58,7 +62,7 @@ describe("WMS cartonization shadow", () => {
 
     expect(result?.warehouseStatus).toBe("ready_to_ship");
     expect(ensurePackPlan).toHaveBeenCalledWith({ wmsOrderId: 42 });
-    expect(storage.updateOrderStatus).toHaveBeenCalledWith(42, "ready_to_ship");
+    expect(progressOwner).toHaveBeenCalledWith({},42,"ready_to_ship","picker-1",expect.any(Function));
   });
 
   it("does not block manual handoff when no verified plan can be produced", async () => {
@@ -71,22 +75,19 @@ describe("WMS cartonization shadow", () => {
     warn.mockRestore();
     expect(result?.warehouseStatus).toBe("ready_to_ship");
     expect(ensurePackPlan).toHaveBeenCalledWith({ wmsOrderId: 42 });
-    expect(storage.updateOrderStatus).toHaveBeenCalledWith(42, "ready_to_ship");
+    expect(progressOwner).toHaveBeenCalledOnce();
   });
 
-  it.each(["ready_to_ship", "picked", "staged"])(
-    "leaves automatic %s handoff unchanged when cartonization fails",
-    async (desiredStatus) => {
-      const { service } = buildService(null);
+  it("does not write order progress when automatic cartonization fails", async () => {
+      const { service, storage } = buildService(null);
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      await expect(
-        (service as any).resolvePostPickStatusForOrder(42, desiredStatus),
-      ).resolves.toBe(desiredStatus);
+      (service as any).triggerCartonizationShadow(42);
       await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+      expect(progressOwner).not.toHaveBeenCalled();
+      expect(storage.updateOrderStatus).not.toHaveBeenCalled();
       warn.mockRestore();
-    },
-  );
+  });
 
   it("does not execute automatically while the shadow flag is off", async () => {
     const { service, ensurePackPlan } = buildService({ complete: true }, false);
@@ -104,6 +105,6 @@ describe("WMS cartonization shadow", () => {
 
     expect(result?.warehouseStatus).toBe("ready_to_ship");
     expect(ensurePackPlan).toHaveBeenCalledWith({ wmsOrderId: 42 });
-    expect(storage.updateOrderStatus).toHaveBeenCalledWith(42, "ready_to_ship");
+    expect(progressOwner).toHaveBeenCalledOnce();
   });
 });

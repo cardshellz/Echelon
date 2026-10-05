@@ -38,8 +38,8 @@ describe("digital inventory exclusion contract", () => {
     expect(reservation).toContain(
       "variant.requiresShipping === false || variant.trackInventory === false",
     );
-    expect(picking).toContain(
-      "productVariant.requiresShipping === false || productVariant.trackInventory === false",
+    expect(picking).toMatch(
+      /productVariant\.requiresShipping === false\s*\|\| productVariant\.trackInventory === false/,
     );
     expect(inventoryRoutes).toContain("!isInventoryManagedVariant(variant)");
   });

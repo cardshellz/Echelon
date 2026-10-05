@@ -17,6 +17,7 @@ import type { WarehouseLocationLike } from "@/lib/warehouse-locations";
 export type InventoryLocationComboboxOption = WarehouseLocationLike;
 
 interface InventoryLocationComboboxProps<TLocation extends InventoryLocationComboboxOption> {
+  id?: string;
   locations: readonly TLocation[];
   value: number | null;
   onValueChange(locationId: number | null): void;
@@ -32,6 +33,7 @@ interface InventoryLocationComboboxProps<TLocation extends InventoryLocationComb
 }
 
 export function InventoryLocationCombobox<TLocation extends InventoryLocationComboboxOption>({
+  id,
   locations,
   value,
   onValueChange,
@@ -67,6 +69,7 @@ export function InventoryLocationCombobox<TLocation extends InventoryLocationCom
     >
       <PopoverTrigger asChild>
         <Button
+          id={id}
           type="button"
           variant="outline"
           role="combobox"

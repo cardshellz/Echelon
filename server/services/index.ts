@@ -49,6 +49,7 @@ import { createChannelSyncService } from "../modules/channels/sync.service";
 import { createReturnsService } from "../modules/orders/returns.service";
 import { createFulfillmentRouterService } from "../modules/orders/fulfillment-router.service";
 import { createSLAMonitorService } from "../modules/orders/sla-monitor.service";
+import { ManualInventoryTransferService } from "../modules/inventory/application/manual-inventory-transfer.service";
 import { createPickingService } from "../modules/orders/picking.use-cases";
 import { createPickCorrectionService } from "../modules/orders/pick-correction.service";
 import { AssemblyExecutionService } from "../modules/warehouse/work/application/assembly-execution.service";
@@ -475,79 +476,35 @@ export function createServices(
   // methods. Inventory-change work uses inventoryPublicationWork below.
   channelSync.setOrchestrator(echelonOrchestrator);
 
-  // Wire inventory change → immediate channel sync
-  // Every inventory mutation (receive, pick, ship, adjust) triggers allocation + push
-  const pendingSyncs = new Set<number>(); // debounce by productId
-  const queueProductInventorySync = (productId: number, triggeredBy: string): void => {
-    if (pendingSyncs.has(productId)) return;
-    pendingSyncs.add(productId);
-
-    // Small delay to batch rapid changes (e.g., multi-line receive)
-    setTimeout(async () => {
-      pendingSyncs.delete(productId);
-      try {
-        const result = await inventoryPublicationWork.syncProduct(
-          productId,
-          `inventory_change:${triggeredBy}`,
-        );
-        if (result.skippedReason) {
-          platformLogger.info("inventory_sync_product", {
-            outcome: "skipped",
-            product_id: productId,
-            triggered_by: `inventory_change:${triggeredBy}`,
-            error_code: result.skippedReason,
-          });
-        }
-      } catch (err: unknown) {
-        // Nothing was published for this product; the next inventory change or the
-        // scheduled sweep retries. Transient failures (velocity read) are anomalies;
-        // permanent ones (invalid rule or input) need a human.
-        const failure = describeAllocationFailure(err);
-        platformLogger[failure.error_class === "transient" ? "warn" : "error"]("inventory_sync_product", {
-          outcome: "skipped",
-          product_id: productId,
-          triggered_by: `inventory_change:${triggeredBy}`,
-          error_code: failure.error_code,
-          error_class: failure.error_class,
-          error: failure.message,
+  // Await publication work creation. The warehouse command outboxes retain failures.
+  const pendingReplenChecks = new Set<number>();
+  const queueVariantInventorySync = async (productVariantId: number, triggeredBy: string): Promise<void> => {
+    const productIds = await inventorySupplyDependencies.getAffectedProductIds(productVariantId);
+    for (const productId of productIds) {
+      const result = await inventoryPublicationWork.syncProduct(productId, `inventory_change:${triggeredBy}`);
+      if (result.inventory.some(work => work.variantsErrored > 0)) throw new Error(`Inventory publication work failed for product ${productId}`);
+      // Preserve the existing debounce for general product re-evaluation. Exact
+      // transfer source checks and task dependencies have durable owners below.
+      if (pendingReplenChecks.has(productId)) continue;
+      pendingReplenChecks.add(productId);
+      setTimeout(() => {
+        pendingReplenChecks.delete(productId);
+        void replenishment.reevaluateReplenForProduct(productId).catch(error => {
+          platformLogger.error("inventory_replen_evaluation", { product_id: productId,
+            error: error instanceof Error ? error.message : String(error) });
         });
-      }
-      try {
-        // Unblock and re-evaluate dependent replen tasks for this product across the warehouse
-        // after bulk receipts, transfers, or inventory adjustments
-        await replenishment.reevaluateReplenForProduct(productId);
-      } catch (err: any) {
-        console.warn(`[Replen] Auto-sync replen failed for product ${productId}: ${err.message}`);
-      }
-    }, 2000); // 2s debounce
-  };
-
-  const queueVariantInventorySync = async (
-    productVariantId: number,
-    triggeredBy: string,
-  ): Promise<void> => {
-    try {
-      const affectedProductIds = await inventorySupplyDependencies.getAffectedProductIds(productVariantId);
-      for (const productId of affectedProductIds) {
-        queueProductInventorySync(productId, triggeredBy);
-      }
-    } catch (err: unknown) {
-      const failure = describeAllocationFailure(err);
-      platformLogger.error("inventory_sync_dependencies", {
-        outcome: "failed", product_variant_id: productVariantId, triggered_by: triggeredBy,
-        error_code: failure.error_code, error_class: failure.error_class, error: failure.message,
-      });
+      }, 2000);
     }
   };
   channelSync.setInventoryChangePublisher(queueVariantInventorySync);
   inventoryCore.onInventoryChange(queueVariantInventorySync);
-  // Wire break/assembly inventory changes into the same sync mechanism as core
-  // This ensures case breaks from replen, UI, or any other caller trigger channel sync
-  breakAssembly.onInventoryChange((variantId: number, trigger: string) => {
-    channelSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
-      console.warn(`[BreakAssembly] Post-${trigger} sync failed for variant ${variantId}:`, err),
-    );
-  });
+  const inventoryTransfers = new ManualInventoryTransferService(db, inventoryCore, {
+    deliver: async transfer => {
+      await replenishment.completeMatchingTransferTask(transfer.transferId, transfer.actor);
+      await replenishment.checkReplenForLocation(transfer.fromLocationId, `transfer:${transfer.transferId}`);
+      await inventoryCore.publishInventoryChange(transfer.productVariantId, "transfer");
+    },
+  }, () => new Date());
 
   builds.onInventoryChange((variantId, trigger) => {
     inventoryCore.triggerNotifyChange(variantId, trigger);
@@ -726,6 +683,7 @@ export function createServices(
     reservation,
     dropshipInventoryRuntimeAuthority,
     replenishment,
+    inventoryTransfers,
     picking,
     pickCorrections,
     channelSync,
