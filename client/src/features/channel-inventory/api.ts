@@ -1,3 +1,6 @@
+import { enableInventoryPublicationTargetRequestSchema, inventoryPublicationTargetEnableResultSchema,
+  type EnableInventoryPublicationTargetRequest, type InventoryPublicationTargetEnableResult,
+} from "@shared/types/inventory-publication-target-enable";
 import { z } from "zod";
 import { channelPublicationStatusSchema } from "@shared/types/inventory-channel-publication-status";
 
@@ -58,6 +61,7 @@ export const ENDPOINTS = {
   target: `${ADMIN_BASE}/publication-target`,
   channelDestinations: `${ADMIN_BASE}/channel-destinations`,
   targetPreviewState: `${ADMIN_BASE}/publication-target-preview-state`,
+  targetEnable: ADMIN_BASE + "/publication-target-enable",
   targetStop: `${ADMIN_BASE}/publication-target-stop`,
   targetResumeReview: `${ADMIN_BASE}/publication-target-resume-review`,
   targetResume: `${ADMIN_BASE}/publication-target-resume`,
@@ -351,6 +355,11 @@ export function setReadinessInclusion(
 ): Promise<InventoryPublicationTargetCommandResult> {
   const parsed = setInventoryPublicationTargetPreviewStateRequestSchema.parse(request);
   return requestJson(ENDPOINTS.targetPreviewState, inventoryPublicationTargetCommandResultSchema, jsonInit("PUT", parsed));
+}
+
+export function enableDestination(input: EnableInventoryPublicationTargetRequest): Promise<InventoryPublicationTargetEnableResult> {
+  return requestJson(ENDPOINTS.targetEnable, inventoryPublicationTargetEnableResultSchema,
+    jsonInit("PUT", enableInventoryPublicationTargetRequestSchema.parse(input)));
 }
 
 export function stopDestination(

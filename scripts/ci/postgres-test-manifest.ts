@@ -99,6 +99,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/dropship/__tests__/integration/dropship-canonical-acceptance-stage.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-publication-global-control.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-resume.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-enable.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/transformation-execution-authority.integration.test.ts",
   "server/modules/inventory/__tests__/integration/build-order-transformation-authority.integration.test.ts",
   "server/modules/catalog/__tests__/integration/piece-variant-backfill.integration.test.ts",

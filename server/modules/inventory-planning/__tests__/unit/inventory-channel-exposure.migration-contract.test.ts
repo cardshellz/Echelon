@@ -106,8 +106,8 @@ describe("inventory channel exposure inactive foundation", () => {
     // target toward publishing stays activate-gated.
     expect(routes.match(/requirePermission\("inventory_planning", "edit"\)/g)).toHaveLength(5);
     // Stop, resume review, resume, and the hold/release pair: each changes what
-    // a marketplace sells, so all six carry the activation permission.
-    expect(routes.match(/requirePermission\("inventory_planning", "activate"\)/g)).toHaveLength(6);
+    // a marketplace sells, so all seven carry the activation permission.
+    expect(routes.match(/requirePermission\("inventory_planning", "activate"\)/g)).toHaveLength(7);
     // Bulk setup creates disabled targets only, so it must never be activate-gated
     // nor slip into the activation surface.
     expect(routes).toContain("channel-destinations");
@@ -121,14 +121,12 @@ describe("inventory channel exposure inactive foundation", () => {
     // Account controls use the authority supplied by the workspace read model.
     expect(stockUpdatesControl).toContain("describeStockUpdates(target, view.runtimeAuthority, globalOn)");
     expect(page).not.toContain("Legacy runtime retained");
-    // Check command wiring instead of labels: inclusion still needs a reason
-    // and requests preview, while the switch reflects persisted target state.
-    expect(stockUpdatesControl).toContain('checked={target.state === "live"} disabled={!canActivate || busy}');
-    expect(stockUpdatesControl).toContain("setReadinessInclusion({");
-    expect(stockUpdatesControl).toContain("changeReason: input.reason");
-    expect(stockUpdatesControl).toMatch(
-      /dialog === "include" && <ReasonDialog[\s\S]*?onConfirm=\{reason => inclusion\.mutate\(\{ state: "preview", reason \}\)\}/,
-    );
+    // The on-switch is a direct actor-audited enable, independent of pause history.
+    expect(stockUpdatesControl).toContain('checked={target.state === "live"} disabled={!canActivate || busy || enableOutcomeUnknown}');
+    expect(stockUpdatesControl).toContain("enableDestination(enableRequest.current)");
+    expect(stockUpdatesControl).not.toContain("hasPriorLiveStop");
+    expect(stockUpdatesControl).not.toContain("setReadinessInclusion");
+    expect(routes).toMatch(/publication-target-enable"[\s\S]{0,200}?requirePermission\("inventory_planning", "activate"\)/);
     expect(page).not.toMatch(/publish now/i);
     expect(stockUpdatesControl).not.toMatch(/publish now/i);
   });

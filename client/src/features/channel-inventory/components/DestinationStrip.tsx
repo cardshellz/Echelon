@@ -39,7 +39,7 @@ export function DestinationStrip({ view, channel, targets, selectedId, onSelect,
               <span className="w-full truncate text-sm font-medium">{identity.title}</span>
               <span className="w-full truncate text-xs text-muted-foreground">{identity.scope}</span>
             </button>
-            <StockUpdatesControl key={`${target.id}:${target.revision}`} view={view} channel={channel} target={target}
+            <StockUpdatesControl view={view} channel={channel} target={target}
               canActivate={canActivate} detailsOpen={stockDetailsTargetId === target.id}
               onDetailsOpenChange={open => onStockDetailsChange(open ? target.id : null)} onOpenTab={onOpenTab} />
           </div>
