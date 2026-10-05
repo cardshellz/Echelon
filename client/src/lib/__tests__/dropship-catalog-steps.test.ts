@@ -70,7 +70,7 @@ describe("catalog step ticks", () => {
     expect(chooseStepTick([{ action: "exclude" }, { action: "include" }])).toBe("done");
   });
 
-  it("ticks Set how it lists once eBay setup reports nothing missing", () => {
+  it("ticks Listing settings once eBay setup reports nothing missing", () => {
     expect(setupStepTick(undefined)).toBe("unknown");
     expect(setupStepTick({ missingFields: ["merchantLocationKey"] })).toBe("todo");
     expect(setupStepTick({ missingFields: [] })).toBe("done");
@@ -88,15 +88,15 @@ describe("catalog step lines and action bar", () => {
 
   it("lets Choose continue only once something is selected", () => {
     expect(describeCatalogActionBar({ step: "choose", selectedCount: 3, storeName: "Marz Cards" })).toEqual({
-      summary: "3 selected", next: { step: "setup", label: "Next: Set how it lists", disabled: false },
+      summary: "3 selected", next: { step: "setup", label: "Next: Listing settings", disabled: false },
     });
     expect(describeCatalogActionBar({ step: "choose", selectedCount: 0, storeName: "Marz Cards" }).next?.disabled).toBe(true);
     expect(describeCatalogActionBar({ step: "choose", selectedCount: null, storeName: null })).toEqual({
-      summary: "Loading your selection", next: { step: "setup", label: "Next: Set how it lists", disabled: true },
+      summary: "Loading your selection", next: { step: "setup", label: "Next: Listing settings", disabled: true },
     });
   });
 
-  it("names the store on Set how it lists and Publish, and leaves Publish's actions to its panel", () => {
+  it("names the store on Listing settings and Publish, and leaves Publish's actions to its panel", () => {
     expect(describeCatalogActionBar({ step: "setup", selectedCount: 3, storeName: "Marz Cards" })).toEqual({
       summary: "Settings for Marz Cards", next: { step: "publish", label: "Next: Publish", disabled: false },
     });

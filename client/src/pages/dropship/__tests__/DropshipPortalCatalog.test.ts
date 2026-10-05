@@ -212,7 +212,7 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(formatIssue("missing_config:merchantLocationKey")).toBe("eBay setup: Inventory location");
     expect(formatIssue("missing_config:businessPolicies.returnPolicyId")).toBe("eBay setup: Return policy");
     expect(formatIssue("ebay_browse_category_required")).toBe(
-      "No eBay category. Add a rule or set a store default under eBay categories in step 2, Set how it lists.",
+      "No eBay category. Add a rule or set a store default under eBay categories in step 2, Listing settings.",
     );
   });
 

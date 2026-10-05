@@ -11,11 +11,15 @@ export type CatalogStep = (typeof CATALOG_STEPS)[number];
 
 export const CATALOG_STEP_LABELS: Readonly<Record<CatalogStep, string>> = {
   choose: "Choose what to sell",
-  setup: "Set how it lists",
+  setup: "Listing settings",
   publish: "Publish",
 };
 
-/** Narrow screens show these in the rail so all three steps fit without scrolling. */
+/**
+ * Narrow screens show these in the rail so all three steps fit without scrolling.
+ * Step 2 stays "Set up": a bare "Settings" would read like the portal's own
+ * Settings page in the menu.
+ */
 export const CATALOG_STEP_SHORT_LABELS: Readonly<Record<CatalogStep, string>> = {
   choose: "Choose",
   setup: "Set up",
@@ -79,7 +83,7 @@ export function setupStepTick(setup: { missingFields: readonly string[] } | unde
   return setup.missingFields.length === 0 ? "done" : "todo";
 }
 
-/** The line under Set how it lists in the rail. */
+/** The line under Listing settings in the rail. */
 export function describeSetupStep(tick: CatalogStepTick, storeChosen: boolean): string {
   if (tick === "unknown") return "Checking";
   if (!storeChosen) return "No eBay store";
@@ -93,9 +97,8 @@ export interface CatalogActionBarContent {
 }
 
 /**
- * The bar's button names the next step by its own title. "Continue to Set how
- * it lists" read as broken English, and a bare "Publish" would look like it
- * publishes; "Next: Publish" only moves to that step.
+ * The bar's button names the next step by its own title. A bare "Publish"
+ * would look like it publishes; "Next: Publish" only moves to that step.
  */
 function nextStepLabel(step: CatalogStep): string {
   return `Next: ${CATALOG_STEP_LABELS[step]}`;

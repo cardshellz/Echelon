@@ -185,7 +185,7 @@ test("a bare Catalog address opens Choose, and moving between steps keeps the ve
   await expect(page.getByTestId("catalog-action-summary")).toHaveText("1 selected");
   await shot(page, testInfo, "catalog-step-choose");
 
-  await page.getByRole("link", { name: "Next: Set how it lists" }).click();
+  await page.getByRole("link", { name: "Next: Listing settings" }).click();
   await expect(page).toHaveURL(`${CATALOG_PATH}/setup`);
   await expect(step(page, "setup")).toHaveAttribute("aria-current", "step");
   await expect(step(page, "setup")).toContainText("Setup complete");
@@ -225,8 +225,8 @@ test("Next stays off until something is selected", async ({ page }) => {
 
   await expect(step(page, "choose")).toContainText("0 selected");
   await expect(step(page, "choose")).toContainText("not done yet");
-  await expect(page.getByRole("button", { name: "Next: Set how it lists" })).toBeDisabled();
-  await expect(page.getByRole("link", { name: "Next: Set how it lists" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Next: Listing settings" })).toBeDisabled();
+  await expect(page.getByRole("link", { name: "Next: Listing settings" })).toHaveCount(0);
   // The rail still opens any step.
   await step(page, "publish").click();
   await expect(page.getByText("Choose items in step 1, Choose what to sell.", { exact: false })).toBeVisible();
