@@ -27,7 +27,7 @@ describe("Channel Inventory page contract", () => {
   const sources = featureSources();
   const all = sources.map(([, source]) => source).join("\n");
 
-  it("never asks for a written reason on a routine save, and always asks on a publishing command", () => {
+  it("keeps routine notes optional and retains reasons for activation and readiness commands", () => {
     for (const [name, source] of sources) {
       expect(source, name).not.toMatch(/Reason for this draft/);
       expect(source, name).not.toMatch(/reason\.trim\(\)\.length === 0 \|\| save/);

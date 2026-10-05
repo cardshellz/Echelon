@@ -36,7 +36,9 @@ async function setup(page: Page, options: {
   const state = { data, writes: [] as Array<{ path: string; body: Record<string, unknown>; raw: string }>,
     applyLostResponse: false, applyConflict: false, reviewBlocked: false, progress: null as ChannelDefinitionProgress | null,
     reads: [] as string[], errors: [] as string[], unexpected: [] as string[], loseResponse: false, conflict: false, invalidResponse: false,
-    globalFailed: false, previewFailed: false, stopFailed: false,
+    globalFailed: false, globalChangeFailed: false, previewFailed: false, stopFailed: false,
+    global: { globalEnabled: options.globalEnabled ?? true, sweepIntervalMinutes: 15, revision: "1",
+      changedBy: "operator-1", changeReason: "Approved" as string | null, lastSweepAt: null },
     statusFailed: false, status: { publicationTargetId: 5, productId: 10, capturedAt: AT, runtimeAuthority: "canonical", targetRevision: "3",
       rows: [{ productVariantId: 101, activeInventoryItemId: "test-item",
         desired: { outboxId: "9", revision: "2", quantity: "60", state: "queued", targetRevision: "3", createdAt: AT },
@@ -76,12 +78,21 @@ async function setup(page: Page, options: {
       if (path === "/api/warehouses/inventory-sources") return route.fulfill({ json: { warehouses: [] } });
       if (path === "/api/sync/status") return state.globalFailed
         ? route.fulfill({ status: 503, json: { error: { code: "STATUS_UNAVAILABLE", message: "Stock-update control is unavailable." } } })
-        : route.fulfill({ json: { global: { globalEnabled: options.globalEnabled ?? true, sweepIntervalMinutes: 15,
-        revision: "1", changedBy: "operator-1", changeReason: "Approved", lastSweepAt: null } } });
+        : route.fulfill({ json: { global: state.global } });
       if (path === "/api/inventory-planning/runtime-authority") return route.fulfill({ json: {
         contractVersion: "inventory_runtime_authority_readout_v1", authority: options.legacy ? "legacy" : "canonical", liveAllocator: options.legacy ? "channel_allocation" : "inventory_exposure",
         revision: "9", activationRunId: "44", changedBy: "operator-1", changeReason: "Approved", changedAt: AT,
       } });
+    }
+    if (req.method() === "PUT" && path === "/api/inventory-planning/admin/publication-global-control") {
+      const body = req.postDataJSON(); state.writes.push({ path, body, raw: req.postData()! });
+      if (state.globalChangeFailed) return route.fulfill({ status: 503,
+        json: { error: { code: "GLOBAL_CONTROL_BUSY", message: "Stock-update control is busy. Retry this change." } } });
+      state.global = { ...state.global, globalEnabled: body.globalEnabled ?? state.global.globalEnabled,
+        sweepIntervalMinutes: body.sweepIntervalMinutes ?? state.global.sweepIntervalMinutes,
+        revision: String(Number(state.global.revision) + 1), changeReason: body.changeReason ?? null };
+      const { lastSweepAt: _lastSweepAt, ...result } = state.global;
+      return route.fulfill({ json: { ...result, changedAt: AT, alreadyApplied: false } });
     }
     if (req.method() === "PUT" && path === `${BASE}/publication-target-stop`) {
       const body = req.postDataJSON(); state.writes.push({ path, body, raw: req.postData()! });
@@ -749,7 +760,9 @@ test("account toggle confirms a pause, preserves its state on cancellation or fa
   expect(state.writes).toEqual([]);
   await toggle.focus();
   await page.keyboard.press("Space");
-  await dialog.getByLabel("Reason (required for this publishing command)").fill("Investigate a stock discrepancy");
+  await expect(dialog.getByRole("textbox")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Pause stock updates", exact: true })).toBeEnabled();
+  await dialog.screenshot({ path: info.outputPath("pause-confirmation.png") });
   state.stopFailed = true;
   await dialog.getByRole("button", { name: "Pause stock updates", exact: true }).click();
   await expect(page.getByText("Stock updates could not be paused.", { exact: true }).first()).toBeVisible();
@@ -759,7 +772,7 @@ test("account toggle confirms a pause, preserves its state on cancellation or fa
   await expect(toggle).not.toBeChecked();
   expect(state.writes).toHaveLength(2);
   expect(state.writes[1].raw).toBe(state.writes[0].raw);
-  expect(state.writes[1].body).toMatchObject({ publicationTargetId: 5, expectedRevision: "3", changeReason: "Investigate a stock discrepancy" });
+  expect(state.writes[1].body).toMatchObject({ publicationTargetId: 5, expectedRevision: "3", changeReason: null });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: info.outputPath("account-stock-toggle-paused.png"), fullPage: true });
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
@@ -786,11 +799,49 @@ test("each account toggle operates on its own location without changing the sele
   await expect(first).toBeChecked(); await expect(second).toBeChecked();
   await second.click();
   const dialog = page.getByRole("alertdialog");
-  await dialog.getByLabel("Reason (required for this publishing command)").fill("Pause only the second location");
+  await expect(dialog.getByRole("textbox")).toHaveCount(0);
   await dialog.getByRole("button", { name: "Pause stock updates", exact: true }).click();
   await expect(second).not.toBeChecked(); await expect(first).toBeChecked();
   expect(state.writes).toHaveLength(1);
   expect(state.writes[0].body).toMatchObject({ publicationTargetId: 6, expectedRevision: "3" });
   await expect(page).toHaveURL(/destination=5/);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+
+test("pausing all channels needs no reason and retains retry identity; enabling still asks for a reason", async ({ page }, info) => {
+  const state = await setup(page);
+  const openControl = () => page.getByRole("button", { name: /^(All-channel control on|Stock updates off for all channels)/ }).click();
+  await openControl();
+  const dialog = page.getByRole("dialog", { name: "Stock updates for all channels", exact: true });
+  await dialog.getByRole("switch", { name: "Send quantity updates", exact: true }).uncheck();
+  await expect(dialog.getByRole("textbox")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Apply", exact: true })).toBeEnabled();
+  await dialog.getByRole("button", { name: "Close", exact: true }).first().click();
+  expect(state.writes).toEqual([]);
+  expect(state.global.globalEnabled).toBe(true);
+  await openControl();
+  await dialog.getByRole("switch", { name: "Send quantity updates", exact: true }).uncheck();
+  await dialog.screenshot({ path: info.outputPath("all-channel-pause.png") });
+  state.globalChangeFailed = true;
+  await dialog.getByRole("button", { name: "Apply", exact: true }).click();
+  await expect(page.getByText("Stock-update control is busy. Retry this change.", { exact: true }).first()).toBeVisible();
+  expect(state.global.globalEnabled).toBe(true);
+  state.globalChangeFailed = false;
+  await dialog.getByRole("button", { name: "Apply", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(state.writes).toHaveLength(2);
+  expect(state.writes[1].raw).toBe(state.writes[0].raw);
+  expect(state.writes[1].body).toMatchObject({ globalEnabled: false, expectedRevision: "1" });
+  expect(state.writes[1].body).not.toHaveProperty("changeReason");
+  expect(state.global.globalEnabled).toBe(false);
+  await openControl();
+  await dialog.getByRole("switch", { name: "Send quantity updates", exact: true }).check();
+  await expect(dialog.getByRole("textbox")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Apply", exact: true })).toBeDisabled();
+  await dialog.getByRole("textbox").fill("Resume after review");
+  await expect(dialog.getByRole("button", { name: "Apply", exact: true })).toBeEnabled();
+  await dialog.getByRole("button", { name: "Close", exact: true }).first().click();
+  expect(state.writes).toHaveLength(2);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });

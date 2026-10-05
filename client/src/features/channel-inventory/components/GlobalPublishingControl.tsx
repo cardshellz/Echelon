@@ -27,8 +27,8 @@ const SWEEP_INTERVAL_OPTIONS_MINUTES = [5, 10, 15, 30, 60] as const;
 /**
  * The one global publishing switch, shared by every channel. It is never
  * scoped to the channel on screen. Changing it is a sensitive publication
- * command (activate permission, required reason), so it opens a dialog rather
- * than flipping in place. Pausing publishing does not publish zero.
+ * command with activation permission. Pausing needs no written reason; enabling
+ * or changing the schedule still does. Pausing publishing does not publish zero.
  */
 export function GlobalPublishingControl({ canActivate, now, triggerLabel }: { canActivate: boolean; now: () => Date; triggerLabel?: string }) {
   const status = usePublishingStatus();
@@ -99,6 +99,7 @@ function GlobalPublishingDialog(props: {
   const [reason, setReason] = useState("");
   const changed = enabled !== props.globalEnabled || interval !== props.sweepIntervalMinutes;
   const trimmedReason = reason.trim();
+  const pauseOnly = props.globalEnabled && !enabled && interval === props.sweepIntervalMinutes;
 
   const change = useMutation({
     mutationFn: () => {
@@ -106,7 +107,7 @@ function GlobalPublishingDialog(props: {
         ...(enabled !== props.globalEnabled ? { globalEnabled: enabled } : {}),
         ...(interval !== props.sweepIntervalMinutes ? { sweepIntervalMinutes: interval } : {}),
         expectedRevision: props.revision,
-        changeReason: trimmedReason,
+        ...(pauseOnly ? {} : { changeReason: trimmedReason }),
       };
       return changeGlobalPublishing({ ...payload, idempotencyKey: command.keyFor(JSON.stringify(payload)) });
     },
@@ -171,9 +172,9 @@ function GlobalPublishingDialog(props: {
             </p>
           )}
           <p className="text-xs text-muted-foreground">
-            Revision {props.revision} · last changed by {props.changedBy}: {props.changeReason}
+            Revision {props.revision} · last changed by {props.changedBy}{props.changeReason ? `: ${props.changeReason}` : ""}
           </p>
-          {props.canActivate ? (
+          {props.canActivate && !pauseOnly && (
             <div className="space-y-2">
               <Label htmlFor="global-publishing-reason">Reason (required for this publishing command)</Label>
               <Textarea
@@ -185,7 +186,8 @@ function GlobalPublishingDialog(props: {
                 onChange={(event) => setReason(event.target.value)}
               />
             </div>
-          ) : (
+          )}
+          {!props.canActivate && (
             <Callout>Changing the global switch needs the inventory activation permission.</Callout>
           )}
         </div>
@@ -196,7 +198,7 @@ function GlobalPublishingDialog(props: {
           {props.canActivate && (
             <Button
               type="button"
-              disabled={!changed || trimmedReason.length === 0 || change.isPending}
+              disabled={!changed || (!pauseOnly && trimmedReason.length === 0) || change.isPending}
               onClick={() => change.mutate()}
             >
               {change.isPending ? "Applying…" : "Apply"}
