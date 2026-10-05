@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createShipmentCostRecoveryStore } from "../../shipment-cost-create-recovery";
 import { createShipmentCostCommandClient, createShipmentCostPayload } from "../../shipment-cost-command";
 
-const body = createShipmentCostPayload({ costType: "freight", description: "Freight", amount: "-0.55", allocationMethod: "default", vendorId: null, vendorName: "", performedByName: "", costDate: "" });
+const body = createShipmentCostPayload({ costType: "freight", description: "Freight", amount: "-0.55", allocationMethod: "default", vendorId: null, vendorName: "", performedByVendorId: null, performedByName: "", costDate: "" });
 const command = { method: "POST" as const, shipmentId: 42, body };
 const saved = () => new Response(JSON.stringify({ id: 31, inboundShipmentId: 42, version: "a".repeat(64) }));
 function session() {

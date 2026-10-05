@@ -26,6 +26,7 @@ const recordedCostSchema = z.object({
   allocationMethod: z.string().nullable(),
   vendorId: idSchema.nullable(),
   vendorName: z.string().nullable().optional(),
+  performedByVendorId: idSchema.nullable().optional(),
   performedByName: z.string().nullable(),
   invoiceDate: z.string().nullable(),
   vendorInvoiceId: idSchema.nullable(),
@@ -42,6 +43,7 @@ export type ShipmentCostForm = {
   allocationMethod: string;
   vendorName: string;
   vendorId: number | null;
+  performedByVendorId: number | null;
   performedByName: string;
   costDate: string;
 };
@@ -50,7 +52,7 @@ export type ShipmentCostEditor = ShipmentCostForm & {
   inboundShipmentId: number;
   version: string;
   economicFieldsLocked: boolean;
-  original: Readonly<Pick<ShipmentCostForm, "costType" | "amount" | "allocationMethod" | "vendorId" | "costDate">>;
+  original: Readonly<Pick<ShipmentCostForm, "costType" | "amount" | "allocationMethod" | "vendorId" | "costDate" | "performedByVendorId" | "performedByName">>;
 };
 
 export function isInvoiceOwnedShipmentCost(cost: {
@@ -103,6 +105,7 @@ export function shipmentCostEditorFromRecord(input: unknown, expectedShipmentId?
     allocationMethod: cost.allocationMethod ?? "default",
     vendorId: cost.vendorId,
     vendorName: cost.vendorName ?? "",
+    performedByVendorId: cost.performedByVendorId ?? null,
     performedByName: cost.performedByName ?? "",
     costDate,
     // A non-USD row remains readable and can receive metadata corrections.
@@ -110,6 +113,7 @@ export function shipmentCostEditorFromRecord(input: unknown, expectedShipmentId?
     original: {
       costType: cost.costType, amount: centsAsInput(effectiveShipmentCostCents(cost)),
       allocationMethod: cost.allocationMethod ?? "default", vendorId: cost.vendorId, costDate,
+      performedByVendorId: cost.performedByVendorId ?? null, performedByName: cost.performedByName ?? "",
     },
   };
 }
@@ -146,6 +150,7 @@ function economicPayload(form: ShipmentCostForm) {
     costType,
     description: form.description,
     vendorId: idSchema.nullable().parse(form.vendorId),
+    performedByVendorId: idSchema.nullable().parse(form.performedByVendorId),
     performedByName: form.performedByName,
     estimatedCents: cents,
     actualCents: cents,
@@ -165,6 +170,7 @@ export function shipmentCostFormFromCreate(body: ReturnType<typeof createShipmen
     amount: centsAsInput(body.actualCents ?? body.estimatedCents ?? null),
     allocationMethod: body.allocationMethod ?? "default", vendorId: body.vendorId ?? null,
     vendorName: "", performedByName: body.performedByName ?? "",
+    performedByVendorId: body.performedByVendorId ?? null,
     costDate: date ? `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}` : "",
   };
 }
@@ -176,6 +182,12 @@ export function updateShipmentCostPayload(editor: ShipmentCostEditor) {
     expectedVersion: editor.version,
     reason: "Updated shipment cost from shipment detail",
   };
+  // A performer is descriptive evidence, independently editable from the AP counterparty.
+  // Omit an unchanged identity so historical names and name snapshots remain intact.
+  if (editor.performedByVendorId !== editor.original.performedByVendorId
+    || editor.performedByName !== editor.original.performedByName) {
+    changes.performedByVendorId = editor.performedByVendorId;
+  }
   if (!editor.economicFieldsLocked) {
     if (editor.costType !== editor.original.costType) changes.costType = editor.costType;
     if (editor.vendorId !== editor.original.vendorId) changes.vendorId = editor.vendorId;

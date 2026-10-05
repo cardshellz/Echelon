@@ -87,6 +87,7 @@ vi.mock("@shared/schema", () => ({
     actualCents: "actualCents",
     estimatedCents: "estimatedCents",
     performedByName: "performedByName",
+    performedByVendorId: "performedByVendorId",
     costStatus: "costStatus",
     invoiceNumber: "invoiceNumber",
     invoiceDate: "invoiceDate",
