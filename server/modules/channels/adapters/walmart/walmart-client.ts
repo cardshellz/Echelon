@@ -163,6 +163,18 @@ export class WalmartClient {
       remainingTokens: null, nextReplenishmentAt: null };
     let recorded = false;
     try {
+      let requestBody: BodyInit | undefined = body;
+      const requestHeaders = { ...headers };
+      if (isListingSetupFeedRequest(method, new URL(url)) && body !== undefined) {
+        // The feed endpoint documents a multipart file upload. Keep the exact
+        // approved JSON as the file content; send() still records its semantic
+        // hash before transport encoding, independent of multipart boundaries.
+        // https://developer.walmart.com/global-marketplace/reference/itembulkuploads
+        const form = new FormData();
+        form.append("file", new Blob([body], { type: "application/json" }), "items.json");
+        requestBody = form;
+        delete requestHeaders["Content-Type"];
+      }
       const response = await this.dependencies.fetch(url, {
         method,
         headers: {
@@ -171,9 +183,9 @@ export class WalmartClient {
           "WM_MARKET": this.credentials.market,
           ...(this.credentials.environment === "sandbox" && this.credentials.market === "us" ? { "WM_SANDBOX": "v2" } : {}),
           "WM_QOS.CORRELATION_ID": correlationId,
-          ...headers,
+          ...requestHeaders,
         },
-        body,
+        body: requestBody,
         redirect: "error",
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
@@ -229,7 +241,12 @@ export class WalmartClient {
 
 function isQuantityRequest(method: string, url: URL): boolean {
   return (method === "PUT" && url.pathname === "/v3/inventory")
-    || (method === "POST" && url.pathname === "/v3/feeds" && ["MP_ITEM", "MP_ITEM_MATCH"].includes(url.searchParams.get("feedType") ?? ""));
+    || isListingSetupFeedRequest(method, url);
+}
+
+function isListingSetupFeedRequest(method: string, url: URL): boolean {
+  return method === "POST" && url.pathname === "/v3/feeds"
+    && ["MP_ITEM", "MP_ITEM_MATCH"].includes(url.searchParams.get("feedType") ?? "");
 }
 
 function responseMetadata(response: Response, correlationId: string, now: Date): WalmartResponseMetadata {
