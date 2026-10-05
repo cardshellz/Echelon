@@ -8,7 +8,7 @@ Reviewed and patched against origin/main `4d12a17f6c5c2bc308231fb45feaadf1724fe1
 2. The mapper previously assigned this raw text directly to `startedAt` (now corrected at `orders.storage.ts:539`). PostgreSQL's space-separated timestamp is not an ISO datetime accepted by the picker response contract (`shared/types/picker-order.ts:5-8,41`).
 3. `PickingUseCases.loadPickQueue` (`server/modules/orders/picking.use-cases.ts:3975`) plans items and calls `validatePickerOrder` (line 4048). A non-null raw `startedAt` raises a Zod `invalid_string` error at that field. The queue route catches this and returns 500 for the entire queue (`server/modules/orders/picking.routes.ts:159-171`).
 
-The patch reuses `orders.startedAt.mapFromDriverValue` to decode the recorded timestamp using the existing column's UTC semantics (`shared/schema/orders.schema.ts:168`; Drizzle `pg-core/columns/timestamp.js:32-33`). Null remains null; the validator stays strict. This read path performs no writes, invents no timestamp and changes no quantities, claims, holds, picks, costs, replenishment policy or migration.
+The patch reuses `orders.startedAt.mapFromDriverValue` to decode the recorded timestamp using the existing column's UTC semantics (`shared/schema/orders.schema.ts:168`; Drizzle `pg-core/columns/timestamp.js:30-31`). Null remains null; the validator stays strict. This read path performs no writes, invents no timestamp and changes no quantities, claims, holds, picks, costs, replenishment policy or migration.
 
 ## Evidence and validation
 
