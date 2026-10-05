@@ -6,7 +6,7 @@
  * On a phone, Compare and "How this page counts" fold into the ⋯ menu.
  */
 
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import type { DateRange } from "react-day-picker";
 import { MoreHorizontal, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -57,13 +57,19 @@ export interface FinancePeriodBarProps {
   readonly onCompare: (compare: boolean) => void;
   readonly onRemoveVendor: () => void;
   readonly onOpenChecks: () => void;
-  readonly onOpenCounting: () => void;
+  /** `opener` is where focus goes back when the sheet closes. */
+  readonly onOpenCounting: (opener: HTMLElement | null) => void;
 }
 
 export function FinancePeriodBar(props: FinancePeriodBarProps) {
   const { view, state } = props;
   const [customOpen, setCustomOpen] = useState(false);
   const compareChecked = state.compare && !view.compareDisabled;
+  // "Custom dates…" was picked and the date picker opens once the period list has closed (see SelectContent below).
+  const customPending = useRef(false);
+  // "How this page counts" was picked in the ⋯ menu: the sheet takes focus, not the menu's trigger.
+  const countingPending = useRef(false);
+  const moreTrigger = useRef<HTMLButtonElement>(null);
 
   return (
     <section
@@ -78,14 +84,24 @@ export function FinancePeriodBar(props: FinancePeriodBarProps) {
           value={state.period}
           onValueChange={(value) => {
             const preset = financePeriodPresetFromSelect(value);
-            if (preset === "custom") setCustomOpen(true);
+            if (preset === "custom") customPending.current = true;
             else if (preset !== null) props.onPreset(preset);
           }}
         >
           <SelectTrigger className="h-9 w-auto min-w-[11rem]" aria-label="Period">
             <SelectValue>{view.presetLabel}</SelectValue>
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent
+            onCloseAutoFocus={(event) => {
+              // Once the list has closed, Radix moves focus back to its trigger. The date picker is a
+              // popover that shuts when focus leaves it, so opening it any earlier lets that focus move
+              // shut it again at once. It opens here instead, after the list is gone, and keeps focus.
+              if (!customPending.current) return;
+              customPending.current = false;
+              event.preventDefault();
+              setCustomOpen(true);
+            }}
+          >
             {FINANCE_PERIOD_PRESET_OPTIONS.map((preset) => (
               <SelectItem key={preset} value={preset}>
                 {FINANCE_PERIOD_PRESET_LABELS[preset]}
@@ -163,11 +179,19 @@ export function FinancePeriodBar(props: FinancePeriodBarProps) {
           )}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="sm:hidden" aria-label="More period options">
+              <Button ref={moreTrigger} variant="ghost" size="icon" className="sm:hidden" aria-label="More period options">
                 <MoreHorizontal aria-hidden="true" className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
+            <DropdownMenuContent
+              align="end"
+              onCloseAutoFocus={(event) => {
+                // The sheet that just opened holds focus; the menu must not pull it back to ⋯.
+                if (!countingPending.current) return;
+                countingPending.current = false;
+                event.preventDefault();
+              }}
+            >
               <DropdownMenuCheckboxItem
                 checked={compareChecked}
                 disabled={view.compareDisabled}
@@ -175,7 +199,15 @@ export function FinancePeriodBar(props: FinancePeriodBarProps) {
               >
                 {view.compareDisabled ? view.compareHint : view.compareLabel}
               </DropdownMenuCheckboxItem>
-              <DropdownMenuItem onSelect={props.onOpenCounting}>{FINANCE_HOW_COUNTS_LINK_TEXT}</DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() => {
+                  countingPending.current = true;
+                  // The menu item goes away with the menu, so focus comes back to ⋯ when the sheet closes.
+                  props.onOpenCounting(moreTrigger.current);
+                }}
+              >
+                {FINANCE_HOW_COUNTS_LINK_TEXT}
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
@@ -247,12 +279,12 @@ function CustomRangePicker(props: {
 }
 
 /** The sentence under the bar and the link to "How this page counts", plus any policy-era notes (spec §3.1, §7). */
-export function FinanceTwoClocksLine({ notes, onOpenCounting }: { notes: readonly string[]; onOpenCounting: () => void }) {
+export function FinanceTwoClocksLine({ notes, onOpenCounting }: { notes: readonly string[]; onOpenCounting: (opener: HTMLElement | null) => void }) {
   return (
     <div className="space-y-1">
       <p className="text-[13px] text-muted-foreground">
         {FINANCE_TWO_CLOCKS_TEXT}{" "}
-        <button type="button" data-finance-action="open-counting" onClick={onOpenCounting} className={FINANCE_TEXT_BUTTON_CLASS}>
+        <button type="button" data-finance-action="open-counting" onClick={(event) => onOpenCounting(event.currentTarget)} className={FINANCE_TEXT_BUTTON_CLASS}>
           {FINANCE_HOW_COUNTS_LINK_TEXT} ›
         </button>
       </p>

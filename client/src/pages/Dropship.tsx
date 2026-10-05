@@ -269,7 +269,7 @@ import { useAuth } from "@/lib/auth";
 import { DropshipWalletPolicyPanel } from "./dropship-wallet-policy-panel";
 import { DropshipCostChangePolicyPanel } from "./dropship-cost-change-policy-panel";
 import { DropshipFinancePanel } from "./dropship-finance-panel";
-import { DROPSHIP_FINANCE_QUERY_KEY_ROOT } from "./dropship-finance-model";
+import { refreshFinanceQueries } from "./dropship-finance-model";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
 type DogfoodReadinessStatusFilter = DropshipDogfoodReadinessStatus | "all";
@@ -823,9 +823,10 @@ export default function Dropship() {
     void overviewQuery.refetch();
     void auditQuery.refetch();
     // The finance tab has no Refresh of its own: the header button refetches
-    // every finance query, keeping the numbers on screen while it runs.
+    // the summary on screen, keeping its numbers up while it runs, and marks
+    // the other cached periods stale.
     if (activeTab === "finance") {
-      void queryClient.refetchQueries({ queryKey: [DROPSHIP_FINANCE_QUERY_KEY_ROOT] });
+      void refreshFinanceQueries(queryClient);
     }
   }
 

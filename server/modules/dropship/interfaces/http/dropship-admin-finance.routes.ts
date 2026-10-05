@@ -6,7 +6,14 @@ import {
 } from "../../../../../shared/dropship/program-finance";
 import { logger as platformLogger } from "../../../../platform/observability/logger";
 import { requirePermission } from "../../../../routes/middleware";
-import type { DropshipFinanceLogger, DropshipFinanceService } from "../../application/dropship-finance-service";
+import {
+  FINANCE_CLASSIFIED_CODES,
+  FINANCE_INTERNAL_ERROR_CODE,
+  financeErrorClassification,
+  type DropshipFinanceLogger,
+  type DropshipFinanceService,
+  type FinanceErrorClassification,
+} from "../../application/dropship-finance-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipFinanceServiceFromEnv } from "../../infrastructure/dropship-finance.factory";
 
@@ -17,52 +24,60 @@ import { createDropshipFinanceServiceFromEnv } from "../../infrastructure/dropsh
  */
 export const FINANCE_SUMMARY_PATH = "/api/dropship/admin/finance/summary";
 
-export type FinanceErrorClassification = "transient" | "permanent" | "fatal";
-
 export interface FinanceErrorClass {
   readonly status: number;
   readonly classification: FinanceErrorClassification;
 }
 
-const FINANCE_INTERNAL_ERROR_CODE = "DROPSHIP_FINANCE_INTERNAL_ERROR";
 const FINANCE_CONTRACT_VIOLATION_CODE = "DROPSHIP_FINANCE_CONTRACT_VIOLATION";
 
 /**
- * The single code → HTTP status and class map (contract §5). DropshipError
- * has no classification field, so this table is where a finance code gets
- * one; the client retries only `transient`.
+ * The HTTP status of each finance code (contract §5). The class comes from
+ * the one code → class map in the application layer
+ * (financeErrorClassification); the error-map test keeps both maps on the
+ * same codes.
  */
-const FINANCE_ERROR_CLASSES: Readonly<Record<string, FinanceErrorClass>> = Object.freeze({
-  DROPSHIP_FINANCE_INVALID_INPUT: { status: 400, classification: "permanent" },
-  DROPSHIP_FINANCE_INVALID_PERIOD: { status: 400, classification: "permanent" },
-  DROPSHIP_FINANCE_INVALID_CURSOR: { status: 400, classification: "permanent" },
-  DROPSHIP_FINANCE_ORDER_NOT_FOUND: { status: 404, classification: "permanent" },
-  DROPSHIP_FINANCE_VENDOR_NOT_FOUND: { status: 404, classification: "permanent" },
-  DROPSHIP_FINANCE_EXPORT_TOO_LARGE: { status: 400, classification: "permanent" },
-  DROPSHIP_FINANCE_ORDER_TOO_LARGE: { status: 422, classification: "permanent" },
-  DROPSHIP_FINANCE_BUSY: { status: 503, classification: "transient" },
-  DROPSHIP_FINANCE_QUERY_TIMEOUT: { status: 503, classification: "transient" },
-  DROPSHIP_FINANCE_DB_UNAVAILABLE: { status: 503, classification: "transient" },
-  DROPSHIP_FINANCE_TABLE_MISSING: { status: 503, classification: "transient" },
-  DROPSHIP_FINANCE_BUDGET_EXCEEDED: { status: 503, classification: "transient" },
-  DROPSHIP_FINANCE_SCHEMA_MISMATCH: { status: 500, classification: "fatal" },
-  // Bad stored data: retrying reads the same rows, so it is not transient.
-  DROPSHIP_FINANCE_DATA_INVALID: { status: 500, classification: "permanent" },
-  DROPSHIP_FINANCE_AMOUNT_OUT_OF_RANGE: { status: 500, classification: "fatal" },
-  [FINANCE_CONTRACT_VIOLATION_CODE]: { status: 500, classification: "fatal" },
-  [FINANCE_INTERNAL_ERROR_CODE]: { status: 500, classification: "fatal" },
+const FINANCE_ERROR_STATUS: Readonly<Record<string, number>> = Object.freeze({
+  DROPSHIP_FINANCE_INVALID_INPUT: 400,
+  DROPSHIP_FINANCE_INVALID_PERIOD: 400,
+  DROPSHIP_FINANCE_INVALID_CURSOR: 400,
+  DROPSHIP_FINANCE_ORDER_NOT_FOUND: 404,
+  DROPSHIP_FINANCE_VENDOR_NOT_FOUND: 404,
+  DROPSHIP_FINANCE_EXPORT_TOO_LARGE: 400,
+  DROPSHIP_FINANCE_ORDER_TOO_LARGE: 422,
+  DROPSHIP_FINANCE_BUSY: 503,
+  DROPSHIP_FINANCE_QUERY_TIMEOUT: 503,
+  DROPSHIP_FINANCE_DB_UNAVAILABLE: 503,
+  DROPSHIP_FINANCE_TABLE_MISSING: 503,
+  DROPSHIP_FINANCE_BUDGET_EXCEEDED: 503,
+  DROPSHIP_FINANCE_SCHEMA_MISMATCH: 500,
+  DROPSHIP_FINANCE_DATA_INVALID: 500,
+  DROPSHIP_FINANCE_AMOUNT_OUT_OF_RANGE: 500,
+  [FINANCE_CONTRACT_VIOLATION_CODE]: 500,
+  [FINANCE_INTERNAL_ERROR_CODE]: 500,
 });
 
-/** Every code the map knows (the error-map test walks them). */
-export const FINANCE_ERROR_CODES: readonly string[] = Object.freeze(Object.keys(FINANCE_ERROR_CLASSES));
+/** Every code the route answers with its own status (the error-map test walks them). */
+export const FINANCE_ERROR_CODES: readonly string[] = Object.freeze(Object.keys(FINANCE_ERROR_STATUS));
+
+function isAnsweredCode(code: string): boolean {
+  return FINANCE_ERROR_STATUS[code] !== undefined && FINANCE_CLASSIFIED_CODES.includes(code);
+}
 
 /** HTTP status and class of a finance error code; anything unknown is an internal (fatal) error. */
 export function classifyFinanceError(code: string): FinanceErrorClass {
-  return FINANCE_ERROR_CLASSES[code] ?? FINANCE_ERROR_CLASSES[FINANCE_INTERNAL_ERROR_CODE];
+  const answered = isAnsweredCode(code) ? code : FINANCE_INTERNAL_ERROR_CODE;
+  return { status: FINANCE_ERROR_STATUS[answered], classification: financeErrorClassification(answered) };
 }
 
 /** Context keys a refused request may send back so the page can word the refusal. */
 const PERMANENT_CONTEXT_KEYS = ["reason", "issues", "vendorId"] as const;
+
+/**
+ * The correlation fields (contract §5) a failed request's log line copies
+ * from the service's `correlation` context. Log only: never in a response.
+ */
+const LOG_CORRELATION_KEYS = ["vendor_id", "period_preset", "period_from", "period_to", "compare", "generated_at", "duration_ms"] as const;
 
 function noStore(_req: Request, res: Response, next: NextFunction): void {
   res.set("Cache-Control", "no-store");
@@ -118,11 +133,40 @@ function issuePathsOf(context: Record<string, unknown> | undefined): string[] | 
     : "?"));
 }
 
-function logFinanceFailure(logger: DropshipFinanceLogger, error: unknown, code: string, classification: FinanceErrorClassification, actorId: string | null): void {
-  const originalCode = error instanceof DropshipError ? error.code : null;
+/** The request's correlation fields for the log line; the vendor a VENDOR_NOT_FOUND names when the service gave none. */
+function correlationOf(context: Record<string, unknown> | undefined): Record<string, unknown> {
+  const correlation = context?.correlation;
+  const fields: Record<string, unknown> = {};
+  if (typeof correlation === "object" && correlation !== null) {
+    for (const key of LOG_CORRELATION_KEYS) {
+      const value = (correlation as Record<string, unknown>)[key];
+      if (value !== undefined) fields[key] = value;
+    }
+  }
+  if (fields.vendor_id === undefined && context?.vendorId !== undefined) fields.vendor_id = context.vendorId;
+  return fields;
+}
+
+/**
+ * INFO `request_refused` for a refusal the page words (permanent, 4xx);
+ * WARN `request_failed` when a retry may fix it; ERROR `request_failed` when
+ * a human must look (fatal, or permanent bad data answered with 500).
+ */
+function logFinanceFailure(
+  logger: DropshipFinanceLogger,
+  error: unknown,
+  code: string,
+  { status, classification }: FinanceErrorClass,
+  actorId: string | null,
+): void {
   const context = error instanceof DropshipError ? error.context : undefined;
+  // The service hands on a failure that was not a DropshipError as INTERNAL_ERROR, the original as its cause.
+  const original = context?.cause !== undefined ? context.cause : error;
+  const originalCode = original instanceof DropshipError ? original.code : null;
+  const refused = classification === "permanent" && status < 500;
   const entry = {
-    outcome: "refused",
+    ...correlationOf(context),
+    outcome: refused ? "refused" : "failed",
     endpoint: FINANCE_SUMMARY_PATH,
     actor_id: actorId,
     error_code: code,
@@ -130,9 +174,9 @@ function logFinanceFailure(logger: DropshipFinanceLogger, error: unknown, code: 
     ...(context?.reason !== undefined ? { reason: context.reason } : {}),
     ...(code === FINANCE_CONTRACT_VIOLATION_CODE ? { issues: issuePathsOf(context) } : {}),
     // An error the map does not know is a bug: keep what it was for the person who looks.
-    ...(originalCode !== code ? { original_code: originalCode, error_message: error instanceof Error ? error.message : String(error) } : {}),
+    ...(originalCode !== code ? { original_code: originalCode, error_message: original instanceof Error ? original.message : String(original) } : {}),
   };
-  if (classification === "permanent") logger.info("dropship.finance.request_refused", entry);
+  if (refused) logger.info("dropship.finance.request_refused", entry);
   else if (classification === "transient") logger.warn("dropship.finance.request_failed", entry);
   else logger.error("dropship.finance.request_failed", entry);
 }
@@ -143,10 +187,11 @@ function logFinanceFailure(logger: DropshipFinanceLogger, error: unknown, code: 
  * its class, never database detail.
  */
 function sendFinanceError(res: Response, error: unknown, logger: DropshipFinanceLogger, actorId: string | null): Response {
-  const known = error instanceof DropshipError && FINANCE_ERROR_CLASSES[error.code] !== undefined;
+  const known = error instanceof DropshipError && isAnsweredCode(error.code);
   const code = known ? (error as DropshipError).code : FINANCE_INTERNAL_ERROR_CODE;
-  const { status, classification } = classifyFinanceError(code);
-  logFinanceFailure(logger, error, code, classification, actorId);
+  const errorClass = classifyFinanceError(code);
+  const { status, classification } = errorClass;
+  logFinanceFailure(logger, error, code, errorClass, actorId);
   const envelope: FinanceErrorEnvelope = {
     error: {
       code,

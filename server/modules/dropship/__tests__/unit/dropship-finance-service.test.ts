@@ -25,7 +25,12 @@ interface Harness {
   logger: { [K in keyof DropshipFinanceLogger]: ReturnType<typeof vi.fn> };
 }
 
-function harness(read: (request: FinanceSummaryReadRequest) => FinanceSummaryRead | Promise<FinanceSummaryRead>, now = FINANCE_FIXTURE_NOW): Harness {
+/** `stepMs`: how far the clock moves on each reading after the first, so a request lasts that long. */
+function harness(
+  read: (request: FinanceSummaryReadRequest) => FinanceSummaryRead | Promise<FinanceSummaryRead>,
+  now = FINANCE_FIXTURE_NOW,
+  stepMs = 0,
+): Harness {
   const requests: FinanceSummaryReadRequest[] = [];
   const repository: DropshipFinanceRepository = {
     readSummary: vi.fn(async (request) => {
@@ -34,7 +39,9 @@ function harness(read: (request: FinanceSummaryReadRequest) => FinanceSummaryRea
     }),
   };
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const service = new DropshipFinanceService({ repository, clock: { now: () => new Date(now.getTime()) }, logger });
+  let readings = 0;
+  const clock = { now: () => new Date(now.getTime() + stepMs * readings++) };
+  const service = new DropshipFinanceService({ repository, clock, logger });
   return { service, requests, logger };
 }
 
@@ -163,6 +170,20 @@ describe("DropshipFinanceService.getSummary", () => {
     }));
   });
 
+  it("logs a section of bad stored data at ERROR with the class the error map gives it: permanent", async () => {
+    const raw = { ...fixtureRaw(), products: { status: "error", errorCode: "DROPSHIP_FINANCE_DATA_INVALID" } as const };
+    const statements: FinanceStatementOutcome[] = [
+      { name: "products", status: "error", errorCode: "DROPSHIP_FINANCE_DATA_INVALID", sqlState: "22P02", durationMs: 4 },
+    ];
+    const h = harness(() => read(raw, statements));
+    await h.service.getSummary({}, actor);
+
+    expect(h.logger.warn).not.toHaveBeenCalled();
+    expect(h.logger.error).toHaveBeenCalledWith("dropship.finance.section_failed", expect.objectContaining({
+      section: "products", error_code: "DROPSHIP_FINANCE_DATA_INVALID", error_class: "permanent", sql_state: "22P02",
+    }));
+  });
+
   it("logs the sections the time budget skipped once, as a WARN", async () => {
     const skipped = { status: "skipped", errorCode: "DROPSHIP_FINANCE_BUDGET_EXCEEDED" } as const;
     const raw = { ...fixtureRaw(), checks: { ...fixtureRaw().checks, K3: skipped } };
@@ -188,11 +209,47 @@ describe("DropshipFinanceService.getSummary", () => {
     expect(JSON.stringify(h.logger.error.mock.calls)).not.toContain("90071992547409930");
   });
 
-  it("lets a repository failure through unchanged", async () => {
-    const busy = new DropshipError("DROPSHIP_FINANCE_BUSY", "busy");
-    const h = harness(() => { throw busy; });
-    await expect(h.service.getSummary({}, actor)).rejects.toBe(busy);
+  it("passes a repository failure on with its code, message and context, plus the log-only correlation fields", async () => {
+    const busy = new DropshipError("DROPSHIP_FINANCE_BUSY", "busy", { limit: 2, waitedMs: 2000 });
+    // The read takes 2,000 ms on the injected clock.
+    const h = harness(() => { throw busy; }, FINANCE_FIXTURE_NOW, 2_000);
+    const error = (await h.service.getSummary({ vendorId: "12", period: "last-month" }, actor).then(() => null, (caught: unknown) => caught)) as DropshipError;
+
+    expect(error).toBeInstanceOf(DropshipError);
+    expect(error).toMatchObject({ code: "DROPSHIP_FINANCE_BUSY", message: "busy" });
+    expect(error.context).toEqual({
+      limit: 2,
+      waitedMs: 2000,
+      correlation: {
+        vendor_id: 12, period_preset: "last-month", period_from: "2026-09-01", period_to: "2026-09-30", compare: true,
+        generated_at: FINANCE_FIXTURE_NOW.toISOString(), duration_ms: 2_000,
+      },
+    });
+    expect(busy.context).toEqual({ limit: 2, waitedMs: 2000 });
     expect(h.logger.info).not.toHaveBeenCalled();
+  });
+
+  it("names the days asked for when the period itself is refused", async () => {
+    const h = harness(() => read(fixtureRaw()));
+    const error = (await h.service.getSummary({ period: "custom", from: "2026-10-03", to: "2026-10-01", vendorId: "13" }, actor)
+      .then(() => null, (caught: unknown) => caught)) as DropshipError;
+
+    expect(error.code).toBe("DROPSHIP_FINANCE_INVALID_PERIOD");
+    expect(error.context).toMatchObject({
+      reason: "from_after_to",
+      correlation: { vendor_id: 13, period_preset: "custom", period_from: "2026-10-03", period_to: "2026-10-01", duration_ms: 0 },
+    });
+    expect(h.requests).toHaveLength(0);
+  });
+
+  it("turns a failure that is not a DropshipError into INTERNAL_ERROR, keeping the original as its cause", async () => {
+    const bug = new TypeError("cannot read x of undefined");
+    const h = harness(() => { throw bug; });
+    const error = (await h.service.getSummary({}, actor).then(() => null, (caught: unknown) => caught)) as DropshipError;
+
+    expect(error).toMatchObject({ code: "DROPSHIP_FINANCE_INTERNAL_ERROR", message: "The finance figures could not be read." });
+    expect(error.context?.cause).toBe(bug);
+    expect(error.context?.correlation).toMatchObject({ vendor_id: null, period_preset: "mtd", period_from: "2026-10-01", period_to: "2026-10-05" });
   });
 
   it("refuses to label numbers with bounds the database worked out differently", async () => {

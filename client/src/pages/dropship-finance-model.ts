@@ -20,6 +20,7 @@
  * to a sheet that does not exist yet.
  */
 
+import type { QueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import {
   FINANCE_CHECK_GROUPS,
@@ -54,7 +55,9 @@ import {
   type FinanceVendorAggregateRow,
   type FinanceVendorRow,
   type FinanceWindow,
+  type FinanceWorkingOperand,
   type FinanceWorkingStep,
+  type FinanceWorkingUnit,
 } from "@shared/dropship/program-finance";
 import {
   FINANCE_CHECK_DEFINITIONS,
@@ -90,9 +93,21 @@ import { formatPoints } from "@/lib/dropship-wallet-guidance";
 export const DROPSHIP_FINANCE_SUMMARY_URL = "/api/dropship/admin/finance/summary";
 /**
  * Every finance query key starts with this, so the page's header Refresh
- * can refetch them all with one prefix (spec §5 "Required wiring").
+ * can reach them all with one prefix (spec §5 "Required wiring").
  */
 export const DROPSHIP_FINANCE_QUERY_KEY_ROOT = "dropship-finance";
+
+/**
+ * The header Refresh while the finance tab is open. Only the summary on
+ * screen is fetched again, keeping its numbers up while it runs; every other
+ * period or vendor cached earlier is marked stale, so it fetches fresh when it
+ * is shown again. Refetching them all at once would queue the visible summary
+ * behind snapshots nobody is looking at, on a server that runs two at a time
+ * and turns the rest away as busy.
+ */
+export function refreshFinanceQueries(queryClient: Pick<QueryClient, "invalidateQueries">): Promise<void> {
+  return queryClient.invalidateQueries({ queryKey: [DROPSHIP_FINANCE_QUERY_KEY_ROOT], refetchType: "active" });
+}
 /** Retries after the first failure, transient errors only (spec §7). */
 export const FINANCE_QUERY_MAX_RETRIES = 2;
 /** Backoff base: 1s, then 2s (`retryDelay 1000·2ⁿ`, spec §7). */
@@ -1518,7 +1533,8 @@ function pointsMemos(ctx: SectionContext): FinanceMemoView[] {
   const buckets = (["points.expiry.next_30_days", "points.expiry.days_31_to_90", "points.expiry.later", "points.expiry.never"] as const)
     .map((key) => {
       const line = ctx.lines.get(key);
-      return line && line.amount !== null ? `${lineWords(ctx, key)} ${formatFinancePoints(line.amount)}` : null;
+      // An empty bucket comes as an "every line" line: Summary leaves it out like any other.
+      return line && line.amount !== null && isLineShown(line, ctx.depth) ? `${lineWords(ctx, key)} ${formatFinancePoints(line.amount)}` : null;
     })
     .filter((part): part is string => part !== null);
   if (buckets.length > 0) memos.push(memo(ctx, "points.expiry", `${FINANCE_POINTS_EXPIRY_HEADING} ${buckets.join(" · ")}`));
@@ -1618,6 +1634,30 @@ function amountOf(lines: LineIndex, key: FinanceLineKey): number | null {
   return line && (line.status === "recorded" || line.status === "partial") ? line.amount : null;
 }
 
+/**
+ * The figure a collapsed row is built on, or the plain words for why it has
+ * none (spec §7): "Unavailable" when it could not be worked out this time
+ * (Try again may bring it back), "Not recorded" only for what Echelon never
+ * records, and "Some amounts missing" for a partial line with no total.
+ */
+type HeadlineFigure = { readonly amount: number } | { readonly missing: string };
+
+function headlineFigure(lines: LineIndex, key: FinanceLineKey): HeadlineFigure {
+  const line = lines.get(key);
+  if (!line || line.status === "unavailable") return { missing: FINANCE_UNAVAILABLE_TEXT };
+  if (line.status === "not_recorded") return { missing: FINANCE_NOT_RECORDED_TEXT };
+  if (line.amount === null) return { missing: FINANCE_PARTIAL_TEXT };
+  return { amount: line.amount };
+}
+
+/** A collapsed row's amount: the copy deck's words around the figure ("$26.41 kept"), or the reason there is none, muted. */
+function headlineAmount(
+  figure: HeadlineFigure,
+  words: (amount: number) => string,
+): { amount: string; tone: FinanceRowAmountTone } {
+  return "missing" in figure ? { amount: figure.missing, tone: "muted" } : { amount: words(figure.amount), tone: "default" };
+}
+
 function countText(value: number | null, noun: CountNoun): string {
   return value === null ? FINANCE_NOT_RECORDED_TEXT : formatFinanceCountOf(value, noun.one, noun.many);
 }
@@ -1633,16 +1673,18 @@ const CASH_RAIL_WORDS: readonly (readonly [FinanceLineKey, string])[] = [
 function collapsedSummary(key: FinanceSectionKey, ctx: SectionContext): { summary: string; amount: string; tone: FinanceRowAmountTone } {
   const definition = FINANCE_SECTION_DEFINITIONS[key];
   const lines = ctx.lines;
-  const money = (lineKey: FinanceLineKey) => formatFinanceMoney(amountOf(lines, lineKey));
+  const money = (lineKey: FinanceLineKey) =>
+    headlineAmount(headlineFigure(lines, lineKey), (amount) => fillFinanceWords(definition.amount, { $: formatFinanceMoney(amount) }));
   switch (key) {
     case "sales": {
       const orders = lines.get("sales.billed")?.count ?? ctx.summary.answer.orders;
       const waiting = lines.get("sales.waiting")?.count ?? 0;
-      const kept = amountOf(lines, "sales.kept");
+      const kept = headlineFigure(lines, "sales.kept");
+      const headline = money("sales.kept");
       return {
         summary: `${formatFinanceCountOf(orders, "order", "orders")} · ${formatFinanceCount(waiting)} waiting on costs`,
-        amount: fillFinanceWords(definition.amount, { $: formatFinanceMoney(kept) }),
-        tone: kept !== null && kept < 0 ? "loss" : "default",
+        amount: headline.amount,
+        tone: "amount" in kept && kept.amount < 0 ? "loss" : headline.tone,
       };
     }
     case "products": {
@@ -1653,50 +1695,39 @@ function collapsedSummary(key: FinanceSectionKey, ctx: SectionContext): { summar
           pieces: pieces && pieces.amount !== null ? formatFinanceCount(pieces.amount) : FINANCE_NOT_RECORDED_TEXT.toLowerCase(),
           n: formatFinanceCount(amountOf(lines, "products.count")),
         }),
-        amount: fillFinanceWords(definition.amount, { $: money("products.billed") }),
-        tone: "default",
+        ...money("products.billed"),
       };
     }
     case "cash": {
       const rails = CASH_RAIL_WORDS.filter(([lineKey]) => (amountOf(lines, lineKey) ?? 0) !== 0).map(([, words]) => words);
-      const deposits = lines.get("cash.received_deposits")?.count
-        ?? CASH_RAIL_WORDS.reduce((total, [lineKey]) => total + (lines.get(lineKey)?.count ?? 0), 0);
-      return {
-        summary: `${formatFinanceCountOf(deposits, DEPOSITS.one, DEPOSITS.many)}${rails.length > 0 ? ` · ${rails.join(", ")}` : ""}`,
-        amount: fillFinanceWords(definition.amount, { $: money("cash.received") }),
-        tone: "default",
-      };
+      // The server counts the settled deposits itself (contract: cash.received_deposits.count); the page never adds them up.
+      const deposits = lines.get("cash.received_deposits")?.count;
+      const parts = [...(deposits !== undefined ? [formatFinanceCountOf(deposits, DEPOSITS.one, DEPOSITS.many)] : []), ...(rails.length > 0 ? [rails.join(", ")] : [])];
+      return { summary: parts.join(" · "), ...money("cash.received") };
     }
     case "returns": {
       const credited = lines.get("returns.credited");
       return {
         summary: `${countText(credited?.count ?? null, { one: "credit", many: "credits" })} · ${formatFinanceMoney(amountOf(lines, "returns.fees"))} in return fees`,
-        amount: fillFinanceWords(definition.amount, { $: money("returns.credited") }),
-        tone: "default",
+        ...money("returns.credited"),
       };
     }
     case "owed":
       return {
         summary: fillFinanceWords(definition.summary, { n: formatFinanceCount(amountOf(lines, "owed.wallets")) }),
-        amount: fillFinanceWords(definition.amount, { $: money("owed.we_owe") }),
-        tone: "default",
+        ...money("owed.we_owe"),
       };
-    case "points": {
-      const held = amountOf(lines, "points.held");
+    case "points":
       return {
         summary: definition.summary,
-        amount: held === null ? FINANCE_NOT_RECORDED_TEXT : `${formatFinancePoints(held)} held`,
-        tone: "default",
+        ...headlineAmount(headlineFigure(lines, "points.held"), (held) => `${formatFinancePoints(held)} held`),
       };
-    }
     case "pool": {
-      const closing = amountOf(lines, "pool.closing");
-      const unavailable = lines.get("pool.closing")?.status === "unavailable";
-      return {
-        summary: definition.summary,
-        amount: unavailable ? "Program-wide" : fillFinanceWords(definition.amount, { $: formatFinanceMoney(closing) }),
-        tone: unavailable ? "muted" : "default",
-      };
+      // In a vendor's view the pool is not split by vendor: that is not a failure, so it says why instead of "Unavailable".
+      if (lines.get("pool.closing")?.reasonKey === "program_wide") {
+        return { summary: definition.summary, amount: "Program-wide", tone: "muted" };
+      }
+      return { summary: definition.summary, ...money("pool.closing") };
     }
     case "vendors": {
       const vendors = ctx.summary.sections.vendors;
@@ -2443,7 +2474,8 @@ export function buildFinanceAnswerView(summary: FinanceSummary): FinanceAnswerVi
       text: heroText,
       size: financeHeroSize(heroText),
       loss: answer.state === "loss",
-      spoken: `${title}, ${formatFinanceMoneySpoken(keptAmount)}, ${FINANCE_KEPT_CAVEAT}`,
+      // Screen readers hear what the screen shows: "unavailable", never "not recorded", for a kept that could not be worked out.
+      spoken: `${title}, ${answer.kept.status === "unavailable" ? FINANCE_UNAVAILABLE_TEXT.toLowerCase() : formatFinanceMoneySpoken(keptAmount)}, ${FINANCE_KEPT_CAVEAT}`,
     };
   }
 
@@ -2489,9 +2521,40 @@ export interface FinanceTileView {
   readonly checkDots: readonly FinanceCheckDotView[];
 }
 
-function figureText(figure: { amount: number | null; status: FinanceLineStatus; errorCode?: string }): string {
+type TileFigure = { amount: number | null; status: FinanceLineStatus; errorCode?: string };
+type TileSubLine = FinanceTileView["subLines"][number];
+
+function figureText(figure: TileFigure): string {
   if (figure.status === "unavailable") return FINANCE_UNAVAILABLE_TEXT;
   return formatFinanceMoney(figure.amount);
+}
+
+/**
+ * A tile's sub-lines. A figure that could not be worked out comes with
+ * zeroed counts (the server has nothing to count), so its only sub-line says
+ * it couldn't be worked out; "No orders" or "0 vendors" under "Unavailable"
+ * would state a fact the page does not know.
+ */
+function tileSubLines(figure: TileFigure, lines: () => readonly TileSubLine[]): readonly TileSubLine[] {
+  if (figure.status !== "unavailable") return lines();
+  return [{ text: `Couldn't work this out${figure.errorCode ? ` (${figure.errorCode})` : ""}`, icon: "none" }];
+}
+
+/**
+ * "No deposits" only when nothing came in and nothing was pulled back or won
+ * back. The tile is the net of the three, so a deposit disputed in full nets
+ * to $0.00 and still reads "after disputes · before Stripe's fees" (spec §3.3).
+ */
+function cashReceivedNote(summary: FinanceSummary): string {
+  const cash = summary.sections.cash;
+  const lines = cash.status === "ok" ? indexLines(cash.lines) : null;
+  const zero = (key: FinanceLineKey) => {
+    const line = lines?.get(key);
+    return line !== undefined && line.status === "recorded" && line.amount === 0;
+  };
+  return zero("cash.received_deposits") && zero("cash.pulled_back") && zero("cash.won_back")
+    ? "No deposits"
+    : "after disputes · before Stripe's fees";
 }
 
 /**
@@ -2535,7 +2598,9 @@ export function buildFinanceTilesView(summary: FinanceSummary): FinanceTileView[
       value: figureText(tiles.billed),
       negative: false,
       delta: formatFinanceDelta(tiles.billed.prior, compareSpan),
-      subLines: [{ text: tiles.billed.orders === 0 ? "No orders" : formatFinanceCountOf(tiles.billed.orders, "order", "orders"), icon: "none" }],
+      subLines: tileSubLines(tiles.billed, () => [
+        { text: tiles.billed.orders === 0 ? "No orders" : formatFinanceCountOf(tiles.billed.orders, "order", "orders"), icon: "none" },
+      ]),
       info: null,
       checkDots: dots.get("tiles.billed") ?? [],
     },
@@ -2545,7 +2610,7 @@ export function buildFinanceTilesView(summary: FinanceSummary): FinanceTileView[
       value: figureText(tiles.cashReceived),
       negative: tiles.cashReceived.amount !== null && tiles.cashReceived.amount < 0,
       delta: formatFinanceDelta(tiles.cashReceived.prior, compareSpan),
-      subLines: [{ text: tiles.cashReceived.amount === 0 ? "No deposits" : "after disputes · before Stripe's fees", icon: "none" }],
+      subLines: tileSubLines(tiles.cashReceived, () => [{ text: cashReceivedNote(summary), icon: "none" }]),
       info: FINANCE_INFO_TEXT.cash,
       checkDots: dots.get("tiles.cash_received") ?? [],
     },
@@ -2555,14 +2620,14 @@ export function buildFinanceTilesView(summary: FinanceSummary): FinanceTileView[
       value: figureText(tiles.weOweNow),
       negative: false,
       delta: null,
-      subLines: [
+      subLines: tileSubLines(tiles.weOweNow, () => [
         { text: formatFinanceCountOf(tiles.weOweNow.vendors, "vendor", "vendors"), icon: "none" },
         ...(tiles.weOweNow.onTheWay !== null && tiles.weOweNow.onTheWay !== 0
           ? [{ text: `${formatFinanceMoney(tiles.weOweNow.onTheWay)} on the way, not yet cash`, icon: "clock" as const }]
           : []),
         ...atEnd(tiles.weOweNow.atEndOfPeriod),
-      ],
-      info: tiles.weOweNow.onTheWay !== null && tiles.weOweNow.onTheWay !== 0 ? FINANCE_INFO_TEXT.onTheWay : null,
+      ]),
+      info: tiles.weOweNow.status !== "unavailable" && tiles.weOweNow.onTheWay !== null && tiles.weOweNow.onTheWay !== 0 ? FINANCE_INFO_TEXT.onTheWay : null,
       checkDots: dots.get("tiles.we_owe_now") ?? [],
     },
     {
@@ -2571,10 +2636,10 @@ export function buildFinanceTilesView(summary: FinanceSummary): FinanceTileView[
       value: figureText(tiles.owedToUsNow),
       negative: false,
       delta: null,
-      subLines: [
+      subLines: tileSubLines(tiles.owedToUsNow, () => [
         { text: `${formatFinanceCountOf(tiles.owedToUsNow.vendors, "vendor", "vendors")} below zero`, icon: "none" },
         ...atEnd(tiles.owedToUsNow.atEndOfPeriod),
-      ],
+      ]),
       info: FINANCE_INFO_TEXT.owedToUs,
       checkDots: dots.get("tiles.owed_to_us_now") ?? [],
     },
@@ -2686,15 +2751,54 @@ function stepTitle(textKey: string, values: Readonly<Record<string, string>>): s
   return words === null ? "Step" : fillFinanceWords(words, values);
 }
 
+/** The two working units that are shares rather than amounts (contract FINANCE_WORKING_UNITS). */
+function isShareUnit(unit: FinanceWorkingUnit): boolean {
+  return unit === "share_tenths" || unit === "share_change_tenths";
+}
+
+/**
+ * A working figure in the unit the server says it is in: cents as money,
+ * points, a count, a share as "39.9%" and a change of a share as "−0.5 pts".
+ * A share of nothing reads "—"; any other missing figure "Not recorded".
+ */
+export function formatFinanceWorkingFigure(value: number | null, unit: FinanceWorkingUnit): string {
+  switch (unit) {
+    case "cents":
+      return formatFinanceMoney(value);
+    case "points":
+      return formatFinancePoints(value);
+    case "count":
+      return formatFinanceCount(value);
+    case "share_tenths":
+      return formatFinancePercent(value);
+    case "share_change_tenths":
+      return formatFinancePts(value);
+  }
+}
+
+/**
+ * An operand's label: its line's words, "as a share" when the figure is a
+ * share, and the dates it covers when the step puts this period beside the
+ * comparison period ("Kept on orders (Sep 1 – 5)").
+ */
+function operandLabel(operand: FinanceWorkingOperand, period: FinancePeriodWords, spans: { current: string; compare: string } | null): string {
+  if (!isFinanceLineKey(operand.lineKey)) return FINANCE_UNAVAILABLE_TEXT;
+  const words = fillFinanceWords(FINANCE_LINE_DEFINITIONS[operand.lineKey].words, { period: period.phrase, date: period.startDay });
+  const label = isShareUnit(operand.unit) ? `${words} as a share` : words;
+  if (spans === null) return label;
+  return `${label} (${operand.period === "compare" ? spans.compare : spans.current})`;
+}
+
 /**
  * The drawer renders the server's working steps and never recomputes them
  * (spec §3.6): each step's words, its operands with their operators, and the
- * result the server sent.
+ * result the server sent, each written in the unit the server gives it.
  */
 export function buildFinanceHowView(summary: FinanceSummary, key: FinanceLineKey): FinanceHowView | null {
   const found = findWorkings(summary, key);
   if (!found) return null;
   const period = financePeriodWords(summary.period);
+  const compareSpan = financeCompareSpan(summary) ?? "the comparison period";
   const definition = FINANCE_LINE_DEFINITIONS[key];
   const amount = key === "answer.kept"
     ? (summary.answer.kept.status === "unavailable" ? FINANCE_UNAVAILABLE_TEXT : formatFinanceMoney(summary.answer.kept.amount))
@@ -2709,25 +2813,29 @@ export function buildFinanceHowView(summary: FinanceSummary, key: FinanceLineKey
     amount,
     chip,
     definition: definition.definition,
-    steps: found.steps.map((step) => ({
-      step: step.step,
-      title: stepTitle(step.textKey, { period: period.phrase, date: period.startDay, $: step.result !== null ? formatFinanceMoney(step.result) : ELLIPSIS }),
-      operands: step.operands.map((operand) => ({
-        operatorSymbol: OPERATOR_SYMBOLS[operand.operator],
-        operatorWords: OPERATOR_WORDS[operand.operator],
-        label: isFinanceLineKey(operand.lineKey)
-          ? fillFinanceWords(FINANCE_LINE_DEFINITIONS[operand.lineKey].words, { period: period.phrase, date: period.startDay })
-          : FINANCE_UNAVAILABLE_TEXT,
-        amount: operand.amount === null
-          ? FINANCE_NOT_RECORDED_TEXT
-          : operand.unit === "points"
-            ? formatFinancePoints(operand.amount)
-            : operand.unit === "count"
-              ? formatFinanceCount(operand.amount)
-              : formatFinanceMoney(operand.amount),
-      })),
-      result: step.result === null ? null : formatFinanceMoney(step.result),
-    })),
+    steps: found.steps.map((step) => {
+      // A step that puts the comparison period beside this one names both periods' dates on its figures.
+      const spans = step.operands.some((operand) => operand.period === "compare") ? { current: period.phrase, compare: compareSpan } : null;
+      return {
+        step: step.step,
+        // Only a money result can fill a "{$}" in the step's words.
+        title: stepTitle(step.textKey, {
+          period: period.phrase,
+          date: period.startDay,
+          $: step.result !== null && step.resultUnit === "cents" ? formatFinanceMoney(step.result) : ELLIPSIS,
+        }),
+        operands: step.operands.map((operand) => ({
+          operatorSymbol: OPERATOR_SYMBOLS[operand.operator],
+          operatorWords: OPERATOR_WORDS[operand.operator],
+          label: operandLabel(operand, period, spans),
+          amount: formatFinanceWorkingFigure(operand.amount, operand.unit),
+        })),
+        // Words-only steps have no figure. A share of nothing still shows its "—", so the step does not look unfinished.
+        result: step.result !== null || (isShareUnit(step.resultUnit) && step.operands.length > 0)
+          ? formatFinanceWorkingFigure(step.result, step.resultUnit)
+          : null,
+      };
+    }),
     technicalSource: definition.technicalSource,
   };
 }

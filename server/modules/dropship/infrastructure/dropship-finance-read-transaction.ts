@@ -23,9 +23,23 @@ import type { FinanceErrorCode, FinanceRawResult } from "../domain/program-finan
 /** `SET LOCAL statement_timeout` per statement (contract §4 FINANCE_STATEMENT_TIMEOUT_MS). */
 export const FINANCE_STATEMENT_TIMEOUT_MS = 8_000;
 /**
- * The whole request's time budget. Checked before each section: once it is
- * spent, every later section is skipped. 20s plus one 8s statement stays under
- * Heroku's 30s router limit (contract §1.1).
+ * The whole request's time budget, counted from when the request reached the
+ * repository: the wait for a semaphore slot and for a pooled client spend it
+ * too. Checked before every statement of a section, not only when the
+ * section starts: once it is spent, the next statement is not sent, and that
+ * section and every later one are skipped with DROPSHIP_FINANCE_BUDGET_EXCEEDED.
+ *
+ * Worst case 28s, under Heroku's 30s router limit (contract §1.1):
+ * - no section statement starts after FINANCE_REQUEST_BUDGET_MS (20s), and
+ *   each is cut off at FINANCE_STATEMENT_TIMEOUT_MS (8s): 20s + 8s = 28s;
+ * - before the first section a request waits at most FINANCE_BUSY_WAIT_MS
+ *   (2s, dropship-finance.repository.ts) for a slot and the pool's
+ *   connectionTimeoutMillis (10s, server/db.ts) for a client, then runs Q0
+ *   and, when scoped to one vendor, the vendor lookup, 8s at most each; the
+ *   budget does not stop those two: 2s + 10s + 8s + 8s = 28s, after which
+ *   every section is skipped.
+ * Only the SAVEPOINT / RELEASE / ROLLBACK TO SAVEPOINT and COMMIT round trips
+ * come on top. Raising any of these limits (or the pool's) breaks the bound.
  */
 export const FINANCE_REQUEST_BUDGET_MS = 20_000;
 
@@ -78,6 +92,13 @@ const UNAVAILABLE_SQLSTATES: ReadonlySet<string> = new Set(["57P01", "57P02", "5
 const DATA_INVALID_SQLSTATES: ReadonlySet<string> = new Set(["22P02", "22008"]);
 /** node-pg's own message when the pool cannot hand out a client in time. */
 const POOL_CONNECT_TIMEOUT_MESSAGE = "timeout exceeded when trying to connect";
+/**
+ * node-pg's message for any statement sent on a client whose connection is
+ * gone ("Client has encountered a connection error and is not queryable",
+ * "Client was closed and is not queryable"): a savepoint rollback after a
+ * lost connection fails with it.
+ */
+const CLIENT_NOT_QUERYABLE_MESSAGE = /is not queryable/;
 
 /**
  * What a person needs to find a failure that is not the database's: the
@@ -93,7 +114,10 @@ function detailOf(error: unknown): string | undefined {
 function sqlStateOf(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null) return undefined;
   const code = (error as { code?: unknown }).code;
-  return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? code : undefined;
+  if (typeof code !== "string") return undefined;
+  // A socket code can be five capitals too (EPIPE): it is a lost connection, not a SQLSTATE.
+  if (CONNECTION_ERROR_CODES.has(code)) return undefined;
+  return /^[0-9A-Z]{5}$/.test(code) ? code : undefined;
 }
 
 /**
@@ -120,6 +144,7 @@ export function financeCodeForDatabaseError(error: unknown): FinanceErrorCode {
     const message = (error as { message?: unknown }).message;
     if (typeof message === "string" && message.includes(POOL_CONNECT_TIMEOUT_MESSAGE)) return FINANCE_DB_UNAVAILABLE_CODE;
     if (typeof message === "string" && /Connection terminated/i.test(message)) return FINANCE_DB_UNAVAILABLE_CODE;
+    if (typeof message === "string" && CLIENT_NOT_QUERYABLE_MESSAGE.test(message)) return FINANCE_DB_UNAVAILABLE_CODE;
   }
   return FINANCE_INTERNAL_ERROR_SQL_CODE;
 }
@@ -146,13 +171,30 @@ export function financeRequestError(error: unknown, stage: string): DropshipErro
 
 // ── the transaction ─────────────────────────────────────────────────────
 
+/**
+ * Thrown by a section's runner in place of a statement once the request
+ * budget is spent; section() turns it into a `skipped` outcome. Never leaves
+ * section().
+ */
+class FinanceBudgetSpentError extends Error {
+  constructor() {
+    super(FINANCE_BUDGET_EXCEEDED_CODE);
+    this.name = "FinanceBudgetSpentError";
+  }
+}
+
 export class FinanceReadTransaction implements FinanceQueryRunner {
   private savepoints = 0;
   private readonly outcomes: FinanceStatementOutcome[] = [];
+  /** What a section's work runs its statements on: the budget is checked before each one. */
+  private readonly sectionRunner: FinanceQueryRunner = {
+    query: <R>(text: string, values: readonly unknown[]): Promise<R[]> => this.budgetedQuery<R>(text, values),
+  };
 
   constructor(
     private readonly client: Pick<PoolClient, "query">,
     private readonly clock: FinanceBudgetClock,
+    /** When the request arrived (budget clock), before the waits for a slot and a client. */
     private readonly startedAtMs: number,
     private readonly budgetMs: number,
   ) {}
@@ -168,9 +210,19 @@ export class FinanceReadTransaction implements FinanceQueryRunner {
     return [...this.outcomes];
   }
 
-  /** Whether the request budget is spent (the next section would be skipped). */
+  /** Whether the request budget is spent (the next section statement would not be sent). */
   budgetSpent(): boolean {
     return this.clock.now().getTime() - this.startedAtMs > this.budgetMs;
+  }
+
+  private async budgetedQuery<R>(text: string, values: readonly unknown[]): Promise<R[]> {
+    if (this.budgetSpent()) throw new FinanceBudgetSpentError();
+    return this.query<R>(text, values);
+  }
+
+  private skipped<T>(name: string, durationMs: number): FinanceRawResult<T> {
+    this.outcomes.push({ name, status: "skipped", errorCode: FINANCE_BUDGET_EXCEEDED_CODE, durationMs });
+    return { status: "skipped", errorCode: FINANCE_BUDGET_EXCEEDED_CODE };
   }
 
   /** Records a section that was not run because a table it needs is missing. */
@@ -182,20 +234,20 @@ export class FinanceReadTransaction implements FinanceQueryRunner {
   /**
    * Runs one section in its own savepoint. A statement or mapping failure
    * rolls back to the savepoint and becomes that section's error; the
-   * request goes on. If even the rollback to the savepoint fails, the
-   * transaction is in an unknown state and the whole request fails.
+   * request goes on. A section whose next statement finds the budget spent
+   * rolls back too and is `skipped`, even if an earlier statement of it ran:
+   * a section is shown whole or not at all. If even the rollback to the
+   * savepoint fails, the transaction is in an unknown state and the whole
+   * request fails.
    */
   async section<T>(name: string, work: (runner: FinanceQueryRunner) => Promise<T>): Promise<FinanceRawResult<T>> {
-    if (this.budgetSpent()) {
-      this.outcomes.push({ name, status: "skipped", errorCode: FINANCE_BUDGET_EXCEEDED_CODE, durationMs: 0 });
-      return { status: "skipped", errorCode: FINANCE_BUDGET_EXCEEDED_CODE };
-    }
+    if (this.budgetSpent()) return this.skipped<T>(name, 0);
     this.savepoints += 1;
     const savepoint = `${SAVEPOINT_PREFIX}${this.savepoints}`;
     const started = this.clock.now().getTime();
     await this.client.query(`SAVEPOINT ${savepoint}`);
     try {
-      const data = await work(this);
+      const data = await work(this.sectionRunner);
       await this.client.query(`RELEASE SAVEPOINT ${savepoint}`);
       this.outcomes.push({ name, status: "ok", durationMs: this.clock.now().getTime() - started });
       return { status: "ok", data };
@@ -208,6 +260,7 @@ export class FinanceReadTransaction implements FinanceQueryRunner {
       } catch (rollbackError) {
         throw new AggregateError([error, rollbackError], `Finance section ${name} failed and its savepoint could not be rolled back.`);
       }
+      if (error instanceof FinanceBudgetSpentError) return this.skipped<T>(name, this.clock.now().getTime() - started);
       this.outcomes.push({
         name,
         status: "error",
@@ -225,6 +278,12 @@ export interface FinanceReadTransactionOptions {
   readonly clock: FinanceBudgetClock;
   /** Defaults to FINANCE_REQUEST_BUDGET_MS. */
   readonly budgetMs?: number;
+  /**
+   * When the request arrived, on `clock`, so the waits before this call
+   * (the semaphore) count against the budget. Defaults to this call's start,
+   * which still counts the pool connect.
+   */
+  readonly startedAtMs?: number;
 }
 
 /**
@@ -239,6 +298,8 @@ export async function withFinanceReadTransaction<T>(
   options: FinanceReadTransactionOptions,
   work: (transaction: FinanceReadTransaction) => Promise<T>,
 ): Promise<T> {
+  // Read before the connect: the wait for a pooled client spends the budget too.
+  const startedAtMs = options.startedAtMs ?? options.clock.now().getTime();
   let client: PoolClient;
   try {
     client = await pool.connect();
@@ -250,12 +311,7 @@ export async function withFinanceReadTransaction<T>(
     await client.query(BEGIN_SQL);
     await client.query(STATEMENT_TIMEOUT_SQL);
     await client.query(TIME_ZONE_SQL);
-    const transaction = new FinanceReadTransaction(
-      client,
-      options.clock,
-      options.clock.now().getTime(),
-      options.budgetMs ?? FINANCE_REQUEST_BUDGET_MS,
-    );
+    const transaction = new FinanceReadTransaction(client, options.clock, startedAtMs, options.budgetMs ?? FINANCE_REQUEST_BUDGET_MS);
     const result = await work(transaction);
     await client.query("COMMIT");
     return result;

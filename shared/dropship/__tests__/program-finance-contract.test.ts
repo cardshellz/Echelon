@@ -98,9 +98,9 @@ function validSummary(): FinanceSummaryInput {
       paidWithPoints: { billed: 2_200, points: 2_200 },
       coverage: { done: 3, total: 10 },
       workings: [
-        { step: 1, textKey: "sales.billed", operands: [], result: 18_730, opensMetric: "sales.billed" },
+        { step: 1, textKey: "sales.billed", operands: [], result: 18_730, resultUnit: "cents", opensMetric: "sales.billed" },
         {
-          step: 2, textKey: "sales.kept_orders", result: 3_881, opensMetric: "sales.kept_orders",
+          step: 2, textKey: "sales.kept_orders", result: 3_881, resultUnit: "cents", opensMetric: "sales.kept_orders",
           operands: [
             { lineKey: "sales.billed_fc", amount: 9_730, unit: "cents", operator: "none" },
             { lineKey: "sales.cogs", amount: 3_764, unit: "cents", operator: "minus" },
@@ -109,14 +109,35 @@ function validSummary(): FinanceSummaryInput {
           ],
         },
         {
-          step: 3, textKey: "sales.kept", result: 2_641,
+          step: 3, textKey: "sales.kept", result: 2_641, resultUnit: "cents",
           operands: [
             { lineKey: "sales.kept_orders", amount: 3_881, unit: "cents", operator: "none" },
             { lineKey: "sales.fees", amount: 760, unit: "cents", operator: "plus" },
             { lineKey: "sales.return_credits_cs", amount: 2_000, unit: "cents", operator: "minus" },
           ],
         },
-        { step: 4, textKey: "working.not_included", operands: [], result: null },
+        {
+          step: 4, textKey: "working.margin_share", result: 399, resultUnit: "share_tenths",
+          operands: [
+            { lineKey: "sales.kept_orders", amount: 3_881, unit: "cents", operator: "none" },
+            { lineKey: "sales.billed_fc", amount: 9_730, unit: "cents", operator: "none" },
+          ],
+        },
+        {
+          step: 5, textKey: "working.margin_prior", result: 404, resultUnit: "share_tenths",
+          operands: [
+            { lineKey: "sales.kept_orders", amount: 1_050, unit: "cents", operator: "none", period: "compare" },
+            { lineKey: "sales.billed_fc", amount: 2_600, unit: "cents", operator: "none", period: "compare" },
+          ],
+        },
+        {
+          step: 6, textKey: "working.margin_change", result: -5, resultUnit: "share_change_tenths",
+          operands: [
+            { lineKey: "sales.kept_orders", amount: 399, unit: "share_tenths", operator: "none" },
+            { lineKey: "sales.kept_orders", amount: 404, unit: "share_tenths", operator: "minus", period: "compare" },
+          ],
+        },
+        { step: 7, textKey: "working.not_included", operands: [], result: null, resultUnit: "cents" },
       ],
     },
     tiles: {
@@ -477,10 +498,89 @@ describe("financeSummarySchema", () => {
     bar.answer.barBps = { kept: 2_072, costOfGoods: 2_009, carrierLabels: 1_033, poolShare: 80, waiting: 4_805 };
     expect(issuesOf(bar)).toContain("answer.barBps: the bar widths add up to 10000");
 
-    const loss = validSummary();
-    loss.answer.centsOfEachDollar = null;
-    loss.answer.barBps = null;
-    expect(issuesOf(loss)).toEqual([]);
+  });
+
+  it("ties the split of each dollar and the bar to kept on orders, never to the hero's state", () => {
+    // Return credits push what we kept below zero while kept on orders is still positive: a loss, split shown.
+    const lossWithSplit = validSummary();
+    Object.assign(lossWithSplit.answer, { state: "loss", kept: { amount: -359, status: "recorded" }, returnCreditsPaid: 5_000 });
+    expect(issuesOf(lossWithSplit)).toEqual([]);
+
+    const splitWithheld = validSummary();
+    splitWithheld.answer.centsOfEachDollar = null;
+    splitWithheld.answer.barBps = null;
+    expect(issuesOf(splitWithheld)).toEqual([
+      "answer.centsOfEachDollar: kept on orders of zero or more is split",
+      "answer.barBps: kept on orders of zero or more has bar widths",
+    ]);
+
+    // Costs ran $2.12 over what we billed on fully costed orders: the loss layout, no split.
+    const costsOver = validSummary();
+    Object.assign(costsOver.answer, {
+      state: "loss", kept: { amount: -212, status: "recorded" }, keptOnOrders: -212, feesCharged: 0, returnCreditsPaid: 0,
+      orders: 2, billed: 2_000, fullyCosted: { orders: 1, billed: 1_000 }, waiting: { orders: 1, billed: 1_000 },
+      costOfGoods: 900, carrierLabels: 262, poolShare: 50, marginTenths: -212, marginBps: -2_120, centsOfEachDollar: null, barBps: null,
+    });
+    expect(issuesOf(costsOver)).toEqual([]);
+    const costsOverWithSplit = structuredClone(costsOver);
+    costsOverWithSplit.answer.centsOfEachDollar = { kept: 0, costOfGoods: 90, carrierLabels: 5, poolShare: 5 };
+    costsOverWithSplit.answer.barBps = { kept: 0, costOfGoods: 4_500, carrierLabels: 250, poolShare: 250, waiting: 5_000 };
+    expect(issuesOf(costsOverWithSplit)).toEqual([
+      "answer.centsOfEachDollar: a negative kept on orders has no split of each dollar",
+      "answer.barBps: a negative kept on orders has no bar widths",
+    ]);
+
+    // Nothing fully costed: no split of each dollar, and the bar is all waiting.
+    const notReady = validSummary();
+    Object.assign(notReady.answer, {
+      state: "not_ready", kept: { amount: 0, status: "recorded" }, keptOnOrders: 0, feesCharged: 0, returnCreditsPaid: 0,
+      orders: 2, billed: 2_000, fullyCosted: { orders: 0, billed: 0 }, waiting: { orders: 2, billed: 2_000 },
+      costOfGoods: 0, carrierLabels: 0, poolShare: 0, marginTenths: null, marginBps: null, centsOfEachDollar: null,
+      barBps: { kept: 0, costOfGoods: 0, carrierLabels: 0, poolShare: 0, waiting: 10_000 },
+    });
+    expect(issuesOf(notReady)).toEqual([]);
+
+    // A failed answer carries placeholders only, so the rule does not apply.
+    const failed = validSummary();
+    Object.assign(failed.answer, {
+      state: "unavailable", status: "error", errorCode: "DROPSHIP_FINANCE_QUERY_TIMEOUT",
+      kept: { amount: null, status: "unavailable", errorCode: "DROPSHIP_FINANCE_QUERY_TIMEOUT" }, centsOfEachDollar: null, barBps: null,
+    });
+    expect(issuesOf(failed)).toEqual([]);
+  });
+
+  it("carries a working step's result unit, share units and comparison operands", () => {
+    const summary = validSummary();
+    const parsed = financeSummarySchema.parse(summary);
+    expect(parsed.answer.workings.map((step) => [step.textKey, step.result, step.resultUnit])).toEqual([
+      ["sales.billed", 18_730, "cents"],
+      ["sales.kept_orders", 3_881, "cents"],
+      ["sales.kept", 2_641, "cents"],
+      ["working.margin_share", 399, "share_tenths"],
+      ["working.margin_prior", 404, "share_tenths"],
+      ["working.margin_change", -5, "share_change_tenths"],
+      ["working.not_included", null, "cents"],
+    ]);
+    expect(parsed.answer.workings[4].operands.map((operand) => operand.period)).toEqual(["compare", "compare"]);
+    expect(parsed.answer.workings[5].operands.map((operand) => operand.period)).toEqual([undefined, "compare"]);
+
+    const noUnit = validSummary();
+    delete (noUnit.answer.workings[0] as { resultUnit?: string }).resultUnit;
+    expect(issuesOf(noUnit).some((issue) => issue.startsWith("answer.workings.0.resultUnit"))).toBe(true);
+
+    const badUnit = validSummary();
+    (badUnit.answer.workings[3] as { resultUnit: string }).resultUnit = "percent";
+    expect(issuesOf(badUnit).some((issue) => issue.startsWith("answer.workings.3.resultUnit"))).toBe(true);
+
+    const badPeriod = validSummary();
+    (badPeriod.answer.workings[4].operands[0] as { period?: string }).period = "current";
+    expect(issuesOf(badPeriod).some((issue) => issue.startsWith("answer.workings.4.operands.0.period"))).toBe(true);
+
+    // A line never carries a share unit; only working steps do.
+    const shareLine = validSummary();
+    const kept = shareLine.sections.sales.lines.find((candidate) => candidate.key === "sales.kept_orders");
+    if (kept) (kept as { unit: string }).unit = "share_tenths";
+    expect(issuesOf(shareLine).some((issue) => issue.endsWith(".unit: Invalid enum value. Expected 'cents' | 'points' | 'count', received 'share_tenths'"))).toBe(true);
   });
 
   it("needs every check exactly once", () => {

@@ -142,6 +142,35 @@ describe("program finance definitions", () => {
     expect(FINANCE_LINE_DEFINITIONS["points.held"].wordsAtEndOfPeriod).toBe("Held at end of {date}");
   });
 
+  it("describe on the way and the charged deposit lines as the page works them out", () => {
+    // The Cash in memo sums the pending deposits in the wallet history; the We-owe figure reads the wallets (check W2 compares them).
+    expect(FINANCE_LINE_DEFINITIONS["cash.memo.on_the_way"].technicalSource).toEqual({
+      tables: ["dropship.dropship_wallet_ledger"],
+      columns: ["Σ amount_cents", "COUNT(*)"],
+      filters: ["type = 'funding'", "status = 'pending'"],
+      dateColumn: null,
+    });
+    expect(FINANCE_METRIC_DEFINITIONS["cash.on_the_way"].technicalSource).toEqual(FINANCE_LINE_DEFINITIONS["cash.memo.on_the_way"].technicalSource);
+    expect(FINANCE_LINE_DEFINITIONS["owed.on_the_way"].technicalSource).toMatchObject({
+      tables: ["dropship.dropship_wallet_accounts"], columns: ["Σ pending_balance_cents"],
+    });
+    // A charged amount that is not whole cents counts at the wallet credit (contract C8): never "left out".
+    const charged = ["cash.ach", "cash.card", "cash.usdc", "cash.collection", "cash.unknown", "cash.received_deposits"] as const;
+    for (const key of charged) {
+      const filters = FINANCE_LINE_DEFINITIONS[key].technicalSource.filters;
+      expect(filters.some((filter) => filter.includes("counts at amount_cents") && filter.includes("partial")), key).toBe(true);
+      expect(filters.some((filter) => filter.includes("left out")), key).toBe(false);
+    }
+    expect(FINANCE_LINE_DEFINITIONS["cash.received_deposits"].technicalSource.columns).toContain("COUNT(*)");
+    // A card fee or points amount that is not whole cents is left out of its own sum.
+    for (const key of ["sales.fees.card", "cash.card.fees", "points.memo.from_cash"] as const) {
+      expect(FINANCE_LINE_DEFINITIONS[key].technicalSource.filters.some((filter) => filter.includes("left out")), key).toBe(true);
+    }
+    for (const source of [FINANCE_CHECK_DEFINITIONS.D7.technicalSource, FINANCE_REASON_DEFINITIONS.metadata_malformed.technicalSource]) {
+      expect(source.filters.some((filter) => filter.includes("chargedCents that is not counts at amount_cents"))).toBe(true);
+    }
+  });
+
   it("word each waiting reason and its summary line the same way", () => {
     for (const reason of FINANCE_WAITING_REASONS) {
       const definition = FINANCE_WAITING_REASON_DEFINITIONS[reason];

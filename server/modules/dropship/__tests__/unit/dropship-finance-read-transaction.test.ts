@@ -1,14 +1,31 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { Pool, PoolClient } from "pg";
 import { DropshipError } from "../../domain/errors";
 import {
   FINANCE_BUDGET_EXCEEDED_CODE,
   FINANCE_REQUEST_BUDGET_MS,
+  FINANCE_STATEMENT_TIMEOUT_MS,
   FinanceRowError,
   financeCodeForDatabaseError,
   withFinanceReadTransaction,
   type FinanceBudgetClock,
 } from "../../infrastructure/dropship-finance-read-transaction";
+import { FINANCE_BUSY_WAIT_MS } from "../../infrastructure/dropship-finance.repository";
+
+vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
+
+/**
+ * The shared pool's connect timeout, read from server/db.ts itself: the pool
+ * config is not exported, and the worst case below must move with it.
+ */
+function sharedPoolConnectTimeoutMs(): number {
+  const source = readFileSync(resolve(process.cwd(), "server/db.ts"), "utf8");
+  const shared = /const poolConfig = createDatabasePoolConfig\(\{[\s\S]*?connectionTimeoutMillis:\s*(\d+)/.exec(source);
+  if (!shared) throw new Error("server/db.ts no longer sets connectionTimeoutMillis on the shared pool config");
+  return Number(shared[1]);
+}
 
 const T0 = new Date("2026-10-05T13:14:00.000Z");
 
@@ -140,6 +157,66 @@ describe("withFinanceReadTransaction", () => {
     expect(outcome.outcomes.map((entry) => entry.status)).toEqual(["ok", "skipped", "skipped"]);
   });
 
+  it("stops a section between two of its statements once the budget runs out: the second is never sent", async () => {
+    const clock = manualClock();
+    // The first ledger statement takes the request past its budget.
+    const fake = fakeClient((sql) => {
+      if (sql === "SELECT ledger groups") clock.advance(FINANCE_REQUEST_BUDGET_MS + 1);
+      return null;
+    });
+    const outcome = await withFinanceReadTransaction(poolOf(fake.client), { clock }, async (tx) => {
+      const ledger = await tx.section("ledger", async (runner) => {
+        const groups = await runner.query("SELECT ledger groups", []);
+        const failure = await runner.query("SELECT first failure code", []);
+        return { groups, failure };
+      });
+      const disputes = await tx.section("disputes", async (runner) => runner.query("SELECT disputes", []));
+      return { ledger, disputes, outcomes: tx.statementOutcomes() };
+    });
+
+    expect(outcome.ledger).toEqual({ status: "skipped", errorCode: FINANCE_BUDGET_EXCEEDED_CODE });
+    expect(outcome.disputes).toEqual({ status: "skipped", errorCode: FINANCE_BUDGET_EXCEEDED_CODE });
+    expect(fake.sql.slice(3)).toEqual(["SAVEPOINT fin_1", "SELECT ledger groups", "ROLLBACK TO SAVEPOINT fin_1", "COMMIT"]);
+    expect(outcome.outcomes).toEqual([
+      { name: "ledger", status: "skipped", errorCode: FINANCE_BUDGET_EXCEEDED_CODE, durationMs: FINANCE_REQUEST_BUDGET_MS + 1 },
+      { name: "disputes", status: "skipped", errorCode: FINANCE_BUDGET_EXCEEDED_CODE, durationMs: 0 },
+    ]);
+  });
+
+  it("counts the wait for a pooled client against the budget", async () => {
+    const clock = manualClock();
+    const fake = fakeClient();
+    const slowPool = { connect: vi.fn(async () => { clock.advance(FINANCE_REQUEST_BUDGET_MS + 1); return fake.client; }) } as unknown as Pick<Pool, "connect">;
+    const outcome = await withFinanceReadTransaction(slowPool, { clock }, (tx) => tx.section("orders", (runner) => runner.query("SELECT orders", [])));
+
+    expect(outcome).toEqual({ status: "skipped", errorCode: FINANCE_BUDGET_EXCEEDED_CODE });
+    expect(fake.sql).not.toContain("SELECT orders");
+  });
+
+  it("counts from when the request arrived, so an earlier wait (the semaphore) spends the budget too", async () => {
+    const clock = manualClock();
+    const arrivedAtMs = clock.now().getTime();
+    clock.advance(FINANCE_REQUEST_BUDGET_MS + 1);
+    const fake = fakeClient();
+    const outcome = await withFinanceReadTransaction(poolOf(fake.client), { clock, startedAtMs: arrivedAtMs }, async (tx) => ({
+      first: await tx.section("orders", (runner) => runner.query("SELECT orders", [])),
+      budgetSpent: tx.budgetSpent(),
+    }));
+
+    expect(outcome).toEqual({ first: { status: "skipped", errorCode: FINANCE_BUDGET_EXCEEDED_CODE }, budgetSpent: true });
+    expect(fake.sql).not.toContain("SELECT orders");
+  });
+
+  it("keeps the worst case under Heroku's 30s router limit (the file header's arithmetic)", () => {
+    // The real values, so raising the busy wait or the pool's connect timeout fails here.
+    const HEROKU_ROUTER_LIMIT_MS = 30_000;
+    const lastSectionStatementEnds = FINANCE_REQUEST_BUDGET_MS + FINANCE_STATEMENT_TIMEOUT_MS;
+    const beforeTheFirstSection = FINANCE_BUSY_WAIT_MS + sharedPoolConnectTimeoutMs() + 2 * FINANCE_STATEMENT_TIMEOUT_MS;
+    expect(lastSectionStatementEnds).toBe(28_000);
+    expect(beforeTheFirstSection).toBe(28_000);
+    expect(Math.max(lastSectionStatementEnds, beforeTheFirstSection)).toBeLessThan(HEROKU_ROUTER_LIMIT_MS);
+  });
+
   it("records a section not run for a missing table", async () => {
     const fake = fakeClient();
     const outcome = await withFinanceReadTransaction(poolOf(fake.client), { clock: manualClock() }, async (tx) => ({
@@ -194,6 +271,30 @@ describe("withFinanceReadTransaction", () => {
     expect(fake.sql).not.toContain("COMMIT");
   });
 
+  it("reports a socket closed under a statement (EPIPE) outside a section as DB_UNAVAILABLE, with no SQLSTATE", async () => {
+    const epipe = Object.assign(new Error("write EPIPE"), { code: "EPIPE", syscall: "write" });
+    const fake = fakeClient((sql) => (sql === "SELECT q0" ? epipe : null));
+    const error = (await withFinanceReadTransaction(poolOf(fake.client), { clock: manualClock() }, (tx) => tx.query("SELECT q0", []))
+      .then(() => null, (caught: unknown) => caught)) as DropshipError;
+
+    expect(error).toBeInstanceOf(DropshipError);
+    expect(error.code).toBe("DROPSHIP_FINANCE_DB_UNAVAILABLE");
+    expect(error.context).toEqual({ stage: "transaction" });
+  });
+
+  it("reports a lost connection found by the savepoint rollback as DB_UNAVAILABLE", async () => {
+    const fake = fakeClient((sql) => {
+      if (sql === "SELECT products") return Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+      // node-pg refuses every later statement on a client whose connection failed.
+      if (sql.startsWith("ROLLBACK")) return new Error("Client has encountered a connection error and is not queryable");
+      return null;
+    });
+    await expect(withFinanceReadTransaction(poolOf(fake.client), { clock: manualClock() }, (tx) =>
+      tx.section("products", (runner) => runner.query("SELECT products", []))))
+      .rejects.toMatchObject({ code: "DROPSHIP_FINANCE_DB_UNAVAILABLE", context: { stage: "transaction" } });
+    expect(fake.release).toHaveBeenCalledWith(true);
+  });
+
   it("maps a pool that cannot connect to DB_UNAVAILABLE", async () => {
     const pool = { connect: vi.fn(async () => { throw new Error("timeout exceeded when trying to connect"); }) } as unknown as Pick<Pool, "connect">;
     await expect(withFinanceReadTransaction(pool, { clock: manualClock() }, async () => 1))
@@ -232,13 +333,16 @@ describe("financeCodeForDatabaseError (contract §5)", () => {
     expect(financeCodeForDatabaseError(pgError(sqlState))).toBe(code);
   });
 
-  it.each(["ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "ETIMEDOUT"])("driver error %s → DB_UNAVAILABLE", (code) => {
+  // EPIPE is five capitals, like a SQLSTATE: it must still read as a lost connection.
+  it.each(["ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "ETIMEDOUT", "EPIPE", "EHOSTUNREACH", "ENETUNREACH"])("driver error %s → DB_UNAVAILABLE", (code) => {
     expect(financeCodeForDatabaseError(Object.assign(new Error(code), { code }))).toBe("DROPSHIP_FINANCE_DB_UNAVAILABLE");
   });
 
-  it("maps a dropped connection and the pool's connect timeout to DB_UNAVAILABLE", () => {
+  it("maps a dropped connection, the pool's connect timeout and a client that is no longer queryable to DB_UNAVAILABLE", () => {
     expect(financeCodeForDatabaseError(new Error("Connection terminated unexpectedly"))).toBe("DROPSHIP_FINANCE_DB_UNAVAILABLE");
     expect(financeCodeForDatabaseError(new Error("timeout exceeded when trying to connect"))).toBe("DROPSHIP_FINANCE_DB_UNAVAILABLE");
+    expect(financeCodeForDatabaseError(new Error("Client has encountered a connection error and is not queryable"))).toBe("DROPSHIP_FINANCE_DB_UNAVAILABLE");
+    expect(financeCodeForDatabaseError(new Error("Client was closed and is not queryable"))).toBe("DROPSHIP_FINANCE_DB_UNAVAILABLE");
   });
 
   it("keeps a row mapper's own code, and maps anything else to INTERNAL_ERROR", () => {

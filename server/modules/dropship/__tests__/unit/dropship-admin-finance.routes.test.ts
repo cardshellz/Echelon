@@ -176,6 +176,68 @@ describe("dropship admin finance routes", () => {
     expect(response.body.error.context).not.toHaveProperty("database");
   });
 
+  it("logs a failed read with the request's vendor, period and duration, and never sends them back", async () => {
+    const { service } = realService(() => { throw new DropshipError("DROPSHIP_FINANCE_BUSY", "The finance page is busy; try again in a moment.", { limit: 2, waitedMs: 2000 }); });
+    const url = await serve(service);
+    const response = await get(`${url}${PATH}?period=last-month&vendorId=12`);
+
+    expect(response.status).toBe(503);
+    expect(response.body.error).toEqual({
+      code: "DROPSHIP_FINANCE_BUSY", message: "The finance page is busy; try again in a moment.", context: { classification: "transient" },
+    });
+    expect(logger.warn).toHaveBeenCalledWith("dropship.finance.request_failed", {
+      outcome: "failed", endpoint: PATH, actor_id: "staff-7", error_code: "DROPSHIP_FINANCE_BUSY", error_class: "transient",
+      vendor_id: 12, period_preset: "last-month", period_from: "2026-09-01", period_to: "2026-09-30", compare: true,
+      generated_at: FINANCE_FIXTURE_NOW.toISOString(), duration_ms: 0,
+    });
+  });
+
+  it("logs which vendor was not found, and answers with only what the page words the refusal with", async () => {
+    const { service } = realService(() => { throw new DropshipError("DROPSHIP_FINANCE_VENDOR_NOT_FOUND", "That vendor does not exist.", { vendorId: 99 }); });
+    const url = await serve(service);
+    const response = await get(`${url}${PATH}?vendorId=99`);
+
+    expect(response.status).toBe(404);
+    expect(response.body.error.context).toEqual({ classification: "permanent", vendorId: 99 });
+    expect(logger.info).toHaveBeenCalledWith("dropship.finance.request_refused", expect.objectContaining({
+      outcome: "refused", error_code: "DROPSHIP_FINANCE_VENDOR_NOT_FOUND", error_class: "permanent",
+      vendor_id: 99, period_preset: "mtd", period_from: "2026-10-01", period_to: "2026-10-05", duration_ms: 0,
+    }));
+  });
+
+  it("names the vendor of a VENDOR_NOT_FOUND on the log line even without the service's correlation", async () => {
+    const url = await serve({ getSummary: vi.fn(async () => { throw new DropshipError("DROPSHIP_FINANCE_VENDOR_NOT_FOUND", "That vendor does not exist.", { vendorId: 99 }); }) });
+    await get(`${url}${PATH}?vendorId=99`);
+    expect(logger.info).toHaveBeenCalledWith("dropship.finance.request_refused", expect.objectContaining({ vendor_id: 99 }));
+  });
+
+  it("logs bad stored data that fails the whole request at ERROR: a 500 is never a quiet refusal", async () => {
+    const url = await serve({ getSummary: vi.fn(async () => { throw new DropshipError("DROPSHIP_FINANCE_DATA_INVALID", "Stored finance data could not be read."); }) });
+    const response = await get(`${url}${PATH}`);
+
+    expect(response.status).toBe(500);
+    expect(response.body.error.context).toEqual({ classification: "permanent" });
+    expect(logger.info).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith("dropship.finance.request_failed", expect.objectContaining({
+      outcome: "failed", error_code: "DROPSHIP_FINANCE_DATA_INVALID", error_class: "permanent",
+    }));
+  });
+
+  it("logs a bug inside the service with what it was and the request's fields, and answers a plain internal error", async () => {
+    const { service } = realService(() => { throw new TypeError("cannot read x of undefined"); });
+    const url = await serve(service);
+    const response = await get(`${url}${PATH}`);
+
+    expect(response.status).toBe(500);
+    expect(response.body.error).toEqual({
+      code: "DROPSHIP_FINANCE_INTERNAL_ERROR", message: "The finance figures could not be read.", context: { classification: "fatal" },
+    });
+    expect(logger.error).toHaveBeenCalledWith("dropship.finance.request_failed", expect.objectContaining({
+      error_code: "DROPSHIP_FINANCE_INTERNAL_ERROR", error_class: "fatal", original_code: null, error_message: "cannot read x of undefined",
+      vendor_id: null, period_preset: "mtd",
+    }));
+  });
+
   it("logs a transient failure at WARN and a fatal one at ERROR", async () => {
     let next: Error = new DropshipError("DROPSHIP_FINANCE_QUERY_TIMEOUT", "slow");
     const url = await serve({ getSummary: vi.fn(async () => { throw next; }) });

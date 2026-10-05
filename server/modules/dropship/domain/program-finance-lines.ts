@@ -18,6 +18,7 @@ import {
   type FinanceSectionKey,
   type FinanceSectionLineKey,
   type FinanceWorkingStep,
+  type FinanceWorkingUnit,
 } from "../../../../shared/dropship/program-finance";
 import {
   FINANCE_LINE_DEFINITIONS,
@@ -247,11 +248,18 @@ export function operandsOf(lines: readonly (FinanceLine | undefined)[]): Finance
   }));
 }
 
-export function stepOf(step: number, textKey: string, operands: FinanceWorkingOperand[], result: number | null): FinanceWorkingStep {
+/** One step: `result` means what `resultUnit` says (a words-only step has no result and says "cents"). */
+export function stepOf(
+  step: number,
+  textKey: string,
+  operands: FinanceWorkingOperand[],
+  result: number | null,
+  resultUnit: FinanceWorkingUnit,
+): FinanceWorkingStep {
   const metric = Object.prototype.hasOwnProperty.call(FINANCE_LINE_DEFINITIONS, textKey)
     ? FINANCE_LINE_DEFINITIONS[textKey as FinanceLineKey].opensMetric
     : undefined;
-  return { step, textKey, operands, result, ...(metric ? { opensMetric: metric } : {}) };
+  return { step, textKey, operands, result, resultUnit, ...(metric ? { opensMetric: metric } : {}) };
 }
 
 /** A one-step working for a result line: how its operands make it. */
@@ -260,7 +268,8 @@ export function lineWorking<S extends FinanceSectionKey>(lines: LineSet<S>, key:
   if (!result || result.amount === null) return;
   const operands = operandKeys.map((operandKey) => lines.get(operandKey));
   if (operands.some((operand) => operand === undefined || operand.amount === null)) return;
-  lines.attachWorkings(key, [stepOf(1, key, operandsOf(operands), result.amount)]);
+  // The result is the line itself, so it is in the line's unit (points for points held).
+  lines.attachWorkings(key, [stepOf(1, key, operandsOf(operands), result.amount, result.unit)]);
 }
 
 // ── ledger view ─────────────────────────────────────────────────────────

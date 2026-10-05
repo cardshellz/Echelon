@@ -161,7 +161,16 @@ export const FINANCE_NEVER_CHARGED_KINDS = [
   "exception",
 ] as const;
 
+/**
+ * What a working step's integers mean: a line's units, plus a share in
+ * tenths of a percent (39.9% = 399) and a change of a share in tenths of a
+ * percentage point (−0.5 pts = −5). Only the "How this is worked out" steps
+ * carry the two share units; a line never does.
+ */
+export const FINANCE_WORKING_UNITS = [...FINANCE_UNITS, "share_tenths", "share_change_tenths"] as const;
+
 export const financeUnitSchema = z.enum(FINANCE_UNITS);
+export const financeWorkingUnitSchema = z.enum(FINANCE_WORKING_UNITS);
 export const financeLineStatusSchema = z.enum(FINANCE_LINE_STATUSES);
 export const financeDatedBySchema = z.enum(FINANCE_DATED_BY);
 export const financeOperatorSchema = z.enum(FINANCE_OPERATORS);
@@ -442,14 +451,25 @@ const priorSchema = z.object({
   kind: z.enum(["change", "new", "no_change", "unavailable"]),
 });
 
+const workingOperandSchema = z.object({
+  /** The line whose words label the operand. */
+  lineKey: knownLineKey,
+  /** The integer means what `unit` says; null when the figure has no number. */
+  amount: cents.nullable(),
+  unit: financeWorkingUnitSchema,
+  operator: financeOperatorSchema,
+  /** "compare": the comparison window's figure, so the page labels it with those dates. Absent: this period's. */
+  period: z.literal("compare").optional(),
+});
+
 const workingStepSchema = z.object({
   step: z.number().int().min(1).max(FINANCE_WORKING_STEPS_MAX),
   /** A line key or a working key (program-finance-definitions.ts) whose words title the step. */
   textKey,
-  operands: z
-    .array(z.object({ lineKey: knownLineKey, amount: cents.nullable(), unit: financeUnitSchema, operator: financeOperatorSchema }))
-    .max(FINANCE_WORKING_OPERANDS_MAX),
+  operands: z.array(workingOperandSchema).max(FINANCE_WORKING_OPERANDS_MAX),
+  /** The integer means what `resultUnit` says; null when the step has no figure (words only, or a share of nothing). */
   result: cents.nullable(),
+  resultUnit: financeWorkingUnitSchema,
   opensMetric: financeMetricKeySchema.optional(),
 });
 
@@ -726,6 +746,14 @@ const answerSchema = z
     marginBps: bps.nullable(),
     priorMarginTenths: tenths.nullable(),
     marginChangeTenths: tenths.nullable(),
+    /**
+     * Where each $1 billed on fully costed orders went, and the bar's widths.
+     * They follow kept on orders, never the hero (spec §3.2, §7): null when
+     * kept on orders is below zero (the page draws the loss layout), when any
+     * part is below zero, or when there is nothing to split. A period whose
+     * return credits push what we kept below zero while kept on orders is
+     * zero or more is state "loss" and still carries both.
+     */
     centsOfEachDollar: splitOfEachDollarSchema.nullable(),
     barBps: barBpsSchema.nullable(),
     /** 1 point = 1¢ off an order, so the two integers are equal (CD 8). */
@@ -741,7 +769,50 @@ const answerSchema = z
     if (failed && answer.errorCode === undefined) {
       ctx.addIssue({ code: "custom", path: ["errorCode"], message: "a failed answer names its error code" });
     }
+    if (!failed) refineSplitForKeptOnOrders(answer, ctx);
   });
+
+/**
+ * The split and the bar exist exactly when they can be worked out from kept
+ * on orders and its parts (contract §2.1): a negative kept on orders never
+ * has one, and parts that are all zero or more, add up to their base, and
+ * have a base above zero always do. The hero's state plays no part.
+ */
+function refineSplitForKeptOnOrders(
+  answer: {
+    keptOnOrders: number | null;
+    costOfGoods: number | null;
+    carrierLabels: number | null;
+    poolShare: number | null;
+    billed: number;
+    fullyCosted: { billed: number };
+    waiting: { billed: number };
+    centsOfEachDollar: unknown;
+    barBps: unknown;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const parts = [answer.keptOnOrders, answer.costOfGoods, answer.carrierLabels, answer.poolShare];
+  if (answer.keptOnOrders !== null && answer.keptOnOrders < 0) {
+    if (answer.centsOfEachDollar !== null) {
+      ctx.addIssue({ code: "custom", path: ["centsOfEachDollar"], message: "a negative kept on orders has no split of each dollar" });
+    }
+    if (answer.barBps !== null) {
+      ctx.addIssue({ code: "custom", path: ["barBps"], message: "a negative kept on orders has no bar widths" });
+    }
+    return;
+  }
+  if (!parts.every((part): part is number => part !== null && part >= 0)) return;
+  const fullyCosted = parts.reduce((total, part) => total + part, 0);
+  const splittable = answer.fullyCosted.billed > 0 && fullyCosted === answer.fullyCosted.billed;
+  if (splittable && answer.centsOfEachDollar === null) {
+    ctx.addIssue({ code: "custom", path: ["centsOfEachDollar"], message: "kept on orders of zero or more is split" });
+  }
+  const barred = answer.billed > 0 && answer.waiting.billed >= 0 && fullyCosted + answer.waiting.billed === answer.billed;
+  if (barred && answer.barBps === null) {
+    ctx.addIssue({ code: "custom", path: ["barBps"], message: "kept on orders of zero or more has bar widths" });
+  }
+}
 
 const tilesSchema = z.object({
   billed: z
@@ -830,6 +901,7 @@ export type FinanceSummaryQuery = z.infer<typeof financeSummaryQuerySchema>;
 export type FinanceCheckId = (typeof FINANCE_CHECK_IDS)[number];
 export type FinanceMetricKey = (typeof FINANCE_METRIC_KEYS)[number];
 export type FinanceUnit = (typeof FINANCE_UNITS)[number];
+export type FinanceWorkingUnit = (typeof FINANCE_WORKING_UNITS)[number];
 export type FinanceLineStatus = (typeof FINANCE_LINE_STATUSES)[number];
 export type FinanceDatedBy = (typeof FINANCE_DATED_BY)[number];
 export type FinanceOperator = (typeof FINANCE_OPERATORS)[number];
@@ -842,6 +914,7 @@ export type FinanceSectionStatus = z.infer<typeof sectionStatusSchema>;
 
 export type FinancePrior = z.infer<typeof priorSchema>;
 export type FinanceWorkingStep = z.infer<typeof workingStepSchema>;
+export type FinanceWorkingOperand = z.infer<typeof workingOperandSchema>;
 export type FinanceLine = z.infer<typeof financeLineSchema>;
 export type FinanceSection = z.infer<typeof sectionsSchema>["sales"];
 export type FinanceWindow = z.infer<typeof windowSchema>;

@@ -27,9 +27,14 @@ export const FINANCE_SEGMENT_CLASSES: Readonly<Record<FinanceBarSegmentKey, stri
   waiting: "bg-[hsl(var(--finance-track))]",
 });
 
+/**
+ * Status words and their icons. The -700 shades keep the words at 4.5:1 or
+ * more on the card, the page and the amber chip in light mode (5.37, 5.13
+ * and 4.87:1); the -400 shades are 9:1 or more on the dark card (spec §12).
+ */
 export const FINANCE_TONE_TEXT_CLASSES: Readonly<Record<FinanceCheckTone, string>> = Object.freeze({
-  fine: "text-emerald-600 dark:text-emerald-400",
-  attention: "text-amber-600 dark:text-amber-400",
+  fine: "text-emerald-700 dark:text-emerald-400",
+  attention: "text-amber-700 dark:text-amber-400",
   unknown: "text-muted-foreground",
   program: "text-muted-foreground",
 });

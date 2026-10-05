@@ -416,7 +416,19 @@ GROUP BY GROUPING SETS ((), (pl.group_key))`,
 
 // ── Q3: received and never charged (contract §2.3) ──────────────────────
 
-/** Q3: intakes received in the period that ended without a charge, by kind ($1 start, $2 end, $3 vendor). */
+/**
+ * Q3: intakes received in the period that ended without a charge, by kind ($1 start, $2 end, $3 vendor).
+ *
+ * The marketplace-cancellation worker moves a cancelled intake on through
+ * cancellation_status 'marketplace_cancellation_processing' and
+ * '…_retrying' (dropship-order-cancellation.repository.ts) and, once the
+ * marketplace confirms, to 'marketplace_cancelled' whatever the cause was;
+ * a retryable failure also turns a rejected intake into status 'cancelled'.
+ * Those in-flight states count as cancelled on the marketplace, where they
+ * end up, so an order never drops out of the count while the worker runs.
+ * The last arm catches any other cancelled intake, so a cancellation status
+ * added later cannot make an order vanish from the count either.
+ */
 export function neverChargedStatement(tables: FinanceRawTables): FinanceSqlStatement {
   // Without the audit table there is no "would have charged" amount; the
   // builder marks that line unavailable (table_missing).
@@ -442,8 +454,10 @@ FROM (SELECT i.*, CASE
         WHEN i.cancellation_status = 'payment_hold_expired' THEN 'payment_time_ran_out'
         WHEN i.cancellation_status = 'order_intake_rejected' OR i.status = 'rejected' THEN 'rejected'
         WHEN i.cancellation_status = 'marketplace_cancelled' THEN 'marketplace_cancelled'
+        WHEN i.cancellation_status IN ('marketplace_cancellation_processing', 'marketplace_cancellation_retrying') THEN 'marketplace_cancelled'
         WHEN i.status = 'failed' THEN 'failed'
-        WHEN i.status = 'exception' THEN 'exception' END AS kind
+        WHEN i.status = 'exception' THEN 'exception'
+        WHEN i.status = 'cancelled' THEN 'marketplace_cancelled' END AS kind
       FROM dropship.dropship_order_intake i
       WHERE i.received_at >= $1::timestamptz AND i.received_at < $2::timestamptz
         AND ${vendorFilter("i.vendor_id", "$3")}) i

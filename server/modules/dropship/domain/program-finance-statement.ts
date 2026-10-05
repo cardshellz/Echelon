@@ -48,6 +48,7 @@ import {
   type FinanceVendorName,
   type FinanceVendorRow,
   type FinanceWorkingStep,
+  type FinanceWorkingUnit,
 } from "../../../../shared/dropship/program-finance";
 import {
   FINANCE_CHECK_DEFINITIONS,
@@ -769,8 +770,10 @@ function cashSection(build: Build): FinanceSections["cash"] {
   if (!ledger || !cash) return failedSection(build.ledger);
   const lines = new LineSet("cash");
   addDepositLines(lines, ledger);
+  // The deposits counted, staff credits aside: the Cash in row's "{n} deposits" (identity 6 checks it against the rails).
   lines.add(recordedLine("cash.received_deposits", cash.deposits, {
-    datedBy: "settled", operator: "equals", partialReason: cash.depositsPartial ? "metadata_malformed" : null,
+    datedBy: "settled", operator: "equals", count: ledger.sum("nP", cashDeposit),
+    partialReason: cash.depositsPartial ? "metadata_malformed" : null,
   }));
   lines.add(directedLine("cash.pulled_back", cash.pulledBack, "minus", {
     datedBy: "posted",
@@ -1243,29 +1246,44 @@ function barNumbers(split: FinanceBarParts | null): NonNullable<FinanceAnswer["b
   return split && parts ? { ...parts, waiting: count(split.waiting, "answer.split") } : null;
 }
 
+/** The margin figures the answer card shows, in tenths; the drawer's steps carry the same integers. */
+interface MarginFigures {
+  /** This period's kept on orders as a share of billed on fully costed orders; null with no fully costed orders. */
+  readonly current: number | null;
+  /** The same share for the comparison window; null without one or with no fully costed orders in it. */
+  readonly prior: number | null;
+  /** current − prior, in tenths of a percentage point; null unless both are known. */
+  readonly change: number | null;
+}
+
 /** "How this is worked out" for the hero (spec §3.2): the arithmetic with the page's own figures. */
-function answerWorkings(build: Build, sales: FinanceSections["sales"]): FinanceWorkingStep[] {
+function answerWorkings(build: Build, sales: FinanceSections["sales"], margins: MarginFigures): FinanceWorkingStep[] {
   const line = (key: FinanceSectionLineKey<"sales">) => sales.lines.find((candidate) => candidate.key === key);
   const amountOf = (key: FinanceSectionLineKey<"sales">) => line(key)?.amount ?? null;
   const steps: FinanceWorkingStep[] = [];
-  const push = (textKey: string, operands: FinanceWorkingOperand[], result: number | null) =>
-    steps.push(stepOf(steps.length + 1, textKey, operands, result));
+  const push = (textKey: string, operands: FinanceWorkingOperand[], result: number | null, resultUnit: FinanceWorkingUnit = "cents") =>
+    steps.push(stepOf(steps.length + 1, textKey, operands, result, resultUnit));
   const operands = (...keys: FinanceSectionLineKey<"sales">[]) => operandsOf(keys.map(line));
   push("working.two_clocks", [], null);
   push("sales.billed_fc", operands("sales.billed", "sales.waiting"), amountOf("sales.billed_fc"));
   push("sales.kept_orders", operands("sales.billed_fc", "sales.cogs", "sales.labels", "sales.pool_fc"), amountOf("sales.kept_orders"));
   push("working.cogs_basis", [], null);
   push("sales.kept", operands("sales.kept_orders", "sales.fees", "sales.return_credits_cs"), amountOf("sales.kept"));
-  // A share, not a sum: both figures are shown as they are, and the margin itself is on the answer.
-  const share = (keptOnOrders: number | null, billedFc: number | null): FinanceWorkingOperand[] => [
-    { lineKey: "sales.kept_orders", amount: keptOnOrders, unit: "cents", operator: "none" },
-    { lineKey: "sales.billed_fc", amount: billedFc, unit: "cents", operator: "none" },
+  // A share, not a sum: both dollar figures are shown as they are and the result is the share the card shows.
+  const share = (keptOnOrders: number | null, billedFc: number | null, period?: "compare"): FinanceWorkingOperand[] => [
+    { lineKey: "sales.kept_orders", amount: keptOnOrders, unit: "cents", operator: "none", ...(period ? { period } : {}) },
+    { lineKey: "sales.billed_fc", amount: billedFc, unit: "cents", operator: "none", ...(period ? { period } : {}) },
   ];
-  push("working.margin_share", share(amountOf("sales.kept_orders"), amountOf("sales.billed_fc")), null);
+  push("working.margin_share", share(amountOf("sales.kept_orders"), amountOf("sales.billed_fc")), margins.current, "share_tenths");
   const prior = compareOrderFigures(build);
   if (prior !== null && prior !== "unavailable") {
-    push("working.margin_prior", share(toSafeNumber(prior.keptOnOrders), toSafeNumber(prior.totals.billedFc)), null);
-    push("working.margin_change", [], null);
+    // The comparison's figures are labelled with the comparison dates (period "compare"), never as this period's.
+    push("working.margin_prior", share(toSafeNumber(prior.keptOnOrders), toSafeNumber(prior.totals.billedFc), "compare"),
+      margins.prior, "share_tenths");
+    push("working.margin_change", [
+      { lineKey: "sales.kept_orders", amount: margins.current, unit: "share_tenths", operator: "none" },
+      { lineKey: "sales.kept_orders", amount: margins.prior, unit: "share_tenths", operator: "minus", period: "compare" },
+    ], margins.change, "share_change_tenths");
   }
   push("working.not_included", [], null);
   return steps;
@@ -1283,10 +1301,18 @@ function answerOf(build: Build, sales: FinanceSections["sales"]): FinanceAnswer 
     const state = answerState(figures, kept);
     const margin = financeShare(figures.keptOnOrders, t.billedFc);
     const prior = priorMargin(build);
+    const margins: MarginFigures = {
+      current: nullableCents(margin.tenths),
+      prior: nullableCents(prior),
+      change: margin.tenths !== null && prior !== null ? nullableCents(margin.tenths - prior) : null,
+    };
     const keptAmount = toSafeNumber(kept);
     const parts = { kept: figures.keptOnOrders, costOfGoods: figures.costOfGoods, carrierLabels: t.labelsFc, poolShare: t.poolFc };
-    // A loss has no "where each $1 went" split; the page draws the loss layout (spec §7).
-    const showSplit = state !== "loss";
+    // The split follows kept on orders, never the hero (spec §3.2): return credits can push what we
+    // kept below zero while kept on orders is still zero or more, and the split shows then. A negative
+    // kept on orders has none, and the page draws the loss layout (§7). largestRemainder also refuses
+    // any negative part, so a negative cost leaves both null too.
+    const showSplit = figures.keptOnOrders >= ZERO;
     return {
       state,
       status: "ok",
@@ -1303,15 +1329,15 @@ function answerOf(build: Build, sales: FinanceSections["sales"]): FinanceAnswer 
       costOfGoods: toSafeNumber(figures.costOfGoods),
       carrierLabels: toSafeNumber(t.labelsFc),
       poolShare: toSafeNumber(t.poolFc),
-      marginTenths: nullableCents(margin.tenths),
+      marginTenths: margins.current,
       marginBps: nullableCents(margin.bps),
-      priorMarginTenths: nullableCents(prior),
-      marginChangeTenths: margin.tenths !== null && prior !== null ? nullableCents(margin.tenths - prior) : null,
+      priorMarginTenths: margins.prior,
+      marginChangeTenths: margins.change,
       centsOfEachDollar: showSplit ? billedPartsNumbers(centsOfEachDollar(parts, t.billedFc)) : null,
       barBps: showSplit ? barNumbers(barWidths({ ...parts, waiting: figures.waitingBilled }, t.billed)) : null,
       paidWithPoints: { billed: cents(t.paidPoints, "answer.paidWithPoints"), points: count(t.paidPoints, "answer.paidWithPoints") },
       coverage: { done: count(t.fcOrders, "answer.coverage"), total: count(t.orders, "answer.coverage") },
-      workings: answerWorkings(build, sales),
+      workings: answerWorkings(build, sales, margins),
     };
   } catch (error) {
     if (!(error instanceof FinanceFigureError)) throw error;

@@ -17,6 +17,7 @@ import {
   financeQueryRetryDelay,
 } from "../dropship-finance-model";
 import { FinanceCountingBody, FinanceHowBody } from "../dropship-finance/finance-sheets";
+import { FINANCE_TONE_TEXT_CLASSES } from "../dropship-finance/finance-ui";
 import {
   financeFixtureCheck,
   financeSummaryFixture,
@@ -93,6 +94,11 @@ function region(html: string, testId: string): string {
   return html.slice(start);
 }
 
+/** Text as renderToStaticMarkup escapes it. */
+function escapeHtml(text: string): string {
+  return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#x27;");
+}
+
 function tags(html: string, tag: string): string[] {
   return html.match(new RegExp(`<${tag}(\\s[^>]*)?>`, "g")) ?? [];
 }
@@ -131,11 +137,13 @@ describe("wiring", () => {
     expect(tabSource).toContain('canView={hasPermission("dropship", "manage_operations")}');
   });
 
-  it("makes the header Refresh refetch every finance query while the finance tab is open", () => {
+  it("makes the header Refresh refresh the finance summary on screen while the finance tab is open", () => {
     const refreshStart = page.indexOf("function refreshAll()");
     const refresh = page.slice(refreshStart, page.indexOf("\n  }\n", refreshStart));
     expect(refresh).toContain('if (activeTab === "finance")');
-    expect(refresh).toContain("queryClient.refetchQueries({ queryKey: [DROPSHIP_FINANCE_QUERY_KEY_ROOT] })");
+    // What it refetches (the visible summary only) is the model's refreshFinanceQueries, tested with a real QueryClient.
+    expect(refresh).toContain("void refreshFinanceQueries(queryClient);");
+    expect(refresh).not.toContain("refetchQueries");
     expect(DROPSHIP_FINANCE_QUERY_KEY_ROOT).toBe("dropship-finance");
   });
 
@@ -162,6 +170,34 @@ describe("wiring", () => {
     expect(shell).toContain('const DROPSHIP_TAB_HREF_PREFIX = "/dropship?tab=";');
   });
 
+  it("keeps the status words at 4.5:1 text contrast or more in light and dark", () => {
+    // Worked out from the shipped colours: Tailwind's OKLCH palette and the theme's HSL tokens.
+    const palette = read("node_modules", "tailwindcss", "theme.css");
+    const oklch = (name: string) => {
+      const match = new RegExp(`--color-${name}: oklch\\(([\\d.]+)% ([\\d.]+) ([\\d.]+)\\)`).exec(palette);
+      if (!match) throw new Error(`no ${name} in Tailwind's theme`);
+      return oklchToSrgb(Number(match[1]) / 100, Number(match[2]), Number(match[3]));
+    };
+    const light = (token: string) => hslToken(css, token, 0);
+    const dark = (token: string) => hslToken(css, token, 1);
+    const [fine, attention] = [FINANCE_TONE_TEXT_CLASSES.fine, FINANCE_TONE_TEXT_CLASSES.attention];
+    const shade = (classes: string, mode: "light" | "dark") => {
+      const match = (mode === "light" ? /^text-([a-z]+-\d+)/ : /dark:text-([a-z]+-\d+)/).exec(classes);
+      if (!match) throw new Error(`no ${mode} text colour in ${classes}`);
+      return oklch(match[1]);
+    };
+    const pairs: Array<[string, number[], number[]]> = [
+      ["light Fine on the card", shade(fine, "light"), light("card")],
+      ["light Fine on the page", shade(fine, "light"), light("background")],
+      ["light Needs a look on the card", shade(attention, "light"), light("card")],
+      ["light Needs a look on the amber chip", shade(attention, "light"), oklch("amber-50")],
+      ["dark Fine on the card", shade(fine, "dark"), dark("card")],
+      ["dark Needs a look on the card", shade(attention, "dark"), dark("card")],
+      ["dark Needs a look on the amber chip", shade(attention, "dark"), blend(oklch("amber-950"), 0.4, dark("background"))],
+    ];
+    for (const [what, text, background] of pairs) expect(contrastRatio(text, background), what).toBeGreaterThanOrEqual(4.5);
+  });
+
   it("defines the finance colour tokens for light and dark themes", () => {
     for (const token of ["--finance-kept: var(--primary);", "--finance-track: var(--muted);"]) {
       expect(css.split(token)).toHaveLength(3);
@@ -174,6 +210,50 @@ describe("wiring", () => {
     expect(css).toContain("--finance-pool: 215 16% 47%;");
   });
 });
+
+// ── colour maths for the contrast test (WCAG 2 relative luminance) ──────────
+
+function oklchToSrgb(lightness: number, chroma: number, hueDegrees: number): number[] {
+  const hue = (hueDegrees * Math.PI) / 180;
+  const a = chroma * Math.cos(hue);
+  const b = chroma * Math.sin(hue);
+  const l = (lightness + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (lightness - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (lightness - 0.0894841775 * a - 1.291485548 * b) ** 3;
+  const linear = [
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
+  ];
+  return linear.map((value) => {
+    const clamped = Math.min(1, Math.max(0, value));
+    return clamped <= 0.0031308 ? 12.92 * clamped : 1.055 * clamped ** (1 / 2.4) - 0.055;
+  });
+}
+
+/** An HSL token from index.css: the first (light, :root) or second (dark, .dark) definition. */
+function hslToken(source: string, token: string, occurrence: number): number[] {
+  const matches = [...source.matchAll(new RegExp(`--${token}: (\\d+) (\\d+)% (\\d+)%;`, "g"))];
+  const match = matches[occurrence];
+  if (!match) throw new Error(`no --${token} #${occurrence} in index.css`);
+  const [hue, saturation, lightness] = [Number(match[1]), Number(match[2]) / 100, Number(match[3]) / 100];
+  const k = (n: number) => (n + hue / 30) % 12;
+  const a = saturation * Math.min(lightness, 1 - lightness);
+  return [0, 8, 4].map((n) => lightness - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1))));
+}
+
+function blend(top: number[], alpha: number, below: number[]): number[] {
+  return top.map((channel, index) => channel * alpha + below[index] * (1 - alpha));
+}
+
+function contrastRatio(first: number[], second: number[]): number {
+  const luminance = (rgb: number[]) => {
+    const [r, g, b] = rgb.map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const [lighter, darker] = [luminance(first), luminance(second)].sort((x, y) => y - x);
+  return (lighter + 0.05) / (darker + 0.05);
+}
 
 describe("money safety in the finance sources", () => {
   it("imports none of the float or compact money formatters", () => {
@@ -340,6 +420,11 @@ describe("the loaded page", () => {
     }
     // The only buttons in the tiles are their ⓘ buttons and amber check dots.
     for (const button of tags(tiles, "button")) expect(button).toMatch(/data-finance-action="(info|open-checks)"/);
+    // A value never wraps: its font follows the tile's width (a container query) and the value's length.
+    const values = tags(tiles, "p").filter((tag) => tag.includes('data-testid="finance-tile-value"'));
+    expect(values).toHaveLength(4);
+    for (const value of values) expect(value).toMatch(/class="[^"]*whitespace-nowrap[^"]*" style="font-size:min\(1\.5rem, calc\(100cqi \/ \d+ \/ 0\.7\)\)"/);
+    expect(tags(tiles, "div").filter((tag) => tag.includes('data-testid="finance-tile-')).every((tag) => tag.includes("@container"))).toBe(true);
   });
 
   it("puts the period, compare, checks chip and as-of time in the sticky bar", () => {
@@ -478,6 +563,8 @@ describe("sheet bodies", () => {
     expect(html).toContain("$38.81");
     expect(html).toContain("Technical source");
     expect(html).toContain("dropship.dropship_order_economics_snapshots");
+    // The margin steps show the card's own figures, in their units, the comparison with its dates.
+    for (const text of ["39.9%", "40.4%", "−0.5 pts", "Kept on orders (Sep 1 – 5)", "Kept on orders as a share (Oct 1 – 5)"]) expect(html).toContain(text);
   });
 
   it("lists every number's plain definition, the money path and the choices", () => {
@@ -488,5 +575,12 @@ describe("sheet bodies", () => {
     expect(html).toContain("What we kept");
     expect(html).toContain("Technical source");
     expect(html).not.toMatch(/\{[a-z$]+\}/);
+    // Each choice's code-level wording sits folded under "Technical source", never in plain view.
+    const choices = region(html, "finance-choices-list");
+    for (const choice of buildFinanceCountingView().choices) {
+      const at = choices.indexOf(escapeHtml(choice.technical));
+      expect(at, choice.key).toBeGreaterThan(0);
+      expect(choices.lastIndexOf("<details", at), choice.key).toBeGreaterThan(choices.lastIndexOf("</details>", at));
+    }
   });
 });

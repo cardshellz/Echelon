@@ -76,7 +76,7 @@ export interface FinanceLineDefinition extends FinanceDefinition {
 }
 
 export const FINANCE_VENDOR_SCOPE_NOTE =
-  "In a vendor's view every source is limited to that vendor: economics, intake, wallet entries and wallets by vendor_id.";
+  "In a vendor's view every figure counts only that vendor's orders, wallet entries and wallet.";
 
 // ── shared source fragments (constant text, contract §2.0) ───────────────
 
@@ -135,6 +135,15 @@ const AVAILABLE_TYPES =
   "type moves the wallet balance: funding, order_debit, advance_fee, funding_reversal, funding_reinstated, return_credit, insurance_pool_credit, return_fee, refund_credit, manual_adjustment";
 const REWARDS_TYPES = "type IN ('rewards_earned', 'rewards_spent', 'rewards_expired', 'rewards_reversed', 'rewards_reinstated')";
 const WHOLE_CENTS = "metadata amounts count only when they are whole cents (^-?[0-9]{1,18}$); others are left out and listed by check D7";
+/**
+ * The charged amount of a deposit falls back to its wallet credit instead of
+ * being left out (contract C8): the deposit lines are partial, never short.
+ */
+const CHARGED_FALLBACK =
+  "a chargedCents that is not whole cents (^-?[0-9]{1,18}$) counts at amount_cents, the wallet credit; a row with any metadata amount that is not whole cents makes the line partial and check D7 lists it";
+/** What check D7 and the metadata_malformed reason read: every metadata amount, and what happens to one that is not whole cents. */
+const METADATA_WHOLE_CENTS =
+  "an amount is whole cents when it matches ^-?[0-9]{1,18}$; a chargedCents that is not counts at amount_cents, any other that is not is left out";
 const ORDER_PAYMENT_JOIN = "dropship_wallet_ledger.reference_id = economics.intake_id::text";
 const ORDER_TABLES = [ECONOMICS, OMS_ORDERS, OMS_LINES, WMS_ORDERS, WMS_ITEMS, ITEM_COSTS, SHIPMENTS, SHIPMENT_ITEMS];
 
@@ -280,8 +289,10 @@ const NEVER_CHARGED_DEFINITIONS: Readonly<Record<FinanceNeverChargedKind, { word
   },
   marketplace_cancelled: {
     words: "cancelled on the marketplace",
-    definition: "Cancelled on the marketplace before we charged for it.",
-    test: "cancellation_status = 'marketplace_cancelled'",
+    definition: "Cancelled on the marketplace, or being cancelled there now, before we charged for it.",
+    // Q3 (dropship-finance-sql.ts neverChargedStatement) also puts any other cancelled
+    // intake here, so a cancellation state added later is counted, never dropped.
+    test: "cancellation_status IN ('marketplace_cancelled', 'marketplace_cancellation_processing', 'marketplace_cancellation_retrying'), or any other status = 'cancelled'",
   },
   failed: {
     words: "failed",
@@ -527,24 +538,24 @@ const CHARGED = `Σ COALESCE(int(metadata->>'chargedCents'), amount_cents)`;
 
 const CASH_LINES = {
   "cash.ach": line("cents", "Bank transfer (ACH)", "Bank transfers that settled in the period, at the amount charged.",
-    depositSource([CHARGED], [`${RAIL} = 'stripe_ach'`, NOT_COLLECTION, WHOLE_CENTS]), { opensMetric: "cash.deposits" }),
+    depositSource([CHARGED], [`${RAIL} = 'stripe_ach'`, NOT_COLLECTION, CHARGED_FALLBACK]), { opensMetric: "cash.deposits" }),
   "cash.card": line("cents", "Card", "Card top-ups that settled in the period, at the amount charged, card fee included.",
-    depositSource([CHARGED], [`${RAIL} = 'stripe_card'`, NOT_COLLECTION, WHOLE_CENTS]), { opensMetric: "cash.deposits" }),
+    depositSource([CHARGED], [`${RAIL} = 'stripe_card'`, NOT_COLLECTION, CHARGED_FALLBACK]), { opensMetric: "cash.deposits" }),
   "cash.card.fees": line("cents", "includes {$} card fees charged to vendors",
     "The card fees inside the card amount. They are also counted in fees we charged.",
     depositSource(["Σ int(metadata->>'cardFeeCents')"], [`${RAIL} = 'stripe_card'`, WHOLE_CENTS]), { opensMetric: "cash.deposits" }),
   "cash.usdc": line("cents", "USDC (digital dollars)", "USDC deposits counted when they settled on chain in the period, at $1.00 per USDC.",
-    depositSource([CHARGED], [`${RAIL} = 'usdc_base'`, NOT_COLLECTION]), { opensMetric: "cash.deposits" }),
+    depositSource([CHARGED], [`${RAIL} = 'usdc_base'`, NOT_COLLECTION, CHARGED_FALLBACK]), { opensMetric: "cash.deposits" }),
   "cash.usdc.chain_watcher": line("cents", "found on chain automatically", "USDC deposits Echelon found on chain by itself.",
     depositSource([CHARGED], [`${RAIL} = 'usdc_base'`, "metadata->>'source' = 'chain_watcher'"]), { opensMetric: "cash.deposits" }),
   "cash.usdc.staff_confirmed": line("cents", "confirmed by staff", "USDC deposits staff confirmed by hand.",
     depositSource([CHARGED], [`${RAIL} = 'usdc_base'`, "metadata->>'source' is not 'chain_watcher'"]), { opensMetric: "cash.deposits" }),
   "cash.collection": line("cents", "Weekly collection (retired)", "Deposits the retired weekly collection took from vendors.",
-    depositSource([CHARGED], ["metadata->>'collection' = 'true'"]), { opensMetric: "cash.deposits" }),
+    depositSource([CHARGED], ["metadata->>'collection' = 'true'", CHARGED_FALLBACK]), { opensMetric: "cash.deposits" }),
   "cash.unknown": line("cents", "Way paid not recorded", "Deposits with no way paid on the entry or on its funding method.",
-    depositSource([CHARGED], [`${RAIL} = 'unknown'`, NOT_COLLECTION]), { opensMetric: "cash.deposits" }),
+    depositSource([CHARGED], [`${RAIL} = 'unknown'`, NOT_COLLECTION, CHARGED_FALLBACK]), { opensMetric: "cash.deposits" }),
   "cash.received_deposits": line("cents", "Deposits received", "Every deposit that settled in the period, except staff wallet credits.",
-    depositSource([CHARGED], [`${RAIL} ≠ 'manual'`, WHOLE_CENTS]), { opensMetric: "cash.deposits" }),
+    depositSource([CHARGED, "COUNT(*)"], [`${RAIL} ≠ 'manual'`, CHARGED_FALLBACK]), { opensMetric: "cash.deposits" }),
   "cash.pulled_back": line("cents", "Pulled back by disputes and bank returns",
     "Deposit money taken back by card disputes and bank returns posted in the period, at the disputed amount.",
     postedSource(["Σ int(metadata->>'disputeAmountCents')"], ["type = 'funding_reversal'", "a row with no disputed amount makes the line partial (check D7)"]),
@@ -570,7 +581,7 @@ const CASH_LINES = {
     depositSource([CHARGED], ["metadata->>'autoReload' = 'true'", "metadata->>'autoReloadReason' = 'payment_hold'"]), { opensMetric: "cash.deposits" }),
   "cash.memo.on_the_way": line("cents", "On the way right now",
     "Deposits vendors sent that haven't settled. It isn't cash yet and vendors can't spend it yet.",
-    source([ACCOUNTS, LEDGER], ["Σ dropship_wallet_accounts.pending_balance_cents", "COUNT of funding entries with status = 'pending'"], [], null),
+    source([LEDGER], ["Σ amount_cents", "COUNT(*)"], ["type = 'funding'", "status = 'pending'"], null),
     { opensMetric: "cash.on_the_way" }),
   "cash.memo.stuck": line("cents", `Waiting more than ${FINANCE_STALE_PENDING_DEPOSIT_DAYS} days`,
     `Deposits still on the way more than ${FINANCE_STALE_PENDING_DEPOSIT_DAYS} days after they were sent.`,
@@ -902,8 +913,8 @@ export const FINANCE_REASON_DEFINITIONS = Object.freeze({
     "Their carrier estimate and markup are missing, so those parts don't add up to shipping.",
     source([ECONOMICS, QUOTES], ["shipping_quote_snapshot_id"], ["no dropship_shipping_quote_snapshots row"], ACCEPTED_AT)),
   metadata_malformed: reason("partial", "Some stored amounts aren't whole cents. Checks lists them.",
-    "Amounts stored in deposit and dispute details that aren't whole cents are never counted as zero; check D7 lists each one.",
-    source([LEDGER], ["metadata chargedCents, cardFeeCents, disputeAmountCents, rewardsClawback.fromCashCents"], [WHOLE_CENTS], POSTED_AT)),
+    "An amount stored in a deposit's or dispute's details that isn't whole cents can't be read: a deposit then counts at what its wallet was credited, any other such amount is left out, and check D7 lists each one.",
+    source([LEDGER], ["metadata chargedCents, cardFeeCents, disputeAmountCents, rewardsClawback.fromCashCents"], [METADATA_WHOLE_CENTS], POSTED_AT)),
   dispute_amount_missing: reason("partial", "Some disputes have no disputed amount saved. Checks lists them.",
     "Those pull-backs are left out of the disputed total; check D7 lists each one.",
     source([LEDGER], ["metadata->>'disputeAmountCents'"], ["type = 'funding_reversal'", "missing or not whole cents"], POSTED_AT)),
@@ -1110,7 +1121,7 @@ export const FINANCE_CHECK_DEFINITIONS: Readonly<Record<FinanceCheckId, FinanceC
   D7: check("deposits", "period", "Every amount stored in deposit and dispute details is a whole number of cents",
     "No amount stored in a deposit's or dispute's details fails to read as whole cents, no failed deposit lacks its failure time, and every win pairs with its pull-back.",
     ["cash.received_deposits", "cash.pulled_back", "cash.won_back", "cash.memo.failed", "sales.fees.card", "points.memo.from_cash"],
-    source([LEDGER], ["metadata chargedCents, cardFeeCents, disputeAmountCents, rewardsClawback.fromCashCents, failure.failedAt"], [WHOLE_CENTS], POSTED_AT)),
+    source([LEDGER], ["metadata chargedCents, cardFeeCents, disputeAmountCents, rewardsClawback.fromCashCents, failure.failedAt"], [METADATA_WHOLE_CENTS], POSTED_AT)),
   K1: check("costs", "period", "Label costs are consistent: combined labels counted once, voided labels holding a cost listed, shipping splits add up",
     "Every package's cost source matches its cost, voided packages holding a cost are listed, and every order's shipping split adds up to its shipping (recon 17).",
     ["sales.labels"],

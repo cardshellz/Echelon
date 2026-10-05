@@ -518,11 +518,13 @@ export class PgDropshipFinanceRepository implements DropshipFinanceRepository {
   }
 
   async readSummary(request: FinanceSummaryReadRequest): Promise<FinanceSummaryRead> {
+    // The request budget starts here, before the waits for a slot and a pooled client (contract §1.1).
+    const startedAtMs = this.clock.now().getTime();
     const release = await this.semaphore.acquire(this.busyWaitMs);
     try {
       return await withFinanceReadTransaction(
         this.dbPool,
-        { clock: this.clock, ...(this.budgetMs !== undefined ? { budgetMs: this.budgetMs } : {}) },
+        { clock: this.clock, startedAtMs, ...(this.budgetMs !== undefined ? { budgetMs: this.budgetMs } : {}) },
         (transaction) => readSnapshot(transaction, request),
       );
     } finally {

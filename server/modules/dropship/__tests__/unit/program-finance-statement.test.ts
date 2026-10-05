@@ -102,7 +102,7 @@ describe("buildFinanceSummary: the contract §6.4 seeded program (mtd, all vendo
     ]);
     expect(steps.map((step) => step.step)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(steps[2]).toEqual({
-      step: 3, textKey: "sales.kept_orders", result: 3_881, opensMetric: "sales.kept_orders",
+      step: 3, textKey: "sales.kept_orders", result: 3_881, resultUnit: "cents", opensMetric: "sales.kept_orders",
       operands: [
         { lineKey: "sales.billed_fc", amount: 9_730, unit: "cents", operator: "none" },
         { lineKey: "sales.cogs", amount: 3_764, unit: "cents", operator: "minus" },
@@ -113,7 +113,38 @@ describe("buildFinanceSummary: the contract §6.4 seeded program (mtd, all vendo
     expect(steps[4].operands.map((operand) => [operand.lineKey, operand.operator, operand.amount])).toEqual([
       ["sales.kept_orders", "none", 3_881], ["sales.fees", "plus", 760], ["sales.return_credits_cs", "minus", 2_000],
     ]);
-    expect(steps[6].operands.map((operand) => operand.amount)).toEqual([1_050, 2_600]);
+    // The margin steps carry the card's own figures: 3,881 / 9,730 = 39.9%; Sep 1 – 5 1,050 / 2,600 = 40.4%; −0.5 pts.
+    expect(steps[5]).toEqual({
+      step: 6, textKey: "working.margin_share", result: 399, resultUnit: "share_tenths",
+      operands: [
+        { lineKey: "sales.kept_orders", amount: 3_881, unit: "cents", operator: "none" },
+        { lineKey: "sales.billed_fc", amount: 9_730, unit: "cents", operator: "none" },
+      ],
+    });
+    expect(steps[6]).toEqual({
+      step: 7, textKey: "working.margin_prior", result: 404, resultUnit: "share_tenths",
+      operands: [
+        { lineKey: "sales.kept_orders", amount: 1_050, unit: "cents", operator: "none", period: "compare" },
+        { lineKey: "sales.billed_fc", amount: 2_600, unit: "cents", operator: "none", period: "compare" },
+      ],
+    });
+    expect(steps[7]).toEqual({
+      step: 8, textKey: "working.margin_change", result: -5, resultUnit: "share_change_tenths",
+      operands: [
+        { lineKey: "sales.kept_orders", amount: 399, unit: "share_tenths", operator: "none" },
+        { lineKey: "sales.kept_orders", amount: 404, unit: "share_tenths", operator: "minus", period: "compare" },
+      ],
+    });
+    expect([steps[5].result, steps[6].result, steps[7].result])
+      .toEqual([summary.answer.marginTenths, summary.answer.priorMarginTenths, summary.answer.marginChangeTenths]);
+    // Words-only steps have no figure.
+    for (const index of [0, 3, 8]) expect([steps[index].result, steps[index].resultUnit]).toEqual([null, "cents"]);
+  });
+
+  it("gives each line's working the line's own unit", () => {
+    expect(lineOf(summary, "points", "points.held").workings?.[0]).toMatchObject({ result: 1_530, resultUnit: "points" });
+    expect(lineOf(summary, "cash", "cash.received").workings?.[0]).toMatchObject({ result: 88_300, resultUnit: "cents" });
+    expect(lineOf(summary, "pool", "pool.closing").workings?.[0]).toMatchObject({ result: -910, resultUnit: "cents" });
   });
 
   it("builds the Sales statement", () => {
@@ -189,7 +220,8 @@ describe("buildFinanceSummary: the contract §6.4 seeded program (mtd, all vendo
       "cash.usdc": ["none", 25_000, 1],
       "cash.usdc.chain_watcher": ["none", 25_000],
       "cash.collection": ["none", 5_000, 1],
-      "cash.received_deposits": ["equals", 90_300],
+      // ACH, card, USDC and the weekly collection; the staff credit is not a deposit.
+      "cash.received_deposits": ["equals", 90_300, 4],
       "cash.pulled_back": ["minus", 12_300, 2],
       "cash.won_back": ["plus", 10_300, 1],
       "cash.received": ["equals", 88_300],
@@ -430,7 +462,21 @@ describe("buildFinanceSummary: a period that ended (last month)", () => {
     expect(summary.period).toMatchObject({ fromDate: "2026-09-01", toDate: "2026-09-30", endsNow: false, endAt: "2026-10-01T04:00:00.000Z" });
     expect(summary.answer).toMatchObject({ billed: 4_100, keptOnOrders: 1_710, marginTenths: 417, priorMarginTenths: null, marginChangeTenths: null });
     expect(summary.tiles.billed.prior).toMatchObject({ amount: 0, change: 4_100, kind: "new" });
-    expectLines(summary, "cash", { "cash.received_deposits": ["equals", 300_000] });
+    expectLines(summary, "cash", { "cash.received_deposits": ["equals", 300_000, 1] });
+  });
+
+  it("shows no comparison share when August had no fully costed orders", () => {
+    const steps = summary.answer.workings;
+    const byKey = (key: string) => steps.find((step) => step.textKey === key);
+    expect(byKey("working.margin_share")).toMatchObject({ result: 417, resultUnit: "share_tenths" });
+    expect(byKey("working.margin_prior")).toMatchObject({
+      result: null, resultUnit: "share_tenths",
+      operands: [{ amount: 0, period: "compare" }, { amount: 0, period: "compare" }],
+    });
+    expect(byKey("working.margin_change")).toMatchObject({
+      result: null, resultUnit: "share_change_tenths",
+      operands: [{ amount: 417, unit: "share_tenths", operator: "none" }, { amount: null, unit: "share_tenths", operator: "minus", period: "compare" }],
+    });
   });
 
   it("shows balances right now beside the balances at the end of the period", () => {
@@ -568,6 +614,46 @@ describe("buildFinanceSummary: periods with nothing, or not enough, to show", ()
       marginTenths: null, centsOfEachDollar: null,
       barBps: { kept: 0, costOfGoods: 0, carrierLabels: 0, poolShare: 0, waiting: 10_000 },
       coverage: { done: 0, total: 2 },
+    });
+  });
+
+  it("keeps the split when return credits, not orders, make it a loss", () => {
+    // §6.4 with $30.00 more return credits: kept on orders +$38.81, fees $7.60, credits $50.00, kept −$3.59.
+    const groups = fixtureLedgerGroups().map((group) => (group.vendorId === 12 && group.type === "return_credit"
+      ? { ...group, amountP: group.amountP + b(3_000), amountBeforeEnd: group.amountBeforeEnd + b(3_000) }
+      : group));
+    const summary = build({ ...fixtureRaw(), ledger: ok({ groups, firstFailureCode: "R01" }) });
+    expect(summary.answer).toMatchObject({
+      state: "loss", keptOnOrders: 3_881, feesCharged: 760, returnCreditsPaid: 5_000, kept: { amount: -359, status: "recorded" },
+      marginTenths: 399,
+      centsOfEachDollar: { kept: 40, costOfGoods: 39, carrierLabels: 20, poolShare: 1 },
+      barBps: { kept: 2_072, costOfGoods: 2_010, carrierLabels: 1_033, poolShare: 80, waiting: 4_805 },
+    });
+    expectLines(summary, "sales", { "sales.kept_orders": ["equals", 3_881], "sales.kept": ["equals", -359] });
+    expect(checkResults(summary).P1).toBe("fine");
+  });
+
+  it("withholds the split when orders cost more than we billed, even if fees make up for it", () => {
+    const raw = emptyRaw();
+    const summary = build({
+      ...raw,
+      orders: ok({
+        totals: {
+          ...zeroOrderTotals(), orders: b(1), fcOrders: b(1), billed: b(1_000), billedFc: b(1_000), productBilled: b(600),
+          productBilledFc: b(600), shippingBilled: b(400), shippingNetPoolFc: b(350), poolAll: b(50), poolFc: b(50),
+          paidCash: b(1_000), cogsMillsFc: b(150_000), labelsFc: b(300), coverageLabels: b(1), coverageLabelsCosted: b(1),
+        },
+        byReason: [],
+      }),
+      ledger: ok({
+        groups: [ledgerGroup({ vendorId: 12, type: "advance_fee", status: "settled", referenceType: "order_intake_advance_fee",
+          nP: b(1), amountP: b(-1_000), amountBeforeEnd: b(-1_000) })],
+        firstFailureCode: null,
+      }),
+    });
+    // Kept on orders −$8.50 + $10.00 in fees = $1.50 kept: the hero is "kept", the bar is the loss layout.
+    expect(summary.answer).toMatchObject({
+      state: "kept", keptOnOrders: -850, feesCharged: 1_000, kept: { amount: 150 }, centsOfEachDollar: null, barBps: null,
     });
   });
 
@@ -772,7 +858,12 @@ describe("buildFinanceSummary: guards", () => {
     expect(summary.tiles.billed.prior).toBeNull();
     expect(summary.tiles.cashReceived.prior).toBeNull();
     expect(summary.answer.priorMarginTenths).toBeNull();
-    expect(summary.answer.workings.map((step) => step.textKey)).not.toContain("working.margin_prior");
+    const keys = summary.answer.workings.map((step) => step.textKey);
+    expect(keys).not.toContain("working.margin_prior");
+    expect(keys).not.toContain("working.margin_change");
+    // This period's share still shows, with the card's figure.
+    expect(summary.answer.workings.find((step) => step.textKey === "working.margin_share"))
+      .toMatchObject({ result: 399, resultUnit: "share_tenths" });
   });
 
   it("reports a summary that would break its contract, by path only", () => {

@@ -2,7 +2,6 @@ import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { join, resolve } from "node:path";
 import type { FinanceSummaryInput } from "../../shared/dropship/program-finance";
 import {
-  financeFixtureLine,
   financeSummaryFixtureInput,
   parseFinanceFixture,
 } from "../../client/src/pages/__tests__/fixtures/dropship-finance-summary.fixture";
@@ -10,9 +9,12 @@ import {
 // Journeys for the Dropship "Program finance" tab (part 1, the rollup). The
 // real panel runs under the app's query client; the only API it may call is
 // GET /api/dropship/admin/finance/summary, which every test stubs with the
-// §6.4 seeded program (the shared fixture) or a variant derived from it.
-// Every variant goes through the shared contract before it is served, so a
-// journey can never pass on a response the real page would refuse.
+// §6.4 seeded program or a variant derived from it. The program is the golden
+// summary: the server's own output (buildFinanceSummary on the §6.4 raw
+// fixture), kept equal to the server by program-finance-golden.test.ts. A
+// variant changes only what its journey needs, the way the server would send
+// it, and goes through the shared contract before it is served, so a journey
+// can never pass on a response the real page would refuse.
 
 // Playwright's serviceWorkers:block init script reads navigator.serviceWorker in
 // every frame, which throws in an opaque sandbox. This local-only harness
@@ -83,13 +85,41 @@ function lastMonth(input: FinanceSummaryInput): FinanceSummaryInput {
   return input;
 }
 
-/** compare=off: the server sends no earlier window and no deltas. */
+/**
+ * compare=off, as the server sends it: no earlier window, no deltas on the
+ * tiles or lines, and no comparison steps in the working of what we kept.
+ */
 function withoutCompare(input: FinanceSummaryInput): FinanceSummaryInput {
   input.comparePeriod = null;
   input.tiles.billed.prior = null;
   input.tiles.cashReceived.prior = null;
   input.answer.priorMarginTenths = null;
   input.answer.marginChangeTenths = null;
+  input.answer.workings = input.answer.workings
+    .filter((step) => step.textKey !== "working.margin_prior" && step.textKey !== "working.margin_change")
+    .map((step, index) => ({ ...step, step: index + 1 }));
+  for (const section of Object.values(input.sections)) {
+    if (section.status !== "ok") continue;
+    for (const line of section.lines) delete line.prior;
+  }
+  return input;
+}
+
+/**
+ * A custom period of Oct 1 – 3, with the windows the server's period rules
+ * resolve for it (resolveFinancePeriod("custom", …) at the fixture clock): it
+ * ended on Oct 3, and it is compared with the three days before it.
+ */
+function forCustomDays(input: FinanceSummaryInput, from: string, to: string): FinanceSummaryInput {
+  if (from !== "2026-10-01" || to !== "2026-10-03") throw new Error(`no custom window is set up for ${from} – ${to}`);
+  input.period = {
+    preset: "custom", fromDate: from, toDate: to,
+    startAt: "2026-10-01T04:00:00.000Z", endAt: "2026-10-04T04:00:00.000Z", endsNow: false, clampedToMonthEnd: false,
+  };
+  input.comparePeriod = {
+    preset: "custom", fromDate: "2026-09-28", toDate: "2026-09-30",
+    startAt: "2026-09-28T04:00:00.000Z", endAt: "2026-10-01T04:00:00.000Z", endsNow: false, clampedToMonthEnd: false,
+  };
   return input;
 }
 
@@ -104,6 +134,7 @@ function forVendor(input: FinanceSummaryInput, vendorId: number): FinanceSummary
 function programResponder(query: URLSearchParams): Reply {
   let input = financeSummaryFixtureInput();
   if (query.get("period") === "last-month") input = lastMonth(input);
+  if (query.get("period") === "custom") input = forCustomDays(input, query.get("from") ?? "", query.get("to") ?? "");
   if (query.get("compare") === "off") input = withoutCompare(input);
   const vendorId = query.get("vendorId");
   if (vendorId !== null) input = forVendor(input, Number(vendorId));
@@ -139,18 +170,32 @@ function asNotReady(input: FinanceSummaryInput): FinanceSummaryInput {
     orders: 10, billed: 18_730, fullyCosted: { orders: 0, billed: 0 }, waiting: { orders: 10, billed: 18_730 },
     costOfGoods: 0, carrierLabels: 0, poolShare: 0, marginTenths: null, marginBps: null, priorMarginTenths: null, marginChangeTenths: null,
     centsOfEachDollar: null, barBps: { kept: 0, costOfGoods: 0, carrierLabels: 0, poolShare: 0, waiting: 10_000 },
-    coverage: { done: 0, total: 10 }, workings: [],
+    coverage: { done: 0, total: 10 },
   });
   return input;
 }
 
-/** Two "every line" lines that are zero: Summary depth hides them, Every line shows them (spec §3.4 A). */
+/**
+ * No replacement labels this period: the server sends that zero as an
+ * "every line" line (its everyLineWhenZero), so Summary depth hides it and
+ * Every line shows it (spec §3.4 A). The golden's own automatic top-ups line
+ * in Cash in is such a zero already.
+ */
 function withZeroEveryLineLines(input: FinanceSummaryInput): FinanceSummaryInput {
-  salesLine(input, "sales.labels.replacement").amount = 0;
-  const cash = input.sections.cash;
-  if (cash.status !== "ok") throw new Error("the fixture's cash section is ok");
-  const chainWatcher = cash.lines.findIndex((line) => line.key === "cash.usdc.chain_watcher");
-  cash.lines.splice(chainWatcher + 1, 0, financeFixtureLine("cash.usdc.staff_confirmed", 0, { datedBy: "settled", depth: "every_line" }));
+  Object.assign(salesLine(input, "sales.labels.replacement"), { amount: 0, depth: "every_line" });
+  return input;
+}
+
+/**
+ * Seven-digit balances: what we owe vendors is $1,234,567.89 and the cash in
+ * is $123,456.78, so every tile carries a long figure (spec §6: the font steps
+ * down, the number never wraps).
+ */
+function withLargeTiles(input: FinanceSummaryInput): FinanceSummaryInput {
+  input.tiles.billed = { ...input.tiles.billed, amount: 1_873_000 };
+  input.tiles.cashReceived = { ...input.tiles.cashReceived, amount: 12_345_678 };
+  input.tiles.weOweNow = { ...input.tiles.weOweNow, amount: 123_456_789, onTheWay: 3_811_110 };
+  input.tiles.owedToUsNow = { ...input.tiles.owedToUsNow, amount: 3_811_110 };
   return input;
 }
 
@@ -314,6 +359,8 @@ test("month to date leads with what we kept, the bar's exact amounts and four ti
 
   // Every detail row starts closed: titles and one amount each, nothing opened.
   await expect(page.getByTestId("finance-detail-sales")).toContainText("$26.41 kept");
+  // The deposit count is the server's own (cash.received_deposits.count), not a sum of the ways paid.
+  await expect(page.getByTestId("finance-detail-cash")).toContainText("4 deposits · bank, card, USDC, weekly collection");
   await expect(page.getByTestId("finance-checks")).toHaveCount(0);
   await expectNoHorizontalPageScroll(page);
   await screenshot(page, testInfo, "default");
@@ -355,29 +402,40 @@ test("opening Sales and what we kept lists the statement in order, with each ope
 });
 
 test("Every line shows the zero lines Summary hides, without asking the server again", async ({ page }) => {
-  const harness = await setup(page, { respond: () => ok(withZeroEveryLineLines(financeSummaryFixtureInput())), search: "tab=finance&open=sales,cash" });
+  const harness = await setup(page, { respond: () => ok(withZeroEveryLineLines(financeSummaryFixtureInput())), search: "tab=finance&open=sales,cash,points" });
   const sales = page.getByTestId("finance-detail-sales");
   const cash = page.getByTestId("finance-detail-cash");
+  const points = page.getByTestId("finance-detail-points");
   await expect(sales).toContainText("Carrier labels");
   await expect(sales).not.toContainText("of which replacement packages");
   await expect(cash).toContainText("found on chain automatically $250.00");
-  await expect(cash).not.toContainText("confirmed by staff");
+  await expect(cash).not.toContainText("Of which automatic top-ups");
+  await expect(points).toContainText("Expiring: 31–90 days 250 points · never 1,280 points");
 
   await page.getByRole("radio", { name: "Every line" }).click();
   await expect.poll(() => urlParams(page).get("depth")).toBe("all");
   await expect(sales).toContainText("of which replacement packages $0.00");
-  await expect(cash).toContainText("found on chain automatically $250.00 · confirmed by staff $0.00");
+  await expect(cash).toContainText("Of which automatic top-ups: 0 · $0.00");
+  await expect(points).toContainText("Expiring: next 30 days 0 points · 31–90 days 250 points · later 0 points · never 1,280 points");
 
   await page.getByRole("radio", { name: "Summary" }).click();
   await expect.poll(() => urlParams(page).get("depth")).toBeNull();
   await expect(sales).not.toContainText("of which replacement packages");
+  await expect(cash).not.toContainText("Of which automatic top-ups");
   expect(harness.requests).toEqual(["?period=mtd"]);
   expectClean(harness);
 });
 
-test("the How drawer for What we kept shows the server's steps in order, and Back or Esc closes it", async ({ page }, testInfo) => {
+/** One working step's table as rows of [operator column, label (with its screen-reader word), amount]. */
+async function stepRows(page: Page, stepIndex: number): Promise<string[][]> {
+  return page.getByTestId("finance-how-body").locator("ol > li").nth(stepIndex).locator("tbody tr").evaluateAll((rows) =>
+    rows.map((row) => [...row.querySelectorAll("td, th")].map((cell) => cell.textContent ?? "")));
+}
+
+test("the How drawer for What we kept shows the server's steps, margins included, and Back or Esc closes it back to the hero", async ({ page }, testInfo) => {
   const harness = await setup(page);
-  await page.getByRole("button", { name: /^What we kept, 26 dollars and 41 cents, .*opens how it was worked out$/ }).click();
+  const hero = page.getByRole("button", { name: /^What we kept, 26 dollars and 41 cents, .*opens how it was worked out$/ });
+  await hero.click();
   await expect.poll(() => urlParams(page).get("how")).toBe("answer.kept");
   const drawer = page.getByRole("dialog", { name: "What we kept" });
   await expect(drawer).toBeVisible();
@@ -394,28 +452,93 @@ test("the How drawer for What we kept shows the server's steps in order, and Bac
     "Change in that share, in points",
     "Not included: packaging, Stripe's fees and overheads, which Echelon does not record. Points used are shown beside what we kept, not taken off.",
   ]);
-  const lastSum = body.locator("ol > li").nth(4).locator("tbody tr");
-  const expected = [
+  expect(await stepRows(page, 4)).toEqual([
     ["", "Kept on orders", "$38.81"],
     ["+", "plus Fees we charged", "$7.60"],
     ["−", "minus Return credits we paid (not from the pool)", "$20.00"],
     ["=", "equals What we kept", "$26.41"],
-  ];
-  await expect(lastSum).toHaveCount(expected.length);
-  for (const [index, cells] of expected.entries()) await expect(lastSum.nth(index).locator("td, th")).toHaveText(cells);
+  ]);
+  // The margin, the comparison's share and the change: the card's own figures, in their units, with each period's dates.
+  expect(await stepRows(page, 5)).toEqual([
+    ["", "Kept on orders", "$38.81"],
+    ["", "Billed on fully costed orders", "$97.30"],
+    ["=", "equals Kept on orders as a share of what we billed on fully costed orders", "39.9%"],
+  ]);
+  expect(await stepRows(page, 6)).toEqual([
+    ["", "Kept on orders (Sep 1 – 5)", "$10.50"],
+    ["", "Billed on fully costed orders (Sep 1 – 5)", "$26.00"],
+    ["=", "equals The same share for the comparison period, measured as of now", "40.4%"],
+  ]);
+  expect(await stepRows(page, 7)).toEqual([
+    ["", "Kept on orders as a share (Oct 1 – 5)", "39.9%"],
+    ["−", "minus Kept on orders as a share (Sep 1 – 5)", "40.4%"],
+    ["=", "equals Change in that share, in points", "−0.5 pts"],
+  ]);
   await screenshot(page, testInfo, "how");
 
-  // Opening pushed a history entry: Back closes the drawer and keeps the page.
+  // Opening pushed a history entry: Back closes the drawer, keeps the page and gives focus back to the hero.
   await page.goBack();
   await expect(drawer).toBeHidden();
   expect(urlParams(page).get("how")).toBeNull();
   await expect(page.getByTestId("finance-hero")).toHaveText("$26.41");
+  await expect(hero).toBeFocused();
 
-  await page.getByTestId("finance-hero").click();
+  // From the keyboard: Enter opens it, Esc closes it and focus is back on the hero.
+  await hero.press("Enter");
   await expect(drawer).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(drawer).toBeHidden();
   await expect.poll(() => urlParams(page).get("how")).toBeNull();
+  await expect(hero).toBeFocused();
+  // Esc went Back to the page the drawer was opened from rather than adding a copy of it,
+  // so the drawer's own entry is still ahead: Forward opens it again.
+  await page.goForward();
+  await expect(drawer).toBeVisible();
+  expect(urlParams(page).get("how")).toBe("answer.kept");
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+
+  // A statement line's own working opens from its row, and closing it returns focus there.
+  await page.getByTestId("finance-detail-sales").getByRole("button", { name: /Sales and what we kept/ }).click();
+  const linkHow = page.getByTestId("finance-detail-sales").getByRole("button", { name: "How this is worked out ›" }).first();
+  await linkHow.click();
+  await expect(page.getByRole("dialog", { name: "Billed on fully costed orders" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(linkHow).toBeFocused();
+  expect(harness.requests).toEqual(["?period=mtd"]);
+  expectClean(harness);
+});
+
+test("How this page counts keeps each choice's technical wording folded, and Esc gives focus back to what opened it", async ({ page }, testInfo) => {
+  const harness = await setup(page);
+  await expect(page.getByTestId("finance-hero")).toHaveText("$26.41");
+  const link = page.getByRole("button", { name: "How this page counts ›" });
+  await link.click();
+  const sheet = page.getByRole("dialog", { name: "How this page counts" });
+  await expect(sheet).toBeVisible();
+  const choices = sheet.getByTestId("finance-choices-list");
+  await expect(choices).toContainText("Only staff with Dropship operations access (Administrator) can see this page.");
+  const technical = choices.getByText("requirePermission('dropship', 'manage_operations') on every /api/dropship/admin/finance route");
+  await expect(technical).toBeHidden();
+  await choices.locator("summary").first().click();
+  await expect(technical).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(sheet).toBeHidden();
+  await expect(link).toBeFocused();
+
+  // On a phone the sheet also opens from the ⋯ menu; the menu is gone by then, so focus comes back to ⋯.
+  if (isMobile(testInfo)) {
+    const more = page.getByRole("button", { name: "More period options" });
+    await more.click();
+    await page.getByRole("menuitem", { name: "How this page counts" }).click();
+    await expect(sheet).toBeVisible();
+    // The sheet holds focus; the closing menu does not pull it back to ⋯.
+    await expect.poll(() => page.evaluate(() => document.activeElement?.closest("[role=dialog]") !== null)).toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(sheet).toBeHidden();
+    await expect(more).toBeFocused();
+  }
   expect(harness.requests).toEqual(["?period=mtd"]);
   expectClean(harness);
 });
@@ -481,6 +604,77 @@ test("turning Compare off asks without the earlier period and hides every delta"
   expectClean(harness);
 });
 
+test("Custom dates… in the period list opens the date picker, which stays open until Apply asks for exactly those days", async ({ page }) => {
+  const harness = await setup(page);
+  await expect(page.getByTestId("finance-hero")).toHaveText("$26.41");
+  await choosePeriod(page, "Custom dates…");
+  const apply = page.getByRole("button", { name: "Apply" });
+  await expect(apply).toBeVisible();
+  // It used to shut again about 150ms later, when the closing list moved focus back to its trigger.
+  await page.waitForTimeout(600);
+  await expect(apply).toBeVisible();
+  // Nothing is asked for until a valid range is picked.
+  await apply.click();
+  await expect(page.getByRole("alert").filter({ hasText: "Pick an end date on or after the start date." })).toBeVisible();
+  expect(harness.requests).toEqual(["?period=mtd"]);
+
+  await page.getByRole("button", { name: "Thursday, October 1st, 2026" }).click();
+  await page.getByRole("button", { name: "Saturday, October 3rd, 2026" }).click();
+  await apply.click();
+  await expect(apply).toBeHidden();
+  await expect.poll(() => urlParams(page).toString()).toBe("tab=finance&period=custom&from=2026-10-01&to=2026-10-03");
+  await expect.poll(() => harness.requests).toEqual(["?period=mtd", "?period=custom&from=2026-10-01&to=2026-10-03"]);
+  const bar = page.getByTestId("finance-period-bar");
+  await expect(page.getByRole("combobox", { name: "Period" })).toHaveText("Custom dates…");
+  await expect(bar).toContainText("Oct 1 – 3, 2026");
+  await expect(page.getByTestId("finance-hero")).toHaveText("$26.41");
+  expectClean(harness);
+});
+
+test("from the keyboard, Custom dates… opens the date picker and Esc closes it without asking for anything", async ({ page }) => {
+  const harness = await setup(page);
+  await expect(page.getByTestId("finance-hero")).toHaveText("$26.41");
+  const period = page.getByRole("combobox", { name: "Period" });
+  await period.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("option", { name: "This month so far" })).toBeVisible();
+  await page.keyboard.press("End");
+  await expect(page.getByRole("option", { name: "Custom dates…" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  const apply = page.getByRole("button", { name: "Apply" });
+  await expect(apply).toBeVisible();
+  await page.waitForTimeout(600);
+  await expect(apply).toBeVisible();
+  // Focus is inside the picker, not back on the closed list.
+  expect(await page.evaluate(() => document.activeElement?.closest("[data-radix-popper-content-wrapper]") !== null)).toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(apply).toBeHidden();
+  await expect(period).toHaveText("This month so far");
+  expect(harness.requests).toEqual(["?period=mtd"]);
+  expectClean(harness);
+});
+
+test("long tile figures step their font down and stay on one line, even at 360px", async ({ page }, testInfo) => {
+  if (isMobile(testInfo)) await page.setViewportSize({ width: 360, height: 780 });
+  const harness = await setup(page, { respond: () => ok(withLargeTiles(financeSummaryFixtureInput())) });
+  const values = page.getByTestId("finance-tiles").getByTestId("finance-tile-value");
+  await expect(values).toHaveText(["$18,730.00", "$123,456.78", "$1,234,567.89", "$38,111.10"]);
+  const boxes = await values.evaluateAll((elements) => elements.map((element) => {
+    const lineHeight = Number.parseInt(getComputedStyle(element).lineHeight, 10);
+    const tile = element.parentElement as HTMLElement;
+    const tileStyle = getComputedStyle(tile);
+    const room = tile.clientWidth - Number.parseInt(tileStyle.paddingLeft, 10) - Number.parseInt(tileStyle.paddingRight, 10);
+    return { text: element.textContent, lines: Math.round(element.getBoundingClientRect().height / lineHeight), width: element.scrollWidth, room };
+  }));
+  for (const box of boxes) {
+    // One line box per value, and the whole figure inside its tile: no wrap, no overflow, nothing cut off.
+    expect(box.lines, box.text ?? "").toBe(1);
+    expect(box.width, box.text ?? "").toBeLessThanOrEqual(box.room);
+  }
+  await expectNoHorizontalPageScroll(page);
+  expectClean(harness);
+});
+
 test("clicking a vendor in the Vendors row scopes the whole page; the chip takes it back to all vendors", async ({ page }) => {
   const harness = await setup(page, { search: "tab=finance&open=vendors" });
   const vendors = page.getByTestId("finance-detail-vendors");
@@ -512,7 +706,10 @@ test("a section that failed shows its own error while the other rows render, and
   });
   const cash = page.getByTestId("finance-detail-cash");
   await expect(cash).toContainText("Couldn't work out cash in: DROPSHIP_FINANCE_QUERY_TIMEOUT.");
-  await expect(page.getByTestId("finance-tile-cash_received")).toContainText("Unavailable");
+  const cashTile = page.getByTestId("finance-tile-cash_received");
+  await expect(cashTile).toContainText("Unavailable");
+  await expect(cashTile).toContainText("Couldn't work this out (DROPSHIP_FINANCE_QUERY_TIMEOUT)");
+  await expect(cashTile).not.toContainText("No deposits");
   // The other rows and the answer render as usual.
   await expect(page.getByTestId("finance-hero")).toHaveText("$26.41");
   expect((await statementRows(page, "finance-detail-sales")).at(-1)).toEqual(["=", "equals What we kept", "$26.41"]);

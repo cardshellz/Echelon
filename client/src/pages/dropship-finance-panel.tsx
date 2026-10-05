@@ -103,6 +103,12 @@ export function DropshipFinancePanel({ canView, clock = systemClock }: DropshipF
   const [memory, setMemory] = useState<FinanceViewMemory | null>(() => readFinanceViewMemory(financeViewStorage()));
   const [countingOpen, setCountingOpen] = useState(false);
   const [announcement, setAnnouncement] = useState("");
+  // What opened each sheet, so closing it gives focus back there (spec §12).
+  const howOpener = useRef<HTMLElement | null>(null);
+  const countingOpener = useRef<HTMLElement | null>(null);
+  // True while the How drawer sits on a history entry this page pushed: closing it then goes Back,
+  // so the next browser Back leaves the page the drawer was opened from instead of a copy of it.
+  const howPushed = useRef(false);
   const view = resolveFinanceView(state, memory);
   const scope = financeSummaryScope(state);
 
@@ -130,6 +136,11 @@ export function DropshipFinancePanel({ canView, clock = systemClock }: DropshipF
   useEffect(() => {
     if (dropped.length > 0) navigate(financeUrlHref(state), { replace: true });
   }, [dropped, navigate, state]);
+
+  // Closed by browser Back (or never pushed): there is no entry of ours left to pop.
+  useEffect(() => {
+    if (state.how === null) howPushed.current = false;
+  }, [state.how]);
 
   // A drawer for a figure the loaded summary has no workings for closes.
   useEffect(() => {
@@ -176,8 +187,29 @@ export function DropshipFinancePanel({ canView, clock = systemClock }: DropshipF
     changeView({ open: [...view.open, "checks"] });
   }
 
+  function openHow(key: FinanceLineKey, opener: HTMLElement | null) {
+    howOpener.current = opener;
+    howPushed.current = true;
+    go({ how: key }, "push");
+  }
+
+  function closeHow() {
+    if (howPushed.current) {
+      howPushed.current = false;
+      window.history.back();
+      return;
+    }
+    // Opened from a link with how= already in it: there is no entry of ours to go back to.
+    go({ how: null });
+  }
+
+  function openCounting(opener: HTMLElement | null) {
+    countingOpener.current = opener;
+    setCountingOpen(true);
+  }
+
   const actions: FinancePageActions = {
-    onOpenHow: (key) => go({ how: key }, "push"),
+    onOpenHow: openHow,
     onOpenChecks: openChecks,
     onScopeVendor: (vendorId) => go({ vendorId, how: null }, "push"),
     onOpenChange: (open) => changeView({ open }),
@@ -204,9 +236,9 @@ export function DropshipFinancePanel({ canView, clock = systemClock }: DropshipF
         onCompare={(compare) => go({ compare })}
         onRemoveVendor={() => go({ vendorId: null, how: null })}
         onOpenChecks={openChecks}
-        onOpenCounting={() => setCountingOpen(true)}
+        onOpenCounting={openCounting}
       />
-      <FinanceTwoClocksLine notes={periodBar.notes} onOpenCounting={() => setCountingOpen(true)} />
+      <FinanceTwoClocksLine notes={periodBar.notes} onOpenCounting={openCounting} />
       {pageError ? (
         <FinancePageError error={pageError} onRetry={actions.onRetry} />
       ) : summary ? (
@@ -214,14 +246,15 @@ export function DropshipFinancePanel({ canView, clock = systemClock }: DropshipF
       ) : (
         <FinanceLoading vendorScoped={state.vendorId !== null} />
       )}
-      <FinanceHowSheet view={howView} onClose={() => go({ how: null })} />
-      <FinanceCountingSheet open={countingOpen} view={COUNTING_VIEW} onOpenChange={setCountingOpen} />
+      <FinanceHowSheet view={howView} onClose={closeHow} opener={() => howOpener.current} />
+      <FinanceCountingSheet open={countingOpen} view={COUNTING_VIEW} onOpenChange={setCountingOpen} opener={() => countingOpener.current} />
     </div>
   );
 }
 
 interface FinancePageActions {
-  readonly onOpenHow: (key: FinanceLineKey) => void;
+  /** `opener` is the button that asked for the drawer; focus goes back to it on close. */
+  readonly onOpenHow: (key: FinanceLineKey, opener: HTMLElement | null) => void;
   readonly onOpenChecks: () => void;
   readonly onScopeVendor: (vendorId: number) => void;
   readonly onOpenChange: (open: FinanceDetailKey[]) => void;
@@ -257,7 +290,7 @@ function FinanceLoaded({
 
   return (
     <>
-      <FinanceAnswerCard view={answer} onOpenHow={() => actions.onOpenHow("answer.kept")} onOpenChecks={actions.onOpenChecks} onRetry={actions.onRetry} />
+      <FinanceAnswerCard view={answer} onOpenHow={(opener) => actions.onOpenHow("answer.kept", opener)} onOpenChecks={actions.onOpenChecks} onRetry={actions.onRetry} />
       <FinanceTiles tiles={tiles} onOpenChecks={actions.onOpenChecks} />
       <FinanceDetail
         groups={groups}

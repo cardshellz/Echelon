@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
+import { describe, expect, it, vi } from "vitest";
 import {
   FINANCE_SECTION_KEYS,
   FINANCE_SECTION_LINE_KEYS,
@@ -59,9 +60,11 @@ import {
   formatFinancePoints,
   formatFinancePts,
   formatFinanceSignedMoney,
+  formatFinanceWorkingFigure,
   isFinanceLocalDate,
   parseFinanceSummary,
   readFinanceUrlState,
+  refreshFinanceQueries,
   readFinanceViewMemory,
   resolveFinanceView,
   validateFinanceCustomRange,
@@ -91,6 +94,33 @@ function row(input: FinanceSummaryInput, key: (typeof FINANCE_SECTION_KEYS)[numb
 
 function statementLabels(view: ReturnType<typeof buildFinanceSectionRow>, index = 0) {
   return view.statements[index]?.rows.map((line) => `${line.operatorSymbol}|${line.label}|${line.amount}`) ?? [];
+}
+
+const QUERY_TIMEOUT = "DROPSHIP_FINANCE_QUERY_TIMEOUT";
+
+/**
+ * Marks lines the way the server's unavailableLine does when their source
+ * failed or is missing: no amount, no count, the cause's code or reason.
+ */
+function markUnavailable(
+  lines: FinanceSummaryInput["sections"]["sales"]["lines"],
+  keys: readonly string[],
+  cause: { errorCode?: string; reasonKey?: string },
+) {
+  for (const line of lines) {
+    if (!keys.includes(line.key)) continue;
+    const { count: _count, coverage: _coverage, percentTenths: _tenths, percentBps: _bps, workings: _workings, prior: _prior, ...rest } = line;
+    Object.keys(line).forEach((field) => delete (line as Record<string, unknown>)[field]);
+    Object.assign(line, rest, { amount: null, status: "unavailable", depth: "summary" }, cause);
+  }
+}
+
+function setLine(input: FinanceSummaryInput, section: "cash", key: string, patch: Record<string, unknown>) {
+  const target = input.sections[section];
+  if (target.status !== "ok") throw new Error(`the golden's ${section} section is ok`);
+  const line = target.lines.find((candidate) => candidate.key === key);
+  if (!line) throw new Error(`the golden has no ${key}`);
+  Object.assign(line, patch);
 }
 
 // ── formatters ────────────────────────────────────────────────────────────
@@ -356,6 +386,36 @@ describe("remembered view", () => {
 // ── the request ───────────────────────────────────────────────────────────
 
 describe("summary request", () => {
+  it("refreshes only the summary on screen and marks the other cached periods stale", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } });
+    const fetches: string[] = [];
+    const queryFor = (period: "mtd" | "last-month") => ({
+      queryKey: financeSummaryQueryKey(financeSummaryScope({ ...FINANCE_DEFAULT_URL_STATE, period })),
+      queryFn: async () => {
+        fetches.push(period);
+        return period;
+      },
+    });
+    // Both periods were looked at earlier; only this month is on screen now.
+    await client.fetchQuery(queryFor("mtd"));
+    await client.fetchQuery(queryFor("last-month"));
+    const onScreen = new QueryObserver(client, queryFor("mtd"));
+    const unsubscribe = onScreen.subscribe(() => undefined);
+    fetches.length = 0;
+
+    await refreshFinanceQueries(client);
+    expect(fetches).toEqual(["mtd"]);
+    expect(client.getQueryState(queryFor("last-month").queryKey)?.isInvalidated).toBe(true);
+
+    // Going back to last month later fetches it fresh, though staleTime is Infinity app-wide.
+    const later = new QueryObserver(client, queryFor("last-month"));
+    const unsubscribeLater = later.subscribe(() => undefined);
+    await vi.waitFor(() => expect(fetches).toEqual(["mtd", "last-month"]));
+    unsubscribe();
+    unsubscribeLater();
+    client.clear();
+  });
+
   it("keys every finance query under one root so Refresh can refetch them all", () => {
     const scope = financeSummaryScope({ ...FINANCE_DEFAULT_URL_STATE, vendorId: 12, open: ["sales"], how: "answer.kept" });
     expect(financeSummaryQueryKey(scope)).toEqual([
@@ -614,6 +674,29 @@ describe("answer card", () => {
     expect(view.hasWorkings).toBe(false);
   });
 
+  it("keeps the split of each dollar when return credits, not orders, make it a loss", () => {
+    const input = financeSummaryFixtureInput();
+    // The server's §6.4 answer with $30.00 more return credits (program-finance-statement.test.ts):
+    // kept on orders stays $38.81, what we kept goes to −$3.59, and the split and bar widths stay.
+    Object.assign(input.answer, { state: "loss", kept: { amount: -359, status: "recorded" }, returnCreditsPaid: 5_000 });
+    const view = buildFinanceAnswerView(parseFinanceFixture(input));
+    expect(view.hero).toMatchObject({ text: `${MINUS}$3.59`, loss: true });
+    expect(view.bar.layout).toBe("split");
+    expect(view.bar.segments.map((segment) => segment.key)).toEqual(["kept", "cogs", "labels", "pool", "waiting"]);
+    expect(view.bar.centsCaption).toBe("of each $1");
+    expect(view.bar.legend.map((entry) => entry.cents)).toEqual(["40¢", "39¢", "20¢", "1¢", "·"]);
+    expect(view.bar.lossLabel).toBeNull();
+    expect(view.bridge).toBe(`$38.81 kept on orders + $7.60 fees we charged ${MINUS} $50.00 return credits we paid = ${MINUS}$3.59 kept`);
+  });
+
+  it("says unavailable aloud when what we kept could not be worked out", () => {
+    const input = financeSummaryFixtureInput();
+    input.answer.kept = { amount: null, status: "unavailable", errorCode: "DROPSHIP_FINANCE_AMOUNT_OUT_OF_RANGE" };
+    const view = buildFinanceAnswerView(parseFinanceFixture(input));
+    expect(view.hero?.text).toBe(FINANCE_UNAVAILABLE_TEXT);
+    expect(view.hero?.spoken).toBe("What we kept, unavailable, before packaging, Stripe fees and overheads");
+  });
+
   it("steps the hero font down for long figures instead of compacting money", () => {
     expect(financeHeroSize("$1,934.10")).toBe("xl");
     expect(financeHeroSize("$1,234,567.89")).toBe("lg");
@@ -659,6 +742,39 @@ describe("tiles", () => {
     expect(formatFinanceDelta({ amount: null, change: null, changeTenths: null, changeBps: null, kind: "unavailable" }, "Sep 1 – 5")?.text).toBe("Comparison unavailable");
     expect(formatFinanceDelta({ amount: -50, change: 150, changeTenths: null, changeBps: null, kind: "change" }, "Sep 1 – 5")?.text).toBe("+$1.50 vs Sep 1 – 5");
     expect(formatFinanceDelta(null, "Sep 1 – 5")).toBeNull();
+  });
+
+  it("says a failed tile couldn't be worked out instead of claiming no orders or 0 vendors", () => {
+    const input = financeSummaryFixtureInput();
+    // What the server sends when the orders or wallets query fails: no figure, zeroed counts (tilesOf).
+    input.tiles.billed = { amount: null, status: "unavailable", errorCode: QUERY_TIMEOUT, orders: 0, prior: null };
+    input.tiles.weOweNow = { amount: null, status: "unavailable", errorCode: QUERY_TIMEOUT, vendors: 0, onTheWay: null, atEndOfPeriod: null };
+    input.tiles.owedToUsNow = { amount: null, status: "unavailable", errorCode: QUERY_TIMEOUT, vendors: 0, atEndOfPeriod: null };
+    input.tiles.cashReceived = { amount: null, status: "unavailable", errorCode: QUERY_TIMEOUT, prior: null };
+    const tiles = buildFinanceTilesView(parseFinanceFixture(input));
+    for (const tile of tiles) {
+      expect(tile.value, tile.key).toBe(FINANCE_UNAVAILABLE_TEXT);
+      expect(tile.subLines.map((line) => line.text), tile.key).toEqual([`Couldn't work this out (${QUERY_TIMEOUT})`]);
+      expect(tile.delta, tile.key).toBeNull();
+    }
+    expect(tiles[2].info).toBeNull();
+  });
+
+  it("says No deposits only when nothing came in, not when disputes took a deposit back in full", () => {
+    // A $300.00 card deposit settles and the same $300.00 is pulled back by a dispute: the tile nets to $0.00.
+    const disputed = financeSummaryFixtureInput();
+    disputed.tiles.cashReceived = { amount: 0, status: "recorded", prior: null };
+    setLine(disputed, "cash", "cash.received_deposits", { amount: 30_000, count: 1 });
+    setLine(disputed, "cash", "cash.pulled_back", { amount: 30_000, count: 1 });
+    setLine(disputed, "cash", "cash.won_back", { amount: 0, count: 0 });
+    setLine(disputed, "cash", "cash.received", { amount: 0 });
+    const cashTile = (input: FinanceSummaryInput) => buildFinanceTilesView(parseFinanceFixture(input))[1];
+    expect(cashTile(disputed)).toMatchObject({ value: "$0.00", subLines: [{ text: "after disputes · before Stripe's fees", icon: "none" }] });
+
+    const nothing = financeSummaryFixtureInput();
+    nothing.tiles.cashReceived = { amount: 0, status: "recorded", prior: null };
+    for (const key of ["cash.received_deposits", "cash.pulled_back", "cash.won_back", "cash.received"]) setLine(nothing, "cash", key, { amount: 0, count: 0 });
+    expect(cashTile(nothing).subLines.map((line) => line.text)).toEqual(["No deposits"]);
   });
 
   it("names the vendor on every tile in the vendor view", () => {
@@ -733,10 +849,10 @@ describe("detail rows", () => {
 
   it("hides 'every line' lines that are zero in Summary and shows them in Every line", () => {
     const input = financeSummaryFixtureInput();
-    const card = salesLines(input).find((line) => line.key === "sales.fees.card");
-    if (card) card.amount = 0;
-    const replacement = salesLines(input).find((line) => line.key === "sales.labels.replacement");
-    if (replacement) replacement.amount = 0;
+    // A zero on these two lines comes from the server marked "every_line" (its everyLineWhenZero).
+    for (const line of salesLines(input)) {
+      if (line.key === "sales.fees.card" || line.key === "sales.labels.replacement") Object.assign(line, { amount: 0, depth: "every_line" });
+    }
     const summaryDepth = row(input, "sales", "summary").statements[0].rows;
     expect(summaryDepth.find((line) => line.key === "sales.fees")?.subLines).toEqual(["advance fees $0.10 · return fees $4.50"]);
     expect(summaryDepth.find((line) => line.key === "sales.labels")?.subLines).toEqual([]);
@@ -800,6 +916,7 @@ describe("detail rows", () => {
       `${MINUS}|Used to pay for orders|2,200 points`,
       `${MINUS}|Expired|80 points`,
       `${MINUS}|Taken back after disputes|20 points`,
+      "+|Given back after disputes we won|0 points",
       "=|Held now|1,530 points",
     ]);
     const pool = buildFinanceSectionRow(summary, "pool", "summary");
@@ -810,6 +927,18 @@ describe("detail rows", () => {
       "Carrier claims filed: 1 · $9.00 asked · none approved or paid yet",
       `The pool's own record shows ${MINUS}$8.00`,
     ]);
+  });
+
+  it("leaves the empty points expiry buckets and automatic top-ups out of Summary, and shows them in Every line", () => {
+    const summary = financeSummaryFixture();
+    const expiry = (depth: "summary" | "every_line") =>
+      buildFinanceSectionRow(summary, "points", depth).memos.find((memo) => memo.key === "points.expiry")?.text;
+    expect(expiry("summary")).toBe("Expiring: 31–90 days 250 points · never 1,280 points");
+    expect(expiry("every_line")).toBe("Expiring: next 30 days 0 points · 31–90 days 250 points · later 0 points · never 1,280 points");
+    const autoTopUps = (depth: "summary" | "every_line") =>
+      buildFinanceSectionRow(summary, "cash", depth).memos.find((memo) => memo.key === "cash.memo.auto_top_ups")?.text;
+    expect(autoTopUps("summary")).toBeUndefined();
+    expect(autoTopUps("every_line")).toBe("Of which automatic top-ups: 0 · $0.00");
   });
 
   it("lists the Cash in memos, including the failure code as stored", () => {
@@ -858,6 +987,70 @@ describe("detail rows", () => {
   });
 });
 
+describe("collapsed rows when a source fails or is not split by vendor", () => {
+  it("says Unavailable, not Not recorded, when the wallet ledger could not be read", () => {
+    const input = financeSummaryFixtureInput();
+    // The server's sales section stays ok, with its six ledger lines unavailable (addSalesLedgerLines).
+    markUnavailable(salesLines(input), ["sales.fees", "sales.fees.advance", "sales.fees.card", "sales.fees.returns", "sales.return_credits_cs", "sales.kept"], { errorCode: QUERY_TIMEOUT });
+    const sales = row(input, "sales");
+    expect(sales).toMatchObject({ state: "ok", amount: FINANCE_UNAVAILABLE_TEXT, amountTone: "muted" });
+    expect(sales.statements[0].rows.find((line) => line.key === "sales.kept")?.amount).toBe(FINANCE_UNAVAILABLE_TEXT);
+  });
+
+  it("says Unavailable for every row whose headline figure failed", () => {
+    const input = financeSummaryFixtureInput();
+    const cash = input.sections.cash;
+    const owed = input.sections.owed;
+    const points = input.sections.points;
+    const returns = input.sections.returns;
+    const products = input.sections.products;
+    if (cash.status !== "ok" || owed.status !== "ok" || points.status !== "ok" || returns.status !== "ok" || products.status !== "ok") throw new Error("ok in the golden");
+    markUnavailable(cash.lines, ["cash.won_back", "cash.received"], { errorCode: QUERY_TIMEOUT });
+    markUnavailable(owed.lines, ["owed.we_owe"], { errorCode: QUERY_TIMEOUT });
+    markUnavailable(points.lines, ["points.held"], { errorCode: QUERY_TIMEOUT });
+    markUnavailable(returns.lines, ["returns.credited"], { errorCode: QUERY_TIMEOUT });
+    markUnavailable(products.lines, ["products.billed"], { errorCode: QUERY_TIMEOUT });
+    for (const key of ["cash", "owed", "points", "returns", "products"] as const) {
+      expect(row(input, key), key).toMatchObject({ amount: FINANCE_UNAVAILABLE_TEXT, amountTone: "muted" });
+    }
+  });
+
+  it("keeps Not recorded for a figure Echelon never records", () => {
+    const input = financeSummaryFixtureInput();
+    for (const line of salesLines(input)) {
+      if (line.key === "sales.kept") Object.assign(line, { amount: null, status: "not_recorded", reasonKey: "packaging_not_saved" });
+    }
+    expect(row(input, "sales")).toMatchObject({ amount: FINANCE_NOT_RECORDED_TEXT, amountTone: "muted" });
+  });
+
+  it("says Program-wide for the pool only in a vendor's view, and Unavailable when its record is missing", () => {
+    const vendorView = financeSummaryFixtureInput();
+    vendorView.scope = { vendor: { vendorId: 12, name: "Acme TCG", nameSource: "business_name" } };
+    const vendorPool = vendorView.sections.pool;
+    if (vendorPool.status !== "ok") throw new Error("ok in the golden");
+    // poolLedgerUnavailable: the vendor view's pool balance is the whole program's.
+    markUnavailable(vendorPool.lines, ["pool.opening", "pool.closing", "pool.topped_up", "pool.record"], { reasonKey: "program_wide" });
+    expect(row(vendorView, "pool")).toMatchObject({ amount: "Program-wide", amountTone: "muted" });
+
+    const missingTable = financeSummaryFixtureInput();
+    const pool = missingTable.sections.pool;
+    if (pool.status !== "ok") throw new Error("ok in the golden");
+    // The pool's own ledger table is missing in the whole-program view (TABLE_MISSING).
+    markUnavailable(pool.lines, ["pool.opening", "pool.closing", "pool.topped_up", "pool.record"], { errorCode: "DROPSHIP_FINANCE_TABLE_MISSING", reasonKey: "table_missing" });
+    expect(row(missingTable, "pool")).toMatchObject({ amount: FINANCE_UNAVAILABLE_TEXT, amountTone: "muted" });
+  });
+
+  it("counts deposits with the server's own count, never by adding the ways paid", () => {
+    expect(row(financeSummaryFixtureInput(), "cash").summary).toBe("4 deposits · bank, card, USDC, weekly collection");
+    const input = financeSummaryFixtureInput();
+    // The rails still say 1 each; the page shows what the server counted.
+    setLine(input, "cash", "cash.received_deposits", { count: 7 });
+    expect(row(input, "cash").summary).toBe("7 deposits · bank, card, USDC, weekly collection");
+    setLine(input, "cash", "cash.received_deposits", { count: undefined });
+    expect(row(input, "cash").summary).toBe("bank, card, USDC, weekly collection");
+  });
+});
+
 describe("products and vendors tables", () => {
   it("lists the top products, the rounding row and the exact total", () => {
     const table = buildFinanceProductsTable(financeSummaryFixture());
@@ -886,8 +1079,8 @@ describe("products and vendors tables", () => {
   it("lists the vendors and a totals row that equals the page", () => {
     const table = buildFinanceVendorsTable(financeSummaryFixture());
     expect(table?.rows.map((entry) => [entry.vendorId, entry.name, entry.orders, entry.billed, entry.kept, entry.weOwe, entry.theyOwe])).toEqual([
-      [12, "Acme TCG", "5", "$117.30", "$19.21", "$3,418.40", "$0.00"],
-      [13, "PackRat", "5", "$70.00", "$7.19", "$392.70", "$0.00"],
+      [12, "Acme TCG", "5", "$117.30", "$19.21", "$3,568.60", "$0.00"],
+      [13, "PackRat", "5", "$70.00", "$7.19", "$242.50", "$0.00"],
       [14, "Vendor #14", "0", "$0.00", "$0.00", "$0.00", "$12.50"],
     ]);
     expect(table?.rounding).toEqual({ kept: "+$0.01" });
@@ -951,24 +1144,24 @@ describe("checks", () => {
   it("words the information lines with their amounts", () => {
     const view = buildFinanceChecksView(financeSummaryFixture());
     expect(view.info.map((line) => line.text)).toEqual([
-      "Cash returned (disputed amounts) $103.00 vs wallet restored $100.00; the difference is card fee part (dispute above the credit) $3.00 · points recovered from cash $0.00",
+      `Why the Overview dashboard shows a different Dropship total: its 'Dropship OMS' row $189.30 ${MINUS} billed here $187.30 = leftover pending orders $10.00 + orders cancelled in OMS ${MINUS}$8.00 + order date vs accepted date difference $0.00`,
       `The pool's own record shows ${MINUS}$8.00; the worked-out balance is ${MINUS}$9.10 because order contributions and carrier-fault payouts are never written to it`,
+      "Cash returned (disputed amounts) $103.00 vs wallet restored $100.00; the difference is card fee part (dispute above the credit) $3.00 · points recovered from cash $0.00",
     ]);
   });
 
   it("words the Overview bridge in three parts", () => {
     const input = financeSummaryFixtureInput();
-    input.info.push({
-      key: "overview_bridge", status: "recorded",
-      lines: [
-        financeFixtureLine("info.overview_bridge.oms_row", 20_530),
-        financeFixtureLine("info.overview_bridge.billed", 18_730),
-        financeFixtureLine("info.overview_bridge.leftover_pending", 2_500),
-        financeFixtureLine("info.overview_bridge.cancelled_in_oms", -800),
-        financeFixtureLine("info.overview_bridge.date_basis", 100),
-      ],
-    });
-    expect(buildFinanceChecksView(parseFinanceFixture(input)).info.at(-1)?.text).toBe(
+    const bridge = input.info.find((entry) => entry.key === "overview_bridge");
+    if (!bridge) throw new Error("the golden has an Overview bridge");
+    bridge.lines = [
+      financeFixtureLine("info.overview_bridge.oms_row", 20_530),
+      financeFixtureLine("info.overview_bridge.billed", 18_730),
+      financeFixtureLine("info.overview_bridge.leftover_pending", 2_500),
+      financeFixtureLine("info.overview_bridge.cancelled_in_oms", -800),
+      financeFixtureLine("info.overview_bridge.date_basis", 100),
+    ];
+    expect(buildFinanceChecksView(parseFinanceFixture(input)).info.find((line) => line.key === "overview_bridge")?.text).toBe(
       `Why the Overview dashboard shows a different Dropship total: its 'Dropship OMS' row $205.30 ${MINUS} billed here $187.30 = leftover pending orders $25.00 + orders cancelled in OMS ${MINUS}$8.00 + order date vs accepted date difference $1.00`,
     );
   });
@@ -977,7 +1170,9 @@ describe("checks", () => {
 describe("How this is worked out", () => {
   it("renders the server's steps for what we kept, never recomputing them", () => {
     const summary = financeSummaryFixture();
-    expect(financeWorkingsKeys(summary)).toEqual(["answer.kept", "cash.received"]);
+    expect(financeWorkingsKeys(summary)).toEqual([
+      "answer.kept", "sales.billed_fc", "sales.kept_orders", "sales.kept", "cash.received", "returns.net", "points.held", "pool.closing",
+    ]);
     const view = buildFinanceHowView(summary, "answer.kept");
     expect(view).toMatchObject({ title: "What we kept", amount: "$26.41", chip: "day accepted" });
     expect(view?.steps.map((step) => [step.step, step.title, step.result])).toEqual([
@@ -986,21 +1181,15 @@ describe("How this is worked out", () => {
       [3, "Kept on orders", "$38.81"],
       [4, "Cost of goods is today's cost of the stock each order used, oldest stock first.", null],
       [5, "What we kept", "$26.41"],
-      [6, "Kept on orders as a share of what we billed on fully costed orders", null],
-      [7, "The same share for the comparison period, measured as of now", null],
-      [8, "Change in that share, in points", null],
+      [6, "Kept on orders as a share of what we billed on fully costed orders", "39.9%"],
+      [7, "The same share for the comparison period, measured as of now", "40.4%"],
+      [8, "Change in that share, in points", `${MINUS}0.5 pts`],
       [9, "Not included: packaging, Stripe's fees and overheads, which Echelon does not record. Points used are shown beside what we kept, not taken off.", null],
     ]);
-    expect(view?.steps[1].operands.map((operand) => `${operand.operatorSymbol}${operand.label} ${operand.amount}`)).toEqual([
-      "Billed to vendors $187.30",
-      `${MINUS}Not yet fully costed $90.00`,
-    ]);
-    expect(view?.steps[4].operands.map((operand) => `${operand.operatorSymbol}${operand.label} ${operand.amount}`)).toEqual([
-      "Kept on orders $38.81",
-      "+Fees we charged $7.60",
-      `${MINUS}Return credits we paid (not from the pool) $20.00`,
-    ]);
-    expect(view?.steps[2].operands.map((operand) => `${operand.operatorSymbol}${operand.label} ${operand.amount}`)).toEqual([
+    const operands = (index: number) => view?.steps[index].operands.map((operand) => `${operand.operatorSymbol}${operand.label} ${operand.amount}`);
+    expect(operands(1)).toEqual(["Billed to vendors $187.30", `${MINUS}Not yet fully costed $90.00`]);
+    expect(operands(4)).toEqual(["Kept on orders $38.81", "+Fees we charged $7.60", `${MINUS}Return credits we paid (not from the pool) $20.00`]);
+    expect(operands(2)).toEqual([
       "Billed on fully costed orders $97.30",
       `${MINUS}Cost of goods (what the products cost us) $37.64`,
       `${MINUS}Carrier labels $19.35`,
@@ -1009,9 +1198,64 @@ describe("How this is worked out", () => {
     expect(view?.technicalSource.tables.length).toBeGreaterThan(0);
   });
 
+  it("shows the margin, the comparison share and the change in the units the server sends, with each period's dates", () => {
+    const summary = financeSummaryFixture();
+    const steps = buildFinanceHowView(summary, "answer.kept")?.steps ?? [];
+    const labelled = (step: number) => steps[step - 1].operands.map((operand) => `${operand.operatorSymbol}${operand.label} ${operand.amount}`);
+    // This period's figures alone carry no dates; next to the comparison period's, both say which days they cover.
+    expect(labelled(6)).toEqual(["Kept on orders $38.81", "Billed on fully costed orders $97.30"]);
+    expect(labelled(7)).toEqual(["Kept on orders (Sep 1 – 5) $10.50", "Billed on fully costed orders (Sep 1 – 5) $26.00"]);
+    expect(labelled(8)).toEqual(["Kept on orders as a share (Oct 1 – 5) 39.9%", `${MINUS}Kept on orders as a share (Sep 1 – 5) 40.4%`]);
+    // The drawer shows the card's own figures: nothing is worked out again in the browser.
+    const answer = buildFinanceAnswerView(summary);
+    expect(answer.margin?.text.startsWith(steps[5].result ?? "")).toBe(true);
+    expect(answer.margin?.change?.text.startsWith(steps[7].result ?? "")).toBe(true);
+  });
+
+  it("shows a share of nothing as a dash when the comparison period had no fully costed orders", () => {
+    const input = financeSummaryFixtureInput();
+    // What the server sends then: a null comparison share, so a null change and a null second operand.
+    input.answer.priorMarginTenths = null;
+    input.answer.marginChangeTenths = null;
+    input.answer.workings = input.answer.workings.map((step) => {
+      if (step.textKey === "working.margin_prior") {
+        return { ...step, result: null, operands: step.operands.map((operand) => ({ ...operand, amount: 0 })) };
+      }
+      if (step.textKey === "working.margin_change") {
+        return { ...step, result: null, operands: step.operands.map((operand) => (operand.period === "compare" ? { ...operand, amount: null } : operand)) };
+      }
+      return step;
+    });
+    const steps = buildFinanceHowView(parseFinanceFixture(input), "answer.kept")?.steps ?? [];
+    expect(steps[6]).toMatchObject({ title: "The same share for the comparison period, measured as of now", result: "—" });
+    expect(steps[7].result).toBe("—");
+    expect(steps[7].operands.map((operand) => operand.amount)).toEqual(["39.9%", "—"]);
+  });
+
+  it("writes a points working in points, not money", () => {
+    const view = buildFinanceHowView(financeSummaryFixture(), "points.held");
+    expect(view).toMatchObject({ title: "Held now", amount: "1,530 points" });
+    expect(view?.steps.map((step) => step.result)).toEqual(["1,530 points"]);
+    expect(view?.steps[0].operands.map((operand) => `${operand.operatorSymbol}${operand.amount}`)).toEqual([
+      "3,080 points", "+750 points", `${MINUS}2,200 points`, `${MINUS}80 points`, `${MINUS}20 points`, "+0 points",
+    ]);
+  });
+
+  it("formats every working unit the contract has", () => {
+    expect(formatFinanceWorkingFigure(193_410, "cents")).toBe("$1,934.10");
+    expect(formatFinanceWorkingFigure(1_530, "points")).toBe("1,530 points");
+    expect(formatFinanceWorkingFigure(12_110, "count")).toBe("12,110");
+    expect(formatFinanceWorkingFigure(399, "share_tenths")).toBe("39.9%");
+    expect(formatFinanceWorkingFigure(-5, "share_change_tenths")).toBe(`${MINUS}0.5 pts`);
+    expect(formatFinanceWorkingFigure(null, "share_tenths")).toBe("—");
+    expect(formatFinanceWorkingFigure(null, "cents")).toBe(FINANCE_NOT_RECORDED_TEXT);
+  });
+
   it("renders a line's own workings and has no drawer for a line without them", () => {
     const summary = financeSummaryFixture();
-    expect(buildFinanceHowView(summary, "cash.received")).toMatchObject({ title: "Cash received · before Stripe's fees", amount: "$883.00", chip: "day it settled" });
+    const cash = buildFinanceHowView(summary, "cash.received");
+    expect(cash).toMatchObject({ title: "Cash received · before Stripe's fees", amount: "$883.00", chip: "day it settled" });
+    expect(cash?.steps.map((step) => [step.title, step.result])).toEqual([["Cash received · before Stripe's fees", "$883.00"]]);
     expect(buildFinanceHowView(summary, "sales.cogs")).toBeNull();
   });
 });

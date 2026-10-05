@@ -199,6 +199,8 @@ const MUTATIONS: readonly [string, (summary: FinanceSummary) => void, readonly s
   ["a waiting reason's orders", (s) => { lineIn(s, "sales", "sales.waiting.shared_label").count = 3; }, ["identity_4_waiting_orders"]],
   ["kept on shipping", (s) => bump(s, "sales", "sales.kept_orders.on_shipping"), ["identity_5_kept_parts"]],
   ["a deposit line", (s) => bump(s, "cash", "cash.ach"), ["identity_6_deposit_lines"]],
+  ["a deposit line's count", (s) => { lineIn(s, "cash", "cash.usdc").count = 2; }, ["identity_6_deposit_count"]],
+  ["the deposits received count", (s) => { lineIn(s, "cash", "cash.received_deposits").count = 5; }, ["identity_6_deposit_count"]],
   ["disputes won back", (s) => bump(s, "cash", "cash.won_back"), ["identity_6_cash_received"]],
   ["a product row's billing", (s) => { s.sections.products.top[0].billedForProduct += 1; }, ["identity_7_products_rows_billed"]],
   ["the packs line", (s) => bump(s, "products", "products.packs"), ["identity_7_products_packs"]],

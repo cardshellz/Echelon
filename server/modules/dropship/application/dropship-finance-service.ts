@@ -11,7 +11,9 @@
  * served, one line per section that could not be read (WARN when a retry may
  * fix it, ERROR when a human must look), one ERROR per figure withheld as out
  * of range. No money value is ever logged; these lines are an access audit,
- * not a state change.
+ * not a state change. A request that fails is logged by the route; the
+ * failure it gets from here carries the request's correlation fields for
+ * that line (never for the response).
  */
 
 import {
@@ -28,19 +30,64 @@ import { buildFinanceSummary, financeSummaryDiagnostics } from "../domain/progra
 
 export const FINANCE_INVALID_INPUT_CODE = "DROPSHIP_FINANCE_INVALID_INPUT";
 export const FINANCE_VENDOR_NOT_FOUND_CODE = "DROPSHIP_FINANCE_VENDOR_NOT_FOUND";
+export const FINANCE_INTERNAL_ERROR_CODE = "DROPSHIP_FINANCE_INTERNAL_ERROR";
+const BUDGET_EXCEEDED_CODE = "DROPSHIP_FINANCE_BUDGET_EXCEEDED";
+const AMOUNT_OUT_OF_RANGE_CODE = "DROPSHIP_FINANCE_AMOUNT_OUT_OF_RANGE";
+
+// ── error classes (contract §5) ─────────────────────────────────────────
+
+export type FinanceErrorClassification = "transient" | "permanent" | "fatal";
 
 /**
- * Section failures a retry may fix (contract §5 "transient"): logged at WARN.
- * Every other section failure needs a human and is logged at ERROR. The
- * error-map test keeps this set in step with classifyFinanceError.
+ * The single code → class map (contract §5). DropshipError has no
+ * classification field, so this table is where a finance code gets one:
+ * the route answers with it (beside its own HTTP status per code), the
+ * client retries only `transient`, and every log line names it. A code not
+ * listed is an internal error, so `fatal`.
  */
-export const FINANCE_TRANSIENT_SECTION_CODES: ReadonlySet<string> = new Set([
-  "DROPSHIP_FINANCE_QUERY_TIMEOUT",
-  "DROPSHIP_FINANCE_DB_UNAVAILABLE",
-  "DROPSHIP_FINANCE_TABLE_MISSING",
-  "DROPSHIP_FINANCE_BUDGET_EXCEEDED",
-]);
-const BUDGET_EXCEEDED_CODE = "DROPSHIP_FINANCE_BUDGET_EXCEEDED";
+const FINANCE_ERROR_CLASSIFICATIONS: Readonly<Record<string, FinanceErrorClassification>> = Object.freeze({
+  DROPSHIP_FINANCE_INVALID_INPUT: "permanent",
+  DROPSHIP_FINANCE_INVALID_PERIOD: "permanent",
+  DROPSHIP_FINANCE_INVALID_CURSOR: "permanent",
+  DROPSHIP_FINANCE_ORDER_NOT_FOUND: "permanent",
+  DROPSHIP_FINANCE_VENDOR_NOT_FOUND: "permanent",
+  DROPSHIP_FINANCE_EXPORT_TOO_LARGE: "permanent",
+  DROPSHIP_FINANCE_ORDER_TOO_LARGE: "permanent",
+  DROPSHIP_FINANCE_BUSY: "transient",
+  DROPSHIP_FINANCE_QUERY_TIMEOUT: "transient",
+  DROPSHIP_FINANCE_DB_UNAVAILABLE: "transient",
+  DROPSHIP_FINANCE_TABLE_MISSING: "transient",
+  DROPSHIP_FINANCE_BUDGET_EXCEEDED: "transient",
+  DROPSHIP_FINANCE_SCHEMA_MISMATCH: "fatal",
+  // Bad stored data: retrying reads the same rows, so it is not transient.
+  DROPSHIP_FINANCE_DATA_INVALID: "permanent",
+  DROPSHIP_FINANCE_AMOUNT_OUT_OF_RANGE: "fatal",
+  DROPSHIP_FINANCE_CONTRACT_VIOLATION: "fatal",
+  [FINANCE_INTERNAL_ERROR_CODE]: "fatal",
+});
+
+/** Every code the class map knows (the error-map test walks them). */
+export const FINANCE_CLASSIFIED_CODES: readonly string[] = Object.freeze(Object.keys(FINANCE_ERROR_CLASSIFICATIONS));
+
+/** The class of a finance error code; a code the map does not know (or none) is fatal. */
+export function financeErrorClassification(code: string | undefined): FinanceErrorClassification {
+  return (code !== undefined ? FINANCE_ERROR_CLASSIFICATIONS[code] : undefined) ?? "fatal";
+}
+
+/**
+ * The correlation fields of contract §5 that the route copies onto a failed
+ * request's log line, under the `correlation` key of the error's context.
+ * They are never part of the response.
+ */
+export interface FinanceLogCorrelation {
+  readonly vendor_id: number | null;
+  readonly period_preset: string;
+  readonly period_from: string | null;
+  readonly period_to: string | null;
+  readonly compare?: boolean;
+  readonly generated_at: string;
+  readonly duration_ms: number;
+}
 
 // ── ports ───────────────────────────────────────────────────────────────
 
@@ -133,28 +180,41 @@ export class DropshipFinanceService {
     }
     const query = parsed.data;
     const now = this.deps.clock.now();
-    const resolved = resolveFinancePeriod(query.period, query.from ?? null, query.to ?? null, now, FINANCE_TIME_ZONE);
-    // All time has nothing earlier to compare with; asking for it is not an error.
-    const comparePeriod = query.compare === "off" || query.period === "all" ? null : resolved.compare;
     const vendorId = query.vendorId ?? null;
-
-    const read = await this.deps.repository.readSummary({ period: resolved.current, comparePeriod, now, vendorId });
-    const vendor = read.vendor
-      ? financeVendorName(read.vendor.vendorId, read.vendor.businessName, read.vendor.contactName)
-      : null;
-    const summary = buildFinanceSummary(read.raw, { generatedAt: now, period: resolved.current, comparePeriod, vendor });
-
-    this.logServed(summary, read.statements, {
-      actor_id: actor.actorId,
+    // Until the period resolves, the line names the days asked for (schema-checked YYYY-MM-DD, or none).
+    let correlation: Omit<FinanceLogCorrelation, "duration_ms"> = {
       vendor_id: vendorId,
       period_preset: query.period,
-      period_from: resolved.current.fromDate,
-      period_to: resolved.current.toDate,
-      compare: comparePeriod !== null,
+      period_from: query.from ?? null,
+      period_to: query.to ?? null,
       generated_at: now.toISOString(),
-      duration_ms: Math.max(0, this.deps.clock.now().getTime() - now.getTime()),
-    });
-    return summary;
+    };
+    try {
+      const resolved = resolveFinancePeriod(query.period, query.from ?? null, query.to ?? null, now, FINANCE_TIME_ZONE);
+      // All time has nothing earlier to compare with; asking for it is not an error.
+      const comparePeriod = query.compare === "off" || query.period === "all" ? null : resolved.compare;
+      correlation = {
+        ...correlation,
+        period_from: resolved.current.fromDate,
+        period_to: resolved.current.toDate,
+        compare: comparePeriod !== null,
+      };
+
+      const read = await this.deps.repository.readSummary({ period: resolved.current, comparePeriod, now, vendorId });
+      const vendor = read.vendor
+        ? financeVendorName(read.vendor.vendorId, read.vendor.businessName, read.vendor.contactName)
+        : null;
+      const summary = buildFinanceSummary(read.raw, { generatedAt: now, period: resolved.current, comparePeriod, vendor });
+
+      this.logServed(summary, read.statements, { actor_id: actor.actorId, ...correlation, duration_ms: this.elapsedMs(now) });
+      return summary;
+    } catch (error) {
+      throw withLogCorrelation(error, { ...correlation, duration_ms: this.elapsedMs(now) });
+    }
+  }
+
+  private elapsedMs(since: Date): number {
+    return Math.max(0, this.deps.clock.now().getTime() - since.getTime());
   }
 
   private logServed(summary: FinanceSummary, statements: readonly FinanceStatementOutcome[], correlation: Record<string, unknown>): void {
@@ -165,32 +225,33 @@ export class DropshipFinanceService {
         ...correlation,
         outcome: "skipped",
         error_code: BUDGET_EXCEEDED_CODE,
-        error_class: "transient",
+        error_class: financeErrorClassification(BUDGET_EXCEEDED_CODE),
         skipped_sections: skipped,
       });
     }
     for (const statement of statements) {
       if (statement.status !== "error") continue;
-      const transient = statement.errorCode !== undefined && FINANCE_TRANSIENT_SECTION_CODES.has(statement.errorCode);
+      // WARN when a retry may fix it (transient); ERROR when a human must look (permanent or fatal).
+      const errorClass = financeErrorClassification(statement.errorCode);
       const entry = {
         ...correlation,
         outcome: "section_failed",
         section: statement.name,
         error_code: statement.errorCode,
-        error_class: transient ? "transient" : "fatal",
+        error_class: errorClass,
         ...(statement.sqlState ? { sql_state: statement.sqlState } : {}),
         ...(statement.detail ? { detail: statement.detail } : {}),
         statement_ms: statement.durationMs,
       };
-      if (transient) this.deps.logger.warn("dropship.finance.section_failed", entry);
+      if (errorClass === "transient") this.deps.logger.warn("dropship.finance.section_failed", entry);
       else this.deps.logger.error("dropship.finance.section_failed", entry);
     }
     for (const lineKey of diagnostics.outOfRange) {
       this.deps.logger.error("dropship.finance.amount_out_of_range", {
         ...correlation,
         outcome: "withheld",
-        error_code: "DROPSHIP_FINANCE_AMOUNT_OUT_OF_RANGE",
-        error_class: "fatal",
+        error_code: AMOUNT_OUT_OF_RANGE_CODE,
+        error_class: financeErrorClassification(AMOUNT_OUT_OF_RANGE_CODE),
         line_key: lineKey,
       });
     }
@@ -203,4 +264,17 @@ export class DropshipFinanceService {
       statements: statements.length,
     });
   }
+}
+
+/**
+ * The failure, unchanged in code, message and context, plus the request's
+ * correlation fields under `correlation` for the route's log line. A failure
+ * that is not a DropshipError is a bug: it becomes INTERNAL_ERROR and keeps
+ * the original as `cause`, so the log line can still say what it was.
+ */
+function withLogCorrelation(error: unknown, correlation: FinanceLogCorrelation): DropshipError {
+  if (error instanceof DropshipError) {
+    return new DropshipError(error.code, error.message, { ...error.context, correlation });
+  }
+  return new DropshipError(FINANCE_INTERNAL_ERROR_CODE, "The finance figures could not be read.", { correlation, cause: error });
 }

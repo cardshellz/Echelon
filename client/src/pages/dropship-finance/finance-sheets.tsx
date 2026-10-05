@@ -8,6 +8,11 @@
  *
  * Each body is its own component so it can be rendered and tested without
  * the dialog portal around it.
+ *
+ * Neither sheet has a SheetTrigger (the page opens them from its own
+ * buttons), so Radix would send focus to <body> on close. Each sheet takes the
+ * element that opened it and gives focus back to it on Esc, ✕ or browser Back
+ * (spec §12).
  */
 
 import React from "react";
@@ -25,11 +30,29 @@ import { FinanceClockChip } from "./finance-ui";
 
 const SHEET_CLASS = "w-full overflow-y-auto p-6 sm:max-w-2xl motion-reduce:animate-none motion-reduce:transition-none";
 
+/** Reads, at close time, the element that opened a sheet; null for a sheet a deep link opened. */
+export type FinanceSheetOpener = () => HTMLElement | null;
+
+/**
+ * The sheet's onCloseAutoFocus: focus goes back to the opener. With no opener
+ * still on the page, Radix's own handling stays.
+ */
+function focusOpenerOnClose(opener: FinanceSheetOpener) {
+  return (event: Event) => {
+    const target = opener();
+    if (!target || !target.isConnected) return;
+    event.preventDefault();
+    target.focus();
+  };
+}
+
+const SUMMARY_CLASS = "min-h-6 cursor-pointer select-none font-medium text-foreground";
+
 /** A technical source as a collapsed list (tables, columns, filters, date column). */
 function TechnicalSource({ source }: { source: FinanceTechnicalSource }) {
   return (
     <details className="text-[13px] text-muted-foreground">
-      <summary className="min-h-6 cursor-pointer select-none font-medium text-foreground">Technical source</summary>
+      <summary className={SUMMARY_CLASS}>Technical source</summary>
       <dl className="mt-1 space-y-1 pl-3">
         {source.tables.length > 0 ? (
           <div>
@@ -115,10 +138,10 @@ export function FinanceHowBody({ view }: { view: FinanceHowView }) {
   );
 }
 
-export function FinanceHowSheet({ view, onClose }: { view: FinanceHowView | null; onClose: () => void }) {
+export function FinanceHowSheet({ view, onClose, opener }: { view: FinanceHowView | null; onClose: () => void; opener: FinanceSheetOpener }) {
   return (
     <Sheet open={view !== null} onOpenChange={(open) => (open ? undefined : onClose())}>
-      <SheetContent side="right" className={SHEET_CLASS} data-testid="finance-how">
+      <SheetContent side="right" className={SHEET_CLASS} data-testid="finance-how" onCloseAutoFocus={focusOpenerOnClose(opener)}>
         {view ? (
           <>
             <SheetHeader className="space-y-1 pb-4 pr-8">
@@ -166,7 +189,7 @@ export function FinanceCountingBody({ view }: { view: FinanceCountingView }) {
         <h3 id="finance-choices" className="text-sm font-semibold">
           Choices this page makes
         </h3>
-        <ul className="space-y-2">
+        <ul className="space-y-2" data-testid="finance-choices-list">
           {view.choices.map((choice) => (
             <li key={choice.key} className="space-y-0.5">
               <p className="text-sm">
@@ -175,7 +198,11 @@ export function FinanceCountingBody({ view }: { view: FinanceCountingView }) {
                   <span className="ml-2 inline-flex rounded-md border border-border px-1.5 text-xs text-muted-foreground">Needs the owner's sign-off</span>
                 ) : null}
               </p>
-              <p className="break-words font-mono text-xs text-muted-foreground">{choice.technical}</p>
+              {/* The owner reads the choice in words; where it sits in the code stays folded away, as for every definition. */}
+              <details className="text-[13px] text-muted-foreground">
+                <summary className={SUMMARY_CLASS}>Technical source</summary>
+                <p className="mt-1 break-words pl-3 font-mono text-xs">{choice.technical}</p>
+              </details>
             </li>
           ))}
         </ul>
@@ -207,10 +234,20 @@ export function FinanceCountingBody({ view }: { view: FinanceCountingView }) {
   );
 }
 
-export function FinanceCountingSheet({ open, view, onOpenChange }: { open: boolean; view: FinanceCountingView; onOpenChange: (open: boolean) => void }) {
+export function FinanceCountingSheet({
+  open,
+  view,
+  onOpenChange,
+  opener,
+}: {
+  open: boolean;
+  view: FinanceCountingView;
+  onOpenChange: (open: boolean) => void;
+  opener: FinanceSheetOpener;
+}) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className={SHEET_CLASS} data-testid="finance-counting">
+      <SheetContent side="right" className={SHEET_CLASS} data-testid="finance-counting" onCloseAutoFocus={focusOpenerOnClose(opener)}>
         <SheetHeader className="space-y-1 pb-4 pr-8">
           <SheetTitle className="text-lg font-semibold">{FINANCE_HOW_COUNTS_LINK_TEXT}</SheetTitle>
           <SheetDescription>Every number on this page, what it means and where it comes from.</SheetDescription>

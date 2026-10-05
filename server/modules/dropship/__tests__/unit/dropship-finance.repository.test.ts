@@ -261,6 +261,44 @@ describe("PgDropshipFinanceRepository.readSummary", () => {
     expect(fake.calls.at(-1)?.text).toBe("COMMIT");
   });
 
+  it("skips the ledger section when the budget runs out between its two statements, and never sends the second", async () => {
+    let now = NOW.getTime();
+    const clock: FinanceBudgetClock = { now: () => new Date(now) };
+    const fake = fakePool({
+      respond: (text) => {
+        // Q4 takes 21s: the first-failure query that follows it in the same section is over budget.
+        if (text === FINANCE_LEDGER_GROUPS.text) now += 21_000;
+        return undefined;
+      },
+    });
+    const read = await repositoryFor(fake, { clock }).readSummary(request());
+
+    expect(read.raw.ledger).toEqual({ status: "skipped", errorCode: "DROPSHIP_FINANCE_BUDGET_EXCEEDED" });
+    expect(read.raw.disputes).toEqual({ status: "skipped", errorCode: "DROPSHIP_FINANCE_BUDGET_EXCEEDED" });
+    expect(fake.statements().map((call) => call.text)).not.toContain(FINANCE_FIRST_FAILURE_CODE.text);
+    expect(fake.statements().at(-1)?.text).toBe(FINANCE_LEDGER_GROUPS.text);
+    expect(read.statements.find((outcome) => outcome.name === "ledger")).toMatchObject({ status: "skipped", durationMs: 21_000 });
+    expect(fake.calls.at(-1)?.text).toBe("COMMIT");
+  });
+
+  it("starts the budget before the wait for a slot: a request that waited past it runs Q0 and skips every section", async () => {
+    let now = NOW.getTime();
+    const clock: FinanceBudgetClock = { now: () => new Date(now) };
+    const semaphore = new FinanceRequestSemaphore(1);
+    const hold = await semaphore.acquire(10);
+    const fake = fakePool();
+    const pending = repositoryFor(fake, { clock, semaphore, busyWaitMs: 60_000 }).readSummary(request());
+    // The request waits for the slot while 21s pass on the budget clock.
+    now += 21_000;
+    hold();
+    const read = await pending;
+
+    expect(fake.statements().map((call) => call.text)).toEqual([FINANCE_Q0.text]);
+    expect(read.statements.length).toBeGreaterThan(0);
+    expect(read.statements.every((outcome) => outcome.status === "skipped" && outcome.errorCode === "DROPSHIP_FINANCE_BUDGET_EXCEEDED")).toBe(true);
+    expect(semaphore.inUse()).toBe(0);
+  });
+
   it("fails a section whose core table is missing without sending its SQL", async () => {
     const tables = allTables({ ledger: false });
     const fake = fakePool({ tables });

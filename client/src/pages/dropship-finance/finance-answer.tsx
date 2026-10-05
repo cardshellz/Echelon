@@ -44,9 +44,28 @@ function weightStyle(weight: number, minimumPx: number): CSSProperties {
 /** The 2px sliver: a tiny non-zero part stays visible (spec §6). */
 const MIN_SLIVER_PX = 2;
 
+/**
+ * The widest character a tile value can hold, in em: DejaVu Sans Bold, the
+ * widest fallback font met so far, has 0.70em digits (Roboto and SF are
+ * narrower). Sizing for it keeps every value on one line in any font.
+ */
+const TILE_VALUE_EM_PER_CHARACTER = 0.7;
+
+/**
+ * A tile value never wraps, truncates or compacts (spec §6: the font steps
+ * down instead). Two tiles share a phone's width, so the font follows the
+ * tile's own width (a container query on the tile) and the value's length:
+ * at most the spec's 24px, and never wider than the tile, so "$1,234,567.89"
+ * stays on one line in a 360px phone's tile. Layout only; no figure changes.
+ */
+function tileValueStyle(text: string): CSSProperties {
+  return { fontSize: `min(1.5rem, calc(100cqi / ${Math.max(text.length, 1)} / ${TILE_VALUE_EM_PER_CHARACTER}))` };
+}
+
 export interface FinanceAnswerCardProps {
   readonly view: FinanceAnswerView;
-  readonly onOpenHow: () => void;
+  /** `opener` is the hero button, so the drawer can give focus back to it. */
+  readonly onOpenHow: (opener: HTMLElement | null) => void;
   readonly onOpenChecks: () => void;
   readonly onRetry: () => void;
 }
@@ -120,7 +139,7 @@ function AnswerHero({ view, onOpenHow, onOpenChecks, onRetry }: FinanceAnswerCar
           type="button"
           data-finance-action="open-how"
           aria-label={`${view.hero.spoken}, opens how it was worked out`}
-          onClick={onOpenHow}
+          onClick={(event) => onOpenHow(event.currentTarget)}
           className={cn("text-left hover:underline", FINANCE_FOCUS_CLASS)}
           data-testid="finance-hero"
         >
@@ -298,13 +317,15 @@ export function FinanceTiles({ tiles, onOpenChecks }: { tiles: readonly FinanceT
   return (
     <section aria-label="Totals" data-testid="finance-tiles" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
       {tiles.map((tile) => (
-        <div key={tile.key} data-testid={`finance-tile-${tile.key}`} className="min-w-0 rounded-md border bg-card p-4">
+        <div key={tile.key} data-testid={`finance-tile-${tile.key}`} className="@container min-w-0 rounded-md border bg-card p-4">
           <div className="flex items-start gap-1">
             <h3 className="min-w-0 flex-1 text-[13px] font-normal text-muted-foreground">{tile.label}</h3>
             {tile.info ? <FinanceInfoButton label={`About ${tile.label.toLowerCase()}`} text={tile.info} /> : null}
             <FinanceCheckDots dots={tile.checkDots} onOpenChecks={onOpenChecks} />
           </div>
-          <p className="mt-1 break-words text-2xl font-semibold leading-8">{tile.value}</p>
+          <p className="mt-1 whitespace-nowrap text-2xl font-semibold leading-8" style={tileValueStyle(tile.value)} data-testid="finance-tile-value">
+            {tile.value}
+          </p>
           <div className="mt-1 space-y-0.5 text-xs text-muted-foreground">
             {/* Icons sit on the first line: in a narrow tile the words wrap, and a centred icon would drift down beside the second. */}
             {tile.delta ? (

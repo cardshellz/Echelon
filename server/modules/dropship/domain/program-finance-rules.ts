@@ -407,8 +407,11 @@ function negate(value: bigint | undefined): bigint | undefined {
 }
 
 function cashIdentities(collect: IdentityCollector, cash: SectionLines): void {
-  // 6. The deposit lines add up to deposits received; received − pulled back + won back = cash received.
+  // 6. The deposit lines add up to deposits received, in dollars and deposits; received − pulled back + won back = cash received.
   collect.add("identity_6_deposit_lines", "cents", cash.required("cash.received_deposits"), DEPOSIT_RAIL_KEYS.map((key) => cash.part(key)));
+  // A rail left out because nothing moved on it counts no deposits.
+  collect.add("identity_6_deposit_count", "count", cash.count("cash.received_deposits"), DEPOSIT_RAIL_KEYS.map((key) =>
+    cash.line(key) ? cash.count(key) : ZERO));
   collect.add("identity_6_cash_received", "cents", cash.required("cash.received"), [
     cash.required("cash.received_deposits"),
     negate(cash.required("cash.pulled_back", "minus")),

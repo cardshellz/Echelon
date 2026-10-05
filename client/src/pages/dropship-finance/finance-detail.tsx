@@ -74,7 +74,8 @@ export interface FinanceDetailProps {
   readonly depth: FinanceDepth;
   readonly onOpenChange: (open: FinanceDetailKey[]) => void;
   readonly onDepthChange: (depth: FinanceDepth) => void;
-  readonly onOpenHow: (key: FinanceLineKey) => void;
+  /** `opener` is the line's "How this is worked out" button; the drawer gives focus back to it. */
+  readonly onOpenHow: (key: FinanceLineKey, opener: HTMLElement | null) => void;
   readonly onOpenChecks: () => void;
   readonly onScopeVendor: (vendorId: number) => void;
   readonly onRetry: () => void;
@@ -198,7 +199,7 @@ function StatementTable({
   onOpenChecks,
 }: {
   statement: FinanceStatementView;
-  onOpenHow: (key: FinanceLineKey) => void;
+  onOpenHow: FinanceDetailProps["onOpenHow"];
   onOpenChecks: () => void;
 }) {
   if (statement.rows.length === 0) return null;
@@ -223,7 +224,7 @@ function StatementRow({
   onOpenChecks,
 }: {
   row: FinanceStatementRowView;
-  onOpenHow: (key: FinanceLineKey) => void;
+  onOpenHow: FinanceDetailProps["onOpenHow"];
   onOpenChecks: () => void;
 }) {
   const loss = row.negative && LOSS_LINE_KEYS.has(row.key);
@@ -248,7 +249,7 @@ function StatementRow({
           <button
             type="button"
             data-finance-action="open-how"
-            onClick={() => onOpenHow(row.key)}
+            onClick={(event) => onOpenHow(row.key, event.currentTarget)}
             className={cn(FINANCE_TEXT_BUTTON_CLASS, "ml-2 text-xs font-normal text-muted-foreground")}
           >
             {FINANCE_HOW_LINK_TEXT} ›

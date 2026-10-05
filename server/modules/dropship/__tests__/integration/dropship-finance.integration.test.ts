@@ -22,9 +22,14 @@ import {
   type FinanceSummary,
 } from "../../../../../shared/dropship/program-finance";
 import { signedMillsToCents } from "../../../../../shared/dropship/program-finance-money";
-import { DropshipFinanceService } from "../../application/dropship-finance-service";
+import {
+  DropshipFinanceService,
+  type DropshipFinanceRepository,
+  type FinanceStatementOutcome,
+} from "../../application/dropship-finance-service";
 import { FINANCE_TABLES, type FinanceRawTables } from "../../domain/program-finance-raw";
 import { classifyWaitingReason } from "../../domain/program-finance-rules";
+import type { FinanceBudgetClock } from "../../infrastructure/dropship-finance-read-transaction";
 import { FinanceRequestSemaphore, PgDropshipFinanceRepository } from "../../infrastructure/dropship-finance.repository";
 import { ORDER_CTE_PARAMS, orderEconomicsCte, productsStatement, sqlRoundMills } from "../../infrastructure/dropship-finance-sql";
 import {
@@ -119,12 +124,17 @@ describeDatabase.sequential("Program finance summary on PostgreSQL (contract §6
     return schema;
   }
 
-  /** The real service over the real repository, with every statement qualified into `schema`. */
-  function financeService(schema: string, options: { now?: Date; beforeQuery?: QueryHook } = {}) {
+  /**
+   * The real service over the real repository, with every statement qualified into `schema`.
+   * `budgetClock` replaces the fixed request-budget clock (the perf smoke test times sections with it).
+   */
+  function financeService(schema: string, options: { now?: Date; beforeQuery?: QueryHook; budgetClock?: FinanceBudgetClock } = {}) {
     const now = options.now ?? FINANCE_FIXTURE_NOW;
     const logs: LogEntry[] = [];
     const statements: string[] = [];
     const releases: Array<boolean | Error | undefined> = [];
+    /** How each section of each read ended, as the repository reported it. */
+    const outcomes: FinanceStatementOutcome[] = [];
     const qualifyingPool = {
       connect: async () => {
         const client = await pool.connect();
@@ -141,11 +151,18 @@ describeDatabase.sequential("Program finance summary on PostgreSQL (contract §6
         } as Pick<PoolClient, "query" | "release">;
       },
     } as unknown as Pick<pg.Pool, "connect">;
-    // A fixed budget clock: the request budget never runs out, so no section is skipped by timing.
-    const repository = new PgDropshipFinanceRepository(qualifyingPool, {
+    // A fixed budget clock unless one is given: the request budget never runs out, so no section is skipped by timing.
+    const pgRepository = new PgDropshipFinanceRepository(qualifyingPool, {
       semaphore: new FinanceRequestSemaphore(1),
-      clock: { now: () => new Date(now.getTime()) },
+      clock: options.budgetClock ?? { now: () => new Date(now.getTime()) },
     });
+    const repository: DropshipFinanceRepository = {
+      readSummary: async (request) => {
+        const read = await pgRepository.readSummary(request);
+        outcomes.push(...read.statements);
+        return read;
+      },
+    };
     const record = (level: LogEntry["level"]) => (action: string, data: Record<string, unknown>) => { logs.push({ level, action, data }); };
     const service = new DropshipFinanceService({
       repository,
@@ -156,6 +173,7 @@ describeDatabase.sequential("Program finance summary on PostgreSQL (contract §6
       logs,
       statements,
       releases,
+      outcomes,
       summary: (query: Record<string, string> = {}) => service.getSummary(query, { actorId: "integration-test" }),
     };
   }
@@ -247,30 +265,48 @@ describeDatabase.sequential("Program finance summary on PostgreSQL (contract §6
 
     it("answer workings: the hero's arithmetic with the page's own figures", () => {
       const operand = (lineKey: string, amount: number, operator: "none" | "plus" | "minus") => ({ lineKey, amount, unit: "cents", operator });
+      // A figure from the comparison window (Sep 1 – 5) is marked so the page labels it with those dates.
+      const compareOperand = (lineKey: string, amount: number, operator: "none" | "minus") => ({ ...operand(lineKey, amount, operator), period: "compare" });
+      // A share in tenths of a percent (399 = 39.9%), not cents.
+      const shareOperand = (amount: number, operator: "none" | "minus") => ({ lineKey: "sales.kept_orders", amount, unit: "share_tenths", operator });
       expect(mtd.answer.workings).toEqual([
-        { step: 1, textKey: "working.two_clocks", operands: [], result: null },
+        { step: 1, textKey: "working.two_clocks", operands: [], result: null, resultUnit: "cents" },
         {
-          step: 2, textKey: "sales.billed_fc", result: 9730, opensMetric: "sales.billed",
+          step: 2, textKey: "sales.billed_fc", result: 9730, resultUnit: "cents", opensMetric: "sales.billed",
           operands: [operand("sales.billed", 18_730, "none"), operand("sales.waiting", 9000, "minus")],
         },
         {
-          step: 3, textKey: "sales.kept_orders", result: 3881, opensMetric: "sales.kept_orders",
+          step: 3, textKey: "sales.kept_orders", result: 3881, resultUnit: "cents", opensMetric: "sales.kept_orders",
           operands: [
             operand("sales.billed_fc", 9730, "none"), operand("sales.cogs", 3764, "minus"),
             operand("sales.labels", 1935, "minus"), operand("sales.pool_fc", 150, "minus"),
           ],
         },
-        { step: 4, textKey: "working.cogs_basis", operands: [], result: null },
+        { step: 4, textKey: "working.cogs_basis", operands: [], result: null, resultUnit: "cents" },
         {
-          step: 5, textKey: "sales.kept", result: 2641,
+          step: 5, textKey: "sales.kept", result: 2641, resultUnit: "cents",
           operands: [operand("sales.kept_orders", 3881, "none"), operand("sales.fees", 760, "plus"), operand("sales.return_credits_cs", 2000, "minus")],
         },
-        // 3,881 / 9,730 = 39.9%; Sep 1–5: 1,050 / 2,600 = 40.4%.
-        { step: 6, textKey: "working.margin_share", operands: [operand("sales.kept_orders", 3881, "none"), operand("sales.billed_fc", 9730, "none")], result: null },
-        { step: 7, textKey: "working.margin_prior", operands: [operand("sales.kept_orders", 1050, "none"), operand("sales.billed_fc", 2600, "none")], result: null },
-        { step: 8, textKey: "working.margin_change", operands: [], result: null },
-        { step: 9, textKey: "working.not_included", operands: [], result: null },
+        // 3,881 / 9,730 = 39.9%.
+        {
+          step: 6, textKey: "working.margin_share", result: 399, resultUnit: "share_tenths",
+          operands: [operand("sales.kept_orders", 3881, "none"), operand("sales.billed_fc", 9730, "none")],
+        },
+        // Sep 1 – 5: 1,050 / 2,600 = 40.4%.
+        {
+          step: 7, textKey: "working.margin_prior", result: 404, resultUnit: "share_tenths",
+          operands: [compareOperand("sales.kept_orders", 1050, "none"), compareOperand("sales.billed_fc", 2600, "none")],
+        },
+        // 39.9% − 40.4% = −0.5 points, in tenths of a point.
+        {
+          step: 8, textKey: "working.margin_change", result: -5, resultUnit: "share_change_tenths",
+          operands: [shareOperand(399, "none"), { ...shareOperand(404, "minus"), period: "compare" }],
+        },
+        { step: 9, textKey: "working.not_included", operands: [], result: null, resultUnit: "cents" },
       ]);
+      // The drawer's margin steps carry exactly the card's own figures.
+      expect(mtd.answer.workings.slice(5, 8).map((step) => step.result))
+        .toEqual([mtd.answer.marginTenths, mtd.answer.priorMarginTenths, mtd.answer.marginChangeTenths]);
     });
 
     it("sales lines, waiting reasons and the never-charged memo", () => {
@@ -727,6 +763,39 @@ FROM classified ORDER BY intake_id`;
     expect(summary.info.some((info) => info.key === "pool_record")).toBe(false);
   });
 
+  it("cancellations still being sent to the marketplace (or retried) stay in the never-charged count", async () => {
+    const schema = await variantSchema("inflight");
+    // What the marketplace-cancellation worker leaves while it works (dropship-order-cancellation.repository.ts):
+    // a claimed cancellation, one eBay refused for now, and a cancelled intake with no cancellation status at all.
+    const intakes = [
+      { id: 1104, vendor_id: 12, cancellation_status: "marketplace_cancellation_retrying", grandTotalCents: 4000, received_at: "2026-10-03T12:00:00.000Z" },
+      { id: 1105, vendor_id: 13, cancellation_status: "marketplace_cancellation_processing", grandTotalCents: 5000, received_at: "2026-10-04T12:00:00.000Z" },
+      { id: 1106, vendor_id: 13, cancellation_status: null, grandTotalCents: 600, received_at: "2026-10-04T13:00:00.000Z" },
+    ];
+    for (const intake of intakes) {
+      const insert = financeFixtureInsert({
+        table: "dropship.dropship_order_intake",
+        row: {
+          id: intake.id, channel_id: 7, vendor_id: intake.vendor_id, status: "cancelled", cancellation_status: intake.cancellation_status,
+          normalized_payload: { totals: { grandTotalCents: intake.grandTotalCents } }, oms_order_id: null, received_at: intake.received_at, accepted_at: null,
+        },
+      });
+      await pool.query(qualifyFinanceSql(insert.text, schema), insert.values);
+    }
+    const summary = await financeService(schema).summary();
+
+    expect(summary.sections.sales.status).toBe("ok");
+    expect(amountsOf(summary, "sales")).toMatchObject({
+      "sales.never_charged": 6,
+      "sales.never_charged.waiting_for_payment": 1,
+      "sales.never_charged.payment_time_ran_out": 1,
+      "sales.never_charged.rejected": 1,
+      "sales.never_charged.marketplace_cancelled": 3,
+    });
+    // Only orders held for payment have a "would have charged" amount.
+    expect(lineOf(summary, "sales", "sales.never_charged.would_have_charged").amount).toBe(2500);
+  });
+
   it("a statement timeout in one section fails that section while the others render", async () => {
     const schema = await variantSchema("timeout");
     const products = productsStatement(ALL_TABLES).text;
@@ -762,4 +831,93 @@ FROM classified ORDER BY intake_id`;
       locker.release();
     }
   });
+
+  // ── performance smoke (contract §4) ───────────────────────────────────
+
+  it("performance smoke: 2,000 more accepted orders read in under 3s, every section under 1s", async () => {
+    const schema = await variantSchema("perf");
+    for (const statement of PERF_SEED_SQL) await pool.query(qualifyFinanceSql(statement, schema));
+    // Plans as production would see them: the planner knows how big the tables now are.
+    for (const relation of PERF_SEEDED_RELATIONS) await pool.query(qualifyFinanceSql(`ANALYZE ${relation}`, schema));
+    const run = financeService(schema, { budgetClock: { now: () => new Date() } });
+
+    const startedAt = performance.now();
+    const summary = await run.summary();
+    const totalMs = performance.now() - startedAt;
+
+    // The work was really done: the seeded orders are on the page.
+    expect(summary.answer.orders).toBe(10 + PERF_ORDERS);
+    expect(run.outcomes.length).toBeGreaterThan(30);
+    expect(run.outcomes.filter((outcome) => outcome.status !== "ok")).toEqual([]);
+    expect(totalMs).toBeLessThan(PERF_TOTAL_CEILING_MS);
+    const slow = run.outcomes.filter((outcome) => outcome.durationMs >= PERF_STATEMENT_CEILING_MS);
+    expect(slow).toEqual([]);
+  });
 });
+
+/** Contract §4 perf smoke: how many orders, and the two ceilings it asserts. */
+const PERF_ORDERS = 2000;
+const PERF_TOTAL_CEILING_MS = 3000;
+const PERF_STATEMENT_CEILING_MS = 1000;
+/** Ids above every §6.4 id, one block per table. */
+const PERF_ID = 100_000;
+
+/**
+ * The perf seed: 2,000 accepted October orders (Oct 1 05:00Z to Oct 5 09:00Z, every 3 minutes,
+ * alternating V12 and V13), each with its quote, economics row, OMS order and line, WMS order and
+ * item, a cost row, one shipped and costed ShipStation label with its customer_fulfillment item,
+ * and the wallet's order debit. Every tenth order is not shipped yet, every seventh shares a
+ * combined label with the next one, so the waiting-reason paths are walked too. Set-based SQL,
+ * one statement per table; the values are fixed, so the seed is the same on every run.
+ */
+const PERF_SEED_SQL: readonly string[] = [
+  `INSERT INTO dropship.dropship_shipping_quote_snapshots (id, base_rate_cents, markup_cents, dunnage_cents, insurance_pool_cents, total_shipping_cents)
+   SELECT ${PERF_ID} + g, 300, 50, 0, 25, 375 FROM generate_series(1, ${PERF_ORDERS}) g`,
+  `INSERT INTO dropship.dropship_order_intake (id, channel_id, vendor_id, status, cancellation_status, normalized_payload, oms_order_id, received_at, accepted_at)
+   SELECT ${PERF_ID} + g, 7, 12 + (g % 2), 'accepted', NULL,
+          jsonb_build_object('totals', jsonb_build_object('grandTotalCents', 1800), 'lines', jsonb_build_array(jsonb_build_object('quantity', 2))),
+          ${2 * PERF_ID} + g,
+          timestamptz '2026-10-01 05:00:00+00' + (g * interval '3 minutes') - interval '5 minutes',
+          timestamptz '2026-10-01 05:00:00+00' + (g * interval '3 minutes')
+   FROM generate_series(1, ${PERF_ORDERS}) g`,
+  `INSERT INTO dropship.dropship_order_economics_snapshots (id, intake_id, oms_order_id, vendor_id, store_connection_id, shipping_quote_snapshot_id,
+     wholesale_subtotal_cents, shipping_cents, insurance_pool_cents, fees_cents, total_debit_cents, pricing_snapshot, created_at)
+   SELECT ${PERF_ID} + g, ${PERF_ID} + g, ${2 * PERF_ID} + g, 12 + (g % 2), 1, ${PERF_ID} + g, 1000, 375, 25, 0, 1375,
+          '{"wholesale": {"lines": [{"quantity": 2, "wholesaleLineTotalCents": 1000}]}}'::jsonb,
+          timestamptz '2026-10-01 05:00:00+00' + (g * interval '3 minutes')
+   FROM generate_series(1, ${PERF_ORDERS}) g`,
+  `INSERT INTO oms.oms_orders (id, channel_id, status, financial_status, subtotal_cents, shipping_cents, tax_cents, discount_cents, total_cents, ordered_at, cancelled_at)
+   SELECT ${2 * PERF_ID} + g, 7, 'open', 'paid', 1000, 375, 0, 0, 1375,
+          ((timestamptz '2026-10-01 05:00:00+00' + (g * interval '3 minutes')) AT TIME ZONE 'America/New_York'), NULL
+   FROM generate_series(1, ${PERF_ORDERS}) g`,
+  `INSERT INTO oms.oms_order_lines (id, order_id, product_variant_id, sku, quantity, total_price_cents)
+   SELECT ${4 * PERF_ID} + g, ${2 * PERF_ID} + g, CASE WHEN g % 2 = 0 THEN 101 ELSE 102 END, CASE WHEN g % 2 = 0 THEN 'TL-25' ELSE 'PS-100' END, 2, 1000
+   FROM generate_series(1, ${PERF_ORDERS}) g`,
+  `INSERT INTO wms.orders (id, source, oms_fulfillment_order_id)
+   SELECT ${3 * PERF_ID} + g, 'oms', (${2 * PERF_ID} + g)::text FROM generate_series(1, ${PERF_ORDERS}) g`,
+  `INSERT INTO wms.order_items (id, order_id, oms_order_line_id, picked_quantity)
+   SELECT ${5 * PERF_ID} + g, ${3 * PERF_ID} + g, ${4 * PERF_ID} + g, CASE WHEN g % 10 = 0 THEN 0 ELSE 2 END FROM generate_series(1, ${PERF_ORDERS}) g`,
+  `INSERT INTO oms.order_item_costs (id, order_id, order_item_id, inventory_lot_id, qty, unit_cost_cents, total_cost_cents, unit_cost_mills, total_cost_mills)
+   SELECT ${6 * PERF_ID} + g, ${3 * PERF_ID} + g, ${5 * PERF_ID} + g, 1, 2, 250, 500, 25000, 50000
+   FROM generate_series(1, ${PERF_ORDERS}) g WHERE g % 10 <> 0`,
+  `INSERT INTO wms.outbound_shipments (id, order_id, status, shipment_purpose, carrier_cost_cents, carrier_cost_source, carrier_cost_recorded_at, external_fulfillment_id)
+   SELECT ${7 * PERF_ID} + g, ${3 * PERF_ID} + g, 'shipped', 'customer_fulfillment', 300, 'shipstation',
+          timestamptz '2026-10-01 05:00:00+00' + (g * interval '3 minutes'),
+          CASE WHEN g % 7 = 0 THEN 'shipstation_combined:' || (${PERF_ID} + g) || ':order:' || (${3 * PERF_ID} + g)
+               WHEN g % 7 = 1 AND g > 1 THEN 'shipstation_combined:' || (${PERF_ID} + g - 1) || ':order:' || (${3 * PERF_ID} + g)
+               ELSE 'shipstation_shipment:' || (${PERF_ID} + g) END
+   FROM generate_series(1, ${PERF_ORDERS}) g WHERE g % 10 <> 0`,
+  `INSERT INTO wms.outbound_shipment_items (id, shipment_id, order_item_id, qty, shipment_item_purpose)
+   SELECT ${8 * PERF_ID} + g, ${7 * PERF_ID} + g, ${5 * PERF_ID} + g, 2, 'customer_fulfillment'
+   FROM generate_series(1, ${PERF_ORDERS}) g WHERE g % 10 <> 0`,
+  `INSERT INTO dropship.dropship_wallet_ledger (id, wallet_account_id, vendor_id, type, status, amount_cents, reference_type, reference_id, metadata, created_at, settled_at)
+   SELECT ${9 * PERF_ID} + g, 1 + (g % 2), 12 + (g % 2), 'order_debit', 'settled', -1375, 'order_intake', (${PERF_ID} + g)::text, '{}'::jsonb,
+          timestamptz '2026-10-01 05:00:00+00' + (g * interval '3 minutes'), timestamptz '2026-10-01 05:00:00+00' + (g * interval '3 minutes')
+   FROM generate_series(1, ${PERF_ORDERS}) g`,
+];
+
+const PERF_SEEDED_RELATIONS: readonly string[] = [
+  "dropship.dropship_shipping_quote_snapshots", "dropship.dropship_order_intake", "dropship.dropship_order_economics_snapshots",
+  "oms.oms_orders", "oms.oms_order_lines", "wms.orders", "wms.order_items", "oms.order_item_costs",
+  "wms.outbound_shipments", "wms.outbound_shipment_items", "dropship.dropship_wallet_ledger",
+];
