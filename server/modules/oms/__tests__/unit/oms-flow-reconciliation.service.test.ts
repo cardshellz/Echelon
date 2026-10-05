@@ -4,7 +4,10 @@ import { resolve } from "node:path";
 import {
   autoCloseResolvedDeadFulfillmentRetries,
   collectOmsFlowReconciliationIssues,
+  FLOW_CHECK_FAILED_CODE,
+  getOmsFlowReconciliationSchedulerHeartbeat,
   remediateOmsFlowIssue,
+  resetOmsFlowReconciliationSchedulerHeartbeatForTests,
   runOmsFlowReconciliation,
 } from "../../oms-flow-reconciliation.service";
 
@@ -19,6 +22,50 @@ function countRows(count: number) {
 
 function sampleRows(rows: unknown[]) {
   return { rows };
+}
+
+function sqlText(query: any): string {
+  return (query?.queryChunks ?? [])
+    .flatMap((chunk: any) => chunk?.value ?? [])
+    .join(" ");
+}
+
+// Each flow check is recognised by its own SQL, never by call order: positional
+// fixtures are how 0142f220 (checks filed under each other's codes) went unseen.
+// The Shopify writeback check reads channel-writeback health and is routed by
+// the caller's fallback instead.
+const CHECK_SQL: Record<string, RegExp> = {
+  OMS_FINAL_WMS_ACTIVE: /'ready', 'in_progress', 'ready_to_ship', 'picking', 'packed'/,
+  OMS_PAID_WITHOUT_WMS: /oo\.financial_status IN \('paid', 'partially_paid'\)/,
+  WMS_READY_WITHOUT_SHIPMENT: /FROM wms\.orders wo\s+WHERE wo\.warehouse_status IN \('ready', 'in_progress', 'ready_to_ship'\)\s+AND wo\.created_at/,
+  WMS_FINAL_OMS_OPEN: /wo\.warehouse_status IN \('cancelled', 'shipped'\)/,
+  SHIPMENT_SHIPPED_OMS_OPEN: /oo\.status NOT IN \('shipped', 'partially_shipped', 'cancelled', 'refunded'\)/,
+  WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED: /c\.provider IN \('ebay', 'shopify'\)/,
+  SHIPMENT_NOT_PUSHED_TO_SHIPSTATION: /os\.status IN \('planned', 'queued'\)\s+AND os\.created_at < NOW\(\) - INTERVAL '15 minutes'/,
+  WMS_PARTITION_DUPLICATE_LINE_COVERAGE: /WITH duplicate_line_coverage/,
+  OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT: /WITH provider_reference_rows/,
+  CHANNEL_FULFILLMENT_RECEIPT_STALLED: /FROM oms\.channel_fulfillment_receipts receipt/,
+};
+
+type CheckFixture = { count: number; sample?: unknown[] } | Error;
+
+function checkDb(
+  fixtures: Partial<Record<string, CheckFixture>> = {},
+  fallback: (query: any, text: string) => unknown = () => sampleRows([]),
+) {
+  const hits: Record<string, number> = {};
+  const execute = vi.fn(async (query: any) => {
+    const text = sqlText(query);
+    const code = Object.keys(CHECK_SQL).find((candidate) => CHECK_SQL[candidate].test(text));
+    if (!code) return fallback(query, text);
+    hits[code] = (hits[code] ?? 0) + 1;
+    const fixture = fixtures[code];
+    if (fixture instanceof Error) throw fixture;
+    return /COUNT\(\*\)::int AS count/.test(text)
+      ? countRows(fixture?.count ?? 0)
+      : sampleRows(fixture?.sample ?? []);
+  });
+  return { execute, hits };
 }
 
 function canonicalAuthority(ensureLegacyShipment: any) {
@@ -70,22 +117,13 @@ describe("oms-flow-reconciliation.service", () => {
   });
 
   it("returns critical OMS/WMS and shipment drift issues with samples", async () => {
-    const db = {
-      execute: vi
-        .fn()
-        .mockResolvedValueOnce(countRows(2))
-        .mockResolvedValueOnce(sampleRows([{ oms_order_id: 1 }]))
-        .mockResolvedValueOnce(countRows(1))
-        .mockResolvedValueOnce(sampleRows([{ wms_order_id: 10 }]))
-        .mockResolvedValueOnce(countRows(1))
-        .mockResolvedValueOnce(sampleRows([{ shipment_id: 20 }]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([])),
-    };
+    const { execute } = checkDb({
+      OMS_FINAL_WMS_ACTIVE: { count: 2, sample: [{ oms_order_id: 1 }] },
+      WMS_FINAL_OMS_OPEN: { count: 1, sample: [{ wms_order_id: 10 }] },
+      SHIPMENT_SHIPPED_OMS_OPEN: { count: 1, sample: [{ shipment_id: 20 }] },
+    });
 
-    const issues = await collectOmsFlowReconciliationIssues(db);
+    const issues = await collectOmsFlowReconciliationIssues({ execute });
 
     expect(issues.map((issue) => issue.code)).toEqual([
       "OMS_FINAL_WMS_ACTIVE",
@@ -94,35 +132,62 @@ describe("oms-flow-reconciliation.service", () => {
     ]);
     expect(issues.every((issue) => issue.severity === "critical")).toBe(true);
     expect(issues[0].sample).toEqual([{ oms_order_id: 1 }]);
+    expect(issues[1].sample).toEqual([{ wms_order_id: 10 }]);
+    expect(issues[2].sample).toEqual([{ shipment_id: 20 }]);
   });
 
   it("returns critical missing bridge issues with samples", async () => {
-    const db = {
-      execute: vi
-        .fn()
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(1))
-        .mockResolvedValueOnce(sampleRows([{ oms_order_id: 10 }]))
-        .mockResolvedValueOnce(countRows(1))
-        .mockResolvedValueOnce(sampleRows([{ wms_order_id: 20 }]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([])),
-    };
+    const { execute } = checkDb({
+      OMS_PAID_WITHOUT_WMS: { count: 1, sample: [{ oms_order_id: 10 }] },
+      WMS_READY_WITHOUT_SHIPMENT: { count: 1, sample: [{ wms_order_id: 20 }] },
+    });
 
-    const issues = await collectOmsFlowReconciliationIssues(db);
+    const issues = await collectOmsFlowReconciliationIssues({ execute });
 
     expect(issues.map((issue) => issue.code)).toEqual([
       "OMS_PAID_WITHOUT_WMS",
       "WMS_READY_WITHOUT_SHIPMENT",
     ]);
     expect(issues.every((issue) => issue.severity === "critical")).toBe(true);
+    expect(issues[1].sample).toEqual([{ wms_order_id: 20 }]);
+  });
+
+  it("files every check's rows under its own code (0142f220 regression)", async () => {
+    // From 2026-05-08 to 2026-10-05 five checks were matched to results by array
+    // position and reported each other's rows: Ready orders with no shipment
+    // (#63772, #63775) were filed as shipped packages and never re-sent.
+    const fixtures = Object.fromEntries(Object.keys(CHECK_SQL).map((code) => [
+      code, { count: 1, sample: [{ from: code }] },
+    ]));
+    const { execute, hits } = checkDb(fixtures);
+
+    const issues = await collectOmsFlowReconciliationIssues({ execute });
+
+    for (const code of Object.keys(CHECK_SQL)) {
+      // Exactly one count and one sample query per check: fingerprints are unique.
+      expect(hits[code], code).toBe(2);
+      const issue = issues.find((entry) => entry.code === code);
+      expect(issue?.sample, code).toEqual([{ from: code }]);
+    }
+  });
+
+  it("reports a failing check and still returns every other check", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { execute } = checkDb({
+      WMS_PARTITION_DUPLICATE_LINE_COVERAGE: new Error('relation "x" does not exist'),
+      WMS_READY_WITHOUT_SHIPMENT: { count: 1, sample: [{ wms_order_id: 20 }] },
+    });
+
+    const issues = await collectOmsFlowReconciliationIssues({ execute });
+
+    expect(issues.map((issue) => issue.code)).toEqual(["WMS_READY_WITHOUT_SHIPMENT", FLOW_CHECK_FAILED_CODE]);
+    expect(issues[1]).toMatchObject({
+      severity: "critical",
+      count: 1,
+      sample: [{ check: "WMS_PARTITION_DUPLICATE_LINE_COVERAGE", error: 'relation "x" does not exist' }],
+    });
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("\"action\":\"oms_flow_check\""));
+    error.mockRestore();
   });
 
   it("treats voided-only outbound shipments as missing shipment work", () => {
@@ -192,27 +257,28 @@ describe("oms-flow-reconciliation.service", () => {
     }
   });
 
-  it("per-step isolation: a throwing detector no longer aborts the remaining steps", async () => {
+  it("per-step isolation: failing checks are reported and the run continues", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    // Every query throws — the pre-2026-07-07 behavior was a rejected promise
-    // from the first collect query, which meant autoClose/remediation never ran.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    resetOmsFlowReconciliationSchedulerHeartbeatForTests();
+    // Every query throws. Before 2026-07-07 the first rejection aborted every
+    // later step; before 2026-10-05 it emptied all checks at once.
     const db = {
-      execute: vi.fn(async () => {
+      execute: vi.fn(async (_query: unknown) => {
         throw new Error('column "oms_order_id" does not exist');
       }),
     };
 
     const issues = await runOmsFlowReconciliation(db, flowDependencies());
 
-    // Resolves (not rejects) with no issues…
-    expect(issues).toEqual([]);
-    // …and execution CONTINUED past the failed collect into later steps
-    // (auto-close + reservation remediation each issue their own queries).
-    expect(db.execute.mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(consoleError).toHaveBeenCalledWith(
-      expect.stringContaining("step 'collect' failed (continuing)"),
-    );
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ code: FLOW_CHECK_FAILED_CODE, count: 11 });
+    // Execution continued past the checks into later steps (dead-retry cleanup).
+    expect(db.execute.mock.calls.some(([query]) => sqlText(query).includes("WITH candidates AS"))).toBe(true);
+    expect(getOmsFlowReconciliationSchedulerHeartbeat().lastError)
+      .toContain("collect: OMS_FINAL_WMS_ACTIVE: column \"oms_order_id\" does not exist");
     consoleError.mockRestore();
+    warn.mockRestore();
   });
 
   it("treats refunded OMS financial status as final for WMS reconciliation", () => {
@@ -225,22 +291,11 @@ describe("oms-flow-reconciliation.service", () => {
 
   it("logs a compact summary when scheduled reconciliation finds issues", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const db = {
-      execute: vi
-        .fn()
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(3))
-        .mockResolvedValueOnce(sampleRows([{ shipment_id: 30 }]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([])),
-    };
+    const { execute } = checkDb({
+      WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED: { count: 3, sample: [{ shipment_id: 30 }] },
+    });
 
-    const issues = await runOmsFlowReconciliation(db, flowDependencies());
+    const issues = await runOmsFlowReconciliation({ execute }, flowDependencies());
 
     expect(issues).toHaveLength(1);
     expect(issues[0]).toMatchObject({
@@ -289,50 +344,28 @@ describe("oms-flow-reconciliation.service", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const inserts: unknown[] = [];
     const ensureLegacyShipment = vi.fn(async () => ({}));
+    const { execute } = checkDb({
+      WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED: {
+        count: 2,
+        sample: [{ oms_order_id: 10, shipment_id: 30 }, { oms_order_id: 11, shipment_id: 31 }],
+      },
+    }, (_query, text) => text.includes("FROM shipped_channel_shipments")
+      ? {
+          rows: [
+            { oms_order_id: 10, shipment_id: 30, provider: "ebay", pending_retry: false, dead_retry: false },
+            { oms_order_id: 11, shipment_id: 31, provider: "ebay", pending_retry: false, dead_retry: false },
+          ],
+        }
+      : sampleRows([]));
     const db = {
-      execute: vi
-        .fn()
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(2))
-        .mockResolvedValueOnce(sampleRows([
-          { oms_order_id: 10, shipment_id: 30 },
-          { oms_order_id: 11, shipment_id: 31 },
-        ]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(sampleRows([{ id: 99 }])),
+      execute,
       insert: vi.fn(() => ({
         values: vi.fn(async (row: unknown) => {
           inserts.push(row);
           return undefined;
         }),
-        })),
+      })),
     };
-    const queuedExecute = db.execute;
-    db.execute = vi.fn(async (query: any) => {
-      const queryText = (query?.queryChunks ?? [])
-        .flatMap((chunk: any) => chunk?.value ?? [])
-        .join(" ");
-      if (queryText.includes("FROM shipped_channel_shipments")) {
-        return {
-          rows: [
-            { oms_order_id: 10, shipment_id: 30, provider: "ebay", pending_retry: false, dead_retry: false },
-            { oms_order_id: 11, shipment_id: 31, provider: "ebay", pending_retry: false, dead_retry: false },
-          ],
-        };
-      }
-      return queuedExecute(query);
-    });
 
     const issues = await runOmsFlowReconciliation(
       db,
@@ -340,7 +373,7 @@ describe("oms-flow-reconciliation.service", () => {
     );
 
     expect(issues).toHaveLength(1);
-    expect(db.execute).toHaveBeenCalled();
+    expect(issues[0].code).toBe("WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED");
     expect(inserts).toHaveLength(0);
     expect(ensureLegacyShipment).toHaveBeenNthCalledWith(1, 30, {
       executeImmediately: false,
@@ -359,24 +392,11 @@ describe("oms-flow-reconciliation.service", () => {
   it("auto-queues ShipStation push retries when scheduled reconciliation finds unpushed shipments", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const inserts: unknown[] = [];
+    const { execute } = checkDb({
+      SHIPMENT_NOT_PUSHED_TO_SHIPSTATION: { count: 1, sample: [{ shipment_id: 482, order_number: "#57067" }] },
+    });
     const db = {
-      execute: vi
-        .fn()
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(1))
-        .mockResolvedValueOnce(sampleRows([{ shipment_id: 482, order_number: "#57067" }]))
-        .mockResolvedValueOnce(sampleRows([])),
+      execute,
       insert: vi.fn(() => ({
         values: vi.fn(async (row: unknown) => {
           inserts.push(row);
@@ -404,69 +424,43 @@ describe("oms-flow-reconciliation.service", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const inserts: unknown[] = [];
     const ensureLegacyShipment = vi.fn(async () => ({}));
+    const { execute } = checkDb({}, (_query, text) => {
+      if (!text.includes("FROM shipped_channel_shipments")) return sampleRows([]);
+      if (text.includes("GROUP BY provider")) {
+        return {
+          rows: [{
+            provider: "shopify",
+            shipped: 1,
+            complete: 0,
+            missing: 1,
+            masked: 0,
+            partial_orders: 0,
+            retrying: 0,
+            dead: 0,
+          }],
+        };
+      }
+      return {
+        rows: [
+          {
+            oms_order_id: 10,
+            shipment_id: 1441,
+            provider: "shopify",
+            pending_retry: false,
+            dead_retry: false,
+          },
+        ],
+      };
+    });
     const db = {
-      execute: vi
-        .fn()
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(sampleRows([])),
+      execute,
       insert: vi.fn(() => ({
         values: vi.fn(async (row: unknown) => {
           inserts.push(row);
           return undefined;
         }),
-        })),
+      })),
     };
-    const queuedExecute = db.execute;
-    db.execute = vi.fn(async (query: any) => {
-      const queryText = (query?.queryChunks ?? [])
-        .flatMap((chunk: any) => chunk?.value ?? [])
-        .join(" ");
-      if (queryText.includes("FROM shipped_channel_shipments")) {
-        if (queryText.includes("GROUP BY provider")) {
-          return {
-            rows: [{
-              provider: "shopify",
-              shipped: 1,
-              complete: 0,
-              missing: 1,
-              masked: 0,
-              partial_orders: 0,
-              retrying: 0,
-              dead: 0,
-            }],
-          };
-        }
-        return {
-          rows: [
-            {
-              oms_order_id: 10,
-              shipment_id: 1441,
-              provider: "shopify",
-              pending_retry: false,
-              dead_retry: false,
-            },
-          ],
-        };
-      }
-      return queuedExecute(query);
-    });
 
     const issues = await runOmsFlowReconciliation(
       db,
@@ -492,40 +486,15 @@ describe("oms-flow-reconciliation.service", () => {
   it("leaves replay-after-fix orders for operators while auto-remediating missing shipments", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const inserts: unknown[] = [];
+    const { execute } = checkDb({
+      OMS_PAID_WITHOUT_WMS: { count: 1, sample: [{ oms_order_id: 10 }] },
+      WMS_READY_WITHOUT_SHIPMENT: { count: 1, sample: [{ wms_order_id: 20 }] },
+    }, (_query, text) => text.includes("WHERE wo.id =") && text.includes("FROM wms.orders wo")
+      // The WMS_READY_WITHOUT_SHIPMENT remediation re-reads the order before queueing.
+      ? sampleRows([{ id: 20, oms_order_id: "10" }])
+      : sampleRows([]));
     const db = {
-      execute: vi
-        .fn()
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(1))
-        .mockResolvedValueOnce(sampleRows([{ oms_order_id: 10 }]))
-        .mockResolvedValueOnce(countRows(1))
-        .mockResolvedValueOnce(sampleRows([{ wms_order_id: 20 }]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        // WMS_PARTITION_DUPLICATE_LINE_COVERAGE detector count + sample.
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        // OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT detector count + sample.
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        // CHANNEL_FULFILLMENT_RECEIPT_STALLED detector count + sample.
-        .mockResolvedValueOnce(countRows(0))
-        .mockResolvedValueOnce(sampleRows([]))
-        // Auto-close cleanup finds no resolved dead fulfillment/tracking retries.
-        .mockResolvedValueOnce(sampleRows([]))
-        // WMS_READY_WITHOUT_SHIPMENT remediation SELECT + duplicate retry check + audit event.
-        .mockResolvedValueOnce(sampleRows([{ id: 20, oms_order_id: "10" }]))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(sampleRows([])),
+      execute,
       insert: vi.fn(() => ({
         values: vi.fn(async (row: unknown) => {
           inserts.push(row);
@@ -542,12 +511,35 @@ describe("oms-flow-reconciliation.service", () => {
     ]);
     expect(inserts).toHaveLength(1);
     expect((inserts[0] as any).topic).toBe("wms_shipment_create");
+    expect((inserts[0] as any).payload).toEqual({ wmsOrderId: 20 });
     expect(warn).not.toHaveBeenCalledWith(
       expect.stringContaining("auto-remediated 1 OMS_PAID_WITHOUT_WMS row"),
     );
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("auto-remediated 1 WMS_READY_WITHOUT_SHIPMENT row"),
     );
+    warn.mockRestore();
+  });
+
+  it("reports WMS-final and shipped-package drift but leaves their repair to an operator", async () => {
+    // Both repairs push fulfillments to the channel at once, oldest first with no
+    // age limit. They never ran automatically while their checks were mislabelled.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const ensureLegacyShipment = vi.fn(async () => ({}));
+    const authority = canonicalAuthority(ensureLegacyShipment);
+    const { execute } = checkDb({
+      WMS_FINAL_OMS_OPEN: { count: 1, sample: [{ oms_order_id: 10, wms_order_id: 20 }] },
+      SHIPMENT_SHIPPED_OMS_OPEN: { count: 1, sample: [{ oms_order_id: 11, shipment_id: 30 }] },
+    });
+
+    const issues = await runOmsFlowReconciliation({ execute }, flowDependencies(authority));
+
+    expect(issues.map((issue) => issue.code)).toEqual(["WMS_FINAL_OMS_OPEN", "SHIPMENT_SHIPPED_OMS_OPEN"]);
+    expect(ensureLegacyShipment).not.toHaveBeenCalled();
+    expect(authority.recordPhysicalPackage).not.toHaveBeenCalled();
+    expect(execute.mock.calls.map(([query]) => sqlText(query)).join("\n"))
+      .not.toContain("flow_reconciliation_remediated");
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("auto-remediated"));
     warn.mockRestore();
   });
 
