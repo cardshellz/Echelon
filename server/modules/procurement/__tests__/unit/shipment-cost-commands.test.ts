@@ -112,7 +112,7 @@ const recordedCost: InboundFreightCost = {
   id: 31, inboundShipmentId: 7, costType: "freight", description: null,
   estimatedCents: 100, actualCents: null, currency: "USD", exchangeRate: "1.0000",
   allocationMethod: null, costStatus: "estimated", invoiceNumber: null, invoiceDate: null,
-  dueDate: null, paidDate: null, performedByName: null, vendorId: null,
+  dueDate: null, paidDate: null, performedByName: null, performedByVendorId: null, vendorId: null,
   vendorInvoiceId: null, notes: null, createdAt: NOW, updatedAt: NOW,
 };
 
@@ -128,7 +128,7 @@ describe("shipment cost content versions", () => {
 
   it.each([
     ["actualCents", 0], ["estimatedCents", -100], ["vendorInvoiceId", 19],
-    ["vendorId", 23], ["invoiceNumber", "INV-fixture"], ["notes", "Corrected"],
+    ["vendorId", 23], ["performedByVendorId", 24], ["invoiceNumber", "INV-fixture"], ["notes", "Corrected"],
     ["costStatus", "paid"], ["exchangeRate", "0.9000"], ["currency", "EUR"],
     ["paidDate", new Date("2026-09-07T00:00:00.000Z")],
   ])("detects a change to %s even with an unchanged updatedAt", (field, value) => {

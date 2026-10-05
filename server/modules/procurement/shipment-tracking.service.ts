@@ -800,6 +800,30 @@ export function createShipmentTrackingService(
     return comparable(oldValue) !== comparable(newValue);
   }
 
+  async function resolveCostPerformer(
+    tx: any, updates: Partial<InsertInboundFreightCost>, before: InboundFreightCost | null,
+  ): Promise<Partial<InsertInboundFreightCost>> {
+    if (updates.performedByVendorId === undefined) {
+      // Older clients can still correct text-only evidence. Detach a linked identity
+      // when its recorded name is replaced, rather than keeping contradictory fields.
+      if (before?.performedByVendorId != null && costFieldChanged(before, updates, "performedByName")) {
+        return { ...updates, performedByVendorId: null };
+      }
+      return updates;
+    }
+    if (updates.performedByVendorId === null) {
+      return { ...updates, performedByName: updates.performedByName ?? null };
+    }
+    // SHARE serializes name snapshots with vendor edits/deletion. The invoice
+    // counterparty remains vendorId; the performer never controls AP grouping.
+    const [performer] = await tx.select({ name: vendors.name }).from(vendors)
+      .where(eq(vendors.id, updates.performedByVendorId)).for("share");
+    if (!performer) {
+      costError("The selected service performer no longer exists. Refresh the vendor list and select a vendor.", 422, "SHIPMENT_COST_PERFORMER_NOT_FOUND");
+    }
+    return { ...updates, performedByName: performer.name };
+  }
+
   async function executeCostCommandInTransaction(
     tx: any, command: ShipmentCostCommand, actorId: string, now: Date,
   ) {
@@ -839,7 +863,7 @@ export function createShipmentTrackingService(
       }
     }
 
-    const updates = command.operation === "delete" ? {} : costFields(data);
+    const updates = command.operation === "delete" ? {} : await resolveCostPerformer(tx, costFields(data), before);
     const allocationFields = ["costType", "estimatedCents", "actualCents", "currency", "exchangeRate", "allocationMethod"] as const;
     const protectedFields = [...allocationFields, "vendorId", "invoiceDate"] as const;
     const affectsEconomics = command.operation !== "update" || allocationFields.some((field) => costFieldChanged(before!, updates, field));
