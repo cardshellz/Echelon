@@ -138,6 +138,11 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/pages/dropship/__tests__/DropshipCatalogFrame.test.ts",
       "client/src/lib/__tests__/dropship-ebay-category-rules.test.ts",
       "client/src/pages/dropship/__tests__/DropshipEbayCategoryRulesPanel.test.ts",
+      "shared/dropship/__tests__/program-finance-money.test.ts",
+      "shared/dropship/__tests__/program-finance-contract.test.ts",
+      "shared/dropship/__tests__/program-finance-definitions.test.ts",
+      "client/src/pages/__tests__/dropship-finance-model.test.ts",
+      "client/src/pages/__tests__/dropship-finance-panel.test.ts",
     ]) expect(contracts).toContain(file);
     expect(contracts).toContain("--strict --types node scripts/inventory-cutover-records-*.ts");
   });

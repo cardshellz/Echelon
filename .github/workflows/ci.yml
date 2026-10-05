@@ -151,6 +151,15 @@ jobs:
           client/src/pages/dropship/__tests__/DropshipCatalogFrame.test.ts
           client/src/lib/__tests__/dropship-ebay-category-rules.test.ts
           client/src/pages/dropship/__tests__/DropshipEbayCategoryRulesPanel.test.ts
+      # These paths have no "unit" in them, so test:unit never selects them.
+      - name: Dropship program finance contracts
+        run: >-
+          npx vitest run
+          shared/dropship/__tests__/program-finance-money.test.ts
+          shared/dropship/__tests__/program-finance-contract.test.ts
+          shared/dropship/__tests__/program-finance-definitions.test.ts
+          client/src/pages/__tests__/dropship-finance-model.test.ts
+          client/src/pages/__tests__/dropship-finance-panel.test.ts
 
   check-and-unit:
     # Preserve the existing required check name; skipped/cancelled jobs are failures.
