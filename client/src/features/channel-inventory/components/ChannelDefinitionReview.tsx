@@ -6,11 +6,11 @@ import { channelDefinitionReviewSchema, channelDefinitionReceiptSchema, channelD
 import { Button } from "@/components/ui/button";
 import { requestJson, jsonInit, ChannelInventoryApiError } from "../api";
 import { isDefinitiveDraftRejection } from "../draft-session";
-import { useDraftNavigationBlock } from "../DraftNavigation";
+import { useDraftNavigation, useDraftNavigationBlock } from "../DraftNavigation";
 import { invalidateChannelInventory } from "../hooks";
 import { formatUnits, formatPercent, pluralize } from "../format";
 import { describeDestination, type Channel, type View } from "../model";
-import { Callout, EvidenceNote, SectionCard } from "./primitives";
+import { Callout, EvidenceNote } from "./primitives";
 
 const endpoint = "/api/inventory-planning/admin/channel-definitions";
 const PAGE_SIZE = 25;
@@ -20,6 +20,7 @@ export function ChannelDefinitionReview({ view, channel, canActivate }: {
   view: View; channel: Channel; canActivate: boolean;
 }) {
   const client = useQueryClient();
+  const requestNavigation = useDraftNavigation();
   const [review, setReview] = useState<Review | null>(null);
   const [reviewFingerprint, setReviewFingerprint] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -69,19 +70,23 @@ export function ChannelDefinitionReview({ view, channel, canActivate }: {
     catch { setError("Settings were applied, but the latest display could not be refreshed. Reload this workspace."); }
     finally { inFlight.current = false; setBusy(null); }
   };
-  return <SectionCard title="Saved changes" description={`Review warehouse, stock-rule and listing-link changes for all accounts on ${channel.name}. Applying settings does not start a paused account.`}>
-    {pending && <ul className="flex flex-wrap gap-x-5 gap-y-1 text-sm" aria-label="Settings awaiting review">
-      {sourceHeads.some(head => head.draftBinding) && <li>Warehouse changes</li>}
-      {policyHeads.some(head => head.draftPolicy) && <li>Stock rule changes</li>}
-      {mappingHeads.some(head => head.draftMapping) && <li>Listing link changes</li>}
-    </ul>}
-    {view.runtimeAuthority !== "canonical" ? <EvidenceNote>These settings are saved for first-time inventory setup. They cannot replace the settings currently in use from this page.</EvidenceNote>
-      : <>
-        <Button variant="outline" disabled={!pending || busy !== null || uncertain} onClick={() => void runReview()}>
+  if (!pending && !review && !error && !progress.data && !progress.isError) return null;
+  return <div className="space-y-3 rounded-md border bg-muted/30 p-3" aria-label="Saved channel changes">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="space-y-1">
+        <p className="text-sm font-medium">Saved changes</p>
+        {pending && <ul className="flex flex-wrap gap-x-5 gap-y-1 text-sm" aria-label="Settings awaiting review">
+          {sourceHeads.some(head => head.draftBinding) && <li>Warehouse changes</li>}
+          {policyHeads.some(head => head.draftPolicy) && <li>Stock rule changes</li>}
+          {mappingHeads.some(head => head.draftMapping) && <li>Listing link changes</li>}
+        </ul>}
+      </div>
+      {view.runtimeAuthority !== "canonical"
+        ? <EvidenceNote>These settings are saved for first-time inventory setup. They cannot replace the settings currently in use from this page.</EvidenceNote>
+        : pending && <Button variant="outline" disabled={busy !== null || uncertain} onClick={() => requestNavigation(() => void runReview())}>
           {busy === "review" ? "Checking affected SKUs…" : "Review saved changes"}
-        </Button>
-        {!pending && <p className="text-sm text-muted-foreground">No saved changes to apply.</p>}
-      </>}
+        </Button>}
+    </div>
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
     {review && <div className="space-y-4 rounded-md border p-4" aria-label="Channel changes review">
       <p className="font-medium">{pluralize(review.changes.length, "saved change")} · {pluralize(review.affectedProductIds.length, "affected product")}</p>
@@ -111,7 +116,7 @@ export function ChannelDefinitionReview({ view, channel, canActivate }: {
         </div>}
       </details>
       <EvidenceNote>Stock updates are queued for enabled Echelon accounts. Paused accounts stay paused. Accounts managed elsewhere keep their existing stock manager.</EvidenceNote>
-      {canActivate ? <Button disabled={busy!==null || (!uncertain && (!review.ready || stale))} onClick={() => void apply()}>
+      {canActivate ? <Button disabled={busy!==null || (!uncertain && (!review.ready || stale))} onClick={() => { if (uncertain) void apply(); else requestNavigation(() => void apply()); }}>
         {busy === "apply" ? "Applying…" : uncertain ? "Retry same Apply" : "Apply changes"}
       </Button> : <p className="text-sm">Your role can review but needs inventory activation permission to apply.</p>}
     </div>}
@@ -121,7 +126,7 @@ export function ChannelDefinitionReview({ view, channel, canActivate }: {
         <p>{pluralize(progress.data.publications.length, "stock update")} · {progress.data.publications.filter(row => row.state === "verified").length} confirmed by a marketplace stock check.</p>
         {progress.data.publications.some(row => ["dead_letter","drifted","retryable"].includes(row.state)) && <p className="text-destructive">Some updates need attention. Open Stock preview for update history.</p>}
       </div>}
-  </SectionCard>;
+  </div>;
 }
 
 function destinationLabel(targetId: number, view: View): string {

@@ -36,7 +36,7 @@ async function setup(page: Page, options: {
   const state = { data, writes: [] as Array<{ path: string; body: Record<string, unknown>; raw: string }>,
     applyLostResponse: false, applyConflict: false, reviewBlocked: false, progress: null as ChannelDefinitionProgress | null,
     reads: [] as string[], errors: [] as string[], unexpected: [] as string[], loseResponse: false, conflict: false, invalidResponse: false,
-    globalFailed: false, previewFailed: false,
+    globalFailed: false, previewFailed: false, stopFailed: false,
     statusFailed: false, status: { publicationTargetId: 5, productId: 10, capturedAt: AT, runtimeAuthority: "canonical", targetRevision: "3",
       rows: [{ productVariantId: 101, activeInventoryItemId: "test-item",
         desired: { outboxId: "9", revision: "2", quantity: "60", state: "queued", targetRevision: "3", createdAt: AT },
@@ -57,6 +57,7 @@ async function setup(page: Page, options: {
       } });
       if (path === BASE) return route.fulfill({ json: state.data });
       if (path === "/api/inventory-planning/admin/channel-definitions/3/progress") return route.fulfill({ json: state.progress });
+      if ([4,104].some(id => path === `/api/inventory-planning/admin/channel-definitions/${id}/progress`)) return route.fulfill({ json: null });
       if (path === `${BASE}/preview`) return state.previewFailed
         ? route.fulfill({ status: 503, json: { error: { code: "PREVIEW_UNAVAILABLE", message: "Stock calculation could not be loaded." } } })
         : route.fulfill({ json: {
@@ -81,6 +82,14 @@ async function setup(page: Page, options: {
         contractVersion: "inventory_runtime_authority_readout_v1", authority: options.legacy ? "legacy" : "canonical", liveAllocator: options.legacy ? "channel_allocation" : "inventory_exposure",
         revision: "9", activationRunId: "44", changedBy: "operator-1", changeReason: "Approved", changedAt: AT,
       } });
+    }
+    if (req.method() === "PUT" && path === `${BASE}/publication-target-stop`) {
+      const body = req.postDataJSON(); state.writes.push({ path, body, raw: req.postData()! });
+      if (state.stopFailed) return route.fulfill({ status: 503, json: { error: { code: "STOP_UNAVAILABLE", message: "Stock updates could not be paused." } } });
+      const account = state.data.publicationTargets.find(item => item.id === body.publicationTargetId)!;
+      account.state = "disabled"; account.revision = "4"; account.hasPriorLiveStop = true;
+      return route.fulfill({ json: { publicationTargetId: account.id, revision: "4", state: account.state,
+        alreadyApplied: false, runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false } });
     }
     if (req.method() === "PUT" && path === `${BASE}/publication-target-preview-state`) {
       const body = req.postDataJSON(); state.writes.push({ path, body, raw: req.postData()! });
@@ -145,6 +154,12 @@ test("new Walmart accounts explain startup separately from preview and never off
       publicationTargets: [target({ state: "disabled", hasPriorLiveStop: false, externalScopeId: "10002558022" })],
     },
   });
+  await expect(page.getByRole("tab", { name: "Stock updates", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("switch", { name: "Automatic stock updates for Card Shellz, Location 10002558022", exact: true })).not.toBeChecked();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page).not.toHaveURL(/tab=publishing/);
+  await page.screenshot({ path: info.outputPath("account-stock-toggle.png"), fullPage: true });
+  await page.getByRole("switch", { name: "Automatic stock updates for Card Shellz, Location 10002558022", exact: true }).click();
   await expect(page.getByText("Starting stock updates is unavailable", { exact: true })).toBeVisible();
   await expect(page.getByText(/does not yet support starting a new account from this screen/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Check before resuming", exact: true })).toHaveCount(0);
@@ -161,7 +176,7 @@ test("previously paused accounts prepare for a check without sending stock updat
   const state = await setup(page, { query: "?channel=3&destination=5&tab=publishing", viewOverrides: {
     publicationTargets: [target({ state: "disabled", hasPriorLiveStop: true })],
   } });
-  await page.getByRole("button", { name: "Prepare account", exact: true }).click();
+  await page.getByRole("switch", { name: /^Automatic stock updates for/ }).click();
   const dialog = page.getByRole("alertdialog");
   await expect(dialog).toContainText("This does not turn on automatic stock updates");
   await expect(dialog.getByRole("button", { name: "Prepare account", exact: true })).toBeDisabled();
@@ -194,7 +209,9 @@ test("empty stock selection does not claim the catalog has no sellable SKUs", as
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: info.outputPath("empty-stock-selection.png"), fullPage: true });
   await page.getByRole("button", { name: "Set up stock updates", exact: true }).click();
-  await expect(page.getByRole("tab", { name: "Stock updates", exact: true })).toHaveAttribute("data-state", "active");
+  await expect(page.getByRole("dialog")).toContainText("Automatic stock updates");
+  await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Stock preview", exact: true })).toHaveAttribute("data-state", "active");
   expect(state.writes).toEqual([]); expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
@@ -209,6 +226,7 @@ test("failed global status refresh does not leave an enabled account looking con
   await expect(page.getByText("Enabled", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Stock-update status unavailable", { exact: true })).toBeVisible();
   state.globalFailed = false;
+  await page.getByRole("button", { name: /^Stock update details for/ }).click();
   await page.getByRole("button", { name: "Reload all-channel status", exact: true }).click();
   await expect(page.getByText("Enabled", { exact: true })).toBeVisible();
   expect(state.writes).toEqual([]); expect(state.errors).toEqual([]);
@@ -218,6 +236,7 @@ test("unknown setup history is not treated as a new or previously paused account
   const state = await setup(page, { query: "?channel=3&destination=5&tab=publishing", viewOverrides: {
     publicationTargets: [target({ hasPriorLiveStop: undefined })],
   } });
+  await page.getByRole("switch", { name: /^Automatic stock updates for/ }).click();
   await expect(page.getByText("Account setup history is unavailable", { exact: true })).toBeVisible();
   await expect(page.getByText("Starting stock updates is unavailable", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Check before resuming", exact: true })).toHaveCount(0);
@@ -229,6 +248,7 @@ test("externally managed stock has no Echelon start or pause controls", async ({
     publicationTargets: [target({ state: "live", publicationAuthority: "external_provider" })],
   } });
   await expect(page.getByText("Managed elsewhere", { exact: true })).toBeVisible();
+  await expect(page.getByRole("switch", { name: /^Automatic stock updates for/ })).toHaveCount(0);
   for (const name of ["Prepare account", "Check before resuming", "Resume stock updates", "Pause stock updates"]) {
     await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
   }
@@ -250,6 +270,8 @@ test("view-only operators cannot prepare an account and the all-channel pause st
   const state = await setup(page, { permission: "view", globalEnabled: false, query: "?channel=3&destination=5&tab=publishing",
     viewOverrides: { publicationTargets: [target({ state: "disabled" })] },
   });
+  await expect(page.getByRole("switch", { name: /^Automatic stock updates for/ })).toBeDisabled();
+  await page.getByRole("button", { name: /^Stock update details for/ }).click();
   await expect(page.getByRole("button", { name: "Prepare account", exact: true })).toBeDisabled();
   await page.getByRole("button", { name: "All-channel controls", exact: true }).click();
   await expect(page.getByRole("dialog").getByRole("switch")).toBeDisabled();
@@ -280,7 +302,7 @@ test("Walmart destination setup shows the seller name and fulfillment center ins
 
   state.data.publicationTargets = [target({ channelId: 104, channelConnectionId: 67, externalScopeId: "10002558022" })];
   await page.evaluate(() => window.dispatchEvent(new Event("channel-inventory-test-refresh")));
-  await expect(page.getByRole("group", { name: "Destinations", exact: true }).getByRole("button", { name: /Card Shellz/ })).toBeVisible();
+  await expect(page.getByRole("group", { name: "Destinations", exact: true }).getByRole("button", { name: /^Card Shellz Location/ })).toBeVisible();
   expect(state.writes).toEqual([]);
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
@@ -627,7 +649,7 @@ test("lost Apply responses retain the exact command through background refresh a
   await expect(page.getByText(/Apply outcome is unknown/)).toBeVisible();
   await page.evaluate(() => window.dispatchEvent(new Event("channel-inventory-test-refresh")));
   await expect(page.getByText("Saved settings changed. Review again before applying.", { exact: true })).toBeVisible();
-  await page.getByRole("tab", { name: "Warehouses", exact: true }).click();
+  await page.getByRole("tab", { name: "Stock rules", exact: true }).click();
   await expect(page.getByRole("alertdialog")).toContainText("Resolve the save first");
   await page.getByRole("button", { name: "Keep editing", exact: true }).click();
   await page.getByRole("button", { name: "Retry same Apply", exact: true }).click();
@@ -708,4 +730,67 @@ test("an existing SKU exception can restore complete inheritance as an audited d
   expect(state.writes[0].body).toMatchObject({ expectedHeadRevision: "1", value: { inheritAll: true, shareBps: null,
     allocationSemantics: null, eligible: null, holdbackSellableUnits: null, maxPublish: null, minPublishSellableUnits: null } });
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+
+test("account toggle confirms a pause, preserves its state on cancellation or failure, and changes only after success", async ({ page }, info) => {
+  const state = await setup(page, { query: "?channel=3&destination=5&tab=rules", viewOverrides: {
+    publicationTargets: [target({ state: "live" })],
+  } });
+  const toggle = page.getByRole("switch", { name: /^Automatic stock updates for/ });
+  await expect(toggle).toBeChecked();
+  await expect(page.getByRole("tab", { name: "Stock updates", exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Saved channel changes", { exact: true })).toHaveCount(0);
+  await toggle.click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toContainText("Pausing does not set it to zero");
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(toggle).toBeChecked();
+  expect(state.writes).toEqual([]);
+  await toggle.focus();
+  await page.keyboard.press("Space");
+  await dialog.getByLabel("Reason (required for this publishing command)").fill("Investigate a stock discrepancy");
+  state.stopFailed = true;
+  await dialog.getByRole("button", { name: "Pause stock updates", exact: true }).click();
+  await expect(page.getByText("Stock updates could not be paused.", { exact: true }).first()).toBeVisible();
+  await expect(page.locator('#stock-updates-5')).toBeChecked();
+  state.stopFailed = false;
+  await dialog.getByRole("button", { name: "Pause stock updates", exact: true }).click();
+  await expect(toggle).not.toBeChecked();
+  expect(state.writes).toHaveLength(2);
+  expect(state.writes[1].raw).toBe(state.writes[0].raw);
+  expect(state.writes[1].body).toMatchObject({ publicationTargetId: 5, expectedRevision: "3", changeReason: "Investigate a stock discrepancy" });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath("account-stock-toggle-paused.png"), fullPage: true });
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("saved changes review is available next to rules and protects unsaved edits", async ({ page }) => {
+  const state = await setup(page, { pending: true });
+  await expect(page.getByRole("tab", { name: "Stock rules", exact: true })).toHaveAttribute("data-state", "active");
+  await page.getByLabel("Stock percentage", { exact: true }).fill("70");
+  await page.getByRole("button", { name: "Review saved changes", exact: true }).click();
+  await expect(page.getByRole("alertdialog")).toContainText("Discard unsaved changes?");
+  await page.getByRole("button", { name: "Keep editing", exact: true }).click();
+  await expect(page.getByLabel("Channel changes review", { exact: true })).toHaveCount(0);
+  expect(state.writes).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+
+test("each account toggle operates on its own location without changing the selected account", async ({ page }) => {
+  const state = await setup(page, { query: "?channel=3&destination=5&tab=rules", viewOverrides: {
+    publicationTargets: [target({ state: "live" }), target({ id: 6, state: "live", externalScopeId: "gid://shopify/Location/2" })],
+  } });
+  const first = page.getByRole("switch", { name: /Automatic stock updates.*Location\/1$/ });
+  const second = page.getByRole("switch", { name: /Automatic stock updates.*Location\/2$/ });
+  await expect(first).toBeChecked(); await expect(second).toBeChecked();
+  await second.click();
+  const dialog = page.getByRole("alertdialog");
+  await dialog.getByLabel("Reason (required for this publishing command)").fill("Pause only the second location");
+  await dialog.getByRole("button", { name: "Pause stock updates", exact: true }).click();
+  await expect(second).not.toBeChecked(); await expect(first).toBeChecked();
+  expect(state.writes).toHaveLength(1);
+  expect(state.writes[0].body).toMatchObject({ publicationTargetId: 6, expectedRevision: "3" });
+  await expect(page).toHaveURL(/destination=5/);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });

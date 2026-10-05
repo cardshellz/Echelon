@@ -12,7 +12,7 @@ import { SetUpDestinationsDialog } from "./components/SetUpDestinationsDialog";
 import { ChannelRail, ChannelSelect, ProviderGlyph } from "./components/ChannelRail";
 import { DestinationStrip } from "./components/DestinationStrip";
 import { GlobalPublishingControl } from "./components/GlobalPublishingControl";
-import { PublishingTab } from "./components/PublishingTab";
+import { ChannelDefinitionReview } from "./components/ChannelDefinitionReview";
 import { QuantitiesTab } from "./components/QuantitiesTab";
 import { SellingRulesTab } from "./components/SellingRulesTab";
 import { SupplyTab } from "./components/SupplyTab";
@@ -23,7 +23,7 @@ import { DraftNavigation, useDraftNavigation } from "./DraftNavigation";
 
 export const CHANNEL_INVENTORY_PATH = "/channels/inventory";
 
-const TABS = ["supply", "rules", "quantities", "publishing"] as const;
+const TABS = ["supply", "rules", "quantities"] as const;
 type Tab = typeof TABS[number];
 
 interface PageSelection {
@@ -88,6 +88,7 @@ function AuthorizedChannelInventoryPage() {
     navigate(`${CHANNEL_INVENTORY_PATH}${next ? `?${next}` : ""}`);
   }, [selection, navigate]);
   const [addingDestination, setAddingDestination] = useState(false);
+  const [stockDetailsTargetId, setStockDetailsTargetId] = useState<number | null>(null);
   const now = useCallback(() => new Date(), []);
 
   const viewQuery = useChannelInventoryView(selection.productId);
@@ -103,15 +104,19 @@ function AuthorizedChannelInventoryPage() {
   const targetId = reconcileSelection(selection.targetId, targets);
   const target = targets.find((item) => item.id === targetId) ?? null;
 
+  useEffect(() => setStockDetailsTargetId(null), [channelId]);
+
   // Persist reconciled ids so the URL never points at a channel/destination
   // that no longer exists.
   useEffect(() => {
     if (!view) return;
-    if (channelId !== selection.channelId || targetId !== selection.targetId) {
+    // Existing bookmarks to the removed tab land on the account controls and warehouses.
+    const removedTab = new URLSearchParams(search).get("tab") === "publishing";
+    if (channelId !== selection.channelId || targetId !== selection.targetId || removedTab) {
       const next = writeSelection({ ...selection, channelId, targetId });
       navigate(`${CHANNEL_INVENTORY_PATH}?${next}`, { replace: true });
     }
-  }, [view, channelId, targetId, selection, navigate]);
+  }, [view, channelId, targetId, selection, search, navigate]);
 
   const focusProduct = useCallback((productId: number) => {
     setSelection((current) => (current.productId === productId ? current : { ...current, productId }));
@@ -191,6 +196,11 @@ function AuthorizedChannelInventoryPage() {
 
               <DestinationStrip
                 view={view}
+                channel={channel}
+                canActivate={canActivate}
+                stockDetailsTargetId={stockDetailsTargetId}
+                onStockDetailsChange={setStockDetailsTargetId}
+                onOpenTab={tab => requestNavigation(() => setSelection(current => ({ ...current, tab })))}
                 targets={targets}
                 selectedId={targetId}
                 onSelect={(id) => requestNavigation(() => setSelection((current) => ({ ...current, targetId: id })))}
@@ -198,12 +208,13 @@ function AuthorizedChannelInventoryPage() {
                 onAdd={() => requestNavigation(() => setAddingDestination(true))}
               />
 
+              <ChannelDefinitionReview key={channel.id} view={view} channel={channel} canActivate={canActivate} />
+
               <Tabs value={selection.tab} onValueChange={(value) => requestNavigation(() => setSelection((current) => ({ ...current, tab: value as Tab })))}>
-                <TabsList className="grid h-auto w-full grid-cols-2 gap-1 sm:inline-flex sm:w-auto">
-                  <TabsTrigger value="supply">Warehouses</TabsTrigger>
-                  <TabsTrigger value="rules">Stock rules</TabsTrigger>
-                  <TabsTrigger value="quantities">Stock preview</TabsTrigger>
-                  <TabsTrigger value="publishing">Stock updates</TabsTrigger>
+                <TabsList className="grid h-auto w-full grid-cols-3 gap-1 sm:inline-flex sm:w-auto">
+                  <TabsTrigger value="supply" className="px-2 text-xs sm:px-3 sm:text-sm">Warehouses</TabsTrigger>
+                  <TabsTrigger value="rules" className="px-2 text-xs sm:px-3 sm:text-sm">Stock rules</TabsTrigger>
+                  <TabsTrigger value="quantities" className="px-2 text-xs sm:px-3 sm:text-sm">Stock preview</TabsTrigger>
                 </TabsList>
                 <TabsContent value="supply" className="mt-4">
                   <SupplyTab
@@ -235,22 +246,11 @@ function AuthorizedChannelInventoryPage() {
                     canEdit={canEdit}
                     productId={selection.productId}
                     onProductChange={id => requestNavigation(() => focusProduct(id))}
-                    onManagePublishing={() => requestNavigation(() => setSelection(current => ({ ...current, tab: "publishing" })))}
+                    onManagePublishing={() => setStockDetailsTargetId(targetId)}
                     onAddDestination={() => setAddingDestination(true)}
                     onReload={reload}
                     reloading={viewQuery.isFetching}
                     now={now}
-                  />
-                </TabsContent>
-                <TabsContent value="publishing" className="mt-4">
-                  <PublishingTab
-                    view={view}
-                    channel={channel}
-                    target={target}
-                    canEdit={canEdit}
-                    canActivate={canActivate}
-                    onAddDestination={() => setAddingDestination(true)}
-                    onOpenTab={tab => requestNavigation(() => setSelection(current => ({ ...current, tab })))}
                   />
                 </TabsContent>
               </Tabs>
