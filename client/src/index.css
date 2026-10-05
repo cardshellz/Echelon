@@ -115,6 +115,14 @@
   --chart-3: 38 92% 50%;  /* Warning Orange */
   --chart-4: 262 83% 58%; /* Purple */
   --chart-5: 0 84% 60%;   /* Error Red */
+
+  /* Program finance bar (Dropship, spec §6): the one accent is "kept"; the
+     costs are three greys and the not-yet-costed part is the empty track. */
+  --finance-kept: var(--primary);
+  --finance-cogs: 215 25% 27%;
+  --finance-labels: 215 16% 47%;
+  --finance-pool: 215 20% 65%;
+  --finance-track: var(--muted);
 }
 
 .dark {
@@ -154,6 +162,13 @@
   --sidebar-accent-foreground: 210 40% 98%;
   --sidebar-border: 217 33% 17%;
   --sidebar-ring: 224.3 76.3% 48%;
+
+  /* Program finance bar: the grey ramp reverses so the darkest cost stays furthest from the track. */
+  --finance-kept: var(--primary);
+  --finance-cogs: 213 27% 84%;
+  --finance-labels: 215 20% 65%;
+  --finance-pool: 215 16% 47%;
+  --finance-track: var(--muted);
 }
 
 @layer base {

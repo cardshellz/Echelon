@@ -114,6 +114,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/inventory/__tests__/integration/manual-transfer-command.integration.test.ts",
       "server/modules/inventory/__tests__/integration/inline-replenishment.integration.test.ts",
       "server/modules/membership/__tests__/integration/member-directory.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-finance.integration.test.ts",
     ];
     const priorSuiteCount = 70;
     // Derive the total from the protected baseline and this independent review list,

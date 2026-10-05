@@ -268,6 +268,8 @@ import { EbayOAuthBrandingAdminPanel } from "@/components/dropship/EbayOAuthBran
 import { useAuth } from "@/lib/auth";
 import { DropshipWalletPolicyPanel } from "./dropship-wallet-policy-panel";
 import { DropshipCostChangePolicyPanel } from "./dropship-cost-change-policy-panel";
+import { DropshipFinancePanel } from "./dropship-finance-panel";
+import { DROPSHIP_FINANCE_QUERY_KEY_ROOT } from "./dropship-finance-model";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
 type DogfoodReadinessStatusFilter = DropshipDogfoodReadinessStatus | "all";
@@ -295,6 +297,7 @@ type DropshipOpsTabValue =
   | "order-intake"
   | "wallet-ops"
   | "wallet-policy"
+  | "finance"
   | "cost-changes"
   | "stores"
   | "listing-pushes"
@@ -378,6 +381,7 @@ const dropshipOpsTabValues = new Set<DropshipOpsTabValue>([
   "order-intake",
   "wallet-ops",
   "wallet-policy",
+  "finance",
   "cost-changes",
   "stores",
   "listing-pushes",
@@ -759,6 +763,7 @@ function buildDropshipTabHref(tab: DropshipOpsTabValue): string {
 
 export default function Dropship() {
   const [, navigate] = useLocation();
+  const queryClient = useQueryClient();
   const searchString = useSearch();
   const locationTab = useMemo(
     () => parseDropshipOpsTab(searchString),
@@ -817,6 +822,11 @@ export default function Dropship() {
   function refreshAll() {
     void overviewQuery.refetch();
     void auditQuery.refetch();
+    // The finance tab has no Refresh of its own: the header button refetches
+    // every finance query, keeping the numbers on screen while it runs.
+    if (activeTab === "finance") {
+      void queryClient.refetchQueries({ queryKey: [DROPSHIP_FINANCE_QUERY_KEY_ROOT] });
+    }
   }
 
   function openSmokeOpsSearch(input: Omit<DropshipOpsSearchSignal, "nonce">) {
@@ -928,6 +938,10 @@ export default function Dropship() {
 
           <TabsContent value="wallet-policy" className="m-0">
             <WalletPolicyTab />
+          </TabsContent>
+
+          <TabsContent value="finance" className="m-0">
+            <ProgramFinanceTab />
           </TabsContent>
 
           <TabsContent value="cost-changes" className="m-0">
@@ -4932,6 +4946,16 @@ function OrderIntakeOpsTab({
       />
     </div>
   );
+}
+
+/**
+ * Program finance tab: the program-level money rollup. Every finance route
+ * requires `dropship:manage_operations` (Administrator), read here because
+ * `/dropship` itself is gated by role only.
+ */
+function ProgramFinanceTab() {
+  const { hasPermission } = useAuth();
+  return <DropshipFinancePanel canView={hasPermission("dropship", "manage_operations")} />;
 }
 
 /**
