@@ -1,3 +1,4 @@
+import { legacyTransformationExecutionAuthority } from "../../application/transformation-execution-authority.port";
 import { describe, expect, it, vi } from "vitest";
 import { validateReplenishmentTrigger } from "../../domain/replenishment-trigger";
 import { insertReplenTaskSchema } from "@shared/schema";
@@ -26,7 +27,7 @@ describe("replenishment trigger contract", () => {
 
   it("rejects invalid reasons before either automatic entry point starts work", async () => {
     const db = { transaction: vi.fn() };
-    const service = new ReplenishmentUseCases(db as any, {} as any);
+    const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     await expect(service.createAndExecuteReplen(1, 2, "picker", { triggeredBy: " " }))
       .rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     await expect(service.checkAndTriggerAfterPick(1, 2, "bad\0reason"))

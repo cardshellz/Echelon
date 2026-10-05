@@ -245,7 +245,8 @@ async function main() {
       const inventoryLots = createInventoryLotService(db);
       const cogs = createCOGSService(db);
       const inventoryCore = new InventoryUseCases(db, inventoryStorage, inventoryLots, cogs);
-      replenishment = createReplenishmentService(db, inventoryCore);
+      const { createTransformationExecutionAuthorityRepository } = await import("../server/modules/inventory-planning/infrastructure/transformation-execution-authority.repository");
+      replenishment = createReplenishmentService(db, inventoryCore, () => new Date(), createTransformationExecutionAuthorityRepository(db));
       return replenishment;
     };
 

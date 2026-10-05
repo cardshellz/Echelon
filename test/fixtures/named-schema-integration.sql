@@ -392,6 +392,7 @@ CREATE TABLE inventory.inventory_transactions (
   transaction_type varchar(30) NOT NULL,
   reason_id integer,
   variant_qty_delta integer NOT NULL DEFAULT 0,
+  units_per_variant_snapshot integer CHECK (units_per_variant_snapshot > 0),
   variant_qty_before integer,
   variant_qty_after integer,
   reserved_qty_delta integer,

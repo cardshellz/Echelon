@@ -32,7 +32,8 @@ describe("pick status is forward-only under shipment projection", () => {
       /AND COALESCE\((?:oi|open_items)\.picked_quantity, 0\) < COALESCE\((?:oi|open_items)\.quantity, 0\)/g,
     ) ?? [];
     expect(sqlGuards.length).toBe(2);
-    expect(storage).toContain("(i.pickedQuantity ?? 0) < (i.quantity ?? 0)");
+    // Queue reads no longer run a second in-memory progress/self-heal policy.
+    expect(storage).toContain("return db.transaction(tx => reconcileWmsPickingProgress(tx, orderId,");
     const idx = read("../../../../index.ts");
     expect(idx).toContain("AND COALESCE(oi.picked_quantity, 0) < COALESCE(oi.quantity, 0)");
   });

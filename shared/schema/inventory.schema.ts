@@ -458,6 +458,7 @@ export const inventoryTransactions = inventorySchema.table("inventory_transactio
 
   // Quantity changes in variant units
   variantQtyDelta: integer("variant_qty_delta").notNull().default(0), // Positive = add, negative = remove
+  unitsPerVariantSnapshot: integer("units_per_variant_snapshot"), // Immutable transfer unit basis; null on older receipts.
   variantQtyBefore: integer("variant_qty_before"), // Snapshot: variant qty before at location
   variantQtyAfter: integer("variant_qty_after"), // Snapshot: variant qty after at location
   // Reservation counter delta (variant units). Reserve rows: +qty; unreserve
@@ -843,6 +844,10 @@ export type LocationReplenConfig = typeof locationReplenConfig.$inferSelect;
 
 // Replenishment tasks - work queue for warehouse workers
 export const replenTasks = inventorySchema.table("replen_tasks", {
+  operationKey: text("operation_key"),
+  operationRequestHash: varchar("operation_request_hash", { length: 64 }),
+  revision: integer("revision").notNull().default(0),
+  executionMovedBaseUnits: integer("execution_moved_base_units"),
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   replenRuleId: integer("replen_rule_id").references(() => replenRules.id),
   fromLocationId: integer("from_location_id").notNull().references(() => warehouseLocations.id),

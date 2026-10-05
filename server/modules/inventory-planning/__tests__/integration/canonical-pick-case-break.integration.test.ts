@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -15,6 +15,8 @@ import { PickCorrectionService } from "../../../orders/pick-correction.service";
 import { observeMissingPick } from "../../../wms/pick-correction.repository";
 import { PostgresCanonicalClaimDispatchRepository } from "../../infrastructure/inventory-availability-dispatch.repository";
 import { WmsCanonicalClaimDispatchSourceOwner } from "../../../wms/canonical-claim-dispatch-source";
+import { installWarehouseOperationMigration } from "../../../orders/__tests__/fixtures/install-warehouse-operation-migration";
+import { preparePickingCommand, pickingCommandKey, readPickingCommand } from "../../../wms/picking-command.repository";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -119,6 +121,42 @@ suite.sequential("canonical picker case conversions with active quantity authori
       costs: (await context.pool.query("SELECT * FROM oms.order_item_costs ORDER BY id")).rows,
       item: (await context.pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows };
   }
+
+  it("couples the WMS command receipt to exact canonical movement and replays concurrent requests once", async () => {
+    await installWarehouseOperationMigration(context.pool);
+    await context.pool.query("UPDATE wms.order_items SET unit_price_cents=100,paid_price_cents=100,total_price_cents=200,zone='P' WHERE id=21");
+    const key=pickingCommandKey("pick",randomUUID());
+    const orm=drizzle(context.pool);
+    await preparePickingCommand(orm as any,key,{action:"pick",itemId:21,actor:"picker",params:{pickedQuantity:2,status:"completed"}},()=>now);
+    const input=command({idempotencyKey:key});
+    const attempts=await Promise.allSettled([owner.pickClaimLine(input),owner.pickClaimLine(input)]);
+    expect(attempts.some(attempt=>attempt.status === "fulfilled")).toBe(true);
+    const receipt=await readPickingCommand(orm as any,key);
+    expect(receipt?.physical_receipt?.canonicalResult).toMatchObject({orderId:2,orderItemId:21,quantity:"2"});
+    const beforeReplay=await evidence();
+    await owner.pickClaimLine(input);
+    expect(await evidence()).toEqual(beforeReplay);
+    expect((await context.pool.query("SELECT picked_quantity FROM wms.order_items WHERE id=21")).rows[0].picked_quantity).toBe(2);
+  });
+
+  it("rolls conversion, lot costs, quantity journal and command receipt back if receipt persistence fails", async () => {
+    await installWarehouseOperationMigration(context.pool);
+    await context.pool.query("UPDATE wms.order_items SET unit_price_cents=100,paid_price_cents=100,total_price_cents=200,zone='P' WHERE id=21");
+    const key=pickingCommandKey("pick",randomUUID());
+    const orm=drizzle(context.pool);
+    await preparePickingCommand(orm as any,key,{action:"pick",itemId:21,actor:"picker",params:{pickedQuantity:2,status:"completed"}},()=>now);
+    await context.pool.query(`CREATE FUNCTION wms.fail_command_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.physical_receipt IS NOT NULL THEN RAISE EXCEPTION 'receipt commit failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER fail_command_receipt BEFORE UPDATE ON wms.picking_commands FOR EACH ROW EXECUTE FUNCTION wms.fail_command_receipt()`);
+    const before=await evidence();
+    const input=command({idempotencyKey:key});
+    await expect(owner.pickClaimLine(input)).rejects.toThrow("receipt commit failure");
+    expect(await evidence()).toEqual(before);
+    expect((await readPickingCommand(orm as any,key))?.physical_receipt).toBeNull();
+    await context.pool.query("DROP TRIGGER fail_command_receipt ON wms.picking_commands");
+    await expect(owner.pickClaimLine(input)).resolves.toMatchObject({quantity:"2",outcome:"picked"});
+    expect((await readPickingCommand(orm as any,key))?.physical_receipt).not.toBeNull();
+  });
 
   async function seedRepackagingConfiguration() {
     await context.pool.query(`INSERT INTO catalog.product_variants(id,product_id,sku,units_per_variant,hierarchy_level)

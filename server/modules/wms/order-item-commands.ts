@@ -14,7 +14,7 @@ export type WmsOrderItemExecutor = {
   insert: (...args: any[]) => any;
   update: (...args: any[]) => any;
   delete: (...args: any[]) => any;
-  execute: (query: any) => Promise<any>;
+  execute: (query: any) => PromiseLike<any>;
 };
 
 export class WmsOrderItemCommandError extends Error {

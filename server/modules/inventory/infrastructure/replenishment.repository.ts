@@ -141,9 +141,6 @@ export interface IReplenishmentStorage {
   deleteLocationReplenConfig(id: number): Promise<boolean>;
   getAllReplenTasks(filters?: { status?: string; assignedTo?: string }): Promise<ReplenTask[]>;
   getReplenTaskById(id: number): Promise<ReplenTask | undefined>;
-  createReplenTask(data: InsertReplenTask, tx?: any): Promise<ReplenTask>;
-  updateReplenTask(id: number, updates: Partial<InsertReplenTask>, tx?: any): Promise<ReplenTask | null>;
-  deleteReplenTask(id: number, tx?: any): Promise<boolean>;
   getPendingReplenTasksForLocation(toLocationId: number): Promise<ReplenTask[]>;
   getAllWarehouseSettings(): Promise<WarehouseSettings[]>;
   getWarehouseSettingsByCode(code: string): Promise<WarehouseSettings | undefined>;
@@ -319,24 +316,6 @@ export const replenishmentMethods: IReplenishmentStorage = {
   async getReplenTaskById(id: number): Promise<ReplenTask | undefined> {
     const result = await db.select().from(replenTasks).where(eq(replenTasks.id, id)).limit(1);
     return result[0];
-  },
-
-  async createReplenTask(data: InsertReplenTask, tx: any = db): Promise<ReplenTask> {
-    const result = await tx.insert(replenTasks).values(data).returning();
-    return result[0];
-  },
-
-  async updateReplenTask(id: number, updates: Partial<InsertReplenTask>, tx: any = db): Promise<ReplenTask | null> {
-    const result = await tx.update(replenTasks)
-      .set({ ...updates, updatedAt: new Date() })
-      .where(eq(replenTasks.id, id))
-      .returning();
-    return result[0] || null;
-  },
-
-  async deleteReplenTask(id: number, tx: any = db): Promise<boolean> {
-    const result = await tx.delete(replenTasks).where(eq(replenTasks.id, id));
-    return (result.rowCount ?? 0) > 0;
   },
 
   async getPendingReplenTasksForLocation(toLocationId: number): Promise<ReplenTask[]> {

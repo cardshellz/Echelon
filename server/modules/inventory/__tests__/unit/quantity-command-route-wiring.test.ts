@@ -16,8 +16,8 @@ describe("quantity owner HTTP wiring ratchet", () => {
       const handler = route(inventory, "post", `/api/inventory/${path}`);
       expect(handler).toContain("validateInventoryCommandKey");
       if (path === "transfer") {
-        expect(handler).toContain("inventoryTransferRequestSchema.safeParse(req.body)");
-        expect(handler).toContain("commandKey,");
+        expect(handler).toContain("inventoryTransfers.transfer(req.body, req.session.user?.id");
+        expect(handler).not.toContain("inventoryCore.transfer(");
       } else expect(handler).toContain("commandKey: req.body.commandKey");
       expect(handler).toContain("sendInventoryQuantityError(res, error)");
     });

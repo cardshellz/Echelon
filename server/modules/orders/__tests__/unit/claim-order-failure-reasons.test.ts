@@ -31,7 +31,8 @@ function makeService(opts: {
 
 describe("claimOrder failure reasons", () => {
   it("succeeds and returns order + items when claim is granted", async () => {
-    const claimed = { id: 1, orderNumber: "58054", warehouseStatus: "in_progress", assignedPickerId: "me" };
+    const claimed = { id: 1, orderNumber: "58054", warehouseStatus: "in_progress", assignedPickerId: "me",
+      warehouseId: 1, onHold: 0, startedAt: new Date("2026-10-04T12:00:00Z") };
     const { service } = makeService({ claimResult: claimed, currentOrder: claimed });
     const result = await service.claimOrder(1, "me");
     expect(result.order).toEqual(claimed);

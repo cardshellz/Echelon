@@ -1,3 +1,4 @@
+import { reconcileWmsPickingProgress } from "../wms/picking-progress.repository";
 import {
   type WmsOrder as Order,
   type InsertWmsOrder as InsertOrder,
@@ -21,10 +22,9 @@ import { getSlaCutoffConfig, type SlaCutoffConfig } from "../warehouse/settings.
 import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
 import { recomputeOrderStatusFromShipments } from "./shipment-rollup";
 import { transitionOrderStatus, completeOrder } from "./order-status-core";
-import { completeWmsOrderAndRelease, type ReservationReleaser } from "./cancel-wms-order";
+import { completeWmsOrderAndRelease } from "./cancel-wms-order";
 import type { WmsWarehouseStatus } from "@shared/enums/order-status";
 import {
-  completePendingNonShippingWmsOrderItems,
   finalizePhysicallyCompleteWmsOrderItems,
   incrementWmsOrderItemFulfilledQuantityByShopifyLineId,
   insertWmsOrderItems,
@@ -33,14 +33,6 @@ import {
   setWmsOrderItemLocation,
   syncWmsOrderItemsFulfilledFromOms,
 } from "../wms/order-item-commands";
-
-// Injected at boot (server/index.ts) so the pick-queue self-heal can release
-// leftover reservations when it completes an order — the storage layer cannot
-// reach app.locals.services. Mirrors setOmsFlowReconciliationServices.
-let pickQueueReservation: ReservationReleaser | null = null;
-export function setPickQueueReservationService(reservation: ReservationReleaser): void {
-  pickQueueReservation = reservation;
-}
 
 /**
  * Order statuses that are DERIVED from the underlying shipments via
@@ -361,10 +353,7 @@ export interface IOrderStorage {
   debugPickingQueue(): Promise<any[]>;
   diagnoseOrder(orderNumber: string): Promise<{ order: any; items: any[] }>;
   diagnoseOvercountedOrders(): Promise<any[]>;
-  fixOrderCounts(): Promise<number>;
   getStuckInProgressOrders(): Promise<any[]>;
-  transitionStuckOrder(orderId: number, newStatus: string): Promise<void>;
-  completeNonShippableItems(orderId: number): Promise<void>;
   getOrdersWithShipments(since: Date | null): Promise<{ order: Order; shipment: any | null }[]>;
   getShipmentsByOrderIds(orderIds: number[]): Promise<any[]>;
   getPendingOrderItemsForSku(sku: string): Promise<{ id: number; location: string | null; zone: string | null }[]>;
@@ -421,6 +410,7 @@ export const orderMethods: IOrderStorage = {
         o.on_hold,
         o.held_at,
         o.assigned_picker_id,
+        o.warehouse_id,
         o.started_at AS claimed_at,
         o.completed_at,
         o.exception_at,
@@ -544,6 +534,8 @@ export const orderMethods: IOrderStorage = {
       heldAt: row.held_at,
       assignedPickerId: row.assigned_picker_id,
       claimedAt: row.claimed_at,
+      startedAt: row.claimed_at,
+      warehouseId: row.warehouse_id,
       completedAt: row.completed_at,
       exceptionAt: row.exception_at,
       exceptionType: row.exception_type,
@@ -577,6 +569,8 @@ export const orderMethods: IOrderStorage = {
         order_id,
         oms_order_line_id,
         product_id,
+        catalog_product_id,
+        inventory_tracking,
         sku,
         name,
         barcode,
@@ -603,6 +597,8 @@ export const orderMethods: IOrderStorage = {
       orderId: row.order_id,
       omsOrderLineId: row.oms_order_line_id,
       productId: row.product_id,
+      catalogProductId: row.catalog_product_id,
+      inventoryTracking: row.inventory_tracking,
       sku: row.sku,
       name: row.name,
       title: row.name,
@@ -712,78 +708,6 @@ export const orderMethods: IOrderStorage = {
       itemsByOrderId.set(item.orderId, existing);
     }
     
-    for (const order of orderRows) {
-      if (order.warehouseStatus === "in_progress") {
-        const items = itemsByOrderId.get(order.id) || [];
-        const shippableItems = items.filter(i => i.requiresShipping === 1);
-        const allShippableDone = shippableItems.length > 0 &&
-          shippableItems.every(i => i.status === "completed" || i.status === "short");
-        if (allShippableDone) {
-          const hasShort = shippableItems.some(i => i.status === "short");
-          const fixedStatus: WmsWarehouseStatus = hasShort ? "exception" : "completed";
-          try {
-            const result = await transitionOrderStatus(db, order.id, {
-              from: ["in_progress" as WmsWarehouseStatus],
-              to: fixedStatus,
-              reason: "self_heal_all_items_done",
-              setCompletedAt: true,
-            });
-            if (result.transitioned) {
-              const nonShippablePending = items.filter(i => i.requiresShipping !== 1 && i.status === "pending");
-              for (const item of nonShippablePending) {
-                await persistWmsOrderItemPickProgress(db, {
-                  itemId: item.id,
-                  status: "completed" as ItemStatus,
-                });
-                item.status = "completed";
-              }
-              order.warehouseStatus = fixedStatus;
-              order.completedAt = new Date();
-            }
-          } catch (err) {
-            console.error(`[PickQueue] Failed to auto-fix order ${order.orderNumber}:`, err);
-          }
-        }
-      }
-
-      // Self-heal: auto-complete orders with zero shippable items remaining
-      if (["ready", "in_progress"].includes(order.warehouseStatus)) {
-        const items = itemsByOrderId.get(order.id) || [];
-        const pendingShippable = items.filter(
-          i => i.requiresShipping === 1
-            && !["cancelled", "completed", "short"].includes(i.status)
-            // physically picked = not pickable, whatever the label says
-            && (i.pickedQuantity ?? 0) < (i.quantity ?? 0),
-        );
-        if (pendingShippable.length === 0) {
-          try {
-            // 'completed' is terminal for demand: release leftover reservations
-            // (short/cancelled-item residue) on entry, or they leak forever.
-            const result = pickQueueReservation
-              ? await completeWmsOrderAndRelease(db, pickQueueReservation, order.id, "self_heal_zero_shippable")
-              : await completeOrder(db, order.id, "self_heal_zero_shippable");
-            if (!pickQueueReservation) {
-              console.warn(
-                `[PickQueue] Reservation service not injected — completed order ${order.id} without releasing leftovers`,
-              );
-            }
-            if (result.transitioned) {
-              order.warehouseStatus = "completed";
-              order.completedAt = new Date();
-              console.log(
-                `[PickQueue] Self-healed order ${order.orderNumber} (id=${order.id}): zero shippable items → completed`,
-              );
-            }
-          } catch (err) {
-            console.error(`[PickQueue] Failed to auto-complete zero-item order ${order.orderNumber}:`, err);
-          }
-        }
-      }
-
-      // Shipping transitions belong to shipment processing/reconciliation, not
-      // a page read. In particular, terminal package headers do not prove that
-      // physical order lines without any package have been fulfilled.
-    }
 
     return orderRows.map((order: any) => ({
       ...order,
@@ -1059,47 +983,8 @@ export const orderMethods: IOrderStorage = {
   },
 
   async updateOrderProgress(orderId: number, postPickStatus: string = "ready_to_ship"): Promise<Order | null> {
-    const items = await this.getOrderItems(orderId);
-    const shippableItems = items.filter(item => item.requiresShipping === 1);
-    const pickedCount = shippableItems.reduce((sum, item) => sum + item.pickedQuantity, 0);
-    const itemCount = items.length;
-    const unitCount = items.reduce((sum, item) => sum + item.quantity, 0);
-
-    const allShippableDone = shippableItems.length === 0 ||
-      shippableItems.every(item => item.status === "completed" || item.status === "short");
-    const hasShortItems = shippableItems.some(item => item.status === "short");
-    const allItemsCancelled = items.length > 0 && items.every(item => item.status === "cancelled");
-
-    const updates: any = { pickedCount, itemCount, unitCount };
-    if (allItemsCancelled) {
-      updates.warehouseStatus = "cancelled" as OrderStatus;
-      updates.completedAt = new Date();
-    } else if (allShippableDone) {
-      if (hasShortItems) {
-        updates.warehouseStatus = "exception" as OrderStatus;
-        updates.exceptionAt = new Date();
-        updates.completedAt = new Date();
-      } else {
-        updates.warehouseStatus = postPickStatus as OrderStatus;
-        updates.completedAt = new Date();
-      }
-      
-      const nonShippablePending = items.filter(item => item.requiresShipping !== 1 && item.status === "pending");
-      for (const item of nonShippablePending) {
-        await persistWmsOrderItemPickProgress(db, {
-          itemId: item.id,
-          status: "completed" as ItemStatus,
-        });
-      }
-    }
-    
-    const result = await db
-      .update(orders)
-      .set(updates)
-      .where(eq(orders.id, orderId))
-      .returning();
-    
-    return result[0] || null;
+    return db.transaction(tx => reconcileWmsPickingProgress(tx, orderId,
+      postPickStatus as WmsWarehouseStatus, "system:wms_progress", () => new Date()));
   },
 
   async holdOrder(orderId: number): Promise<Order | null> {
@@ -1510,30 +1395,6 @@ export const orderMethods: IOrderStorage = {
     return result.rows as any[];
   },
 
-  async fixOrderCounts(): Promise<number> {
-    const result = await db.execute(sql`
-      UPDATE wms.orders o
-      SET
-        item_count = sub.actual_item_count,
-        unit_count = sub.actual_unit_count,
-        picked_count = sub.actual_picked_count
-      FROM (
-        SELECT
-          oi.order_id,
-          COUNT(*) as actual_item_count,
-          COALESCE(SUM(oi.quantity), 0) as actual_unit_count,
-          COALESCE(SUM(CASE WHEN oi.requires_shipping = 1 THEN oi.picked_quantity ELSE 0 END), 0) as actual_picked_count
-        FROM wms.order_items oi
-        GROUP BY oi.order_id
-      ) sub
-      WHERE o.id = sub.order_id
-        AND (o.item_count != sub.actual_item_count
-             OR o.unit_count != sub.actual_unit_count
-             OR o.picked_count != sub.actual_picked_count)
-    `);
-    return result.rowCount || 0;
-  },
-
   async getStuckInProgressOrders(): Promise<any[]> {
     const result = await db.execute(sql`
       SELECT o.id, o.order_number, o.warehouse_status, o.item_count,
@@ -1544,19 +1405,6 @@ export const orderMethods: IOrderStorage = {
       WHERE o.warehouse_status = 'in_progress'
     `);
     return result.rows as any[];
-  },
-
-  async transitionStuckOrder(orderId: number, newStatus: string): Promise<void> {
-    await transitionOrderStatus(db, orderId, {
-      from: ["in_progress" as WmsWarehouseStatus],
-      to: newStatus as WmsWarehouseStatus,
-      reason: "fix_stuck_in_progress",
-      setCompletedAt: true,
-    });
-  },
-
-  async completeNonShippableItems(orderId: number): Promise<void> {
-    await completePendingNonShippingWmsOrderItems(db, orderId);
   },
 
   async getOrdersWithShipments(since: Date | null): Promise<{ order: Order; shipment: any | null }[]> {
