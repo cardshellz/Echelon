@@ -111,7 +111,7 @@ export class WalmartClient {
       if (this.token?.value === token) this.token = null;
       // The quantity owner persists each physical rejection. It schedules the next
       // attempt; replaying inside that owner would invalidate its terminal evidence.
-      if (isQuantityRequest(method, url)) throw error;
+      if (isQuantityRequest(method, url) || isListingMaintenanceRequest(method, url)) throw error;
       const renewed = await this.accessToken();
       return this.send(url.href, method, {
         "WM_SEC.ACCESS_TOKEN": renewed,
@@ -165,7 +165,7 @@ export class WalmartClient {
     try {
       let requestBody: BodyInit | undefined = body;
       const requestHeaders = { ...headers };
-      if (isListingSetupFeedRequest(method, new URL(url)) && body !== undefined) {
+      if ((isListingSetupFeedRequest(method, new URL(url)) || isListingMaintenanceRequest(method, new URL(url))) && body !== undefined) {
         // The feed endpoint documents a multipart file upload. Keep the exact
         // approved JSON as the file content; send() still records its semantic
         // hash before transport encoding, independent of multipart boundaries.
@@ -247,6 +247,10 @@ function isQuantityRequest(method: string, url: URL): boolean {
 function isListingSetupFeedRequest(method: string, url: URL): boolean {
   return method === "POST" && url.pathname === "/v3/feeds"
     && ["MP_ITEM", "MP_ITEM_MATCH"].includes(url.searchParams.get("feedType") ?? "");
+}
+
+function isListingMaintenanceRequest(method: string, url: URL): boolean {
+  return method === "POST" && url.pathname === "/v3/feeds" && url.searchParams.get("feedType") === "MP_MAINTENANCE";
 }
 
 function responseMetadata(response: Response, correlationId: string, now: Date): WalmartResponseMetadata {

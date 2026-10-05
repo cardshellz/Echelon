@@ -15,8 +15,10 @@ import { normalizeWalmartListingTaxonomy } from "./walmart-listing-taxonomy";
 export const WALMART_LISTING_SPEC = {
   MP_ITEM: "5.0.20260803-17_50_56-api",
   MP_ITEM_MATCH: "5.0.20260607-22_38_54-api",
+  MP_MAINTENANCE: "5.0.20260803-17_50_56-api",
 } as const;
-export type WalmartListingFeedType = keyof typeof WALMART_LISTING_SPEC;
+export type WalmartListingFeedType = "MP_ITEM" | "MP_ITEM_MATCH";
+export type WalmartItemSchemaFeedType = keyof typeof WALMART_LISTING_SPEC;
 export const walmartListingFeedTypeSchema = z.enum([
   "MP_ITEM",
   "MP_ITEM_MATCH",
@@ -85,6 +87,9 @@ const itemObservationSchema = z.object({
         mart: z.literal("WALMART_US"),
         wpid: providerId.nullish(),
         productName: z.string().max(1_000).optional(),
+        productType: z.string().max(200).optional(),
+        gtin: z.string().max(32).nullish(),
+        upc: z.string().max(32).nullish(),
         lifecycleStatus: z.string().min(1).max(100),
         publishedStatus: z.string().min(1).max(100),
         price: z
@@ -149,10 +154,10 @@ export class WalmartListingApi {
   }
 
   async requirements(
-    feedType: WalmartListingFeedType,
+    feedType: WalmartItemSchemaFeedType,
     productType: string,
   ): Promise<WalmartListingSchema> {
-    walmartListingFeedTypeSchema.parse(feedType);
+    z.enum(["MP_ITEM", "MP_ITEM_MATCH", "MP_MAINTENANCE"]).parse(feedType);
     const version = WALMART_LISTING_SPEC[feedType];
     const response = await this.client.requestWithMetadata(
       "POST",
@@ -160,7 +165,7 @@ export class WalmartListingApi {
       {
         feedType,
         version,
-        ...(feedType === "MP_ITEM"
+        ...(feedType !== "MP_ITEM_MATCH"
           ? { productTypes: [productTypeSchema.parse(productType)] }
           : {}),
       },
@@ -417,5 +422,19 @@ export class WalmartListingApi {
         false,
       );
     return response.metadata;
+  }
+
+  /** Content maintenance cannot carry initial or ongoing inventory quantities. */
+  async submitMaintenance(payload: Record<string, unknown>, correlationId: string): Promise<string> {
+    z.string().uuid().parse(correlationId);
+    const items = z.array(z.object({ Orderable: z.record(z.unknown()) })).length(1).parse(payload.MPItem);
+    if (items.some(item => Object.hasOwn(item.Orderable, "inventory"))) {
+      throw new WalmartApiError("WALMART_MAINTENANCE_STOCK_FORBIDDEN", "Listing edits cannot change stock quantities", false);
+    }
+    if (Buffer.byteLength(JSON.stringify(payload), "utf8") > 1_000_000) {
+      throw new WalmartApiError("WALMART_MAINTENANCE_TOO_LARGE", "The listing changes exceed the supported size", false);
+    }
+    const response = await this.client.requestWithMetadata("POST", "/v3/feeds?feedType=MP_MAINTENANCE", payload, { correlationId });
+    return parse(z.object({ feedId: providerId, error: z.array(z.unknown()).max(0).nullish(), errors: z.array(z.unknown()).max(0).nullish() }), response.data).feedId;
   }
 }

@@ -50,7 +50,7 @@ const issue = (
   message: string,
   field: string | null = null,
 ): ListingIssue => ({ code, message, field });
-function listingErrorDescription(value: string | undefined): string {
+export function listingErrorDescription(value: string | undefined): string {
   // These are structured item-validation descriptions, not arbitrary HTTP error
   // bodies. Bound display text and redact authentication-shaped fragments.
   return (

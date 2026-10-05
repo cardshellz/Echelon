@@ -130,6 +130,7 @@ jobs:
           npx vitest run
           client/src/features/channel-listing-publication/__tests__/api.test.ts
           client/src/features/channel-listing-publication/__tests__/model.test.ts
+          client/src/features/channel-listing-publication/__tests__/listing-update-model.test.ts
       - name: Dropship listing policy UI contracts
         run: >-
           npx vitest run
