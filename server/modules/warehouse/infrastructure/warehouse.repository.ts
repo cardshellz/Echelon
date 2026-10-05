@@ -283,6 +283,43 @@ export async function getBinLocationFromInventoryBySku(sku: string, tx: Tx = db)
   return { location: row.location_code, zone: row.zone || "U", barcode: row.barcode, imageUrl: row.image_url };
 }
 
+/**
+ * Barcode and photo for many SKUs in one read, keyed by upper-case SKU. Same
+ * sources as getBinLocationFromInventoryBySku: the variant's barcode, and the
+ * primary active bin's photo, else the variant's then the product's primary
+ * catalog photo. The pick queue used to call the per-SKU lookup once per SKU,
+ * one after another, on every refresh (2026-10-05).
+ */
+export async function getScanDisplayBySkus(
+  skus: readonly string[],
+  tx: Tx = db,
+): Promise<Map<string, { barcode: string | null; imageUrl: string | null }>> {
+  const wanted = Array.from(new Set(skus.map((sku) => sku.trim().toUpperCase()).filter(Boolean)));
+  const display = new Map<string, { barcode: string | null; imageUrl: string | null }>();
+  if (wanted.length === 0) return display;
+  const result = await tx.execute(sql`
+    SELECT DISTINCT ON (upper(pv.sku)) upper(pv.sku) AS sku, pv.barcode,
+           COALESCE(primary_bin.image_url, variant_asset.url, product_asset.url) AS image_url
+    FROM catalog.product_variants pv
+    LEFT JOIN LATERAL (
+      SELECT pl.image_url FROM warehouse.product_locations pl
+      WHERE pl.product_variant_id = pv.id AND pl.is_primary = 1 AND pl.status = 'active'
+      ORDER BY pl.updated_at DESC LIMIT 1
+    ) primary_bin ON true
+    LEFT JOIN catalog.product_assets variant_asset
+      ON variant_asset.product_variant_id = pv.id AND variant_asset.is_primary = 1
+    LEFT JOIN catalog.product_assets product_asset
+      ON product_asset.product_id = pv.product_id AND product_asset.product_variant_id IS NULL
+     AND product_asset.is_primary = 1
+    WHERE upper(pv.sku) = ANY(ARRAY[${sql.join(wanted.map((sku) => sql`${sku}`), sql`, `)}]::text[])
+    ORDER BY upper(pv.sku), pv.id
+  `);
+  for (const row of result.rows as Array<{ sku: string; barcode: string | null; image_url: string | null }>) {
+    display.set(row.sku, { barcode: row.barcode ?? null, imageUrl: row.image_url ?? null });
+  }
+  return display;
+}
+
 export async function getProductLocationByProductId(productId: number, tx: Tx = db): Promise<ProductLocation | undefined> {
   const result = await tx.select().from(productLocations).where(eq(productLocations.productId, productId));
   return result[0];
