@@ -25,6 +25,7 @@ import type {
 } from "./listing-publication-provider.port";
 import { ListingSubmissionError } from "./listing-publication-provider.port";
 import type { ListingPublicationStore } from "./listing-publication-store.port";
+import type { ListingUpdateStore } from "./listing-update-ports";
 import type { ListingSetupZeroIntent } from "../../inventory-planning/application/listing-setup-zero-intent";
 import {
   ListingPublicationError,
@@ -73,6 +74,8 @@ export interface ListingPublicationDependencies {
   provider(channelId: number): Promise<ListingPublicationProvider>;
   identities(channelId: number): Promise<Pick<ChannelCatalogService, "link">>;
   inventory: ListingPublicationInventory;
+  /** Read only accepted maintenance intent; never adopt an arbitrary provider price. */
+  listingUpdates?: Pick<ListingUpdateStore, "acceptedPrice">;
   now(): Date;
   uuid(): string;
 }
@@ -636,12 +639,20 @@ export class ListingPublicationService {
             await persist();
             continue;
           }
+          // A reviewed maintenance price may supersede initial setup while Walmart
+          // is still activating the item. It must belong to this exact seller SKU
+          // and WPID, follow this creation, and be confirmed by the current readback.
+          const editedPrice = observed.item.sku === item.sku && observed.item.externalProductId
+            ? await this.dependencies.listingUpdates?.acceptedPrice(
+                currentAccount, item.sku, observed.item.externalProductId, new Date(operation.createdAt),
+              )
+            : null;
           if (
             observed.item.sku !== item.sku ||
-            observed.priceCents !== item.priceCents
+            observed.priceCents !== (editedPrice ?? item.priceCents)
           ) {
             item.error =
-              "The observed SKU or price does not yet match the submitted item.";
+              "The observed SKU or price does not yet match the latest accepted submission.";
             await persist();
             continue;
           }

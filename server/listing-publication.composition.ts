@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import { ListingPublicationService } from "./modules/marketplace-listings/application/listing-publication.service";
 import { ListingPublicationError } from "./modules/marketplace-listings/domain/listing-publication";
 import { PostgresListingPublicationRepository } from "./modules/marketplace-listings/infrastructure/pg-listing-publication.repository";
+import { PostgresListingUpdateRepository } from "./modules/marketplace-listings/infrastructure/pg-listing-update.repository";
 import { ChannelListingCatalogRepository } from "./modules/channels/channel-listing-catalog.repository";
 import { WalmartListingProvider } from "./modules/channels/adapters/walmart/walmart-listing.provider";
 import type { WalmartChannelService } from "./modules/channels/adapters/walmart/walmart-channel.service";
@@ -20,6 +21,7 @@ export function createListingPublicationService(input: {
   const provider = new WalmartListingProvider(input.walmart);
   return new ListingPublicationService({
     store: new PostgresListingPublicationRepository(input.pool),
+    listingUpdates: new PostgresListingUpdateRepository(input.pool),
     catalog: new ChannelListingCatalogRepository(input.pool, createCatalogPublicImageUrl(process.env)),
     provider: async (channelId) => {
       await provider.account(channelId);

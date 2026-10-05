@@ -144,6 +144,7 @@ function setup(snapshot = publicationSnapshot()) {
     catalog,
     identities: vi.fn(async () => ({ link })),
     inventory,
+    listingUpdates: { acceptedPrice: vi.fn().mockResolvedValue(null) },
     now: () => new Date(clock),
     uuid: () => testId(uuid++),
   } satisfies ListingPublicationDependencies;
@@ -960,6 +961,27 @@ describe("ListingPublicationService asynchronous worker", () => {
     await h.run();
     expect(h.operation.state).toBe("completed");
     expect(h.provider.submit).toHaveBeenCalledOnce();
+  });
+  it("verifies a later accepted maintenance price without changing the original creation evidence or resending stock", async () => {
+    const h = setup();
+    h.provider.status.mockResolvedValue({ state: "processed", items: [result("SKU-10", "accepted")] });
+    const observation = await h.provider.observe(h.operation.snapshot.account, "SKU-10");
+    h.provider.observe.mockResolvedValue({ ...observation, priceCents: 2799 });
+    h.dependencies.listingUpdates.acceptedPrice.mockResolvedValue(2799);
+    await h.run();
+    expect(h.operation.state).toBe("completed");
+    expect(h.dependencies.listingUpdates.acceptedPrice).toHaveBeenCalledWith(h.operation.snapshot.account, "SKU-10", "WPID-SKU-10", new Date(h.operation.createdAt));
+    expect(h.operation.progress.items[0].priceCents).toBe(1299);
+    expect(h.inventory.submitZero).toHaveBeenCalledOnce();
+    expect(h.link).toHaveBeenCalledOnce();
+  });
+  it("still waits when provider price does not match the accepted maintenance price", async () => {
+    const h = setup();
+    h.provider.status.mockResolvedValue({ state: "processed", items: [result("SKU-10", "accepted")] });
+    h.dependencies.listingUpdates.acceptedPrice.mockResolvedValue(2799);
+    await h.run();
+    expect(h.operation.progress.items[0].state).toBe("accepted");
+    expect(h.link).not.toHaveBeenCalled();
   });
   it("never replays or adopts an uncertain submission without its feed receipt even when the SKU exists", async () => {
     const h = setup();

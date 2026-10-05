@@ -81,7 +81,7 @@ export function registerListingPublicationRoutes(app: Express): void {
   );
 }
 
-function sendError(response: Response, error: unknown): void {
+export function sendError(response: Response, error: unknown): void {
   const known =
     error instanceof ListingPublicationError ||
     error instanceof ChannelProviderError;
