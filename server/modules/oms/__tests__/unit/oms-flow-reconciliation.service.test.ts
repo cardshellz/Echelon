@@ -264,7 +264,7 @@ describe("oms-flow-reconciliation.service", () => {
     // Every query throws. Before 2026-07-07 the first rejection aborted every
     // later step; before 2026-10-05 it emptied all checks at once.
     const db = {
-      execute: vi.fn(async () => {
+      execute: vi.fn(async (_query: unknown) => {
         throw new Error('column "oms_order_id" does not exist');
       }),
     };
