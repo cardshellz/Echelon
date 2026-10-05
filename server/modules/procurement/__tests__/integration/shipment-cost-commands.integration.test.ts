@@ -166,7 +166,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     for (const migration of ["136_financial_command_results.sql", "140_financial_command_operations.sql"]) {
       await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     }
-    await pool.query(readFileSync(resolve(process.cwd(), "migrations/0719_shipment_cost_performer_vendor.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/0722_shipment_cost_performer_vendor.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
     commandTablesReady = true;
     database = drizzle(pool, { schema });
@@ -288,7 +288,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     // Reproduce the pre-upgrade table, including real historical rows.
     await pool.query("ALTER TABLE procurement.inbound_freight_costs DROP COLUMN performed_by_vendor_id");
     const before = await state();
-    const migration = readFileSync(resolve(process.cwd(), "migrations/0719_shipment_cost_performer_vendor.sql"), "utf8");
+    const migration = readFileSync(resolve(process.cwd(), "migrations/0722_shipment_cost_performer_vendor.sql"), "utf8");
     await pool.query(migration);
     await pool.query(migration);
     const after = await state();
