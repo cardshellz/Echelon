@@ -9,6 +9,14 @@ import ts from "typescript";
 // an unrelated page can break startup. Preserve that full runtime dependency
 // graph; narrowing procurement to route-specific pages would be unsafe today.
 export const BROWSER_SUITES = {
+  orderEdits: {
+    config: "playwright.order-edits.config.ts",
+    workflow: ".github/workflows/order-edits.yml",
+    tests: /^test\/browser\/order-edits\.spec\.ts$/,
+    // The pilot renders the real application, including its eager page imports.
+    roots: ["client/src/main.tsx"],
+    ownedPrefixes: ["server/modules/order-edits/", "client/src/pages/OrderEdits.tsx"],
+  },
   procurement: {
     config: "playwright.procurement.config.ts",
     workflow: ".github/workflows/procurement-navigation.yml",

@@ -9,7 +9,7 @@ import { canonicalClaimDispatchSourceRequestSchema } from "../inventory-planning
 const id = z.number().int().positive().max(2_147_483_647);
 const bigintId = z.string().regex(/^[1-9][0-9]{0,18}$/);
 const orderSchema = z.object({ id, warehouse_id: id.nullable(), warehouse_status: z.enum(WMS_WAREHOUSE_STATUS_VALUES),
-  on_hold: z.union([z.literal(0), z.literal(1)]), cancelled: z.boolean() }).strict();
+  on_hold: z.union([z.literal(0), z.literal(1)]), order_edit_operation_id: z.string().uuid().nullish(), cancelled: z.boolean() }).strict();
 const itemSchema = z.object({ id, order_id: id, product_id: id.nullable(),
   status: z.enum(["pending", "in_progress", "short", "completed", "cancelled"]),
   on_hold: z.boolean(), requires_shipping: z.union([z.literal(0), z.literal(1)]) }).strict();
@@ -72,12 +72,12 @@ export class WmsCanonicalClaimDispatchSourceOwner implements CanonicalClaimDispa
     requireFact(settings.rows.length === 1 && settings.rows[0].isolation === "serializable" && settings.rows[0].read_only === "off",
       "WMS_DISPATCH_TRANSACTION_REQUIRED", "Dispatch source locks require the caller's SERIALIZABLE read-write transaction");
 
-    const order = parse(orderSchema, (await client.query(`SELECT id, warehouse_id, warehouse_status, on_hold,
+    const order = parse(orderSchema, (await client.query(`SELECT id, warehouse_id, warehouse_status, on_hold, order_edit_operation_id,
       (cancelled_at IS NOT NULL) AS cancelled FROM wms.orders WHERE id=$1 FOR UPDATE`, [command.orderId])).rows[0], "order");
     requireFact(order.id === command.orderId && order.warehouse_id !== null,
       "WMS_DISPATCH_IDENTITY_MISMATCH", "Order must belong to an explicit dispatch warehouse");
     requireFact(!order.cancelled && order.warehouse_status !== "cancelled", "WMS_DISPATCH_CANCELLED", "Cancelled orders cannot dispatch picked custody");
-    requireFact(order.on_hold === 0 && order.warehouse_status !== "on_hold", "WMS_DISPATCH_HELD", "The order is held");
+    requireFact(order.on_hold === 0 && order.order_edit_operation_id == null && order.warehouse_status !== "on_hold", "WMS_DISPATCH_HELD", "The order is held");
     requireFact(!["exception", "awaiting_3pl"].includes(order.warehouse_status), "WMS_DISPATCH_NOT_AUTHORIZED", "Order requires review or external custody authority");
 
     const item = parse(itemSchema, (await client.query(`SELECT id, order_id, product_id, status, on_hold, requires_shipping

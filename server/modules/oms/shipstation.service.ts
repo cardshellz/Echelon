@@ -11,6 +11,8 @@
  */
 
 import { eq, and, sql } from "drizzle-orm";
+import { z } from "zod";
+import { OrderEditError } from "../order-edits/domain/order-edit-error";
 import { CountryCodeValidationError, requireCountryCode } from "@shared/country-code";
 import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 // Preserve existing callers while sharing the pure normalizer with returns.
@@ -97,6 +99,8 @@ export {
 };
 
 const EBAY_CHANNEL_ID = 67;
+// Provider hold is indefinite; the operation's payment deadline owns recovery.
+const ORDER_EDIT_PROVIDER_HOLD_UNTIL = "2099-12-31";
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
 const SHIPSTATION_SPLIT_SOURCE = "shipstation_split";
 const SHIPSTATION_COMBINED_CHILD_SOURCE = "shipstation_combined_child";
@@ -296,6 +300,7 @@ export interface WmsOrderRow {
   warehouse_status?: string | null;
   financial_status?: string | null;
   cancelled_at?: Date | string | null;
+  order_edit_operation_id?: string | null;
   sort_rank: string | null;
   customer_name: string | null;
   customer_email: string | null;
@@ -4644,9 +4649,11 @@ export function createShipStationService(
   async function releaseOrderFromHold(shipstationOrderId: number): Promise<void> {
     if (!isConfigured()) return;
     try {
-      await apiRequest("POST", "/orders/restorefromhold", {
-        orderId: shipstationOrderId,
-      }, { replaySafe: true });
+      await withOrderEditProviderFence(shipstationOrderId, async () => {
+        await apiRequest("POST", "/orders/restorefromhold", {
+          orderId: shipstationOrderId,
+        }, { replaySafe: true });
+      });
       console.log(`[ShipStation] Order ${shipstationOrderId} released from hold`);
     } catch (err: any) {
       console.error(`[ShipStation] Failed to release order ${shipstationOrderId} from hold:`, err.message);
@@ -4667,6 +4674,142 @@ export function createShipStationService(
       console.warn(`[ShipStation] getOrderById ${shipstationOrderId} failed:`, err.message);
       return null;
     }
+  }
+
+  /** A stale manual release or cosmetic upsert cannot lift an edit-owned hold. */
+  async function withOrderEditProviderFence<T>(providerOrderId: number, write: () => Promise<T>): Promise<T> {
+    return db.transaction(async (tx: any) => {
+      const result = await tx.execute(sql`SELECT wo.id,wo.order_edit_operation_id FROM wms.orders wo
+        WHERE EXISTS(SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id=wo.id
+          AND (os.shipstation_order_id=${providerOrderId} OR (os.shipping_engine='shipstation' AND os.engine_order_ref=${String(providerOrderId)})))
+        ORDER BY wo.id FOR UPDATE OF wo`);
+      if ((result.rows ?? []).some((row: { order_edit_operation_id?: string | null }) => row.order_edit_operation_id != null)) {
+        throw new OrderEditError("ORDER_EDIT_PROVIDER_HELD", "This shipment is held by an order edit.");
+      }
+      return write();
+    });
+  }
+
+  /**
+   * Order-edit shipping owner. Serializes against ordinary push/amend, persists
+   * the original provider hold before mutation, and never creates a new label.
+   */
+  async function synchronizeOrderEditShipment(input: {
+    shipmentId: number; operationId: string; mode: "hold" | "verify" | "synchronize" | "release";
+  }): Promise<void> {
+    z.object({ shipmentId: z.number().int().positive(), operationId: z.string().uuid(),
+      mode: z.enum(["hold", "verify", "synchronize", "release"]) }).strict().parse(input);
+    const providerSchema = z.object({ orderId: z.number().int().positive(), orderNumber: z.string().min(1), orderStatus: z.string(),
+      items: z.array(z.object({ lineItemKey: z.string(), quantity: z.number().int().nonnegative() }).passthrough()) }).passthrough();
+    const itemSchema = z.object({ id: z.number().int().positive(), qty: z.number().int().positive(),
+      sku: z.string(), name: z.string(), unit_price_cents: z.coerce.number().int().nonnegative().safe() });
+    const headerSchema = z.object({ id: z.number().int().positive(), order_id: z.number().int().positive(),
+      provider_order_id: z.number().int().positive().nullable(), order_edit_operation_id: z.string().uuid().nullable(),
+      status: z.string(), on_hold: z.number().int(), held: z.boolean(), requires_review: z.boolean() });
+    async function lock(tx: any) {
+      const source = await tx.execute(sql`SELECT oo.id FROM oms.oms_orders oo JOIN oms.order_edit_operations operation
+        ON operation.oms_order_id=oo.id WHERE operation.id=${input.operationId}::uuid
+        AND operation.status NOT IN ('completed','recovered','expired','failed') FOR UPDATE OF oo`);
+      if (source.rows?.length !== 1) throw new OrderEditError("ORDER_EDIT_HOLD_OWNER_INVALID", "The active edit no longer owns this order.");
+      const order = await tx.execute(sql`SELECT wo.id FROM wms.orders wo
+        WHERE wo.id=(SELECT order_id FROM wms.outbound_shipments WHERE id=${input.shipmentId}) FOR UPDATE OF wo`);
+      if (order.rows?.length !== 1) throw new OrderEditError("ORDER_EDIT_SHIPMENT_MISSING", "The warehouse shipment is unavailable.");
+      const result = await tx.execute(sql`SELECT os.id,os.order_id,os.status,os.held,os.requires_review,
+        COALESCE(os.shipstation_order_id,CASE WHEN os.shipping_engine='shipstation' AND os.engine_order_ref ~ '^[0-9]+$'
+          AND length(os.engine_order_ref)<10 THEN os.engine_order_ref::int END) AS provider_order_id,
+        wo.order_edit_operation_id,wo.on_hold FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id=os.order_id
+        WHERE os.id=${input.shipmentId} FOR UPDATE OF os`);
+      const row = headerSchema.parse(result.rows?.[0]);
+      if (row.order_edit_operation_id !== input.operationId || row.requires_review || !["planned", "queued", "on_hold"].includes(row.status)) {
+        throw new OrderEditError("ORDER_EDIT_SHIPMENT_CHANGED", "The shipment is no longer held by this editable operation.");
+      }
+      // A timed-out push may have created a remote order before its identity
+      // was persisted. Absence of the local ID is not proof of provider absence.
+      if (row.provider_order_id === null) throw new OrderEditError("ORDER_EDIT_PROVIDER_IDENTITY_UNVERIFIED", "Wait for the warehouse shipment to finish linking to ShipStation before editing this order.");
+      return { ...row, provider_order_id: row.provider_order_id };
+    }
+    async function readProvider(providerOrderId: number) {
+      const live = providerSchema.parse(await apiRequest<unknown>("GET", `/orders/${providerOrderId}`));
+      if (live.orderId !== providerOrderId || !["awaiting_shipment", "on_hold"].includes(live.orderStatus)) {
+        throw new OrderEditError("ORDER_EDIT_PROVIDER_NOT_EDITABLE", "ShipStation no longer reports an editable shipment.");
+      }
+      // Provider splits can acquire a different orderId while keeping the
+      // orderNumber. Read the complete number scope so a child label blocks too.
+      const labels = z.object({ shipments: z.array(z.object({ orderId: z.number().int(), orderNumber: z.string(), voided: z.boolean() }).passthrough()),
+        pages: z.number().int().nonnegative() }).passthrough().parse(await apiRequest<unknown>("GET", `/shipments?orderNumber=${encodeURIComponent(live.orderNumber)}&page=1&pageSize=100`));
+      if (labels.pages > 1 || labels.shipments.some(label => label.orderNumber === live.orderNumber && !label.voided)) {
+        throw new OrderEditError("ORDER_EDIT_PROVIDER_LABEL_EXISTS", "A provider label exists or label verification is incomplete.");
+      }
+      const related = z.object({ orders: z.array(z.object({ orderId: z.number().int().positive(), orderNumber: z.string(), orderStatus: z.string() }).passthrough()),
+        pages: z.number().int().nonnegative() }).passthrough().parse(await apiRequest<unknown>("GET", `/orders?orderNumber=${encodeURIComponent(live.orderNumber)}&page=1&pageSize=100`));
+      const known = await db.execute(sql`SELECT COALESCE(os.shipstation_order_id,
+        CASE WHEN os.shipping_engine='shipstation' AND os.engine_order_ref ~ '^[0-9]+$' AND length(os.engine_order_ref)<10 THEN os.engine_order_ref::int END) AS provider_order_id
+        FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id=os.order_id WHERE wo.order_edit_operation_id=${input.operationId}::uuid`);
+      const knownIds = new Set((known.rows ?? []).map((row: { provider_order_id: number | null }) => row.provider_order_id));
+      if (related.pages > 1 || !related.orders.some(order => order.orderId === live.orderId)
+        || related.orders.some(order => order.orderNumber === live.orderNumber && order.orderStatus !== "cancelled" && !knownIds.has(order.orderId))) {
+        throw new OrderEditError("ORDER_EDIT_PROVIDER_SPLIT_UNVERIFIED", "A related ShipStation shipment is not covered by this edit hold.");
+      }
+      return live;
+    }
+    function verifyItems(live: z.infer<typeof providerSchema>, expected: Array<{ lineItemKey: string; quantity: number }>): void {
+      const actual = new Map(live.items.map(item => [item.lineItemKey, item.quantity]));
+      if (actual.size !== live.items.length || actual.size !== expected.length || expected.some(item => actual.get(item.lineItemKey) !== item.quantity)) {
+        throw new OrderEditError("ORDER_EDIT_PROVIDER_QUANTITY_MISMATCH", "ShipStation quantities do not exactly match the edited shipment.");
+      }
+    }
+    await withShipmentPushLock(input.shipmentId, async () => {
+      // Commit baseline hold ownership BEFORE calling holduntil. A timeout after
+      // provider success must not be misclassified as somebody else's hold.
+      if (input.mode === "hold") await db.transaction(async (tx: any) => {
+        const row = await lock(tx);
+        if (!isConfigured()) throw new OrderEditError("ORDER_EDIT_SHIPPING_UNAVAILABLE", "ShipStation is unavailable.");
+        const live = await readProvider(row.provider_order_id);
+        await tx.execute(sql`INSERT INTO oms.order_edit_provider_holds(operation_id,shipment_id,provider_order_id,was_held)
+          VALUES(${input.operationId}::uuid,${input.shipmentId},${row.provider_order_id},${live.orderStatus === "on_hold"})
+          ON CONFLICT(operation_id,shipment_id) DO NOTHING`);
+      });
+      await db.transaction(async (tx: any) => {
+        const row = await lock(tx);
+        if (!isConfigured()) throw new OrderEditError("ORDER_EDIT_SHIPPING_UNAVAILABLE", "ShipStation is unavailable.");
+        const proof = await tx.execute(sql`SELECT provider_order_id,was_held FROM oms.order_edit_provider_holds
+          WHERE operation_id=${input.operationId}::uuid AND shipment_id=${input.shipmentId} FOR UPDATE`);
+        const baseline = z.object({ provider_order_id: z.coerce.number().int().positive().safe(), was_held: z.boolean() }).parse(proof.rows?.[0]);
+        if (baseline.provider_order_id !== row.provider_order_id) throw new OrderEditError("ORDER_EDIT_PROVIDER_IDENTITY_CHANGED", "The provider shipment identity changed.");
+        const live = await readProvider(row.provider_order_id);
+        if (input.mode === "hold") {
+          if (live.orderStatus !== "on_hold") await apiRequest("POST", "/orders/holduntil", { orderId: row.provider_order_id, holdUntilDate: ORDER_EDIT_PROVIDER_HOLD_UNTIL }, { replaySafe: true });
+        } else if (input.mode !== "release" && live.orderStatus !== "on_hold") {
+          throw new OrderEditError("ORDER_EDIT_PROVIDER_HOLD_MISSING", "ShipStation no longer confirms the edit hold.");
+        }
+        let expectedItems: Array<{ lineItemKey: string; quantity: number }> | undefined;
+        if (input.mode === "synchronize" || input.mode === "release") {
+          const result = await tx.execute(sql`SELECT osi.id,osi.qty,oi.sku,oi.name,
+            COALESCE(oi.paid_price_cents,oi.unit_price_cents,0) AS unit_price_cents
+            FROM wms.outbound_shipment_items osi JOIN wms.order_items oi ON oi.id=osi.order_item_id
+            WHERE osi.shipment_id=${input.shipmentId} AND osi.qty>0 AND oi.status<>'cancelled' ORDER BY osi.id`);
+          const rows = z.array(itemSchema).min(1).parse(result.rows);
+          expectedItems = rows.map(item => ({ lineItemKey: `wms-item-${item.id}`, quantity: item.qty }));
+          if (input.mode === "synchronize") {
+            // Currency is persisted in exact cents. Convert only at this legacy
+            // provider's decimal-number boundary; never calculate money here.
+            await apiRequest("POST", "/orders/createorder", { ...live, orderStatus: "on_hold",
+              items: rows.map(item => ({ ...live.items.find(existing => existing.lineItemKey === `wms-item-${item.id}`), lineItemKey: `wms-item-${item.id}`, quantity: item.qty,
+                sku: item.sku, name: item.name, unitPrice: Number(`${Math.floor(item.unit_price_cents / 100)}.${String(item.unit_price_cents % 100).padStart(2, "0")}`) })) }, { replaySafe: true });
+          } else {
+            verifyItems(live, expectedItems);
+            // Preserve preexisting provider, manual order and shipment holds.
+            if (!baseline.was_held && row.on_hold === 0 && !row.held && live.orderStatus === "on_hold") {
+              await apiRequest("POST", "/orders/restorefromhold", { orderId: row.provider_order_id }, { replaySafe: true });
+            }
+          }
+        }
+        const verified = await readProvider(row.provider_order_id);
+        const retainedHold = input.mode !== "release" || baseline.was_held || row.on_hold !== 0 || row.held;
+        if (verified.orderStatus !== (retainedHold ? "on_hold" : "awaiting_shipment")) throw new OrderEditError("ORDER_EDIT_PROVIDER_HOLD_NOT_VERIFIED", "ShipStation hold state was not verified.");
+        if (expectedItems) verifyItems(verified, expectedItems);
+      });
+    });
   }
 
   /**
@@ -4826,14 +4969,14 @@ export function createShipStationService(
     // (createorder reactivates a cancelled SS order — ENGINE-CANCEL-DIVERGENCE-DESIGN.md).
     if (ssOrder.orderStatus === "cancelled") return;
 
-    await apiRequest("POST", "/orders/createorder", {
+    await withOrderEditProviderFence(shipstationOrderId, () => apiRequest("POST", "/orders/createorder", {
       ...ssOrder,
       customField1: sortRank,
       advancedOptions: {
         ...(ssOrder.advancedOptions || {}),
         customField1: sortRank,
       },
-    }, { replaySafe: true });
+    }, { replaySafe: true }));
   }
 
   async function updateSortRankForShipmentRows(
@@ -4986,7 +5129,7 @@ export function createShipStationService(
         continue;
       }
 
-      await apiRequest("POST", "/orders/createorder", {
+      await withOrderEditProviderFence(ssOrderId, () => apiRequest("POST", "/orders/createorder", {
         ...ssOrder,
         shipTo: {
           name: order.shipping_name || order.customer_name || "",
@@ -4999,7 +5142,7 @@ export function createShipStationService(
           country: shippingCountry,
           phone: ssOrder.shipTo?.phone || "",
         },
-      }, { replaySafe: true });
+      }, { replaySafe: true }));
       updated += 1;
       console.log(
         `[ShipStation] Ship-to address updated on SS order ${ssOrderId} (WMS order ${wmsOrderId}, shipment ${row.id}) after address change`,
@@ -5060,14 +5203,15 @@ export function createShipStationService(
     return withShipmentPushLock<EngineShipmentItemAppendResult>(shipmentId, async () => {
       const shipmentResult: any = await db.execute(sql`
         SELECT
-          id,
-          status,
-          held,
-          requires_review,
-          review_reason,
-          shipstation_order_id
-        FROM wms.outbound_shipments
-        WHERE id = ${shipmentId}
+          os.id,
+          os.status,
+          os.held,
+          os.requires_review,
+          os.review_reason,
+          os.shipstation_order_id,
+          wo.order_edit_operation_id
+        FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id=os.order_id
+        WHERE os.id = ${shipmentId}
         LIMIT 1
       `);
       const shipment = shipmentResult?.rows?.[0];
@@ -5136,6 +5280,9 @@ export function createShipStationService(
       // residual-package fallback.
       const liveOrder = await apiRequest<any>("GET", `/orders/${shipstationOrderId}`);
       const providerStatus = String(liveOrder?.orderStatus ?? "unknown").toLowerCase();
+      if (shipment.order_edit_operation_id != null && providerStatus !== "on_hold") {
+        throw new OrderEditError("ORDER_EDIT_PROVIDER_HOLD_MISSING", "ShipStation must remain held while edited lines synchronize.");
+      }
       const liveItems = Array.isArray(liveOrder?.items) ? liveOrder.items : [];
       const existingKeys = new Set(
         liveItems
@@ -5350,6 +5497,7 @@ export function createShipStationService(
       warehouse_status: wmsOrders.warehouseStatus,
       financial_status: wmsOrders.financialStatus,
       cancelled_at: wmsOrders.cancelledAt,
+      order_edit_operation_id: wmsOrders.orderEditOperationId,
       sort_rank: wmsOrders.sortRank,
       external_order_id: wmsOrders.externalOrderId,
       customer_name: wmsOrders.customerName,
@@ -5384,6 +5532,9 @@ export function createShipStationService(
       });
     }
     const finalFinancialStatus = String(orderRow.financial_status ?? "").toLowerCase();
+    if (orderRow.order_edit_operation_id != null) {
+      throw new OrderEditError("ORDER_EDIT_PROVIDER_HELD", "This order is held for an edit; ordinary shipment pushes cannot resume it.");
+    }
     if (
       orderRow.warehouse_status === "cancelled" ||
       orderRow.cancelled_at != null ||
@@ -5798,6 +5949,7 @@ export function createShipStationService(
     updateSortRank,
     updateSortRankSingle: updateShipStationCustomField1,
     syncWmsOrderShipStationHoldState,
+    synchronizeOrderEditShipment,
     syncWmsOrderShipStationShipToAddress,
   };
 }

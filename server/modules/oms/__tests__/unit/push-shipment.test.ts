@@ -1434,7 +1434,8 @@ describe("ShipStation WMS hold/sort sync", () => {
       svc.syncWmsOrderShipStationHoldState(202542, "hold"),
     ).resolves.toEqual({ touched: 2 });
 
-    expect(mock.getCallCount()).toBe(2);
+    // Each cosmetic provider write rechecks the edit hold under the WMS row lock.
+    expect(mock.getCallCount()).toBe(4);
     expect(fetchMock).toHaveBeenCalledTimes(6);
 
     const holdBodies = fetchMock.mock.calls

@@ -1,0 +1,661 @@
+import { describe, expect, it, vi } from "vitest";
+import { OrderEditService } from "../../application/order-edit.service";
+import type {
+  OrderEditProvider,
+  OrderEditQuote,
+  OrderEditSnapshot,
+} from "../../application/order-edit-provider";
+import type {
+  OrderEditRecord,
+  OrderEditReleaseProof,
+  OrderEditStore,
+  OrderEditWarehouse,
+} from "../../application/order-edit-store";
+import type { OrderEditQuoteInput } from "@shared/order-edits/order-edit.contract";
+import { OrderEditError } from "../../domain/order-edit-error";
+import {
+  OrderEditCommitNotSentError,
+  OrderEditProviderError,
+} from "../../application/order-edit-provider";
+
+const OP = "11111111-1111-4111-8111-111111111111";
+const KEY = "22222222-2222-4222-8222-222222222222";
+const REFUND_KEY = "33333333-3333-4333-8333-333333333333";
+const START = Date.parse("2026-10-05T12:00:00.000Z");
+const proof: OrderEditReleaseProof = {
+  allocationRequired: true,
+  wmsOrderIds: [9],
+  shipmentIds: [7],
+  contentFingerprint: "release-proof",
+};
+
+function baseline(): OrderEditSnapshot {
+  return {
+    connectionId: 4,
+    channelId: 36,
+    orderId: "gid://shopify/Order/100",
+    name: "#100",
+    customerId: "gid://shopify/Customer/8",
+    currency: "USD",
+    updatedAt: new Date(START).toISOString(),
+    editable: true,
+    editableErrors: [],
+    cancelled: false,
+    closed: false,
+    fullyPaid: true,
+    totalCents: 2000,
+    outstandingCents: 0,
+    subtotalCents: 2000,
+    taxCents: 0,
+    netPaidCents: 2000,
+    capturableCents: 0,
+    shippingCents: 0,
+    paymentUrl: null,
+    memberPlan: null,
+    memberPricingEnabled: false,
+    discountsPresent: false,
+    lines: [
+      {
+        id: "gid://shopify/LineItem/1",
+        variantId: "gid://shopify/ProductVariant/10",
+        title: "Product",
+        variantTitle: "Single",
+        sku: "TEST",
+        quantity: 2,
+        unfulfilledQuantity: 2,
+        originalUnitPriceCents: 1000,
+        discountedUnitPriceCents: 1000,
+        totalCents: 2000,
+        discountFingerprint: "none",
+        unsupported: false,
+      },
+    ],
+    transactions: [],
+    refunds: [],
+    contentFingerprint: "contents-original",
+    fingerprint: "baseline",
+    evidence: { countryCode: "US" },
+  };
+}
+
+export function serviceHarness(quantity = 3) {
+  let now = START;
+  let current = baseline();
+  let saved: OrderEditRecord | null = null;
+  let enabled = true;
+  let locked = false;
+  const events: Array<{
+    action: string;
+    releaseProof?: OrderEditReleaseProof;
+  }> = [];
+  const connection = () => ({
+    connectionId: 4,
+    channelId: 36,
+    name: "Test store",
+    shopDomain: "test.myshopify.com",
+    paymentWindowMinutes: 30,
+    enabled,
+  });
+  const input: OrderEditQuoteInput = {
+    connectionId: 4,
+    omsOrderId: 1,
+    expectedRevision: "baseline",
+    requestKey: KEY,
+    changes: [{ lineItemId: current.lines[0].id, quantity }],
+    additions: [],
+  };
+  const store: OrderEditStore = {
+    connections: async () => [connection()],
+    settings: async () => connection(),
+    saveSettings: async () => connection(),
+    findOrders: async () => [],
+    orderReference: async () => ({
+      omsOrderId: 1,
+      channelId: 36,
+      connectionId: 4,
+      externalOrderId: "100",
+      externalCustomerId: "8",
+      orderNumber: "#100",
+      customerName: "Test",
+      customerEmail: null,
+      activeOperationId: saved?.id ?? null,
+    }),
+    withOrderLock: async (_id, work) => {
+      if (locked) throw new OrderEditError("ORDER_EDIT_BUSY", "Busy");
+      locked = true;
+      try {
+        return await work();
+      } finally {
+        locked = false;
+      }
+    },
+    findByRequestKey: async (key) =>
+      saved?.requestKey === key ? structuredClone(saved) : null,
+    get: async () => {
+      if (!saved) throw new Error("missing");
+      return structuredClone(saved);
+    },
+    create: async (record) => {
+      if (saved) throw new Error("one active operation");
+      saved = structuredClone(record);
+    },
+    save: async (record, version, _actor, action, releaseProof) => {
+      if (!saved || saved.version !== version) throw new Error("stale version");
+      if (
+        ["completed", "recovered", "expired"].includes(record.status) &&
+        !releaseProof
+      )
+        throw new Error("missing proof");
+      saved = structuredClone(record);
+      events.push({ action, releaseProof });
+    },
+    pending: async () => (saved ? [saved.id] : []),
+  };
+  const quote: OrderEditQuote = {
+    connectionId: 4,
+    channelId: 36,
+    orderId: current.orderId,
+    operationId: OP,
+    calculatedOrderId: "gid://shopify/CalculatedOrder/1",
+    sessionId: "gid://shopify/OrderEditSession/1",
+    baselineFingerprint: current.fingerprint,
+    baseline: baseline(),
+    plan: input,
+    lines: [
+      {
+        title: "Product",
+        variantTitle: "Single",
+        originalLineId: current.lines[0].id,
+        calculatedLineId: "gid://shopify/CalculatedLineItem/1",
+        variantId: current.lines[0].variantId,
+        quantity,
+        originalUnitPriceCents: 1000,
+        discountedUnitPriceCents: 1000,
+        totalCents: quantity * 1000,
+      },
+    ],
+    totalCents: quantity * 1000,
+    outstandingCents: (quantity - 2) * 1000,
+    deltaCents: (quantity - 2) * 1000,
+    shippingCents: 0,
+    createdAt: new Date(START).toISOString(),
+    evidence: {},
+  };
+  const provider = {
+    readOrder: vi.fn(async () => structuredClone(current)),
+    searchVariants: vi.fn(async () => []),
+    quote: vi.fn(async () => structuredClone(quote)),
+    commit: vi.fn(async () => {
+      current = {
+        ...current,
+        lines: [{ ...current.lines[0], quantity, totalCents: quantity * 1000 }],
+        totalCents: quantity * 1000,
+        subtotalCents: quantity * 1000,
+        outstandingCents: (quantity - 2) * 1000,
+        fullyPaid: quantity <= 2,
+        contentFingerprint: "contents-edited",
+        fingerprint: "edited",
+        paymentUrl: "https://test.myshopify.com/pay",
+      };
+      return structuredClone(current);
+    }),
+    reconcileCommit: vi.fn(async () => ({
+      status: "applied" as const,
+      snapshot: structuredClone(current),
+    })),
+    prepareRefund: vi.fn(async () => ({
+      connectionId: 4,
+      channelId: 36,
+      orderId: current.orderId,
+      operationId: OP,
+      idempotencyKey: REFUND_KEY,
+      currency: "USD" as const,
+      amountCents: 2000 - quantity * 1000,
+      parentTransactionId: "gid://shopify/OrderTransaction/1",
+      gateway: "shopify_payments",
+      note: "refund",
+      contentFingerprint: current.contentFingerprint,
+    })),
+    refund: vi.fn<OrderEditProvider["refund"]>(async () => {
+      current = {
+        ...current,
+        netPaidCents: current.totalCents,
+        outstandingCents: 0,
+      };
+      return {
+        status: "succeeded" as const,
+        refundId: "gid://shopify/Refund/1",
+        evidence: {
+          id: "gid://shopify/Refund/1",
+          note: "refund",
+          amountCents: 1000,
+          transactions: [],
+        },
+      };
+    }),
+    recoverUnpaid: vi.fn(async () => {
+      current = baseline();
+      return structuredClone(current);
+    }),
+    reconcileRecovery: vi.fn<OrderEditProvider["reconcileRecovery"]>(
+      async () => ({
+        status: "restored" as const,
+        snapshot: structuredClone(current),
+      }),
+    ),
+  } satisfies OrderEditProvider;
+  const warehouse = {
+    inspect: vi.fn(async () => ({
+      editable: true,
+      reasons: [],
+      wmsOrderIds: [9],
+    })),
+    acquire: vi.fn(async () => {}),
+    assertHeld: vi.fn(async () => {}),
+    reconcileAndRelease: vi.fn(async () => proof),
+    releaseUnchanged: vi.fn(async () => proof),
+  } satisfies OrderEditWarehouse;
+  let uuidCount = 0;
+  const report = vi.fn();
+  const service = new OrderEditService(
+    store,
+    provider,
+    warehouse,
+    () => new Date(now),
+    () => (uuidCount++ === 0 ? OP : REFUND_KEY),
+    report,
+  );
+  return {
+    service,
+    provider,
+    warehouse,
+    input,
+    events,
+    report,
+    store,
+    record: () => saved!,
+    snapshot: () => current,
+    setCurrent: (patch: Partial<OrderEditSnapshot>) => {
+      current = { ...current, ...patch };
+    },
+    advance: (ms: number) => {
+      now += ms;
+    },
+    disable: () => {
+      enabled = false;
+    },
+  };
+}
+
+describe("private order edit orchestration", () => {
+  it("allows safe cancellation only after an explicit not-submitted result", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    h.provider.commit.mockRejectedValueOnce(
+      new OrderEditCommitNotSentError("STOCK_CHANGED", "Stock changed"),
+    );
+    const rejected = await h.service.commit(OP, OP, "staff");
+    expect(rejected.status).toBe("review_required");
+    expect(rejected.canAbandon).toBe(true);
+    expect(h.record()).toMatchObject({
+      commitStartedAt: null,
+      commitKey: null,
+      paymentDeadline: null,
+    });
+    expect(h.events.map((event) => event.action)).toContain("commit_intent");
+    expect(h.events.map((event) => event.action)).toContain(
+      "commit_not_submitted",
+    );
+    await h.service.commit(OP, OP, "staff");
+    expect(h.provider.commit).toHaveBeenCalledTimes(1);
+    expect((await h.service.abandon(OP, "staff")).status).toBe("expired");
+    expect(h.warehouse.releaseUnchanged).toHaveBeenCalledOnce();
+  });
+  it("does not treat a generic rejected provider error as proof nothing was sent", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    h.provider.commit.mockRejectedValueOnce(
+      new OrderEditProviderError(
+        "STOCK_CHANGED",
+        "Unclassified phase",
+        "rejected",
+      ),
+    );
+    expect((await h.service.commit(OP, OP, "staff")).canAbandon).toBe(false);
+    expect(h.record().commitStartedAt).not.toBeNull();
+    await expect(h.service.abandon(OP, "staff")).rejects.toMatchObject({
+      code: "ORDER_EDIT_ALREADY_SUBMITTED",
+    });
+  });
+  it("retains automatic expiry after a transient payment readback outage", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    await h.service.commit(OP, OP, "staff");
+    h.provider.reconcileCommit.mockRejectedValueOnce(
+      new OrderEditProviderError("SHOPIFY_UNAVAILABLE", "Read timed out"),
+    );
+    expect((await h.service.reconcile(OP, "staff")).status).toBe(
+      "awaiting_payment",
+    );
+    expect(h.warehouse.reconcileAndRelease).not.toHaveBeenCalled();
+    h.advance(31 * 60_000);
+    await h.service.sweep();
+    expect(h.record().status).toBe("recovered");
+    expect(h.provider.commit).toHaveBeenCalledTimes(1);
+    expect(h.provider.recoverUnpaid).toHaveBeenCalledTimes(1);
+  });
+  it("replays quote requests without acquiring or staging twice and rejects changed-key payloads", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    await h.service.quote(h.input, "staff");
+    expect(h.provider.quote).toHaveBeenCalledTimes(1);
+    expect(h.warehouse.acquire).toHaveBeenCalledTimes(1);
+    await expect(
+      h.service.quote(
+        { ...h.input, changes: [{ ...h.input.changes[0], quantity: 4 }] },
+        "staff",
+      ),
+    ).rejects.toMatchObject({ code: "ORDER_EDIT_KEY_REUSED" });
+  });
+  it("checks identity, payment and stale revision before creating or holding an operation", async () => {
+    const h = serviceHarness();
+    h.setCurrent({ customerId: "gid://shopify/Customer/99" });
+    await expect(h.service.quote(h.input, "staff")).rejects.toMatchObject({
+      code: "ORDER_EDIT_IDENTITY_CHANGED",
+    });
+    h.setCurrent({
+      customerId: "gid://shopify/Customer/8",
+      fingerprint: "changed",
+    });
+    await expect(h.service.quote(h.input, "staff")).rejects.toMatchObject({
+      code: "ORDER_EDIT_STALE_ORDER",
+    });
+    expect(h.warehouse.acquire).not.toHaveBeenCalled();
+    expect(h.record()).toBeNull();
+  });
+  it("does not stage when picking wins acquisition", async () => {
+    const h = serviceHarness();
+    h.warehouse.acquire.mockRejectedValue(
+      new OrderEditError("ORDER_EDIT_PICKING_CUTOFF", "Picking started"),
+    );
+    expect((await h.service.quote(h.input, "staff")).status).toBe(
+      "review_required",
+    );
+    expect(h.provider.quote).not.toHaveBeenCalled();
+  });
+  it("rechecks warehouse cutoff and quote revision at commit", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    h.warehouse.assertHeld.mockRejectedValue(
+      new OrderEditError("ORDER_EDIT_PICKING_CUTOFF", "Picking started"),
+    );
+    await expect(h.service.commit(OP, OP, "staff")).rejects.toMatchObject({
+      code: "ORDER_EDIT_PICKING_CUTOFF",
+    });
+    expect(h.provider.commit).not.toHaveBeenCalled();
+  });
+  it("persists a commit intent before the provider write and never commits again on retries", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    h.provider.commit.mockImplementation(async () => {
+      expect(h.record().status).toBe("committing");
+      expect(h.record().commitStartedAt).not.toBeNull();
+      throw new Error("response lost");
+    });
+    expect((await h.service.commit(OP, OP, "staff")).status).toBe("committing");
+    await h.service.commit(OP, OP, "staff");
+    expect(h.provider.commit).toHaveBeenCalledTimes(1);
+    expect(h.warehouse.reconcileAndRelease).not.toHaveBeenCalled();
+  });
+  it("serializes concurrent confirmations", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    const results = await Promise.allSettled([
+      h.service.commit(OP, OP, "staff"),
+      h.service.commit(OP, OP, "staff"),
+    ]);
+    expect(
+      results.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(h.provider.commit).toHaveBeenCalledTimes(1);
+  });
+  it("holds an increase for payment and uses the configured window from confirmation", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    h.advance(5 * 60_000);
+    const operation = await h.service.commit(OP, OP, "staff");
+    expect(operation.status).toBe("awaiting_payment");
+    expect(operation.paymentDeadline).toBe(
+      new Date(START + 35 * 60_000).toISOString(),
+    );
+    expect(operation.paymentUrl).toContain("/pay");
+    expect(h.warehouse.reconcileAndRelease).not.toHaveBeenCalled();
+  });
+  it("releases only after full payment and atomic terminal release proof", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    await h.service.commit(OP, OP, "staff");
+    h.setCurrent({ fullyPaid: true, outstandingCents: 0, netPaidCents: 3000 });
+    expect((await h.service.reconcile(OP, "staff")).status).toBe("completed");
+    expect(h.events.at(-1)?.releaseProof).toEqual(proof);
+    await h.service.reconcile(OP, "staff");
+    expect(h.warehouse.reconcileAndRelease).toHaveBeenCalledTimes(1);
+  });
+  it.each([500, 999])(
+    "never automatically recovers a partial additional payment of %s cents",
+    async (extra) => {
+      const h = serviceHarness();
+      await h.service.quote(h.input, "staff");
+      await h.service.commit(OP, OP, "staff");
+      h.advance(31 * 60_000);
+      h.setCurrent({
+        netPaidCents: 2000 + extra,
+        outstandingCents: 1000 - extra,
+      });
+      expect((await h.service.reconcile(OP, "staff")).error?.code).toBe(
+        "ORDER_EDIT_PARTIAL_PAYMENT",
+      );
+      expect(h.provider.recoverUnpaid).not.toHaveBeenCalled();
+    },
+  );
+  it("keeps in-flight payment held even after expiry", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    await h.service.commit(OP, OP, "staff");
+    h.advance(31 * 60_000);
+    h.setCurrent({
+      transactions: [
+        {
+          id: "pending",
+          parentId: null,
+          kind: "SALE",
+          status: "PENDING",
+          gateway: "shopify_payments",
+          amountCents: 1000,
+          manual: false,
+        },
+      ],
+    });
+    expect((await h.service.reconcile(OP, "staff")).error?.code).toBe(
+      "ORDER_EDIT_PAYMENT_PENDING",
+    );
+    expect(h.provider.recoverUnpaid).not.toHaveBeenCalled();
+  });
+  it("automatically restores an unpaid increase once, even if new edits are disabled", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    await h.service.commit(OP, OP, "staff");
+    h.advance(31 * 60_000);
+    h.disable();
+    await h.service.sweep();
+    expect(h.record().status).toBe("recovered");
+    expect(h.provider.recoverUnpaid).toHaveBeenCalledTimes(1);
+    expect(h.events.at(-1)?.releaseProof).toEqual(proof);
+  });
+  it("reconciles recovery after a lost response without a second inverse mutation", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    await h.service.commit(OP, OP, "staff");
+    h.advance(31 * 60_000);
+    h.provider.recoverUnpaid.mockRejectedValueOnce(new Error("lost"));
+    await h.service.reconcile(OP, "staff");
+    h.setCurrent(baseline());
+    expect((await h.service.reconcile(OP, "staff")).status).toBe("recovered");
+    expect(h.provider.recoverUnpaid).toHaveBeenCalledTimes(1);
+  });
+  it("holds a late payment or content conflict during recovery", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    await h.service.commit(OP, OP, "staff");
+    h.advance(31 * 60_000);
+    h.provider.reconcileRecovery.mockImplementation(async () => ({
+      status: "conflict",
+      snapshot: h.snapshot(),
+    }));
+    expect((await h.service.reconcile(OP, "staff")).status).toBe(
+      "review_required",
+    );
+    expect(h.warehouse.reconcileAndRelease).not.toHaveBeenCalled();
+  });
+  it("persists a single refund intent and verifies it on later pending-to-success transitions", async () => {
+    const h = serviceHarness(1);
+    await h.service.quote(h.input, "staff");
+    h.provider.refund.mockImplementationOnce(async () => {
+      expect(h.record().refundIntent?.idempotencyKey).toBe(REFUND_KEY);
+      return {
+        status: "pending",
+        refundId: "refund",
+        evidence: {
+          id: "refund",
+          note: null,
+          amountCents: 1000,
+          transactions: [],
+        },
+      };
+    });
+    expect((await h.service.commit(OP, OP, "staff")).status).toBe("refunding");
+    expect(h.warehouse.reconcileAndRelease).not.toHaveBeenCalled();
+    h.setCurrent({ netPaidCents: 1000, outstandingCents: 0 });
+    expect((await h.service.reconcile(OP, "staff")).status).toBe("completed");
+    expect(h.provider.prepareRefund).toHaveBeenCalledTimes(1);
+    expect(h.provider.refund).toHaveBeenCalledTimes(2);
+    expect(h.provider.refund.mock.calls[0].slice(1)).toEqual(
+      h.provider.refund.mock.calls[1].slice(1),
+    );
+  });
+  it("keeps the hold when warehouse synchronization fails and retries readback, not the financial mutation", async () => {
+    const h = serviceHarness(1);
+    await h.service.quote(h.input, "staff");
+    h.warehouse.reconcileAndRelease.mockRejectedValueOnce(
+      new Error("OMS delayed"),
+    );
+    expect((await h.service.commit(OP, OP, "staff")).status).toBe(
+      "synchronizing",
+    );
+    expect((await h.service.reconcile(OP, "staff")).status).toBe("completed");
+    expect(h.provider.commit).toHaveBeenCalledTimes(1);
+    expect(h.provider.prepareRefund).toHaveBeenCalledTimes(1);
+  });
+  it("abandons an unsubmitted quote without Shopify commit/refund", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    expect((await h.service.abandon(OP, "staff")).status).toBe("expired");
+    expect(h.provider.commit).not.toHaveBeenCalled();
+    expect(h.provider.refund).not.toHaveBeenCalled();
+    expect(h.events.at(-1)?.releaseProof).toEqual(proof);
+  });
+  it("read-only status never causes a financial side effect", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    await h.service.get(OP);
+    expect(h.provider.commit).not.toHaveBeenCalled();
+    expect(h.provider.refund).not.toHaveBeenCalled();
+    expect(h.provider.recoverUnpaid).not.toHaveBeenCalled();
+  });
+  it("continues polling an in-flight payment while hiding the hosted payment link", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    await h.service.commit(OP, OP, "staff");
+    h.setCurrent({
+      transactions: [
+        {
+          id: "pending",
+          parentId: null,
+          kind: "SALE",
+          status: "PENDING",
+          gateway: "shopify_payments",
+          amountCents: 1000,
+          manual: false,
+        },
+      ],
+    });
+    const pending = await h.service.reconcile(OP, "staff");
+    expect(pending.status).toBe("awaiting_payment");
+    expect(pending.paymentUrl).toBeNull();
+    h.setCurrent({
+      transactions: [],
+      fullyPaid: true,
+      netPaidCents: 3000,
+      outstandingCents: 0,
+    });
+    await h.service.sweep();
+    expect(h.record().status).toBe("completed");
+  });
+  it("hides a payment link after expiry without changing the order in a GET", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    await h.service.commit(OP, OP, "staff");
+    h.advance(31 * 60_000);
+    expect((await h.service.get(OP)).paymentUrl).toBeNull();
+    expect(h.provider.recoverUnpaid).not.toHaveBeenCalled();
+  });
+  it("reconciles a refund timeout using the original intent instead of creating a second one", async () => {
+    const h = serviceHarness(1);
+    await h.service.quote(h.input, "staff");
+    h.provider.refund.mockRejectedValueOnce(
+      new OrderEditProviderError(
+        "SHOPIFY_UNAVAILABLE",
+        "Response lost",
+        "unknown",
+      ),
+    );
+    expect((await h.service.commit(OP, OP, "staff")).status).toBe("refunding");
+    await h.service.sweep();
+    expect(h.record().status).toBe("completed");
+    expect(h.provider.prepareRefund).toHaveBeenCalledTimes(1);
+    expect(h.provider.refund.mock.calls[0].slice(1)).toEqual(
+      h.provider.refund.mock.calls[1].slice(1),
+    );
+  });
+  it.each(["REFUND_FAILED", "REFUND_AMBIGUOUS", "REFUND_RETRY_WINDOW_EXPIRED"])(
+    "requires staff review for %s instead of an automatic refund retry",
+    async (code) => {
+      const h = serviceHarness(1);
+      await h.service.quote(h.input, "staff");
+      h.provider.refund.mockRejectedValueOnce(
+        new OrderEditProviderError(code, "Manual reconciliation", "unknown"),
+      );
+      expect((await h.service.commit(OP, OP, "staff")).status).toBe(
+        "review_required",
+      );
+      expect(h.warehouse.reconcileAndRelease).not.toHaveBeenCalled();
+    },
+  );
+  it("offers abandon only before submission, including a rejected quote", async () => {
+    const h = serviceHarness();
+    h.provider.quote.mockRejectedValueOnce(
+      new OrderEditProviderError(
+        "PROMOTION_UNSUPPORTED",
+        "Unsupported promotion",
+      ),
+    );
+    const rejected = await h.service.quote(h.input, "staff");
+    expect(rejected.canAbandon).toBe(true);
+    expect((await h.service.abandon(OP, "staff")).canAbandon).toBe(false);
+    const submitted = serviceHarness();
+    await submitted.service.quote(submitted.input, "staff");
+    expect((await submitted.service.commit(OP, OP, "staff")).canAbandon).toBe(
+      false,
+    );
+  });
+});

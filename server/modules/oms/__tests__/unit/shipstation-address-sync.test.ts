@@ -118,14 +118,17 @@ describe("syncWmsOrderShipStationShipToAddress :: happy path", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(JSON.parse(fetchMock.mock.calls[1][1].body).shipTo.country).toBe(expected);
-    expect(sqlTextOf(mock.executeCalls[2])).toContain("requires_review = false");
+    const reviewUpdates = mock.executeCalls.map(sqlTextOf).filter(statement => statement.includes("requires_review = false"));
+    expect(reviewUpdates).toHaveLength(1);
+    expect(reviewUpdates[0]).toContain("review_reason = 'address_changed_after_push'");
   });
 
   it("swaps ONLY shipTo on ShipStation's own copy and clears the address review flag", async () => {
     const mock = makeDb([
       { rows: [WMS_ORDER_ROW] },                                                  // wms.orders
       { rows: [{ id: 3254, status: "queued", shipstation_order_id: 744000001 }] }, // shipments
-      { rows: [] },                                                                // review-flag clear UPDATE
+      { rows: [] },                                                             // dedicated order-edit hold check
+      { rows: [] },                                                             // review-flag clear UPDATE
     ]);
     const fetchMock = mockFetchQueue([
       SS_ORDER,            // GET /orders/744000001
@@ -155,7 +158,9 @@ describe("syncWmsOrderShipStationShipToAddress :: happy path", () => {
     expect(body.advancedOptions).toEqual(SS_ORDER.advancedOptions);
 
     // Review-flag clear targets ONLY the address reason (invariant 4).
-    const updateSql = sqlTextOf(mock.executeCalls[2]);
+    const updates = mock.executeCalls.map(sqlTextOf).filter(statement => statement.includes("requires_review = false"));
+    expect(updates).toHaveLength(1);
+    const updateSql = updates[0];
     expect(updateSql).toContain("requires_review = false");
     expect(updateSql).toContain("review_reason = 'address_changed_after_push'");
   });
