@@ -5,6 +5,7 @@ import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { parseProcurementRecord } from "@/lib/procurement-navigation";
 import { createReceivingNavigationSession } from "@/lib/receiving-navigation-session";
 import { ReceivingUnitControl } from "@/components/purchasing/ReceivingUnitControl";
+import { ReceivingCountControl } from "@/components/purchasing/ReceivingCountControl";
 import { hasReceivingUnitVersion, ReceivingUnitVersionError, parseReceivingUnitRefresh, parseReceivingLineMutation, receivingSelectedFactor, receivingVariantChange, receivingCompleteAllCommand, receivingCountChange, receivingAddQuantity, recordedReceivingFactor, type ReceivingUnitLine } from "@/lib/receiving-units";
 import { ProcurementContext } from "@/components/procurement-context";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -895,6 +896,35 @@ DEF-456,25,,,5.00,,Location TBD`;
     } finally { if (isCurrentReceiptNavigation(context)) setReloadingUnits(false); }
   }
 
+  function renderReceivedCount(line: ReceivingLine, layout: "mobile" | "desktop") {
+    if (selectedReceipt?.status !== "open" && selectedReceipt?.status !== "receiving") {
+      return selectedReceipt?.status === "draft"
+        ? <span className="text-xs text-muted-foreground italic">Press Start to count</span>
+        : <span>{line.receivedQty}</span>;
+    }
+    const draft = countDrafts[line.id];
+    return <ReceivingCountControl
+      lineId={line.id}
+      value={draft?.value ?? String(line.receivedQty)}
+      hasDraft={!!draft}
+      showSave={line.status !== "complete" || !!draft}
+      // A stale or ambiguous response must not leave a green confirmation on
+      // the previous count after its draft is discarded; verify the source first.
+      confirmed={line.status === "complete" && !draft && hasReceivingUnitVersion(line) && recordedReceivingFactor(line) !== null && !unitErrors[line.id]}
+      disabled={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
+      discardDisabled={updateLineMutation.isPending}
+      compact={layout === "desktop"}
+      saveTestId={layout === "desktop" ? `btn-complete-line-${line.id}` : `btn-complete-line-mobile-${line.id}`}
+      onChange={(value) => setReceivedDraft(line, value)}
+      onSave={() => saveReceivedCount(line)}
+      onDiscard={() => setCountDrafts((current) => {
+        const next = { ...current };
+        delete next[line.id];
+        return next;
+      })}
+    />;
+  }
+
   function renderUnitControl(line: ReceivingLine) {
     const mutable = !!selectedReceipt && !["closed", "cancelled"].includes(selectedReceipt.status);
     // Older or incomplete command responses need a source read, not a guessed version.
@@ -911,7 +941,6 @@ DEF-456,25,,,5.00,,Location TBD`;
         <p>{error.message}</p>
         {error.needsRefresh && <Button size="sm" variant="outline" className="mt-2 h-auto min-h-10 whitespace-normal" disabled={reloadingUnits || updateLineMutation.isPending} onClick={() => void reloadReceiptUnits(line.id)}>Load latest line and discard count draft</Button>}
       </div>}
-      {countDrafts[line.id] && <Button size="sm" variant="ghost" disabled={updateLineMutation.isPending} onClick={() => setCountDrafts((current) => { const next = { ...current }; delete next[line.id]; return next; })}>Discard count draft</Button>}
     </div>;
   }
   const updateReceiptMutation = useMutation({
@@ -2033,7 +2062,10 @@ DEF-456,25,,,5.00,,Location TBD`;
                 </div>
 
                 {selectedReceipt.status !== "closed" && (receiveUnitsNeedReview || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0) && (
-                  <p className="rounded border border-amber-400/50 p-3 text-sm text-amber-800 dark:text-amber-200">Before closing, confirm every receive unit and save or discard count drafts. Resolve line errors by loading the latest receipt.</p>
+                  <div className="space-y-2 rounded border border-amber-400/50 p-3 text-sm text-amber-800 dark:text-amber-200">
+                    {Object.keys(countDrafts).length > 0 && <p>You have unsaved received counts. Use Confirm count beside each Received field, or press Enter in the field, before finalizing.</p>}
+                    {(receiveUnitsNeedReview || Object.keys(unitErrors).length > 0) && <p>Confirm receive units and resolve line errors before finalizing. Load the latest receipt when a line requires refresh.</p>}
+                  </div>
                 )}
 
                 {/* Receive-time validation warnings (Spec D, Part 2) — advisory,
@@ -2216,23 +2248,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                 </div>
                                 <div>
                                   <Label className="text-xs text-muted-foreground">Received</Label>
-                                  {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") ? (
-                                    <Input
-                                      type="number"
-                                      aria-label={"Received count for line " + line.id}
-                                      value={countDrafts[line.id]?.value ?? String(line.receivedQty)}
-                                      onChange={(e) => setReceivedDraft(line, e.target.value)}
-                                      onKeyDown={(e) => { if (e.key === "Enter") saveReceivedCount(line); }}
-                                      disabled={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
-                                      className="h-10 w-full mt-1"
-                                      min={0}
-                                      autoComplete="off"
-                                    />
-                                  ) : selectedReceipt.status === "draft" ? (
-                                    <div className="text-xs text-muted-foreground italic mt-1">Press Start to count</div>
-                                  ) : (
-                                    <div className="font-medium">{line.receivedQty}</div>
-                                  )}
+                                  {renderReceivedCount(line, "mobile")}
                                 </div>
                               </div>
                               <div className="flex items-center justify-between gap-2">
@@ -2272,22 +2288,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                     )}
                                   </div>
                                 </div>
-                                {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") && (line.status !== "complete" || !!countDrafts[line.id]) && (
-                                  <Button
-                                    variant="outline"
-                                    size="sm"
-                                    className="min-h-[44px]"
-                                    onClick={() => saveReceivedCount(line)}
-                                    disabled={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
-                                    data-testid={`btn-complete-line-mobile-${line.id}`}
-                                  >
-                                    <Check className="h-4 w-4 mr-1" />
-                                    Save count
-                                  </Button>
-                                )}
-                                {line.status === "complete" && (
-                                  <Check className="h-5 w-5 text-green-600" />
-                                )}
+
                                 {selectedReceipt.status === "closed" &&
                                   ((line.receivedQty ?? 0) - (line.reversedQty ?? 0)) > 0 && (
                                   <Button
@@ -2336,13 +2337,12 @@ DEF-456,25,,,5.00,,Location TBD`;
                           {selectedReceipt.status === "closed" && <TableHead>Reversed</TableHead>}
                           {selectedReceipt.status === "closed" && <TableHead></TableHead>}
                           {selectedReceipt.status !== "closed" && <TableHead>Issues</TableHead>}
-                          {selectedReceipt.status !== "closed" && <TableHead></TableHead>}
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {sortedLines.length === 0 ? (
                           <TableRow>
-                            <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
+                            <TableCell colSpan={selectedReceipt.status === "closed" ? 9 : 8} className="text-center text-muted-foreground py-8">
                               No lines yet. Import CSV or add lines manually.
                             </TableCell>
                           </TableRow>
@@ -2354,26 +2354,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                               <TableCell className="min-w-64">{renderUnitControl(line)}</TableCell>
                               <TableCell className="whitespace-nowrap"><b>{line.expectedQty}</b> receive units</TableCell>
                               <TableCell>
-                                {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") ? (
-                                  <div>
-                                    <Input
-                                      type="number"
-                                      aria-label={"Received count for line " + line.id}
-                                      value={countDrafts[line.id]?.value ?? String(line.receivedQty)}
-                                      onChange={(e) => setReceivedDraft(line, e.target.value)}
-                                      onKeyDown={(e) => { if (e.key === "Enter") saveReceivedCount(line); }}
-                                      disabled={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
-                                      className="w-20 h-10"
-                                      min={0}
-                                      autoComplete="off"
-                                    />
-
-                                  </div>
-                                ) : selectedReceipt.status === "draft" ? (
-                                  <span className="text-xs text-muted-foreground italic">Press Start to count</span>
-                                ) : (
-                                  line.receivedQty
-                                )}
+                                {renderReceivedCount(line, "desktop")}
                               </TableCell>
                               <TableCell>
                                 {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") ? (
@@ -2467,28 +2448,6 @@ DEF-456,25,,,5.00,,Location TBD`;
                                       )}
                                     </div>
                                   )}
-                                </TableCell>
-                              )}
-                              {selectedReceipt.status !== "closed" && (
-                                <TableCell>
-                                  {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") && (
-                                    (line.status !== "complete" || !!countDrafts[line.id]) ? (
-                                    <Button
-                                      variant="ghost"
-                                      size="sm"
-                                      className="min-h-[44px]"
-                                      onClick={() => saveReceivedCount(line)}
-                                      disabled={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
-                                      aria-label={"Save received count for line " + line.id}
-                                      data-testid={`btn-complete-line-${line.id}`}
-                                    >
-                                      <Check className="h-4 w-4" />
-                                    </Button>
-                                  ) : (!line.productVariantId || !line.putawayLocationId) ? (
-                                    <AlertTriangle className="h-4 w-4 text-amber-500" />
-                                  ) : (
-                                    <Check className="h-4 w-4 text-green-600" />
-                                  ))}
                                 </TableCell>
                               )}
                             </TableRow>
