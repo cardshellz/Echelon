@@ -162,6 +162,7 @@ type Storage = {
   getProductVariantById: (id: number) => Promise<any | undefined>;
   getProductVariantsByProductId: (productId: number) => Promise<any[]>;
   getBinLocationFromInventoryBySku: (sku: string) => Promise<{ location: string; zone: string; barcode: string | null; imageUrl: string | null } | undefined>;
+  getScanDisplayBySkus: (skus: readonly string[]) => Promise<Map<string, { barcode: string | null; imageUrl: string | null }>>;
   createPickingLog: (log: any) => Promise<any>;
   updateOrderProgress: (orderId: number, postPickStatus?: string) => Promise<Order | null>;
   claimOrder: (orderId: number, pickerId: string) => Promise<Order | null>;
@@ -4226,9 +4227,21 @@ export class PickingUseCases {
       skus.add(item.sku);
     }
     const display = new Map<string, ScanDisplay>();
+    if (skus.size === 0) return display;
+    let bySku: Map<string, ScanDisplay>;
+    try {
+      // One read for the whole queue: per-SKU lookups made every refresh slow
+      // enough to fill the page-read limit (503s) on 2026-10-05.
+      bySku = await this.storage.getScanDisplayBySkus(Array.from(skus));
+    } catch (error) {
+      // Barcode and photo are display only; never let them fail the pick queue.
+      console.warn(JSON.stringify({ level: "warn", action: "picker_scan_display", outcome: "skipped",
+        error: error instanceof Error ? error.message : String(error) }));
+      return display;
+    }
     for (const sku of Array.from(skus)) {
-      const found = await this.storage.getBinLocationFromInventoryBySku(sku);
-      if (found) display.set(sku, { barcode: found.barcode, imageUrl: found.imageUrl });
+      const found = bySku.get(sku.trim().toUpperCase());
+      if (found) display.set(sku, found);
     }
     return display;
   }
