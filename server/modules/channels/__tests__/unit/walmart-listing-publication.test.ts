@@ -6,7 +6,7 @@ import {
   type ListingCatalogItem,
 } from "@shared/types/channel-listing-publication";
 import type { WalmartChannelService } from "../../adapters/walmart/walmart-channel.service";
-import { WalmartApiError } from "../../adapters/walmart/walmart-client";
+import { WalmartApiError, WalmartClient } from "../../adapters/walmart/walmart-client";
 import {
   WalmartListingApi,
   WALMART_LISTING_SPEC,
@@ -15,6 +15,9 @@ import {
 import { WalmartListingProvider } from "../../adapters/walmart/walmart-listing.provider";
 import {
   priceFromWalmart,
+  compileListingSchema,
+  listingSubmissionSchema,
+  jsonObject,
   sameProductIdentifier,
   validProductIdentifier,
 } from "../../adapters/walmart/walmart-listing-schema";
@@ -30,6 +33,7 @@ import {
 import createSchema from "../fixtures/walmart-listing-sleeves.schema.json";
 import matchSchema from "../fixtures/walmart-listing-match.schema.json";
 import { createCatalogPublicImageUrl } from "../../../catalog/catalog-public-image";
+import { QuantityProviderEvidenceCollector } from "../../../inventory-planning/application/quantity-provider-request-evidence";
 
 const account: ListingAccount = {
   channelId: 104,
@@ -188,10 +192,90 @@ describe("Walmart listing provider", () => {
     expect(prepared.issues).toEqual([]);
     expect(prepared.payload.Orderable).toMatchObject({
       sku: "SLEEVES-100",
+      specProductType: type,
       price: 12.99,
       inventory: [{ quantity: 0, fulfillmentCenterID: "12345" }],
     });
     expect(prepared.schemaHash).toHaveLength(64);
+  });
+
+  it("binds the documented selector without changing the provider schema or admitting other extra fields", async () => {
+    const original = structuredClone(createSchema);
+    const { provider } = setup();
+    const prepared = await provider.prepare(account, { catalog, draft: draft(), priceCents: 1299 });
+    const validate = compileListingSchema(listingSubmissionSchema(createSchema, "MP_ITEM", type));
+    const header = { businessUnit: "WALMART_US", locale: "en", version: WALMART_LISTING_SPEC.MP_ITEM };
+    const payload = { MPItemFeedHeader: header, MPItem: [prepared.payload] };
+    expect(validate(payload)).toBe(true);
+    const orderable = prepared.payload.Orderable as Record<string, unknown>;
+    const withOffer = (offer: Record<string, unknown>) => ({ ...payload, MPItem: [{ ...prepared.payload, Orderable: offer }] });
+    expect(validate(withOffer({ ...orderable, specProductType: "default" }))).toBe(false);
+    expect(validate(withOffer({ ...orderable, unknownField: "unexpected" }))).toBe(false);
+    expect(validate(withOffer({ ...orderable, ShippingWeight: -1 }))).toBe(false);
+    expect(createSchema).toEqual(original);
+    expect(listingSubmissionSchema(matchSchema, "MP_ITEM_MATCH", "")).toBe(matchSchema);
+    expect(() => listingSubmissionSchema(createSchema, "MP_ITEM", "Unknown type")).toThrow();
+    expect(() => listingSubmissionSchema(createSchema, "MP_ITEM", "__proto__")).toThrow();
+  });
+
+  it("retains any provider-supplied selector constraints", async () => {
+    const schema = structuredClone(createSchema);
+    const orderable = jsonObject(schema.properties.MPItem.items.properties.Orderable);
+    orderable.properties = { ...jsonObject(orderable.properties), specProductType: { type: "string", enum: ["Other type"] } };
+    const { provider } = setup();
+    const item = await provider.prepare(account, { catalog, draft: draft(), priceCents: 1299 });
+    const validate = compileListingSchema(listingSubmissionSchema(schema, "MP_ITEM", type));
+    expect(validate({ MPItemFeedHeader: { businessUnit: "WALMART_US", locale: "en", version: WALMART_LISTING_SPEC.MP_ITEM }, MPItem: [item.payload] })).toBe(false);
+  });
+
+  it.each([undefined, "default"])("blocks a missing or conflicting approved selector (%s) before sending", async (selector) => {
+    const { provider, api } = setup();
+    const item = await provider.prepare(account, { catalog, draft: draft(), priceCents: 1299 });
+    const offer = item.payload.Orderable as Record<string, unknown>;
+    if (selector === undefined) delete offer.specProductType;
+    else offer.specProductType = selector;
+    const beforeSubmit = vi.fn();
+    await expect(runWithListingSetupZeroAdmission(intent(), () => provider.submit(account, {
+      operationId, correlationId, items: [item], zeroStockAdmission: intent(), beforeSubmit,
+    }))).rejects.toMatchObject({ code: "WALMART_LISTING_REVIEW_STALE", effect: "not_sent" });
+    expect(api.submitFeed).not.toHaveBeenCalled();
+  });
+
+  it("sends the selected type and all content through the real API client as an unchanged JSON file", async () => {
+    const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({ access_token: "test-token", expires_in: 900, token_type: "Bearer" }))
+      .mockResolvedValueOnce(json({}, 404))
+      .mockResolvedValueOnce(json({ schema: createSchema }))
+      .mockResolvedValueOnce(json({}, 404))
+      .mockResolvedValueOnce(json({ feedId: "feed@US" }));
+    const api = new WalmartListingApi(new WalmartClient({
+      clientId: "test-client", clientSecret: "test-secret", environment: "production", market: "us",
+    }, { fetch: fetchMock as typeof fetch, now: () => new Date("2026-10-05T12:00:00Z"), correlationId: () => correlationId }));
+    const { channels } = setup();
+    const provider = new WalmartListingProvider({ ...channels, listingApi: () => api } as unknown as WalmartChannelService);
+    const item = await provider.prepare(account, { catalog, draft: draft(), priceCents: 1299 });
+    expect(item.issues).toEqual([]);
+    const store = { start: vi.fn().mockResolvedValue("request-1"), finish: vi.fn().mockResolvedValue(undefined) };
+    const collector = new QuantityProviderEvidenceCollector(store, () => new Date("2026-10-05T12:00:00Z"));
+    await collector.run(() => runWithListingSetupZeroAdmission(intent(), () => provider.submit(account, {
+      operationId, correlationId, items: [item], zeroStockAdmission: intent(), beforeSubmit: async () => {},
+    })));
+    collector.assertSingleCompletedRequest("POST", ["/v3/feeds?feedType=MP_ITEM"]);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    const [url, request] = fetchMock.mock.calls[4];
+    expect(url).toBe("https://marketplace.walmartapis.com/v3/feeds?feedType=MP_ITEM");
+    expect(request.body).toBeInstanceOf(FormData);
+    const file = (request.body as FormData).get("file");
+    expect(file).toBeInstanceOf(Blob);
+    const sent = JSON.parse(await (file as Blob).text());
+    expect(sent.MPItem).toEqual([item.payload]);
+    expect(sent.MPItem[0].Orderable.specProductType).toBe(type);
+    expect(Object.keys(sent.MPItem[0].Visible)).toEqual([type]);
+    expect(sent.MPItem[0].Visible[type].productName).toBe(catalog.title);
+    expect(sent.MPItemFeedHeader.version).toBe(WALMART_LISTING_SPEC.MP_ITEM);
+    expect(request.headers["Content-Type"]).toBeUndefined();
+    expect(fetchMock.mock.calls[2][1].headers["Content-Type"]).toBe("application/json");
   });
 
   it("shows writable nested requirements without exposing quantity, identity or price controls", async () => {
@@ -212,6 +296,7 @@ describe("Walmart listing provider", () => {
       "sku",
       "price",
       "productIdentifiers",
+      "specProductType",
       "SkuUpdate",
       "ProductIdUpdate",
       "automate_pricing",
@@ -261,6 +346,7 @@ describe("Walmart listing provider", () => {
     "ProductIdUpdate",
     "price",
     "automate_pricing",
+    "specProductType",
   ])("blocks protected attribute %s", async (key) => {
     const { provider, api } = setup();
     const item = draft();
@@ -307,6 +393,7 @@ describe("Walmart listing provider", () => {
     expect(prepared.payload.Item).toMatchObject({
       productIdentifiers: { productIdType: "UPC", productId: "036000291452" },
     });
+    expect(prepared.payload.Item).not.toHaveProperty("specProductType");
   });
 
   it("blocks a provider match for another identifier", async () => {
