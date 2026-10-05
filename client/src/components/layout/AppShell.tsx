@@ -105,9 +105,28 @@ function navHrefBelongsToLocation(pathname: string, href: string): boolean {
   return pathname === hrefPath || (hrefPath !== "/" && pathname.startsWith(`${hrefPath}/`));
 }
 
+/** Sidebar links to a tab of the one-route Dropship admin page. */
+const DROPSHIP_TAB_HREF_PREFIX = "/dropship?tab=";
+
+/** One query parameter of an href or of the current location, or null when absent. */
+function navHrefQueryParam(href: string, name: string): string | null {
+  const queryStart = href.indexOf("?");
+  if (queryStart < 0) return null;
+  const hashStart = href.indexOf("#", queryStart);
+  const query = href.slice(queryStart + 1, hashStart < 0 ? undefined : hashStart);
+  return new URLSearchParams(query).get(name);
+}
+
 function isNavHrefActive(pathname: string, currentHref: string, href: string): boolean {
   if (href === "/dropship?tab=overview" && pathname === "/dropship" && currentHref === "/dropship") {
     return true;
+  }
+
+  // A Dropship tab writes its own query string (Program finance keeps its
+  // period, vendor and open rows in the URL), so its link matches on the
+  // path and the `tab` param only, not on the whole href.
+  if (href.startsWith(DROPSHIP_TAB_HREF_PREFIX)) {
+    return pathname === "/dropship" && navHrefQueryParam(currentHref, "tab") === navHrefQueryParam(href, "tab");
   }
 
   if (navHrefHasQueryOrHash(href)) {
@@ -259,6 +278,12 @@ const navStructure: NavEntry[] = [
       { label: "Tracking Pushes", icon: Truck, href: "/dropship?tab=tracking-pushes" },
       { label: "Wallet Ops", icon: CreditCard, href: "/dropship?tab=wallet-ops" },
       { label: "Wallet Policy", icon: DollarSign, href: "/dropship?tab=wallet-policy" },
+      {
+        label: "Program finance",
+        icon: Receipt,
+        href: "/dropship?tab=finance",
+        requiredPermission: { resource: "dropship", action: "manage_operations" },
+      },
       { label: "Cost Changes", icon: TrendingUp, href: "/dropship?tab=cost-changes" },
       { label: "Notifications", icon: Bell, href: "/dropship?tab=notifications" },
       { label: "Audit", icon: History, href: "/dropship?tab=audit" },

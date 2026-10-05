@@ -62,6 +62,11 @@ jobs:
         run: npm run check
       - name: Server test types
         if: matrix.project == 'server-tests'
+        # This program needs ~4.1 GB of heap (tsc --extendedDiagnostics,
+        # Oct 2026), past Node's ~4 GB default, so tsc would die out of memory.
+        # 6 GB leaves headroom on the 16 GB runner; tsc is its only process.
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: npx tsc -p tsconfig.tests.server.json
       - name: Client test types
         if: matrix.project == 'client-tests'
@@ -146,6 +151,15 @@ jobs:
           client/src/pages/dropship/__tests__/DropshipCatalogFrame.test.ts
           client/src/lib/__tests__/dropship-ebay-category-rules.test.ts
           client/src/pages/dropship/__tests__/DropshipEbayCategoryRulesPanel.test.ts
+      # These paths have no "unit" in them, so test:unit never selects them.
+      - name: Dropship program finance contracts
+        run: >-
+          npx vitest run
+          shared/dropship/__tests__/program-finance-money.test.ts
+          shared/dropship/__tests__/program-finance-contract.test.ts
+          shared/dropship/__tests__/program-finance-definitions.test.ts
+          client/src/pages/__tests__/dropship-finance-model.test.ts
+          client/src/pages/__tests__/dropship-finance-panel.test.ts
 
   check-and-unit:
     # Preserve the existing required check name; skipped/cancelled jobs are failures.
