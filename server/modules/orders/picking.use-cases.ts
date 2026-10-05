@@ -3,7 +3,7 @@ import { preparePickingCommand, pickingCommandKey, pickingCommandBeforeItem, rea
   type PickingCommandRecord, pickingReceiptItemSchema, executePickingCommand } from "../wms/picking-command.repository";
 import { createPickingCommandLog } from "../wms/picking-command-log.repository";
 import { selectPickingSource, PickingSourcePlanError, type PickingSourcePlan } from "@shared/picking-source-plan";
-import { reconcileWmsPickingProgress } from "../wms/picking-progress.repository";
+import { reconcileWmsPickingProgress, UNMAPPED_LINE_MISSING_VARIANT } from "../wms/picking-progress.repository";
 import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 import { validatePickerOrder } from "@shared/types/picker-order";
 import { pickingInventoryContextSchema, type PickingInventoryContext } from "@shared/types/picking-inventory-context";
@@ -471,6 +471,21 @@ interface CartonizationLike {
   ensurePackPlan(request: { wmsOrderId: number }): Promise<{ complete: boolean } | null>;
 }
 
+
+/** Upper bound on one exception re-check pass; each order is a few short queries. */
+const MAX_PICK_EXCEPTION_RECHECK_BATCH = 500;
+const PICK_EXCEPTION_RECHECK_ACTOR = "system:pick-exception-recheck";
+
+export interface ClearedPickExceptionTotals {
+  /** Exception orders that passed the pre-filter and were evaluated. */
+  checked: number;
+  /** Moved on to the post-pick status (ready_to_ship by default). */
+  released: number;
+  /** A blocker remains; left in exception for a lead. */
+  stillBlocked: number;
+  /** Errored; retried on the next pass. */
+  failed: number;
+}
 
 export class PickingUseCases {
   constructor(
@@ -3715,6 +3730,119 @@ export class PickingUseCases {
     });
 
     return order;
+  }
+
+  /**
+   * An order lands in "exception" when its last pick still had a ready-to-ship
+   * blocker, and only another pick re-evaluates it. A blocker that clears
+   * without a pick (a resolved allocation exception, a finished replen task, a
+   * corrected blocker rule) left the order in exception for good: it never got
+   * a shipment and never reached ShipStation (#63721, 2026-10-03).
+   *
+   * This runs the same projection a pick runs (reconcileWmsPickingProgress), but
+   * only where no person is involved: no lead decision, not held, every active
+   * shippable line completed and fully picked. The projection stays the rule; an
+   * order with any blocker left is not changed.
+   */
+  async releaseClearedPickExceptions(limit: number): Promise<ClearedPickExceptionTotals> {
+    if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_PICK_EXCEPTION_RECHECK_BATCH) {
+      throw new ValidationError(`limit must be an integer from 1 to ${MAX_PICK_EXCEPTION_RECHECK_BATCH}`);
+    }
+    // Pre-filter only. Skipping orders that still have an open blocker keeps a
+    // backlog of blocked orders from filling the batch.
+    const candidates = await this.db.execute(sql`
+      SELECT wo.id, wo.warehouse_id
+      FROM wms.orders wo
+      WHERE wo.warehouse_status = 'exception'
+        AND wo.exception_resolution IS NULL
+        AND wo.on_hold = 0
+        AND wo.cancelled_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM wms.order_items active
+          WHERE active.order_id = wo.id AND active.requires_shipping = 1
+            AND COALESCE(active.on_hold, false) = false AND active.status <> 'cancelled'
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM wms.order_items open_line
+          WHERE open_line.order_id = wo.id AND open_line.requires_shipping = 1
+            AND COALESCE(open_line.on_hold, false) = false AND open_line.status <> 'cancelled'
+            AND (open_line.status <> 'completed'
+              OR COALESCE(open_line.picked_quantity, 0) <> COALESCE(open_line.quantity, 0))
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM wms.allocation_exceptions blocking
+          WHERE blocking.order_id = wo.id
+            AND blocking.status NOT IN ('resolved', 'resolved_inline', 'cancelled')
+            AND (blocking.status = 'blocked' OR COALESCE(blocking.metadata->>'shipmentBlocking', 'false') = 'true')
+            AND NOT ${UNMAPPED_LINE_MISSING_VARIANT}
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM inventory.replen_tasks replen
+          WHERE replen.order_id = wo.id
+            AND replen.blocks_shipment = TRUE
+            AND replen.status NOT IN ('completed', 'cancelled')
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM wms.picking_commands pending
+          WHERE pending.order_id = wo.id
+            AND pending.physical_receipt IS NOT NULL AND pending.completed_at IS NULL
+        )
+      ORDER BY wo.id ASC
+      LIMIT ${limit}
+    `);
+    const rows = (candidates.rows ?? []) as Array<{ id: unknown; warehouse_id: unknown }>;
+    const totals: ClearedPickExceptionTotals = { checked: rows.length, released: 0, stillBlocked: 0, failed: 0 };
+
+    for (const row of rows) {
+      const orderId = Number(row.id);
+      try {
+        const settings = await this.getPickSettings(row.warehouse_id == null ? undefined : Number(row.warehouse_id));
+        const outcome = await this.releaseClearedPickException(orderId, settings.postPickStatus);
+        if (outcome === "released") totals.released++;
+        if (outcome === "blocked") totals.stillBlocked++;
+      } catch (error: any) {
+        // One order's failure must not stop the others; the caller surfaces the
+        // count, and the next pass retries it.
+        totals.failed++;
+        console.error(JSON.stringify({ level: "error", action: "pick_exception_recheck", outcome: "failed",
+          wms_order_id: orderId, error_code: error?.code ?? null, error: error?.message ?? String(error) }));
+      }
+    }
+
+    if (rows.length === limit) {
+      // Visible, not silent: a full batch can delay orders behind it.
+      console.warn(JSON.stringify({ level: "warn", action: "pick_exception_recheck", outcome: "batch_full",
+        limit, released: totals.released, still_blocked: totals.stillBlocked }));
+    }
+    return totals;
+  }
+
+  private async releaseClearedPickException(
+    orderId: number,
+    postPickStatus: string,
+  ): Promise<"released" | "blocked" | "changed"> {
+    const projected = await this.db.transaction(async (tx: any) => {
+      // Re-read under the row lock: a lead's decision or a hold placed since the
+      // scan wins, and nothing is written.
+      const locked = await tx.execute(sql`
+        SELECT id FROM wms.orders
+        WHERE id = ${orderId}
+          AND warehouse_status = 'exception'
+          AND exception_resolution IS NULL
+          AND on_hold = 0
+          AND cancelled_at IS NULL
+        FOR UPDATE
+      `);
+      if (!locked.rows?.[0]) return null;
+      // Same projection as a pick; it audits the transition (wms.picking_progress_projected).
+      return reconcileWmsPickingProgress(tx, orderId, postPickStatus, PICK_EXCEPTION_RECHECK_ACTOR, this.clock);
+    });
+    if (!projected) return "changed";
+    if (projected.warehouseStatus === "exception") return "blocked";
+    this.triggerCartonizationShadow(orderId);
+    console.log(JSON.stringify({ level: "info", action: "pick_exception_recheck", outcome: "released",
+      wms_order_id: orderId, before: "exception", after: projected.warehouseStatus }));
+    return "released";
   }
 
   async closeResolvedShipmentBlockers(orderId: number, params: {

@@ -1947,6 +1947,74 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
     expect(statements.some((statement) => /SET requires_review = false/.test(statement))).toBe(false);
   });
 
+  // 2026-10-03, #63721: a graded card with no catalog identity (SKU "UNKNOWN")
+  // is confirmed at pick and never holds stock, but its variant-less source row
+  // sent the whole package to review, so the mapped lines could never post.
+  const mappedSource = {
+    id: 10001, order_item_id: 30001, order_item_row_id: 30001, product_variant_id: 40001, qty: 1,
+    pick_location_id: 50001, reserved_location_id: null, order_item_sku: "EG-SLV-PF-P100",
+    order_item_catalog_product_id: 36, order_item_product_id: 40001,
+    shipment_purpose: "customer_fulfillment", shipment_item_purpose: "customer_fulfillment",
+  };
+  const unmappedSource = {
+    id: 10002, order_item_id: 30002, order_item_row_id: 30002, product_variant_id: null, qty: 1,
+    pick_location_id: null, reserved_location_id: null, order_item_sku: "UNKNOWN",
+    order_item_catalog_product_id: null, order_item_product_id: null,
+    shipment_purpose: "customer_fulfillment", shipment_item_purpose: "customer_fulfillment",
+  };
+
+  it("ships an unmapped line without moving stock and still posts the package's mapped lines", async () => {
+    const rows = happyPathRows();
+    rows.splice(5, 0, { rows: [mappedSource, unmappedSource] }, { rows: [] });
+    const mock = makeDb(rows);
+    const inventoryCore = { recordShipment: vi.fn().mockResolvedValue(undefined) };
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    globalThis.fetch = mockFetchOnceOk({ shipments: [makeExactShipmentPayload()] }) as any;
+
+    await expect(createTestShipStationService(mock, inventoryCore).confirmDispatch(makeDispatchInput()))
+      .resolves.toMatchObject({ processed: true });
+    expect(inventoryCore.recordShipment).toHaveBeenCalledOnce();
+    expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({ shipmentItemId: 10001 }));
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledOnce();
+    expect(mock.calls.map((call) => call.sqlText).join("\n")).not.toMatch(/SET requires_review = true/);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("\"action\":\"ship_unmapped_line\""));
+    log.mockRestore();
+  });
+
+  it("completes a package of only unmapped lines without an inventory movement", async () => {
+    const rows = happyPathRows();
+    rows.splice(5, 0, { rows: [unmappedSource] }, { rows: [] });
+    const mock = makeDb(rows);
+    const inventoryCore = { recordShipment: vi.fn() };
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    globalThis.fetch = mockFetchOnceOk({ shipments: [makeExactShipmentPayload()] }) as any;
+
+    await expect(createTestShipStationService(mock, inventoryCore).confirmDispatch(makeDispatchInput()))
+      .resolves.toMatchObject({ processed: true });
+    expect(inventoryCore.recordShipment).not.toHaveBeenCalled();
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledOnce();
+    log.mockRestore();
+  });
+
+  it.each([
+    ["a line mapped to the catalog since it was picked", { order_item_catalog_product_id: 36 }],
+    ["a line with a real SKU", { order_item_sku: "EG-SLV-PF-P100" }],
+    ["a non-customer line", { shipment_item_purpose: "concession" }],
+    ["a line whose order line row is missing", { order_item_row_id: null, order_item_sku: null }],
+  ])("still sends %s with no variant to review", async (_label, override) => {
+    const rows = happyPathRows();
+    rows.splice(5, 0, { rows: [{ ...unmappedSource, ...override }] }, { rows: [] });
+    const mock = makeDb(rows);
+    const inventoryCore = { recordShipment: vi.fn() };
+    globalThis.fetch = mockFetchOnceOk({ shipments: [makeExactShipmentPayload()] }) as any;
+
+    await expect(createTestShipStationService(mock, inventoryCore).confirmDispatch(makeDispatchInput()))
+      .rejects.toMatchObject({ code: "CARRIER_DISPATCH_APPLICATION_FAILED", retryable: false,
+        context: { sourceCode: "SHIPMENT_INVENTORY_SOURCE_INVALID" } });
+    expect(inventoryCore.recordShipment).not.toHaveBeenCalled();
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
+  });
+
   it("rejects a voided label before any WMS or inventory transition", async () => {
     const mock = makeDb([]);
     globalThis.fetch = mockFetchOnceOk({

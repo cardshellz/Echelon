@@ -900,6 +900,7 @@ function startEchelonSyncScheduler(
           reservation: services.reservation,
           fulfillmentAuthority: services.channelFulfillmentAuthority,
           pickCorrections: services.pickCorrections,
+          pickExceptions: services.picking,
         });
       } else {
         logSchedulerDisabled("scheduler", "OMS flow reconciliation scheduler", "OMS_FLOW_RECONCILIATION_SCHEDULER_DISABLED");
