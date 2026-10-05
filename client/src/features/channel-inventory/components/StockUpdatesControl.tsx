@@ -5,6 +5,10 @@ import { Link } from "wouter";
 import { ArrowRight, Pause, Play } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
@@ -72,9 +76,9 @@ export function StockUpdatesControl({ view, channel, target, canActivate, detail
     onError: fail,
   });
   const stop = useMutation({
-    mutationFn: (reason: string) => stopDestination({
-      publicationTargetId: target.id, expectedRevision: target.revision, changeReason: reason,
-      idempotencyKey: stopKey.keyFor(JSON.stringify({ target: target.id, revision: target.revision, reason })),
+    mutationFn: () => stopDestination({
+      publicationTargetId: target.id, expectedRevision: target.revision,
+      idempotencyKey: stopKey.keyFor(JSON.stringify({ target: target.id, revision: target.revision })),
     }),
     onSuccess: async () => {
       stopKey.clear(); setDialog(null); await refresh();
@@ -223,11 +227,25 @@ export function StockUpdatesControl({ view, channel, target, canActivate, detail
     {dialog === "exclude" && <ReasonDialog open onOpenChange={open => { if (!open) setDialog(null); }}
       title="Remove from stock setup" description={<p>Exclude {identity.title} from setup checks. You can still preview quantities. Marketplace stock stays unchanged.</p>}
       confirmLabel="Remove from setup" pending={inclusion.isPending} onConfirm={reason => inclusion.mutate({ state: "disabled", reason })} />}
-    {dialog === "stop" && <ReasonDialog open onOpenChange={open => { if (!open) setDialog(null); }}
-      title={`Pause stock updates for ${identity.title}`} description={<>
-        <p>Stop future updates and cancel queued updates for this account.</p>
-        <p>Stock already shown in the marketplace stays available to buy. Pausing does not set it to zero.</p>
-      </>} confirmLabel="Pause stock updates" destructive pending={stop.isPending} onConfirm={reason => stop.mutate(reason)} />}
+    <AlertDialog open={dialog === "stop"} onOpenChange={open => { if (!open && !stop.isPending) setDialog(null); }}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Pause stock updates for {identity.title}</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-2 text-sm text-muted-foreground">
+              <p>Stop future updates and cancel queued updates for this account.</p>
+              <p>Stock already shown in the marketplace stays available to buy. Pausing does not set it to zero.</p>
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={stop.isPending}>Cancel</AlertDialogCancel>
+          <Button type="button" variant="destructive" disabled={stop.isPending} onClick={() => stop.mutate()}>
+            {stop.isPending ? "Pausing…" : "Pause stock updates"}
+          </Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
     {dialog === "review" && <ReasonDialog open onOpenChange={open => { if (!open) setDialog(null); }}
       title="Check before resuming" description={<>
         <p>Check warehouses, stock rules and listing links for {identity.title} using recorded marketplace stock checks.</p>
