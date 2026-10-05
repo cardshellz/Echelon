@@ -472,6 +472,26 @@ interface CartonizationLike {
 }
 
 
+type ScanDisplay = { barcode: string | null; imageUrl: string | null };
+
+/**
+ * A pending line takes the catalog's current barcode and photo; a started line
+ * keeps what it has and only fills gaps (the pre-#1672 rule).
+ */
+export function withScanDisplay<T extends { sku: string; status: string; barcode?: string | null; imageUrl?: string | null }>(
+  item: T,
+  display: ReadonlyMap<string, ScanDisplay>,
+): T {
+  const found = display.get(item.sku);
+  if (!found) return item;
+  const pending = item.status === "pending";
+  return {
+    ...item,
+    barcode: (pending ? found.barcode || item.barcode : item.barcode || found.barcode) ?? null,
+    imageUrl: (pending ? found.imageUrl || item.imageUrl : item.imageUrl || found.imageUrl) ?? null,
+  };
+}
+
 export class PickingUseCases {
   constructor(
     private readonly db: DrizzleDb,
@@ -3659,7 +3679,9 @@ export class PickingUseCases {
     });
 
     const items = await this.storage.getOrderItems(orderId);
-    const plannedItems = await this.planPickingItems(items, order.warehouseId ?? null);
+    const scanDisplay = await this.loadScanDisplay(items);
+    const plannedItems = (await this.planPickingItems(items, order.warehouseId ?? null))
+      .map(item => withScanDisplay(item, scanDisplay));
     validatePickerOrder({ ...order, items: plannedItems });
     return { order, items: plannedItems };
   }
@@ -3926,7 +3948,9 @@ export class PickingUseCases {
     const order = await this.storage.getOrderById(orderId);
     if (!order) throw new NotFoundError("Picker order not found", { orderId });
     const items = (await this.storage.getOrderItems(orderId)).filter(item => item.requiresShipping === 1);
-    return validatePickerOrder({ ...order, items: await this.planPickingItems(items, order.warehouseId ?? null) });
+    const scanDisplay = await this.loadScanDisplay(items);
+    return validatePickerOrder({ ...order, items: (await this.planPickingItems(items, order.warehouseId ?? null))
+      .map(item => withScanDisplay(item, scanDisplay)) });
   }
 
   async getReplenGuidance(itemId: number) {
@@ -4000,8 +4024,10 @@ export class PickingUseCases {
       if (channel) channelMap.set(channelId, { name: channel.name, provider: channel.provider });
     }
 
+    const scanDisplay = await this.loadScanDisplay(filteredOrders.flatMap((order: any) => order.items));
     const plannedOrders = await Promise.all(filteredOrders.map(async order => ({ ...order,
-      items: await this.planPickingItems(order.items, order.warehouseId ?? null) })));
+      items: (await this.planPickingItems(order.items, order.warehouseId ?? null))
+        .map(item => withScanDisplay(item, scanDisplay)) })));
     const replenPredictionMap = await this._buildReplenPredictions(plannedOrders.flatMap(order => order.items));
 
     // Assemble response with metadata
@@ -4054,6 +4080,29 @@ export class PickingUseCases {
         channelProvider: channelInfo?.provider || order.source || null,
       });
     });
+  }
+
+  /**
+   * Barcode and photo per SKU for the gun, from the same catalog lookup the queue
+   * used before #1672. That rewrite rightly stopped this lookup from moving a
+   * pick's bin, but it also dropped the barcode and photo it supplied, so scans of
+   * product barcodes stopped matching and the gun showed no pictures
+   * (2026-10-05). Display only: the source plan still owns the bin.
+   */
+  private async loadScanDisplay(items: readonly OrderItem[]): Promise<Map<string, ScanDisplay>> {
+    const skus = new Set<string>();
+    for (const item of items) {
+      if (!item.sku || item.requiresShipping !== 1) continue;
+      if (item.inventoryTracking === false && item.catalogProductId != null) continue;
+      if (isUnmappedOrderLine(item)) continue;
+      skus.add(item.sku);
+    }
+    const display = new Map<string, ScanDisplay>();
+    for (const sku of Array.from(skus)) {
+      const found = await this.storage.getBinLocationFromInventoryBySku(sku);
+      if (found) display.set(sku, { barcode: found.barcode, imageUrl: found.imageUrl });
+    }
+    return display;
   }
 
   private async planPickingItems<T extends OrderItem>(items: readonly T[], warehouseId: number | null): Promise<Array<T & { sourcePlan: PickingSourcePlan }>> {
