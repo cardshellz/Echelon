@@ -15,7 +15,7 @@ import { InventoryChannelExposureAdminService } from "../../application/inventor
 import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructure/inventory-availability-master-data.repository";
 import { PostgresInventoryPromiseSafetyAdminStore } from "../../infrastructure/inventory-promise-safety-admin.repository";
 import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
-import { createAuthorityAwareInventoryPublicationService, createTransactionScopedInventoryPublicationService } from "../../infrastructure/inventory-availability-runtime-publication.repository";
+import { createAuthorityAwareInventoryPublicationService, createTransactionScopedInventoryPublicationService, LATEST_PUBLICATION_ROW_SQL } from "../../infrastructure/inventory-availability-runtime-publication.repository";
 import { installOperationalPublicationPrerequisites } from "../fixtures/shipment-operational-publication";
 import { installUnopenedQuantityLedgerFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
 import { PostgresOperationalShipmentDispatchRepository } from "../../../inventory/infrastructure/operational-shipment-dispatch.repository";
@@ -3320,6 +3320,25 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       ),
       "publication revision must be greater than existing revision 1",
     );
+
+    // 2026-10-05: the latest-row read sorted revisions as text, so "9" outranked
+    // "10" and the next write re-used 10 forever. It must read 10 as the latest.
+    for (let revision = 2; revision <= 10; revision += 1) {
+      await pool.query(
+        `INSERT INTO inventory.inventory_publication_outbox (
+           publication_target_id, product_variant_id, desired_revision, desired_quantity,
+           channel_connection_id_snapshot, external_scope_id_snapshot,
+           external_inventory_item_id_snapshot, idempotency_key, payload_hash, available_at
+         ) VALUES ($1, $2, $3, 0, $4, 'shopify-location-1', 'inventory-item-1',
+           $5, $6, $7)`,
+        [target.rows[0]!.id, scope.variantIds[0], revision, connection.rows[0]!.id,
+          `publication:${revision}`, HASH, FIXED_TIME],
+      );
+    }
+    const latestRow = await pool.query<{ desired_revision: string }>(
+      LATEST_PUBLICATION_ROW_SQL, [target.rows[0]!.id, scope.variantIds[0]],
+    );
+    expect(latestRow.rows.map((row) => row.desired_revision)).toEqual(["10"]);
 
     const standaloneReadback = await pool.query<{ id: string }>(
       `INSERT INTO inventory.inventory_publication_readbacks (

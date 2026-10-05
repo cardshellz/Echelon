@@ -336,7 +336,7 @@ function publicationDatabase(options: { failQueueTransition?: boolean } = {}) {
       query: async (sql, values) => {
         if (sql.includes("pg_try_advisory_xact_lock")) return { rows: [{ acquired: true }] };
         if (sql.includes("FROM inventory.inventory_publication_outbox")
-          && sql.includes("ORDER BY desired_revision DESC")) {
+          && sql.includes("ORDER BY outbox.desired_revision DESC")) {
           return { rows: database.latest ? [{ ...database.latest }] : [] };
         }
         if (sql.startsWith("UPDATE inventory.inventory_publication_outbox")

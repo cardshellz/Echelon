@@ -534,6 +534,7 @@ const HISTORICAL_CARRIER_DISPATCH_REPAIR_COHORTS = [
   "package_resolution_retry",
   "legacy_outbound_shipment_identity_conflict",
   "confirmed_historical_inventory_gap",
+  "publication_revision_order",
 ] as const satisfies readonly HistoricalCarrierDispatchRepairCohort[];
 
 function historicalCarrierDispatchRepairCohort(
@@ -580,6 +581,14 @@ function historicalCarrierDispatchRepairCohortSql() {
         AND NULLIF(BTRIM(command.result_evidence ->> 'sourceMessage'), '') ~
           '^Negative Inventory Guard: Cannot record shipment of [0-9]+[.] Picked: [0-9]+, On-hand: [0-9]+, Required from on-hand: [0-9]+[.]$'
         THEN 'confirmed_historical_inventory_gap'
+      -- Stock publication picked "9" over "10" as the latest revision (text sort),
+      -- so the outbox guard refused every later write for that pair. Fixed
+      -- 2026-10-05 (LATEST_PUBLICATION_ROW_SQL); a rerun now succeeds.
+      WHEN command.last_error_code = 'CARRIER_DISPATCH_APPLICATION_FAILED'
+        AND NULLIF(BTRIM(command.result_evidence ->> 'sourceCode'), '') = 'P0001'
+        AND NULLIF(BTRIM(command.result_evidence ->> 'sourceMessage'), '') ~
+          '^publication revision must be greater than existing revision [0-9]+$'
+        THEN 'publication_revision_order'
       ELSE NULL
     END
   `;
@@ -606,7 +615,8 @@ function historicalCarrierDispatchRepairEligibilitySql(
         'active_combined_package_resolution',
         'aggregate_package_identity_conflict',
         'immutable_command_request_conflict',
-        'legacy_outbound_shipment_identity_conflict'
+        'legacy_outbound_shipment_identity_conflict',
+        'publication_revision_order'
       )
       OR (
         ${commandId}::bigint IS NOT NULL

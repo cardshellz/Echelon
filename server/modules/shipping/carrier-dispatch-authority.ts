@@ -4,7 +4,8 @@ export type HistoricalCarrierDispatchRepairCohort =
   | "immutable_command_request_conflict"
   | "package_resolution_retry"
   | "legacy_outbound_shipment_identity_conflict"
-  | "confirmed_historical_inventory_gap";
+  | "confirmed_historical_inventory_gap"
+  | "publication_revision_order";
 
 export interface ReviewedCarrierDispatchRepairAuthorization {
   requeueId: number;
