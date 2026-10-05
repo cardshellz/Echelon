@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { InventoryPublicationTargetResumeReview } from "@shared/types/inventory-publication-target-resume";
+import type { EnableInventoryPublicationTargetRequest } from "@shared/types/inventory-publication-target-enable";
 import { Link } from "wouter";
-import { ArrowRight, Pause, Play } from "lucide-react";
+import { Pause, Play } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -13,15 +13,15 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
 
-import { describeError, resumeDestination, reviewResume, setReadinessInclusion, stopDestination } from "../api";
-import { formatAbsoluteTime, pluralize } from "../format";
+import { ChannelInventoryApiError, describeError, enableDestination, stopDestination } from "../api";
+import { pluralize } from "../format";
 import { invalidateChannelInventory, useCommandKey, usePublishingStatus } from "../hooks";
 import { PUBLISHER_LABELS, describeDestination, summarizePendingChanges, type Channel, type Target, type View } from "../model";
-import { describeResumeIssue, describeStockUpdates } from "../publishing-presentation";
-import { Callout, KeyValue, ReasonDialog, StatePill } from "./primitives";
+import { describeStockUpdates } from "../publishing-presentation";
+import { Callout, KeyValue, StatePill } from "./primitives";
 import { GlobalPublishingControl } from "./GlobalPublishingControl";
 
-type Command = "include" | "exclude" | "stop" | "review" | "resume";
+type Command = "stop";
 type SettingsTab = "supply" | "rules" | "quantities";
 const now = () => new Date();
 
@@ -41,17 +41,11 @@ export function StockUpdatesControl({ view, channel, target, canActivate, detail
   const publishing = describeStockUpdates(target, view.runtimeAuthority, globalOn);
   const pending = summarizePendingChanges(view, channel.id, target.id);
   const [dialog, setDialog] = useState<Command | null>(null);
-  const [review, setReview] = useState<InventoryPublicationTargetResumeReview | null>(null);
-  const includeKey = useCommandKey();
   const stopKey = useCommandKey();
-  const reviewKey = useCommandKey();
-  const resumeKey = useCommandKey();
+  const enableRequest = useRef<EnableInventoryPublicationTargetRequest | null>(null);
+  const [enableError, setEnableError] = useState<string | null>(null);
   const managedHere = target.publicationAuthority === "echelon";
-  const canResume = target.state === "preview" && managedHere
-    && view.runtimeAuthority === "canonical" && target.hasPriorLiveStop === true;
-  const cannotResume = managedHere && target.state !== "live" && target.hasPriorLiveStop === false;
-  const canPrepare = target.state === "disabled"
-    && (view.runtimeAuthority !== "canonical" || target.hasPriorLiveStop === true);
+  const canEnable = managedHere && target.state !== "live" && view.runtimeAuthority === "canonical";
 
   const openCommand = (command: Command) => {
     onDetailsOpenChange(false);
@@ -63,17 +57,27 @@ export function StockUpdatesControl({ view, channel, target, canActivate, detail
   };
   const refresh = () => invalidateChannelInventory(queryClient);
 
-  const inclusion = useMutation({
-    mutationFn: (input: { state: "disabled" | "preview"; reason: string }) => setReadinessInclusion({
-      publicationTargetId: target.id, expectedRevision: target.revision, state: input.state, changeReason: input.reason,
-      idempotencyKey: includeKey.keyFor(JSON.stringify({ target: target.id, revision: target.revision, ...input })),
-    }),
-    onSuccess: async result => {
-      includeKey.clear(); setDialog(null); onDetailsOpenChange(true); await refresh();
-      toast({ title: result.state === "preview" ? "Account included in stock setup" : "Account removed from stock setup",
-        description: "No stock quantities were sent to the marketplace." });
+  const enable = useMutation({
+    mutationFn: () => {
+      // Keep the exact request on a network/5xx error, even if a background
+      // refresh observes the committed revision before the operator retries.
+      if (!enableRequest.current || enableRequest.current.publicationTargetId !== target.id) {
+        enableRequest.current = { publicationTargetId: target.id, expectedRevision: target.revision,
+          idempotencyKey: crypto.randomUUID() };
+      }
+      return enableDestination(enableRequest.current);
     },
-    onError: fail,
+    onSuccess: async result => {
+      enableRequest.current = null; setEnableError(null); onDetailsOpenChange(false); await refresh();
+      toast({ title: "Stock updates turned on for " + identity.title,
+        description: globalOn === false ? "The all-channel control is still paused. Turn it on when you want updates sent."
+          : result.publicationRows > 0 ? pluralize(result.publicationRows, "stock update") + " queued. View Stock preview for delivery status."
+          : "Updates will be sent when listings are included for this account." });
+    },
+    onError: (error: unknown) => {
+      if (error instanceof ChannelInventoryApiError && error.status < 500) enableRequest.current = null;
+      setEnableError(describeError(error).message); onDetailsOpenChange(true);
+    },
   });
   const stop = useMutation({
     mutationFn: () => stopDestination({
@@ -87,33 +91,8 @@ export function StockUpdatesControl({ view, channel, target, canActivate, detail
     },
     onError: fail,
   });
-  const reviewMutation = useMutation({
-    mutationFn: (reason: string) => reviewResume({
-      publicationTargetId: target.id, expectedRevision: target.revision, reason,
-      idempotencyKey: reviewKey.keyFor(JSON.stringify({ target: target.id, revision: target.revision, reason })),
-    }),
-    onSuccess: result => {
-      reviewKey.clear(); resumeKey.clear(); setReview(result); setDialog(null); onDetailsOpenChange(true);
-    },
-    onError: fail,
-  });
-  const resume = useMutation({
-    mutationFn: (reason: string) => {
-      if (!review || review.state !== "ready") throw new Error("Check this account before resuming stock updates.");
-      return resumeDestination({
-        publicationTargetId: target.id, expectedRevision: target.revision, resumeReviewId: review.resumeReviewId,
-        expectedEvidenceHash: review.evidenceHash, reason,
-        idempotencyKey: resumeKey.keyFor(JSON.stringify({ target: target.id, review: review.resumeReviewId, reason })),
-      });
-    },
-    onSuccess: async result => {
-      resumeKey.clear(); setReview(null); setDialog(null); await refresh();
-      toast({ title: `Stock updates resumed for ${identity.title}`,
-        description: `${pluralize(result.publicationRows, "stock update")} queued. Check Stock preview for delivery results.` });
-    },
-    onError: fail,
-  });
-  const busy = inclusion.isPending || stop.isPending || reviewMutation.isPending || resume.isPending;
+  const busy = stop.isPending || enable.isPending;
+  const enableOutcomeUnknown = enableError !== null && enableRequest.current?.publicationTargetId === target.id;
 
   const switchId = `stock-updates-${target.id}`;
   return <>
@@ -122,11 +101,10 @@ export function StockUpdatesControl({ view, channel, target, canActivate, detail
         <label htmlFor={switchId} className="text-xs font-medium">Automatic stock updates</label>
         <Switch id={switchId} aria-label={`Automatic stock updates for ${identity.title}, ${identity.scope}`}
           aria-describedby={`${switchId}-status`}
-          checked={target.state === "live"} disabled={!canActivate || busy}
+          checked={target.state === "live"} disabled={!canActivate || busy || enableOutcomeUnknown}
           onCheckedChange={enabled => {
             if (!enabled) openCommand("stop");
-            else if (canResume) openCommand(review?.state === "ready" ? "resume" : "review");
-            else if (canPrepare) openCommand("include");
+            else if (canEnable) enable.mutate();
             else onDetailsOpenChange(true);
           }} />
       </div>}
@@ -144,52 +122,28 @@ export function StockUpdatesControl({ view, channel, target, canActivate, detail
         </DialogHeader>
         <p className="text-sm leading-relaxed">{publishing.explanation}</p>
 
-        {managedHere && view.runtimeAuthority === "canonical" && cannotResume && (
-          <Callout title="Starting stock updates is unavailable">
-            This account has no previous pause recorded, so it cannot use Resume.
-            Echelon does not yet support starting a new account from this screen. You can save settings and preview quantities here.
-          </Callout>
-        )}
-        {managedHere && view.runtimeAuthority !== "canonical" && <p className="text-sm">
-          First-time setup is handled in <Link href="/inventory/cutover" className="font-medium text-primary underline underline-offset-2">Inventory setup</Link>.
-          {" "}Saving or previewing here does not switch the system over.
-        </p>}
-        {managedHere && view.runtimeAuthority === "canonical" && target.state !== "live" && target.hasPriorLiveStop === undefined && (
-          <Callout title="Account setup history is unavailable"
-            action={<Button type="button" variant="outline" size="sm" onClick={() => void refresh()}>Reload account status</Button>}>
-            Echelon cannot confirm whether this account can resume stock updates. Reload to check again.
-          </Callout>
-        )}
+        {enableError && <Callout tone="danger" title={enableOutcomeUnknown ? "Stock update change not confirmed" : "Stock updates could not be turned on"}>{enableError}</Callout>}
+        {managedHere && view.runtimeAuthority !== "canonical" && <Callout title="Channel Inventory setup is needed">
+          Complete <Link className="underline" href="/inventory/cutover">Inventory setup</Link> before using automatic stock updates here.
+        </Callout>}
         {target.hold && <p className="rounded-md border border-orange-200 bg-orange-50 p-3 text-sm text-orange-900 dark:border-orange-800 dark:bg-orange-950/30 dark:text-orange-100">
           <span className="font-medium">Stock hold:</span> {target.hold.reason}
         </p>}
         {managedHere && globalOn === false && target.state !== "live" && (
-          <p className="text-sm text-muted-foreground">The all-channel control is also off. Previewing or resuming this account does not turn it on.</p>
+          <p className="text-sm text-muted-foreground">The all-channel control is also off. Turning on this account does not turn it on.</p>
         )}
         {managedHere && globalOn === null && target.state !== "live" && (
           <p className="text-sm text-muted-foreground">The all-channel stock-update status is not available.</p>
         )}
 
         {managedHere && <div className="space-y-3">
-          {canPrepare && <div className="space-y-2">
-            <Button type="button" disabled={!canActivate || busy} onClick={() => openCommand("include")}>
-              Prepare account <ArrowRight className="ml-1 h-4 w-4" aria-hidden="true" />
+          {(canEnable || enableOutcomeUnknown) && <div className="space-y-2">
+            <Button type="button" disabled={!canActivate || busy} onClick={() => enable.mutate()}>
+              <Play className="mr-1 h-4 w-4" aria-hidden="true" /> {enable.isPending ? "Turning on…" : enableOutcomeUnknown ? "Retry turning on" : "Turn on stock updates"}
             </Button>
-            <p className="text-xs text-muted-foreground">Include this account in setup checks. This does not send stock updates.</p>
+            {pending.total > 0 && <p className="text-xs text-muted-foreground">First-time setup uses your saved warehouses and channel default. Other pending changes stay saved until applied.</p>}
           </div>}
-          {canResume && <div className="space-y-2">
-            {pending.total > 0 && <p className="text-sm">Review saved changes in the workspace to use them. Resuming uses the settings already applied.</p>}
-            <div className="flex flex-wrap gap-2">
-              {review?.state !== "ready" && <Button type="button" disabled={!canActivate || busy} onClick={() => openCommand("review")}>
-                {review ? "Check account again" : "Check before resuming"}
-              </Button>}
-              {review?.state === "ready" && <Button type="button" disabled={!canActivate || busy} onClick={() => openCommand("resume")}>
-                <Play className="mr-1 h-4 w-4" aria-hidden="true" /> Resume stock updates
-              </Button>}
-            </div>
-            <p className="text-xs text-muted-foreground">Checks listing links and applied stock rules against recorded marketplace stock checks.</p>
-          </div>}
-          {target.state === "live" && <Button type="button" variant="outline" disabled={!canActivate || busy} onClick={() => openCommand("stop")}>
+          {target.state === "live" && <Button type="button" variant="outline" disabled={!canActivate || busy || enableOutcomeUnknown} onClick={() => openCommand("stop")}>
             <Pause className="mr-1 h-4 w-4" aria-hidden="true" /> Pause stock updates
           </Button>}
           {!canActivate && <p className="text-xs text-muted-foreground">Your role can view this setup. Starting or pausing stock updates requires inventory activation permission.</p>}
@@ -198,7 +152,7 @@ export function StockUpdatesControl({ view, channel, target, canActivate, detail
             Reload all-channel status
           </Button>}
         </div>}
-        {review && <ResumeReviewSummary review={review} />}
+
 
         <nav aria-label="Stock setup" className="flex flex-wrap gap-2 border-t pt-4">
           <Button type="button" size="sm" variant="outline" onClick={() => { onDetailsOpenChange(false); onOpenTab("supply"); }}>Edit warehouses</Button>
@@ -214,19 +168,12 @@ export function StockUpdatesControl({ view, channel, target, canActivate, detail
             <KeyValue label="Settings in use">{view.runtimeAuthority === "canonical" ? "Channel Inventory" : "Previous Channel Allocation settings"}</KeyValue>
             <KeyValue label="Account record">#{target.id} · revision {target.revision}</KeyValue>
           </dl>
-          {managedHere && target.state === "preview" && <Button type="button" className="mt-4" variant="outline" size="sm"
-            disabled={!canActivate || busy} onClick={() => openCommand("exclude")}>Remove from stock setup</Button>}
+
         </details>
 
       </DialogContent>
     </Dialog>
 
-    {dialog === "include" && <ReasonDialog open onOpenChange={open => { if (!open) setDialog(null); }}
-      title="Prepare account" description={<p>Include {identity.title} in the checks before stock updates start or resume. This does not turn on automatic stock updates.</p>}
-      confirmLabel="Prepare account" pending={inclusion.isPending} onConfirm={reason => inclusion.mutate({ state: "preview", reason })} />}
-    {dialog === "exclude" && <ReasonDialog open onOpenChange={open => { if (!open) setDialog(null); }}
-      title="Remove from stock setup" description={<p>Exclude {identity.title} from setup checks. You can still preview quantities. Marketplace stock stays unchanged.</p>}
-      confirmLabel="Remove from setup" pending={inclusion.isPending} onConfirm={reason => inclusion.mutate({ state: "disabled", reason })} />}
     <AlertDialog open={dialog === "stop"} onOpenChange={open => { if (!open && !stop.isPending) setDialog(null); }}>
       <AlertDialogContent>
         <AlertDialogHeader>
@@ -246,32 +193,5 @@ export function StockUpdatesControl({ view, channel, target, canActivate, detail
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
-    {dialog === "review" && <ReasonDialog open onOpenChange={open => { if (!open) setDialog(null); }}
-      title="Check before resuming" description={<>
-        <p>Check warehouses, stock rules and listing links for {identity.title} using recorded marketplace stock checks.</p>
-        <p>This uses applied settings. Saved changes are reviewed separately in the workspace.</p>
-      </>} confirmLabel="Check account" pending={reviewMutation.isPending} onConfirm={reason => reviewMutation.mutate(reason)} />}
-    {dialog === "resume" && review && <ReasonDialog open onOpenChange={open => { if (!open) setDialog(null); }}
-      title={`Resume stock updates for ${identity.title}`} description={<>
-        <p>Restart this paused account using its checked settings. Echelon will queue fresh stock quantities.</p>
-        {globalOn !== true && <p>The all-channel control must also be on for updates to be sent.</p>}
-      </>} confirmLabel="Resume stock updates" pending={resume.isPending} onConfirm={reason => resume.mutate(reason)} />}
   </>;
-}
-
-function ResumeReviewSummary({ review }: { review: InventoryPublicationTargetResumeReview }) {
-  return <div className="space-y-3 rounded-md border p-4 text-sm" aria-label="Stock update check">
-    <p className="font-medium">{review.state === "ready" ? "Account checked — ready to resume" : "Stock updates cannot resume yet"}</p>
-    <p className="text-xs text-muted-foreground">Checked {formatAbsoluteTime(review.capturedAt)} · {pluralize(review.products.length, "product")}</p>
-    {review.blockers.length > 0 && <ul className="list-disc space-y-2 pl-5">
-      {[...new Set(review.blockers.map(blocker => describeResumeIssue(blocker.code)))].map(message => <li key={message}>{message}</li>)}
-    </ul>}
-    <details>
-      <summary className="cursor-pointer text-muted-foreground">Check details</summary>
-      <p className="my-2 text-xs text-muted-foreground">Check #{review.resumeReviewId} · account revision {review.publicationTargetRevision}</p>
-      <ul className="list-disc space-y-2 pl-5">{review.blockers.map((blocker, index) => <li key={`${blocker.code}:${index}`}>
-        <p>{blocker.message}</p><code className="break-all text-xs text-muted-foreground">{blocker.code}</code>
-      </li>)}</ul>
-    </details>
-  </div>;
 }

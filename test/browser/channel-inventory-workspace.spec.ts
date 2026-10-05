@@ -36,7 +36,7 @@ async function setup(page: Page, options: {
   const state = { data, writes: [] as Array<{ path: string; body: Record<string, unknown>; raw: string }>,
     applyLostResponse: false, applyConflict: false, reviewBlocked: false, progress: null as ChannelDefinitionProgress | null,
     reads: [] as string[], errors: [] as string[], unexpected: [] as string[], loseResponse: false, conflict: false, invalidResponse: false,
-    globalFailed: false, globalChangeFailed: false, previewFailed: false, stopFailed: false,
+    enableFailed: false, enableLostResponse: false, globalFailed: false, globalChangeFailed: false, previewFailed: false, stopFailed: false,
     global: { globalEnabled: options.globalEnabled ?? true, sweepIntervalMinutes: 15, revision: "1",
       changedBy: "operator-1", changeReason: "Approved" as string | null, lastSweepAt: null },
     statusFailed: false, status: { publicationTargetId: 5, productId: 10, capturedAt: AT, runtimeAuthority: "canonical", targetRevision: "3",
@@ -93,6 +93,18 @@ async function setup(page: Page, options: {
         revision: String(Number(state.global.revision) + 1), changeReason: body.changeReason ?? null };
       const { lastSweepAt: _lastSweepAt, ...result } = state.global;
       return route.fulfill({ json: { ...result, changedAt: AT, alreadyApplied: false } });
+    }
+    if (req.method() === "PUT" && path === BASE + "/publication-target-enable") {
+      const body = req.postDataJSON(); state.writes.push({ path, body, raw: req.postData()! });
+      if (state.enableFailed) return route.fulfill({ status: 409, json: { error: {
+        code: "INVENTORY_PUBLICATION_ENABLE_STOCK_RULES_REQUIRED", message: "Save a complete channel default in Stock rules before turning stock updates on.",
+      } } });
+      const account = state.data.publicationTargets.find(item => item.id === body.publicationTargetId)!;
+      const replay = account.state === "live";
+      account.state = "live"; account.revision = "4";
+      if (state.enableLostResponse) { state.enableLostResponse = false; return route.abort("failed"); }
+      return route.fulfill({ json: { publicationTargetId: account.id, revision: "4", state: account.state,
+        publicationRows: 0, initialDefinitionsApplied: 0, alreadyApplied: replay, runtimeAuthorityChanged: false, providerWriteAttempted: false } });
     }
     if (req.method() === "PUT" && path === `${BASE}/publication-target-stop`) {
       const body = req.postDataJSON(); state.writes.push({ path, body, raw: req.postData()! });
@@ -155,7 +167,7 @@ async function setup(page: Page, options: {
   return state;
 }
 
-test("new Walmart accounts explain startup separately from preview and never offer resume", async ({ page }, info) => {
+test("a new Walmart account turns on directly without pause history or a reason", async ({ page }, info) => {
   const state = await setup(page, {
     pending: true, query: "?channel=3&destination=5&tab=publishing&product=10",
     viewOverrides: {
@@ -165,40 +177,59 @@ test("new Walmart accounts explain startup separately from preview and never off
       publicationTargets: [target({ state: "disabled", hasPriorLiveStop: false, externalScopeId: "10002558022" })],
     },
   });
-  await expect(page.getByRole("tab", { name: "Stock updates", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("switch", { name: "Automatic stock updates for Card Shellz, Location 10002558022", exact: true })).not.toBeChecked();
+  const toggle = page.getByRole("switch", { name: "Automatic stock updates for Card Shellz, Location 10002558022", exact: true });
+  await expect(toggle).not.toBeChecked();
+  await toggle.click();
+  await expect(toggle).toBeChecked();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await expect(page).not.toHaveURL(/tab=publishing/);
-  await page.screenshot({ path: info.outputPath("account-stock-toggle.png"), fullPage: true });
-  await page.getByRole("switch", { name: "Automatic stock updates for Card Shellz, Location 10002558022", exact: true }).click();
-  await expect(page.getByText("Starting stock updates is unavailable", { exact: true })).toBeVisible();
-  await expect(page.getByText(/does not yet support starting a new account from this screen/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Check before resuming", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Resume stock updates", exact: true })).toHaveCount(0);
-  await expect(page.getByText("Live allocator", { exact: true })).toHaveCount(0);
-  expect(state.writes).toEqual([]);
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  expect(state.writes).toHaveLength(1);
+  expect(state.writes[0]).toMatchObject({ path: BASE + "/publication-target-enable", body: {
+    publicationTargetId: 5, expectedRevision: "3", idempotencyKey: expect.any(String),
+  } });
+  expect(state.writes[0].body).not.toHaveProperty("reason");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({ path: info.outputPath("walmart-stock-updates.png"), fullPage: true });
-  await expect(page.getByRole("button", { name: "Prepare account", exact: true })).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath("walmart-stock-updates-enabled.png"), fullPage: true });
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
-test("previously paused accounts prepare for a check without sending stock updates", async ({ page }) => {
+test("previously paused accounts turn on in one step", async ({ page }) => {
   const state = await setup(page, { query: "?channel=3&destination=5&tab=publishing", viewOverrides: {
     publicationTargets: [target({ state: "disabled", hasPriorLiveStop: true })],
   } });
-  await page.getByRole("switch", { name: /^Automatic stock updates for/ }).click();
-  const dialog = page.getByRole("alertdialog");
-  await expect(dialog).toContainText("This does not turn on automatic stock updates");
-  await expect(dialog.getByRole("button", { name: "Prepare account", exact: true })).toBeDisabled();
-  await dialog.getByLabel("Reason (required for this publishing command)").fill("Review the paused account before resuming");
-  await dialog.getByRole("button", { name: "Prepare account", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Check before resuming", exact: true })).toBeVisible();
+  const toggle = page.getByRole("switch", { name: /^Automatic stock updates for/ });
+  await toggle.click();
+  await expect(toggle).toBeChecked();
   expect(state.writes).toHaveLength(1);
-  expect(state.writes[0]).toMatchObject({ path: `${BASE}/publication-target-preview-state`, body: {
-    publicationTargetId: 5, expectedRevision: "3", state: "preview", changeReason: "Review the paused account before resuming",
-  } });
-  await expect(page.getByRole("button", { name: "Resume stock updates", exact: true })).toHaveCount(0);
+  expect(state.writes[0].path).toBe(BASE + "/publication-target-enable");
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("failed enable stays off and shows the specific setup correction", async ({ page }) => {
+  const state = await setup(page, { viewOverrides: { publicationTargets: [target({ state: "disabled", hasPriorLiveStop: false })] } });
+  state.enableFailed = true;
+  const toggle = page.getByRole("switch", { name: /^Automatic stock updates for/ });
+  await toggle.click();
+  await expect(page.getByRole("dialog")).toContainText("Save a complete channel default in Stock rules");
+  await expect(page.locator("#stock-updates-5")).not.toBeChecked();
+  await page.getByRole("button", { name: "Edit stock rules", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.writes).toHaveLength(1);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("lost enable response retries the exact request without a second enable", async ({ page }) => {
+  const state = await setup(page, { viewOverrides: { publicationTargets: [target({ state: "disabled" })] } });
+  state.enableLostResponse = true;
+  await page.getByRole("switch", { name: /^Automatic stock updates for/ }).click();
+  await expect(page.getByRole("dialog")).toContainText("Stock update change not confirmed");
+  await page.evaluate(() => window.dispatchEvent(new Event("channel-inventory-test-refresh")));
+  await expect(page.locator("#stock-updates-5")).toBeChecked();
+  await page.getByRole("button", { name: "Retry turning on", exact: true }).click();
+  await expect(page.getByRole("switch", { name: /^Automatic stock updates for/ })).toBeChecked();
+  expect(state.writes).toHaveLength(2);
+  expect(state.writes[1].raw).toBe(state.writes[0].raw);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
@@ -243,15 +274,13 @@ test("failed global status refresh does not leave an enabled account looking con
   expect(state.writes).toEqual([]); expect(state.errors).toEqual([]);
 });
 
-test("unknown setup history is not treated as a new or previously paused account", async ({ page }) => {
-  const state = await setup(page, { query: "?channel=3&destination=5&tab=publishing", viewOverrides: {
-    publicationTargets: [target({ hasPriorLiveStop: undefined })],
-  } });
-  await page.getByRole("switch", { name: /^Automatic stock updates for/ }).click();
-  await expect(page.getByText("Account setup history is unavailable", { exact: true })).toBeVisible();
-  await expect(page.getByText("Starting stock updates is unavailable", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Check before resuming", exact: true })).toHaveCount(0);
-  expect(state.writes).toEqual([]); expect(state.errors).toEqual([]);
+test("missing historical pause hints never block direct enable", async ({ page }) => {
+  const state = await setup(page, { viewOverrides: { publicationTargets: [target({ hasPriorLiveStop: undefined })] } });
+  const toggle = page.getByRole("switch", { name: /^Automatic stock updates for/ });
+  await toggle.click(); await expect(toggle).toBeChecked();
+  expect(state.writes).toHaveLength(1);
+  expect(state.writes[0].path).toBe(BASE + "/publication-target-enable");
+  expect(state.errors).toEqual([]);
 });
 
 test("externally managed stock has no Echelon start or pause controls", async ({ page }) => {
@@ -277,13 +306,13 @@ test("failed preview refresh hides stale calculated stock while keeping separate
   expect(state.writes).toEqual([]); expect(state.errors).toEqual([]);
 });
 
-test("view-only operators cannot prepare an account and the all-channel pause stays distinct", async ({ page }) => {
+test("view-only operators cannot enable an account and the all-channel pause stays distinct", async ({ page }) => {
   const state = await setup(page, { permission: "view", globalEnabled: false, query: "?channel=3&destination=5&tab=publishing",
     viewOverrides: { publicationTargets: [target({ state: "disabled" })] },
   });
   await expect(page.getByRole("switch", { name: /^Automatic stock updates for/ })).toBeDisabled();
   await page.getByRole("button", { name: /^Stock update details for/ }).click();
-  await expect(page.getByRole("button", { name: "Prepare account", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Turn on stock updates", exact: true })).toBeDisabled();
   await page.getByRole("button", { name: "All-channel controls", exact: true }).click();
   await expect(page.getByRole("dialog").getByRole("switch")).toBeDisabled();
   await expect(page.getByRole("dialog").getByRole("button", { name: "Apply", exact: true })).toHaveCount(0);

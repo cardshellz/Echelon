@@ -43,6 +43,10 @@ import { PostgresInventoryPublicationTargetHoldStore } from "../../infrastructur
 import { ChannelPublicationStatusService } from "../../application/inventory-channel-publication-status.service";
 import { PostgresChannelPublicationStatusReader } from "../../infrastructure/inventory-channel-publication-status.repository";
 
+import { enableInventoryPublicationTargetRequestSchema, inventoryPublicationTargetEnableResultSchema } from "@shared/types/inventory-publication-target-enable";
+import { InventoryPublicationTargetEnableService } from "../../application/inventory-publication-target-enable.service";
+import { PostgresInventoryPublicationTargetEnableStore } from "../../infrastructure/inventory-publication-target-enable.repository";
+
 const positiveId = z.coerce.number().int().positive().max(2_147_483_647);
 type ChannelExposureService = Pick<
   InventoryChannelExposureAdminService,
@@ -54,6 +58,7 @@ type ChannelExposureService = Pick<
 export interface InventoryChannelExposureRouteDependencies {
   service?: ChannelExposureService;
   store?: InventoryChannelExposureAdminStore;
+  targetEnableService?: Pick<InventoryPublicationTargetEnableService, "enable">;
   targetStopService?: Pick<InventoryPublicationTargetStopService, "stop">;
   targetResumeService?: Pick<InventoryPublicationTargetResumeService, "review" | "resume">;
   targetHoldService?: Pick<InventoryPublicationTargetHoldService, "hold" | "release">;
@@ -72,6 +77,8 @@ export function registerInventoryChannelExposureRoutes(
     // reads it through that module's resolver instead of re-deriving the rule.
     dependencies.dropshipChannel ?? createDropshipOmsChannelResolver(pool),
   );
+  const targetEnableService = dependencies.targetEnableService
+    ?? new InventoryPublicationTargetEnableService(new PostgresInventoryPublicationTargetEnableStore());
   const targetStopService = dependencies.targetStopService
     ?? new InventoryPublicationTargetStopService(new PostgresInventoryPublicationTargetStopStore());
   const targetResumeService = dependencies.targetResumeService
@@ -80,6 +87,18 @@ export function registerInventoryChannelExposureRoutes(
     ?? new InventoryPublicationTargetHoldService(new PostgresInventoryPublicationTargetHoldStore());
   const publicationStatusService = dependencies.publicationStatusService
     ?? new ChannelPublicationStatusService(new PostgresChannelPublicationStatusReader(pool));
+
+  app.put(
+    "/api/inventory-planning/admin/channel-exposure/publication-target-enable",
+    requirePermission("inventory_planning", "activate"),
+    async (req, res) => {
+      try {
+        return res.json(inventoryPublicationTargetEnableResultSchema.parse(await targetEnableService.enable(
+          parseBody(enableInventoryPublicationTargetRequestSchema, req.body), auditActor(req),
+        )));
+      } catch (error) { return sendError(res, error, "enable automatic stock updates"); }
+    },
+  );
 
   app.get(
     "/api/inventory-planning/admin/channel-exposure/publication-status",
