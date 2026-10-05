@@ -84,18 +84,18 @@ describe("catalog action bar", () => {
   it("links to the next step", () => {
     const markup = render(React.createElement(CatalogActionBar, {
       summary: "3 selected",
-      next: { label: "Continue to Set how it lists", href: "/dropship-portal/catalog/setup", disabled: false },
+      next: { label: "Next: Set how it lists", href: "/dropship-portal/catalog/setup", disabled: false },
     }));
     expect(markup).toContain("3 selected");
-    expect(markup).toMatch(/<a [^>]*href="\/dropship-portal\/catalog\/setup"[^>]*>Continue to Set how it lists/);
+    expect(markup).toMatch(/<a [^>]*href="\/dropship-portal\/catalog\/setup"[^>]*>Next: Set how it lists/);
   });
 
   it("disables the way forward without linking anywhere, and can offer none", () => {
     const disabled = render(React.createElement(CatalogActionBar, {
       summary: "0 selected",
-      next: { label: "Continue to Set how it lists", href: "/dropship-portal/catalog/setup", disabled: true },
+      next: { label: "Next: Set how it lists", href: "/dropship-portal/catalog/setup", disabled: true },
     }));
-    expect(disabled).toMatch(/<button[^>]* disabled=""[^>]*>Continue to Set how it lists/);
+    expect(disabled).toMatch(/<button[^>]* disabled=""[^>]*>Next: Set how it lists/);
     expect(disabled).not.toContain("href=");
     const none = render(React.createElement(CatalogActionBar, { summary: "3 selected · publishing to Marz Cards", next: null }));
     expect(none).toContain("3 selected · publishing to Marz Cards");

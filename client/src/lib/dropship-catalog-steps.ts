@@ -93,6 +93,15 @@ export interface CatalogActionBarContent {
 }
 
 /**
+ * The bar's button names the next step by its own title. "Continue to Set how
+ * it lists" read as broken English, and a bare "Publish" would look like it
+ * publishes; "Next: Publish" only moves to that step.
+ */
+function nextStepLabel(step: CatalogStep): string {
+  return `Next: ${CATALOG_STEP_LABELS[step]}`;
+}
+
+/**
  * What the bar at the bottom of each step says and offers. Choose cannot
  * continue with nothing selected; Publish keeps its preview and queue buttons
  * in its own panel until readiness moves into the bar (design PR 9).
@@ -108,13 +117,13 @@ export function describeCatalogActionBar(input: {
   if (input.step === "choose") {
     return {
       summary: selected,
-      next: { step: "setup", label: `Continue to ${CATALOG_STEP_LABELS.setup}`, disabled: !input.selectedCount },
+      next: { step: "setup", label: nextStepLabel("setup"), disabled: !input.selectedCount },
     };
   }
   if (input.step === "setup") {
     return {
       summary: input.storeName ? `Settings for ${input.storeName}` : "No eBay store ready",
-      next: { step: "publish", label: `Continue to ${CATALOG_STEP_LABELS.publish}`, disabled: false },
+      next: { step: "publish", label: nextStepLabel("publish"), disabled: false },
     };
   }
   return { summary: input.storeName ? `${selected} · publishing to ${input.storeName}` : selected, next: null };
