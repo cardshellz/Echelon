@@ -67,8 +67,19 @@ function harness(options: {
       return { rows: row ? [row] : [] };
     }
     if (text.includes("FROM oms.order_item_costs")) {
-      return { rows: [{ unit_cost_cents: options.costCents ?? 275 }] };
+      return { rows: [{ id: 9,order_id: 61,order_item_id: 71,product_variant_id: 301,inventory_lot_id: 801,qty: 4,
+        unit_cost_cents: options.costCents ?? 275,unit_cost_mills: (options.costCents ?? 275)*100,cost_precision_version: 1 }] };
     }
+    if (text.includes("SUM(quantity)") && text.includes("return_cost_allocations")) return { rows: [{ quantity: 0 }] };
+    if (text.includes("source.qty_received AS source_qty")) return { rows: [{ source_qty: 4,output_qty: 2,qty_received: 4,
+      cost_precision_version: 1, cost_provisional: 0, po_unit_cost_mills: (options.costCents ?? 275)*100,
+      packaging_cost_mills: 0, landed_cost_mills: 0,
+      unit_cost_mills: (options.costCents ?? 275)*100,total_unit_cost_mills: (options.costCents ?? 275)*100 }] };
+    if (text.includes("FROM inventory.inventory_lots") && text.includes("FOR UPDATE")) return { rows: [{ id: 801,
+      qty_received: 4,cost_provisional: 0,cost_precision_version: 1,unit_cost_mills: (options.costCents ?? 275)*100,
+      total_unit_cost_mills: (options.costCents ?? 275)*100,po_unit_cost_mills: (options.costCents ?? 275)*100,
+      packaging_cost_mills: 0,landed_cost_mills: 0 }] };
+    if (text.includes("inventory.lot_cost_contributions") || text.startsWith("INSERT INTO inventory.return_cost_allocations")) return { rows: [] };
     if (text.startsWith("INSERT INTO inventory.inventory_lots")) return { rows: [{ id: 501 }] };
     if (text.startsWith("UPDATE inventory.inventory_levels")) return { rows: [] };
     if (text.startsWith("INSERT INTO inventory.inventory_transactions")) return { rows: [{ id: 601 }] };
@@ -94,15 +105,16 @@ describe("applyReturnRestock", () => {
       quantity: 2,
       inventoryTransactionId: 601,
       inventoryLotId: 501,
+      inventoryLotIds: [501],inventoryTransactionIds: [601],
       replayed: false,
     });
     const lot = queries.find((query) => query.sql.startsWith("INSERT INTO inventory.inventory_lots"));
-    expect(lot?.params).toEqual(expect.arrayContaining(["RET-0000000042-D91", 301, 17, 275, 27500, 2, NOW, "order_cogs", "sellable return"]));
+    expect(lot?.params).toEqual(expect.arrayContaining(["RET-0000000042-D91", 301, 17, 275, "27500", 2, NOW, "order_cogs", "sellable return"]));
     const levelUpdate = queries.find((query) => query.sql.startsWith("UPDATE inventory.inventory_levels"));
     expect(levelUpdate?.params).toEqual([10, NOW, 401]);
     const ledger = queries.find((query) => query.sql.startsWith("INSERT INTO inventory.inventory_transactions"));
     expect(ledger?.params).toEqual([
-      301, 17, 2, 8, 10, 275, 501, 61, 71,
+      301, 17, 2, 8, 10, "on_hand", 275, 501, 61, 71,
       "return_inventory_treatment", "91", "sellable return", "user:7", NOW,
     ]);
     expect(queries.find((query) => query.sql.includes("FROM catalog.product_variants"))?.sql)
@@ -113,15 +125,18 @@ describe("applyReturnRestock", () => {
     const { executor, queries } = harness({
       existing: {
         id: 601,
+        order_id: 61,
+        order_item_id: 71,
         product_variant_id: 301,
         to_location_id: 17,
         variant_qty_delta: 2,
         inventory_lot_id: 501,
+        target_state: "on_hand",
       },
     });
 
     await expect(applyReturnRestock(executor, input())).resolves.toMatchObject({ replayed: true });
-    expect(queries).toHaveLength(4);
+    expect(queries.some(query=>query.sql.includes("FROM warehouse.warehouse_locations"))).toBe(false);
     expect(queries.some((query) => query.sql.startsWith("INSERT INTO inventory.inventory_lots"))).toBe(false);
     expect(queries.some((query) => query.sql.startsWith("UPDATE inventory.inventory_levels"))).toBe(false);
   });
@@ -130,17 +145,20 @@ describe("applyReturnRestock", () => {
     const { executor, queries } = harness({
       existing: {
         id: 601,
+        order_id: 61,
+        order_item_id: 71,
         product_variant_id: 301,
         to_location_id: 17,
         variant_qty_delta: 1,
         inventory_lot_id: 501,
+        target_state: "on_hand",
       },
     });
 
     await expect(applyReturnRestock(executor, input())).rejects.toMatchObject({
       code: "RETURN_RESTOCK_REPLAY_CONFLICT",
     });
-    expect(queries).toHaveLength(4);
+    expect(queries.some(query=>query.sql.includes("FROM warehouse.warehouse_locations"))).toBe(false);
   });
 
   it.each([
@@ -169,7 +187,7 @@ describe("applyReturnRestock", () => {
     const { executor, queries } = harness({ costCents: 275.5 });
 
     await expect(applyReturnRestock(executor, input())).rejects.toMatchObject({
-      code: "RETURN_RESTOCK_DATA_INVALID",
+      code: "INVALID_SOURCE_LOT_COST",
     });
     expect(queries.some((query) => query.sql.startsWith("INSERT INTO inventory.inventory_lots"))).toBe(false);
   });

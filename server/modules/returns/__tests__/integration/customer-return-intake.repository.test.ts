@@ -1,4 +1,6 @@
 import { drizzle } from "drizzle-orm/node-postgres";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -36,6 +38,11 @@ integration("private return intake on migration-defined PostgreSQL", () => {
       statement_timeout: 15_000,
     });
     await createIntakeTestSchema(pool);
+    const migration = readFileSync(resolve(process.cwd(), "migrations/0726_inventory_return_cost_allocations.sql"), "utf8");
+    const start = migration.indexOf("CREATE TABLE inventory.return_commands (");
+    const end = migration.indexOf("CREATE TRIGGER cost_evidence_immutable", start);
+    if (start < 0 || end <= start) throw new Error("Return command fixture migration boundaries changed");
+    await pool.query(migration.slice(start, end));
     store = new PostgresCustomerReturnIntakeStore(
       drizzle(pool),
       () => new Date(clockInstant),
@@ -394,17 +401,23 @@ integration("private return intake on migration-defined PostgreSQL", () => {
 
   it("routes portal-owned purchased lines to canonical receipt across partitions while preserving unrelated legacy routing", async () => {
     await store.persist(partialIntake());
-    // Stop at the inventory boundary: this test proves the real SQL fence and
-    // transaction path, while unit coverage verifies the legacy stock calls.
-    const legacy = createReturnsService(drizzle(pool), {
-      withTx: () => {
-        throw new Error("UNRELATED_LEGACY_RECEIVING_REACHED");
-      },
+    // Real PostgreSQL source/replay fences; stop at the subsequent catalog
+    // boundary. Actual physical stock/cost posting has its own owner suite.
+    const database = drizzle(pool);
+    const legacy = createReturnsService({
+      select: database.select.bind(database), insert: database.insert.bind(database),
+      update: database.update.bind(database), delete: database.delete.bind(database), execute: database.execute.bind(database),
+      transaction: <T>(work: (tx: any) => Promise<T>) => database.transaction(tx => work({
+        select: () => { throw new Error("UNRELATED_LEGACY_RECEIVING_REACHED"); },
+        insert: tx.insert.bind(tx), update: tx.update.bind(tx), delete: tx.delete.bind(tx),
+        execute: tx.execute.bind(tx), transaction: tx.transaction.bind(tx),
+      })),
     });
     await expect(
       legacy.processReturn({
         orderId: 202,
         warehouseLocationId: 1,
+        userId: "return-intake-test",
         items: [
           {
             orderItemId: 302,
@@ -419,6 +432,7 @@ integration("private return intake on migration-defined PostgreSQL", () => {
       legacy.processReturn({
         orderId: 202,
         warehouseLocationId: 1,
+        userId: "return-intake-test",
         items: [
           {
             orderItemId: 303,

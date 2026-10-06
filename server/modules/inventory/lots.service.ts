@@ -1,3 +1,4 @@
+import { readInventoryValuation } from "./application/read-inventory-valuation";
 import { CostEvidenceError, lockInventoryCostGraph, recordLotCostContribution } from "./infrastructure/cost-evidence.repository";
 import type { OperationalQuantityPosting } from "./infrastructure/operational-quantity-posting";
 /**
@@ -32,7 +33,7 @@ import {
 } from "./domain/inventory.domain";
 import { millsToCents, centsToMills } from "@shared/utils/money";
 import { AppError, IntegrityError, ValidationError } from "../../../shared/errors";
-import { normalizeBuildLotCosts } from "./infrastructure/build.repository";
+import { normalizeLotCosts as normalizeBuildLotCosts, lotCostRecord, recordedUnitCostMills } from "./domain/lot-cost";
 import { planShipmentLotDepletion, ShipmentLotConflictError, shipmentLotDepletionRequestSchema,
   type ShipmentLotDepletionRequest } from "./domain/shipment-lot-depletion";
 
@@ -59,34 +60,12 @@ function assertPositiveSafeInteger(value: number, field: string): void {
 }
 
 function storedUnitCostMills(
-  row: { unitCostCents: unknown; unitCostMills?: unknown },
+  row: { unitCostCents: unknown; unitCostMills?: unknown; costPrecisionVersion?: unknown },
   context: Record<string, unknown>,
 ): number {
-  const unitCostCents = Number(row.unitCostCents);
-  if (!Number.isSafeInteger(unitCostCents) || unitCostCents < 0) {
-    throw new IntegrityError("Stored order-item unit cost cents are invalid", {
-      reason: "order_item_cost_value_invalid",
-      ...context,
-      unitCostCents: row.unitCostCents,
-    });
-  }
-
-  if (row.unitCostMills == null) return centsToMills(unitCostCents);
-  const unitCostMills = Number(row.unitCostMills);
-  if (!Number.isSafeInteger(unitCostMills) || unitCostMills < 0) {
-    throw new IntegrityError("Stored order-item unit cost mills are invalid", {
-      reason: "order_item_cost_value_invalid",
-      ...context,
-      unitCostMills: row.unitCostMills,
-    });
-  }
-
-  // Historical rows were backfilled through a zero default before mills
-  // became authoritative. Retain their exact cent value rather than treating
-  // a positive cent cost as free inventory.
-  return unitCostMills === 0 && unitCostCents > 0
-    ? centsToMills(unitCostCents)
-    : unitCostMills;
+  return safeMillsNumber(recordedUnitCostMills({ unit_cost_cents: row.unitCostCents,
+    unit_cost_mills: row.unitCostMills, cost_precision_version: row.costPrecisionVersion }),
+    String(context.inventoryLotId ?? "orderItemCost.unitCostMills"));
 }
 
 type DrizzleDb = {
@@ -199,6 +178,7 @@ export class InventoryLotService {
         packagingCostMills,
         landedCostMills,
         totalUnitCostMills,
+        costPrecisionVersion: 1,
         qtyReceived: params.qty,
         costSource: params.costSource ?? ((params.poLineId || params.purchaseOrderId) ? "po" : "manual"),
         poLineId: params.poLineId ?? null,
@@ -212,7 +192,7 @@ export class InventoryLotService {
         costProvisional: params.costProvisional ?? 0,
         status: "active",
         notes: params.notes ?? null,
-      } as any)
+      })
       .returning();
 
     if (params.quantityPosting) await params.quantityPosting.addLot(lot.id, {
@@ -578,10 +558,7 @@ export class InventoryLotService {
         // COGS in MILLS (lot.unitCostMills mirrors the lot's total per-variant-unit
         // cost). cents columns are derived mirrors (half-up), so the period COGS stays
         // exact when summed in mills (take × per-unit-mills, rounded once at display).
-        const lotUnitMills = storedUnitCostMills(lot as any, {
-          inventoryLotId: lot.id,
-          productVariantId: params.productVariantId,
-        });
+        const lotUnitMills = safeMillsNumber(normalizeBuildLotCosts(lotCostRecord(lot)).totalMills,"lot.unitCostMills");
         const totalCostMills = safeMillsNumber(
           BigInt(take) * BigInt(lotUnitMills),
           "orderItemCost.totalCostMills",
@@ -596,6 +573,7 @@ export class InventoryLotService {
           totalCostCents: millsToCents(totalCostMills),
           unitCostMills: lotUnitMills,
           totalCostMills,
+          costPrecisionVersion: 1,
         });
       }
 
@@ -779,6 +757,7 @@ export class InventoryLotService {
         .set({
           qty: partialCost.remainingQty,
           totalCostMills,
+          costPrecisionVersion: 1,
           totalCostCents: millsToCents(totalCostMills),
         })
         .where(and(
@@ -949,18 +928,7 @@ export class InventoryLotService {
       const take = unreservedTake + reservedTake;
       if (take <= 0) continue;
 
-      const normalizedCosts = normalizeBuildLotCosts({
-        total_unit_cost_mills: lot.totalUnitCostMills,
-        unit_cost_mills: lot.unitCostMills,
-        total_unit_cost_cents: lot.totalUnitCostCents,
-        unit_cost_cents: lot.unitCostCents,
-        po_unit_cost_mills: lot.poUnitCostMills,
-        po_unit_cost_cents: lot.poUnitCostCents,
-        packaging_cost_mills: lot.packagingCostMills,
-        packaging_cost_cents: lot.packagingCostCents,
-        landed_cost_mills: lot.landedCostMills,
-        landed_cost_cents: lot.landedCostCents,
-      });
+      const normalizedCosts = normalizeBuildLotCosts(lotCostRecord(lot));
       adjustUpdates.push({ lotId: lot.id, take, reservedRelease: reservedTake });
       consumedCostCents += take * lot.unitCostCents;
       consumedQty += take;
@@ -1093,18 +1061,7 @@ export class InventoryLotService {
       if (available <= 0) continue;
 
       const take = Math.min(available, remaining);
-      const normalizedCosts = normalizeBuildLotCosts({
-        total_unit_cost_mills: lot.totalUnitCostMills,
-        unit_cost_mills: lot.unitCostMills,
-        total_unit_cost_cents: lot.totalUnitCostCents,
-        unit_cost_cents: lot.unitCostCents,
-        po_unit_cost_mills: lot.poUnitCostMills,
-        po_unit_cost_cents: lot.poUnitCostCents,
-        packaging_cost_mills: lot.packagingCostMills,
-        packaging_cost_cents: lot.packagingCostCents,
-        landed_cost_mills: lot.landedCostMills,
-        landed_cost_cents: lot.landedCostCents,
-      });
+      const normalizedCosts = normalizeBuildLotCosts(lotCostRecord(lot));
       layers.push({
         lotId: lot.id,
         take,
@@ -1249,6 +1206,7 @@ export class InventoryLotService {
    */
   async getInventoryValuation(): Promise<{
     total: { qty: number; valueCents: number; zeroCostQty: number; provisionalQty: number };
+    quantityUnit: "variant"; totalValueMills: string; unknownCostQty: number;
     byVariant: Array<{
       productVariantId: number;
       sku: string | null;
@@ -1259,49 +1217,11 @@ export class InventoryLotService {
       provisionalQty: number;
     }>;
   }> {
-    const rows = await this.db
-      .select({
-        productVariantId: inventoryLots.productVariantId,
-        sku: productVariants.sku,
-        qty: sql<number>`SUM(${inventoryLots.qtyOnHand})`,
-        totalCost: sql<number>`SUM(${inventoryLots.qtyOnHand} * COALESCE(NULLIF(${inventoryLots.totalUnitCostCents}, 0), ${inventoryLots.unitCostCents}, 0))`,
-        zeroCostQty: sql<number>`SUM(CASE WHEN COALESCE(NULLIF(${inventoryLots.totalUnitCostCents}, 0), ${inventoryLots.unitCostCents}, 0) = 0 THEN ${inventoryLots.qtyOnHand} ELSE 0 END)`,
-        provisionalQty: sql<number>`SUM(CASE WHEN ${inventoryLots.costProvisional} = 1 THEN ${inventoryLots.qtyOnHand} ELSE 0 END)`,
-      })
-      .from(inventoryLots)
-      .innerJoin(productVariants, eq(productVariants.id, inventoryLots.productVariantId))
-      .where(and(eq(inventoryLots.status, "active"), gt(inventoryLots.qtyOnHand, 0)))
-      .groupBy(inventoryLots.productVariantId, productVariants.sku);
+    const valuation = await readInventoryValuation(this.db);
+    return { total: valuation.total, byVariant: valuation.byVariant,
+      quantityUnit: valuation.quantityUnit, totalValueMills: valuation.totalValueMills,
+      unknownCostQty: valuation.unknownCostQty };
 
-    let totalQty = 0;
-    let totalValue = 0;
-    let totalZeroCostQty = 0;
-    let totalProvisionalQty = 0;
-
-    const byVariant = rows.map((r: any) => {
-      const qty = Number(r.qty) || 0;
-      const valueCents = Number(r.totalCost) || 0;
-      const zeroCostQty = Number(r.zeroCostQty) || 0;
-      const provisionalQty = Number(r.provisionalQty) || 0;
-      totalQty += qty;
-      totalValue += valueCents;
-      totalZeroCostQty += zeroCostQty;
-      totalProvisionalQty += provisionalQty;
-      return {
-        productVariantId: r.productVariantId,
-        sku: r.sku,
-        qty,
-        avgCostCents: qty > 0 ? Math.round(valueCents / qty) : 0,
-        valueCents,
-        zeroCostQty,
-        provisionalQty,
-      };
-    });
-
-    return {
-      total: { qty: totalQty, valueCents: totalValue, zeroCostQty: totalZeroCostQty, provisionalQty: totalProvisionalQty },
-      byVariant,
-    };
   }
 
   // ---------------------------------------------------------------------------

@@ -146,6 +146,7 @@ suite.sequential("COGS read queries against the canonical PostgreSQL schema", ()
     await expect(service.getInventoryValuation()).resolves.toEqual({
       totalValueCents: 0, totalQty: 0, zeroCostQty: 0, provisionalQty: 0,
       landedPendingLots: 0, landedPendingValueCents: 0, byProduct: [],
+      totalValueMills: "0", quantityUnit: "variant", unknownCostQty: 0,
     });
     await expect(service.getAllCostLots()).resolves.toEqual({ lots: [], total: 0 });
   });
@@ -156,10 +157,12 @@ suite.sequential("COGS read queries against the canonical PostgreSQL schema", ()
     expect(columns.rows.map((row) => row.column_name)).toContain("sku");
     expect(columns.rows.map((row) => row.column_name)).not.toContain("base_sku");
     const report = await service.getInventoryValuation();
-    expect(report).toMatchObject({ totalValueCents: 375, totalQty: 103, zeroCostQty: 3, provisionalQty: 100, landedPendingLots: 1, landedPendingValueCents: 375 });
+    // Legacy zero has no mill-authority provenance, so retain its uncertainty.
+    expect(report).toMatchObject({ totalValueCents: 375, totalQty: 103, zeroCostQty: 3, provisionalQty: 103,
+      unknownCostQty: 3, totalValueMills: "37500", quantityUnit: "variant", landedPendingLots: 1, landedPendingValueCents: 375 });
     expect(report.byProduct).toEqual([
-      { productId: 1, productName: "Test product", baseSku: "BASE-A", totalQty: 100, avgCostPerPiece: 4, totalValueCents: 375, activeLots: 1, zeroCostQty: 0, hasLandedPending: true },
-      { productId: 2, productName: "No family SKU", baseSku: "", totalQty: 3, avgCostPerPiece: 0, totalValueCents: 0, activeLots: 1, zeroCostQty: 3, hasLandedPending: false },
+      { productId: 1, productName: "Test product", baseSku: "BASE-A", totalQty: 100, avgCostPerPiece: 4, totalValueCents: 375, activeLots: 1, zeroCostQty: 0, hasLandedPending: true, valueMills: "37500", quantityUnit: "variant" },
+      { productId: 2, productName: "No family SKU", baseSku: "", totalQty: 3, avgCostPerPiece: 0, totalValueCents: 0, activeLots: 1, zeroCostQty: 3, hasLandedPending: false, valueMills: "0", quantityUnit: "variant" },
     ]);
   });
 

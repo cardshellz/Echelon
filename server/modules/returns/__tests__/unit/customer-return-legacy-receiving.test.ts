@@ -1,19 +1,26 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it, vi } from "vitest";
-vi.mock("../../../inventory/cost-resolver", () => ({ resolveReturnCost: vi.fn(async () => ({ costCents: 25 })) }));
+const physicalOwners = vi.hoisted(() => ({ restock: vi.fn(),quarantine: vi.fn() }));
+vi.mock("../../../inventory/application/return-restock.use-case",async importOriginal=>({
+  ...await importOriginal<typeof import("../../../inventory/application/return-restock.use-case")>(), applyReturnedStock: physicalOwners.restock,
+}));
+vi.mock("../../../inventory/application/quarantine-returned-stock",()=>({ quarantineReturnedStock: physicalOwners.quarantine }));
 import { createReturnsService, type ProcessReturnParams } from "../../../orders/returns.service";
 
 const dialect = new PgDialect();
 const input = (): ProcessReturnParams => ({ orderId: 201, warehouseLocationId: 1, userId: "admin:test", items: [{ orderItemId: 301, productVariantId: 501, qty: 1, condition: "sellable" }] });
 function fixture(root = false) {
+  physicalOwners.restock.mockReset().mockResolvedValue({ inventoryLotIds: [901],inventoryLotId: 901,
+    inventoryTransactionIds: [902],inventoryTransactionId: 902,quantity: 1,replayed: false });
+  physicalOwners.quarantine.mockReset().mockResolvedValue(undefined);
   const statements: string[] = [];
   const parameters: unknown[][] = [];
   const execute = vi.fn(async query => {
     const rendered = dialect.sqlToQuery(query); const statement = rendered.sql; statements.push(statement); parameters.push(rendered.params);
     if (statement.includes("FROM wms.orders")) return { rows: [{ id: 201, oms_fulfillment_order_id: "100" }] };
     if (statement.includes("FROM returns.customer_return_authorizations")) return { rows: root ? [{ present: 1 }] : [] };
-    if (statement.includes("FROM wms.order_items")) return { rows: [{ id: 301, oms_order_line_id: 101, product_variant_id: 501 }] };
-    return { rows: [{ id: 100 }] };
+    if (statement.includes("FROM wms.order_items")) return { rows: [{ id: 301, quantity: 1, oms_order_line_id: 101, product_variant_id: 501 }] };
+    return { rows: [] };
   });
   const select = vi.fn(() => ({ from: () => ({ where: () => ({ limit: async () => [{ unitsPerVariant: 1 }] }) }) }));
   const tx = { execute, select };
@@ -28,7 +35,7 @@ describe("legacy inventory receiving portal fence", () => {
     await expect(h.service.processReturn(input())).rejects.toThrow("RETURN_CANONICAL_RECEIVING_REQUIRED");
     expect(h.statements.findIndex(statement => statement.includes("pg_advisory_xact_lock")))
       .toBeLessThan(h.statements.findIndex(statement => statement.includes("FROM returns.customer_return_authorizations")));
-    expect(h.statements).toContain("ROLLBACK"); expect(h.core.receiveInventory).not.toHaveBeenCalled();
+    expect(h.statements).toContain("ROLLBACK"); expect(physicalOwners.restock).not.toHaveBeenCalled();
     const fence = h.statements.findIndex(statement => statement.includes("FROM returns.customer_return_authorizations"));
     expect(h.statements[fence]).toContain("requested.oms_order_line_id=al.oms_order_line_id");
     expect(h.statements[fence]).toContain("requested.id IN");
@@ -36,12 +43,13 @@ describe("legacy inventory receiving portal fence", () => {
   });
   it("retains normal nonportal receipt and binds inventory writes to the fenced transaction", async () => {
     const h = fixture(); const result = await h.service.processReturn(input());
-    expect(result.processed).toBe(1); expect(h.core.withTx).toHaveBeenCalledWith(h.tx);
-    expect(h.core.receiveInventory).toHaveBeenCalledTimes(1); expect(h.core.logTransaction).toHaveBeenCalledTimes(1);
+    expect(result.processed).toBe(1); expect(h.core.withTx).not.toHaveBeenCalled();
+    expect(physicalOwners.restock).toHaveBeenCalledTimes(1);
+    expect(physicalOwners.restock).toHaveBeenCalledWith(h.tx,expect.objectContaining({ wmsOrderId: 201,wmsOrderItemId: 301,productVariantId: 501,quantity: 1 }));
     expect(h.statements).toContain("COMMIT");
   });
   it("rolls back all effects if receipt audit persistence fails", async () => {
-    const h = fixture(); h.core.logTransaction.mockRejectedValue(new Error("audit failure"));
+    const h = fixture(); physicalOwners.restock.mockRejectedValue(new Error("audit failure"));
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try { await expect(h.service.processReturn(input())).rejects.toThrow("audit failure"); }
     finally { log.mockRestore(); }
@@ -50,7 +58,7 @@ describe("legacy inventory receiving portal fence", () => {
   it("rejects an order-item/variant mismatch before stock changes", async () => {
     const h = fixture(); const request = input(); request.items[0].productVariantId = 999;
     await expect(h.service.processReturn(request)).rejects.toThrow("RETURN_LEGACY_ITEM_MISMATCH");
-    expect(h.core.receiveInventory).not.toHaveBeenCalled();
+    expect(physicalOwners.restock).not.toHaveBeenCalled();
   });
   it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])("rejects invalid location %s before opening a transaction", async warehouseLocationId => {
     const h = fixture(); await expect(h.service.processReturn({ ...input(), warehouseLocationId })).rejects.toThrow("RETURN_LEGACY_INPUT_INVALID");

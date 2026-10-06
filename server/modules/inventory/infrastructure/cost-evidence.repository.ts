@@ -1,30 +1,12 @@
-import { createHash } from "node:crypto";
+import { costInteger, CostEvidenceError } from "./cost-evidence-values";
+export { costInteger, costFingerprint, CostEvidenceError } from "./cost-evidence-values";
+import { recordLotCostFollowUp } from "./lot-cost-follow-up.repository";
+import { lotCostNeedsReview } from "../domain/lot-cost";
 import { sql } from "drizzle-orm";
-import { canonicalJson } from "@shared/utils/canonical-json";
 import { type CostSourceRevision } from "@shared/procurement/cost-source-contracts";
 
 export interface CostEvidenceTransaction {
   execute(query: unknown): Promise<{ rows: any[] }>;
-}
-
-export class CostEvidenceError extends Error {
-  readonly statusCode = 409;
-  constructor(readonly code: string, message: string, readonly context: Record<string, unknown> = {}) {
-    super(message);
-    this.name = "CostEvidenceError";
-  }
-}
-
-export function costFingerprint(value: unknown): string {
-  return createHash("sha256").update(canonicalJson(value)).digest("hex");
-}
-
-export function costInteger(value: unknown, field: string, minimum = 0): number {
-  const parsed = typeof value === "string" && /^-?\d+$/.test(value) ? Number(value) : value;
-  if (typeof parsed !== "number" || !Number.isSafeInteger(parsed) || parsed < minimum) {
-    throw new CostEvidenceError("COST_EVIDENCE_INVALID_INTEGER", `${field} is not a supported integer.`, { field });
-  }
-  return parsed;
 }
 
 /** All graph writers take this transaction lock before reading source costs or
@@ -99,7 +81,7 @@ export interface LotCostContribution {
   sourceQty: number;
   outputQty: number;
   outputStartQty?: number;
-  operationKind: "transfer" | "conversion" | "assembly" | "build";
+  operationKind: "transfer" | "conversion" | "assembly" | "build" | "return";
   operationKey: string;
 }
 
@@ -112,17 +94,29 @@ export async function recordLotCostContribution(
   if (contribution.sourceLotId === contribution.outputLotId || !contribution.operationKey.trim() || !actorId.trim() || !Number.isFinite(now.getTime())) {
     throw new CostEvidenceError("COST_LINEAGE_INVALID", "A cost contribution needs distinct lots and an audited operation.");
   }
-  if (!["transfer", "conversion", "assembly", "build"].includes(contribution.operationKind)) throw new CostEvidenceError("COST_OPERATION_KIND_INVALID", "Cost operation kind is unsupported.");
+  if (!["transfer", "conversion", "assembly", "build", "return"].includes(contribution.operationKind)) throw new CostEvidenceError("COST_OPERATION_KIND_INVALID", "Cost operation kind is unsupported.");
   await lockInventoryCostGraph(tx);
   const bounds = await tx.execute(sql`
-    SELECT source.qty_received AS source_qty,output.qty_received AS output_qty
+    SELECT source.*,source.qty_received AS source_qty,output.qty_received AS output_qty
     FROM inventory.inventory_lots source JOIN inventory.inventory_lots output ON output.id=${contribution.outputLotId}
     WHERE source.id=${contribution.sourceLotId}
   `);
   const row = bounds.rows[0];
-  if (!row || costInteger(row.source_qty, "sourceLot.qtyReceived", 1) < contribution.sourceQty
+  const sourceQty = row?.source_qty == null ? 0 : costInteger(row.source_qty, "sourceLot.qtyReceived");
+  if (!row || (sourceQty > 0 && sourceQty < contribution.sourceQty)
     || BigInt(costInteger(row.output_qty, "outputLot.qtyReceived", 1)) + BigInt(outputStartQty) > BigInt(contribution.outputQty)) {
     throw new CostEvidenceError("COST_CONTRIBUTION_INTERVAL_INVALID", "The input quantity or output interval exceeds the recorded original lot quantity.");
+  }
+  // No invented receipt quantity: actual input/output quantities remain facts.
+  // Missing historical accounting basis is deferred only with durable evidence.
+  if (sourceQty === 0 || lotCostNeedsReview(row)) {
+    await recordLotCostFollowUp(tx, {
+      inventoryLotId: contribution.sourceLotId, relatedLotId: contribution.outputLotId,
+      operationKey: contribution.operationKey,
+      issueCode: sourceQty === 0 ? "COST_HISTORICAL_BASIS_MISSING" : "COST_SOURCE_UNRESOLVED",
+      evidence: { contribution, sourceCost: row }, actor: actorId, occurredAt: now,
+    });
+    await tx.execute(sql`UPDATE inventory.inventory_lots SET cost_provisional=1 WHERE id=${contribution.outputLotId}`);
   }
   const conflict = await tx.execute(sql`
     SELECT id FROM inventory.lot_cost_contributions WHERE output_lot_id=${contribution.outputLotId}

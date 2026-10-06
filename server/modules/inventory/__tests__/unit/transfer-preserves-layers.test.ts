@@ -65,10 +65,11 @@ describe("InventoryLotService.transferLots — layer preservation", () => {
       execute: vi.fn(async (query: any) => {
         const compiled = new PgDialect().sqlToQuery(query);
         const statement = compiled.sql;
-        if (statement.includes("SELECT source.qty_received AS source_qty")) {
+        if (statement.includes("source.qty_received AS source_qty")) {
           const source = sourceLots.find((lot) => lot.id === compiled.params[1])!;
           const output = createdLots[Number(compiled.params[0]) - 101];
-          return { rows: [{ source_qty: source.qtyOnHand, output_qty: output.qtyReceived }] };
+          return { rows: [{ source_qty: source.qtyOnHand, output_qty: output.qtyReceived, qty_received: source.qtyOnHand,
+            unit_cost_cents: source.unitCostCents, po_unit_cost_cents: source.unitCostCents }] };
         }
         return { rows: statement.includes("UPDATE inventory.inventory_lots") ? [{ id: 1 }, { id: 2 }] : [] };
       }),

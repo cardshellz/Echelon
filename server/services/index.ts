@@ -791,6 +791,6 @@ export type { ShipmentTrackingService, ShipmentTrackingError } from "../modules/
 export { createInventoryLotService } from "../modules/inventory/lots.service";
 export type { InventoryLotService } from "../modules/inventory/lots.service";
 export { createCOGSService } from "../modules/inventory/cogs.service";
-export type { COGSService, CostLotConsumption, OrderCOGSResult, InventoryValuationResult, CostAdjustmentLog } from "../modules/inventory/cogs.service";
+export type { COGSService, OrderCOGSResult, InventoryValuationResult, CostAdjustmentLog } from "../modules/inventory/cogs.service";
 export { createShipStationService } from "../modules/oms/shipstation.service";
 export type { ShipStationService } from "../modules/oms/shipstation.service";

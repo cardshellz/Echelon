@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { presentOrderEditSettlement } from "../domain/order-edit-financials";
 import {
   orderEditOperationSchema,
   orderEditOrderSchema,
@@ -139,9 +140,13 @@ export class OrderEditService {
         sku: line.sku,
         quantity: line.quantity,
         unitPriceCents: line.discountedUnitPriceCents,
-        totalCents: line.totalCents,
+        totalCents:
+          snapshot.financials?.lines.find((entry) => entry.id === line.id)
+            ?.netCents ?? line.totalCents,
       })),
       totalCents: snapshot.totalCents,
+      financials: snapshot.financials,
+      settlement: presentOrderEditSettlement(snapshot),
       financialStatus: snapshot.fullyPaid ? "Paid" : "Payment outstanding",
       warehouseStatus: warehouse.editable
         ? "Not yet picking"
@@ -892,37 +897,49 @@ export class OrderEditService {
   private present(record: OrderEditRecord): OrderEditOperation {
     const snapshot = record.lastSnapshot ?? record.baseline;
     const quote = record.quote;
+    const useCurrent = terminal.has(record.status);
+    const presentedTotal = useCurrent
+      ? snapshot.totalCents
+      : (quote?.totalCents ?? snapshot.totalCents);
+    const presentedPaid = useCurrent
+      ? snapshot.netPaidCents
+      : record.baseline.netPaidCents;
     return orderEditOperationSchema.parse({
       operationId: record.id,
       orderNumber: record.baseline.name,
       currency: record.baseline.currency,
       previousTotalCents: record.baseline.totalCents,
-      updatedTotalCents: quote?.totalCents ?? record.baseline.totalCents,
-      balanceDueCents: Math.max(
-        0,
-        (quote?.totalCents ?? record.baseline.totalCents) -
-          record.baseline.netPaidCents,
-      ),
-      refundDueCents: Math.max(
-        0,
-        record.baseline.netPaidCents -
-          (quote?.totalCents ?? record.baseline.totalCents),
-      ),
-      lines: quote
-        ? quote.lines.map((line) => ({
-            id: line.calculatedLineId,
-            title: line.title,
-            variantTitle: line.variantTitle,
-            quantity: line.quantity,
-            totalCents: line.totalCents,
-          }))
-        : snapshot.lines.map((line) => ({
-            id: line.id,
-            title: line.title,
-            variantTitle: line.variantTitle,
-            quantity: line.quantity,
-            totalCents: line.totalCents,
-          })),
+      updatedTotalCents: presentedTotal,
+      quoteAvailable: quote !== null,
+      balanceDueCents: Math.max(0, presentedTotal - presentedPaid),
+      refundDueCents: Math.max(0, presentedPaid - presentedTotal),
+      financials: {
+        before: record.baseline.financials ?? null,
+        quoted: quote?.financials ?? null,
+        current: snapshot.financials ?? null,
+      },
+      settlement: presentOrderEditSettlement(snapshot),
+      lines:
+        quote && !useCurrent
+          ? quote.lines.map((line) => ({
+              id: line.calculatedLineId,
+              title: line.title,
+              variantTitle: line.variantTitle,
+              quantity: line.quantity,
+              totalCents:
+                quote.financials?.lines.find(
+                  (entry) => entry.id === line.calculatedLineId,
+                )?.netCents ?? line.totalCents,
+            }))
+          : snapshot.lines.map((line) => ({
+              id: line.id,
+              title: line.title,
+              variantTitle: line.variantTitle,
+              quantity: line.quantity,
+              totalCents:
+                snapshot.financials?.lines.find((entry) => entry.id === line.id)
+                  ?.netCents ?? line.totalCents,
+            })),
       warnings: [
         "Private staff testing. Customer access is disabled.",
         "Shipping charges stay unchanged in this pilot; review the revised order before applying it.",

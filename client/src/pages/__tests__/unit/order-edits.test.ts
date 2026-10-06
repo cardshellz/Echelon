@@ -13,6 +13,25 @@ import OrderEdits, {
   OrderEditOperationView,
 } from "../../OrderEdits";
 import { createOrderEditTransport } from "@/lib/order-edits";
+import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";
+
+const discountedFinancials: OrderEditFinancials = {
+  itemsGrossCents: 11995,
+  itemsDiscountCents: 1199,
+  itemsNetCents: 10796,
+  itemDiscountLabels: ["AMAZZIN'"],
+  shippingGrossCents: 1299,
+  shippingDiscountCents: 1299,
+  shippingCents: 0,
+  shippingDiscountLabels: ["Free shipping"],
+  taxCents: 0,
+  taxesIncluded: false,
+  totalCents: 10796,
+  lines: [
+    { id: "line-1", grossCents: 1996, discountCents: 200, netCents: 1796 },
+    { id: "line-2", grossCents: 9999, discountCents: 999, netCents: 9000 },
+  ],
+};
 
 const state = vi.hoisted(() => ({
   canEdit: true,
@@ -128,6 +147,138 @@ beforeEach(() => {
   state.canEdit = true;
   state.canConfigure = false;
   state.operation = undefined;
+});
+
+describe("order financial presentation", () => {
+  it("shows before and after discounts, shipping, tax, and the payment required for a change", () => {
+    const after: OrderEditFinancials = {
+      ...discountedFinancials,
+      itemsGrossCents: 12494,
+      itemsDiscountCents: 1249,
+      itemsNetCents: 11245,
+      totalCents: 11245,
+      lines: [
+        { id: "line-1", grossCents: 2495, discountCents: 250, netCents: 2245 },
+        discountedFinancials.lines[1],
+      ],
+    };
+    const html = renderOperation({
+      ...operation,
+      previousTotalCents: 10796,
+      updatedTotalCents: 11245,
+      balanceDueCents: 449,
+      financials: {
+        before: discountedFinancials,
+        quoted: after,
+        current: discountedFinancials,
+      },
+    });
+    for (const label of [
+      "Before edit",
+      "After changes",
+      "Items before discounts",
+      "Item discounts",
+      "AMAZZIN",
+      "Shipping discounts",
+      "Free shipping",
+      "Shipping after discounts",
+      "Tax",
+      "Order total",
+    ])
+      expect(html).toContain(label);
+    for (const amount of [
+      "$119.95",
+      "−$11.99",
+      "−$12.99",
+      "$107.96",
+      "$112.45",
+    ])
+      expect(html).toContain(amount);
+    expect(html).toContain("Payment required for these changes: $4.49");
+  });
+  it("shows received payments, issued refunds, pending history, and remaining balance separately", () => {
+    const html = renderOperation({
+      ...operation,
+      status: "refunding",
+      settlement: {
+        receivedCents: 2000,
+        refundedCents: 500,
+        netPaidCents: 1500,
+        outstandingCents: -500,
+        activity: [
+          {
+            id: "payment",
+            kind: "payment",
+            status: "SUCCESS",
+            amountCents: 2000,
+            processedAt: "2026-10-06T12:00:00.000Z",
+          },
+          {
+            id: "issued-refund",
+            kind: "refund",
+            status: "SUCCESS",
+            amountCents: 500,
+            processedAt: null,
+          },
+          {
+            id: "refund",
+            kind: "refund",
+            status: "PENDING",
+            amountCents: 500,
+            processedAt: null,
+          },
+        ],
+      },
+    });
+    for (const label of [
+      "Payments received",
+      "Refunds issued",
+      "Net paid",
+      "Amount to refund",
+      "Payment history",
+      "Refund · Pending",
+    ])
+      expect(html).toContain(label);
+    expect(html).toContain('dateTime="2026-10-06T12:00:00.000Z"');
+  });
+  it("does not present an invented quote when preparation failed", () => {
+    const html = renderOperation({
+      ...operation,
+      quoteAvailable: false,
+      status: "review_required",
+      updatedTotalCents: operation.previousTotalCents,
+    });
+    expect(html).toContain("Current order total");
+    expect(html).not.toContain("Quoted total");
+    expect(html).not.toContain("Original total");
+  });
+  it.each(["recovered", "failed"] as const)(
+    "shows current totals after %s without calling a quoted balance an unpaid debt",
+    (status) => {
+      const html = renderOperation({
+        ...operation,
+        status,
+        balanceDueCents: 0,
+        financials: {
+          before: discountedFinancials,
+          current: discountedFinancials,
+          quoted: discountedFinancials,
+        },
+        settlement: {
+          receivedCents: 10796,
+          refundedCents: 0,
+          netPaidCents: 10796,
+          outstandingCents: 0,
+          activity: [],
+        },
+      });
+      expect(html).toContain("Current order");
+      expect(html).not.toContain("After changes");
+      expect(html).toContain("Amount still due");
+      expect(html).not.toContain("quoted differences");
+      expect(html).not.toContain("Payment required for these changes");
+    },
+  );
 });
 afterEach(() => vi.unstubAllGlobals());
 
