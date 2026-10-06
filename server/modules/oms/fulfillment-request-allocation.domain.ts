@@ -13,6 +13,7 @@ const scopeSchema = z.object({
 });
 const targetSchema = scopeSchema.extend({
   legacyWmsShipmentItemId: id,
+  sourceWmsShipmentItemId: id,
   shippingProvider: z.string().min(1),
   providerPhysicalShipmentId: z.string().min(1),
   quantityShipped: quantity.positive(),
@@ -30,6 +31,8 @@ const requestSchema = scopeSchema.extend({
   linkedToShippingOrder: z.boolean(),
 });
 const physicalSchema = z.object({
+  physicalShipmentItemId: id,
+  allocationSourceShipmentItemId: id.nullable(),
   shipmentRequestItemId: id,
   fulfillmentPlanLineId: id,
   legacyWmsShipmentItemId: id.nullable(),
@@ -52,7 +55,14 @@ export type FulfillmentRequestAllocationDecision =
     kind: "reuse";
     shipmentRequestId: number;
     shipmentRequestItemId: number;
-    reason: "physical_replay" | "source_item" | "shipping_order_remaining_quantity";
+    reason: "source_item" | "shipping_order_remaining_quantity";
+  }>
+  | Readonly<{
+    kind: "reuse";
+    shipmentRequestId: number;
+    shipmentRequestItemId: number;
+    physicalShipmentItemId: number;
+    reason: "physical_replay";
   }>;
 
 export class FulfillmentRequestAllocationError extends Error {
@@ -111,11 +121,15 @@ export function resolveFulfillmentRequestAllocation(
   }
   const samePackage = (item: FulfillmentRequestPhysicalSnapshot): boolean =>
     item.shippingProvider === target.shippingProvider && item.providerPhysicalShipmentId === target.providerPhysicalShipmentId;
-  if (physical.some(item => item.legacyWmsShipmentItemId !== null && item.labelReplacementSourceItemId != null)) {
+  if (physical.some(item => [item.legacyWmsShipmentItemId, item.labelReplacementSourceItemId,
+    item.allocationSourceShipmentItemId].filter(value => value != null).length > 1)) {
     fail("ambiguous_physical_source_provenance");
   }
   const replays = physical.filter(item => item.legacyWmsShipmentItemId === target.legacyWmsShipmentItemId
-    || (item.labelReplacementSourceItemId === target.legacyWmsShipmentItemId && samePackage(item)));
+    || (item.labelReplacementSourceItemId === target.legacyWmsShipmentItemId && samePackage(item))
+    // Allocation provenance is a nonexclusive source portion. A different
+    // compatibility child still names this exact package and original source.
+    || (item.allocationSourceShipmentItemId === target.sourceWmsShipmentItemId && samePackage(item)));
   if (replays.length > 1) fail("ambiguous_physical_replay");
   const replay = replays[0];
   if (replay && (!samePackage(replay) || replay.fulfillmentPlanLineId !== target.fulfillmentPlanLineId
@@ -142,8 +156,13 @@ export function resolveFulfillmentRequestAllocation(
     if (!replay && physical.some(item => samePackage(item) && item.shipmentRequestItemId === request.shipmentRequestItemId)) {
       fail("physical_package_already_allocated");
     }
-    return Object.freeze({ kind: "reuse", shipmentRequestId: request.shipmentRequestId,
-      shipmentRequestItemId: request.shipmentRequestItemId, reason });
+    const identity = { kind: "reuse" as const, shipmentRequestId: request.shipmentRequestId,
+      shipmentRequestItemId: request.shipmentRequestItemId };
+    if (reason === "physical_replay") {
+      if (!replay) return fail("physical_replay_missing");
+      return Object.freeze({ ...identity, physicalShipmentItemId: replay.physicalShipmentItemId, reason });
+    }
+    return Object.freeze({ ...identity, reason });
   };
   if (replay) {
     const request = requests.find(request => request.shipmentRequestItemId === replay.shipmentRequestItemId);

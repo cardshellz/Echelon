@@ -168,6 +168,32 @@ function resolveSku(facts: PackageAllocationSourceFacts): string {
   return candidate;
 }
 
+/** The immutable registration owns capacity. Compatibility split rows
+ * must conserve that quantity; they are not a new capacity authorization. */
+export function resolvePackageAllocationSourceQuantity(input: {
+  readonly sourceWmsShipmentItemId: number;
+  readonly partitionedQuantity: number;
+  readonly registeredQuantity: number | null;
+}): number {
+  const parsed = z.object({
+    sourceWmsShipmentItemId: positivePostgresInteger,
+    partitionedQuantity: positivePostgresInteger,
+    registeredQuantity: nullablePositivePostgresInteger,
+  }).strict().safeParse(input);
+  if (!parsed.success) {
+    throw new PackageAllocationSourceIdentityError(
+      "INVALID_SOURCE_FACTS", "Source capacity evidence is invalid", { issues: parsed.error.issues },
+    );
+  }
+  const evidence = parsed.data;
+  if (evidence.registeredQuantity !== null && evidence.registeredQuantity !== evidence.partitionedQuantity) {
+    throw new PackageAllocationSourceIdentityError(
+      "SOURCE_LINEAGE_INVALID", "Split rows do not conserve the registered source quantity", evidence,
+    );
+  }
+  return evidence.registeredQuantity ?? evidence.partitionedQuantity;
+}
+
 export function derivePackageAllocationSourceRegistration(
   rawFacts: PackageAllocationSourceFacts,
 ): PackageAllocationSourceRegistrationV1 {

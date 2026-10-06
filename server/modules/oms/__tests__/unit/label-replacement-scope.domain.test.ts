@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planLabelReplacement } from "../../label-replacement-plan.domain";
+import { classifyAdditionalLabelPackage, planLabelReplacement, type AdditionalLabelPackageInput } from "../../label-replacement-plan.domain";
 import { MAX_LABEL_REPLACEMENT_ITEMS, scopeLabelReplacementPredecessors, type LabelReplacementScopeInput } from "../../label-replacement-scope.domain";
 
 describe("channel-independent label replacement package scope", () => {
@@ -67,5 +67,65 @@ describe("channel-independent label replacement package scope", () => {
       ...previous[0], physicalItemId: index + 1, physicalShipmentId: index + 1 })) },
   ])("rejects invalid, conflicting, or truncated candidate evidence %#", invalid => {
     expect(scopeLabelReplacementPredecessors(invalid)).toEqual({ outcome: "review", reason: "invalid_replacement_scope" });
+  });
+});
+
+
+describe("additional parcels use original source capacity", () => {
+  const input: AdditionalLabelPackageInput = {
+    sources: [{ sourceItemId: 100, quantity: 3 }],
+    contents: [{ sourceItemId: 100, quantity: 1 }],
+    previous: [{ sourceItemId: 100, quantity: 2, physicalItemId: 1, physicalShipmentId: 10,
+      providerOrderId: "first-parcel", labelStatus: "active", carrierPossession: true }],
+    scopedPhysicalItemIds: [1],
+  };
+  it("admits the last one-unit parcel after a two-unit parcel reached the carrier", () => {
+    const frozen = structuredClone(input);
+    expect(classifyAdditionalLabelPackage(input)).toEqual({ outcome: "additional" });
+    expect(input).toEqual(frozen);
+  });
+  it("does not treat residual compatibility quantity as the original three-unit capacity", () => {
+    expect(classifyAdditionalLabelPackage({ ...input, sources: [{ sourceItemId: 100, quantity: 1 }] }))
+      .toEqual({ outcome: "replacement" });
+  });
+  it("requires the conserving replacement workflow for an actual fourth unit", () => {
+    expect(classifyAdditionalLabelPackage({ ...input, contents: [{ sourceItemId: 100, quantity: 2 }] }))
+      .toEqual({ outcome: "replacement" });
+  });
+  it("requires predecessor void evidence even when the old package leaves unused source capacity", () => {
+    expect(classifyAdditionalLabelPackage({ ...input, previous: [{ ...input.previous[0], labelStatus: "voided" }] }))
+      .toEqual({ outcome: "replacement" });
+  });
+  it("does not mistake an unrelated voided sibling for a replacement of the scoped package", () => {
+    expect(classifyAdditionalLabelPackage({ ...input, previous: [...input.previous,
+      { ...input.previous[0], sourceItemId: 200, physicalItemId: 2, physicalShipmentId: 20, labelStatus: "voided" }] }))
+      .toEqual({ outcome: "additional" });
+  });
+  it("admits repeated one-unit splits and counts every existing portion", () => {
+    expect(classifyAdditionalLabelPackage({ ...input, previous: [
+      { ...input.previous[0], quantity: 1 },
+      { ...input.previous[0], quantity: 1, physicalItemId: 2, physicalShipmentId: 20 },
+    ] })).toEqual({ outcome: "additional" });
+  });
+  it.each([0, -1, 0.5, Number.NaN, 2_147_483_648])("reviews invalid quantity %s", quantity => {
+    expect(classifyAdditionalLabelPackage({ ...input, contents: [{ sourceItemId: 100, quantity }] }))
+      .toEqual({ outcome: "review", reason: "invalid_package_quantities" });
+  });
+  it.each([
+    { ...input, sources: [...input.sources, ...input.sources] },
+    { ...input, contents: [...input.contents, ...input.contents] },
+    { ...input, previous: [...input.previous, ...input.previous] },
+    { ...input, scopedPhysicalItemIds: [1, 1] },
+    { ...input, scopedPhysicalItemIds: [99] },
+    { ...input, contents: [{ sourceItemId: 99, quantity: 1 }] },
+  ])("reviews ambiguous or unproved source and package identity %#", invalid => {
+    expect(classifyAdditionalLabelPackage(invalid)).toEqual({ outcome: "review", reason: "invalid_package_quantities" });
+  });
+  it("counts quantities exactly at the PostgreSQL integer limit", () => {
+    const max = 2_147_483_647;
+    expect(classifyAdditionalLabelPackage({ ...input, sources: [{ sourceItemId: 100, quantity: max }],
+      previous: [{ ...input.previous[0], quantity: max - 1 }] })).toEqual({ outcome: "additional" });
+    expect(classifyAdditionalLabelPackage({ ...input, sources: [{ sourceItemId: 100, quantity: max }],
+      previous: [{ ...input.previous[0], quantity: max }] })).toEqual({ outcome: "replacement" });
   });
 });

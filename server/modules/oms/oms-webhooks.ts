@@ -35,7 +35,7 @@ import {
   RefundsCreateBadPayloadError,
   __test__ as refundCascadeTest,
 } from "./shopify-refund-cascade.service";
-import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
+import { normalizeShopifyLineItems, readShopifyLineCurrentQuantity } from "./shopify-line-item-normalizer";
 import { resolveOrderLineCatalogIdentity, recordOrderLineCatalogIdentity, orderLineInventoryIdentitySnapshot } from "./order-line-catalog-identity.service";
 import {
   processShopifyFulfillmentIngress,
@@ -562,6 +562,8 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
     name: item.name,
     variantTitle: item.variantTitle,
     quantity: item.quantity,
+    currentQuantity: item.currentQuantity,
+    fulfillableQuantity: item.fulfillableQuantity,
     paidPriceCents: item.paidPriceCents,
     totalCents: item.totalCents,
     taxCents: 0, // Tax handled at order level
@@ -635,21 +637,6 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
     orderedAt: shopifyOrder.created_at ? new Date(shopifyOrder.created_at) : new Date(),
     lineItems,
   };
-}
-
-/**
- * Shopify line `current_quantity`: ordered quantity minus units removed by an
- * order edit or cancellation. Returns null when absent or malformed, so line
- * authority keeps its legacy rule rather than trusting a bad channel value.
- */
-function readShopifyLineCurrentQuantity(lineItem: any): number | null {
-  const raw = lineItem?.current_quantity;
-  const value = typeof raw === "number"
-    ? raw
-    : typeof raw === "string" && /^\d+$/.test(raw.trim())
-      ? Number(raw.trim())
-      : Number.NaN;
-  return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function mapShopifyLineFulfillmentStatus(

@@ -92,6 +92,8 @@ export interface LineItemData {
   couponDiscountCents?: number;
   taxable?: boolean;
   requiresShipping?: boolean;
+  /** Explicit channel commercial quantity; never inferred from remaining work. */
+  currentQuantity?: number | null;
   fulfillableQuantity?: number | null;
   fulfillmentService?: string | null;
   fulfillmentProvider?: string | null;
@@ -165,6 +167,7 @@ function buildLineAuthorityState(
     sourceInboxId: data.sourceInboxId ?? null,
     financialStatus: data.financialStatus,
     quantity: item.quantity,
+    currentQuantity: item.currentQuantity ?? null,
     fulfillableQuantity: item.fulfillableQuantity ?? null,
     previous,
   });

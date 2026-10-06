@@ -59,7 +59,7 @@ describe("Shopify line current_quantity reader", () => {
     expect(__test__.readShopifyLineCurrentQuantity({ current_quantity: "0" })).toBe(0);
   });
 
-  it("returns null when the field is absent so authority keeps its legacy rule", () => {
+  it("keeps missing commercial quantity unknown", () => {
     expect(__test__.readShopifyLineCurrentQuantity({})).toBeNull();
     expect(__test__.readShopifyLineCurrentQuantity({ current_quantity: null })).toBeNull();
     expect(__test__.readShopifyLineCurrentQuantity(undefined)).toBeNull();

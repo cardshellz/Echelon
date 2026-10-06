@@ -43,6 +43,12 @@ authority.
 
 Before the first run:
 
+The source reader now includes `wms.package_allocation_source_lines` so previews
+use the same immutable original capacity as split/relabel admission. The declared
+credential relation set includes `SELECT` on that table. An existing dedicated
+audit credential needs the grant-only update below before running a preview;
+deploying this code does not apply grants or enable an audit run.
+
 1. Deploy this audit slice and require green TypeScript, unit, and PostgreSQL
    hardening CI. The PostgreSQL test must execute rather than skip.
 2. Preview the dedicated audit-role grant update:
