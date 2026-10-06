@@ -27,6 +27,7 @@ import {
   deriveOmsLineAuthority,
   type OmsLineAuthorityState,
 } from "./oms-line-authority";
+import { guardOrderEditShopifyIngress } from "../order-edits/infrastructure/order-edit-ingress-guard";
 import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
 import {
   applyShopifyRefundCascade,
@@ -1046,6 +1047,9 @@ export function registerOmsWebhooks(
         sourceInboxId: inbox.receipt.id,
       };
       const omsOrder = await omsService.ingestOrder(channelId, externalOrderId, orderData);
+      if ((await db.transaction((tx: any) => guardOrderEditShopifyIngress(tx,omsOrder.id,shopifyOrder,new Date()))).skipOrder) {
+        await markInboxSucceeded(inbox.receipt); acknowledgeProcessed(req,res); return;
+      }
 
       // Check if newly created (within last 5 seconds)
       const isNew = omsOrder.createdAt && (Date.now() - new Date(omsOrder.createdAt).getTime()) < 5000;
@@ -1174,7 +1178,9 @@ export function registerOmsWebhooks(
         sourceInboxId: inbox.receipt.id,
       };
       const existing = await omsService.ingestOrder(channelId, externalOrderId, orderData);
-
+      if ((await db.transaction((tx: any) => guardOrderEditShopifyIngress(tx,existing.id,shopifyOrder,new Date()))).skipOrder) {
+        await markInboxSucceeded(inbox.receipt); acknowledgeProcessed(req,res); return;
+      }
 
       const nextShipTo = canonicalShipToFromShopifyUpdate(shopifyOrder, existing);
       const now = new Date();
@@ -1353,6 +1359,7 @@ export function registerOmsWebhooks(
             // authorizing write on the same row, so `previous` is always the
             // latest committed authority (min(1,1)=1 preserves authorization).
             await db.transaction(async (tx: any) => {
+              if ((await guardOrderEditShopifyIngress(tx,existing.id,shopifyOrder,new Date())).skipLines) return;
               const [lockedLine] = await tx
                 .select()
                 .from(omsOrderLines)
@@ -1442,6 +1449,7 @@ export function registerOmsWebhooks(
             });
             // Insert new line and authority ledger atomically.
             await db.transaction(async (tx: any) => {
+              if ((await guardOrderEditShopifyIngress(tx,existing.id,shopifyOrder,new Date())).skipLines) return;
               const identity = await resolveOrderLineCatalogIdentity(tx, {
                 channelId: existing.channelId, sku: item.sku,
                 externalVariantId: normalizedLine?.externalVariantId,
@@ -1508,6 +1516,7 @@ export function registerOmsWebhooks(
                 previous: existingLine,
               });
               await db.transaction(async (tx: any) => {
+                if ((await guardOrderEditShopifyIngress(tx,existing.id,shopifyOrder,new Date())).skipLines) return;
                 await tx
                   .update(omsOrderLines)
                   .set({

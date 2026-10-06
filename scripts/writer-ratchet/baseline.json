@@ -813,6 +813,12 @@
   "marketplace.channel_listing_scopes": [
     "modules/marketplace-listings"
   ],
+  "marketplace.channel_listing_update_events": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.channel_listing_updates": [
+    "modules/marketplace-listings"
+  ],
   "marketplace.dropship_listing_scopes": [
     "modules/marketplace-listings"
   ],
@@ -932,6 +938,21 @@
   ],
   "oms.order_country_repairs": [
     "modules/orders"
+  ],
+  "oms.order_edit_events": [
+    "modules/order-edits"
+  ],
+  "oms.order_edit_operations": [
+    "modules/order-edits"
+  ],
+  "oms.order_edit_paid_projections": [
+    "modules/oms"
+  ],
+  "oms.order_edit_provider_holds": [
+    "modules/oms"
+  ],
+  "oms.order_edit_settings": [
+    "modules/order-edits"
   ],
   "oms.order_item_costs": [
     "modules/inventory"

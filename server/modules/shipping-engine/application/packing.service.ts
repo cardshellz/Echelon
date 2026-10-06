@@ -163,6 +163,7 @@ export async function getPackingQueue(
           ...PACKING_ELIGIBLE_WAREHOUSE_STATUSES,
         ]),
         eq(orders.onHold, 0),
+        sql`${orders.orderEditOperationId} IS NULL`,
         orderId === undefined ? undefined : eq(orders.id, orderId),
       ),
     )

@@ -72,6 +72,23 @@ describe("writer-ratchet (P2.1)", () => {
     expect(baseline["channels.channel_product_identities"]).toEqual(["modules/channels"]);
   });
 
+  it.each([
+    ["oms.order_edit_events", "modules/order-edits"],
+    ["oms.order_edit_operations", "modules/order-edits"],
+    ["oms.order_edit_settings", "modules/order-edits"],
+    ["oms.order_edit_paid_projections", "modules/oms"],
+    ["oms.order_edit_provider_holds", "modules/oms"],
+  ])("%s has only its declared order-edit owner, including scripts", (table, owner) => {
+    expect(current[table]).toEqual([owner]);
+    expect(currentIncludingScripts[table]).toEqual([owner]);
+    expect(baseline[table]).toEqual([owner]);
+  });
+
+  it("order edits cannot become another WMS order or OMS retry queue writer", () => {
+    expect(currentIncludingScripts["wms.orders"]).not.toContain("modules/order-edits");
+    expect(currentIncludingScripts["oms.webhook_retry_queue"]).toEqual(["modules/oms"]);
+  });
+
   it("no table gains a writer that is not in the baseline", () => {
     const added: string[] = [];
     for (const [table, buckets] of Object.entries(current)) {
@@ -136,6 +153,8 @@ describe("writer-ratchet (P2.1)", () => {
         "marketplace.channel_listing_operations",
         "marketplace.channel_listing_publication_events",
         "marketplace.channel_listing_reviews",
+        "marketplace.channel_listing_update_events",
+        "marketplace.channel_listing_updates",
       ],
       "modules/inventory-planning": [
         "inventory.publication_initial_scope_receipts",

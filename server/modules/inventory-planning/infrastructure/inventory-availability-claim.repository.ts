@@ -677,7 +677,8 @@ async function requireCanonicalAuthority(client: PoolClient): Promise<RuntimeAut
 
 async function loadOrder(client: PoolClient, orderId: number, lock: boolean): Promise<LockedOrder> {
   const orderRow = rows(await client.query(
-    `SELECT id AS order_id, warehouse_id, warehouse_status, on_hold
+    `SELECT id AS order_id, warehouse_id, warehouse_status, on_hold,
+            to_jsonb(orders)->>'order_edit_operation_id' AS order_edit_operation_id
      FROM wms.orders
      WHERE id = $1
      ${lock ? "FOR UPDATE" : ""}`,
@@ -811,7 +812,7 @@ async function loadOrder(client: PoolClient, orderId: number, lock: boolean): Pr
       ? null
       : positiveInteger(orderRow.warehouse_id, "order.warehouseId"),
     warehouseStatus: String(orderRow.warehouse_status ?? ""),
-    onHold: onHold === 1,
+    onHold: onHold === 1 || orderRow.order_edit_operation_id != null,
     lines,
   };
 }

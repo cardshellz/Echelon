@@ -208,6 +208,7 @@ const navStructure: NavEntry[] = [
     roles: ["admin", "lead"],
     children: [
       { label: "Orders", icon: Globe, href: "/oms/orders" },
+      { label: "Order editor pilot", icon: FileText, href: "/order-edits", requiredPermission: { resource: "orders", action: "edit" } },
       { label: "Order History", icon: History, href: "/order-history" },
     ],
   },

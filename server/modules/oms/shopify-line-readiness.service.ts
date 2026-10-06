@@ -6,6 +6,7 @@ import {
   type OmsLineAuthorityState,
 } from "./oms-line-authority";
 import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
+import { guardOrderEditShopifyIngress } from "../order-edits/infrastructure/order-edit-ingress-guard";
 
 export interface ShopifyLineReadinessSnapshot {
   externalLineItemId: string | number;
@@ -107,6 +108,10 @@ export async function reconcileShopifyLineReadiness(
   const now = input.now ?? new Date();
 
   return input.db.transaction(async (tx: any) => {
+    if ((await guardOrderEditShopifyIngress(tx,omsOrderId,null,now)).skipLines) return {
+      checkedLines:snapshots.length,matchedLines:0,advancedLines:0,advancedQuantity:0,missingLines:0,quantityMismatches:0,
+      protectedLines:snapshots.length,nonShippableLines:0,wmsSyncRequired:false,
+    };
     const lockedLines = await tx
       .select()
       .from(omsOrderLines)

@@ -31,6 +31,7 @@ export function ChannelListingFeedRow({
   selectable,
   onSelect,
   onEdit,
+  onEditExisting,
   onRemove,
   onMatch,
   onActivity,
@@ -42,11 +43,15 @@ export function ChannelListingFeedRow({
   selectable: boolean;
   onSelect(checked: boolean): void;
   onEdit(variantId: number): void;
+  onEditExisting(sku: string): void;
   onRemove(variantId: number): void;
   onMatch(item: ChannelCatalogRow): void;
   onActivity(): void;
 }) {
   const { draft, catalog, remote, operation } = row;
+  const existingListing = remote
+    ? remote.lifecycleStatus.toUpperCase() === "ACTIVE"
+    : operation && ["accepted", "verified"].includes(operation.item.state);
   const variantId = draft?.variantId ?? operation?.item.variantId;
   const title =
     draft?.title ??
@@ -242,6 +247,17 @@ export function ChannelListingFeedRow({
               onClick={() => onRemove(draft.variantId)}
             >
               Remove
+            </Button>
+          )}
+          {!draft && existingListing && row.sku && canEdit && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={locked}
+              aria-label={`Edit listing ${row.sku}`}
+              onClick={() => onEditExisting(row.sku!)}
+            >
+              Edit listing
             </Button>
           )}
           {remote &&

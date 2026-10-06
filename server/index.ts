@@ -1,4 +1,8 @@
 import { startWalmartOrderPolling } from "./modules/channels/adapters/walmart/walmart-order-poll.service";
+import { createOrderEditService } from "./modules/order-edits/order-edit.composition";
+import { registerOrderEditRoutes } from "./modules/order-edits/interfaces/order-edit.routes";
+import { startOrderEditScheduler } from "./modules/order-edits/infrastructure/order-edit-scheduler";
+import { hasPermission } from "./modules/identity";
 import { startListingPublicationWorker } from "./modules/marketplace-listings/application/listing-publication-worker";
 import { startArchonOrderDelivery } from "./modules/oms/archon-order-delivery.worker";
 import express, { type Request, Response, NextFunction } from "express";
@@ -489,6 +493,7 @@ function startEchelonSyncScheduler(
   setDropshipFulfillmentSync(services.wmsSync);
   setDropshipInventoryRuntimeAuthorityGate(services.dropshipInventoryRuntimeAuthority);
   startListingPublicationWorker(services.listingPublication);
+  startListingPublicationWorker(services.listingUpdates, "listing_update_worker");
 
   if (process.env.WALMART_ORDER_POLLING_ENABLED !== "false" && !schedulersDisabled("WALMART_ORDER_POLLING_DISABLED")) {
     startWalmartOrderPolling(services.walmartOrderPoll, services.walmart);
@@ -695,6 +700,16 @@ function startEchelonSyncScheduler(
   }
 
   await registerRoutes(httpServer, app);
+
+  const orderEdits = createOrderEditService(dbPool, services);
+  registerOrderEditRoutes(app, { service: orderEdits, hasPermission,
+    report: event => console.error(JSON.stringify({ event: "order_edit_request_failed", ...event })) });
+  if (!schedulersDisabled("ORDER_EDIT_SCHEDULER_DISABLED")) {
+    httpServer.once("close", startOrderEditScheduler(orderEdits,
+      event => console.error(JSON.stringify({ event: "order_edit_worker_failed", ...event }))));
+  } else {
+    logSchedulerDisabled("scheduler", "Order edit recovery", "ORDER_EDIT_SCHEDULER_DISABLED");
+  }
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

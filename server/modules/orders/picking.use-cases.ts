@@ -1228,7 +1228,7 @@ export class PickingUseCases {
     },
   ): Promise<PickProgressAtomicResult> {
     const lockedOrder = await tx.execute(sql`
-      SELECT warehouse_status, on_hold
+      SELECT warehouse_status, on_hold, order_edit_operation_id
       FROM wms.orders
       WHERE id = ${input.beforeItem.orderId}
       FOR UPDATE
@@ -1242,7 +1242,7 @@ export class PickingUseCases {
         `Cannot pick item ${input.itemId}: order ${input.beforeItem.orderId} is ${orderState.warehouse_status}`,
       );
     }
-    if (Number(orderState.on_hold) === 1 && !recordsConfirmedShipment(input)) {
+    if ((Number(orderState.on_hold) === 1 || orderState.order_edit_operation_id != null) && !recordsConfirmedShipment(input)) {
       throw new IntegrityError(
         `Cannot pick item ${input.itemId}: order ${input.beforeItem.orderId} is on hold`,
         { reason: "order_on_hold", orderId: input.beforeItem.orderId, orderItemId: input.itemId },
@@ -1391,7 +1391,7 @@ export class PickingUseCases {
   }): Promise<PickProgressAtomicResult> {
     return this.db.transaction(async (tx: any) => {
       const lockedOrder = await tx.execute(sql`
-        SELECT warehouse_status, on_hold
+        SELECT warehouse_status, on_hold, order_edit_operation_id
         FROM wms.orders
         WHERE id = ${input.beforeItem.orderId}
         FOR UPDATE
@@ -1406,7 +1406,7 @@ export class PickingUseCases {
           `Cannot pick item ${input.itemId}: order ${input.beforeItem.orderId} is ${orderState.warehouse_status}`,
         );
       }
-      if (Number(orderState.on_hold) === 1 && !recordsConfirmedShipment(input)) {
+      if ((Number(orderState.on_hold) === 1 || orderState.order_edit_operation_id != null) && !recordsConfirmedShipment(input)) {
         throw new IntegrityError(
           `Cannot pick item ${input.itemId}: order ${input.beforeItem.orderId} is on hold`,
           { reason: "order_on_hold", orderId: input.beforeItem.orderId, orderItemId: input.itemId },
@@ -1932,7 +1932,7 @@ export class PickingUseCases {
       throw new PickCorrectionError("PICK_CORRECTION_REQUIRED", "Answer the missing-pick confirmation before recording this pick.");
     }
 
-    if (orderForPick?.onHold === 1 && !confirmsShippedUnits) {
+    if ((orderForPick?.onHold === 1 || orderForPick?.orderEditOperationId != null) && !confirmsShippedUnits) {
       const message = `Cannot pick item ${itemId}: order ${beforeItem.orderId} is on hold`;
       await this.logRejectedPickCommand({
         beforeItem,
@@ -3281,7 +3281,7 @@ export class PickingUseCases {
       throw new IntegrityError(`Order ${beforeItem.orderId} not found`);
     }
 
-    if (orderBefore.onHold === 1) {
+    if (orderBefore.onHold === 1 || orderBefore.orderEditOperationId != null) {
       return {
         success: false,
         error: "order_on_hold",
@@ -3331,7 +3331,7 @@ export class PickingUseCases {
 
     const executeLegacyUnpick = async (tx: any) => {
       const lockedOrder = await tx.execute(sql`
-        SELECT warehouse_status, on_hold
+        SELECT warehouse_status, on_hold, order_edit_operation_id
         FROM wms.orders
         WHERE id = ${beforeItem.orderId}
           AND warehouse_id IS NOT DISTINCT FROM ${orderBefore.warehouseId ?? null}
@@ -3343,7 +3343,7 @@ export class PickingUseCases {
       }
 
       const orderState = lockedOrder.rows[0];
-      if (Number(orderState.on_hold) === 1) {
+      if (Number(orderState.on_hold) === 1 || orderState.order_edit_operation_id != null) {
         throw new IntegrityError(
           `Cannot unpick item ${itemId}: order ${beforeItem.orderId} is on hold`,
           { reason: "order_on_hold", orderId: beforeItem.orderId, orderItemId: itemId },
@@ -3652,7 +3652,7 @@ export class PickingUseCases {
       if (!current) {
         throw new NotFoundError(`Order ${orderId} not found`, { reason: "not_found", orderId });
       }
-      if (current.onHold === 1) {
+      if (current.onHold === 1 || current.orderEditOperationId != null) {
         throw new IntegrityError("Order is on hold and cannot be picked", {
           reason: "on_hold",
           orderId,
@@ -3779,6 +3779,7 @@ export class PickingUseCases {
       WHERE wo.warehouse_status = 'exception'
         AND wo.exception_resolution IS NULL
         AND wo.on_hold = 0
+        AND wo.order_edit_operation_id IS NULL
         AND wo.cancelled_at IS NULL
         AND EXISTS (
           SELECT 1 FROM wms.order_items active
@@ -3853,6 +3854,7 @@ export class PickingUseCases {
           AND warehouse_status = 'exception'
           AND exception_resolution IS NULL
           AND on_hold = 0
+          AND order_edit_operation_id IS NULL
           AND cancelled_at IS NULL
         FOR UPDATE
       `);
@@ -4128,7 +4130,7 @@ export class PickingUseCases {
   private async loadPickQueue(warehouseId?: number): Promise<PickQueueOrder[]> {
     const allOrders = await this.storage.getPickQueueOrders();
     const delegated = this.assemblyWorkload ? await this.assemblyWorkload.handedOffOrderIds(
-      allOrders.filter((order: Order) => order.onHold !== 1 && order.warehouseStatus === "in_progress"),
+      allOrders.filter((order: Order) => order.onHold !== 1 && order.orderEditOperationId == null && order.warehouseStatus === "in_progress"),
     ) : new Set<number>();
 
     // Filter to orders with shippable items

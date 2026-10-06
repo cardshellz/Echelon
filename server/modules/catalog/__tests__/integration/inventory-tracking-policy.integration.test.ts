@@ -27,6 +27,7 @@ import { listTrackingStopHistory, exportTrackingStopHistory } from "../../../inv
 
 import { COGSService } from "../../../inventory/cogs.service";
 import { installWarehouseOperationMigration } from "../../../orders/__tests__/fixtures/install-warehouse-operation-migration";
+import { orderEditProjectionQueryFixtureSql } from "../../../order-edits/__tests__/fixtures/order-edit-projection.fixture";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -40,6 +41,7 @@ describeDatabase.sequential("product inventory policy migration and transactions
   const now = new Date("2026-09-21T12:00:00Z");
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, inventoryTrackingPolicyBaseFixture);
+    await database.pool.query(orderEditProjectionQueryFixtureSql);
     migration = await readFile(resolve("migrations/0694_product_inventory_tracking_policy.sql"), "utf8");
     custodyMigration = await readFile(resolve("migrations/0696_inventory_tracking_lot_custody.sql"), "utf8");
     await database.pool.query(`INSERT INTO catalog.products(id,name) VALUES(1,'Existing');
@@ -61,7 +63,7 @@ describeDatabase.sequential("product inventory policy migration and transactions
       TRUNCATE inventory.tracking_stop_history, inventory.build_component_reservations, inventory.quantity_ledger_opening, inventory.replen_tasks CASCADE;
       TRUNCATE catalog.products, catalog.product_variants, channels.channels,
       channels.channel_product_identities, channels.channel_listings, channels.channel_feeds,
-      oms.oms_orders, oms.oms_order_lines, oms.oms_order_events, oms.oms_order_line_authority_events,
+      oms.oms_orders, oms.oms_order_lines, oms.oms_order_events, oms.oms_order_line_authority_events, oms.order_edit_paid_projections,
       wms.orders, wms.order_items, wms.picking_logs, wms.allocation_exceptions, inventory.inventory_levels, inventory.inventory_lots,
       inventory.availability_claim_lines, inventory.availability_claim_resources,
       inventory.inventory_publication_outbox, inventory.availability_runtime_authority, inventory.availability_claim_commands,

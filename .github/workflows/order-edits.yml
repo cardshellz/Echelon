@@ -1,0 +1,88 @@
+name: Order editor browser coverage
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: order-edits-browser-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  select:
+    name: Select order editor browser coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.impact.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - id: impact
+        name: Check suite dependencies (uncertainty runs coverage)
+        env:
+          BROWSER_SUITE: orderEdits
+          BROWSER_EVENT_NAME: ${{ github.event_name }}
+          BROWSER_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BROWSER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci/browser-suite-impact.mjs
+
+  browser:
+    name: Order editor browser tests
+    needs: select
+    # A missing output or failed selector must never silently bypass coverage.
+    if: ${{ !cancelled() && (needs.select.result != 'success' || needs.select.outputs.run != 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test --config playwright.order-edits.config.ts
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: order-edits-browser-traces
+          path: test-results/
+          retention-days: 7
+
+  result:
+    name: Order editor browser journeys
+    needs: [select, browser]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require complete browser coverage or an explicit safe skip
+        env:
+          SELECT_RESULT: ${{ needs.select.result }}
+          RUN_SUITE: ${{ needs.select.outputs.run }}
+          BROWSER_RESULT: ${{ needs.browser.result }}
+        run: |
+          if [ "$SELECT_RESULT" != "success" ]; then
+            echo "::error::Browser coverage selection failed"
+            exit 1
+          fi
+          if [ "$RUN_SUITE" = "false" ] && [ "$BROWSER_RESULT" = "skipped" ]; then
+            echo "Dependency analysis found no affected order editor browser coverage."
+            exit 0
+          fi
+          if [ "$RUN_SUITE" != "true" ] || [ "$BROWSER_RESULT" != "success" ]; then
+            echo "::error::Order editor browser tests did not pass (result: $BROWSER_RESULT)"
+            exit 1
+          fi

@@ -819,6 +819,7 @@ export const orderMethods: IOrderStorage = {
         and(
           eq(orders.id, orderId),
           eq(orders.onHold, 0),
+          isNull(orders.orderEditOperationId),
           inArray(orders.warehouseStatus, [
             "ready",
             "partially_shipped",

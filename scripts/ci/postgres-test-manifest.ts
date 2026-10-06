@@ -122,6 +122,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/oms/__tests__/integration/channel-receipt-immutable-replay.integration.test.ts",
   "server/modules/oms/__tests__/integration/oms-disposition-cutover-replay.integration.test.ts",
   "server/modules/marketplace-listings/__tests__/integration/pg-listing-publication.integration.test.ts",
+  "server/modules/marketplace-listings/__tests__/integration/pg-listing-update.integration.test.ts",
   "server/modules/marketplace-listings/__tests__/integration/channel-listing-catalog.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/walmart-publication-membership.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-publication-scope.integration.test.ts",
@@ -136,4 +137,6 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/inventory/__tests__/integration/inline-replenishment.integration.test.ts",
   "server/modules/membership/__tests__/integration/member-directory.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-finance.integration.test.ts",
+  "server/modules/order-edits/__tests__/integration/order-edit-warehouse.integration.test.ts",
+  "server/modules/oms/__tests__/integration/order-edit-paid-projection.integration.test.ts",
 ]);
