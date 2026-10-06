@@ -53,6 +53,7 @@ export interface OrderEditReleaseProof {
   contentFingerprint: string;
   ownership?: "owned" | "none";
   allocationRequired?: boolean;
+  fulfilledCancellation?: boolean;
 }
 export interface OrderEditStore {
   connections(): Promise<OrderEditConnection[]>;
@@ -96,6 +97,10 @@ export interface OrderEditWarehouse {
     snapshot: OrderEditSnapshot,
   ): Promise<OrderEditReleaseProof>;
   releaseUnchanged(
+    omsOrderId: number,
+    operationId: string,
+  ): Promise<OrderEditReleaseProof>;
+  releaseFulfilledUnsubmitted(
     omsOrderId: number,
     operationId: string,
   ): Promise<OrderEditReleaseProof>;
