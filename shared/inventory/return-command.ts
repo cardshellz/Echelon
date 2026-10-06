@@ -8,6 +8,13 @@ export const returnCommandBodySchema = z.object({
     condition: z.enum(["sellable","damaged","defective"]), reason: z.string().optional() }).strict()).min(1).max(200),
 }).strict();
 export type ReturnCommandBody = z.infer<typeof returnCommandBodySchema>;
+/** The optional key preserves older clients; malformed keys are rejected before
+ * the application starts a transaction. A physical batch identifies each item once.
+ */
+export const returnCommandRequestSchema = returnCommandBodySchema.extend({
+  commandKey: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9:_-]{0,119}$/).optional(),
+}).refine(body => new Set(body.items.map(item => item.orderItemId)).size === body.items.length,
+  { message: "Each return item must appear once in the physical command.", path: ["items"] });
 export const returnCommandResultSchema = z.object({
   orderId: id, processed: quantity, sellable: quantity, damaged: quantity, totalBaseUnitsReturned: quantity,
   items: z.array(z.object({ orderItemId: id,productVariantId: id,qty: id,

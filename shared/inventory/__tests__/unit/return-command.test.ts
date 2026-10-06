@@ -1,10 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { returnCommandResultFor, returnCommandResultSchema } from "../../return-command";
+import { returnCommandRequestSchema, returnCommandResultFor, returnCommandResultSchema } from "../../return-command";
 
 const body = { orderId: 61, warehouseLocationId: 30,
   items: [{ orderItemId: 71, productVariantId: 101, qty: 1, condition: "sellable" as const }] };
 const result = { orderId: 61, processed: 1, sellable: 1, damaged: 0, totalBaseUnitsReturned: 5,
   items: [{ ...body.items[0], baseUnitsReturned: 5 }] };
+
+describe("physical return request boundary", () => {
+  it.each([body, { ...body, commandKey: "inventory:retained-return" }])("retains optional-key client compatibility", request => {
+    expect(returnCommandRequestSchema.parse(request)).toEqual(request);
+  });
+  it.each([
+    null, [], { ...body, commandKey: "" }, { ...body, commandKey: " key" },
+    { ...body, commandKey: 42 }, { ...body, commandKey: "x".repeat(121) },
+    { ...body, items: [body.items[0], body.items[0]] }, { ...body, unknownField: true },
+  ])("rejects malformed requests before physical work", request => {
+    expect(returnCommandRequestSchema.safeParse(request).success).toBe(false);
+  });
+});
 
 describe("physical return acknowledgement", () => {
   it("accepts an exact response for the original command", () => {

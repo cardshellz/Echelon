@@ -81,7 +81,7 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
         product_variant_id integer,sku text,old_cost_cents bigint,new_cost_cents bigint,delta_cents bigint,
         reason text,created_at timestamp NOT NULL);`);
     await installPreOpeningQuantityAuthorityFixture(pool);
-    for (const name of ["222_procurement_cost_evidence.sql","0723_inventory_cost_admission_evidence.sql","0724_inventory_return_cost_allocations.sql"]) {
+    for (const name of ["222_procurement_cost_evidence.sql","0724_inventory_cost_admission_evidence.sql","0725_inventory_return_cost_allocations.sql"]) {
       await pool.query(readFileSync(resolve(process.cwd(),"migrations",name),"utf8"));
     }
     database = drizzle(pool,{ schema }); cogs = new COGSService(database,()=>now);
@@ -322,7 +322,9 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
   it("posts and replays the registered HTTP return with real PostgreSQL and validates follow-up timestamps", async () => {
     await pool.query("DELETE FROM oms.order_item_costs WHERE order_item_id=71; UPDATE catalog.product_variants SET last_cost_cents=0 WHERE id=101");
     const app = express();
-    app.use(express.json());
+    // Let malformed JSON values reach the registered handler so its own boundary
+    // is proved independently of Express's earlier strict-object parser.
+    app.use(express.json({ strict: false }));
     app.use((req, _res, next) => {
       req.session = { user: { id: "operator:cost-test" } } as typeof req.session;
       next();
@@ -339,7 +341,7 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
       server.listen(0, "127.0.0.1", resolve);
     });
     const port = (server.address() as AddressInfo).port;
-    const request = (path: string, body?: Record<string, unknown>): Promise<{ status: number; body: unknown }> =>
+    const request = (path: string, body?: Record<string, unknown> | null): Promise<{ status: number; body: unknown }> =>
       new Promise((resolve, reject) => {
         const call = httpRequest({ hostname: "127.0.0.1", port, path,
           method: body === undefined ? "GET" : "POST", headers: { "Content-Type": "application/json" } }, response => {
@@ -358,6 +360,11 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
       items: [{ orderItemId: 71, productVariantId: 101, qty: 3, condition: "sellable" as const }] };
     const wire = { ...body, commandKey: "inventory:http-return" };
     try {
+      for (const invalid of [null, { ...wire, commandKey: " invalid" },
+        { ...wire, items: [body.items[0], body.items[0]] }, { ...wire, unknownField: true }]) {
+        expect(await request("/api/returns/process", invalid))
+          .toMatchObject({ status: 400, body: { code: "RETURN_INPUT_INVALID" } });
+      }
       expect(await request("/api/returns/process", { ...wire, items: [{ ...body.items[0], qty: -1 }] }))
         .toMatchObject({ status: 400, body: { code: "RETURN_INPUT_INVALID" } });
       expect(await returnedLayers()).toEqual([]);

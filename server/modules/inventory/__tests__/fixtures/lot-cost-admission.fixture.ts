@@ -26,7 +26,7 @@ export async function installLotCostAdmissionFixture(client: { query(text: strin
   const immutableFunction = source.match(/CREATE OR REPLACE FUNCTION inventory\.reject_cost_evidence_mutation\(\)[\s\S]*?\$\$;/)?.[0];
   if (!immutableFunction) throw new Error("Cost evidence fixture immutable-function boundary changed");
   await client.query(qualify(immutableFunction));
-  for (const name of ["0723_inventory_cost_admission_evidence.sql",...(options.returns ? ["0724_inventory_return_cost_allocations.sql"] : [])]) {
+  for (const name of ["0724_inventory_cost_admission_evidence.sql",...(options.returns ? ["0725_inventory_return_cost_allocations.sql"] : [])]) {
     const table = name.includes("cost_admission_evidence") ? "lot_cost_follow_ups" : "return_cost_allocations";
     const result = await client.query(qualify(`SELECT to_regclass('inventory.${table}') AS relation`)) as { rows: { relation: string | null }[] };
     if (result.rows[0]?.relation === null) {

@@ -122,7 +122,7 @@ export async function createFlowCostHarness(url: string) {
 
     const rfqHelper = await import("./rfq-controlled-acceptance-helper");
     for (const migration of [...rfqHelper.RFQ_CONTROLLED_MIGRATIONS,
-      "221_receiving_unit_snapshots.sql", "222_procurement_cost_evidence.sql", "0723_inventory_cost_admission_evidence.sql", "231_receipt_cost_recovery.sql",
+      "221_receiving_unit_snapshots.sql", "222_procurement_cost_evidence.sql", "0724_inventory_cost_admission_evidence.sql", "231_receipt_cost_recovery.sql",
       "0703_corrective_picking.sql"]) {
       await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
       if (migration === "136_financial_command_results.sql") {

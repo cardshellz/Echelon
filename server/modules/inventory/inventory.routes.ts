@@ -1,5 +1,5 @@
 import { lotCostFollowUpQuerySchema } from "@shared/inventory/lot-cost-follow-up";
-import { returnCommandBodySchema, returnCommandResultFor } from "@shared/inventory/return-command";
+import { returnCommandRequestSchema, returnCommandResultFor } from "@shared/inventory/return-command";
 import { isLevelDeleteForbiddenError, isRetiredEmptyLevel } from "./domain/retired-inventory-level";
 import type { Express } from "express";
 import { awaitPageReads, limitPageRead } from "../../platform/http/page-read-limit";
@@ -911,28 +911,28 @@ export function registerInventoryRoutes(app: Express) {
   app.post("/api/returns/process", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { returns } = req.app.locals.services;
-      const { orderId, items, warehouseLocationId, notes, commandKey } = req.body;
       const userId = req.session.user?.id;
 
-      const parsed = returnCommandBodySchema.safeParse({ orderId, items, warehouseLocationId, notes });
+      const parsed = returnCommandRequestSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({ code: "RETURN_INPUT_INVALID", error: "Return identities, quantities and conditions must be valid." });
       }
+      const { commandKey, ...body } = parsed.data;
 
       const result = await returns.processReturn({
-        ...parsed.data,
+        ...body,
         userId,
         commandKey,
       });
 
       const { replenishment: retReplen } = req.app.locals.services;
       if (retReplen) {
-        retReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
-          console.warn(`[Replen] Post-return check failed for loc ${warehouseLocationId}:`, err)
+        retReplen.checkReplenForLocation(body.warehouseLocationId).catch((err: any) =>
+          console.warn(`[Replen] Post-return check failed for loc ${body.warehouseLocationId}:`, err)
         );
       }
 
-      res.json(returnCommandResultFor(parsed.data).parse(result));
+      res.json(returnCommandResultFor(body).parse(result));
     } catch (error: any) {
       console.error("Error processing return:", error);
       if (error instanceof ReturnRestockError || error instanceof CostEvidenceError || error instanceof LotCostError) {
