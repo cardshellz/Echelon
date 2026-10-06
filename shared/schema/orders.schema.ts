@@ -1,4 +1,4 @@
-import { pgTable, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, uniqueIndex, pgSchema, type AnyPgColumn } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, uniqueIndex, pgSchema, uuid, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
@@ -130,6 +130,8 @@ export const orders = wmsSchema.table("orders", {
   warehouseStatus: varchar("warehouse_status", { length: 20 }).notNull().default("ready"), // ready, picking, picked, packing, packed, shipped, exception, cancelled, awaiting_3pl
   fulfillmentPartitionKey: varchar("fulfillment_partition_key", { length: 120 }).notNull().default("default"), // Explicit fulfillment partition; default preserves one WMS work order per OMS order.
   onHold: integer("on_hold").notNull().default(0), // 1 = on hold, 0 = available
+  // Dedicated operation ownership: releasing a manual hold cannot release an edit.
+  orderEditOperationId: uuid("order_edit_operation_id"),
   heldAt: timestamp("held_at"),
   assignedPickerId: varchar("assigned_picker_id", { length: 100 }),
   batchId: varchar("batch_id", { length: 50 }),

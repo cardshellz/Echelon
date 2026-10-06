@@ -108,6 +108,7 @@ import { WalmartChannelRouteHost } from "@/pages/WalmartChannelPage";
 import ShopifyChannelPage from "@/pages/ShopifyChannelPage";
 import SyncLogPage from "@/pages/SyncLogPage";
 import OmsOrders from "@/pages/OmsOrders";
+import OrderEdits from "@/pages/OrderEdits";
 import FlowMonitor from "@/pages/FlowMonitor";
 import VendorList from "@/pages/VendorList";
 import VendorDetail from "@/pages/VendorDetail";
@@ -445,6 +446,9 @@ function Router() {
         </Route>
         <Route path="/oms/orders">
           <ProtectedRoute component={OmsOrders} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/order-edits">
+          <ProtectedRoute component={OrderEdits} requiredPermission={{ resource: "orders", action: "edit" }} />
         </Route>
         <Route path="/oms/flow-monitor">
           <ProtectedRoute component={FlowMonitor} allowedRoles={["admin", "lead"]} />

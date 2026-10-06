@@ -15,6 +15,7 @@ const NOW = new Date("2026-08-21T12:00:00.000Z");
 function createDb(line: Record<string, unknown>) {
   const updates: Record<string, unknown>[] = [];
   const tx = {
+    execute: vi.fn(async () => ({ rows: [] })),
     select: () => ({
       from: () => ({
         where: () => ({

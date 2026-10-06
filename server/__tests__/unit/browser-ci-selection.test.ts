@@ -16,6 +16,7 @@ function fixture(extra: Record<string, string> = {}) {
     "client/src/features/unrelated/Isolated.ts": "export const isolated = true;",
     "client/src/components/shipping/BoxSuitesPanel.tsx": "export const boxes = true;",
     "test/browser/procurement-navigation.spec.ts": 'import "@playwright/test";',
+    "test/browser/order-edits.spec.ts": 'import "@playwright/test";',
     "test/browser/dropship-pricing-rules.spec.ts": 'import "@playwright/test";',
     ...Object.fromEntries(Object.values(BROWSER_SUITES).flatMap((suite) => suite.roots.map((root: string) => [root, ""]))),
     "client/src/main.tsx": 'import "./App";',
@@ -32,6 +33,33 @@ function selection(file: string, suite = "procurement", extra: Record<string, st
 }
 
 describe("browser CI impact selection", () => {
+  it.each([
+    ".github/workflows/order-edits.yml",
+    "playwright.order-edits.config.ts",
+    "test/browser/order-edits.spec.ts",
+    "client/src/pages/OrderEdits.tsx",
+    "server/modules/order-edits/application/order-edit.service.ts",
+    "server/modules/order-edits/interfaces/order-edit.routes.ts",
+  ])("runs order editor browser coverage for its owned path: %s", file => {
+    expect(selection(file, "orderEdits", { [file]: "" }).run).toBe(true);
+  });
+
+  it.each(["package.json", "package-lock.json", "shared/order-edits/order-edit.contract.ts", "client/src/lib/order-edits.ts"])(
+    "runs order editor browser coverage for shared or package dependencies: %s", file => {
+      expect(selection(file, "orderEdits", { [file]: "" }).run).toBe(true);
+    },
+  );
+
+  it("keeps the full application startup graph for the order editor and skips unrelated server work", () => {
+    expect(BROWSER_SUITES.orderEdits.roots).toEqual(["client/src/main.tsx"]);
+    const startupDependency = "client/src/components/shipping/BoxSuitesPanel.tsx";
+    expect(selection(startupDependency, "orderEdits")).toEqual({ run: true, reason: `Transitive suite dependency: ${startupDependency}` });
+    const unrelated = "server/modules/inventory/unrelated.service.ts";
+    expect(selection(unrelated, "orderEdits", { [unrelated]: "export const unrelated = true;" })).toEqual({
+      run: false, reason: "Only known paths outside this suite's dependency graph changed",
+    });
+  });
+
   it("preserves eagerly imported packaging startup dependencies in procurement", () => {
     const source = "client/src/components/shipping/BoxSuitesPanel.tsx";
     expect(selection(source).reason).toBe(`Transitive suite dependency: ${source}`);

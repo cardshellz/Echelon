@@ -606,7 +606,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     expect(reviewWriter.recordReview).not.toHaveBeenCalled();
   });
 
-  it.each(["regular", "assembly", "assembly_rejected", "correction"] as const)("picks exact WMS progress and rolls back owner/fence failures: %s", async (mode) => {
+  it.each(["regular", "assembly", "assembly_rejected", "correction", "edit_held"] as const)("picks exact WMS progress and rolls back owner/fence failures: %s", async (mode) => {
     const plan = packageClaimPlan();
     let rejectWmsProgress = false;
     let existingPicked = 0;
@@ -657,7 +657,8 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
         return { rows: [] };
       }
       if (text.includes("FROM wms.orders")) {
-        return { rows: [{ order_id: 70, warehouse_id: 1, warehouse_status: "ready" }] };
+        return { rows: [{ order_id: 70, warehouse_id: 1, warehouse_status: "ready", on_hold: 0,
+          order_edit_operation_id: mode === "edit_held" ? "00000000-0000-4000-8000-000000000001" : null }] };
       }
       if (text.includes("FROM wms.order_items")) {
         return {
@@ -768,6 +769,11 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       return { locationCode: "ASSEMBLY-OUTPUT", zone: "PACK" };
     }) };
     const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME, undefined, undefined, work as any);
+    if (mode === "edit_held") {
+      await expect(repository.pickClaimLine(command)).rejects.toMatchObject({ code: "CLAIM_ORDER_NOT_PICKABLE" });
+      expect(writer.pickResources).not.toHaveBeenCalled();
+      return;
+    }
     if (mode === "assembly_rejected") {
       await expect(repository.pickClaimLine(command)).rejects.toMatchObject({ code: "WORK_OUTPUT_PICK_FENCE_INVALID" });
       expect(writer.pickResources).toHaveBeenCalledOnce();

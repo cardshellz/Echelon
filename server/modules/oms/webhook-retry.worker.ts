@@ -1411,7 +1411,7 @@ export async function dispatchShipStationHoldSyncRetry(
   }
 
   const orderResult = await dbArg.execute(sql`
-    SELECT id, order_number, on_hold
+    SELECT id, order_number, on_hold, order_edit_operation_id
     FROM wms.orders
     WHERE id = ${wmsOrderId}
     LIMIT 1
@@ -1429,7 +1429,7 @@ export async function dispatchShipStationHoldSyncRetry(
     return "dead";
   }
 
-  const mode: "hold" | "release" = Number(orderRow.on_hold) === 1 ? "hold" : "release";
+  const mode: "hold" | "release" = Number(orderRow.on_hold) === 1 || orderRow.order_edit_operation_id != null ? "hold" : "release";
 
   try {
     let touched = 0;

@@ -18,6 +18,7 @@ import {
   type OmsLineAuthorityState,
 } from "./oms-line-authority";
 import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
+import { guardOrderEditShopifyIngress } from "../order-edits/infrastructure/order-edit-ingress-guard";
 import { resolveOrderLineCatalogIdentity, recordOrderLineCatalogIdentity, orderLineInventoryIdentitySnapshot } from "./order-line-catalog-identity.service";
 
 // ---------------------------------------------------------------------------
@@ -362,6 +363,7 @@ export function createOmsService(db: any, reservationService?: any) {
       }
 
       let existingOrder = existing[0];
+      if ((await db.transaction((tx: any) => guardOrderEditShopifyIngress(tx,existingOrder.id,data.rawPayload,new Date()))).skipLines) return existingOrder;
       const incomingChannelShipByDate = coerceValidDate(data.channelShipByDate);
       if (
         incomingChannelShipByDate &&
@@ -409,6 +411,7 @@ export function createOmsService(db: any, reservationService?: any) {
 
         if (existingLine) {
           await db.transaction(async (tx: any) => {
+            if ((await guardOrderEditShopifyIngress(tx,existingOrder.id,data.rawPayload,new Date())).skipLines) return;
             const [lockedLine] = await tx
               .select()
               .from(omsOrderLines)
@@ -476,6 +479,7 @@ export function createOmsService(db: any, reservationService?: any) {
 
         const authority = buildLineAuthorityState(data, item);
         await db.transaction(async (tx: any) => {
+          if ((await guardOrderEditShopifyIngress(tx,existingOrder.id,data.rawPayload,new Date())).skipLines) return;
           const identity = await resolveOrderLineCatalogIdentity(tx, { ...item, channelId });
           const productVariantId = identity?.id ?? null;
           const variantCompareAtPrice = identity?.compareAtPriceCents ?? null;

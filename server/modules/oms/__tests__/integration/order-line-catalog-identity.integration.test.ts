@@ -9,6 +9,7 @@ import { createOmsService } from "../../oms.service";
 import { normalizeShopifyLineItems } from "../../shopify-line-item-normalizer";
 import { buildWmsLineItemFromOmsLine } from "../../wms-sync.service";
 import { createHistoricalOrderLineIdentityRepairService } from "../../application/historical-order-line-identity-repair.service";
+import { orderEditProjectionQueryFixtureSql } from "../../../order-edits/__tests__/fixtures/order-edit-projection.fixture";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -42,7 +43,7 @@ function fixtureTable(table: PgTable): string {
 }
 const namespaces = [...new Set(tables.map(table => getTableConfig(table).schema!))];
 const fixtureSql = namespaces.map(name => `CREATE SCHEMA ${quote(name)};`).join("\n")
-  + tables.map(fixtureTable).join("\n") + `
+  + tables.map(fixtureTable).join("\n") + orderEditProjectionQueryFixtureSql + `
     CREATE UNIQUE INDEX oms_channel_order_unique ON oms.oms_orders(channel_id,external_order_id);
     CREATE UNIQUE INDEX oms_authority_event_unique ON oms.oms_order_line_authority_events(event_key);
     CREATE UNIQUE INDEX oms_hist_identity_command_unique
@@ -59,7 +60,7 @@ describeDatabase.sequential("order line identity PostgreSQL and WMS handoff", ()
   beforeEach(async () => {
     await database.pool.query(`TRUNCATE catalog.products, channels.channel_product_identities, catalog.product_variants, channels.channel_listings,
       oms.oms_orders, oms.oms_order_lines, oms.oms_order_events, oms.oms_order_line_authority_events,
-      oms.webhook_inbox, wms.orders, wms.order_items,
+      oms.webhook_inbox, oms.order_edit_paid_projections, wms.orders, wms.order_items,
       oms.historical_order_line_identity_repair_commands RESTART IDENTITY`);
     await database.pool.query(`INSERT INTO catalog.products(id,name) VALUES(1,'Product');
       INSERT INTO catalog.product_variants(id,product_id,name,sku,compare_at_price_cents)
