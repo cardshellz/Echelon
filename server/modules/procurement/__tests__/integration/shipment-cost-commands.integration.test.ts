@@ -166,6 +166,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     for (const migration of ["136_financial_command_results.sql", "140_financial_command_operations.sql"]) {
       await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     }
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/0722_shipment_cost_performer_vendor.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
     commandTablesReady = true;
     database = drizzle(pool, { schema });
@@ -282,6 +283,96 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     expect(await state()).toEqual(before);
   });
 
+  it("adds the performer relationship to historical costs without guessing identities or changing financial evidence", async () => {
+    await pool.query("UPDATE procurement.inbound_freight_costs SET performed_by_name='Unmatched historical carrier',actual_cents=-55,currency=NULL WHERE id=31");
+    // Reproduce the pre-upgrade table, including real historical rows.
+    await pool.query("ALTER TABLE procurement.inbound_freight_costs DROP COLUMN performed_by_vendor_id");
+    const before = await state();
+    const migration = readFileSync(resolve(process.cwd(), "migrations/0722_shipment_cost_performer_vendor.sql"), "utf8");
+    await pool.query(migration);
+    await pool.query(migration);
+    const after = await state();
+    expect(after[0].map(({ performed_by_vendor_id: _id, ...cost }) => cost)).toEqual(before[0]);
+    expect(after[0][0].performed_by_vendor_id).toBeNull();
+    expect(after.slice(1)).toEqual(before.slice(1));
+  });
+
+  it("creates a charge with distinct billing and performer vendors and a server-resolved name", async () => {
+    const body = { costType: "insurance", actualCents: 125, vendorId: 5, performedByVendorId: 6, performedByName: "Forged client label" };
+    const input = structuredClone(body);
+    expect(await execute({ operation: "create", resourceId: 1, body })).toMatchObject({
+      vendorId: 5, performedByVendorId: 6, performedByName: "Supplier B", actualCents: 125,
+    });
+    expect(body).toEqual(input);
+    const audit = (await state())[4][0];
+    expect(audit).toMatchObject({ actor: actorId, changes: { before: null, after: { vendorId: 5, performedByVendorId: 6, performedByName: "Supplier B" } } });
+  });
+
+  it("changes a performer on an invoiced charge without changing invoice ownership or allocations", async () => {
+    await pool.query("UPDATE procurement.inbound_freight_costs SET vendor_invoice_id=71,cost_status='invoiced',performed_by_name='Historical performer' WHERE id=31");
+    const before = await state();
+    expect(await execute(await patch({ performedByVendorId: 6, performedByName: "Untrusted label" })))
+      .toMatchObject({ vendorId: 5, vendorInvoiceId: 71, performedByVendorId: 6, performedByName: "Supplier B", actualCents: 500, costStatus: "invoiced" });
+    const after = await state();
+    expect(after.slice(1, 4)).toEqual(before.slice(1, 4));
+    expect(after.slice(5)).toEqual(before.slice(5));
+    expect(after[4][0].changes).toMatchObject({ before: { performedByName: "Historical performer", performedByVendorId: null }, after: { performedByVendorId: 6, performedByName: "Supplier B" } });
+  });
+
+  it("preserves a linked name snapshot during vendor renames and ordinary metadata corrections", async () => {
+    await execute(await patch({ performedByVendorId: 6 }));
+    await pool.query("UPDATE procurement.vendors SET name='Renamed Supplier B' WHERE id=6");
+    expect(await execute(await patch({ performedByName: "Supplier B", description: "More evidence" })))
+      .toMatchObject({ performedByVendorId: 6, performedByName: "Supplier B" });
+    expect(await execute(await patch({ performedByVendorId: 6 })))
+      .toMatchObject({ performedByVendorId: 6, performedByName: "Renamed Supplier B" });
+  });
+
+  it("retains compatibility with text-only clients without storing a contradictory vendor identity", async () => {
+    await execute(await patch({ performedByVendorId: 6 }));
+    expect(await execute(await patch({ performedByName: "Historical subcontractor" })))
+      .toMatchObject({ performedByVendorId: null, performedByName: "Historical subcontractor", vendorId: 5 });
+  });
+
+  it("clears the performer explicitly while preserving the billing vendor", async () => {
+    await execute(await patch({ performedByVendorId: 6 }));
+    expect(await execute(await patch({ performedByVendorId: null })))
+      .toMatchObject({ performedByVendorId: null, performedByName: null, vendorId: 5 });
+  });
+
+  it("enforces the performer FK and retains its recorded name if the vendor is deleted", async () => {
+    const before = await state();
+    await expect(pool.query("UPDATE procurement.inbound_freight_costs SET performed_by_vendor_id=999 WHERE id=31"))
+      .rejects.toMatchObject({ code: "23503" });
+    expect(await state()).toEqual(before);
+    await execute(await patch({ performedByVendorId: 6 }));
+    await pool.query("DELETE FROM procurement.vendors WHERE id=6");
+    expect(await readCost()).toMatchObject({ performedByVendorId: null, performedByName: "Supplier B", vendorId: 5 });
+  });
+
+  it("takes the committed vendor name after waiting for a concurrent rename", async () => {
+    const result = await contend(await patch({ performedByVendorId: 6 }),
+      (client) => client.query("UPDATE procurement.vendors SET name='Committed performer name' WHERE id=6"));
+    expect(result).toMatchObject({ ok: true, value: { performedByVendorId: 6, performedByName: "Committed performer name", vendorId: 5 } });
+  });
+
+  it("rejects and replays a missing performer without writing cost or audit evidence", async () => {
+    const before = await state();
+    const command = await patch({ performedByVendorId: 999 });
+    const request = descriptor("missing-performer", command);
+    const commands = commandFactory(service, repositoryFactory(database), () => NOW);
+    const rejected = await commands.execute(command, actorId, request);
+    expect(rejected).toMatchObject({ httpStatus: 422, terminalState: "rejected", replayed: false, body: { code: "SHIPMENT_COST_PERFORMER_NOT_FOUND" } });
+    expect(await commands.execute(command, delegateId, request)).toMatchObject({ commandId: rejected.commandId, replayed: true, body: rejected.body });
+    expect(await state()).toEqual(before);
+  });
+
+  it.each([0, -1, 1.5, 2_147_483_648])("rejects invalid performer ID %s before writing", async (performedByVendorId) => {
+    const before = await state();
+    await expect(execute(await patch({ performedByVendorId }))).rejects.toThrow();
+    expect(await state()).toEqual(before);
+  });
+
   it("preserves signed legacy amounts and unknown currency when correcting metadata", async () => {
     await pool.query("UPDATE procurement.inbound_freight_costs SET actual_cents=-55,currency=NULL,exchange_rate=NULL WHERE id=31");
     const before = await state();
@@ -340,7 +431,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     const before = await state();
     await pool.query("ALTER TABLE public.audit_events ADD CONSTRAINT shipment_cost_test_reject_audit CHECK(action <> 'procurement.shipment_cost.amended')");
     try {
-      await expect(execute(await patch({ actualCents: 777 }))).rejects.toThrow();
+      await expect(execute(await patch({ actualCents: 777, performedByVendorId: 6 }))).rejects.toThrow();
       expect(await state()).toEqual(before);
     } finally {
       await pool.query("ALTER TABLE public.audit_events DROP CONSTRAINT shipment_cost_test_reject_audit");
@@ -556,12 +647,13 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
   });
 
   it("replays the committed create across delegated actors without a second cost or audit", async () => {
-    const command: ShipmentCostCommand = { operation: "create", resourceId: 1, body: { costType: "insurance", actualCents: 125 } };
+    const command: ShipmentCostCommand = { operation: "create", resourceId: 1, body: { costType: "insurance", actualCents: 125, vendorId: 5, performedByVendorId: 6 } };
     const request = descriptor("delegated-replay", command);
     const commands = commandFactory(service, repositoryFactory(database), () => NOW);
     const first = await commands.execute(command, actorId, request);
     const replay = await commands.execute(command, delegateId, request);
-    expect(first).toMatchObject({ httpStatus: 201, terminalState: "succeeded", replayed: false });
+    expect(first).toMatchObject({ httpStatus: 201, terminalState: "succeeded", replayed: false,
+      body: { vendorId: 5, performedByVendorId: 6, performedByName: "Supplier B" } });
     expect(replay).toMatchObject({ httpStatus: 201, replayed: true, body: JSON.parse(JSON.stringify(first.body)) });
     expect((await pool.query("SELECT * FROM procurement.inbound_freight_costs")).rows).toHaveLength(2);
     expect((await pool.query("SELECT actor FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, delegateId]])).rows).toEqual([{ actor: actorId }]);

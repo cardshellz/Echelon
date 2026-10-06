@@ -30,6 +30,7 @@ const editableShape = {
   exchangeRate: z.literal("1"),
   allocationMethod: z.enum(SHIPMENT_COST_ALLOCATION_METHODS).nullable(),
   vendorId: shipmentCostResourceIdSchema.nullable(),
+  performedByVendorId: shipmentCostResourceIdSchema.nullable(),
   performedByName: z.string().nullable(),
   invoiceDate: evidenceDate.nullable(),
   notes: z.string().nullable(),

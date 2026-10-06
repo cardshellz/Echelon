@@ -7,6 +7,7 @@ import {
   isInvoiceOwnedShipmentCost,
   shipmentCostEditorFromRecord,
   shipmentCostNeedsRefresh,
+  shipmentCostFormFromCreate,
   updateShipmentCostPayload,
   type ShipmentCostForm,
 } from "../../shipment-cost-command";
@@ -21,7 +22,7 @@ const record = {
 };
 const form: ShipmentCostForm = {
   costType: "freight", description: "Sea freight", amount: "50.00", allocationMethod: "default",
-  vendorId: 7, vendorName: "Carrier", performedByName: "Forwarder", costDate: "2026-09-06",
+  vendorId: 7, vendorName: "Carrier", performedByVendorId: null, performedByName: "Forwarder", costDate: "2026-09-06",
 };
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 const saved = { id: 31, inboundShipmentId: 12, version: nextVersion };
@@ -33,7 +34,7 @@ describe("shipment cost edit payloads", () => {
     const payload = createShipmentCostPayload({ ...form, inboundShipmentId: 999, vendorInvoiceId: 88, updatedAt: "forged", costStatus: "paid" } as ShipmentCostForm);
     expect(payload).toEqual({
       costType: "freight", description: "Sea freight", estimatedCents: 5000, actualCents: 5000,
-      allocationMethod: null, vendorId: 7, performedByName: "Forwarder",
+      allocationMethod: null, vendorId: 7, performedByVendorId: null, performedByName: "Forwarder",
       invoiceDate: new Date("2026-09-06T00:00:00").toISOString(),
       reason: "Added shipment charge from shipment detail",
     });
@@ -99,6 +100,42 @@ describe("shipment cost edit payloads", () => {
     expect(shipmentCostEditorFromRecord(cost).amount).toBe(amount);
     expect(updateShipmentCostPayload(shipmentCostEditorFromRecord(cost))).not.toHaveProperty("actualCents");
     expect(updateShipmentCostPayload(shipmentCostEditorFromRecord(cost))).not.toHaveProperty("estimatedCents");
+  });
+});
+
+describe("shipment cost performer identity", () => {
+  it("retains independent provider and performer IDs through create recovery", () => {
+    const payload = createShipmentCostPayload({ ...form, performedByVendorId: 8 });
+    expect(payload).toMatchObject({ vendorId: 7, performedByVendorId: 8, performedByName: "Forwarder" });
+    expect(shipmentCostFormFromCreate(payload)).toMatchObject({ vendorId: 7, performedByVendorId: 8, performedByName: "Forwarder" });
+  });
+
+  it("preserves old name-only records without assigning a vendor identity", () => {
+    const editor = shipmentCostEditorFromRecord(record);
+    expect(editor).toMatchObject({ performedByVendorId: null, performedByName: "Forwarder" });
+    expect(updateShipmentCostPayload({ ...editor, description: "More evidence" })).not.toHaveProperty("performedByVendorId");
+    const { performedByVendorId: _id, ...oldBody } = createShipmentCostPayload(form);
+    expect(shipmentCostFormFromCreate(oldBody)).toMatchObject({ performedByVendorId: null, performedByName: "Forwarder" });
+  });
+
+  it("permits performer selection on an invoiced row without sending economic changes", () => {
+    const editor = shipmentCostEditorFromRecord({ ...record, vendorInvoiceId: 71 });
+    const payload = updateShipmentCostPayload({ ...editor, performedByVendorId: 8, performedByName: "Selected performer" });
+    expect(payload).toMatchObject({ performedByVendorId: 8, performedByName: "Selected performer", expectedVersion: version });
+    for (const field of ["vendorId", "actualCents", "estimatedCents", "allocationMethod", "invoiceDate"]) expect(payload).not.toHaveProperty(field);
+  });
+
+  it("clears a linked performer explicitly without changing the invoice provider", () => {
+    const editor = shipmentCostEditorFromRecord({ ...record, performedByVendorId: 8 });
+    expect(updateShipmentCostPayload({ ...editor, performedByVendorId: null, performedByName: "" }))
+      .toMatchObject({ performedByVendorId: null, performedByName: "" });
+    expect(updateShipmentCostPayload(editor)).not.toHaveProperty("performedByVendorId");
+  });
+
+  it.each([0, -1, 1.5, 2_147_483_648, Number.NaN, Number.POSITIVE_INFINITY])("rejects invalid performer ID %s before dispatch", (performedByVendorId) => {
+    expect(() => createShipmentCostPayload({ ...form, performedByVendorId })).toThrow();
+    const editor = shipmentCostEditorFromRecord(record);
+    expect(() => updateShipmentCostPayload({ ...editor, performedByVendorId })).toThrow();
   });
 });
 
