@@ -501,7 +501,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
     })).resolves.toEqual({ reversedCostCents: 700 });
 
     expect(db.delete).not.toHaveBeenCalled();
-    expect(set).toHaveBeenCalledWith({ qty: 1, totalCostMills: 70_000, totalCostCents: 700 });
+    expect(set).toHaveBeenCalledWith({ qty: 1, totalCostMills: 70_000, totalCostCents: 700, costPrecisionVersion: 1 });
     expect(returning).toHaveBeenCalledOnce();
   });
 

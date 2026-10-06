@@ -1,3 +1,5 @@
+import { normalizeLotCosts as normalizeBuildLotCosts, roundedMillsToCents as buildMillsToRoundedCents } from "../domain/lot-cost";
+export { normalizeLotCosts as normalizeBuildLotCosts, roundedMillsToCents as buildMillsToRoundedCents } from "../domain/lot-cost";
 import { sql } from "drizzle-orm";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
 import {
@@ -5,7 +7,6 @@ import {
   BuildDomainError,
   calculateBuildQuantities,
   validateBuildRecipeDefinition,
-  type BuildCostTotals,
   type BuildRecipeType,
   type BuildVariantFacts,
 } from "../domain/build.domain";
@@ -120,34 +121,6 @@ function buildAuthorizationRequest(
 }
 
 
-function toBigInt(value: unknown, field: string): bigint {
-  try {
-    return BigInt(value == null ? 0 : String(value));
-  } catch {
-    throw new BuildDomainError("INVALID_BUILD_COST", `${field} is not an integer mill value`, {
-      field,
-      value,
-    });
-  }
-}
-function centsToMills(value: unknown, field: string): bigint {
-  return toBigInt(value, field) * BigInt(100);
-}
-
-function preferredMills(
-  mills: unknown,
-  cents: unknown,
-  millsField: string,
-  centsField: string,
-): bigint {
-  const exactMills = toBigInt(mills, millsField);
-  return exactMills > BigInt(0) ? exactMills : centsToMills(cents, centsField);
-}
-
-export function buildMillsToRoundedCents(value: bigint): bigint {
-  return (value + BigInt(50)) / BigInt(100);
-}
-
 export async function loadActiveBuildVariantFacts(
   tx: Pick<Db, "execute">,
   variantIds: number[],
@@ -238,63 +211,6 @@ function getVariantFacts(
     });
   }
   return facts;
-}
-
-
-export function normalizeBuildLotCosts(lot: any): BuildCostTotals & { totalMills: bigint } {
-  const totalMills = preferredMills(
-    toBigInt(lot.total_unit_cost_mills, "total_unit_cost_mills") > BigInt(0)
-      ? lot.total_unit_cost_mills
-      : lot.unit_cost_mills,
-    toBigInt(lot.total_unit_cost_cents, "total_unit_cost_cents") > BigInt(0)
-      ? lot.total_unit_cost_cents
-      : lot.unit_cost_cents,
-    "total_unit_cost_mills",
-    "total_unit_cost_cents",
-  );
-  const packagingMills = preferredMills(
-    lot.packaging_cost_mills,
-    lot.packaging_cost_cents,
-    "packaging_cost_mills",
-    "packaging_cost_cents",
-  );
-  const landedMills = preferredMills(
-    lot.landed_cost_mills,
-    lot.landed_cost_cents,
-    "landed_cost_mills",
-    "landed_cost_cents",
-  );
-  const recordedPoMills = preferredMills(
-    lot.po_unit_cost_mills,
-    lot.po_unit_cost_cents,
-    "po_unit_cost_mills",
-    "po_unit_cost_cents",
-  );
-  const negativeField = [
-    ["total_unit_cost_mills", totalMills],
-    ["po_unit_cost_mills", recordedPoMills],
-    ["packaging_cost_mills", packagingMills],
-    ["landed_cost_mills", landedMills],
-  ].find(([, value]) => (value as bigint) < BigInt(0));
-  if (negativeField) {
-    throw new BuildDomainError(
-      "INVALID_SOURCE_LOT_COST",
-      `Lot ${lot.id} has a negative ${negativeField[0]} value`,
-      { lotId: Number(lot.id), field: negativeField[0] },
-    );
-  }
-  const nonPoMills = packagingMills + landedMills;
-  if (nonPoMills > totalMills) {
-    throw new BuildDomainError(
-      "INVALID_SOURCE_LOT_COST",
-      `Lot ${lot.id} has packaging plus landed cost greater than total cost`,
-      { lotId: Number(lot.id) },
-    );
-  }
-  const poMills = recordedPoMills + nonPoMills === totalMills
-    ? recordedPoMills
-    : totalMills - nonPoMills;
-  return { poMills, packagingMills, landedMills, totalMills };
 }
 
 

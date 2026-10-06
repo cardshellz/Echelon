@@ -11,11 +11,11 @@ function createClient(handler: (text: string, values: unknown[]) => Promise<any>
   const query = vi.fn(async (text: string, values: unknown[] = []) => {
     if (text.includes("FROM inventory.quantity_ledger_opening")) return { rows: [] };
     if (text.includes("pg_advisory_xact_lock") || text.includes("inventory.lot_cost_contributions")) return { rows: [] };
-    if (text.includes("SELECT source.qty_received AS source_qty")) {
+    if (text.includes("source.qty_received AS source_qty")) {
       const outputQty = lotOriginalQuantities.get(Number(values[0]));
       const sourceQty = lotOriginalQuantities.get(Number(values[1]));
       if (outputQty === undefined || sourceQty === undefined) throw new Error("Missing original lot quantity fixture for contribution bounds");
-      return { rows: [{ source_qty: sourceQty, output_qty: outputQty }] };
+      return { rows: [{ source_qty: sourceQty, output_qty: outputQty, qty_received: sourceQty, total_unit_cost_mills: 125, unit_cost_mills: 125 }] };
     }
     return handler(text, values);
   });
@@ -633,6 +633,7 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
 
     await expect(repository.pickResources({
       client: fake.client,
+      commandKey: "canonical:test:pick",
       claimId: BigInt(9),
       claimLineId: BigInt(10),
       resources: [{

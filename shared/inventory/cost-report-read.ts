@@ -14,6 +14,7 @@ const recordedDateTime = z.union([
   z.string().refine((value) => isoOrLocalDateTime.safeParse(value.replace(" ", "T")).success, "Invalid recorded timestamp"),
   z.date(),
 ]);
+const exactValueMills = z.string().regex(/^\d+$/).max(40);
 
 // PostgreSQL BIGINT columns arrive as strings in raw lot queries. Keep those
 // values exact; validation must not coerce them through a JavaScript number.
@@ -36,6 +37,8 @@ const valuationProduct = z.object({
   activeLots: quantity,
   zeroCostQty: quantity,
   hasLandedPending: z.boolean(),
+  valueMills: exactValueMills.optional(),
+  quantityUnit: z.literal("variant").optional(),
 }).passthrough();
 
 // Extra fields remain compatible with additive API releases, while every
@@ -48,6 +51,9 @@ export const inventoryValuationReportSchema = z.object({
   landedPendingLots: quantity,
   landedPendingValueCents: safeInteger,
   byProduct: z.array(valuationProduct),
+  totalValueMills: exactValueMills.optional(),
+  quantityUnit: z.literal("variant").optional(),
+  unknownCostQty: quantity.optional(),
 }).passthrough().superRefine((report, context) => {
   const productIds = report.byProduct.map((product) => product.productId);
   if (new Set(productIds).size !== productIds.length) {

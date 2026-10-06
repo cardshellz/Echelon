@@ -253,7 +253,7 @@ export interface ReturnCaseOperationTransaction {
 }
 
 export interface ReturnCaseOperationStore {
-  transaction<T>(work: (tx: ReturnCaseOperationTransaction) => Promise<T>): Promise<T>;
+  transaction<T>(work: (tx: ReturnCaseOperationTransaction) => Promise<T>, options?: { inventoryCosting: boolean }): Promise<T>;
 }
 
 export class ReturnCaseOperationError extends Error {
@@ -570,7 +570,7 @@ export class ReturnCaseOperationService {
         aggregate, idempotencyKey: input.idempotencyKey, requestHash,
         actor: input.actor, notes: input.notes, lines, now: readClock(this.clock),
       });
-    });
+    }, { inventoryCosting: true });
     if (!result.replayed && this.inventoryNotifier) {
       for (const variantId of new Set(result.lines.flatMap((line) =>
         line.inventoryTransactionId !== null && line.productVariantId !== null ? [line.productVariantId] : []))) {

@@ -15,6 +15,12 @@ import {
   perUnitMills,
 } from "../money";
 
+it("parses and rounds decimal money exactly at the supported integer boundary", () => {
+  expect(dollarsToMills("900719925474.0991")).toBe(Number.MAX_SAFE_INTEGER);
+  expect(dollarsToMills("900719925474.09905")).toBe(Number.MAX_SAFE_INTEGER);
+  expect(()=>dollarsToMills("900719925474.09915")).toThrow(RangeError);
+});
+
 describe("perUnitMills (case-break per-unit cost)", () => {
   it("divides a whole-case cost evenly across base units", () => {
     // $10.00 case (100000 mills) / 100 units = $0.10/unit (1000 mills)

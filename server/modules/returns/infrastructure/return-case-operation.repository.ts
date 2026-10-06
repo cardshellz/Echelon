@@ -8,7 +8,10 @@ import { persistAuditEvent } from "../../../infrastructure/auditLogger";
 import {
   applyReturnRestock,
   ReturnRestockError,
-} from "../../inventory/application/return-restock.use-case";
+  lockInventoryCostGraph,
+  CostEvidenceError,
+  LotCostError,
+} from "../../inventory/return-inventory.api";
 import {
   receiveExpectedWmsReturn,
   WmsReturnReceiptCommandError,
@@ -135,8 +138,11 @@ interface InsertedDispositionRow { id: unknown }
 const RETURN_QUANTITY_LOCK_NAMESPACE = 918413;
 
 export class PostgresReturnCaseOperationStore implements ReturnCaseOperationStore {
-  transaction<T>(work: (tx: ReturnCaseOperationTransaction) => Promise<T>): Promise<T> {
-    return db.transaction((tx) => work(new PostgresReturnCaseOperationTransaction(tx)));
+  transaction<T>(work: (tx: ReturnCaseOperationTransaction) => Promise<T>, options?: { inventoryCosting: boolean }): Promise<T> {
+    return db.transaction(async (tx) => {
+      if (options?.inventoryCosting) await lockInventoryCostGraph(tx);
+      return work(new PostgresReturnCaseOperationTransaction(tx));
+    });
   }
 }
 
@@ -770,7 +776,9 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
           inventoryTransactionId = restock.inventoryTransactionId;
           inventoryLotId = restock.inventoryLotId;
         } catch (error) {
-          if (error instanceof ReturnRestockError) throw mapReturnRestockError(error, input);
+          if (error instanceof ReturnRestockError || error instanceof CostEvidenceError || error instanceof LotCostError) {
+            throw mapReturnRestockError(error, input);
+          }
           throw error;
         }
       }
@@ -851,7 +859,7 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
 }
 
 function mapReturnRestockError(
-  error: ReturnRestockError,
+  error: ReturnRestockError | CostEvidenceError | LotCostError,
   input: PersistReturnInventoryTreatmentInput,
 ): ReturnCaseOperationError {
   const integrityFailure = error.code.includes("DATA_INVALID")

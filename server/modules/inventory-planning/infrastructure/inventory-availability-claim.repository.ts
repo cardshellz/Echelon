@@ -5551,11 +5551,9 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
       const client = await this.connectionPool.connect();
       try {
         await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
-        if (command.wmsProgress || command.locationStrategy === "reconcile_picker_observation") {
-          // A WMS pick may materialize its reserved case break. Acquire the cost
-          // graph before product/order locks, exactly as explicit transformations do.
-          await lockInventoryCostGraph(costEvidenceTransactionFromPg(client));
-        }
+        // Price binding and any case break share the cost graph lock. Always
+        // acquire it before product/order/level rows, including ordinary picks.
+        await lockInventoryCostGraph(costEvidenceTransactionFromPg(client));
         const replay = await loadPickReplay(client, command.idempotencyKey, requestHash, commandType);
         if (replay) {
           await client.query("COMMIT");

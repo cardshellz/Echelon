@@ -122,6 +122,42 @@ suite.sequential("canonical picker case conversions with active quantity authori
       item: (await context.pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows };
   }
 
+  it("keeps exact case ownership while binding a changed price after the claim", async () => {
+    await context.pool.query("UPDATE inventory.inventory_lots SET unit_cost_mills=5000,total_unit_cost_mills=5000,po_unit_cost_mills=5000 WHERE id=5");
+    await expect(owner.pickClaimLine(command())).resolves.toMatchObject({ quantity: "2",outcome: "picked" });
+    const costs = (await context.pool.query("SELECT unit_cost_mills,total_cost_mills FROM oms.order_item_costs WHERE order_item_id=21")).rows;
+    expect(costs).toEqual([{ unit_cost_mills: "125",total_cost_mills: "250" }]);
+    const committed = await evidence();
+    // A later reprice does not cause a replayed physical command to post again.
+    await owner.pickClaimLine(command());
+    expect(await evidence()).toEqual(committed);
+  });
+
+  it("posts inline case replenishment with missing history and retains accounting follow-up after commit", async () => {
+    await context.pool.query("UPDATE inventory.inventory_lots SET qty_received=0 WHERE id=5");
+    const results = await Promise.all([owner.pickClaimLine(command()),owner.pickClaimLine(command())]);
+    expect(results.every(result=>result.quantity === "2")).toBe(true);
+    expect((await context.pool.query("SELECT qty_received FROM inventory.inventory_lots WHERE id=5")).rows[0].qty_received).toBe(0);
+    const followUps = (await context.pool.query("SELECT inventory_lot_id,issue_code FROM inventory.lot_cost_follow_ups ORDER BY id")).rows;
+    expect(followUps.some(row=>row.inventory_lot_id === 5 && row.issue_code === "COST_HISTORICAL_BASIS_MISSING")).toBe(true);
+    const outputs = (await context.pool.query("SELECT cost_provisional FROM inventory.inventory_lots WHERE id IN (SELECT output_lot_id FROM inventory.lot_cost_contributions WHERE source_lot_id=5)")).rows;
+    expect(outputs.length).toBeGreaterThan(0);
+    expect(outputs.every(row=>row.cost_provisional === 1)).toBe(true);
+    const committed = await evidence();
+    await owner.pickClaimLine(command());
+    expect(await evidence()).toEqual(committed);
+  });
+
+  it("rolls back active-journal case work if durable costing evidence fails", async () => {
+    await context.pool.query("UPDATE inventory.inventory_lots SET qty_received=0 WHERE id=5");
+    await context.pool.query(`CREATE FUNCTION inventory.fail_cost_follow_up() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'cost follow-up persistence failed'; END $$;
+      CREATE TRIGGER fail_cost_follow_up BEFORE INSERT ON inventory.lot_cost_follow_ups FOR EACH ROW EXECUTE FUNCTION inventory.fail_cost_follow_up()`);
+    const before = await evidence();
+    await expect(owner.pickClaimLine(command())).rejects.toThrow("cost follow-up persistence failed");
+    expect(await evidence()).toEqual(before);
+  });
+
   it("couples the WMS command receipt to exact canonical movement and replays concurrent requests once", async () => {
     await installWarehouseOperationMigration(context.pool);
     await context.pool.query("UPDATE wms.order_items SET unit_price_cents=100,paid_price_cents=100,total_price_cents=200,zone='P' WHERE id=21");

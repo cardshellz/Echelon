@@ -4,7 +4,11 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { useAuth } from "./auth";
 import { financialCommandFetchJson } from "./financial-command";
 
-export type InventoryCommandRequester = <T = unknown>(url: string, body: Record<string, unknown>) => Promise<T>;
+export interface InventoryCommandRequester {
+  <T = unknown>(url: string, body: Record<string, unknown>, responseSchema?: { parse(value: unknown): T }): Promise<T>;
+  pending<T>(url: string, bodySchema: { parse(value: unknown): T }): ReadonlyArray<{ commandKey: string; body: T }>;
+  resume<T>(url: string, commandKey: string, responseSchema: { parse(value: unknown): T }): Promise<T>;
+}
 export interface InventoryIntentPersistence {
   /** The authenticated account, never a role or display name. */
   actorId: string;
@@ -64,7 +68,18 @@ export function createInventoryCommandRequester(
     try { persistence.storage().setItem(storageKey, JSON.stringify({ version: 1, pending })); }
     catch (cause) { throw new InventoryIntentRecoveryError(cause); }
   };
-  return async <T>(url: string, body: Record<string, unknown>): Promise<T> => {
+  const sendIntent = async <T>(intent: PendingIntent, responseSchema?: { parse(value: unknown): T }): Promise<T> => {
+    const rawResult = await send<T>(intent.url, {
+      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+      body: intent.requestBody,
+    });
+    // A malformed success is ambiguous. Keep the original intent for replay.
+    const result = responseSchema ? responseSchema.parse(rawResult) : rawResult;
+    // Remove only the acknowledged command, preserving concurrent intents.
+    write(read().filter(entry => entry.commandKey !== intent.commandKey));
+    return result;
+  };
+  const request = async <T>(url: string, body: Record<string, unknown>, responseSchema?: { parse(value: unknown): T }): Promise<T> => {
     if (Object.prototype.hasOwnProperty.call(body, "commandKey")) throw new Error("The inventory intent owner supplies commandKey");
     // Fingerprint the actual wire payload, excluding omitted undefined fields.
     const payload = JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
@@ -79,15 +94,20 @@ export function createInventoryCommandRequester(
       // edits a form; returning to that intent must still find its original key.
       write([...pending, intent]);
     }
-    const result = await send<T>(url, {
-      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
-      body: intent.requestBody,
-    });
-    // Read again: another request may have retained its own intent while this
-    // one was in flight. Remove only the acknowledged command, never its peers.
-    write(read().filter(entry => entry.commandKey !== intent.commandKey));
-    return result;
+    return sendIntent(intent, responseSchema);
   };
+  return Object.assign(request, {
+    pending: <T>(url: string, bodySchema: { parse(value: unknown): T }) => read().filter(entry => entry.url === url).map(entry => {
+      const { commandKey, ...body } = JSON.parse(entry.requestBody) as Record<string, unknown>;
+      return { commandKey: entry.commandKey, body: bodySchema.parse(body) };
+    }),
+    resume: async <T>(url: string, commandKey: string, responseSchema: { parse(value: unknown): T }): Promise<T> => {
+      const intent = read().find(entry => entry.url === url && entry.commandKey === commandKey);
+      if (!intent) throw new InventoryIntentRecoveryError(new Error("The exact retained inventory command is unavailable"));
+      // Never generate a replacement key when checking an uncertain result.
+      return sendIntent(intent, responseSchema);
+    },
+  });
 }
 
 export function useInventoryCommand(): InventoryCommandRequester {

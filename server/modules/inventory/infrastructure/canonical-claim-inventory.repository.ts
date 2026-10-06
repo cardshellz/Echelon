@@ -15,9 +15,11 @@ import type {
   CanonicalClaimTransactionClient,
 } from "../../inventory-planning/application/canonical-claim-inventory.port";
 import { allocateBuildCostLayers } from "../domain/build.domain";
-import { buildMillsToRoundedCents, normalizeBuildLotCosts } from "./build.repository";
+import { roundedMillsToCents as buildMillsToRoundedCents, normalizeLotCosts as normalizeBuildLotCosts, lotCostNeedsReview } from "../domain/lot-cost";
+import { recordLotCostFollowUp } from "./lot-cost-follow-up.repository";
 import { dispatchCanonicalPickedResources, loadCanonicalDispatchCosts } from "./canonical-claim-dispatch-inventory";
 import { CanonicalClaimQuantityPosting } from "./canonical-claim-quantity-posting";
+import { InventoryQuantityError } from "../domain/quantity-ledger";
 
 type CanonicalTransformationExecutionInput =
   | Parameters<CanonicalClaimInventoryMutationPort["executePackageOperation"]>[0]
@@ -597,7 +599,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
               unit_cost_cents, po_unit_cost_cents, packaging_cost_cents,
               landed_cost_cents, total_unit_cost_cents, unit_cost_mills,
               po_unit_cost_mills, packaging_cost_mills, landed_cost_mills,
-              total_unit_cost_mills
+              total_unit_cost_mills, cost_precision_version, cost_provisional, cost_source, qty_received
        FROM inventory.inventory_lots
        WHERE product_variant_id = $1
          AND warehouse_location_id = $2
@@ -942,7 +944,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
               cost_provisional, cost_source, unit_cost_cents, po_unit_cost_cents,
               packaging_cost_cents, landed_cost_cents, total_unit_cost_cents,
               unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
-              landed_cost_mills, total_unit_cost_mills
+              landed_cost_mills, total_unit_cost_mills, cost_precision_version, qty_received
        FROM inventory.inventory_lots
        WHERE id = ANY($1::integer[])
           OR (product_variant_id = $2 AND warehouse_location_id = $3 AND status = 'active')
@@ -1077,16 +1079,6 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
           { inventoryLotId: relocation.inventoryLotId, cause: cause instanceof Error ? cause.message : String(cause) },
         );
       }
-      if (liveCosts.totalMills !== relocation.costs.unitCostMills
-        || liveCosts.poMills !== relocation.costs.poUnitCostMills
-        || liveCosts.packagingMills !== relocation.costs.packagingUnitCostMills
-        || liveCosts.landedMills !== relocation.costs.landedUnitCostMills) {
-        throw new CanonicalClaimInventoryMutationError(
-          "CLAIM_OBSERVATION_SOURCE_COST_CHANGED",
-          "A source FIFO lot no longer matches the claim cost snapshot used for observed relocation.",
-          { inventoryLotId: relocation.inventoryLotId },
-        );
-      }
       relocationByLevel.set(
         relocation.resource.inventoryLevelId,
         (relocationByLevel.get(relocation.resource.inventoryLevelId) ?? BigInt(0)) + relocation.quantity,
@@ -1153,8 +1145,11 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       });
     }
     for (const [index, relocation] of relocations.entries()) {
-      const layer = relocation.costs;
       const sourceLot = lotsById.get(relocation.inventoryLotId)!;
+      const liveCosts = normalizeBuildLotCosts(sourceLot);
+      const layer = { ...relocation.costs, unitCostMills: liveCosts.totalMills,
+        poUnitCostMills: liveCosts.poMills, packagingUnitCostMills: liveCosts.packagingMills,
+        landedUnitCostMills: liveCosts.landedMills };
       const quantity = positivePostgresInteger(relocation.quantity, "observationLot.quantity");
       if (sourceLot.cost_provisional == null) {
         throw new CanonicalClaimInventoryMutationError(
@@ -1216,11 +1211,11 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
            po_unit_cost_mills, packaging_cost_mills, landed_cost_mills,
            total_unit_cost_mills, qty_received, qty_on_hand, qty_reserved,
            qty_picked, qty_consumed, received_at, status, cost_provisional,
-           cost_source, notes, created_at
+           cost_source, notes, created_at, cost_precision_version
          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
                    $10, $11, $12, $13, $10, $14, $15, $16, $17, $14,
                    $18, $24, $24, 0, 0, $19, 'active', $20,
-                   $21, $22, $23)
+                   $21, $22, $23, 1)
          RETURNING id`,
         [
           lotNumber,
@@ -1391,14 +1386,26 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     validateAuditInput(input);
     positiveBigInt(input.claimLineId, "claimLine.id");
     positiveInteger(input.orderItemId, "orderItem.id");
-    const resources = validatePickResources(input.resources);
-    const { levelsById, lotsById } = await lockPickInventory(input.client, resources);
-    validatePickInventory(resources, levelsById, lotsById);
+    if (typeof input.commandKey !== "string" || !input.commandKey.trim()) {
+      throw new InventoryQuantityError("CANONICAL_QUANTITY_COMMAND_REQUIRED", "Picking requires a stable business command identity.");
+    }
     const quantityPosting = await CanonicalClaimQuantityPosting.forCommand(input.client, {
       key: input.commandKey, kind: "pick", actor: input.actor, reason: input.reason,
       occurredAt: input.occurredAt, reference: { type: "availability_claim_pick", id: String(input.claimLineId) },
     });
-
+    const physicalResources = validatePickResources(input.resources);
+    const costTransaction = costEvidenceTransactionFromPg(input.client);
+    await lockInventoryCostGraph(costTransaction);
+    const { levelsById, lotsById } = await lockPickInventory(input.client, physicalResources);
+    validatePickInventory(physicalResources, levelsById, lotsById);
+    const resources = physicalResources.map((resource) => ({
+      ...resource,
+      lotAllocations: resource.lotAllocations.map((allocation) => {
+        const costs = normalizeBuildLotCosts(lotsById.get(allocation.inventoryLotId)!);
+        return { ...allocation, unitCostMills: costs.totalMills, poUnitCostMills: costs.poMills,
+          packagingUnitCostMills: costs.packagingMills, landedUnitCostMills: costs.landedMills };
+      }),
+    }));
     const runningLevels = new Map<number, { variantQty: number; reservedQty: number }>(
       [...levelsById].map(([id, level]) => [id, {
         variantQty: nonnegativeInteger(level.variant_qty, "inventoryLevel.variantQty"),
@@ -1434,8 +1441,8 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         const cogsRow = rows(await input.client.query(
           `INSERT INTO oms.order_item_costs (
              order_id, order_item_id, inventory_lot_id, product_variant_id, qty,
-             unit_cost_cents, total_cost_cents, unit_cost_mills, total_cost_mills, created_at
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             unit_cost_cents, total_cost_cents, unit_cost_mills, total_cost_mills, created_at, cost_precision_version
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1)
            RETURNING id`,
           [
             input.orderId,
@@ -1513,6 +1520,21 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       }
     }
     if (quantityPosting) await quantityPosting.post();
+    // Use the frozen pre-post lot evidence. Recording obligations remains in
+    // this transaction; failure rolls back quantity, COGS and audit together.
+    // The existing quantity owner rejects a low-level replay before these facts
+    // are compared with an already changed physical lot snapshot.
+    for (const resource of resources) for (const allocation of resource.lotAllocations) {
+      const lot = lotsById.get(allocation.inventoryLotId)!;
+      if (lotCostNeedsReview(lot)) await recordLotCostFollowUp(costTransaction, {
+        inventoryLotId: allocation.inventoryLotId, operationKey: input.commandKey,
+        issueCode: Number(lot.qty_received ?? 0) === 0 ? "COST_HISTORICAL_BASIS_MISSING" : "COST_SOURCE_UNRESOLVED",
+        evidence: { claimLineId: input.claimLineId.toString(), orderId: input.orderId,
+          orderItemId: input.orderItemId, claimResourceId: resource.claimResourceId.toString(),
+          claimLotAllocationId: allocation.claimLotAllocationId.toString(), quantity: allocation.pickQty.toString(),
+          sourceCost: lot }, actor: input.actor, occurredAt: input.occurredAt,
+      });
+    }
     return { movements, totalCostMills };
   }
 
@@ -1873,7 +1895,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
               qty_picked, status, received_at, unit_cost_cents, po_unit_cost_cents,
               packaging_cost_cents, landed_cost_cents, total_unit_cost_cents,
               unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
-              landed_cost_mills, total_unit_cost_mills
+              landed_cost_mills, total_unit_cost_mills, cost_precision_version, cost_provisional, cost_source, qty_received
        FROM inventory.inventory_lots
        WHERE id = ANY($1::integer[])
        ORDER BY warehouse_location_id, product_variant_id, received_at, id
@@ -1891,8 +1913,15 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       );
     }
 
+    const pricedAllocationEntries = allocationEntries.map(({ resource, allocation }) => {
+      const costs = normalizeBuildLotCosts(lotsById.get(allocation.inventoryLotId)!);
+      return { resource, allocation: { ...allocation, unitCostMills: costs.totalMills,
+        poUnitCostMills: costs.poMills, packagingUnitCostMills: costs.packagingMills,
+        landedUnitCostMills: costs.landedMills } };
+    });
+    const outputCostProvisional = lotRows.some(lotCostNeedsReview) ? 1 : 0;
     const totalCosts = { poMills: BigInt(0), packagingMills: BigInt(0), landedMills: BigInt(0) };
-    for (const { resource, allocation } of allocationEntries) {
+    for (const { resource, allocation } of pricedAllocationEntries) {
       const lot = lotsById.get(allocation.inventoryLotId)!;
       const consumeQty = positivePostgresInteger(allocation.consumeQty, "claimLotAllocation.consumeQty");
       if (positiveInteger(lot.product_variant_id, "inventoryLot.variantId") !== resource.sourceVariantId
@@ -1918,26 +1947,6 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
           { inventoryLotId: allocation.inventoryLotId, consumeQty },
         );
       }
-      let liveCosts: ReturnType<typeof normalizeBuildLotCosts>;
-      try {
-        liveCosts = normalizeBuildLotCosts(lot);
-      } catch (cause) {
-        throw new CanonicalClaimInventoryMutationError(
-          "INVALID_CLAIM_LOT_COST",
-          "A claim-owned source lot has invalid current cost evidence.",
-          { inventoryLotId: allocation.inventoryLotId, cause: cause instanceof Error ? cause.message : String(cause) },
-        );
-      }
-      if (liveCosts.totalMills !== allocation.unitCostMills
-        || liveCosts.poMills !== allocation.poUnitCostMills
-        || liveCosts.packagingMills !== allocation.packagingUnitCostMills
-        || liveCosts.landedMills !== allocation.landedUnitCostMills) {
-        throw new CanonicalClaimInventoryMutationError(
-          "CLAIM_LOT_COST_CHANGED",
-          "A claim-owned source lot was re-costed after the claim and must be replanned before execution.",
-          { inventoryLotId: allocation.inventoryLotId },
-        );
-      }
       const multiplier = BigInt(consumeQty);
       totalCosts.poMills += allocation.poUnitCostMills * multiplier;
       totalCosts.packagingMills += allocation.packagingUnitCostMills * multiplier;
@@ -1951,7 +1960,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       }]),
     );
     const referenceId = `claim:${input.claimId}:operation:${input.claimOperationId}`;
-    for (const { resource, allocation } of allocationEntries) {
+    for (const { resource, allocation } of pricedAllocationEntries) {
       const consumeQty = positivePostgresInteger(allocation.consumeQty, "claimLotAllocation.consumeQty");
       quantityPosting?.add({ inventoryLotId: allocation.inventoryLotId, inventoryLevelId: resource.inventoryLevelId,
         warehouseLocationId: resource.warehouseLocationId, productVariantId: resource.sourceVariantId,
@@ -2133,9 +2142,9 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
                po_unit_cost_mills, packaging_cost_mills, landed_cost_mills,
                total_unit_cost_mills, qty_received, qty_on_hand, qty_reserved,
                qty_picked, qty_consumed, received_at, status, cost_provisional,
-               cost_source, notes, created_at
+               cost_source, notes, created_at, cost_precision_version
              ) VALUES ($1, $2, $3, $17, $18, $4, $5, $6, $7, $4, $8, $9, $10, $11, $8,
-                       $12, $16, $13, 0, 0, $14, 'active', 0, 'build', $15, $14)
+                       $12, $16, $13, 0, 0, $14, 'active', ${outputCostProvisional}, 'build', $15, $14, 1)
              RETURNING id`
           : `INSERT INTO inventory.inventory_lots (
                lot_number, product_variant_id, warehouse_location_id,
@@ -2144,9 +2153,9 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
                po_unit_cost_mills, packaging_cost_mills, landed_cost_mills,
                total_unit_cost_mills, qty_received, qty_on_hand, qty_reserved,
                qty_picked, qty_consumed, received_at, status, cost_provisional,
-               cost_source, notes, created_at
+               cost_source, notes, created_at, cost_precision_version
              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $4, $8, $9, $10, $11, $8,
-                       $12, $16, $13, 0, 0, $14, 'active', 0, 'transformation', $15, $14)
+                       $12, $16, $13, 0, 0, $14, 'active', ${outputCostProvisional}, 'transformation', $15, $14, 1)
              RETURNING id`,
         build ? [...lotValues, build.buildOrderId, build.buildRunId] : lotValues,
       ))[0];
@@ -2531,7 +2540,7 @@ async function lockPickInventory(
             qty_picked, status, received_at, unit_cost_cents, po_unit_cost_cents,
             packaging_cost_cents, landed_cost_cents, total_unit_cost_cents,
             unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
-            landed_cost_mills, total_unit_cost_mills
+            landed_cost_mills, total_unit_cost_mills, cost_precision_version, cost_provisional, cost_source, qty_received
      FROM inventory.inventory_lots
      WHERE id = ANY($1::integer[])
      ORDER BY warehouse_location_id, product_variant_id, received_at, id
@@ -2600,26 +2609,6 @@ function validatePickInventory(
           "CLAIM_PICK_LOT_IDENTITY_CHANGED",
           "A claim-owned pick allocation no longer matches an active FIFO lot.",
           { claimLotAllocationId: allocation.claimLotAllocationId.toString(), inventoryLotId: allocation.inventoryLotId },
-        );
-      }
-      let liveCosts: ReturnType<typeof normalizeBuildLotCosts>;
-      try {
-        liveCosts = normalizeBuildLotCosts(lot);
-      } catch (cause) {
-        throw new CanonicalClaimInventoryMutationError(
-          "INVALID_CLAIM_PICK_LOT_COST",
-          "A claim-owned FIFO lot has invalid current cost evidence.",
-          { inventoryLotId: allocation.inventoryLotId, cause: cause instanceof Error ? cause.message : String(cause) },
-        );
-      }
-      if (liveCosts.totalMills !== allocation.unitCostMills
-        || liveCosts.poMills !== allocation.poUnitCostMills
-        || liveCosts.packagingMills !== allocation.packagingUnitCostMills
-        || liveCosts.landedMills !== allocation.landedUnitCostMills) {
-        throw new CanonicalClaimInventoryMutationError(
-          "CLAIM_PICK_LOT_COST_CHANGED",
-          "A claim-owned FIFO lot was re-costed after claiming and must be replanned before pick.",
-          { inventoryLotId: allocation.inventoryLotId },
         );
       }
       byLot.set(allocation.inventoryLotId, (byLot.get(allocation.inventoryLotId) ?? BigInt(0)) + allocation.pickQty);
