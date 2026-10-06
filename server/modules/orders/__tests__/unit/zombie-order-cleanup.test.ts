@@ -54,11 +54,7 @@ describe("Zombie order prevention", () => {
     });
 
     it("the startup zombie repair counts held lines as pending shippable", () => {
-      const indexSrc = readFileSync(resolve(__dirname, "../../../../index.ts"), "utf-8");
-      const repair = indexSrc.slice(
-        indexSrc.indexOf("Zombie orders: active warehouse_status"),
-        indexSrc.indexOf("Shipped-order cleanup error"),
-      );
+      const repair = readFileSync(resolve(__dirname, "../../zombie-order-repair.ts"), "utf-8");
       expect(repair).toContain("oi.status NOT IN ('cancelled', 'completed', 'short')");
       expect(repair).not.toMatch(/on_hold/);
     });
@@ -95,11 +91,21 @@ describe("Startup zombie repair", () => {
     resolve(__dirname, "../../../../index.ts"),
     "utf-8",
   );
-
-  const repairSection = INDEX_SRC.slice(
-    INDEX_SRC.indexOf("Zombie orders: active warehouse_status"),
-    INDEX_SRC.indexOf("Shipped-order cleanup error"),
+  // The repair SQL moved out of index.ts into zombie-order-repair.ts.
+  const repairSection = readFileSync(
+    resolve(__dirname, "../../zombie-order-repair.ts"),
+    "utf-8",
   );
+
+  it("is still wired into startup", () => {
+    expect(INDEX_SRC).toContain("runStartupZombieOrderRepair({");
+  });
+
+  it("guards terminal transitions against units the live OMS still owes", () => {
+    expect(repairSection).toContain(
+      "${OMS_STILL_OWES_UNCARRIED_UNITS_FOR_WMS_ORDER_O} AS oms_still_owes_uncarried_units",
+    );
+  });
 
   it("targets orders in active pick-queue statuses", () => {
     expect(repairSection).toContain("'ready', 'in_progress', 'partially_shipped', 'ready_to_ship'");

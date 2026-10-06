@@ -4,6 +4,7 @@ import {
   deriveOmsLineAuthority,
   getOmsLineMaterializableQuantity,
   getOmsLineRemainingMaterializableQuantity,
+  type OmsLineAuthorityInput,
 } from "../../oms-line-authority";
 
 const NOW = new Date("2026-06-25T12:00:00.000Z");
@@ -254,5 +255,198 @@ describe("OMS line authority", () => {
         wmsMaterializedQuantity: 5,
       }),
     ).toBe(0);
+  });
+});
+
+// Shopify's fulfillable_quantity is workflow permission (holds, schedules,
+// location moves, fulfillment progress), not demand. Only current_quantity —
+// units removed by an order edit or cancellation — may lower what the
+// warehouse owes. Regression for #63275 (2026-09-18) and #63861 (2026-10-06):
+// a Global-e merchant-of-record hold zeroed fulfillable_quantity minutes after
+// payment, authority followed it to 0, and the materialized WMS line was
+// cancelled and never restored when the hold lifted.
+describe("OMS line authority under Shopify fulfillment holds", () => {
+  const PAID_15 = {
+    paidQuantity: 15,
+    authorityFulfillableQuantity: 15,
+    authorizationStatus: "authorized",
+    authorizedAt: NOW,
+    authorizedByEventId: "webhook_inbox:paid",
+  } as const;
+
+  function refresh(input: {
+    fulfillableQuantity: number | null;
+    currentQuantity?: number | null;
+    previous: OmsLineAuthorityInput["previous"];
+    quantity?: number;
+  }) {
+    return deriveOmsLineAuthority({
+      sourceTopic: "orders/updated",
+      sourceEventId: "webhook_inbox:update",
+      financialStatus: "paid",
+      quantity: input.quantity ?? 15,
+      fulfillableQuantity: input.fulfillableQuantity,
+      currentQuantity: input.currentQuantity,
+      previous: input.previous,
+    });
+  }
+
+  it("keeps materialized authority when a hold zeroes fulfillable_quantity", () => {
+    const authority = refresh({ fulfillableQuantity: 0, currentQuantity: 15, previous: PAID_15 });
+
+    expect(authority.authorityFulfillableQuantity).toBe(15);
+    expect(authority.paidQuantity).toBe(15);
+    expect(authority.authorizationStatus).toBe("authorized");
+  });
+
+  it("raises authority when a hold that began at payment is released", () => {
+    const authority = refresh({
+      fulfillableQuantity: 15,
+      currentQuantity: 15,
+      previous: { ...PAID_15, authorityFulfillableQuantity: 0 },
+    });
+
+    expect(authority.authorityFulfillableQuantity).toBe(15);
+  });
+
+  it("does not raise authority while a hold that began at payment is still on", () => {
+    const authority = refresh({
+      fulfillableQuantity: 0,
+      currentQuantity: 15,
+      previous: { ...PAID_15, authorityFulfillableQuantity: 0 },
+    });
+
+    expect(authority.authorityFulfillableQuantity).toBe(0);
+  });
+
+  it("does not shrink authority as units are fulfilled", () => {
+    const authority = refresh({ fulfillableQuantity: 10, currentQuantity: 15, previous: PAID_15 });
+
+    expect(authority.authorityFulfillableQuantity).toBe(15);
+  });
+
+  it("lowers authority to current_quantity when an order edit removes units", () => {
+    const authority = refresh({ fulfillableQuantity: 10, currentQuantity: 10, previous: PAID_15 });
+
+    expect(authority.authorityFulfillableQuantity).toBe(10);
+  });
+
+  it("honors an order-edit removal that arrives while the order is on hold", () => {
+    const authority = refresh({ fulfillableQuantity: 0, currentQuantity: 10, previous: PAID_15 });
+
+    expect(authority.authorityFulfillableQuantity).toBe(10);
+  });
+
+  it("drops authority to zero when an edit removes the whole line", () => {
+    const authority = refresh({ fulfillableQuantity: 0, currentQuantity: 0, previous: PAID_15 });
+
+    expect(authority.authorityFulfillableQuantity).toBe(0);
+  });
+
+  it("never lets a released hold exceed paid quantity", () => {
+    const authority = refresh({
+      quantity: 20,
+      fulfillableQuantity: 20,
+      currentQuantity: 20,
+      previous: { ...PAID_15, authorityFulfillableQuantity: 0 },
+    });
+
+    expect(authority.paidQuantity).toBe(15);
+    expect(authority.authorityFulfillableQuantity).toBe(15);
+  });
+
+  it("keeps the legacy fulfillable-driven rule when an update lacks current_quantity", () => {
+    // Without current_quantity an edit removal is indistinguishable from a
+    // hold; picking units the customer removed is the costlier mistake.
+    const authority = refresh({ fulfillableQuantity: 0, currentQuantity: null, previous: PAID_15 });
+
+    expect(authority.authorityFulfillableQuantity).toBe(0);
+  });
+
+  it("replays a Global-e sequence (paid 1, held, released) without ever dropping below paid", () => {
+    const paid = deriveOmsLineAuthority({
+      sourceTopic: "orders/paid",
+      sourceEventId: "webhook_inbox:paid",
+      financialStatus: "paid",
+      quantity: 1,
+      fulfillableQuantity: null,
+      now: NOW,
+    });
+    const held = refresh({ quantity: 1, fulfillableQuantity: 0, currentQuantity: 1, previous: paid });
+    const released = refresh({ quantity: 1, fulfillableQuantity: 1, currentQuantity: 1, previous: held });
+
+    const sequence = [paid, held, released];
+    expect(sequence.map((step) => step.authorityFulfillableQuantity)).toEqual([1, 1, 1]);
+    for (const step of sequence) {
+      expect(step.paidQuantity).toBe(1);
+      expect(step.authorityFulfillableQuantity).toBeGreaterThanOrEqual(step.paidQuantity);
+      expect(step.authorizationStatus).toBe("authorized");
+    }
+  });
+
+  it("rejects a negative current_quantity before authority can be persisted", () => {
+    expect(() =>
+      refresh({ fulfillableQuantity: 15, currentQuantity: -1, previous: PAID_15 }),
+    ).toThrow(/currentQuantity must be a non-negative integer/);
+  });
+});
+
+// Authorizing topics (orders/paid, shopify/bridge, reconciler/authorize, ...)
+// record payment, never an edit. Their fulfillable_quantity used to cap
+// authority on every re-authorization, so a re-bridge during a hold zeroed an
+// already-authorized line the same way the readiness refresh did.
+describe("OMS line authority re-authorization under Shopify fulfillment holds", () => {
+  const AUTHORIZED_1 = {
+    paidQuantity: 1,
+    authorityFulfillableQuantity: 1,
+    authorizationStatus: "authorized",
+    authorizedAt: NOW,
+    authorizedByEventId: "webhook_inbox:paid",
+  } as const;
+
+  function reauthorize(input: {
+    fulfillableQuantity: number | null;
+    currentQuantity?: number | null;
+    previous?: OmsLineAuthorityInput["previous"];
+  }) {
+    return deriveOmsLineAuthority({
+      sourceTopic: "shopify/bridge",
+      sourceEventId: "shopify_orders:bridge",
+      financialStatus: "paid",
+      quantity: 1,
+      fulfillableQuantity: input.fulfillableQuantity,
+      currentQuantity: input.currentQuantity,
+      previous: input.previous,
+      now: NOW,
+    });
+  }
+
+  it("does not lower an existing authority because a hold zeroed fulfillable_quantity", () => {
+    expect(reauthorize({ fulfillableQuantity: 0, previous: AUTHORIZED_1 }).authorityFulfillableQuantity).toBe(1);
+  });
+
+  it("still waits for readiness on a first authorization made during a hold", () => {
+    expect(reauthorize({ fulfillableQuantity: 0 }).authorityFulfillableQuantity).toBe(0);
+  });
+
+  it("lowers a re-authorized line only to a reported current_quantity", () => {
+    expect(
+      reauthorize({ fulfillableQuantity: 0, currentQuantity: 0, previous: AUTHORIZED_1 })
+        .authorityFulfillableQuantity,
+    ).toBe(0);
+  });
+
+  it("keeps the Walmart disposition cap authoritative over the previous authority", () => {
+    const authority = deriveOmsLineAuthority({
+      sourceTopic: "walmart/acknowledged",
+      sourceEventId: "walmart:hash",
+      financialStatus: "paid",
+      quantity: 1,
+      fulfillableQuantity: 0,
+      previous: { ...AUTHORIZED_1, cancelledQuantity: 1, refundedQuantity: 0 },
+      now: NOW,
+    });
+
+    expect(authority.authorityFulfillableQuantity).toBe(0);
   });
 });
