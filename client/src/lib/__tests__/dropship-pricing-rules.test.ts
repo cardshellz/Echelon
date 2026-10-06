@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseNonnegativeHundredths, parseProfileDraft, profileDraft } from "../dropship-pricing-rules";
+import { describePriceBasis, describeReviewedSize, parseNonnegativeHundredths, parseProfileDraft, profileDraft } from "../dropship-pricing-rules";
 import { draftFromListingPrice, isListingPriceDirty, prepareListingPriceSave } from "../dropship-listing-price";
 import type { ListingPriceSetting } from "@shared/dropship/listing-price";
 describe("pricing rule form contracts", () => {
@@ -21,5 +21,23 @@ describe("pricing rule form contracts", () => {
     expect(isListingPriceDirty({ ...draft, useRules: false, useDefault: true })).toBe(true);
     const attempt = prepareListingPriceSave({ storeConnectionId: 22, productVariantId: 66 }, { ...draft, baseline: { ...baseline, pricingMode: "fixed" } }, null, () => "test");
     expect(attempt.request).toMatchObject({ pricingMode: "rules", priceCents: null, expectedRevisionId: 3 });
+  });
+});
+describe("pricing review words", () => {
+  it.each([
+    [{ preserved: false, basis: "catalog_retail", basisCents: 1249 }, "Reference retail $12.49"],
+    [{ preserved: false, basis: "product_cost", basisCents: 1089 }, ".ops cost $10.89"],
+    [{ preserved: false, basis: "catalog_retail", basisCents: null }, "No catalog reference retail"],
+    [{ preserved: false, basis: "product_cost", basisCents: null }, "No .ops product cost"],
+    [{ preserved: true, basis: null, basisCents: null }, "Your fixed price"],
+    [{ preserved: false, basis: null, basisCents: null }, "—"],
+    [{ preserved: false }, "—"],
+  ] as const)("describes %o as %s", (row, expected) => {
+    expect(describePriceBasis(row)).toBe(expected);
+  });
+  it("shows the size name and SKU, skipping blanks", () => {
+    expect(describeReviewedSize({ sizeName: "Box of 5 Packs of 100", sku: "EG-SLV-STD-5PCK-B500" })).toBe("Box of 5 Packs of 100 · EG-SLV-STD-5PCK-B500");
+    expect(describeReviewedSize({ sku: "EG-SLV-STD-5PCK-B500" })).toBe("EG-SLV-STD-5PCK-B500");
+    expect(describeReviewedSize({ sizeName: "  ", sku: null })).toBe("");
   });
 });
