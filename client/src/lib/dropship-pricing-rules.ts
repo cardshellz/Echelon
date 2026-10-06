@@ -7,9 +7,24 @@ export type ProfileDraft = { defaultRecipe: RecipeDraft; groups: GroupDraft[] };
 export function recipeDraft(recipe: PricingRecipe): RecipeDraft {
   return { basis: recipe.basis, percentage: listingPriceInput(recipe.markupBps), flat: listingPriceInput(recipe.flatCents), rounding: recipe.rounding };
 }
+/**
+ * What a store with no saved pricing rules starts from: the catalog reference
+ * retail, unchanged. Starting from the .ops cost + 0% meant applying the form
+ * as it opened listed every size at cost. It is only a suggestion until the
+ * vendor reviews and applies it.
+ */
+export const SUGGESTED_PRICING_RECIPE: PricingRecipe = { basis: "catalog_retail", markupBps: 0, flatCents: 0, rounding: "cent" };
 export function profileDraft(profile: PricingProfile | null): ProfileDraft {
-  return { defaultRecipe: recipeDraft(profile?.defaultRecipe ?? { basis: "product_cost", markupBps: 0, flatCents: 0, rounding: "cent" }),
+  return { defaultRecipe: recipeDraft(profile?.defaultRecipe ?? SUGGESTED_PRICING_RECIPE),
     groups: profile?.groups.map((group) => ({ ...group, priority: String(group.priority), recipe: recipeDraft(group.recipe) })) ?? [] };
+}
+/**
+ * Whether two drafts hold the same text in every field. The same value typed
+ * another way ("0" for "0.00") counts as a change. Both come from profileDraft
+ * or its edits, so their keys share one order.
+ */
+export function pricingDraftsMatch(a: ProfileDraft, b: ProfileDraft): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 export function parseNonnegativeHundredths(value: string, label: string): number {
   if (!/^\d+(?:\.\d{1,2})?$/.test(value.trim()) || value.length > 20) throw new Error(`${label} needs a nonnegative number with at most two decimal places.`);

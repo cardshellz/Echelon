@@ -7,7 +7,13 @@ import { describe, expect, it, vi } from "vitest";
 import type { DropshipEbayListingSetupResponse } from "@/lib/dropship-ops-surface";
 import { DropshipApiError } from "@/lib/dropship-ops-surface";
 import { ebayListingSetupQueryKey } from "@/lib/dropship-ebay-listing-query-sync";
-import { buildEbayListingSetupDraft, EbayListingSetupPanel, ListingSetupError } from "../EbayListingSetupPanel";
+import {
+  buildEbayListingSetupDraft,
+  EbayListingSetupPanel,
+  ListingSetupError,
+  listingSetupHasUnsavedPolicy,
+  suggestedListingSetupFields,
+} from "../EbayListingSetupPanel";
 
 vi.mock("../EbayStoreCategoryAuthorizationRecovery", () => ({
   EbayStoreCategoryAuthorizationRecovery: () => React.createElement("button", null, "Start customer consent"),
@@ -87,6 +93,64 @@ describe("EbayListingSetupPanel", () => {
       returnPolicyId: "return-30",
       paymentPolicyId: "payment-managed",
     });
+  });
+
+  it("marks a policy Card Shellz filled in as a suggestion until the vendor saves or changes it", () => {
+    const response = setup({
+      selection: { merchantLocationKey: null, fulfillmentPolicyId: null, returnPolicyId: "return-30", paymentPolicyId: null },
+      options: {
+        merchantLocations: [{ id: "warehouse-main", name: "Main warehouse" }],
+        fulfillmentPolicies: [policyOption("fulfillment-standard", "Standard"), policyOption("fulfillment-fast", "Fast")],
+        returnPolicies: [{ id: "return-30", name: "Thirty days" }],
+        paymentPolicies: [{ id: "payment-managed", name: "Managed payments" }],
+      },
+    });
+    const draft = buildEbayListingSetupDraft(response);
+    // Payment was filled in (one choice, none saved); return is the saved choice; fulfillment is open.
+    expect([...suggestedListingSetupFields(response, draft)]).toEqual(["paymentPolicyId"]);
+    // Once the vendor picks something else, it is their change, not a suggestion.
+    expect([...suggestedListingSetupFields(response, { ...draft, paymentPolicyId: "" })]).toEqual([]);
+  });
+
+  it("counts a policy as unsaved only when the draft holds one that is not saved", () => {
+    const twoOfEach = {
+      merchantLocations: [{ id: "warehouse-main", name: "Main warehouse" }],
+      fulfillmentPolicies: [policyOption("fulfillment-standard", "Standard"), policyOption("fulfillment-fast", "Fast")],
+      returnPolicies: [{ id: "return-30", name: "Thirty days" }, { id: "return-60", name: "Sixty days" }],
+      paymentPolicies: [{ id: "payment-managed", name: "Managed payments" }, { id: "payment-other", name: "Other" }],
+    };
+    const nothingSaved = setup({
+      selection: { merchantLocationKey: null, fulfillmentPolicyId: null, returnPolicyId: null, paymentPolicyId: null },
+      options: twoOfEach,
+    });
+    // Nothing saved and several choices: the fields open empty, which is nothing to lose.
+    expect(listingSetupHasUnsavedPolicy(nothingSaved, buildEbayListingSetupDraft(nothingSaved))).toBe(false);
+    // Nothing saved and no choices at all: the same.
+    const noChoices = setup({
+      selection: nothingSaved.selection,
+      options: { merchantLocations: [], fulfillmentPolicies: [], returnPolicies: [], paymentPolicies: [] },
+    });
+    expect(listingSetupHasUnsavedPolicy(noChoices, buildEbayListingSetupDraft(noChoices))).toBe(false);
+    // A saved policy eBay no longer offers opens empty; the vendor has changed nothing.
+    const withdrawn = setup({
+      selection: { merchantLocationKey: null, fulfillmentPolicyId: "fulfillment-gone", returnPolicyId: "return-30", paymentPolicyId: "payment-managed" },
+      options: twoOfEach,
+    });
+    expect(buildEbayListingSetupDraft(withdrawn).fulfillmentPolicyId).toBe("");
+    expect(listingSetupHasUnsavedPolicy(withdrawn, buildEbayListingSetupDraft(withdrawn))).toBe(false);
+    // Picking a policy that is not saved is unsaved; picking the saved one again is not.
+    expect(listingSetupHasUnsavedPolicy(withdrawn, { ...buildEbayListingSetupDraft(withdrawn), fulfillmentPolicyId: "fulfillment-fast" })).toBe(true);
+    expect(listingSetupHasUnsavedPolicy(withdrawn, { ...buildEbayListingSetupDraft(withdrawn), returnPolicyId: "return-60" })).toBe(true);
+    expect(listingSetupHasUnsavedPolicy(withdrawn, { ...buildEbayListingSetupDraft(withdrawn), returnPolicyId: "return-30" })).toBe(false);
+    // A policy Card Shellz filled in (one choice, none saved) is unsaved until saved.
+    const oneChoice = setup({
+      selection: nothingSaved.selection,
+      options: { ...twoOfEach, paymentPolicies: [{ id: "payment-managed", name: "Managed payments" }] },
+    });
+    expect(listingSetupHasUnsavedPolicy(oneChoice, buildEbayListingSetupDraft(oneChoice))).toBe(true);
+    // Once saved, the same draft is not.
+    const saved = setup({ selection: { ...nothingSaved.selection, paymentPolicyId: "payment-managed" }, options: oneChoice.options });
+    expect(listingSetupHasUnsavedPolicy(saved, buildEbayListingSetupDraft(oneChoice))).toBe(false);
   });
 
   it("preserves a valid existing choice when multiple choices are available", () => {

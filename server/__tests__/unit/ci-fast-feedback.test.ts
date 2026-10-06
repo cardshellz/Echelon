@@ -138,6 +138,7 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/pages/dropship/__tests__/DropshipCatalogFrame.test.ts",
       "client/src/lib/__tests__/dropship-ebay-category-rules.test.ts",
       "client/src/pages/dropship/__tests__/DropshipEbayCategoryRulesPanel.test.ts",
+      "client/src/lib/__tests__/dropship-unsaved-changes.test.ts",
       "shared/dropship/__tests__/program-finance-money.test.ts",
       "shared/dropship/__tests__/program-finance-contract.test.ts",
       "shared/dropship/__tests__/program-finance-definitions.test.ts",

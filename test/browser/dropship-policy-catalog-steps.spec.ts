@@ -49,14 +49,34 @@ function listingSetup(storeConnectionId: number) {
       paymentPolicies: [{ id: "payments", name: "Managed payments" }] } };
 }
 
+/** A store that has saved no eBay policies yet, with two of each to choose from. */
+function listingSetupWithNothingSaved(storeConnectionId: number) {
+  const setup = listingSetup(storeConnectionId);
+  return { ...setup, complete: false, missingFields: ["fulfillmentPolicyId", "returnPolicyId", "paymentPolicyId"],
+    selection: { merchantLocationKey: "managed", fulfillmentPolicyId: null, returnPolicyId: null, paymentPolicyId: null },
+    options: { ...setup.options,
+      fulfillmentPolicies: [...setup.options.fulfillmentPolicies,
+        { id: "priority", name: "USPS Priority Mail", compatible: true, compatibilityIssues: [] }],
+      returnPolicies: [...setup.options.returnPolicies, { id: "no-returns", name: "No returns" }],
+      paymentPolicies: [...setup.options.paymentPolicies, { id: "payments-other", name: "Other payments" }] } };
+}
+
 interface StubState {
   stores: StoreFixture[];
   selected: boolean;
   previewCalls: number;
   setupReads: number[];
+  /** eBay listing setup by store; a store left out gets listingSetup(). */
+  listingSetups: Record<number, unknown>;
+  /** Saved pricing rules by store; a store left out has none. */
+  pricingRules: Record<number, unknown>;
   unexpected: string[];
   errors: string[];
 }
+
+/** Saved pricing rules: catalog reference retail + 15%. */
+const SAVED_PRICING_RULES = { revisionId: 3, updatedAt: STAMP, profile: {
+  defaultRecipe: { basis: "catalog_retail", markupBps: 1_500, flatCents: 0, rounding: "cent" }, groups: [] } };
 
 function storeConnection(store: StoreFixture) {
   return { storeConnectionId: store.storeConnectionId, vendorId: 1, platform: store.platform, externalAccountId: `acct-${store.storeConnectionId}`,
@@ -103,7 +123,7 @@ function settingsJson(state: StubState) {
 }
 
 async function openCatalog(page: Page, path: string, initial: Partial<StubState> = {}) {
-  const state: StubState = { stores: [MARZ], selected: true, previewCalls: 0, setupReads: [], unexpected: [], errors: [], ...initial };
+  const state: StubState = { stores: [MARZ], selected: true, previewCalls: 0, setupReads: [], listingSetups: {}, pricingRules: {}, unexpected: [], errors: [], ...initial };
   page.on("pageerror", (error) => state.errors.push(error.message));
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
   await page.route("**/api/**", async (route) => {
@@ -132,7 +152,7 @@ async function openCatalog(page: Page, path: string, initial: Partial<StubState>
     if (storeId !== null && method === "GET" && state.stores.some((store) => store.storeConnectionId === storeId && store.platform === "ebay")) {
       if (path === `/api/dropship/ebay/listing-setup/${storeId}`) {
         state.setupReads.push(storeId);
-        return route.fulfill({ json: listingSetup(storeId) });
+        return route.fulfill({ json: state.listingSetups[storeId] ?? listingSetup(storeId) });
       }
       if (path === `/api/dropship/ebay/listing-policy-overrides/${storeId}/saved`) {
         return route.fulfill({ json: { storeConnectionId: storeId, verification: "not_checked",
@@ -140,6 +160,9 @@ async function openCatalog(page: Page, path: string, initial: Partial<StubState>
       }
       if (path === `/api/dropship/ebay/store-categories/${storeId}`) {
         return route.fulfill({ json: { storeConnectionId: storeId, categories: [], assignments: [], fetchedAt: STAMP } });
+      }
+      if (path === `/api/dropship/listings/stores/${storeId}/pricing-rules` && state.pricingRules[storeId]) {
+        return route.fulfill({ json: state.pricingRules[storeId] });
       }
       if (path === `/api/dropship/listings/stores/${storeId}/ebay-category-rules`
         || path === `/api/dropship/listings/stores/${storeId}/pricing-rules`
@@ -230,6 +253,124 @@ test("Next stays off until something is selected", async ({ page }) => {
   // The rail still opens any step.
   await step(page, "publish").click();
   await expect(page.getByText("Choose items in step 1, Choose what to sell.", { exact: false })).toBeVisible();
+  expect(state.unexpected).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
+test("asks before leaving Listing settings with changes that aren't saved", async ({ page }) => {
+  const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { stores: [MARZ, OUTLET],
+    pricingRules: { [OUTLET.storeConnectionId]: SAVED_PRICING_RULES } });
+  const markup = page.getByLabel("Markup (%)", { exact: true });
+  const dialog = page.getByRole("alertdialog");
+  await expect(page.getByRole("heading", { name: "Listing pricing rules" })).toBeVisible();
+
+  // With no saved pricing rules the form opens on a suggestion, which is not a change on its own.
+  await expect(page.getByText("Suggested · not saved")).toBeVisible();
+  await expect(markup).toHaveValue("0.00");
+  await page.getByRole("link", { name: "Next: Publish" }).click();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
+  await step(page, "setup").click();
+
+  await markup.fill("20");
+  await expect(page.getByRole("heading", { name: "Listing pricing rules" })).toContainText("Not saved");
+
+  // The Next button asks first, and Keep editing keeps the change.
+  await page.getByRole("link", { name: "Next: Publish" }).click();
+  await expect(dialog).toContainText("Leave without saving?");
+  await expect(dialog).toContainText("You have changes that aren't saved in Listing pricing rules.");
+  await dialog.getByRole("button", { name: "Keep editing" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page).toHaveURL(`${CATALOG_PATH}/setup`);
+  await expect(markup).toHaveValue("20");
+
+  // So do the step links and the store picker.
+  await step(page, "choose").click();
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Keep editing" }).click();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/setup`);
+  await page.getByTestId("catalog-store-select").click();
+  await page.getByRole("option", { name: "Marz Cards Outlet (eBay)" }).click();
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Keep editing" }).click();
+  await expect(page.getByTestId("catalog-action-summary")).toHaveText("Settings for Marz Cards");
+  await expect(markup).toHaveValue("20");
+
+  // Discard and leave goes where the vendor asked, and the change is gone when they come back.
+  await page.getByRole("link", { name: "Next: Publish" }).click();
+  await dialog.getByRole("button", { name: "Discard and leave" }).click();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
+  await step(page, "setup").click();
+  await expect(markup).toHaveValue("0.00");
+
+  // Discarding through the store picker opens the other store's own saved rules, not this store's draft.
+  await markup.fill("20");
+  await page.getByTestId("catalog-store-select").click();
+  await page.getByRole("option", { name: "Marz Cards Outlet (eBay)" }).click();
+  await dialog.getByRole("button", { name: "Discard and leave" }).click();
+  await expect(page.getByTestId("catalog-action-summary")).toHaveText("Settings for Marz Cards Outlet");
+  await expect(markup).toHaveValue("15.00");
+  await expect(page.getByRole("heading", { name: "Listing pricing rules" })).not.toContainText("Not saved");
+  await expect(page.getByText("Suggested · not saved")).toHaveCount(0);
+  expect(state.unexpected).toEqual([]);
+  expect(state.errors).toEqual([]);
+
+  // Closing the tab with a change gets the browser's own question.
+  await markup.fill("25");
+  await expect(page.getByRole("heading", { name: "Listing pricing rules" })).toContainText("Not saved");
+  const asked = page.waitForEvent("dialog");
+  await page.close({ runBeforeUnload: true });
+  const unload = await asked;
+  expect(unload.type()).toBe("beforeunload");
+  await unload.accept();
+});
+
+test("eBay listing setup with nothing saved is not a change until the vendor picks a policy", async ({ page }) => {
+  const state = await openCatalog(page, `${CATALOG_PATH}/setup`,
+    { listingSetups: { [MARZ.storeConnectionId]: listingSetupWithNothingSaved(MARZ.storeConnectionId) } });
+  const heading = page.getByRole("heading", { name: /^eBay listing setup/ });
+  const fulfillment = page.getByRole("combobox", { name: "Fulfillment policy", exact: true });
+  const dialog = page.getByRole("alertdialog");
+
+  // Several policies to choose from and none saved: the fields open empty, which is nothing to lose.
+  await expect(fulfillment).toBeVisible();
+  await expect(heading).not.toContainText("Not saved");
+  await page.getByRole("link", { name: "Next: Publish" }).click();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
+  await step(page, "setup").click();
+
+  // Picking one is a change until saved.
+  await fulfillment.click();
+  await page.getByRole("option", { name: /USPS Priority Mail/ }).click();
+  await expect(heading).toContainText("Not saved");
+  await page.getByRole("link", { name: "Next: Publish" }).click();
+  await expect(dialog).toContainText("You have changes that aren't saved in eBay listing setup.");
+  await dialog.getByRole("button", { name: "Discard and leave" }).click();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
+  await step(page, "setup").click();
+  await expect(heading).not.toContainText("Not saved");
+  expect(state.unexpected).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
+test("description templates still say Not saved after the vendor hides them", async ({ page }) => {
+  const state = await openCatalog(page, `${CATALOG_PATH}/setup`);
+  const heading = page.getByRole("heading", { name: "Description templates" });
+  const dialog = page.getByRole("alertdialog");
+  await page.getByRole("button", { name: "Edit templates" }).click();
+  const introduction = page.getByLabel(/introduction/i);
+  await expect(introduction).toHaveValue("");
+  await expect(heading).not.toContainText("Not saved");
+
+  await introduction.fill("Ships from Card Shellz.");
+  await expect(heading).toContainText("Not saved");
+  await page.getByRole("button", { name: "Hide templates" }).click();
+  await expect(introduction).toBeHidden();
+  await expect(heading).toContainText("Not saved");
+  await page.getByRole("link", { name: "Next: Publish" }).click();
+  await expect(dialog).toContainText("You have changes that aren't saved in Description templates.");
+  await dialog.getByRole("button", { name: "Keep editing" }).click();
+  await page.getByRole("button", { name: "Edit templates" }).click();
+  await expect(introduction).toHaveValue("Ships from Card Shellz.");
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
 });

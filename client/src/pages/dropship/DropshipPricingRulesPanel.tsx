@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { pricingProfileStateSchema, pricingReviewResponseSchema,
@@ -9,7 +9,9 @@ import { Input } from "@/components/ui/input";
 import { createDropshipIdempotencyKey, DropshipApiError, fetchJson, postJson, queryErrorMessage } from "@/lib/dropship-ops-surface";
 import { displayListingPrice } from "@/lib/dropship-listing-price";
 import { formatListingPreviewIssue } from "@/lib/dropship-listing-preview";
-import { describePriceBasis, describeReviewedSize, parseProfileDraft, profileDraft, type ProfileDraft, type RecipeDraft } from "@/lib/dropship-pricing-rules";
+import { describePriceBasis, describeReviewedSize, parseProfileDraft, pricingDraftsMatch, profileDraft, type ProfileDraft, type RecipeDraft } from "@/lib/dropship-pricing-rules";
+import { LISTING_SETTINGS_SEND_TIMING } from "@/lib/dropship-catalog-steps";
+import { NotSavedBadge, useUnsavedDraft } from "./catalog/UnsavedChangesGuard";
 
 export function DropshipPricingRulesPanel(props: { storeConnectionId: number; storeName: string; onConfigurationChange: () => void }) {
   return <PricingRulesSession key={props.storeConnectionId} {...props} />;
@@ -36,6 +38,16 @@ function PricingRulesSession({ storeConnectionId, storeName, onConfigurationChan
     if (query.data && draft === null) { setDraft(profileDraft(query.data.profile)); setRevisionId(query.data.revisionId); }
   }, [query.data, draft]);
   const disabled = phase !== "editing";
+  // What is saved, as a draft. With no saved rules this is the suggested
+  // starting point, which is not counted as a change until it is edited.
+  const savedDraft = useMemo(() => (query.data ? profileDraft(query.data.profile) : null), [query.data]);
+  const draftChanged = draft !== null && savedDraft !== null && !pricingDraftsMatch(draft, savedDraft);
+  const suggested = query.data?.profile === null && !draftChanged;
+  // A review shown but not applied is unsaved too: nothing is written until Apply.
+  // After "refresh_error" the rules are saved (or the vendor asked to discard
+  // the draft by reloading), so nothing is left to lose.
+  const dirty = phase !== "refresh_error" && (draftChanged || review !== null || releaseFixed);
+  useUnsavedDraft(`pricing-rules:${storeConnectionId}`, "Listing pricing rules", dirty);
 
   function edit(next: ProfileDraft) { setDraft(next); setReview(null); setError(""); setMessage(""); applyKey.current = null; }
   async function reviewImpact() {
@@ -79,7 +91,7 @@ function PricingRulesSession({ storeConnectionId, storeName, onConfigurationChan
       saved = true;
       await reloadRules();
       if (!mounted.current) return;
-      setPhase("editing"); setMessage("Pricing rules saved. Generate a new listing preview to review the resulting prices. No marketplace listing was changed.");
+      setPhase("editing"); setMessage("Pricing rules saved. Nothing was sent to eBay now: each listing gets its new price the next time it is sent. Make a new listing preview to see the prices.");
     } catch (caught) {
       if (!mounted.current) return;
       if (!saved && caught instanceof DropshipApiError && caught.code === "DROPSHIP_PRICING_REVIEW_STALE") {
@@ -103,15 +115,15 @@ function PricingRulesSession({ storeConnectionId, storeName, onConfigurationChan
   }
   return <section className="rounded-lg border bg-white" aria-label="Listing pricing rules">
     <div className="flex flex-wrap items-start justify-between gap-3 border-b p-4">
-      <div><h2 className="text-lg font-semibold">Listing pricing rules</h2>
+      <div><h2 className="flex flex-wrap items-center gap-2 text-lg font-semibold">Listing pricing rules{dirty && <NotSavedBadge />}</h2>
         <p className="mt-1 text-sm text-zinc-500">Set prices across {storeName || "this store"}. Use individual price edits only for exceptions.</p>
-        <p className="mt-1 text-xs text-zinc-500">Revision {revisionId ?? "not configured"} · Saving changes local pricing, not live marketplace listings.</p></div>
+        <p className="mt-1 text-xs text-zinc-500">{LISTING_SETTINGS_SEND_TIMING}</p></div>
       <Button size="sm" variant="outline" disabled={inFlight.current} onClick={() => void reload()}>Reload saved rules</Button>
     </div>
     {!draft && <p className="p-4 text-sm" role={query.error ? "alert" : "status"}>{query.error ? queryErrorMessage(query.error, "Pricing rules unavailable.") : "Loading pricing rules…"}</p>}
     {draft && <div className="space-y-4 p-4">
       <fieldset disabled={disabled} className="space-y-4">
-        <legend className="mb-2 font-medium">Store default</legend>
+        <legend className="mb-2 font-medium">Store default{suggested && <span className="ml-2 text-xs font-normal text-amber-800">Suggested · not saved</span>}</legend>
         <RecipeFields value={draft.defaultRecipe} onChange={(value) => edit({ ...draft, defaultRecipe: value })} />
         <p className="text-xs text-zinc-500">Basis × (1 + markup %) + flat markup. Per sellable pack. Markup is not profit margin; shipping and marketplace fees are separate.</p>
         <div className="flex items-center justify-between gap-3"><h3 className="font-medium">Group rules ({draft.groups.length})</h3>
@@ -147,7 +159,7 @@ function PricingRulesSession({ storeConnectionId, storeName, onConfigurationChan
         <Button onClick={() => void reviewImpact()}>{phase === "reviewing" ? "Reviewing all selected listings…" : "Review pricing impact"}</Button>
       </fieldset>
       {review && <div className="space-y-3 border-t pt-4" aria-label="Pricing impact review">
-        <div><h3 className="font-medium">Review all {review.summary.total.toLocaleString()} selected listings</h3>
+        <div><h3 className="font-medium">Review all {review.summary.total.toLocaleString()} selected listings <span className="text-sm font-normal text-amber-800">· Not saved yet</span></h3>
           <p className="text-sm text-zinc-500">{review.summary.changed} price changes · {review.summary.preserved} fixed prices preserved · {review.summary.blocked} blocked</p></div>
         <div className="max-h-80 overflow-auto overscroll-contain rounded border"><table className="w-full text-left text-sm">
           <thead className="sticky top-0 bg-zinc-50"><tr>{["Listing", "Built from", "Your cost", "Before", "After", "Rule / issue"].map((label) => <th key={label} className="whitespace-nowrap p-2 font-medium">{label}</th>)}</tr></thead>
@@ -162,7 +174,7 @@ function PricingRulesSession({ storeConnectionId, storeName, onConfigurationChan
           <div className="flex gap-2"><Button size="sm" variant="outline" disabled={disabled || review.page === 0} onClick={() => void pageReview(review.page - 1)}>Previous</Button>
             <Button size="sm" variant="outline" disabled={disabled || (review.page + 1) * PRICING_REVIEW_PAGE_SIZE >= review.summary.total} onClick={() => void pageReview(review.page + 1)}>Next</Button></div></div>
         <Button disabled={disabled || review.summary.blocked > 0} onClick={() => void apply()}>Apply reviewed rules to {review.summary.total - review.summary.preserved} listings</Button>
-        <p className="text-xs text-zinc-500">Future listings inherit these rules. Cost changes appear in new previews and require explicit publication; saving does not automatically reprice live listings.</p>
+        <p className="text-xs text-zinc-500">Nothing is saved until you apply. After that, each listing gets its new price the next time it is sent to eBay, and listings you add later use these rules too.</p>
       </div>}
       {error && <div role="alert" className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><p>{error}</p>
         {phase === "uncertain" && <Button className="mt-2" size="sm" variant="outline" onClick={() => void apply()}>Retry same apply</Button>}

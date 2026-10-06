@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { NotSavedBadge, useUnsavedDraft } from "./catalog/UnsavedChangesGuard";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, CheckCircle2, ChevronsUpDown, Clock3, MapPinned, RefreshCw, Save, Truck } from "lucide-react";
@@ -74,6 +75,21 @@ export function EbayListingSetupPanel({
     () => setupQuery.data ? !listingSetupSelectionMatches(setupQuery.data, draft) : false,
     [draft, setupQuery.data],
   );
+  // A policy Card Shellz filled in because eBay offers only one is a suggestion
+  // until saved, so it counts as an unsaved change and is marked as such.
+  const suggestedFields = useMemo(
+    () => setupQuery.data ? suggestedListingSetupFields(setupQuery.data, draft) : new Set<ListingSetupPolicyField>(),
+    [draft, setupQuery.data],
+  );
+  // Not draftChanged: a field with nothing saved and nothing chosen differs
+  // from the saved null without holding anything to lose. While a confirmed
+  // save is refreshing, the draft is what was saved and the fields are locked.
+  const unsavedPolicy = useMemo(
+    () => savedStoreToRefresh === null && setupQuery.data !== undefined
+      && listingSetupHasUnsavedPolicy(setupQuery.data, draft),
+    [draft, savedStoreToRefresh, setupQuery.data],
+  );
+  useUnsavedDraft(`listing-setup:${storeConnectionId}`, "eBay listing setup", unsavedPolicy);
   const managedLocationNeedsReconciliation = Boolean(
     setupQuery.data?.missingFields.includes("merchantLocationKey"),
   );
@@ -138,7 +154,7 @@ export function EbayListingSetupPanel({
     <section className="mt-5 overflow-hidden rounded-md border border-zinc-200 bg-white">
       <div className="flex flex-col gap-3 border-b border-zinc-200 p-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-lg font-semibold">eBay listing setup</h2>
+          <h2 className="flex flex-wrap items-center gap-2 text-lg font-semibold">eBay listing setup{unsavedPolicy && <NotSavedBadge />}</h2>
           <p className="mt-1 text-sm text-zinc-500">
             Choose your store&apos;s default eBay business policies. Card Shellz controls the physical inventory location used for dropship fulfillment.
           </p>
@@ -205,6 +221,7 @@ export function EbayListingSetupPanel({
                   : policy.compatibilityIssues[0]?.message ?? "Not compatible",
               }))}
               value={draft.fulfillmentPolicyId}
+              suggested={suggestedFields.has("fulfillmentPolicyId")}
               onValueChange={(value) => setDraft((current) => ({ ...current, fulfillmentPolicyId: value }))}
             />
             <ListingSetupField
@@ -215,6 +232,7 @@ export function EbayListingSetupPanel({
               emptyMessage="No matching return policies."
               options={setupQuery.data.options.returnPolicies}
               value={draft.returnPolicyId}
+              suggested={suggestedFields.has("returnPolicyId")}
               onValueChange={(value) => setDraft((current) => ({ ...current, returnPolicyId: value }))}
             />
             <ListingSetupField
@@ -225,6 +243,7 @@ export function EbayListingSetupPanel({
               emptyMessage="No matching payment policies."
               options={setupQuery.data.options.paymentPolicies}
               value={draft.paymentPolicyId}
+              suggested={suggestedFields.has("paymentPolicyId")}
               onValueChange={(value) => setDraft((current) => ({ ...current, paymentPolicyId: value }))}
             />
           </div>
@@ -423,6 +442,7 @@ function ListingSetupField({
   options,
   placeholder,
   searchPlaceholder,
+  suggested,
   value,
 }: {
   disabled: boolean;
@@ -432,6 +452,8 @@ function ListingSetupField({
   options: readonly ListingSetupDisplayOption[];
   placeholder: string;
   searchPlaceholder: string;
+  /** Card Shellz filled this in because eBay offers only one choice; it is not saved yet. */
+  suggested: boolean;
   value: string;
 }) {
   return (
@@ -449,6 +471,7 @@ function ListingSetupField({
           value={value}
         />
       </div>
+      {suggested && <p className="mt-1 text-xs text-amber-800">Suggested · not saved</p>}
       {options.length === 0 && (
         <p className="mt-1 text-xs text-amber-800">No eligible options were returned by eBay.</p>
       )}
@@ -568,6 +591,40 @@ export function buildEbayListingSetupDraft(
     returnPolicyId: selectedOrOnly(setup.selection.returnPolicyId, setup.options.returnPolicies),
     paymentPolicyId: selectedOrOnly(setup.selection.paymentPolicyId, setup.options.paymentPolicies),
   };
+}
+
+type ListingSetupPolicyField = keyof ReplaceDropshipEbayListingSetupInput;
+
+const LISTING_SETUP_POLICY_FIELDS: readonly ListingSetupPolicyField[] = [
+  "fulfillmentPolicyId", "returnPolicyId", "paymentPolicyId",
+];
+
+/**
+ * The policies the draft holds only because Card Shellz filled them in (eBay
+ * offered one choice and none is saved), while the vendor has not changed them.
+ */
+export function suggestedListingSetupFields(
+  setup: DropshipEbayListingSetupResponse,
+  draft: ReplaceDropshipEbayListingSetupInput,
+): Set<ListingSetupPolicyField> {
+  const filled = buildEbayListingSetupDraft(setup);
+  return new Set(LISTING_SETUP_POLICY_FIELDS.filter((field) => filled[field] !== ""
+    && filled[field] !== (setup.selection[field] ?? "")
+    && draft[field] === filled[field]));
+}
+
+/**
+ * Whether leaving would lose a policy: the draft holds one that is not the
+ * saved one, picked by the vendor or filled in by Card Shellz. An empty field
+ * holds nothing to lose (and cannot be saved), so a store with nothing saved,
+ * or a saved policy eBay no longer offers, is not a change until one is picked.
+ */
+export function listingSetupHasUnsavedPolicy(
+  setup: DropshipEbayListingSetupResponse,
+  draft: ReplaceDropshipEbayListingSetupInput,
+): boolean {
+  return LISTING_SETUP_POLICY_FIELDS.some((field) => draft[field] !== ""
+    && draft[field] !== (setup.selection[field] ?? ""));
 }
 
 function selectedOrOnly(

@@ -152,6 +152,7 @@ jobs:
           client/src/pages/dropship/__tests__/DropshipCatalogFrame.test.ts
           client/src/lib/__tests__/dropship-ebay-category-rules.test.ts
           client/src/pages/dropship/__tests__/DropshipEbayCategoryRulesPanel.test.ts
+          client/src/lib/__tests__/dropship-unsaved-changes.test.ts
       # These paths have no "unit" in them, so test:unit never selects them.
       - name: Dropship program finance contracts
         run: >-

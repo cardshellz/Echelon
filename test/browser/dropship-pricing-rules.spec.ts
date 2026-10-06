@@ -54,9 +54,17 @@ async function enterRecipe(page: Page) {
   await page.getByLabel("Plus flat markup (USD)", { exact: true }).fill("1.00");
 }
 test("reviews 1,000 listings with bounded scrolling and applies once without publishing", async ({ page }, testInfo) => {
-  const state = await setup(page); await enterRecipe(page);
+  const state = await setup(page);
+  const heading = page.getByRole("heading", { name: /Listing pricing rules/ });
+  // No saved rules yet: the form opens on a suggestion, and nothing is marked unsaved.
+  await expect(page.getByText("Suggested · not saved")).toBeVisible();
+  await expect(heading).not.toContainText("Not saved");
+  await enterRecipe(page);
+  await expect(heading).toContainText("Not saved");
+  await expect(page.getByText("Suggested · not saved")).toHaveCount(0);
   await page.getByRole("button", { name: "Review pricing impact" }).click();
   await expect(page.getByText("Review all 1,000 selected listings")).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Review all 1,000 selected listings/ })).toContainText("Not saved yet");
   await expect(page.locator("tbody tr")).toHaveCount(50);
   expect(state.reviews[0]).toMatchObject({ releaseFixedOverrides: false, profile: { defaultRecipe: { markupBps: 3000, flatCents: 100 } } });
   // Each row says what its price is built from, next to the vendor's own cost.
@@ -75,6 +83,9 @@ test("reviews 1,000 listings with bounded scrolling and applies once without pub
   await expect(page.getByText("Test mailer 51", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Apply reviewed rules to 999 listings" }).click();
   await expect(page.getByRole("status")).toContainText("Pricing rules saved");
+  await expect(page.getByRole("status")).toContainText("Nothing was sent to eBay now");
+  // Once applied, nothing is left unsaved.
+  await expect(heading).not.toContainText("Not saved");
   expect(state.applies).toHaveLength(1); expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
   expect(await page.evaluate(() => (window as unknown as { __pricingChanged: number }).__pricingChanged)).toBe(1);
 });
