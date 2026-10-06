@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
 import {
-  MAX_ORDER_EDIT_PAYMENT_WINDOW_MINUTES,
   orderEditQuoteInputSchema,
   orderEditSettingsInputSchema,
   type OrderEditConnection,
@@ -19,6 +18,13 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/lib/auth";
 import { useDebounce } from "@/hooks/use-debounce";
+import {
+  MIN_ORDER_EDIT_PAYMENT_WINDOW_HOURS,
+  MAX_ORDER_EDIT_PAYMENT_WINDOW_HOURS,
+  parseOrderEditPaymentWindowHours,
+  orderEditPaymentWindowHoursInput,
+  formatOrderEditPaymentWindowHours,
+} from "@/lib/order-edit-payment-window";
 import {
   createOrderEditTransport,
   formatOrderEditMoney,
@@ -72,8 +78,8 @@ export function ConnectionSettings({
   detailsRef?: React.RefObject<HTMLDetailsElement | null>;
 }) {
   const [expanded, setExpanded] = useState(!connection.enabled);
-  const [minutes, setMinutes] = useState(
-    connection.paymentWindowMinutes?.toString() ?? "",
+  const [hours, setHours] = useState(
+    orderEditPaymentWindowHoursInput(connection.paymentWindowMinutes),
   );
   const [enabled, setEnabled] = useState(connection.enabled);
   const [pending, setPending] = useState(false);
@@ -83,13 +89,13 @@ export function ConnectionSettings({
   const command = useRef<{ fingerprint: string; key: string } | null>(null);
   const inflight = useRef(false);
   const parsed = orderEditSettingsInputSchema.safeParse({
-    paymentWindowMinutes: minutes.trim() ? Number(minutes) : null,
+    paymentWindowMinutes: parseOrderEditPaymentWindowHours(hours),
     enabled,
   });
-  const windowHelp = !minutes.trim()
+  const windowHelp = !hours.trim()
     ? "Enter a payment window before enabling staff edits."
     : !parsed.success
-      ? `Enter a whole number from 1 to ${MAX_ORDER_EDIT_PAYMENT_WINDOW_MINUTES} minutes.`
+      ? `Enter a positive duration up to ${MAX_ORDER_EDIT_PAYMENT_WINDOW_HOURS} hours in whole-minute increments, such as 0.5 or 1.25.`
       : null;
   async function save() {
     if (!parsed.success || inflight.current) return;
@@ -106,7 +112,7 @@ export function ConnectionSettings({
         parsed.data,
         command.current.key,
       );
-      setMinutes(String(result.paymentWindowMinutes ?? ""));
+      setHours(orderEditPaymentWindowHoursInput(result.paymentWindowMinutes));
       setEnabled(result.enabled);
       setLocked(false);
       await onSaved(result);
@@ -136,20 +142,21 @@ export function ConnectionSettings({
       </p>
       <div className="mt-4 grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto]">
         <div className="space-y-2">
-          <Label htmlFor="edit-payment-window">Payment window (minutes)</Label>
+          <Label htmlFor="edit-payment-window">Payment window (hours)</Label>
           <Input
             id="edit-payment-window"
             type="number"
-            min={1}
-            max={MAX_ORDER_EDIT_PAYMENT_WINDOW_MINUTES}
-            step={1}
+            min={MIN_ORDER_EDIT_PAYMENT_WINDOW_HOURS}
+            max={MAX_ORDER_EDIT_PAYMENT_WINDOW_HOURS}
+            step="any"
+            placeholder="e.g. 0.5 or 24"
             required
             aria-describedby="edit-payment-window-help edit-payment-window-validation"
-            aria-invalid={Boolean(minutes.trim()) && !parsed.success}
-            value={minutes}
+            aria-invalid={Boolean(hours.trim()) && !parsed.success}
+            value={hours}
             disabled={pending || locked}
             onChange={(event) => {
-              setMinutes(event.target.value);
+              setHours(event.target.value);
               setSaved(false);
             }}
           />
@@ -157,8 +164,8 @@ export function ConnectionSettings({
             id="edit-payment-window-help"
             className="text-xs text-muted-foreground"
           >
-            Unpaid changes enter automatic recovery when this window expires.
-            Choose a window before enabling the pilot.
+            0.5 hours = 30 minutes. Unpaid changes enter automatic recovery when
+            this window expires. Choose a window before enabling the pilot.
           </p>
           <p
             id="edit-payment-window-validation"
@@ -1071,7 +1078,9 @@ export default function OrderEdits() {
                         Payment window:{" "}
                         {connection.paymentWindowMinutes === null
                           ? "Not configured"
-                          : `${connection.paymentWindowMinutes} minutes`}
+                          : formatOrderEditPaymentWindowHours(
+                              connection.paymentWindowMinutes,
+                            )}
                       </span>
                     </div>
                     {canConfigure && !draftLocked && (
