@@ -534,6 +534,7 @@ export const __test__ = {
   RefundsCreateBadPayloadError,
   ...refundCascadeTest,
   mapShopifyLineFulfillmentStatus,
+  readShopifyLineCurrentQuantity,
   deriveOmsUpdateFinality,
   mapShopifyOrderToOrderData,
   canonicalShipToFromShopifyUpdate,
@@ -634,6 +635,21 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
     orderedAt: shopifyOrder.created_at ? new Date(shopifyOrder.created_at) : new Date(),
     lineItems,
   };
+}
+
+/**
+ * Shopify line `current_quantity`: ordered quantity minus units removed by an
+ * order edit or cancellation. Returns null when absent or malformed, so line
+ * authority keeps its legacy rule rather than trusting a bad channel value.
+ */
+function readShopifyLineCurrentQuantity(lineItem: any): number | null {
+  const raw = lineItem?.current_quantity;
+  const value = typeof raw === "number"
+    ? raw
+    : typeof raw === "string" && /^\d+$/.test(raw.trim())
+      ? Number(raw.trim())
+      : Number.NaN;
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function mapShopifyLineFulfillmentStatus(
@@ -1384,6 +1400,7 @@ export function registerOmsWebhooks(
                 fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
                   ? Number(item.fulfillable_quantity)
                   : previousAuthority.fulfillableQuantity,
+                currentQuantity: readShopifyLineCurrentQuantity(item),
                 previous: previousAuthority,
               });
 
@@ -1446,6 +1463,7 @@ export function registerOmsWebhooks(
               fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
                 ? Number(item.fulfillable_quantity)
                 : null,
+              currentQuantity: readShopifyLineCurrentQuantity(item),
             });
             // Insert new line and authority ledger atomically.
             await db.transaction(async (tx: any) => {
@@ -1513,6 +1531,7 @@ export function registerOmsWebhooks(
                 financialStatus: shopifyOrder.financial_status,
                 quantity: 0,
                 fulfillableQuantity: 0,
+                currentQuantity: 0,
                 previous: existingLine,
               });
               await db.transaction(async (tx: any) => {

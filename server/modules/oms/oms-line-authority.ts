@@ -18,6 +18,13 @@ export interface OmsLineAuthorityInput {
   financialStatus?: string | null;
   quantity: number | null | undefined;
   fulfillableQuantity?: number | null;
+  /**
+   * Shopify line `current_quantity`: the ordered quantity minus units removed
+   * by an order edit or cancellation. This, not `fulfillable_quantity`, is the
+   * commercial ceiling for what the warehouse still owes. Null/undefined when
+   * the channel payload does not carry it.
+   */
+  currentQuantity?: number | null;
   previous?: {
     paidQuantity?: number | null;
     authorityFulfillableQuantity?: number | null;
@@ -136,6 +143,47 @@ function statusAfterNonAuthorizingUpdate(
   }
 }
 
+/**
+ * Shopify's `fulfillable_quantity` is workflow permission, not demand. It
+ * drops to 0 while a fulfillment order is on hold (a merchant-of-record app
+ * such as Global-e processing an international order, a fraud check, an
+ * address problem), scheduled, or moving between locations, and it falls as
+ * units are fulfilled. None of those mean the customer no longer wants the
+ * goods (channel-fulfillment-quantity-authority.ts: "remaining work, not a
+ * lifetime cap or a cancellation count").
+ *
+ * So readiness may RAISE authority (a hold or schedule is released) but may
+ * LOWER it only to `current_quantity`, the channel's record of units removed
+ * by an order edit or cancellation. Lowering on a hold cancelled
+ * already-materialized WMS lines that nothing restored when the hold lifted
+ * (#63275 on 2026-09-18, #63861 on 2026-10-06).
+ *
+ * `allowFulfillableToLower` covers a readiness refresh without
+ * `current_quantity`: orders/updated is the topic that carries order edits,
+ * and without `current_quantity` an edit removal is indistinguishable from a
+ * hold, so the legacy fulfillable-driven rule stays (picking units the
+ * customer removed is the costlier mistake). Authorizing topics pass false:
+ * they record payment, never an edit, so a fulfillable dip there is always a
+ * hold or fulfillment progress.
+ */
+function fulfillableReadinessCap(input: {
+  previousAuthority: number;
+  incomingFulfillableQuantity: number;
+  incomingCurrentQuantity: number | null;
+  allowFulfillableToLower: boolean;
+}): number {
+  const raisedByReadiness = Math.max(
+    input.previousAuthority,
+    input.incomingFulfillableQuantity,
+  );
+  if (input.incomingCurrentQuantity !== null) {
+    return Math.min(input.incomingCurrentQuantity, raisedByReadiness);
+  }
+  return input.allowFulfillableToLower
+    ? input.incomingFulfillableQuantity
+    : raisedByReadiness;
+}
+
 function coerceDate(value: Date | string | null | undefined): Date | null {
   if (!value) return null;
   const date = value instanceof Date ? value : new Date(value);
@@ -152,6 +200,10 @@ export function deriveOmsLineAuthority(
   const eventCanAuthorize =
     canSourceTopicAuthorizeOmsLine(input.sourceTopic) &&
     isPaidFinancialStatus(input.financialStatus);
+  const incomingCurrentQuantity = finiteNonNegativeIntegerOrNull(
+    input.currentQuantity,
+    "currentQuantity",
+  );
 
   if (eventCanAuthorize) {
     const fulfillableQuantity = finiteNonNegativeIntegerOrNull(
@@ -163,10 +215,24 @@ export function deriveOmsLineAuthority(
         - requireNonNegativeInteger(input.previous?.cancelledQuantity, "previous.cancelledQuantity")
         - requireNonNegativeInteger(input.previous?.refundedQuantity, "previous.refundedQuantity"))
       : observedQuantity;
+    // A first authorization still waits for readiness (a line already on hold
+    // at payment is not materialized until released). A re-authorization of a
+    // line that already carries authority is never lowered by a hold.
+    const readinessCap = fulfillableQuantity === null
+      ? incomingCurrentQuantity ?? observedQuantity
+      : fulfillableReadinessCap({
+        previousAuthority: requireNonNegativeInteger(
+          input.previous?.authorityFulfillableQuantity ?? 0,
+          "previous.authorityFulfillableQuantity",
+        ),
+        incomingFulfillableQuantity: fulfillableQuantity,
+        incomingCurrentQuantity,
+        allowFulfillableToLower: false,
+      });
     const authorityFulfillableQuantity = Math.min(
       observedQuantity,
       dispositionCap,
-      fulfillableQuantity ?? observedQuantity,
+      readinessCap,
     );
     let authorizationStatus = statusForQuantities(observedQuantity);
     if (input.sourceTopic === "walmart/acknowledged" && dispositionCap < observedQuantity) {
@@ -228,7 +294,15 @@ export function deriveOmsLineAuthority(
     (previousAuthorizationStatus === "seen" ||
       previousAuthorizationStatus === "authorized");
   const authorityFulfillableQuantity = canRefreshOperationalReadiness
-    ? Math.min(paidQuantity, incomingFulfillableQuantity)
+    ? Math.min(
+      paidQuantity,
+      fulfillableReadinessCap({
+        previousAuthority: previousFulfillableQuantity,
+        incomingFulfillableQuantity,
+        incomingCurrentQuantity,
+        allowFulfillableToLower: true,
+      }),
+    )
     : Math.min(previousFulfillableQuantity, paidQuantity);
 
   return {
