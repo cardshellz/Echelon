@@ -4,7 +4,7 @@ import Decimal from "decimal.js";
 import type { ListingIssue } from "@shared/types/channel-listing-publication";
 import { WalmartApiError } from "./walmart-client";
 import type {
-  WalmartListingFeedType,
+  WalmartItemSchemaFeedType,
   WalmartListingIdentifier,
 } from "./walmart-listing-api";
 
@@ -30,6 +30,12 @@ export const CANONICAL_VISIBLE_FIELDS = new Set([
   "mainImageUrl",
   "productSecondaryImageURL",
 ]);
+export const MAINTENANCE_PROTECTED_ORDERABLE_FIELDS = new Set([
+  ...PROTECTED_ORDERABLE_FIELDS,
+  "externalProductIdentifier",
+  "businessPrice",
+  "country_of_origin_substantial_transformation",
+]);
 type JsonObject = Record<string, unknown>;
 export function jsonObject(value: unknown): JsonObject {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -49,7 +55,7 @@ function fieldSchema(schema: JsonObject, name: string): JsonObject {
 
 export function itemSections(
   schema: JsonObject,
-  feedType: WalmartListingFeedType,
+  feedType: WalmartItemSchemaFeedType,
   productType: string,
 ): { orderable: JsonObject; visible: JsonObject | null } {
   const item = jsonObject(fieldSchema(schema, "MPItem").items);
@@ -61,16 +67,17 @@ export function itemSections(
   };
 }
 
-/** Walmart's MP_ITEM setup example includes Orderable.specProductType, but its
+/** Walmart's MP_ITEM and MP_MAINTENANCE examples include Orderable.specProductType, but their
  * 5.0.20260803-17_50_56-api spec endpoint and published schema omit that property
  * while disallowing additional properties (verified 2026-10-05). Admit only this
  * documented selector, bound to the selected Visible branch; retain every other
  * provider constraint. Do not modify the provider document or the editor schema.
  * https://developer.walmart.com/us-marketplace/docs/create-a-new-item-full-item-setup
+ * https://developer.walmart.com/us-marketplace/docs/update-my-existing-items
  */
 export function listingSubmissionSchema(
   schema: JsonObject,
-  feedType: WalmartListingFeedType,
+  feedType: WalmartItemSchemaFeedType,
   productType: string,
 ): JsonObject {
   if (feedType === "MP_ITEM_MATCH") return schema;
@@ -329,12 +336,13 @@ function writableSection(
 
 export function editorSchema(
   schema: JsonObject,
-  feedType: WalmartListingFeedType,
+  feedType: WalmartItemSchemaFeedType,
   productType: string,
 ): JsonObject {
   const sections = itemSections(schema, feedType, productType);
   const hidden = new Set([
     ...PROTECTED_ORDERABLE_FIELDS,
+    ...(feedType === "MP_MAINTENANCE" ? MAINTENANCE_PROTECTED_ORDERABLE_FIELDS : []),
     ...(feedType === "MP_ITEM_MATCH" ? CANONICAL_VISIBLE_FIELDS : []),
   ]);
   const budget = { nodes: 0 };
