@@ -10,13 +10,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { publicationRequest } from "./api";
 import { errorMessage } from "./model";
+import { ListingUpdateVerification } from "./ListingUpdateVerification";
 
 const labels: Record<ListingUpdateState, string> = {
   reviewed: "Reviewed",
   queued: "Queued",
   sending: "Sending changes",
   processing: "Walmart processing",
-  accepted: "Walmart accepted",
+  accepted: "Feed accepted",
   needs_attention: "Needs attention",
   uncertain: "Check submission outcome",
 };
@@ -51,7 +52,11 @@ export function ListingUpdateActivity({
         {},
       );
       await query.refetch();
-      setMessage(updated.message ?? "Walmart status checked.");
+      setMessage(
+        updated.state === "accepted"
+          ? "Feed processed. Current item details are shown below."
+          : updated.message ?? "Walmart status checked.",
+      );
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -97,7 +102,21 @@ export function ListingUpdateActivity({
                 {labels[update.state]}
               </Badge>
             </div>
-            {update.message && <p className="text-sm">{update.message}</p>}
+            {update.state === "accepted" ? (
+              <p className="text-sm">
+                Walmart processed this feed. Acceptance alone does not confirm
+                the item's category or publication.
+              </p>
+            ) : update.message && <p className="text-sm">{update.message}</p>}
+            {update.state === "accepted" &&
+              query.data?.find(
+                (candidate) => candidate.sku === update.sku && candidate.submissionId,
+              )?.id === update.id && (
+                <ListingUpdateVerification
+                  channelId={channelId}
+                  updateId={update.id}
+                />
+              )}
             <p className="text-xs text-muted-foreground">
               Updated {new Date(update.updatedAt).toLocaleString()}
             </p>

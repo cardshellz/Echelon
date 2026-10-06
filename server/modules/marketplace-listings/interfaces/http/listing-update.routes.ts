@@ -54,6 +54,9 @@ export function registerListingUpdateRoutes(app: Express): void {
   route("post", "/review", true, (service, id, request) =>
     service.review(id, request.body, actor(request)),
   );
+  route("get", "/:updateId/verification", false, (service, id, request) =>
+    service.verify(id, request.params.updateId),
+  );
   route("post", "/:updateId/submit", true, (service, id, request) =>
     service.submit(id, request.params.updateId, request.body, actor(request)),
   );

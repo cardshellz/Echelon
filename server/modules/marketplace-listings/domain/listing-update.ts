@@ -6,7 +6,10 @@ import {
 import {
   listingUpdateObservationSchema,
   listingUpdateViewSchema,
+  listingUpdateVerificationSchema,
   reviewListingUpdateSchema,
+  type ListingUpdateObservation,
+  type ListingUpdateVerification,
 } from "@shared/types/channel-listing-update";
 import { ListingPublicationError, listingHash } from "./listing-publication";
 import type { StoredListingUpdate } from "../application/listing-update-ports";
@@ -36,6 +39,33 @@ export function assertUpdateSource(expected: unknown, current: unknown): void {
     );
   }
 }
+/** Feed acceptance and current catalog classification are separate evidence. */
+export function verifyListingUpdateObservation(
+  record: StoredListingUpdate,
+  current: ListingUpdateObservation,
+  checkedAt: Date,
+): ListingUpdateVerification {
+  const source = record.intent.source;
+  if (
+    current.sku !== source.sku ||
+    current.externalProductId !== source.externalProductId ||
+    current.identifier.type !== source.identifier.type ||
+    current.identifier.value !== source.identifier.value
+  ) {
+    throw new ListingPublicationError(
+      "LISTING_UPDATE_PRODUCT_CHANGED",
+      "Walmart returned a different product or barcode. Reopen the listing before making changes.",
+    );
+  }
+  return listingUpdateVerificationSchema.parse({
+    updateId: record.view.id,
+    requestedProductType: record.intent.command.productType,
+    categoryMatches: current.productType === record.intent.command.productType,
+    current,
+    checkedAt: checkedAt.toISOString(),
+  });
+}
+
 export function assertUpdateReview(
   record: StoredListingUpdate,
   now: Date,

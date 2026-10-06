@@ -4,6 +4,7 @@ import type {
   ListingIssue,
 } from "@shared/types/channel-listing-publication";
 import {
+  hasListingUpdateChanges,
   listingUpdateObservationSchema,
   reviewListingUpdateSchema,
   type ListingUpdateObservation,
@@ -140,6 +141,13 @@ export class WalmartListingUpdateProvider implements ListingUpdateProvider {
     );
     const issues: ListingIssue[] = [];
     const changes = command.changes;
+    // Revalidate older saved reviews at send time as well as new reviews.
+    if (!hasListingUpdateChanges(changes))
+      issues.push({
+        code: "LISTING_UPDATE_EMPTY",
+        field: "changes",
+        message: "Change at least one item field. A product-type selection alone does not update item content.",
+      });
     const orderable = changes.attributes?.Orderable ?? {};
     const visible = changes.attributes?.Visible ?? {};
     for (const key of Object.keys(orderable))
@@ -176,8 +184,8 @@ export class WalmartListingUpdateProvider implements ListingUpdateProvider {
               : { price: priceForWalmart(changes.priceCents) }),
           },
           Visible: {
-            // Maintenance selects the product type here. Walmart rejects the
-            // undocumented Orderable.specProductType field in this feed.
+            // This selects the maintenance attribute schema. Feed acceptance
+            // does not prove Walmart changed its assigned catalog product type.
             [command.productType]: {
               ...visible,
               ...(changes.title === undefined
@@ -294,7 +302,7 @@ export class WalmartListingUpdateProvider implements ListingUpdateProvider {
       ? {
           state: "accepted" as const,
           message:
-            "Walmart accepted these changes. Storefront updates may take time.",
+            "Walmart processed this feed. Check the item on Walmart to verify its category and listing status.",
         }
       : {
           state: "processing" as const,

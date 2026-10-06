@@ -30,6 +30,7 @@ describe("listing update HTTP boundary", () => {
     review: vi.fn(),
     submit: vi.fn(),
     refresh: vi.fn(),
+    verify: vi.fn(),
   };
   beforeEach(async () => {
     vi.resetAllMocks();
@@ -93,6 +94,18 @@ describe("listing update HTTP boundary", () => {
     });
     expect(response.status).toBe(400);
     expect(service.list).not.toHaveBeenCalled();
+  });
+  it("allows item verification with view permission and passes the URL identity", async () => {
+    service.verify.mockResolvedValue({ categoryMatches: false });
+    const response = await fetch(`${base}/update-id/verification`, { headers: { "x-permission": "channels:view" } });
+    expect(response.status).toBe(200);
+    expect(service.verify).toHaveBeenCalledExactlyOnceWith(104, "update-id");
+    expect(service.submit).not.toHaveBeenCalled();
+  });
+  it("requires channel view permission for verification", async () => {
+    const response = await fetch(`${base}/update-id/verification`);
+    expect(response.status).toBe(403);
+    expect(service.verify).not.toHaveBeenCalled();
   });
   it("never returns unknown exception bodies", async () => {
     service.list.mockRejectedValue(new Error("secret-database-string"));

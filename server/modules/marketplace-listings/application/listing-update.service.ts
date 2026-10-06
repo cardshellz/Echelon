@@ -1,9 +1,11 @@
 import { z } from "zod";
 import {
+  hasListingUpdateChanges,
   listingUpdateContextSchema,
   listingUpdateSkuSchema,
   reviewListingUpdateSchema,
   submitListingUpdateSchema,
+  type ListingUpdateVerification,
 } from "@shared/types/channel-listing-update";
 import {
   ListingPublicationError,
@@ -13,6 +15,7 @@ import {
 import {
   assertUpdateReview,
   assertUpdateSource,
+  verifyListingUpdateObservation,
 } from "../domain/listing-update";
 import { ListingSubmissionError } from "./listing-publication-provider.port";
 import type {
@@ -84,20 +87,10 @@ export class ListingUpdateService {
         "LISTING_UPDATE_STALE",
         "The Walmart listing changed. Reopen it and review your changes again.",
       );
-    const changedAttributes = Object.values(
-      command.changes.attributes ?? {},
-    ).some((section) => section && Object.keys(section).length > 0);
-    const changedContent = Object.keys(command.changes).some(
-      (key) => key !== "attributes",
-    );
-    if (
-      !changedAttributes &&
-      !changedContent &&
-      command.productType === source.productType
-    )
+    if (!hasListingUpdateChanges(command.changes))
       throw new ListingPublicationError(
         "LISTING_UPDATE_EMPTY",
-        "Change at least one field before reviewing.",
+        "Change at least one item field before reviewing. Selecting a product type alone sends no item content and does not confirm a category correction.",
         400,
       );
     const prepared = await this.dependencies.provider.prepare(
@@ -183,6 +176,30 @@ export class ListingUpdateService {
     // A status check only polls an already-receipted update; it cannot send a queued edit.
     if (record.view.state === "processing") await this.processDue(1, updateId);
     return (await this.dependencies.store.get(channelId, updateId)).view;
+  }
+  async verify(channelId: number, id: unknown): Promise<ListingUpdateVerification> {
+    const account = await this.dependencies.provider.account(channelId);
+    const record = await this.dependencies.store.get(
+      channelId,
+      z.string().uuid().parse(id),
+    );
+    // Credentials may rotate, but the seller, connection and fulfillment scope
+    // must still be the ones that received this immutable update.
+    assertUpdateSource(
+      { ...record.intent.account, revision: account.revision },
+      account,
+    );
+    if (record.view.state !== "accepted" || !record.view.submissionId) {
+      throw new ListingPublicationError(
+        "LISTING_UPDATE_NOT_ACCEPTED",
+        "Wait for Walmart to process this feed before checking its item result.",
+      );
+    }
+    const current = await this.dependencies.provider.observe(
+      account,
+      record.view.sku,
+    );
+    return verifyListingUpdateObservation(record, current, this.now());
   }
   private async assertCurrent(record: StoredListingUpdate) {
     const { account, source } = record.intent;
