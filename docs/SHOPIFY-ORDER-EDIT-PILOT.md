@@ -35,8 +35,15 @@ The new persistence has explicit module ownership, enforced by the writer ratche
 
 ## Staff flow
 
-1. Select the Shopify connection, open **Pilot settings**, choose the payment
-   window, and enable staff edits.
+1. Select the Shopify connection. **Pilot settings** opens automatically while
+   staff editing is disabled. Choose **Payment window (minutes)**, check
+   **Enable staff order edits for this Shopify connection**, and select
+   **Save settings**. The saved status and payment window appear above the form.
+   A disabled order also offers **Configure staff editing** to open and focus
+   these settings. Staff without settings permission must ask an administrator.
+   Saving enabled settings unlocks eligible order fields without reloading;
+   a failed save does not enable a disabled connection. This setting does not
+   grant customer access.
 2. Search for an exact order number, with or without `#`. Existing active edits
    appear with **Resume edit**, including after closing the original browser tab.
 3. Adjust quantities or add a supported product. Review the Shopify-calculated
@@ -82,6 +89,13 @@ The certified current contents are projected by the OMS owner with an immutable
 before/after event. Historical purchased quantities remain intact. Scoped Shopify
 ingestion guards protect that projection from older observations; normal
 fulfillment and disposition commands retain their existing responsibilities.
+
+Warehouse items do not have a `product_variant_id` column. Order-edit checks
+resolve their independent catalog identity from `product_id` for catalog-mapped
+rows or an unambiguous active SKU for legacy rows, then compare it with the
+exact linked OMS line and inventory claim. Missing, ambiguous, or cross-order
+lineage keeps fulfillment held. Both synchronization and release use the same
+reader; regression fixtures must use the actual WMS column names.
 
 The worker runs every 30 seconds without overlapping its own passes. Per-order
 locking and persisted intent protect concurrent requests and restarts. Transport
