@@ -52,3 +52,32 @@ describe("Shopify orders/updated line fulfillment status sync", () => {
     expect(OMS_WEBHOOKS_SRC).toContain("fulfillableQuantity:");
   });
 });
+
+describe("Shopify line current_quantity reader", () => {
+  it("reads a valid current_quantity", () => {
+    expect(__test__.readShopifyLineCurrentQuantity({ current_quantity: 15 })).toBe(15);
+    expect(__test__.readShopifyLineCurrentQuantity({ current_quantity: "0" })).toBe(0);
+  });
+
+  it("returns null when the field is absent so authority keeps its legacy rule", () => {
+    expect(__test__.readShopifyLineCurrentQuantity({})).toBeNull();
+    expect(__test__.readShopifyLineCurrentQuantity({ current_quantity: null })).toBeNull();
+    expect(__test__.readShopifyLineCurrentQuantity(undefined)).toBeNull();
+  });
+
+  it("rejects malformed values instead of trusting them", () => {
+    for (const bad of [-1, 1.5, "abc", "", " ", "-2", "1e3", true, Number.NaN]) {
+      expect(__test__.readShopifyLineCurrentQuantity({ current_quantity: bad })).toBeNull();
+    }
+  });
+
+  it("orders/updated passes current_quantity into every line authority derivation", () => {
+    const updatedHandler = OMS_WEBHOOKS_SRC.slice(
+      OMS_WEBHOOKS_SRC.indexOf('app.post("/api/oms/webhooks/orders/updated"'),
+      OMS_WEBHOOKS_SRC.indexOf("const authorizedDemandResult"),
+    );
+    expect(updatedHandler.match(/deriveOmsLineAuthority\(/g)).toHaveLength(3);
+    expect(updatedHandler.match(/currentQuantity: readShopifyLineCurrentQuantity\(item\)/g)).toHaveLength(2);
+    expect(updatedHandler).toContain("currentQuantity: 0,");
+  });
+});
