@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { orderEditFinancialsSchema } from "@shared/order-edits/order-edit-financials";
 import type {
   OrderEditSnapshot,
   OrderEditQuote,
@@ -88,6 +89,33 @@ const line = z
 
 export const orderEditSnapshotSchema: z.ZodType<OrderEditSnapshot> = z
   .object({
+    financials: orderEditFinancialsSchema.optional(),
+    discountRules: z
+      .array(
+        z
+          .object({
+            index: quantity,
+            type: text,
+            targetType: text,
+            allocationMethod: text,
+            targetSelection: text,
+            label: text,
+            value: z.discriminatedUnion("type", [
+              z
+                .object({
+                  type: z.literal("percentage"),
+                  percentage: z.number().finite().min(0).max(100),
+                })
+                .strict(),
+              z
+                .object({ type: z.literal("fixed"), amountCents: money })
+                .strict(),
+            ]),
+          })
+          .strict(),
+      )
+      .optional(),
+    paymentDates: z.record(z.string().datetime().nullable()).optional(),
     connectionId: connection,
     channelId: connection,
     orderId: gid("Order"),
@@ -139,6 +167,41 @@ export const orderEditSnapshotSchema: z.ZodType<OrderEditSnapshot> = z
   })
   .strict()
   .superRefine((value, context) => {
+    // Zod still runs refinements after an integer validation issue. Do not
+    // convert malformed monetary or quantity input to BigInt and throw.
+    if (
+      value.lines.some(
+        (entry) =>
+          !Number.isSafeInteger(entry.originalUnitPriceCents) ||
+          !Number.isSafeInteger(entry.quantity),
+      ) ||
+      value.financials?.lines.some(
+        (entry) => !Number.isSafeInteger(entry.grossCents),
+      )
+    )
+      return;
+    if (
+      value.financials &&
+      (value.financials.totalCents !== value.totalCents ||
+        value.financials.itemsNetCents !== value.subtotalCents ||
+        value.financials.taxCents !== value.taxCents ||
+        value.financials.shippingCents !== value.shippingCents ||
+        value.financials.lines.length !== value.lines.length ||
+        value.lines.some(
+          (line) =>
+            !value.financials!.lines.some(
+              (entry) =>
+                entry.id === line.id &&
+                BigInt(entry.grossCents) ===
+                  BigInt(line.originalUnitPriceCents) * BigInt(line.quantity),
+            ),
+        ))
+    )
+      context.addIssue({
+        code: "custom",
+        message:
+          "Snapshot financial breakdown does not match its order and lines.",
+      });
     if (
       new Set(value.lines.map((entry) => entry.id)).size !== value.lines.length
     )
@@ -188,6 +251,7 @@ const plan = z
   .strict();
 export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
   .object({
+    financials: orderEditFinancialsSchema.optional(),
     connectionId: connection,
     channelId: connection,
     orderId: gid("Order"),
@@ -221,6 +285,44 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (
+      ![
+        value.totalCents,
+        value.baseline.totalCents,
+        value.baseline.netPaidCents,
+        value.deltaCents,
+        value.outstandingCents,
+      ].every(Number.isSafeInteger) ||
+      value.lines.some(
+        (entry) =>
+          !Number.isSafeInteger(entry.originalUnitPriceCents) ||
+          !Number.isSafeInteger(entry.quantity),
+      ) ||
+      value.financials?.lines.some(
+        (entry) => !Number.isSafeInteger(entry.grossCents),
+      )
+    )
+      return;
+    if (
+      value.financials &&
+      (value.financials.totalCents !== value.totalCents ||
+        value.financials.shippingCents !== value.shippingCents ||
+        value.financials.lines.length !== value.lines.length ||
+        value.lines.some(
+          (line) =>
+            !value.financials!.lines.some(
+              (entry) =>
+                entry.id === line.calculatedLineId &&
+                BigInt(entry.grossCents) ===
+                  BigInt(line.originalUnitPriceCents) * BigInt(line.quantity),
+            ),
+        ))
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Quote financial breakdown does not match its total.",
+      });
+    }
     if (
       value.orderId !== value.baseline.orderId ||
       value.connectionId !== value.baseline.connectionId ||

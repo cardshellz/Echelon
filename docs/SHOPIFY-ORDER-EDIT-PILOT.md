@@ -50,8 +50,11 @@ The new persistence has explicit module ownership, enforced by the writer ratche
 2. Search for an exact order number, with or without `#`. Existing active edits
    appear with **Resume edit**, including after closing the original browser tab.
 3. Adjust quantities or add a supported product. Review the Shopify-calculated
-   total before applying the change. A quote holds fulfillment but does not commit
-   the order edit or issue a refund.
+   total before applying the change. The review compares original and proposed
+   product prices, named product discounts, shipping charges and discounts, tax,
+   and the final total. Payment history shows payments and refunds already
+   recorded on the current order; a proposed change is not a payment. A quote
+   holds fulfillment but does not commit the order edit or issue a refund.
 4. Confirm once. If an extra balance is due, use Shopify's hosted payment link.
    The order remains held until payment and downstream contents are verified.
 5. For a reduction, the pilot reconciles its own automatic refund to the supported
@@ -64,6 +67,11 @@ The new persistence has explicit module ownership, enforced by the writer ratche
 An unsubmitted quote can be cancelled after verifying the original order. A
 submitted edit cannot be cancelled as though nothing happened.
 
+Older saved operations retain their original evidence and display. For an
+unsubmitted edit blocked by the former discount restriction, cancel that saved
+edit and create a fresh quote after deploying discount support. Do not replace
+its stored baseline or remove its hold directly in the database.
+
 ## Pilot boundaries
 
 - USD, domestic US physical orders only; Shopify and warehouse eligibility are
@@ -71,7 +79,13 @@ submitted edit cannot be cancelled as though nothing happened.
   combinations fail closed.
 - Shipping charges remain unchanged. Address editing is not included.
 - Existing-line pricing is verified; added products use verified current member
-  pricing when applicable. Unsupported promotion combinations are rejected.
+  pricing when applicable. Native order-wide percentage discount codes are
+  supported alongside unchanged shipping discounts, including free shipping.
+  Shopify's exact line allocations determine net prices and totals; rounded
+  discounted unit prices are not multiplied to invent a line total.
+  Fixed-amount or product-specific codes, scripts, unverified automatic product
+  discounts, and orders with nonzero tax included in prices require staff review.
+  The pilot does not recalculate shipping or assume a promotion is still valid.
 - An edit requiring extra payment cannot completely remove an original line;
   restoring that line's identity on expiry has not been proven. Partial quantity
   reductions are supported. Emptying the entire order is rejected.

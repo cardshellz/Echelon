@@ -120,9 +120,28 @@ export async function orderEditRequest<T>(
 export function formatOrderEditMoney(cents: number, currency: string): string {
   if (!Number.isSafeInteger(cents) || !/^[A-Z]{3}$/.test(currency))
     return "Unavailable";
-  return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(
-    cents / 100,
-  );
+  const amount = BigInt(cents);
+  const zero = BigInt(0);
+  const centsPerUnit = BigInt(100);
+  const magnitude = amount < zero ? -amount : amount;
+  const whole = magnitude / centsPerUnit;
+  const fraction = (magnitude % centsPerUnit).toString().padStart(2, "0");
+  // Keep cent precision even at the safe-integer boundary. For negative amounts
+  // below one dollar, use a signed placeholder to obtain the currency's sign layout.
+  const signedWhole = amount < zero ? -(whole || BigInt(1)) : whole;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
+    .formatToParts(signedWhole)
+    .map((part) => {
+      if (part.type === "fraction") return fraction;
+      if (part.type === "integer" && whole === zero) return "0";
+      return part.value;
+    })
+    .join("");
 }
 
 export function orderEditOperationFromSearch(search: string): string | null {
