@@ -28,12 +28,14 @@ function setup() {
   let incorrectReadback = false;
   let labels: unknown[] = [];
   let split = false;
+  let splitStatus = "awaiting_shipment";
   const header = {
     id: 9,
     order_id: 10,
     provider_order_id: 55,
     order_edit_operation_id: OPERATION,
     status: "queued",
+    warehouse_status: "ready",
     on_hold: 0,
     held: false,
     requires_review: false,
@@ -109,7 +111,7 @@ function setup() {
                   {
                     orderId: 99,
                     orderNumber: "#100",
-                    orderStatus: "awaiting_shipment",
+                    orderStatus: splitStatus,
                   },
                 ]
               : []),
@@ -140,7 +142,9 @@ function setup() {
   const service = createShipStationService(db, undefined, {
     sessionLock: async (_lock, callback) => callback(),
   });
-  const run = (mode: "hold" | "verify" | "synchronize" | "release") =>
+  const run = (
+    mode: "hold" | "verify" | "synchronize" | "release" | "verify_shipped",
+  ) =>
     service.synchronizeOrderEditShipment({
       shipmentId: 9,
       operationId: OPERATION,
@@ -169,8 +173,13 @@ function setup() {
     setLabels: (value: unknown[]) => {
       labels = value;
     },
-    split: () => {
+    split: (status = "awaiting_shipment") => {
       split = true;
+      splitStatus = status;
+    },
+    ship: () => {
+      live.orderStatus = "shipped";
+      header.warehouse_status = "shipped";
     },
   };
 }
@@ -185,6 +194,47 @@ afterEach(() => {
 });
 
 describe("ShipStation order-edit ownership and readback", () => {
+  it("verifies completed provider splits with GET only instead of restoring shipped orders from hold", async () => {
+    const f = setup();
+    await f.run("hold");
+    f.ship();
+    f.split("shipped");
+    f.setLabels([
+      { orderId: 55, orderNumber: "#100", voided: false },
+      { orderId: 99, orderNumber: "#100", voided: false },
+    ]);
+    const prior = f.calls.length;
+    await f.run("verify_shipped");
+    expect(f.calls.slice(prior).map((call) => call.path)).toEqual([
+      "/orders/55",
+      "/shipments",
+      "/orders",
+    ]);
+    expect(f.calls.slice(prior).every((call) => call.body === null)).toBe(true);
+    expect(f.live.orderStatus).toBe("shipped");
+  });
+  it("refuses completed-order cleanup when an unknown split remains active", async () => {
+    const f = setup();
+    await f.run("hold");
+    f.ship();
+    f.split();
+    const prior = f.calls.length;
+    await expect(f.run("verify_shipped")).rejects.toMatchObject({
+      code: "ORDER_EDIT_PROVIDER_FULFILLMENT_PENDING",
+    });
+    expect(f.calls.slice(prior).every((call) => call.body === null)).toBe(true);
+  });
+  it("requires both a shipped warehouse partition and a shipped provider order", async () => {
+    const f = setup();
+    await f.run("hold");
+    await expect(f.run("verify_shipped")).rejects.toMatchObject({
+      code: "ORDER_EDIT_SHIPMENT_CHANGED",
+    });
+    f.header.warehouse_status = "shipped";
+    await expect(f.run("verify_shipped")).rejects.toMatchObject({
+      code: "ORDER_EDIT_PROVIDER_NOT_EDITABLE",
+    });
+  });
   it("persists hold ownership before an ambiguous provider response and releases its own hold on retry", async () => {
     const f = setup();
     f.loseHoldResponse();

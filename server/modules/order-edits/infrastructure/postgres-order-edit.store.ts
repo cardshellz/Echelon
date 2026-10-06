@@ -14,6 +14,7 @@ import type {
   OrderEditReleaseProof,
 } from "../application/order-edit-store";
 import { OrderEditError } from "../domain/order-edit-error";
+import { unchangedFulfilledOrderEdit } from "../application/order-edit-evidence";
 import { finalizeOrderEditWarehouseRelease } from "./order-edit-warehouse.gateway";
 import { appendOrderEditAudit } from "./order-edit-audit.writer";
 import {
@@ -342,6 +343,22 @@ export class PostgresOrderEditStore implements OrderEditStore {
             "ORDER_EDIT_RELEASE_PROOF_REQUIRED",
             "Warehouse release must be verified before this edit can finish.",
           );
+        if (
+          releaseProof.fulfilledCancellation &&
+          (record.status !== "expired" ||
+            record.commitStartedAt ||
+            record.commitKey ||
+            record.refundIntent ||
+            record.refundStartedAt ||
+            record.recoveryStartedAt ||
+            !record.lastSnapshot ||
+            !unchangedFulfilledOrderEdit(record.lastSnapshot, record.baseline))
+        ) {
+          throw new OrderEditError(
+            "ORDER_EDIT_FULFILLED_CANCEL_INVALID",
+            "Only an unchanged, fully fulfilled, unsubmitted edit can use completed-order cleanup.",
+          );
+        }
         if (
           ["completed", "recovered"].includes(record.status) &&
           releaseProof.allocationRequired !== true

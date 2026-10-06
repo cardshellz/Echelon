@@ -79,6 +79,47 @@ export function listingUpdateChanges(
     );
   return parsed.data;
 }
+
+/** An explicit content resubmission must not diff against the prefilled values:
+ * those are prior requests, not evidence that Walmart applied this product type.
+ * Only carry fields exposed by the maintenance schema. Creation-only values
+ * such as condition and country of origin must not leak into the repair feed. */
+export function listingUpdateContentResubmission(
+  original: ListingUpdateFields,
+  current: ListingUpdateFields,
+  maintenanceSchema: Record<string, unknown>,
+): ListingUpdateChanges {
+  const properties = object(maintenanceSchema.properties);
+  const visibleProperties = object(object(properties.Visible).properties);
+  if (Object.keys(visibleProperties).length === 0) {
+    throw new Error(
+      "Load the selected product type's editable fields before resubmitting content.",
+    );
+  }
+  const changes = listingUpdateChanges(original, current);
+  for (const key of ["title", "description", "brand"] as const) {
+    if (current[key].trim()) changes[key] = current[key].trim();
+  }
+  if (current.images.trim()) {
+    changes.images = current.images
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+  const visible = Object.fromEntries(
+    Object.entries(object(current.attributes.Visible)).filter(
+      ([key, value]) =>
+        Object.hasOwn(visibleProperties, key) &&
+        value !== undefined && value !== null && value !== "",
+    ),
+  );
+  changes.attributes = {
+    ...changes.attributes,
+    Visible: structuredClone(visible),
+  };
+  return listingUpdateChangesSchema.parse(changes);
+}
+
 export function updateFieldLabel(
   schema: Record<string, unknown> | undefined,
   section: string,

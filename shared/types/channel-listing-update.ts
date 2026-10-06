@@ -37,6 +37,20 @@ export const listingUpdateChangesSchema = z
   .strict();
 export type ListingUpdateChanges = z.infer<typeof listingUpdateChangesSchema>;
 
+/** A schema/product-type selection is not itself an item attribute update. */
+export function hasListingUpdateChanges(changes: ListingUpdateChanges): boolean {
+  return Object.entries(changes).some(([key, value]) =>
+    key === "attributes"
+      ? Object.values(changes.attributes ?? {}).some((section) =>
+          Object.values(section ?? {}).some(
+            (attribute) =>
+              attribute !== undefined && attribute !== null && attribute !== "",
+          ),
+        )
+      : value !== undefined,
+  );
+}
+
 export const listingUpdateObservationSchema = z
   .object({
     sku: listingUpdateSkuSchema,
@@ -62,6 +76,17 @@ export const listingUpdateObservationSchema = z
 export type ListingUpdateObservation = z.infer<
   typeof listingUpdateObservationSchema
 >;
+export const listingUpdateVerificationSchema = z.object({
+  updateId: z.string().uuid(),
+  requestedProductType: z.string().min(1).max(200),
+  categoryMatches: z.boolean(),
+  current: listingUpdateObservationSchema,
+  checkedAt: z.string().datetime(),
+});
+export type ListingUpdateVerification = z.infer<
+  typeof listingUpdateVerificationSchema
+>;
+
 export const reviewListingUpdateSchema = z
   .object({
     sku: listingUpdateSkuSchema,

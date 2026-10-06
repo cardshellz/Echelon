@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { wmsOmsOrderIdSql } from "../../oms/oms-wms-order-link.sql";
 import { OrderEditError } from "../domain/order-edit-error";
 import type { OrderEditSnapshot } from "../application/order-edit-provider";
+import { orderEditSnapshotSchema } from "../application/order-edit-provider.schema";
 import type { OrderEditReleaseProof } from "../application/order-edit-store";
 import { getOmsLineMaterializableQuantity } from "../../oms/oms-line-authority";
 import {
@@ -59,7 +60,7 @@ export interface OrderEditWarehouseProvider {
   synchronizeOrderEditShipment(input: {
     shipmentId: number;
     operationId: string;
-    mode: "hold" | "verify" | "synchronize" | "release";
+    mode: "hold" | "verify" | "synchronize" | "release" | "verify_shipped";
   }): Promise<void>;
 }
 export interface OrderEditWarehouseInspection {
@@ -74,6 +75,7 @@ async function readReleaseProof(
   operationId: string,
   ownership: "owned" | "none" = "owned",
   allocationRequired = false,
+  fulfilledCancellation = false,
 ): Promise<OrderEditReleaseProof> {
   const source = await client.query(
     "SELECT id,channel_id,external_order_id,status,financial_status,updated_at FROM oms.oms_orders WHERE id=$1 FOR UPDATE",
@@ -129,7 +131,7 @@ async function readReleaseProof(
     }
   }
   const orders = await client.query(
-    `SELECT wo.id,wo.order_edit_operation_id,wo.warehouse_status,wo.on_hold,
+    `SELECT wo.id,wo.channel_id,wo.order_edit_operation_id,wo.warehouse_status,wo.on_hold,
     wo.started_at,wo.assigned_picker_id,wo.picked_count,wo.cancelled_at FROM wms.orders wo
     WHERE ${binding}=$1 ORDER BY wo.id FOR UPDATE OF wo`,
     [omsOrderId],
@@ -149,7 +151,7 @@ async function readReleaseProof(
   }
   const wmsOrderIds = orders.rows.map((row) => positiveId.parse(row.id));
   const shipments = await client.query(
-    `SELECT id,status,held,requires_review,shipstation_order_id,engine_order_ref,
+    `SELECT id,order_id,shipping_engine,status,held,requires_review,shipstation_order_id,engine_order_ref,
     tracking_number,shipped_at FROM wms.outbound_shipments WHERE order_id=ANY($1::int[]) ORDER BY id FOR UPDATE`,
     [wmsOrderIds],
   );
@@ -160,6 +162,158 @@ async function readReleaseProof(
     [omsOrderId],
   );
   const shipmentIds = shipments.rows.map((row) => positiveId.parse(row.id));
+  const providerHolds = fulfilledCancellation
+    ? (
+        await client.query(
+          "SELECT shipment_id,provider_order_id,was_held FROM oms.order_edit_provider_holds WHERE operation_id=$1 ORDER BY shipment_id FOR UPDATE",
+          [operationId],
+        )
+      ).rows
+    : [];
+  if (fulfilledCancellation) {
+    if (ownership !== "owned" || allocationRequired)
+      throw new OrderEditError(
+        "ORDER_EDIT_FULFILLED_CANCEL_INVALID",
+        "Completed-order cleanup requires this unsubmitted edit's own hold.",
+      );
+    const operation = (
+      await client.query(
+        `SELECT
+      document ?& ARRAY['commitStartedAt','commitKey','refundIntent','refundStartedAt','recoveryStartedAt'] AS has_intent_fields,
+      document->>'commitStartedAt' AS commit_started_at, document->>'commitKey' AS commit_key,
+      document->>'refundIntent' AS refund_intent, document->>'refundStartedAt' AS refund_started_at,
+      document->>'recoveryStartedAt' AS recovery_started_at,
+      document->'baseline' AS baseline FROM oms.order_edit_operations
+      WHERE id=$1 AND oms_order_id=$2 AND status NOT IN ('completed','recovered','failed','expired') FOR UPDATE`,
+        [operationId, omsOrderId],
+      )
+    ).rows;
+    if (
+      operation.length !== 1 ||
+      operation[0].has_intent_fields !== true ||
+      [
+        operation[0].commit_started_at,
+        operation[0].commit_key,
+        operation[0].refund_intent,
+        operation[0].refund_started_at,
+        operation[0].recovery_started_at,
+      ].some((intent) => intent !== null)
+    )
+      throw new OrderEditError(
+        "ORDER_EDIT_ALREADY_SUBMITTED",
+        "A submitted or financially uncertain edit cannot use completed-order cleanup.",
+      );
+    const baseline = orderEditSnapshotSchema.parse(operation[0].baseline);
+    if (
+      source.rows[0].status !== "shipped" ||
+      source.rows[0].financial_status !== "paid" ||
+      baseline.orderId.replace(/^gid:\/\/shopify\/Order\//, "") !==
+        String(source.rows[0].external_order_id).replace(
+          /^gid:\/\/shopify\/Order\//,
+          "",
+        ) ||
+      baseline.channelId !== source.rows[0].channel_id ||
+      orders.rows.some(
+        (row) =>
+          row.warehouse_status !== "shipped" ||
+          row.channel_id !== source.rows[0].channel_id,
+      )
+    )
+      throw new OrderEditError(
+        "ORDER_EDIT_FULFILLMENT_NOT_COMPLETE",
+        "Every warehouse partition and the source order must be shipped and paid.",
+      );
+    assertOrderEditWarehouseItemIdentities(items);
+    const physical = new Map<string, bigint>();
+    for (const item of items.filter(
+      (entry) => entry.status !== "cancelled" && entry.quantity > 0,
+    )) {
+      if (
+        item.status !== "completed" ||
+        item.fulfilled_quantity !== item.quantity ||
+        item.oms_order_line_id === null
+      )
+        throw new OrderEditError(
+          "ORDER_EDIT_FULFILLMENT_NOT_COMPLETE",
+          "All physical items must be fully fulfilled before completed-order cleanup.",
+        );
+      const key = String(item.oms_order_line_id);
+      physical.set(
+        key,
+        (physical.get(key) ?? BigInt(0)) + BigInt(item.quantity),
+      );
+    }
+    if (!physical.size)
+      throw new OrderEditError(
+        "ORDER_EDIT_FULFILLMENT_NOT_COMPLETE",
+        "Completed physical items are required to verify completed-order cleanup.",
+      );
+    const purchased = new Map(
+      baseline.lines.map((line) => [
+        line.id.replace(/^gid:\/\/shopify\/LineItem\//, ""),
+        line.quantity,
+      ]),
+    );
+    if (purchased.size !== baseline.lines.length)
+      throw new OrderEditError(
+        "ORDER_EDIT_SOURCE_CHANGED",
+        "The original order has ambiguous purchased-line identities.",
+      );
+    const integer = z.coerce.number().int().safe().nonnegative().nullable();
+    for (const line of lines.rows) {
+      const paid = integer.safeParse(line.paid_quantity);
+      const remaining = integer.safeParse(line.authority_fulfillable_quantity);
+      const key = String(line.external_line_item_id).replace(
+        /^gid:\/\/shopify\/LineItem\//,
+        "",
+      );
+      if (
+        !paid.success ||
+        paid.data === null ||
+        !remaining.success ||
+        remaining.data !== 0 ||
+        purchased.get(key) !== paid.data ||
+        (physical.get(String(line.id)) ?? BigInt(0)) !== BigInt(paid.data)
+      )
+        throw new OrderEditError(
+          "ORDER_EDIT_FULFILLMENT_NOT_COMPLETE",
+          "Paid source quantities and completed physical quantities do not reconcile.",
+        );
+      physical.delete(String(line.id));
+      purchased.delete(key);
+    }
+    if (physical.size || purchased.size)
+      throw new OrderEditError(
+        "ORDER_EDIT_FULFILLMENT_NOT_COMPLETE",
+        "The original purchased lines, paid source lines and completed warehouse items do not reconcile.",
+      );
+    const heldIdentities = new Map(
+      providerHolds.map((row) => [row.shipment_id, row.provider_order_id]),
+    );
+    for (const shipment of shipments.rows.filter(
+      (row) => !["cancelled", "voided"].includes(row.status),
+    )) {
+      const heldProviderId = heldIdentities.get(shipment.id);
+      const providerId =
+        shipment.shipstation_order_id ??
+        (shipment.shipping_engine === "shipstation" &&
+        /^[1-9][0-9]*$/.test(shipment.engine_order_ref ?? "")
+          ? Number(shipment.engine_order_ref)
+          : null);
+      if (
+        shipment.requires_review ||
+        shipment.shipping_engine !== "shipstation" ||
+        providerId === null ||
+        !Number.isSafeInteger(providerId) ||
+        heldProviderId === undefined ||
+        Number(heldProviderId) !== providerId
+      )
+        throw new OrderEditError(
+          "ORDER_EDIT_PROVIDER_IDENTITY_UNVERIFIED",
+          "Every completed-order shipment must retain its verified provider hold identity.",
+        );
+    }
+  }
   const shipmentItems = await client.query(
     `SELECT id,shipment_id,order_item_id,qty FROM wms.outbound_shipment_items
     WHERE shipment_id=ANY($1::int[]) ORDER BY id FOR UPDATE`,
@@ -174,6 +328,7 @@ async function readReleaseProof(
     shipmentIds,
     ...(ownership === "none" ? { ownership } : {}),
     ...(allocationRequired ? { allocationRequired: true } : {}),
+    ...(fulfilledCancellation ? { fulfilledCancellation: true } : {}),
     contentFingerprint: createHash("sha256")
       .update(
         JSON.stringify({
@@ -185,6 +340,7 @@ async function readReleaseProof(
           shipmentItems: shipmentItems.rows,
           authority,
           allocation,
+          ...(fulfilledCancellation ? { providerHolds } : {}),
         }),
       )
       .digest("hex"),
@@ -309,6 +465,7 @@ export async function finalizeOrderEditWarehouseRelease(
     contentFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
     ownership: z.enum(["owned", "none"]).optional(),
     allocationRequired: z.boolean().optional(),
+    fulfilledCancellation: z.boolean().optional(),
   })
     .strict()
     .parse(proof);
@@ -318,6 +475,7 @@ export async function finalizeOrderEditWarehouseRelease(
     operationId,
     proof.ownership ?? "owned",
     proof.allocationRequired ?? false,
+    proof.fulfilledCancellation ?? false,
   );
   if (
     current.contentFingerprint !== proof.contentFingerprint ||
@@ -536,9 +694,9 @@ export class OrderEditWarehouseGateway {
   }
 
   private async providerPhase(
-    shipments: Shipment[],
+    shipments: Array<Pick<Shipment, "id" | "provider_order_id">>,
     operationId: string,
-    mode: "hold" | "verify" | "synchronize" | "release",
+    mode: "hold" | "verify" | "synchronize" | "release" | "verify_shipped",
   ): Promise<void> {
     for (const shipment of shipments) {
       // Even an unlinked shipment must pass the provider's push lock: a push
@@ -703,6 +861,53 @@ export class OrderEditWarehouseGateway {
     );
     await this.assertHeld(omsOrderId, operationId);
     return this.releaseOwned(omsOrderId, operationId);
+  }
+
+  async releaseFulfilledUnsubmitted(
+    omsOrderId: number,
+    operationId: string,
+  ): Promise<OrderEditReleaseProof> {
+    positiveId.parse(omsOrderId);
+    operationIdSchema.parse(operationId);
+    const { before, shipments } = await this.transaction(async (client) => {
+      const before = await readReleaseProof(
+        client,
+        omsOrderId,
+        operationId,
+        "owned",
+        false,
+        true,
+      );
+      const shipments = z
+        .array(
+          z.object({
+            id: positiveId,
+            provider_order_id: z.coerce.number().int().positive().safe(),
+          }),
+        )
+        .parse(
+          (
+            await client.query(
+              `SELECT h.shipment_id AS id,h.provider_order_id FROM oms.order_edit_provider_holds h
+          JOIN wms.outbound_shipments os ON os.id=h.shipment_id WHERE h.operation_id=$1
+          AND os.order_id=ANY($2::int[]) AND os.status NOT IN ('cancelled','voided') ORDER BY h.shipment_id FOR UPDATE OF h,os`,
+              [operationId, before.wmsOrderIds],
+            )
+          ).rows,
+        );
+      return { before, shipments };
+    });
+    // GET-only terminal verification. Never restore an already shipped provider order from hold.
+    await this.providerPhase(shipments, operationId, "verify_shipped");
+    const after = await this.transaction((client) =>
+      readReleaseProof(client, omsOrderId, operationId, "owned", false, true),
+    );
+    if (before.contentFingerprint !== after.contentFingerprint)
+      throw new OrderEditError(
+        "ORDER_EDIT_RELEASE_CHANGED",
+        "Completed order state changed during provider verification.",
+      );
+    return after;
   }
 
   private async releaseOwned(

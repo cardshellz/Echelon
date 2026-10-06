@@ -6,7 +6,7 @@ import type {
   StoredListingUpdate,
 } from "../../application/listing-update-ports";
 import { ListingSubmissionError } from "../../application/listing-publication-provider.port";
-import { ListingPublicationError } from "../../domain/listing-publication";
+import { ListingPublicationError, listingHash } from "../../domain/listing-publication";
 import {
   fixedNow,
   testAccount,
@@ -114,6 +114,73 @@ function setup() {
 }
 
 describe("reviewed existing-listing updates", () => {
+  it.each([{}, { attributes: {} }, { attributes: { Visible: {}, Orderable: {} } }])(
+    "rejects empty category corrections before storing or sending a feed: %j",
+    async (changes) => {
+      const s = setup();
+      const source = { ...updateSource, productType: "default" };
+      s.provider.observe.mockResolvedValue(source);
+      await expect(s.service.review(104, {
+        ...s.get().intent.command,
+        sourceHash: listingHash({ account: testAccount, current: source }),
+        changes,
+      }, "operator")).rejects.toMatchObject({ code: "LISTING_UPDATE_EMPTY" });
+      expect(s.store.insert).not.toHaveBeenCalled();
+      expect(s.provider.prepare).not.toHaveBeenCalled();
+      expect(s.provider.send).not.toHaveBeenCalled();
+    },
+  );
+  it("checks an accepted feed against the exact current item without writing or resubmitting", async () => {
+    const s = setup();
+    const record = s.get();
+    record.view.state = "accepted";
+    record.view.submissionId = "feed@US";
+    s.set(record);
+    s.provider.observe.mockResolvedValue({ ...updateSource, productType: "default" });
+    const mismatch = await s.service.verify(104, record.view.id);
+    expect(mismatch).toMatchObject({
+      categoryMatches: false,
+      requestedProductType: updateSource.productType,
+      current: { productType: "default", publishedStatus: "SYSTEM_PROBLEM" },
+      checkedAt: fixedNow.toISOString(),
+    });
+    s.provider.observe.mockResolvedValue(updateSource);
+    const matched = await s.service.verify(104, record.view.id);
+    expect(matched.categoryMatches).toBe(true);
+    // Matching classification is not proof of a published listing.
+    expect(matched.current.publishedStatus).toBe("SYSTEM_PROBLEM");
+    expect(s.store.progress).not.toHaveBeenCalled();
+    expect(s.store.refresh).not.toHaveBeenCalled();
+    expect(s.provider.send).not.toHaveBeenCalled();
+  });
+  it.each(["sku", "externalProductId", "identifier"] as const)(
+    "rejects %s drift during item verification", async (field) => {
+      const s = setup();
+      const record = s.get(); record.view.state = "accepted"; record.view.submissionId = "feed@US"; s.set(record);
+      s.provider.observe.mockResolvedValue({ ...updateSource, [field]: field === "identifier" ? { type: "GTIN", value: "other" } : "other" });
+      await expect(s.service.verify(104, record.view.id)).rejects.toMatchObject({ code: "LISTING_UPDATE_PRODUCT_CHANGED" });
+    },
+  );
+  it("allows same-account credential rotation, but rejects another account and unaccepted updates", async () => {
+    const s = setup();
+    await expect(s.service.verify(104, s.get().view.id)).rejects.toMatchObject({ code: "LISTING_UPDATE_NOT_ACCEPTED" });
+    expect(s.provider.observe).not.toHaveBeenCalled();
+    const record = s.get(); record.view.state = "accepted"; record.view.submissionId = "feed@US"; s.set(record);
+    s.provider.account.mockResolvedValue({ ...testAccount, revision: testAccount.revision + 1 });
+    await expect(s.service.verify(104, record.view.id)).resolves.toMatchObject({ categoryMatches: true });
+    s.provider.observe.mockClear();
+    s.provider.account.mockResolvedValue({ ...testAccount, accountId: "other" });
+    await expect(s.service.verify(104, record.view.id)).rejects.toMatchObject({ code: "LISTING_UPDATE_STALE" });
+    expect(s.provider.observe).not.toHaveBeenCalled();
+  });
+  it("surfaces failed item readback without changing accepted evidence", async () => {
+    const s = setup();
+    const record = s.get(); record.view.state = "accepted"; record.view.submissionId = "feed@US"; s.set(record);
+    s.provider.observe.mockRejectedValue(new Error("readback unavailable"));
+    await expect(s.service.verify(104, record.view.id)).rejects.toThrow("readback unavailable");
+    expect(s.get().view.state).toBe("accepted");
+    expect(s.provider.send).not.toHaveBeenCalled();
+  });
   it("reads current provider title/price while labeling other fields as last submitted", async () => {
     const { service, store, provider } = setup();
     provider.observe.mockResolvedValue({

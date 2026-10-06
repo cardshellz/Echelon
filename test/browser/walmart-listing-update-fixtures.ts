@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import {
   listingUpdateContextSchema,
   listingUpdateViewSchema,
+  listingUpdateVerificationSchema,
   reviewListingUpdateSchema,
   submitListingUpdateSchema,
   type ListingUpdateView,
@@ -28,12 +29,15 @@ export function createListingUpdateMock() {
     commands: [] as string[],
     loseSubmissionResponse: false,
     reportedProductType: productType,
+    verificationError: false,
+    verificationReads: [] as string[],
     lastSubmitted: {
       description: "A previous description",
       brand: "Shellz",
+      images: ["https://example.com/front.jpg", "https://example.com/back.jpg"],
       attributes: {
-        Orderable: { ShippingWeight: 2 },
-        Visible: { pieceCount: 200 },
+        Orderable: { ShippingWeight: 2, country_of_origin_substantial_transformation: "China" },
+        Visible: { pieceCount: 200, condition: "New", keyFeatures: ["Clear sleeves", "Archival material", "Pack of 100"] },
       },
     },
   };
@@ -47,6 +51,27 @@ export async function handleListingUpdateRequest(
     path = url.pathname;
   if (!path.startsWith(UPDATE_BASE)) return false;
   if (request.method() === "GET") {
+    if (path.endsWith("/verification")) {
+      state.verificationReads.push(path);
+      if (state.verificationError) {
+        await route.fulfill({ status: 503, json: { error: "Walmart item check is unavailable" } });
+        return true;
+      }
+      const update = state.updates.find((entry) => entry.id === path.split("/").at(-2))!;
+      await route.fulfill({ json: listingUpdateVerificationSchema.parse({
+        updateId: update.id,
+        requestedProductType: update.productType,
+        categoryMatches: update.productType === state.reportedProductType,
+        current: {
+          sku: update.sku, externalProductId: `WPID-${update.sku}`,
+          identifier: { type: "GTIN", value: "00036000291452" },
+          title: update.title, productType: state.reportedProductType,
+          priceCents: 2499, lifecycleStatus: "ACTIVE", publishedStatus: "SYSTEM_PROBLEM",
+        },
+        checkedAt: "2026-10-06T18:30:00.000Z",
+      }) });
+      return true;
+    }
     if (path === UPDATE_BASE) {
       await route.fulfill({ json: state.updates });
       return true;
@@ -136,7 +161,7 @@ export async function handleListingUpdateRequest(
       const update = state.updates.find((update) => update.id === id)!;
       update.state = "accepted";
       update.message =
-        "Walmart accepted these changes. Storefront updates may take time.";
+        "Walmart processed this feed. Check the item on Walmart to verify its category and listing status.";
       await route.fulfill({ json: update });
       return true;
     }
