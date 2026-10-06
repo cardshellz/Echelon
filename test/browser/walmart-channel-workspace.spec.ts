@@ -5,6 +5,7 @@ import type { ChannelCatalogRow } from "../../shared/types/channel-catalog";
 import { listingDraftItemSchema, listingOperationSchema } from "../../shared/types/channel-listing-publication";
 import { createMembershipMock, createPublicationMock, handleMembershipRequest, handlePublicationRequest, PUBLICATION_BASE } from "./walmart-publication-fixtures";
 import { editorSchema } from "../../server/modules/channels/adapters/walmart/walmart-listing-schema";
+import { createListingUpdateMock, handleListingUpdateRequest, UPDATE_BASE } from "./walmart-listing-update-fixtures";
 
 const BASE = "/api/channels/77";
 const status = { channelId: 77, connectionId: 9, partnerId: "10002558022", partnerName: "Card Shellz", environment: "production",
@@ -16,12 +17,13 @@ const listing = (sku: string, matched = true): ChannelCatalogRow => ({ sku, titl
 async function setup(page: Page, options: { readOnly?: boolean; connected?: boolean; catalogError?: boolean; catalogEmpty?: boolean; remoteRows?: ChannelCatalogRow[]; blocked?: boolean; inventoryAccess?: "view" | "activate" } = {}) {
   const state = { writes: [] as { path: string; body: any }[], reads: [] as string[], errors: [] as string[], unexpected: [] as string[],
     connected: options.connected !== false, linked: false, catalogError: options.catalogError ?? false,
-    remoteRows: options.remoteRows ?? (options.catalogEmpty ? [] : null), publication: createPublicationMock(), membership: createMembershipMock() };
+    remoteRows: options.remoteRows ?? (options.catalogEmpty ? [] : null), publication: createPublicationMock(), membership: createMembershipMock(), updates: createListingUpdateMock() };
   page.on("pageerror", error => state.errors.push(error.message));
   await page.route("**/*", route => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
   await page.route("**/api/**", async route => {
     const req = route.request(), url = new URL(req.url()), path = url.pathname;
     if (req.method() === "GET") state.reads.push(url.pathname + url.search);
+    if (await handleListingUpdateRequest(route, state.updates)) return;
     if (await handlePublicationRequest(route, state.publication)) return;
     if (await handleMembershipRequest(route, state.membership)) return;
     if (req.method() === "GET") {
@@ -59,6 +61,82 @@ async function setup(page: Page, options: { readOnly?: boolean; connected?: bool
   await expect(page.getByText("Store Setup", { exact: true })).toBeVisible();
   return state;
 }
+test("existing listing edits review only changed prices and check the maintenance feed status", async ({ page }, info) => {
+  const state = await setup(page, { remoteRows: [{ ...listing("CARD-P5"), mappingStatus: "linked", publishedStatus: "SYSTEM_PROBLEM" }] });
+  await page.getByRole("button", { name: "Edit listing CARD-P5", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "Edit Walmart listing", exact: true })).toBeVisible();
+  await expect(dialog.getByLabel("Walmart title", { exact: true })).toHaveValue("55PT Toploader Essentials Clear+ Easy Glide Combo Pack");
+  await dialog.getByLabel("Walmart price (USD)", { exact: true }).fill("27.49");
+  await expect(dialog.getByRole("button", { name: "Review changes", exact: true })).toBeInViewport({ ratio: 0.99 });
+  await dialog.screenshot({ path: info.outputPath("existing-listing-editor.png") });
+  expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(state.updates.writes).toEqual([]);
+  await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
+  await expect(dialog.getByText("$27.49", { exact: true })).toBeVisible();
+  expect(state.updates.writes[0]).toEqual({ path: `${UPDATE_BASE}/review`, body: { sku: "CARD-P5", sourceHash: "a".repeat(64), productType: "Trading Card Sleeves & Holders", changes: { priceCents: 2749 } } });
+  expect(state.updates.updates).toEqual([]);
+  await dialog.getByRole("button", { name: "Send changes to Walmart", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Listing changes", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Check Walmart status", exact: true }).click();
+  await expect(page.getByText("Walmart accepted", { exact: true })).toBeVisible();
+  expect(state.updates.writes.at(-1)?.path).toMatch(/\/status$/);
+  expect(state.publication.writes).toEqual([]); expect(state.membership.writes).toEqual([]);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("existing listing edits repair category and shipping while preserving untouched content", async ({ page }, info) => {
+  const state = await setup(page);
+  state.updates.reportedProductType = "default";
+  await page.getByRole("button", { name: "Edit listing CARD-P5", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("Walmart currently reports an unassigned category. The last submitted category is shown above.")).toBeVisible();
+  await dialog.getByRole("textbox", { name: "Search listing fields", exact: true }).fill("Shipping Weight");
+  await dialog.getByRole("spinbutton", { name: /^Shipping Weight \(lbs\)/ }).fill("3");
+  await expect(dialog.getByRole("button", { name: "Review changes", exact: true })).toBeInViewport({ ratio: 0.99 });
+  await dialog.screenshot({ path: info.outputPath("existing-listing-shipping.png") });
+  expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
+  expect(state.updates.reviews[0]).toMatchObject({ productType: "Trading Card Sleeves & Holders", changes: { attributes: { Orderable: { ShippingWeight: 3 } } } });
+  await dialog.getByRole("button", { name: "Back to edit", exact: true }).click();
+  await expect(dialog.getByLabel("Walmart price (USD)", { exact: true })).toHaveValue("24.99");
+  expect(state.updates.updates).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("existing listing edits reuse the command after a lost submission response and block a second in-flight update", async ({ page }) => {
+  const state = await setup(page); state.updates.loseSubmissionResponse = true;
+  await page.getByRole("button", { name: "Edit listing CARD-P5", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Walmart price (USD)", { exact: true }).fill("28.49");
+  await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
+  await dialog.getByRole("button", { name: "Send changes to Walmart", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Connection interrupted");
+  await dialog.getByRole("button", { name: "Send changes to Walmart", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(state.updates.updates).toHaveLength(1); expect(state.updates.commands).toHaveLength(2);
+  expect(state.updates.commands[0]).toBe(state.updates.commands[1]);
+  await page.getByRole("tab", { name: "Listing Feed", exact: true }).click();
+  await page.getByRole("button", { name: "Edit listing CARD-P5", exact: true }).click();
+  await expect(dialog.getByText("An update is already in progress for this listing. Check its status in Activity before sending another.")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Review changes", exact: true })).toBeDisabled();
+  expect(state.publication.writes).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("existing listing edits are unavailable to viewers", async ({ page }) => {
+  const state = await setup(page, { readOnly: true });
+  await expect(page.getByText("Product CARD-P5", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Edit listing / })).toHaveCount(0);
+  expect(state.updates.writes).toEqual([]);
+});
+
+test("existing listing edits exclude retired listings", async ({ page }) => {
+  const state = await setup(page, { remoteRows: [{ ...listing("RETIRED-SKU"), lifecycleStatus: "RETIRED" }] });
+  await expect(page.getByText("Product RETIRED-SKU", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Edit listing / })).toHaveCount(0);
+  expect(state.updates.writes).toEqual([]);
+});
+
 test("connected workspace uses normal sections, bulk matching and pagination", async ({ page }, info) => {
   const state = await setup(page);
   await expect(page.getByRole("tab", { name: "Listing Feed", exact: true })).toBeVisible();
@@ -369,7 +447,8 @@ test("one feed shows existing listings and selected drafts but publishes only th
   await expect(feed.getByText("1 draft items", { exact: true })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Existing listings", exact: true })).toHaveCount(0);
   const existing = table.getByRole("row").filter({ has: page.getByText("CARD-P5", { exact: true }) });
-  await expect(existing.getByRole("button", { name: /^Edit / })).toHaveCount(0);
+  await expect(existing.getByRole("button", { name: "Edit listing CARD-P5", exact: true })).toBeVisible();
+  await expect(existing.getByRole("button", { name: "Edit details", exact: true })).toHaveCount(0);
   await expect(existing.getByText("$4.99", { exact: true })).toHaveCount(0);
   await reviewSelectedDrafts(page, ["CARD-1"]);
   await expect(page.getByRole("dialog").getByRole("button", { name: "Publish 1 items", exact: true })).toBeVisible();

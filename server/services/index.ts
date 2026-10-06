@@ -26,6 +26,7 @@
  */
 
 import { createListingPublicationService } from "../listing-publication.composition";
+import { createListingUpdateService } from "../listing-update.composition";
 import { InventoryPublicationMembershipService } from "../modules/inventory-planning/application/inventory-publication-membership.service";
 import { InventoryPublicationInitialScopeService } from "../modules/inventory-planning/application/inventory-publication-initial-scope.service";
 import { PostgresInitialPublicationScopeStore } from "../modules/inventory-planning/infrastructure/inventory-publication-initial-scope.repository";
@@ -410,6 +411,7 @@ export function createServices(
   } };
   const walmartAdapter = new WalmartAdapter(walmart, new PostgresInventoryPublicationSupplyReader(databasePool));
   const listingPublication = createListingPublicationService({pool: databasePool, walmart, channelCatalog, quantityAdmission: quantityPublicationAdmission});
+  const listingUpdates = createListingUpdateService(databasePool, walmart);
   const inventoryPublicationMembership = new InventoryPublicationMembershipService(new PostgresInventoryPublicationMembershipStore(databasePool));
   const inventoryPublicationInitialScope = new InventoryPublicationInitialScopeService(new PostgresInitialPublicationScopeStore(databasePool));
   const adapterRegistry = new ChannelAdapterRegistry();
@@ -737,6 +739,7 @@ export function createServices(
     channelCatalog,
     walmartOrderPoll,
     listingPublication,
+    listingUpdates,
     inventoryPublicationMembership,
     inventoryPublicationInitialScope,
   };

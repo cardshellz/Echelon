@@ -32,6 +32,8 @@ import {
 } from "./model";
 import { ChannelListingFeed } from "./ChannelListingFeed";
 import { ListingActivity } from "./ListingActivity";
+import { ListingUpdateActivity } from "./ListingUpdateActivity";
+import { ListingUpdateEditor } from "./ListingUpdateEditor";
 import { ListingCatalogPicker } from "./ListingCatalogPicker";
 import { ListingItemEditor } from "./ListingItemEditor";
 import { ListingPricingRules } from "./ListingPricingRules";
@@ -80,6 +82,7 @@ export function ChannelListingPublicationWorkspace({
   const [dirty, setDirty] = useState(false);
   const [picking, setPicking] = useState(false);
   const [editing, setEditing] = useState<number | null>(null);
+  const [editingExistingSku, setEditingExistingSku] = useState<string | null>(null);
   const [bulkSelectedIds, setBulkSelectedIds] = useState<ReadonlySet<number>>(
     new Set(),
   );
@@ -652,6 +655,7 @@ export function ChannelListingPublicationWorkspace({
               }
               onAdd={() => setPicking(true)}
               onEdit={setEditing}
+              onEditExisting={setEditingExistingSku}
               onRemove={(variantId) =>
                 changeItems(
                   draft.items.filter((item) => item.variantId !== variantId),
@@ -676,7 +680,8 @@ export function ChannelListingPublicationWorkspace({
               onSave={savePricing}
             />
           </TabsContent>
-          <TabsContent value="activity">
+          <TabsContent value="activity" className="space-y-4">
+            <ListingUpdateActivity channelId={channelId} canEdit={canEdit} onEdit={setEditingExistingSku} />
             <ListingActivity
               channelId={channelId}
               connectionId={connectionId}
@@ -726,6 +731,20 @@ export function ChannelListingPublicationWorkspace({
                 ),
               );
               setEditing(null);
+            }}
+          />
+        )}
+        {editingExistingSku && canEdit && (
+          <ListingUpdateEditor
+            key={editingExistingSku}
+            channelId={channelId}
+            sku={editingExistingSku}
+            onClose={() => setEditingExistingSku(null)}
+            onSubmitted={() => {
+              setEditingExistingSku(null);
+              setTab("activity");
+              setNotice("Listing changes queued. Follow the update in Activity.");
+              void client.invalidateQueries({ queryKey: [`/api/channels/${channelId}/listing-updates`] });
             }}
           />
         )}

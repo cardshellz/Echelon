@@ -489,6 +489,7 @@ function startEchelonSyncScheduler(
   setDropshipFulfillmentSync(services.wmsSync);
   setDropshipInventoryRuntimeAuthorityGate(services.dropshipInventoryRuntimeAuthority);
   startListingPublicationWorker(services.listingPublication);
+  startListingPublicationWorker(services.listingUpdates, "listing_update_worker");
 
   if (process.env.WALMART_ORDER_POLLING_ENABLED !== "false" && !schedulersDisabled("WALMART_ORDER_POLLING_DISABLED")) {
     startWalmartOrderPolling(services.walmartOrderPoll, services.walmart);
