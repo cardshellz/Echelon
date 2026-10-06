@@ -167,7 +167,6 @@ export class WalmartListingUpdateProvider implements ListingUpdateProvider {
           Orderable: {
             ...orderable,
             sku: source.sku,
-            specProductType: command.productType,
             productIdentifiers: {
               productIdType: source.identifier.type,
               productId: source.identifier.value,
@@ -177,6 +176,8 @@ export class WalmartListingUpdateProvider implements ListingUpdateProvider {
               : { price: priceForWalmart(changes.priceCents) }),
           },
           Visible: {
+            // Maintenance selects the product type here. Walmart rejects the
+            // undocumented Orderable.specProductType field in this feed.
             [command.productType]: {
               ...visible,
               ...(changes.title === undefined

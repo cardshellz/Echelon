@@ -9,6 +9,10 @@ import {
   WALMART_LISTING_SPEC,
   WalmartListingApi,
 } from "../../adapters/walmart/walmart-listing-api";
+import {
+  compileListingSchema,
+  listingSubmissionSchema,
+} from "../../adapters/walmart/walmart-listing-schema";
 import { listingHash } from "../../../marketplace-listings/domain/listing-publication";
 import {
   listingUpdateRecord,
@@ -86,6 +90,60 @@ function setup() {
 }
 
 describe("Walmart existing-listing maintenance", () => {
+  it("validates category-only repairs against Walmart's unchanged maintenance schema", async () => {
+    const { provider, account, record } = setup();
+    const prepared = await provider.prepare(
+      account,
+      { ...updateSource, productType: "default" },
+      { ...record.intent.command, changes: {} },
+    );
+    const validate = compileListingSchema(maintenanceSchema);
+    expect(validate(prepared.payload), JSON.stringify(validate.errors)).toBe(true);
+    expect(prepared.issues).toEqual([]);
+    expect(prepared.payload).toMatchObject({
+      MPItem: [{
+        Orderable: {
+          sku: updateSource.sku,
+          productIdentifiers: {
+            productIdType: updateSource.identifier.type,
+            productId: updateSource.identifier.value,
+          },
+        },
+        Visible: { [record.intent.command.productType]: {} },
+      }],
+    });
+    expect(prepared.schemaHash).toBe(listingHash(maintenanceSchema));
+    expect(listingSubmissionSchema(
+      maintenanceSchema, "MP_MAINTENANCE", record.intent.command.productType,
+    )).toBe(maintenanceSchema);
+  });
+  it("does not allow specProductType through maintenance schema validation", () => {
+    const schema = listingSubmissionSchema(
+      maintenanceSchema, "MP_MAINTENANCE", updateSource.productType,
+    );
+    const validate = compileListingSchema(schema);
+    const payload = {
+      MPItemFeedHeader: {
+        businessUnit: "WALMART_US", locale: "en", version: WALMART_LISTING_SPEC.MP_MAINTENANCE,
+      },
+      MPItem: [{
+        Orderable: {
+          sku: updateSource.sku,
+          productIdentifiers: { productIdType: updateSource.identifier.type, productId: updateSource.identifier.value },
+          specProductType: updateSource.productType,
+        },
+        Visible: { [updateSource.productType]: {} },
+      }],
+    };
+    expect(validate(payload)).toBe(false);
+    expect(validate.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        keyword: "additionalProperties",
+        instancePath: "/MPItem/0/Orderable",
+        params: { additionalProperty: "specProductType" },
+      }),
+    ]));
+  });
   it("sends only the changed price, exact identifier and bound product type, without stock or creation defaults", async () => {
     const { provider, account, record, api } = setup();
     const source = await provider.observe(account, updateSource.sku);
@@ -110,7 +168,6 @@ describe("Walmart existing-listing maintenance", () => {
         {
           Orderable: {
             sku: "SKU-10",
-            specProductType: updateSource.productType,
             productIdentifiers: {
               productIdType: "GTIN",
               productId: "00036000291452",
@@ -162,6 +219,29 @@ describe("Walmart existing-listing maintenance", () => {
     expect(JSON.stringify(prepared.payload)).not.toContain('"price"');
     expect(JSON.stringify(prepared.payload)).not.toContain('"inventory"');
     expect(JSON.stringify(prepared.payload)).toContain('"ShippingWeight":0.75');
+  });
+  it("requires a new review for a previously prepared payload containing specProductType", async () => {
+    const { provider, account, record, api } = setup();
+    const prepared = await provider.prepare(account, updateSource, record.intent.command);
+    const legacyPayload = structuredClone(prepared.payload);
+    const items = legacyPayload.MPItem as Array<{ Orderable: Record<string, unknown> }>;
+    items[0].Orderable.specProductType = record.intent.command.productType;
+    const beforeSend = vi.fn(async () => {});
+    await expect(provider.send({
+      ...record.intent,
+      prepared: { ...prepared, payload: legacyPayload },
+    }, testId(4), beforeSend)).rejects.toMatchObject({
+      code: "LISTING_UPDATE_STALE", effect: "not_sent",
+    });
+    expect(beforeSend).not.toHaveBeenCalled();
+    expect(api.submitMaintenance).not.toHaveBeenCalled();
+  });
+  it.each(["Unknown type", "__proto__"])("rejects an unsupported maintenance product type (%s)", async (productType) => {
+    const { provider, account, record, api } = setup();
+    await expect(provider.prepare(account, updateSource, {
+      ...record.intent.command, productType,
+    })).rejects.toMatchObject({ code: "WALMART_LISTING_SCHEMA_INVALID" });
+    expect(api.submitMaintenance).not.toHaveBeenCalled();
   });
   it.each([
     "inventory",
@@ -419,7 +499,11 @@ describe("Walmart existing-listing maintenance", () => {
       expect(sends).toHaveLength(1);
       expect(sends[0].url).toContain("feedType=MP_MAINTENANCE");
       const file = (sends[0].init?.body as FormData).get("file") as File;
-      expect(listingHash(JSON.parse(await file.text()))).toBe(
+      const submitted = JSON.parse(await file.text());
+      const validate = compileListingSchema(maintenanceSchema);
+      expect(validate(submitted), JSON.stringify(validate.errors)).toBe(true);
+      expect(Object.keys(submitted.MPItem[0].Visible)).toEqual([updateSource.productType]);
+      expect(listingHash(submitted)).toBe(
         listingHash(prepared.payload),
       );
     },
