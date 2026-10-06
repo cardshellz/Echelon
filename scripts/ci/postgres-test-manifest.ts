@@ -22,6 +22,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/procurement/__tests__/integration/shipment-purchase-orders.integration.test.ts",
   "server/modules/procurement/__tests__/integration/receiving-cost-application.integration.test.ts",
   "server/modules/inventory/__tests__/integration/cost-lineage-owners.integration.test.ts",
+  "server/modules/inventory/__tests__/integration/lot-cost-ownership.integration.test.ts",
   "server/modules/inventory/__tests__/integration/canonical-claim-picker-observation.integration.test.ts",
   "server/modules/procurement/__tests__/integration/invoice-cost-review.integration.test.ts",
   "server/modules/inventory/__tests__/integration/quantity-ledger.integration.test.ts",
@@ -44,7 +45,6 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/procurement/__tests__/integration/po-lifecycle-timestamp.integration.test.ts",
   "server/modules/procurement/__tests__/integration/historical-po-supplier-evidence-backfill.integration.test.ts",
   "server/modules/procurement/__tests__/integration/legacy-po-receive-config-remediation.integration.test.ts",
-  "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts",
   "server/modules/procurement/__tests__/integration/ap-invoice-line-metadata.integration.test.ts",
   "server/modules/inventory/__tests__/integration/lot-cost-column-types.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-availability-foundation.integration.test.ts",
@@ -139,4 +139,5 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/dropship/__tests__/integration/dropship-finance.integration.test.ts",
   "server/modules/order-edits/__tests__/integration/order-edit-warehouse.integration.test.ts",
   "server/modules/oms/__tests__/integration/order-edit-paid-projection.integration.test.ts",
+  "server/modules/catalog/__tests__/integration/catalog-variant-publication-photos.integration.test.ts",
 ]);

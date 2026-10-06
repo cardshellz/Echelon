@@ -332,6 +332,14 @@ describe("order editor presentation boundaries", () => {
     expect(formatOrderEditMoney(1999, "USD")).toBe("$19.99");
     expect(formatOrderEditMoney(0, "USD")).toBe("$0.00");
     expect(formatOrderEditMoney(-100, "USD")).toBe("-$1.00");
+    expect(formatOrderEditMoney(-1, "USD")).toBe("-$0.01");
+    expect(formatOrderEditMoney(Number.MAX_SAFE_INTEGER, "USD")).toBe(
+      "$90,071,992,547,409.91",
+    );
+    expect(formatOrderEditMoney(-Number.MAX_SAFE_INTEGER, "USD")).toBe(
+      "-$90,071,992,547,409.91",
+    );
+    expect(formatOrderEditMoney(100, "bad")).toBe("Unavailable");
     expect(formatOrderEditMoney(1.5, "USD")).toBe("Unavailable");
     expect(formatOrderEditMoney(Number.MAX_SAFE_INTEGER + 1, "USD")).toBe(
       "Unavailable",

@@ -118,7 +118,7 @@ describeWithDisposableDb.sequential("inventory lot cost column types", () => {
     // The exact value that broke every transfer: zero, padded to scale 4.
     expect(lot.packaging_cost_cents).toBe("0.0000");
     expect(() => normalizeBuildLotCosts(lot))
-      .toThrowError(expect.objectContaining({ code: "INVALID_BUILD_COST" }));
+      .toThrowError(expect.objectContaining({ code: "INVALID_SOURCE_LOT_COST" }));
   });
 
   it("converts the column to bigint and unblocks the read path", async () => {

@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useInventoryCommand } from "@/lib/inventory-command";
+import { returnCommandBodySchema, returnCommandResultFor, type ReturnCommandBody } from "@shared/inventory/return-command";
+import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -84,6 +86,7 @@ export default function Returns() {
   const [returnItems, setReturnItems] = useState<Record<number, ReturnItemState>>({});
   const [locationId, setLocationId] = useState<string>("");
   const [notes, setNotes] = useState("");
+  const inventoryCommand = useInventoryCommand();
 
   const { data: locations = [] } = useQuery<WarehouseLocation[]>({
     queryKey: ["/api/warehouse/locations"],
@@ -141,22 +144,14 @@ export default function Returns() {
   }
 
   const processReturnMutation = useMutation({
-    mutationFn: async (body: {
-      orderId: number;
-      items: Array<{ orderItemId: number; productVariantId: number; qty: number; condition: string; reason?: string }>;
-      warehouseLocationId: number;
-      notes?: string;
-    }) => {
-      const res = await fetch("/api/returns/process", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || "Failed to process return");
+    mutationFn: async (command: { body: ReturnCommandBody } | { retainedKey: string }) => {
+      if ("retainedKey" in command) {
+        const retained = inventoryCommand.pending("/api/returns/process", returnCommandBodySchema)
+          .find(intent => intent.commandKey === command.retainedKey);
+        if (!retained) throw new Error("The earlier return information is unavailable. Verify it before starting another return.");
+        return inventoryCommand.resume("/api/returns/process", retained.commandKey, returnCommandResultFor(retained.body));
       }
-      return res.json();
+      return inventoryCommand("/api/returns/process", command.body, returnCommandResultFor(command.body));
     },
     onSuccess: (result) => {
       toast({
@@ -196,13 +191,23 @@ export default function Returns() {
       return;
     }
 
-    processReturnMutation.mutate({
+    processReturnMutation.mutate({ body: {
       orderId: lookupData.order.id,
       items: selectedItems,
       warehouseLocationId: parseInt(locationId),
       notes: notes || undefined,
-    });
+    } });
   };
+
+  const retainedReturns = useMemo(() => {
+    if (!lookupData) return { items: [], error: null };
+    try {
+      return { items: inventoryCommand.pending("/api/returns/process", returnCommandBodySchema)
+        .filter(intent => intent.body.orderId === lookupData.order.id), error: null };
+    } catch (error) {
+      return { items: [], error: error instanceof Error ? error.message : "Previous return information needs verification." };
+    }
+  }, [inventoryCommand, lookupData, processReturnMutation.status]);
 
   const selectedCount = Object.values(returnItems).filter((s) => s.selected && s.qty > 0).length;
   const hasItemsWithoutVariant = lookupData?.items.some(
@@ -278,6 +283,17 @@ export default function Returns() {
       {/* Order Info */}
       {lookupData && (
         <>
+          {retainedReturns.error && <p role="alert" className="text-destructive">{retainedReturns.error}</p>}
+          {retainedReturns.items.map(intent => (
+            <Card key={intent.commandKey}>
+              <CardContent className="p-3 flex flex-col gap-2">
+                <p>No confirmation was received for a previous return of {intent.body.items.reduce((sum,item)=>sum+item.qty,0)} item(s). Check its result before receiving those items again.</p>
+                <Button disabled={processReturnMutation.isPending} onClick={()=>processReturnMutation.mutate({ retainedKey: intent.commandKey })}>
+                  Check return result
+                </Button>
+              </CardContent>
+            </Card>
+          ))}
           <Card>
             <CardHeader className="p-3 md:p-4 pb-2">
               <CardTitle className="text-base md:text-lg flex items-center gap-2">

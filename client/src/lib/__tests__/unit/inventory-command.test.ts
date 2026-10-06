@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { createInventoryCommandRequester, InventoryIntentRecoveryError } from "../../inventory-command";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -11,6 +12,41 @@ function retainedStore() {
 }
 
 describe("inventory command client intent", () => {
+  it("resumes an exact retained command without reconstructing or generating its payload", async () => {
+    const store = retainedStore();
+    const persistence = { actorId: "operator-1", storage: () => store };
+    const fetchMock = vi.fn().mockRejectedValueOnce(new Error("Lost response"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ orderId: 200 }), { status: 200 }));
+    vi.stubGlobal("fetch",fetchMock);
+    await expect(createInventoryCommandRequester(()=>"return-intent",undefined,persistence)("/return",payload)).rejects.toThrow();
+    const neverGenerate = vi.fn(()=>"replacement");
+    const requester = createInventoryCommandRequester(neverGenerate,undefined,persistence);
+    const bodySchema = z.object({ productVariantId: z.number(),warehouseLocationId: z.number(),qtyDelta: z.number(),reason: z.string() }).strict();
+    expect(requester.pending("/return",bodySchema)).toEqual([{ commandKey: "return-intent",body: payload }]);
+    await expect(requester.resume("/return","return-intent",z.object({ orderId: z.number() }).strict())).resolves.toEqual({ orderId: 200 });
+    expect(fetchMock.mock.calls[1][1].body).toBe(fetchMock.mock.calls[0][1].body);
+    expect(neverGenerate).not.toHaveBeenCalled();
+    await expect(requester.resume("/return","return-intent",z.object({ orderId: z.number() }))).rejects.toBeInstanceOf(InventoryIntentRecoveryError);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it("retains a return command across reload when a successful response violates its contract", async () => {
+    const store = retainedStore();
+    const persistence = { actorId: "operator-1", storage: () => store };
+    const responseSchema = z.object({ orderId: z.number().int().positive() }).strict();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ orderId: "wrong" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ orderId: 200 }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(createInventoryCommandRequester(() => "return-intent", undefined, persistence)
+      ("/api/returns/process", payload, responseSchema)).rejects.toThrow();
+    const neverGenerate = vi.fn(() => "unsafe-new-return");
+    await expect(createInventoryCommandRequester(neverGenerate, undefined, persistence)
+      ("/api/returns/process", payload, responseSchema)).resolves.toEqual({ orderId: 200 });
+    expect(neverGenerate).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls[1][1].body).toBe(fetchMock.mock.calls[0][1].body);
+    expect(JSON.parse([...store.data.values()][0]).pending).toEqual([]);
+  });
+
   it.each(["network", "server", "invalid-success", "rejection"])("retains the exact key after %s failure", async failure => {
     const fetchMock = vi.fn();
     if (failure === "network") fetchMock.mockRejectedValueOnce(new Error("Lost response"));

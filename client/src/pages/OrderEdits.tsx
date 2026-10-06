@@ -19,6 +19,10 @@ import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/lib/auth";
 import { useDebounce } from "@/hooks/use-debounce";
 import {
+  OrderEditTotals,
+  OrderEditPayments,
+} from "@/components/order-edits/OrderEditFinancials";
+import {
   MIN_ORDER_EDIT_PAYMENT_WINDOW_HOURS,
   MAX_ORDER_EDIT_PAYMENT_WINDOW_HOURS,
   parseOrderEditPaymentWindowHours,
@@ -533,6 +537,14 @@ export function OrderDraft({
         </p>
         <ErrorMessage text={validationMessage} />
         <ErrorMessage text={error} />
+        {order.financials && (
+          <OrderEditTotals
+            columns={[{ label: "Current order", financials: order.financials }]}
+          />
+        )}
+        {order.settlement && (
+          <OrderEditPayments settlement={order.settlement} />
+        )}
         <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
           <p className="text-sm">
             Current order total{" "}
@@ -587,6 +599,24 @@ export function OrderEditOperationView({
     formatOrderEditMoney(value, operation.currency);
   const expired =
     operation.expiresAt !== null && Date.parse(operation.expiresAt) <= now;
+  const financials = operation.financials;
+  const showCurrent = ["completed", "recovered", "failed", "expired"].includes(
+    operation.status,
+  );
+  const totalsColumns =
+    financials?.before && financials.quoted && !showCurrent
+      ? [
+          { label: "Before edit", financials: financials.before },
+          { label: "After changes", financials: financials.quoted },
+        ]
+      : financials?.before && financials.current && showCurrent
+        ? [
+            { label: "Before edit", financials: financials.before },
+            { label: "Current order", financials: financials.current },
+          ]
+        : financials?.current
+          ? [{ label: "Current order", financials: financials.current }]
+          : [];
   return (
     <Card>
       <CardHeader>
@@ -603,10 +633,10 @@ export function OrderEditOperationView({
             ? "This edit needs review. You can cancel this unsubmitted edit, or keep its reference for investigation."
             : copy.description}
         </p>
-        {["completed", "recovered", "expired"].includes(operation.status) && (
+        {showCurrent && (
           <p className="text-xs text-muted-foreground">
-            The reviewed changes below are retained for reference. Payment and
-            refund amounts are the quoted differences.
+            Items and totals below show the current order. Payments and refunds
+            show their recorded status.
           </p>
         )}
         <div className="divide-y rounded-md border">
@@ -625,32 +655,59 @@ export function OrderEditOperationView({
             </div>
           ))}
         </div>
-        <dl className="ml-auto grid max-w-sm grid-cols-2 gap-x-4 gap-y-2 text-sm">
-          <dt>Original total</dt>
-          <dd className="text-right tabular-nums">
-            {money(operation.previousTotalCents)}
-          </dd>
-          <dt>Quoted total</dt>
-          <dd className="text-right tabular-nums">
-            {money(operation.updatedTotalCents)}
-          </dd>
-          {payable && (
-            <>
-              <dt className="font-semibold">Payment difference</dt>
-              <dd className="text-right font-semibold tabular-nums">
-                {money(operation.balanceDueCents)}
-              </dd>
-            </>
+        {totalsColumns.length > 0 ? (
+          <OrderEditTotals columns={totalsColumns} />
+        ) : (
+          <dl className="ml-auto grid max-w-sm grid-cols-2 gap-x-4 gap-y-2 text-sm">
+            <dt>
+              {operation.quoteAvailable === false
+                ? "Current order total"
+                : "Original total"}
+            </dt>
+            <dd className="text-right tabular-nums">
+              {money(operation.previousTotalCents)}
+            </dd>
+            {operation.quoteAvailable !== false && (
+              <>
+                <dt>{showCurrent ? "Current order total" : "Quoted total"}</dt>
+                <dd className="text-right tabular-nums">
+                  {money(operation.updatedTotalCents)}
+                </dd>
+              </>
+            )}
+            {payable && (
+              <>
+                <dt className="font-semibold">Payment difference</dt>
+                <dd className="text-right font-semibold tabular-nums">
+                  {money(operation.balanceDueCents)}
+                </dd>
+              </>
+            )}
+            {refundable && (
+              <>
+                <dt className="font-semibold">Refund difference</dt>
+                <dd className="text-right font-semibold tabular-nums">
+                  {money(operation.refundDueCents)}
+                </dd>
+              </>
+            )}
+          </dl>
+        )}
+        {totalsColumns.length > 0 &&
+          operation.status === "ready" &&
+          (payable || refundable) && (
+            <p className="text-right text-sm font-semibold">
+              {payable
+                ? `Payment required for these changes: ${money(operation.balanceDueCents)}`
+                : `Refund for these changes: ${money(operation.refundDueCents)}`}
+            </p>
           )}
-          {refundable && (
-            <>
-              <dt className="font-semibold">Refund difference</dt>
-              <dd className="text-right font-semibold tabular-nums">
-                {money(operation.refundDueCents)}
-              </dd>
-            </>
-          )}
-        </dl>
+        {operation.settlement && (
+          <OrderEditPayments
+            settlement={operation.settlement}
+            pendingChanges={operation.status === "ready"}
+          />
+        )}
         {operation.paymentDeadline && (
           <p className="rounded-md bg-muted p-3 text-sm">
             Payment deadline:{" "}

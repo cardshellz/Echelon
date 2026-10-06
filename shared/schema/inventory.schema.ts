@@ -967,6 +967,8 @@ export const inventoryLots = inventorySchema.table("inventory_lots", {
   status: varchar("status", { length: 20 }).default("active"), // active, depleted, expired
   inboundShipmentId: integer("inbound_shipment_id").references(() => inboundShipments.id, { onDelete: "set null" }), // FK to inbound_shipments (added post-definition)
   costProvisional: integer("cost_provisional").notNull().default(0), // 1 = landed cost not yet finalized
+  // 0 preserves historical compatibility mirrors; 1 proves mills, including zero.
+  costPrecisionVersion: integer("cost_precision_version").notNull().default(0),
   // --- COGS cost layers (migration 051 / server/db.ts startup DDL) ---------
   // These were historically raw-SQL-only columns. Surfaced in Drizzle here so
   // the ORM is the single source of truth for lot cost. All four are WHOLE

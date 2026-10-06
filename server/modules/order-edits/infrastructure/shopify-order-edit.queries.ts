@@ -1,11 +1,13 @@
 const MONEY = `presentmentMoney { amount currencyCode } shopMoney { amount currencyCode }`;
-const TRANSACTION = `id kind status gateway manualPaymentGateway parentTransaction { id } amountSet { ${MONEY} }`;
+const TRANSACTION = `id kind status gateway manualPaymentGateway processedAt parentTransaction { id } amountSet { ${MONEY} }`;
+const DISCOUNT_VALUE = `value { __typename ... on PricingPercentageValue { percentage } ... on MoneyV2 { amount currencyCode } }`;
+const CALCULATED_ALLOCATION = `calculatedDiscountAllocations { allocatedAmountSet { ${MONEY} } discountApplication { __typename id allocationMethod appliedTo targetType targetSelection description ${DISCOUNT_VALUE} ... on CalculatedDiscountCodeApplication { code } } }`;
 export const REFUND_FIELDS = `id note totalRefundedSet { ${MONEY} } transactions(first: 250) { nodes { ${TRANSACTION} } pageInfo { hasNextPage } }`;
 export const ORDER_QUERY = `query EchelonEditOrder($id: ID!) {
   shop { currencyCode primaryDomain { host } transformEnabled: metafield(namespace: "cardshellz", key: "transform_global_enabled") { value } }
   order(id: $id) {
     id name updatedAt merchantEditable merchantEditableErrors cancelledAt closed fullyPaid
-    currencyCode presentmentCurrencyCode capturable
+    currencyCode presentmentCurrencyCode capturable taxesIncluded
     currentTotalPriceSet { ${MONEY} } totalOutstandingSet { ${MONEY} }
     currentSubtotalPriceSet { ${MONEY} } currentTotalTaxSet { ${MONEY} }
     netPaymentSet { ${MONEY} } totalCapturableSet { ${MONEY} } currentShippingPriceSet { ${MONEY} }
@@ -14,7 +16,7 @@ export const ORDER_QUERY = `query EchelonEditOrder($id: ID!) {
     customAttributes { key value }
     shippingAddress { address1 address2 city provinceCode zip countryCodeV2 }
     customer { id tags membershipPlan: metafield(namespace: "cardshellz", key: "membership_plan") { value } }
-    discountApplications(first: 250) { nodes { __typename index targetType allocationMethod targetSelection
+    discountApplications(first: 250) { nodes { __typename index targetType allocationMethod targetSelection ${DISCOUNT_VALUE}
       ... on AutomaticDiscountApplication { title }
       ... on ManualDiscountApplication { title }
       ... on DiscountCodeApplication { code }
@@ -23,9 +25,11 @@ export const ORDER_QUERY = `query EchelonEditOrder($id: ID!) {
       id title variantTitle sku currentQuantity unfulfilledQuantity originalUnitPriceSet { ${MONEY} }
       unfulfilledDiscountedTotalSet { ${MONEY} }
       discountedUnitPriceSet { ${MONEY} } merchantEditable requiresShipping isGiftCard
+      priceAfterAllDiscountsBeforeTaxesSet { ${MONEY} }
       sellingPlan { name } lineItemGroup { id } variant { id }
       discountAllocations { allocatedAmountSet { ${MONEY} } discountApplication { index } }
     } pageInfo { hasNextPage } }
+    shippingLines(first: 250) { nodes { id isRemoved originalPriceSet { ${MONEY} } currentDiscountedPriceSet { ${MONEY} } } pageInfo { hasNextPage } }
     transactions(first: 250) { ${TRANSACTION} }
     transactionsCount { count precision }
     refunds { ${REFUND_FIELDS} }
@@ -55,12 +59,15 @@ export const PRICING_PROVENANCE_QUERY = `query EchelonEditPricingProvenance {
   } } pageInfo { hasNextPage } }
 }`;
 export const CALCULATED_FIELDS = `id originalOrder { id } totalPriceSet { ${MONEY} } totalOutstandingSet { ${MONEY} }
+  subtotalPriceSet { ${MONEY} } cartDiscountAmountSet { ${MONEY} } taxLines { priceSet { ${MONEY} } }
   shippingLines { id price { ${MONEY} } stagedStatus }
   lineItems(first: 250) { nodes { id title variantTitle quantity editableQuantityBeforeChanges editableSubtotalSet { ${MONEY} } variant { id }
     originalUnitPriceSet { ${MONEY} } discountedUnitPriceSet { ${MONEY} }
+    ${CALCULATED_ALLOCATION}
   } pageInfo { hasNextPage } }
   addedLineItems(first: 250) { nodes { id title variantTitle quantity editableQuantityBeforeChanges editableSubtotalSet { ${MONEY} } variant { id }
     originalUnitPriceSet { ${MONEY} } discountedUnitPriceSet { ${MONEY} }
+    ${CALCULATED_ALLOCATION}
   } pageInfo { hasNextPage } }`;
 export const BEGIN_MUTATION = `mutation EchelonEditBegin($id: ID!) {
   orderEditBegin(id: $id) { calculatedOrder { ${CALCULATED_FIELDS} } orderEditSession { id } userErrors { field message } }

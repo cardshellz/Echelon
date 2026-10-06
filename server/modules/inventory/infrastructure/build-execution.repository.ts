@@ -1,3 +1,4 @@
+import { lotCostNeedsReview } from "../domain/lot-cost";
 import { lockInventoryCostGraph, recordLotCostContribution } from "./cost-evidence.repository";
 import { sql } from "drizzle-orm";
 import { openOperationalQuantityPosting } from "./operational-quantity-posting";
@@ -863,6 +864,7 @@ export class BuildExecutionRepository {
     const run = runResult.rows[0];
     const consumedCost = emptyCost();
     const sourceQuantities = new Map<number, number>();
+    let outputCostProvisional = 0;
     // Reuse the durable run timestamp; do not sample a second application clock.
     if (!(run.created_at instanceof Date) && typeof run.created_at !== "string") {
       throw new BuildDomainError("BUILD_COST_AUDIT_TIME_INVALID", "The build run has no recorded creation time.");
@@ -963,6 +965,7 @@ export class BuildExecutionRepository {
         }
 
         const costs = this.dependencies.normalizeBuildLotCosts(reservation);
+        if (lotCostNeedsReview(reservation)) outputCostProvisional = 1;
         addCost(consumedCost, costs, take);
         const sourceLotId = asInteger(reservation.id, "sourceLot.id");
         sourceQuantities.set(sourceLotId, (sourceQuantities.get(sourceLotId) ?? 0) + take);
@@ -1088,7 +1091,7 @@ export class BuildExecutionRepository {
            landed_cost_cents, total_unit_cost_cents, unit_cost_mills,
            po_unit_cost_mills, packaging_cost_mills, landed_cost_mills,
            total_unit_cost_mills, qty_received, qty_on_hand, qty_reserved,
-           qty_picked, received_at, status, cost_provisional, cost_source, notes)
+           qty_picked, received_at, status, cost_provisional, cost_source, notes, cost_precision_version)
         VALUES
           (${lotNumber}, ${order.output_variant_id}, ${order.output_location_id},
            ${input.buildOrderId}, ${run.id}, ${totalCostCents}, ${poCostCents},
@@ -1096,8 +1099,8 @@ export class BuildExecutionRepository {
            ${layer.totalMills.toString()}::bigint, ${layer.poMills.toString()}::bigint,
            ${layer.packagingMills.toString()}::bigint, ${layer.landedMills.toString()}::bigint,
            ${layer.totalMills.toString()}::bigint, ${layer.qty}, ${quantityPosting ? 0 : layer.qty}, 0, 0,
-           now(), 'active', 0, 'build',
-           ${`Output from build ${order.system_number} run ${run.run_number}`})
+           now(), 'active', ${outputCostProvisional}, 'build',
+           ${`Output from build ${order.system_number} run ${run.run_number}`}, 1)
         RETURNING id
       `);
       if (quantityPosting) await quantityPosting.addLot(Number(outputLot.rows[0].id), {

@@ -1,3 +1,5 @@
+import { lotCostFollowUpQuerySchema } from "@shared/inventory/lot-cost-follow-up";
+import { returnCommandRequestSchema, returnCommandResultFor } from "@shared/inventory/return-command";
 import { isLevelDeleteForbiddenError, isRetiredEmptyLevel } from "./domain/retired-inventory-level";
 import type { Express } from "express";
 import { awaitPageReads, limitPageRead } from "../../platform/http/page-read-limit";
@@ -28,6 +30,7 @@ import { createChannelSyncService } from "../channels/sync.service";
 import { AppError } from "@shared/errors";
 import { ZodError } from "zod";
 import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
+import { ReturnRestockError, CostEvidenceError, LotCostError } from "./return-inventory.api";
 
 type InventoryRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
@@ -908,32 +911,34 @@ export function registerInventoryRoutes(app: Express) {
   app.post("/api/returns/process", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { returns } = req.app.locals.services;
-      const { orderId, items, warehouseLocationId, notes } = req.body;
       const userId = req.session.user?.id;
 
-      if (!orderId || !items || !Array.isArray(items) || items.length === 0 || !warehouseLocationId) {
-        return res.status(400).json({ error: "Missing required fields: orderId, items (array), warehouseLocationId" });
+      const parsed = returnCommandRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ code: "RETURN_INPUT_INVALID", error: "Return identities, quantities and conditions must be valid." });
       }
+      const { commandKey, ...body } = parsed.data;
 
       const result = await returns.processReturn({
-        orderId,
-        items,
-        warehouseLocationId,
+        ...body,
         userId,
-        notes,
+        commandKey,
       });
 
       const { replenishment: retReplen } = req.app.locals.services;
       if (retReplen) {
-        retReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
-          console.warn(`[Replen] Post-return check failed for loc ${warehouseLocationId}:`, err)
+        retReplen.checkReplenForLocation(body.warehouseLocationId).catch((err: any) =>
+          console.warn(`[Replen] Post-return check failed for loc ${body.warehouseLocationId}:`, err)
         );
       }
 
-      res.json(result);
+      res.json(returnCommandResultFor(body).parse(result));
     } catch (error: any) {
       console.error("Error processing return:", error);
-      res.status(500).json({ error: error.message || "Failed to process return" });
+      if (error instanceof ReturnRestockError || error instanceof CostEvidenceError || error instanceof LotCostError) {
+        return res.status(error.statusCode).json({ code: error.code,error: error.message,context: error.context });
+      }
+      res.status(500).json({ error: "Failed to process return" });
     }
   });
 
@@ -2597,6 +2602,18 @@ export function registerInventoryRoutes(app: Express) {
   // ============================================
 
   // Inventory valuation summary
+  app.get("/api/cogs/cost-follow-ups", requirePermission("inventory", "view"), async (req,res) => {
+    const parsed = lotCostFollowUpQuerySchema.safeParse(req.query);
+    if (!parsed.success) return res.status(400).json({ code: "COST_FOLLOW_UP_QUERY_INVALID",error: "Invalid cost follow-up cursor or limit." });
+    try {
+      const { cogs } = req.app.locals.services;
+      res.json(await cogs.getCostFollowUps(parsed.data));
+    } catch (error) {
+      console.error(JSON.stringify({ event: "cost_follow_up_read_failed",code: error && typeof error === "object" && "code" in error ? error.code : "UNCLASSIFIED" }));
+      res.status(500).json({ code: "COST_FOLLOW_UP_READ_FAILED",error: "Could not read accounting follow-up evidence." });
+    }
+  });
+
   app.get("/api/cogs/valuation", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const { cogs } = req.app.locals.services;

@@ -976,12 +976,8 @@ export class InventoryUseCases {
       });
     }
 
-    // COGS is recorded authoritatively at PICK time (pickFromLots →
-    // oms.order_item_costs), not at ship. The old recordShipmentCOGS path
-    // here wrote to the retired inventory.order_line_costs ledger AND
-    // re-decremented lot.qty_consumed — a double-consume hazard that, in
-    // practice, recorded nothing because consumeLotsFIFO only sees
-    // un-picked on-hand (already zero by ship time). Removed in COGS Phase 1.
+    // Pick owners record COGS in oms.order_item_costs. Shipping releases
+    // physical custody without consuming or costing the lot again.
 
     // The pre-write advisory fence handles ordinary replay. A late unique
     // violation must propagate: PostgreSQL has aborted this transaction, and

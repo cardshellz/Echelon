@@ -98,23 +98,19 @@ export function dollarsToMills(input: string | number): number {
   // "0.0375" -> whole=0, frac="0375"
   // Pad to at least 5 so we see the rounding digit; take first 5.
   const fracPadded = fracRaw.padEnd(5, "0").slice(0, 5);
-  const whole = parseInt(wholeRaw || "0", 10);
-  const fourDecimals = parseInt(fracPadded.slice(0, 4) || "0", 10);
+  const whole = BigInt(wholeRaw || "0");
+  const fourDecimals = BigInt(fracPadded.slice(0, 4) || "0");
   const fifthDigit = parseInt(fracPadded[4] || "0", 10);
-
-  if (!Number.isFinite(whole) || !Number.isFinite(fourDecimals)) {
-    throw new RangeError(`dollarsToMills: unparsable input "${input}"`);
-  }
 
   // whole dollars -> mills = whole * 10000
   // plus the first 4 decimal digits as-is
   // plus 1 mill if the 5th digit rounds up (half-up).
-  const mills = whole * 10000 + fourDecimals + (fifthDigit >= 5 ? 1 : 0);
+  const mills = whole * BigInt(10000) + fourDecimals + (fifthDigit >= 5 ? BigInt(1) : BigInt(0));
 
-  if (!Number.isSafeInteger(mills)) {
+  if (mills > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new RangeError(`dollarsToMills: input exceeds safe integer range`);
   }
-  return mills;
+  return Number(mills);
 }
 
 /**

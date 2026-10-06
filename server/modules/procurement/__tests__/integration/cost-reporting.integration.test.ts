@@ -29,7 +29,7 @@ const tables=[schema.purchaseOrders,schema.purchaseOrderLines,schema.inboundShip
     for (const name of ["procurement","inventory"]) {await pool.query(`CREATE SCHEMA ${name}`);owned.push(name);}
     for (const table of tables) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys(tables)) await pool.query(statement);
-    for (const name of ["222_procurement_cost_evidence.sql","230_procurement_cost_reporting_delivery.sql"]) await pool.query(readFileSync(resolve(process.cwd(),"migrations",name),"utf8"));
+    for (const name of ["222_procurement_cost_evidence.sql","0725_inventory_cost_admission_evidence.sql","230_procurement_cost_reporting_delivery.sql"]) await pool.query(readFileSync(resolve(process.cwd(),"migrations",name),"utf8"));
     await pool.query(`INSERT INTO procurement.purchase_orders(id,po_number,vendor_id) VALUES(10,'REPORT-FIXTURE',5);
       INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,sku,order_qty,unit_cost_cents,line_total_cents) VALUES(21,10,1,'REPORT',3,2,6);
       INSERT INTO procurement.receiving_orders(id,receipt_number,source_type,status) VALUES(40,'REPORT-RECEIPT','purchase_order','closed');

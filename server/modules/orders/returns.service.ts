@@ -1,10 +1,12 @@
 import { eq, and, sql } from "drizzle-orm";
 import {
   productVariants,
-  inventoryLevels,
   inventoryTransactions,
 } from "@shared/schema";
-import { resolveReturnCost } from "../inventory/cost-resolver";
+import { randomUUID } from "node:crypto";
+import { applyReturnedStock, quarantineReturnedStock, lockInventoryCostGraph, costFingerprint,
+  loadReturnCommand, recordReturnCommand, ReturnRestockError, readPhysicalReturnQuantities } from "../inventory/return-inventory.api";
+import { returnCommandResultSchema } from "@shared/inventory/return-command";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -49,6 +51,8 @@ export interface ReturnItemParams {
 
 export interface ProcessReturnParams {
   orderId: number;
+  /** Optional for older clients; current UI reuses this key on every retry. */
+  commandKey?: string;
   items: ReturnItemParams[];
   warehouseLocationId: number;
   userId?: string;
@@ -67,14 +71,15 @@ export interface ProcessReturnParams {
  * on-hand stock; damaged/defective items are quarantined via an adjustment.
  *
  * Design principles:
- * - Delegates low-level bucket mutations to `InventoryCoreService`.
+ * - Delegates physical stock and costing to the published Inventory return owner.
  * - The source fence and all inventory/audit effects share one transaction.
  * - Every mutation is audited via the inventory transactions ledger.
  */
 class ReturnsService {
   constructor(
     private readonly db: DrizzleDb,
-    private readonly inventoryCore: any,
+    private readonly clock: () => Date = () => new Date(),
+    private readonly newCommandKey: () => string = randomUUID,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -86,8 +91,7 @@ class ReturnsService {
    *
    * For each returned item:
    *   - **Sellable**: Adds stock back to `variantQty` at the specified
-   *     location via `inventoryCore.receiveInventory()` with
-   *     `transactionType = "return"`.
+   *     location through the shared Inventory return application.
    *   - **Damaged / Defective**: Logs the return transaction but places the
    *     units in a quarantine state by writing a `"return"` receipt followed
    *     immediately by a damage `"adjustment"` to keep them out of
@@ -99,18 +103,29 @@ class ReturnsService {
   async processReturn(params: ProcessReturnParams): Promise<ReturnResult> {
     if (!Number.isSafeInteger(params.orderId) || params.orderId <= 0
       || !Number.isSafeInteger(params.warehouseLocationId) || params.warehouseLocationId <= 0 || !Array.isArray(params.items)
+      || typeof params.userId !== "string" || !params.userId.trim()
+      || (params.notes !== undefined && typeof params.notes !== "string")
       || params.items.length === 0 || params.items.length > 200
+      || params.items.some(item=>!item || typeof item !== "object")
       || new Set(params.items.map(item => item.orderItemId)).size !== params.items.length
       || params.items.some(item => !Number.isSafeInteger(item.orderItemId) || item.orderItemId <= 0
         || !Number.isSafeInteger(item.productVariantId) || item.productVariantId <= 0
         || !Number.isSafeInteger(item.qty) || item.qty <= 0
-        || !["sellable","damaged","defective"].includes(item.condition))) {
+        || !["sellable","damaged","defective"].includes(item.condition)
+        || (item.reason !== undefined && typeof item.reason !== "string"))) {
       throw new Error("RETURN_LEGACY_INPUT_INVALID: Return item quantities and identities must be valid.");
     }
-    if (typeof this.inventoryCore.withTx !== "function") {
-      throw new Error("RETURN_LEGACY_TRANSACTION_REQUIRED: Inventory return processing requires the transaction-bound inventory service.");
+    if (params.commandKey !== undefined && (typeof params.commandKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,119}$/.test(params.commandKey))) {
+      throw new Error("RETURN_LEGACY_IDEMPOTENCY_INVALID: Return command key must be a supported stable inventory key.");
     }
+    // The optional key preserves old-client compatibility. Without a client key,
+    // this is a new physical command as before, not a claim of safe request replay.
+    const commandKey = params.commandKey ?? this.newCommandKey();
+    const requestHash = costFingerprint(params);
     return this.db.transaction(async (tx: DrizzleDb) => {
+      await lockInventoryCostGraph(tx);
+      const replay = await loadReturnCommand(tx,commandKey,requestHash);
+      if (replay) return replay;
       const initial = sqlRows(await tx.execute(sql`SELECT id,oms_fulfillment_order_id FROM wms.orders WHERE id=${params.orderId}`))[0];
       if (!initial) throw new Error("RETURN_LEGACY_SOURCE_MISSING: The source order was not found.");
       const omsId = typeof initial.oms_fulfillment_order_id === "string" && /^[1-9][0-9]*$/.test(initial.oms_fulfillment_order_id)
@@ -135,7 +150,7 @@ class ReturnsService {
       if (roots.length > 0) {
         throw new Error("RETURN_CANONICAL_RECEIVING_REQUIRED: Receive portal returns through their linked Return Case.");
       }
-      const items = sqlRows(await tx.execute(sql`SELECT wi.id,wi.oms_order_line_id,ol.product_variant_id FROM wms.order_items wi
+      const items = sqlRows(await tx.execute(sql`SELECT wi.id,wi.quantity,wi.oms_order_line_id,ol.product_variant_id FROM wms.order_items wi
         LEFT JOIN oms.oms_order_lines ol ON ol.id=wi.oms_order_line_id
         WHERE wi.order_id=${params.orderId} FOR UPDATE OF wi`));
       // WMS items have no variant-id column. An exact OMS line owns that link;
@@ -144,12 +159,30 @@ class ReturnsService {
         && (source.oms_order_line_id == null || Number(source.product_variant_id) === item.productVariantId)))) {
         throw new Error("RETURN_LEGACY_ITEM_MISMATCH: Return items must belong to the source order and catalog variant.");
       }
-      return new ReturnsService(tx, this.inventoryCore.withTx(tx)).processItems(params);
+      // Physical entitlement comes from the locked WMS item and prior physical
+      // return audit, independently of whether sold cost evidence exists.
+      const priorReturns = await readPhysicalReturnQuantities(tx,params.orderId,params.items.map(item=>item.orderItemId));
+      for (const item of params.items) {
+        const ordered = items.find(source=>Number(source.id)===item.orderItemId)!.quantity;
+        if (!Number.isSafeInteger(ordered) || Number(ordered)<=0) {
+          throw new ReturnRestockError("RETURN_SOURCE_QUANTITY_INVALID", "The original order quantity needs verification.", { orderItemId: item.orderItemId });
+        }
+        const returned = priorReturns.get(item.orderItemId) ?? BigInt(0);
+        if (returned + BigInt(item.qty)>BigInt(Number(ordered))) {
+          throw new ReturnRestockError("RETURN_QUANTITY_EXCEEDED", "The return exceeds this order item's remaining quantity.", { orderItemId: item.orderItemId });
+        }
+      }
+      const now = this.clock();
+      if (!Number.isFinite(now.getTime())) throw new Error("RETURN_LEGACY_CLOCK_INVALID");
+      const result = await this.processItems(tx,params,commandKey,now);
+      await recordReturnCommand(tx,{ key: commandKey,hash: requestHash,result: returnCommandResultSchema.parse(result),
+        actor: params.userId!,now });
+      return result;
     });
   }
 
   /** Called only while the shared source-order lock and inventory transaction are held. */
-  private async processItems(params: ProcessReturnParams): Promise<ReturnResult> {
+  private async processItems(tx: DrizzleDb, params: ProcessReturnParams, commandKey: string, now: Date): Promise<ReturnResult> {
     const result: ReturnResult = {
       orderId: params.orderId,
       processed: 0,
@@ -162,122 +195,40 @@ class ReturnsService {
     for (const item of params.items) {
       try {
         // Look up variant for base unit calculation in response
-        const [variant] = await this.db
+        const [variant] = await tx
           .select()
           .from(productVariants)
           .where(eq(productVariants.id, item.productVariantId))
           .limit(1);
 
-        const unitsPerVariant = variant?.unitsPerVariant ?? 1;
+        const unitsPerVariant = variant?.unitsPerVariant;
+        if (!Number.isSafeInteger(unitsPerVariant) || unitsPerVariant<=0) throw new Error("RETURN_VARIANT_UNIT_BASIS_INVALID");
         const baseUnits = item.qty * unitsPerVariant;
+        if (!Number.isSafeInteger(baseUnits)) throw new Error("RETURN_QUANTITY_OVERFLOW");
 
-        if (item.condition === "sellable") {
-          // ---- SELLABLE: receive back into on-hand inventory ----
-          // Look up the original COGS so the returned lot carries the cost
-          // the unit was sold at, not $0 (COGS Phase 2).
-          const returnCost = await resolveReturnCost(
-            this.db,
-            item.productVariantId,
-            params.orderId,
-          );
-          await this.inventoryCore.receiveInventory({
-            productVariantId: item.productVariantId,
-            warehouseLocationId: params.warehouseLocationId,
-            qty: item.qty,
-            referenceId: String(params.orderId),
-            notes: params.notes
-              ? `Return (sellable): ${params.notes}`
-              : `Return (sellable) for order ${params.orderId}`,
-            userId: params.userId,
-            unitCostCents: returnCost.costCents,
+        const actor = params.userId!;
+        const notes = `${item.condition} return${item.reason ? `: ${item.reason}` : ""}${params.notes ? `; ${params.notes}` : ""}`;
+        const restock = await applyReturnedStock(tx,{
+          productVariantId: item.productVariantId,warehouseLocationId: params.warehouseLocationId,quantity: item.qty,
+          wmsOrderId: params.orderId,wmsOrderItemId: item.orderItemId,actor,notes,now,
+          condition: item.condition,
+          operationKey: `legacy_return:${commandKey}:${item.orderItemId}`,
+          referenceType: "order_return_command",referenceId: `${commandKey}:${item.orderItemId}`,
+          lotNumberPrefix: `RET-${costFingerprint(commandKey).slice(0,16)}-${item.orderItemId}`,
+        });
+        if (item.condition === "sellable") result.sellable++;
+        else {
+          await quarantineReturnedStock(tx,{
+            inventoryLotIds: restock.inventoryLotIds,productVariantId: item.productVariantId,
+            warehouseLocationId: params.warehouseLocationId,quantity: item.qty,actor,
+            reason: item.reason ?? `${item.condition} return`,
+            operationKey: `legacy_return_quarantine:${commandKey}:${item.orderItemId}`,occurredAt: now,
           });
-
-          // Log the return-specific transaction for traceability.
-          // receiveInventory already logs a "receipt" transaction; we add
-          // a separate "return" record referencing the order so return
-          // history queries work correctly.
-          await this.inventoryCore.logTransaction({
-            productVariantId: item.productVariantId,
-            toLocationId: params.warehouseLocationId,
-            transactionType: "return",
-            variantQtyDelta: item.qty,
-            variantQtyBefore: null,
-            variantQtyAfter: null,
-            sourceState: "returned",
-            targetState: "on_hand",
-            orderId: params.orderId,
-            orderItemId: item.orderItemId,
-            referenceType: "order",
-            referenceId: String(params.orderId),
-            notes: item.reason
-              ? `Sellable return: ${item.reason}`
-              : "Sellable return",
-            userId: params.userId ?? null,
-          });
-
-          result.sellable++;
-        } else {
-          // ---- DAMAGED / DEFECTIVE: receive then immediately adjust out ----
-          // Both operations MUST be atomic — if the adjust fails after
-          // receiving, damaged stock would sit in sellable inventory.
-          // Even damaged returns carry original COGS for write-off valuation.
-          const damagedCost = await resolveReturnCost(
-            this.db,
-            item.productVariantId,
-            params.orderId,
-          );
-          {
-            const tx = this.db;
-            const txCore = this.inventoryCore.withTx
-              ? this.inventoryCore.withTx(tx)
-              : this.inventoryCore;
-
-            // Step 1: Receive so we have an audit record of the physical receipt
-            await txCore.receiveInventory({
-              productVariantId: item.productVariantId,
-              warehouseLocationId: params.warehouseLocationId,
-              qty: item.qty,
-              referenceId: String(params.orderId),
-              notes: `Return (${item.condition}) for order ${params.orderId}`,
-              userId: params.userId,
-              unitCostCents: damagedCost.costCents,
-            });
-
-            // Step 2: Immediately adjust out as damaged -- this removes the
-            // units from on-hand so they are not available for picking.
-            await txCore.adjustInventory({
-              productVariantId: item.productVariantId,
-              warehouseLocationId: params.warehouseLocationId,
-              qtyDelta: -item.qty,
-              reason: `${item.condition} return${item.reason ? `: ${item.reason}` : ""}`,
-              userId: params.userId,
-            });
-          }
-
-          // Log the return-specific transaction
-          await this.inventoryCore.logTransaction({
-            productVariantId: item.productVariantId,
-            toLocationId: params.warehouseLocationId,
-            transactionType: "return",
-            variantQtyDelta: item.qty,
-            variantQtyBefore: null,
-            variantQtyAfter: null,
-            sourceState: "returned",
-            targetState: item.condition, // "damaged" or "defective"
-            orderId: params.orderId,
-            orderItemId: item.orderItemId,
-            referenceType: "order",
-            referenceId: String(params.orderId),
-            notes: item.reason
-              ? `${item.condition} return: ${item.reason}`
-              : `${item.condition} return`,
-            userId: params.userId ?? null,
-          });
-
           result.damaged++;
         }
 
         result.processed++;
+        if (!Number.isSafeInteger(result.totalBaseUnitsReturned + baseUnits)) throw new Error("RETURN_QUANTITY_OVERFLOW");
         result.totalBaseUnitsReturned += baseUnits;
         result.items.push({
           orderItemId: item.orderItemId,
@@ -405,18 +356,19 @@ function sqlRows(result: unknown): Record<string, unknown>[] {
 
 /**
  * Create a new `ReturnsService` bound to the supplied Drizzle database
- * and inventory core service instances.
+ * and optional injected clock/command identity. The legacy core parameter is
+ * accepted for existing callers; stock posting has one Inventory owner.
  *
  * ```ts
  * import { db } from "../db";
- * import { createInventoryCoreService } from "./inventory-core";
  * import { createReturnsService } from "./returns";
  *
- * const inventoryCore = createInventoryCoreService(db);
- * const returns = createReturnsService(db, inventoryCore);
- * await returns.processReturn({ orderId, items: [...], warehouseLocationId });
+ * const returns = createReturnsService(db);
+ * await returns.processReturn({ orderId, items: [...], warehouseLocationId, userId, commandKey });
  * ```
  */
-export function createReturnsService(db: any, inventoryCore: any) {
-  return new ReturnsService(db, inventoryCore);
+export function createReturnsService(db: any, _legacyInventoryCore?: any, options: { clock?: () => Date; newCommandKey?: () => string } = {}) {
+  // Keep the existing factory call contract. The return owner now receives the
+  // actual transaction directly; no unused transaction-bound service is created.
+  return new ReturnsService(db,options.clock,options.newCommandKey);
 }

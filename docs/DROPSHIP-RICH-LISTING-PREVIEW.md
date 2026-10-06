@@ -4,6 +4,8 @@ Status: Implemented for review on 2026-09-06 in `codex/dropship-rich-listing-pre
 
 2026-09-08 correction: the customer shipping estimate now returns only the final charge and scenario, not the internal rate/fee breakdown. Both estimates and order quotes default to the configured shared shipping engine. See [the quantity failure, engine integration, and privacy correction](DROPSHIP-SHIPPING-ESTIMATE-ENGINE.md) for current evidence and deployment boundaries. The September 6 verification below is historical.
 
+2026-10-06 correction: uploaded catalog photos are now published. Every listing build (the step 3 preview, queueing, the push-time refresh and the stock catch-up) takes each size's photos from `PgCatalogVariantPublicationPhotoReader` (`server/modules/catalog/catalog-publication-images.reader.ts`): primary first, then by position and id, at most 20 (`DROPSHIP_LISTING_MAX_PHOTOS`). An uploaded file goes out at the catalog's anonymous public address, `/api/catalog/images/<asset-id>/<sha256>.<extension>`, the same one Walmart listings use (see [Walmart listing publication](WALMART_LISTING_PUBLICATION.md#uploaded-catalog-photos) for `CATALOG_PUBLIC_BASE_URL`). An uploaded photo that cannot be published (no public address configured, or a missing, oversized or mislabeled file) is left out with a row warning and a `DROPSHIP_LISTING_PHOTO_UNPUBLISHABLE` log line. It blocks the listing only when no photo is left. Unlike Walmart, a photo issue is a warning, not a review blocker, so a broken upload never stops a live listing's stock updates. The authenticated preview file route below is unchanged and is still never a publication URL. Statements below that file-only media is preview-only are historical.
+
 ## Scope and authority
 
 The richer preview is a read-only review surface for listing presentation, vendor product cost, and a destination/quantity scenario for Card Shellz fulfillment charges. It does not publish listings or turn a scenario into an accepted order or wallet debit.
@@ -17,7 +19,7 @@ Suggested pricing remains deferred under **DSP-PRICE-01** in [the historical mar
 - Present the resolved title and description, ordered image gallery, variant/SKU and pack information, selected listing price/quantity, and effective listing policies with their inheritance/override source.
 - Treat catalog descriptions and asset metadata as untrusted. Render descriptions safely; do not execute embedded markup, scripts, event handlers, or unsafe URLs.
 - Missing content or assets must have an explicit empty/unavailable state. Preserve preview validation and publication blockers rather than inventing content or relaxing requirements.
-- File-only catalog images may be shown through a scoped, authorized preview delivery path. Label these **preview-only / not publishable**; being visible in this UI does not create a marketplace-ready image URL. Do not expose storage paths or bypass asset ownership checks.
+- File-only catalog images may be shown through a scoped, authorized preview delivery path. Being visible in this UI does not create a marketplace-ready image URL. Do not expose storage paths or bypass asset ownership checks. (Since 2026-10-06 a published uploaded photo is shown at its public address and labeled included; one left out says why.)
 
 ### Vendor product cost
 
@@ -76,10 +78,10 @@ Paths below are relative to the repository root. These references establish impl
 
 ## Deployment smoke test
 
-1. Generate a fresh preview for a selected listing and open **View preview**. Compare title, pack/SKU, price, effective policies, and included image order with the catalog and intended eBay listing. Authenticated catalog-only images must remain labeled as not included.
+1. Generate a fresh preview for a selected listing and open **View preview**. Compare title, pack/SKU, price, effective policies, and included image order with the catalog and intended eBay listing. An uploaded photo the listing publishes is labeled included and loads from its `/api/catalog/images/` address; one left out says why.
 2. Compare the per-pack vendor product cost with the exact active `.ops` price-list entry in Shellz Club. Missing or ambiguous source data must display unavailable, not an invented cost.
 3. Enter a supported destination and purchase quantity; request an estimate. Privately compare the final charge with the applicable configured Card Shellz rates. Verify the customer display AND response contain no fee breakdown, rate-program identity, or raw pricing diagnostics. Change quantity/destination and verify the prior estimate clears; exercise an unsupported/no-rate scenario.
 4. Close/reopen or switch stores during an estimate and confirm no result from the previous scenario appears. Confirm saved listing values, wallet balances, orders, and marketplace listings are unchanged.
 5. Test a scoped catalog file with a different member/store and confirm it cannot be read. Check real data scale separately from the local bounded-render test.
 
-Suggested pricing is deliberately absent. Catalog reference retail is labeled as a reference, not a recommendation, and file-only preview media is not made publicly fetchable by eBay.
+Suggested pricing is deliberately absent. Catalog reference retail is labeled as a reference, not a recommendation, and the authenticated preview file route is never sent to eBay. Uploaded photos reach eBay only through the catalog's public photo address.

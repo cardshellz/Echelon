@@ -1,3 +1,4 @@
+import { normalizeLotCosts, lotCostNeedsReview } from "../domain/lot-cost";
 import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { type CostComponent, type CostIssue } from "@shared/procurement/cost-source-contracts";
@@ -78,17 +79,24 @@ export async function applyCostRevision(
   }
   const allLotIds = [...new Set([...lotIds, ...edgeResult.rows.map((edge) => costInteger(edge.source_lot_id, "sourceLotId", 1))])].sort((a,b) => a-b);
   const lotResult = allLotIds.length === 0 ? { rows: [] } : await tx.execute(sql`
-    SELECT id,po_unit_cost_mills,packaging_cost_mills,landed_cost_mills,qty_received,cost_source,
+    SELECT inventory_lots.*,
       EXISTS(SELECT 1 FROM inventory.cost_component_protections protection WHERE protection.inventory_lot_id=inventory_lots.id AND protection.component=${source.component}) AS component_protected
     FROM inventory.inventory_lots
     WHERE id IN (SELECT value::integer FROM jsonb_array_elements_text(${JSON.stringify(allLotIds)}::jsonb))
     ORDER BY id FOR UPDATE
   `);
-  const lots = new Map<number, Lot>(lotResult.rows.map((row) => [costInteger(row.id, "lot.id", 1), {
-    id: costInteger(row.id, "lot.id", 1), productMills: costInteger(row.po_unit_cost_mills, "productMills"),
-    packagingMills: costInteger(row.packaging_cost_mills, "packagingMills"), landedMills: costInteger(row.landed_cost_mills, "landedMills"),
-    qtyReceived: costInteger(row.qty_received, "qtyReceived", 1), source: row,
-  }]));
+  const lots = new Map<number, Lot>(lotResult.rows.map((row) => {
+    const costs = normalizeLotCosts(row);
+    return [costInteger(row.id, "lot.id", 1), {
+      id: costInteger(row.id, "lot.id", 1), productMills: costInteger(costs.poMills.toString(), "productMills"),
+      packagingMills: costInteger(costs.packagingMills.toString(), "packagingMills"),
+      landedMills: costInteger(costs.landedMills.toString(), "landedMills"),
+      qtyReceived: row.qty_received == null ? 0 : costInteger(row.qty_received, "qtyReceived"), source: row,
+    }];
+  }));
+  for (const lot of lots.values()) if (lot.qtyReceived === 0) issues.push({
+    code: "COST_HISTORICAL_BASIS_MISSING", message: `Lot ${lot.id} has no proven original quantity basis. No physical work was replayed.`,
+  });
   if (lots.size !== allLotIds.length) issues.push({ code: "COST_GRAPH_LOT_MISSING", message: "A recorded contribution refers to a missing inventory lot." });
   if (lotIds.some((id) => { const lot = lots.get(id); return lot?.source.component_protected || (source.component === "product" && lot?.source.cost_source === "manual"); })) {
     issues.push({ code: "COST_MANUAL_OVERRIDE_REVIEW", message: "A manual correction protects this component. Review its disposition before a source revision may replace it; unrelated components remain independent." });
@@ -190,5 +198,18 @@ export async function applyCostRevision(
     INSERT INTO inventory.cost_reporting_events(application_id,contract_version,payload,recorded_at)
     VALUES (${result.applicationId},1,${canonicalJson({ contractVersion: 1, currency: source.currency, sourceRevisionId: revision.id, sourceFingerprint: source.fingerprint, component: source.component, changes, cogsDeltaCents: result.totalCogsDeltaCents, actorId, recordedAt: now.toISOString() })}::jsonb,${now})
   `);
+  if (allLotIds.length > 0) {
+    const refreshed = await tx.execute(sql`SELECT * FROM inventory.inventory_lots
+      WHERE id IN (SELECT value::integer FROM jsonb_array_elements_text(${JSON.stringify(allLotIds)}::jsonb))`);
+    const reviewedByLot = new Map(refreshed.rows.map((lot) => [Number(lot.id), lotCostNeedsReview(lot)]));
+    const followUps = await tx.execute(sql`SELECT id,inventory_lot_id FROM inventory.lot_cost_follow_ups
+      WHERE inventory_lot_id IN (SELECT value::integer FROM jsonb_array_elements_text(${JSON.stringify(allLotIds)}::jsonb))
+      ORDER BY id`);
+    for (const followUp of followUps.rows) await tx.execute(sql`
+      INSERT INTO inventory.lot_cost_follow_up_attempts(follow_up_id,application_id,state,evidence,recorded_by,recorded_at)
+      VALUES (${followUp.id},${result.applicationId},${result.status === "applied" && reviewedByLot.get(Number(followUp.inventory_lot_id)) === false ? "resolved" : "review_required"},
+        ${canonicalJson({ sourceRevisionId: revision.id, result })}::jsonb,${actorId},${now}) ON CONFLICT DO NOTHING
+    `);
+  }
   return result;
 }

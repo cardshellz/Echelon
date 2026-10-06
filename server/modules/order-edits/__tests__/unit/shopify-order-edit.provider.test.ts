@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ShopifyOrderEditProvider } from "../../infrastructure/shopify-order-edit.provider";
+import { isUnpaidRecoveryRestored } from "../../application/order-edit-evidence";
 import {
   OrderEditCommitNotSentError,
   type OrderEditQuote,
@@ -12,11 +13,32 @@ const bag = (amount: string) => ({
   presentmentMoney: { amount, currencyCode: "USD" },
   shopMoney: { amount, currencyCode: "USD" },
 });
-const lineAmount = (price: string, quantity: number) => {
+interface DiscountAllocationFixture {
+  allocatedAmountSet: ReturnType<typeof bag>;
+  discountApplication: {
+    __typename: string;
+    code?: string;
+    id: string;
+    allocationMethod: string;
+    appliedTo: string;
+    targetType: string;
+    targetSelection: string;
+    description: string | null;
+    value:
+      | { __typename: "MoneyV2"; amount: string; currencyCode: string }
+      | { __typename: "PricingPercentageValue"; percentage: number };
+  };
+}
+const cents = (price: string) => {
   const [whole, fraction = ""] = price.split(".");
-  const result =
-    (BigInt(whole) * BigInt(100) + BigInt(fraction.padEnd(2, "0"))) *
-    BigInt(quantity);
+  return BigInt(whole) * BigInt(100) + BigInt(fraction.padEnd(2, "0"));
+};
+const decimal = (result: bigint) => {
+  const magnitude = result < BigInt(0) ? -result : result;
+  return `${result < BigInt(0) ? "-" : ""}${magnitude / BigInt(100)}.${String(magnitude % BigInt(100)).padStart(2, "0")}`;
+};
+const lineAmount = (price: string, quantity: number) => {
+  const result = cents(price) * BigInt(quantity);
   return `${result / BigInt(100)}.${String(result % BigInt(100)).padStart(2, "0")}`;
 };
 const tx = (
@@ -31,6 +53,7 @@ const tx = (
   status,
   gateway: "shopify_payments",
   manualPaymentGateway: false,
+  processedAt: NOW.toISOString(),
   parentTransaction:
     parent === null ? null : { id: id("OrderTransaction", parent) },
   amountSet: bag(amount),
@@ -45,6 +68,7 @@ const line = (value = 1, variant = 10, quantity = 2, price = "10.00") => ({
   unfulfilledDiscountedTotalSet: bag(lineAmount(price, quantity)),
   originalUnitPriceSet: bag(price),
   discountedUnitPriceSet: bag(price),
+  priceAfterAllDiscountsBeforeTaxesSet: bag(lineAmount(price, quantity)),
   merchantEditable: true,
   requiresShipping: true,
   isGiftCard: false,
@@ -70,6 +94,7 @@ function rawOrder(overrides: Record<string, unknown> = {}) {
       closed: false,
       fullyPaid: true,
       capturable: false,
+      taxesIncluded: false,
       currencyCode: "USD",
       presentmentCurrencyCode: "USD",
       currentTotalPriceSet: bag("20.00"),
@@ -94,6 +119,7 @@ function rawOrder(overrides: Record<string, unknown> = {}) {
       },
       customer: { id: id("Customer", 1), tags: [], membershipPlan: null },
       discountApplications: { nodes: [], pageInfo: { hasNextPage: false } },
+      shippingLines: { nodes: [], pageInfo: { hasNextPage: false } },
       lineItems: { nodes: [line()], pageInfo: { hasNextPage: false } },
       transactions: [tx()],
       transactionsCount: { count: 1, precision: "EXACT" },
@@ -118,6 +144,29 @@ const calcLine = (
   editableSubtotalSet: bag(lineAmount(discounted, quantity)),
   originalUnitPriceSet: bag(price),
   discountedUnitPriceSet: bag(discounted),
+  calculatedDiscountAllocations: (price === discounted
+    ? []
+    : [
+        {
+          allocatedAmountSet: bag(
+            decimal((cents(price) - cents(discounted)) * BigInt(quantity)),
+          ),
+          discountApplication: {
+            __typename: "CalculatedManualDiscountApplication",
+            id: id("CalculatedDiscountApplication", value),
+            allocationMethod: "EACH",
+            appliedTo: "LINE",
+            targetType: "LINE_ITEM",
+            targetSelection: "EXPLICIT",
+            description: "Echelon member pricing",
+            value: {
+              __typename: "MoneyV2",
+              amount: decimal(cents(price) - cents(discounted)),
+              currencyCode: "USD",
+            },
+          },
+        },
+      ]) as DiscountAllocationFixture[],
 });
 function calculated(
   total = "20.00",
@@ -130,19 +179,22 @@ function calculated(
     originalOrder: { id: id("Order", 100) },
     totalPriceSet: bag(total),
     totalOutstandingSet: bag(outstanding),
+    subtotalPriceSet: bag(total),
+    cartDiscountAmountSet: null,
+    taxLines: [],
     shippingLines: [],
     lineItems: { nodes: lines, pageInfo: { hasNextPage: false } },
     addedLineItems: { nodes: added, pageInfo: { hasNextPage: false } },
   };
 }
-const begin = (value = calculated()) => ({
+const begin = (value: unknown = calculated()) => ({
   orderEditBegin: {
     userErrors: [],
     calculatedOrder: value,
     orderEditSession: { id: id("OrderEditSession", 100) },
   },
 });
-const quantity = (value: ReturnType<typeof calculated>) => ({
+const quantity = (value: unknown) => ({
   orderEditSetQuantity: { userErrors: [], calculatedOrder: value },
 });
 const variant = (
@@ -233,7 +285,679 @@ async function reduction() {
   return { snapshot, quote };
 }
 
+// The observed #63909 pricing combination, with synthetic identities and no live mutations.
+function codeOrder(
+  itemQuantity = 4,
+  lineNet = "17.96",
+  total = "107.96",
+  secondNet = "90.00",
+) {
+  const first = line(1, 10, itemQuantity, "4.99");
+  const second = line(2, 20, 1, "99.99");
+  const original = rawOrder();
+  return {
+    ...original,
+    order: {
+      ...original.order,
+      name: "#63909",
+      fullyPaid: total === "107.96",
+      currentSubtotalPriceSet: bag(total),
+      currentTotalPriceSet: bag(total),
+      netPaymentSet: bag("107.96"),
+      totalOutstandingSet: bag(decimal(cents(total) - cents("107.96"))),
+      transactions: [tx(1, "107.96")],
+      discountApplications: {
+        nodes: [
+          {
+            __typename: "AutomaticDiscountApplication",
+            index: 0,
+            targetType: "SHIPPING_LINE",
+            allocationMethod: "EACH",
+            targetSelection: "ALL",
+            title: "Free shipping",
+            value: { __typename: "PricingPercentageValue", percentage: 100 },
+          },
+          {
+            __typename: "DiscountCodeApplication",
+            index: 1,
+            targetType: "LINE_ITEM",
+            allocationMethod: "ACROSS",
+            targetSelection: "ALL",
+            code: "AMAZZIN'",
+            value: { __typename: "PricingPercentageValue", percentage: 10 },
+          },
+        ],
+        pageInfo: { hasNextPage: false },
+      },
+      shippingLines: {
+        nodes: [
+          {
+            id: id("ShippingLine", 1),
+            isRemoved: false,
+            originalPriceSet: bag("12.99"),
+            currentDiscountedPriceSet: bag("0.00"),
+          },
+        ],
+        pageInfo: { hasNextPage: false },
+      },
+      lineItems: {
+        nodes: [
+          {
+            ...first,
+            priceAfterAllDiscountsBeforeTaxesSet: bag(lineNet),
+            discountAllocations: [
+              {
+                allocatedAmountSet: bag(
+                  decimal(
+                    cents(lineAmount("4.99", itemQuantity)) - cents(lineNet),
+                  ),
+                ),
+                discountApplication: { index: 1 },
+              },
+            ],
+          },
+          {
+            ...second,
+            priceAfterAllDiscountsBeforeTaxesSet: bag(secondNet),
+            discountAllocations: [
+              {
+                allocatedAmountSet: bag(
+                  decimal(cents("99.99") - cents(secondNet)),
+                ),
+                discountApplication: { index: 1 },
+              },
+            ],
+          },
+        ],
+        pageInfo: { hasNextPage: false },
+      },
+    },
+  };
+}
+function codeCalculated(
+  itemQuantity = 4,
+  firstDiscount = "2.00",
+  total = "107.96",
+  applicationId = 1,
+) {
+  const application: DiscountAllocationFixture["discountApplication"] = {
+    __typename: "CalculatedDiscountCodeApplication",
+    code: "AMAZZIN'",
+    id: id("CalculatedDiscountApplication", applicationId),
+    appliedTo: "ORDER",
+    allocationMethod: "ACROSS",
+    targetType: "LINE_ITEM",
+    targetSelection: "ALL",
+    description: "AMAZZIN'",
+    value: { __typename: "PricingPercentageValue", percentage: 10 },
+  };
+  const lines = [
+    {
+      ...calcLine(1, 10, itemQuantity, "4.99"),
+      calculatedDiscountAllocations: [
+        {
+          allocatedAmountSet: bag(firstDiscount),
+          discountApplication: application,
+        },
+      ],
+    },
+    {
+      ...calcLine(2, 20, 1, "99.99"),
+      calculatedDiscountAllocations: [
+        { allocatedAmountSet: bag("9.99"), discountApplication: application },
+      ],
+    },
+  ];
+  return {
+    ...calculated(total, decimal(cents(total) - cents("107.96")), lines),
+    cartDiscountAmountSet: bag(decimal(cents(firstDiscount) + cents("9.99"))),
+    shippingLines: [
+      {
+        id: id("CalculatedShippingLine", 1),
+        price: bag("12.99"),
+        stagedStatus: "UNCHANGED",
+      },
+    ],
+  };
+}
+async function codeIncrease() {
+  const h = harness([
+    codeOrder(),
+    codeOrder(),
+    { nodes: [variant(10, "4.99")] },
+    begin(codeCalculated()),
+    quantity(codeCalculated(5, "2.50", "112.45")),
+  ]);
+  const snapshot = await h.provider.readOrder(4, "100");
+  const quote = await h.provider.quote(
+    4,
+    snapshot,
+    { changes: [{ lineItemId: "1", quantity: 5 }], additions: [] },
+    "edit-1",
+  );
+  return { h, snapshot, quote };
+}
+
 describe("ShopifyOrderEditProvider", () => {
+  it("shows exact current product discounts separately from free shipping", async () => {
+    const h = harness([codeOrder()]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    expect(snapshot.financials).toMatchObject({
+      itemsGrossCents: 11995,
+      itemsDiscountCents: 1199,
+      itemsNetCents: 10796,
+      itemDiscountLabels: ["AMAZZIN'"],
+      shippingGrossCents: 1299,
+      shippingDiscountCents: 1299,
+      shippingCents: 0,
+      shippingDiscountLabels: ["Free shipping"],
+      taxCents: 0,
+      totalCents: 10796,
+      lines: [
+        { id: id("LineItem", 1), netCents: 1796 },
+        { id: id("LineItem", 2), netCents: 9000 },
+      ],
+    });
+    expect(snapshot.lines[0].totalCents).toBe(1996); // Preserve the legacy fingerprint contract.
+  });
+
+  it("uses Shopify's rounded native percentage allocations without applying the code twice", async () => {
+    const { h, quote } = await codeIncrease();
+    expect(quote).toMatchObject({
+      totalCents: 11245,
+      deltaCents: 449,
+      outstandingCents: 449,
+      financials: {
+        itemsGrossCents: 12494,
+        itemsDiscountCents: 1249,
+        itemsNetCents: 11245,
+        shippingGrossCents: 1299,
+        shippingDiscountCents: 1299,
+        shippingCents: 0,
+        totalCents: 11245,
+      },
+    });
+    expect(
+      h.requests.some((request) =>
+        request.query.includes("orderEditAddLineItemDiscount"),
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects an edit baseline that reallocates a cent between items before any requested change", async () => {
+    const calculatedBaseline = codeCalculated();
+    calculatedBaseline.lineItems.nodes[0].calculatedDiscountAllocations[0].allocatedAmountSet =
+      bag("2.01");
+    calculatedBaseline.lineItems.nodes[1].calculatedDiscountAllocations[0].allocatedAmountSet =
+      bag("9.98");
+    const h = harness([
+      codeOrder(),
+      codeOrder(),
+      { nodes: [variant(10, "4.99")] },
+      begin(calculatedBaseline),
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    await expect(
+      h.provider.quote(
+        4,
+        snapshot,
+        { changes: [{ lineItemId: "1", quantity: 5 }], additions: [] },
+        "edit-1",
+      ),
+    ).rejects.toMatchObject({ code: "QUOTE_BASELINE_MISMATCH" });
+    expect(
+      h.requests.some((request) =>
+        request.query.includes("orderEditSetQuantity"),
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    "removed",
+    "changed percentage",
+    "changed code",
+    "replaced identity",
+  ])("rejects a native discount %s before commit", async (change) => {
+    const result = codeCalculated(
+      5,
+      "2.50",
+      "112.45",
+      change === "replaced identity" ? 9 : 1,
+    );
+    if (change === "removed")
+      result.lineItems.nodes.forEach((entry) => {
+        entry.calculatedDiscountAllocations = [];
+      });
+    if (change === "changed percentage")
+      result.lineItems.nodes.forEach((entry) => {
+        entry.calculatedDiscountAllocations[0].discountApplication.value = {
+          __typename: "PricingPercentageValue",
+          percentage: 20,
+        };
+      });
+    if (change === "changed code")
+      result.lineItems.nodes.forEach((entry) => {
+        entry.calculatedDiscountAllocations[0].discountApplication.code =
+          "OTHER10";
+      });
+    const h = harness([
+      codeOrder(),
+      codeOrder(),
+      { nodes: [variant(10, "4.99")] },
+      begin(codeCalculated()),
+      quantity(result),
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    await expect(
+      h.provider.quote(
+        4,
+        snapshot,
+        { changes: [{ lineItemId: "1", quantity: 5 }], additions: [] },
+        "edit-1",
+      ),
+    ).rejects.toMatchObject({ code: "PROMOTION_PARITY_UNVERIFIED" });
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditCommit")),
+    ).toBe(false);
+  });
+
+  it("rejects discount allocations that differ from Shopify's quoted discount total", async () => {
+    const result = codeCalculated(5, "2.50", "112.45");
+    result.cartDiscountAmountSet = bag("12.48");
+    const h = harness([
+      codeOrder(),
+      codeOrder(),
+      { nodes: [variant(10, "4.99")] },
+      begin(codeCalculated()),
+      quantity(result),
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    await expect(
+      h.provider.quote(
+        4,
+        snapshot,
+        { changes: [{ lineItemId: "1", quantity: 5 }], additions: [] },
+        "edit-1",
+      ),
+    ).rejects.toMatchObject({ code: "ORDER_DISCOUNT_TOTAL_MISMATCH" });
+  });
+
+  it("rejects changed gross shipping even if a discount hides it in the order total", async () => {
+    const result = codeCalculated(5, "2.50", "112.45");
+    result.shippingLines[0].price = bag("19.99");
+    const h = harness([
+      codeOrder(),
+      codeOrder(),
+      { nodes: [variant(10, "4.99")] },
+      begin(codeCalculated()),
+      quantity(result),
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    await expect(
+      h.provider.quote(
+        4,
+        snapshot,
+        { changes: [{ lineItemId: "1", quantity: 5 }], additions: [] },
+        "edit-1",
+      ),
+    ).rejects.toMatchObject({ code: "SHIPPING_CHANGED" });
+  });
+
+  it("verifies discounted per-line amounts and rules on post-commit readback", async () => {
+    const { quote } = await codeIncrease();
+    const h = harness([
+      codeOrder(),
+      { nodes: [variant(10, "4.99")] },
+      { orderEditCommit: { order: { id: id("Order", 100) }, userErrors: [] } },
+      codeOrder(5, "22.46", "112.46"),
+    ]);
+    await expect(h.provider.commit(4, quote, "edit-1")).rejects.toMatchObject({
+      code: "COMMIT_UNCONFIRMED",
+      outcome: "unknown",
+    });
+    const exact = harness([
+      codeOrder(),
+      { nodes: [variant(10, "4.99")] },
+      { orderEditCommit: { order: { id: id("Order", 100) }, userErrors: [] } },
+      codeOrder(5, "22.44", "112.45", "90.01"),
+    ]);
+    // The header total is unchanged, but the per-line discount allocation has drifted.
+    await expect(
+      exact.provider.commit(4, quote, "edit-1"),
+    ).rejects.toMatchObject({ outcome: "unknown" });
+    const good = harness([
+      codeOrder(),
+      { nodes: [variant(10, "4.99")] },
+      { orderEditCommit: { order: { id: id("Order", 100) }, userErrors: [] } },
+      codeOrder(5, "22.45", "112.45"),
+    ]);
+    expect(
+      (await good.provider.commit(4, quote, "edit-1")).outstandingCents,
+    ).toBe(449);
+  });
+
+  it("rejects a changed code value even when the legacy fingerprint and total are unchanged", async () => {
+    const { quote } = await codeIncrease();
+    const raw = codeOrder();
+    raw.order.discountApplications.nodes[1].value.percentage = 20;
+    const h = harness([raw]);
+    await expect(h.provider.commit(4, quote, "edit-1")).rejects.toBeInstanceOf(
+      OrderEditCommitNotSentError,
+    );
+    expect(h.requests).toHaveLength(1);
+    expect(h.requests[0].query).not.toContain("mutation");
+  });
+
+  it("restores a native discounted quantity increase and free shipping after payment expiry", async () => {
+    const { snapshot, quote } = await codeIncrease();
+    const pending = codeOrder(5, "22.45", "112.45");
+    const h = harness([
+      pending,
+      begin(codeCalculated(5, "2.50", "112.45")),
+      quantity(codeCalculated()),
+      pending,
+      { orderEditCommit: { order: { id: id("Order", 100) }, userErrors: [] } },
+      codeOrder(),
+    ]);
+    const restored = await h.provider.recoverUnpaid(
+      4,
+      snapshot,
+      quote,
+      "expire-1",
+    );
+    expect(restored.financials).toEqual(snapshot.financials);
+    expect(restored.outstandingCents).toBe(0);
+    expect(
+      h.requests.some((request) =>
+        /refundCreate|orderEditAddLineItemDiscount/.test(request.query),
+      ),
+    ).toBe(false);
+  });
+
+  it("quotes a discounted reduction and prepares a refund for the net difference", async () => {
+    const h = harness([
+      codeOrder(),
+      codeOrder(),
+      begin(codeCalculated()),
+      quantity(codeCalculated(3, "1.50", "103.47")),
+      refundCapacity("107.96"),
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      snapshot,
+      { changes: [{ lineItemId: "1", quantity: 3 }], additions: [] },
+      "edit-1",
+    );
+    expect(quote).toMatchObject({
+      totalCents: 10347,
+      deltaCents: -449,
+      outstandingCents: -449,
+      financials: {
+        itemsGrossCents: 11496,
+        itemsDiscountCents: 1149,
+        shippingDiscountCents: 1299,
+        totalCents: 10347,
+      },
+    });
+    expect(quote.evidence.refundPreflight).toMatchObject({ amountCents: 449 });
+    const reduced = codeOrder(3, "13.47", "103.47");
+    const refund = harness([reduced, reduced, refundCapacity("107.96")]);
+    const changed = await refund.provider.readOrder(4, "100");
+    expect(
+      await refund.provider.prepareRefund(4, changed, "edit-1", "refund-key"),
+    ).toMatchObject({ amountCents: 449 });
+  });
+
+  it("includes Shopify's recalculated tax in the discounted total and payment difference", async () => {
+    const raw = codeOrder();
+    Object.assign(raw.order, {
+      currentTotalPriceSet: bag("114.44"),
+      currentTotalTaxSet: bag("6.48"),
+      netPaymentSet: bag("114.44"),
+      transactions: [tx(1, "114.44")],
+    });
+    const initial = {
+      ...codeCalculated(),
+      totalPriceSet: bag("114.44"),
+      taxLines: [{ priceSet: bag("6.48") }],
+    };
+    const changed = {
+      ...codeCalculated(5, "2.50", "112.45"),
+      totalPriceSet: bag("119.20"),
+      totalOutstandingSet: bag("4.76"),
+      taxLines: [{ priceSet: bag("6.75") }],
+    };
+    const h = harness([
+      raw,
+      raw,
+      { nodes: [variant(10, "4.99")] },
+      begin(initial),
+      quantity(changed),
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      snapshot,
+      { changes: [{ lineItemId: "1", quantity: 5 }], additions: [] },
+      "edit-1",
+    );
+    expect(quote).toMatchObject({
+      totalCents: 11920,
+      deltaCents: 476,
+      financials: { itemsNetCents: 11245, taxCents: 675, totalCents: 11920 },
+    });
+  });
+
+  it("combines native percentage codes with a verified member price on an added product", async () => {
+    const source = codeOrder();
+    const raw = {
+      ...source,
+      order: {
+        ...source.order,
+        customer: {
+          ...source.order.customer,
+          membershipPlan: { value: "plan-a" },
+        },
+      },
+    };
+    const base = codeCalculated();
+    const native =
+      base.lineItems.nodes[0].calculatedDiscountAllocations[0]
+        .discountApplication;
+    const added = {
+      ...calcLine(3, 30, 1, "5.00"),
+      calculatedDiscountAllocations: [
+        { allocatedAmountSet: bag("0.50"), discountApplication: native },
+      ],
+    };
+    const member = calcLine(3, 30, 1, "5.00", "4.00");
+    member.calculatedDiscountAllocations.push({
+      allocatedAmountSet: bag("0.40"),
+      discountApplication: native,
+    });
+    const addedOrder = {
+      ...base,
+      totalPriceSet: bag("112.46"),
+      totalOutstandingSet: bag("4.50"),
+      subtotalPriceSet: bag("112.46"),
+      cartDiscountAmountSet: bag("12.49"),
+      addedLineItems: { nodes: [added], pageInfo: { hasNextPage: false } },
+    };
+    const memberOrder = {
+      ...base,
+      totalPriceSet: bag("111.56"),
+      totalOutstandingSet: bag("3.60"),
+      subtotalPriceSet: bag("111.56"),
+      cartDiscountAmountSet: bag("12.39"),
+      addedLineItems: { nodes: [member], pageInfo: { hasNextPage: false } },
+    };
+    const h = harness([
+      raw,
+      raw,
+      {
+        nodes: [
+          variant(30, "5.00", JSON.stringify({ "plan-a": { cents: 400 } })),
+        ],
+      },
+      begin(base),
+      {
+        orderEditAddVariant: {
+          userErrors: [],
+          calculatedLineItem: { id: member.id },
+          calculatedOrder: addedOrder,
+        },
+      },
+      {
+        orderEditAddLineItemDiscount: {
+          userErrors: [],
+          calculatedOrder: memberOrder,
+        },
+      },
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      snapshot,
+      { changes: [], additions: [{ variantId: "30", quantity: 1 }] },
+      "edit-1",
+    );
+    expect(quote).toMatchObject({
+      totalCents: 11156,
+      deltaCents: 360,
+      financials: {
+        itemsGrossCents: 12495,
+        itemsDiscountCents: 1339,
+        itemsNetCents: 11156,
+      },
+    });
+    expect(
+      quote.financials?.lines.find((entry) => entry.id === member.id)?.netCents,
+    ).toBe(360);
+    expect(
+      h.requests.filter((request) =>
+        request.query.includes("mutation EchelonEditMemberPrice"),
+      ),
+    ).toHaveLength(1);
+
+    function withMemberLine(memberQuantity: number) {
+      const original = line(303, 30, memberQuantity, "5.00");
+      const current = {
+        ...raw.order,
+        fullyPaid: memberQuantity === 0,
+        currentTotalPriceSet: bag(memberQuantity === 0 ? "107.96" : "111.56"),
+        currentSubtotalPriceSet: bag(
+          memberQuantity === 0 ? "107.96" : "111.56",
+        ),
+        totalOutstandingSet: bag(memberQuantity === 0 ? "0.00" : "3.60"),
+        lineItems: {
+          ...raw.order.lineItems,
+          nodes: [
+            ...raw.order.lineItems.nodes,
+            {
+              ...original,
+              discountedUnitPriceSet: bag("4.00"),
+              unfulfilledDiscountedTotalSet: bag(
+                memberQuantity === 0 ? "0.00" : "4.00",
+              ),
+              priceAfterAllDiscountsBeforeTaxesSet: bag(
+                memberQuantity === 0 ? "0.00" : "3.60",
+              ),
+              discountAllocations: [
+                {
+                  allocatedAmountSet: bag("0.40"),
+                  discountApplication: { index: 1 },
+                },
+                {
+                  allocatedAmountSet: bag("1.00"),
+                  discountApplication: { index: 2 },
+                },
+              ],
+            },
+          ],
+        },
+        discountApplications: {
+          ...raw.order.discountApplications,
+          nodes: [
+            ...raw.order.discountApplications.nodes,
+            {
+              __typename: "ManualDiscountApplication",
+              index: 2,
+              targetType: "LINE_ITEM",
+              allocationMethod: "EACH",
+              targetSelection: "EXPLICIT",
+              title: "Echelon member pricing",
+              value: {
+                __typename: "MoneyV2",
+                amount: "1.00",
+                currencyCode: "USD",
+              },
+            },
+          ],
+        },
+      };
+      return { ...raw, order: current };
+    }
+    const pending = withMemberLine(1);
+    const postCommit = harness([
+      raw,
+      { nodes: [variant(30, "5.00")] },
+      { orderEditCommit: { order: { id: id("Order", 100) }, userErrors: [] } },
+      pending,
+    ]);
+    expect(
+      (await postCommit.provider.commit(4, quote, "edit-1")).outstandingCents,
+    ).toBe(360);
+    const removed = {
+      ...member,
+      quantity: 0,
+      editableSubtotalSet: bag("0.00"),
+    };
+    const restoredCalculated = {
+      ...base,
+      lineItems: {
+        ...base.lineItems,
+        nodes: [...base.lineItems.nodes, removed],
+      },
+    };
+    const recoveryStart = {
+      ...memberOrder,
+      addedLineItems: { ...memberOrder.addedLineItems, nodes: [] },
+      lineItems: {
+        ...base.lineItems,
+        nodes: [...base.lineItems.nodes, member],
+      },
+    };
+    const recovery = harness([
+      pending,
+      begin(recoveryStart),
+      quantity(restoredCalculated),
+      pending,
+      { orderEditCommit: { order: { id: id("Order", 100) }, userErrors: [] } },
+      withMemberLine(0),
+    ]);
+    const restored = await recovery.provider.recoverUnpaid(
+      4,
+      snapshot,
+      quote,
+      "expire-1",
+    );
+    expect(isUnpaidRecoveryRestored(restored, snapshot)).toBe(true);
+    expect(restored.financials?.itemDiscountLabels).toEqual(["AMAZZIN'"]);
+  });
+
+  it("fails closed when the displayed financial components cannot reconcile", async () => {
+    const raw = codeOrder();
+    raw.order.currentTotalPriceSet = bag("107.95");
+    await expect(
+      harness([raw]).provider.readOrder(4, "100"),
+    ).rejects.toMatchObject({ code: "ORDER_EDIT_FINANCIAL_MISMATCH" });
+    await expect(
+      harness([
+        rawOrder({ taxesIncluded: true, currentTotalTaxSet: bag("1.00") }),
+      ]).provider.readOrder(4, "100"),
+    ).rejects.toMatchObject({ code: "TAX_INCLUDED_UNSUPPORTED" });
+  });
   it("validates exact money, complete history, and specific connection credentials", async () => {
     const wrong = harness([], { connectionId: 8 });
     await expect(wrong.provider.readOrder(4, "100")).rejects.toMatchObject({
@@ -265,8 +989,23 @@ describe("ShopifyOrderEditProvider", () => {
         "edit-1",
       ),
     ).rejects.toMatchObject({ code: "SHOPIFY_RESPONSE_INVALID" });
+    for (const field of ["originalUnitPriceCents", "quantity"] as const) {
+      const fractional = structuredClone(snapshot);
+      fractional.lines[0][field] = 1.5;
+      await expect(
+        h.provider.quote(
+          4,
+          fractional,
+          { changes: [{ lineItemId: "1", quantity: 1 }], additions: [] },
+          "edit-1",
+        ),
+      ).rejects.toMatchObject({ code: "SHOPIFY_RESPONSE_INVALID" });
+    }
     await expect(
       h.provider.commit(4, { ...quote, deltaCents: 1 }, "edit-1"),
+    ).rejects.toMatchObject({ code: "SHOPIFY_RESPONSE_INVALID" });
+    await expect(
+      h.provider.commit(4, { ...quote, totalCents: 1.5 }, "edit-1"),
     ).rejects.toMatchObject({ code: "SHOPIFY_RESPONSE_INVALID" });
     const changedPlan = structuredClone(quote);
     changedPlan.plan.changes[0].quantity = 0;
@@ -366,6 +1105,10 @@ describe("ShopifyOrderEditProvider", () => {
 
   it("does not guess the identity of duplicate original variants", async () => {
     const raw = rawOrder({
+      currentSubtotalPriceSet: bag("40.00"),
+      currentTotalPriceSet: bag("40.00"),
+      netPaymentSet: bag("40.00"),
+      transactions: [tx(1, "40.00")],
       lineItems: { nodes: [line(), line(2)], pageInfo: { hasNextPage: false } },
     });
     const h = harness([raw, raw]);
@@ -556,6 +1299,11 @@ describe("ShopifyOrderEditProvider", () => {
             allocationMethod: "ACROSS",
             targetSelection: "ALL",
             code: "SAVE",
+            value: {
+              __typename: "MoneyV2",
+              amount: "5.00",
+              currencyCode: "USD",
+            },
           },
         ],
         pageInfo: { hasNextPage: false },
@@ -765,6 +1513,7 @@ describe("ShopifyOrderEditProvider", () => {
     const { quote } = await reduction();
     const updated = rawOrder({
       lineItems: { nodes: [line(1, 10, 1)], pageInfo: { hasNextPage: false } },
+      currentSubtotalPriceSet: bag("10.00"),
       currentTotalPriceSet: bag("10.00"),
       totalOutstandingSet: bag("-10.00"),
     });
@@ -827,6 +1576,8 @@ describe("ShopifyOrderEditProvider", () => {
 
   it("creates an exact monetary refund intent after an order reduction", async () => {
     const raw = rawOrder({
+      lineItems: { nodes: [line(1, 10, 1)], pageInfo: { hasNextPage: false } },
+      currentSubtotalPriceSet: bag("10.00"),
       currentTotalPriceSet: bag("10.00"),
       totalOutstandingSet: bag("-10.00"),
     });
@@ -864,6 +1615,11 @@ describe("ShopifyOrderEditProvider", () => {
     "proves refund transaction outcome %s without treating record creation as payment",
     async (status) => {
       const raw = rawOrder({
+        lineItems: {
+          nodes: [line(1, 10, 1)],
+          pageInfo: { hasNextPage: false },
+        },
+        currentSubtotalPriceSet: bag("10.00"),
         currentTotalPriceSet: bag("10.00"),
         totalOutstandingSet: bag("-10.00"),
       });
@@ -905,6 +1661,8 @@ describe("ShopifyOrderEditProvider", () => {
 
   it("refuses an automatic refund resend after the 24-hour provider window", async () => {
     const raw = rawOrder({
+      lineItems: { nodes: [line(1, 10, 1)], pageInfo: { hasNextPage: false } },
+      currentSubtotalPriceSet: bag("10.00"),
       currentTotalPriceSet: bag("10.00"),
       totalOutstandingSet: bag("-10.00"),
     });
@@ -923,6 +1681,8 @@ describe("ShopifyOrderEditProvider", () => {
 
   it("reconciles an existing matching refund without creating another, even after 24 hours", async () => {
     const raw = rawOrder({
+      lineItems: { nodes: [line(1, 10, 1)], pageInfo: { hasNextPage: false } },
+      currentSubtotalPriceSet: bag("10.00"),
       currentTotalPriceSet: bag("10.00"),
       totalOutstandingSet: bag("-10.00"),
     });
@@ -962,6 +1722,7 @@ describe("ShopifyOrderEditProvider", () => {
         netPaymentSet: bag("22.00"),
         totalOutstandingSet: bag("3.00"),
         currentTotalPriceSet: bag("25.00"),
+        currentSubtotalPriceSet: bag("25.00"),
         lineItems: {
           nodes: [line(), line(2, 20, 1, "5.00")],
           pageInfo: { hasNextPage: false },
@@ -986,6 +1747,7 @@ describe("ShopifyOrderEditProvider", () => {
     const pending = rawOrder({
       fullyPaid: false,
       currentTotalPriceSet: bag("25.00"),
+      currentSubtotalPriceSet: bag("25.00"),
       totalOutstandingSet: bag("5.00"),
       lineItems: {
         nodes: [line(), line(2, 20, 1, "5.00")],
@@ -1085,7 +1847,10 @@ describe("ShopifyOrderEditProvider", () => {
     const h = harness([
       rawOrder(),
       restored,
-      rawOrder({ currentTotalTaxSet: bag("1.00") }),
+      rawOrder({
+        currentTotalTaxSet: bag("1.00"),
+        currentTotalPriceSet: bag("21.00"),
+      }),
       rawOrder({
         transactions: [tx(), tx(2, "5.00")],
         transactionsCount: { count: 2, precision: "EXACT" },

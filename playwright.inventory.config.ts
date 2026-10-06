@@ -15,6 +15,7 @@ export default defineConfig({
     "pick-corrections.spec.ts",
     "inventory-availability.spec.ts",
     "inventory-transfer.spec.ts",
+    "return-receiving.spec.ts",
     "inventory-authority-gates.spec.ts",
     "inventory-publication-target-resume.spec.ts",
     "channel-inventory-workspace.spec.ts",

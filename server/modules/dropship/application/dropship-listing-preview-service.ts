@@ -7,6 +7,10 @@ import type { EbayCategorySource } from "../../../../shared/dropship/ebay-catego
 import { z } from "zod";
 import type { DropshipListingPresentation, DropshipListingEconomics } from "../../../../shared/dropship/listing-presentation";
 import type { CatalogImageFile } from "../../catalog/catalog-media.reader";
+import type {
+  CatalogVariantPublicationPhotoReader,
+  CatalogVariantPublicationPhotos,
+} from "../../catalog/catalog-publication-images.reader";
 import { enrichDropshipListingRows, type DropshipListingPresentationDependencies } from "./dropship-listing-presentation";
 import type {
   DropshipSourcePlatform,
@@ -21,6 +25,7 @@ import {
 } from "../domain/catalog-exposure";
 import { DropshipError } from "../domain/errors";
 import { evaluateListingPriceAgainstCost } from "../domain/listing-price-cost";
+import { listingPhotoLeftOutReason } from "../domain/listing-photo-reasons";
 import {
   listingTierForVariantUomType,
   type DropshipListingTierEligibility,
@@ -63,6 +68,17 @@ import {
   type GenerateVendorListingPreviewInput,
   type QueuedEbayCategory,
 } from "./dropship-use-case-dtos";
+
+/**
+ * The most photos a listing carries, in catalog order. No push publishes
+ * more: eBay sends the first 12 (dropship-ebay-listing-push.provider.ts) and
+ * Shopify the first 20 (dropship-shopify-listing-push.provider.ts). The limit
+ * also bounds how many uploaded files one preview fingerprints.
+ */
+export const DROPSHIP_LISTING_MAX_PHOTOS = 20;
+
+/** Uploaded photos that cannot be published are named in one log line, up to this many. */
+const MAX_LOGGED_UNPUBLISHABLE_PHOTOS = 100;
 
 export interface DropshipListingStoreContext {
   vendorId: number;
@@ -257,6 +273,11 @@ export interface DropshipListingPreviewRepository {
 export interface DropshipListingPreviewServiceDependencies {
   presentation?: DropshipListingPresentationDependencies;
   /**
+   * The photos each size publishes, uploaded files included. Without it a
+   * listing publishes only the catalog's URL photos (listCatalogCandidates).
+   */
+  listingPhotos?: CatalogVariantPublicationPhotoReader;
+  /**
    * Cost of one sellable pack, for the below-cost warning. Falls back to the
    * presentation reader; with neither, the preview never warns about cost.
    */
@@ -409,11 +430,19 @@ export class DropshipListingPreviewService {
     if (ebayCategories && candidates.some((candidate) => !ebayCategories.has(candidate.productVariantId))) {
       throw new Error("eBay category resolution returned an incomplete catalog result.");
     }
+    const exposedCandidates = candidates.filter(
+      (candidate) => evaluateDropshipCatalogExposure(candidate, adminRules, generatedAt).exposed,
+    );
     const productCosts = await this.loadProductCosts({
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
-      candidates: candidates.filter((candidate) => evaluateDropshipCatalogExposure(candidate, adminRules, generatedAt).exposed),
+      candidates: exposedCandidates,
       rulePrices,
+    });
+    const listingPhotos = await this.loadListingPhotos({
+      vendorId: parsed.vendorId,
+      storeConnectionId: parsed.storeConnectionId,
+      candidates: exposedCandidates,
     });
     if (contents && ruleEligibleCandidates.some((candidate) => !contents.has(candidate.productVariantId))) {
       throw new Error("Listing content resolution returned an incomplete catalog result.");
@@ -476,6 +505,7 @@ export class DropshipListingPreviewService {
         : null;
       return buildListingPreviewRow({
         candidate,
+        listingPhotos: listingPhotos?.get(productVariantId) ?? null,
         resolvedContent: contents?.get(productVariantId),
         resolvedCategory: ebayCategories?.get(productVariantId) ?? null,
         queuedCategory: parsed.queuedEbayCategoriesByVariantId?.[String(productVariantId)] ?? null,
@@ -505,7 +535,7 @@ export class DropshipListingPreviewService {
 
     const presentation = this.deps.presentation;
     const enrichedRows = presentation
-      ? await enrichDropshipListingRows({ rows, candidates, vendorId: parsed.vendorId,
+      ? await enrichDropshipListingRows({ rows, candidates, listingPhotos, vendorId: parsed.vendorId,
           storeConnectionId: parsed.storeConnectionId, deps: { ...presentation,
             // The costs were read once above for the warning; the economics reuse them.
             productCosts: { loadProductCosts: async (input) => new Map(input.productVariantIds.flatMap((id) => {
@@ -522,6 +552,47 @@ export class DropshipListingPreviewService {
       rows: enrichedRows,
       summary: summarizeRows(rows),
     };
+  }
+
+  /**
+   * The photos each exposed size publishes, or null without a photo reader.
+   * A failed read fails the preview, like the other catalog reads: a push
+   * built without it would drop uploaded photos from a live listing. A photo
+   * that cannot be published is left out, logged, and warned about on its row;
+   * it never blocks a listing that has other photos, so a broken upload
+   * cannot stop a live listing's stock updates.
+   */
+  private async loadListingPhotos(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    candidates: readonly DropshipListingCatalogCandidate[];
+  }): Promise<ReadonlyMap<number, CatalogVariantPublicationPhotos> | null> {
+    const reader = this.deps.listingPhotos;
+    if (!reader) return null;
+    if (input.candidates.length === 0) return new Map();
+    const photos = await reader.listPublicationPhotos({
+      productVariantIds: input.candidates.map((candidate) => candidate.productVariantId),
+      maxPhotosPerVariant: DROPSHIP_LISTING_MAX_PHOTOS,
+    });
+    if (input.candidates.some((candidate) => !photos.has(candidate.productVariantId))) {
+      throw new Error("Listing photo resolution returned an incomplete catalog result.");
+    }
+    const unpublishable = input.candidates.flatMap((candidate) => (photos.get(candidate.productVariantId)?.issues ?? [])
+      .map((issue) => ({ productVariantId: candidate.productVariantId, assetId: issue.assetId, code: issue.code })));
+    if (unpublishable.length > 0) {
+      this.deps.logger.warn({
+        code: "DROPSHIP_LISTING_PHOTO_UNPUBLISHABLE",
+        message: "Uploaded catalog photos were left out of listings because they cannot be published.",
+        context: {
+          vendorId: input.vendorId,
+          storeConnectionId: input.storeConnectionId,
+          unpublishableCount: unpublishable.length,
+          photos: unpublishable.slice(0, MAX_LOGGED_UNPUBLISHABLE_PHOTOS),
+          truncated: unpublishable.length > MAX_LOGGED_UNPUBLISHABLE_PHOTOS,
+        },
+      });
+    }
+    return photos;
   }
 
   /**
@@ -947,6 +1018,8 @@ export const systemDropshipListingPreviewClock: DropshipClock = {
 };
 
 function buildListingPreviewRow(input: {
+  /** The size's photos, uploaded files included; null publishes the candidate's URL photos. */
+  listingPhotos?: CatalogVariantPublicationPhotos | null;
   resolvedContent?: import("../../../../shared/dropship/listing-content").ResolvedListingContent;
   resolvedCategory?: ResolvedEbayListingCategory | null;
   /** Push time only: the category the listing was queued with. */
@@ -1027,7 +1100,7 @@ function buildListingPreviewRow(input: {
   const marketplaceValidation = input.config
     ? input.marketplaceListing.buildListingIntent({
         config: input.config,
-        content: listingIntentContent(input.candidate, input.resolvedContent, publishedCategory),
+        content: listingIntentContent(input.candidate, input.resolvedContent, publishedCategory, input.listingPhotos ?? null),
         priceCents,
         quantity: marketplaceQuantity,
         storeCategoryNames: input.storeCategoryNames,
@@ -1035,6 +1108,7 @@ function buildListingPreviewRow(input: {
     : { intent: null, blockers: [], warnings: [] };
   blockers.push(...marketplaceValidation.blockers);
   warnings.push(...marketplaceValidation.warnings);
+  warnings.push(...unpublishablePhotoWarnings(input.listingPhotos ?? null));
   if (input.ebayFulfillmentPreflight?.compatible === false) {
     blockers.push(...input.ebayFulfillmentPreflight.issues.map(
       (issue) => `ebay_fulfillment_policy:${issue.code}`,
@@ -1108,17 +1182,27 @@ function buildListingPreviewRow(input: {
   };
 }
 
-/** The candidate as the marketplace sees it: the resolved description and the eBay category to publish. */
+/**
+ * The candidate as the marketplace sees it: the resolved description, the
+ * eBay category and the photos to publish.
+ */
 function listingIntentContent(
   candidate: DropshipListingCatalogCandidate,
   resolvedContent: import("../../../../shared/dropship/listing-content").ResolvedListingContent | undefined,
   category: PublishedEbayCategory | null,
+  photos: CatalogVariantPublicationPhotos | null,
 ): DropshipListingCatalogCandidate {
   return {
     ...candidate,
     ...(resolvedContent ? { description: resolvedContent.descriptionHtml } : {}),
     ...(category ? { ebayBrowseCategoryId: category.categoryId, ebayBrowseCategoryName: category.categoryName } : {}),
+    ...(photos ? { imageUrls: photos.photos.map((photo) => photo.url) } : {}),
   };
+}
+
+/** One warning per reason an uploaded photo is left out, in a stable order. */
+function unpublishablePhotoWarnings(photos: CatalogVariantPublicationPhotos | null): string[] {
+  return [...new Set((photos?.issues ?? []).map((issue) => listingPhotoLeftOutReason(issue.code)))].sort();
 }
 
 interface PublishedEbayCategory {

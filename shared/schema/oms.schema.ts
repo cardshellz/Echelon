@@ -395,7 +395,8 @@ export const orderItemCosts = omsSchema.table("order_item_costs", {
   // *_cents (× 100) on startup; written authoritatively by the FIFO pick path
   // (lot mills × qty) in a later PR. *_cents stay as derived display mirrors.
   unitCostMills: bigint("unit_cost_mills", { mode: "number" }).notNull().default(0),
-  totalCostMills: bigint("total_cost_mills", { mode: "number" }).notNull().default(0), 
+  totalCostMills: bigint("total_cost_mills", { mode: "number" }).notNull().default(0),
+  costPrecisionVersion: integer("cost_precision_version").notNull().default(0),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
