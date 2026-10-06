@@ -89,6 +89,86 @@ describe("dropship listing presentation", () => {
     expect(presentation.unitsPerVariant).toBe(25);
   });
 
+  describe("uploaded catalog photos", () => {
+    const uploadedUrl = `https://catalog.example.com/api/catalog/images/3/${"c".repeat(64)}.png`;
+    const media = [
+      { assetId: 1, productVariantId: null, url: "https://images.test/product.jpg", altText: "Product", storageType: "url", hasFile: false },
+      { assetId: 3, productVariantId: 7, url: null, altText: "Uploaded", storageType: "file", hasFile: true },
+    ];
+
+    it("shows a published uploaded photo once, as included, at the address the listing publishes", () => {
+      const listingIntent = { ...intent, imageUrls: [uploadedUrl, "https://images.test/product.jpg"] };
+      const presentation = buildDropshipListingPresentation({ candidate, storeConnectionId: 9,
+        publication: resolveDropshipPublicationPreview(listingIntent), images: media,
+        photos: { photos: [
+          { assetId: 3, url: uploadedUrl, uploaded: true },
+          { assetId: 1, url: "https://images.test/product.jpg", uploaded: false },
+        ], issues: [] } });
+
+      expect(presentation.images).toEqual([
+        { assetId: 3, url: uploadedUrl, altText: "Uploaded", source: "catalog_file", publicationStatus: "included", reason: null },
+        { assetId: 1, url: "https://images.test/product.jpg", altText: "Product", source: "external_url", publicationStatus: "included", reason: null },
+      ]);
+      expect(presentation.issues).toEqual([]);
+    });
+
+    it("says why each uploaded photo is left out, and keeps showing it to the vendor", () => {
+      const presentation = buildDropshipListingPresentation({ candidate, storeConnectionId: 9,
+        publication: { title: "Resolved", description: null, condition: "NEW", itemSpecifics: {}, imageUrls: ["https://images.test/product.jpg"] },
+        images: [
+          ...media,
+          { assetId: 4, productVariantId: null, url: null, altText: null, storageType: "file", hasFile: true },
+          { assetId: 5, productVariantId: null, url: null, altText: null, storageType: "both", hasFile: true },
+        ],
+        photos: { photos: [{ assetId: 1, url: "https://images.test/product.jpg", uploaded: false }], issues: [
+          { assetId: 4, code: "CATALOG_PUBLIC_URL_REQUIRED", message: "not configured" },
+          { assetId: 5, code: "IMAGE_FORMAT_UNSUPPORTED", message: "mislabeled" },
+        ] } });
+
+      expect(presentation.images.map(({ assetId, url, publicationStatus, reason }) => ({ assetId, url, publicationStatus, reason }))).toEqual([
+        { assetId: 1, url: "https://images.test/product.jpg", publicationStatus: "included", reason: null },
+        // After the photos the listing carries, e.g. eBay's first 12.
+        { assetId: 3, url: "/api/dropship/listings/stores/9/variants/7/assets/3/file", publicationStatus: "not_included", reason: "not_in_publication_payload" },
+        { assetId: 4, url: "/api/dropship/listings/stores/9/variants/7/assets/4/file", publicationStatus: "not_included", reason: "catalog_photo_public_address_missing" },
+        { assetId: 5, url: "/api/dropship/listings/stores/9/variants/7/assets/5/file", publicationStatus: "not_included", reason: "catalog_photo_unavailable" },
+      ]);
+    });
+
+    it("lists an uploaded photo after eBay's first 12 as not included", () => {
+      const linked = Array.from({ length: 12 }, (_, index) => `https://images.test/${index}.jpg`);
+      const listingIntent = { ...intent, imageUrls: [...linked, uploadedUrl] };
+      const presentation = buildDropshipListingPresentation({ candidate, storeConnectionId: 9,
+        publication: resolveDropshipPublicationPreview(listingIntent), images: [media[1]],
+        photos: { photos: [
+          ...linked.map((url, index) => ({ assetId: 100 + index, url, uploaded: false })),
+          { assetId: 3, url: uploadedUrl, uploaded: true },
+        ], issues: [] } });
+
+      expect(presentation.images.filter((image) => image.publicationStatus === "included")).toHaveLength(12);
+      expect(presentation.images.at(-1)).toMatchObject({ assetId: 3, publicationStatus: "not_included", reason: "not_in_publication_payload" });
+    });
+
+    it("hands each row its own photos", async () => {
+      const row = { productVariantId: 7, productId: 5, sku: "PACK-25", title: "Card protectors", platform: "ebay" as const,
+        listingMode: "live", currentListingStatus: "not_listed", previewStatus: "ready" as const, blockers: [], warnings: [],
+        marketplaceQuantity: 3, priceCents: 2000, marketplaceCategoryId: "183438", marketplaceCategoryName: "Card Toploaders",
+        storeCategoryNames: [], businessPolicySelection: null, previewHash: "hash", listingTier: null,
+        listingIntent: { ...intent, imageUrls: [uploadedUrl] },
+        adminExposureDecision: { exposed: true, reason: "exposed", includeRuleIds: [1], excludeRuleIds: [] },
+        selectionDecision: { selected: true, reason: "selected", adminExposureReason: "exposed", includeRuleIds: [2], excludeRuleIds: [],
+          autoConnectNewSkus: true, autoListNewSkus: false, marketplaceQuantity: 3, quantityCapApplied: false } } satisfies DropshipListingPreviewRow;
+      const [enriched] = await enrichDropshipListingRows({ rows: [row], candidates: [candidate], vendorId: 10, storeConnectionId: 9,
+        listingPhotos: new Map([[7, { photos: [{ assetId: 3, url: uploadedUrl, uploaded: true }], issues: [] }]]),
+        deps: { media: { listImages: async () => new Map([[7, [media[1]]]]), readImageFile: async () => null },
+          productCosts: { loadProductCosts: async () => new Map() }, resolvePublication: resolveDropshipPublicationPreview,
+          logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } } });
+
+      expect(enriched.presentation?.images).toEqual([
+        { assetId: 3, url: uploadedUrl, altText: "Uploaded", source: "catalog_file", publicationStatus: "included", reason: null },
+      ]);
+    });
+  });
+
   it("does not claim catalog fallback images are published and never returns unsafe URLs", () => {
     const presentation = buildDropshipListingPresentation({ candidate, publication: null, storeConnectionId: 9,
       images: [ { assetId: 1, productVariantId: null, url: "javascript:alert(1)", altText: null, storageType: "url", hasFile: false } ],

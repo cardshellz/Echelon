@@ -6,7 +6,9 @@ import {
   type DropshipListingPresentation,
 } from "../../../../shared/dropship/listing-presentation";
 import type { CatalogVariantImage, CatalogVariantMediaReader } from "../../catalog/catalog-media.reader";
+import type { CatalogPublicationPhoto, CatalogVariantPublicationPhotos } from "../../catalog/catalog-publication-images.reader";
 import { DropshipError } from "../domain/errors";
+import { listingPhotoLeftOutReason } from "../domain/listing-photo-reasons";
 import type { DropshipProductCost, DropshipProductCostReader } from "./dropship-product-cost";
 import type { DropshipListingCatalogCandidate, DropshipListingPreviewRow } from "./dropship-listing-preview-service";
 import type { DropshipMarketplaceListingIntent } from "./dropship-marketplace-listing-provider";
@@ -31,6 +33,8 @@ export interface DropshipListingPresentationDependencies {
 export async function enrichDropshipListingRows(input: {
   rows: readonly DropshipListingPreviewRow[];
   candidates: readonly DropshipListingCatalogCandidate[];
+  /** Each size's publishable photos, when the preview resolved them. */
+  listingPhotos?: ReadonlyMap<number, CatalogVariantPublicationPhotos> | null;
   vendorId: number;
   storeConnectionId: number;
   deps: DropshipListingPresentationDependencies;
@@ -58,6 +62,7 @@ export async function enrichDropshipListingRows(input: {
         candidate, publication, storeConnectionId: input.storeConnectionId,
         images: media?.get(row.productVariantId) ?? [],
         mediaUnavailable: media === null,
+        photos: input.listingPhotos?.get(row.productVariantId) ?? null,
       }),
       economics: buildDropshipListingEconomics(candidate, row.priceCents, productCosts?.get(row.productVariantId) ?? null),
     };
@@ -92,6 +97,11 @@ export function buildDropshipListingPresentation(input: {
   storeConnectionId: number;
   images: readonly CatalogVariantImage[];
   mediaUnavailable?: boolean;
+  /**
+   * The size's publishable photos. They name the asset behind each published
+   * URL, which an uploaded photo's public address cannot be matched by.
+   */
+  photos?: CatalogVariantPublicationPhotos | null;
 }): DropshipListingPresentation {
   const { candidate, publication } = input;
   const issues: string[] = [];
@@ -99,17 +109,27 @@ export function buildDropshipListingPresentation(input: {
   if (input.mediaUnavailable) issues.push("catalog_media_unavailable");
   const images: DropshipListingPresentation["images"] = [];
   const publishedUrls = publication?.imageUrls ?? [];
+  // The first photo with a URL owns it, as the catalog media lookup below does.
+  const photoByUrl = new Map<string, CatalogPublicationPhoto>();
+  for (const photo of input.photos?.photos ?? []) if (!photoByUrl.has(photo.url)) photoByUrl.set(photo.url, photo);
   // Preserve publish order and duplicates. Do not claim un-published catalog media is included.
   for (const url of publishedUrls) {
-    const asset = input.images.find((image) => image.url === url);
+    const photo = photoByUrl.get(url);
+    const asset = photo
+      ? input.images.find((image) => image.assetId === photo.assetId)
+      : input.images.find((image) => image.url === url);
     const safe = isSafeDropshipExternalImageUrl(url);
     images.push({
-      assetId: asset?.assetId ?? null, url: safe ? url : null, altText: asset?.altText ?? null,
-      source: "external_url", publicationStatus: safe ? "included" : "unavailable",
+      assetId: photo?.assetId ?? asset?.assetId ?? null, url: safe ? url : null, altText: asset?.altText ?? null,
+      source: photo?.uploaded ? "catalog_file" : "external_url", publicationStatus: safe ? "included" : "unavailable",
       reason: safe ? null : "unsafe_image_url",
     });
   }
+  const includedAssetIds = new Set(images.flatMap((image) =>
+    image.publicationStatus === "included" && image.assetId !== null ? [image.assetId] : []));
+  const leftOutCodes = new Map((input.photos?.issues ?? []).map((issue) => [issue.assetId, issue.code]));
   for (const asset of input.images) {
+    if (includedAssetIds.has(asset.assetId)) continue;
     if (asset.url && publishedUrls.includes(asset.url) && isSafeDropshipExternalImageUrl(asset.url)) continue;
     if (asset.url && isSafeDropshipExternalImageUrl(asset.url)) {
       images.push({ assetId: asset.assetId, url: asset.url, altText: asset.altText,
@@ -119,7 +139,7 @@ export function buildDropshipListingPresentation(input: {
         assetId: asset.assetId,
         url: `/api/dropship/listings/stores/${input.storeConnectionId}/variants/${candidate.productVariantId}/assets/${asset.assetId}/file`,
         altText: asset.altText, source: "catalog_file", publicationStatus: "not_included",
-        reason: "authenticated_catalog_image_only",
+        reason: uploadedPhotoLeftOutReason(input.photos ?? null, leftOutCodes.get(asset.assetId)),
       });
     } else {
       images.push({ assetId: asset.assetId, url: null, altText: asset.altText,
@@ -138,6 +158,16 @@ export function buildDropshipListingPresentation(input: {
     itemSpecifics: Object.entries(publication?.itemSpecifics ?? {}).map(([name, values]) => ({ name, values })),
     images, issues,
   });
+}
+
+/**
+ * Why an uploaded photo is not in the listing: the catalog could not publish
+ * it, or it comes after the photos the listing carries. Without resolved
+ * photos the preview publishes URL photos only, so the file stays a catalog image.
+ */
+function uploadedPhotoLeftOutReason(photos: CatalogVariantPublicationPhotos | null, catalogIssueCode: string | undefined): string {
+  if (!photos) return "authenticated_catalog_image_only";
+  return catalogIssueCode === undefined ? "not_in_publication_payload" : listingPhotoLeftOutReason(catalogIssueCode);
 }
 
 /** Plain-text extraction, not an HTML sanitizer. The DTO deliberately has no renderable HTML field. */

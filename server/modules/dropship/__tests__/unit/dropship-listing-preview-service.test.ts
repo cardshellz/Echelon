@@ -15,9 +15,15 @@ import type { ListingRulePrice } from "../../application/dropship-rule-price";
 import type { DropshipProductCost, DropshipProductCostReader } from "../../application/dropship-product-cost";
 import { DropshipError } from "../../domain/errors";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
+import type {
+  CatalogVariantPublicationPhotos,
+  CatalogVariantPublicationPhotoReader,
+} from "../../../catalog/catalog-publication-images.reader";
 import {
+  DROPSHIP_LISTING_MAX_PHOTOS,
   DropshipListingPreviewService,
   hashListingPushJobRequest,
+  type DropshipListingPreviewServiceDependencies,
   type CreateDropshipListingPushJobRepositoryInput,
   type CreateDropshipListingPushJobRepositoryResult,
   type DropshipExistingVendorListing,
@@ -85,6 +91,7 @@ describe("DropshipListingPreviewService", () => {
   let listingTierEligibility: DropshipListingTierEligibility;
   let productCosts: Map<number, DropshipProductCost>;
   let productCostReader: DropshipProductCostReader;
+  let serviceDeps: DropshipListingPreviewServiceDependencies;
 
   beforeEach(() => {
     repository = new FakeListingPreviewRepository();
@@ -104,7 +111,7 @@ describe("DropshipListingPreviewService", () => {
       issues: [],
     };
     evaluatedFulfillmentPolicyIds = [];
-    service = new DropshipListingPreviewService({
+    serviceDeps = {
       vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
       repository,
       productCosts: { loadProductCosts: (input) => productCostReader.loadProductCosts(input) },
@@ -124,7 +131,8 @@ describe("DropshipListingPreviewService", () => {
         warn: (event) => logs.push(event),
         error: (event) => logs.push(event),
       },
-    });
+    };
+    service = new DropshipListingPreviewService(serviceDeps);
   });
 
   it("reports the tier a SKU sells in and leaves an on-sale tier alone", async () => {
@@ -325,6 +333,155 @@ describe("DropshipListingPreviewService", () => {
     repository.loadListingContents = async () => new Map();
     await expect(service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] })).rejects.toThrow("incomplete catalog result");
   });
+  describe("uploaded catalog photos", () => {
+    const uploadedUrl = `https://catalog.example.com/api/catalog/images/31/${"c".repeat(64)}.png`;
+    const linkedUrl = "https://cdn.example.test/toploader.jpg";
+    let photoRequests: Array<{ productVariantIds: readonly number[]; maxPhotosPerVariant: number }>;
+    let photos: Map<number, CatalogVariantPublicationPhotos>;
+
+    function withPhotoReader(reader?: CatalogVariantPublicationPhotoReader): DropshipListingPreviewService {
+      return new DropshipListingPreviewService({ ...serviceDeps, listingPhotos: reader ?? {
+        listPublicationPhotos: async (input) => { photoRequests.push(input); return photos; },
+      } });
+    }
+    function photoLogs() {
+      return logs.filter((event) => event.code === "DROPSHIP_LISTING_PHOTO_UNPUBLISHABLE");
+    }
+
+    beforeEach(() => {
+      photoRequests = [];
+      // The eBay store default requires a photo (dropship-listing-config-service.ts).
+      repository.config = { ...repository.config!, requiredProductFields: ["description", "brand", "imageUrls"] };
+      // Today's catalog read keeps URL photos only: this product's only photo is uploaded.
+      repository.candidate.imageUrls = [];
+      photos = new Map([[101, { photos: [{ assetId: 31, url: uploadedUrl, uploaded: true }], issues: [] }]]);
+    });
+
+    it("lists a product whose only photo is uploaded, which the URL-only catalog read blocks", async () => {
+      const without = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+      expect(without.rows[0].blockers).toContain("missing_product_field:imageUrls");
+
+      const preview = await withPhotoReader().previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+
+      expect(preview.rows[0]).toMatchObject({ previewStatus: "ready", blockers: [], warnings: [] });
+      expect(preview.rows[0].listingIntent?.imageUrls).toEqual([uploadedUrl]);
+      expect(photoRequests).toEqual([{ productVariantIds: [101], maxPhotosPerVariant: DROPSHIP_LISTING_MAX_PHOTOS }]);
+      expect(DROPSHIP_LISTING_MAX_PHOTOS).toBe(20);
+      expect(photoLogs()).toEqual([]);
+    });
+
+    it("publishes the catalog's photo order, uploaded and linked photos together", async () => {
+      repository.candidate.imageUrls = [linkedUrl];
+      photos.set(101, { photos: [
+        { assetId: 31, url: uploadedUrl, uploaded: true },
+        { assetId: 7, url: linkedUrl, uploaded: false },
+      ], issues: [] });
+
+      const preview = await withPhotoReader().previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+
+      expect(preview.rows[0].listingIntent?.imageUrls).toEqual([uploadedUrl, linkedUrl]);
+      // The preview hash covers the intent, so a changed photo needs a new review.
+      const linkedOnly = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+      expect(linkedOnly.rows[0].listingIntent?.imageUrls).toEqual([linkedUrl]);
+      expect(preview.rows[0].previewHash).not.toBe(linkedOnly.rows[0].previewHash);
+    });
+
+    it("leaves out uploaded photos it cannot publish, warns once per reason, and still queues the listing", async () => {
+      photos.set(101, { photos: [{ assetId: 7, url: linkedUrl, uploaded: false }], issues: [
+        { assetId: 31, code: "CATALOG_PUBLIC_URL_REQUIRED", message: "not configured" },
+        { assetId: 32, code: "CATALOG_IMAGE_UNAVAILABLE", message: "missing file" },
+        { assetId: 33, code: "IMAGE_FORMAT_UNSUPPORTED", message: "mislabeled" },
+      ] });
+      const photoService = withPhotoReader();
+
+      const preview = await photoService.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+
+      expect(preview.rows[0]).toMatchObject({ previewStatus: "warning", blockers: [],
+        warnings: ["catalog_photo_public_address_missing", "catalog_photo_unavailable"] });
+      expect(preview.rows[0].listingIntent?.imageUrls).toEqual([linkedUrl]);
+      expect(photoLogs()).toEqual([expect.objectContaining({ context: {
+        vendorId: 10, storeConnectionId: 22, unpublishableCount: 3, truncated: false,
+        photos: [
+          { productVariantId: 101, assetId: 31, code: "CATALOG_PUBLIC_URL_REQUIRED" },
+          { productVariantId: 101, assetId: 32, code: "CATALOG_IMAGE_UNAVAILABLE" },
+          { productVariantId: 101, assetId: 33, code: "IMAGE_FORMAT_UNSUPPORTED" },
+        ],
+      } })]);
+      const queued = await photoService.createListingPushJobForMember("member-1", {
+        storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "photos-warning-1", reviewMode: "current_preview",
+      });
+      expect(queued.job.status).toBe("queued");
+      expect(repository.lastCreatedInput?.preview.rows[0].listingIntent?.imageUrls).toEqual([linkedUrl]);
+    });
+
+    it("blocks a listing only when it is left with no photo at all", async () => {
+      photos.set(101, { photos: [], issues: [{ assetId: 31, code: "CATALOG_PUBLIC_URL_REQUIRED", message: "not configured" }] });
+
+      const preview = await withPhotoReader().previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+
+      expect(preview.rows[0].previewStatus).toBe("blocked");
+      expect(preview.rows[0].blockers).toContain("missing_product_field:imageUrls");
+      expect(preview.rows[0].warnings).toContain("catalog_photo_public_address_missing");
+    });
+
+    it("pushes the photos the current catalog gives at push time", async () => {
+      const photoService = withPhotoReader();
+      const intent = await refreshQueuedListingIntent({
+        generatePreview: (input) => photoService.generatePreview(input),
+        resolveCostChangePolicy: async () => ({ policyId: null, settings: DEFAULT_DROPSHIP_COST_CHANGE_POLICY }),
+        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      }, { jobId: 30, jobItemId: 1, vendorId: 10, storeConnectionId: 22, productVariantId: 101, queuedPriceCents: 1199,
+        queuedMarketplaceCategory: null });
+
+      expect(intent.imageUrls).toEqual([uploadedUrl]);
+    });
+
+    it("fails the preview when the photos cannot be read, rather than publish without uploaded photos", async () => {
+      const failure = new Error("catalog read failed");
+      const photoService = withPhotoReader({ listPublicationPhotos: async () => { throw failure; } });
+
+      await expect(photoService.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] })).rejects.toBe(failure);
+      await expect(photoService.createListingPushJobForMember("member-1", {
+        storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "photos-failed-1", reviewMode: "current_preview",
+      })).rejects.toBe(failure);
+      expect(repository.jobs).toHaveLength(0);
+    });
+
+    it("refuses a photo result that leaves a size out", async () => {
+      photos = new Map();
+      await expect(withPhotoReader().previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] }))
+        .rejects.toThrow("Listing photo resolution returned an incomplete catalog result.");
+    });
+
+    it("reads no photos for a size the catalog does not expose", async () => {
+      repository.candidate.productIsActive = false;
+
+      const preview = await withPhotoReader().previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+
+      expect(photoRequests).toEqual([]);
+      expect(preview.rows[0].previewStatus).toBe("blocked");
+    });
+
+    it("names at most 100 photos it cannot publish in one log line, and says how many there were", async () => {
+      photos.set(101, { photos: [{ assetId: 7, url: linkedUrl, uploaded: false }], issues: Array.from({ length: 101 }, (_, index) => ({
+        assetId: 1000 + index, code: "CATALOG_IMAGE_UNAVAILABLE", message: "missing file",
+      })) });
+
+      const preview = await withPhotoReader().previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+
+      expect(preview.rows[0].warnings).toEqual(["catalog_photo_unavailable"]);
+      const [event] = photoLogs();
+      expect(event.context).toMatchObject({ unpublishableCount: 101, truncated: true });
+      expect((event.context as { photos: unknown[] }).photos).toHaveLength(100);
+    });
+
+    it("keeps the catalog's URL photos when no photo reader is configured", async () => {
+      repository.candidate.imageUrls = [linkedUrl];
+      const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+      expect(preview.rows[0].listingIntent?.imageUrls).toEqual([linkedUrl]);
+    });
+  });
+
   it("builds a ready listing preview from store connection listing config", async () => {
     const result = await service.previewForMember("member-1", {
       storeConnectionId: 22,
