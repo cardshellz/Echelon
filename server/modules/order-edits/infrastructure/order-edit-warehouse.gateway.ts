@@ -9,6 +9,10 @@ import type { OrderEditSnapshot } from "../application/order-edit-provider";
 import type { OrderEditReleaseProof } from "../application/order-edit-store";
 import { getOmsLineMaterializableQuantity } from "../../oms/oms-line-authority";
 import {
+  assertOrderEditWarehouseItemIdentities,
+  readOrderEditWarehouseItems,
+} from "./order-edit-warehouse-items";
+import {
   acquireOrderEditWarehouseHold,
   releaseOrderEditWarehouseHold,
 } from "../../wms/order-edit-hold.commands";
@@ -149,11 +153,7 @@ async function readReleaseProof(
     tracking_number,shipped_at FROM wms.outbound_shipments WHERE order_id=ANY($1::int[]) ORDER BY id FOR UPDATE`,
     [wmsOrderIds],
   );
-  const items = await client.query(
-    `SELECT id,order_id,oms_order_line_id,product_variant_id,quantity,picked_quantity,fulfilled_quantity,status,on_hold
-    FROM wms.order_items WHERE order_id=ANY($1::int[]) ORDER BY id FOR UPDATE`,
-    [wmsOrderIds],
-  );
+  const items = await readOrderEditWarehouseItems(client, omsOrderId, true);
   const lines = await client.query(
     `SELECT id,external_line_item_id,product_variant_id,quantity,paid_quantity,authority_fulfillable_quantity
     FROM oms.oms_order_lines WHERE order_id=$1 ORDER BY id FOR UPDATE`,
@@ -165,27 +165,9 @@ async function readReleaseProof(
     WHERE shipment_id=ANY($1::int[]) ORDER BY id FOR UPDATE`,
     [shipmentIds],
   );
-  if (
-    allocationRequired &&
-    items.rows.some(
-      (item) =>
-        item.status !== "cancelled" &&
-        item.quantity > 0 &&
-        (!item.product_variant_id ||
-          !lines.rows.some(
-            (line) =>
-              String(line.id) === String(item.oms_order_line_id) &&
-              line.product_variant_id === item.product_variant_id,
-          )),
-    )
-  ) {
-    throw new OrderEditError(
-      "ORDER_EDIT_INVENTORY_PENDING",
-      "Warehouse and source product identities do not match.",
-    );
-  }
+  if (allocationRequired) assertOrderEditWarehouseItemIdentities(items);
   const allocation = allocationRequired
-    ? await readAllocationProof(client, wmsOrderIds, items.rows)
+    ? await readAllocationProof(client, wmsOrderIds, items)
     : null;
   return {
     wmsOrderIds,
@@ -198,7 +180,7 @@ async function readReleaseProof(
           source: source.rows,
           orders: orders.rows,
           shipments: shipments.rows,
-          items: items.rows,
+          items,
           lines: lines.rows,
           shipmentItems: shipmentItems.rows,
           authority,
