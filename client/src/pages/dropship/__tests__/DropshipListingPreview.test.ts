@@ -84,6 +84,22 @@ describe("rich listing preview", () => {
     expect(markup).toContain("Unavailable"); expect(markup).toContain("No image available"); expect(markup).toContain("not included in the listing payload");
     expect(markup).not.toContain("$0.00");
   });
+  it("shows an uploaded photo the listing publishes as included, and says why one is left out", () => {
+    const uploadedUrl = `https://catalog.example.test/api/catalog/images/3/${"c".repeat(64)}.png`;
+    const value = row();
+    value.presentation!.images = [{ assetId: 3, url: uploadedUrl, altText: "Uploaded photo", source: "catalog_file", publicationStatus: "included", reason: null }];
+    const included = render(React.createElement(ListingPreviewDetailsContent, { row: value, generatedAt: "2026-10-06T12:00:00.000Z" }));
+    expect(included).toContain(`src="${uploadedUrl}"`);
+    expect(included).toContain("1 included in listing");
+    expect(included).toContain("Included in the listing payload.");
+
+    value.presentation!.images = [{ assetId: 4, url: "/api/dropship/listings/stores/9/variants/1/assets/4/file", altText: null,
+      source: "catalog_file", publicationStatus: "not_included", reason: "catalog_photo_public_address_missing" }];
+    value.warnings = ["catalog_photo_public_address_missing"];
+    const leftOut = render(React.createElement(ListingPreviewDetailsContent, { row: value, generatedAt: "2026-10-06T12:00:00.000Z" }));
+    expect(leftOut).toContain("0 included in listing");
+    expect(leftOut).toContain("An uploaded catalog photo can&#x27;t be sent to the marketplace yet, so this listing goes out without it.");
+  });
   it("keeps old responses usable with a new-preview prompt", () => {
     const value = row(); delete value.economics; delete value.presentation;
     const markup = render(React.createElement(ListingPreviewDetailsContent, { row: value, generatedAt: "2026-09-06T12:00:00.000Z" }));

@@ -34,6 +34,19 @@ describe("product-cost preview issues", () => {
   });
 });
 
+describe("listing photo preview issues", () => {
+  it("says an uploaded photo is left out and that the vendor cannot fix it", () => {
+    expect(formatListingPreviewIssue("catalog_photo_public_address_missing"))
+      .toBe("An uploaded catalog photo can't be sent to the marketplace yet, so this listing goes out without it. Card Shellz has to finish setting up photo hosting. Contact support.");
+    expect(formatListingPreviewIssue("catalog_photo_unavailable"))
+      .toBe("An uploaded catalog photo is missing, too large, or not a JPEG, PNG, WebP or GIF file, so this listing goes out without it. Contact support.");
+  });
+  it("says plainly when a product has no photo to send", () => {
+    expect(formatListingPreviewIssue("missing_product_field:imageUrls"))
+      .toBe("This product has no photo that can be sent to the marketplace. Contact support.");
+  });
+});
+
 describe("listing tier preview issues", () => {
   it("says why the listing's tier is not active and what to change, never on sale or off sale", () => {
     expect(formatListingPreviewIssue("listing_tier:autopay_off"))

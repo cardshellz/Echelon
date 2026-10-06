@@ -1,5 +1,7 @@
 import { db, pool } from "../../../db";
 import { PgCatalogVariantMediaReader } from "../../catalog/catalog-media.reader";
+import { createCatalogPublicImageUrl } from "../../catalog/catalog-public-image";
+import { PgCatalogVariantPublicationPhotoReader } from "../../catalog/catalog-publication-images.reader";
 import { createAllocationEngine } from "../../channels/allocation-engine.service";
 import { resolveDropshipPublicationPreview } from "./dropship-listing-publication-preview.provider";
 import { createAuthorityAwareInventoryAtpService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
@@ -29,6 +31,9 @@ export function createDropshipListingPreviewServiceFromEnv(): DropshipListingPre
     vendorProvisioning: createDropshipVendorProvisioningServiceFromEnv(),
     repository,
     productCosts,
+    // Uploaded photos publish at the catalog's public photo address
+    // (CATALOG_PUBLIC_BASE_URL, see docs/WALMART_LISTING_PUBLICATION.md).
+    listingPhotos: new PgCatalogVariantPublicationPhotoReader(pool, createCatalogPublicImageUrl(process.env)),
     presentation: {
       media: new PgCatalogVariantMediaReader(pool),
       productCosts,
