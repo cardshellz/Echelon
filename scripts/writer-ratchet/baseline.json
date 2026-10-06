@@ -825,6 +825,12 @@
   "marketplace.channel_listing_scopes": [
     "modules/marketplace-listings"
   ],
+  "marketplace.channel_listing_update_events": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.channel_listing_updates": [
+    "modules/marketplace-listings"
+  ],
   "marketplace.dropship_listing_scopes": [
     "modules/marketplace-listings"
   ],

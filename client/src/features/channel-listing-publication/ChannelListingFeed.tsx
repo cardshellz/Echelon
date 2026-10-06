@@ -55,6 +55,7 @@ export interface ChannelListingFeedProps {
   onBulkEdit(): void;
   onAdd(): void;
   onEdit(variantId: number): void;
+  onEditExisting(sku: string): void;
   onRemove(variantId: number): void;
   onSave(): void;
   onReview(): void;
@@ -388,6 +389,7 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
                           : choose(row.sku, checked)
                       }
                       onEdit={props.onEdit}
+                      onEditExisting={props.onEditExisting}
                       onRemove={props.onRemove}
                       onMatch={catalog.chooseVariant}
                       onActivity={props.onActivity}

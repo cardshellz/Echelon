@@ -22,6 +22,7 @@ import { registerFinanceAnalyticsRoutes } from "./modules/oms/finance-analytics.
 import { registerWalmartChannelRoutes } from "./modules/channels/adapters/walmart/walmart.routes";
 import { registerChannelCatalogRoutes } from "./modules/channels/channel-catalog.routes";
 import { registerListingPublicationRoutes } from "./modules/marketplace-listings/interfaces/http/listing-publication.routes";
+import { registerListingUpdateRoutes } from "./modules/marketplace-listings/interfaces/http/listing-update.routes";
 import { registerInventoryPublicationMembershipRoutes } from "./modules/inventory-planning/interfaces/http/inventory-publication-membership.routes";
 import { registerInventoryPublicationInitialScopeRoutes } from "./modules/inventory-planning/interfaces/http/inventory-publication-initial-scope.routes";
 import { registerChannelRoutes } from "./modules/channels/channels.routes";
@@ -239,6 +240,7 @@ export async function registerRoutes(
   registerWalmartChannelRoutes(app);
   registerChannelCatalogRoutes(app);
   registerListingPublicationRoutes(app);
+  registerListingUpdateRoutes(app);
   registerInventoryPublicationMembershipRoutes(app, app.locals.services.inventoryPublicationMembership);
   registerInventoryPublicationInitialScopeRoutes(app, app.locals.services.inventoryPublicationInitialScope);
   registerMarketplaceListingRegistrationRoutes(
