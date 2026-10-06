@@ -4,6 +4,10 @@ import type { OrderEditSnapshot } from "../application/order-edit-provider";
 import { OrderEditError } from "../domain/order-edit-error";
 import { getOmsLineMaterializableQuantity } from "../../oms/oms-line-authority";
 import { canonicalAvailabilityReservationStatusProjectionSchema } from "@shared/types/inventory-availability-claims";
+import {
+  assertOrderEditWarehouseItemIdentities,
+  readOrderEditWarehouseItems,
+} from "./order-edit-warehouse-items";
 
 const integer = z.coerce.number().int().nonnegative().safe();
 const headerSchema = z.object({
@@ -120,32 +124,39 @@ export class OrderEditOmsSynchronizer {
       );
     }
     await this.wms.syncOmsOrderToWms(omsOrderId);
-    const items = z
-      .array(
-        z.object({
-          id: integer,
-          order_id: integer,
-          quantity: integer,
-          product_variant_id: integer.positive(),
-          source_variant_id: integer.positive(),
-        }),
-      )
-      .parse(
-        (
-          await this.pool.query(
-            `SELECT oi.id,oi.order_id,oi.quantity,oi.product_variant_id,ol.product_variant_id AS source_variant_id FROM wms.order_items oi
-       JOIN oms.oms_order_lines ol ON ol.id=oi.oms_order_line_id
-       WHERE ol.order_id=$1 AND oi.status<>'cancelled' AND oi.quantity>0 ORDER BY oi.order_id,oi.id`,
-            [omsOrderId],
-          )
-        ).rows,
+    const items = (
+      await readOrderEditWarehouseItems(this.pool, omsOrderId)
+    ).filter((item) => item.status !== "cancelled" && item.quantity > 0);
+    assertOrderEditWarehouseItemIdentities(items);
+    const warehouseRemaining = new Map(
+      rows.map((line) => [
+        line.external_line_item_id.replace(/^gid:\/\/shopify\/LineItem\//, ""),
+        line.authority_fulfillable_quantity,
+      ]),
+    );
+    for (const item of items) {
+      const key = item.source_external_line_item_id?.replace(
+        /^gid:\/\/shopify\/LineItem\//,
+        "",
       );
-    if (
-      items.some((item) => item.product_variant_id !== item.source_variant_id)
-    ) {
+      const remainingQuantity =
+        key === undefined ? undefined : warehouseRemaining.get(key);
+      if (
+        key === undefined ||
+        remainingQuantity === undefined ||
+        remainingQuantity < item.quantity
+      ) {
+        throw new OrderEditError(
+          "ORDER_EDIT_INVENTORY_PENDING",
+          "Warehouse items do not match the paid source quantities. The order remains held.",
+        );
+      }
+      warehouseRemaining.set(key, remainingQuantity - item.quantity);
+    }
+    if ([...warehouseRemaining.values()].some((quantity) => quantity !== 0)) {
       throw new OrderEditError(
         "ORDER_EDIT_INVENTORY_PENDING",
-        "An edited item's warehouse variant does not match the source order.",
+        "An edited item is missing from the warehouse. The order remains held.",
       );
     }
     for (const orderId of new Set(items.map((item) => item.order_id))) {

@@ -8,5 +8,7 @@ const client = new QueryClient({ defaultOptions: { queries: { retry: false, refe
 createRoot(document.getElementById("root")!).render(<QueryClientProvider client={client}>
   <DropshipPricingRulesPanel storeConnectionId={22} storeName="Test store" onConfigurationChange={() => {
     const state = window as unknown as { __pricingChanged?: number }; state.__pricingChanged = (state.__pricingChanged ?? 0) + 1;
-  }} />
+  }} priceSaveCallbacks={{ onSaveStarted() {}, onSaveSettled() {}, async onSaved() {
+    const state = window as unknown as { __priceSaved?: number }; state.__priceSaved = (state.__priceSaved ?? 0) + 1;
+  } }} />
 </QueryClientProvider>);

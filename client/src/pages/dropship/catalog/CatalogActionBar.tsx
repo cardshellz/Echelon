@@ -1,6 +1,6 @@
-import { Link } from "wouter";
 import { ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { GuardedLink } from "./UnsavedChangesGuard";
 
 export interface CatalogNextStepAction {
   label: string;
@@ -8,7 +8,7 @@ export interface CatalogNextStepAction {
   disabled: boolean;
 }
 
-/** Bottom of every step: what the vendor is working on, and the step's one way forward. */
+/** Bottom of every step: what the vendor is working on, and the step's one way forward (asks first when changes aren't saved). */
 export function CatalogActionBar({ next, summary }: { summary: string; next: CatalogNextStepAction | null }) {
   return (
     <div
@@ -24,10 +24,10 @@ export function CatalogActionBar({ next, summary }: { summary: string; next: Cat
           </Button>
         ) : (
           <Button asChild className="shrink-0 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]">
-            <Link href={next.href}>
+            <GuardedLink href={next.href}>
               {next.label}
               <ArrowRight className="h-4 w-4" />
-            </Link>
+            </GuardedLink>
           </Button>
         ))}
       </div>

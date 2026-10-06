@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ListingPriceSetting } from "@shared/dropship/listing-price";
-import { displayListingPrice, draftFromListingPrice, isListingPriceDirty, listingPriceEndpoint,
+import { belowCostNote, describeListingPriceBuiltFrom, displayListingPrice, draftFromListingPrice, isListingPriceDirty, listingPriceEndpoint,
   listingPriceInput, parseListingPriceCents, prepareListingPriceSave, readListingPrice, readSavedListingPrice,
   reconcileListingPriceDraft } from "../dropship-listing-price";
 
@@ -111,5 +111,31 @@ describe("price response boundary", () => {
   it("requires the save replay indicator and does not accept a save response for a GET", () => {
     expect(() => readSavedListingPrice({ price: price() }, identity)).toThrow();
     expect(() => readListingPrice({ price: price(), idempotentReplay: true }, identity)).toThrow();
+  });
+});
+
+describe("what a size's price is built from", () => {
+  const rules = { ...price(), source: "rules" as const, ruleName: "Store default rule", productCostCents: 1089 };
+  it.each([
+    [{ ...price(), source: "override" as const }, "Exact price"],
+    [{ ...price(), source: "catalog_default" as const }, "Catalog reference retail"],
+    [{ ...price(), source: "saved_listing" as const }, "Price last sent to eBay"],
+    [{ ...price(), source: "unavailable" as const }, "No price yet"],
+    [{ ...rules, ruleBasis: "catalog_retail" as const, defaultPriceCents: 1249 }, "Store default rule, from reference retail $12.49"],
+    [{ ...rules, ruleBasis: "product_cost" as const }, "Store default rule, from .ops cost $10.89"],
+    // A starting amount that is not known is left out rather than shown as $0.00.
+    [{ ...rules, ruleBasis: "product_cost" as const, productCostCents: null }, "Store default rule"],
+    [{ ...rules, ruleBasis: "catalog_retail" as const, defaultPriceCents: null }, "Store default rule"],
+    [{ ...rules, ruleName: null, ruleBasis: null }, "Pricing rules"],
+  ])("%#: %s", (setting, words) => {
+    expect(describeListingPriceBuiltFrom(setting)).toBe(words);
+  });
+  it("notes a typed price below the .ops cost, and only then", () => {
+    expect(belowCostNote("10.88", 1089)).toBe("This is below your .ops cost of $10.89.");
+    expect(belowCostNote("10.89", 1089)).toBeNull();
+    expect(belowCostNote("14.99", 1089)).toBeNull();
+    expect(belowCostNote("14.99", null)).toBeNull();
+    expect(belowCostNote("not a price", 1089)).toBeNull();
+    expect(belowCostNote("0.01", 0)).toBeNull();
   });
 });

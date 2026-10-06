@@ -7,7 +7,10 @@ const reviewId = "cd6bca1f-54d5-484b-9638-20499dc199d0";
 async function setup(page: Page) {
   const state = { profile: null as PricingProfile | null, revisionId: null as number | null,
     reviews: [] as ReviewPricingRulesInput[], applies: [] as Array<Record<string, unknown>>, changes: 0,
-    abortApplyOnce: false, failReloadOnce: false, block: false, unexpected: [] as string[], errors: [] as string[] };
+    abortApplyOnce: false, failReloadOnce: false, block: false, unexpected: [] as string[], errors: [] as string[],
+    // The one size the exact-price journey prices: what is saved for it, the saves sent, and a refusal to send back once.
+    exactPriceCents: null as number | null, exactPriceRevision: null as number | null,
+    priceSaves: [] as Array<Record<string, unknown>>, refuseNextPrice: null as null | { code: string; message: string } };
   page.on("pageerror", (error) => state.errors.push(error.message));
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
   await page.route("**/api/**", async (route) => {
@@ -17,7 +20,23 @@ async function setup(page: Page) {
       if (state.failReloadOnce && state.revisionId !== null) { state.failReloadOnce = false; return route.fulfill({ status: 503, json: { error: { message: "Synthetic reload failure" } } }); }
       return route.fulfill({ json: { revisionId: state.revisionId, profile: state.profile, updatedAt: state.revisionId ? "2026-09-07T12:00:00Z" : null } });
     }
+    if (path === `${base}/targets` && url.searchParams.get("type") === "listings") {
+      const search = (url.searchParams.get("search") ?? "").toLowerCase();
+      const matches = SIZES.filter((size) => size.name.toLowerCase().includes(search));
+      return route.fulfill({ json: { total: matches.length, rows: matches.slice(0, 50) } });
+    }
     if (path === `${base}/targets`) return route.fulfill({ json: { total: 1, rows: [{ id: "Mailers", name: "Mailers" }] } });
+    if (path === PRICE_PATH && route.request().method() === "GET") return route.fulfill({ json: { price: exactPriceSetting(state) } });
+    if (path === PRICE_PATH && route.request().method() === "PUT") {
+      const body = route.request().postDataJSON() as { priceCents: number | null };
+      state.priceSaves.push(body);
+      if (state.refuseNextPrice) {
+        const error = state.refuseNextPrice; state.refuseNextPrice = null;
+        return route.fulfill({ status: 422, json: { error } });
+      }
+      state.exactPriceCents = body.priceCents; state.exactPriceRevision = (state.exactPriceRevision ?? 0) + 1;
+      return route.fulfill({ json: { price: exactPriceSetting(state), idempotentReplay: false } });
+    }
     if (path === `${base}/reviews` || path === `${base}/reviews/${reviewId}`) {
       if (route.request().method() === "POST") state.reviews.push(route.request().postDataJSON());
       const input = state.reviews.at(-1)!;
@@ -29,7 +48,9 @@ async function setup(page: Page) {
           title: `Test mailer ${pageNumber * 50 + index + 1}`, sku: `TEST-${pageNumber * 50 + index + 1}`,
           previousPriceCents: 999, priceCents: state.block && index === 0 ? null : changedPrice, productCostCents: 809,
           ruleName: "Store default rule", preserved: false, issues: state.block && index === 0 ? ["pricing_basis_unavailable"] : [],
-          settingRevisionId: null, evidenceHash: "b".repeat(64) })) } });
+          settingRevisionId: null, evidenceHash: "b".repeat(64), sizeName: "Pack of 50",
+          basis: index === 2 ? "catalog_retail" : "product_cost", basisCents: index === 2 ? 1249 : 809,
+          warnings: index === 1 ? ["price_below_product_cost"] : [] })) } });
     }
     if (path === `${base}/apply`) {
       state.applies.push(route.request().postDataJSON());
@@ -47,16 +68,46 @@ async function setup(page: Page) {
   await expect(page.getByLabel("Markup (%)", { exact: true }), JSON.stringify(state.errors)).toBeVisible();
   return state;
 }
+const PRICE_PATH = "/api/dropship/listings/stores/22/variants/101/price";
+/** Sizes the exact-price search can find: one to price, and 120 more than one page holds. */
+const SIZES = [{ id: "101", name: "Armalope · Pack of 50 · ARM-50" },
+  ...Array.from({ length: 120 }, (_, index) => ({ id: String(2001 + index), name: `Test mailer ${index + 1} · Pack of 50 · TEST-${index + 1}` }))];
+/** Size 101 follows the store rule ($8.09 cost + rule = $11.52) until the vendor types an exact price. */
+function exactPriceSetting(state: { exactPriceCents: number | null; exactPriceRevision: number | null }) {
+  const typed = state.exactPriceCents !== null;
+  return { storeConnectionId: 22, productVariantId: 101, revisionId: state.exactPriceRevision,
+    overridePriceCents: state.exactPriceCents, effectivePriceCents: state.exactPriceCents ?? 1152, defaultPriceCents: 1249,
+    source: typed ? "override" : "rules", pricingMode: typed ? "fixed" : "rules", ruleName: "Store default rule",
+    pricingIssue: null, rulePriceCents: 1152, rulesConfigured: true, ruleBasis: "product_cost", productCostCents: 809,
+    updatedAt: state.exactPriceRevision ? "2026-09-07T12:00:00Z" : null };
+}
 async function enterRecipe(page: Page) {
   await page.getByLabel("Markup (%)", { exact: true }).fill("30");
   await page.getByLabel("Plus flat markup (USD)", { exact: true }).fill("1.00");
 }
 test("reviews 1,000 listings with bounded scrolling and applies once without publishing", async ({ page }, testInfo) => {
-  const state = await setup(page); await enterRecipe(page);
+  const state = await setup(page);
+  const heading = page.getByRole("heading", { name: /Listing pricing rules/ });
+  // No saved rules yet: the form opens on a suggestion, and nothing is marked unsaved.
+  await expect(page.getByText("Suggested · not saved")).toBeVisible();
+  await expect(heading).not.toContainText("Not saved");
+  await enterRecipe(page);
+  await expect(heading).toContainText("Not saved");
+  await expect(page.getByText("Suggested · not saved")).toHaveCount(0);
   await page.getByRole("button", { name: "Review pricing impact" }).click();
   await expect(page.getByText("Review all 1,000 selected listings")).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Review all 1,000 selected listings/ })).toContainText("Not saved yet");
   await expect(page.locator("tbody tr")).toHaveCount(50);
   expect(state.reviews[0]).toMatchObject({ releaseFixedOverrides: false, profile: { defaultRecipe: { markupBps: 3000, flatCents: 100 } } });
+  // Each row says what its price is built from, next to the vendor's own cost.
+  await expect(page.getByRole("columnheader", { name: "Built from" })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "Your cost" })).toBeVisible();
+  const firstRow = page.locator("tbody tr").first();
+  await expect(firstRow).toContainText("Pack of 50 · TEST-1");
+  await expect(firstRow.locator("td").nth(1)).toHaveText(".ops cost $8.09");
+  await expect(page.locator("tbody tr").nth(2).locator("td").nth(1)).toHaveText("Reference retail $12.49");
+  // A price below cost is a warning, never a block: Apply stays available below.
+  await expect(page.locator("tbody tr").nth(1)).toContainText("Priced below your .ops product cost");
   const scroll = await page.locator("table").evaluate((table) => ({ height: table.parentElement!.clientHeight, scrollHeight: table.parentElement!.scrollHeight }));
   expect(scroll.height).toBeLessThanOrEqual(320); expect(scroll.scrollHeight).toBeGreaterThan(scroll.height);
   await page.screenshot({ path: testInfo.outputPath("pricing-review.png"), fullPage: true });
@@ -64,6 +115,9 @@ test("reviews 1,000 listings with bounded scrolling and applies once without pub
   await expect(page.getByText("Test mailer 51", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Apply reviewed rules to 999 listings" }).click();
   await expect(page.getByRole("status")).toContainText("Pricing rules saved");
+  await expect(page.getByRole("status")).toContainText("Nothing was sent to eBay now");
+  // Once applied, nothing is left unsaved.
+  await expect(heading).not.toContainText("Not saved");
   expect(state.applies).toHaveLength(1); expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
   expect(await page.evaluate(() => (window as unknown as { __pricingChanged: number }).__pricingChanged)).toBe(1);
 });
@@ -101,4 +155,58 @@ test("uses read-only recovery when approval succeeded but refreshing failed", as
   await page.getByRole("button", { name: "Reload saved rules" }).click();
   await expect(page.getByLabel("Markup (%)", { exact: true })).toBeEnabled();
   expect(state.applies).toHaveLength(1);
+});
+test("types an exact price for one size without a preview", async ({ page }) => {
+  const state = await setup(page);
+  const box = page.getByRole("region", { name: "Exact price for one size" });
+  const heading = box.getByRole("heading", { name: /Exact price for one size/ });
+  const search = box.getByLabel("Find a size by name or SKU");
+  // The search covers every selected size, a page at a time, and says when there is more.
+  await search.fill("test");
+  await expect(box.getByText("Showing the first 50 of 120. Type more of the name or SKU to narrow it.")).toBeVisible();
+  await search.fill("zzz");
+  await expect(box.getByText("No selected size matches \u201czzz\u201d.")).toBeVisible();
+  await search.fill("arm-50");
+  await box.getByRole("button", { name: "Armalope · Pack of 50 · ARM-50" }).click();
+
+  // Before anything is typed: the price, what it is built from, and the vendor's own cost.
+  await expect(box).toContainText("$11.52");
+  await expect(box).toContainText("Store default rule, from .ops cost $8.09");
+  await expect(box).toContainText("Your .ops cost");
+  await expect(heading).not.toContainText("Not saved");
+
+  // Typing a price is all it takes; it unticks "Use pricing rules".
+  const priceInput = box.getByLabel("Your listing price (USD)");
+  await priceInput.fill("14.99");
+  await expect(box.getByLabel(/Use pricing rules/)).not.toBeChecked();
+  await expect(heading).toContainText("Not saved");
+  await box.getByRole("button", { name: "Save listing price" }).click();
+  await expect(box.getByRole("status")).toContainText("Price saved. Saved settings go to eBay the next time a listing is sent");
+  expect(state.priceSaves[0]).toMatchObject({ priceCents: 1499, expectedRevisionId: null });
+  expect(state.priceSaves[0]).not.toHaveProperty("pricingMode");
+  await expect(box).toContainText("Exact price");
+  await expect(heading).not.toContainText("Not saved");
+
+  // Below the .ops cost is a note, never a block.
+  await priceInput.fill("7.99");
+  await expect(box.getByText("This is below your .ops cost of $8.09.")).toBeVisible();
+  await box.getByRole("button", { name: "Save listing price" }).click();
+  await expect(box.getByRole("status")).toContainText("Price saved");
+  expect(state.priceSaves[1]).toMatchObject({ priceCents: 799, expectedRevisionId: 1 });
+
+  // A price Card Shellz refuses is explained, and the change stays unsaved on screen.
+  state.refuseNextPrice = { code: "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT",
+    message: "That price is below the Card Shellz minimum of $10.00 for this item. Enter a price Card Shellz allows." };
+  await priceInput.fill("9.00");
+  await box.getByRole("button", { name: "Save listing price" }).click();
+  await expect(box.getByRole("alert")).toContainText("That price is below the Card Shellz minimum of $10.00 for this item.");
+  await expect(heading).toContainText("Not saved");
+  await expect(priceInput).toHaveValue("9.00");
+
+  // Another size can be chosen; the rules above are untouched by any of this.
+  await box.getByRole("button", { name: "Choose another size" }).click();
+  await expect(search).toBeVisible();
+  expect(state.reviews).toHaveLength(0); expect(state.applies).toHaveLength(0);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+  expect(await page.evaluate(() => (window as unknown as { __priceSaved?: number }).__priceSaved)).toBe(2);
 });

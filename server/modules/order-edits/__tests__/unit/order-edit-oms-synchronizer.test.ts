@@ -6,6 +6,7 @@ import {
 } from "@shared/types/inventory-availability-claims";
 import type { OrderEditSnapshot } from "../../application/order-edit-provider";
 import { OrderEditOmsSynchronizer } from "../../infrastructure/order-edit-oms-synchronizer";
+import type { OrderEditWarehouseItem } from "../../infrastructure/order-edit-warehouse-items";
 
 type Claim = NonNullable<
   CanonicalAvailabilityReservationStatusProjection["claim"]
@@ -18,13 +19,30 @@ type OmsLine = {
   authority_fulfillable_quantity: number;
   product_variant_id: number | null;
 };
-type WmsItem = {
-  id: number;
-  order_id: number;
-  quantity: number;
-  product_variant_id: number;
-  source_variant_id: number;
-};
+type WmsItem = OrderEditWarehouseItem;
+function warehouseItem(patch: Partial<WmsItem> = {}): WmsItem {
+  return {
+    id: 101,
+    order_id: 9,
+    oms_order_line_id: "11",
+    quantity: 2,
+    warehouse_channel_id: 36,
+    source_channel_id: 36,
+    product_id: 10,
+    catalog_product_id: 20,
+    sku: "BINDER",
+    product_variant_id: 10,
+    variant_product_id: 20,
+    variant_match_count: 1,
+    source_variant_id: 10,
+    source_external_line_item_id: "1",
+    picked_quantity: 0,
+    fulfilled_quantity: 0,
+    status: "pending",
+    on_hold: false,
+    ...patch,
+  };
+}
 
 function paidSnapshot(): OrderEditSnapshot {
   return {
@@ -142,15 +160,7 @@ function harness() {
         product_variant_id: 10,
       },
     ],
-    items: [
-      {
-        id: 101,
-        order_id: 9,
-        quantity: 2,
-        product_variant_id: 10,
-        source_variant_id: 10,
-      },
-    ],
+    items: [warehouseItem()],
     reservation: reservation(),
   };
   const sequence: string[] = [];
@@ -487,20 +497,8 @@ describe("order edit canonical inventory evidence", () => {
   it("requires exact claims independently for every WMS partition", async () => {
     const h = harness();
     h.data.items = [
-      {
-        id: 101,
-        order_id: 9,
-        quantity: 1,
-        product_variant_id: 10,
-        source_variant_id: 10,
-      },
-      {
-        id: 102,
-        order_id: 10,
-        quantity: 1,
-        product_variant_id: 10,
-        source_variant_id: 10,
-      },
+      warehouseItem({ id: 101, order_id: 9, quantity: 1 }),
+      warehouseItem({ id: 102, order_id: 10, quantity: 1 }),
     ];
     h.getOrderReservationStatus.mockImplementation(async (id) =>
       reservation(id, [claimLine(id === 9 ? 101 : 102, "1")]),

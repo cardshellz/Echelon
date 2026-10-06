@@ -35,13 +35,26 @@ The new persistence has explicit module ownership, enforced by the writer ratche
 
 ## Staff flow
 
-1. Select the Shopify connection, open **Pilot settings**, choose the payment
-   window, and enable staff edits.
+1. Select the Shopify connection. **Pilot settings** opens automatically while
+   staff editing is disabled. Choose **Payment window (hours)**, check
+   **Enable staff order edits for this Shopify connection**, and select
+   **Save settings**. The saved status and payment window appear above the form.
+   A disabled order also offers **Configure staff editing** to open and focus
+   these settings. Staff without settings permission must ask an administrator.
+   Saving enabled settings unlocks eligible order fields without reloading;
+   a failed save does not enable a disabled connection. This setting does not
+   grant customer access.
+   Decimal hours are supported: `0.5` means 30 minutes and `1.25` means 75
+   minutes. The API and stored setting retain whole-minute precision; invalid
+   values or fractional-minute durations are rejected instead of rounded.
 2. Search for an exact order number, with or without `#`. Existing active edits
    appear with **Resume edit**, including after closing the original browser tab.
 3. Adjust quantities or add a supported product. Review the Shopify-calculated
-   total before applying the change. A quote holds fulfillment but does not commit
-   the order edit or issue a refund.
+   total before applying the change. The review compares original and proposed
+   product prices, named product discounts, shipping charges and discounts, tax,
+   and the final total. Payment history shows payments and refunds already
+   recorded on the current order; a proposed change is not a payment. A quote
+   holds fulfillment but does not commit the order edit or issue a refund.
 4. Confirm once. If an extra balance is due, use Shopify's hosted payment link.
    The order remains held until payment and downstream contents are verified.
 5. For a reduction, the pilot reconciles its own automatic refund to the supported
@@ -54,6 +67,11 @@ The new persistence has explicit module ownership, enforced by the writer ratche
 An unsubmitted quote can be cancelled after verifying the original order. A
 submitted edit cannot be cancelled as though nothing happened.
 
+Older saved operations retain their original evidence and display. For an
+unsubmitted edit blocked by the former discount restriction, cancel that saved
+edit and create a fresh quote after deploying discount support. Do not replace
+its stored baseline or remove its hold directly in the database.
+
 ## Pilot boundaries
 
 - USD, domestic US physical orders only; Shopify and warehouse eligibility are
@@ -61,7 +79,13 @@ submitted edit cannot be cancelled as though nothing happened.
   combinations fail closed.
 - Shipping charges remain unchanged. Address editing is not included.
 - Existing-line pricing is verified; added products use verified current member
-  pricing when applicable. Unsupported promotion combinations are rejected.
+  pricing when applicable. Native order-wide percentage discount codes are
+  supported alongside unchanged shipping discounts, including free shipping.
+  Shopify's exact line allocations determine net prices and totals; rounded
+  discounted unit prices are not multiplied to invent a line total.
+  Fixed-amount or product-specific codes, scripts, unverified automatic product
+  discounts, and orders with nonzero tax included in prices require staff review.
+  The pilot does not recalculate shipping or assume a promotion is still valid.
 - An edit requiring extra payment cannot completely remove an original line;
   restoring that line's identity on expiry has not been proven. Partial quantity
   reductions are supported. Emptying the entire order is rejected.
@@ -82,6 +106,13 @@ The certified current contents are projected by the OMS owner with an immutable
 before/after event. Historical purchased quantities remain intact. Scoped Shopify
 ingestion guards protect that projection from older observations; normal
 fulfillment and disposition commands retain their existing responsibilities.
+
+Warehouse items do not have a `product_variant_id` column. Order-edit checks
+resolve their independent catalog identity from `product_id` for catalog-mapped
+rows or an unambiguous active SKU for legacy rows, then compare it with the
+exact linked OMS line and inventory claim. Missing, ambiguous, or cross-order
+lineage keeps fulfillment held. Both synchronization and release use the same
+reader; regression fixtures must use the actual WMS column names.
 
 The worker runs every 30 seconds without overlapping its own passes. Per-order
 locking and persisted intent protect concurrent requests and restarts. Transport

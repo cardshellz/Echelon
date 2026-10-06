@@ -5,6 +5,7 @@ import {
   OrderEditWarehouseGateway,
   orderEditWarehouseBlockers,
 } from "../infrastructure/order-edit-warehouse.gateway";
+import type { OrderEditWarehouseItem } from "../infrastructure/order-edit-warehouse-items";
 
 const OPERATION = "00000000-0000-4000-8000-000000000001";
 const OTHER = "00000000-0000-4000-8000-000000000002";
@@ -26,7 +27,28 @@ function ready() {
 }
 function fixture() {
   const orders = [{ ...ready(), order_edit_operation_id: OPERATION }];
-  const items = [{ id: 1, order_id: 10, quantity: 1, picked_quantity: 0 }];
+  const items: OrderEditWarehouseItem[] = [
+    {
+      id: 1,
+      order_id: 10,
+      oms_order_line_id: "30",
+      warehouse_channel_id: 36,
+      source_channel_id: 36,
+      product_id: 100,
+      catalog_product_id: 200,
+      sku: "SKU",
+      product_variant_id: 100,
+      variant_product_id: 200,
+      variant_match_count: 1,
+      source_variant_id: 100,
+      source_external_line_item_id: "101",
+      quantity: 1,
+      picked_quantity: 0,
+      fulfilled_quantity: 0,
+      status: "pending",
+      on_hold: false,
+    },
+  ];
   const commands: string[] = [];
   const query = vi.fn(async (text: string, values: unknown[] = []) => {
     commands.push(text);

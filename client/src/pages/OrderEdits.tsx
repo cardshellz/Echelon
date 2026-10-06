@@ -2,13 +2,13 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
 import {
-  MAX_ORDER_EDIT_PAYMENT_WINDOW_MINUTES,
   orderEditQuoteInputSchema,
   orderEditSettingsInputSchema,
   type OrderEditConnection,
   type OrderEditOperation,
   type OrderEditOrder,
   type OrderEditQuoteInput,
+  type OrderEditState,
   type OrderEditVariant,
 } from "@shared/order-edits/order-edit.contract";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,17 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/lib/auth";
 import { useDebounce } from "@/hooks/use-debounce";
+import {
+  OrderEditTotals,
+  OrderEditPayments,
+} from "@/components/order-edits/OrderEditFinancials";
+import {
+  MIN_ORDER_EDIT_PAYMENT_WINDOW_HOURS,
+  MAX_ORDER_EDIT_PAYMENT_WINDOW_HOURS,
+  parseOrderEditPaymentWindowHours,
+  orderEditPaymentWindowHoursInput,
+  formatOrderEditPaymentWindowHours,
+} from "@/lib/order-edit-payment-window";
 import {
   createOrderEditTransport,
   formatOrderEditMoney,
@@ -59,17 +70,20 @@ function ErrorMessage({ text }: { text: string | null }) {
   ) : null;
 }
 
-function ConnectionSettings({
+export function ConnectionSettings({
   connection,
   api,
   onSaved,
+  detailsRef,
 }: {
   connection: OrderEditConnection;
   api: OrderEditTransport;
   onSaved(saved: OrderEditConnection): Promise<unknown>;
+  detailsRef?: React.RefObject<HTMLDetailsElement | null>;
 }) {
-  const [minutes, setMinutes] = useState(
-    connection.paymentWindowMinutes?.toString() ?? "",
+  const [expanded, setExpanded] = useState(!connection.enabled);
+  const [hours, setHours] = useState(
+    orderEditPaymentWindowHoursInput(connection.paymentWindowMinutes),
   );
   const [enabled, setEnabled] = useState(connection.enabled);
   const [pending, setPending] = useState(false);
@@ -79,9 +93,14 @@ function ConnectionSettings({
   const command = useRef<{ fingerprint: string; key: string } | null>(null);
   const inflight = useRef(false);
   const parsed = orderEditSettingsInputSchema.safeParse({
-    paymentWindowMinutes: minutes.trim() ? Number(minutes) : null,
+    paymentWindowMinutes: parseOrderEditPaymentWindowHours(hours),
     enabled,
   });
+  const windowHelp = !hours.trim()
+    ? "Enter a payment window before enabling staff edits."
+    : !parsed.success
+      ? `Enter a positive duration up to ${MAX_ORDER_EDIT_PAYMENT_WINDOW_HOURS} hours in whole-minute increments, such as 0.5 or 1.25.`
+      : null;
   async function save() {
     if (!parsed.success || inflight.current) return;
     const fingerprint = JSON.stringify(parsed.data);
@@ -97,7 +116,7 @@ function ConnectionSettings({
         parsed.data,
         command.current.key,
       );
-      setMinutes(String(result.paymentWindowMinutes ?? ""));
+      setHours(orderEditPaymentWindowHoursInput(result.paymentWindowMinutes));
       setEnabled(result.enabled);
       setLocked(false);
       await onSaved(result);
@@ -112,29 +131,51 @@ function ConnectionSettings({
     }
   }
   return (
-    <details className="rounded-lg border bg-card p-4">
+    <details
+      id="order-edit-settings"
+      ref={detailsRef}
+      open={expanded}
+      onToggle={(event) => setExpanded(event.currentTarget.open)}
+      className="rounded-lg border bg-card p-4"
+    >
       <summary className="cursor-pointer text-sm font-medium">
         Pilot settings
       </summary>
+      <p className="mt-3 text-sm text-muted-foreground">
+        Applies only to {connection.name} ({connection.shopDomain}).
+      </p>
       <div className="mt-4 grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto]">
         <div className="space-y-2">
-          <Label htmlFor="edit-payment-window">Payment window (minutes)</Label>
+          <Label htmlFor="edit-payment-window">Payment window (hours)</Label>
           <Input
             id="edit-payment-window"
             type="number"
-            min={1}
-            max={MAX_ORDER_EDIT_PAYMENT_WINDOW_MINUTES}
-            step={1}
-            value={minutes}
+            min={MIN_ORDER_EDIT_PAYMENT_WINDOW_HOURS}
+            max={MAX_ORDER_EDIT_PAYMENT_WINDOW_HOURS}
+            step="any"
+            placeholder="e.g. 0.5 or 24"
+            required
+            aria-describedby="edit-payment-window-help edit-payment-window-validation"
+            aria-invalid={Boolean(hours.trim()) && !parsed.success}
+            value={hours}
             disabled={pending || locked}
             onChange={(event) => {
-              setMinutes(event.target.value);
+              setHours(event.target.value);
               setSaved(false);
             }}
           />
-          <p className="text-xs text-muted-foreground">
-            Unpaid changes enter automatic recovery when this window expires.
-            Choose a window before enabling the pilot.
+          <p
+            id="edit-payment-window-help"
+            className="text-xs text-muted-foreground"
+          >
+            0.5 hours = 30 minutes. Unpaid changes enter automatic recovery when
+            this window expires. Choose a window before enabling the pilot.
+          </p>
+          <p
+            id="edit-payment-window-validation"
+            className="text-xs text-muted-foreground"
+          >
+            {windowHelp}
           </p>
           <label className="flex items-center gap-2 text-sm">
             <input
@@ -177,6 +218,7 @@ export function OrderDraft({
   staffId,
   onQuote,
   onLock,
+  onConfigure,
 }: {
   order: OrderEditOrder;
   api: OrderEditTransport;
@@ -184,6 +226,7 @@ export function OrderDraft({
   staffId: string;
   onQuote(operation: OrderEditOperation): void;
   onLock(locked: boolean): void;
+  onConfigure?: () => void;
 }) {
   const [quantities, setQuantities] = useState<Record<string, string>>(() =>
     Object.fromEntries(
@@ -297,13 +340,26 @@ export function OrderDraft({
         </div>
       </CardHeader>
       <CardContent className="space-y-5">
-        {!canEdit && (
+        {!enabled && (
+          <div className="space-y-3 rounded-md border bg-muted/40 p-3">
+            <p role="status" className="text-sm">
+              Staff order editing is disabled for this Shopify connection.{" "}
+              {onConfigure
+                ? "Choose a payment window and save enabled pilot settings to edit eligible orders."
+                : "Ask an administrator with settings permission to configure and enable staff edits."}
+            </p>
+            {onConfigure && (
+              <Button type="button" variant="outline" onClick={onConfigure}>
+                Configure staff editing
+              </Button>
+            )}
+          </div>
+        )}
+        {!order.eligibility.editable && (
           <ErrorMessage
             text={
-              !enabled
-                ? "Staff order editing is disabled for this Shopify connection."
-                : order.eligibility.reasons.join(" ") ||
-                  "This order is not eligible for editing."
+              order.eligibility.reasons.join(" ") ||
+              "This order is not eligible for editing."
             }
           />
         )}
@@ -481,6 +537,14 @@ export function OrderDraft({
         </p>
         <ErrorMessage text={validationMessage} />
         <ErrorMessage text={error} />
+        {order.financials && (
+          <OrderEditTotals
+            columns={[{ label: "Current order", financials: order.financials }]}
+          />
+        )}
+        {order.settlement && (
+          <OrderEditPayments settlement={order.settlement} />
+        )}
         <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
           <p className="text-sm">
             Current order total{" "}
@@ -535,6 +599,24 @@ export function OrderEditOperationView({
     formatOrderEditMoney(value, operation.currency);
   const expired =
     operation.expiresAt !== null && Date.parse(operation.expiresAt) <= now;
+  const financials = operation.financials;
+  const showCurrent = ["completed", "recovered", "failed", "expired"].includes(
+    operation.status,
+  );
+  const totalsColumns =
+    financials?.before && financials.quoted && !showCurrent
+      ? [
+          { label: "Before edit", financials: financials.before },
+          { label: "After changes", financials: financials.quoted },
+        ]
+      : financials?.before && financials.current && showCurrent
+        ? [
+            { label: "Before edit", financials: financials.before },
+            { label: "Current order", financials: financials.current },
+          ]
+        : financials?.current
+          ? [{ label: "Current order", financials: financials.current }]
+          : [];
   return (
     <Card>
       <CardHeader>
@@ -551,10 +633,10 @@ export function OrderEditOperationView({
             ? "This edit needs review. You can cancel this unsubmitted edit, or keep its reference for investigation."
             : copy.description}
         </p>
-        {["completed", "recovered", "expired"].includes(operation.status) && (
+        {showCurrent && (
           <p className="text-xs text-muted-foreground">
-            The reviewed changes below are retained for reference. Payment and
-            refund amounts are the quoted differences.
+            Items and totals below show the current order. Payments and refunds
+            show their recorded status.
           </p>
         )}
         <div className="divide-y rounded-md border">
@@ -573,32 +655,59 @@ export function OrderEditOperationView({
             </div>
           ))}
         </div>
-        <dl className="ml-auto grid max-w-sm grid-cols-2 gap-x-4 gap-y-2 text-sm">
-          <dt>Original total</dt>
-          <dd className="text-right tabular-nums">
-            {money(operation.previousTotalCents)}
-          </dd>
-          <dt>Quoted total</dt>
-          <dd className="text-right tabular-nums">
-            {money(operation.updatedTotalCents)}
-          </dd>
-          {payable && (
-            <>
-              <dt className="font-semibold">Payment difference</dt>
-              <dd className="text-right font-semibold tabular-nums">
-                {money(operation.balanceDueCents)}
-              </dd>
-            </>
+        {totalsColumns.length > 0 ? (
+          <OrderEditTotals columns={totalsColumns} />
+        ) : (
+          <dl className="ml-auto grid max-w-sm grid-cols-2 gap-x-4 gap-y-2 text-sm">
+            <dt>
+              {operation.quoteAvailable === false
+                ? "Current order total"
+                : "Original total"}
+            </dt>
+            <dd className="text-right tabular-nums">
+              {money(operation.previousTotalCents)}
+            </dd>
+            {operation.quoteAvailable !== false && (
+              <>
+                <dt>{showCurrent ? "Current order total" : "Quoted total"}</dt>
+                <dd className="text-right tabular-nums">
+                  {money(operation.updatedTotalCents)}
+                </dd>
+              </>
+            )}
+            {payable && (
+              <>
+                <dt className="font-semibold">Payment difference</dt>
+                <dd className="text-right font-semibold tabular-nums">
+                  {money(operation.balanceDueCents)}
+                </dd>
+              </>
+            )}
+            {refundable && (
+              <>
+                <dt className="font-semibold">Refund difference</dt>
+                <dd className="text-right font-semibold tabular-nums">
+                  {money(operation.refundDueCents)}
+                </dd>
+              </>
+            )}
+          </dl>
+        )}
+        {totalsColumns.length > 0 &&
+          operation.status === "ready" &&
+          (payable || refundable) && (
+            <p className="text-right text-sm font-semibold">
+              {payable
+                ? `Payment required for these changes: ${money(operation.balanceDueCents)}`
+                : `Refund for these changes: ${money(operation.refundDueCents)}`}
+            </p>
           )}
-          {refundable && (
-            <>
-              <dt className="font-semibold">Refund difference</dt>
-              <dd className="text-right font-semibold tabular-nums">
-                {money(operation.refundDueCents)}
-              </dd>
-            </>
-          )}
-        </dl>
+        {operation.settlement && (
+          <OrderEditPayments
+            settlement={operation.settlement}
+            pendingChanges={operation.status === "ready"}
+          />
+        )}
         {operation.paymentDeadline && (
           <p className="rounded-md bg-muted p-3 text-sm">
             Payment deadline:{" "}
@@ -697,6 +806,7 @@ export default function OrderEdits() {
   const [operationError, setOperationError] = useState<string | null>(null);
   const [isUncertain, setIsUncertain] = useState(false);
   const [draftLocked, setDraftLocked] = useState(false);
+  const settingsRef = useRef<HTMLDetailsElement>(null);
   const [savedQuote, setSavedQuote] = useState<OrderEditQuoteInput | null>(
     null,
   );
@@ -1015,24 +1125,55 @@ export default function OrderEdits() {
                 </div>
                 {connection && (
                   <>
+                    <div className="flex flex-wrap items-center gap-2 text-sm">
+                      <Badge variant="outline">
+                        {connection.enabled
+                          ? "Staff edits enabled"
+                          : "Staff edits disabled"}
+                      </Badge>
+                      <span className="text-muted-foreground">
+                        Payment window:{" "}
+                        {connection.paymentWindowMinutes === null
+                          ? "Not configured"
+                          : formatOrderEditPaymentWindowHours(
+                              connection.paymentWindowMinutes,
+                            )}
+                      </span>
+                    </div>
                     {canConfigure && !draftLocked && (
                       <ConnectionSettings
                         key={connection.connectionId}
                         connection={connection}
                         api={api}
+                        detailsRef={settingsRef}
                         onSaved={async (saved) => {
-                          client.setQueryData(
-                            [ORDER_EDITS_API, user?.id, "state"],
-                            {
+                          const stateKey = [ORDER_EDITS_API, user?.id, "state"];
+                          // A state read started before the save must not restore old enablement.
+                          await client.cancelQueries({
+                            queryKey: stateKey,
+                            exact: true,
+                          });
+                          client.setQueryData<OrderEditState>(
+                            stateKey,
+                            (current) => ({
                               customerAccess: false,
-                              connections: connections.map((item) =>
+                              connections: (
+                                current?.connections ?? connections
+                              ).map((item) =>
                                 item.connectionId === saved.connectionId
                                   ? saved
                                   : item,
                               ),
-                            },
+                            }),
                           );
-                          await state.refetch();
+                          await client.invalidateQueries({
+                            queryKey: [
+                              ORDER_EDITS_API,
+                              user?.id,
+                              "order",
+                              saved.connectionId,
+                            ],
+                          });
                         }}
                       />
                     )}
@@ -1150,6 +1291,21 @@ export default function OrderEdits() {
                 enabled={connection.enabled}
                 staffId={user.id}
                 onLock={setDraftLocked}
+                onConfigure={
+                  canConfigure && !draftLocked
+                    ? () => {
+                        const settings = settingsRef.current;
+                        if (!settings) return;
+                        settings.open = true;
+                        settings.scrollIntoView({ block: "center" });
+                        settings
+                          .querySelector<HTMLInputElement>(
+                            "#edit-payment-window",
+                          )
+                          ?.focus({ preventScroll: true });
+                      }
+                    : undefined
+                }
                 onQuote={(result) => received(result, true)}
               />
             )}

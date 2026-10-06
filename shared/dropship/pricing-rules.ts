@@ -1,12 +1,14 @@
 import { z } from "zod";
 import { catalogScopeSchema, matchesCatalogScope, catalogTargetsInputSchema, catalogTargetsResponseSchema } from "./catalog-scope";
-import { listingPriceCentsSchema, MAX_LISTING_PRICE_CENTS } from "./listing-price";
+import { listingAmountCentsSchema, listingPriceBasisSchema, listingPriceCentsSchema, MAX_LISTING_PRICE_CENTS } from "./listing-price";
 
 export const PRICING_REVIEW_PAGE_SIZE = 50;
 export const MAX_PRICING_REVIEW_ITEMS = 10_000;
 const id = z.number().int().positive().max(MAX_LISTING_PRICE_CENTS);
+/** A known money amount in integer cents: a cost or a reference retail price. */
+export const pricingAmountCentsSchema = listingAmountCentsSchema;
 export const pricingRecipeSchema = z.object({
-  basis: z.enum(["product_cost", "catalog_retail"]),
+  basis: listingPriceBasisSchema,
   // 100 bps = 1%; this explicit bound permits up to a 10,000% markup.
   markupBps: z.number().int().min(0).max(1_000_000),
   flatCents: z.number().int().min(0).max(MAX_LISTING_PRICE_CENTS),
@@ -36,9 +38,20 @@ export const applyPricingRulesInputSchema = z.object({
 export const pricingImpactRowSchema = z.object({
   productVariantId: id, title: z.string(), sku: z.string().nullable(),
   previousPriceCents: listingPriceCentsSchema.nullable(), priceCents: listingPriceCentsSchema.nullable(),
-  productCostCents: z.number().int().min(0).max(MAX_LISTING_PRICE_CENTS).nullable(),
+  productCostCents: pricingAmountCentsSchema.nullable(),
   ruleName: z.string().nullable(), preserved: z.boolean(), issues: z.array(z.string()),
   settingRevisionId: id.nullable(), evidenceHash: z.string().regex(/^[a-f0-9]{64}$/),
+  // The fields below were added after reviews were first stored. They are
+  // optional so a stored review without them still parses; applying such a
+  // review re-checks it and asks for a fresh review.
+  /** The size's own name, such as "Box of 5 Packs of 100". */
+  sizeName: z.string().optional(),
+  /** What the new price is built from; null for a kept fixed price or when no recipe was chosen. */
+  basis: pricingRecipeSchema.shape.basis.nullable().optional(),
+  /** The amount the basis starts from; null when that amount is missing. */
+  basisCents: pricingAmountCentsSchema.nullable().optional(),
+  /** Notes on the new price that never block applying: below the .ops cost, warn-only price limits. */
+  warnings: z.array(z.string()).optional(),
 }).strict();
 export const pricingReviewSummarySchema = z.object({
   total: z.number().int().nonnegative(), changed: z.number().int().nonnegative(),
@@ -64,6 +77,13 @@ export interface PricingRuleCandidate {
 export type RulePriceBasis = PricingRecipe["basis"];
 /** `basis` names what the winning recipe prices from; null when no recipe was chosen. */
 export interface RulePriceResult { priceCents: number | null; ruleName: string | null; ruleId: string | null; issue: string | null; basis: RulePriceBasis | null }
+
+/** The amount a recipe basis prices from: the .ops cost or the catalog reference retail. */
+export function pricingBasisCents(basis: RulePriceBasis, amounts: {
+  productCostCents: number | null; catalogRetailCents: number | null;
+}): number | null {
+  return basis === "product_cost" ? amounts.productCostCents : amounts.catalogRetailCents;
+}
 
 /** Pure, integer-only recipe evaluation. No clock, remote reads, or input mutation. */
 export function calculateRulePrice(recipeInput: PricingRecipe, basisCents: number | null): RulePriceResult {
@@ -93,6 +113,6 @@ export function resolvePricingRule(input: {
   }
   const winner = matches[0];
   const recipe = winner?.recipe ?? input.profile.defaultRecipe;
-  return { ...calculateRulePrice(recipe, recipe.basis === "product_cost" ? input.productCostCents : input.catalogRetailCents),
+  return { ...calculateRulePrice(recipe, pricingBasisCents(recipe.basis, input)),
     ruleName: winner?.name ?? "Store default rule", ruleId: winner?.id ?? null };
 }

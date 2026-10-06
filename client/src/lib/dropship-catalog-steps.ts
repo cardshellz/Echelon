@@ -16,6 +16,17 @@ export const CATALOG_STEP_LABELS: Readonly<Record<CatalogStep, string>> = {
 };
 
 /**
+ * When saved Listing settings reach eBay. Saving never publishes, but a later
+ * send uses whatever is saved then: a queued listing is rebuilt from the
+ * current settings when it is sent (dropship-listing-intent-refresh.ts), and
+ * the stock catch-up sends a full listing from the current preview
+ * (dropship-quantity-publication-catchup.provider.ts). So the page never says
+ * live listings change only when the vendor publishes.
+ */
+export const LISTING_SETTINGS_SEND_TIMING =
+  "Saved settings go to eBay the next time a listing is sent: when you publish it, or when Card Shellz updates it.";
+
+/**
  * Narrow screens show these in the rail so all three steps fit without scrolling.
  * Step 2 stays "Set up": a bare "Settings" would read like the portal's own
  * Settings page in the menu.

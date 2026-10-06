@@ -67,13 +67,12 @@ export function itemSections(
   };
 }
 
-/** Walmart's MP_ITEM and MP_MAINTENANCE examples include Orderable.specProductType, but their
+/** Walmart's new-item MP_ITEM example includes Orderable.specProductType, but its
  * 5.0.20260803-17_50_56-api spec endpoint and published schema omit that property
  * while disallowing additional properties (verified 2026-10-05). Admit only this
  * documented selector, bound to the selected Visible branch; retain every other
  * provider constraint. Do not modify the provider document or the editor schema.
  * https://developer.walmart.com/us-marketplace/docs/create-a-new-item-full-item-setup
- * https://developer.walmart.com/us-marketplace/docs/update-my-existing-items
  */
 export function listingSubmissionSchema(
   schema: JsonObject,
@@ -81,6 +80,13 @@ export function listingSubmissionSchema(
   productType: string,
 ): JsonObject {
   if (feedType === "MP_ITEM_MATCH") return schema;
+  if (feedType === "MP_MAINTENANCE") {
+    // The live maintenance feed rejects specProductType (verified 2026-10-06).
+    // Validate the selected Visible branch exists, then use Walmart's schema
+    // unchanged. The new-item exception below must not relax update validation.
+    itemSections(schema, feedType, productType);
+    return schema;
+  }
   const rootProperties = jsonObject(schema.properties);
   const items = jsonObject(rootProperties.MPItem);
   const item = jsonObject(items.items);

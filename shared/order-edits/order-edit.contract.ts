@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  orderEditFinancialsSchema,
+  orderEditSettlementSchema,
+} from "./order-edit-financials";
 
 export const ORDER_EDIT_API = "/api/order-edits/admin";
 export const ORDER_EDIT_PAGE = "/order-edits";
@@ -87,6 +91,8 @@ export const orderEditOrderSchema = orderEditOrderSummarySchema
     totalCents: money,
     financialStatus: z.string(),
     warehouseStatus: z.string(),
+    financials: orderEditFinancialsSchema.optional(),
+    settlement: orderEditSettlementSchema.optional(),
   })
   .strict();
 export const orderEditVariantSchema = z
@@ -158,8 +164,18 @@ export const orderEditOperationSchema = z
     canAbandon: z.boolean(),
     previousTotalCents: money,
     updatedTotalCents: money,
+    quoteAvailable: z.boolean().optional(),
     balanceDueCents: money,
     refundDueCents: money,
+    financials: z
+      .object({
+        before: orderEditFinancialsSchema.nullable(),
+        quoted: orderEditFinancialsSchema.nullable(),
+        current: orderEditFinancialsSchema.nullable(),
+      })
+      .strict()
+      .optional(),
+    settlement: orderEditSettlementSchema.optional(),
     lines: z.array(
       z
         .object({

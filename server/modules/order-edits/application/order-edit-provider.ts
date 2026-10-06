@@ -43,6 +43,10 @@ export interface OrderEditRefund {
 
 /** JSON-safe persisted evidence. Amounts are exact USD integer cents. */
 export interface OrderEditSnapshot {
+  /** Optional for legacy saved operations; enrichment does not alter their identity fingerprint. */
+  financials?: OrderEditFinancials;
+  discountRules?: OrderEditDiscountRule[];
+  paymentDates?: Record<string, string | null>;
   connectionId: number;
   channelId: number;
   orderId: string;
@@ -92,6 +96,7 @@ export interface OrderEditExpectedLine {
 }
 
 export interface OrderEditQuote {
+  financials?: OrderEditFinancials;
   connectionId: number;
   channelId: number;
   orderId: string;
@@ -214,4 +219,17 @@ export interface OrderEditProvider {
     baseline: OrderEditSnapshot,
     operationId: string,
   ): Promise<{ status: "restored" | "conflict"; snapshot: OrderEditSnapshot }>;
+}
+import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";
+
+export interface OrderEditDiscountRule {
+  index: number;
+  type: string;
+  targetType: string;
+  allocationMethod: string;
+  targetSelection: string;
+  label: string;
+  value:
+    | { type: "percentage"; percentage: number }
+    | { type: "fixed"; amountCents: number };
 }

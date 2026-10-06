@@ -1,13 +1,16 @@
 import { createHash } from "node:crypto";
 import {
-  listingPriceCentsSchema, listingPriceSettingSchema, listingPriceTargetSchema,
+  listingAmountCentsSchema, listingPriceCentsSchema, listingPriceSettingSchema, listingPriceTargetSchema,
   saveListingPriceInputSchema, type ListingPriceSetting, type ListingPriceTarget,
   type SaveListingPriceInput, type SavedListingPriceRevision, resolveListingPrice,
 } from "../../../../shared/dropship/listing-price";
 import { evaluateDropshipCatalogExposure } from "../domain/catalog-exposure";
 import { evaluateDropshipVendorCatalogSelection } from "../domain/vendor-selection";
 import { DropshipError } from "../domain/errors";
-import type { DropshipListingPreviewRepository, DropshipListingCatalogCandidate } from "./dropship-listing-preview-service";
+import { refuseListingPriceSave, type ListingPriceSaveRefusal } from "../domain/listing-price-save-guard";
+import { evaluateListingPricingPolicy, type DropshipListingPreviewRepository, type DropshipListingCatalogCandidate,
+  type DropshipPricingPolicyRecord } from "./dropship-listing-preview-service";
+import type { DropshipProductCost } from "./dropship-product-cost";
 import type { ListingRulePrice } from "./dropship-rule-price";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
 
@@ -16,9 +19,18 @@ export type ListingPriceCatalogReader = Pick<DropshipListingPreviewRepository,
   "listSelectionRules" | "listVariantOverrides" | "listExistingListings">;
 export interface ListingPriceTransaction {
   vendorId: number;
-  catalog: ListingPriceCatalogReader;
+  // The price writer also checks Card Shellz's price limits. The other users of
+  // ListingPriceCatalogReader (content, categories, the selected catalog) do not.
+  catalog: ListingPriceCatalogReader & Pick<DropshipListingPreviewRepository, "listPricingPolicies">;
   loadSaved(): Promise<SavedListingPriceRevision | null>;
   loadRulePrice?(candidate: DropshipListingCatalogCandidate): Promise<ListingRulePrice | null>;
+  /** The vendor's .ops cost for the size, shown next to its price. */
+  loadProductCost(candidate: DropshipListingCatalogCandidate): Promise<DropshipProductCost | null>;
+  /**
+   * What an earlier save with this key wrote, or null when the key is new.
+   * Throws DROPSHIP_IDEMPOTENCY_CONFLICT when the key was used for another change.
+   */
+  loadReplay(input: { idempotencyKey: string; requestHash: string }): Promise<SavedListingPriceRevision | null>;
   save(input: SaveListingPriceInput & { requestHash: string; now: Date }): Promise<{
     saved: SavedListingPriceRevision; idempotentReplay: boolean;
   }>;
@@ -35,8 +47,8 @@ export class DropshipListingPriceService {
     const parsed = listingPriceTargetSchema.parse(target);
     assertMember(memberId);
     return this.deps.repository.execute({ ...parsed, memberId }, async (tx) => {
-      const context = await this.authorize(tx, parsed, this.deps.clock.now());
-      return projectSetting(parsed, context, await tx.loadSaved());
+      const { candidate, sources } = await this.authorize(tx, parsed, this.deps.clock.now());
+      return projectSetting(parsed, sources, await tx.loadSaved(), await loadCost(tx, candidate, sources));
     });
   }
 
@@ -53,12 +65,20 @@ export class DropshipListingPriceService {
       ...(parsed.pricingMode ? { pricingMode: parsed.pricingMode } : {}),
     })).digest("hex");
     const result = await this.deps.repository.execute({ ...parsedTarget, memberId, idempotencyKey: parsed.idempotencyKey }, async (tx) => {
-      const context = await this.authorize(tx, parsedTarget, now);
-      if (parsed.pricingMode === "rules" && !context.rulePrice) {
+      const { candidate, sources } = await this.authorize(tx, parsedTarget, now);
+      // A retried save returns what the first one wrote and is not checked again:
+      // it already happened, and the rules below may have changed since.
+      const replay = await tx.loadReplay({ idempotencyKey: parsed.idempotencyKey, requestHash });
+      if (replay) {
+        return { price: projectSetting(parsedTarget, sources, replay, await loadCost(tx, candidate, sources)), idempotentReplay: true };
+      }
+      if (parsed.pricingMode === "rules" && !sources.rulePrice) {
         throw new DropshipError("DROPSHIP_PRICING_RULES_NOT_CONFIGURED", "Configure store pricing rules before using them for this listing.");
       }
+      await assertPriceKept(tx, parsedTarget, candidate, sources, parsed);
       const saved = await tx.save({ ...parsed, requestHash, now });
-      return { price: projectSetting(parsedTarget, context, saved.saved), idempotentReplay: saved.idempotentReplay };
+      return { price: projectSetting(parsedTarget, sources, saved.saved, await loadCost(tx, candidate, sources)),
+        idempotentReplay: saved.idempotentReplay };
     });
     this.deps.logger.info({
       code: result.idempotentReplay ? "DROPSHIP_LISTING_PRICE_REPLAYED" : "DROPSHIP_LISTING_PRICE_SAVED",
@@ -68,7 +88,9 @@ export class DropshipListingPriceService {
     return result;
   }
 
-  private async authorize(tx: ListingPriceTransaction, target: ListingPriceTarget, now: Date): Promise<PriceSources> {
+  private async authorize(tx: ListingPriceTransaction, target: ListingPriceTarget, now: Date): Promise<{
+    candidate: DropshipListingCatalogCandidate; sources: PriceSources;
+  }> {
     const context = await tx.catalog.loadStoreContext({ vendorId: tx.vendorId, storeConnectionId: target.storeConnectionId });
     if (!context) throw new DropshipError("DROPSHIP_STORE_CONNECTION_REQUIRED", "Store connection was not found.");
     if (!["active", "onboarding"].includes(context.vendorStatus)) {
@@ -98,15 +120,85 @@ export class DropshipListingPriceService {
     if (!exposure.exposed || !selection.selected) {
       throw new DropshipError("DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "Select an available catalog item before setting its listing price.");
     }
-    return { defaultPriceCents: candidate.defaultRetailPriceCents,
+    return { candidate, sources: { defaultPriceCents: candidate.defaultRetailPriceCents,
       rulePrice: await tx.loadRulePrice?.(candidate) ?? null,
-      existingListingPriceCents: listings.find((row) => row.productVariantId === target.productVariantId)?.vendorRetailPriceCents ?? null };
+      existingListingPriceCents: listings.find((row) => row.productVariantId === target.productVariantId)?.vendorRetailPriceCents ?? null } };
   }
 }
 
 interface PriceSources { defaultPriceCents: number | null; existingListingPriceCents: number | null; rulePrice: ListingRulePrice | null }
-function projectSetting(target: ListingPriceTarget, sources: PriceSources, saved: SavedListingPriceRevision | null): ListingPriceSetting {
+
+/** A store with rules loaded the cost with the rule price; read it once either way. */
+async function loadCost(tx: ListingPriceTransaction, candidate: DropshipListingCatalogCandidate,
+  sources: PriceSources): Promise<DropshipProductCost | null> {
+  return sources.rulePrice ? sources.rulePrice.productCost : tx.loadProductCost(candidate);
+}
+
+/**
+ * Refuses a save that would leave a size without a price it can be listed at
+ * (see refuseListingPriceSave). Before and after are resolved the same way the
+ * preview and the push resolve them, and checked against the same limits.
+ */
+async function assertPriceKept(tx: ListingPriceTransaction, target: ListingPriceTarget,
+  candidate: DropshipListingCatalogCandidate, sources: PriceSources, input: SaveListingPriceInput): Promise<void> {
+  const [current, policies] = await Promise.all([tx.loadSaved(), tx.catalog.listPricingPolicies()]);
+  // An out-of-date request is refused by the save's version check instead: the
+  // vendor first needs to see the price as it is now.
+  if ((current?.revisionId ?? null) !== input.expectedRevisionId) return;
+  const before = resolveListingPrice({ ...sources, saved: current }).effectivePriceCents;
+  const after = resolveListingPrice({ ...sources, saved: { overridePriceCents: input.priceCents,
+    pricingMode: input.pricingMode ?? (input.priceCents === null ? "catalog_default" : "fixed") } }).effectivePriceCents;
+  const beforeBlockers = evaluateListingPricingPolicy(candidate, policies, before).blockers;
+  const afterBlockers = evaluateListingPricingPolicy(candidate, policies, after).blockers;
+  const refusal = refuseListingPriceSave({ before: { priceCents: before, blockers: beforeBlockers },
+    after: { priceCents: after, blockers: afterBlockers, typed: input.priceCents !== null } });
+  if (!refusal) return;
+  throw new DropshipError(refusal, refusalMessage(refusal, after, afterBlockers, policies), {
+    ...target, beforePriceCents: before, afterPriceCents: after, blockers: afterBlockers,
+    pricingMode: input.pricingMode ?? null,
+  });
+}
+
+const LIMIT_CODE = /^pricing:(below_floor|above_ceiling):policy_(\d+)$/;
+
+/** Names the Card Shellz limit a price breaks, with its amount, so the vendor can fix it. */
+function refusalMessage(refusal: ListingPriceSaveRefusal, afterCents: number | null, blockers: readonly string[],
+  policies: readonly DropshipPricingPolicyRecord[]): string {
+  const limits = describeBrokenLimits(blockers, policies);
+  if (refusal === "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT") {
+    return `That price is ${limits ?? "outside what Card Shellz allows for this item"}. Enter a price Card Shellz allows.`;
+  }
+  const outcome = afterCents === null ? "be left with no price"
+    : `move to ${formatUsdCents(afterCents)}, ${limits ?? "which Card Shellz does not allow for this item"}`;
+  return `This size would ${outcome}, so it could not be listed and a live listing would stop getting stock updates. Type an exact price instead.`;
+}
+
+function describeBrokenLimits(blockers: readonly string[], policies: readonly DropshipPricingPolicyRecord[]): string | null {
+  const byId = new Map(policies.map((policy) => [policy.id, policy]));
+  const floors: number[] = [];
+  const ceilings: number[] = [];
+  for (const blocker of blockers) {
+    const match = LIMIT_CODE.exec(blocker);
+    const policy = match ? byId.get(Number(match[2])) : undefined;
+    if (match?.[1] === "below_floor" && policy?.floorPriceCents != null) floors.push(policy.floorPriceCents);
+    if (match?.[1] === "above_ceiling" && policy?.ceilingPriceCents != null) ceilings.push(policy.ceilingPriceCents);
+  }
+  // The highest floor and the lowest ceiling are the ones the price must clear.
+  if (floors.length) return `below the Card Shellz minimum of ${formatUsdCents(Math.max(...floors))} for this item`;
+  if (ceilings.length) return `above the Card Shellz maximum of ${formatUsdCents(Math.min(...ceilings))} for this item`;
+  return null;
+}
+
+/** Integer cents as dollars, e.g. 1499 -> "$14.99", in the client's format and without floating point. */
+function formatUsdCents(cents: number): string {
+  const value = BigInt(cents);
+  return `$${value / BigInt(100)}.${String(value % BigInt(100)).padStart(2, "0")}`;
+}
+
+function projectSetting(target: ListingPriceTarget, sources: PriceSources, saved: SavedListingPriceRevision | null,
+  cost: DropshipProductCost | null): ListingPriceSetting {
   const defaultPrice = listingPriceCentsSchema.safeParse(sources.defaultPriceCents);
+  const costCents = listingAmountCentsSchema.safeParse(cost?.status === "available" ? cost.unitCostCents : null);
   return listingPriceSettingSchema.parse({
     ...target, revisionId: saved?.revisionId ?? null, overridePriceCents: saved?.overridePriceCents ?? null,
     defaultPriceCents: defaultPrice.success ? defaultPrice.data : null,
@@ -114,6 +206,7 @@ function projectSetting(target: ListingPriceTarget, sources: PriceSources, saved
       : sources.rulePrice ? "rules" : sources.existingListingPriceCents !== null ? "fixed" : "catalog_default"),
     ruleName: sources.rulePrice?.ruleName ?? null, pricingIssue: sources.rulePrice?.issue ?? null,
     rulePriceCents: sources.rulePrice?.priceCents ?? null, rulesConfigured: sources.rulePrice !== null,
+    ruleBasis: sources.rulePrice?.basis ?? null, productCostCents: costCents.success ? costCents.data : null,
     ...resolveListingPrice({ ...sources, saved }), updatedAt: saved?.updatedAt ?? null,
   });
 }

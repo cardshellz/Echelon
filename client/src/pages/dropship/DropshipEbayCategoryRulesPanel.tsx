@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { LISTING_SETTINGS_SEND_TIMING } from "@/lib/dropship-catalog-steps";
+import { NotSavedBadge, useUnsavedDraft } from "./catalog/UnsavedChangesGuard";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { EbayCategory, EbayCategoryRulesDraft, EbayCategoryRulesReview, EbayCategoryRulesState } from "@shared/dropship/ebay-category-rules";
 import { MAX_EBAY_CATEGORY_RULES } from "@shared/dropship/ebay-category-rules";
@@ -84,6 +86,7 @@ function EbayCategoryRulesSession({ storeConnectionId, storeName, renderAuthoriz
 
   const editable = phase === "editing" && !callbacks.disabled;
   const dirty = draft !== null && saved !== null && !sameEbayCategoryDraft(draft, editorDraftFromState(saved));
+  useUnsavedDraft(`ebay-category-rules:${storeConnectionId}`, "eBay categories", dirty);
 
   function edit(next: EbayCategoryRulesEditorDraft) {
     if (!editable) return;
@@ -130,7 +133,7 @@ function EbayCategoryRulesSession({ storeConnectionId, storeName, renderAuthoriz
       await callbacks.onSaved();
       if (!mounted.current) return;
       setPhase("editing");
-      setMessage("eBay categories saved and the listing preview refreshed. Live eBay listings change only when you publish them.");
+      setMessage(`eBay categories saved and the listing preview refreshed. ${LISTING_SETTINGS_SEND_TIMING}`);
     } catch (caught) {
       if (!mounted.current) return;
       if (confirmed) {
@@ -203,12 +206,12 @@ function EbayCategoryRulesSession({ storeConnectionId, storeName, renderAuthoriz
     <section className="rounded-lg border bg-white" aria-label="eBay categories">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b p-4">
         <div>
-          <h2 className="text-lg font-semibold">eBay categories</h2>
+          <h2 className="flex flex-wrap items-center gap-2 text-lg font-semibold">eBay categories{dirty && <NotSavedBadge />}</h2>
           <p className="mt-1 text-sm text-zinc-500">
             Choose the eBay category your listings use in {storeName || "this store"}. Each listing uses the first rule that matches it,
             then your store default, then the Card Shellz category for its product type.
           </p>
-          <p className="mt-1 text-xs text-zinc-500">Saving changes your listing previews. Live eBay listings change only when you publish them.</p>
+          <p className="mt-1 text-xs text-zinc-500">Saving changes your listing previews. {LISTING_SETTINGS_SEND_TIMING}</p>
         </div>
         <Button size="sm" variant="outline" disabled={phase === "reviewing" || phase === "saving"} onClick={() => void reload()}>Reload saved categories</Button>
       </div>

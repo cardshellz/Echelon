@@ -22,25 +22,32 @@ import type { OrderEditSnapshot } from "../../application/order-edit-provider";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { SQL } from "drizzle-orm";
 import { guardOrderEditShopifyIngress } from "../../infrastructure/order-edit-ingress-guard";
+import { OrderEditOmsSynchronizer } from "../../infrastructure/order-edit-oms-synchronizer";
+import type { CanonicalAvailabilityReservationStatusProjection } from "@shared/types/inventory-availability-claims";
+import { buildOrderEditFinancials } from "../../domain/order-edit-financials";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const OP = "00000000-0000-4000-8000-000000000001";
 // Minimal prerequisite tables; the new 0723 migration is executed verbatim.
 const prerequisites = `
-CREATE SCHEMA identity; CREATE SCHEMA channels; CREATE SCHEMA oms; CREATE SCHEMA wms; CREATE SCHEMA inventory;
+CREATE SCHEMA identity; CREATE SCHEMA channels; CREATE SCHEMA oms; CREATE SCHEMA wms; CREATE SCHEMA inventory; CREATE SCHEMA catalog;
+CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer NOT NULL,sku text,is_active boolean NOT NULL DEFAULT true);
+INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(100,200,'SKU'),(101,200,'OTHER-PACK'),(999,999,'OTHER');
 CREATE TABLE identity.users(id varchar(255) PRIMARY KEY);
 CREATE TABLE channels.channels(id integer PRIMARY KEY,name text DEFAULT 'Shopify',provider text DEFAULT 'shopify',status text DEFAULT 'active');
 CREATE TABLE channels.channel_connections(id integer PRIMARY KEY, channel_id integer REFERENCES channels.channels(id),shop_domain text DEFAULT 'example.myshopify.com');
 CREATE TABLE oms.oms_orders(id bigint PRIMARY KEY,channel_id integer,external_order_id text,status text,financial_status text,updated_at timestamptz,
-  external_customer_id text,external_order_number text,customer_name text DEFAULT 'Test Customer',customer_email text);
+  external_customer_id text,external_order_number text,customer_name text DEFAULT 'Test Customer',customer_email text,
+  currency text DEFAULT 'USD',total_cents integer DEFAULT 1000,cancelled_at timestamptz);
 CREATE TABLE oms.oms_order_lines(id bigint PRIMARY KEY,order_id bigint REFERENCES oms.oms_orders(id),external_line_item_id text,
   quantity integer,paid_quantity integer,authority_fulfillable_quantity integer,product_variant_id integer DEFAULT 100,authority_source_topic text);
 CREATE TABLE wms.orders(id integer PRIMARY KEY,source text,oms_fulfillment_order_id text,source_table_id text,channel_id integer,
   external_order_id text,warehouse_status text NOT NULL DEFAULT 'ready',on_hold integer NOT NULL DEFAULT 0,
   assigned_picker_id text,started_at timestamptz,picked_count integer NOT NULL DEFAULT 0,combined_group_id integer,cancelled_at timestamptz);
 CREATE TABLE wms.order_items(id integer PRIMARY KEY,order_id integer REFERENCES wms.orders(id),oms_order_line_id bigint,
-  quantity integer,picked_quantity integer DEFAULT 0,fulfilled_quantity integer DEFAULT 0,status text DEFAULT 'pending',on_hold boolean DEFAULT false,product_variant_id integer DEFAULT 100);
+  quantity integer,picked_quantity integer DEFAULT 0,fulfilled_quantity integer DEFAULT 0,status text DEFAULT 'pending',on_hold boolean DEFAULT false,
+  product_id integer DEFAULT 100,catalog_product_id integer DEFAULT 200,sku text DEFAULT 'SKU');
 CREATE TABLE wms.outbound_shipments(id integer PRIMARY KEY,order_id integer REFERENCES wms.orders(id),status text DEFAULT 'planned',
   held boolean DEFAULT false,requires_review boolean DEFAULT false,shipstation_order_id integer,shipping_engine text,engine_order_ref text,
   tracking_number text,shipped_at timestamptz);
@@ -143,6 +150,45 @@ function record(): OrderEditRecord {
   };
 }
 
+function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection {
+  return {
+    schemaVersion: "inventory_availability_reservation_status_v1",
+    authority: "canonical",
+    authorityRevision: "1",
+    activationRunId: "1",
+    orderId: 10,
+    claim: {
+      claimId: "1",
+      claimKey: "order:10",
+      revision: 1,
+      activationRunId: "1",
+      runtimeAuthorityRevision: "1",
+      planStatus: "satisfied",
+      scope: { kind: "warehouse", warehouseId: 1 },
+      planHash: "f".repeat(64),
+      snapshotFingerprint: "b".repeat(64),
+      lines: [
+        {
+          claimLineId: "1",
+          lineKey: "item:40",
+          orderItemId: 40,
+          sku: "SKU",
+          targetVariantId: 100,
+          requestedQty: "1",
+          plannedQty: "1",
+          shortfallQty: "0",
+          releasedTargetQty: "0",
+          consumedTargetQty: "0",
+          pickedTargetQty: "0",
+          openPlannedQty: "1",
+          resources: [],
+          operations: [],
+        },
+      ],
+    },
+  };
+}
+
 (url && disposable ? describe : describe.skip).sequential(
   "order edit migration and warehouse locks in real PostgreSQL",
   () => {
@@ -212,6 +258,8 @@ function record(): OrderEditRecord {
       await database.pool.query(
         "TRUNCATE oms.order_edit_operations,wms.orders,oms.oms_orders,oms.webhook_retry_queue CASCADE",
       );
+      await database.pool.query(`TRUNCATE catalog.product_variants;
+        INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(100,200,'SKU'),(101,200,'OTHER-PACK'),(999,999,'OTHER')`);
       await database.pool
         .query(`INSERT INTO oms.oms_orders(id,channel_id,external_order_id,status,financial_status,updated_at) VALUES(20,36,'1','open','paid','2026-10-05T00:00:00Z');
       INSERT INTO oms.oms_order_lines(id,order_id,external_line_item_id,quantity,paid_quantity,authority_fulfillable_quantity) VALUES(30,20,'101',1,1,1);
@@ -221,6 +269,213 @@ function record(): OrderEditRecord {
       await database.pool
         .query(`INSERT INTO inventory.availability_claims VALUES(1,10,'active',1,'satisfied',1,1,repeat('f',64));
       INSERT INTO inventory.availability_claim_lines VALUES(1,1,40,100,1,1,0,0,0,0);`);
+    });
+    function synchronizer() {
+      const reservation = vi.fn(async () => inventoryProjection());
+      return {
+        service: new OrderEditOmsSynchronizer(
+          database.pool,
+          { syncOmsOrderToWms: vi.fn(async () => 10) },
+          { getOrderReservationStatus: reservation },
+          vi.fn(),
+        ),
+        reservation,
+      };
+    }
+    it("round-trips new discount and payment evidence alongside legacy operations", async () => {
+      const store = new PostgresOrderEditStore(database.pool);
+      expect((await store.get(OP)).baseline.financials).toBeUndefined();
+      await database.pool.query(
+        "INSERT INTO oms.oms_orders(id,channel_id,external_order_id,status,financial_status,updated_at) VALUES(21,36,'2','open','paid','2026-10-05T00:00:00Z')",
+      );
+      const financials = buildOrderEditFinancials({
+        lines: [
+          { id: snapshot().lines[0].id, grossCents: 1100, netCents: 1000 },
+        ],
+        itemsNetCents: 1000,
+        itemDiscountLabels: ["Member discount"],
+        shippingGrossCents: 500,
+        shippingCents: 0,
+        shippingDiscountLabels: ["Free shipping"],
+        taxCents: 0,
+        taxesIncluded: false,
+        totalCents: 1000,
+      });
+      const newId = "00000000-0000-4000-8000-000000000003";
+      const requestKey = "00000000-0000-4000-8000-000000000004";
+      const operation = {
+        ...record(),
+        id: newId,
+        omsOrderId: 21,
+        requestKey,
+        input: { ...record().input, omsOrderId: 21, requestKey },
+        baseline: {
+          ...snapshot(),
+          orderId: "gid://shopify/Order/2",
+          financials,
+          discountsPresent: true,
+          lines: [{ ...snapshot().lines[0], originalUnitPriceCents: 1100 }],
+          paymentDates: {},
+          discountRules: [],
+        },
+      };
+      await store.create(operation);
+      expect((await store.get(newId)).baseline).toEqual(operation.baseline);
+      const nextRequestKey = "00000000-0000-4000-8000-000000000006";
+      const contradictory = {
+        ...operation,
+        id: "00000000-0000-4000-8000-000000000005",
+        requestKey: nextRequestKey,
+        input: { ...operation.input, requestKey: nextRequestKey },
+        baseline: { ...operation.baseline, totalCents: 999 },
+      };
+      await expect(store.create(contradictory)).rejects.toThrow(
+        /Snapshot financial breakdown/,
+      );
+      expect(
+        (
+          await database.pool.query(
+            "SELECT count(*)::int AS count FROM oms.order_edit_operations",
+          )
+        ).rows[0].count,
+      ).toBe(2);
+    });
+    it.each(["completed", "recovered"] as const)(
+      "synchronizes paid contents and atomically releases %s against the real WMS identity columns",
+      async (status) => {
+        const sync = synchronizer();
+        const actualGateway = new OrderEditWarehouseGateway(
+          database.pool,
+          { isConfigured: () => true, synchronizeOrderEditShipment: vi.fn() },
+          (id, expected, operation) =>
+            sync.service.synchronize(id, expected, operation),
+        );
+        await actualGateway.acquire(20, OP);
+        const proof = await actualGateway.reconcileAndRelease(
+          20,
+          OP,
+          snapshot(),
+        );
+        await new PostgresOrderEditStore(database.pool).save(
+          { ...record(), status, version: 1 },
+          0,
+          "staff",
+          status,
+          proof,
+        );
+        expect(sync.reservation).toHaveBeenCalledWith(10);
+        expect(
+          (
+            await database.pool.query(
+              "SELECT order_edit_operation_id FROM wms.orders WHERE id=10",
+            )
+          ).rows[0],
+        ).toEqual({ order_edit_operation_id: null });
+        expect(
+          (
+            await database.pool.query(
+              "SELECT status FROM oms.order_edit_operations WHERE id=$1",
+              [OP],
+            )
+          ).rows[0].status,
+        ).toBe(status);
+      },
+    );
+    it.each([
+      [
+        "missing source line",
+        "UPDATE wms.order_items SET oms_order_line_id=NULL WHERE id=40",
+      ],
+      [
+        "other order's source line",
+        `INSERT INTO oms.oms_orders(id,channel_id,external_order_id) VALUES(21,36,'2');
+        INSERT INTO oms.oms_order_lines(id,order_id,external_line_item_id,quantity,paid_quantity,authority_fulfillable_quantity) VALUES(31,21,'102',1,1,1);
+        UPDATE wms.order_items SET oms_order_line_id=31 WHERE id=40`,
+      ],
+      [
+        "unresolved WMS variant",
+        "UPDATE wms.order_items SET product_id=NULL WHERE id=40",
+      ],
+      [
+        "different pack variant",
+        "UPDATE wms.order_items SET product_id=101 WHERE id=40",
+      ],
+      [
+        "different root product",
+        "UPDATE wms.order_items SET catalog_product_id=999 WHERE id=40",
+      ],
+      [
+        "ambiguous legacy SKU",
+        "UPDATE wms.order_items SET catalog_product_id=NULL WHERE id=40; UPDATE catalog.product_variants SET sku='SKU' WHERE id=101",
+      ],
+      ["missing WMS line", "DELETE FROM wms.order_items WHERE id=40"],
+      [
+        "extra WMS quantity",
+        "UPDATE wms.order_items SET quantity=2 WHERE id=40",
+      ],
+    ])(
+      "keeps the hold and refuses inventory certification for %s",
+      async (_label, statement) => {
+        await gateway.acquire(20, OP);
+        await database.pool.query(statement);
+        const sync = synchronizer();
+        await expect(
+          sync.service.synchronize(20, snapshot(), OP),
+        ).rejects.toMatchObject({ code: "ORDER_EDIT_INVENTORY_PENDING" });
+        expect(sync.reservation).not.toHaveBeenCalled();
+        expect(
+          (
+            await database.pool.query(
+              "SELECT order_edit_operation_id FROM wms.orders WHERE id=10",
+            )
+          ).rows[0].order_edit_operation_id,
+        ).toBe(OP);
+      },
+    );
+    it("resolves a legacy root-product identity by its single active SKU consistently with canonical allocation", async () => {
+      await database.pool.query(
+        "UPDATE wms.order_items SET product_id=200,catalog_product_id=NULL WHERE id=40",
+      );
+      await expect(
+        synchronizer().service.synchronize(20, snapshot(), OP),
+      ).resolves.toBeUndefined();
+      await gateway.acquire(20, OP);
+      expect(
+        (await gateway.reconcileAndRelease(20, OP, snapshot()))
+          .allocationRequired,
+      ).toBe(true);
+    });
+    it("does not borrow fulfillment quantities from another WMS order linked to this source line", async () => {
+      await database.pool
+        .query(`INSERT INTO oms.oms_orders(id,channel_id,external_order_id) VALUES(21,36,'2');
+        INSERT INTO wms.orders(id,source,oms_fulfillment_order_id,channel_id,external_order_id) VALUES(11,'oms','21',36,'2');
+        UPDATE wms.order_items SET order_id=11 WHERE id=40`);
+      await expect(
+        synchronizer().service.synchronize(20, snapshot(), OP),
+      ).rejects.toMatchObject({ code: "ORDER_EDIT_INVENTORY_PENDING" });
+    });
+    it("invalidates a release fingerprint if the catalog identity changes after provider verification", async () => {
+      await gateway.acquire(20, OP);
+      const proof = await gateway.reconcileAndRelease(20, OP, snapshot());
+      await database.pool.query(
+        "UPDATE catalog.product_variants SET product_id=999 WHERE id=100",
+      );
+      await expect(
+        new PostgresOrderEditStore(database.pool).save(
+          { ...record(), status: "completed", version: 1 },
+          0,
+          "staff",
+          "completed",
+          proof,
+        ),
+      ).rejects.toMatchObject({ code: "ORDER_EDIT_INVENTORY_PENDING" });
+      expect(
+        (
+          await database.pool.query(
+            "SELECT order_edit_operation_id FROM wms.orders WHERE id=10",
+          )
+        ).rows[0].order_edit_operation_id,
+      ).toBe(OP);
     });
     it("inherits an active edit on a new fulfillment partition and protects source identity", async () => {
       await gateway.acquire(20, OP);
@@ -538,7 +793,9 @@ function record(): OrderEditRecord {
     it.each([
       "UPDATE inventory.availability_claim_lines SET planned_qty=0,shortfall_qty=1 WHERE id=1",
       "UPDATE inventory.availability_claim_lines SET target_variant_id=999 WHERE id=1",
-      "UPDATE wms.order_items SET product_variant_id=999 WHERE id=40",
+      "UPDATE wms.order_items SET product_id=101 WHERE id=40",
+      "UPDATE wms.order_items SET catalog_product_id=999 WHERE id=40",
+      "UPDATE wms.order_items SET product_id=NULL WHERE id=40",
     ])("keeps a changed or short allocation held: %s", async (statement) => {
       await gateway.acquire(20, OP);
       await database.pool.query(statement);

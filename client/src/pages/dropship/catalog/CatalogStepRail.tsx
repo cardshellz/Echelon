@@ -1,7 +1,7 @@
-import { Link } from "wouter";
 import { CheckCircle2, Circle, CircleDashed } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatStatus } from "@/lib/dropship-ops-surface";
+import { GuardedLink } from "./UnsavedChangesGuard";
 import {
   CATALOG_STEPS,
   CATALOG_STEP_LABELS,
@@ -54,7 +54,7 @@ export function CatalogStepRail({
               const detail = details[step];
               return (
                 <li key={step}>
-                  <Link
+                  <GuardedLink
                     href={hrefFor(step)}
                     aria-current={isCurrent ? "step" : undefined}
                     data-testid={`catalog-step-${step}`}
@@ -70,7 +70,7 @@ export function CatalogStepRail({
                       {tick && <span className="sr-only">, {TICK_TEXT[tick]}</span>}
                       {detail && <span className="block text-xs text-zinc-500">{detail}</span>}
                     </span>
-                  </Link>
+                  </GuardedLink>
                 </li>
               );
             })}

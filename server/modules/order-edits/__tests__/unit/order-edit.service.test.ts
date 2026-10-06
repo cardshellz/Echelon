@@ -13,6 +13,7 @@ import type {
 } from "../../application/order-edit-store";
 import type { OrderEditQuoteInput } from "@shared/order-edits/order-edit.contract";
 import { OrderEditError } from "../../domain/order-edit-error";
+import { buildOrderEditFinancials } from "../../domain/order-edit-financials";
 import {
   OrderEditCommitNotSentError,
   OrderEditProviderError,
@@ -288,6 +289,57 @@ export function serviceHarness(quantity = 3) {
 }
 
 describe("private order edit orchestration", () => {
+  it("presents exact after-discount line totals instead of Shopify's pre-code legacy totals", async () => {
+    const h = serviceHarness();
+    const financials = buildOrderEditFinancials({
+      lines: [
+        { id: h.snapshot().lines[0].id, grossCents: 2000, netCents: 1800 },
+      ],
+      itemsNetCents: 1800,
+      itemDiscountLabels: ["TEN"],
+      shippingGrossCents: 500,
+      shippingCents: 0,
+      shippingDiscountLabels: ["Free shipping"],
+      taxCents: 0,
+      taxesIncluded: false,
+      totalCents: 1800,
+    });
+    h.setCurrent({
+      financials,
+      totalCents: 1800,
+      subtotalCents: 1800,
+      netPaidCents: 1800,
+    });
+    const order = await h.service.order(4, 1);
+    expect(order.lines[0].totalCents).toBe(1800);
+    expect(order.financials).toEqual(financials);
+    h.provider.quote.mockRejectedValueOnce(
+      new OrderEditProviderError(
+        "PROMOTION_PARITY_UNVERIFIED",
+        "Discount requires review",
+      ),
+    );
+    const failed = await h.service.quote(h.input, "staff");
+    expect(failed).toMatchObject({
+      quoteAvailable: false,
+      lines: [{ totalCents: 1800 }],
+      financials: { current: financials, quoted: null },
+    });
+  });
+  it("shows restored quantities, totals, and zero debt after unpaid recovery", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    await h.service.commit(OP, OP, "staff");
+    h.advance(31 * 60_000);
+    const recovered = await h.service.reconcile(OP, "staff");
+    expect(recovered).toMatchObject({
+      status: "recovered",
+      updatedTotalCents: 2000,
+      balanceDueCents: 0,
+      lines: [{ quantity: 2, totalCents: 2000 }],
+      settlement: { outstandingCents: 0, netPaidCents: 2000 },
+    });
+  });
   it("allows safe cancellation only after an explicit not-submitted result", async () => {
     const h = serviceHarness();
     await h.service.quote(h.input, "staff");
