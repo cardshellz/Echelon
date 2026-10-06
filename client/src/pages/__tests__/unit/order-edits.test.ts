@@ -8,6 +8,7 @@ import type {
   OrderEditOrder,
 } from "@shared/order-edits/order-edit.contract";
 import OrderEdits, {
+  ConnectionSettings,
   OrderDraft,
   OrderEditOperationView,
 } from "../../OrderEdits";
@@ -131,6 +132,31 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("staff order editor access and resume", () => {
+  it("opens unconfigured connection settings and requires an explicit payment window", () => {
+    const html = renderToStaticMarkup(
+      createElement(ConnectionSettings, {
+        connection: {
+          connectionId: 3,
+          channelId: 8,
+          name: "Fixture shop",
+          shopDomain: "fixture.myshopify.com",
+          paymentWindowMinutes: null,
+          enabled: false,
+        },
+        api: createOrderEditTransport(vi.fn()),
+        onSaved: vi.fn(),
+      }),
+    );
+    expect(html).toMatch(/<details[^>]+open=""/);
+    expect(html).toContain(
+      "Applies only to Fixture shop (fixture.myshopify.com)",
+    );
+    expect(html).toContain(
+      "Enter a payment window before enabling staff edits.",
+    );
+    expect(html).toMatch(/<input[^>]+id="edit-payment-window"[^>]+value=""/);
+    expect(html).toMatch(/<button[^>]+disabled=""[^>]*>Save settings/);
+  });
   it("blocks every read and hides cached order information without edit permission", async () => {
     state.canEdit = false;
     state.operation = operation;
@@ -316,5 +342,25 @@ describe("verified order edit review", () => {
     expect(html).toContain(
       "Shipping address changes are not supported in this pilot",
     );
+  });
+  it("shows both missing enablement and order eligibility blockers without a configuration action for non-admins", () => {
+    const html = renderToStaticMarkup(
+      createElement(OrderDraft, {
+        order: {
+          ...order,
+          eligibility: { editable: false, reasons: ["Picking has started."] },
+        },
+        api: createOrderEditTransport(vi.fn()),
+        enabled: false,
+        staffId: "staff-1",
+        onQuote: vi.fn(),
+        onLock: vi.fn(),
+      }),
+    );
+    expect(html).toContain("Staff order editing is disabled");
+    expect(html).toContain("Ask an administrator with settings permission");
+    expect(html).toContain("Picking has started.");
+    expect(html).not.toContain("Configure staff editing</button>");
+    expect(html).toMatch(/<input[^>]+disabled=""/);
   });
 });

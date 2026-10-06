@@ -4,6 +4,7 @@ import {
   orderEditQuoteInputSchema,
   orderEditSettingsInputSchema,
   type OrderEditOperation,
+  type OrderEditConnection,
   type OrderEditOrder,
   type OrderEditQuoteInput,
 } from "../../shared/order-edits/order-edit.contract";
@@ -41,6 +42,10 @@ async function installFixtures(
   page: Page,
   options: {
     canEdit?: boolean;
+    canConfigure?: boolean;
+    connectionEnabled?: boolean;
+    paymentWindowMinutes?: number | null;
+    rejectSettings?: boolean;
     loseQuoteResponse?: boolean;
     loseCommitResponse?: boolean;
     rejectQuote?: boolean;
@@ -63,13 +68,16 @@ async function installFixtures(
       : null;
   let loseQuote = options.loseQuoteResponse === true;
   let loseCommit = options.loseCommitResponse === true;
-  let connection = {
+  let connection: OrderEditConnection = {
     connectionId: 3,
     channelId: 8,
     name: "Fixture shop",
     shopDomain: "fixture.myshopify.com",
-    paymentWindowMinutes: 60,
-    enabled: true,
+    paymentWindowMinutes:
+      options.paymentWindowMinutes === undefined
+        ? 60
+        : options.paymentWindowMinutes,
+    enabled: options.connectionEnabled ?? true,
   };
   await page.clock.setFixedTime(new Date("2026-10-05T12:00:00.000Z"));
   page.on("pageerror", (error) => failures.push(error.message));
@@ -89,7 +97,12 @@ async function installFixtures(
           },
           roles: ["Administrator"],
           permissions:
-            options.canEdit === false ? [] : ["orders:edit", "settings:edit"],
+            options.canEdit === false
+              ? []
+              : [
+                  "orders:edit",
+                  ...(options.canConfigure === false ? [] : ["settings:edit"]),
+                ],
         },
       });
     if (!path.startsWith(ORDER_EDIT_API)) {
@@ -112,6 +125,14 @@ async function installFixtures(
         json: { connections: [connection], customerAccess: false },
       });
     if (path === `${ORDER_EDIT_API}/settings/3` && method === "PUT") {
+      if (options.rejectSettings)
+        return route.fulfill({
+          status: 422,
+          json: {
+            code: "SETTINGS_REJECTED",
+            message: "Settings could not be saved.",
+          },
+        });
       connection = {
         ...connection,
         ...orderEditSettingsInputSchema.parse(body),
@@ -261,6 +282,147 @@ async function assertFitsScreen(page: Page) {
     ),
   ).toBe(true);
 }
+
+test("disabled connection guides setup and unlocks the selected order only after a successful save", async ({
+  page,
+}, testInfo) => {
+  const fixture = await installFixtures(page, {
+    connectionEnabled: false,
+    paymentWindowMinutes: null,
+  });
+  await chooseOrder(page);
+  const quantity = page.getByRole("spinbutton", {
+    name: "Quantity for Toploader Binder Pages Black · 1 Binder",
+  });
+  const save = page.getByRole("button", { name: "Save settings", exact: true });
+  await expect(quantity).toBeDisabled();
+  await expect(
+    page.getByText("Staff edits disabled", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Payment window (minutes)")).toBeVisible();
+  await expect(page.getByLabel("Payment window (minutes)")).toHaveValue("");
+  await expect(save).toBeDisabled();
+  await expect(
+    page.getByText("Enter a payment window before enabling staff edits."),
+  ).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath("disabled-setup.png"),
+    fullPage: true,
+  });
+  await page.getByText("Pilot settings", { exact: true }).click();
+  await expect(page.getByLabel("Payment window (minutes)")).toBeHidden();
+  await page
+    .getByRole("button", { name: "Configure staff editing", exact: true })
+    .click();
+  await expect(page.getByLabel("Payment window (minutes)")).toBeFocused();
+  await page.getByLabel("Payment window (minutes)").fill("15");
+  await page
+    .getByLabel("Enable staff order edits for this Shopify connection")
+    .check();
+  await expect(quantity).toBeDisabled();
+  expect(fixture.requests.every((request) => request.method === "GET")).toBe(
+    true,
+  );
+  await save.click();
+  await expect(page.getByText("Settings saved.")).toBeVisible();
+  await expect(
+    page.getByText("Staff edits enabled", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Payment window: 15 minutes", { exact: true }),
+  ).toBeVisible();
+  await expect(quantity).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "Configure staff editing", exact: true }),
+  ).toHaveCount(0);
+  await quantity.fill("3");
+  await expect(
+    page.getByRole("button", { name: "Review changes", exact: true }),
+  ).toBeEnabled();
+  await page.screenshot({
+    path: testInfo.outputPath("enabled-order.png"),
+    fullPage: true,
+  });
+  const mutations = fixture.requests.filter(
+    (request) => request.method !== "GET",
+  );
+  expect(mutations).toHaveLength(1);
+  expect(mutations[0]).toMatchObject({
+    method: "PUT",
+    path: `${ORDER_EDIT_API}/settings/3`,
+    body: { paymentWindowMinutes: 15, enabled: true },
+  });
+  expect(fixture.failures).toEqual([]);
+  await assertFitsScreen(page);
+});
+
+test("failed settings save leaves quantities disabled and does not submit an edit", async ({
+  page,
+}) => {
+  const fixture = await installFixtures(page, {
+    connectionEnabled: false,
+    paymentWindowMinutes: null,
+    rejectSettings: true,
+  });
+  await chooseOrder(page);
+  await page.getByLabel("Payment window (minutes)").fill("15");
+  await page
+    .getByLabel("Enable staff order edits for this Shopify connection")
+    .check();
+  await page
+    .getByRole("button", { name: "Save settings", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Settings could not be saved.",
+  );
+  await expect(
+    page.getByText("Staff edits disabled", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("spinbutton", {
+      name: "Quantity for Toploader Binder Pages Black · 1 Binder",
+    }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Review changes", exact: true }),
+  ).toBeDisabled();
+  expect(
+    fixture.requests.filter((request) => request.method !== "GET"),
+  ).toHaveLength(1);
+  expect(
+    fixture.requests.some((request) => request.path.endsWith("/quotes")),
+  ).toBe(false);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("order editors without settings permission see the administrator instruction and cannot enable the connection", async ({
+  page,
+}) => {
+  const fixture = await installFixtures(page, {
+    connectionEnabled: false,
+    paymentWindowMinutes: null,
+    canConfigure: false,
+  });
+  await chooseOrder(page);
+  await expect(
+    page.getByText("Ask an administrator with settings permission", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Payment window (minutes)")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Configure staff editing", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("spinbutton", {
+      name: "Quantity for Toploader Binder Pages Black · 1 Binder",
+    }),
+  ).toBeDisabled();
+  expect(fixture.requests.every((request) => request.method === "GET")).toBe(
+    true,
+  );
+  expect(fixture.failures).toEqual([]);
+});
 
 test("staff can configure a payment window, quote quantity/addition changes and open pending payment", async ({
   page,
