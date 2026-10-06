@@ -1,5 +1,5 @@
 -- Metadata only: do not infer provenance or rewrite historical prices/quantities.
-BEGIN;
+-- The release executor owns the transaction, including its migration record.
 
 ALTER TABLE inventory.inventory_lots
   ADD COLUMN IF NOT EXISTS cost_precision_version integer NOT NULL DEFAULT 0
@@ -35,5 +35,3 @@ CREATE TRIGGER cost_evidence_immutable BEFORE UPDATE OR DELETE ON inventory.lot_
   FOR EACH ROW EXECUTE FUNCTION inventory.reject_cost_evidence_mutation();
 CREATE TRIGGER cost_evidence_immutable BEFORE UPDATE OR DELETE ON inventory.lot_cost_follow_up_attempts
   FOR EACH ROW EXECUTE FUNCTION inventory.reject_cost_evidence_mutation();
-
-COMMIT;

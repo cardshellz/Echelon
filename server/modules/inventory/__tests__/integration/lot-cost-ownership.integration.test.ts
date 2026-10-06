@@ -20,6 +20,7 @@ import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "../../../procu
 import { installPreOpeningQuantityAuthorityFixture } from "../fixtures/pre-opening-quantity-authority.fixture";
 import { returnCommandResultFor } from "@shared/inventory/return-command";
 import { lotCostFollowUpReportSchema } from "@shared/inventory/lot-cost-follow-up";
+import { executeMigrationWithRetry } from "../../../../../migrations/migration-executor";
 
 // Exercise registered HTTP handlers against the real application/PG owners.
 // Authentication and unrelated module singletons are isolated; no global DB
@@ -81,7 +82,7 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
         product_variant_id integer,sku text,old_cost_cents bigint,new_cost_cents bigint,delta_cents bigint,
         reason text,created_at timestamp NOT NULL);`);
     await installPreOpeningQuantityAuthorityFixture(pool);
-    for (const name of ["222_procurement_cost_evidence.sql","0724_inventory_cost_admission_evidence.sql","0725_inventory_return_cost_allocations.sql"]) {
+    for (const name of ["222_procurement_cost_evidence.sql","0725_inventory_cost_admission_evidence.sql","0726_inventory_return_cost_allocations.sql"]) {
       await pool.query(readFileSync(resolve(process.cwd(),"migrations",name),"utf8"));
     }
     database = drizzle(pool,{ schema }); cogs = new COGSService(database,()=>now);
@@ -506,5 +507,61 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
       expect(waiting).toBe(true); await writer.query("COMMIT"); await pending;
       expect((await returnedLayers())[0]).toMatchObject({ total_unit_cost_mills: "249",po_unit_cost_mills: "200" });
     } finally { await writer.query("ROLLBACK"); writer.release(); await pending; }
+  });
+
+  it.each([
+    { name: "0725_inventory_cost_admission_evidence.sql", schemaName: "inventory", tableName: "inventory_lots",
+      evidenceTables: ["inventory.lot_cost_follow_ups", "inventory.lot_cost_follow_up_attempts"],
+      reset: `DROP TABLE inventory.lot_cost_follow_up_attempts,inventory.lot_cost_follow_ups;
+        ALTER TABLE inventory.inventory_lots DROP COLUMN cost_precision_version;` },
+    { name: "0726_inventory_return_cost_allocations.sql", schemaName: "oms", tableName: "order_item_costs",
+      evidenceTables: ["inventory.return_cost_allocations", "inventory.return_commands"],
+      reset: `DROP TABLE inventory.return_cost_allocations,inventory.return_commands;
+        ALTER TABLE oms.order_item_costs DROP COLUMN cost_precision_version;
+        ALTER TABLE inventory.lot_cost_contributions DROP CONSTRAINT lot_cost_contributions_operation_kind_check;
+        ALTER TABLE inventory.lot_cost_contributions ADD CONSTRAINT lot_cost_contributions_operation_kind_check
+          CHECK(operation_kind IN ('transfer','conversion','assembly','build'));` },
+  ])("keeps $name schema and tracking atomic under the release executor", async migration => {
+    const client = await pool.connect();
+    let trackingCreated = false;
+    try {
+      // This suite owns the disposable database and runs sequentially. Reset only
+      // this batch's metadata; keep all source lots and physical quantities intact.
+      expect((await client.query("SELECT to_regclass('_migrations') AS relation")).rows[0].relation).toBeNull();
+      await client.query(migration.reset);
+      const physical = (await client.query("SELECT id,qty_on_hand,qty_received FROM inventory.inventory_lots ORDER BY id")).rows;
+      await client.query(`CREATE TABLE _migrations(filename text PRIMARY KEY,content_hash text,
+        CONSTRAINT reject_migration_tracking CHECK(false))`);
+      trackingCreated = true;
+      const sourceSql = readFileSync(resolve(process.cwd(), "migrations", migration.name), "utf8");
+      const input = { client,file: migration.name,sql: sourceSql,contentHash: costFingerprint(sourceSql),
+        options: { maxAttempts: 1,retryBaseDelayMs: 0,retryMaxDelayMs: 0,lockTimeoutMs: 2000 } };
+      await expect(executeMigrationWithRetry(input)).rejects.toMatchObject({ code: "23514" });
+      for (const table of migration.evidenceTables) {
+        expect((await client.query("SELECT to_regclass($1) AS relation", [table])).rows[0].relation).toBeNull();
+      }
+      const column = await client.query(`SELECT EXISTS(SELECT 1 FROM information_schema.columns
+        WHERE table_schema=$1 AND table_name=$2 AND column_name='cost_precision_version') AS present`,
+      [migration.schemaName,migration.tableName]);
+      expect(column.rows[0].present).toBe(false);
+      expect((await client.query("SELECT count(*)::integer AS count FROM _migrations")).rows[0].count).toBe(0);
+      expect((await client.query("SELECT id,qty_on_hand,qty_received FROM inventory.inventory_lots ORDER BY id")).rows).toEqual(physical);
+      if (migration.schemaName === "oms") {
+        expect((await client.query(`SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
+          WHERE conrelid='inventory.lot_cost_contributions'::regclass
+            AND conname='lot_cost_contributions_operation_kind_check'`)).rows[0].definition).not.toContain("'return'");
+      }
+      await client.query("ALTER TABLE _migrations DROP CONSTRAINT reject_migration_tracking");
+      expect(await executeMigrationWithRetry(input)).toEqual({ attempts: 1 });
+      expect((await client.query("SELECT filename,content_hash FROM _migrations")).rows)
+        .toEqual([{ filename: migration.name,content_hash: input.contentHash }]);
+      for (const table of migration.evidenceTables) {
+        expect((await client.query("SELECT to_regclass($1) AS relation", [table])).rows[0].relation).not.toBeNull();
+      }
+      expect((await client.query("SELECT id,qty_on_hand,qty_received FROM inventory.inventory_lots ORDER BY id")).rows).toEqual(physical);
+    } finally {
+      try { if (trackingCreated) await client.query("DROP TABLE _migrations"); }
+      finally { client.release(); }
+    }
   });
 });

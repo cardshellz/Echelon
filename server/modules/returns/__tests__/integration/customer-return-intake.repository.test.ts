@@ -38,7 +38,7 @@ integration("private return intake on migration-defined PostgreSQL", () => {
       statement_timeout: 15_000,
     });
     await createIntakeTestSchema(pool);
-    const migration = readFileSync(resolve(process.cwd(), "migrations/0725_inventory_return_cost_allocations.sql"), "utf8");
+    const migration = readFileSync(resolve(process.cwd(), "migrations/0726_inventory_return_cost_allocations.sql"), "utf8");
     const start = migration.indexOf("CREATE TABLE inventory.return_commands (");
     const end = migration.indexOf("CREATE TRIGGER cost_evidence_immutable", start);
     if (start < 0 || end <= start) throw new Error("Return command fixture migration boundaries changed");

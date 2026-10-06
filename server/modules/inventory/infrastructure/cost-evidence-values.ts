@@ -20,4 +20,3 @@ export function costInteger(value: unknown, field: string, minimum = 0): number 
   }
   return parsed;
 }
-

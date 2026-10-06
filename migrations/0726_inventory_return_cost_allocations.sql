@@ -1,4 +1,4 @@
-BEGIN;
+-- The release executor owns the transaction, including its migration record.
 
 ALTER TABLE oms.order_item_costs ADD COLUMN IF NOT EXISTS cost_precision_version integer NOT NULL DEFAULT 0
   CHECK (cost_precision_version IN (0,1));
@@ -35,5 +35,3 @@ CREATE TRIGGER cost_evidence_immutable BEFORE UPDATE OR DELETE ON inventory.retu
   FOR EACH ROW EXECUTE FUNCTION inventory.reject_cost_evidence_mutation();
 CREATE TRIGGER cost_evidence_immutable BEFORE UPDATE OR DELETE ON inventory.return_commands
   FOR EACH ROW EXECUTE FUNCTION inventory.reject_cost_evidence_mutation();
-
-COMMIT;
