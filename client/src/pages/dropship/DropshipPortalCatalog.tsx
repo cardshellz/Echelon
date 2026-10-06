@@ -89,6 +89,7 @@ import { DropshipContentTemplatesPanel } from "./DropshipContentTemplatesPanel";
 import { DropshipEbayCategoryRulesPanel } from "./DropshipEbayCategoryRulesPanel";
 import { CatalogStepRail } from "./catalog/CatalogStepRail";
 import { CatalogActionBar, type CatalogNextStepAction } from "./catalog/CatalogActionBar";
+import { UnsavedChangesProvider, useLeaveGuard } from "./catalog/UnsavedChangesGuard";
 import { ebayListingSetupQueryOptions } from "@/lib/dropship-ebay-listing-query-sync";
 import {
   CATALOG_STEPS,
@@ -163,8 +164,18 @@ export async function fetchAllSelectedCatalogRows(
   return Array.from(rowsByVariantId.values());
 }
 
+/** The Catalog page, with one guard against leaving Listing settings with changes that aren't saved. */
 export default function DropshipPortalCatalog() {
+  return (
+    <UnsavedChangesProvider>
+      <DropshipPortalCatalogPage />
+    </UnsavedChangesProvider>
+  );
+}
+
+function DropshipPortalCatalogPage() {
   const queryClient = useQueryClient();
+  const leaveGuard = useLeaveGuard();
   const {
     principal,
     refetch: refetchAuth,
@@ -664,7 +675,7 @@ export default function DropshipPortalCatalog() {
           }}
           storeOptions={storeOptions}
           selectedStoreConnectionId={storeReady ? selectedStoreConnectionIdNumber : null}
-          onStoreChange={chooseStore}
+          onStoreChange={(storeConnectionId) => leaveGuard(() => chooseStore(storeConnectionId))}
         />
 
         {error && (

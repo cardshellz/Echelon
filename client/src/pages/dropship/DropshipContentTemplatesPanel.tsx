@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { contentProfileStateSchema, contentProfileSchema, saveContentProfileResponseSchema, MAX_TEMPLATE_TEXT_LENGTH,
   type ContentProfile, type ContentProfileState, type DescriptionTemplate } from "@shared/dropship/listing-content";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { createDropshipIdempotencyKey } from "@/lib/dropship-ops-surface";
 import { DropshipCatalogScopePicker } from "./DropshipCatalogScopePicker";
 import { useContentDraft, type ContentSaveCallbacks } from "./useContentDraft";
+import { LISTING_SETTINGS_SEND_TIMING } from "@/lib/dropship-catalog-steps";
+import { NotSavedBadge, useUnsavedDraft } from "./catalog/UnsavedChangesGuard";
 
 const blankTemplate = (): DescriptionTemplate => ({ introduction: "", footer: "" });
 const blankProfile = (): ContentProfile => ({ defaultTemplate: blankTemplate(), groups: [] });
@@ -17,15 +19,17 @@ function TemplatesSession(props: { storeConnectionId: number; storeName: string 
   const endpoint = `/api/dropship/listings/stores/${props.storeConnectionId}/content-profile`;
   const [open, setOpen] = useState(false);
   const [opened, setOpened] = useState(false);
+  // Reported by the editor so the title still says "Not saved" after the vendor hides it.
+  const [dirty, setDirty] = useState(false);
   return <section className="rounded-lg border bg-white p-4">
-    <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-semibold">Description templates</h3>
+    <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="flex flex-wrap items-center gap-2 font-semibold">Description templates{dirty && <NotSavedBadge />}</h3>
       <p className="text-xs text-zinc-500">Reusable introductions and footers for {props.storeName}. Product descriptions stay unique to each listing.</p></div>
       <Button variant="outline" size="sm" onClick={() => { setOpened(true); setOpen(!open); }}>{open ? "Hide templates" : "Edit templates"}</Button>
     </div>
-    {opened && <div hidden={!open}><TemplateEditor endpoint={endpoint} {...props} /></div>}
+    {opened && <div hidden={!open}><TemplateEditor endpoint={endpoint} onDirtyChange={setDirty} {...props} /></div>}
   </section>;
 }
-function TemplateEditor({ endpoint, ...props }: { endpoint: string } & ContentSaveCallbacks) {
+function TemplateEditor({ endpoint, onDirtyChange, ...props }: { endpoint: string; onDirtyChange: (dirty: boolean) => void } & ContentSaveCallbacks) {
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const editor = useContentDraft<ContentProfileState, ContentProfile>({
     endpoint, callbacks: { ...props, onSaved: props.onSaved },
@@ -35,7 +39,11 @@ function TemplateEditor({ endpoint, ...props }: { endpoint: string } & ContentSa
     validateSave: (value) => { saveContentProfileResponseSchema.parse(value); },
   });
   const draft = editor.draft;
-  const dirty = draft && JSON.stringify(draft) !== JSON.stringify(editor.state?.profile ?? blankProfile());
+  const dirty = Boolean(draft) && JSON.stringify(draft) !== JSON.stringify(editor.state?.profile ?? blankProfile());
+  // The endpoint names the store, so each store's templates are their own entry.
+  useUnsavedDraft(endpoint, "Description templates", dirty);
+  useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
   return <div className="mt-4 space-y-4">
     {draft && <fieldset disabled={!editor.editable} className="space-y-4">
       <TemplateFields value={draft.defaultTemplate} onChange={(defaultTemplate) => editor.edit({ ...draft, defaultTemplate })} />
@@ -65,7 +73,7 @@ function TemplateEditor({ endpoint, ...props }: { endpoint: string } & ContentSa
       <Button variant="outline" size="sm" disabled={editor.busy} onClick={() => void editor.reload()}>Reload saved templates</Button>
       {editor.phase === "refresh_error" && <Button variant="outline" size="sm" onClick={() => void editor.refreshPreview()}>Retry preview refresh</Button>}
     </div>
-    <p className="text-xs text-zinc-500">Templates apply to current and future local listing drafts. Saving does not publish or rewrite live listings. Open a listing preview to inspect its assembled description. Reload discards local edits.</p>
+    <p className="text-xs text-zinc-500">Templates apply to your current and future listings. {LISTING_SETTINGS_SEND_TIMING} Open a listing preview to see a full description. Reload discards changes you haven&apos;t saved.</p>
     {editor.error && <p role="alert" className="text-sm text-amber-800">{editor.error}</p>}
     {editor.message && <p role="status" className="text-sm text-emerald-800">{editor.message}</p>}
   </div>;

@@ -72,7 +72,8 @@ describe("eBay category rules panel", () => {
     expect(markup).toContain("Rules (2 of 100)");
     expect(markup.indexOf("1. Toploaders")).toBeGreaterThan(-1);
     expect(markup.indexOf("2. Penny sleeves")).toBeGreaterThan(markup.indexOf("1. Toploaders"));
-    expect(markup).toContain("Live eBay listings change only when you publish them.");
+    expect(markup).toContain("Saved settings go to eBay the next time a listing is sent: when you publish it, or when Card Shellz updates it.");
+    expect(markup).not.toContain("change only when you publish");
     expect(markup).toContain("No unsaved changes.");
   });
 
