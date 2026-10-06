@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { WalmartApiError, WalmartClient, type WalmartCredentials } from "../../adapters/walmart/walmart-client";
 import { QuantityProviderEvidenceCollector } from "../../../inventory-planning/application/quantity-provider-request-evidence";
+import { createHash } from "node:crypto";
+import { canonicalJson } from "@shared/utils/canonical-json";
 
 const credentials: WalmartCredentials = {
   clientId: "test-client", clientSecret: "test-secret", environment: "production", market: "us",
@@ -104,16 +106,38 @@ describe("WalmartClient", () => {
     expect(JSON.stringify(result)).not.toContain("private");
   });
 
-  it.each([429, 503])("captures a single physical feed HTTP %i outcome without replaying it", async status => {
+  it.each([401, 429, 503])("captures a single physical feed HTTP %i outcome without replaying it", async status => {
     const fetchMock = vi.fn().mockResolvedValueOnce(token()).mockResolvedValueOnce(new Response(JSON.stringify({ secret: "test-secret" }), { status, headers: { "Retry-After": "120" } }));
     const store = { start: vi.fn().mockResolvedValue("request-1"), finish: vi.fn().mockResolvedValue(undefined) };
     const collector = new QuantityProviderEvidenceCollector(store, () => new Date("2026-09-21T12:00:00Z"));
     await expect(collector.run(() => setup(fetchMock).client.request("POST", "/v3/feeds?feedType=MP_ITEM", { MPItem: [] }))).rejects.toMatchObject({ status });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(store.start).toHaveBeenCalledTimes(1);
-    expect(store.finish.mock.calls[0][1]).toMatchObject({ outcome: status === 429 ? "rejected" : "uncertain", httpStatus: status,
+    expect(store.finish.mock.calls[0][1]).toMatchObject({ outcome: status === 503 ? "uncertain" : "rejected", httpStatus: status,
       providerRequestId: requestId, responseHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
     expect(JSON.stringify(store.finish.mock.calls)).not.toContain("test-secret");
+  });
+
+  it.each(["MP_ITEM", "MP_ITEM_MATCH"])("uploads %s as a JSON file while auditing the same approved content", async feedType => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(token()).mockResolvedValueOnce(json({ feedId: "f@US" }));
+    const payload = { MPItemFeedHeader: { locale: "en" }, MPItem: [{ [feedType === "MP_ITEM" ? "Orderable" : "Item"]: { sku: "TEST", inventory: [{ quantity: 0 }] } }] };
+    const expected = structuredClone(payload);
+    const store = { start: vi.fn().mockResolvedValue("request-1"), finish: vi.fn().mockResolvedValue(undefined) };
+    const collector = new QuantityProviderEvidenceCollector(store, () => new Date("2026-09-21T12:00:00Z"));
+    await collector.run(() => setup(fetchMock).client.request("POST", `/v3/feeds?feedType=${feedType}`, payload));
+    const request = fetchMock.mock.calls[1][1];
+    expect(request.body).toBeInstanceOf(FormData);
+    const form = request.body as FormData;
+    expect([...form.keys()]).toEqual(["file"]);
+    const file = form.get("file") as File;
+    expect(file.name).toBe("items.json");
+    expect(file.type).toBe("application/json");
+    expect(await file.text()).toBe(JSON.stringify(expected));
+    expect(request.headers["Content-Type"]).toBeUndefined();
+    expect(store.start.mock.calls[0][0].requestHash).toBe(createHash("sha256").update(canonicalJson(expected)).digest("hex"));
+    collector.assertSingleCompletedRequest("POST", [`/v3/feeds?feedType=${feedType}`]);
+    expect(payload).toEqual(expected);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("records an ambiguous feed timeout and leaves reconciliation to the owner", async () => {

@@ -2410,12 +2410,12 @@ export default function InboundShipmentDetail() {
 
       {/* ═══════ Add Cost Dialog ═══════ */}
       <Dialog open={showAddCostDialog} onOpenChange={(open) => { if (!addCostMutation.isPending) setShowAddCostDialog(open); }}>
-        <DialogContent className="max-w-md max-h-[90dvh] overflow-y-auto">
+        <DialogContent className="max-w-3xl max-h-[90dvh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Add Shipment Cost</DialogTitle>
             <DialogDescription>Record a cost associated with this shipment.</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
+          <div className="min-w-0 space-y-4">
             {costCreateRecovery && <p role="alert" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">This cost may already be saved. Retry sends the original request and key to confirm the result. Its details stay locked until that result is known.</p>}
             <fieldset disabled={addCostMutation.isPending || !!costCreateRecovery} className="min-w-0 space-y-4">
             <div className="space-y-2">
@@ -2436,7 +2436,7 @@ export default function InboundShipmentDetail() {
               </Select>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label>Date</Label>
                 <Input
@@ -2523,7 +2523,7 @@ export default function InboundShipmentDetail() {
 
       {/* ═══════ Edit Cost Dialog ═══════ */}
       <Dialog open={showEditCostDialog} onOpenChange={(open) => { if (!updateCostMutation.isPending && !reloadingCost) { setShowEditCostDialog(open); if (!open) { setEditingCost(null); setCostEditConflict(false); } } }}>
-        <DialogContent className="max-w-md max-h-[90dvh] overflow-y-auto">
+        <DialogContent className="max-w-3xl max-h-[90dvh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Edit Cost</DialogTitle>
             <DialogDescription>Update cost details.</DialogDescription>
@@ -2557,7 +2557,7 @@ export default function InboundShipmentDetail() {
                 </Select>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <Label>Date</Label>
                   <Input

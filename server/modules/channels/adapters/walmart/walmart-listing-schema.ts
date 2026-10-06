@@ -12,6 +12,7 @@ export const PROTECTED_ORDERABLE_FIELDS = new Set([
   "sku",
   "price",
   "productIdentifiers",
+  "specProductType",
   "inventory",
   "automate_pricing",
   "SkuUpdate",
@@ -42,7 +43,8 @@ export function jsonObject(value: unknown): JsonObject {
 }
 
 function fieldSchema(schema: JsonObject, name: string): JsonObject {
-  return jsonObject(jsonObject(schema.properties)[name]);
+  const properties = jsonObject(schema.properties);
+  return jsonObject(Object.hasOwn(properties, name) ? properties[name] : undefined);
 }
 
 export function itemSections(
@@ -59,11 +61,64 @@ export function itemSections(
   };
 }
 
+/** Walmart's MP_ITEM setup example includes Orderable.specProductType, but its
+ * 5.0.20260803-17_50_56-api spec endpoint and published schema omit that property
+ * while disallowing additional properties (verified 2026-10-05). Admit only this
+ * documented selector, bound to the selected Visible branch; retain every other
+ * provider constraint. Do not modify the provider document or the editor schema.
+ * https://developer.walmart.com/us-marketplace/docs/create-a-new-item-full-item-setup
+ */
+export function listingSubmissionSchema(
+  schema: JsonObject,
+  feedType: WalmartListingFeedType,
+  productType: string,
+): JsonObject {
+  if (feedType === "MP_ITEM_MATCH") return schema;
+  const rootProperties = jsonObject(schema.properties);
+  const items = jsonObject(rootProperties.MPItem);
+  const item = jsonObject(items.items);
+  const properties = jsonObject(item.properties);
+  // Require the provider to recognize this exact product type before extending
+  // the orderable section. A UI label alone cannot authorize a new schema branch.
+  const { orderable } = itemSections(schema, feedType, productType);
+  const orderableProperties = jsonObject(orderable.properties);
+  const required = orderable.required === undefined ? [] : orderable.required;
+  if (!Array.isArray(required) || required.some((name) => typeof name !== "string")) {
+    throw new WalmartApiError("WALMART_LISTING_SCHEMA_INVALID", "Walmart returned invalid required listing fields", false);
+  }
+  const selector = orderableProperties.specProductType === undefined
+    ? { type: "string" }
+    : jsonObject(orderableProperties.specProductType);
+  return {
+    ...schema,
+    properties: {
+      ...rootProperties,
+      MPItem: {
+        ...items,
+        items: {
+          ...item,
+          properties: {
+            ...properties,
+            Orderable: {
+              ...orderable,
+              properties: {
+                ...orderableProperties,
+                specProductType: { allOf: [selector, { const: productType }] },
+              },
+              required: [...new Set([...required, "specProductType"])],
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
 const EDITOR_SCHEMA_LIMITS = { depth: 32, nodes: 30_000 } as const;
 const UNSAFE_SCHEMA_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
-/** Inline bounded local definitions into the editor document. The original
- * provider document remains the authority used for final payload validation. */
+/** Inline bounded local definitions into the editor document without changing
+ * the provider requirements used by listingSubmissionSchema. */
 function localEditorSchema(
   value: unknown,
   root: JsonObject,

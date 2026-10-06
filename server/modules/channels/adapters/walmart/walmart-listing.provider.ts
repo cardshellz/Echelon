@@ -18,6 +18,7 @@ import { WalmartApiError } from "./walmart-client";
 import {
   WALMART_LISTING_SPEC,
   WalmartListingApi,
+  listingJsonHash,
   walmartListingFeedTypeSchema,
   type WalmartListingFeedType,
   type WalmartListingSchema,
@@ -28,6 +29,7 @@ import {
   compileListingSchema,
   editorSchema,
   jsonObject,
+  listingSubmissionSchema,
   priceForWalmart,
   priceFromWalmart,
   sameProductIdentifier,
@@ -325,6 +327,7 @@ export class WalmartListingProvider implements ListingPublicationProvider {
       );
     const offer = {
       ...orderable,
+      ...(feedType === "MP_ITEM" ? { specProductType: draft.productType } : {}),
       sku,
       productIdentifiers: {
         productIdType: identifier.type,
@@ -646,7 +649,14 @@ export class WalmartListingProvider implements ListingPublicationProvider {
     const cached = this.schemas.get(key);
     if (cached) return cached;
     const schema = await api.requirements(feedType, productType);
-    const entry = { ...schema, validate: compileListingSchema(schema.schema) };
+    const submissionSchema = listingSubmissionSchema(schema.schema, feedType, productType);
+    const entry = {
+      ...schema,
+      // Reviews bind both Walmart's requirements and the explicit selector
+      // contract. Older reviews must be rebuilt before they can be submitted.
+      schemaHash: listingJsonHash(submissionSchema),
+      validate: compileListingSchema(submissionSchema),
+    };
     if (this.schemas.size >= 32)
       this.schemas.delete(this.schemas.keys().next().value!);
     this.schemas.set(key, entry);

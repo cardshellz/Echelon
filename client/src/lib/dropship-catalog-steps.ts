@@ -11,11 +11,15 @@ export type CatalogStep = (typeof CATALOG_STEPS)[number];
 
 export const CATALOG_STEP_LABELS: Readonly<Record<CatalogStep, string>> = {
   choose: "Choose what to sell",
-  setup: "Set how it lists",
+  setup: "Listing settings",
   publish: "Publish",
 };
 
-/** Narrow screens show these in the rail so all three steps fit without scrolling. */
+/**
+ * Narrow screens show these in the rail so all three steps fit without scrolling.
+ * Step 2 stays "Set up": a bare "Settings" would read like the portal's own
+ * Settings page in the menu.
+ */
 export const CATALOG_STEP_SHORT_LABELS: Readonly<Record<CatalogStep, string>> = {
   choose: "Choose",
   setup: "Set up",
@@ -79,7 +83,7 @@ export function setupStepTick(setup: { missingFields: readonly string[] } | unde
   return setup.missingFields.length === 0 ? "done" : "todo";
 }
 
-/** The line under Set how it lists in the rail. */
+/** The line under Listing settings in the rail. */
 export function describeSetupStep(tick: CatalogStepTick, storeChosen: boolean): string {
   if (tick === "unknown") return "Checking";
   if (!storeChosen) return "No eBay store";
@@ -90,6 +94,14 @@ export interface CatalogActionBarContent {
   summary: string;
   /** The step the bar's one button opens, or null when the step's own panel holds its action. */
   next: { step: CatalogStep; label: string; disabled: boolean } | null;
+}
+
+/**
+ * The bar's button names the next step by its own title. A bare "Publish"
+ * would look like it publishes; "Next: Publish" only moves to that step.
+ */
+function nextStepLabel(step: CatalogStep): string {
+  return `Next: ${CATALOG_STEP_LABELS[step]}`;
 }
 
 /**
@@ -108,13 +120,13 @@ export function describeCatalogActionBar(input: {
   if (input.step === "choose") {
     return {
       summary: selected,
-      next: { step: "setup", label: `Continue to ${CATALOG_STEP_LABELS.setup}`, disabled: !input.selectedCount },
+      next: { step: "setup", label: nextStepLabel("setup"), disabled: !input.selectedCount },
     };
   }
   if (input.step === "setup") {
     return {
       summary: input.storeName ? `Settings for ${input.storeName}` : "No eBay store ready",
-      next: { step: "publish", label: `Continue to ${CATALOG_STEP_LABELS.publish}`, disabled: false },
+      next: { step: "publish", label: nextStepLabel("publish"), disabled: false },
     };
   }
   return { summary: input.storeName ? `${selected} · publishing to ${input.storeName}` : selected, next: null };
