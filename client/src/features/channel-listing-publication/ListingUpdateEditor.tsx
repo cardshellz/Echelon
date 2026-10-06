@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { z } from "zod";
 import { Loader2 } from "lucide-react";
 import {
+  hasListingUpdateChanges,
   listingUpdateContextSchema,
   listingUpdateViewSchema,
   type ListingUpdateContext,
@@ -28,6 +29,7 @@ import { ListingProductTypePicker } from "./ListingProductTypePicker";
 import {
   initialListingUpdateFields,
   listingUpdateChanges,
+  listingUpdateContentResubmission,
   updateFieldLabel,
 } from "./listing-update-model";
 
@@ -140,11 +142,24 @@ function UpdateForm({
       ),
     retry: false,
   });
-  async function reviewChanges() {
+  async function reviewChanges(resubmitContent = false) {
     setBusy(true);
     setError("");
     try {
-      const changes = listingUpdateChanges(original.current, fields);
+      const changes = resubmitContent
+        ? listingUpdateContentResubmission(
+            original.current,
+            fields,
+            requirements.data ?? {},
+          )
+        : listingUpdateChanges(original.current, fields);
+      if (!hasListingUpdateChanges(changes)) {
+        throw new Error(
+          context.current.productType !== fields.productType
+            ? "No fields changed. To resend the filled product details under the selected type, use Review content resubmission."
+            : "No fields changed. Edit at least one field before reviewing.",
+        );
+      }
       const result = await publicationRequest(
         "POST",
         `${base}/review`,
@@ -251,7 +266,7 @@ function UpdateForm({
                 quantities stay unchanged.
               </p>
               <dl className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-x-4 gap-y-3 text-sm">
-                <dt>Product type</dt>
+                <dt>Product type for these fields</dt>
                 <dd className="break-words font-medium">
                   {review.productType}
                 </dd>
@@ -308,7 +323,7 @@ function UpdateForm({
                 unchanged.
               </p>
               <section className="space-y-4">
-                <h3 className="font-semibold">Price and category</h3>
+                <h3 className="font-semibold">Price and product type</h3>
                 <div className="max-w-xs space-y-1.5">
                   <Label htmlFor={`${prefix}-price`}>Walmart price (USD)</Label>
                   <Input
@@ -347,12 +362,29 @@ function UpdateForm({
                     }))
                   }
                 />
-                {context.current.productType !==
-                  context.suggestedProductType && (
-                  <p className="text-xs text-muted-foreground">
-                    Walmart currently reports an unassigned category. The last
-                    submitted category is shown above.
-                  </p>
+                {context.current.productType !== fields.productType && (
+                  <div className="space-y-3 rounded-md border p-3 text-sm">
+                    <p>
+                      Walmart currently reports:{" "}
+                      <strong>{context.current.productType || "Not returned"}</strong>.
+                    </p>
+                    <p>
+                      Resubmit the filled title, description, brand, images and
+                      supported product details using the selected type. You can
+                      review every field before sending.
+                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={
+                        busy || Boolean(pending) || !fields.productType ||
+                        requirements.isFetching || !requirements.data
+                      }
+                      onClick={() => void reviewChanges(true)}
+                    >
+                      Review content resubmission
+                    </Button>
+                  </div>
                 )}
                 <p className="text-xs text-muted-foreground">
                   {context.current.identifier.type}:{" "}

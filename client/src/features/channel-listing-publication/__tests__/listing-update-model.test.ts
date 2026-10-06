@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   initialListingUpdateFields,
   listingUpdateChanges,
+  listingUpdateContentResubmission,
 } from "../listing-update-model";
-import type { ListingUpdateContext } from "@shared/types/channel-listing-update";
+import { hasListingUpdateChanges, type ListingUpdateContext } from "@shared/types/channel-listing-update";
 
 const context: ListingUpdateContext = {
   current: {
@@ -37,6 +38,49 @@ const context: ListingUpdateContext = {
   },
 };
 describe("existing-listing edit patches", () => {
+  it("resubmits the prefilled content for an unassigned Walmart type without resending price or creation-only fields", () => {
+    const original = initialListingUpdateFields({
+      ...context,
+      current: { ...context.current, productType: "default" },
+    });
+    original.attributes.Orderable = { ShippingWeight: 2, country_of_origin_substantial_transformation: "China" };
+    original.attributes.Visible = { ...original.attributes.Visible as Record<string, unknown>, condition: "New" };
+    const before = structuredClone(original);
+    // The suggestion is already selected: the old diff returned an empty update.
+    expect(listingUpdateChanges(original, original)).toEqual({});
+    const changes = listingUpdateContentResubmission(original, original, {
+      properties: { Visible: { properties: { pieceCount: {}, netContent: {} } } },
+    });
+    expect(changes).toEqual({
+      title: "Real Walmart title", description: "Old description", brand: "Shellz",
+      images: ["https://example.com/one.jpg"],
+      attributes: { Visible: {
+        pieceCount: 200,
+        netContent: { productNetContentUnit: "Each", productNetContentMeasure: 1 },
+      } },
+    });
+    expect(original).toEqual(before);
+    expect(hasListingUpdateChanges(changes)).toBe(true);
+  });
+  it("preserves explicit price and shipping edits when content is resubmitted", () => {
+    const original = initialListingUpdateFields(context);
+    const current = structuredClone(original);
+    current.price = "27.49";
+    current.attributes.Orderable = { ShippingWeight: 3 };
+    expect(listingUpdateContentResubmission(original, current, {
+      properties: { Visible: { properties: { pieceCount: {} } } },
+    })).toMatchObject({ priceCents: 2749, attributes: { Orderable: { ShippingWeight: 3 }, Visible: { pieceCount: 200 } } });
+  });
+  it("cannot resubmit content without loaded maintenance fields", () => {
+    const original = initialListingUpdateFields(context);
+    expect(() => listingUpdateContentResubmission(original, original, {})).toThrow("Load the selected product type");
+  });
+  it("treats empty attributes as no edits while preserving false, zero and explicit list replacements", () => {
+    expect(hasListingUpdateChanges({ attributes: { Visible: { missing: null, blank: "" } } })).toBe(false);
+    for (const value of [false, 0, []]) {
+      expect(hasListingUpdateChanges({ attributes: { Visible: { value } } })).toBe(true);
+    }
+  });
   it("keeps current Walmart price and title without treating catalog defaults as edits", () => {
     const original = initialListingUpdateFields(context);
     expect(original.title).toBe("Real Walmart title");

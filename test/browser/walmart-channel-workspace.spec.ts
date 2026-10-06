@@ -94,18 +94,22 @@ test("existing listing edits review only changed prices and check the maintenanc
   await expect(dialog).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Listing changes", exact: true })).toBeVisible();
   await page.getByRole("region", { name: "Listing changes", exact: true }).getByRole("button", { name: "Check Walmart status", exact: true }).click();
-  await expect(page.getByText("Walmart accepted", { exact: true })).toBeVisible();
+  await expect(page.getByText("Feed accepted", { exact: true })).toBeVisible();
+  await expect(page.getByText("Walmart reports the submitted product type. Listing status is shown separately above.")).toBeVisible();
   expect(state.updates.writes.at(-1)?.path).toMatch(/\/status$/);
   expect(state.publication.writes).toEqual([]); expect(state.membership.writes).toEqual([]);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
-test("existing listing edits repair category and shipping while preserving untouched content", async ({ page }, info) => {
+test("existing listing edits show the actual category and edit shipping while preserving untouched content", async ({ page }, info) => {
   const state = await setup(page);
   state.updates.reportedProductType = "default";
   await page.getByRole("button", { name: "Edit listing CARD-P5", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText("Walmart currently reports an unassigned category. The last submitted category is shown above.")).toBeVisible();
+  await expect(dialog.getByText("Walmart currently reports:", { exact: false })).toContainText("default");
+  await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("No fields changed.");
+  expect(state.updates.writes).toEqual([]);
   await dialog.getByRole("textbox", { name: "Search listing fields", exact: true }).fill("Shipping Weight");
   await dialog.getByRole("spinbutton", { name: /^Shipping Weight \(lbs\)/ }).fill("3");
   await expect(dialog.getByRole("button", { name: "Review changes", exact: true })).toBeInViewport({ ratio: 0.99 });
@@ -116,6 +120,62 @@ test("existing listing edits repair category and shipping while preserving untou
   await dialog.getByRole("button", { name: "Back to edit", exact: true }).click();
   await expect(dialog.getByLabel("Walmart price (USD)", { exact: true })).toHaveValue("24.99");
   expect(state.updates.updates).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("accepted feeds show category mismatch and recheck the item without another submission", async ({ page }, info) => {
+  const state = await setup(page);
+  state.updates.reportedProductType = "default";
+  await page.getByRole("button", { name: "Edit listing CARD-P5", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Walmart price (USD)", { exact: true }).fill("27.49");
+  await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
+  await dialog.getByRole("button", { name: "Send changes to Walmart", exact: true }).click();
+  const region = page.getByRole("region", { name: "Listing changes", exact: true });
+  await region.getByRole("button", { name: "Check Walmart status", exact: true }).click();
+  await expect(region.getByText("Feed accepted", { exact: true })).toBeVisible();
+  await expect(region.getByText(/The product type is not confirmed/)).toBeVisible();
+  await expect(region.getByText("default", { exact: true })).toBeVisible();
+  await expect(region.getByText("SYSTEM_PROBLEM", { exact: true })).toBeVisible();
+  const writes = state.updates.writes.length;
+  await region.screenshot({ path: info.outputPath("walmart-category-mismatch.png") });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  state.updates.verificationError = true;
+  await region.getByRole("button", { name: "Check item on Walmart", exact: true }).click();
+  await expect(region.getByRole("alert")).toHaveText("Walmart item check is unavailable");
+  state.updates.verificationError = false;
+  state.updates.reportedProductType = "Trading Card Sleeves & Holders";
+  await region.getByRole("button", { name: "Check item on Walmart", exact: true }).click();
+  await expect(region.getByText("Walmart reports the submitted product type. Listing status is shown separately above.")).toBeVisible();
+  await expect(region.getByText("SYSTEM_PROBLEM", { exact: true })).toBeVisible();
+  expect(state.updates.verificationReads).toHaveLength(3);
+  expect(state.updates.writes).toHaveLength(writes);
+  expect(state.publication.writes).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
+test("existing listing edits resubmit retained content under the selected type without changing price or inventory", async ({ page }, info) => {
+  const state = await setup(page);
+  state.updates.reportedProductType = "default";
+  await page.getByRole("button", { name: "Edit listing CARD-P5", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "Review content resubmission", exact: true }).click();
+  expect(state.updates.reviews[0].changes).toEqual({
+    title: "55PT Toploader Essentials Clear+ Easy Glide Combo Pack",
+    description: "A previous description",
+    brand: "Shellz",
+    images: ["https://example.com/front.jpg", "https://example.com/back.jpg"],
+    attributes: { Visible: { pieceCount: 200, keyFeatures: ["Clear sleeves", "Archival material", "Pack of 100"] } },
+  });
+  await expect(dialog.getByText("Stock quantities stay unchanged.", { exact: false })).toBeVisible();
+  await expect(dialog.getByText("https://example.com/front.jpg", { exact: false })).toBeVisible();
+  await expect(dialog.getByText("Shipping Weight", { exact: false })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Send changes to Walmart", exact: true })).toBeInViewport({ ratio: 0.99 });
+  await dialog.screenshot({ path: info.outputPath("walmart-content-resubmission-review.png") });
+  expect(state.updates.updates).toEqual([]);
+  await dialog.getByRole("button", { name: "Send changes to Walmart", exact: true }).click();
+  expect(state.updates.updates).toHaveLength(1);
+  expect(state.publication.writes).toEqual([]);
+  expect(state.errors).toEqual([]);
 });
 
 test("existing listing edits reuse the command after a lost submission response and block a second in-flight update", async ({ page }) => {

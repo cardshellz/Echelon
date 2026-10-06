@@ -90,7 +90,7 @@ function setup() {
 }
 
 describe("Walmart existing-listing maintenance", () => {
-  it("validates category-only repairs against Walmart's unchanged maintenance schema", async () => {
+  it("blocks empty category corrections even though Walmart's raw schema accepts them", async () => {
     const { provider, account, record } = setup();
     const prepared = await provider.prepare(
       account,
@@ -99,7 +99,7 @@ describe("Walmart existing-listing maintenance", () => {
     );
     const validate = compileListingSchema(maintenanceSchema);
     expect(validate(prepared.payload), JSON.stringify(validate.errors)).toBe(true);
-    expect(prepared.issues).toEqual([]);
+    expect(prepared.issues).toEqual([expect.objectContaining({ code: "LISTING_UPDATE_EMPTY" })]);
     expect(prepared.payload).toMatchObject({
       MPItem: [{
         Orderable: {
@@ -116,6 +116,16 @@ describe("Walmart existing-listing maintenance", () => {
     expect(listingSubmissionSchema(
       maintenanceSchema, "MP_MAINTENANCE", record.intent.command.productType,
     )).toBe(maintenanceSchema);
+  });
+  it("does not send a previously reviewed empty category correction", async () => {
+    const { provider, account, record, api } = setup();
+    const command = { ...record.intent.command, changes: {} };
+    const prepared = await provider.prepare(account, updateSource, command);
+    const beforeSend = vi.fn();
+    await expect(provider.send({ ...record.intent, command, prepared }, testId(4), beforeSend))
+      .rejects.toMatchObject({ code: "LISTING_UPDATE_INVALID", effect: "not_sent" });
+    expect(beforeSend).not.toHaveBeenCalled();
+    expect(api.submitMaintenance).not.toHaveBeenCalled();
   });
   it("does not allow specProductType through maintenance schema validation", () => {
     const schema = listingSubmissionSchema(
