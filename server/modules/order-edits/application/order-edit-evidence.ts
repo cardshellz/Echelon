@@ -59,6 +59,64 @@ function preservesRecoveryDiscountRules(
         rule.label === "Echelon member pricing"),
   );
 }
+
+/** Cancelling an unsubmitted edit never rolls back fulfillment performed outside that edit. */
+export function unchangedFulfilledOrderEdit(
+  current: OrderEditSnapshot,
+  baseline: OrderEditSnapshot,
+): boolean {
+  const active = current.lines.filter((line) => line.quantity > 0);
+  if (
+    !active.length ||
+    active.some((line) => line.unfulfilledQuantity !== 0) ||
+    current.cancelled ||
+    !current.fullyPaid ||
+    current.outstandingCents !== 0 ||
+    current.netPaidCents !== current.totalCents ||
+    current.capturableCents !== 0 ||
+    unresolved(current.transactions)
+  )
+    return false;
+  // Only fulfillment/closure and the legacy unfulfilled-line total may differ.
+  // Purchased quantities, prices, discount allocation identities, address, tender,
+  // and any new exact financial evidence must still match the original order.
+  const identity = (snapshot: OrderEditSnapshot) => ({
+    connectionId: snapshot.connectionId,
+    channelId: snapshot.channelId,
+    orderId: snapshot.orderId,
+    customerId: snapshot.customerId,
+    currency: snapshot.currency,
+    cancelled: snapshot.cancelled,
+    totalCents: snapshot.totalCents,
+    subtotalCents: snapshot.subtotalCents,
+    taxCents: snapshot.taxCents,
+    shippingCents: snapshot.shippingCents,
+    netPaidCents: snapshot.netPaidCents,
+    outstandingCents: snapshot.outstandingCents,
+    capturableCents: snapshot.capturableCents,
+    fullyPaid: snapshot.fullyPaid,
+    memberPlan: snapshot.memberPlan,
+    memberPricingEnabled: snapshot.memberPricingEnabled,
+    evidence: snapshot.evidence,
+    transactions: snapshot.transactions,
+    refunds: snapshot.refunds,
+    lines: snapshot.lines
+      .map(({ unfulfilledQuantity, totalCents, unsupported, ...line }) => line)
+      .sort((left, right) => left.id.localeCompare(right.id)),
+  });
+  return (
+    canonicalJson(identity(current)) === canonicalJson(identity(baseline)) &&
+    (!baseline.financials ||
+      (current.financials !== undefined &&
+        canonicalJson(current.financials) ===
+          canonicalJson(baseline.financials))) &&
+    (!baseline.discountRules ||
+      (current.discountRules !== undefined &&
+        canonicalJson(current.discountRules) ===
+          canonicalJson(baseline.discountRules)))
+  );
+}
+
 export function matchesOrderEditQuote(
   snapshot: OrderEditSnapshot,
   quote: OrderEditQuote,

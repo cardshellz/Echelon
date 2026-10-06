@@ -255,6 +255,11 @@ export function serviceHarness(quantity = 3) {
     assertHeld: vi.fn(async () => {}),
     reconcileAndRelease: vi.fn(async () => proof),
     releaseUnchanged: vi.fn(async () => proof),
+    releaseFulfilledUnsubmitted: vi.fn(async () => ({
+      ...proof,
+      allocationRequired: false,
+      fulfilledCancellation: true,
+    })),
   } satisfies OrderEditWarehouse;
   let uuidCount = 0;
   const report = vi.fn();
@@ -624,6 +629,201 @@ describe("private order edit orchestration", () => {
     expect(h.provider.refund).not.toHaveBeenCalled();
     expect(h.provider.recoverUnpaid).not.toHaveBeenCalled();
   });
+  it("cancels a rejected unsubmitted edit after external fulfillment, without restoring or rewriting the order", async () => {
+    const h = serviceHarness();
+    h.provider.quote.mockRejectedValueOnce(
+      new OrderEditProviderError("PROMOTION_UNSUPPORTED", "Unsupported"),
+    );
+    await h.service.quote(h.input, "staff");
+    h.setCurrent({
+      closed: true,
+      fingerprint: "fulfilled",
+      contentFingerprint: "fulfilled-contents",
+      lines: h
+        .snapshot()
+        .lines.map((line) => ({
+          ...line,
+          unfulfilledQuantity: 0,
+          totalCents: 0,
+        })),
+      financials: buildOrderEditFinancials({
+        lines: [
+          { id: h.snapshot().lines[0].id, grossCents: 2000, netCents: 2000 },
+        ],
+        itemsNetCents: 2000,
+        itemDiscountLabels: [],
+        shippingGrossCents: 0,
+        shippingCents: 0,
+        shippingDiscountLabels: [],
+        taxCents: 0,
+        taxesIncluded: false,
+        totalCents: 2000,
+      }),
+    });
+    const result = await h.service.abandon(OP, "staff");
+    expect(result).toMatchObject({
+      status: "expired",
+      canAbandon: false,
+      updatedTotalCents: 2000,
+      lines: [{ quantity: 2, totalCents: 2000 }],
+    });
+    expect(h.warehouse.releaseFulfilledUnsubmitted).toHaveBeenCalledOnce();
+    expect(h.warehouse.releaseUnchanged).not.toHaveBeenCalled();
+    expect(h.record().lastSnapshot).toEqual(h.snapshot());
+    expect(h.events.at(-1)?.action).toBe(
+      "uncommitted_edit_abandoned_after_fulfillment",
+    );
+    expect(h.provider.commit).not.toHaveBeenCalled();
+    expect(h.provider.refund).not.toHaveBeenCalled();
+    expect(h.provider.recoverUnpaid).not.toHaveBeenCalled();
+    await h.service.abandon(OP, "staff");
+    expect(h.warehouse.releaseFulfilledUnsubmitted).toHaveBeenCalledOnce();
+  });
+  it.each([
+    "quantity",
+    "price",
+    "payment",
+    "customer",
+    "discount",
+    "partial fulfillment",
+  ])(
+    "does not bypass cancellation verification after %s changes",
+    async (change) => {
+      const h = serviceHarness();
+      await h.service.quote(h.input, "staff");
+      const current = structuredClone(h.snapshot());
+      current.closed = true;
+      current.fingerprint = "fulfilled";
+      current.lines = current.lines.map((line) => ({
+        ...line,
+        unfulfilledQuantity: 0,
+        totalCents: 0,
+      }));
+      if (change === "quantity") current.lines[0].quantity += 1;
+      if (change === "price") current.lines[0].originalUnitPriceCents += 1;
+      if (change === "payment")
+        current.transactions = [
+          {
+            id: "pending",
+            parentId: null,
+            kind: "SALE",
+            status: "PENDING",
+            gateway: "shopify_payments",
+            amountCents: 1,
+            manual: false,
+          },
+        ];
+      if (change === "customer")
+        current.customerId = "gid://shopify/Customer/999";
+      if (change === "discount")
+        current.lines[0].discountFingerprint = "changed";
+      if (change === "partial fulfillment")
+        current.lines[0].unfulfilledQuantity = 1;
+      h.setCurrent(current);
+      expect((await h.service.abandon(OP, "staff")).status).toBe(
+        "review_required",
+      );
+      expect(h.warehouse.releaseUnchanged).not.toHaveBeenCalled();
+      expect(h.warehouse.releaseFulfilledUnsubmitted).not.toHaveBeenCalled();
+    },
+  );
+  it("retains the operation when terminal shipping verification fails", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    h.setCurrent({
+      closed: true,
+      fingerprint: "fulfilled",
+      lines: h
+        .snapshot()
+        .lines.map((line) => ({
+          ...line,
+          unfulfilledQuantity: 0,
+          totalCents: 0,
+        })),
+    });
+    h.warehouse.releaseFulfilledUnsubmitted.mockRejectedValueOnce(
+      new OrderEditError(
+        "ORDER_EDIT_PROVIDER_FULFILLMENT_PENDING",
+        "Provider work is active",
+      ),
+    );
+    await expect(h.service.abandon(OP, "staff")).rejects.toMatchObject({
+      code: "ORDER_EDIT_PROVIDER_FULFILLMENT_PENDING",
+    });
+    expect(h.record().status).toBe("ready");
+  });
+  it.each([
+    "unchanged",
+    "different allocations",
+    "missing breakdown",
+    "different rules",
+    "missing rules",
+  ])(
+    "compares exact financial and discount evidence for new operations: %s",
+    async (change) => {
+      const h = serviceHarness();
+      const financials = buildOrderEditFinancials({
+        lines: [
+          { id: h.snapshot().lines[0].id, grossCents: 2000, netCents: 2000 },
+        ],
+        itemsNetCents: 2000,
+        itemDiscountLabels: [],
+        shippingGrossCents: 0,
+        shippingCents: 0,
+        shippingDiscountLabels: [],
+        taxCents: 0,
+        taxesIncluded: false,
+        totalCents: 2000,
+      });
+      h.setCurrent({ financials, discountRules: [] });
+      await h.service.quote(h.input, "staff");
+      const current = structuredClone(h.snapshot());
+      current.closed = true;
+      current.fingerprint = "fulfilled";
+      current.lines = current.lines.map((line) => ({
+        ...line,
+        unfulfilledQuantity: 0,
+        totalCents: 0,
+      }));
+      if (change === "different allocations")
+        current.financials = buildOrderEditFinancials({
+          lines: [
+            { id: current.lines[0].id, grossCents: 2100, netCents: 2000 },
+          ],
+          itemsNetCents: 2000,
+          itemDiscountLabels: ["New discount"],
+          shippingGrossCents: 0,
+          shippingCents: 0,
+          shippingDiscountLabels: [],
+          taxCents: 0,
+          taxesIncluded: false,
+          totalCents: 2000,
+        });
+      if (change === "missing breakdown") current.financials = undefined;
+      if (change === "different rules")
+        current.discountRules = [
+          {
+            index: 0,
+            type: "ManualDiscountApplication",
+            targetType: "LINE_ITEM",
+            allocationMethod: "ACROSS",
+            targetSelection: "ALL",
+            label: "New discount",
+            value: { type: "fixed", amountCents: 100 },
+          },
+        ];
+      if (change === "missing rules") current.discountRules = undefined;
+      h.setCurrent(current);
+      const before = structuredClone(h.snapshot());
+      expect((await h.service.abandon(OP, "staff")).status).toBe(
+        change === "unchanged" ? "expired" : "review_required",
+      );
+      expect(h.snapshot()).toEqual(before);
+      expect(h.warehouse.releaseFulfilledUnsubmitted).toHaveBeenCalledTimes(
+        change === "unchanged" ? 1 : 0,
+      );
+    },
+  );
   it("continues polling an in-flight payment while hiding the hosted payment link", async () => {
     const h = serviceHarness();
     await h.service.quote(h.input, "staff");
