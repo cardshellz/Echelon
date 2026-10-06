@@ -53,9 +53,19 @@ describe("listing price HTTP boundary", () => {
   });
   it.each([["DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", 409], ["DROPSHIP_IDEMPOTENCY_CONFLICT", 409],
     ["DROPSHIP_STORE_CONNECTION_REQUIRED", 404], ["DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", 404],
-    ["DROPSHIP_LISTING_STORE_BLOCKED", 403], ["DROPSHIP_LISTING_ENTITLEMENT_BLOCKED", 403]])("maps %s to %s", async (code, status) => {
+    ["DROPSHIP_LISTING_STORE_BLOCKED", 403], ["DROPSHIP_LISTING_ENTITLEMENT_BLOCKED", 403],
+    ["DROPSHIP_PRICING_RULES_NOT_CONFIGURED", 422], ["DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", 422],
+    ["DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT", 422]])("maps %s to %s", async (code, status) => {
     saveForMember.mockRejectedValueOnce(new DropshipError(String(code), "Controlled error."));
     expect((await request()).status).toBe(status);
+  });
+  it("passes a refusal's own words to the vendor", async () => {
+    saveForMember.mockRejectedValueOnce(new DropshipError("DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT",
+      "That price is below the Card Shellz minimum of $10.00 for this item. Enter a price Card Shellz allows.", { productVariantId: 101 }));
+    const result = await request();
+    expect(result.status).toBe(422);
+    expect(await result.json()).toEqual({ error: { code: "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT",
+      message: "That price is below the Card Shellz minimum of $10.00 for this item. Enter a price Card Shellz allows." } });
   });
   it("does not leak internal failures", async () => {
     saveForMember.mockRejectedValueOnce(new Error("secret connection string"));

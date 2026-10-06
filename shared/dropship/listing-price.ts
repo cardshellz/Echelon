@@ -4,6 +4,10 @@ import { z } from "zod";
 // limit, not a suggested retail price or a marketplace-specific pricing rule.
 export const MAX_LISTING_PRICE_CENTS = 2_147_483_647;
 export const listingPriceCentsSchema = z.number().int().positive().max(MAX_LISTING_PRICE_CENTS);
+/** A known money amount in integer cents that may be zero: a cost or the amount a rule starts from. Never a listing price. */
+export const listingAmountCentsSchema = z.number().int().min(0).max(MAX_LISTING_PRICE_CENTS);
+/** What a pricing rule starts from: the vendor's .ops cost or the catalog reference retail. */
+export const listingPriceBasisSchema = z.enum(["product_cost", "catalog_retail"]);
 export const listingPriceTargetSchema = z.object({
   storeConnectionId: z.number().int().positive().max(2_147_483_647),
   productVariantId: z.number().int().positive().max(2_147_483_647),
@@ -26,6 +30,10 @@ export const listingPriceSettingSchema = listingPriceTargetSchema.extend({
   pricingIssue: z.string().nullable().optional(),
   rulePriceCents: listingPriceCentsSchema.nullable().optional(),
   rulesConfigured: z.boolean().optional(),
+  /** What the store's rule for this size starts from, when the store has rules. */
+  ruleBasis: listingPriceBasisSchema.nullable().optional(),
+  /** The vendor's .ops cost for one sellable pack, or null when it is not known. */
+  productCostCents: listingAmountCentsSchema.nullable().optional(),
   updatedAt: z.string().datetime().nullable(),
 }).strict();
 export const listingPriceResponseSchema = z.object({ price: listingPriceSettingSchema }).strict();
