@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
 
 const initialVersion = "a".repeat(64);
@@ -174,6 +174,66 @@ test("billing and performer dropdowns use the same vendors with independent iden
   expect(state.commands[0].body).toMatchObject({ vendorId: 7, performedByVendorId: 9, performedByName: "Test forwarder" });
   expect(failures).toEqual([]);
 });
+
+async function expectCompleteVendorLabel(container: Locator, name: string) {
+  const label = container.getByText(name, { exact: true });
+  await expect(label).toBeVisible();
+  const size = await label.evaluate((element) => ({
+    clientWidth: element.clientWidth, scrollWidth: element.scrollWidth,
+    clientHeight: element.clientHeight, scrollHeight: element.scrollHeight,
+  }));
+  expect(size.clientWidth).toBeGreaterThan(0);
+  expect(size.scrollWidth).toBeLessThanOrEqual(size.clientWidth + 1);
+  expect(size.scrollHeight).toBeLessThanOrEqual(size.clientHeight + 1);
+}
+
+for (const mode of ["create", "edit"] as const) {
+  test(`the ${mode} cost modal keeps long vendor names readable in fields and options`, async ({ page }, testInfo) => {
+    if (testInfo.project.name === "desktop") await page.setViewportSize({ width: 827, height: 820 });
+    const { state, failures } = await setup(page);
+    const roles = [
+      { label: "Service Provider", id: 7, code: "BILLING-VENDOR-123456", name: "International Shipment Billing and Customs Brokerage Services — European Regional Operations" },
+      { label: "Performed By", id: 8, code: "PERFORMER-CODE-12345", name: "ConsolidatedInternationalFreightHandlingAndTransportationServicesABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" },
+    ];
+    await page.route("**/api/vendors", (route) => route.fulfill({ json: roles.map(({ id, code, name }) => ({ id, code, name })) }));
+    if (mode === "create") await page.getByRole("button", { name: "Add Cost", exact: true }).click();
+    else await editButton(page).click();
+    const dialog = page.getByRole("dialog", { name: mode === "create" ? "Add Shipment Cost" : "Edit Cost", exact: true });
+    const viewport = page.viewportSize()!;
+    const modalBox = await dialog.boundingBox();
+    expect(modalBox).not.toBeNull();
+    expect(modalBox!.width).toBeGreaterThanOrEqual(testInfo.project.name === "desktop" ? 700 : 300);
+    expect(modalBox!.x).toBeGreaterThanOrEqual(16);
+    expect(modalBox!.x + modalBox!.width).toBeLessThanOrEqual(viewport.width - 16);
+    for (const role of roles) {
+      const trigger = dialog.getByRole("combobox", { name: role.label, exact: true });
+      await trigger.click();
+      const choices = page.getByRole("dialog", { name: `${role.label} vendors`, exact: true });
+      const option = choices.getByRole("option").filter({ hasText: role.name });
+      await expectCompleteVendorLabel(option, role.name);
+      await expectCompleteVendorLabel(option, role.code);
+      const popoverBox = await choices.boundingBox();
+      expect(popoverBox).not.toBeNull();
+      expect(popoverBox!.x).toBeGreaterThanOrEqual(0);
+      expect(popoverBox!.x + popoverBox!.width).toBeLessThanOrEqual(viewport.width);
+      const nameBox = await option.getByText(role.name, { exact: true }).boundingBox();
+      const codeBox = await option.getByText(role.code, { exact: true }).boundingBox();
+      expect(nameBox!.x + nameBox!.width).toBeLessThanOrEqual(codeBox!.x + 1);
+      await page.screenshot({ path: testInfo.outputPath(`${mode}-${role.id}-vendor-options.png`), fullPage: true, animations: "disabled" });
+      await option.click();
+      await expect(choices).not.toBeVisible();
+      await expectCompleteVendorLabel(trigger, role.name);
+    }
+    const modalSize = await dialog.evaluate((element) => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }));
+    expect(modalSize.scrollWidth).toBeLessThanOrEqual(modalSize.clientWidth + 1);
+    await page.screenshot({ path: testInfo.outputPath(`${mode}-full-vendor-names.png`), fullPage: true, animations: "disabled" });
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).not.toBeVisible();
+    expect(state.commands).toEqual([]);
+    expect(failures).toEqual([]);
+  });
+}
+
 
 test("an invoiced cost permits performer selection while its billing vendor remains locked", async ({ page }) => {
   const { state, failures } = await setup(page, { protected: "header" });

@@ -37,9 +37,9 @@ export function ShipmentCostVendorSelect({
     <Popover open={open && !disabled} onOpenChange={(next) => { setOpen(next); if (!next) setSearch(""); }}>
       <PopoverTrigger asChild>
         <Button id={id} aria-label={label} aria-expanded={open && !disabled} disabled={disabled}
-          variant="outline" role="combobox" className="w-full justify-between h-10 font-normal">
-          <span className="truncate">{displayName || "Select vendor..."}</span>
-          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          variant="outline" role="combobox" className="h-auto min-h-10 w-full justify-between gap-2 py-2 text-left font-normal">
+          <span className="min-w-0 flex-1 whitespace-normal break-words">{displayName || "Select vendor..."}</span>
+          <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
       <PopoverContent aria-label={`${label} vendors`} className="w-[var(--radix-popover-trigger-width)] p-0" align="start">
@@ -56,9 +56,9 @@ export function ShipmentCostVendorSelect({
                   {matches.map((vendor) => (
                     <CommandItem key={vendor.id} value={`vendor:${vendor.id}`}
                       onSelect={() => { onSelect(vendor); close(); }}>
-                      <Check className={`mr-2 h-4 w-4 ${vendorId === vendor.id ? "opacity-100" : "opacity-0"}`} />
-                      <span className="truncate">{vendor.name}</span>
-                      {vendor.code && <span className="ml-auto pl-2 text-xs text-muted-foreground">{vendor.code}</span>}
+                      <Check className={`mr-2 h-4 w-4 shrink-0 ${vendorId === vendor.id ? "opacity-100" : "opacity-0"}`} />
+                      <span className="min-w-0 flex-1 whitespace-normal break-words">{vendor.name}</span>
+                      {vendor.code && <span className="ml-auto max-w-[35%] shrink-0 break-words pl-2 text-right text-xs text-muted-foreground">{vendor.code}</span>}
                     </CommandItem>
                   ))}
                 </CommandGroup>
