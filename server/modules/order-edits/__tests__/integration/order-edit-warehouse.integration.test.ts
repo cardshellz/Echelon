@@ -24,6 +24,7 @@ import type { SQL } from "drizzle-orm";
 import { guardOrderEditShopifyIngress } from "../../infrastructure/order-edit-ingress-guard";
 import { OrderEditOmsSynchronizer } from "../../infrastructure/order-edit-oms-synchronizer";
 import type { CanonicalAvailabilityReservationStatusProjection } from "@shared/types/inventory-availability-claims";
+import { buildOrderEditFinancials } from "../../domain/order-edit-financials";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -281,6 +282,64 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         reservation,
       };
     }
+    it("round-trips new discount and payment evidence alongside legacy operations", async () => {
+      const store = new PostgresOrderEditStore(database.pool);
+      expect((await store.get(OP)).baseline.financials).toBeUndefined();
+      await database.pool.query(
+        "INSERT INTO oms.oms_orders(id,channel_id,external_order_id,status,financial_status,updated_at) VALUES(21,36,'2','open','paid','2026-10-05T00:00:00Z')",
+      );
+      const financials = buildOrderEditFinancials({
+        lines: [
+          { id: snapshot().lines[0].id, grossCents: 1100, netCents: 1000 },
+        ],
+        itemsNetCents: 1000,
+        itemDiscountLabels: ["Member discount"],
+        shippingGrossCents: 500,
+        shippingCents: 0,
+        shippingDiscountLabels: ["Free shipping"],
+        taxCents: 0,
+        taxesIncluded: false,
+        totalCents: 1000,
+      });
+      const newId = "00000000-0000-4000-8000-000000000003";
+      const requestKey = "00000000-0000-4000-8000-000000000004";
+      const operation = {
+        ...record(),
+        id: newId,
+        omsOrderId: 21,
+        requestKey,
+        input: { ...record().input, omsOrderId: 21, requestKey },
+        baseline: {
+          ...snapshot(),
+          orderId: "gid://shopify/Order/2",
+          financials,
+          discountsPresent: true,
+          lines: [{ ...snapshot().lines[0], originalUnitPriceCents: 1100 }],
+          paymentDates: {},
+          discountRules: [],
+        },
+      };
+      await store.create(operation);
+      expect((await store.get(newId)).baseline).toEqual(operation.baseline);
+      const nextRequestKey = "00000000-0000-4000-8000-000000000006";
+      const contradictory = {
+        ...operation,
+        id: "00000000-0000-4000-8000-000000000005",
+        requestKey: nextRequestKey,
+        input: { ...operation.input, requestKey: nextRequestKey },
+        baseline: { ...operation.baseline, totalCents: 999 },
+      };
+      await expect(store.create(contradictory)).rejects.toThrow(
+        /Snapshot financial breakdown/,
+      );
+      expect(
+        (
+          await database.pool.query(
+            "SELECT count(*)::int AS count FROM oms.order_edit_operations",
+          )
+        ).rows[0].count,
+      ).toBe(2);
+    });
     it.each(["completed", "recovered"] as const)(
       "synchronizes paid contents and atomically releases %s against the real WMS identity columns",
       async (status) => {
