@@ -23,7 +23,8 @@ describeDatabase.sequential("WMS canonical dispatch source PostgreSQL owner", ()
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable); pool = database.pool;
     await pool.query(`CREATE SCHEMA wms;
-      CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_id integer, warehouse_status text, on_hold integer, cancelled_at timestamptz);
+      CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_id integer, warehouse_status text, on_hold integer, cancelled_at timestamptz,
+        order_edit_operation_id uuid);
       CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), product_id integer, status text, on_hold boolean, requires_shipping integer,
       catalog_product_id integer, inventory_tracking boolean
     );
@@ -110,6 +111,7 @@ describeDatabase.sequential("WMS canonical dispatch source PostgreSQL owner", ()
   it.each([
     ["source quantity", "UPDATE wms.outbound_shipment_items SET qty=2 WHERE id=101", "WMS_DISPATCH_QUANTITY_MISMATCH"],
     ["order hold", "UPDATE wms.orders SET on_hold=1 WHERE id=70", "WMS_DISPATCH_HELD"],
+    ["order edit hold", "UPDATE wms.orders SET order_edit_operation_id='00000000-0000-4000-8000-000000000001' WHERE id=70", "WMS_DISPATCH_HELD"],
   ])("aborts a stale serializable snapshot after concurrent %s change and rejects it on fresh retry", async (_name, sql, expectedCode) => {
     const client = await pool.connect();
     let resume: () => void = () => {};

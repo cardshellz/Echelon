@@ -15,6 +15,7 @@ import {
 import { OrderEditError } from "../order-edits/domain/order-edit-error";
 import { wmsOmsOrderIdSql } from "./oms-wms-order-link.sql";
 import { buildOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
+import { appendOrderEditAudit } from "../order-edits/infrastructure/order-edit-audit.writer";
 
 const integer = z.coerce.number().int().nonnegative().safe();
 const positive = integer.refine((value) => value > 0);
@@ -478,24 +479,21 @@ export class OrderEditPaidProjection {
       ).rows;
       // This ledger has database-enforced immutability. Capture actual locked DB
       // before/after values, not only the provider snapshot or service phase.
-      await client.query(
-        `INSERT INTO oms.order_edit_events(operation_id,connection_id,actor_id,action,before_state,after_state,occurred_at)
-        VALUES($1,$2,$3,'paid_current_projected',$4,$5,$6)`,
-        [
-          operationId,
-          snapshot.connectionId,
-          document.actorId,
-          JSON.stringify({ header, lines }),
-          JSON.stringify({
-            snapshot,
-            sourceEventId,
-            sourceUpdatedAt: snapshot.updatedAt,
-            header: persistedHeader,
-            lines: persistedLines,
-          }),
-          now,
-        ],
-      );
+      await appendOrderEditAudit(client, {
+        operationId,
+        connectionId: snapshot.connectionId,
+        actorId: document.actorId,
+        action: "paid_current_projected",
+        before: { header, lines },
+        after: {
+          snapshot,
+          sourceEventId,
+          sourceUpdatedAt: snapshot.updatedAt,
+          header: persistedHeader,
+          lines: persistedLines,
+        },
+        occurredAt: now,
+      });
       await client.query(
         `INSERT INTO oms.oms_order_events(order_id,event_type,details,created_at) VALUES($1,'order_edit_paid_projected',$2,$3)`,
         [

@@ -267,6 +267,7 @@ for write primitives (invariant guards + advisory locks + transactions).
 | State | Owner (sole writer) | Everyone else uses |
 |---|---|---|
 | `oms.*` (orders, lines, events, costs) | `modules/oms` | `omsApi.ingestOrder / applyEdit / applyRefund / transitionStatus / recordShipmentOutcome` |
+| `oms.order_edit_operations`, `order_edit_settings`, `order_edit_events` | `modules/order-edits` (same-order edit lifecycle and immutable evidence) | `OrderEditService` / transaction-composable `appendOrderEditAudit`; OMS owns paid projections and provider hold records |
 | `wms.orders`, `order_items` | `modules/wms` (absorb `modules/orders` order-state writes) | `wmsApi.syncOrder / cancelOrder / holdLine / recordPick` |
 | `wms.outbound_shipments`, items | `modules/wms` shipment state machine | `wmsApi.createShipment / applyShipmentEvent(CanonicalShipmentEvent)` |
 | `inventory.*` (levels, ledger, lots, reservations) | `modules/inventory` | `inventoryCore.*` + `reserveForOrder/releaseForOrder` (order-scoped, idempotent) |

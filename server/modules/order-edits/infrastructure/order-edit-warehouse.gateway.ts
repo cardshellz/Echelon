@@ -8,6 +8,10 @@ import { OrderEditError } from "../domain/order-edit-error";
 import type { OrderEditSnapshot } from "../application/order-edit-provider";
 import type { OrderEditReleaseProof } from "../application/order-edit-store";
 import { getOmsLineMaterializableQuantity } from "../../oms/oms-line-authority";
+import {
+  acquireOrderEditWarehouseHold,
+  releaseOrderEditWarehouseHold,
+} from "../../wms/order-edit-hold.commands";
 
 const positiveId = z.number().int().positive().safe();
 const operationIdSchema = z.string().uuid();
@@ -343,11 +347,11 @@ export async function finalizeOrderEditWarehouseRelease(
       "Warehouse state changed after provider verification; verify the edit again.",
     );
   if (proof.ownership === "none") return;
-  const result = await client.query(
-    "UPDATE wms.orders SET order_edit_operation_id=NULL WHERE id=ANY($1::int[]) AND order_edit_operation_id=$2",
-    [current.wmsOrderIds, operationId],
-  );
-  if (result.rowCount !== current.wmsOrderIds.length)
+  const released = await releaseOrderEditWarehouseHold(client, {
+    operationId,
+    wmsOrderIds: current.wmsOrderIds,
+  });
+  if (released !== current.wmsOrderIds.length)
     throw new OrderEditError(
       "ORDER_EDIT_RELEASE_OWNER_CHANGED",
       "Warehouse hold ownership changed.",
@@ -528,10 +532,15 @@ export class OrderEditWarehouseGateway {
           "The active edit no longer owns this order.",
         );
       if (acquire) {
-        await client.query(
-          "UPDATE wms.orders SET order_edit_operation_id=$1 WHERE id=ANY($2::int[])",
-          [operationId, orders.map((order) => order.id)],
-        );
+        const acquired = await acquireOrderEditWarehouseHold(client, {
+          operationId,
+          wmsOrderIds: orders.map((order) => order.id),
+        });
+        if (acquired !== orders.length)
+          throw new OrderEditError(
+            "ORDER_EDIT_HOLD_OWNER_INVALID",
+            "The active edit no longer owns every warehouse order.",
+          );
       } else if (
         orders.some((order) => order.order_edit_operation_id !== operationId)
       ) {

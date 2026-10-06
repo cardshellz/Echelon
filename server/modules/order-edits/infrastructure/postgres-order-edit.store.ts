@@ -15,6 +15,7 @@ import type {
 } from "../application/order-edit-store";
 import { OrderEditError } from "../domain/order-edit-error";
 import { finalizeOrderEditWarehouseRelease } from "./order-edit-warehouse.gateway";
+import { appendOrderEditAudit } from "./order-edit-audit.writer";
 import {
   orderEditSnapshotSchema,
   orderEditQuoteSchema,
@@ -174,16 +175,15 @@ export class PostgresOrderEditStore implements OrderEditStore {
           now,
         ],
       );
-      await client.query(
-        `INSERT INTO oms.order_edit_events(connection_id,actor_id,action,before_state,after_state,occurred_at) VALUES($1,$2,'settings_saved',$3,$4,$5)`,
-        [
-          connectionId,
-          actorId,
-          JSON.stringify(before),
-          JSON.stringify(validated),
-          now,
-        ],
-      );
+      await appendOrderEditAudit(client, {
+        operationId: null,
+        connectionId,
+        actorId,
+        action: "settings_saved",
+        before,
+        after: validated,
+        occurredAt: now,
+      });
     });
     return this.settings(connectionId);
   }
@@ -399,18 +399,15 @@ export class PostgresOrderEditStore implements OrderEditStore {
     actorId: string | null,
     action: string,
   ) {
-    await client.query(
-      `INSERT INTO oms.order_edit_events(operation_id,connection_id,actor_id,action,before_state,after_state,occurred_at) VALUES($1,$2,$3,$4,$5,$6,$7)`,
-      [
-        record.id,
-        record.connectionId,
-        actorId,
-        action,
-        JSON.stringify(before),
-        JSON.stringify(record),
-        record.updatedAt,
-      ],
-    );
+    await appendOrderEditAudit(client, {
+      operationId: record.id,
+      connectionId: record.connectionId,
+      actorId,
+      action,
+      before,
+      after: record,
+      occurredAt: record.updatedAt,
+    });
   }
   private async transaction<T>(
     work: (client: PoolClient) => Promise<T>,

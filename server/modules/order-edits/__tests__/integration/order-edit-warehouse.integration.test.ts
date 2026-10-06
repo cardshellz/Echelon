@@ -19,7 +19,7 @@ import {
 import { PostgresOrderEditStore } from "../../infrastructure/postgres-order-edit.store";
 import type { OrderEditRecord } from "../../application/order-edit-store";
 import type { OrderEditSnapshot } from "../../application/order-edit-provider";
-import { PgDialect } from "drizzle-orm/pg-core";
+import { drizzle } from "drizzle-orm/node-postgres";
 import type { SQL } from "drizzle-orm";
 import { guardOrderEditShopifyIngress } from "../../infrastructure/order-edit-ingress-guard";
 
@@ -170,29 +170,19 @@ function record(): OrderEditRecord {
       payload: unknown,
       write?: (execute: (statement: SQL) => Promise<any>) => Promise<void>,
     ) {
-      const client = await database.pool.connect();
-      const dialect = new PgDialect();
-      const execute = async (statement: SQL) => {
-        const query = dialect.sqlToQuery(statement);
-        return client.query(query.sql, query.params);
-      };
-      try {
-        await client.query("BEGIN");
+      return drizzle(database.pool).transaction(async (tx) => {
+        // Exercise the production transaction shape: Drizzle has both execute()
+        // and a non-callable relational `query` namespace.
         const decision = await guardOrderEditShopifyIngress(
-          { execute },
+          tx,
           20,
           payload,
           new Date("2026-10-05T00:02:00Z"),
         );
-        if (write && !decision.skipLines) await write(execute);
-        await client.query("COMMIT");
+        if (write && !decision.skipLines)
+          await write((statement) => tx.execute(statement));
         return decision;
-      } catch (error) {
-        await client.query("ROLLBACK");
-        throw error;
-      } finally {
-        client.release();
-      }
+      });
     }
     beforeAll(async () => {
       database = await createInventoryCutoverTestDatabase(

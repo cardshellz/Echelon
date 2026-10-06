@@ -126,6 +126,15 @@ describeDatabase.sequential("canonical dispatch connected PostgreSQL lifecycle",
     await expect(store().dispatch(command())).rejects.toMatchObject({ code: expect.stringMatching(/^WMS_DISPATCH_/) });
     expect(await snapshot()).toEqual(before);
   });
+  it("preserves custody, journals and publication when an order edit holds dispatch independently of the manual hold", async () => {
+    await pool.query("UPDATE wms.orders SET order_edit_operation_id='00000000-0000-4000-8000-000000000001' WHERE id=70");
+    expect((await pool.query("SELECT on_hold FROM wms.orders WHERE id=70")).rows[0].on_hold).toBe(0);
+    const before = await snapshot();
+    const hook = vi.fn<CanonicalClaimDispatchBeforeCommit>(async () => undefined);
+    await expect(store(hook).dispatch(command())).rejects.toMatchObject({ code: "WMS_DISPATCH_HELD" });
+    expect(hook).not.toHaveBeenCalled();
+    expect(await snapshot()).toEqual(before);
+  });
   it("rejects legacy ship evidence before attaching a canonical receipt or another physical deduction", async () => {
     await pool.query("INSERT INTO inventory.inventory_transactions(transaction_type,variant_qty_delta,shipment_id,shipment_item_id,order_id,order_item_id) VALUES('ship',-5,90,101,70,71)");
     const before = await snapshot(); await expect(store().dispatch(command())).rejects.toMatchObject({ code: "CLAIM_DISPATCH_SOURCE_ALREADY_POSTED" });

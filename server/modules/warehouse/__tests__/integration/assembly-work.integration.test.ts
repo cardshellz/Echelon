@@ -60,7 +60,8 @@ databaseSuite("assembly work PostgreSQL ownership and atomicity", () => {
       CREATE TABLE inventory.availability_claims (id bigint PRIMARY KEY, status text NOT NULL);
       CREATE TABLE inventory.availability_claim_lines (id bigint PRIMARY KEY, claim_id bigint REFERENCES inventory.availability_claims(id), order_item_id integer NOT NULL, requested_qty bigint NOT NULL, planned_qty bigint NOT NULL, picked_target_qty bigint NOT NULL, released_target_qty bigint NOT NULL DEFAULT 0, consumed_target_qty bigint NOT NULL DEFAULT 0, shortfall_qty bigint NOT NULL DEFAULT 0);
       CREATE TABLE inventory.availability_claim_operations (id bigint PRIMARY KEY, claim_id bigint REFERENCES inventory.availability_claims(id), UNIQUE(id,claim_id));
-      CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_status text NOT NULL, on_hold integer DEFAULT 0, assigned_picker_id varchar, warehouse_id integer, updated_at timestamptz);
+      CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_status text NOT NULL, on_hold integer DEFAULT 0, assigned_picker_id varchar, warehouse_id integer, updated_at timestamptz,
+        order_edit_operation_id uuid);
       CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), status text NOT NULL, on_hold boolean NOT NULL DEFAULT false, requires_shipping integer NOT NULL DEFAULT 1, location varchar(50), zone varchar(10), sku text NOT NULL DEFAULT 'P5', quantity integer NOT NULL DEFAULT 2, picked_quantity integer NOT NULL DEFAULT 0,
       catalog_product_id integer, inventory_tracking boolean
     );
@@ -192,6 +193,19 @@ databaseSuite("assembly work PostgreSQL ownership and atomicity", () => {
     await expect(f.packing.ready("assembler", f.task.id, f.command)).rejects.toMatchObject({ code: "WORK_PACKING_BLOCKED" });
     expect((await query("SELECT status FROM inventory.replen_tasks WHERE id=$1", [f.id])).rows[0].status).toBe("pending");
     expect((await query("SELECT warehouse_status FROM wms.orders WHERE id=$1", [f.id])).rows[0].warehouse_status).toBe("in_progress");
+  });
+  it("blocks packing while an order edit owns the hold without advancing the order or recording a receipt", async () => {
+    const f = await packingFixture();
+    const operationId = "00000000-0000-4000-8000-000000000001";
+    await query("UPDATE wms.orders SET order_edit_operation_id=$2 WHERE id=$1", [f.id, operationId]);
+    const before = (await query("SELECT * FROM wms.orders WHERE id=$1", [f.id])).rows;
+    const eventsBefore = await eventCount(f.task.id);
+    await expect(f.packing.ready("assembler", f.task.id, f.command)).rejects.toMatchObject({
+      code: "WORK_PACKING_BLOCKED", message: "Order is held for an edit",
+    });
+    expect((await query("SELECT * FROM wms.orders WHERE id=$1", [f.id])).rows).toEqual(before);
+    expect(await eventCount(f.task.id)).toBe(eventsBefore);
+    expect((await query("SELECT * FROM warehouse.assembly_packing_handoff_receipts WHERE order_id=$1", [f.id])).rowCount).toBe(0);
   });
   it("rejects WMS-completed lines whose canonical pick is incomplete", async () => {
     const f = await packingFixture();

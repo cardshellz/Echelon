@@ -13,7 +13,7 @@ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,
     );
 ALTER TABLE wms.orders ADD COLUMN warehouse_id integer REFERENCES warehouse.warehouses,
   ADD COLUMN warehouse_status varchar(30) NOT NULL DEFAULT 'ready_to_ship', ADD COLUMN on_hold integer NOT NULL DEFAULT 0,
-  ADD COLUMN cancelled_at timestamp;
+  ADD COLUMN cancelled_at timestamp, ADD COLUMN order_edit_operation_id uuid;
 ALTER TABLE wms.order_items ADD COLUMN product_id integer REFERENCES catalog.product_variants,
   ADD COLUMN status varchar(30) NOT NULL DEFAULT 'completed', ADD COLUMN on_hold boolean NOT NULL DEFAULT false,
   ADD COLUMN requires_shipping integer NOT NULL DEFAULT 1;

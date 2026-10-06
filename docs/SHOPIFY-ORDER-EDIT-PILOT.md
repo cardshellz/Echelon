@@ -18,6 +18,21 @@ Orderify entry points, and the existing return/refund flow are unchanged.
   holds are preserved. Confirmation, payment, refund and recovery evidence are
   recorded before fulfillment can resume.
 
+The new persistence has explicit module ownership, enforced by the writer ratchet:
+
+- `modules/order-edits` owns `oms.order_edit_operations`,
+  `oms.order_edit_settings`, and `oms.order_edit_events`. Other modules append
+  audit evidence through `appendOrderEditAudit` inside their existing transaction.
+- `modules/oms` owns `oms.order_edit_paid_projections` and
+  `oms.order_edit_provider_holds`, alongside the existing OMS order/line projection
+  and ShipStation integration. The ingress guard queues provider reconciliation
+  through `enqueueShipStationHoldSyncInTransaction`; it cannot write the retry
+  queue directly.
+- `modules/wms` owns the `wms.orders.order_edit_operation_id` mutation commands.
+  Acquisition and release compare ownership, preserve manual holds, and run in
+  the caller's locked transaction. Release proof, terminal state, and audit remain
+  one atomic commit. The pilot adds no new writer to `wms.orders`.
+
 ## Staff flow
 
 1. Select the Shopify connection, open **Pilot settings**, choose the payment

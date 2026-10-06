@@ -3,6 +3,9 @@ import { z } from "zod";
 import { wmsOmsOrderIdSql } from "../../oms/oms-wms-order-link.sql";
 import { orderEditSnapshotSchema } from "../application/order-edit-provider.schema";
 import type { OrderEditSnapshot } from "../application/order-edit-provider";
+import { acquireOrderEditWarehouseHold } from "../../wms/order-edit-hold.commands";
+import { enqueueShipStationHoldSyncInTransaction } from "../../oms/shipstation-hold-retry.command";
+import { OrderEditError } from "../domain/order-edit-error";
 
 interface Transaction {
   execute(statement: SQL): Promise<{ rows: Array<Record<string, unknown>> }>;
@@ -199,12 +202,21 @@ export async function guardOrderEditShopifyIngress(
       VALUES(${String(owner.id)}::uuid,${Number(owner.connection_id)},NULL,'newer_source_conflict',${JSON.stringify(before)}::jsonb,${JSON.stringify(after)}::jsonb,${now})`);
   }
   for (const order of orders.rows) {
-    await tx.execute(
-      sql`UPDATE wms.orders SET order_edit_operation_id=${String(owner.id)}::uuid WHERE id=${Number(order.id)} AND (order_edit_operation_id IS NULL OR order_edit_operation_id=${String(owner.id)}::uuid)`,
-    );
-    await tx.execute(sql`INSERT INTO oms.webhook_retry_queue(provider,topic,payload,attempts,status,last_error,next_retry_at)
-      SELECT 'internal','shipstation_hold_sync',${JSON.stringify({ wmsOrderId: Number(order.id), requestedMode: "hold" })}::jsonb,0,'pending','Newer Shopify content conflicts with certified order edit',${now}
-      WHERE NOT EXISTS(SELECT 1 FROM oms.webhook_retry_queue WHERE provider='internal' AND topic='shipstation_hold_sync' AND status='pending' AND payload->>'wmsOrderId'=${String(order.id)})`);
+    const acquired = await acquireOrderEditWarehouseHold(tx, {
+      operationId: String(owner.id),
+      wmsOrderIds: [Number(order.id)],
+    });
+    if (acquired !== 1)
+      throw new OrderEditError(
+        "ORDER_EDIT_HOLD_OWNER_INVALID",
+        "The conflicting order is no longer owned by this edit.",
+      );
+    await enqueueShipStationHoldSyncInTransaction(tx, {
+      wmsOrderId: Number(order.id),
+      requestedMode: "hold",
+      reason: "Newer Shopify content conflicts with certified order edit",
+      now,
+    });
   }
   return skip;
 }
