@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { createDropshipIdempotencyKey, DropshipApiError, fetchJson, postJson, queryErrorMessage } from "@/lib/dropship-ops-surface";
 import { displayListingPrice } from "@/lib/dropship-listing-price";
 import { formatListingPreviewIssue } from "@/lib/dropship-listing-preview";
-import { parseProfileDraft, profileDraft, type ProfileDraft, type RecipeDraft } from "@/lib/dropship-pricing-rules";
+import { describePriceBasis, describeReviewedSize, parseProfileDraft, profileDraft, type ProfileDraft, type RecipeDraft } from "@/lib/dropship-pricing-rules";
 
 export function DropshipPricingRulesPanel(props: { storeConnectionId: number; storeName: string; onConfigurationChange: () => void }) {
   return <PricingRulesSession key={props.storeConnectionId} {...props} />;
@@ -150,11 +150,13 @@ function PricingRulesSession({ storeConnectionId, storeName, onConfigurationChan
         <div><h3 className="font-medium">Review all {review.summary.total.toLocaleString()} selected listings</h3>
           <p className="text-sm text-zinc-500">{review.summary.changed} price changes · {review.summary.preserved} fixed prices preserved · {review.summary.blocked} blocked</p></div>
         <div className="max-h-80 overflow-auto overscroll-contain rounded border"><table className="w-full text-left text-sm">
-          <thead className="sticky top-0 bg-zinc-50"><tr>{["Listing", "Product cost", "Before", "After", "Rule / issue"].map((label) => <th key={label} className="p-2 font-medium">{label}</th>)}</tr></thead>
-          <tbody>{review.rows.map((row) => <tr key={row.productVariantId} className="border-t"><td className="p-2"><div>{row.title}</div><div className="text-xs text-zinc-500">{row.sku}</div></td>
+          <thead className="sticky top-0 bg-zinc-50"><tr>{["Listing", "Built from", "Your cost", "Before", "After", "Rule / issue"].map((label) => <th key={label} className="whitespace-nowrap p-2 font-medium">{label}</th>)}</tr></thead>
+          <tbody>{review.rows.map((row) => <tr key={row.productVariantId} className="border-t"><td className="p-2"><div>{row.title}</div><div className="text-xs text-zinc-500">{describeReviewedSize(row)}</div></td>
+            <td className="whitespace-nowrap p-2">{describePriceBasis(row)}</td>
             <td className="whitespace-nowrap p-2">{displayListingPrice(row.productCostCents)}</td><td className="whitespace-nowrap p-2">{displayListingPrice(row.previousPriceCents)}</td>
             <td className="whitespace-nowrap p-2 font-medium">{displayListingPrice(row.priceCents)}</td><td className="p-2 text-xs">{row.ruleName}
-              {row.issues.map((issue) => <p key={issue} className="text-rose-700">{formatListingPreviewIssue(issue)}</p>)}</td></tr>)}</tbody>
+              {row.issues.map((issue) => <p key={issue} className="text-rose-700">{formatListingPreviewIssue(issue)}</p>)}
+              {row.warnings?.map((warning) => <p key={warning} className="text-amber-800">{formatListingPreviewIssue(warning)}</p>)}</td></tr>)}</tbody>
         </table></div>
         <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-zinc-500">Page {review.page + 1} of {Math.max(1, Math.ceil(review.summary.total / PRICING_REVIEW_PAGE_SIZE))} · {PRICING_REVIEW_PAGE_SIZE} per page</span>
           <div className="flex gap-2"><Button size="sm" variant="outline" disabled={disabled || review.page === 0} onClick={() => void pageReview(review.page - 1)}>Previous</Button>

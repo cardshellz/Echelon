@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateRulePrice, resolvePricingRule, pricingProfileSchema, pricingRecipeSchema, type PricingProfile, type PricingRecipe } from "../../../../../shared/dropship/pricing-rules";
+import { calculateRulePrice, resolvePricingRule, pricingBasisCents, pricingImpactRowSchema, pricingProfileSchema, pricingRecipeSchema, type PricingProfile, type PricingRecipe } from "../../../../../shared/dropship/pricing-rules";
 import { resolveListingPrice, saveListingPriceInputSchema, MAX_LISTING_PRICE_CENTS } from "../../../../../shared/dropship/listing-price";
 
 const recipe: PricingRecipe = { basis: "product_cost", markupBps: 3000, flatCents: 100, rounding: "cent" };
@@ -71,5 +71,36 @@ describe("deterministic vendor pricing rules", () => {
     const before = JSON.stringify({ profile, candidate });
     resolvePricingRule({ profile, candidate, productCostCents: 809, catalogRetailCents: 899 });
     expect(JSON.stringify({ profile, candidate })).toBe(before);
+  });
+  it("names the amount each basis prices from, and the resolver uses that same amount", () => {
+    const amounts = { productCostCents: 809, catalogRetailCents: 1249 };
+    expect(pricingBasisCents("product_cost", amounts)).toBe(809);
+    expect(pricingBasisCents("catalog_retail", amounts)).toBe(1249);
+    expect(pricingBasisCents("catalog_retail", { productCostCents: 809, catalogRetailCents: null })).toBeNull();
+    // 1249 × 1.2 = 1498.8, rounded half-up to 1499: the reviewed $14.99.
+    const retail = { defaultRecipe: { basis: "catalog_retail" as const, markupBps: 2000, flatCents: 0, rounding: "cent" as const }, groups: [] };
+    expect(resolvePricingRule({ profile: retail, candidate, ...amounts })).toMatchObject({ priceCents: 1499, basis: "catalog_retail" });
+  });
+});
+
+describe("pricing review rows", () => {
+  const row = { productVariantId: 66, title: "Easy Glide Soft Sleeves Standard", sku: "EG-SLV-STD-5PCK-B500",
+    previousPriceCents: 1089, priceCents: 1499, productCostCents: 1089, ruleName: "Store default rule", preserved: false,
+    issues: [], settingRevisionId: null, evidenceHash: "a".repeat(64) };
+  it("still parses a row stored before rows carried the basis", () => {
+    expect(pricingImpactRowSchema.parse(row)).toEqual(row);
+  });
+  it("carries the size, the basis and its amount, and non-blocking warnings", () => {
+    const full = { ...row, sizeName: "Box of 5 Packs of 100", basis: "catalog_retail", basisCents: 1249, warnings: ["price_below_product_cost"] };
+    expect(pricingImpactRowSchema.parse(full)).toEqual(full);
+    expect(pricingImpactRowSchema.parse({ ...row, basis: null, basisCents: null })).toMatchObject({ basis: null, basisCents: null });
+  });
+  it.each([
+    ["a negative amount", { basisCents: -1 }],
+    ["a fractional amount", { basisCents: 12.5 }],
+    ["an unknown basis", { basis: "msrp" }],
+    ["an unknown field", { surprise: true }],
+  ])("rejects %s", (_label, change) => {
+    expect(pricingImpactRowSchema.safeParse({ ...row, ...change }).success).toBe(false);
   });
 });

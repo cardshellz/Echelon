@@ -2,10 +2,12 @@ import { z } from "zod";
 import { loadSelectedCandidates, selectedCatalogTargets } from "./dropship-selected-catalog";
 import { isTypedListingPrice, resolveListingPrice } from "../../../../shared/dropship/listing-price";
 import { applyPricingRulesInputSchema, reviewPricingRulesInputSchema, pricingImpactRowSchema,
-  PRICING_REVIEW_PAGE_SIZE, MAX_PRICING_REVIEW_ITEMS, type PricingProfileState, type ReviewPricingRulesInput,
+  PRICING_REVIEW_PAGE_SIZE, MAX_PRICING_REVIEW_ITEMS, pricingAmountCentsSchema, pricingBasisCents,
+  type PricingProfileState, type ReviewPricingRulesInput, type RulePriceBasis,
   type PricingImpactRow, type PricingReviewResponse, type ApplyPricingRulesInput } from "../../../../shared/dropship/pricing-rules";
 import { pricingTargetsInputSchema } from "../../../../shared/dropship/pricing-rules";
 import { DropshipError } from "../domain/errors";
+import { evaluateListingPriceAgainstCost } from "../domain/listing-price-cost";
 import { evaluateListingPricingPolicy, type DropshipListingPreviewRepository, type DropshipListingCatalogCandidate } from "./dropship-listing-preview-service";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
 import type { DropshipProductCostReader } from "./dropship-product-cost";
@@ -114,6 +116,7 @@ export class DropshipPricingRulesService {
       const setting = savedById.get(candidate.productVariantId) ?? null;
       const existing = listingById.get(candidate.productVariantId)?.vendorRetailPriceCents ?? null;
       const cost = costs.get(candidate.productVariantId) ?? null;
+      const productCostCents = cost?.status === "available" ? cost.unitCostCents : null;
       const oldRule = current.profile ? resolveListingRulePrice({ state: current, candidate, cost }) : null;
       const old = resolveListingPrice({ saved: setting, existingListingPriceCents: existing,
         defaultPriceCents: candidate.defaultRetailPriceCents, rulePrice: oldRule });
@@ -122,19 +125,39 @@ export class DropshipPricingRulesService {
       const preserved = !input.releaseFixedOverrides && isTypedListingPrice(setting);
       const rule = resolveListingRulePrice({ state: proposed, candidate, cost });
       const priceCents = preserved ? old.effectivePriceCents : rule.priceCents;
-      const issues = preserved ? [] : [rule.issue, ...evaluateListingPricingPolicy(candidate, guardrails, priceCents).blockers]
-        .filter((issue): issue is string => issue !== null);
+      // A preserved row is not changed by applying, so like its issues, its
+      // notes and basis describe nothing the vendor is about to do.
+      const policy = preserved ? null : evaluateListingPricingPolicy(candidate, guardrails, priceCents);
+      const issues = policy ? [rule.issue, ...policy.blockers].filter((issue): issue is string => issue !== null) : [];
+      const warnings = policy
+        ? [...policy.warnings, ...evaluateListingPriceAgainstCost({ priceCents, unitCostCents: productCostCents }).warnings]
+        : [];
+      const basis = preserved ? null : rule.basis;
       return pricingImpactRowSchema.parse({ productVariantId: candidate.productVariantId,
         title: candidate.title?.trim() || candidate.productName, sku: candidate.sku,
-        previousPriceCents: old.effectivePriceCents, priceCents, productCostCents: cost?.status === "available" ? cost.unitCostCents : null,
+        previousPriceCents: old.effectivePriceCents, priceCents, productCostCents,
         ruleName: preserved ? "Fixed override preserved" : rule.ruleName, preserved, issues,
         settingRevisionId: setting?.revisionId ?? null,
-        evidenceHash: pricingHash({ rule: rule.evidenceHash, oldRule: oldRule?.evidenceHash ?? null, setting, existing, guardrails }) });
+        evidenceHash: pricingHash({ rule: rule.evidenceHash, oldRule: oldRule?.evidenceHash ?? null, setting, existing, guardrails }),
+        sizeName: candidate.variantName, basis,
+        basisCents: basisAmountCents(basis, { productCostCents, catalogRetailCents: candidate.defaultRetailPriceCents }),
+        warnings });
     });
   }
 }
 
 
+/**
+ * The amount a basis starts from, or null when it is missing or not a usable
+ * cents value. A null basis (no recipe chose the price) has no amount.
+ */
+function basisAmountCents(basis: RulePriceBasis | null, amounts: {
+  productCostCents: number | null; catalogRetailCents: number | null;
+}): number | null {
+  if (basis === null) return null;
+  const amount = pricingAmountCentsSchema.safeParse(pricingBasisCents(basis, amounts));
+  return amount.success ? amount.data : null;
+}
 async function requireReview(tx: PricingRulesTransaction, id: string): Promise<StoredPricingReview> {
   const review = await tx.loadReview(id);
   if (!review) throw new DropshipError("DROPSHIP_PRICING_REVIEW_NOT_FOUND", "Pricing review was not found for this store.");

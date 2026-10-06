@@ -1,5 +1,5 @@
-import { pricingProfileSchema, type PricingProfile, type PricingRecipe } from "@shared/dropship/pricing-rules";
-import { listingPriceInput } from "./dropship-listing-price";
+import { pricingProfileSchema, type PricingImpactRow, type PricingProfile, type PricingRecipe } from "@shared/dropship/pricing-rules";
+import { displayListingPrice, listingPriceInput } from "./dropship-listing-price";
 
 export type RecipeDraft = { basis: PricingRecipe["basis"]; percentage: string; flat: string; rounding: PricingRecipe["rounding"] };
 export type GroupDraft = { id: string; name: string; priority: string; scope: PricingProfile["groups"][number]["scope"]; recipe: RecipeDraft };
@@ -26,4 +26,25 @@ export function parseProfileDraft(draft: ProfileDraft): PricingProfile {
   })) });
   if (!result.success) throw new Error(result.error.issues[0]?.message ?? "Check the rule fields.");
   return result.data;
+}
+
+/**
+ * What a reviewed price is built from, in the same words as the "Price basis"
+ * choices above the table, so the vendor can see why the price came out as it
+ * did. A review stored before rows carried the basis shows a dash.
+ */
+export function describePriceBasis(row: Pick<PricingImpactRow, "preserved" | "basis" | "basisCents">): string {
+  if (row.preserved) return "Your fixed price";
+  if (row.basis === "catalog_retail") {
+    return row.basisCents == null ? "No catalog reference retail" : `Reference retail ${displayListingPrice(row.basisCents)}`;
+  }
+  if (row.basis === "product_cost") {
+    return row.basisCents == null ? "No .ops product cost" : `.ops cost ${displayListingPrice(row.basisCents)}`;
+  }
+  return "—";
+}
+
+/** The size name and SKU under a listing's title, without empty parts. */
+export function describeReviewedSize(row: Pick<PricingImpactRow, "sizeName" | "sku">): string {
+  return [row.sizeName?.trim(), row.sku?.trim()].filter((part): part is string => Boolean(part)).join(" · ");
 }

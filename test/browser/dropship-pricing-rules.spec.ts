@@ -29,7 +29,9 @@ async function setup(page: Page) {
           title: `Test mailer ${pageNumber * 50 + index + 1}`, sku: `TEST-${pageNumber * 50 + index + 1}`,
           previousPriceCents: 999, priceCents: state.block && index === 0 ? null : changedPrice, productCostCents: 809,
           ruleName: "Store default rule", preserved: false, issues: state.block && index === 0 ? ["pricing_basis_unavailable"] : [],
-          settingRevisionId: null, evidenceHash: "b".repeat(64) })) } });
+          settingRevisionId: null, evidenceHash: "b".repeat(64), sizeName: "Pack of 50",
+          basis: index === 2 ? "catalog_retail" : "product_cost", basisCents: index === 2 ? 1249 : 809,
+          warnings: index === 1 ? ["price_below_product_cost"] : [] })) } });
     }
     if (path === `${base}/apply`) {
       state.applies.push(route.request().postDataJSON());
@@ -57,6 +59,15 @@ test("reviews 1,000 listings with bounded scrolling and applies once without pub
   await expect(page.getByText("Review all 1,000 selected listings")).toBeVisible();
   await expect(page.locator("tbody tr")).toHaveCount(50);
   expect(state.reviews[0]).toMatchObject({ releaseFixedOverrides: false, profile: { defaultRecipe: { markupBps: 3000, flatCents: 100 } } });
+  // Each row says what its price is built from, next to the vendor's own cost.
+  await expect(page.getByRole("columnheader", { name: "Built from" })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "Your cost" })).toBeVisible();
+  const firstRow = page.locator("tbody tr").first();
+  await expect(firstRow).toContainText("Pack of 50 · TEST-1");
+  await expect(firstRow.locator("td").nth(1)).toHaveText(".ops cost $8.09");
+  await expect(page.locator("tbody tr").nth(2).locator("td").nth(1)).toHaveText("Reference retail $12.49");
+  // A price below cost is a warning, never a block: Apply stays available below.
+  await expect(page.locator("tbody tr").nth(1)).toContainText("Priced below your .ops product cost");
   const scroll = await page.locator("table").evaluate((table) => ({ height: table.parentElement!.clientHeight, scrollHeight: table.parentElement!.scrollHeight }));
   expect(scroll.height).toBeLessThanOrEqual(320); expect(scroll.scrollHeight).toBeGreaterThan(scroll.height);
   await page.screenshot({ path: testInfo.outputPath("pricing-review.png"), fullPage: true });

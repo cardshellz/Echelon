@@ -4,6 +4,7 @@ import type { DropshipListingCatalogCandidate, DropshipListingPreviewRepository 
 import type { DropshipProductCost } from "../../application/dropship-product-cost";
 import type { PricingProfileState } from "../../../../../shared/dropship/pricing-rules";
 import type { SavedListingPriceRevision } from "../../../../../shared/dropship/listing-price";
+import { pricingHash } from "../../application/dropship-rule-price";
 
 const now = new Date("2026-09-07T12:00:00.000Z");
 const reviewId = "02892196-a1f2-4e72-823a-32188b9cb234";
@@ -114,6 +115,57 @@ describe("store pricing review and approval", () => {
     vi.mocked(tx.catalog.loadStoreContext).mockResolvedValue(null);
     await expect(review()).rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_REQUIRED" });
     expect(tx.listVariantIds).not.toHaveBeenCalled(); expect(tx.costs.loadProductCosts).not.toHaveBeenCalled();
+  });
+  it("says what each reviewed price is built from: the basis, its amount and the size", async () => {
+    const result = await review();
+    expect(result.rows[0]).toMatchObject({ sizeName: "Pack 1", basis: "product_cost", basisCents: 809,
+      productCostCents: 809, priceCents: 1152, warnings: [] });
+  });
+  it("shows the reference retail amount a retail-based price is built from", async () => {
+    const retail = { defaultRecipe: { basis: "catalog_retail" as const, markupBps: 2000, flatCents: 0, rounding: "cent" as const }, groups: [] };
+    candidates[0] = { ...candidates[0], defaultRetailPriceCents: 1249 };
+    const result = await service.reviewForMember("member-1", 22, { ...input, profile: retail });
+    // 1249 x 1.2 = 1498.8, rounded half-up once: $14.99. The cost column still shows the .ops cost.
+    expect(result.rows[0]).toMatchObject({ basis: "catalog_retail", basisCents: 1249, priceCents: 1499, productCostCents: 809 });
+  });
+  it("names a missing reference retail instead of inventing an amount", async () => {
+    const retail = { defaultRecipe: { basis: "catalog_retail" as const, markupBps: 2000, flatCents: 0, rounding: "cent" as const }, groups: [] };
+    candidates[0] = { ...candidates[0], defaultRetailPriceCents: null };
+    const result = await service.reviewForMember("member-1", 22, { ...input, profile: retail });
+    expect(result.rows[0]).toMatchObject({ basis: "catalog_retail", basisCents: null, priceCents: null,
+      issues: expect.arrayContaining(["pricing_basis_unavailable"]) });
+  });
+  it("gives a kept fixed price no basis and no notes, since applying does not change it", async () => {
+    settings = [{ productVariantId: 1, revisionId: 7, overridePriceCents: 999, updatedAt: now.toISOString() }];
+    const result = await review();
+    expect(result.rows[0]).toMatchObject({ preserved: true, priceCents: 999, basis: null, basisCents: null, warnings: [], issues: [] });
+  });
+  it("warns about a price below the .ops cost without blocking the apply", async () => {
+    const retail = { defaultRecipe: { basis: "catalog_retail" as const, markupBps: 0, flatCents: 0, rounding: "cent" as const }, groups: [] };
+    currentCost = { ...cost, unitCostCents: 950 };
+    const result = await service.reviewForMember("member-1", 22, { ...input, profile: retail });
+    expect(result.rows[0]).toMatchObject({ priceCents: 899, productCostCents: 950, warnings: ["price_below_product_cost"], issues: [] });
+    expect(result.summary.blocked).toBe(0);
+    expect(await service.applyForMember("member-1", 22, { reviewId: result.reviewId, reviewHash: result.reviewHash, idempotencyKey: "apply-1" }))
+      .toEqual({ revisionId: 1, idempotentReplay: false });
+  });
+  it("reports a warn-only price limit as a warning and a blocking limit as an issue", async () => {
+    const limit = { scopeType: "catalog" as const, productLineId: null, productId: null, productVariantId: null, category: null, floorPriceCents: null, ceilingPriceCents: 1000 };
+    vi.mocked(tx.catalog.listPricingPolicies).mockResolvedValue([{ ...limit, id: 5, mode: "warn_only" }]);
+    const warned = await review();
+    expect(warned.rows[0]).toMatchObject({ priceCents: 1152, warnings: ["pricing:above_ceiling:policy_5"], issues: [] });
+    expect(warned.summary.blocked).toBe(0);
+    vi.mocked(tx.catalog.listPricingPolicies).mockResolvedValue([{ ...limit, id: 6, mode: "block_listing_push" }]);
+    const blocked = await review();
+    expect(blocked.rows[0]).toMatchObject({ warnings: [], issues: ["pricing:above_ceiling:policy_6"] });
+  });
+  it("asks for a fresh review instead of applying one stored before rows carried the basis", async () => {
+    await review();
+    const legacyRows = stored!.rows.map(({ sizeName: _size, basis: _basis, basisCents: _amount, warnings: _warnings, ...row }) => row);
+    stored = { ...stored!, rows: legacyRows, hash: pricingHash({ input: stored!.input, rows: legacyRows }) };
+    await expect(service.applyForMember("member-1", 22, { reviewId, reviewHash: stored.hash, idempotencyKey: "apply-1" }))
+      .rejects.toMatchObject({ code: "DROPSHIP_PRICING_REVIEW_STALE" });
+    expect(tx.applyReview).not.toHaveBeenCalled();
   });
   it("cannot loop forever on a broken cursor", async () => {
     vi.mocked(tx.listVariantIds).mockResolvedValue([1]);
