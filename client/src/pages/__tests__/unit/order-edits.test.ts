@@ -154,8 +154,28 @@ describe("staff order editor access and resume", () => {
     expect(html).toContain(
       "Enter a payment window before enabling staff edits.",
     );
+    expect(html).toContain("Payment window (hours)");
+    expect(html).toContain("0.5 hours = 30 minutes.");
+    expect(html).toMatch(/<input[^>]+id="edit-payment-window"[^>]+step="any"/);
     expect(html).toMatch(/<input[^>]+id="edit-payment-window"[^>]+value=""/);
     expect(html).toMatch(/<button[^>]+disabled=""[^>]*>Save settings/);
+  });
+  it("shows a saved half-hour setting as 0.5 hours", () => {
+    const html = renderToStaticMarkup(
+      createElement(ConnectionSettings, {
+        connection: {
+          connectionId: 3,
+          channelId: 8,
+          name: "Fixture shop",
+          shopDomain: "fixture.myshopify.com",
+          paymentWindowMinutes: 30,
+          enabled: true,
+        },
+        api: createOrderEditTransport(vi.fn()),
+        onSaved: vi.fn(),
+      }),
+    );
+    expect(html).toMatch(/<input[^>]+id="edit-payment-window"[^>]+value="0.5"/);
   });
   it("blocks every read and hides cached order information without edit permission", async () => {
     state.canEdit = false;

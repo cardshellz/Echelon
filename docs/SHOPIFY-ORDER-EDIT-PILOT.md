@@ -36,7 +36,7 @@ The new persistence has explicit module ownership, enforced by the writer ratche
 ## Staff flow
 
 1. Select the Shopify connection. **Pilot settings** opens automatically while
-   staff editing is disabled. Choose **Payment window (minutes)**, check
+   staff editing is disabled. Choose **Payment window (hours)**, check
    **Enable staff order edits for this Shopify connection**, and select
    **Save settings**. The saved status and payment window appear above the form.
    A disabled order also offers **Configure staff editing** to open and focus
@@ -44,6 +44,9 @@ The new persistence has explicit module ownership, enforced by the writer ratche
    Saving enabled settings unlocks eligible order fields without reloading;
    a failed save does not enable a disabled connection. This setting does not
    grant customer access.
+   Decimal hours are supported: `0.5` means 30 minutes and `1.25` means 75
+   minutes. The API and stored setting retain whole-minute precision; invalid
+   values or fractional-minute durations are rejected instead of rounded.
 2. Search for an exact order number, with or without `#`. Existing active edits
    appear with **Resume edit**, including after closing the original browser tab.
 3. Adjust quantities or add a supported product. Review the Shopify-calculated
