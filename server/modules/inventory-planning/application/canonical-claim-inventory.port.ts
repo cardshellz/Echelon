@@ -257,7 +257,7 @@ export interface CanonicalClaimInventoryMutationPort {
   }): Promise<CanonicalClaimInventoryObservedReconciliationResult>;
 
   pickResources(input: {
-    commandKey?: string;
+    commandKey: string;
     client: CanonicalClaimTransactionClient;
     claimId: bigint;
     claimLineId: bigint;

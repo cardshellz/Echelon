@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveCost, resolveReturnCost } from "../../cost-resolver";
+import { resolveCost } from "../../cost-resolver";
 
 function mockDb(variantRow?: any, cogsRows?: any[]) {
   const selectChain = {
@@ -56,34 +56,5 @@ describe("resolveCost", () => {
     const db = mockDb(null);
     const result = await resolveCost(db, 999);
     expect(result).toEqual({ costCents: 0, source: "unresolved", provisional: true });
-  });
-});
-
-describe("resolveReturnCost", () => {
-  it("returns order COGS cost when found", async () => {
-    const db = mockDb(
-      { lastCostCents: 100, standardCostCents: 0, avgCostCents: 0 },
-      [{ unit_cost_cents: 350 }],
-    );
-    const result = await resolveReturnCost(db, 1, 42);
-    expect(result).toEqual({ costCents: 350, source: "order_cogs", provisional: false });
-  });
-
-  it("falls back to standard waterfall when no COGS rows", async () => {
-    const db = mockDb(
-      { lastCostCents: 100, standardCostCents: 0, avgCostCents: 0 },
-      [],
-    );
-    const result = await resolveReturnCost(db, 1, 42);
-    expect(result).toEqual({ costCents: 100, source: "last_paid", provisional: true });
-  });
-
-  it("falls back when COGS row has zero cost", async () => {
-    const db = mockDb(
-      { lastCostCents: 0, standardCostCents: 200, avgCostCents: 0 },
-      [{ unit_cost_cents: 0 }],
-    );
-    const result = await resolveReturnCost(db, 1, 42);
-    expect(result).toEqual({ costCents: 200, source: "standard", provisional: true });
   });
 });

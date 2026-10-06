@@ -113,7 +113,7 @@ describe("lot cost normalization against real column wire formats", () => {
     // half cent quietly dropped is a money bug, and the mills columns are where
     // sub-cent precision belongs.
     expect(() => normalizeBuildLotCosts(lot({ packaging_cost_cents: "0.0000" })))
-      .toThrowError(expect.objectContaining({ code: "INVALID_BUILD_COST" }));
+      .toThrowError(expect.objectContaining({ code: "INVALID_SOURCE_LOT_COST" }));
   });
 
   it("treats a null cost column as zero rather than throwing", () => {

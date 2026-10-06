@@ -9,6 +9,7 @@ import { planCutoverReconstruction } from "../../domain/inventory-cutover-recons
 import { planFreshCutoverClaims } from "../../domain/inventory-cutover-reconstruction-planning";
 import { reconstructionSupply } from "../fixtures/inventory-cutover-reconstruction.fixture";
 import { reconstructionDatabaseFixtureSql, reconstructionDatabaseSeedSql } from "../fixtures/inventory-cutover-reconstruction-database.fixture";
+import { installLotCostAdmissionFixture } from "../../../inventory/__tests__/fixtures/lot-cost-admission.fixture";
 import { captureActiveClaimSupplySnapshotInsideTransaction } from "../../infrastructure/inventory-availability-shadow.repository";
 import { PostgresInventoryAvailabilityClaimRepository } from "../../infrastructure/inventory-availability-claim.repository";
 import { PostgresCanonicalClaimInventoryRepository } from "../../../inventory/infrastructure/canonical-claim-inventory.repository";
@@ -139,6 +140,7 @@ dbDescribe.sequential("reviewed reconstruction with real claim DDL and inventory
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, reconstructionDatabaseFixtureSql);
     await installUnopenedQuantityLedgerFixture(database.pool);
+    await installLotCostAdmissionFixture(database.pool);
     for (const file of ["0640_inventory_availability_claim_lineage.sql","0642_inventory_availability_claim_execution_contract.sql",
       "0647_inventory_availability_claim_pick_lineage.sql","0649_inventory_availability_claim_replacement.sql","233_inventory_cutover_reconstruction.sql"]) {
       await database.pool.query(readFileSync(resolve(process.cwd(),"migrations",file),"utf8"));

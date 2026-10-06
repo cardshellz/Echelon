@@ -1,20 +1,23 @@
+import { readLotCostFollowUps } from "./infrastructure/lot-cost-follow-up.repository";
+import { readInventoryValuation } from "./application/read-inventory-valuation";
+import { normalizeLotCosts, recordedUnitCostMills, moneyToSafeNumber, roundedSignedMillsToCents } from "./domain/lot-cost";
 import { costInteger, lockInventoryCostGraph } from "./infrastructure/cost-evidence.repository";
 import type { CostComponent } from "@shared/procurement/cost-source-contracts";
 /**
  * FIFO COGS Engine for Echelon WMS.
  *
- * All costs at the PIECE level. No estimates — lots have "current cost"
- * which updates when landed costs arrive. FIFO is strict: oldest lot
- * consumed first, always. All cost operations are atomic (transactions).
+ * Costs are per variant unit and may remain provisional. Source revisions
+ * revalue the recorded lineage without replaying physical quantities. FIFO
+ * custody belongs to InventoryLotService; this owner applies financial changes.
  *
  * Tables: inventory.inventory_lots (cost layers), oms.order_item_costs
- * (the single live COGS ledger, written at pick time by pickFromLots).
+ * (the single live COGS ledger, written by the existing inventory pick owners).
  * The legacy inventory.order_line_costs ledger is retired (COGS Phase 1).
  */
 
-import { eq, and, sql, asc, gt, desc, isNull, isNotNull } from "drizzle-orm";
+import { eq, and, sql, asc, desc, isNull, isNotNull } from "drizzle-orm";
 import type { PgTransactionConfig } from "drizzle-orm/pg-core";
-import { millsToCents, centsToMills } from "@shared/utils/money";
+import { millsToCents, centsToMills, dollarsToMills } from "@shared/utils/money";
 import {
   inventoryLots,
   productVariants,
@@ -22,7 +25,6 @@ import {
   orders,
   orderItems,
 } from "@shared/schema";
-import { calculateUnreservedLotOnHand } from "./domain/inventory.domain";
 import type { InventoryLot } from "@shared/schema";
 import { assertLegacyQuantityImportAllowed } from "./application/legacy-quantity-import";
 import { parseCostLotsReport, parseInventoryValuationReport } from "@shared/inventory/cost-report-read";
@@ -44,11 +46,14 @@ export function parseLotCostCsvRow(row: Record<string, any>):
   const rawCost = String(row.cost_per_piece ?? "").trim();
   if (!sku) return { ok: false, error: "missing sku" };
   if (!rawCost) return { ok: false, error: "missing cost_per_piece" };
-  const dollars = Number(rawCost.replace(/[$,\s]/g, ""));
-  if (!Number.isFinite(dollars) || dollars < 0) {
+  try {
+    const value = rawCost.replace(/[$,\s]/g,"");
+    if (!/^[+]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value)) throw new RangeError("Invalid decimal price");
+    const costPerPieceMills = dollarsToMills(value);
+    return { ok: true,sku,costPerPieceMills };
+  } catch {
     return { ok: false, error: `invalid cost_per_piece "${rawCost}"` };
   }
-  return { ok: true, sku, costPerPieceMills: Math.round(dollars * 10000) };
 }
 
 type DrizzleDb = {
@@ -61,14 +66,6 @@ type DrizzleDb = {
 };
 
 // ─── Types ──────────────────────────────────────────────────────────
-
-export interface CostLotConsumption {
-  lotId: number;
-  lotNumber: string;
-  qty: number;
-  unitCostCents: number;
-  totalCostCents: number;
-}
 
 export interface InventoryValuationResult {
   totalValueCents: number;
@@ -144,55 +141,39 @@ export class COGSService {
 
     const newUnitCostCents = millsToCents(newUnitCostMills);
     const affected = await tx.execute(sql`
-      SELECT
-        id,
-        qty,
-        unit_cost_cents,
-        CASE
-          WHEN COALESCE(unit_cost_mills, 0) != 0 THEN unit_cost_mills
-          ELSE COALESCE(unit_cost_cents, 0) * 100
-        END AS old_unit_cost_mills
-      FROM oms.order_item_costs
-      WHERE inventory_lot_id = ${lotId}
-        AND (
-          CASE
-            WHEN COALESCE(unit_cost_mills, 0) != 0 THEN unit_cost_mills
-            ELSE COALESCE(unit_cost_cents, 0) * 100
-          END
-        ) != ${newUnitCostMills}
+      SELECT id,qty,unit_cost_cents,unit_cost_mills,total_cost_cents,total_cost_mills,cost_precision_version
+      FROM oms.order_item_costs WHERE inventory_lot_id=${lotId} ORDER BY id FOR UPDATE
     `);
 
-    const rows = affected.rows || [];
+    const rows = (affected.rows || []).filter((row: any) => recordedUnitCostMills(row) !== BigInt(newUnitCostMills));
     if (rows.length === 0) {
       return { rowsUpdated: 0, totalDeltaCents: 0 };
     }
 
     let deltaCents = BigInt(0);
     for (const row of rows) {
-      const oldUnitMills = BigInt(costInteger(row.old_unit_cost_mills, "cogs.oldUnitCostMills"));
-      const qty = BigInt(costInteger(row.qty, "cogs.quantity"));
+      const oldUnitMills = recordedUnitCostMills(row);
+      const qty = BigInt(costInteger(row.qty, "cogs.quantity", -2_147_483_647));
       const nextTotal = BigInt(newUnitCostMills) * qty;
       const priorTotal = oldUnitMills * qty;
       // SQL stores bigint and rounds each extended row, not a rounded unit.
       // Keep that same exact boundary for the audit/export delta.
-      if (nextTotal > BigInt("9223372036854775807")) throw new Error("COGS extended cost exceeds PostgreSQL bigint range");
-      deltaCents += (nextTotal + BigInt(50)) / BigInt(100) - (priorTotal + BigInt(50)) / BigInt(100);
+      const maxStored = BigInt("9223372036854775807");
+      if (nextTotal > maxStored || nextTotal < -maxStored || priorTotal > maxStored || priorTotal < -maxStored) {
+        throw new Error("COGS extended cost exceeds PostgreSQL bigint range");
+      }
+      deltaCents += roundedSignedMillsToCents(nextTotal) - roundedSignedMillsToCents(priorTotal);
     }
     const totalDeltaCents = costInteger(deltaCents.toString(), "cogs.totalDeltaCents", -Number.MAX_SAFE_INTEGER);
 
     await tx.execute(sql`
       UPDATE oms.order_item_costs
-      SET unit_cost_mills = ${newUnitCostMills},
-          total_cost_mills = qty::bigint * ${newUnitCostMills},
+      SET unit_cost_mills = ${newUnitCostMills}, total_cost_mills = qty::bigint * ${newUnitCostMills},
           unit_cost_cents = ${newUnitCostCents},
-          total_cost_cents = ((qty::bigint * ${newUnitCostMills}) + 50) / 100
-      WHERE inventory_lot_id = ${lotId}
-        AND (
-          CASE
-            WHEN COALESCE(unit_cost_mills, 0) != 0 THEN unit_cost_mills
-            ELSE COALESCE(unit_cost_cents, 0) * 100
-          END
-        ) != ${newUnitCostMills}
+          total_cost_cents = CASE WHEN qty < 0 THEN -(((-qty::bigint * ${newUnitCostMills}) + 50) / 100)
+            ELSE ((qty::bigint * ${newUnitCostMills}) + 50) / 100 END,
+          cost_precision_version=1
+      WHERE id IN (${sql.join(rows.map((row: any) => sql`${costInteger(row.id,"cogs.id",1)}`),sql`, `)})
     `);
 
     return { rowsUpdated: rows.length, totalDeltaCents };
@@ -215,21 +196,7 @@ export class COGSService {
       const now = this.clock();
       if (!Number.isFinite(now.getTime())) throw new Error("Invalid lot cost clock");
       const result = await tx.execute(sql`
-        SELECT
-          il.id,
-          il.lot_number,
-          il.product_variant_id,
-          il.cost_source,
-          COALESCE(NULLIF(il.po_unit_cost_mills, 0), ROUND(COALESCE(il.po_unit_cost_cents, 0)::numeric * 100)::bigint, 0) AS product_mills,
-          COALESCE(NULLIF(il.packaging_cost_mills, 0), ROUND(COALESCE(il.packaging_cost_cents, 0)::numeric * 100)::bigint, 0) AS packaging_mills,
-          COALESCE(NULLIF(il.landed_cost_mills, 0), ROUND(COALESCE(il.landed_cost_cents, 0)::numeric * 100)::bigint, 0) AS landed_mills,
-          COALESCE(
-            NULLIF(il.total_unit_cost_mills, 0),
-            NULLIF(il.unit_cost_mills, 0),
-            ROUND(COALESCE(NULLIF(il.total_unit_cost_cents, 0), il.unit_cost_cents, 0)::numeric * 100)::bigint,
-            0
-          ) AS old_total_mills,
-          pv.sku
+        SELECT il.*, pv.sku
         FROM inventory.inventory_lots il
         LEFT JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
         WHERE il.id = ${params.lotId}
@@ -241,12 +208,10 @@ export class COGSService {
         return null;
       }
 
-      const currentProductMills =
-        Number(lot.product_mills) || centsToMills(Number(lot.po_unit_cost_cents) || 0);
-      const currentPackagingMills =
-        Number(lot.packaging_mills) || centsToMills(Number(lot.packaging_cost_cents) || 0);
-      const currentLandedMills =
-        Number(lot.landed_mills) || centsToMills(Number(lot.landed_cost_cents) || 0);
+      const current = normalizeLotCosts(lot);
+      const currentProductMills = moneyToSafeNumber(current.poMills,"productCostMills");
+      const currentPackagingMills = moneyToSafeNumber(current.packagingMills,"packagingCostMills");
+      const currentLandedMills = moneyToSafeNumber(current.landedMills,"landedCostMills");
       const productCostMills = params.productCostMills ?? currentProductMills;
       const packagingCostMills = params.packagingCostMills ?? currentPackagingMills;
       const landedCostMills = params.landedCostMills ?? currentLandedMills;
@@ -258,9 +223,7 @@ export class COGSService {
       const totalUnitCostMills = costInteger((BigInt(productCostMills) + BigInt(packagingCostMills) + BigInt(landedCostMills)).toString(), "totalUnitCostMills");
       this.assertNonNegativeMills(totalUnitCostMills, "totalUnitCostMills");
 
-      const oldTotalMills =
-        Number(lot.old_total_mills)
-        || centsToMills(Number(lot.total_unit_cost_cents) || Number(lot.unit_cost_cents) || 0);
+      const oldTotalMills = moneyToSafeNumber(current.totalMills,"oldTotalMills");
       const oldCostCents = millsToCents(oldTotalMills);
       const newCostCents = millsToCents(totalUnitCostMills);
       const productCostCents = millsToCents(productCostMills);
@@ -299,7 +262,7 @@ export class COGSService {
             total_unit_cost_cents = ${newCostCents},
             unit_cost_cents = ${newCostCents},
             cost_provisional = CASE WHEN ${params.clearProvisional === false ? 0 : 1} = 1 THEN 0 ELSE cost_provisional END,
-            cost_source = ${costSource}
+            cost_source = ${costSource}, cost_precision_version=1
         WHERE id = ${params.lotId}
       `);
 
@@ -408,84 +371,13 @@ export class COGSService {
         unit_cost_mills = ${totalUnitCostMills},
         qty_received = ${params.qtyPieces},
         qty_consumed = 0,
-        cost_source = ${costSource},
+        cost_source = ${costSource}, cost_precision_version=1,
         batch_number = ${params.batchNumber ?? null}
       WHERE id = ${lot.id}
     `);
 
     return lot as InventoryLot;
   }
-
-  // ---------------------------------------------------------------------------
-  // CONSUME LOTS FIFO
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Deplete oldest lots first for a given product variant.
-   * Returns array of lot consumptions with cost breakdown.
-   * Does NOT modify lots — caller must be in a transaction.
-   */
-  async consumeLotsFIFO(
-    productVariantId: number,
-    qty: number,
-    tx?: any,
-  ): Promise<CostLotConsumption[]> {
-    const db = tx || this.db;
-
-    // Get active lots ordered by received_at ASC (FIFO)
-    const lots = await db
-      .select()
-      .from(inventoryLots)
-      .where(
-        and(
-          eq(inventoryLots.productVariantId, productVariantId),
-          eq(inventoryLots.status, "active"),
-          gt(inventoryLots.qtyOnHand, 0),
-        ),
-      )
-      .orderBy(asc(inventoryLots.receivedAt));
-
-    let remaining = qty;
-    const consumptions: CostLotConsumption[] = [];
-
-    for (const lot of lots) {
-      if (remaining <= 0) break;
-
-      const available = calculateUnreservedLotOnHand(lot);
-      if (available <= 0) continue;
-
-      const take = Math.min(available, remaining);
-
-      // Get full cost from COGS columns. Use the provided transaction handle;
-      // Drizzle execute returns a result object, not an iterable tuple.
-      const lotCost = await db.execute(sql`
-        SELECT total_unit_cost_cents FROM inventory.inventory_lots WHERE id = ${lot.id}
-      `);
-      // Fall back to unit_cost_cents when total_unit_cost_cents is 0/null (BUG-2:
-      // total defaulted to 0 and `?? ` does not treat 0 as missing).
-      const totalUnitCost = Number(lotCost?.rows?.[0]?.total_unit_cost_cents) || 0;
-      const unitCost = totalUnitCost > 0 ? totalUnitCost : (lot.unitCostCents ?? 0);
-
-      consumptions.push({
-        lotId: lot.id,
-        lotNumber: lot.lotNumber,
-        qty: take,
-        unitCostCents: Number(unitCost),
-        totalCostCents: take * Number(unitCost),
-      });
-
-      remaining -= take;
-    }
-
-    return consumptions;
-  }
-
-  // NOTE (COGS Phase 1): recordShipmentCOGS was removed. It wrote to the
-  // retired inventory.order_line_costs ledger at ship time and re-decremented
-  // lot.qty_consumed, duplicating the consumption already booked at pick time
-  // by InventoryLotService.pickFromLots → oms.order_item_costs (the single
-  // live COGS ledger). consumeLotsFIFO below remains as a read-only FIFO cost
-  // simulation for valuation/preview use.
 
   // ---------------------------------------------------------------------------
   // UPDATE LOT LANDED COST
@@ -527,135 +419,6 @@ export class COGSService {
     newUnitCostCents: number,
   ): Promise<{ rowsUpdated: number; totalDeltaCents: number }> {
     return this.cascadeRecostForLotMills(lotId, centsToMills(newUnitCostCents));
-  }
-
-  // ---------------------------------------------------------------------------
-  // INVOICE VARIANCE → LOT COST RECONCILIATION
-  // ---------------------------------------------------------------------------
-
-  /**
-   * When approved invoice evidence changes the authoritative per-base-piece
-   * cost recorded on the PO, update the affected lots and cascade the corrected
-   * cost to COGS rows. The base-piece cost is scaled by the lot variant's
-   * units-per-variant before it is written as that lot's product cost.
-   *
-   * Finds lots by the exact purchase-order line, then scales the base-piece
-   * invoice cost to each lot's actual received variant configuration.
-   * Logs each adjustment to cost_adjustment_log.
-   *
-   * Returns summary of lots updated and total COGS delta.
-   */
-  async reconcileInvoiceVariance(params: {
-    purchaseOrderId: number;
-    purchaseOrderLineId: number;
-    invoiceUnitCostCents?: number;
-    invoiceUnitCostMills?: number;
-    invoiceNumber?: string;
-    costSource?: "invoice" | "po";
-    reason?: string;
-  }, client?: any): Promise<{ lotsUpdated: number; cogsRowsUpdated: number; totalCogsDeltaCents: number }> {
-    const { purchaseOrderId, purchaseOrderLineId } = params;
-    if (!Number.isSafeInteger(purchaseOrderId) || purchaseOrderId <= 0) {
-      throw new Error("purchaseOrderId must be a positive integer");
-    }
-    if (!Number.isSafeInteger(purchaseOrderLineId) || purchaseOrderLineId <= 0) {
-      throw new Error("purchaseOrderLineId must be a positive integer");
-    }
-    if (params.invoiceUnitCostCents === undefined && params.invoiceUnitCostMills === undefined) {
-      throw new Error("invoiceUnitCostCents or invoiceUnitCostMills is required");
-    }
-    const invoiceUnitCostMills = params.invoiceUnitCostMills === undefined
-      ? centsToMills(params.invoiceUnitCostCents as number)
-      : params.invoiceUnitCostMills;
-    this.assertNonNegativeMills(invoiceUnitCostMills, "invoiceUnitCostMills");
-    if (
-      params.invoiceUnitCostCents !== undefined &&
-      millsToCents(invoiceUnitCostMills) !== params.invoiceUnitCostCents
-    ) {
-      throw new Error("invoiceUnitCostCents and invoiceUnitCostMills disagree");
-    }
-
-    const reconcile = async (tx: any) => {
-      await lockInventoryCostGraph(tx);
-      // Lock every affected lot before revaluing any of them. Deterministic
-      // ordering prevents concurrent invoice approvals from deadlocking.
-      const affectedLots = await tx.execute(sql`
-        SELECT
-          il.id,
-          il.unit_cost_cents,
-          il.landed_cost_cents,
-          il.total_unit_cost_cents,
-          COALESCE(NULLIF(il.po_unit_cost_mills, 0), ROUND(COALESCE(il.po_unit_cost_cents, 0)::numeric * 100)::bigint, 0) AS product_mills,
-          COALESCE(NULLIF(il.packaging_cost_mills, 0), ROUND(COALESCE(il.packaging_cost_cents, 0)::numeric * 100)::bigint, 0) AS packaging_mills,
-          COALESCE(NULLIF(il.landed_cost_mills, 0), ROUND(COALESCE(il.landed_cost_cents, 0)::numeric * 100)::bigint, 0) AS landed_mills,
-          COALESCE(
-            NULLIF(il.total_unit_cost_mills, 0),
-            NULLIF(il.unit_cost_mills, 0),
-            ROUND(COALESCE(NULLIF(il.total_unit_cost_cents, 0), il.unit_cost_cents, 0)::numeric * 100)::bigint,
-            0
-          ) AS total_mills,
-          COALESCE(pv.units_per_variant, 1) AS units_per_variant
-        FROM inventory.inventory_lots il
-        LEFT JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
-        WHERE il.purchase_order_id = ${purchaseOrderId}
-          AND il.po_line_id = ${purchaseOrderLineId}
-        ORDER BY il.id
-        FOR UPDATE OF il
-      `);
-
-      const lots = affectedLots.rows || [];
-      if (lots.length === 0) {
-        return { lotsUpdated: 0, cogsRowsUpdated: 0, totalCogsDeltaCents: 0 };
-      }
-
-      let lotsUpdated = 0;
-      let cogsRowsUpdated = 0;
-      let totalCogsDeltaCents = 0;
-
-      for (const lot of lots) {
-        const unitsPerVariant = Number(lot.units_per_variant);
-        if (!Number.isSafeInteger(unitsPerVariant) || unitsPerVariant <= 0) {
-          throw new Error("inventory lot variant units_per_variant must be a positive safe integer");
-        }
-        const scaledInvoiceMills = BigInt(invoiceUnitCostMills) * BigInt(unitsPerVariant);
-        if (scaledInvoiceMills > BigInt(Number.MAX_SAFE_INTEGER)) {
-          throw new Error("scaled invoice unit cost exceeds the supported integer mills range");
-        }
-        const invoiceLotProductCostMills = Number(scaledInvoiceMills);
-        const packagingMills = Number(lot.packaging_mills) || 0;
-        const landedMills = Number(lot.landed_mills) || centsToMills(Number(lot.landed_cost_cents) || 0);
-        const newTotalMills = invoiceLotProductCostMills + packagingMills + landedMills;
-        this.assertNonNegativeMills(newTotalMills, "totalUnitCostMills");
-        const currentProductMills = Number(lot.product_mills) || centsToMills(Number(lot.unit_cost_cents) || 0);
-        const currentTotalMills =
-          Number(lot.total_mills)
-          || centsToMills(Number(lot.total_unit_cost_cents) || Number(lot.unit_cost_cents) || 0);
-
-        if (currentProductMills === invoiceLotProductCostMills && currentTotalMills === newTotalMills) {
-          continue;
-        }
-
-        const reason = params.reason ?? (params.invoiceNumber
-          ? `invoice_variance:${params.invoiceNumber}`
-          : "invoice_variance");
-
-        const revalue = await this.revalueLotCostMills({
-          lotId: Number(lot.id),
-          productCostMills: invoiceLotProductCostMills,
-          costSource: params.costSource ?? "invoice",
-          reason,
-        }, tx);
-        if (!revalue) continue;
-
-        cogsRowsUpdated += revalue.cogsRowsUpdated;
-        totalCogsDeltaCents += revalue.totalCogsDeltaCents;
-        lotsUpdated++;
-      }
-
-      return { lotsUpdated, cogsRowsUpdated, totalCogsDeltaCents };
-    };
-
-    return client ? reconcile(client) : this.runInTransaction(reconcile);
   }
 
   // ---------------------------------------------------------------------------
@@ -754,67 +517,20 @@ export class COGSService {
   // INVENTORY VALUATION
   // ---------------------------------------------------------------------------
 
+  async getCostFollowUps(input: { afterId?: number; limit?: number } = {}) {
+    return readLotCostFollowUps(this.db,input);
+  }
+
   async getInventoryValuation(): Promise<InventoryValuationResult> {
-    const result = await this.db.execute(sql`
-      SELECT
-        p.id as product_id,
-        p.name as product_name,
-        p.sku AS base_sku,
-        SUM(il.qty_on_hand) as total_qty,
-        CASE WHEN SUM(il.qty_on_hand) > 0
-          THEN SUM(il.qty_on_hand * COALESCE(NULLIF(il.total_unit_cost_mills, 0), il.unit_cost_mills, 0)) / SUM(il.qty_on_hand)
-          ELSE 0
-        END as avg_cost_per_piece_mills,
-        SUM(il.qty_on_hand * COALESCE(NULLIF(il.total_unit_cost_mills, 0), il.unit_cost_mills, 0)) as total_value_mills,
-        COUNT(il.id) as active_lots,
-        SUM(CASE WHEN COALESCE(NULLIF(il.total_unit_cost_mills, 0), il.unit_cost_mills, 0) = 0 THEN il.qty_on_hand ELSE 0 END) as zero_cost_qty,
-        BOOL_OR(il.cost_provisional = 1 AND il.inbound_shipment_id IS NOT NULL) as has_landed_pending
-      FROM inventory.inventory_lots il
-      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
-      JOIN catalog.products p ON p.id = pv.product_id
-      WHERE il.status = 'active' AND il.qty_on_hand > 0
-      GROUP BY p.id, p.name, p.sku
-      ORDER BY total_value_mills DESC
-    `);
-
-    const byProduct = (result.rows || []).map((r: any) => ({
-      productId: r.product_id,
-      productName: r.product_name,
-      baseSku: r.base_sku || '',
-      totalQty: Number(r.total_qty) || 0,
-      avgCostPerPiece: millsToCents(Math.round(Number(r.avg_cost_per_piece_mills) || 0)),
-      totalValueCents: millsToCents(Math.round(Number(r.total_value_mills) || 0)),
-      activeLots: Number(r.active_lots) || 0,
-      zeroCostQty: Number(r.zero_cost_qty) || 0,
-      hasLandedPending: r.has_landed_pending || false,
-    }));
-
-    const totalValueCents = byProduct.reduce((s: number, p: any) => s + p.totalValueCents, 0);
-    const totalQty = byProduct.reduce((s: number, p: any) => s + p.totalQty, 0);
-    const zeroCostQty = byProduct.reduce((s: number, p: any) => s + p.zeroCostQty, 0);
-
-    // Provisional + landed pending summary
-    const pendingResult = await this.db.execute(sql`
-      SELECT
-        COUNT(*) FILTER (WHERE il.cost_provisional = 1 AND il.inbound_shipment_id IS NOT NULL) as landed_pending_count,
-        COALESCE(SUM(il.qty_on_hand * COALESCE(NULLIF(il.total_unit_cost_mills, 0), il.unit_cost_mills, 0))
-          FILTER (WHERE il.cost_provisional = 1 AND il.inbound_shipment_id IS NOT NULL), 0) as landed_pending_value_mills,
-        COALESCE(SUM(il.qty_on_hand) FILTER (WHERE il.cost_provisional = 1), 0) as provisional_qty
-      FROM inventory.inventory_lots il
-      WHERE il.status = 'active'
-        AND il.qty_on_hand > 0
-    `);
-    const pending = pendingResult.rows?.[0] as any || {};
-
+    const valuation = await readInventoryValuation(this.db);
     return parseInventoryValuationReport({
-      totalValueCents,
-      totalQty,
-      zeroCostQty,
-      provisionalQty: Number(pending.provisional_qty) || 0,
-      landedPendingLots: Number(pending.landed_pending_count) || 0,
-      landedPendingValueCents: millsToCents(Math.round(Number(pending.landed_pending_value_mills) || 0)),
-      byProduct,
+      totalValueCents: valuation.total.valueCents, totalQty: valuation.total.qty,
+      zeroCostQty: valuation.total.zeroCostQty, provisionalQty: valuation.total.provisionalQty,
+      landedPendingLots: valuation.landedPendingLots, landedPendingValueCents: valuation.landedPendingValueCents,
+      byProduct: valuation.byProduct, totalValueMills: valuation.totalValueMills,
+      quantityUnit: valuation.quantityUnit, unknownCostQty: valuation.unknownCostQty,
     });
+
   }
 
   // ---------------------------------------------------------------------------

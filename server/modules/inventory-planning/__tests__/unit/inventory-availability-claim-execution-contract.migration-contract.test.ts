@@ -48,7 +48,10 @@ describe("canonical claim execution contract migration", () => {
     expect(repository).toContain("CLAIM_PLAN_HASH_MISMATCH");
     expect(repository).toContain("CLAIM_OPERATION_PLAN_EVIDENCE_MISMATCH");
     expect(inventoryWriter).toContain("async executePackageOperation");
-    expect(inventoryWriter).toContain("CLAIM_LOT_COST_CHANGED");
+    expect(inventoryWriter).toContain("CLAIM_EXECUTION_LOT_IDENTITY_CHANGED");
+    // A source revision changes financial evidence, not the physical claim.
+    // The real claim-owner suites prove current locked prices and rollback.
+    expect(inventoryWriter).not.toContain("CLAIM_LOT_COST_CHANGED");
     expect(inventoryWriter).toContain("qty_on_hand = qty_on_hand - $1");
     expect(inventoryWriter).toContain("qty_reserved = qty_reserved - $1");
     expect(inventoryWriter).toContain("reserved_qty = reserved_qty + $2");

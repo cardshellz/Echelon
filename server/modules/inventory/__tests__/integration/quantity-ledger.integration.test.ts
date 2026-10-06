@@ -15,6 +15,8 @@ import { InventoryUseCases } from "../../application/inventory.use-cases";
 import { InventoryLotService } from "../../lots.service";
 import { createInventoryMethods } from "../../infrastructure/inventory.repository";
 import { applyReturnRestock } from "../../application/return-restock.use-case";
+import { installLotCostAdmissionFixture } from "../fixtures/lot-cost-admission.fixture";
+import { createReturnsService } from "../../../orders/returns.service";
 import { BuildExecutionRepository } from "../../infrastructure/build-execution.repository";
 import { buildMillsToRoundedCents, normalizeBuildLotCosts } from "../../infrastructure/build.repository";
 import { BreakAssemblyUseCases } from "../../application/break-assembly.use-cases";
@@ -231,7 +233,7 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
   it("rejects missing canonical command identity and rolls back low-level replay or later receipt failure", async () => {
     await open();
     const before = await state();
-    await expect(transaction(client => canonical.pickResources({ ...canonicalAudit, client,
+    await expect(transaction(client => canonical.pickResources({ ...canonicalAudit, client, commandKey: "",
       claimLineId: BigInt(1), resources: [pickResource(1)] }))).rejects.toMatchObject({ code: "CANONICAL_QUANTITY_COMMAND_REQUIRED" });
     await expect(canonical.pickResources({ ...canonicalAudit, client: pool,
       commandKey: "canonical:test:autocommit", claimLineId: BigInt(1), resources: [pickResource(1)] }))
@@ -482,6 +484,7 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
 
   it("restocks an exact return once without direct projection writes", async () => {
     await prepareOperationalMetadata();
+    await installLotCostAdmissionFixture(pool, { returns: true });
     const input = { dispositionItemId: 700, returnCaseId: 701, caseNumber: "RET-701", productVariantId: 101,
       warehouseLocationId: 100, quantity: 2, omsOrderId: 1, wmsOrderId: 1, wmsOrderItemId: 11,
       actor: "operator", notes: "Inspected sellable return", now: new Date(NOW) };
@@ -489,6 +492,80 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
     expect((await transaction(client => applyReturnRestock(drizzle(client, { schema: inventorySchema }), input))).replayed).toBe(true);
     expect((await state()).commands).toBe(2);
     expect((await state()).levels[0].variant_qty).toBe(22);
+  });
+
+  async function activeReturnService() {
+    await prepareCanonicalMetadata();
+    await installLotCostAdmissionFixture(pool, { returns: true });
+    // Portal authorization is independently tested by the Returns module.
+    // These empty relations permit the supported legacy boundary for this
+    // actual journal test; no authorization or physical record is fabricated.
+    await pool.query(`CREATE SCHEMA returns;
+      CREATE TABLE returns.customer_return_authorizations(id integer PRIMARY KEY);
+      CREATE TABLE returns.customer_return_authorization_lines(authorization_id integer,oms_order_line_id bigint);
+      INSERT INTO oms.oms_orders(id,status) VALUES(1,'pending');
+      INSERT INTO oms.oms_order_lines(id,order_id,product_variant_id,sku,quantity,requires_shipping,
+        authority_fulfillable_quantity,wms_materialized_quantity,authorization_status)
+        VALUES(11,1,101,'P5',6,true,6,6,'authorized');`);
+    await open();
+    return createReturnsService(drizzle(pool, { schema: inventorySchema }), undefined, { clock: () => new Date(NOW) });
+  }
+  const activeReturnInput = (condition: "sellable" | "damaged" = "sellable") => ({
+    orderId: 1, warehouseLocationId: 100, userId: "operator", commandKey: `inventory:active-return:${condition}`,
+    items: [{ orderItemId: 11, productVariantId: 101, qty: 1, condition }],
+  });
+
+  it("posts concurrent legacy return retries once under active quantity authority with exact sold mills", async () => {
+    const service = await activeReturnService();
+    const results = await Promise.all([service.processReturn(activeReturnInput()), service.processReturn(activeReturnInput())]);
+    expect(results[0]).toEqual(results[1]);
+    const current = await state();
+    expect(current.commands).toBe(2);
+    expect(current.lots[0]).toMatchObject({ id: 4, qty_on_hand: 20, qty_reserved: 3, qty_picked: 2 });
+    expect(current.lots[1]).toMatchObject({ qty_on_hand: 1 });
+    // jsonb_agg in state() returns JSON numbers, which cannot represent this
+    // fixture's mills. Read the actual persisted bigint as text for cost proof.
+    expect((await pool.query("SELECT total_unit_cost_mills::text AS mills FROM inventory.inventory_lots WHERE id<>4")).rows)
+      .toEqual([{ mills: originalCost.toString() }]);
+    expect(current.levels[0].variant_qty).toBe(21);
+    expect((await pool.query("SELECT source_order_item_cost_id,quantity,wms_order_id,wms_order_item_id FROM inventory.return_cost_allocations")).rows)
+      .toEqual([{ source_order_item_cost_id: 9, quantity: 1, wms_order_id: 1, wms_order_item_id: 11 }]);
+    expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.return_commands")).rows[0].count).toBe(1);
+  });
+
+  it("quarantines only newly returned damaged custody through the active journal and replays the whole command", async () => {
+    const service = await activeReturnService();
+    await service.processReturn(activeReturnInput("damaged"));
+    const accepted = await state();
+    await service.processReturn(activeReturnInput("damaged"));
+    expect(await state()).toEqual(accepted);
+    expect(accepted.commands).toBe(3);
+    expect(accepted.lots[0]).toMatchObject({ id: 4, qty_on_hand: 20, qty_reserved: 3, qty_picked: 2 });
+    expect(accepted.lots[1]).toMatchObject({ qty_on_hand: 0, qty_reserved: 0, qty_picked: 0, status: "depleted" });
+    expect((await pool.query("SELECT qty_consumed FROM inventory.inventory_lots WHERE id<>4")).rows).toEqual([{ qty_consumed: 1 }]);
+    expect(accepted.levels[0].variant_qty).toBe(20);
+    expect((await pool.query("SELECT kind FROM inventory.quantity_commands ORDER BY id")).rows)
+      .toEqual([{ kind: "opening" }, { kind: "return" }, { kind: "adjust" }]);
+  });
+
+  it("rolls back active-journal return, quarantine, costs and allocation if the final command receipt fails", async () => {
+    const service = await activeReturnService();
+    const before = await state();
+    await pool.query(`CREATE FUNCTION inventory.fail_active_return_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'injected return receipt failure'; END $$;
+      CREATE TRIGGER fail_active_return_receipt BEFORE INSERT ON inventory.return_commands
+        FOR EACH ROW EXECUTE FUNCTION inventory.fail_active_return_receipt()`);
+    try {
+      await expect(service.processReturn(activeReturnInput("damaged"))).rejects.toThrow("injected return receipt failure");
+      expect(await state()).toEqual(before);
+      for (const table of ["return_commands", "return_cost_allocations", "lot_cost_contributions", "lot_cost_follow_ups"]) {
+        expect((await pool.query(`SELECT count(*)::integer AS count FROM inventory.${table}`)).rows[0].count).toBe(0);
+      }
+    } finally {
+      await pool.query("DROP TRIGGER fail_active_return_receipt ON inventory.return_commands; DROP FUNCTION inventory.fail_active_return_receipt()");
+    }
+    await service.processReturn(activeReturnInput("damaged"));
+    expect((await state()).commands).toBe(3);
   });
 
   it("corrects SKU identity with preserved cost layers and replays without a second physical movement", async () => {

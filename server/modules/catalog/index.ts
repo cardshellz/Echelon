@@ -10,5 +10,7 @@ export { type IProductStorage, productMethods } from "./catalog.storage";
 import { type IProductStorage, productMethods } from "./catalog.storage";
 export const catalogStorage: IProductStorage = productMethods;
 
+export { readInventoryCostDisplay, type InventoryCostDisplay } from "./inventory-cost-display.reader";
+
 // Service types
 export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "./product-import.service";

@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { cutoverCompositionBaseSql, cutoverCompositionSeedSql, cutoverCompositionChannelSeedSql, cutoverCompositionChannelSeed, cutoverCompositionObserveOnlySeedSql, installCutoverCompositionMigrations, seedCompositionReviewedDryRun } from "../fixtures/inventory-cutover-composition-database.fixture";
+import { installLotCostAdmissionFixture } from "../../../inventory/__tests__/fixtures/lot-cost-admission.fixture";
 import { PostgresInventoryCutoverReconstructionRepository } from "../../infrastructure/inventory-cutover-reconstruction.repository";
 import { captureProposedClaimSupplySnapshotInsideTransaction } from "../../infrastructure/inventory-availability-shadow.repository";
 import { planFreshCutoverClaims } from "../../domain/inventory-cutover-reconstruction-planning";
@@ -531,6 +532,7 @@ dbDescribe.sequential.each([
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl,disposable,cutoverCompositionBaseSql);
     await installCutoverCompositionMigrations(database.pool);
+    await installLotCostAdmissionFixture(database.pool);
     await database.pool.query(readFileSync(resolve(process.cwd(), "migrations/0709_walmart_quantity_admission.sql"), "utf8"));
     await database.pool.query(readFileSync(resolve(process.cwd(), "migrations/0716_inventory_publication_reconciliation.sql"), "utf8"));
     await database.pool.query(cutoverCompositionSeedSql);

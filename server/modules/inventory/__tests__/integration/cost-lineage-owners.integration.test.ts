@@ -65,6 +65,7 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
       CREATE UNIQUE INDEX build_run_replay_identity ON inventory.build_runs(idempotency_key);
     `);
     await pool.query(await readFile(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
+    await pool.query(await readFile(resolve(process.cwd(), "migrations/0725_inventory_cost_admission_evidence.sql"), "utf8"));
     database = drizzle(pool, { schema });
   });
 
@@ -123,6 +124,48 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
     }
   });
 
+  it("moves real stock with missing receipt basis and commits durable accounting follow-up", async () => {
+    await seedLot(101, 5);
+    await pool.query("UPDATE inventory.inventory_lots SET qty_received=0 WHERE id=101");
+    await transfer(3);
+    expect((await pool.query("SELECT qty_received,qty_on_hand FROM inventory.inventory_lots WHERE id=101")).rows)
+      .toEqual([{ qty_received: 0, qty_on_hand: 2 }]);
+    expect((await pool.query("SELECT source_qty,output_qty FROM inventory.lot_cost_contributions")).rows)
+      .toEqual([{ source_qty: 3, output_qty: 3 }]);
+    expect((await pool.query("SELECT inventory_lot_id,related_lot_id,issue_code,recorded_by FROM inventory.lot_cost_follow_ups")).rows)
+      .toEqual([{ inventory_lot_id: 101, related_lot_id: 1, issue_code: "COST_HISTORICAL_BASIS_MISSING", recorded_by: "integration-test" }]);
+    expect((await pool.query("SELECT total_unit_cost_mills,cost_provisional,cost_precision_version FROM inventory.inventory_lots WHERE id=1")).rows)
+      .toEqual([{ total_unit_cost_mills: "125", cost_provisional: 1, cost_precision_version: 1 }]);
+    // No invented original receipt or quantity. A fresh connection can find the
+    // financial obligation after the physical owner's connection is gone.
+    expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.lot_cost_origins")).rows[0].count).toBe(0);
+    await expect(pool.query("DELETE FROM inventory.lot_cost_follow_ups")).rejects.toMatchObject({ code: "55000" });
+  });
+
+  it("rolls back physical work if its missing-cost follow-up cannot be saved", async () => {
+    await seedLot(101, 5);
+    await pool.query("UPDATE inventory.inventory_lots SET qty_received=0 WHERE id=101");
+    await pool.query(`CREATE FUNCTION inventory.fail_test_follow_up() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected follow-up failure'; END $$;
+      CREATE TRIGGER fail_test_follow_up BEFORE INSERT ON inventory.lot_cost_follow_ups FOR EACH ROW EXECUTE FUNCTION inventory.fail_test_follow_up()`);
+    try {
+      await expect(transfer(3)).rejects.toThrow("injected follow-up failure");
+      expect((await pool.query("SELECT id,qty_on_hand FROM inventory.inventory_lots ORDER BY id")).rows)
+        .toEqual([{ id: 101, qty_on_hand: 5 }]);
+      expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.lot_cost_contributions")).rows[0].count).toBe(0);
+    } finally {
+      await pool.query("DROP TRIGGER fail_test_follow_up ON inventory.lot_cost_follow_ups");
+      await pool.query("DROP FUNCTION inventory.fail_test_follow_up()");
+    }
+  });
+
+  it("retains the guard against a conflicting positive historical quantity", async () => {
+    await seedLot(101, 5);
+    await pool.query("UPDATE inventory.inventory_lots SET qty_received=1 WHERE id=101");
+    await expect(transfer(3)).rejects.toMatchObject({ code: "COST_CONTRIBUTION_INTERVAL_INVALID" });
+    expect((await pool.query("SELECT id,qty_on_hand FROM inventory.inventory_lots ORDER BY id")).rows)
+      .toEqual([{ id: 101, qty_on_hand: 5 }]);
+  });
+
   it("waits before reading source costs and copies the cost committed by the preceding graph owner", async () => {
     await seedLot(101, 5);
     const writer = await pool.connect();
@@ -157,8 +200,10 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
     }
   });
 
-  it("records all standard build inputs for every remainder output layer and replays without duplicate edges", async () => {
+  it.each(["confirmed","estimated","unknown"] as const)("preserves %s confidence, all build inputs and remainder layers on replay", async confidence => {
     await seedLot(101, 2, 2); await seedLot(102, 3, 3);
+    await pool.query("UPDATE inventory.inventory_lots SET cost_provisional=$1,cost_source=$2 WHERE id=102",
+      [confidence === "estimated" ? 1 : 0,confidence === "unknown" ? "unresolved" : "purchase_order"]);
     await pool.query(`
       INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty,reserved_qty) VALUES (101,20,5,5);
       INSERT INTO inventory.build_orders(id,system_number,recipe_id,recipe_code,recipe_version,recipe_type,
@@ -189,6 +234,10 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
       { source_lot_id: 102, output_lot_id: output.id, source_qty: 3, output_qty: 4, output_start_qty: index === 0 ? 0 : 1, operation_kind: "build" },
     ]));
     expect((await pool.query("SELECT SUM(total_unit_cost_mills*qty_received)::text AS total FROM inventory.inventory_lots WHERE build_run_id=$1", [result.buildRunId])).rows[0].total).toBe("625");
+    expect((await pool.query("SELECT cost_provisional FROM inventory.inventory_lots WHERE build_run_id=$1 ORDER BY id",[result.buildRunId])).rows)
+      .toEqual(outputs.map(()=>({ cost_provisional: confidence === "confirmed" ? 0 : 1 })));
+    expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.lot_cost_follow_ups")).rows[0].count)
+      .toBe(confidence === "confirmed" ? 0 : outputs.length);
     expect((await repository.executeOrder(command)).alreadyPosted).toBe(true);
     expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.lot_cost_contributions")).rows[0].count).toBe(edges.length);
   });

@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { installLotCostAdmissionFixture } from "../fixtures/lot-cost-admission.fixture";
 import { resolve } from "node:path";
 
 import { config } from "dotenv";
@@ -231,6 +232,7 @@ describeWithDisposableDb.sequential("canonical claim picker-observation PostgreS
       throw new Error("The cost contribution migration fixture boundaries changed.");
     }
     await pool.query(qualify(costMigration.slice(contributionStart, contributionEnd)));
+    await installLotCostAdmissionFixture(pool,{ qualify,cogs: false });
   }, 300_000);
 
   afterAll(async () => {

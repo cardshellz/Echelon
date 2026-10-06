@@ -13,6 +13,7 @@ import { PostgresInventoryAvailabilityActivationRepository } from "../../../inve
 import { acquireInventoryCutoverFenceInsideTransaction } from "../../../inventory-planning/infrastructure/inventory-cutover-admission-fence.repository";
 import { PostgresInventoryQuantityLedger } from "../../infrastructure/quantity-ledger.repository";
 import type { QuantityCommand } from "../../domain/quantity-ledger";
+import { installLotCostAdmissionFixture } from "./lot-cost-admission.fixture";
 
 export const QUANTITY_TEST_TIME = "2026-09-10T16:00:00.000Z";
 
@@ -27,6 +28,7 @@ export async function createQuantityLedgerTestContext(connectionString: string |
     await installCutoverCompositionMigrations(pool);
     await pool.query(cutoverCompositionSeedSql);
     await installCutoverAdmissionFixturePrerequisites(pool);
+    await installLotCostAdmissionFixture(pool);
     // Reduced compatibility fixtures may expose an empty relation, but this
     // fixture must install the actual ledger schema, guards and foreign keys.
     await pool.query("DROP TABLE IF EXISTS inventory.quantity_ledger_opening");
