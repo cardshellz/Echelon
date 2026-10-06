@@ -34,7 +34,8 @@ describe("pick status is forward-only under shipment projection", () => {
     expect(sqlGuards.length).toBe(2);
     // Queue reads no longer run a second in-memory progress/self-heal policy.
     expect(storage).toContain("return db.transaction(tx => reconcileWmsPickingProgress(tx, orderId,");
-    const idx = read("../../../../index.ts");
-    expect(idx).toContain("AND COALESCE(oi.picked_quantity, 0) < COALESCE(oi.quantity, 0)");
+    // The startup zombie repair SQL moved out of index.ts.
+    const zombieRepair = read("../../../orders/zombie-order-repair.ts");
+    expect(zombieRepair).toContain("AND COALESCE(oi.picked_quantity, 0) < COALESCE(oi.quantity, 0)");
   });
 });

@@ -116,6 +116,21 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
       return replay ? { ...replay, replay: true } : { revisionId: await tx.applyReview(review, input, now), replay: false };
     });
   }
+  it("finds the revision an earlier save with the same key wrote, and refuses that key for another change", async () => {
+    const first = await save("replay-lookup");
+    const input: SaveListingPriceInput = { idempotencyKey: "replay-lookup", priceCents: 1299, expectedRevisionId: null };
+    const requestHash = createHash("sha256").update(JSON.stringify({ ...input, variant: 101, store: 22 })).digest("hex");
+    const lookup = (key: string, hash: string) => repository.execute(
+      { memberId: "member-1", storeConnectionId: 22, productVariantId: 101, idempotencyKey: key },
+      (tx) => tx.loadReplay({ idempotencyKey: key, requestHash: hash }));
+    await expect(lookup("replay-lookup", requestHash)).resolves.toEqual(first.saved);
+    await expect(lookup("replay-lookup", "f".repeat(64))).rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT" });
+    await expect(lookup("a-new-key", requestHash)).resolves.toBeNull();
+    // Looking up writes nothing.
+    const after = await state();
+    expect(after.revisions).toHaveLength(1);
+    expect(after.audits).toHaveLength(1);
+  });
   it("adopts 1,000 rule-owned listings atomically using the real migration and repository", async () => {
     await pool!.query(qualify("INSERT INTO catalog.product_variants (id, product_id) SELECT x,7 FROM generate_series(103,1100) x ON CONFLICT DO NOTHING"));
     const review = ruleReview(Array.from({ length: 1000 }, (_, index) => index + 101));

@@ -859,7 +859,8 @@ function DropshipPortalCatalogPage() {
             )}
 
             {selectedStoreConnectionIdNumber > 0 && <DropshipPricingRulesPanel storeConnectionId={selectedStoreConnectionIdNumber}
-              storeName={selectedStoreName} onConfigurationChange={() => invalidateListingPreview(true)} />}
+              storeName={selectedStoreName} onConfigurationChange={() => invalidateListingPreview(true)}
+              priceSaveCallbacks={priceSaveCallbacks} />}
             {selectedStoreConnectionIdNumber > 0 && <DropshipContentTemplatesPanel storeConnectionId={selectedStoreConnectionIdNumber}
               storeName={selectedStoreName} {...priceSaveCallbacks} />}
           </>
