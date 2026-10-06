@@ -54,7 +54,7 @@ export function ListingUpdateVerification({
           ) : (
             <p className="text-amber-800 dark:text-amber-300">
               The product type is not confirmed. Walmart still reports a different
-              type. Use Edit listing to review and resubmit the product content.
+              type. Check the item again before sending another update.
             </p>
           )}
           <p className="text-xs text-muted-foreground">

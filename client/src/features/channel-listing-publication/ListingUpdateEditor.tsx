@@ -142,11 +142,14 @@ function UpdateForm({
       ),
     retry: false,
   });
-  async function reviewChanges(resubmitContent = false) {
+  async function reviewChanges() {
     setBusy(true);
     setError("");
     try {
-      const changes = resubmitContent
+      // The suggested type is already prefilled from the previous submission.
+      // Compare with Walmart's readback, not that suggestion, so the primary
+      // action cannot reduce a category correction to a price-only feed.
+      const changes = context.current.productType !== fields.productType
         ? listingUpdateContentResubmission(
             original.current,
             fields,
@@ -155,9 +158,7 @@ function UpdateForm({
         : listingUpdateChanges(original.current, fields);
       if (!hasListingUpdateChanges(changes)) {
         throw new Error(
-          context.current.productType !== fields.productType
-            ? "No fields changed. To resend the filled product details under the selected type, use Review content resubmission."
-            : "No fields changed. Edit at least one field before reviewing.",
+          "No fields changed. Edit at least one field before reviewing.",
         );
       }
       const result = await publicationRequest(
@@ -369,21 +370,10 @@ function UpdateForm({
                       <strong>{context.current.productType || "Not returned"}</strong>.
                     </p>
                     <p>
-                      Resubmit the filled title, description, brand, images and
-                      supported product details using the selected type. You can
-                      review every field before sending.
+                      Review changes will include the filled title, description,
+                      brand, images and supported product details using the
+                      selected type. You can review every field before sending.
                     </p>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      disabled={
-                        busy || Boolean(pending) || !fields.productType ||
-                        requirements.isFetching || !requirements.data
-                      }
-                      onClick={() => void reviewChanges(true)}
-                    >
-                      Review content resubmission
-                    </Button>
                   </div>
                 )}
                 <p className="text-xs text-muted-foreground">

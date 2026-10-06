@@ -90,6 +90,25 @@ function setup() {
 }
 
 describe("Walmart existing-listing maintenance", () => {
+  it.each([{ priceCents: 2498 }, { attributes: { Orderable: { ShippingWeight: 3 } } }])(
+    "blocks older reviews without product content when Walmart reports a different type: %j",
+    async (changes) => {
+      const { provider, account, record, api } = setup();
+      const source = { ...updateSource, productType: "default" };
+      const observed = await api.observe();
+      api.observe.mockResolvedValue({ ...observed, productType: "default" });
+      const command = { ...record.intent.command, changes };
+      const prepared = await provider.prepare(account, source, command);
+      expect(prepared.issues).toEqual([expect.objectContaining({ code: "LISTING_UPDATE_CONTENT_REQUIRED" })]);
+      const beforeSend = vi.fn();
+      await expect(provider.send({
+        ...record.intent, source, command,
+        prepared: { ...prepared, issues: [] },
+      }, testId(4), beforeSend)).rejects.toMatchObject({ effect: "not_sent" });
+      expect(beforeSend).not.toHaveBeenCalled();
+      expect(api.submitMaintenance).not.toHaveBeenCalled();
+    },
+  );
   it("blocks empty category corrections even though Walmart's raw schema accepts them", async () => {
     const { provider, account, record } = setup();
     const prepared = await provider.prepare(

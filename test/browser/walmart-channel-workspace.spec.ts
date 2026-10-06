@@ -107,9 +107,7 @@ test("existing listing edits show the actual category and edit shipping while pr
   await page.getByRole("button", { name: "Edit listing CARD-P5", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("Walmart currently reports:", { exact: false })).toContainText("default");
-  await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
-  await expect(dialog.getByRole("alert")).toContainText("No fields changed.");
-  expect(state.updates.writes).toEqual([]);
+  await expect(dialog.getByRole("button", { name: "Review content resubmission", exact: true })).toHaveCount(0);
   await dialog.getByRole("textbox", { name: "Search listing fields", exact: true }).fill("Shipping Weight");
   await dialog.getByRole("spinbutton", { name: /^Shipping Weight \(lbs\)/ }).fill("3");
   await expect(dialog.getByRole("button", { name: "Review changes", exact: true })).toBeInViewport({ ratio: 0.99 });
@@ -127,8 +125,18 @@ test("accepted feeds show category mismatch and recheck the item without another
   state.updates.reportedProductType = "default";
   await page.getByRole("button", { name: "Edit listing CARD-P5", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await dialog.getByLabel("Walmart price (USD)", { exact: true }).fill("27.49");
+  await dialog.getByLabel("Walmart price (USD)", { exact: true }).fill("24.98");
   await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
+  // Regression: a one-cent edit with the prefilled correct type previously sent
+  // only price and an empty Visible object while Walmart still reported default.
+  expect(state.updates.reviews[0].changes).toEqual({
+    priceCents: 2498,
+    title: "55PT Toploader Essentials Clear+ Easy Glide Combo Pack",
+    description: "A previous description",
+    brand: "Shellz",
+    images: ["https://example.com/front.jpg", "https://example.com/back.jpg"],
+    attributes: { Visible: { pieceCount: 200, keyFeatures: ["Clear sleeves", "Archival material", "Pack of 100"] } },
+  });
   await dialog.getByRole("button", { name: "Send changes to Walmart", exact: true }).click();
   const region = page.getByRole("region", { name: "Listing changes", exact: true });
   await region.getByRole("button", { name: "Check Walmart status", exact: true }).click();
@@ -158,7 +166,7 @@ test("existing listing edits resubmit retained content under the selected type w
   state.updates.reportedProductType = "default";
   await page.getByRole("button", { name: "Edit listing CARD-P5", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await dialog.getByRole("button", { name: "Review content resubmission", exact: true }).click();
+  await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
   expect(state.updates.reviews[0].changes).toEqual({
     title: "55PT Toploader Essentials Clear+ Easy Glide Combo Pack",
     description: "A previous description",

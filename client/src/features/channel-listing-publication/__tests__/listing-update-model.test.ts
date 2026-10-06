@@ -4,7 +4,7 @@ import {
   listingUpdateChanges,
   listingUpdateContentResubmission,
 } from "../listing-update-model";
-import { hasListingUpdateChanges, type ListingUpdateContext } from "@shared/types/channel-listing-update";
+import { hasListingUpdateChanges, hasListingUpdateProductContent, type ListingUpdateContext } from "@shared/types/channel-listing-update";
 
 const context: ListingUpdateContext = {
   current: {
@@ -38,6 +38,12 @@ const context: ListingUpdateContext = {
   },
 };
 describe("existing-listing edit patches", () => {
+  it("distinguishes product content from a price or shipping update", () => {
+    expect(hasListingUpdateProductContent({ priceCents: 2498 })).toBe(false);
+    expect(hasListingUpdateProductContent({ attributes: { Orderable: { ShippingWeight: 3 }, Visible: {} } })).toBe(false);
+    expect(hasListingUpdateProductContent({ title: "Card sleeves" })).toBe(true);
+    expect(hasListingUpdateProductContent({ attributes: { Visible: { pieceCount: 200 } } })).toBe(true);
+  });
   it("resubmits the prefilled content for an unassigned Walmart type without resending price or creation-only fields", () => {
     const original = initialListingUpdateFields({
       ...context,
