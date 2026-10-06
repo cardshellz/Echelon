@@ -296,7 +296,7 @@ export default function DropshipPortalCatalog() {
     queryFn: () => fetchJson<DropshipEbayStoreCategoryResponse>(
       `/api/dropship/ebay/store-categories/${selectedStoreConnectionIdNumber}`,
     ),
-    // Only the Set how it lists step shows them; other steps never ask eBay for them.
+    // Only the Listing settings step shows them; other steps never ask eBay for them.
     enabled: selectedStoreConnection?.platform === "ebay" && activeStep === "setup",
     staleTime: 60_000,
   });
@@ -650,7 +650,7 @@ export default function DropshipPortalCatalog() {
             Catalog
           </h1>
           <p className="mt-1 text-sm text-zinc-500">
-            Choose what to sell, set how it lists, then publish it to your eBay store.
+            Choose what to sell, review your listing settings, then publish it to your eBay store.
           </p>
         </div>
 

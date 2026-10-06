@@ -107,7 +107,7 @@ async function setup(page: Page, initial: Partial<StubState> = {}) {
       return route.fulfill({ json: onboardingJson(state) });
     }
     if (path === "/api/dropship/settings" && method === "GET") return route.fulfill({ json: settingsJson(state) });
-    // The step rail ticks Set how it lists from the store's eBay setup.
+    // The step rail ticks Listing settings from the store's eBay setup.
     if (path === `/api/dropship/ebay/listing-setup/${STORE_ID}` && method === "GET") {
       return route.fulfill({ json: { storeConnectionId: STORE_ID, marketplaceId: "EBAY_US", complete: true, missingFields: [] } });
     }

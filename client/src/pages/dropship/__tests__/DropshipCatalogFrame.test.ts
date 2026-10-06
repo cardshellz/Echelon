@@ -45,7 +45,7 @@ describe("catalog step rail", () => {
     expect(markup.match(/aria-current="step"/g)).toHaveLength(1);
     expect(markup).toMatch(/aria-current="step"[^>]*data-testid="catalog-step-setup"/);
     expect(markup).toContain("1 · Choose what to sell");
-    expect(markup).toContain("2 · Set how it lists");
+    expect(markup).toContain("2 · Listing settings");
     expect(markup).toContain("3 · Publish");
     // Status appears with its own page (design PR 10); the rail never links to an empty one.
     expect(markup).not.toContain("Status");
@@ -84,18 +84,18 @@ describe("catalog action bar", () => {
   it("links to the next step", () => {
     const markup = render(React.createElement(CatalogActionBar, {
       summary: "3 selected",
-      next: { label: "Continue to Set how it lists", href: "/dropship-portal/catalog/setup", disabled: false },
+      next: { label: "Next: Listing settings", href: "/dropship-portal/catalog/setup", disabled: false },
     }));
     expect(markup).toContain("3 selected");
-    expect(markup).toMatch(/<a [^>]*href="\/dropship-portal\/catalog\/setup"[^>]*>Continue to Set how it lists/);
+    expect(markup).toMatch(/<a [^>]*href="\/dropship-portal\/catalog\/setup"[^>]*>Next: Listing settings/);
   });
 
   it("disables the way forward without linking anywhere, and can offer none", () => {
     const disabled = render(React.createElement(CatalogActionBar, {
       summary: "0 selected",
-      next: { label: "Continue to Set how it lists", href: "/dropship-portal/catalog/setup", disabled: true },
+      next: { label: "Next: Listing settings", href: "/dropship-portal/catalog/setup", disabled: true },
     }));
-    expect(disabled).toMatch(/<button[^>]* disabled=""[^>]*>Continue to Set how it lists/);
+    expect(disabled).toMatch(/<button[^>]* disabled=""[^>]*>Next: Listing settings/);
     expect(disabled).not.toContain("href=");
     const none = render(React.createElement(CatalogActionBar, { summary: "3 selected · publishing to Marz Cards", next: null }));
     expect(none).toContain("3 selected · publishing to Marz Cards");

@@ -11,7 +11,7 @@ Evidence note. File and line citations were produced by the mapping pass. In thi
 
 ### Goals
 
-1. A vendor can pick what to sell, set how it lists, and publish, without reading instructions. One step on screen at a time. One primary button per step.
+1. A vendor can pick what to sell, review listing settings, and publish, without reading instructions. One step on screen at a time. One primary button per step.
 2. Every setting (price, eBay category, description, policies, store shelf) is set the same way: pick a scope, set values, save once. Scopes: one listing, a checked set, a catalog category, a product line, a product, or all listings.
 3. The page works at 10,000 selected SKUs. The browser never holds the whole selection. Counts come from the server. 10,000 selected listings per vendor is a hard launch cap: `loadSelectedCandidates` refuses more (`dropship-selected-catalog.ts:35-39`), and the design says what the UI does above it (section 8).
 4. The vendor eBay category rules layer ships as part of this: store default, rules by scope, first match wins, verified leaf categories, Card Shellz mapping as the base default. The base default does not depend on the Card Shellz listing toggle. A changed category never fails a queue or a push: a listing publishes the category the rules name when it is sent, or the one it was queued with when they name none (owner decision).
@@ -56,7 +56,7 @@ Evidence note. File and line citations were produced by the mapping pass. In thi
 |---|---|---|
 | `/catalog` | redirect | PR2 (built): always to `/catalog/choose`, replacing the address; an unknown step does the same. PR10 (when the runs list and listing status endpoint exist): to `/catalog/status` when the store has any listing row or push run, else to `/catalog/choose`. |
 | `/catalog/choose` | 1 · Choose what to sell | Facet tree, browse table, checked set, bulk bar, "Your rules". Vendor-wide (selection rules key on `vendorId`). |
-| `/catalog/setup` | 2 · Set how it lists | Per store. Store defaults card. Rules by group table. Exceptions list. Store shelves (optional). Linked from Settings → Stores too, so a vendor can find it later. |
+| `/catalog/setup` | 2 · Listing settings | Per store. Store defaults card. Rules by group table. Exceptions list. Store shelves (optional). Linked from Settings → Stores too, so a vendor can find it later. |
 | `/catalog/publish` | 3 · Publish | Per store. Readiness tiles, "Needs attention" groups, spot-check table, Publish button. |
 | `/catalog/status` | Status | Per store. Publish runs, "Your listings on <store>" table, Fix links. Arrives with its page in PR10; until then the rail has no Status entry, so it never links to an empty page. |
 
@@ -72,13 +72,13 @@ Sticky under the shell header. Three steps, plus Status once its page exists (PR
 
 The store selector sits in the rail, once. It auto-picks the first launch-ready eBay connection (`listLaunchReadyStoreConnections`). The last choice is remembered per vendor in `localStorage` as a convenience only.
 
-As built (PR2): every step is one page (`/catalog/:step?`), so the selection, the preview and a push in progress survive moving between steps and the browser's Back button walks them. The step model is `client/src/lib/dropship-catalog-steps.ts`; the rail and bar are `client/src/pages/dropship/catalog/`. The remembered choice is keyed by member (`dropship.catalog.store:<memberId>`) and re-checked on every render: a remembered store that is gone, not ready or not eBay falls back to the first eBay store. A launch-ready store on another platform is listed as "Not supported yet" and cannot be chosen; with no eBay store the rail says "No eBay store ready" and Set how it lists and Publish say what to do. Narrow screens show short step names ("Choose", "Set up", "Publish") so all three fit. eBay Store categories are read only on Set how it lists, the only step that shows them.
+As built (PR2): every step is one page (`/catalog/:step?`), so the selection, the preview and a push in progress survive moving between steps and the browser's Back button walks them. The step model is `client/src/lib/dropship-catalog-steps.ts`; the rail and bar are `client/src/pages/dropship/catalog/`. The remembered choice is keyed by member (`dropship.catalog.store:<memberId>`) and re-checked on every render: a remembered store that is gone, not ready or not eBay falls back to the first eBay store. A launch-ready store on another platform is listed as "Not supported yet" and cannot be chosen; with no eBay store the rail says "No eBay store ready" and Listing settings and Publish say what to do. Narrow screens show short step names ("Choose", "Set up", "Publish") so all three fit. eBay Store categories are read only on Listing settings, the only step that shows them.
 
 ### Sticky action bar
 
 Bottom of every step. Left: context summary. Right: the one primary button for the step. Action errors render here, next to the button. Access blocks (`describeListingAccess`) render here with `ListingAccessLinkButton`.
 
-As built (PR2): Choose offers "Continue to Set how it lists" (off until something is selected); Set how it lists offers "Continue to Publish". Publish's preview and queue buttons, errors and access blocks stay in its card until readiness moves into the bar (PR9).
+As built (PR2, renamed in #1684): Choose offers "Next: Listing settings" (off until something is selected); Listing settings offers "Next: Publish". Publish's preview and queue buttons, errors and access blocks stay in its card until readiness moves into the bar (PR9).
 
 ### Error rule (two surfaces)
 
@@ -99,7 +99,7 @@ An error shows inline next to the control that failed, plus one toast with Retry
 │ Card Shellz · Dropship portal      [Dashboard] [Catalog] [Cost changes] [Orders] …    │
 ├──────────────────────────────────────────────────────────────────────────────────────┤
 │ Catalog                                                    Store: [ MyShop (eBay) ▾ ] │
-│ ● 1 Choose what to sell ──── ✓ 2 Set how it lists ──── ○ 3 Publish ──── ▸ Status      │
+│ ● 1 Choose what to sell ──── ✓ 2 Listing settings ──── ○ 3 Publish ──── ▸ Status      │
 │   312 selected                setup complete             not checked yet              │
 ├──────────────────────────────────────────────────────────────────────────────────────┤
 │ STEP 1 · Choose what to sell      Selection applies to all your stores.               │
@@ -114,7 +114,7 @@ An error shows inline next to the control that failed, plus one toast with Retry
 │ │ ▸ Your rules (4)           │ │ 1–200 of 1,433                         [Load more] │ │
 │ └────────────────────────────┘ └────────────────────────────────────────────────────┘ │
 ├──────────────────────────────────────────────────────────────────────────────────────┤
-│ 312 selected · 2 exceptions                            [ Continue to Set how it lists ] │
+│ 312 selected · 2 exceptions                               [ Next: Listing settings ] │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 Legend  ● selected via rule   ○ not selected   ✕ exception (excluded)   ⚠ selected, tier not on sale
         ☑ whole group selected   ◪ part of group selected (118 of 311)   ☐ none
@@ -156,16 +156,16 @@ First run (nothing selected):
 │ Nothing selected yet. Tick a category on the left to sell everything in it, or   │
 │ check single rows on the right.                                                  │
 ├──────────────────────────────────────────────────────────────────────────────────┤
-│ 0 selected                                        [ Continue ] (disabled)        │
+│ 0 selected                                 [ Next: Listing settings ] (disabled) │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Above 10,000 selected the bar reads "10,412 selected · over the 10,000 limit — rules and publishing are paused until you reduce it" and Continue stays enabled so the vendor can see Step 2's explanation.
+Above 10,000 selected the bar reads "10,412 selected · over the 10,000 limit — rules and publishing are paused until you reduce it" and Next stays enabled so the vendor can see Step 2's explanation.
 
-### 4.2 Step 2 · Set how it lists
+### 4.2 Step 2 · Listing settings
 
 ```
-┌ STEP 2 · Set how it lists · MyShop (eBay) ───────────────────────────────────────────┐
+┌ STEP 2 · Listing settings · MyShop (eBay) ───────────────────────────────────────────┐
 │ ┌ Store defaults — used unless a rule below says otherwise ────────────────────────┐ │
 │ │ ✓ Policies       Fulfillment: Standard · Return: 30 days · Payment: Managed [Change]│
 │ │ ✓ Price          Product cost + 35 %, round to .99                         [Change]│
@@ -351,7 +351,7 @@ Count pills are clickable filters. The seven status pills partition the ten list
 |---|---|---|---|
 | 1 | Step 1: tick "Envelopes (300)" | 1 | 0 |
 | 2 | Bulk bar: "Sell these 300" | 1 | `POST selection-rules/changes` (1) + refetch catalog page and rules (2) |
-| 3 | "Continue to Set how it lists" | 1 | Step 2 profile GETs, ≤4, cached; rules impact (1) |
+| 3 | "Next: Listing settings" | 1 | Step 2 profile GETs, ≤4, cached; rules impact (1) |
 | 4 | "+ Add rule" | 1 | 0 |
 | 5 | Applies to: Category → pick Envelopes | 1 | `GET …/targets` (1, debounced 500 ms) |
 | 6 | Price: "Markup", type 30 | 1 + 1 typed | 0 |
