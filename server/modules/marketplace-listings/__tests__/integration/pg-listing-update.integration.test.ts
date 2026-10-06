@@ -37,7 +37,7 @@ const fixtureSql = `CREATE SCHEMA channels; CREATE SCHEMA catalog;
       // Real migrations, not reduced persistence substitutes.
       for (const file of [
         "0707_channel_listing_publication.sql",
-      "0723_channel_listing_updates.sql",
+        "0724_channel_listing_updates.sql",
       ]) {
         await database.pool.query(
           readFileSync(resolve("migrations", file), "utf8"),

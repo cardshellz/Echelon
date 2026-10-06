@@ -60,7 +60,7 @@ export function ListingUpdateActivity({
   }
   if (!query.error && !query.data?.length) return null;
   return (
-    <Card>
+    <Card role="region" aria-label="Listing changes">
       <CardHeader>
         <CardTitle role="heading" aria-level={3}>
           Listing changes

@@ -63,7 +63,21 @@ async function setup(page: Page, options: { readOnly?: boolean; connected?: bool
 }
 test("existing listing edits review only changed prices and check the maintenance feed status", async ({ page }, info) => {
   const state = await setup(page, { remoteRows: [{ ...listing("CARD-P5"), mappingStatus: "linked", publishedStatus: "SYSTEM_PROBLEM" }] });
-  await page.getByRole("button", { name: "Edit listing CARD-P5", exact: true }).click();
+  state.publication.operations = [listingOperationSchema.parse({
+    id: "22222222-2222-4222-8222-222222222222", channelId: 77, state: "processing", submissionId: "feed-1",
+    items: [{ variantId: 11, sku: "CARD-P5", priceCents: 2499, state: "accepted", externalProductId: "WPID-CARD-P5",
+      error: "Waiting for Walmart to finish item activation.", stockState: "waiting_for_item" }],
+    createdAt: "2026-09-21T12:00:00.000Z", updatedAt: "2026-09-21T12:00:00.000Z", error: null,
+  })];
+  await page.reload();
+  const submittedRow = page.getByRole("row").filter({ hasText: "CARD-P5" });
+  await expect(submittedRow.getByText("SYSTEM_PROBLEM", { exact: true })).toBeVisible();
+  await expect(submittedRow.getByText("Accepted · verification pending", { exact: true })).toBeVisible();
+  await expect(submittedRow.getByText("Linked", { exact: true })).toBeVisible();
+  await expect(submittedRow.getByRole("button", { name: "View activity", exact: true })).toBeVisible();
+  await expect(submittedRow.getByRole("button", { name: "Edit listing CARD-P5", exact: true })).toBeVisible();
+  await page.screenshot({ path: info.outputPath("accepted-linked-listing-edit-action.png"), fullPage: true });
+  await submittedRow.getByRole("button", { name: "Edit listing CARD-P5", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("heading", { name: "Edit Walmart listing", exact: true })).toBeVisible();
   await expect(dialog.getByLabel("Walmart title", { exact: true })).toHaveValue("55PT Toploader Essentials Clear+ Easy Glide Combo Pack");
@@ -79,7 +93,7 @@ test("existing listing edits review only changed prices and check the maintenanc
   await dialog.getByRole("button", { name: "Send changes to Walmart", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Listing changes", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Check Walmart status", exact: true }).click();
+  await page.getByRole("region", { name: "Listing changes", exact: true }).getByRole("button", { name: "Check Walmart status", exact: true }).click();
   await expect(page.getByText("Walmart accepted", { exact: true })).toBeVisible();
   expect(state.updates.writes.at(-1)?.path).toMatch(/\/status$/);
   expect(state.publication.writes).toEqual([]); expect(state.membership.writes).toEqual([]);
