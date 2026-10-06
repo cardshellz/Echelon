@@ -238,9 +238,9 @@ export const orderEditStatusCopy: Record<
       "Review the reported error and check status before starting another edit.",
   },
   expired: {
-    title: "Quote expired",
+    title: "Edit closed",
     description:
-      "This quote can no longer be applied. Check status before preparing another edit.",
+      "This unsubmitted edit is closed. No changes were applied by this edit.",
   },
 };
 

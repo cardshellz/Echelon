@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { presentOrderEditSettlement } from "../domain/order-edit-financials";
 import {
+  unchangedFulfilledOrderEdit,
+  unchangedOrderEditSnapshot,
+} from "./order-edit-evidence";
+import {
   orderEditOperationSchema,
   orderEditOrderSchema,
   orderEditQuoteInputSchema,
@@ -756,7 +760,13 @@ export class OrderEditService {
     record: OrderEditRecord,
     actorId: string | null,
   ): Promise<OrderEditOperation> {
-    if (record.commitStartedAt)
+    if (
+      record.commitStartedAt ||
+      record.commitKey ||
+      record.refundIntent ||
+      record.refundStartedAt ||
+      record.recoveryStartedAt
+    )
       throw new OrderEditError(
         "ORDER_EDIT_ALREADY_SUBMITTED",
         "This edit has already been submitted. Check its status.",
@@ -766,27 +776,32 @@ export class OrderEditService {
       record.connectionId,
       record.baseline.orderId,
     );
-    if (current.fingerprint !== record.baseline.fingerprint)
+    const fulfilled = unchangedFulfilledOrderEdit(current, record.baseline);
+    if (!fulfilled && !unchangedOrderEditSnapshot(current, record.baseline))
       return this.present(
         await this.review(
           record,
           actorId,
           new OrderEditError(
             "ORDER_EDIT_ABANDON_CONFLICT",
-            "The order changed while it was held. Staff review is required.",
+            "The order's items, payment, or fulfillment changed. Cancellation needs verification before its edit hold can be cleared.",
           ),
         ),
       );
-    const proof = await this.warehouse.releaseUnchanged(
-      record.omsOrderId,
-      record.id,
-    );
+    const proof = fulfilled
+      ? await this.warehouse.releaseFulfilledUnsubmitted(
+          record.omsOrderId,
+          record.id,
+        )
+      : await this.warehouse.releaseUnchanged(record.omsOrderId, record.id);
     return this.present(
       await this.update(
         record,
-        { status: "expired", error: null },
+        { status: "expired", error: null, lastSnapshot: current },
         actorId,
-        "uncommitted_edit_abandoned",
+        fulfilled
+          ? "uncommitted_edit_abandoned_after_fulfillment"
+          : "uncommitted_edit_abandoned",
         proof,
       ),
     );
@@ -944,7 +959,13 @@ export class OrderEditService {
         "Private staff testing. Customer access is disabled.",
         "Shipping charges stay unchanged in this pilot; review the revised order before applying it.",
       ],
-      canAbandon: !record.commitStartedAt && !terminal.has(record.status),
+      canAbandon:
+        !record.commitStartedAt &&
+        !record.commitKey &&
+        !record.refundIntent &&
+        !record.refundStartedAt &&
+        !record.recoveryStartedAt &&
+        !terminal.has(record.status),
       status: record.status,
       expiresAt: record.commitStartedAt
         ? record.paymentDeadline

@@ -150,6 +150,22 @@ function record(): OrderEditRecord {
   };
 }
 
+function fulfilledSnapshot(): OrderEditSnapshot {
+  const original = snapshot();
+  return {
+    ...original,
+    closed: true,
+    editable: false,
+    updatedAt: "2026-10-06T00:00:00.000Z",
+    fingerprint: "e".repeat(64),
+    lines: original.lines.map((line) => ({
+      ...line,
+      unfulfilledQuantity: 0,
+      totalCents: 0,
+    })),
+  };
+}
+
 function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection {
   return {
     schemaVersion: "inventory_availability_reservation_status_v1",
@@ -282,6 +298,233 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         reservation,
       };
     }
+    async function fulfillHeldOrder() {
+      await database.pool.query("UPDATE wms.orders SET on_hold=1 WHERE id=10");
+      await gateway.acquire(20, OP);
+      await database.pool.query(`
+        UPDATE oms.oms_orders SET status='shipped' WHERE id=20;
+        UPDATE oms.oms_order_lines SET authority_fulfillable_quantity=0 WHERE id=30;
+        UPDATE wms.orders SET warehouse_status='shipped',picked_count=1 WHERE id=10;
+        UPDATE wms.order_items SET status='completed',picked_quantity=1,fulfilled_quantity=1 WHERE id=40;
+        INSERT INTO wms.outbound_shipments(id,order_id,status,shipping_engine,shipstation_order_id,engine_order_ref)
+          VALUES(1,10,'queued','shipstation',55,'55');`);
+      await database.pool.query(
+        "INSERT INTO oms.order_edit_provider_holds(operation_id,shipment_id,provider_order_id,was_held) VALUES($1,1,55,false)",
+        [OP],
+      );
+      const provider = vi.fn(async () => {});
+      const synchronize = vi.fn();
+      return {
+        gateway: new OrderEditWarehouseGateway(
+          database.pool,
+          { isConfigured: () => true, synchronizeOrderEditShipment: provider },
+          synchronize,
+        ),
+        provider,
+        synchronize,
+      };
+    }
+    async function physicalState() {
+      const tables = [
+        "oms.oms_orders",
+        "oms.oms_order_lines",
+        "wms.orders",
+        "wms.order_items",
+        "wms.outbound_shipments",
+        "inventory.availability_claims",
+        "inventory.availability_claim_lines",
+        "inventory.availability_claim_resources",
+        "inventory.availability_claim_lot_allocations",
+      ];
+      return Promise.all(
+        tables.map(
+          async (table) =>
+            (await database.pool.query(`SELECT * FROM ${table} ORDER BY id`))
+              .rows,
+        ),
+      );
+    }
+    it("closes a fully fulfilled unsubmitted edit atomically without changing physical or financial records", async () => {
+      const fulfilled = await fulfillHeldOrder();
+      const before = await physicalState();
+      const proof = await fulfilled.gateway.releaseFulfilledUnsubmitted(20, OP);
+      expect(proof).toMatchObject({
+        fulfilledCancellation: true,
+        wmsOrderIds: [10],
+        shipmentIds: [1],
+      });
+      expect(fulfilled.provider).toHaveBeenCalledExactlyOnceWith({
+        shipmentId: 1,
+        operationId: OP,
+        mode: "verify_shipped",
+      });
+      expect(fulfilled.synchronize).not.toHaveBeenCalled();
+      expect(await physicalState()).toEqual(before);
+      const store = new PostgresOrderEditStore(database.pool);
+      const after = {
+        ...record(),
+        status: "expired" as const,
+        version: 1,
+        lastSnapshot: fulfilledSnapshot(),
+      };
+      await store.save(
+        after,
+        0,
+        "staff",
+        "uncommitted_edit_abandoned_after_fulfillment",
+        proof,
+      );
+      const expected = before.map((rows, index) =>
+        index === 2
+          ? rows.map((row) => ({ ...row, order_edit_operation_id: null }))
+          : rows,
+      );
+      expect(await physicalState()).toEqual(expected);
+      expect(await store.get(OP)).toEqual(after);
+      expect(
+        (
+          await database.pool.query(
+            "SELECT action,before_state,after_state FROM oms.order_edit_events WHERE action='uncommitted_edit_abandoned_after_fulfillment'",
+          )
+        ).rows,
+      ).toEqual([
+        {
+          action: "uncommitted_edit_abandoned_after_fulfillment",
+          before_state: record(),
+          after_state: after,
+        },
+      ]);
+      await expect(
+        store.save(after, 0, "staff", "duplicate", proof),
+      ).rejects.toMatchObject({ code: "ORDER_EDIT_CONCURRENT_CHANGE" });
+    });
+    it.each([
+      "UPDATE wms.order_items SET fulfilled_quantity=0 WHERE id=40",
+      "UPDATE oms.oms_order_lines SET authority_fulfillable_quantity=1 WHERE id=30",
+      "UPDATE oms.oms_order_lines SET paid_quantity=2 WHERE id=30",
+      "UPDATE oms.oms_orders SET financial_status='partially_paid' WHERE id=20",
+      "UPDATE oms.oms_order_lines SET paid_quantity=2,quantity=2 WHERE id=30; UPDATE wms.order_items SET quantity=2,fulfilled_quantity=2,picked_quantity=2 WHERE id=40",
+      "UPDATE oms.oms_order_lines SET external_line_item_id='999' WHERE id=30",
+    ])(
+      "retains the edit ownership when completed fulfillment is not proven: %s",
+      async (change) => {
+        const fulfilled = await fulfillHeldOrder();
+        await database.pool.query(change);
+        const before = await physicalState();
+        await expect(
+          fulfilled.gateway.releaseFulfilledUnsubmitted(20, OP),
+        ).rejects.toMatchObject({
+          code: "ORDER_EDIT_FULFILLMENT_NOT_COMPLETE",
+        });
+        expect(fulfilled.provider).not.toHaveBeenCalled();
+        expect(await physicalState()).toEqual(before);
+        expect(
+          (await new PostgresOrderEditStore(database.pool).get(OP)).status,
+        ).toBe("preparing");
+      },
+    );
+    it.each([
+      "commitStartedAt",
+      "commitKey",
+      "refundIntent",
+      "refundStartedAt",
+      "recoveryStartedAt",
+    ])(
+      "rejects fulfilled cleanup if %s records a financial attempt",
+      async (field) => {
+        const fulfilled = await fulfillHeldOrder();
+        await database.pool.query(
+          "UPDATE oms.order_edit_operations SET document=jsonb_set(document,ARRAY[$2::text],to_jsonb($3::text)) WHERE id=$1",
+          [OP, field, "persisted-intent"],
+        );
+        const before = await physicalState();
+        await expect(
+          fulfilled.gateway.releaseFulfilledUnsubmitted(20, OP),
+        ).rejects.toMatchObject({ code: "ORDER_EDIT_ALREADY_SUBMITTED" });
+        expect(fulfilled.provider).not.toHaveBeenCalled();
+        expect(await physicalState()).toEqual(before);
+      },
+    );
+    it("retains ownership on failed provider verification and rejects a new partition before terminal save", async () => {
+      const fulfilled = await fulfillHeldOrder();
+      fulfilled.provider.mockRejectedValueOnce(
+        new Error("provider unavailable"),
+      );
+      const before = await physicalState();
+      await expect(
+        fulfilled.gateway.releaseFulfilledUnsubmitted(20, OP),
+      ).rejects.toThrow("provider unavailable");
+      expect(await physicalState()).toEqual(before);
+      const proof = await fulfilled.gateway.releaseFulfilledUnsubmitted(20, OP);
+      await database.pool.query(
+        "INSERT INTO wms.orders(id,source,oms_fulfillment_order_id,channel_id,external_order_id) VALUES(11,'oms','20',36,'1')",
+      );
+      const store = new PostgresOrderEditStore(database.pool);
+      await expect(
+        store.save(
+          {
+            ...record(),
+            status: "expired",
+            version: 1,
+            lastSnapshot: fulfilledSnapshot(),
+          },
+          0,
+          "staff",
+          "abandoned",
+          proof,
+        ),
+      ).rejects.toMatchObject({ code: "ORDER_EDIT_FULFILLMENT_NOT_COMPLETE" });
+      expect(
+        (
+          await database.pool.query(
+            "SELECT order_edit_operation_id FROM wms.orders ORDER BY id",
+          )
+        ).rows,
+      ).toEqual([
+        { order_edit_operation_id: OP },
+        { order_edit_operation_id: OP },
+      ]);
+      expect((await store.get(OP)).status).toBe("preparing");
+    });
+    it("rolls back fulfilled cancellation on audit failure and prevents using cleanup proof for an applied edit", async () => {
+      const fulfilled = await fulfillHeldOrder();
+      const proof = await fulfilled.gateway.releaseFulfilledUnsubmitted(20, OP);
+      const before = await physicalState();
+      const store = new PostgresOrderEditStore(database.pool);
+      const next = {
+        ...record(),
+        version: 1,
+        lastSnapshot: fulfilledSnapshot(),
+      };
+      await expect(
+        store.save(
+          { ...next, status: "expired" },
+          0,
+          "unknown-user",
+          "abandoned",
+          proof,
+        ),
+      ).rejects.toMatchObject({ code: "23503" });
+      expect(await physicalState()).toEqual(before);
+      expect(await store.get(OP)).toEqual(record());
+      expect(
+        (
+          await database.pool.query(
+            "SELECT action FROM oms.order_edit_events ORDER BY id",
+          )
+        ).rows,
+      ).toEqual([{ action: "created" }]);
+      await expect(
+        store.save(
+          { ...next, status: "completed" },
+          0,
+          "staff",
+          "completed",
+          proof,
+        ),
+      ).rejects.toMatchObject({ code: "ORDER_EDIT_FULFILLED_CANCEL_INVALID" });
+      expect(await physicalState()).toEqual(before);
+    });
     it("round-trips new discount and payment evidence alongside legacy operations", async () => {
       const store = new PostgresOrderEditStore(database.pool);
       expect((await store.get(OP)).baseline.financials).toBeUndefined();

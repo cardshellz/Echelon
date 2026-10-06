@@ -125,6 +125,18 @@ refund by editing database rows. Resume the saved operation and inspect its
 Shopify, OMS, WMS, allocation and ShipStation evidence. A manual-review state is
 not permission to release fulfillment.
 
+An unsubmitted edit can also be closed after the original order has finished
+shipping. Cancellation verifies unchanged purchased quantities, prices, discounts,
+payments and customer identity in Shopify; paid source quantities and completed
+physical quantities in every shipped OMS/WMS partition; and shipped or cancelled
+ShipStation orders across the full order-number scope. It reads ShipStation without
+restoring or changing provider holds. The terminal edit state, removal of only its
+owned warehouse edit lock, and before/after audit event commit together. Shipping,
+manual holds, payments, inventory claims and fulfilled items are preserved.
+Partial fulfillment, an attempted financial mutation, conflicting evidence or
+active provider work still blocks this cancellation path. This cleanup does not
+explain or repair how an order shipped while retaining its edit lock.
+
 ## Deployment and live acceptance
 
 Apply migration `0723_shopify_order_edit_pilot.sql` before the new application

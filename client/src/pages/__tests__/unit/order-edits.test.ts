@@ -421,6 +421,17 @@ describe("verified order edit review", () => {
     expect(html).not.toContain("Apply changes");
     expect(html).toContain("The proposed price could not be verified.");
   });
+  it("clearly distinguishes a closed edit from cancelling the order", () => {
+    const html = renderOperation({
+      ...operation,
+      status: "expired",
+      canAbandon: false,
+    });
+    expect(html).toContain("Edit closed");
+    expect(html).toContain("No changes were applied by this edit.");
+    expect(html).not.toContain("Cancel edit");
+    expect(html).not.toContain("The original order is unchanged");
+  });
   it("does not infer cancellation authority even for a ready quote", () => {
     expect(renderOperation({ ...operation, canAbandon: false })).not.toContain(
       "Change items",
