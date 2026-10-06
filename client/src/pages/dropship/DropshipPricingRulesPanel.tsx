@@ -12,13 +12,18 @@ import { formatListingPreviewIssue } from "@/lib/dropship-listing-preview";
 import { describePriceBasis, describeReviewedSize, parseProfileDraft, pricingDraftsMatch, profileDraft, type ProfileDraft, type RecipeDraft } from "@/lib/dropship-pricing-rules";
 import { LISTING_SETTINGS_SEND_TIMING } from "@/lib/dropship-catalog-steps";
 import { NotSavedBadge, useUnsavedDraft } from "./catalog/UnsavedChangesGuard";
+import { DropshipExactPriceBox } from "./DropshipExactPriceBox";
+import type { ListingPriceSaveCallbacks } from "./DropshipListingPreview";
 
-export function DropshipPricingRulesPanel(props: { storeConnectionId: number; storeName: string; onConfigurationChange: () => void }) {
+interface PricingRulesPanelProps {
+  storeConnectionId: number; storeName: string; onConfigurationChange: () => void;
+  /** Exact prices save through the same per-size route as the listing preview, so they share its save callbacks. */
+  priceSaveCallbacks: ListingPriceSaveCallbacks;
+}
+export function DropshipPricingRulesPanel(props: PricingRulesPanelProps) {
   return <PricingRulesSession key={props.storeConnectionId} {...props} />;
 }
-function PricingRulesSession({ storeConnectionId, storeName, onConfigurationChange }: {
-  storeConnectionId: number; storeName: string; onConfigurationChange: () => void;
-}) {
+function PricingRulesSession({ storeConnectionId, storeName, onConfigurationChange, priceSaveCallbacks }: PricingRulesPanelProps) {
   const endpoint = `/api/dropship/listings/stores/${storeConnectionId}/pricing-rules`;
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: [endpoint], queryFn: async () => pricingProfileStateSchema.parse(await fetchJson(endpoint)), retry: false });
@@ -181,6 +186,8 @@ function PricingRulesSession({ storeConnectionId, storeName, onConfigurationChan
         {(phase === "uncertain" || phase === "refresh_error") && <p className="mt-2 text-xs">Reload saved rules to see the current state without another write. Reload discards this draft.</p>}</div>}
       {message && <p role="status" className="rounded border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">{message}</p>}
     </div>}
+    {/* Outside the rules form: an exact price needs neither saved rules nor a review. */}
+    <div className="px-4 pb-4"><DropshipExactPriceBox storeConnectionId={storeConnectionId} callbacks={priceSaveCallbacks} /></div>
   </section>;
 }
 

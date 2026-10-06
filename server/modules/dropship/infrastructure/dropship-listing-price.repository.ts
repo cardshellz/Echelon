@@ -53,8 +53,14 @@ export class PgDropshipListingPriceRepository implements ListingPriceRepository 
         loadRulePrice: async (candidate) => {
           const state = await readPricingProfile(client, target.storeConnectionId, vendorId);
           if (!state.profile) return null;
-          const costs = await PgShellzClubProductCostAdapter.forTransaction(client).loadProductCosts({ vendorId, productVariantIds: [candidate.productVariantId] });
-          return resolveListingRulePrice({ state, candidate, cost: costs.get(candidate.productVariantId) ?? null });
+          return resolveListingRulePrice({ state, candidate, cost: await loadProductCost(client, vendorId, candidate.productVariantId) });
+        },
+        loadProductCost: (candidate) => loadProductCost(client, vendorId, candidate.productVariantId),
+        loadReplay: (replayInput) => {
+          if (!input.idempotencyKey || replayInput.idempotencyKey !== input.idempotencyKey) {
+            throw new DropshipError("DROPSHIP_IDEMPOTENCY_CONFLICT", "Price writes require the transaction's original save key.");
+          }
+          return findReplay(client, target, replayInput);
         },
         save: (saveInput) => {
           if (!input.idempotencyKey || saveInput.idempotencyKey !== input.idempotencyKey) {
@@ -80,22 +86,33 @@ async function loadSaved(client: PoolClient, input: ListingPriceTarget & { vendo
   return result.rows[0] ? mapSaved(result.rows[0]) : null;
 }
 
-async function saveWithClient(client: PoolClient,
-  target: ListingPriceTarget & { vendorId: number; memberId: string },
-  input: SaveListingPriceInput & { requestHash: string; now: Date }): Promise<{ saved: SavedListingPriceRevision; idempotentReplay: boolean }> {
+async function loadProductCost(client: PoolClient, vendorId: number, productVariantId: number) {
+  const costs = await PgShellzClubProductCostAdapter.forTransaction(client).loadProductCosts({ vendorId, productVariantIds: [productVariantId] });
+  return costs.get(productVariantId) ?? null;
+}
+
+/** The revision an earlier save with this key wrote; a key reused for another change is a conflict. */
+async function findReplay(client: PoolClient, target: ListingPriceTarget & { vendorId: number },
+  input: { idempotencyKey: string; requestHash: string }): Promise<SavedListingPriceRevision | null> {
   const replay = await client.query<RevisionRow>(`SELECT id AS revision_id, product_variant_id,
     store_connection_id, override_price_cents, pricing_mode, created_at AS updated_at, request_hash
     FROM dropship.dropship_listing_price_revisions WHERE vendor_id = $1 AND idempotency_key = $2`,
     [target.vendorId, input.idempotencyKey]);
-  if (replay.rows[0]) {
-    const revision = replay.rows[0];
-    if (revision.request_hash !== input.requestHash || revision.store_connection_id !== target.storeConnectionId
-      || revision.product_variant_id !== target.productVariantId) {
-      throw new DropshipError("DROPSHIP_IDEMPOTENCY_CONFLICT", "This save key was already used for a different price change.");
-    }
-    // Replay the operation's saved revision, never overwrite a later edit.
-    return { saved: mapSaved(revision), idempotentReplay: true };
+  const revision = replay.rows[0];
+  if (!revision) return null;
+  if (revision.request_hash !== input.requestHash || revision.store_connection_id !== target.storeConnectionId
+    || revision.product_variant_id !== target.productVariantId) {
+    throw new DropshipError("DROPSHIP_IDEMPOTENCY_CONFLICT", "This save key was already used for a different price change.");
   }
+  return mapSaved(revision);
+}
+
+async function saveWithClient(client: PoolClient,
+  target: ListingPriceTarget & { vendorId: number; memberId: string },
+  input: SaveListingPriceInput & { requestHash: string; now: Date }): Promise<{ saved: SavedListingPriceRevision; idempotentReplay: boolean }> {
+  // Replay the operation's saved revision, never overwrite a later edit.
+  const replay = await findReplay(client, target, input);
+  if (replay) return { saved: replay, idempotentReplay: true };
   const before = await loadSaved(client, target);
   if ((before?.revisionId ?? null) !== input.expectedRevisionId) {
     throw new DropshipError("DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", "This listing price changed after you opened it. Reload the price before saving again.", {

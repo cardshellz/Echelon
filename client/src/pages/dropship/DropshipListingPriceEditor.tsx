@@ -5,16 +5,24 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { formatListingPreviewIssue } from "@/lib/dropship-listing-preview";
+import { LISTING_SETTINGS_SEND_TIMING } from "@/lib/dropship-catalog-steps";
 import { createDropshipIdempotencyKey, DropshipApiError, fetchJson, putJson, queryErrorMessage } from "@/lib/dropship-ops-surface";
-import { displayListingPrice, draftFromListingPrice, isListingPriceDirty, listingPriceEndpoint, listingPriceInput,
-  prepareListingPriceSave, readListingPrice, readSavedListingPrice, reconcileListingPriceDraft, type ListingPriceDraft,
-  type ListingPriceSaveAttempt } from "@/lib/dropship-listing-price";
+import { belowCostNote, describeListingPriceBuiltFrom, displayListingPrice, draftFromListingPrice, isListingPriceDirty,
+  listingPriceEndpoint, listingPriceInput, prepareListingPriceSave, readListingPrice, readSavedListingPrice,
+  reconcileListingPriceDraft, type ListingPriceDraft, type ListingPriceSaveAttempt } from "@/lib/dropship-listing-price";
 
 export type DropshipListingPriceEditorProps = {
   storeConnectionId: number;
   productVariantId: number;
   disabled?: boolean;
   compact?: boolean;
+  /** Where the editor sits: a listing preview (step 3) or Listing settings (step 2), which shows no preview. */
+  context?: "preview" | "settings";
+  /**
+   * Reports whether the editor holds a change that is not saved, e.g. for a leave
+   * guard, and false when it unmounts. Pass a stable function (a state setter).
+   */
+  onDirtyChange?: (dirty: boolean) => void;
   onCancel?: () => void;
   onSaveStarted: () => void;
   onSaveSettled: () => void;
@@ -26,7 +34,8 @@ export function DropshipListingPriceEditor(props: DropshipListingPriceEditorProp
   return <ListingPriceEditorSession key={`${props.storeConnectionId}:${props.productVariantId}`} {...props} />;
 }
 
-function ListingPriceEditorSession({ storeConnectionId, productVariantId, disabled = false, compact = false, onCancel, onSaveStarted, onSaveSettled, onSaved }: DropshipListingPriceEditorProps) {
+function ListingPriceEditorSession({ storeConnectionId, productVariantId, disabled = false, compact = false, context = "preview",
+  onDirtyChange, onCancel, onSaveStarted, onSaveSettled, onSaved }: DropshipListingPriceEditorProps) {
   const fieldId = useId();
   const queryClient = useQueryClient();
   const identity = { storeConnectionId, productVariantId };
@@ -49,7 +58,10 @@ function ListingPriceEditorSession({ storeConnectionId, productVariantId, disabl
 
   const busy = phase === "saving" || phase === "refreshing";
   const dirty = draft ? isListingPriceDirty(draft) : false;
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const price = priceQuery.data;
+  const belowCost = draft && !draft.useDefault && !draft.useRules ? belowCostNote(draft.value, price?.productCostCents) : null;
   function updateDraft(change: Partial<Pick<ListingPriceDraft, "useDefault" | "useRules" | "value">>): void {
     if (disabled || busy || phase === "conflict" || phase === "refresh_error") return;
     setDraft((current) => current ? { ...current, ...change } : current);
@@ -167,10 +179,11 @@ function ListingPriceEditorSession({ storeConnectionId, productVariantId, disabl
     {!draft && cancelButton && <div className="mt-2">{cancelButton}</div>}
     {draft && <form onSubmit={(event) => void save(event)} className={compact ? "space-y-2" : "mt-3 space-y-3"}>
       {compact ? <p className="text-xs text-zinc-500">Saved {displayListingPrice(price?.effectivePriceCents ?? null)} · Default {displayListingPrice(price?.defaultPriceCents ?? null)}</p>
-        : <dl className="grid grid-cols-2 gap-3 text-sm">
+        : <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
         <div><dt className="text-xs text-zinc-500">Current saved price</dt><dd className="mt-1 font-medium">{displayListingPrice(price?.effectivePriceCents ?? null)}</dd>
-          <dd className="mt-1 text-xs text-zinc-500">{price?.source === "override" ? "Listing override" : price?.source === "catalog_default" ? "Catalog default" : price?.source === "rules" ? price.ruleName ?? "Pricing rules" : price?.source === "saved_listing" ? "Previously saved listing" : "No price available"}</dd></div>
+          <dd className="mt-1 text-xs text-zinc-500">{price ? describeListingPriceBuiltFrom(price) : "No price yet"}</dd></div>
         <div><dt className="text-xs text-zinc-500">Catalog default</dt><dd className="mt-1 font-medium">{displayListingPrice(price?.defaultPriceCents ?? null)}</dd></div>
+        <div><dt className="text-xs text-zinc-500">Your .ops cost</dt><dd className="mt-1 font-medium">{price?.productCostCents == null ? "Not known" : displayListingPrice(price.productCostCents)}</dd></div>
       </dl>}
       <div className="flex items-center gap-2"><input id={`${fieldId}-default`} type="checkbox" checked={draft.useDefault}
         disabled={disabled || busy || phase === "conflict" || phase === "refresh_error"} onChange={(event) => updateDraft({ useDefault: event.target.checked, useRules: false })}
@@ -180,12 +193,16 @@ function ListingPriceEditorSession({ storeConnectionId, productVariantId, disabl
           disabled={disabled || busy || phase === "conflict" || phase === "refresh_error"}
           onChange={(event) => updateDraft({ useRules: event.target.checked, useDefault: false })} />
           <Label htmlFor={`${fieldId}-rules`}>Use pricing rules{price.ruleName ? ` (${price.ruleName})` : ""}</Label></div>}
+        {/* Stays editable while a box above is ticked: typing a price is how the vendor sets an exact one, so it unticks them. */}
         <Input id={`${fieldId}-price`} type="text" inputMode="decimal" autoComplete="off" placeholder="8.99"
-          disabled={disabled || draft.useDefault || draft.useRules || busy || phase === "conflict" || phase === "refresh_error"}
+          disabled={disabled || busy || phase === "conflict" || phase === "refresh_error"}
           value={draft.useRules ? listingPriceInput(price?.rulePriceCents ?? null) : draft.useDefault ? listingPriceInput(price?.defaultPriceCents ?? null) : draft.value}
-          aria-describedby={`${fieldId}-help`} onChange={(event) => updateDraft({ value: event.target.value })} />
+          aria-describedby={`${fieldId}-help`} onChange={(event) => updateDraft({ value: event.target.value, useDefault: false, useRules: false })} />
       </div>
-      <p id={`${fieldId}-help`} className="text-xs text-zinc-500">{compact ? "Per sellable pack. Save refreshes the preview; it does not publish." : "Changes apply only when you save. Saving updates your stored price and refreshes this preview; it does not publish or modify a live eBay listing."}</p>
+      {belowCost && <p className="text-xs text-amber-800">{belowCost}</p>}
+      <p id={`${fieldId}-help`} className="text-xs text-zinc-500">{compact ? "Per sellable pack. Save refreshes the preview; it does not publish."
+        : context === "settings" ? `Nothing changes until you save. ${LISTING_SETTINGS_SEND_TIMING}`
+          : `Nothing changes until you save. Saving refreshes this preview. ${LISTING_SETTINGS_SEND_TIMING}`}</p>
       {draft.useRules && price?.pricingIssue && <p className="text-xs text-amber-800">{formatListingPreviewIssue(price.pricingIssue)}</p>}
       <div className="flex flex-wrap items-center gap-2"><Button type="submit" size="sm" className="gap-2" disabled={disabled || !dirty || busy || phase === "conflict" || phase === "refresh_error"}>
         <Save aria-hidden="true" className="h-4 w-4" />{phase === "saving" ? "Saving listing price…" : phase === "refreshing" ? "Refreshing preview…" : "Save listing price"}
@@ -200,6 +217,7 @@ function ListingPriceEditorSession({ storeConnectionId, productVariantId, disabl
       {phase === "refresh_error" && <Button className="mt-2" size="sm" variant="outline" type="button" disabled={disabled} onClick={() => void retryPreviewRefresh()}>Retry preview refresh</Button>}
     </div>}
     {priceQuery.isError && draft && !error && <p role="status" className="mt-3 text-xs text-amber-900">The background price refresh failed. Your draft has been preserved.</p>}
-    {phase === "saved" && <p role="status" className="mt-3 text-sm text-emerald-800">Listing price saved and preview refreshed.</p>}
+    {phase === "saved" && <p role="status" className="mt-3 text-sm text-emerald-800">{context === "settings"
+      ? `Price saved. ${LISTING_SETTINGS_SEND_TIMING}` : "Listing price saved and preview refreshed."}</p>}
   </section>;
 }

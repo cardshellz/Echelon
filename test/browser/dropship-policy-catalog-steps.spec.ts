@@ -161,6 +161,15 @@ async function openCatalog(page: Page, path: string, initial: Partial<StubState>
       if (path === `/api/dropship/ebay/store-categories/${storeId}`) {
         return route.fulfill({ json: { storeConnectionId: storeId, categories: [], assignments: [], fetchedAt: STAMP } });
       }
+      if (path === `/api/dropship/listings/stores/${storeId}/pricing-rules/targets` && url.searchParams.get("type") === "listings") {
+        return route.fulfill({ json: { total: 1, rows: [{ id: "101", name: "Envelope Single Pocket · Pack of 50 · ENV-SGL-P50" }] } });
+      }
+      if (path === `/api/dropship/listings/stores/${storeId}/variants/101/price`) {
+        return route.fulfill({ json: { price: { storeConnectionId: storeId, productVariantId: 101, revisionId: null,
+          overridePriceCents: null, effectivePriceCents: 699, defaultPriceCents: 699, source: "catalog_default",
+          pricingMode: "catalog_default", ruleName: null, pricingIssue: null, rulePriceCents: null, rulesConfigured: false,
+          ruleBasis: null, productCostCents: 410, updatedAt: null } } });
+      }
       if (path === `/api/dropship/listings/stores/${storeId}/pricing-rules` && state.pricingRules[storeId]) {
         return route.fulfill({ json: state.pricingRules[storeId] });
       }
@@ -322,6 +331,32 @@ test("asks before leaving Listing settings with changes that aren't saved", asyn
   const unload = await asked;
   expect(unload.type()).toBe("beforeunload");
   await unload.accept();
+});
+
+test("asks before leaving with an exact price that isn't saved, and before choosing another size", async ({ page }) => {
+  const state = await openCatalog(page, `${CATALOG_PATH}/setup`);
+  const box = page.getByRole("region", { name: "Exact price for one size" });
+  const dialog = page.getByRole("alertdialog");
+  await box.getByLabel("Find a size by name or SKU").fill("ENV");
+  await box.getByRole("button", { name: "Envelope Single Pocket · Pack of 50 · ENV-SGL-P50" }).click();
+  await expect(box).toContainText("Catalog reference retail");
+  await box.getByLabel("Your listing price (USD)").fill("14.99");
+
+  await page.getByRole("link", { name: "Next: Publish" }).click();
+  await expect(dialog).toContainText("You have changes that aren't saved in Exact price for one size.");
+  await dialog.getByRole("button", { name: "Keep editing" }).click();
+  await expect(box.getByLabel("Your listing price (USD)")).toHaveValue("14.99");
+
+  await box.getByRole("button", { name: "Choose another size" }).click();
+  await expect(dialog).toContainText("Exact price for one size");
+  await dialog.getByRole("button", { name: "Discard and leave" }).click();
+  await expect(box.getByLabel("Find a size by name or SKU")).toBeVisible();
+
+  // Nothing is left unsaved, so Next goes straight on.
+  await page.getByRole("link", { name: "Next: Publish" }).click();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
+  expect(state.unexpected).toEqual([]);
+  expect(state.errors).toEqual([]);
 });
 
 test("eBay listing setup with nothing saved is not a change until the vendor picks a policy", async ({ page }) => {

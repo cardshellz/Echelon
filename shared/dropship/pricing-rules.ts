@@ -1,14 +1,14 @@
 import { z } from "zod";
 import { catalogScopeSchema, matchesCatalogScope, catalogTargetsInputSchema, catalogTargetsResponseSchema } from "./catalog-scope";
-import { listingPriceCentsSchema, MAX_LISTING_PRICE_CENTS } from "./listing-price";
+import { listingAmountCentsSchema, listingPriceBasisSchema, listingPriceCentsSchema, MAX_LISTING_PRICE_CENTS } from "./listing-price";
 
 export const PRICING_REVIEW_PAGE_SIZE = 50;
 export const MAX_PRICING_REVIEW_ITEMS = 10_000;
 const id = z.number().int().positive().max(MAX_LISTING_PRICE_CENTS);
 /** A known money amount in integer cents: a cost or a reference retail price. */
-export const pricingAmountCentsSchema = z.number().int().min(0).max(MAX_LISTING_PRICE_CENTS);
+export const pricingAmountCentsSchema = listingAmountCentsSchema;
 export const pricingRecipeSchema = z.object({
-  basis: z.enum(["product_cost", "catalog_retail"]),
+  basis: listingPriceBasisSchema,
   // 100 bps = 1%; this explicit bound permits up to a 10,000% markup.
   markupBps: z.number().int().min(0).max(1_000_000),
   flatCents: z.number().int().min(0).max(MAX_LISTING_PRICE_CENTS),

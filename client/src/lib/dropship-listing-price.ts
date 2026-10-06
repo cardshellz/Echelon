@@ -36,6 +36,35 @@ export function displayListingPrice(cents: number | null): string {
   return cents === null ? "Unavailable" : `$${listingPriceInput(cents)}`;
 }
 
+/**
+ * What a size's current price is built from, in the words the pricing review
+ * uses ("Reference retail $12.49", ".ops cost $10.89").
+ */
+export function describeListingPriceBuiltFrom(price: Pick<ListingPriceSetting,
+  "source" | "ruleName" | "ruleBasis" | "defaultPriceCents" | "productCostCents">): string {
+  switch (price.source) {
+    case "override": return "Exact price";
+    case "catalog_default": return "Catalog reference retail";
+    case "saved_listing": return "Price last sent to eBay";
+    case "unavailable": return "No price yet";
+    case "rules": {
+      const rule = price.ruleName ?? "Pricing rules";
+      const start = price.ruleBasis === "catalog_retail" ? price.defaultPriceCents
+        : price.ruleBasis === "product_cost" ? price.productCostCents ?? null : null;
+      if (start === null || !price.ruleBasis) return rule;
+      return `${rule}, from ${price.ruleBasis === "catalog_retail" ? "reference retail" : ".ops cost"} ${displayListingPrice(start)}`;
+    }
+  }
+}
+
+/** A note when a typed price is below the vendor's .ops cost. Below cost is allowed; it is never blocked. */
+export function belowCostNote(value: string, productCostCents: number | null | undefined): string | null {
+  if (productCostCents == null) return null;
+  let priceCents: number;
+  try { priceCents = parseListingPriceCents(value); } catch { return null; }
+  return priceCents < productCostCents ? `This is below your .ops cost of ${displayListingPrice(productCostCents)}.` : null;
+}
+
 export function draftFromListingPrice(price: ListingPriceSetting): ListingPriceDraft {
   return { useDefault: price.pricingMode !== "rules" && price.overridePriceCents === null && price.source !== "saved_listing",
     ...(price.pricingMode === "rules" ? { useRules: true } : {}),
