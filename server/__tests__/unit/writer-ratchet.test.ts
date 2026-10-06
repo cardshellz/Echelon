@@ -107,6 +107,15 @@ describe("writer-ratchet (P2.1)", () => {
     ).toEqual([]);
   });
 
+  it("cost follow-up and return evidence have only the Inventory owner, including scripts", () => {
+    for (const table of ["inventory.lot_cost_follow_ups", "inventory.lot_cost_follow_up_attempts",
+      "inventory.return_cost_allocations", "inventory.return_commands"]) {
+      expect(current[table]).toEqual(["modules/inventory"]);
+      expect(currentIncludingScripts[table]).toEqual(["modules/inventory"]);
+      expect(baseline[table]).toEqual(["modules/inventory"]);
+    }
+  });
+
   it("keeps private return intake and label writes in their Returns owner", () => {
     const tables = [
       "returns.customer_login_challenges",

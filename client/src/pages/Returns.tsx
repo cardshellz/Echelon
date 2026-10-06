@@ -1,5 +1,5 @@
 import { useInventoryCommand } from "@/lib/inventory-command";
-import { returnCommandBodySchema, returnCommandResultSchema, type ReturnCommandBody } from "@shared/inventory/return-command";
+import { returnCommandBodySchema, returnCommandResultFor, type ReturnCommandBody } from "@shared/inventory/return-command";
 import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -145,9 +145,13 @@ export default function Returns() {
 
   const processReturnMutation = useMutation({
     mutationFn: async (command: { body: ReturnCommandBody } | { retainedKey: string }) => {
-      return "retainedKey" in command
-        ? inventoryCommand.resume("/api/returns/process", command.retainedKey, returnCommandResultSchema)
-        : inventoryCommand("/api/returns/process", command.body, returnCommandResultSchema);
+      if ("retainedKey" in command) {
+        const retained = inventoryCommand.pending("/api/returns/process", returnCommandBodySchema)
+          .find(intent => intent.commandKey === command.retainedKey);
+        if (!retained) throw new Error("The earlier return information is unavailable. Verify it before starting another return.");
+        return inventoryCommand.resume("/api/returns/process", retained.commandKey, returnCommandResultFor(retained.body));
+      }
+      return inventoryCommand("/api/returns/process", command.body, returnCommandResultFor(command.body));
     },
     onSuccess: (result) => {
       toast({

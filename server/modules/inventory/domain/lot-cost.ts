@@ -98,6 +98,11 @@ export function roundedMillsToCents(value: bigint): bigint {
   return (value + BigInt(50)) / BigInt(100);
 }
 
+/** Financial reversals round the same magnitude as their positive posting. */
+export function roundedSignedMillsToCents(value: bigint): bigint {
+  return value < BigInt(0) ? -roundedMillsToCents(-value) : roundedMillsToCents(value);
+}
+
 export function moneyToSafeNumber(value: bigint, field: string): number {
   if (value < -BigInt(Number.MAX_SAFE_INTEGER) || value > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new LotCostError(`${field} exceeds the response's safe integer precision.`, { field });

@@ -15,7 +15,9 @@ function createClient(handler: (text: string, values: unknown[]) => Promise<any>
       const outputQty = lotOriginalQuantities.get(Number(values[0]));
       const sourceQty = lotOriginalQuantities.get(Number(values[1]));
       if (outputQty === undefined || sourceQty === undefined) throw new Error("Missing original lot quantity fixture for contribution bounds");
-      return { rows: [{ source_qty: sourceQty, output_qty: outputQty, qty_received: sourceQty, total_unit_cost_mills: 125, unit_cost_mills: 125 }] };
+      return { rows: [{ source_qty: sourceQty, output_qty: outputQty, qty_received: sourceQty,
+        cost_precision_version: 1, cost_provisional: 0, total_unit_cost_mills: 125, unit_cost_mills: 125,
+        po_unit_cost_mills: 100, packaging_cost_mills: 20, landed_cost_mills: 5 }] };
     }
     return handler(text, values);
   });

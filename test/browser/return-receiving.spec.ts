@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 // Actual Returns page and shared persisted-command requester, mocked HTTP.
 // Exact SQL admission/rollback/replay is covered by lot-cost-ownership.integration.
-async function setup(page: Page, failure: "lost-response" | "invalid-success", orderQuantity = 4) {
+async function setup(page: Page, failure: "lost-response" | "invalid-success" | "different-success", orderQuantity = 4) {
   const state = { writes: [] as string[],committed: false,errors: [] as string[],unexpected: [] as string[] };
   page.on("pageerror",error=>state.errors.push(error.message));
   await page.route("**/*",route=>new URL(route.request().url()).hostname==="127.0.0.1" ? route.continue() : route.abort());
@@ -11,9 +11,13 @@ async function setup(page: Page, failure: "lost-response" | "invalid-success", o
     const request = route.request(); const path = new URL(request.url()).pathname;
     if (request.method()==="POST" && path==="/api/returns/process") {
       state.writes.push(request.postData()!); state.committed=true;
-      if (state.writes.length===1) return failure==="lost-response" ? route.abort("failed") : route.fulfill({ json: { processed: "wrong" } });
-      return route.fulfill({ json: { orderId: 61,processed: 1,sellable: 1,damaged: 0,totalBaseUnitsReturned: 5,
-        items: [{ orderItemId: 71,productVariantId: 101,qty: 1,condition: "sellable",baseUnitsReturned: 5 }] } });
+      const result = { orderId: 61,processed: 1,sellable: 1,damaged: 0,totalBaseUnitsReturned: 5,
+        items: [{ orderItemId: 71,productVariantId: 101,qty: 1,condition: "sellable",baseUnitsReturned: 5 }] };
+      if (state.writes.length===1) {
+        if (failure==="lost-response") return route.abort("failed");
+        return route.fulfill({ json: failure==="invalid-success" ? { processed: "wrong" } : { ...result,orderId: 62 } });
+      }
+      return route.fulfill({ json: result });
     }
     if (request.method()==="GET" && path==="/api/auth/me") return route.fulfill({ json: {
       user: { id: "return-operator",username: "operator",role: "admin" },permissions: ["inventory:view","inventory:adjust"],roles: ["admin"],
@@ -46,7 +50,7 @@ async function enterReturn(page: Page) {
   await page.getByRole("option",{ name: "RETURNS",exact: true }).click();
 }
 
-for (const failure of ["lost-response","invalid-success"] as const) {
+for (const failure of ["lost-response","invalid-success","different-success"] as const) {
   test(`recovers the exact full return after ${failure} without creating another physical intent`,async ({ page })=> {
     const state = await setup(page,failure,1); await enterReturn(page);
     await page.getByRole("button",{ name: "Process Return (1 item)",exact: true }).click();

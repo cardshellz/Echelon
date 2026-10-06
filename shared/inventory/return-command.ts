@@ -11,7 +11,28 @@ export type ReturnCommandBody = z.infer<typeof returnCommandBodySchema>;
 export const returnCommandResultSchema = z.object({
   orderId: id, processed: quantity, sellable: quantity, damaged: quantity, totalBaseUnitsReturned: quantity,
   items: z.array(z.object({ orderItemId: id,productVariantId: id,qty: id,
-    condition: z.enum(["sellable","damaged","defective"]),baseUnitsReturned: quantity }).strict()).max(200),
-}).strict();
+    condition: z.enum(["sellable","damaged","defective"]),baseUnitsReturned: id }).strict()).min(1).max(200),
+}).strict().superRefine((result, context) => {
+  const sellable = result.items.filter(item => item.condition === "sellable").length;
+  const baseUnits = result.items.reduce((total, item) => total + BigInt(item.baseUnitsReturned), BigInt(0));
+  if (result.processed !== result.items.length || result.sellable !== sellable
+    || result.damaged !== result.items.length - sellable
+    || baseUnits !== BigInt(result.totalBaseUnitsReturned)
+    || new Set(result.items.map(item => item.orderItemId)).size !== result.items.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Return summary does not match its recorded items." });
+  }
+});
 export type ReturnCommandResult = z.infer<typeof returnCommandResultSchema>;
 
+/** Acknowledgement must identify the exact retained physical command. */
+export function returnCommandResultFor(rawBody: ReturnCommandBody) {
+  const body = returnCommandBodySchema.parse(rawBody);
+  return returnCommandResultSchema.superRefine((result, context) => {
+    if (result.orderId !== body.orderId || result.items.length !== body.items.length
+      || body.items.some(item => !result.items.some(recorded => recorded.orderItemId === item.orderItemId
+        && recorded.productVariantId === item.productVariantId && recorded.qty === item.qty
+        && recorded.condition === item.condition))) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Return result does not identify the requested physical work." });
+    }
+  });
+}

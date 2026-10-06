@@ -25,12 +25,13 @@ export async function quarantineReturnedStock(tx: CostEvidenceTransaction, input
   const before = costInteger(level?.variant_qty,"inventoryLevel.quantity");
   if (before < input.quantity) throw new CostEvidenceError("RETURN_QUARANTINE_STOCK_CONFLICT","Returned level cannot support the exact quarantine quantity.");
   const lots = await tx.execute(sql`SELECT id,product_variant_id,warehouse_location_id,qty_on_hand,qty_reserved,
-    qty_picked,qty_consumed,unit_cost_cents FROM inventory.inventory_lots
+    qty_picked,qty_packed,qty_consumed,unit_cost_cents FROM inventory.inventory_lots
     WHERE id IN (SELECT value::integer FROM jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb)) ORDER BY id FOR UPDATE`);
   let total = BigInt(0);
   for (const lot of lots.rows) {
     if (Number(lot.product_variant_id) !== input.productVariantId || Number(lot.warehouse_location_id) !== input.warehouseLocationId
-      || costInteger(lot.qty_reserved,"lot.reserved") !== 0 || costInteger(lot.qty_picked,"lot.picked") !== 0) {
+      || costInteger(lot.qty_reserved,"lot.reserved") !== 0 || costInteger(lot.qty_picked,"lot.picked") !== 0
+      || costInteger(lot.qty_packed,"lot.packed") !== 0) {
       throw new CostEvidenceError("RETURN_QUARANTINE_IDENTITY_CONFLICT","Quarantine cannot take another SKU, location or reserved custody.");
     }
     total+=BigInt(costInteger(lot.qty_on_hand,"lot.onHand",1));
@@ -41,7 +42,12 @@ export async function quarantineReturnedStock(tx: CostEvidenceTransaction, input
   let running = before;
   for (const lot of lots.rows) {
     const quantity = costInteger(lot.qty_on_hand,"lot.onHand",1);
-    if (posting) await posting.addLot(Number(lot.id),{ onHand: -quantity,reserved: 0,picked: 0,packed: 0 });
+    if (posting) {
+      await posting.addLot(Number(lot.id),{ onHand: -quantity,reserved: 0,picked: 0,packed: 0 });
+      // This existing cost-lineage counter is not a stock bucket (migration 242).
+      // Stock custody still changes exclusively through the quantity posting.
+      await tx.execute(sql`UPDATE inventory.inventory_lots SET qty_consumed=COALESCE(qty_consumed,0)+${quantity} WHERE id=${lot.id}`);
+    }
     else await tx.execute(sql`UPDATE inventory.inventory_lots SET qty_on_hand=0,qty_consumed=qty_consumed+${quantity},status='depleted' WHERE id=${lot.id}`);
     await tx.execute(sql`INSERT INTO inventory.inventory_transactions
       (product_variant_id,from_location_id,transaction_type,variant_qty_delta,variant_qty_before,variant_qty_after,

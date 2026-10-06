@@ -522,7 +522,11 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
     const current = await state();
     expect(current.commands).toBe(2);
     expect(current.lots[0]).toMatchObject({ id: 4, qty_on_hand: 20, qty_reserved: 3, qty_picked: 2 });
-    expect(current.lots[1]).toMatchObject({ qty_on_hand: 1, total_unit_cost_mills: originalCost.toString() });
+    expect(current.lots[1]).toMatchObject({ qty_on_hand: 1 });
+    // jsonb_agg in state() returns JSON numbers, which cannot represent this
+    // fixture's mills. Read the actual persisted bigint as text for cost proof.
+    expect((await pool.query("SELECT total_unit_cost_mills::text AS mills FROM inventory.inventory_lots WHERE id<>4")).rows)
+      .toEqual([{ mills: originalCost.toString() }]);
     expect(current.levels[0].variant_qty).toBe(21);
     expect((await pool.query("SELECT source_order_item_cost_id,quantity,wms_order_id,wms_order_item_id FROM inventory.return_cost_allocations")).rows)
       .toEqual([{ source_order_item_cost_id: 9, quantity: 1, wms_order_id: 1, wms_order_item_id: 11 }]);
@@ -538,6 +542,7 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
     expect(accepted.commands).toBe(3);
     expect(accepted.lots[0]).toMatchObject({ id: 4, qty_on_hand: 20, qty_reserved: 3, qty_picked: 2 });
     expect(accepted.lots[1]).toMatchObject({ qty_on_hand: 0, qty_reserved: 0, qty_picked: 0, status: "depleted" });
+    expect((await pool.query("SELECT qty_consumed FROM inventory.inventory_lots WHERE id<>4")).rows).toEqual([{ qty_consumed: 1 }]);
     expect(accepted.levels[0].variant_qty).toBe(20);
     expect((await pool.query("SELECT kind FROM inventory.quantity_commands ORDER BY id")).rows)
       .toEqual([{ kind: "opening" }, { kind: "return" }, { kind: "adjust" }]);

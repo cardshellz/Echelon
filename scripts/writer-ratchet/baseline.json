@@ -634,6 +634,12 @@
   "inventory.lot_cost_contributions": [
     "modules/inventory"
   ],
+  "inventory.lot_cost_follow_up_attempts": [
+    "modules/inventory"
+  ],
+  "inventory.lot_cost_follow_ups": [
+    "modules/inventory"
+  ],
   "inventory.lot_cost_origins": [
     "modules/inventory"
   ],
@@ -761,6 +767,12 @@
     "modules/inventory"
   ],
   "inventory.replen_trigger_receipts": [
+    "modules/inventory"
+  ],
+  "inventory.return_commands": [
+    "modules/inventory"
+  ],
+  "inventory.return_cost_allocations": [
     "modules/inventory"
   ],
   "inventory.safety_definition_applications": [

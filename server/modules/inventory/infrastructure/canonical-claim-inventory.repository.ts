@@ -1589,8 +1589,8 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         const cogsRow = rows(await input.client.query(
           `INSERT INTO oms.order_item_costs (
              order_id, order_item_id, inventory_lot_id, product_variant_id, qty,
-             unit_cost_cents, total_cost_cents, unit_cost_mills, total_cost_mills, created_at
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             unit_cost_cents, total_cost_cents, unit_cost_mills, total_cost_mills, created_at, cost_precision_version
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1)
            RETURNING id`,
           [
             input.orderId,

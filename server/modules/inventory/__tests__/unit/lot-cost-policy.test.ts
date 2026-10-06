@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { normalizeLotCosts, recordedUnitCostMills, lotCostNeedsReview } from "../../domain/lot-cost";
+import { normalizeLotCosts, recordedUnitCostMills, lotCostNeedsReview, roundedSignedMillsToCents } from "../../domain/lot-cost";
 
 const exact = { id: 1,cost_precision_version: 1,cost_provisional: 0,qty_received: 4,
   unit_cost_mills: "149",total_unit_cost_mills: "149",po_unit_cost_mills: "100",packaging_cost_mills: "20",landed_cost_mills: "29",
   unit_cost_cents: 1,total_unit_cost_cents: 1,po_unit_cost_cents: 1,packaging_cost_cents: 0,landed_cost_cents: 0 };
 
 describe("inventory cost evidence policy", () => {
+  it.each([0, 1, 49, 50, 149, 150, 249, 250, Number.MAX_SAFE_INTEGER])("rounds a signed reversal with the same magnitude for %s mills", mills => {
+    const amount = BigInt(mills);
+    expect(roundedSignedMillsToCents(-amount)).toBe(-roundedSignedMillsToCents(amount));
+  });
   it("keeps an authoritative zero despite stale positive compatibility mirrors", () => {
     const zero = { ...exact,unit_cost_mills: 0,total_unit_cost_mills: 0,po_unit_cost_mills: 0,packaging_cost_mills: 0,landed_cost_mills: 0,
       unit_cost_cents: 999,total_unit_cost_cents: 999,po_unit_cost_cents: 999 };

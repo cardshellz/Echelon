@@ -72,6 +72,8 @@ function harness(options: {
     }
     if (text.includes("SUM(quantity)") && text.includes("return_cost_allocations")) return { rows: [{ quantity: 0 }] };
     if (text.includes("source.qty_received AS source_qty")) return { rows: [{ source_qty: 4,output_qty: 2,qty_received: 4,
+      cost_precision_version: 1, cost_provisional: 0, po_unit_cost_mills: (options.costCents ?? 275)*100,
+      packaging_cost_mills: 0, landed_cost_mills: 0,
       unit_cost_mills: (options.costCents ?? 275)*100,total_unit_cost_mills: (options.costCents ?? 275)*100 }] };
     if (text.includes("FROM inventory.inventory_lots") && text.includes("FOR UPDATE")) return { rows: [{ id: 801,
       qty_received: 4,cost_provisional: 0,cost_precision_version: 1,unit_cost_mills: (options.costCents ?? 275)*100,
@@ -112,7 +114,7 @@ describe("applyReturnRestock", () => {
     expect(levelUpdate?.params).toEqual([10, NOW, 401]);
     const ledger = queries.find((query) => query.sql.startsWith("INSERT INTO inventory.inventory_transactions"));
     expect(ledger?.params).toEqual([
-      301, 17, 2, 8, 10, 275, 501, 61, 71,
+      301, 17, 2, 8, 10, "on_hand", 275, 501, 61, 71,
       "return_inventory_treatment", "91", "sellable return", "user:7", NOW,
     ]);
     expect(queries.find((query) => query.sql.includes("FROM catalog.product_variants"))?.sql)
@@ -129,6 +131,7 @@ describe("applyReturnRestock", () => {
         to_location_id: 17,
         variant_qty_delta: 2,
         inventory_lot_id: 501,
+        target_state: "on_hand",
       },
     });
 
@@ -148,6 +151,7 @@ describe("applyReturnRestock", () => {
         to_location_id: 17,
         variant_qty_delta: 1,
         inventory_lot_id: 501,
+        target_state: "on_hand",
       },
     });
 

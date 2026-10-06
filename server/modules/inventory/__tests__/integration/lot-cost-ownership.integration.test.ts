@@ -1,19 +1,40 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { createServer, request as httpRequest } from "node:http";
+import type { AddressInfo } from "node:net";
+import express, { type RequestHandler } from "express";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as schema from "@shared/schema";
 import { costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
 import { applyReturnRestock } from "../../application/return-restock.use-case";
 import { applyCostRevision } from "../../application/apply-cost-revision";
 import { COGSService } from "../../cogs.service";
+import { InventoryLotService } from "../../lots.service";
 import { costFingerprint, lockInventoryCostGraph, recordReceiptCostOrigin } from "../../infrastructure/cost-evidence.repository";
 import { readLotCostFollowUps } from "../../infrastructure/lot-cost-follow-up.repository";
 import { createReturnsService } from "../../../orders/returns.service";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "../../../procurement/__tests__/integration/shipment-line-fixture";
 import { installPreOpeningQuantityAuthorityFixture } from "../fixtures/pre-opening-quantity-authority.fixture";
+import { returnCommandResultFor } from "@shared/inventory/return-command";
+import { lotCostFollowUpReportSchema } from "@shared/inventory/lot-cost-follow-up";
+
+// Exercise registered HTTP handlers against the real application/PG owners.
+// Authentication and unrelated module singletons are isolated; no global DB
+// or production server is started. Permission behavior has separate tests.
+vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
+vi.mock("../../index", () => ({ inventoryStorage: {} }));
+vi.mock("../../../warehouse", () => ({ warehouseStorage: {} }));
+vi.mock("../../../catalog", () => ({ catalogStorage: {} }));
+vi.mock("../../../orders", () => ({ ordersStorage: {} }));
+vi.mock("../../../channels", () => ({ channelsStorage: {} }));
+vi.mock("../../../../routes/middleware", () => {
+  const pass: RequestHandler = (_req, _res, next) => next();
+  return { requirePermission: () => pass, requireAuth: pass, upload: { single: () => pass } };
+});
+import { registerInventoryRoutes } from "../../inventory.routes";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const suite = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
@@ -231,6 +252,31 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
     expect(await physicalState()).toEqual(before);
   });
 
+  it("recosts explicitly linked picks and unpicks with exact signed amounts before a partial return", async () => {
+    await pool.query(`INSERT INTO oms.order_item_costs(id,order_id,order_item_id,inventory_lot_id,product_variant_id,qty,
+      unit_cost_mills,total_cost_mills,unit_cost_cents,total_cost_cents,cost_precision_version)
+      VALUES(5,61,71,101,101,-1,149,-149,1,-1,1);
+      INSERT INTO inventory.availability_claim_pick_movements VALUES(20,1,'pick',2,NULL),(21,5,'unpick',1,20);`);
+    const source = await revision();
+    const before = await physicalState();
+    const applied = await database.transaction(tx => applyCostRevision(tx, source, cogs, "accountant", now));
+    expect(applied).toMatchObject({ status: "applied", cogsRowsUpdated: 2 });
+    expect(await physicalState()).toEqual(before);
+    expect((await pool.query(`SELECT id,qty,unit_cost_mills,total_cost_mills,total_cost_cents FROM oms.order_item_costs
+      WHERE id IN (1,5) ORDER BY id`)).rows).toEqual([
+      { id: 1, qty: 2, unit_cost_mills: "249", total_cost_mills: "498", total_cost_cents: "5" },
+      { id: 5, qty: -1, unit_cost_mills: "249", total_cost_mills: "-249", total_cost_cents: "-2" },
+    ]);
+    const accepted = await financialState();
+    await database.transaction(tx => applyCostRevision(tx, source, cogs, "accountant", now));
+    expect(await financialState()).toEqual(accepted);
+    await restock();
+    expect((await returnedLayers()).map(layer => ({ source: layer.source_order_item_cost_id, quantity: layer.qty_on_hand,
+      unitMills: layer.total_unit_cost_mills }))).toEqual([
+      { source: 1, quantity: 1, unitMills: "249" }, { source: 2, quantity: 2, unitMills: "250" },
+    ]);
+  });
+
   it("rolls back every return layer and stock projection when audit evidence persistence fails", async () => {
     const before = await physicalState();
     await pool.query(`CREATE FUNCTION inventory.fail_return_allocation() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -273,10 +319,85 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
     expect(await physicalState()).toEqual(accepted);
   });
 
-  it("quarantines only the actual newly returned damaged lots and replays the whole legacy batch", async () => {
+  it("posts and replays the registered HTTP return with real PostgreSQL and validates follow-up timestamps", async () => {
+    await pool.query("DELETE FROM oms.order_item_costs WHERE order_item_id=71; UPDATE catalog.product_variants SET last_cost_cents=0 WHERE id=101");
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.session = { user: { id: "operator:cost-test" } } as typeof req.session;
+      next();
+    });
+    const httpServices: Pick<typeof app.locals.services, "returns" | "cogs" | "inventoryLots"> = {
+      returns: createReturnsService(database, undefined, { clock: () => now }), cogs,
+      inventoryLots: new InventoryLotService(database),
+    };
+    Object.assign(app.locals, { services: httpServices });
+    registerInventoryRoutes(app);
+    const server = createServer(app);
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const port = (server.address() as AddressInfo).port;
+    const request = (path: string, body?: Record<string, unknown>): Promise<{ status: number; body: unknown }> =>
+      new Promise((resolve, reject) => {
+        const call = httpRequest({ hostname: "127.0.0.1", port, path,
+          method: body === undefined ? "GET" : "POST", headers: { "Content-Type": "application/json" } }, response => {
+          const chunks: Buffer[] = [];
+          response.on("data", chunk => chunks.push(Buffer.from(chunk)));
+          response.on("error", reject);
+          response.on("end", () => {
+            try { resolve({ status: response.statusCode!, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) }); }
+            catch (error) { reject(error); }
+          });
+        });
+        call.on("error", reject);
+        call.end(body === undefined ? undefined : JSON.stringify(body));
+      });
+    const body = { orderId: 61, warehouseLocationId: 30,
+      items: [{ orderItemId: 71, productVariantId: 101, qty: 3, condition: "sellable" as const }] };
+    const wire = { ...body, commandKey: "inventory:http-return" };
+    try {
+      expect(await request("/api/returns/process", { ...wire, items: [{ ...body.items[0], qty: -1 }] }))
+        .toMatchObject({ status: 400, body: { code: "RETURN_INPUT_INVALID" } });
+      expect(await returnedLayers()).toEqual([]);
+      const accepted = await Promise.all([request("/api/returns/process", wire), request("/api/returns/process", wire)]);
+      expect(accepted.map(response => response.status)).toEqual([200, 200]);
+      expect(accepted[0].body).toEqual(accepted[1].body);
+      expect(returnCommandResultFor(body).parse(accepted[0].body)).toMatchObject({ processed: 1, totalBaseUnitsReturned: 15 });
+      expect(await returnedLayers()).toMatchObject([{ qty_on_hand: 3, evidence_state: "unknown" }]);
+      expect((await pool.query("SELECT count(*)::integer AS n FROM inventory.return_commands")).rows[0].n).toBe(1);
+      const [lotValuation, cogsValuation] = await Promise.all([
+        request("/api/inventory/valuation"), request("/api/cogs/valuation"),
+      ]);
+      expect(lotValuation).toMatchObject({ status: 200, body: { total: { qty: 6, valueCents: 14 },
+        totalValueMills: "1398", quantityUnit: "variant", unknownCostQty: 3 } });
+      expect(cogsValuation).toMatchObject({ status: 200, body: { totalQty: 6, totalValueCents: 14,
+        totalValueMills: "1398", quantityUnit: "variant", unknownCostQty: 3 } });
+      const physical = await physicalState();
+      await pool.query("UPDATE warehouse.warehouse_locations SET is_active=0 WHERE id=30");
+      expect(await request("/api/returns/process", wire)).toEqual(accepted[0]);
+      const conflict = await request("/api/returns/process", { ...wire, items: [{ ...body.items[0], qty: 4 }] });
+      expect(conflict).toMatchObject({ status: 409, body: { code: "RETURN_COMMAND_REPLAY_CONFLICT" } });
+      expect(await physicalState()).toEqual(physical);
+      const followUps = await request("/api/cogs/cost-follow-ups?limit=2");
+      expect(followUps.status).toBe(200);
+      const report = lotCostFollowUpReportSchema.parse(followUps.body);
+      expect(report.items).toHaveLength(1);
+      expect(report.items[0]).toMatchObject({ state: "review_required", recordedAt: now.toISOString() });
+      expect((await request("/api/cogs/cost-follow-ups?afterId=true")).status).toBe(400);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close(error => error ? reject(error) : resolve());
+        server.closeAllConnections();
+      });
+    }
+  });
+
+  it.each(["damaged", "defective"] as const)("quarantines only newly returned %s lots, preserving history and replay", async condition => {
     const service = createReturnsService(database,{}, { clock: ()=>now });
     const input = { orderId: 61,warehouseLocationId: 30,userId: "operator:cost-test",commandKey: "inventory:damaged",
-      items: [{ orderItemId: 71,productVariantId: 101,qty: 3,condition: "damaged" as const }] };
+      items: [{ orderItemId: 71,productVariantId: 101,qty: 3,condition }] };
     const beforeSource = (await pool.query("SELECT id,qty_on_hand FROM inventory.inventory_lots ORDER BY id")).rows;
     const first = await service.processReturn(input);
     const before = await physicalState();
@@ -284,6 +405,12 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
     expect(await physicalState()).toEqual(before);
     expect((await pool.query("SELECT id,qty_on_hand FROM inventory.inventory_lots WHERE id>=101 ORDER BY id")).rows).toEqual(beforeSource);
     expect((await returnedLayers()).every(layer=>layer.qty_on_hand===0)).toBe(true);
+    const history = await service.getReturnHistory(61);
+    expect(history).toHaveLength(2);
+    expect(history.every(item=>item.condition===condition && item.orderItemId===71)).toBe(true);
+    expect(history.reduce((sum,item)=>sum+item.qty,0)).toBe(3);
+    expect((await pool.query("SELECT qty_consumed FROM inventory.inventory_lots WHERE id IN (SELECT returned_lot_id FROM inventory.return_cost_allocations) ORDER BY id")).rows)
+      .toEqual([{ qty_consumed: 2 }, { qty_consumed: 1 }]);
     expect((await pool.query("SELECT variant_qty FROM inventory.inventory_levels WHERE warehouse_location_id=30")).rows).toEqual([{ variant_qty: 0 }]);
   });
 

@@ -211,6 +211,7 @@ class ReturnsService {
         const restock = await applyReturnedStock(tx,{
           productVariantId: item.productVariantId,warehouseLocationId: params.warehouseLocationId,quantity: item.qty,
           wmsOrderId: params.orderId,wmsOrderItemId: item.orderItemId,actor,notes,now,
+          condition: item.condition,
           operationKey: `legacy_return:${commandKey}:${item.orderItemId}`,
           referenceType: "order_return_command",referenceId: `${commandKey}:${item.orderItemId}`,
           lotNumberPrefix: `RET-${costFingerprint(commandKey).slice(0,16)}-${item.orderItemId}`,

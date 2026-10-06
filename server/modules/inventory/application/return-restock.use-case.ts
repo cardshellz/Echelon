@@ -57,6 +57,7 @@ interface ExistingTransactionRow {
   to_location_id: unknown;
   variant_qty_delta: unknown;
   inventory_lot_id: unknown;
+  target_state: unknown;
 }
 
 interface LocationRow {
@@ -76,6 +77,7 @@ export interface ApplyReturnedStockInput {
   wmsOrderId: number; wmsOrderItemId: number | null; actor: string; notes: string | null; now: Date;
   operationKey: string; referenceType: "return_inventory_treatment" | "order_return_command";
   referenceId: string; lotNumberPrefix: string;
+  condition?: "sellable" | "damaged" | "defective";
 }
 
 /** Compatibility entry for canonical Return Case dispositions. */
@@ -104,6 +106,8 @@ export async function applyReturnedStock(executor: ReturnRestockExecutor, input:
     || !["return_inventory_treatment","order_return_command"].includes(input.referenceType)
     || !(input.now instanceof Date) || !Number.isFinite(input.now.getTime())
     || typeof input.lotNumberPrefix !== "string" || !input.lotNumberPrefix.trim() || input.lotNumberPrefix.length>50
+    || (input.condition !== undefined && !["sellable", "damaged", "defective"].includes(input.condition))
+    || (input.notes !== null && typeof input.notes !== "string")
     || (input.wmsOrderItemId !== null && (!Number.isSafeInteger(input.wmsOrderItemId) || input.wmsOrderItemId<=0))) {
     throw new ReturnRestockError("RETURN_RESTOCK_INPUT_INVALID","An exact audited return operation is required.");
   }
@@ -115,7 +119,7 @@ export async function applyReturnedStock(executor: ReturnRestockExecutor, input:
   const quantityPosting = await openOperationalQuantityPosting(executor);
   await executor.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${input.operationKey}))`);
   const existing = rowsOf<ExistingTransactionRow>(await executor.execute(sql`
-    SELECT id,order_id,order_item_id,product_variant_id,to_location_id,variant_qty_delta,inventory_lot_id
+    SELECT id,order_id,order_item_id,product_variant_id,to_location_id,variant_qty_delta,inventory_lot_id,target_state
     FROM inventory.inventory_transactions WHERE transaction_type='return'
       AND reference_type=${input.referenceType} AND reference_id=${input.referenceId}
       AND voided_at IS NULL ORDER BY id FOR UPDATE
@@ -174,6 +178,7 @@ export async function applyReturnedStock(executor: ReturnRestockExecutor, input:
   });
   const inventoryLotIds: number[] = [];
   const inventoryTransactionIds: number[] = [];
+  const targetState = input.condition && input.condition !== "sellable" ? input.condition : "on_hand";
   let runningQuantity = quantityBefore;
   for (const [index,layer] of layers.entries()) {
     // Existing numeric columns are compatibility mirrors when financial evidence
@@ -223,7 +228,7 @@ export async function applyReturnedStock(executor: ReturnRestockExecutor, input:
         variant_qty_delta,variant_qty_before,variant_qty_after,source_state,target_state,unit_cost_cents,
         inventory_lot_id,order_id,order_item_id,reference_type,reference_id,notes,user_id,created_at)
       VALUES (${input.productVariantId},${input.warehouseLocationId},'return',${layer.quantity},${runningQuantity},${nextQuantity},
-        'customer_return','on_hand',${cents},${inventoryLotId},${input.wmsOrderId},${input.wmsOrderItemId},
+        'customer_return',${targetState},${cents},${inventoryLotId},${input.wmsOrderId},${input.wmsOrderItemId},
         ${input.referenceType},${input.referenceId},${input.notes},${input.actor},${input.now}) RETURNING id
     `));
     if (!transaction) throw integrity("RETURN_RESTOCK_LEDGER_INSERT_FAILED","Return inventory transaction was not created.",input);
@@ -272,11 +277,13 @@ function validateReplay(rows: ExistingTransactionRow[], input: ApplyReturnedStoc
   let quantity = 0;
   const inventoryLotIds: number[] = [];
   const inventoryTransactionIds: number[] = [];
+  const targetState = input.condition && input.condition !== "sellable" ? input.condition : "on_hand";
   for (const row of rows) {
     if (readPositiveInteger(row.order_id,"existing return WMS order") !== input.wmsOrderId
       || (row.order_item_id === null ? null : readPositiveInteger(row.order_item_id,"existing return WMS item")) !== input.wmsOrderItemId
       || readPositiveInteger(row.product_variant_id,"existing return variant") !== input.productVariantId
-      || readPositiveInteger(row.to_location_id,"existing return location") !== input.warehouseLocationId) {
+      || readPositiveInteger(row.to_location_id,"existing return location") !== input.warehouseLocationId
+      || row.target_state !== targetState) {
       throw conflict("RETURN_RESTOCK_REPLAY_CONFLICT","Existing return evidence identifies different stock.",input);
     }
     quantity=checkedAdd(quantity,readPositiveInteger(row.variant_qty_delta,"existing return quantity"),input);

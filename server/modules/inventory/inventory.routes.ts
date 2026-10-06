@@ -1,4 +1,5 @@
 import { lotCostFollowUpQuerySchema } from "@shared/inventory/lot-cost-follow-up";
+import { returnCommandBodySchema, returnCommandResultFor } from "@shared/inventory/return-command";
 import { isLevelDeleteForbiddenError, isRetiredEmptyLevel } from "./domain/retired-inventory-level";
 import type { Express } from "express";
 import { awaitPageReads, limitPageRead } from "../../platform/http/page-read-limit";
@@ -913,16 +914,14 @@ export function registerInventoryRoutes(app: Express) {
       const { orderId, items, warehouseLocationId, notes, commandKey } = req.body;
       const userId = req.session.user?.id;
 
-      if (!orderId || !items || !Array.isArray(items) || items.length === 0 || !warehouseLocationId) {
-        return res.status(400).json({ error: "Missing required fields: orderId, items (array), warehouseLocationId" });
+      const parsed = returnCommandBodySchema.safeParse({ orderId, items, warehouseLocationId, notes });
+      if (!parsed.success) {
+        return res.status(400).json({ code: "RETURN_INPUT_INVALID", error: "Return identities, quantities and conditions must be valid." });
       }
 
       const result = await returns.processReturn({
-        orderId,
-        items,
-        warehouseLocationId,
+        ...parsed.data,
         userId,
-        notes,
         commandKey,
       });
 
@@ -933,13 +932,13 @@ export function registerInventoryRoutes(app: Express) {
         );
       }
 
-      res.json(result);
+      res.json(returnCommandResultFor(parsed.data).parse(result));
     } catch (error: any) {
       console.error("Error processing return:", error);
       if (error instanceof ReturnRestockError || error instanceof CostEvidenceError || error instanceof LotCostError) {
         return res.status(error.statusCode).json({ code: error.code,error: error.message,context: error.context });
       }
-      res.status(500).json({ error: error.message || "Failed to process return" });
+      res.status(500).json({ error: "Failed to process return" });
     }
   });
 

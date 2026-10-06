@@ -1,6 +1,6 @@
 import { readLotCostFollowUps } from "./infrastructure/lot-cost-follow-up.repository";
 import { readInventoryValuation } from "./application/read-inventory-valuation";
-import { normalizeLotCosts, recordedUnitCostMills, moneyToSafeNumber } from "./domain/lot-cost";
+import { normalizeLotCosts, recordedUnitCostMills, moneyToSafeNumber, roundedSignedMillsToCents } from "./domain/lot-cost";
 import { costInteger, lockInventoryCostGraph } from "./infrastructure/cost-evidence.repository";
 import type { CostComponent } from "@shared/procurement/cost-source-contracts";
 /**
@@ -11,7 +11,7 @@ import type { CostComponent } from "@shared/procurement/cost-source-contracts";
  * custody belongs to InventoryLotService; this owner applies financial changes.
  *
  * Tables: inventory.inventory_lots (cost layers), oms.order_item_costs
- * (the single live COGS ledger, written at pick time by pickFromLots).
+ * (the single live COGS ledger, written by the existing inventory pick owners).
  * The legacy inventory.order_line_costs ledger is retired (COGS Phase 1).
  */
 
@@ -153,20 +153,25 @@ export class COGSService {
     let deltaCents = BigInt(0);
     for (const row of rows) {
       const oldUnitMills = recordedUnitCostMills(row);
-      const qty = BigInt(costInteger(row.qty, "cogs.quantity"));
+      const qty = BigInt(costInteger(row.qty, "cogs.quantity", -2_147_483_647));
       const nextTotal = BigInt(newUnitCostMills) * qty;
       const priorTotal = oldUnitMills * qty;
       // SQL stores bigint and rounds each extended row, not a rounded unit.
       // Keep that same exact boundary for the audit/export delta.
-      if (nextTotal > BigInt("9223372036854775807")) throw new Error("COGS extended cost exceeds PostgreSQL bigint range");
-      deltaCents += (nextTotal + BigInt(50)) / BigInt(100) - (priorTotal + BigInt(50)) / BigInt(100);
+      const maxStored = BigInt("9223372036854775807");
+      if (nextTotal > maxStored || nextTotal < -maxStored || priorTotal > maxStored || priorTotal < -maxStored) {
+        throw new Error("COGS extended cost exceeds PostgreSQL bigint range");
+      }
+      deltaCents += roundedSignedMillsToCents(nextTotal) - roundedSignedMillsToCents(priorTotal);
     }
     const totalDeltaCents = costInteger(deltaCents.toString(), "cogs.totalDeltaCents", -Number.MAX_SAFE_INTEGER);
 
     await tx.execute(sql`
       UPDATE oms.order_item_costs
       SET unit_cost_mills = ${newUnitCostMills}, total_cost_mills = qty::bigint * ${newUnitCostMills},
-          unit_cost_cents = ${newUnitCostCents}, total_cost_cents = ((qty::bigint * ${newUnitCostMills}) + 50) / 100,
+          unit_cost_cents = ${newUnitCostCents},
+          total_cost_cents = CASE WHEN qty < 0 THEN -(((-qty::bigint * ${newUnitCostMills}) + 50) / 100)
+            ELSE ((qty::bigint * ${newUnitCostMills}) + 50) / 100 END,
           cost_precision_version=1
       WHERE id IN (${sql.join(rows.map((row: any) => sql`${costInteger(row.id,"cogs.id",1)}`),sql`, `)})
     `);
