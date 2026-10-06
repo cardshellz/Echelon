@@ -80,6 +80,7 @@ import { registerDropshipListingContentRoutes } from "./modules/dropship/interfa
 import { registerDropshipPricingRulesRoutes } from "./modules/dropship/interfaces/http/dropship-pricing-rules.routes";
 import { registerDropshipEbayStoreCategoryRoutes } from "./modules/dropship/interfaces/http/dropship-ebay-store-category.routes";
 import { registerDropshipEbayCategoryRulesRoutes } from "./modules/dropship/interfaces/http/dropship-ebay-category-rules.routes";
+import { registerDropshipListingSettingsRoutes } from "./modules/dropship/interfaces/http/dropship-listing-settings.routes";
 import { registerDropshipEbayListingSetupRoutes } from "./modules/dropship/interfaces/http/dropship-ebay-listing-setup.routes";
 import { registerDropshipEbayListingPolicyOverrideRoutes } from "./modules/dropship/interfaces/http/dropship-ebay-listing-policy-override.routes";
 import { registerDropshipListingConfigRoutes } from "./modules/dropship/interfaces/http/dropship-listing-config.routes";
@@ -222,6 +223,7 @@ export async function registerRoutes(
   registerDropshipEbayListingPolicyOverrideRoutes(app);
   registerDropshipEbayStoreCategoryRoutes(app);
   registerDropshipEbayCategoryRulesRoutes(app);
+  registerDropshipListingSettingsRoutes(app);
   registerLocationRoutes(app);
   registerPickingRoutes(app);
   registerOperationsDashboardRoutes(app);

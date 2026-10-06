@@ -1308,9 +1308,10 @@ export function evaluateListingPricingPolicy(
   return { blockers, warnings };
 }
 
-function pricingPolicyMatchesCandidate(
+/** Whether a Card Shellz price limit covers this size. The listing settings views list the same limits. */
+export function pricingPolicyMatchesCandidate(
   policy: DropshipPricingPolicyRecord,
-  candidate: DropshipListingCatalogCandidate,
+  candidate: Pick<DropshipListingCatalogCandidate, "productLineIds" | "category" | "productId" | "productVariantId">,
 ): boolean {
   switch (policy.scopeType) {
     case "catalog":
