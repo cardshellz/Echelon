@@ -21,6 +21,44 @@ export function OrderEditTotals({
       columns.flatMap((column) => column.financials.shippingDiscountLabels),
     ),
   ].join(", ");
+  // Older saved quotes do not have proven per-code amounts. Keep their complete
+  // aggregate rather than presenting missing evidence as a zero-dollar discount.
+  const detailed = columns.every(
+    (column) => column.financials.itemDiscounts !== undefined,
+  );
+  const discounts = new Map(
+    columns
+      .flatMap((column) => column.financials.itemDiscounts ?? [])
+      .map((discount) => [discount.key, discount]),
+  );
+  const discountRows =
+    detailed && discounts.size > 0
+      ? [...discounts.values()].map((discount) => ({
+          label: discount.label,
+          detail:
+            discount.value.type === "percentage"
+              ? `${discount.value.percentage}% off eligible items`
+              : discount.value.type === "fixed"
+                ? `${money(discount.value.amountCents)} fixed credit`
+                : undefined,
+          amounts: columns.map(
+            (column) =>
+              column.financials.itemDiscounts!.find(
+                (entry) => entry.key === discount.key,
+              )?.amountCents ?? 0,
+          ),
+          discount: true,
+        }))
+      : [
+          {
+            label: "Item discounts",
+            detail: itemLabels,
+            amounts: columns.map(
+              (column) => column.financials.itemsDiscountCents,
+            ),
+            discount: true,
+          },
+        ];
   const rows: Array<{
     label: string;
     detail?: string;
@@ -32,12 +70,7 @@ export function OrderEditTotals({
       label: "Items before discounts",
       amounts: columns.map((column) => column.financials.itemsGrossCents),
     },
-    {
-      label: "Item discounts",
-      detail: itemLabels,
-      amounts: columns.map((column) => column.financials.itemsDiscountCents),
-      discount: true,
-    },
+    ...discountRows,
     {
       label: "Items after discounts",
       amounts: columns.map((column) => column.financials.itemsNetCents),

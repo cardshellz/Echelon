@@ -14,6 +14,7 @@ import OrderEdits, {
 } from "../../OrderEdits";
 import { createOrderEditTransport } from "@/lib/order-edits";
 import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";
+import { OrderEditTotals } from "@/components/order-edits/OrderEditFinancials";
 
 const discountedFinancials: OrderEditFinancials = {
   itemsGrossCents: 11995,
@@ -150,6 +151,91 @@ beforeEach(() => {
 });
 
 describe("order financial presentation", () => {
+  it("shows each percentage code and fixed credit with its exact before/after amount", () => {
+    const before: OrderEditFinancials = {
+      ...discountedFinancials,
+      itemsGrossCents: 10000,
+      itemsDiscountCents: 3000,
+      itemsNetCents: 7000,
+      totalCents: 7000,
+      itemDiscounts: [
+        {
+          key: "TEN",
+          label: "TEN",
+          value: { type: "percentage", percentage: "10" },
+          amountCents: 1000,
+        },
+        {
+          key: "REWARD",
+          label: "Reward credit",
+          value: { type: "fixed", amountCents: 2000 },
+          amountCents: 2000,
+        },
+      ],
+      lines: [
+        { id: "item", grossCents: 10000, discountCents: 3000, netCents: 7000 },
+      ],
+    };
+    const after: OrderEditFinancials = {
+      ...before,
+      itemsGrossCents: 15000,
+      itemsDiscountCents: 3500,
+      itemsNetCents: 11500,
+      totalCents: 11500,
+      itemDiscounts: [
+        { ...before.itemDiscounts![0], amountCents: 1500 },
+        before.itemDiscounts![1],
+      ],
+      lines: [
+        { id: "item", grossCents: 15000, discountCents: 3500, netCents: 11500 },
+      ],
+    };
+    const html = renderToStaticMarkup(
+      createElement(OrderEditTotals, {
+        columns: [
+          { label: "Before edit", financials: before },
+          { label: "After changes", financials: after },
+        ],
+      }),
+    );
+    for (const text of [
+      "TEN",
+      "10% off eligible items",
+      "Reward credit",
+      "$20.00 fixed credit",
+      "−$10.00",
+      "−$15.00",
+      "−$20.00",
+      "$70.00",
+      "$115.00",
+    ])
+      expect(html).toContain(text);
+    expect(html).not.toContain("Item discounts"); // No second aggregate discount row.
+  });
+  it("retains aggregate discounts when an older saved column lacks per-code amounts", () => {
+    const after = {
+      ...discountedFinancials,
+      itemDiscounts: [
+        {
+          key: "AMAZZIN",
+          label: "AMAZZIN",
+          amountCents: 1199,
+          value: { type: "percentage" as const, percentage: "10" },
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(
+      createElement(OrderEditTotals, {
+        columns: [
+          { label: "Before edit", financials: discountedFinancials },
+          { label: "After changes", financials: after },
+        ],
+      }),
+    );
+    expect(html).toContain("Item discounts");
+    expect(html).not.toContain("10% off eligible items");
+    expect(html).toContain("−$11.99");
+  });
   it("shows before and after discounts, shipping, tax, and the payment required for a change", () => {
     const after: OrderEditFinancials = {
       ...discountedFinancials,

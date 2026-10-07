@@ -79,11 +79,11 @@ its stored baseline or remove its hold directly in the database.
   combinations fail closed.
 - Shipping charges remain unchanged. Address editing is not included.
 - Existing-line pricing is verified; added products use verified current member
-  pricing when applicable. Native order-wide percentage discount codes are
+  pricing when applicable. Native order-wide percentage and fixed discount codes are
   supported alongside unchanged shipping discounts, including free shipping.
   Shopify's exact line allocations determine net prices and totals; rounded
   discounted unit prices are not multiplied to invent a line total.
-  Fixed-amount or product-specific codes, scripts, unverified automatic product
+  Product-specific codes, scripts, unverified automatic product
   discounts, and orders with nonzero tax included in prices require staff review.
   The pilot does not recalculate shipping or assume a promotion is still valid.
 - An edit requiring extra payment cannot completely remove an original line;
@@ -93,6 +93,46 @@ its stored baseline or remove its hold directly in the database.
   configured Shopify apps and automations are outside that notification setting.
 - A ShipStation shipment must have a verified provider identity before editing;
   an ambiguous create response is not proof that no remote order exists.
+
+## Discount calculation and evidence
+
+`priceOrderEditDiscounts` is a pure domain engine. All money is validated integer
+cents; percentage arithmetic and penny allocation use `BigInt`. Only the original
+order's accepted discounts enter the engine. There is no new coupon entry or
+second rewards redemption in the editor.
+
+1. Verified product and member discounts establish each eligible item subtotal.
+2. Existing order percentages use that same subtotal, without compounding.
+   A native per-line allocation must equal one of the two adjacent integer cents
+   around the exact percentage. This covers the captured Shopify rounding; it is
+   not a tolerance for an arbitrary difference in order totals.
+3. Each fixed code has one original credit budget across the order. Quantity
+   growth cannot multiply it. Removal must preserve that budget on the remaining
+   eligible items. Shopify's distribution is accepted only if the budget and all
+   item bounds reconcile exactly.
+4. Shipping is reconciled separately; tax comes from Shopify. The final financial
+   quote must reconcile every item allocation, discount, shipping amount and tax
+   to the order total. Commit readback verifies the same per-code amounts and
+   original rule identities before fulfillment can resume.
+
+The review displays each proven percentage code and fixed credit separately,
+including their before/after money amounts. Older saved operations or original
+allocations that include quantities removed by a prior edit retain their verified
+aggregate display rather than invented per-code amounts. Enriching old evidence
+does not prevent cancelling an unchanged unsubmitted edit.
+
+Shopify cannot edit existing order-level discount codes, and some fixed codes
+retain allocations instead of redistributing when an item is removed. The engine
+rejects lost or duplicated fixed credit before commit. It also rejects edits that
+leave unused credit, or require choosing priority between multiple capped fixed
+credits. Automatic settlement of unused Shellz rewards points is not implemented:
+that requires a command owned by the rewards ledger, proven original redemption
+identity, a capped settlement budget and retry-safe audit. A code name is not proof
+of a rewards redemption. The editor does not mint a replacement discount or add a
+manual compensating credit, which could bypass the original combination rules.
+
+These boundaries follow [Shopify's order-edit rules](https://help.shopify.com/en/manual/fulfillment/managing-orders/editing-orders/considerations)
+and [discount combination rules](https://help.shopify.com/en/manual/discounts/discount-combinations).
 
 ## Recovery and diagnostics
 
@@ -161,6 +201,11 @@ Before customer rollout, perform supervised tests on explicitly selected orders:
    resumability, and no duplicate commit/refund.
 5. A picking race, partial payment, or contradictory provider response: verify the
    edit is rejected or remains held with an actionable error.
+6. An original percentage code plus a fixed reward: verify the percentage changes
+   with eligible value, the fixed credit appears once, and the payment/refund
+   difference matches the final total. Verify wholly unpaid expiry restores both
+   the original contents and discount amounts. A removal that loses fixed value
+   or leaves unused credit must be blocked before commit.
 
 Record the order and operation IDs, before/after totals, provider transaction IDs,
 warehouse partitions, allocation evidence and final status for each case. Customer

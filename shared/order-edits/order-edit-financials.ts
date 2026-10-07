@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { orderEditDiscountSchema } from "./order-edit-discounts";
 
 const cents = z.number().int().safe().nonnegative();
 const label = z.string().trim().min(1).max(500);
@@ -9,6 +10,8 @@ export const orderEditFinancialsSchema = z
     itemsDiscountCents: cents,
     itemsNetCents: cents,
     itemDiscountLabels: z.array(label).max(250),
+    // Optional so saved operations retain their original financial proof shape.
+    itemDiscounts: z.array(orderEditDiscountSchema).max(250).optional(),
     shippingGrossCents: cents,
     shippingDiscountCents: cents,
     shippingCents: cents,
@@ -53,6 +56,14 @@ export const orderEditFinancialsSchema = z
       values.reduce((total, amount) => total + BigInt(amount), BigInt(0));
     if (
       new Set(value.lines.map((line) => line.id)).size !== value.lines.length ||
+      (value.itemDiscounts !== undefined &&
+        (new Set(value.itemDiscounts.map((discount) => discount.key)).size !==
+          value.itemDiscounts.length ||
+          value.itemDiscounts.some(
+            (discount) => !Number.isSafeInteger(discount.amountCents),
+          ) ||
+          sum(value.itemDiscounts.map((discount) => discount.amountCents)) !==
+            BigInt(value.itemsDiscountCents))) ||
       value.lines.some(
         (line) =>
           BigInt(line.grossCents) - BigInt(line.discountCents) !==
