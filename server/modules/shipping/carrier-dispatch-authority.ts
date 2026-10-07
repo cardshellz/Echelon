@@ -5,7 +5,9 @@ export type HistoricalCarrierDispatchRepairCohort =
   | "package_resolution_retry"
   | "legacy_outbound_shipment_identity_conflict"
   | "confirmed_historical_inventory_gap"
-  | "publication_revision_order";
+  | "publication_revision_order"
+  | "label_time_package_replay"
+  | "split_sibling_relabel_misread";
 
 export interface ReviewedCarrierDispatchRepairAuthorization {
   requeueId: number;
