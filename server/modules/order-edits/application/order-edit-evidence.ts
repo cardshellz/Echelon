@@ -138,6 +138,7 @@ export function matchesOrderEditQuote(
         .filter(
           (rule) =>
             rule.type === "DiscountCodeApplication" ||
+            rule.type === "AutomaticDiscountApplication" ||
             rule.targetType === "SHIPPING_LINE",
         )
         .some(

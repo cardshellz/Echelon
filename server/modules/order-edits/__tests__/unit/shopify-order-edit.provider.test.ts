@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { ShopifyOrderEditProvider } from "../../infrastructure/shopify-order-edit.provider";
 import { isUnpaidRecoveryRestored } from "../../application/order-edit-evidence";
+import { orderEditQuoteSchema } from "../../application/order-edit-provider.schema";
 import {
   OrderEditCommitNotSentError,
   type OrderEditQuote,
@@ -2718,3 +2719,671 @@ function additionQuote(baseline: OrderEditSnapshot): OrderEditQuote {
     evidence: {},
   };
 }
+
+// Exact observed Shopify scopes for #64008, with synthetic commercial identities.
+const addedMemberLineId =
+  "gid://shopify/CalculatedLineItem/385de2d5-a4b7-49f3-9a8f-10a609b835fe";
+function memberCreditOrder(extraQuantity = 0, includeHistorical = false) {
+  const memberApplication = {
+    __typename: "AutomaticDiscountApplication",
+    index: 0,
+    targetType: "LINE_ITEM",
+    allocationMethod: "ACROSS",
+    targetSelection: "ENTITLED",
+    title: "Member discount",
+    value: { __typename: "MoneyV2", amount: "30.00", currencyCode: "USD" },
+  };
+  const creditApplication = {
+    __typename: "DiscountCodeApplication",
+    index: 2,
+    targetType: "LINE_ITEM",
+    allocationMethod: "ACROSS",
+    targetSelection: "ALL",
+    code: "TEST-REWARD-19",
+    value: { __typename: "MoneyV2", amount: "19.00", currencyCode: "USD" },
+  };
+  const manualApplication = {
+    __typename: "ManualDiscountApplication",
+    index: 3,
+    targetType: "LINE_ITEM",
+    allocationMethod: "EACH",
+    targetSelection: "EXPLICIT",
+    title: "Echelon member pricing",
+    value: { __typename: "MoneyV2", amount: "30.00", currencyCode: "USD" },
+  };
+  const original = {
+    ...line(1, 10, 1, "149.99"),
+    priceAfterAllDiscountsBeforeTaxesSet: bag("100.99"),
+    discountAllocations: [
+      {
+        allocatedAmountSet: bag("30.00"),
+        discountApplication: memberApplication,
+      },
+      {
+        allocatedAmountSet: bag("19.00"),
+        discountApplication: creditApplication,
+      },
+    ],
+  };
+  const extra = {
+    ...line(2, 10, extraQuantity, "149.99"),
+    discountedUnitPriceSet: bag("119.99"),
+    unfulfilledDiscountedTotalSet: bag(lineAmount("119.99", extraQuantity)),
+    priceAfterAllDiscountsBeforeTaxesSet: bag(
+      lineAmount("119.99", extraQuantity),
+    ),
+    discountAllocations: extraQuantity
+      ? [
+          {
+            allocatedAmountSet: bag(lineAmount("30.00", extraQuantity)),
+            discountApplication: manualApplication,
+          },
+        ]
+      : [],
+  };
+  const total = decimal(
+    cents("100.99") + cents("119.99") * BigInt(extraQuantity),
+  );
+  const base = rawOrder();
+  return {
+    ...base,
+    order: {
+      ...base.order,
+      fullyPaid: extraQuantity === 0,
+      currentTotalPriceSet: bag(total),
+      currentSubtotalPriceSet: bag(total),
+      netPaymentSet: bag("100.99"),
+      totalOutstandingSet: bag(lineAmount("119.99", extraQuantity)),
+      transactions: [tx(1, "100.99")],
+      customer: {
+        id: id("Customer", 1),
+        tags: [],
+        membershipPlan: { value: "test-plan" },
+      },
+      lineItems: {
+        nodes: [
+          original,
+          ...(extraQuantity || includeHistorical ? [extra] : []),
+        ],
+        pageInfo: { hasNextPage: false },
+      },
+      discountApplications: {
+        nodes: [
+          memberApplication,
+          {
+            __typename: "AutomaticDiscountApplication",
+            index: 1,
+            targetType: "SHIPPING_LINE",
+            allocationMethod: "EACH",
+            targetSelection: "ALL",
+            title: "Member free shipping",
+            value: { __typename: "PricingPercentageValue", percentage: 100 },
+          },
+          creditApplication,
+          ...(extraQuantity || includeHistorical ? [manualApplication] : []),
+        ],
+        pageInfo: { hasNextPage: false },
+      },
+      shippingLines: {
+        nodes: [
+          {
+            id: id("ShippingLine", 1),
+            isRemoved: false,
+            originalPriceSet: bag("11.99"),
+            currentDiscountedPriceSet: bag("0.00"),
+          },
+        ],
+        pageInfo: { hasNextPage: false },
+      },
+    },
+  };
+}
+function memberCreditCalculated(
+  extraQuantity = 0,
+  member = true,
+  committed = false,
+) {
+  const original = calcLine(1, 10, 1, "149.99");
+  original.calculatedDiscountAllocations = [
+    {
+      allocatedAmountSet: bag("30.00"),
+      discountApplication: {
+        __typename: "CalculatedAutomaticDiscountApplication",
+        id: id("CalculatedAutomaticDiscountApplication", 1),
+        allocationMethod: "ACROSS",
+        appliedTo: "ORDER",
+        targetType: "LINE_ITEM",
+        targetSelection: "ENTITLED",
+        description: "Member discount",
+        value: { __typename: "MoneyV2", amount: "30.00", currencyCode: "USD" },
+      },
+    },
+    {
+      allocatedAmountSet: bag("19.00"),
+      discountApplication: {
+        __typename: "CalculatedDiscountCodeApplication",
+        id: id("CalculatedDiscountCodeApplication", 2),
+        allocationMethod: "ACROSS",
+        appliedTo: "ORDER",
+        targetType: "LINE_ITEM",
+        targetSelection: "ALL",
+        description: "TEST-REWARD-19",
+        code: "TEST-REWARD-19",
+        value: { __typename: "MoneyV2", amount: "19.00", currencyCode: "USD" },
+      },
+    },
+  ];
+  const extra = {
+    ...calcLine(2, 10, extraQuantity, "149.99", member ? "119.99" : "149.99"),
+    id: committed ? id("CalculatedLineItem", 2) : addedMemberLineId,
+    editableQuantityBeforeChanges: committed ? extraQuantity : 0,
+  };
+  const total = decimal(
+    cents("100.99") +
+      cents(member ? "119.99" : "149.99") * BigInt(extraQuantity),
+  );
+  return {
+    ...calculated(
+      total,
+      lineAmount(member ? "119.99" : "149.99", extraQuantity),
+      committed ? [original, extra] : [original],
+      !committed && extraQuantity ? [extra] : [],
+    ),
+    shippingLines: [
+      {
+        id: id("CalculatedShippingLine", 1),
+        price: bag("11.99"),
+        stagedStatus: "NONE",
+      },
+    ],
+  };
+}
+function memberProvenance(title = "Cardshellz Member Pricing") {
+  return {
+    currentAppInstallation: { app: { id: id("App", 300) } },
+    shopifyFunctions: {
+      nodes: [
+        { id: "pricing-function-id", handle: "cardshellz-pricing-discount" },
+      ],
+      pageInfo: { hasNextPage: false },
+    },
+    discountNodes: {
+      nodes: [
+        {
+          id: id("DiscountAutomaticNode", 400),
+          discount: {
+            __typename: "DiscountAutomaticApp",
+            title,
+            status: "ACTIVE",
+            discountClasses: ["PRODUCT"],
+            appDiscountType: {
+              functionId: "pricing-function-id",
+              app: { id: id("App", 300) },
+            },
+          },
+        },
+      ],
+      pageInfo: { hasNextPage: false },
+    },
+  };
+}
+function memberQuoteResponses() {
+  return [
+    memberCreditOrder(),
+    memberCreditOrder(),
+    memberProvenance(),
+    {
+      nodes: [
+        variant(
+          10,
+          "149.99",
+          JSON.stringify({ "test-plan": { cents: 11999 } }),
+        ),
+      ],
+    },
+    begin(memberCreditCalculated()),
+    {
+      orderEditAddVariant: {
+        userErrors: [],
+        calculatedLineItem: { id: addedMemberLineId },
+        calculatedOrder: memberCreditCalculated(1, false),
+      },
+    },
+    {
+      orderEditAddLineItemDiscount: {
+        userErrors: [],
+        calculatedOrder: memberCreditCalculated(1),
+      },
+    },
+  ];
+}
+async function quoteMemberIncrease() {
+  const h = harness(memberQuoteResponses());
+  const snapshot = await h.provider.readOrder(4, "100");
+  const quote = await h.provider.quote(
+    4,
+    snapshot,
+    { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+    "edit-1",
+  );
+  return { ...h, quote, snapshot };
+}
+
+describe("member function pricing on protected quantity increases", () => {
+  it("combines a protected increase and an explicit addition without losing quantity lineage", async () => {
+    const responses = memberQuoteResponses();
+    responses[5] = {
+      orderEditAddVariant: {
+        userErrors: [],
+        calculatedLineItem: { id: addedMemberLineId },
+        calculatedOrder: memberCreditCalculated(2, false),
+      },
+    };
+    responses[6] = {
+      orderEditAddLineItemDiscount: {
+        userErrors: [],
+        calculatedOrder: memberCreditCalculated(2),
+      },
+    };
+    const h = harness(responses);
+    const snapshot = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      snapshot,
+      {
+        changes: [{ lineItemId: "1", quantity: 2 }],
+        additions: [{ variantId: "10", quantity: 1 }],
+      },
+      "edit-1",
+    );
+    expect(quote.totalCents).toBe(34097);
+    expect(quote.lines[1]).toMatchObject({
+      quantity: 2,
+      quantityIncreaseOfLineId: id("LineItem", 1),
+    });
+    expect(
+      h.requests.filter((request) =>
+        request.query.includes("orderEditAddVariant"),
+      ),
+    ).toHaveLength(1);
+    expect(quote.lines.reduce((total, line) => total + line.quantity, 0)).toBe(
+      3,
+    );
+  });
+  it("matches distinguishable original lines of the same variant for a subsequent edit", async () => {
+    const raw = memberCreditOrder(1);
+    Object.assign(raw.order, {
+      fullyPaid: true,
+      netPaymentSet: bag("220.98"),
+      totalOutstandingSet: bag("0.00"),
+      transactions: [tx(1, "100.99"), tx(2, "119.99")],
+      transactionsCount: { count: 2, precision: "EXACT" },
+    });
+    const initial = memberCreditCalculated(1, true, true);
+    initial.totalOutstandingSet = bag("0.00");
+    const revised = memberCreditCalculated(2, true, true);
+    revised.totalOutstandingSet = bag("119.99");
+    const h = harness([
+      raw,
+      raw,
+      memberProvenance(),
+      {
+        nodes: [
+          variant(
+            10,
+            "149.99",
+            JSON.stringify({ "test-plan": { cents: 11999 } }),
+          ),
+        ],
+      },
+      begin(initial),
+      quantity(revised),
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      snapshot,
+      { changes: [{ lineItemId: "2", quantity: 2 }], additions: [] },
+      "edit-1",
+    );
+    expect(quote).toMatchObject({ totalCents: 34097, deltaCents: 11999 });
+    expect(
+      quote.lines.map((line) => ({
+        originalLineId: line.originalLineId,
+        quantity: line.quantity,
+      })),
+    ).toEqual([
+      { originalLineId: id("LineItem", 1), quantity: 1 },
+      { originalLineId: id("LineItem", 2), quantity: 2 },
+    ]);
+  });
+  it("refuses an equal-value readback that replaced the original automatic promotion", async () => {
+    const { quote, snapshot } = await quoteMemberIncrease();
+    const readback = memberCreditOrder(1);
+    Object.assign(readback.order.discountApplications.nodes[0], {
+      title: "Different promotion",
+    });
+    const h = harness([readback]);
+    expect(
+      (await h.provider.reconcileCommit(4, snapshot, quote, "edit-1")).status,
+    ).toBe("conflict");
+    expect(h.requests).toHaveLength(1);
+  });
+  it("quotes the observed 1 -> 2 case on the same order, with the fixed reward used once", async () => {
+    const { quote, requests } = await quoteMemberIncrease();
+    expect(quote).toMatchObject({
+      totalCents: 22098,
+      deltaCents: 11999,
+      outstandingCents: 11999,
+      plan: { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+    });
+    expect(quote.financials).toMatchObject({
+      itemsGrossCents: 29998,
+      itemsDiscountCents: 7900,
+      itemsNetCents: 22098,
+      shippingGrossCents: 1199,
+      shippingDiscountCents: 1199,
+      shippingCents: 0,
+    });
+    expect(quote.financials?.itemDiscounts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "TEST-REWARD-19", amountCents: 1900 }),
+        expect.objectContaining({ amountCents: 6000, key: "product" }),
+      ]),
+    );
+    expect(quote.lines).toEqual([
+      expect.objectContaining({
+        originalLineId: id("LineItem", 1),
+        quantity: 1,
+      }),
+      expect.objectContaining({
+        originalLineId: null,
+        quantityIncreaseOfLineId: id("LineItem", 1),
+        calculatedLineId: addedMemberLineId,
+        quantity: 1,
+        discountedUnitPriceCents: 11999,
+      }),
+    ]);
+    expect(
+      requests.some((request) =>
+        /orderEditSetQuantity|orderEditCommit|refundCreate/.test(request.query),
+      ),
+    ).toBe(false);
+    expect(
+      requests.find((request) => request.query.includes("orderEditAddVariant"))
+        ?.variables,
+    ).toMatchObject({
+      id: id("CalculatedOrder", 100),
+      variantId: id("ProductVariant", 10),
+      quantity: 1,
+    });
+    expect(quote.evidence.pricingProvenance).toMatchObject({
+      title: "Cardshellz Member Pricing",
+      orderMessages: ["Member discount"],
+    });
+  });
+  it("does not depend on the editable registration title", async () => {
+    const responses = memberQuoteResponses();
+    responses[2] = memberProvenance("Renamed promotion");
+    const h = harness(responses);
+    const snapshot = await h.provider.readOrder(4, "100");
+    expect(
+      (
+        await h.provider.quote(
+          4,
+          snapshot,
+          { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+          "edit-1",
+        )
+      ).totalCents,
+    ).toBe(22098);
+  });
+  it("applies a native percentage coupon after both member-priced units", async () => {
+    const raw = memberCreditOrder();
+    const coupon = raw.order.discountApplications.nodes[2];
+    coupon.value = { __typename: "PricingPercentageValue", percentage: 10 };
+    const couponAllocation =
+      raw.order.lineItems.nodes[0].discountAllocations[1];
+    couponAllocation.allocatedAmountSet = bag("12.00");
+    Object.assign(raw.order, {
+      currentTotalPriceSet: bag("107.99"),
+      currentSubtotalPriceSet: bag("107.99"),
+      netPaymentSet: bag("107.99"),
+      transactions: [tx(1, "107.99")],
+    });
+    raw.order.lineItems.nodes[0].priceAfterAllDiscountsBeforeTaxesSet =
+      bag("107.99");
+    const initial = memberCreditCalculated();
+    const full = memberCreditCalculated(1);
+    const afterAdd = memberCreditCalculated(1, false);
+    for (const calculated of [initial, afterAdd, full]) {
+      const credit =
+        calculated.lineItems.nodes[0].calculatedDiscountAllocations[1];
+      credit.discountApplication.value = {
+        __typename: "PricingPercentageValue",
+        percentage: 10,
+      };
+      credit.allocatedAmountSet = bag("12.00");
+    }
+    Object.assign(initial, {
+      totalPriceSet: bag("107.99"),
+      subtotalPriceSet: bag("107.99"),
+      totalOutstandingSet: bag("0.00"),
+    });
+    const addedCredit = structuredClone(
+      full.lineItems.nodes[0].calculatedDiscountAllocations[1],
+    );
+    full.addedLineItems.nodes[0].calculatedDiscountAllocations.push(
+      addedCredit,
+    );
+    Object.assign(full, {
+      totalPriceSet: bag("215.98"),
+      subtotalPriceSet: bag("215.98"),
+      totalOutstandingSet: bag("107.99"),
+    });
+    const h = harness([
+      raw,
+      raw,
+      memberProvenance(),
+      {
+        nodes: [
+          variant(
+            10,
+            "149.99",
+            JSON.stringify({ "test-plan": { cents: 11999 } }),
+          ),
+        ],
+      },
+      begin(initial),
+      {
+        orderEditAddVariant: {
+          userErrors: [],
+          calculatedLineItem: { id: addedMemberLineId },
+          calculatedOrder: afterAdd,
+        },
+      },
+      {
+        orderEditAddLineItemDiscount: { userErrors: [], calculatedOrder: full },
+      },
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      snapshot,
+      { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+      "edit-1",
+    );
+    expect(quote).toMatchObject({ totalCents: 21598, deltaCents: 10799 });
+    expect(quote.financials?.itemDiscounts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "TEST-REWARD-19",
+          amountCents: 2400,
+          value: { type: "percentage", percentage: "10" },
+        }),
+      ]),
+    );
+  });
+  it("rejects an unrelated automatic discount message even with the correct installed app", async () => {
+    const raw = memberCreditOrder();
+    Object.assign(raw.order.discountApplications.nodes[0], {
+      title: "Other promotion",
+    });
+    const h = harness([raw, raw, memberProvenance()]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    await expect(
+      h.provider.quote(
+        4,
+        snapshot,
+        { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+        "edit-1",
+      ),
+    ).rejects.toMatchObject({ code: "PROMOTION_PARITY_UNVERIFIED" });
+    expect(
+      h.requests.every((request) => !request.query.startsWith("mutation")),
+    ).toBe(true);
+  });
+  it("rejects current catalog member pricing that cannot reproduce the original price", async () => {
+    const responses = memberQuoteResponses();
+    responses[3] = {
+      nodes: [
+        variant(
+          10,
+          "149.99",
+          JSON.stringify({ "test-plan": { cents: 12999 } }),
+        ),
+      ],
+    };
+    const h = harness(responses);
+    const snapshot = await h.provider.readOrder(4, "100");
+    await expect(
+      h.provider.quote(
+        4,
+        snapshot,
+        { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+        "edit-1",
+      ),
+    ).rejects.toMatchObject({ code: "MEMBER_PRICE_CHANGED" });
+    expect(
+      h.requests.some((request) =>
+        /orderEditCommit|orderEditAddLineItemDiscount/.test(request.query),
+      ),
+    ).toBe(false);
+  });
+  it.each([
+    "wrong-app",
+    "wrong-function",
+    "ambiguous",
+    "wrong-class",
+    "truncated",
+  ])("rejects %s promotion provenance before opening an edit", async (mode) => {
+    const provenance = memberProvenance();
+    const discount = provenance.discountNodes.nodes[0].discount;
+    if (mode === "wrong-app") discount.appDiscountType.app.id = id("App", 999);
+    if (mode === "wrong-function")
+      discount.appDiscountType.functionId = "wrong";
+    if (mode === "ambiguous")
+      provenance.discountNodes.nodes.push(
+        structuredClone(provenance.discountNodes.nodes[0]),
+      );
+    if (mode === "wrong-class") discount.discountClasses = ["ORDER"];
+    if (mode === "truncated")
+      provenance.discountNodes.pageInfo.hasNextPage = true;
+    const h = harness([memberCreditOrder(), memberCreditOrder(), provenance]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    await expect(
+      h.provider.quote(
+        4,
+        snapshot,
+        { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+        "edit-1",
+      ),
+    ).rejects.toThrow();
+    expect(
+      h.requests.every((request) => !request.query.startsWith("mutation")),
+    ).toBe(true);
+  });
+  it("rejects a changed original member allocation even when the final total reconciles", async () => {
+    const responses = memberQuoteResponses();
+    const changed = memberCreditCalculated(1);
+    changed.lineItems.nodes[0].calculatedDiscountAllocations[0].allocatedAmountSet =
+      bag("29.00");
+    responses[6] = {
+      orderEditAddLineItemDiscount: {
+        userErrors: [],
+        calculatedOrder: changed,
+      },
+    };
+    const h = harness(responses);
+    const snapshot = await h.provider.readOrder(4, "100");
+    await expect(
+      h.provider.quote(
+        4,
+        snapshot,
+        { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+        "edit-1",
+      ),
+    ).rejects.toMatchObject({ code: "PROMOTION_PARITY_UNVERIFIED" });
+  });
+  it.each([
+    "extra-quantity",
+    "inflated-original",
+    "missing-source",
+    "unknown-source",
+    "wrong-variant",
+    "unsafe-id",
+  ])("rejects corrupted %s persisted quantity proof", async (mode) => {
+    const { quote } = await quoteMemberIncrease();
+    if (mode === "extra-quantity") quote.lines[1].quantity = 2;
+    if (mode === "inflated-original") quote.lines[0].quantity = 2;
+    if (mode === "missing-source")
+      delete quote.lines[1].quantityIncreaseOfLineId;
+    if (mode === "unknown-source")
+      quote.lines[1].quantityIncreaseOfLineId = id("LineItem", 999);
+    if (mode === "wrong-variant")
+      quote.lines[1].variantId = id("ProductVariant", 20);
+    if (mode === "unsafe-id")
+      quote.lines[1].calculatedLineId =
+        "gid://shopify/CalculatedLineItem/../../Order/1";
+    expect(orderEditQuoteSchema.safeParse(quote).success).toBe(false);
+  });
+  it("recovers an unpaid increase by removing only the added unit, retaining the original member discount and reward", async () => {
+    const { quote, snapshot } = await quoteMemberIncrease();
+    const pending = memberCreditOrder(1);
+    const h = harness([
+      pending,
+      begin(memberCreditCalculated(1, true, true)),
+      quantity(memberCreditCalculated(0, true, true)),
+      pending,
+      { orderEditCommit: { order: { id: id("Order", 100) }, userErrors: [] } },
+      memberCreditOrder(0, true),
+    ]);
+    const restored = await h.provider.recoverUnpaid(
+      4,
+      snapshot,
+      quote,
+      "expire-1",
+    );
+    expect(restored.totalCents).toBe(10099);
+    expect(restored.outstandingCents).toBe(0);
+    expect(isUnpaidRecoveryRestored(restored, snapshot)).toBe(true);
+    expect(
+      h.requests
+        .filter((request) => request.query.includes("orderEditSetQuantity"))
+        .map((request) => request.variables),
+    ).toEqual([
+      {
+        id: id("CalculatedOrder", 100),
+        lineItemId: id("CalculatedLineItem", 2),
+        quantity: 0,
+      },
+    ]);
+    expect(
+      h.requests.some((request) =>
+        /refundCreate|orderEditAddVariant|orderEditAddLineItemDiscount/.test(
+          request.query,
+        ),
+      ),
+    ).toBe(false);
+  });
+});
