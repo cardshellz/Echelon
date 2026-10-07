@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { matchesOrderEditFinancials } from "../domain/order-edit-financials";
+import {
+  matchesOrderEditFinancials,
+  equivalentOrderEditFinancialEvidence,
+} from "../domain/order-edit-financials";
 import type {
   OrderEditSnapshot,
   OrderEditQuote,
@@ -21,10 +24,10 @@ export function unchangedOrderEditSnapshot(
 ): boolean {
   return (
     actual.fingerprint === expected.fingerprint &&
-    (!expected.financials ||
-      (actual.financials !== undefined &&
-        canonicalJson(actual.financials) ===
-          canonicalJson(expected.financials))) &&
+    equivalentOrderEditFinancialEvidence(
+      actual.financials,
+      expected.financials,
+    ) &&
     (!expected.discountRules ||
       (actual.discountRules !== undefined &&
         canonicalJson(actual.discountRules) ===
@@ -106,10 +109,10 @@ export function unchangedFulfilledOrderEdit(
   });
   return (
     canonicalJson(identity(current)) === canonicalJson(identity(baseline)) &&
-    (!baseline.financials ||
-      (current.financials !== undefined &&
-        canonicalJson(current.financials) ===
-          canonicalJson(baseline.financials))) &&
+    equivalentOrderEditFinancialEvidence(
+      current.financials,
+      baseline.financials,
+    ) &&
     (!baseline.discountRules ||
       (current.discountRules !== undefined &&
         canonicalJson(current.discountRules) ===

@@ -6,6 +6,7 @@ import {
 } from "@shared/order-edits/order-edit-financials";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { OrderEditError } from "./order-edit-error";
+import type { OrderEditDiscount } from "@shared/order-edits/order-edit-discounts";
 
 interface SettlementTransaction {
   id: string;
@@ -48,6 +49,7 @@ export function buildOrderEditFinancials(input: {
   lines: Array<{ id: string; grossCents: number; netCents: number }>;
   itemsNetCents: number;
   itemDiscountLabels: string[];
+  itemDiscounts?: OrderEditDiscount[];
   shippingGrossCents: number;
   shippingCents: number;
   shippingDiscountLabels: string[];
@@ -95,7 +97,26 @@ export function matchesOrderEditFinancials(
     "taxesIncluded",
     "totalCents",
   ] as const;
-  return fields.every((field) => current[field] === expected[field]);
+  return (
+    fields.every((field) => current[field] === expected[field]) &&
+    (!expected.itemDiscounts ||
+      (current.itemDiscounts !== undefined &&
+        canonicalJson(current.itemDiscounts) ===
+          canonicalJson(expected.itemDiscounts)))
+  );
+}
+
+/** New display evidence must not prevent an older unsubmitted edit from being cancelled. */
+export function equivalentOrderEditFinancialEvidence(
+  actual: OrderEditFinancials | undefined,
+  expected: OrderEditFinancials | undefined,
+): boolean {
+  if (!expected) return true;
+  if (!actual) return false;
+  if (expected.itemDiscounts)
+    return canonicalJson(actual) === canonicalJson(expected);
+  const { itemDiscounts: ignored, ...legacyActual } = actual;
+  return canonicalJson(legacyActual) === canonicalJson(expected);
 }
 
 /** Older persisted snapshots can still report settlement without fabricating discount allocations. */

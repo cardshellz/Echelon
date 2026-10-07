@@ -537,6 +537,14 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         ],
         itemsNetCents: 1000,
         itemDiscountLabels: ["Member discount"],
+        itemDiscounts: [
+          {
+            key: "code:credit",
+            label: "Member discount",
+            amountCents: 100,
+            value: { type: "fixed", amountCents: 100 },
+          },
+        ],
         shippingGrossCents: 500,
         shippingCents: 0,
         shippingDiscountLabels: ["Free shipping"],
