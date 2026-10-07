@@ -101,8 +101,8 @@ describe("dropship listing presentation", () => {
       const presentation = buildDropshipListingPresentation({ candidate, storeConnectionId: 9,
         publication: resolveDropshipPublicationPreview(listingIntent), images: media,
         photos: { photos: [
-          { assetId: 3, url: uploadedUrl, uploaded: true },
-          { assetId: 1, url: "https://images.test/product.jpg", uploaded: false },
+          { assetId: 3, position:0, url: uploadedUrl, uploaded: true },
+          { assetId: 1, position:1, url: "https://images.test/product.jpg", uploaded: false },
         ], issues: [] } });
 
       expect(presentation.images).toEqual([
@@ -120,7 +120,7 @@ describe("dropship listing presentation", () => {
           { assetId: 4, productVariantId: null, url: null, altText: null, storageType: "file", hasFile: true },
           { assetId: 5, productVariantId: null, url: null, altText: null, storageType: "both", hasFile: true },
         ],
-        photos: { photos: [{ assetId: 1, url: "https://images.test/product.jpg", uploaded: false }], issues: [
+        photos: { photos: [{ assetId: 1, position:1, url: "https://images.test/product.jpg", uploaded: false }], issues: [
           { assetId: 4, code: "CATALOG_PUBLIC_URL_REQUIRED", message: "not configured" },
           { assetId: 5, code: "IMAGE_FORMAT_UNSUPPORTED", message: "mislabeled" },
         ] } });
@@ -140,8 +140,8 @@ describe("dropship listing presentation", () => {
       const presentation = buildDropshipListingPresentation({ candidate, storeConnectionId: 9,
         publication: resolveDropshipPublicationPreview(listingIntent), images: [media[1]],
         photos: { photos: [
-          ...linked.map((url, index) => ({ assetId: 100 + index, url, uploaded: false })),
-          { assetId: 3, url: uploadedUrl, uploaded: true },
+          ...linked.map((url, index) => ({ assetId: 100 + index, position:index, url, uploaded: false })),
+          { assetId: 3, position:0, url: uploadedUrl, uploaded: true },
         ], issues: [] } });
 
       expect(presentation.images.filter((image) => image.publicationStatus === "included")).toHaveLength(12);
@@ -158,7 +158,7 @@ describe("dropship listing presentation", () => {
         selectionDecision: { selected: true, reason: "selected", adminExposureReason: "exposed", includeRuleIds: [2], excludeRuleIds: [],
           autoConnectNewSkus: true, autoListNewSkus: false, marketplaceQuantity: 3, quantityCapApplied: false } } satisfies DropshipListingPreviewRow;
       const [enriched] = await enrichDropshipListingRows({ rows: [row], candidates: [candidate], vendorId: 10, storeConnectionId: 9,
-        listingPhotos: new Map([[7, { photos: [{ assetId: 3, url: uploadedUrl, uploaded: true }], issues: [] }]]),
+        listingPhotos: new Map([[7, { photos: [{ assetId: 3, position:0, url: uploadedUrl, uploaded: true }], issues: [] }]]),
         deps: { media: { listImages: async () => new Map([[7, [media[1]]]]), readImageFile: async () => null },
           productCosts: { loadProductCosts: async () => new Map() }, resolvePublication: resolveDropshipPublicationPreview,
           logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } } });
@@ -235,7 +235,7 @@ describe("dropship private listing image authorization", () => {
       listVariantOverrides: vi.fn(async () => []),
     };
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    const service = new DropshipListingPreviewService({ repository: repository as unknown as DropshipListingPreviewRepository,
+    const service = new DropshipListingPreviewService({ listingPhotos: { listPublicationPhotos: async () => new Map() }, repository: repository as unknown as DropshipListingPreviewRepository,
       presentation: { media: { listImages: async () => new Map(), readImageFile }, productCosts: { loadProductCosts: async () => new Map([[7, productCost]]) },
         resolvePublication: () => null, logger },
       clock: { now: () => new Date("2026-09-06T12:00:00Z") }, logger,

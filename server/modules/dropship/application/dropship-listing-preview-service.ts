@@ -1,3 +1,4 @@
+import { EBAY_LISTING_MAX_PHOTOS } from "../../channels/ebay-listing-photos.domain";
 import { createHash } from "crypto";
 import { listingPriceFollowsRules, resolveListingPrice, type SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
 import { decideDropshipListingAccess } from "../../../../shared/dropship/listing-access";
@@ -70,10 +71,8 @@ import {
 } from "./dropship-use-case-dtos";
 
 /**
- * The most photos a listing carries, in catalog order. No push publishes
- * more: eBay sends the first 12 (dropship-ebay-listing-push.provider.ts) and
- * Shopify the first 20 (dropship-shopify-listing-push.provider.ts). The limit
- * also bounds how many uploaded files one preview fingerprints.
+ * Shopify's existing photo limit. eBay uses EBAY_LISTING_MAX_PHOTOS from
+ * the shared eBay photo contract. Both limits bound uploaded-file hashing.
  */
 export const DROPSHIP_LISTING_MAX_PHOTOS = 20;
 
@@ -273,10 +272,10 @@ export interface DropshipListingPreviewRepository {
 export interface DropshipListingPreviewServiceDependencies {
   presentation?: DropshipListingPresentationDependencies;
   /**
-   * The photos each size publishes, uploaded files included. Without it a
-   * listing publishes only the catalog's URL photos (listCatalogCandidates).
+   * Required Catalog publication photos, uploaded files included.
+   * Candidate metadata never supplies a second photo-selection path.
    */
-  listingPhotos?: CatalogVariantPublicationPhotoReader;
+  listingPhotos: CatalogVariantPublicationPhotoReader;
   /**
    * Cost of one sellable pack, for the below-cost warning. Falls back to the
    * presentation reader; with neither, the preview never warns about cost.
@@ -443,6 +442,7 @@ export class DropshipListingPreviewService {
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
       candidates: exposedCandidates,
+      platform: context.platform,
     });
     if (contents && ruleEligibleCandidates.some((candidate) => !contents.has(candidate.productVariantId))) {
       throw new Error("Listing content resolution returned an incomplete catalog result.");
@@ -505,7 +505,8 @@ export class DropshipListingPreviewService {
         : null;
       return buildListingPreviewRow({
         candidate,
-        listingPhotos: listingPhotos?.get(productVariantId) ?? null,
+        // Hidden catalog rows are not read; their blocked preview carries no photos.
+        listingPhotos: listingPhotos.get(productVariantId) ?? { photos: [], issues: [] },
         resolvedContent: contents?.get(productVariantId),
         resolvedCategory: ebayCategories?.get(productVariantId) ?? null,
         queuedCategory: parsed.queuedEbayCategoriesByVariantId?.[String(productVariantId)] ?? null,
@@ -566,13 +567,13 @@ export class DropshipListingPreviewService {
     vendorId: number;
     storeConnectionId: number;
     candidates: readonly DropshipListingCatalogCandidate[];
-  }): Promise<ReadonlyMap<number, CatalogVariantPublicationPhotos> | null> {
+    platform: DropshipSourcePlatform;
+  }): Promise<ReadonlyMap<number, CatalogVariantPublicationPhotos>> {
     const reader = this.deps.listingPhotos;
-    if (!reader) return null;
     if (input.candidates.length === 0) return new Map();
     const photos = await reader.listPublicationPhotos({
       productVariantIds: input.candidates.map((candidate) => candidate.productVariantId),
-      maxPhotosPerVariant: DROPSHIP_LISTING_MAX_PHOTOS,
+      maxPhotosPerVariant: input.platform === "ebay" ? EBAY_LISTING_MAX_PHOTOS : DROPSHIP_LISTING_MAX_PHOTOS,
     });
     if (input.candidates.some((candidate) => !photos.has(candidate.productVariantId))) {
       throw new Error("Listing photo resolution returned an incomplete catalog result.");
@@ -1018,8 +1019,8 @@ export const systemDropshipListingPreviewClock: DropshipClock = {
 };
 
 function buildListingPreviewRow(input: {
-  /** The size's photos, uploaded files included; null publishes the candidate's URL photos. */
-  listingPhotos?: CatalogVariantPublicationPhotos | null;
+  /** The size's resolved Catalog photos; hidden/blocked sizes carry an empty gallery. */
+  listingPhotos: CatalogVariantPublicationPhotos;
   resolvedContent?: import("../../../../shared/dropship/listing-content").ResolvedListingContent;
   resolvedCategory?: ResolvedEbayListingCategory | null;
   /** Push time only: the category the listing was queued with. */
@@ -1100,7 +1101,7 @@ function buildListingPreviewRow(input: {
   const marketplaceValidation = input.config
     ? input.marketplaceListing.buildListingIntent({
         config: input.config,
-        content: listingIntentContent(input.candidate, input.resolvedContent, publishedCategory, input.listingPhotos ?? null),
+        content: listingIntentContent(input.candidate, input.resolvedContent, publishedCategory, input.listingPhotos),
         priceCents,
         quantity: marketplaceQuantity,
         storeCategoryNames: input.storeCategoryNames,
@@ -1108,7 +1109,7 @@ function buildListingPreviewRow(input: {
     : { intent: null, blockers: [], warnings: [] };
   blockers.push(...marketplaceValidation.blockers);
   warnings.push(...marketplaceValidation.warnings);
-  warnings.push(...unpublishablePhotoWarnings(input.listingPhotos ?? null));
+  warnings.push(...unpublishablePhotoWarnings(input.listingPhotos));
   if (input.ebayFulfillmentPreflight?.compatible === false) {
     blockers.push(...input.ebayFulfillmentPreflight.issues.map(
       (issue) => `ebay_fulfillment_policy:${issue.code}`,
@@ -1190,13 +1191,13 @@ function listingIntentContent(
   candidate: DropshipListingCatalogCandidate,
   resolvedContent: import("../../../../shared/dropship/listing-content").ResolvedListingContent | undefined,
   category: PublishedEbayCategory | null,
-  photos: CatalogVariantPublicationPhotos | null,
+  photos: CatalogVariantPublicationPhotos,
 ): DropshipListingCatalogCandidate {
   return {
     ...candidate,
     ...(resolvedContent ? { description: resolvedContent.descriptionHtml } : {}),
     ...(category ? { ebayBrowseCategoryId: category.categoryId, ebayBrowseCategoryName: category.categoryName } : {}),
-    ...(photos ? { imageUrls: photos.photos.map((photo) => photo.url) } : {}),
+    imageUrls: photos.photos.map((photo) => photo.url),
   };
 }
 

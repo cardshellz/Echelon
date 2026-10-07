@@ -187,7 +187,7 @@ describe("eBay Adapter", () => {
 
   beforeEach(() => {
     db = createMockDb();
-    adapter = new EbayAdapter(db as any);
+    adapter = new EbayAdapter(db as any, { resolve: vi.fn(async () => ({ byVariantId: new Map(), groupImageUrls: [] })) });
     // Set env vars for auth
     process.env.EBAY_CLIENT_ID = "test-client-id";
     process.env.EBAY_CLIENT_SECRET = "test-client-secret";
@@ -305,7 +305,7 @@ describe("eBay Adapter", () => {
           .mockImplementationOnce(() => chain([exactConnection]))
           .mockImplementationOnce(() => chain([exactConnection, { ...exactConnection, id: 23 }])),
       };
-      const ambiguousAdapter = new EbayAdapter(ambiguousDb as any);
+      const ambiguousAdapter = new EbayAdapter(ambiguousDb as any, { resolve: vi.fn(async () => ({ byVariantId: new Map(), groupImageUrls: [] })) });
 
       await expect((ambiguousAdapter as any).getConnectionMetadata(2, 22))
         .rejects.toThrow("OAuth tokens are currently channel-scoped");
@@ -518,7 +518,7 @@ describe("eBay Listing Builder", () => {
 
   describe("pushInventory", () => {
     it("does not look up or retry an offer after local quantity admission rejects the write", async () => {
-      const adapter = new EbayAdapter(createMockDb());
+      const adapter = new EbayAdapter(createMockDb(), { resolve: vi.fn(async () => ({ byVariantId: new Map(), groupImageUrls: [] })) });
       const blocked = new QuantityPublicationAdmissionError(
         "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED", "A prior provider outcome requires reconciliation.");
       const bulkUpdatePriceQuantity = vi.fn().mockRejectedValue(blocked);
@@ -541,7 +541,7 @@ describe("eBay Listing Builder", () => {
       { format: "combined", responses: [{ sku: "CS-TL35-P25", offerId: "offer-101", statusCode: 200 }] },
       { format: "split", responses: [{ sku: "CS-TL35-P25", statusCode: 200 }, { sku: "CS-TL35-P25", offerId: "offer-101", statusCode: 200 }] },
     ])("uses the shared quantity sender with a $format acknowledgement", async ({ responses }) => {
-      const adapter = new EbayAdapter(createMockDb());
+      const adapter = new EbayAdapter(createMockDb(), { resolve: vi.fn(async () => ({ byVariantId: new Map(), groupImageUrls: [] })) });
       const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({ responses });
       (adapter as any).getApiClient = vi.fn().mockResolvedValue({ bulkUpdatePriceQuantity });
       (adapter as any).delay = vi.fn().mockResolvedValue(undefined);
@@ -569,7 +569,7 @@ describe("eBay Listing Builder", () => {
     });
 
     it("does not bypass local quantity validation through an individual fallback", async () => {
-      const adapter = new EbayAdapter(createMockDb());
+      const adapter = new EbayAdapter(createMockDb(), { resolve: vi.fn(async () => ({ byVariantId: new Map(), groupImageUrls: [] })) });
       const client = { bulkUpdatePriceQuantity: vi.fn(), getOffers: vi.fn(), updateOffer: vi.fn() };
       (adapter as any).getApiClient = vi.fn().mockResolvedValue(client);
       await expect(adapter.pushInventory(2, [{ variantId: 101, sku: "CS-TL35-P25",
@@ -585,7 +585,7 @@ describe("eBay Listing Builder", () => {
     // must re-resolve by SKU, push to the live offer, and report the fresh
     // id so the orchestrator heals the mapping.
     it("recovers a stale offerId by re-resolving the live offer by SKU", async () => {
-      const adapter = new EbayAdapter(createMockDb());
+      const adapter = new EbayAdapter(createMockDb(), { resolve: vi.fn(async () => ({ byVariantId: new Map(), groupImageUrls: [] })) });
       const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({
         responses: [
           {
@@ -643,7 +643,7 @@ describe("eBay Listing Builder", () => {
     });
 
     it("keeps the original error when re-resolution finds no fresher offer", async () => {
-      const adapter = new EbayAdapter(createMockDb());
+      const adapter = new EbayAdapter(createMockDb(), { resolve: vi.fn(async () => ({ byVariantId: new Map(), groupImageUrls: [] })) });
       const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({
         responses: [
           {
@@ -701,7 +701,7 @@ describe("eBay Listing Builder", () => {
     // user error whose MESSAGE says "Please enter a valid offerId." and a
     // different errorId — recovery must key off the message too.
     it("recovers when the stale offer signature is message-only", async () => {
-      const adapter = new EbayAdapter(createMockDb());
+      const adapter = new EbayAdapter(createMockDb(), { resolve: vi.fn(async () => ({ byVariantId: new Map(), groupImageUrls: [] })) });
       const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({
         responses: [
           {
@@ -753,7 +753,7 @@ describe("eBay Listing Builder", () => {
     });
 
     it("does not attempt re-resolution on non-stale per-offer errors", async () => {
-      const adapter = new EbayAdapter(createMockDb());
+      const adapter = new EbayAdapter(createMockDb(), { resolve: vi.fn(async () => ({ byVariantId: new Map(), groupImageUrls: [] })) });
       const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({
         responses: [
           {
@@ -805,7 +805,7 @@ describe("eBay Listing Builder", () => {
 
   describe("pushPricing", () => {
     it("uses eBay bulk price/quantity request shape without changing quantity", async () => {
-      const adapter = new EbayAdapter(createMockDb());
+      const adapter = new EbayAdapter(createMockDb(), { resolve: vi.fn(async () => ({ byVariantId: new Map(), groupImageUrls: [] })) });
       const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({
         responses: [
           {
@@ -971,5 +971,44 @@ describe("eBay Category Mapping", () => {
     it("should return OTHER for null", () => {
       expect(mapCarrierToEbay(null)).toBe("OTHER");
     });
+  });
+});
+
+describe("eBay listing photo ownership", () => {
+  function setup(error?: Error) {
+    const photoPlan = { byVariantId: new Map(SAMPLE_LISTING.variants.map(variant => [variant.variantId, [`https://catalog.example.com/${variant.variantId}.jpg`]])),
+      groupImageUrls: ["https://catalog.example.com/group.jpg"] };
+    const resolve = vi.fn(async () => { if (error) throw error; return photoPlan; });
+    const adapter = new EbayAdapter(createMockDb() as any, { resolve });
+    const client = { getInventoryItemGroup: vi.fn(), getInventoryItem: vi.fn() };
+    vi.spyOn(adapter as any, "getApiClient").mockResolvedValue(client);
+    vi.spyOn(adapter as any, "getChannelOverrides").mockResolvedValue(null);
+    vi.spyOn(adapter as any, "delay").mockResolvedValue(undefined);
+    const pushListing = vi.spyOn((adapter as any).listingConnector, "pushListing")
+      .mockResolvedValue({ status: "created", externalProductId: "listing-42", externalVariantIds: {} });
+    return { adapter, resolve, pushListing, photoPlan };
+  }
+  afterEach(() => vi.restoreAllMocks());
+  it("replaces stale payload URLs with the resolver plan in both inventory items and the group", async () => {
+    const { adapter, resolve, pushListing, photoPlan } = setup();
+    const before = structuredClone(SAMPLE_LISTING);
+    await adapter.pushListings(2, [SAMPLE_LISTING]);
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ productId: 42, channelId: 2, mode: "catalog",
+      variants: SAMPLE_LISTING.variants.map(variant => ({ variantId: variant.variantId, sku: variant.sku })) }));
+    const { draft } = pushListing.mock.calls[0][0] as any;
+    expect(draft.inventoryItems.map((item: any) => item.payload.product.imageUrls)).toEqual([...photoPlan.byVariantId.values()]);
+    expect(draft.itemGroup.payload.imageUrls).toEqual(photoPlan.groupImageUrls);
+    expect(SAMPLE_LISTING).toEqual(before);
+  });
+  it("honors the source lock even when upstream passes old Catalog image URLs", async () => {
+    const { adapter, resolve } = setup();
+    await adapter.pushListings(2, [{ ...SAMPLE_LISTING, imageSyncMode: "preserve" }]);
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ mode: "preserve", readExistingPhotos: expect.any(Function) }));
+  });
+  it("fails before any listing writer when Catalog cannot resolve a selected photo", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { adapter, pushListing } = setup(new Error("Replace uploaded catalog image 42"));
+    await expect(adapter.pushListings(2, [SAMPLE_LISTING])).resolves.toEqual([{ productId: 42, status: "error", error: "Replace uploaded catalog image 42" }]);
+    expect(pushListing).not.toHaveBeenCalled();
   });
 });

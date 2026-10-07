@@ -57,6 +57,8 @@ import type {
 } from "./ebay/ebay-types";
 
 import crypto from "crypto";
+import { readExistingEbayListingPhotos } from "./ebay/ebay-listing-photos.reader";
+import type { EbayListingPhotoResolver } from "../ebay-listing-photos.service";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -120,7 +122,7 @@ export class EbayAdapter implements IChannelAdapter {
   private readonly listingBuilder: EbayListingBuilder;
   private readonly listingConnector: EbayMarketplaceListingConnector;
 
-  constructor(private readonly db: DrizzleDb) {
+  constructor(private readonly db: DrizzleDb, private readonly photos: EbayListingPhotoResolver) {
     this.listingBuilder = createEbayListingBuilder();
     this.listingConnector = new EbayMarketplaceListingConnector({
       delay: (ms) => this.delay(ms),
@@ -204,9 +206,18 @@ export class EbayAdapter implements IChannelAdapter {
       channelOverrides: overrides || undefined,
     };
 
-    const inventoryItems = this.listingBuilder.buildInventoryItems(listing, config);
-    const offers = this.listingBuilder.buildOffers(listing, config);
-    const itemGroup = this.listingBuilder.buildItemGroup(listing, config);
+    const photoVariants = listing.variants.filter(variant => variant.isListed && variant.sku)
+      .map(variant => ({ variantId: variant.variantId, sku: variant.sku! }));
+    if (photoVariants.length === 0) return { productId: listing.productId, status: "skipped" };
+    const photoPlan = await this.photos.resolve({
+      productId: listing.productId, channelId, variants: photoVariants,
+      mode: listing.imageSyncMode === "preserve" ? "preserve" : "catalog",
+      readExistingPhotos: () => readExistingEbayListingPhotos(client, {
+        groupKey: typeof listing.metadata?.groupKey === "string" ? listing.metadata.groupKey : `ECHELON-P${listing.productId}`,
+        variants: photoVariants,
+      }),
+    });
+    const { inventoryItems, offers, itemGroup } = this.listingBuilder.buildListingDraft(listing, config, { photoPlan });
     const hasExistingIds = listing.variants.some(
       (v) => v.externalVariantId,
     );
@@ -1113,6 +1124,6 @@ function exactEbayInventoryItemKey(
 // Factory
 // ---------------------------------------------------------------------------
 
-export function createEbayAdapter(db: any): EbayAdapter {
-  return new EbayAdapter(db);
+export function createEbayAdapter(db: any, photos: EbayListingPhotoResolver): EbayAdapter {
+  return new EbayAdapter(db, photos);
 }

@@ -11,6 +11,8 @@
  * and description HTML generation.
  */
 
+import { assertEbayListingPhotoPlan, buildEbayListingPhotoPlan, type EbayListingPhotoPlan } from "../../ebay-listing-photos.domain";
+
 import type {
   EbayInventoryItem,
   EbayOffer,
@@ -21,7 +23,6 @@ import type {
 import type {
   ChannelListingPayload,
   ChannelVariantPayload,
-  ChannelImagePayload,
 } from "../../channel-adapter.interface";
 import {
   resolveEbayCategoryMapping,
@@ -68,6 +69,8 @@ export interface BuiltItemGroup {
 }
 
 export interface EbayListingBuildOptions {
+  /** Resolved once before any provider write; retry blueprints keep their approved photos. */
+  photoPlan?: EbayListingPhotoPlan;
   availableQuantityByVariantId?: ReadonlyMap<number, number>;
   requirePackageWeight?: boolean;
   titleMaxLength?: number;
@@ -108,10 +111,15 @@ export class EbayListingBuilder {
     config: EbayListingConfig,
     options: EbayListingBuildOptions = {},
   ): BuiltEbayListingDraft {
+    const photoVariants = listing.variants.filter(variant => variant.isListed || options.retainUnlistedVariantsInGroup);
+    if (photoVariants.every(variant => !variant.sku)) return { inventoryItems: [], offers: [], itemGroup: null };
+    const photoPlan = options.photoPlan ?? buildEbayListingPhotoPlan(listing.images, photoVariants);
+    assertEbayListingPhotoPlan(photoPlan, listing.variants);
+    const resolvedOptions = { ...options, photoPlan };
     return {
-      inventoryItems: this.buildInventoryItems(listing, config, options),
-      offers: this.buildOffers(listing, config, options),
-      itemGroup: this.buildItemGroup(listing, config, options),
+      inventoryItems: this.buildInventoryItems(listing, config, resolvedOptions),
+      offers: this.buildOffers(listing, config, resolvedOptions),
+      itemGroup: this.buildItemGroup(listing, config, resolvedOptions),
     };
   }
 
@@ -131,6 +139,10 @@ export class EbayListingBuilder {
       config.channelOverrides?.itemSpecifics,
     );
 
+    if (!listing.variants.some(variant => variant.isListed && variant.sku)) return [];
+    const photoPlan = options.photoPlan ?? buildEbayListingPhotoPlan(listing.images, listing.variants);
+    assertEbayListingPhotoPlan(photoPlan, listing.variants);
+    const resolvedOptions = { ...options, photoPlan };
     return listing.variants
       .filter((v) => v.isListed && v.sku)
       .map((variant) => ({
@@ -139,7 +151,7 @@ export class EbayListingBuilder {
           variant,
           listing,
           productAspects,
-          options,
+          resolvedOptions,
         ),
       }));
   }
@@ -205,10 +217,7 @@ export class EbayListingBuilder {
       config.channelOverrides?.descriptionOverride ||
       this.resolveDescriptionHtml(listing, options);
 
-    const imageUrls = listing.images
-      .sort((a, b) => a.position - b.position)
-      .map((img) => img.url)
-      .slice(0, 12); // eBay max 12 for groups
+    const imageUrls = [...(options.photoPlan ?? buildEbayListingPhotoPlan(listing.images, groupVariants)).groupImageUrls];
 
     // Group key = product SKU or product ID
     const groupKey = options.itemGroupKey
@@ -254,10 +263,7 @@ export class EbayListingBuilder {
     aspects: Record<string, string[]>,
     options: EbayListingBuildOptions,
   ): Omit<EbayInventoryItem, "sku"> {
-    const imageUrls = listing.images
-      .sort((a, b) => a.position - b.position)
-      .map((img) => img.url)
-      .slice(0, 12);
+    const imageUrls = [...(options.photoPlan?.byVariantId.get(variant.variantId) ?? [])];
 
     // Add variant-specific aspects
     const variantAspects = { ...aspects };
