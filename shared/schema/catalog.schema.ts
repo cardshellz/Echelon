@@ -1,4 +1,4 @@
-import { pgTable, text, varchar, integer, bigint, numeric, timestamp, jsonb, boolean, uniqueIndex, index, check, pgSchema } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, bigint, numeric, timestamp, jsonb, boolean, uniqueIndex, index, check, pgSchema, foreignKey } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -358,7 +358,10 @@ export const productAssets = catalogSchema.table("product_assets", {
   mimeType: varchar("mime_type", { length: 100 }),
   storageType: varchar("storage_type", { length: 20 }).notNull().default("url"), // 'url' | 'file' | 'both'
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, table => [
+  foreignKey({ name: "product_assets_variant_product_fk", columns: [table.productVariantId, table.productId],
+    foreignColumns: [productVariants.id, productVariants.productId] }).onDelete("cascade"),
+]);
 
 export const insertProductAssetSchema = createInsertSchema(productAssets).omit({
   id: true,
