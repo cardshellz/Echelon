@@ -1,14 +1,14 @@
 import { sql } from "drizzle-orm";
+import { readPhysicalShipmentAllocationEvidence, readShipmentItemAllocationSource } from "../shipping/physical-shipment-allocation-evidence.repository";
 import {
   FulfillmentRequestAllocationError,
   resolveFulfillmentRequestAllocation,
   type FulfillmentRequestAllocationDecision,
   type FulfillmentRequestAllocationSnapshot,
   type FulfillmentRequestAllocationTarget,
-  type FulfillmentRequestPhysicalSnapshot,
 } from "./fulfillment-request-allocation.domain";
 
-type Target = Omit<FulfillmentRequestAllocationTarget, "fulfillmentPlanId" | "fulfillmentPlanLineId">;
+type Target = Omit<FulfillmentRequestAllocationTarget, "fulfillmentPlanId" | "fulfillmentPlanLineId" | "sourceWmsShipmentItemId">;
 type QueryExecutor = { execute(query: ReturnType<typeof sql>): Promise<unknown> };
 function rows<T>(result: unknown): T[] {
   const value = result as { rows?: T[] };
@@ -26,6 +26,9 @@ export async function readFulfillmentRequestAllocation(
   shippingEngineOrderId: number | null,
   lockForUpdate: boolean,
 ): Promise<FulfillmentRequestAllocationDecision> {
+  const sourceWmsShipmentItemId = await readShipmentItemAllocationSource(tx, {
+    legacyWmsShipmentItemId: target.legacyWmsShipmentItemId, wmsOrderItemId: target.wmsOrderItemId, wmsOrderId: target.wmsOrderId,
+  });
   const planRows = rows<{
     plan_id: string; oms_order_id: string; line_id: string | null;
     wms_order_item_id: number | null; quantity_planned: number | null;
@@ -90,30 +93,8 @@ export async function readFulfillmentRequestAllocation(
     quantityRequested: Number(row.quantity_requested), quantityCancelled: Number(row.quantity_cancelled),
     requestStatus: row.request_status, linkedToShippingOrder: row.linked_to_shipping_order,
   }));
-  const physicalRows = rows<{
-    shipment_request_item_id: string; fulfillment_plan_line_id: string; legacy_wms_shipment_item_id: number | null;
-    label_replacement_source_item_id: number | null;
-    provider: string; provider_physical_shipment_id: string; quantity_shipped: number; effective_quantity: number;
-  }>(await tx.execute(sql`
-    SELECT item.shipment_request_item_id, item.fulfillment_plan_line_id, item.legacy_wms_shipment_item_id,
-      item.label_replacement_source_item_id,
-      package.provider, package.provider_physical_shipment_id, item.quantity_shipped,
-      item.quantity_shipped + COALESCE(adjustment.quantity_delta, 0) AS effective_quantity
-    FROM wms.physical_shipment_items AS item
-    JOIN wms.physical_shipments AS package ON package.id = item.physical_shipment_id
-    LEFT JOIN wms.physical_shipment_item_quantity_adjustments AS adjustment ON adjustment.physical_shipment_item_id = item.id
-    WHERE adjustment.adjustment_kind IS DISTINCT FROM 'provider_label_replacement'
-      AND item.shipment_item_purpose = 'customer_fulfillment'
-      AND (item.fulfillment_plan_line_id = ${fulfillmentPlanLineId}::bigint
-        OR item.legacy_wms_shipment_item_id = ${target.legacyWmsShipmentItemId})
-    ORDER BY item.id
-  `));
-  const physical: FulfillmentRequestPhysicalSnapshot[] = physicalRows.map(row => ({
-    shipmentRequestItemId: Number(row.shipment_request_item_id), fulfillmentPlanLineId: Number(row.fulfillment_plan_line_id),
-    legacyWmsShipmentItemId: row.legacy_wms_shipment_item_id == null ? null : Number(row.legacy_wms_shipment_item_id),
-    labelReplacementSourceItemId: row.label_replacement_source_item_id == null ? null : Number(row.label_replacement_source_item_id),
-    shippingProvider: row.provider, providerPhysicalShipmentId: row.provider_physical_shipment_id,
-    quantityShipped: Number(row.quantity_shipped), effectiveQuantityShipped: Number(row.effective_quantity),
-  }));
-  return resolveFulfillmentRequestAllocation({ ...target, fulfillmentPlanId, fulfillmentPlanLineId }, requests, physical);
+  const physical = await readPhysicalShipmentAllocationEvidence(tx, {
+    fulfillmentPlanLineId, legacyWmsShipmentItemId: target.legacyWmsShipmentItemId, wmsOrderItemId: target.wmsOrderItemId,
+  });
+  return resolveFulfillmentRequestAllocation({ ...target, sourceWmsShipmentItemId, fulfillmentPlanId, fulfillmentPlanLineId }, requests, physical);
 }

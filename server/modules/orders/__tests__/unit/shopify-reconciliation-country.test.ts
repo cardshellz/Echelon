@@ -52,4 +52,21 @@ describe("Shopify reconciliation country boundary", () => {
     expect(ports.sync).not.toHaveBeenCalled();
     expect(queries().filter(query => /INSERT|UPDATE/.test(query.sql))).toEqual([]);
   });
+
+  it("carries live commercial quantity separately from remaining work into readiness", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, headers: { get: () => null }, json: async () => ({ orders: [{
+      id: 1001, name: "#1001", shipping_address: { country_code: "US" }, customer: null, cancelled_at: null,
+      created_at: "2026-09-01T12:00:00.000Z", updated_at: "2026-10-06T12:00:00.000Z", financial_status: "paid",
+      source_name: "web", currency: "USD", line_items: [{ id: 9004, quantity: 3, current_quantity: "3", fulfillable_quantity: 1 }],
+    }] }) })));
+    ports.execute.mockImplementation(async query => ({ rows: dialect.sqlToQuery(query).sql.includes("SELECT DISTINCT")
+      ? [{ shopify_order_id: "gid://shopify/Order/1001", oms_order_id: 42 }] : [] }));
+    expect(await runReconciliationNow()).toMatchObject({ failed: 0 });
+    expect(ports.readiness).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      omsOrderId: 42, financialStatus: "paid", sourceEventId: "shopify-reconcile:1001:2026-10-06T12:00:00.000Z",
+      lineItems: [{ externalLineItemId: 9004, quantity: 3, currentQuantity: 3, fulfillableQuantity: 1 }],
+    }));
+    expect(ports.sync).not.toHaveBeenCalled();
+    expect(ports.bridge).not.toHaveBeenCalled();
+  });
 });

@@ -1,3 +1,6 @@
+import { sql } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { packageAllocationSourceFactsQuery, parsePackageAllocationSourceFactsRows } from "./package-allocation-source-facts.repository";
 import type { Pool, PoolClient } from "pg";
 import { voidedLabelPostingFactsSchema, type VoidedLabelPostingFacts } from "./package-allocation-voided-label.domain";
 import { VOIDED_LABEL_POSTING_FACTS_SQL, VOIDED_LABEL_POSTING_FACTS_REQUIRED_RELATIONS } from "./package-allocation-voided-label.query";
@@ -53,6 +56,7 @@ readonly string[] = Object.freeze([...new Set([
   "wms.order_items",
   "wms.outbound_shipments",
   "wms.package_allocation_groups",
+  "wms.package_allocation_source_lines",
   "wms.shipping_provider_label_events",
 ])].sort());
 
@@ -699,57 +703,8 @@ class PgPackageAllocationLedgerTransaction
         );
       }
     }
-    const rowLockClause = lockRows ? "\n       FOR UPDATE OF shipment_item" : "";
-    const result = await this.client.query(
-      `SELECT
-         shipment_item.id AS source_wms_shipment_item_id,
-         request_item.id::text AS shipment_request_item_id,
-         (
-           shipment_item.qty::bigint
-           + COALESCE((
-             SELECT SUM(split_item.qty)::bigint
-             FROM wms.outbound_shipment_items AS split_item
-             WHERE split_item.split_root_shipment_item_id = shipment_item.id
-               AND split_item.id <> shipment_item.id
-           ), 0::bigint)
-         ) AS source_quantity,
-         CASE WHEN shipment_item.commercial_requested_qty IS NOT NULL
-           OR EXISTS (
-             SELECT 1
-             FROM wms.outbound_shipment_items AS split_item
-             WHERE split_item.split_root_shipment_item_id = shipment_item.id
-               AND split_item.id <> shipment_item.id
-               AND split_item.commercial_requested_qty IS NOT NULL
-           )
-         THEN COALESCE(shipment_item.commercial_requested_qty, shipment_item.qty)::bigint
-           + COALESCE((
-             SELECT SUM(COALESCE(split_item.commercial_requested_qty, split_item.qty))::bigint
-             FROM wms.outbound_shipment_items AS split_item
-             WHERE split_item.split_root_shipment_item_id = shipment_item.id
-               AND split_item.id <> shipment_item.id
-           ), 0::bigint)
-         ELSE NULL END AS commercial_requested_quantity,
-         shipment_item.shipment_item_purpose,
-         shipment_item.order_item_id,
-         shipment_item.replacement_for_order_item_id,
-         shipment_item.correction_for_shipment_item_id,
-         shipment_item.product_variant_id,
-         order_item.sku AS order_item_sku,
-         replacement_item.sku AS replacement_order_item_sku,
-         variant.sku AS product_variant_sku
-       FROM wms.outbound_shipment_items AS shipment_item
-       LEFT JOIN wms.shipment_request_items AS request_item
-         ON request_item.legacy_wms_shipment_item_id = shipment_item.id
-       LEFT JOIN wms.order_items AS order_item
-         ON order_item.id = shipment_item.order_item_id
-       LEFT JOIN wms.order_items AS replacement_item
-         ON replacement_item.id = shipment_item.replacement_for_order_item_id
-       LEFT JOIN catalog.product_variants AS variant
-         ON variant.id = shipment_item.product_variant_id
-       WHERE shipment_item.id = ANY($1::integer[])
-       ORDER BY shipment_item.id${rowLockClause}`,
-      [sortedIds],
-    );
+    const query = new PgDialect().sqlToQuery(packageAllocationSourceFactsQuery(sortedIds, lockRows));
+    const result = await this.client.query(query.sql, query.params);
     if (result.rows.length !== sortedIds.length) {
       const found = new Set(result.rows.map((row: any) => Number(row.source_wms_shipment_item_id)));
       throw new PackageAllocationLedgerRepositoryError(
@@ -758,25 +713,7 @@ class PgPackageAllocationLedgerTransaction
         { missingWmsShipmentItemIds: sortedIds.filter((id) => !found.has(id)) },
       );
     }
-    return Object.freeze(result.rows.map((raw) => {
-      const row = raw as Record<string, unknown>;
-      return Object.freeze({
-        sourceWmsShipmentItemId: positiveInteger(row.source_wms_shipment_item_id, "source_wms_shipment_item_id"),
-        shipmentRequestItemId: optionalBigintText(row.shipment_request_item_id, "shipment_request_item_id"),
-        sourceQuantity: positiveInteger(row.source_quantity, "source_quantity"),
-        ...(row.commercial_requested_quantity == null ? {} : {
-          commercialRequestedQuantity: nonnegativeInteger(row.commercial_requested_quantity, "commercial_requested_quantity"),
-        }),
-        shipmentItemPurpose: requiredText(row.shipment_item_purpose, "shipment_item_purpose") as PackageAllocationSourceFacts["shipmentItemPurpose"],
-        orderItemId: nullablePositiveInteger(row.order_item_id, "order_item_id"),
-        replacementForOrderItemId: nullablePositiveInteger(row.replacement_for_order_item_id, "replacement_for_order_item_id"),
-        correctionForShipmentItemId: nullablePositiveInteger(row.correction_for_shipment_item_id, "correction_for_shipment_item_id"),
-        productVariantId: nullablePositiveInteger(row.product_variant_id, "product_variant_id"),
-        orderItemSku: nullableText(row.order_item_sku),
-        replacementOrderItemSku: nullableText(row.replacement_order_item_sku),
-        productVariantSku: nullableText(row.product_variant_sku),
-      });
-    }));
+    return parsePackageAllocationSourceFactsRows(result.rows as Record<string, unknown>[]);
   }
 
   async discoverAuthorityReadinessPackageSelection(
@@ -1703,38 +1640,20 @@ class PgPackageAllocationLedgerTransaction
     // The immutable physical item binds the added request to the ORIGINAL
     // allocation entry. A newly inserted lookalike request is not sufficient.
     // Lock mutable owner identities while retaining the original source row/hash.
-    const proof = await this.client.query(
-      `SELECT source.source_wms_shipment_item_id
-       FROM jsonb_to_recordset($1::jsonb) AS expected(source_id bigint, request_item_id bigint)
+    const proofQuery = new PgDialect().sqlToQuery(sql`
+       WITH current_source AS (${packageAllocationSourceFactsQuery(enrichments.map(entry => entry.sourceWmsShipmentItemId), false)})
+       SELECT source.source_wms_shipment_item_id
+       FROM jsonb_to_recordset(${JSON.stringify(enrichments.map(entry => ({
+         source_id: entry.sourceId, request_item_id: entry.requestItemId,
+       })))}::jsonb) AS expected(source_id bigint, request_item_id bigint)
        JOIN wms.package_allocation_source_lines source ON source.id = expected.source_id
        JOIN wms.outbound_shipment_items shipment_item
          ON shipment_item.id = source.source_wms_shipment_item_id
         AND shipment_item.order_item_id = source.order_item_id
-        -- The compatibility root shrinks when exact split children are added.
-        -- Reconstruct the same source quantity as loadSourceFacts; the immutable
-        -- request, allocation entry and physical-item proofs below still apply.
-        AND shipment_item.qty::bigint + COALESCE((
-          SELECT SUM(split_item.qty)::bigint FROM wms.outbound_shipment_items split_item
-          WHERE split_item.split_root_shipment_item_id = shipment_item.id
-            AND split_item.id <> shipment_item.id
-        ), 0::bigint) = source.source_quantity
-        AND NOT EXISTS (
-          SELECT 1 FROM wms.outbound_shipment_items split_item
-          LEFT JOIN wms.outbound_shipments split_shipment ON split_shipment.id = split_item.shipment_id
-          WHERE split_item.split_root_shipment_item_id = shipment_item.id
-            AND split_item.id <> shipment_item.id
-            AND (split_shipment.id IS NULL OR split_item.qty < 0
-              OR split_item.order_item_id IS DISTINCT FROM shipment_item.order_item_id
-              OR split_item.replacement_for_order_item_id IS DISTINCT FROM shipment_item.replacement_for_order_item_id
-              OR split_item.correction_for_shipment_item_id IS DISTINCT FROM shipment_item.correction_for_shipment_item_id
-              OR split_item.shipment_item_purpose IS DISTINCT FROM shipment_item.shipment_item_purpose
-              OR split_item.product_variant_id IS DISTINCT FROM shipment_item.product_variant_id
-              OR split_shipment.order_id IS DISTINCT FROM (
-                SELECT parent.order_id FROM wms.outbound_shipments parent WHERE parent.id = shipment_item.shipment_id
-              ))
-        )
         AND shipment_item.shipment_item_purpose = source.shipment_item_purpose
         AND shipment_item.product_variant_id IS NOT DISTINCT FROM source.product_variant_id
+       JOIN current_source facts ON facts.source_wms_shipment_item_id = source.source_wms_shipment_item_id
+         AND facts.partition_lineage_valid AND facts.partitioned_quantity = source.source_quantity
        JOIN wms.order_items order_item ON order_item.id = source.order_item_id
         AND BTRIM(order_item.sku) = source.sku
        JOIN wms.outbound_shipments shipment ON shipment.id = shipment_item.shipment_id
@@ -1763,7 +1682,7 @@ class PgPackageAllocationLedgerTransaction
            SELECT 1 FROM wms.physical_shipment_items physical_item
            JOIN wms.package_allocation_entries entry ON entry.id = physical_item.package_allocation_entry_id
            WHERE entry.package_allocation_source_line_id = source.id
-             AND entry.package_allocation_group_id = $2::bigint
+             AND entry.package_allocation_group_id = ${group.id}::bigint
              AND entry.target_kind = 'package'
              AND physical_item.shipment_request_item_id = request_item.id
              AND physical_item.fulfillment_plan_line_id = plan_line.id
@@ -1781,17 +1700,8 @@ class PgPackageAllocationLedgerTransaction
                OR physical_item.wms_order_item_id IS DISTINCT FROM source.order_item_id)
          )
        ORDER BY source.source_wms_shipment_item_id
-       FOR SHARE OF shipment_item, order_item, shipment, wms_order, request_item, request, plan_line, plan, oms_line`,
-      [
-        JSON.stringify(
-          enrichments.map((entry) => ({
-            source_id: entry.sourceId,
-            request_item_id: entry.requestItemId,
-          })),
-        ),
-        group.id,
-      ],
-    );
+       FOR SHARE OF shipment_item, order_item, shipment, wms_order, request_item, request, plan_line, plan, oms_line`);
+    const proof = await this.client.query(proofQuery.sql, proofQuery.params);
     const proven = new Set(
       proof.rows.map((row) =>
         positiveInteger(

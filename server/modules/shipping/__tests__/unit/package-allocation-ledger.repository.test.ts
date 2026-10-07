@@ -147,7 +147,9 @@ describe("PgPackageAllocationLedgerRepository", () => {
         return [{
           source_wms_shipment_item_id: 7001,
           shipment_request_item_id: "90001",
-          source_quantity: 2,
+          partition_lineage_valid: true,
+          partitioned_quantity: 2,
+          registered_quantity: null,
           shipment_item_purpose: "customer_fulfillment",
           order_item_id: 8101,
           replacement_for_order_item_id: null,
@@ -365,7 +367,9 @@ describe("PgPackageAllocationLedgerRepository", () => {
         {
           source_wms_shipment_item_id: 7001,
           shipment_request_item_id: "90001",
-          source_quantity: 2,
+          partition_lineage_valid: true,
+          partitioned_quantity: 2,
+          registered_quantity: null,
           shipment_item_purpose: "customer_fulfillment",
           order_item_id: 8101,
           replacement_for_order_item_id: null,
@@ -378,7 +382,9 @@ describe("PgPackageAllocationLedgerRepository", () => {
         {
           source_wms_shipment_item_id: 7002,
           shipment_request_item_id: "90002",
-          source_quantity: 1,
+          partition_lineage_valid: true,
+          partitioned_quantity: 1,
+          registered_quantity: null,
           shipment_item_purpose: "customer_fulfillment",
           order_item_id: 8102,
           replacement_for_order_item_id: null,

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { DropshipCostChangePolicySettings } from "../../../../shared/dropship/cost-change-policy";
-import { resolvePricingRule, type PricingProfileState } from "../../../../shared/dropship/pricing-rules";
+import type { PricingProfileState } from "../../../../shared/dropship/pricing-rules";
 import {
   classifyCostChangeListingPrice,
   costChangeHoldIdempotencyKey,
@@ -24,6 +24,7 @@ import type { DropshipCostChangePolicyReader } from "./dropship-cost-detection-s
 import type { DropshipListingVariantHoldGate } from "./dropship-listing-tier-service";
 import { formatNotificationCurrency } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
+import { createRulePriceResolver } from "./dropship-rule-price";
 import type { DropshipClock, DropshipLogger, DropshipNotificationSender } from "./dropship-ports";
 
 /**
@@ -701,11 +702,8 @@ export function classifyListing(facts: CostActionVendorFacts, listing: CostActio
     candidate.storeConnectionId === listing.storeConnectionId && candidate.productVariantId === listing.productVariantId) ?? null;
   const candidate = facts.candidates.get(listing.productVariantId) ?? null;
   const profile = facts.profiles.get(listing.storeConnectionId) ?? null;
-  const rulePrice = profile && candidate
-    ? resolvePricingRule({
-      profile: profile.profile, candidate, productCostCents: costCents, catalogRetailCents: candidate.defaultRetailPriceCents,
-    })
-    : null;
+  // The shared resolver the listing preview prices through, at the cost being judged.
+  const rulePrice = profile && candidate ? createRulePriceResolver({ state: profile }).priceAtCost(candidate, costCents) : null;
   return classifyCostChangeListingPrice({
     saved: saved ? { overridePriceCents: saved.overridePriceCents, pricingMode: saved.pricingMode ?? undefined } : null,
     existingListingPriceCents: listing.vendorRetailPriceCents,

@@ -144,44 +144,28 @@ function statusAfterNonAuthorizingUpdate(
 }
 
 /**
- * Shopify's `fulfillable_quantity` is workflow permission, not demand. It
- * drops to 0 while a fulfillment order is on hold (a merchant-of-record app
- * such as Global-e processing an international order, a fraud check, an
- * address problem), scheduled, or moving between locations, and it falls as
- * units are fulfilled. None of those mean the customer no longer wants the
- * goods (channel-fulfillment-quantity-authority.ts: "remaining work, not a
- * lifetime cap or a cancellation count").
+ * Remaining channel work cannot lower cumulative paid-line authority. Once
+ * readiness has opened, current_quantity supplies the explicit commercial
+ * ceiling; a partial fulfillment is not a new, smaller authorization.
  *
- * So readiness may RAISE authority (a hold or schedule is released) but may
- * LOWER it only to `current_quantity`, the channel's record of units removed
- * by an order edit or cancellation. Lowering on a hold cancelled
- * already-materialized WMS lines that nothing restored when the hold lifted
- * (#63275 on 2026-09-18, #63861 on 2026-10-06).
- *
- * `allowFulfillableToLower` covers a readiness refresh without
- * `current_quantity`: orders/updated is the topic that carries order edits,
- * and without `current_quantity` an edit removal is indistinguishable from a
- * hold, so the legacy fulfillable-driven rule stays (picking units the
- * customer removed is the costlier mistake). Authorizing topics pass false:
- * they record payment, never an edit, so a fulfillable dip there is always a
- * hold or fulfillment progress.
+ * A line first authorized while held still waits for positive readiness. A
+ * payload without current_quantity may raise readiness, but cannot prove an
+ * edit/cancellation from a depleted fulfillable_quantity. Observed quantity
+ * reductions and the disposition owners continue to constrain authority.
  */
 function fulfillableReadinessCap(input: {
   previousAuthority: number;
-  incomingFulfillableQuantity: number;
+  incomingFulfillableQuantity: number | null;
   incomingCurrentQuantity: number | null;
-  allowFulfillableToLower: boolean;
 }): number {
-  const raisedByReadiness = Math.max(
+  const openedAuthority = Math.max(
     input.previousAuthority,
-    input.incomingFulfillableQuantity,
+    input.incomingFulfillableQuantity ?? 0,
   );
-  if (input.incomingCurrentQuantity !== null) {
-    return Math.min(input.incomingCurrentQuantity, raisedByReadiness);
+  if (input.incomingCurrentQuantity !== null && openedAuthority > 0) {
+    return input.incomingCurrentQuantity;
   }
-  return input.allowFulfillableToLower
-    ? input.incomingFulfillableQuantity
-    : raisedByReadiness;
+  return openedAuthority;
 }
 
 function coerceDate(value: Date | string | null | undefined): Date | null {
@@ -227,7 +211,6 @@ export function deriveOmsLineAuthority(
         ),
         incomingFulfillableQuantity: fulfillableQuantity,
         incomingCurrentQuantity,
-        allowFulfillableToLower: false,
       });
     const authorityFulfillableQuantity = Math.min(
       observedQuantity,
@@ -288,7 +271,7 @@ export function deriveOmsLineAuthority(
     READINESS_REFRESH_FINANCIAL_STATUSES.has(
       String(input.financialStatus ?? ""),
     ) &&
-    incomingFulfillableQuantity !== null &&
+    (incomingFulfillableQuantity !== null || incomingCurrentQuantity !== null) &&
     previousCancelledQuantity === 0 &&
     previousRefundedQuantity === 0 &&
     (previousAuthorizationStatus === "seen" ||
@@ -300,7 +283,6 @@ export function deriveOmsLineAuthority(
         previousAuthority: previousFulfillableQuantity,
         incomingFulfillableQuantity,
         incomingCurrentQuantity,
-        allowFulfillableToLower: true,
       }),
     )
     : Math.min(previousFulfillableQuantity, paidQuantity);

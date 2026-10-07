@@ -11,6 +11,7 @@ import { guardOrderEditShopifyIngress } from "../order-edits/infrastructure/orde
 export interface ShopifyLineReadinessSnapshot {
   externalLineItemId: string | number;
   quantity: number;
+  currentQuantity?: number | null;
   fulfillableQuantity: number;
 }
 
@@ -37,7 +38,7 @@ export interface ReconcileShopifyLineReadinessResult {
 
 function requirePositiveInteger(value: unknown, field: string): number {
   const normalized = Number(value);
-  if (!Number.isInteger(normalized) || normalized <= 0) {
+  if (!Number.isSafeInteger(normalized) || normalized <= 0) {
     throw new Error(
       `Shopify readiness ${field} must be a positive integer (got ${String(value)})`,
     );
@@ -47,7 +48,7 @@ function requirePositiveInteger(value: unknown, field: string): number {
 
 function requireNonNegativeInteger(value: unknown, field: string): number {
   const normalized = Number(value);
-  if (!Number.isInteger(normalized) || normalized < 0) {
+  if (!Number.isSafeInteger(normalized) || normalized < 0) {
     throw new Error(
       `Shopify readiness ${field} must be a non-negative integer (got ${String(value)})`,
     );
@@ -91,6 +92,12 @@ export async function reconcileShopifyLineReadiness(
       line.quantity,
       `lineItems[${index}].quantity`,
     ),
+    currentQuantity: line.currentQuantity == null
+      ? null
+      : requireNonNegativeInteger(
+        line.currentQuantity,
+        `lineItems[${index}].currentQuantity`,
+      ),
     fulfillableQuantity: requireNonNegativeInteger(
       line.fulfillableQuantity,
       `lineItems[${index}].fulfillableQuantity`,
@@ -192,6 +199,7 @@ export async function reconcileShopifyLineReadiness(
         sourceEventId,
         financialStatus: input.financialStatus,
         quantity: snapshot.quantity,
+        currentQuantity: snapshot.currentQuantity,
         fulfillableQuantity: snapshot.fulfillableQuantity,
         previous: line,
         now,
