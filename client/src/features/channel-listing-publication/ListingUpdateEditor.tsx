@@ -28,8 +28,7 @@ import { SchemaFields } from "./SchemaFields";
 import { ListingProductTypePicker } from "./ListingProductTypePicker";
 import {
   initialListingUpdateFields,
-  listingUpdateChanges,
-  listingUpdateContentResubmission,
+  listingUpdateSubmission,
   updateFieldLabel,
 } from "./listing-update-model";
 
@@ -113,8 +112,7 @@ function UpdateForm({
   onSubmitted(update: ListingUpdateView): void;
 }) {
   const prefix = useId();
-  const original = useRef(initialListingUpdateFields(context));
-  const [fields, setFields] = useState(original.current);
+  const [fields, setFields] = useState(() => initialListingUpdateFields(context));
   const [review, setReview] = useState<ListingUpdateView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -142,22 +140,14 @@ function UpdateForm({
       ),
     retry: false,
   });
-  async function reviewChanges(resubmitContent = false) {
+  async function reviewChanges() {
     setBusy(true);
     setError("");
     try {
-      const changes = resubmitContent
-        ? listingUpdateContentResubmission(
-            original.current,
-            fields,
-            requirements.data ?? {},
-          )
-        : listingUpdateChanges(original.current, fields);
+      const changes = listingUpdateSubmission(fields, requirements.data ?? {});
       if (!hasListingUpdateChanges(changes)) {
         throw new Error(
-          context.current.productType !== fields.productType
-            ? "No fields changed. To resend the filled product details under the selected type, use Review content resubmission."
-            : "No fields changed. Edit at least one field before reviewing.",
+          "Fill at least one editable field before reviewing the listing.",
         );
       }
       const result = await publicationRequest(
@@ -262,8 +252,8 @@ function UpdateForm({
           {review ? (
             <>
               <p className="text-sm text-muted-foreground">
-                These changes update the existing Walmart listing. Stock
-                quantities stay unchanged.
+                All populated editable fields below will be sent to Walmart.
+                Stock quantities stay unchanged.
               </p>
               <dl className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-x-4 gap-y-3 text-sm">
                 <dt>Product type for these fields</dt>
@@ -319,8 +309,8 @@ function UpdateForm({
           ) : (
             <fieldset disabled={busy} className="min-w-0 space-y-6">
               <p className="text-sm text-muted-foreground">
-                Edit the fields you want to change. Blank fields leave Walmart
-                unchanged.
+                All populated editable fields will be sent, including values you
+                haven't changed. Blank fields leave Walmart unchanged.
               </p>
               <section className="space-y-4">
                 <h3 className="font-semibold">Price and product type</h3>
@@ -368,22 +358,6 @@ function UpdateForm({
                       Walmart currently reports:{" "}
                       <strong>{context.current.productType || "Not returned"}</strong>.
                     </p>
-                    <p>
-                      Resubmit the filled title, description, brand, images and
-                      supported product details using the selected type. You can
-                      review every field before sending.
-                    </p>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      disabled={
-                        busy || Boolean(pending) || !fields.productType ||
-                        requirements.isFetching || !requirements.data
-                      }
-                      onClick={() => void reviewChanges(true)}
-                    >
-                      Review content resubmission
-                    </Button>
                   </div>
                 )}
                 <p className="text-xs text-muted-foreground">
@@ -429,7 +403,7 @@ function UpdateForm({
                 )}
                 {requirements.data && (
                   <SchemaFields
-                    mode="patch"
+                    mode="maintenance"
                     schema={requirements.data}
                     value={fields.attributes}
                     onChange={(attributes) =>

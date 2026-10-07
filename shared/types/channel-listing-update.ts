@@ -51,6 +51,17 @@ export function hasListingUpdateChanges(changes: ListingUpdateChanges): boolean 
   );
 }
 
+/** Price and shipping edits do not carry the selected product type's content. */
+export function hasListingUpdateProductContent(
+  changes: ListingUpdateChanges,
+): boolean {
+  const { priceCents: _price, attributes, ...content } = changes;
+  return hasListingUpdateChanges({
+    ...content,
+    attributes: { Visible: attributes?.Visible },
+  });
+}
+
 export const listingUpdateObservationSchema = z
   .object({
     sku: listingUpdateSkuSchema,

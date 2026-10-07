@@ -114,6 +114,21 @@ function setup() {
 }
 
 describe("reviewed existing-listing updates", () => {
+  it.each([{ priceCents: 2498 }, { attributes: { Orderable: { ShippingWeight: 3 } } }])(
+    "requires product content when the selected type differs from Walmart: %j",
+    async (changes) => {
+      const s = setup();
+      const source = { ...updateSource, productType: "default" };
+      s.provider.observe.mockResolvedValue(source);
+      await expect(s.service.review(104, {
+        ...s.get().intent.command,
+        sourceHash: listingHash({ account: testAccount, current: source }),
+        changes,
+      }, "operator")).rejects.toMatchObject({ code: "LISTING_UPDATE_CONTENT_REQUIRED" });
+      expect(s.store.insert).not.toHaveBeenCalled();
+      expect(s.provider.send).not.toHaveBeenCalled();
+    },
+  );
   it.each([{}, { attributes: {} }, { attributes: { Visible: {}, Orderable: {} } }])(
     "rejects empty category corrections before storing or sending a feed: %j",
     async (changes) => {

@@ -5,6 +5,7 @@ import type {
 } from "@shared/types/channel-listing-publication";
 import {
   hasListingUpdateChanges,
+  hasListingUpdateProductContent,
   listingUpdateObservationSchema,
   reviewListingUpdateSchema,
   type ListingUpdateObservation,
@@ -148,6 +149,16 @@ export class WalmartListingUpdateProvider implements ListingUpdateProvider {
         field: "changes",
         message: "Change at least one item field. A product-type selection alone does not update item content.",
       });
+    else if (
+      command.productType !== source.productType &&
+      !hasListingUpdateProductContent(changes)
+    ) {
+      issues.push({
+        code: "LISTING_UPDATE_CONTENT_REQUIRED",
+        field: "changes",
+        message: "The selected product type differs from Walmart. Include product content with this correction; a price or shipping update alone is insufficient.",
+      });
+    }
     const orderable = changes.attributes?.Orderable ?? {};
     const visible = changes.attributes?.Visible ?? {};
     for (const key of Object.keys(orderable))
