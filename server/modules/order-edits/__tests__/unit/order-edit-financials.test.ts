@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildOrderEditFinancials,
+  equivalentOrderEditFinancialEvidence,
   matchesOrderEditFinancials,
   presentOrderEditSettlement,
   sumOrderEditCents,
@@ -29,6 +30,132 @@ const payment = (
 ) => ({ id, kind, status, amountCents });
 
 describe("exact order edit financials", () => {
+  const details = () => [
+    {
+      key: "code:AMAZZIN'",
+      label: "AMAZZIN'",
+      amountCents: 1199,
+      value: { type: "percentage" as const, percentage: "10" },
+    },
+  ];
+  it("reconciles named discount amounts to the aggregate without changing older financial evidence", () => {
+    const legacy = buildOrderEditFinancials(input());
+    const enriched = buildOrderEditFinancials({
+      ...input(),
+      itemDiscounts: details(),
+    });
+    expect(enriched.itemDiscounts).toEqual(details());
+    expect(legacy.itemDiscounts).toBeUndefined();
+    expect(orderEditFinancialsSchema.safeParse(legacy).success).toBe(true);
+    expect(matchesOrderEditFinancials(enriched, legacy)).toBe(true);
+    expect(equivalentOrderEditFinancialEvidence(enriched, legacy)).toBe(true);
+    expect(
+      equivalentOrderEditFinancialEvidence(
+        { ...enriched, totalCents: 10795 },
+        legacy,
+      ),
+    ).toBe(false);
+    expect(
+      equivalentOrderEditFinancialEvidence(
+        {
+          ...enriched,
+          lines: enriched.lines.map((line) => ({
+            ...line,
+            netCents: line.netCents - 1,
+          })),
+        },
+        legacy,
+      ),
+    ).toBe(false);
+  });
+  it("requires new per-code evidence and catches rule changes even when order totals match", () => {
+    const enriched = buildOrderEditFinancials({
+      ...input(),
+      itemDiscounts: details(),
+    });
+    const legacy = buildOrderEditFinancials(input());
+    expect(matchesOrderEditFinancials(legacy, enriched)).toBe(false);
+    expect(equivalentOrderEditFinancialEvidence(legacy, enriched)).toBe(false);
+    const changed = {
+      ...enriched,
+      itemDiscounts: [
+        {
+          ...details()[0],
+          value: { type: "percentage" as const, percentage: "20" },
+        },
+      ],
+    };
+    expect(matchesOrderEditFinancials(changed, enriched)).toBe(false);
+    expect(equivalentOrderEditFinancialEvidence(changed, enriched)).toBe(false);
+  });
+  it.each(
+    [
+      [
+        {
+          key: "code",
+          label: "Code",
+          amountCents: 1198,
+          value: { type: "percentage", percentage: "10" },
+        },
+      ],
+      [
+        {
+          key: "code",
+          label: "Code",
+          amountCents: 1199,
+          value: { type: "percentage", percentage: "100.01" },
+        },
+      ],
+      [
+        {
+          key: "code",
+          label: "Code",
+          amountCents: 1199,
+          value: { type: "fixed", amountCents: 1000 },
+        },
+      ],
+      [
+        {
+          key: "same",
+          label: "Code",
+          amountCents: 1199,
+          value: { type: "allocated" },
+        },
+        {
+          key: "same",
+          label: "Code",
+          amountCents: 0,
+          value: { type: "allocated" },
+        },
+      ],
+      [
+        {
+          key: "code",
+          label: "Code",
+          amountCents: 1199.5,
+          value: { type: "allocated" },
+        },
+      ],
+      [
+        {
+          key: "code",
+          label: "Code",
+          amountCents: -1,
+          value: { type: "allocated" },
+        },
+      ],
+    ].map((itemDiscounts) => ({ itemDiscounts })),
+  )(
+    "rejects invalid or contradictory per-code display evidence",
+    ({ itemDiscounts }) => {
+      expect(
+        orderEditFinancialsSchema.safeParse({
+          ...buildOrderEditFinancials(input()),
+          itemDiscounts,
+        }).success,
+      ).toBe(false);
+    },
+  );
   it("reconciles discounts separately and does not mutate input", () => {
     const original = input();
     const before = structuredClone(original);
