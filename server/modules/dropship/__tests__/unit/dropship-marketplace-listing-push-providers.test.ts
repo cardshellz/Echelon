@@ -479,7 +479,13 @@ describe("dropship marketplace listing push providers", () => {
     });
   });
 
-  it("fails before calling eBay when the persisted listing intent lacks catalog weight", async () => {
+  it.each([
+    ["no catalog weight", null],
+    ["a zero weight", 0],
+    ["a negative weight", -5],
+    ["a weight that is not a number", Number.NaN],
+    ["an infinite weight", Number.POSITIVE_INFINITY],
+  ])("fails before calling eBay when the persisted listing intent has %s", async (_case, weightGrams) => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([]);
     const provider = createEbayProvider(credentials, fetcher.fetch);
@@ -487,12 +493,40 @@ describe("dropship marketplace listing push providers", () => {
     await expect(provider.pushListing(makeRequest({
       platform: "ebay",
       marketplaceConfig: ebayMarketplaceConfig(),
-      weightGrams: null,
+      weightGrams,
     }))).rejects.toMatchObject({
       code: "DROPSHIP_EBAY_PACKAGE_WEIGHT_REQUIRED",
       context: { productVariantId: 101, retryable: false },
     });
     expect(fetcher.calls).toHaveLength(0);
+  });
+
+  // Catalog weights keep fractions of a gram (numeric(10,2) since migration
+  // 185), so 1 lb is stored as 453.59 g. eBay gets whole grams, at least 1.
+  it.each([
+    [453.59, 454],
+    [12.5, 13],
+    [12.49, 12],
+    [0.4, 1],
+    [100, 100],
+  ])("sends a catalog weight of %s g to eBay as %s g", async (weightGrams, sentGrams) => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([
+      jsonResponse({ offers: [] }),
+      emptyResponse(),
+      jsonResponse({ offerId: "offer-101" }),
+      emptyResponse(),
+    ]);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
+
+    await expect(provider.pushListing(makeRequest({
+      platform: "ebay",
+      marketplaceConfig: ebayMarketplaceConfig(),
+      weightGrams,
+    }))).resolves.toMatchObject({ status: "created", externalOfferId: "offer-101" });
+
+    const inventoryBody = JSON.parse(String(fetcher.calls[1]?.init.body));
+    expect(inventoryBody.packageWeightAndSize.weight).toEqual({ value: sentGrams, unit: "GRAM" });
   });
 
   it("forces an access-token refresh without deleting the grant on an eBay listing API 401", async () => {
