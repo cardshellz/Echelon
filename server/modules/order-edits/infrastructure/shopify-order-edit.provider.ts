@@ -26,6 +26,8 @@ import {
 } from "../application/order-edit-provider";
 import { buildOrderEditFinancials } from "../domain/order-edit-financials";
 import { priceOrderEditDiscounts } from "../domain/order-edit-discount-engine";
+import { resolveOrderEditLinePlan } from "../domain/order-edit-line-plan";
+import { SHOPIFY_CALCULATED_LINE_ID_PATTERN } from "@shared/order-edits/shopify-edit-identity";
 import type { OrderEditDiscount } from "@shared/order-edits/order-edit-discounts";
 import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";
 import * as gql from "./shopify-order-edit.queries";
@@ -39,6 +41,8 @@ export const ORDER_EDIT_SHOPIFY_API_VERSION = "2026-10";
 const REQUEST_TIMEOUT_MS = 20_000;
 const IDEMPOTENCY_RETENTION_MS = 24 * 60 * 60 * 1_000;
 const MAX_GRAPHQL_INPUTS = 250;
+// The installed pricing function emits this line-discount message. Its registration title is editable and separate.
+const MEMBER_PRICING_MESSAGE = "Member discount";
 const PAGE = z.object({ hasNextPage: z.boolean() });
 const TEXT = z.string().min(1);
 const INTEGER = z.number().int().nonnegative().safe();
@@ -539,8 +543,15 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
     unique(
       baseline.lines
         .filter((line) => line.quantity > 0)
-        .map((line) => line.variantId),
-      "original variant identities",
+        .map((line) =>
+          canonicalJson([
+            line.variantId,
+            line.quantity,
+            line.originalUnitPriceCents,
+            line.discountedUnitPriceCents,
+          ]),
+        ),
+      "original line identities",
     );
     const byId = new Map(baseline.lines.map((line) => [line.id, line]));
     for (const change of plan.changes) {
@@ -616,7 +627,15 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
     for (const line of baseline.lines.filter((entry) => entry.quantity > 0)) {
       const matches = calculated.lineItems.nodes.filter(
         (candidate) =>
-          candidate.variant?.id === line.variantId && candidate.quantity > 0,
+          ![...originalCalculated.values()].some(
+            (used) => used.id === candidate.id,
+          ) &&
+          candidate.variant?.id === line.variantId &&
+          candidate.quantity === line.quantity &&
+          money(candidate.originalUnitPriceSet) ===
+            line.originalUnitPriceCents &&
+          money(candidate.discountedUnitPriceSet) ===
+            line.discountedUnitPriceCents,
       );
       if (
         matches.length !== 1 ||
@@ -654,9 +673,32 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
         "Shopify returned an unexpected edit baseline.",
       );
     const expected: OrderEditExpectedLine[] = [];
+    const stagedPlan = resolveOrderEditLinePlan({
+      originals: baseline.lines
+        .filter((line) => line.quantity > 0)
+        .map(({ id, variantId, quantity }) => ({ id, variantId, quantity })),
+      changes: plan.changes.map((change) => ({
+        ...change,
+        lineItemId: gid("LineItem", change.lineItemId),
+      })),
+      additions: plan.additions.map((addition) => ({
+        ...addition,
+        variantId: gid("ProductVariant", addition.variantId),
+      })),
+      protectedLineIds: [...originalCalculated]
+        .filter(([, line]) =>
+          line.calculatedDiscountAllocations.some(
+            (allocation) =>
+              allocation.discountApplication.__typename ===
+                "CalculatedAutomaticDiscountApplication" &&
+              allocation.discountApplication.targetType === "LINE_ITEM",
+          ),
+        )
+        .map(([id]) => id),
+    });
     for (const line of baseline.lines.filter((entry) => entry.quantity > 0)) {
       const calcLine = originalCalculated.get(line.id)!;
-      const change = plan.changes.find(
+      const change = stagedPlan.changes.find(
         (entry) => gid("LineItem", entry.lineItemId) === line.id,
       );
       const quantity = change?.quantity ?? line.quantity;
@@ -685,7 +727,7 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
         totalCents: prorateExact(line.totalCents, line.quantity, quantity),
       });
     }
-    for (const addition of plan.additions) {
+    for (const addition of stagedPlan.additions) {
       const variantId = gid("ProductVariant", addition.variantId);
       const result = await this.mutate(
         credentials,
@@ -717,6 +759,32 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
           "CONTEXTUAL_PRICE_CHANGED",
           "The contextual price differs from the approved product price.",
         );
+      if (addition.quantityIncreaseOfLineId) {
+        const original = originalCalculated.get(
+          addition.quantityIncreaseOfLineId,
+        )!;
+        const existingMemberDiscount = sum(
+          original.calculatedDiscountAllocations
+            .filter(
+              (allocation) =>
+                allocation.discountApplication.__typename ===
+                "CalculatedAutomaticDiscountApplication",
+            )
+            .map((allocation) => money(allocation.allocatedAmountSet)),
+        );
+        if (
+          !baseline.memberPricingEnabled ||
+          !baseline.memberPlan ||
+          member >= retail ||
+          multiply(retail - member, original.quantity) !==
+            existingMemberDiscount
+        ) {
+          fail(
+            "MEMBER_PRICE_CHANGED",
+            "The current member price cannot reproduce this original item's pricing. No order change was committed.",
+          );
+        }
+      }
       if (member < retail) {
         calculated = readCalculated(
           (
@@ -744,6 +812,9 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
         title: line.title,
         variantTitle: line.variantTitle,
         originalLineId: null,
+        ...(addition.quantityIncreaseOfLineId
+          ? { quantityIncreaseOfLineId: addition.quantityIncreaseOfLineId }
+          : {}),
         calculatedLineId: calcId,
         variantId,
         quantity: addition.quantity,
@@ -753,6 +824,7 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
       });
     }
     verifyCalculated(calculated, expected, baseline);
+    verifyPreservedMemberAllocations(calculated, originalCalculated, expected);
     if (
       canonicalJson(calculated.shippingLines) !==
       canonicalJson(originalShippingLines)
@@ -911,7 +983,14 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
     );
     if (
       matching.length !== 1 ||
-      automaticItems.some((entry) => entry.title !== matching[0].title) ||
+      automaticItems.some(
+        (entry) =>
+          ![MEMBER_PRICING_MESSAGE, matching[0].title].includes(
+            entry.title ?? "",
+          ) ||
+          entry.allocationMethod !== "ACROSS" ||
+          entry.targetSelection !== "ENTITLED",
+      ) ||
       discounts.filter((entry) => entry.title === matching[0].title).length !==
         1
     ) {
@@ -925,6 +1004,7 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
       functionId: functions[0].id,
       handle: functions[0].handle,
       title: matching[0].title,
+      orderMessages: automaticItems.map((entry) => entry.title),
       discountIds: provenance.discountNodes.nodes
         .filter((entry) => entry.discount === matching[0])
         .map((entry) => entry.id),
@@ -1689,6 +1769,11 @@ function paymentUrl(
 function gid(resource: string, value: string): string {
   const id = String(value);
   const prefix = `gid://shopify/${resource}/`;
+  if (
+    resource === "CalculatedLineItem" &&
+    SHOPIFY_CALCULATED_LINE_ID_PATTERN.test(id)
+  )
+    return id;
   if (/^[1-9]\d*$/.test(id)) return `${prefix}${id}`;
   if (id.startsWith(prefix) && /^[1-9]\d*$/.test(id.slice(prefix.length)))
     return id;
@@ -2190,6 +2275,108 @@ function readOrderItemDiscounts(
   return sortDiscounts(discounts);
 }
 
+/** Shopify reports function PRODUCT allocations as appliedTo ORDER, excluding them from editableSubtotalSet. */
+function automaticProductOrderAmounts(
+  calculated: Calculated,
+  baseline: OrderEditSnapshot,
+): Map<string, number> {
+  const rules = (baseline.discountRules ?? []).filter(
+    (rule) =>
+      rule.type === "AutomaticDiscountApplication" &&
+      rule.targetType === "LINE_ITEM",
+  );
+  const amounts = new Map<string, number>();
+  for (const line of [
+    ...calculated.lineItems.nodes,
+    ...calculated.addedLineItems.nodes,
+  ].filter((line) => line.quantity > 0)) {
+    const automatic = line.calculatedDiscountAllocations.filter(
+      (allocation) =>
+        allocation.discountApplication.__typename ===
+        "CalculatedAutomaticDiscountApplication",
+    );
+    for (const allocation of automatic) {
+      const application = allocation.discountApplication;
+      const matches = rules.filter(
+        (rule) =>
+          rule.label === application.description &&
+          rule.allocationMethod === application.allocationMethod &&
+          rule.targetSelection === application.targetSelection &&
+          rule.targetType === application.targetType &&
+          rule.value.type === "fixed" &&
+          application.value.__typename === "MoneyV2" &&
+          rule.value.amountCents === cents(application.value.amount),
+      );
+      if (matches.length !== 1)
+        fail(
+          "PROMOTION_PARITY_UNVERIFIED",
+          "The calculated member-pricing discount does not match the original promotion.",
+        );
+    }
+    amounts.set(
+      line.id,
+      sum(
+        automatic
+          .filter(
+            (allocation) =>
+              allocation.discountApplication.appliedTo === "ORDER",
+          )
+          .map((allocation) => money(allocation.allocatedAmountSet)),
+      ),
+    );
+  }
+  return amounts;
+}
+
+function verifyPreservedMemberAllocations(
+  calculated: Calculated,
+  originals: Map<string, z.infer<typeof CALCULATED_LINE>>,
+  expected: OrderEditExpectedLine[],
+): void {
+  const actual = [
+    ...calculated.lineItems.nodes,
+    ...calculated.addedLineItems.nodes,
+  ];
+  for (const line of expected.filter((line) => line.quantity > 0)) {
+    const before = line.originalLineId
+      ? originals.get(line.originalLineId)
+      : undefined;
+    const automatic = (entry: z.infer<typeof CALCULATED_LINE>) =>
+      entry.calculatedDiscountAllocations.filter(
+        (allocation) =>
+          allocation.discountApplication.__typename ===
+          "CalculatedAutomaticDiscountApplication",
+      );
+    const wanted = before ? automatic(before) : [];
+    const observed = automatic(
+      actual.find((entry) => entry.id === line.calculatedLineId)!,
+    );
+    if (
+      wanted.length !== observed.length ||
+      wanted.some((allocation) => {
+        const matching = observed.filter(
+          (entry) =>
+            canonicalJson(entry.discountApplication) ===
+            canonicalJson(allocation.discountApplication),
+        );
+        return (
+          matching.length !== 1 ||
+          money(matching[0].allocatedAmountSet) !==
+            prorateExact(
+              money(allocation.allocatedAmountSet),
+              before!.quantity,
+              line.quantity,
+            )
+        );
+      })
+    )
+      fail(
+        "PROMOTION_PARITY_UNVERIFIED",
+        "Shopify changed an original member-pricing allocation during the edit.",
+      );
+  }
+}
+
 function priceCalculatedOrderDiscounts(
   calculated: Calculated,
   baseline: OrderEditSnapshot,
@@ -2203,10 +2390,14 @@ function priceCalculatedOrderDiscounts(
     ...calculated.lineItems.nodes,
     ...calculated.addedLineItems.nodes,
   ].filter((line) => line.quantity > 0);
+  const automaticProducts = automaticProductOrderAmounts(calculated, baseline);
   const observations = lines.flatMap((line) =>
     line.calculatedDiscountAllocations
       .filter(
-        (allocation) => allocation.discountApplication.appliedTo === "ORDER",
+        (allocation) =>
+          allocation.discountApplication.appliedTo === "ORDER" &&
+          allocation.discountApplication.__typename !==
+            "CalculatedAutomaticDiscountApplication",
       )
       .map((allocation) => {
         const application = allocation.discountApplication;
@@ -2239,7 +2430,10 @@ function priceCalculatedOrderDiscounts(
     })),
     lines: lines.map((line) => ({
       id: line.id,
-      subtotalCents: money(line.editableSubtotalSet),
+      subtotalCents: subtract(
+        money(line.editableSubtotalSet),
+        automaticProducts.get(line.id) ?? 0,
+      ),
     })),
     observations,
   });
@@ -2268,7 +2462,7 @@ function priceCalculatedOrderDiscounts(
           "ORDER_EDIT_PRODUCT_DISCOUNT_MISMATCH",
           "The product discount allocations do not match the eligible item subtotal.",
         );
-      return allocations;
+      return sum([allocations, automaticProducts.get(line.id) ?? 0]);
     }),
   );
   return {

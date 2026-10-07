@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { orderEditFinancialsSchema } from "@shared/order-edits/order-edit-financials";
+import { SHOPIFY_CALCULATED_LINE_ID_PATTERN } from "@shared/order-edits/shopify-edit-identity";
 import type {
   OrderEditSnapshot,
   OrderEditQuote,
@@ -267,7 +268,10 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
           title: text,
           variantTitle: z.string().nullable(),
           originalLineId: gid("LineItem").nullable(),
-          calculatedLineId: gid("CalculatedLineItem"),
+          quantityIncreaseOfLineId: gid("LineItem").optional(),
+          calculatedLineId: z
+            .string()
+            .regex(SHOPIFY_CALCULATED_LINE_ID_PATTERN),
           variantId: gid("ProductVariant"),
           quantity,
           originalUnitPriceCents: money,
@@ -382,6 +386,38 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
     const expectedOriginals = value.lines.filter(
       (entry) => entry.originalLineId !== null,
     );
+    const increases = value.lines.filter(
+      (entry) => entry.quantityIncreaseOfLineId !== undefined,
+    );
+    const increaseByOriginal = new Map(
+      increases.map((entry) => [entry.quantityIncreaseOfLineId!, entry]),
+    );
+    if (
+      increaseByOriginal.size !== increases.length ||
+      increases.some((entry) => {
+        const original = value.baseline.lines.find(
+          (line) => line.id === entry.quantityIncreaseOfLineId,
+        );
+        const requested = original && changes.get(original.id);
+        return (
+          entry.originalLineId !== null ||
+          !original ||
+          original.quantity <= 0 ||
+          requested === undefined ||
+          requested <= original.quantity ||
+          entry.variantId !== original.variantId ||
+          entry.quantity !==
+            requested -
+              original.quantity +
+              (additions.get(entry.variantId) ?? 0)
+        );
+      })
+    )
+      context.addIssue({
+        code: "custom",
+        message:
+          "Quoted quantity increases do not conserve the requested quantities",
+      });
     const requiredOriginals = value.baseline.lines.filter(
       (entry) => entry.quantity > 0 || changes.has(entry.id),
     );
@@ -395,7 +431,10 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
             (expected) =>
               expected.originalLineId === entry.id &&
               expected.variantId === entry.variantId &&
-              expected.quantity === (changes.get(entry.id) ?? entry.quantity) &&
+              expected.quantity ===
+                (increaseByOriginal.has(entry.id)
+                  ? entry.quantity
+                  : (changes.get(entry.id) ?? entry.quantity)) &&
               expected.originalUnitPriceCents === entry.originalUnitPriceCents,
           ),
       )
@@ -418,11 +457,17 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
       (entry) => entry.originalLineId === null,
     );
     if (
-      expectedAdditions.length !== additions.size ||
+      expectedAdditions.length !==
+        new Set([
+          ...additions.keys(),
+          ...increases.map((entry) => entry.variantId),
+        ]).size ||
       new Set(expectedAdditions.map((entry) => entry.variantId)).size !==
         expectedAdditions.length ||
       expectedAdditions.some(
-        (entry) => additions.get(entry.variantId) !== entry.quantity,
+        (entry) =>
+          !entry.quantityIncreaseOfLineId &&
+          additions.get(entry.variantId) !== entry.quantity,
       )
     )
       context.addIssue({
