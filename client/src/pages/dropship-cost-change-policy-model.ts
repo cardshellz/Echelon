@@ -388,7 +388,7 @@ export function isDropshipCostChangePolicyPartlyEnforced(enforcement: DropshipCo
  * the code as of migration 0710: acceptance charges the live cost
  * (`dropship-order-acceptance.repository.ts`, `loadProductCosts` inside the
  * acceptance transaction) and rule prices are computed from the live cost on
- * every preview and push (`loadRulePricesWithClient`, and the push worker's
+ * every preview and push (`loadListingRulePrices`, and the push worker's
  * `refreshListingIntent`). Nothing sends a cost change notice.
  */
 export const DROPSHIP_COST_CHANGE_TODAY_SUMMARY =

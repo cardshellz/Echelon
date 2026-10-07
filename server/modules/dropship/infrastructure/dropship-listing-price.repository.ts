@@ -4,9 +4,8 @@ import type { ListingPriceRepository, ListingPriceTransaction } from "../applica
 import { DropshipError } from "../domain/errors";
 import { pool as defaultPool } from "../../../db";
 import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
-import { readPricingProfile } from "./dropship-pricing-profile.reader";
+import { loadListingRulePrices } from "./dropship-rule-price.loader";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
-import { resolveListingRulePrice } from "../application/dropship-rule-price";
 
 interface PriceRow {
   product_variant_id: number; revision_id: number; override_price_cents: number | null; updated_at: Date;
@@ -50,11 +49,9 @@ export class PgDropshipListingPriceRepository implements ListingPriceRepository 
       const result = await operation({
         vendorId, catalog: PgDropshipListingPreviewRepository.readerForTransaction(client),
         loadSaved: () => loadSaved(client, target),
-        loadRulePrice: async (candidate) => {
-          const state = await readPricingProfile(client, target.storeConnectionId, vendorId);
-          if (!state.profile) return null;
-          return resolveListingRulePrice({ state, candidate, cost: await loadProductCost(client, vendorId, candidate.productVariantId) });
-        },
+        loadRulePrice: async (candidate) => (await loadListingRulePrices(client, {
+          vendorId, storeConnectionId: target.storeConnectionId, candidates: [candidate],
+        })).get(candidate.productVariantId) ?? null,
         loadProductCost: (candidate) => loadProductCost(client, vendorId, candidate.productVariantId),
         loadReplay: (replayInput) => {
           if (!input.idempotencyKey || replayInput.idempotencyKey !== input.idempotencyKey) {
