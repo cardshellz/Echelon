@@ -1,4 +1,7 @@
 import { eq } from "drizzle-orm";
+import { EbayApiRequestError } from "../../modules/channels/adapters/ebay/ebay-api-error";
+import { ChannelEbayListingPhotoResolver } from "../../modules/channels/ebay-listing-photos.service";
+import { createCatalogPublicImageUrl } from "../../modules/catalog/catalog-public-image";
 import https from "https";
 import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../../modules/channels/provider-request-limits";
 import { executeEbayQuantityHttp } from "../../modules/channels/adapters/ebay/ebay-quantity-http";
@@ -13,6 +16,7 @@ import { EbayAuthService, createEbayAuthConfig } from "../../modules/channels/ad
 // ---------------------------------------------------------------------------
 
 export const EBAY_CHANNEL_ID = 67;
+export const ebayListingPhotoResolver = new ChannelEbayListingPhotoResolver(pool, createCatalogPublicImageUrl(process.env));
 export const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const ebayChannelQuantityReader = createEbayChannelQuantityReader(pool);
 
@@ -156,8 +160,8 @@ export function ebayApiRequest(
           return;
         }
         reject(
-          new Error(
-            `eBay API ${method} ${path} failed (${res.statusCode}): ${data.substring(0, 1000)}`,
+          new EbayApiRequestError(
+            res.statusCode, `eBay API ${method} ${path} failed (${res.statusCode}): ${data.substring(0, 1000)}`, data,
           ),
         );
       });
@@ -218,7 +222,7 @@ export async function ebayApiRequestWithRateNotify(
             try { resolve(data ? JSON.parse(data) : undefined); } catch { resolve(data); }
             return;
           }
-          reject(new Error(`eBay API ${method} ${path} failed (${res.statusCode}): ${data.substring(0, 1000)}`));
+          reject(new EbayApiRequestError(res.statusCode, `eBay API ${method} ${path} failed (${res.statusCode}): ${data.substring(0, 1000)}`, data));
         });
       });
       req.on("error", error => { deadline.dispose(); reject(error); });

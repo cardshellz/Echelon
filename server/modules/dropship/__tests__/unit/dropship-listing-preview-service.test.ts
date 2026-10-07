@@ -114,6 +114,9 @@ describe("DropshipListingPreviewService", () => {
     serviceDeps = {
       vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
       repository,
+      listingPhotos: { listPublicationPhotos: async ({ productVariantIds }) => new Map(productVariantIds.map(id => [id, {
+        photos: repository.candidate.imageUrls.map((url, index) => ({ assetId: index + 1, position:index, url, uploaded: false })), issues: [],
+      }])) },
       productCosts: { loadProductCosts: (input) => productCostReader.loadProductCosts(input) },
       atp: new FakeAtpProvider(),
       marketplaceListing: new ConfigDrivenDropshipMarketplaceListingProvider(),
@@ -354,7 +357,7 @@ describe("DropshipListingPreviewService", () => {
       repository.config = { ...repository.config!, requiredProductFields: ["description", "brand", "imageUrls"] };
       // Today's catalog read keeps URL photos only: this product's only photo is uploaded.
       repository.candidate.imageUrls = [];
-      photos = new Map([[101, { photos: [{ assetId: 31, url: uploadedUrl, uploaded: true }], issues: [] }]]);
+      photos = new Map([[101, { photos: [{ assetId: 31, position:0, url: uploadedUrl, uploaded: true }], issues: [] }]]);
     });
 
     it("lists a product whose only photo is uploaded, which the URL-only catalog read blocks", async () => {
@@ -373,8 +376,8 @@ describe("DropshipListingPreviewService", () => {
     it("publishes the catalog's photo order, uploaded and linked photos together", async () => {
       repository.candidate.imageUrls = [linkedUrl];
       photos.set(101, { photos: [
-        { assetId: 31, url: uploadedUrl, uploaded: true },
-        { assetId: 7, url: linkedUrl, uploaded: false },
+        { assetId: 31, position:0, url: uploadedUrl, uploaded: true },
+        { assetId: 7, position:1, url: linkedUrl, uploaded: false },
       ], issues: [] });
 
       const preview = await withPhotoReader().previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
@@ -387,7 +390,7 @@ describe("DropshipListingPreviewService", () => {
     });
 
     it("leaves out uploaded photos it cannot publish, warns once per reason, and still queues the listing", async () => {
-      photos.set(101, { photos: [{ assetId: 7, url: linkedUrl, uploaded: false }], issues: [
+      photos.set(101, { photos: [{ assetId: 7, position:1, url: linkedUrl, uploaded: false }], issues: [
         { assetId: 31, code: "CATALOG_PUBLIC_URL_REQUIRED", message: "not configured" },
         { assetId: 32, code: "CATALOG_IMAGE_UNAVAILABLE", message: "missing file" },
         { assetId: 33, code: "IMAGE_FORMAT_UNSUPPORTED", message: "mislabeled" },
@@ -463,7 +466,7 @@ describe("DropshipListingPreviewService", () => {
     });
 
     it("names at most 100 photos it cannot publish in one log line, and says how many there were", async () => {
-      photos.set(101, { photos: [{ assetId: 7, url: linkedUrl, uploaded: false }], issues: Array.from({ length: 101 }, (_, index) => ({
+      photos.set(101, { photos: [{ assetId: 7, position:1, url: linkedUrl, uploaded: false }], issues: Array.from({ length: 101 }, (_, index) => ({
         assetId: 1000 + index, code: "CATALOG_IMAGE_UNAVAILABLE", message: "missing file",
       })) });
 

@@ -24,7 +24,6 @@ import {
   ebayOauthTokens,
   products,
   productVariants,
-  productAssets,
   channelListings,
 } from "@shared/schema";
 import {
@@ -36,11 +35,11 @@ import {
   createEbayApiClient,
 } from "../modules/channels/adapters/ebay/ebay-api.client";
 import {
-  EbayListingBuilder,
   createEbayListingBuilder,
 } from "../modules/channels/adapters/ebay/ebay-listing-builder";
 import { resolveEbayCategoryMapping } from "../modules/channels/adapters/ebay/ebay-category-map";
-import { atpService as ebayChannelQuantityReader } from "./ebay/ebay-utils";
+import { atpService as ebayChannelQuantityReader, ebayListingPhotoResolver } from "./ebay/ebay-utils";
+import { readExistingEbayListingPhotos } from "../modules/channels/adapters/ebay/ebay-listing-photos.reader";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -400,7 +399,6 @@ export function registerEbaySettingsRoutes(app: Express): void {
       }
 
       const previews = [];
-      const builder = createEbayListingBuilder();
 
       for (const product of sampleProducts) {
         // Get variants
@@ -409,12 +407,6 @@ export function registerEbaySettingsRoutes(app: Express): void {
           .from(productVariants)
           .where(eq(productVariants.productId, product.id));
 
-        // Get images
-        const assets = await (db as any)
-          .select()
-          .from(productAssets)
-          .where(eq(productAssets.productId, product.id));
-
         // Resolve category
         const categoryMapping = resolveEbayCategoryMapping({
           category: product.category,
@@ -422,12 +414,12 @@ export function registerEbaySettingsRoutes(app: Express): void {
           name: product.name,
         });
 
-        // Build preview
-        const imageUrls = assets
-          .sort((a: any, b: any) => (a.position || 0) - (b.position || 0))
-          .map((a: any) => a.url)
-          .filter(Boolean)
-          .slice(0, 12);
+        // Preview the same Catalog scope and channel overlays the listing writer publishes.
+        const photoVariants = variants.filter((variant: any) => variant.sku)
+          .map((variant: any) => ({ variantId: variant.id, sku: variant.sku }));
+        const photoPlan = photoVariants.length > 0
+          ? await ebayListingPhotoResolver.resolve({ productId: product.id, channelId: EBAY_CHANNEL_ID, variants: photoVariants })
+          : null;
 
         const variantPreviews = variants
           .filter((v: any) => v.sku)
@@ -447,7 +439,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
             : null,
           category: categoryMapping.categoryName,
           categoryId: categoryMapping.categoryId,
-          images: imageUrls,
+          images: photoPlan?.groupImageUrls ?? [],
           variants: variantPreviews,
           bulletPoints: product.bulletPoints || [],
           brand: product.brand || "Card Shellz",
@@ -515,11 +507,6 @@ export function registerEbaySettingsRoutes(app: Express): void {
         .from(productVariants)
         .where(eq(productVariants.productId, productId));
 
-      const assets = await (db as any)
-        .select()
-        .from(productAssets)
-        .where(eq(productAssets.productId, productId));
-
       if (variants.length === 0) {
         res.status(400).json({ error: "Product has no variants" });
         return;
@@ -527,17 +514,23 @@ export function registerEbaySettingsRoutes(app: Express): void {
 
       // Use just the first variant for a test listing
       const testVariant = variants[0];
-      const imageUrls = assets
-        .sort((a: any, b: any) => (a.position || 0) - (b.position || 0))
-        .map((a: any) => a.url)
-        .filter(Boolean)
-        .slice(0, 12);
+      if (!testVariant.sku) {
+        res.status(400).json({ error: "The test variant has no SKU." });
+        return;
+      }
 
       const builder = createEbayListingBuilder();
       // The factory installs the shared authority-aware global/exact-scope
       // admission boundary in the low-level client for every quantity-bearing
       // inventory-item, offer and publish request.
       const apiClient = getApiClient(authService);
+      const photoVariants = [{ variantId: testVariant.id, sku: testVariant.sku }];
+      const photoPlan = await ebayListingPhotoResolver.resolve({
+        productId: product.id, channelId: EBAY_CHANNEL_ID, variants: photoVariants,
+        readExistingPhotos: () => readExistingEbayListingPhotos(apiClient, {
+          groupKey: product.sku || `PROD-${product.id}`, variants: photoVariants,
+        }),
+      });
 
       const listingConfig = {
         merchantLocationKey: metadata.merchantLocationKey,
@@ -557,12 +550,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
         category: product.category || "",
         tags: (product.tags as string[]) || [],
         status: "active",
-        images: imageUrls.map((url: string, i: number) => ({
-          url,
-          position: i,
-          altText: product.name,
-          variantSku: null,
-        })),
+        images: [],
         metadata: {
           bulletPoints: product.bulletPoints || [],
           itemSpecifics: product.itemSpecifics || {},
@@ -586,7 +574,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
       };
 
       // Build and create inventory item
-      const inventoryItems = builder.buildInventoryItems(channelPayload, listingConfig);
+      const inventoryItems = builder.buildInventoryItems(channelPayload, listingConfig, { photoPlan });
       if (inventoryItems.length === 0) {
         res.status(400).json({ error: "No inventory items could be built from this product" });
         return;

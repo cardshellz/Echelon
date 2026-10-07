@@ -29,7 +29,7 @@ describe("buildEbayRouteListingDraft", () => {
           ebay_return_policy_override: "variant-return-policy",
         },
       ],
-      effectiveImageUrls: ["https://cdn.example.test/toploader.jpg"],
+      photoPlan: fixturePhotoPlan([215, 216], ["https://cdn.example.test/toploader.jpg"]),
       aspects: {
         Brand: ["Shellz"],
         Type: ["Toploader"],
@@ -124,7 +124,7 @@ describe("buildEbayRouteListingDraft", () => {
           isListed: true,
         },
       ],
-      effectiveImageUrls: ["https://cdn.example.test/envelope.jpg"],
+      photoPlan: fixturePhotoPlan([67, 66, 438], ["https://cdn.example.test/envelope.jpg"]),
       aspects: { Brand: ["Cardshellz"], Type: ["Envelope"] },
       isMultiVariant: true,
       variationAspectName: "Pack Size",
@@ -188,7 +188,7 @@ describe("buildEbayRouteListingDraft", () => {
           price_cents: null,
         },
       ],
-      effectiveImageUrls: ["https://cdn.example.test/toploader.jpg"],
+      photoPlan: fixturePhotoPlan([463], ["https://cdn.example.test/toploader.jpg"]),
       aspects: {
         Brand: ["Cardshellz"],
         Type: ["Toploader"],
@@ -227,7 +227,7 @@ describe("buildEbayRouteListingDraft", () => {
           weight_grams: null,
         },
       ],
-      effectiveImageUrls: ["https://cdn.example.test/toploader.jpg"],
+      photoPlan: fixturePhotoPlan([463], ["https://cdn.example.test/toploader.jpg"]),
       aspects: {
         Brand: ["Cardshellz"],
         Type: ["Toploader"],
@@ -248,3 +248,7 @@ describe("buildEbayRouteListingDraft", () => {
     })).toThrow(/eBay package weight is required for SKU SHLZ-TOP-180PT-BLU-P10/);
   });
 });
+
+function fixturePhotoPlan(variantIds: number[], urls: string[]) {
+  return { byVariantId: new Map(variantIds.map(id => [id, urls])), groupImageUrls: urls };
+}

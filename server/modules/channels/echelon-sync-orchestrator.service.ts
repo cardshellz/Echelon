@@ -75,7 +75,7 @@ type DrizzleDb = {
 };
 
 type ProductPushService = {
-  getResolvedProductForChannel: (productId: number, channelId: number) => Promise<any>;
+  getResolvedProductForChannel: (productId: number, channelId: number, options?: { includeImages?: boolean }) => Promise<any>;
 };
 
 type AtpService = {
@@ -1315,7 +1315,9 @@ class EchelonSyncOrchestrator {
 
         // PUSH locked fields
         if (pushFields.length > 0) {
-          const resolved = await this.productPushService.getResolvedProductForChannel(product.id, channelId);
+          const resolved = await this.productPushService.getResolvedProductForChannel(product.id, channelId, {
+            includeImages: channel.provider !== "ebay",
+          });
           if (resolved && resolved.isListed) {
             console.log(
               `[SyncOrchestrator] ${config.dryRun ? "DRY_RUN " : ""}Listings PUSH: ` +
@@ -1347,6 +1349,7 @@ class EchelonSyncOrchestrator {
                     externalVariantId: v.shopifyVariantId,
                     externalInventoryItemId: null,
                   })),
+                imageSyncMode: pushFields.includes("images") ? "replace" : "preserve",
                 images: pushFields.includes("images")
                   ? resolved.images.map((img: any) => ({
                       url: img.url,
