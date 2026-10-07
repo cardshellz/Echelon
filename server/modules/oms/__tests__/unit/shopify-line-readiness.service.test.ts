@@ -155,4 +155,68 @@ describe("reconcileShopifyLineReadiness", () => {
     expect(result.wmsSyncRequired).toBe(false);
     expect(updates).toHaveLength(0);
   });
+
+  it("restores a paid cumulative ceiling from current_quantity without rematerializing existing WMS work", async () => {
+    const { db, updates } = createDb({
+      id: 104, orderId: 58, externalLineItemId: "9004", quantity: 3,
+      requiresShipping: true, paidQuantity: 3, authorityFulfillableQuantity: 1,
+      wmsMaterializedQuantity: 3, cancelledQuantity: 0, refundedQuantity: 0,
+      authorizationStatus: "authorized", authorizedAt: NOW, authorizedByEventId: "webhook:paid",
+    });
+    const result = await reconcileShopifyLineReadiness({
+      db, omsOrderId: 58, financialStatus: "paid", sourceEventId: "shopify-reconcile:split:version",
+      lineItems: [{ externalLineItemId: "9004", quantity: 3, currentQuantity: 3, fulfillableQuantity: 1 }], now: NOW,
+    });
+    expect(result).toMatchObject({ advancedLines: 1, advancedQuantity: 2, wmsSyncRequired: false });
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({ paidQuantity: 3, authorityFulfillableQuantity: 3, fulfillableQuantity: 1 });
+    expect(recordAuthorityEvent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      sourceEventId: "shopify-reconcile:split:version",
+      previous: expect.objectContaining({ authorityFulfillableQuantity: 1 }),
+      authority: expect.objectContaining({ authorityFulfillableQuantity: 3 }),
+    }));
+  });
+
+  it("cannot invent the original ceiling when current_quantity is absent", async () => {
+    const { db, updates } = createDb({
+      id: 104, orderId: 58, externalLineItemId: "9004", quantity: 3,
+      requiresShipping: true, paidQuantity: 3, authorityFulfillableQuantity: 1,
+      wmsMaterializedQuantity: 3, authorizationStatus: "authorized",
+    });
+    const result = await reconcileShopifyLineReadiness({
+      db, omsOrderId: 58, financialStatus: "paid", sourceEventId: "shopify-reconcile:split:unknown",
+      lineItems: [{ externalLineItemId: "9004", quantity: 3, fulfillableQuantity: 1 }], now: NOW,
+    });
+    expect(result).toMatchObject({ advancedLines: 0, wmsSyncRequired: false });
+    expect(updates).toHaveLength(0);
+    expect(recordAuthorityEvent).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { cancelledQuantity: 1, authorizationStatus: "partially_cancelled" },
+    { refundedQuantity: 1, authorizationStatus: "partially_refunded" },
+    { authorizationStatus: "review" },
+  ])("preserves disposition protection despite full current_quantity: %j", async protection => {
+    const { db, updates } = createDb({
+      id: 104, orderId: 58, externalLineItemId: "9004", quantity: 3,
+      requiresShipping: true, paidQuantity: 3, authorityFulfillableQuantity: 1,
+      wmsMaterializedQuantity: 3, ...protection,
+    });
+    const result = await reconcileShopifyLineReadiness({
+      db, omsOrderId: 58, financialStatus: "paid", sourceEventId: "shopify-reconcile:split:protected",
+      lineItems: [{ externalLineItemId: "9004", quantity: 3, currentQuantity: 3, fulfillableQuantity: 1 }], now: NOW,
+    });
+    expect(result).toMatchObject({ protectedLines: 1, advancedLines: 0, wmsSyncRequired: false });
+    expect(updates).toHaveLength(0);
+    expect(recordAuthorityEvent).not.toHaveBeenCalled();
+  });
+
+  it.each([-1, 0.5, Number.MAX_SAFE_INTEGER + 1])("rejects invalid current quantity %s before a transaction", async currentQuantity => {
+    const transaction = vi.fn();
+    await expect(reconcileShopifyLineReadiness({
+      db: { transaction }, omsOrderId: 58, financialStatus: "paid", sourceEventId: "invalid-quantity",
+      lineItems: [{ externalLineItemId: "9004", quantity: 3, currentQuantity, fulfillableQuantity: 1 }], now: NOW,
+    })).rejects.toThrow("currentQuantity must be a non-negative integer");
+    expect(transaction).not.toHaveBeenCalled();
+  });
 });

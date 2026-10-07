@@ -383,7 +383,7 @@ describe("WMS line reconciliation across a Global-e hold", () => {
     expect(h.db.transaction).not.toHaveBeenCalled();
   });
 
-  it("detects the cancellation this fix prevents (legacy payload without current_quantity)", async () => {
+  it("does not cancel a materialized line when a legacy payload omits current_quantity", async () => {
     const [, held] = globalESequence(null);
     seed({ authority: held.authorityFulfillableQuantity, materialized: 1, item: { status: "pending", quantity: 1 } });
     const { service } = harness({ lockedLine: owedLine(1, 1), lockedItemRow: null });
@@ -391,10 +391,9 @@ describe("WMS line reconciliation across a Global-e hold", () => {
 
     await service.reconcileExistingWmsOrderLines(OMS_ORDER_ID, WMS_ORDER_ID);
 
-    expect(reconcileWmsOrderItemAuthority).toHaveBeenCalledWith(h.db, expect.objectContaining({
-      itemId: ITEM_ID,
-      authorityQuantity: 0,
-    }));
+    expect(held.authorityFulfillableQuantity).toBe(1);
+    expect(reconcileWmsOrderItemAuthority).not.toHaveBeenCalled();
+    expect(h.db.transaction).not.toHaveBeenCalled();
   });
 
   it("restores a line an earlier hold cancelled once its authority is owed again", async () => {

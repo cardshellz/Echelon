@@ -355,12 +355,10 @@ describe("OMS line authority under Shopify fulfillment holds", () => {
     expect(authority.authorityFulfillableQuantity).toBe(15);
   });
 
-  it("keeps the legacy fulfillable-driven rule when an update lacks current_quantity", () => {
-    // Without current_quantity an edit removal is indistinguishable from a
-    // hold; picking units the customer removed is the costlier mistake.
+  it("retains paid authority when depleted remaining work carries no commercial removal evidence", () => {
     const authority = refresh({ fulfillableQuantity: 0, currentQuantity: null, previous: PAID_15 });
 
-    expect(authority.authorityFulfillableQuantity).toBe(0);
+    expect(authority.authorityFulfillableQuantity).toBe(15);
   });
 
   it("replays a Global-e sequence (paid 1, held, released) without ever dropping below paid", () => {
@@ -448,5 +446,51 @@ describe("OMS line authority re-authorization under Shopify fulfillment holds", 
     });
 
     expect(authority.authorityFulfillableQuantity).toBe(0);
+  });
+});
+
+
+describe("cumulative authority across split-package progress", () => {
+  const paid = {
+    paidQuantity: 3, authorityFulfillableQuantity: 3, cancelledQuantity: 0, refundedQuantity: 0,
+    authorizationStatus: "authorized", authorizedAt: NOW, authorizedByEventId: "paid:split",
+  };
+  it.each(["orders/updated", "shopify/reconcile"])("keeps all three paid units through 2+1 progress on %s", sourceTopic => {
+    let previous: NonNullable<OmsLineAuthorityInput["previous"]> = paid;
+    for (const fulfillableQuantity of [3, 1, 0, 1, 0]) {
+      const state = deriveOmsLineAuthority({ sourceTopic, financialStatus: "paid", quantity: 3,
+        fulfillableQuantity, currentQuantity: 3, previous, now: NOW });
+      expect(state.authorityFulfillableQuantity).toBe(3);
+      expect(state.paidQuantity).toBe(3);
+      expect(state.authorizedByEventId).toBe("paid:split");
+      previous = { ...previous, ...state };
+    }
+  });
+  it.each([0, 1, 2])("reuses proven current commercial quantity when prior authority was wrongly capped at %s", authorityFulfillableQuantity => {
+    const state = deriveOmsLineAuthority({ sourceTopic: "orders/updated", financialStatus: "paid", quantity: 3,
+      fulfillableQuantity: 1, currentQuantity: 3, previous: { ...paid, authorityFulfillableQuantity }, now: NOW });
+    expect(state.authorityFulfillableQuantity).toBe(3);
+    expect(state.paidQuantity).toBe(3);
+  });
+  it.each([0, 1, 2])("remaining quantity %s cannot cancel an authorized line when current_quantity is absent", fulfillableQuantity => {
+    expect(deriveOmsLineAuthority({ sourceTopic: "orders/updated", financialStatus: "paid", quantity: 3,
+      fulfillableQuantity, previous: paid, now: NOW }).authorityFulfillableQuantity).toBe(3);
+  });
+  it.each([0, 1, 2])("honors explicit current quantity %s even when remaining work is omitted", currentQuantity => {
+    expect(deriveOmsLineAuthority({ sourceTopic: "orders/updated", financialStatus: "paid", quantity: 3,
+      currentQuantity, previous: paid, now: NOW }).authorityFulfillableQuantity).toBe(currentQuantity);
+  });
+  it.each(["review", "cancelled", "partially_cancelled", "refunded", "partially_refunded"])(
+    "cannot restore a line protected by %s", authorizationStatus => {
+      expect(deriveOmsLineAuthority({ sourceTopic: "orders/updated", financialStatus: "paid", quantity: 3,
+        fulfillableQuantity: 1, currentQuantity: 3, previous: { ...paid, authorityFulfillableQuantity: 1, authorizationStatus },
+        now: NOW }).authorityFulfillableQuantity).toBe(1);
+    });
+  it("does not authorize unpaid added quantity or remove explicit cancellation/refund protection", () => {
+    for (const disposition of [{ cancelledQuantity: 1 }, { refundedQuantity: 1 }]) {
+      expect(deriveOmsLineAuthority({ sourceTopic: "orders/updated", financialStatus: "paid", quantity: 4,
+        fulfillableQuantity: 3, currentQuantity: 4, previous: { ...paid, authorityFulfillableQuantity: 2, ...disposition },
+        now: NOW }).authorityFulfillableQuantity).toBe(2);
+    }
   });
 });

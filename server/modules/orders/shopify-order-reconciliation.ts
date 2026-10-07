@@ -28,6 +28,7 @@ import type { OmsService } from "../oms/oms.service";
 import type { WmsSyncService } from "../oms/wms-sync.service";
 import { bridgeShopifyOrderToOms } from "../oms/shopify-bridge";
 import { reconcileShopifyLineReadiness } from "../oms/shopify-line-readiness.service";
+import { readShopifyLineCurrentQuantity } from "../oms/shopify-line-item-normalizer";
 import { envPositiveInteger } from "../../infrastructure/scheduler-config";
 import { normalizeShopifyOrderGid } from "./shopify-order-id";
 
@@ -83,6 +84,7 @@ interface ShopifyApiOrder {
     title: string;
     variant_title: string | null;
     quantity: number;
+    current_quantity?: number | string | null;
     fulfillable_quantity: number;
     fulfillment_status: string | null;
     requires_shipping: boolean;
@@ -347,6 +349,7 @@ async function reconcileExistingOmsOrderReadiness(
     lineItems: order.line_items.map((line) => ({
       externalLineItemId: line.id,
       quantity: line.quantity,
+      currentQuantity: readShopifyLineCurrentQuantity(line),
       fulfillableQuantity: line.fulfillable_quantity,
     })),
   });

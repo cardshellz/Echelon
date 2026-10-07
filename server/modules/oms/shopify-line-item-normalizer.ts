@@ -22,6 +22,8 @@ export interface NormalizedLineItem {
   name: string | null;
   vendor: string | null;
   quantity: number;
+  currentQuantity: number | null;
+  fulfillableQuantity: number | null;
   paidPriceCents: number;
   retailPriceCents: number; // pre-discount unit price (Shopify line_items[].price)
   totalCents: number;
@@ -43,6 +45,23 @@ interface PreparedLineItem {
   grossTotalCents: number;
   rawDiscount: LineDiscountSplit;
   discountIneligible: boolean;
+}
+
+function readShopifyQuantity(raw: unknown): number | null {
+  const value = typeof raw === "number"
+    ? raw
+    : typeof raw === "string" && /^\d+$/.test(raw.trim())
+      ? Number(raw.trim())
+      : Number.NaN;
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+/** Missing or malformed commercial quantity stays unknown; remaining work
+ * cannot supply evidence that purchased units were removed. */
+export function readShopifyLineCurrentQuantity(
+  lineItem: { current_quantity?: unknown } | null | undefined,
+): number | null {
+  return readShopifyQuantity(lineItem?.current_quantity);
 }
 
 function dollarsToCents(value: string | number | undefined | null): number {
@@ -154,6 +173,8 @@ function buildNormalizedLineItem(
     name: item.name || null,
     vendor: item.vendor || null,
     quantity,
+    currentQuantity: readShopifyLineCurrentQuantity(item),
+    fulfillableQuantity: readShopifyQuantity(item.fulfillable_quantity),
     paidPriceCents,
     retailPriceCents, // pre-discount unit price (Shopify line_items[].price)
     totalCents,

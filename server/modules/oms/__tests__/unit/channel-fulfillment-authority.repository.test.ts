@@ -31,6 +31,7 @@ function identityPreviewFixture(headers = [previewHeader], engines = [previewEng
   const execute = vi.fn(async (query: unknown) => {
     const text = render(query);
     if (text.includes("FROM wms.outbound_shipments AS shipment")) return { rows: headers };
+    if (text.includes("SELECT root.id AS source_id")) return { rows: [{ source_id: previewHeader.legacy_shipment_item_id }] };
     if (text.includes("FROM wms.fulfillment_plans AS plan")
       || text.includes("FROM wms.shipment_request_items AS item")
       || text.includes("FROM wms.physical_shipment_items AS item")) return { rows: [] };
@@ -51,7 +52,7 @@ describe("channel fulfillment authority repository", () => {
     const { repository, execute, transaction } = identityPreviewFixture();
     await expect(repository.validatePhysicalPackageIdentity(previewInput)).resolves.toBeUndefined();
     expect(transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "repeatable read", accessMode: "read only" });
-    expect(execute).toHaveBeenCalledTimes(5);
+    expect(execute).toHaveBeenCalledTimes(6);
     for (const [query] of execute.mock.calls) expect(render(query)).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/i);
   });
 
