@@ -153,4 +153,25 @@ describe("normalizeShopifyLineItems", () => {
       couponDiscountCents: 200,
     });
   });
+
+  it.each([[3, 1], [3, 0], [1, 1], [0, 0], ["3", "1"]])(
+    "preserves commercial %s and remaining %s quantities separately",
+    (current, remaining) => {
+      const source = Object.freeze({ id: 1, quantity: 3, current_quantity: current,
+        fulfillable_quantity: remaining, price: "10.00" });
+      expect(normalizeShopifyLineItems([source], [])[0]).toMatchObject({
+        quantity: 3, currentQuantity: Number(current), fulfillableQuantity: Number(remaining),
+      });
+    },
+  );
+
+  it.each([undefined, null, -1, 0.5, "bad", "", true, Number.MAX_SAFE_INTEGER + 1])(
+    "does not infer commercial quantity from missing or malformed %s",
+    current => {
+      expect(normalizeShopifyLineItems([{ id: 1, quantity: 3, current_quantity: current,
+        fulfillable_quantity: 1, price: "10.00" }], [])[0]).toMatchObject({
+        quantity: 3, currentQuantity: null, fulfillableQuantity: 1,
+      });
+    },
+  );
 });

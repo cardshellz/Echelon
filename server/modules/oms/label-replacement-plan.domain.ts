@@ -19,6 +19,49 @@ export type LabelReplacementPlan =
   | { readonly outcome: "transfer"; readonly physicalItemIds: readonly number[]; readonly labelIds: readonly number[] }
   | { readonly outcome: "waiting" | "review"; readonly reason: string };
 
+
+const additionalPackageSchema = z.object({
+  sources: z.array(content).min(1).max(MAX_LABEL_REPLACEMENT_ITEMS),
+  contents: z.array(content).min(1).max(MAX_LABEL_REPLACEMENT_ITEMS),
+  previous: z.array(predecessor).max(MAX_LABEL_REPLACEMENT_ITEMS),
+  scopedPhysicalItemIds: z.array(id).max(MAX_LABEL_REPLACEMENT_ITEMS),
+}).strict();
+
+export type AdditionalLabelPackageInput = z.input<typeof additionalPackageSchema>;
+export type AdditionalLabelPackageDecision =
+  | { readonly outcome: "additional" | "replacement" }
+  | { readonly outcome: "review"; readonly reason: "invalid_package_quantities" };
+
+/** Ordinary split parcels consume unused units of the original source. A voided
+ * predecessor still requires the existing conserving replacement plan, even
+ * when capacity remains. Carrier possession does not prevent an additional
+ * parcel; it prevents transferring the possessed predecessor's units. */
+export function classifyAdditionalLabelPackage(input: AdditionalLabelPackageInput): AdditionalLabelPackageDecision {
+  const parsed = additionalPackageSchema.safeParse(input);
+  if (!parsed.success) return { outcome: "review", reason: "invalid_package_quantities" };
+  const { sources, contents, previous, scopedPhysicalItemIds } = parsed.data;
+  const capacities = new Map(sources.map(item => [item.sourceItemId, BigInt(item.quantity)]));
+  const previousIds = new Set(previous.map(item => item.physicalItemId));
+  if (capacities.size !== sources.length
+    || new Set(contents.map(item => item.sourceItemId)).size !== contents.length
+    || previousIds.size !== previous.length
+    || new Set(scopedPhysicalItemIds).size !== scopedPhysicalItemIds.length
+    || scopedPhysicalItemIds.some(itemId => !previousIds.has(itemId))
+    || contents.some(item => !capacities.has(item.sourceItemId))) {
+    return { outcome: "review", reason: "invalid_package_quantities" };
+  }
+  const scopedIds = new Set(scopedPhysicalItemIds);
+  if (previous.some(item => scopedIds.has(item.physicalItemId) && item.labelStatus === "voided")) {
+    return { outcome: "replacement" };
+  }
+  const allocated = new Map<number, bigint>();
+  for (const item of previous) allocated.set(item.sourceItemId,
+    (allocated.get(item.sourceItemId) ?? BigInt(0)) + BigInt(item.quantity));
+  const fits = contents.every(item => (allocated.get(item.sourceItemId) ?? BigInt(0))
+    + BigInt(item.quantity) <= capacities.get(item.sourceItemId)!);
+  return { outcome: fits ? "additional" : "replacement" };
+}
+
 /** An entire connected repack commits together: old A(2) -> new B(1), C(1).
  * Lineage isolates ordinary relabels. A merge may expand only into voided
  * allocations of the same canonical source. Units are never borrowed from an

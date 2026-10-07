@@ -21,6 +21,8 @@ import { parseExactPositiveWmsShipmentItems } from "./shipstation-provider-conte
 import { PackageAllocationAuthorityResolutionError } from "./package-allocation-authority-resolution.domain";
 import { PackageAllocationGroupError } from "./package-allocation-group.domain";
 
+import { PackageAllocationSourceIdentityError } from "./package-allocation-source-identity.domain";
+
 const ACTIVATION_ACTOR = "system:shipstation_label_commercial_fulfillment";
 const ACTIVATION_REASON =
   "Mark exact package contents shipped on the sales channel when an outbound label is observed";
@@ -132,7 +134,8 @@ function nullableText(value: unknown): string | null {
 }
 
 function reviewableError(error: unknown): ReviewableError | null {
-  if (error instanceof PackageAllocationAuthorityResolutionError || error instanceof PackageAllocationGroupError) {
+  if (error instanceof PackageAllocationAuthorityResolutionError || error instanceof PackageAllocationGroupError
+    || error instanceof PackageAllocationSourceIdentityError) {
     return { reasonCode: error.code, details: error.context };
   }
   if (

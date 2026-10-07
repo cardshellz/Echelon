@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   derivePackageAllocationSourceRegistration,
+  resolvePackageAllocationSourceQuantity,
   PackageAllocationSourceIdentityError,
   type PackageAllocationSourceFacts,
 } from "../../package-allocation-source-identity.domain";
@@ -183,5 +184,21 @@ describe("derivePackageAllocationSourceRegistration", () => {
       () => derivePackageAllocationSourceRegistration(facts),
       "INVALID_SOURCE_FACTS",
     );
+  });
+});
+
+
+describe("source capacity is conserved across compatibility splits", () => {
+  it.each([null, 3])("retains the original three-unit capacity with registration %s", registeredQuantity => {
+    expect(resolvePackageAllocationSourceQuantity({ sourceWmsShipmentItemId: 7001, partitionedQuantity: 3,
+      registeredQuantity })).toBe(3);
+  });
+  it("rejects a compatibility partition that differs from immutable recorded capacity", () => {
+    expectIdentityError(() => resolvePackageAllocationSourceQuantity({ sourceWmsShipmentItemId: 7001,
+      partitionedQuantity: 4, registeredQuantity: 3 }), "SOURCE_LINEAGE_INVALID");
+  });
+  it.each([0, -1, 0.5, Number.NaN, 2_147_483_648])("rejects invalid capacity %s", partitionedQuantity => {
+    expectIdentityError(() => resolvePackageAllocationSourceQuantity({ sourceWmsShipmentItemId: 7001,
+      partitionedQuantity, registeredQuantity: null }), "INVALID_SOURCE_FACTS");
   });
 });

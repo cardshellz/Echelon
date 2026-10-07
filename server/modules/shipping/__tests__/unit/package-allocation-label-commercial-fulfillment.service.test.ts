@@ -4,6 +4,7 @@ import { PackageAllocationBootstrapPersistenceError } from "../../package-alloca
 import { PackageAllocationPersistenceError } from "../../package-allocation-planning.service";
 import { PackageAllocationLedgerRepositoryError } from "../../package-allocation-ledger.repository";
 import { PackageAllocationAuthorityResolutionError } from "../../package-allocation-authority-resolution.domain";
+import { PackageAllocationSourceIdentityError } from "../../package-allocation-source-identity.domain";
 import { PackageAllocationGroupError } from "../../package-allocation-group.domain";
 import { FulfillmentAuthorityError } from "../../../oms/channel-fulfillment-authority.repository";
 import {
@@ -100,6 +101,17 @@ function shipment(overrides: Record<string, unknown> = {}) {
 }
 
 describe("PackageAllocationLabelCommercialFulfillmentService", () => {
+  it("records source capacity drift for durable review rather than retrying a bad grant", async () => {
+    const f = fixture();
+    f.bootstrap.persistDiscovered.mockRejectedValue(new PackageAllocationSourceIdentityError(
+      "SOURCE_LINEAGE_INVALID", "Registered capacity does not match the compatibility partition", { sourceWmsShipmentItemId: 70001 },
+    ));
+    await expect(f.service.process(shipment(), observation)).resolves.toEqual({ outcome: "review", reason: "SOURCE_LINEAGE_INVALID" });
+    expect(f.bootstrap.persistDiscovered).toHaveBeenCalledTimes(1);
+    expect(f.fulfillmentAuthority.materializeAndActivatePackageAllocationCommercialFulfillment).not.toHaveBeenCalled();
+    expect(f.reviewRepository.record).toHaveBeenCalledTimes(1);
+  });
+
   it("delegates plan persistence and activation to one atomic workflow", async () => {
     const f = fixture();
     await expect(f.service.process(shipment(), observation)).resolves.toMatchObject({

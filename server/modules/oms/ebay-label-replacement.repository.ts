@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
+import { readPackageAllocationSourceFacts } from "../shipping/package-allocation-source-facts.repository";
+import { PackageAllocationSourceIdentityError } from "../shipping/package-allocation-source-identity.domain";
 import { sqlIntegerArray } from "../../infrastructure/postgres-array";
 import { projectPersistedDeclaredPackageLifecycleShadow } from "../shipping/declared-package-lifecycle-shadow.domain";
-import { planLabelReplacement } from "./label-replacement-plan.domain";
+import { classifyAdditionalLabelPackage, planLabelReplacement } from "./label-replacement-plan.domain";
 import {
   MAX_LABEL_REPLACEMENT_CANDIDATES,
   MAX_LABEL_REPLACEMENT_ITEMS,
@@ -42,14 +44,26 @@ interface SourceItem { id: number; shipment_id: number; qty: number; provider: s
 // repack converges in a few expansions; no partial graph is admitted at this cap.
 const MAX_REPACK_DISCOVERY_ROUNDS = 20;
 async function readSources(tx: Transaction, sourceIds: readonly number[]): Promise<SourceItem[]> {
-  return rows<SourceItem>(await tx.execute(sql`
-    SELECT item.id, item.shipment_id, item.qty, channel.provider, item.shipment_item_purpose AS purpose
+  const sourceRows = rows<Omit<SourceItem, "qty">>(await tx.execute(sql`
+    SELECT item.id, item.shipment_id, channel.provider, item.shipment_item_purpose AS purpose
     FROM wms.outbound_shipment_items item
     JOIN wms.order_items order_item ON order_item.id = item.order_item_id
     JOIN oms.oms_order_lines line ON line.id = order_item.oms_order_line_id
     JOIN oms.oms_orders orders ON orders.id = line.order_id
     JOIN channels.channels channel ON channel.id = orders.channel_id
-    WHERE item.id = ANY(${sqlIntegerArray(sourceIds)}) ORDER BY item.id`));
+    WHERE item.id = ANY(${sqlIntegerArray(sourceIds)})
+      AND item.shipment_item_purpose = 'customer_fulfillment'
+      AND channel.provider IN ('shopify', 'ebay') ORDER BY item.id`));
+  if (sourceRows.length === 0) return [];
+  const facts = await readPackageAllocationSourceFacts(tx, sourceRows.map(item => item.id));
+  const quantities = new Map(facts.map(item => [item.sourceWmsShipmentItemId, item.sourceQuantity]));
+  return sourceRows.map(item => {
+    const qty = quantities.get(item.id);
+    if (qty === undefined) throw new PackageAllocationSourceIdentityError(
+      "INVALID_SOURCE_FACTS", "Source capacity is missing", { sourceWmsShipmentItemId: item.id },
+    );
+    return { ...item, qty };
+  });
 }
 
 async function readPreviousItems(tx: Transaction, sourceIds: readonly number[], currentProviderLabelId: string): Promise<PreviousItem[]> {
@@ -135,13 +149,16 @@ export async function reconcileEbayLabelReplacement(
   }));
   const scope = scopeLabelReplacementPredecessors({ providerOrderId: label.provider_order_id, sourceItemIds: sourceIds, previous: scopeInput });
   if (scope.outcome === "review") return defer("review", scope.reason);
-  const priorIds = new Set(scope.physicalItemIds);
-  const initiallyScoped = allocated.filter(item => priorIds.has(Number(item.id)));
-  if (initiallyScoped.every(item => item.label_status !== "voided") && contents.every(content => {
-    const existing = allocated.filter(item => Number(item.source_id) === content.sourceShipmentItemId)
-      .reduce((sum, item) => sum + Number(item.quantity_shipped), 0);
-    return Number.isSafeInteger(existing) && existing + content.quantity <= Number(sources.find(item => item.id === content.sourceShipmentItemId)?.qty);
-  })) return null; // An additional package fits without transferring anyone else's units.
+  const admission = classifyAdditionalLabelPackage({
+    sources: sources.map(item => ({ sourceItemId: item.id, quantity: item.qty })),
+    contents: contents.map(item => ({ sourceItemId: item.sourceShipmentItemId, quantity: item.quantity })),
+    previous: allocated.map(item => ({ physicalItemId: Number(item.id), physicalShipmentId: Number(item.physical_shipment_id),
+      sourceItemId: Number(item.source_id), quantity: Number(item.quantity_shipped), providerOrderId: item.provider_order_id,
+      labelStatus: item.label_status, carrierPossession: item.carrier_possession })),
+    scopedPhysicalItemIds: [...scope.physicalItemIds],
+  });
+  if (admission.outcome === "review") return defer("review", admission.reason);
+  if (admission.outcome === "additional") return null;
   const evidenceById = new Map([[labelId, { label, events, lifecycle }]]);
   const discoveredSourceIds = new Set(sourceIds);
   let discoveryComplete = false;

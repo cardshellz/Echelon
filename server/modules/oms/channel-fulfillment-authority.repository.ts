@@ -1,5 +1,6 @@
 import { reconcileEbayLabelReplacement as reconcileLabelReplacement, readLabelReplacementMaterialization, type AuthorizedLabelReplacement, type EbayLabelReplacementResult } from "./ebay-label-replacement.repository";
 import { createHash } from "node:crypto";
+import { PackageAllocationSourceIdentityError } from "../shipping/package-allocation-source-identity.domain";
 
 import { sql } from "drizzle-orm";
 import { z } from "zod";
@@ -1303,6 +1304,11 @@ async function resolvePhysicalPackageRequest(
       quantityShipped: item.quantityShipped, quantityPlanned: item.quantityPlanned,
     }, shippingEngineOrderId, lockForUpdate);
   } catch (error) {
+    if (error instanceof PackageAllocationSourceIdentityError) {
+      throw new FulfillmentAuthorityError("CANONICAL_STATE_CONFLICT", error.message, {
+        ...error.context, sourceEvidenceCode: error.code,
+      });
+    }
     if (!(error instanceof FulfillmentRequestAllocationError)) throw error;
     throw new FulfillmentAuthorityError(error.code, error.message, { ...error.context });
   }
@@ -4187,7 +4193,11 @@ export function createChannelFulfillmentAuthorityRepository(
           shipmentRequestId,
           shipmentRequestItemId,
         };
-        const physicalShipmentItemId = await findOrCreatePhysicalCustomerItem(tx, stagedItem, physicalShipmentId, Boolean(authorizedReplacement));
+        // Carrier follow-up reuses the label-time allocation. Preserve its
+        // immutable provenance instead of inserting a second legacy owner.
+        const physicalShipmentItemId = allocation.kind === "reuse" && allocation.reason === "physical_replay"
+          ? allocation.physicalShipmentItemId
+          : await findOrCreatePhysicalCustomerItem(tx, stagedItem, physicalShipmentId, Boolean(authorizedReplacement));
         materializedCustomerItems.push({ ...stagedItem, physicalShipmentItemId });
       }
 
