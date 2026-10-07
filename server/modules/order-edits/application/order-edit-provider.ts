@@ -87,6 +87,8 @@ export interface OrderEditExpectedLine {
   title: string;
   variantTitle: string | null;
   originalLineId: string | null;
+  /** The added quantity fulfills an increase on this unchanged original line. */
+  quantityIncreaseOfLineId?: string;
   calculatedLineId: string;
   variantId: string;
   quantity: number;
