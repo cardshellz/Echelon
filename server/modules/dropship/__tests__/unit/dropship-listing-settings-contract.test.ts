@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  LISTING_SETTINGS_FIELD_SETTINGS,
+  LISTING_SETTINGS_FIELDS,
   LISTING_SETTINGS_PAGE_SIZE,
+  LISTING_SETTINGS_SETTING_KEYS,
   MAX_LISTING_SETTINGS_PAGE,
   listingSettingsPricesInputSchema,
   listingSettingsPricesResponseSchema,
+  listingSettingsProductInputSchema,
+  listingSettingsProductSettingsSchema,
   listingSettingsProductsInputSchema,
   listingSettingsSizePriceSchema,
   listingSettingsSummarySchema,
@@ -95,5 +100,30 @@ describe("listing settings contracts", () => {
     const item = { code: "no_ebay_category", count: 1, productId: 7, productName: "Toploader 35pt" };
     expect(listingSettingsSummarySchema.safeParse({ ...summary, attention: { items: [item, item, item], total: 9 } }).success).toBe(true);
     expect(listingSettingsSummarySchema.safeParse({ ...summary, attention: { items: [item, item, item, item], total: 9 } }).success).toBe(false);
+  });
+});
+
+describe("listing settings contracts: one product", () => {
+  const value = (source: string, ruleName: string | null) =>
+    [{ value: { policyId: "F1" }, sources: [{ source, ruleName, productVariantIds: [11] }] }];
+
+  it("takes a store and a product, nothing else", () => {
+    expect(listingSettingsProductInputSchema.parse({ storeConnectionId: 5, productId: 7 })).toEqual({ storeConnectionId: 5, productId: 7 });
+    expect(listingSettingsProductInputSchema.safeParse({ storeConnectionId: 5, productId: 0 }).success).toBe(false);
+    expect(listingSettingsProductInputSchema.safeParse({ storeConnectionId: 5, productId: 7, page: 1 }).success).toBe(false);
+  });
+
+  it("lists every setting once, and maps every row field to its settings", () => {
+    expect(Object.keys(listingSettingsProductSettingsSchema.shape)).toEqual([...LISTING_SETTINGS_SETTING_KEYS]);
+    expect(Object.keys(LISTING_SETTINGS_FIELD_SETTINGS)).toEqual([...LISTING_SETTINGS_FIELDS]);
+    expect(Object.values(LISTING_SETTINGS_FIELD_SETTINGS).flat().sort()).toEqual([...LISTING_SETTINGS_SETTING_KEYS].sort());
+  });
+
+  it("names a group rule, and only a group rule", () => {
+    const policy = listingSettingsProductSettingsSchema.shape.shippingPolicy;
+    expect(policy.safeParse(value("group_rule", "Toploaders")).success).toBe(true);
+    expect(policy.safeParse(value("group_rule", null)).success).toBe(false);
+    expect(policy.safeParse(value("store_default", "Toploaders")).success).toBe(false);
+    expect(policy.safeParse([]).success).toBe(false);
   });
 });

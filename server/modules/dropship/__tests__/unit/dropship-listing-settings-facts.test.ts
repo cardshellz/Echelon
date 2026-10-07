@@ -3,6 +3,7 @@ import type { ContentProfileState, SavedListingContent } from "../../../../../sh
 import type { SavedListingPriceRevision } from "../../../../../shared/dropship/listing-price";
 import {
   listingSettingsPricesResponseSchema,
+  listingSettingsProductDetailSchema,
   listingSettingsProductsResponseSchema,
   listingSettingsSummarySchema,
 } from "../../../../../shared/dropship/listing-settings";
@@ -19,7 +20,9 @@ import {
   buildListingSettingsStoreDefaults,
   buildListingSettingsSummary,
   buildTooLargeListingSettingsSummary,
+  listingSettingsStockUnits,
   selectListingSettingsPrices,
+  selectListingSettingsProduct,
   selectListingSettingsProducts,
   type ListingSettingsInputs,
 } from "../../application/dropship-listing-settings-facts";
@@ -269,7 +272,7 @@ describe("listing settings facts: a product's sizes", () => {
       contentSettings: new Map([[101, text(longest, 3)], [102, text(longest, 4)]]),
     }));
     expect(same.products[0].row).toMatchObject({ ownSettings: ["description"], sizesDiffer: [] });
-    expect(same.sizes[0].values.description.key.length).toBeLessThan(100);
+    expect(same.sizes[0].values.mainText.key.length).toBeLessThan(100);
     const different = buildListingSettingsFacts(inputs([small, large], {
       contentSettings: new Map([[101, text(longest, 3)], [102, text(`${longest.slice(1)}y`, 4)]]),
     }));
@@ -314,6 +317,210 @@ describe("listing settings facts: a product's sizes", () => {
       candidate({ productId: 1, productVariantId: 11, productName: "Sleeves" }),
     ]));
     expect(facts.products.map((product) => product.row.productId)).toEqual([2, 1, 3]);
+  });
+});
+
+describe("listing settings facts: one product", () => {
+  const small = candidate({ productVariantId: 101, variantName: "Pack of 25", sku: "TL-25" });
+  const large = candidate({ productVariantId: 102, variantName: "Pack of 100", sku: "TL-100", defaultRetailPriceCents: 3_999 });
+  const huge = candidate({ productVariantId: 103, variantName: "Pack of 1000", sku: "TL-1000", defaultRetailPriceCents: 9_999 });
+  const content = (profile: NonNullable<ContentProfileState["profile"]>): ContentProfileState =>
+    ({ revisionId: 2, updatedAt: "2026-10-01T00:00:00.000Z", profile });
+  const select = (input: ListingSettingsInputs, productId = 501) => {
+    const selection = selectListingSettingsProduct(buildListingSettingsFacts(input), productId);
+    if (!selection) throw new Error("expected the product");
+    return selection;
+  };
+  /** The answer the route sends, so each test also checks the contract's own rules. */
+  const detail = (selection: ReturnType<typeof select>) => listingSettingsProductDetailSchema.parse({
+    storeConnectionId: 5, ...selection, sizes: selection.sizes.map((size) => ({ ...size, stockUnits: 0 })),
+    stock: { state: "ok", checkedAt: GENERATED_AT.toISOString() }, generatedAt: GENERATED_AT.toISOString(),
+  });
+
+  it("gives one value per setting when every size agrees, with where the sizes get it", () => {
+    const selection = select(inputs([small, large]));
+    expect(selection.settings.shippingPolicy).toEqual([
+      { value: { policyId: "F1" }, sources: [{ source: "store_default", ruleName: null, productVariantIds: [101, 102] }] },
+    ]);
+    expect(selection.settings.ebayCategory).toEqual([{
+      value: { categoryId: "183438", categoryName: "Card Toploaders & Holders" },
+      sources: [{ source: "catalog", ruleName: null, productVariantIds: [101, 102] }],
+    }]);
+    expect(selection.settings.storeShelf).toEqual([
+      { value: { names: [] }, sources: [{ source: "none", ruleName: null, productVariantIds: [101, 102] }] },
+    ]);
+    expect(selection.settings.descriptionTemplate).toEqual([{
+      value: { hasIntroduction: false, hasFooter: false, groupConflict: false },
+      sources: [{ source: "none", ruleName: null, productVariantIds: [101, 102] }],
+    }]);
+    expect(selection.settings.mainText).toEqual([
+      { value: { own: false }, sources: [{ source: "catalog", ruleName: null, productVariantIds: [101, 102] }] },
+    ]);
+    expect(selection.sizes.map((size) => size.price.productVariantId)).toEqual([101, 102]);
+    expect(detail(selection).product).toMatchObject({ productId: 501, sizesChosen: 2, ownSettings: [], sizesDiffer: [] });
+  });
+
+  it("lists each value with its sizes when sizes differ, the most used first", () => {
+    const selection = select(inputs([small, large, huge], {
+      policyOverrides: new Map([[103, override(103, { fulfillmentPolicyId: "F9" })]]),
+    }));
+    expect(selection.settings.shippingPolicy).toEqual([
+      { value: { policyId: "F1" }, sources: [{ source: "store_default", ruleName: null, productVariantIds: [101, 102] }] },
+      { value: { policyId: "F9" }, sources: [{ source: "size", ruleName: null, productVariantIds: [103] }] },
+    ]);
+    expect(detail(selection).product).toMatchObject({ ownSettings: ["shipping_policy"], sizesDiffer: ["shipping_policy"] });
+  });
+
+  it("keeps one value when a size's own policy repeats the store default, and says which sizes have it as their own", () => {
+    const selection = select(inputs([small, large], { policyOverrides: new Map([[102, override(102, { returnPolicyId: "R1" })]]) }));
+    expect(selection.settings.returnPolicy).toEqual([{ value: { policyId: "R1" }, sources: [
+      { source: "size", ruleName: null, productVariantIds: [102] },
+      { source: "store_default", ruleName: null, productVariantIds: [101] },
+    ] }]);
+    expect(detail(selection).product).toMatchObject({ ownSettings: ["return_policy"], sizesDiffer: [] });
+  });
+
+  it("reports no policy, and no own value, while the store has no listing config", () => {
+    const selection = select(inputs([small], { listingConfig: null,
+      policyOverrides: new Map([[101, override(101, { fulfillmentPolicyId: "F9" })]]) }));
+    expect(selection.settings.shippingPolicy).toEqual([
+      { value: { policyId: null }, sources: [{ source: "none", ruleName: null, productVariantIds: [101] }] },
+    ]);
+    expect(detail(selection).product.ownSettings).toEqual([]);
+  });
+
+  it("names the older eBay category rule a value comes from", () => {
+    const rules: EbayCategoryRulesState = { revisionId: 4, updatedAt: "2026-10-01T00:00:00.000Z", profile: {
+      version: 1,
+      defaultCategory: { categoryId: "261328", categoryName: "Card Sleeves", path: ["Collectibles", "Card Sleeves"] },
+      rules: [{ id: "big", name: "Big packs", scope: { type: "listings", productVariantIds: [103] },
+        category: { categoryId: "183438", categoryName: "Toploaders & Holders", path: ["Collectibles", "Toploaders & Holders"] } }],
+    } };
+    const selection = select(inputs([small, huge], { ebayCategoryRules: rules }));
+    expect(selection.settings.ebayCategory).toEqual([
+      { value: { categoryId: "261328", categoryName: "Card Sleeves" },
+        sources: [{ source: "store_default", ruleName: null, productVariantIds: [101] }] },
+      { value: { categoryId: "183438", categoryName: "Toploaders & Holders" },
+        sources: [{ source: "group_rule", ruleName: "Big packs", productVariantIds: [103] }] },
+    ]);
+  });
+
+  it("compares the text above and below by the words sent, not by the template's name", () => {
+    const template = { introduction: "Fast shipping.", footer: "" };
+    const twin = { id: "twin", name: "Store template", priority: 1, scope: { type: "listings" as const, productVariantIds: [102] }, template };
+    const same = select(inputs([small, large], { content: content({ defaultTemplate: template, groups: [twin] }) }));
+    // A group named like the store template, with the same words: one value, from two places.
+    expect(same.settings.descriptionTemplate).toEqual([{
+      value: { hasIntroduction: true, hasFooter: false, groupConflict: false },
+      sources: [
+        { source: "group_rule", ruleName: "Store template", productVariantIds: [102] },
+        { source: "store_default", ruleName: null, productVariantIds: [101] },
+      ],
+    }]);
+    expect(detail(same).product.sizesDiffer).toEqual([]);
+    const other = select(inputs([small, large], { content: content({ defaultTemplate: template,
+      groups: [{ ...twin, template: { introduction: "Ships in a box.", footer: "" } }] }) }));
+    expect(other.settings.descriptionTemplate).toHaveLength(2);
+    expect(detail(other).product.sizesDiffer).toEqual(["description"]);
+  });
+
+  it("treats a blank template as no text above or below", () => {
+    const blank = select(inputs([small, large], { content: content({ defaultTemplate: { introduction: "  ", footer: "\n" }, groups: [
+      { id: "g", name: "Blank group", priority: 1, scope: { type: "listings", productVariantIds: [102] }, template: { introduction: "", footer: "" } },
+    ] }) }));
+    expect(blank.settings.descriptionTemplate).toHaveLength(1);
+    expect(blank.settings.descriptionTemplate[0].value).toEqual({ hasIntroduction: false, hasFooter: false, groupConflict: false });
+  });
+
+  it("marks sizes whose description groups tie as a conflict, apart from sizes with no text", () => {
+    const template = { introduction: "Hi", footer: "" };
+    const selection = select(inputs([small, large], { content: content({ defaultTemplate: { introduction: "", footer: "" }, groups: [
+      { id: "a", name: "A", priority: 3, scope: { type: "listings", productVariantIds: [101] }, template },
+      { id: "b", name: "B", priority: 3, scope: { type: "listings", productVariantIds: [101] }, template },
+    ] }) }));
+    expect(selection.settings.descriptionTemplate).toEqual([
+      { value: { hasIntroduction: false, hasFooter: false, groupConflict: true },
+        sources: [{ source: "none", ruleName: null, productVariantIds: [101] }] },
+      { value: { hasIntroduction: false, hasFooter: false, groupConflict: false },
+        sources: [{ source: "store_default", ruleName: null, productVariantIds: [102] }] },
+    ]);
+    expect(detail(selection).product).toMatchObject({ sizesDiffer: ["description"], fixes: ["description_group_conflict"] });
+  });
+
+  it("tells a size's own main text apart from another size's own text", () => {
+    const own = (customText: string): SavedListingContent =>
+      ({ revisionId: 3, customText, catalogHash: listingCatalogHash(small), updatedAt: "2026-10-01T00:00:00.000Z" });
+    const selection = select(inputs([small, large, huge], { contentSettings: new Map([[101, own("Mine")], [102, own("Also mine")]]) }));
+    expect(selection.settings.mainText.map((value) => [value.value, value.sources.map((entry) => entry.productVariantIds)])).toEqual([
+      [{ own: true }, [[101]]], [{ own: true }, [[102]]], [{ own: false }, [[103]]],
+    ]);
+    expect(detail(selection).product).toMatchObject({ ownSettings: ["description"], sizesDiffer: ["description"] });
+  });
+
+  it("keeps a size's shelves in order: a swapped first and second shelf is a different value", () => {
+    const selection = select(inputs([small, large], {
+      shelfAssignments: new Map([[101, ["Toploaders", "Sleeves"]], [102, ["Sleeves", "Toploaders"]]]),
+    }));
+    expect(selection.settings.storeShelf.map((value) => value.value.names)).toEqual([["Toploaders", "Sleeves"], ["Sleeves", "Toploaders"]]);
+    expect(detail(selection).product.sizesDiffer).toEqual(["store_shelf"]);
+  });
+
+  it("shares one value object among the sizes that agree, and keeps it whole", () => {
+    const facts = buildListingSettingsFacts(inputs([small, large], { shelfAssignments: new Map([[101, ["Toploaders"]], [102, ["Toploaders"]]]) }));
+    expect(facts.sizes[0].values.shippingPolicy).toBe(facts.sizes[1].values.shippingPolicy);
+    expect(facts.sizes[0].values.storeShelf).toBe(facts.sizes[1].values.storeShelf);
+    expect(Object.isFrozen(facts.sizes[0].values.shippingPolicy)).toBe(true);
+    expect(Object.isFrozen(facts.sizes[0].values.storeShelf.value)).toBe(true);
+    expect(Object.isFrozen(facts.sizes[0].values.storeShelf.value.names)).toBe(true);
+  });
+
+  it("keeps each size's own eBay category name, and groups the sizes by the category id eBay lists by", () => {
+    const named = candidate({ productVariantId: 102, variantName: "Pack of 100", ebayBrowseCategoryName: "Toploaders & Holders" });
+    const facts = buildListingSettingsFacts(inputs([small, named]));
+    expect(facts.sizes.map((size) => size.values.ebayCategory.value.categoryName)).toEqual(["Card Toploaders & Holders", "Toploaders & Holders"]);
+    const selection = selectListingSettingsProduct(facts, 501);
+    expect(selection?.settings.ebayCategory).toEqual([{ value: { categoryId: "183438", categoryName: "Card Toploaders & Holders" },
+      sources: [{ source: "catalog", ruleName: null, productVariantIds: [101, 102] }] }]);
+    expect(selection?.product.sizesDiffer).toEqual([]);
+  });
+
+  it("finds no product that has no chosen size", () => {
+    expect(selectListingSettingsProduct(buildListingSettingsFacts(inputs([small])), 999)).toBeNull();
+  });
+
+  it("refuses an answer whose flags disagree with its settings", () => {
+    const selection = select(inputs([small, large], { policyOverrides: new Map([[102, override(102, { fulfillmentPolicyId: "F2" })]]) }));
+    const answer = { storeConnectionId: 5, ...selection, sizes: selection.sizes.map((size) => ({ ...size, stockUnits: 1 })),
+      stock: { state: "ok", checkedAt: GENERATED_AT.toISOString() }, generatedAt: GENERATED_AT.toISOString() };
+    expect(listingSettingsProductDetailSchema.safeParse(answer).success).toBe(true);
+    expect(listingSettingsProductDetailSchema.safeParse({ ...answer, product: { ...answer.product, sizesDiffer: [] } }).success).toBe(false);
+    expect(listingSettingsProductDetailSchema.safeParse({ ...answer, product: { ...answer.product, ownSettings: [] } }).success).toBe(false);
+    expect(listingSettingsProductDetailSchema.safeParse({ ...answer, sizes: answer.sizes.slice(1) }).success).toBe(false);
+    expect(listingSettingsProductDetailSchema.safeParse({ ...answer,
+      stock: { state: "unavailable", retryable: true, checkedAt: GENERATED_AT.toISOString() } }).success).toBe(false);
+  });
+});
+
+describe("listing settings facts: stock for one product", () => {
+  const caps = [{ productVariantId: 101, enabledOverride: true, marketplaceQuantityCap: 5 }];
+
+  it("caps a size's stock at the vendor's own cap under legacy quantity authority, as the preview does", () => {
+    const units = listingSettingsStockUnits({ snapshot: { authority: "legacy", quantities: new Map([[101, 40], [102, 3]]) },
+      overrides: caps, productVariantIds: [101, 102] });
+    expect([...units]).toEqual([[101, 5], [102, 3]]);
+  });
+
+  it("leaves canonical quantities as they are: the cap is already in them", () => {
+    const units = listingSettingsStockUnits({ snapshot: { authority: "canonical", quantities: new Map([[101, 40]]) },
+      overrides: caps, productVariantIds: [101] });
+    expect(units.get(101)).toBe(40);
+  });
+
+  it("gives 0 for a size with no stock, and refuses a read that skipped a size", () => {
+    expect(listingSettingsStockUnits({ snapshot: { authority: "legacy", quantities: new Map([[101, 0]]) },
+      overrides: [], productVariantIds: [101] }).get(101)).toBe(0);
+    expect(() => listingSettingsStockUnits({ snapshot: { authority: "legacy", quantities: new Map() },
+      overrides: [], productVariantIds: [101] })).toThrow(/no quantity for size 101/);
   });
 });
 

@@ -3,6 +3,7 @@ import rateLimit from "express-rate-limit";
 import { ZodError, type z } from "zod";
 import {
   listingSettingsPricesResponseSchema,
+  listingSettingsProductDetailSchema,
   listingSettingsProductsResponseSchema,
   listingSettingsSummarySchema,
 } from "../../../../../shared/dropship/listing-settings";
@@ -13,7 +14,7 @@ import { createDropshipListingSettingsService } from "../../infrastructure/drops
 import { requireDropshipAuth } from "./dropship-auth.routes";
 
 type ListingSettingsRouteService = Pick<DropshipListingSettingsService,
-  "getSummaryForMember" | "listPricesForMember" | "listProductsForMember">;
+  "getSummaryForMember" | "listPricesForMember" | "listProductsForMember" | "getProductForMember">;
 
 /** Reads only, so the read budget from the Listing settings design (8.8). */
 export const LISTING_SETTINGS_READS_PER_MINUTE = 120;
@@ -21,7 +22,8 @@ export const LISTING_SETTINGS_READS_PER_MINUTE = 120;
 /**
  * Read-only listing settings views (Listing settings design 8.4). No route
  * here writes or calls eBay. Inputs are checked by the service's schemas and
- * every answer by its response schema.
+ * every answer by its response schema. One product's view also reads its
+ * sizes' stock, through the same budget.
  */
 export function registerDropshipListingSettingsRoutes(
   app: Express,
@@ -43,6 +45,11 @@ export function registerDropshipListingSettingsRoutes(
     () => service.listPricesForMember(memberId(req), listInput(req))));
   app.get(`${base}/products`, requireDropshipAuth, limiter, (req, res) => respond(req, res, listingSettingsProductsResponseSchema,
     () => service.listProductsForMember(memberId(req), listInput(req))));
+  app.get(`${base}/products/:productId`, requireDropshipAuth, limiter, (req, res) => respond(req, res, listingSettingsProductDetailSchema,
+    () => service.getProductForMember(memberId(req), {
+      storeConnectionId: parseId(req.params.storeConnectionId),
+      productId: parseId(req.params.productId),
+    })));
 }
 
 /** Raw query values go to the service's strict schema; a repeated key arrives as an array and is refused there. */
@@ -78,6 +85,7 @@ async function respond<T>(req: Request, res: Response, schema: z.ZodType<T>, ope
     // A 500 needs a human (fatal); every other answer here is a refusal of this request (permanent).
     const errorClass = status >= 500 ? "fatal" : "permanent";
     const storeConnectionId = parseId(req.params.storeConnectionId ?? "");
+    const productId = parseId(req.params.productId ?? "");
     const entry = {
       outcome: "failed",
       error_code: code,
@@ -85,6 +93,7 @@ async function respond<T>(req: Request, res: Response, schema: z.ZodType<T>, ope
       method: req.method,
       path: req.route?.path ?? req.path,
       store_connection_id: Number.isSafeInteger(storeConnectionId) ? storeConnectionId : null,
+      product_id: Number.isSafeInteger(productId) ? productId : null,
       actor_id: req.session?.dropship?.memberId ?? null,
       error_class: errorClass,
       error_message: errorClass === "fatal" && error instanceof Error ? error.message : undefined,
@@ -110,6 +119,7 @@ function statusFor(error: unknown): number {
     case "DROPSHIP_AUTH_REQUIRED":
       return 401;
     case "DROPSHIP_STORE_CONNECTION_REQUIRED":
+    case "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND":
       return 404;
     case "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY":
     case "DROPSHIP_LISTING_SETTINGS_TOO_LARGE":

@@ -1,9 +1,11 @@
 import {
   LISTING_SETTINGS_PAGE_SIZE,
   listingSettingsPricesInputSchema,
+  listingSettingsProductInputSchema,
   listingSettingsProductsInputSchema,
   listingSettingsStoreInputSchema,
   type ListingSettingsPricesResponse,
+  type ListingSettingsProductDetail,
   type ListingSettingsProductsResponse,
   type ListingSettingsSummary,
 } from "../../../../shared/dropship/listing-settings";
@@ -13,28 +15,33 @@ import {
   buildListingSettingsStoreDefaults,
   buildListingSettingsSummary,
   buildTooLargeListingSettingsSummary,
+  listingSettingsStockUnits,
   selectListingSettingsPrices,
+  selectListingSettingsProduct,
   selectListingSettingsProducts,
   type ListingSettingsFacts,
   type ListingSettingsInputs,
+  type ListingSettingsProductSelection,
 } from "./dropship-listing-settings-facts";
-import type { DropshipListingStoreContext } from "./dropship-listing-preview-service";
+import type { DropshipListingPreviewRepository, DropshipListingStoreContext } from "./dropship-listing-preview-service";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import type { DropshipAtpProvider } from "./dropship-selection-atp-service";
 
 /**
  * Read-only listing settings views (Listing settings design 8.4). Nothing here
  * writes or calls eBay. Each request reads the store's settings fingerprint
  * (one small query) and reuses the views built for that fingerprint, so a
- * save on any server shows on the next read.
+ * save on any server shows on the next read. One product's view adds its
+ * sizes' stock, read live and never cached.
  */
 
 /** Costs and catalog facts have no revision to key on; the design lets them be this old. */
 export const LISTING_SETTINGS_CACHE_TTL_MS = 60_000;
 /**
  * The cache holds at most this many sizes across all stores, so a few large
- * selections cannot hold unbounded memory: the built views take about 1 KB a
- * size (measured at 10,000 sizes), so about 20 MB in all. Two stores at the
- * 10,000-size limit fit. The least recently used store leaves first.
+ * selections cannot hold unbounded memory: the built views take under 1 KB a
+ * size (about 0.7 KB measured at 10,000 sizes), so under 20 MB in all. Two
+ * stores at the 10,000-size limit fit. The least recently used store leaves first.
  */
 export const LISTING_SETTINGS_CACHE_MAX_SIZES = 20_000;
 
@@ -55,8 +62,15 @@ export interface ListingSettingsRepository {
   load(input: { memberId: string; storeConnectionId: number; now: Date }): Promise<ListingSettingsLoad | null>;
 }
 
+/** The reads one product's stock needs: the same quantity source and vendor caps the preview uses. */
+export interface ListingSettingsStockSource {
+  atp: DropshipAtpProvider;
+  overrides: Pick<DropshipListingPreviewRepository, "listVariantOverrides">;
+}
+
 export interface DropshipListingSettingsServiceDependencies {
   repository: ListingSettingsRepository;
+  stock: ListingSettingsStockSource;
   clock: DropshipClock;
   logger: DropshipLogger;
   cacheTtlMs?: number;
@@ -103,6 +117,60 @@ export class DropshipListingSettingsService {
     const page = selectListingSettingsProducts(view.facts, parsed);
     return { storeConnectionId: parsed.storeConnectionId, page: parsed.page, pageSize: LISTING_SETTINGS_PAGE_SIZE,
       total: page.total, rows: page.rows, generatedAt: view.builtAt.toISOString() };
+  }
+
+  /**
+   * One chosen product's settings in full, with its sizes' stock read now.
+   * Stock that can't be read leaves the settings readable (`stock.state`
+   * "unavailable"); any other failure fails the request.
+   */
+  async getProductForMember(memberId: string, input: unknown): Promise<ListingSettingsProductDetail> {
+    const parsed = listingSettingsProductInputSchema.parse(input);
+    const view = requireSizes(await this.viewFor(memberId, parsed.storeConnectionId), parsed.storeConnectionId);
+    const selection = selectListingSettingsProduct(view.facts, parsed.productId);
+    if (!selection) {
+      throw new DropshipError("DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND",
+        "None of this product's sizes is chosen for this store.",
+        { storeConnectionId: parsed.storeConnectionId, productId: parsed.productId });
+    }
+    const stock = await this.readStock(view.facts.store, selection);
+    return {
+      storeConnectionId: parsed.storeConnectionId,
+      product: selection.product,
+      settings: selection.settings,
+      sizes: selection.sizes.map((size) => ({
+        ...size,
+        stockUnits: stock.units === null ? null : requiredUnits(stock.units, size.price.productVariantId),
+      })),
+      stock: stock.state,
+      generatedAt: view.builtAt.toISOString(),
+    };
+  }
+
+  private async readStock(store: DropshipListingStoreContext, selection: ListingSettingsProductSelection): Promise<{
+    state: ListingSettingsProductDetail["stock"]; units: ReadonlyMap<number, number> | null;
+  }> {
+    const productVariantIds = selection.sizes.map((size) => size.price.productVariantId);
+    try {
+      const overrides = await this.deps.stock.overrides.listVariantOverrides({ vendorId: store.vendorId, productVariantIds });
+      const snapshot = await this.deps.stock.atp.getVariantAtp(
+        selection.sizes.map((size) => ({ productId: size.price.productId, productVariantId: size.price.productVariantId })),
+        { storeConnectionId: store.storeConnectionId },
+      );
+      const units = listingSettingsStockUnits({ snapshot, overrides, productVariantIds });
+      return { state: { state: "ok", checkedAt: this.deps.clock.now().toISOString() }, units };
+    } catch (error) {
+      // The stock reads report the failures they know (the allocation engine, the channel quantity, the
+      // Dropship OMS channel's set-up) as DropshipErrors. Anything else, such as a lost database
+      // connection, fails the request: it is a fault, not a missing number.
+      if (!(error instanceof DropshipError)) throw error;
+      const retryable = error.context?.retryable === true;
+      this.deps.logger.warn({ code: "DROPSHIP_LISTING_SETTINGS_STOCK_UNAVAILABLE",
+        message: "Listing settings showed a product without stock because the stock read failed.",
+        context: { storeConnectionId: store.storeConnectionId, productId: selection.product.productId,
+          sizes: productVariantIds.length, stockErrorCode: error.code, retryable } });
+      return { state: { state: "unavailable", retryable, checkedAt: this.deps.clock.now().toISOString() }, units: null };
+    }
   }
 
   private async viewFor(memberId: string, storeConnectionId: number): Promise<ListingSettingsView> {
@@ -182,6 +250,12 @@ function requireSizes(view: ListingSettingsView, storeConnectionId: number): Ext
       "More than 10,000 sizes are chosen for this store. Choose 10,000 or fewer to check their settings.", { storeConnectionId });
   }
   return requireEbay(view, storeConnectionId);
+}
+
+function requiredUnits(units: ReadonlyMap<number, number>, productVariantId: number): number {
+  const value = units.get(productVariantId);
+  if (value === undefined) throw new Error(`Listing settings has no stock for size ${productVariantId}.`);
+  return value;
 }
 
 function storeNotFound(storeConnectionId: number): DropshipError {

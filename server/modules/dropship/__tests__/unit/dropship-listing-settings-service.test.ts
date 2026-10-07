@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
+import { listingSettingsProductDetailSchema } from "../../../../../shared/dropship/listing-settings";
+import { DropshipError } from "../../domain/errors";
+import type { DropshipVendorVariantOverride } from "../../domain/vendor-selection";
 import { prepareEbayCategoryRules, resolveEbayListingCategory } from "../../application/dropship-ebay-category-resolver";
 import type { DropshipListingCatalogCandidate, DropshipListingStoreContext } from "../../application/dropship-listing-preview-service";
 import type { ListingSettingsInputs } from "../../application/dropship-listing-settings-facts";
@@ -7,8 +10,10 @@ import {
   DropshipListingSettingsService,
   type ListingSettingsLoad,
   type ListingSettingsRepository,
+  type ListingSettingsStockSource,
 } from "../../application/dropship-listing-settings-service";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
+import type { DropshipAtpSnapshot } from "../../application/dropship-selection-atp-service";
 
 const T0 = new Date("2026-10-06T12:00:00.000Z");
 
@@ -54,14 +59,36 @@ class FakeRepository implements ListingSettingsRepository {
   }
 }
 
+/** Stock as the preview reads it: the quantity source and the vendor's caps. */
+class FakeStock implements ListingSettingsStockSource {
+  snapshot: DropshipAtpSnapshot | Error = { authority: "legacy", quantities: new Map([[11, 7]]) };
+  caps: DropshipVendorVariantOverride[] = [];
+  atpReads: Array<{ targets: ReadonlyArray<{ productId: number; productVariantId: number }>; scope: unknown }> = [];
+  capReads: Array<{ vendorId: number; productVariantIds: readonly number[] }> = [];
+  atp = {
+    getVariantAtp: async (targets: ReadonlyArray<{ productId: number; productVariantId: number }>, scope?: { storeConnectionId?: number }) => {
+      this.atpReads.push({ targets, scope });
+      if (this.snapshot instanceof Error) throw this.snapshot;
+      return this.snapshot;
+    },
+  };
+  overrides = {
+    listVariantOverrides: async (input: { vendorId: number; productVariantIds: readonly number[] }) => {
+      this.capReads.push(input);
+      return this.caps;
+    },
+  };
+}
+
 let repository: FakeRepository;
+let stock: FakeStock;
 let now: Date;
 let warnings: DropshipLogEvent[];
 let service: DropshipListingSettingsService;
 
 function makeService(options: { cacheMaxSizes?: number } = {}) {
   return new DropshipListingSettingsService({
-    repository, clock: { now: () => now },
+    repository, stock, clock: { now: () => now },
     logger: { info: vi.fn(), warn: (event) => warnings.push(event), error: vi.fn() },
     ...options,
   });
@@ -69,6 +96,7 @@ function makeService(options: { cacheMaxSizes?: number } = {}) {
 
 beforeEach(() => {
   repository = new FakeRepository();
+  stock = new FakeStock();
   now = T0;
   warnings = [];
   service = makeService();
@@ -186,5 +214,76 @@ describe("listing settings service", () => {
     expect(prices.rows).toHaveLength(10);
     const products = await service.listProductsForMember("member-1", { storeConnectionId: 5, search: "product 7" });
     expect(products.rows.map((row) => row.productId)).toEqual([7]);
+  });
+});
+
+describe("listing settings service: one product", () => {
+  const T1 = new Date(T0.getTime() + 30_000);
+
+  it("gives one product's settings with its sizes' stock, read now", async () => {
+    repository.next = { state: "ok", fingerprint: "fp-1", inputs: inputs([candidate(11), candidate(12)]), costReadFailed: false };
+    stock.snapshot = { authority: "legacy", quantities: new Map([[11, 40], [12, 0]]) };
+    stock.caps = [{ productVariantId: 11, enabledOverride: true, marketplaceQuantityCap: 5 }];
+    const detail = await service.getProductForMember("member-1", { storeConnectionId: 5, productId: 501 });
+    expect(listingSettingsProductDetailSchema.safeParse(detail).success).toBe(true);
+    expect(detail.sizes.map((size) => [size.price.productVariantId, size.stockUnits])).toEqual([[11, 5], [12, 0]]);
+    expect(detail).toMatchObject({ storeConnectionId: 5, product: { productId: 501, sizesChosen: 2 },
+      stock: { state: "ok", checkedAt: T0.toISOString() }, generatedAt: T0.toISOString() });
+    expect(stock.capReads).toEqual([{ vendorId: 7, productVariantIds: [11, 12] }]);
+    expect(stock.atpReads).toEqual([{ targets: [{ productId: 501, productVariantId: 11 }, { productId: 501, productVariantId: 12 }],
+      scope: { storeConnectionId: 5 } }]);
+  });
+
+  it("reads stock on every request but the settings once", async () => {
+    await service.getProductForMember("member-1", { storeConnectionId: 5, productId: 501 });
+    now = T1;
+    const detail = await service.getProductForMember("member-1", { storeConnectionId: 5, productId: 501 });
+    expect(repository.loads).toHaveLength(1);
+    expect(stock.atpReads).toHaveLength(2);
+    expect(detail).toMatchObject({ stock: { state: "ok", checkedAt: T1.toISOString() }, generatedAt: T0.toISOString() });
+  });
+
+  it("shows the settings without stock when stock can't be read, and says whether trying again may help", async () => {
+    stock.snapshot = new DropshipError("DROPSHIP_ALLOCATION_UNAVAILABLE", "Channel Allocation could not be computed.", { retryable: true });
+    const transient = await service.getProductForMember("member-1", { storeConnectionId: 5, productId: 501 });
+    expect(listingSettingsProductDetailSchema.safeParse(transient).success).toBe(true);
+    expect(transient.stock).toEqual({ state: "unavailable", retryable: true, checkedAt: T0.toISOString() });
+    expect(transient.sizes.map((size) => size.stockUnits)).toEqual([null]);
+    stock.snapshot = new DropshipError("DROPSHIP_ALLOCATION_WAREHOUSE_SCOPE_REQUIRED", "No warehouse.", { retryable: false });
+    const blocked = await service.getProductForMember("member-1", { storeConnectionId: 5, productId: 501 });
+    expect(blocked.stock).toMatchObject({ state: "unavailable", retryable: false });
+    expect(warnings.map((event) => [event.code, event.context])).toEqual([
+      ["DROPSHIP_LISTING_SETTINGS_STOCK_UNAVAILABLE", { storeConnectionId: 5, productId: 501, sizes: 1,
+        stockErrorCode: "DROPSHIP_ALLOCATION_UNAVAILABLE", retryable: true }],
+      ["DROPSHIP_LISTING_SETTINGS_STOCK_UNAVAILABLE", { storeConnectionId: 5, productId: 501, sizes: 1,
+        stockErrorCode: "DROPSHIP_ALLOCATION_WAREHOUSE_SCOPE_REQUIRED", retryable: false }],
+    ]);
+  });
+
+  it("fails the request when the stock read fails in a way no provider reports", async () => {
+    stock.snapshot = new Error("connection reset");
+    await expect(service.getProductForMember("member-1", { storeConnectionId: 5, productId: 501 })).rejects.toThrow("connection reset");
+    expect(warnings).toEqual([]);
+  });
+
+  it("refuses a product none of whose sizes is chosen, without reading stock", async () => {
+    await expect(service.getProductForMember("member-1", { storeConnectionId: 5, productId: 999 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", context: { storeConnectionId: 5, productId: 999 } });
+    expect(stock.atpReads).toHaveLength(0);
+  });
+
+  it("refuses bad input, a selection over 10,000 sizes and a store not on eBay", async () => {
+    await expect(service.getProductForMember("member-1", { storeConnectionId: 5, productId: Number.NaN })).rejects.toBeInstanceOf(ZodError);
+    await expect(service.getProductForMember("member-1", { storeConnectionId: 5, productId: 501, extra: 1 })).rejects.toBeInstanceOf(ZodError);
+    expect(repository.fingerprintReads).toHaveLength(0);
+    repository.next = { state: "too_large", fingerprint: "fp-1", store,
+      storeLevel: { pricing: emptyState, listingConfig: null, ebayCategoryRules: emptyState, content: emptyState } };
+    await expect(service.getProductForMember("member-1", { storeConnectionId: 5, productId: 501 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE" });
+    repository.fingerprint = "fp-2";
+    repository.next = { state: "not_ebay", fingerprint: "fp-2", store: { ...store, platform: "shopify" } };
+    await expect(service.getProductForMember("member-1", { storeConnectionId: 5, productId: 501 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY" });
+    expect(stock.atpReads).toHaveLength(0);
   });
 });
