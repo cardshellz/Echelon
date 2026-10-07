@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { ShopifyOrderEditProvider } from "../../infrastructure/shopify-order-edit.provider";
 import { isUnpaidRecoveryRestored } from "../../application/order-edit-evidence";
 import {
@@ -438,7 +439,119 @@ async function codeIncrease() {
   return { h, snapshot, quote };
 }
 
+// Observed #63980 order/preview amounts, with synthetic identities. The approved
+// 2026-10-07 preview returned a 9.99 cart summary with no product allocations.
+function shippingOnlyOrder() {
+  return rawOrder({
+    name: "#63980",
+    currentTotalPriceSet: bag("187.98"),
+    currentSubtotalPriceSet: bag("187.98"),
+    netPaymentSet: bag("187.98"),
+    transactions: [tx(1, "187.98")],
+    lineItems: {
+      nodes: [line(1, 10, 1, "47.99"), line(2, 20, 1, "139.99")],
+      pageInfo: { hasNextPage: false },
+    },
+    discountApplications: {
+      nodes: [
+        {
+          __typename: "AutomaticDiscountApplication",
+          index: 0,
+          targetType: "SHIPPING_LINE",
+          allocationMethod: "EACH",
+          targetSelection: "ALL",
+          title: "Member free shipping",
+          value: { __typename: "PricingPercentageValue", percentage: 100 },
+        },
+      ],
+      pageInfo: { hasNextPage: false },
+    },
+    shippingLines: {
+      nodes: [
+        {
+          id: id("ShippingLine", 1),
+          isRemoved: false,
+          originalPriceSet: bag("9.99"),
+          currentDiscountedPriceSet: bag("0.00"),
+        },
+      ],
+      pageInfo: { hasNextPage: false },
+    },
+  });
+}
+
+function shippingOnlyCalculated(
+  firstQuantity: number,
+  cartDiscount: string | null,
+) {
+  const total = decimal(
+    cents("47.99") * BigInt(firstQuantity) + cents("139.99"),
+  );
+  return {
+    ...calculated(total, decimal(cents(total) - cents("187.98")), [
+      calcLine(1, 10, firstQuantity, "47.99"),
+      calcLine(2, 20, 1, "139.99"),
+    ]),
+    cartDiscountAmountSet: cartDiscount === null ? null : bag(cartDiscount),
+    taxLines: [] as Array<{ priceSet: ReturnType<typeof bag> }>,
+    shippingLines: [
+      {
+        id: id("CalculatedShippingLine", 1),
+        price: bag("9.99"),
+        stagedStatus: "NONE",
+      },
+    ],
+  };
+}
+
 describe("ShopifyOrderEditProvider", () => {
+  it("reconciles the captured free-shipping baseline without comparing its cart summary to product allocations", async () => {
+    // Captured through Shopify 2026-10 orderEditBegin; only identities were anonymized.
+    const captured: unknown = JSON.parse(
+      readFileSync(
+        new URL(
+          "../fixtures/shopify-shipping-discount-calculated-order.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    const h = harness([
+      shippingOnlyOrder(),
+      shippingOnlyOrder(),
+      begin(captured),
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      snapshot,
+      { changes: [{ lineItemId: "1", quantity: 1 }], additions: [] },
+      "edit-1",
+    );
+    expect(quote).toMatchObject({
+      totalCents: 18798,
+      deltaCents: 0,
+      outstandingCents: 0,
+      financials: {
+        itemsDiscountCents: 0,
+        itemsNetCents: 18798,
+        shippingGrossCents: 999,
+        shippingDiscountCents: 999,
+        shippingCents: 0,
+        totalCents: 18798,
+      },
+    });
+    expect(h.requests).toHaveLength(3);
+    expect(
+      h.requests.filter((request) => request.query.includes("mutation")),
+    ).toHaveLength(1);
+    expect(h.requests.at(-1)?.query).toContain("orderEditBegin");
+    expect(quote.lines.map((line) => line.calculatedLineId)).toEqual([
+      id("CalculatedLineItem", 501),
+      id("CalculatedLineItem", 502),
+    ]);
+  });
+
   it("shows exact current product discounts separately from free shipping", async () => {
     const h = harness([codeOrder()]);
     const snapshot = await h.provider.readOrder(4, "100");
@@ -561,8 +674,10 @@ describe("ShopifyOrderEditProvider", () => {
     ).toBe(false);
   });
 
-  it("rejects discount allocations that differ from Shopify's quoted discount total", async () => {
+  it("rejects product allocations that do not reconcile to Shopify's quoted subtotal", async () => {
     const result = codeCalculated(5, "2.50", "112.45");
+    result.lineItems.nodes[0].calculatedDiscountAllocations[0].allocatedAmountSet =
+      bag("2.49");
     result.cartDiscountAmountSet = bag("12.48");
     const h = harness([
       codeOrder(),
@@ -579,8 +694,117 @@ describe("ShopifyOrderEditProvider", () => {
         { changes: [{ lineItemId: "1", quantity: 5 }], additions: [] },
         "edit-1",
       ),
-    ).rejects.toMatchObject({ code: "ORDER_DISCOUNT_TOTAL_MISMATCH" });
+    ).rejects.toMatchObject({ code: "ORDER_EDIT_FINANCIAL_MISMATCH" });
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditCommit")),
+    ).toBe(false);
   });
+
+  it.each([null, "0.00", "9.99"])(
+    "preserves free shipping without equating cart summary %s to product allocations",
+    async (cartDiscount) => {
+      const h = harness([
+        shippingOnlyOrder(),
+        shippingOnlyOrder(),
+        { nodes: [variant(10, "47.99")] },
+        begin(shippingOnlyCalculated(1, cartDiscount)),
+        quantity(shippingOnlyCalculated(2, cartDiscount)),
+      ]);
+      const snapshot = await h.provider.readOrder(4, "100");
+      const quote = await h.provider.quote(
+        4,
+        snapshot,
+        { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+        "edit-1",
+      );
+      expect(quote).toMatchObject({
+        totalCents: 23597,
+        deltaCents: 4799,
+        outstandingCents: 4799,
+        financials: {
+          itemsGrossCents: 23597,
+          itemsDiscountCents: 0,
+          itemsNetCents: 23597,
+          shippingGrossCents: 999,
+          shippingDiscountCents: 999,
+          shippingCents: 0,
+          totalCents: 23597,
+        },
+      });
+      expect(
+        h.requests.some((request) =>
+          request.query.includes("cartDiscountAmountSet"),
+        ),
+      ).toBe(false);
+      expect(
+        h.requests.some((request) =>
+          /orderEditCommit|refundCreate|orderEditAddLineItemDiscount/.test(
+            request.query,
+          ),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it("reconciles native percentage allocations even when an unused cart summary differs", async () => {
+    const result = codeCalculated(5, "2.50", "112.45");
+    result.cartDiscountAmountSet = bag("12.48");
+    const h = harness([
+      codeOrder(),
+      codeOrder(),
+      { nodes: [variant(10, "4.99")] },
+      begin(codeCalculated()),
+      quantity(result),
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      snapshot,
+      { changes: [{ lineItemId: "1", quantity: 5 }], additions: [] },
+      "edit-1",
+    );
+    expect(quote.financials).toMatchObject({
+      itemsDiscountCents: 1249,
+      itemsNetCents: 11245,
+      totalCents: 11245,
+    });
+  });
+
+  it.each(["subtotal", "shipping total", "tax"])(
+    "rejects a free-shipping quote with inconsistent %s before commit",
+    async (field) => {
+      const result = shippingOnlyCalculated(2, "9.99");
+      if (field === "subtotal") result.subtotalPriceSet = bag("235.96");
+      if (field === "shipping total") {
+        result.totalPriceSet = bag("245.96");
+        result.totalOutstandingSet = bag(
+          decimal(cents("245.96") - cents("187.98")),
+        );
+      }
+      if (field === "tax") result.taxLines = [{ priceSet: bag("0.01") }];
+      const h = harness([
+        shippingOnlyOrder(),
+        shippingOnlyOrder(),
+        { nodes: [variant(10, "47.99")] },
+        begin(shippingOnlyCalculated(1, "9.99")),
+        quantity(result),
+      ]);
+      const snapshot = await h.provider.readOrder(4, "100");
+      await expect(
+        h.provider.quote(
+          4,
+          snapshot,
+          { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+          "edit-1",
+        ),
+      ).rejects.toMatchObject({ code: "ORDER_EDIT_FINANCIAL_MISMATCH" });
+      expect(
+        h.requests.some((request) =>
+          /orderEditCommit|refundCreate/.test(request.query),
+        ),
+      ).toBe(false);
+    },
+  );
 
   it("rejects changed gross shipping even if a discount hides it in the order total", async () => {
     const result = codeCalculated(5, "2.50", "112.45");

@@ -90,6 +90,25 @@ function setup() {
 }
 
 describe("Walmart existing-listing maintenance", () => {
+  it.each([{ priceCents: 2498 }, { attributes: { Orderable: { ShippingWeight: 3 } } }])(
+    "blocks older reviews without product content when Walmart reports a different type: %j",
+    async (changes) => {
+      const { provider, account, record, api } = setup();
+      const source = { ...updateSource, productType: "default" };
+      const observed = await api.observe();
+      api.observe.mockResolvedValue({ ...observed, productType: "default" });
+      const command = { ...record.intent.command, changes };
+      const prepared = await provider.prepare(account, source, command);
+      expect(prepared.issues).toEqual([expect.objectContaining({ code: "LISTING_UPDATE_CONTENT_REQUIRED" })]);
+      const beforeSend = vi.fn();
+      await expect(provider.send({
+        ...record.intent, source, command,
+        prepared: { ...prepared, issues: [] },
+      }, testId(4), beforeSend)).rejects.toMatchObject({ effect: "not_sent" });
+      expect(beforeSend).not.toHaveBeenCalled();
+      expect(api.submitMaintenance).not.toHaveBeenCalled();
+    },
+  );
   it("blocks empty category corrections even though Walmart's raw schema accepts them", async () => {
     const { provider, account, record } = setup();
     const prepared = await provider.prepare(
@@ -199,6 +218,53 @@ describe("Walmart existing-listing maintenance", () => {
       prepared.payload,
       testId(4),
     );
+  });
+  it("sends complete populated content, price and shipping even when the product type is already correct", async () => {
+    const { provider, account, record, api } = setup();
+    const command = {
+      ...record.intent.command,
+      changes: {
+        priceCents: updateSource.priceCents!,
+        title: updateSource.title,
+        description: "Protect trading cards in clear sleeves.",
+        brand: "Shellz",
+        images: ["https://example.com/front.jpg", "https://example.com/back.jpg"],
+        attributes: {
+          Orderable: { ShippingWeight: 2 },
+          Visible: {
+            pieceCount: 200,
+            keyFeatures: ["Clear sleeves", "Archival material", "Pack of 100"],
+          },
+        },
+      },
+    };
+    const prepared = await provider.prepare(account, updateSource, command);
+    expect(prepared.issues).toEqual([]);
+    expect(prepared.payload.MPItem).toEqual([{
+      Orderable: {
+        sku: updateSource.sku,
+        productIdentifiers: {
+          productIdType: updateSource.identifier.type,
+          productId: updateSource.identifier.value,
+        },
+        price: 24.99,
+        ShippingWeight: 2,
+      },
+      Visible: { [updateSource.productType]: {
+        productName: updateSource.title,
+        shortDescription: command.changes.description,
+        brand: "Shellz",
+        mainImageUrl: "https://example.com/front.jpg",
+        productSecondaryImageURL: ["https://example.com/back.jpg"],
+        ...command.changes.attributes.Visible,
+      } },
+    }]);
+    const beforeSend = vi.fn(async () => {});
+    await expect(provider.send({
+      ...record.intent, command, prepared,
+    }, testId(4), beforeSend)).resolves.toBe("feed@US");
+    expect(beforeSend).toHaveBeenCalledOnce();
+    expect(api.submitMaintenance).toHaveBeenCalledExactlyOnceWith(prepared.payload, testId(4));
   });
   it("validates shipping, packaging, content and category repair with the real maintenance schema", async () => {
     const { provider, account, record } = setup();

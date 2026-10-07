@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   hasListingUpdateChanges,
+  hasListingUpdateProductContent,
   listingUpdateContextSchema,
   listingUpdateSkuSchema,
   reviewListingUpdateSchema,
@@ -93,6 +94,16 @@ export class ListingUpdateService {
         "Change at least one item field before reviewing. Selecting a product type alone sends no item content and does not confirm a category correction.",
         400,
       );
+    if (
+      command.productType !== source.productType &&
+      !hasListingUpdateProductContent(command.changes)
+    ) {
+      throw new ListingPublicationError(
+        "LISTING_UPDATE_CONTENT_REQUIRED",
+        "The selected product type differs from Walmart. Include the product content before reviewing this correction.",
+        400,
+      );
+    }
     const prepared = await this.dependencies.provider.prepare(
       account,
       source,

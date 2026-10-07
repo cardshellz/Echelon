@@ -238,7 +238,6 @@ const CALCULATED = z.object({
   totalPriceSet: BAG,
   totalOutstandingSet: BAG,
   subtotalPriceSet: BAG.nullable(),
-  cartDiscountAmountSet: BAG.nullable(),
   taxLines: z.array(z.object({ priceSet: BAG })),
   shippingLines: z.array(
     z.object({ id: z.string().nullable(), price: BAG, stagedStatus: TEXT }),
@@ -2157,28 +2156,10 @@ function verifyCalculatedFinancials(
     ...calculated.lineItems.nodes,
     ...calculated.addedLineItems.nodes,
   ];
-  const orderAllocations = lines
-    .filter((line) => line.quantity > 0)
-    .flatMap((line) =>
-      line.calculatedDiscountAllocations.filter(
-        (allocation) => allocation.discountApplication.appliedTo === "ORDER",
-      ),
-    );
-  if (
-    sum(
-      orderAllocations.map((allocation) =>
-        money(allocation.allocatedAmountSet),
-      ),
-    ) !==
-    (calculated.cartDiscountAmountSet
-      ? money(calculated.cartDiscountAmountSet)
-      : 0)
-  ) {
-    fail(
-      "ORDER_DISCOUNT_TOTAL_MISMATCH",
-      "Shopify's order discount allocations do not match its quoted discount total.",
-    );
-  }
+  // Product allocations and an order-level discount summary have different
+  // scopes (shipping is separate). Reconcile every product allocation to
+  // subtotalPriceSet, then shipping and tax to totalPriceSet; native discount
+  // identity/rule parity is checked separately by verifyNativeOrderDiscounts.
   return buildOrderEditFinancials({
     lines: lines.map((line) => {
       const grossCents = multiply(

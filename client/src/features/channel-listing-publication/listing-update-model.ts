@@ -30,14 +30,15 @@ export function initialListingUpdateFields(
     attributes: structuredClone(context.lastSubmitted?.attributes ?? {}),
   };
 }
-/** Missing/blank controls mean leave unchanged. Compound fields and lists replace
- * their complete attribute so a changed unit cannot silently keep an old measure. */
-export function listingUpdateChanges(
-  original: ListingUpdateFields,
+/** Review sends every populated editable field, including unchanged values.
+ * The maintenance schema excludes creation-only and protected attributes that
+ * may still be present in a previous submission. Blank controls are omitted. */
+export function listingUpdateSubmission(
   current: ListingUpdateFields,
+  maintenanceSchema: Record<string, unknown>,
 ): ListingUpdateChanges {
   const changes: ListingUpdateChanges = {};
-  if (current.price.trim() && current.price !== original.price) {
+  if (current.price.trim()) {
     const cents = dollarsToCents(current.price);
     if (cents === null)
       throw new Error(
@@ -46,27 +47,39 @@ export function listingUpdateChanges(
     changes.priceCents = cents;
   }
   for (const key of ["title", "description", "brand"] as const) {
-    if (current[key].trim() && current[key] !== original[key])
-      changes[key] = current[key].trim();
+    if (current[key].trim()) changes[key] = current[key].trim();
   }
-  if (current.images.trim() && current.images !== original.images)
+  if (current.images.trim())
     changes.images = current.images
       .split(/\r?\n/)
       .map((value) => value.trim())
       .filter(Boolean);
+  const properties = object(maintenanceSchema.properties);
   for (const section of ["Orderable", "Visible"] as const) {
-    const before = object(original.attributes[section]);
-    const next = object(current.attributes[section]);
-    for (const [key, value] of Object.entries(next)) {
-      if (value === undefined || value === null || value === "") continue;
+    const sectionSchema = object(properties[section]);
+    if (
+      sectionSchema.properties === null ||
+      typeof sectionSchema.properties !== "object" ||
+      Array.isArray(sectionSchema.properties)
+    ) {
+      throw new Error(
+        "Load the selected product type's editable fields before reviewing the listing.",
+      );
+    }
+    const allowed = object(sectionSchema.properties);
+    for (const [key, value] of Object.entries(
+      object(current.attributes[section]),
+    )) {
       if (
-        JSON.stringify(value) === JSON.stringify(before[key]) &&
-        !(section === "Visible" && current.productType !== original.productType)
+        !Object.hasOwn(allowed, key) ||
+        value === undefined ||
+        value === null ||
+        (typeof value === "string" && !value.trim())
       )
         continue;
       changes.attributes ??= {};
       changes.attributes[section] ??= {};
-      changes.attributes[section]![key] = value;
+      changes.attributes[section]![key] = structuredClone(value);
     }
   }
   const parsed = listingUpdateChangesSchema.safeParse(changes);
@@ -78,46 +91,6 @@ export function listingUpdateChanges(
         .join("; "),
     );
   return parsed.data;
-}
-
-/** An explicit content resubmission must not diff against the prefilled values:
- * those are prior requests, not evidence that Walmart applied this product type.
- * Only carry fields exposed by the maintenance schema. Creation-only values
- * such as condition and country of origin must not leak into the repair feed. */
-export function listingUpdateContentResubmission(
-  original: ListingUpdateFields,
-  current: ListingUpdateFields,
-  maintenanceSchema: Record<string, unknown>,
-): ListingUpdateChanges {
-  const properties = object(maintenanceSchema.properties);
-  const visibleProperties = object(object(properties.Visible).properties);
-  if (Object.keys(visibleProperties).length === 0) {
-    throw new Error(
-      "Load the selected product type's editable fields before resubmitting content.",
-    );
-  }
-  const changes = listingUpdateChanges(original, current);
-  for (const key of ["title", "description", "brand"] as const) {
-    if (current[key].trim()) changes[key] = current[key].trim();
-  }
-  if (current.images.trim()) {
-    changes.images = current.images
-      .split(/\r?\n/)
-      .map((value) => value.trim())
-      .filter(Boolean);
-  }
-  const visible = Object.fromEntries(
-    Object.entries(object(current.attributes.Visible)).filter(
-      ([key, value]) =>
-        Object.hasOwn(visibleProperties, key) &&
-        value !== undefined && value !== null && value !== "",
-    ),
-  );
-  changes.attributes = {
-    ...changes.attributes,
-    Visible: structuredClone(visible),
-  };
-  return listingUpdateChangesSchema.parse(changes);
 }
 
 export function updateFieldLabel(

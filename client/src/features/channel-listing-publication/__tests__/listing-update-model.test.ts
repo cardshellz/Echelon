@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   initialListingUpdateFields,
-  listingUpdateChanges,
-  listingUpdateContentResubmission,
+  listingUpdateSubmission,
 } from "../listing-update-model";
-import { hasListingUpdateChanges, type ListingUpdateContext } from "@shared/types/channel-listing-update";
+import {
+  hasListingUpdateChanges,
+  hasListingUpdateProductContent,
+  type ListingUpdateContext,
+} from "@shared/types/channel-listing-update";
 
 const context: ListingUpdateContext = {
   current: {
@@ -37,129 +40,205 @@ const context: ListingUpdateContext = {
     },
   },
 };
-describe("existing-listing edit patches", () => {
-  it("resubmits the prefilled content for an unassigned Walmart type without resending price or creation-only fields", () => {
-    const original = initialListingUpdateFields({
+const maintenanceSchema = {
+  properties: {
+    Orderable: { properties: { ShippingWeight: {} } },
+    Visible: { properties: { netContent: {}, pieceCount: {}, keyFeatures: {} } },
+  },
+};
+const expectedSubmission = {
+  priceCents: 2499,
+  title: "Real Walmart title",
+  description: "Old description",
+  brand: "Shellz",
+  images: ["https://example.com/one.jpg"],
+  attributes: {
+    Orderable: { ShippingWeight: 2 },
+    Visible: {
+      netContent: { productNetContentUnit: "Each", productNetContentMeasure: 1 },
+      pieceCount: 200,
+    },
+  },
+};
+
+describe("complete existing-listing submissions", () => {
+  it("distinguishes product content from a price or shipping update", () => {
+    expect(hasListingUpdateProductContent({ priceCents: 2498 })).toBe(false);
+    expect(hasListingUpdateProductContent({
+      attributes: { Orderable: { ShippingWeight: 3 }, Visible: {} },
+    })).toBe(false);
+    expect(hasListingUpdateProductContent({ title: "Card sleeves" })).toBe(true);
+    expect(hasListingUpdateProductContent({
+      attributes: { Visible: { pieceCount: 200 } },
+    })).toBe(true);
+  });
+
+  it.each(["Trading Card Sleeves & Holders", "default"])(
+    "sends every populated field without an edit when Walmart reports %s",
+    (productType) => {
+      const fields = initialListingUpdateFields({
+        ...context,
+        current: { ...context.current, productType },
+      });
+      const before = structuredClone(fields);
+      const submission = listingUpdateSubmission(fields, maintenanceSchema);
+      expect(submission).toEqual(expectedSubmission);
+      expect(fields).toEqual(before);
+      expect(hasListingUpdateChanges(submission)).toBe(true);
+    },
+  );
+
+  it("includes unchanged content and shipping alongside a one-cent price edit", () => {
+    const fields = initialListingUpdateFields(context);
+    fields.price = "24.98";
+    expect(listingUpdateSubmission(fields, maintenanceSchema)).toEqual({
+      ...expectedSubmission,
+      priceCents: 2498,
+    });
+  });
+
+  it("uses the current Walmart title and price shown by the editor", () => {
+    const fields = initialListingUpdateFields({
       ...context,
-      current: { ...context.current, productType: "default" },
+      current: { ...context.current, title: "Current title", priceCents: 3199 },
+      lastSubmitted: { ...context.lastSubmitted, priceCents: 2499 },
     });
-    original.attributes.Orderable = { ShippingWeight: 2, country_of_origin_substantial_transformation: "China" };
-    original.attributes.Visible = { ...original.attributes.Visible as Record<string, unknown>, condition: "New" };
-    const before = structuredClone(original);
-    // The suggestion is already selected: the old diff returned an empty update.
-    expect(listingUpdateChanges(original, original)).toEqual({});
-    const changes = listingUpdateContentResubmission(original, original, {
-      properties: { Visible: { properties: { pieceCount: {}, netContent: {} } } },
+    expect(listingUpdateSubmission(fields, maintenanceSchema)).toMatchObject({
+      title: "Current title",
+      priceCents: 3199,
+      description: "Old description",
     });
-    expect(changes).toEqual({
-      title: "Real Walmart title", description: "Old description", brand: "Shellz",
-      images: ["https://example.com/one.jpg"],
-      attributes: { Visible: {
-        pieceCount: 200,
-        netContent: { productNetContentUnit: "Each", productNetContentMeasure: 1 },
-      } },
+  });
+
+  it("includes filled shipping edits and excludes retained fields outside the editor schema", () => {
+    const fields = initialListingUpdateFields(context);
+    fields.attributes.Orderable = {
+      ShippingWeight: 3,
+      country_of_origin_substantial_transformation: "China",
+      inventory: { quantity: 100 },
+      sku: "OTHER-SKU",
+      price: 0.01,
+    };
+    fields.attributes.Visible = {
+      ...fields.attributes.Visible as Record<string, unknown>,
+      condition: "New",
+      previousTypeOnly: "old attribute",
+    };
+    expect(listingUpdateSubmission(fields, maintenanceSchema)).toEqual({
+      ...expectedSubmission,
+      attributes: {
+        ...expectedSubmission.attributes,
+        Orderable: { ShippingWeight: 3 },
+      },
     });
-    expect(original).toEqual(before);
-    expect(hasListingUpdateChanges(changes)).toBe(true);
   });
-  it("preserves explicit price and shipping edits when content is resubmitted", () => {
-    const original = initialListingUpdateFields(context);
-    const current = structuredClone(original);
-    current.price = "27.49";
-    current.attributes.Orderable = { ShippingWeight: 3 };
-    expect(listingUpdateContentResubmission(original, current, {
-      properties: { Visible: { properties: { pieceCount: {} } } },
-    })).toMatchObject({ priceCents: 2749, attributes: { Orderable: { ShippingWeight: 3 }, Visible: { pieceCount: 200 } } });
+
+  it.each([
+    {},
+    { properties: { Visible: { properties: {} } } },
+    { properties: { Orderable: { properties: {} }, Visible: { properties: null } } },
+    { properties: { Orderable: { properties: [] }, Visible: { properties: {} } } },
+  ])("requires both loaded editable sections: %j", (schema) => {
+    expect(() => listingUpdateSubmission(
+      initialListingUpdateFields(context), schema,
+    )).toThrow("Load the selected product type");
   });
-  it("cannot resubmit content without loaded maintenance fields", () => {
-    const original = initialListingUpdateFields(context);
-    expect(() => listingUpdateContentResubmission(original, original, {})).toThrow("Load the selected product type");
+
+  it("supports a loaded type with no additional editable attributes", () => {
+    const fields = initialListingUpdateFields(context);
+    const { attributes: _attributes, ...canonical } = expectedSubmission;
+    expect(listingUpdateSubmission(fields, {
+      properties: {
+        Orderable: { properties: {} },
+        Visible: { properties: {} },
+      },
+    })).toEqual(canonical);
   });
-  it("treats empty attributes as no edits while preserving false, zero and explicit list replacements", () => {
-    expect(hasListingUpdateChanges({ attributes: { Visible: { missing: null, blank: "" } } })).toBe(false);
-    for (const value of [false, 0, []]) {
-      expect(hasListingUpdateChanges({ attributes: { Visible: { value } } })).toBe(true);
+
+  it("retains exact cents and validates prices even when prefilled", () => {
+    const fields = initialListingUpdateFields(context);
+    expect(listingUpdateSubmission({
+      ...fields, price: "0.01",
+    }, maintenanceSchema)).toEqual({ ...expectedSubmission, priceCents: 1 });
+    for (const price of ["0", "-1", "1.234", "Infinity", "2e3"]) {
+      expect(() => listingUpdateSubmission({
+        ...fields, price,
+      }, maintenanceSchema)).toThrow();
     }
   });
-  it("keeps current Walmart price and title without treating catalog defaults as edits", () => {
-    const original = initialListingUpdateFields(context);
-    expect(original.title).toBe("Real Walmart title");
-    expect(original.price).toBe("24.99");
-    expect(listingUpdateChanges(original, original)).toEqual({});
-    expect(
-      listingUpdateChanges(original, { ...original, price: "27.49" }),
-    ).toEqual({ priceCents: 2749 });
-  });
-  it("retains exact cents and rejects invalid or zero prices", () => {
-    const original = initialListingUpdateFields(context);
-    expect(
-      listingUpdateChanges(original, { ...original, price: "0.01" }),
-    ).toEqual({ priceCents: 1 });
-    for (const price of ["0", "-1", "1.234", "Infinity", "2e3"])
-      expect(() =>
-        listingUpdateChanges(original, { ...original, price }),
-      ).toThrow();
-  });
-  it("blank text and price controls leave existing fields unchanged", () => {
-    const original = initialListingUpdateFields(context);
-    expect(
-      listingUpdateChanges(original, {
-        ...original,
-        price: "",
-        title: "",
-        brand: "",
-        description: "",
-        images: "",
-      }),
-    ).toEqual({});
-  });
-  it("sends an entire changed compound attribute without other fields", () => {
-    const original = initialListingUpdateFields(context);
-    const current = structuredClone(original);
-    current.attributes.Visible = {
-      netContent: {
-        productNetContentUnit: "Each",
-        productNetContentMeasure: 2,
+
+  it("omits blank controls and absent values without sending clears or defaults", () => {
+    const fields = initialListingUpdateFields(context);
+    const submission = listingUpdateSubmission({
+      ...fields,
+      price: " ",
+      title: "",
+      brand: " ",
+      description: "",
+      images: "\n",
+      attributes: {
+        Orderable: { ShippingWeight: undefined },
+        Visible: { pieceCount: null, keyFeatures: " " },
       },
+    }, maintenanceSchema);
+    expect(submission).toEqual({});
+    expect(hasListingUpdateChanges(submission)).toBe(false);
+  });
+
+  it("preserves false, zero and explicit list values", () => {
+    for (const value of [false, 0, []]) {
+      const fields = initialListingUpdateFields(context);
+      fields.attributes.Visible = { custom: value };
+      const submission = listingUpdateSubmission(fields, {
+        properties: {
+          Orderable: { properties: {} },
+          Visible: { properties: { custom: {} } },
+        },
+      });
+      expect(submission.attributes?.Visible).toEqual({ custom: value });
+    }
+    expect(hasListingUpdateChanges({
+      attributes: { Visible: { missing: null, blank: "" } },
+    })).toBe(false);
+  });
+
+  it("includes complete compound values and does not alias the form state", () => {
+    const fields = initialListingUpdateFields(context);
+    fields.attributes.Visible = {
+      netContent: { productNetContentUnit: "Each", productNetContentMeasure: 2 },
       pieceCount: 200,
     };
-    expect(listingUpdateChanges(original, current)).toEqual({
-      attributes: {
-        Visible: {
-          netContent: {
-            productNetContentUnit: "Each",
-            productNetContentMeasure: 2,
-          },
-        },
-      },
+    const submission = listingUpdateSubmission(fields, maintenanceSchema);
+    expect(submission.attributes?.Visible).toEqual(fields.attributes.Visible);
+    const netContent = submission.attributes!.Visible!.netContent as Record<string, unknown>;
+    netContent.productNetContentMeasure = 99;
+    expect((fields.attributes.Visible as Record<string, unknown>).netContent).toEqual({
+      productNetContentUnit: "Each", productNetContentMeasure: 2,
     });
     expect(context.lastSubmitted?.attributes?.Visible?.netContent).toEqual({
-      productNetContentUnit: "Each",
-      productNetContentMeasure: 1,
+      productNetContentUnit: "Each", productNetContentMeasure: 1,
     });
   });
-  it("category changes do not copy the previous category's attributes", () => {
-    const original = initialListingUpdateFields(context);
-    expect(
-      listingUpdateChanges(original, {
-        ...original,
-        productType: "Other",
-        attributes: { Orderable: original.attributes.Orderable, Visible: {} },
-      }),
-    ).toEqual({});
+
+  it("does not restore the old type's fields after the editor clears them", () => {
+    const fields = initialListingUpdateFields(context);
+    fields.productType = "Other";
+    fields.attributes.Visible = {};
+    expect(listingUpdateSubmission(fields, maintenanceSchema)).toEqual({
+      ...expectedSubmission,
+      attributes: { Orderable: { ShippingWeight: 2 } },
+    });
   });
-  it("treats image order as intentional and validates each URL", () => {
-    const original = initialListingUpdateFields(context);
-    expect(
-      listingUpdateChanges(original, {
-        ...original,
-        images: "https://example.com/two.jpg\nhttps://example.com/one.jpg",
-      }),
-    ).toEqual({
+
+  it("includes image order and validates every populated URL", () => {
+    const fields = initialListingUpdateFields(context);
+    fields.images = "https://example.com/two.jpg\nhttps://example.com/one.jpg";
+    expect(listingUpdateSubmission(fields, maintenanceSchema)).toEqual({
+      ...expectedSubmission,
       images: ["https://example.com/two.jpg", "https://example.com/one.jpg"],
     });
-    expect(() =>
-      listingUpdateChanges(original, { ...original, images: "bad-url" }),
-    ).toThrow("images.0");
+    expect(() => listingUpdateSubmission({
+      ...fields, images: "bad-url",
+    }, maintenanceSchema)).toThrow("images.0");
   });
 });
