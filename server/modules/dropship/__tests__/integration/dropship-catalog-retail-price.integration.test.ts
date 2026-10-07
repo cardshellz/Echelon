@@ -12,7 +12,7 @@ const describeDatabase = testUrl && disposable ? describe : describe.skip;
 
 /** The catalog candidate read names only these; any other name fails the test. */
 const OBJECTS: ReadonlySet<string> = new Set([
-  "catalog.products", "catalog.product_variants", "catalog.product_line_products", "catalog.product_assets",
+  "catalog.products", "catalog.product_variants", "catalog.product_line_products",
   "ebay.ebay_category_mappings", "channels.channels", "public.shopify_variants",
 ]);
 
@@ -93,9 +93,6 @@ describeDatabase.sequential("catalog candidate retail price PostgreSQL guarantee
         requires_shipping boolean NOT NULL DEFAULT true, track_inventory boolean DEFAULT true,
         sales_eligibility varchar(30) NOT NULL DEFAULT 'sellable');
       CREATE TABLE catalog.product_line_products (product_id integer NOT NULL, product_line_id integer NOT NULL);
-      CREATE TABLE catalog.product_assets (id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, product_id integer NOT NULL,
-        product_variant_id integer, asset_type varchar(30) NOT NULL, url text, is_primary boolean NOT NULL DEFAULT false,
-        position integer NOT NULL DEFAULT 0);
       CREATE TABLE channels.channels (id integer PRIMARY KEY, name text, provider text, type text, status text);
       CREATE TABLE ebay.ebay_category_mappings (id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, channel_id integer NOT NULL,
         product_type_slug varchar(100) NOT NULL, ebay_browse_category_id varchar(50), ebay_browse_category_name text);
