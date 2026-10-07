@@ -5612,7 +5612,13 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           const expectedFulfilled = BigInt(command.wmsProgress.expectedFulfilledQuantity ?? 0);
           // Provider-declared packed quantities can precede the missing pick.
           // Only actual claim consumption, not that declaration, removes picked custody.
-          const expectedClaimPicked = expectedPicked - (command.wmsProgress.pickCorrectionId
+          // Label printing marks a box fulfilled before the carrier scan consumes
+          // its claim units, so fulfilled can run ahead of consumption. Picked
+          // custody then still holds those shipped units (#63891, 2026-10-07):
+          // accept it only when it is exactly picked - consumed, never more.
+          const consumptionPending = line.consumedTargetQty < expectedFulfilled
+            && line.pickedTargetQty === expectedPicked - line.consumedTargetQty;
+          const expectedClaimPicked = expectedPicked - (command.wmsProgress.pickCorrectionId || consumptionPending
             ? line.consumedTargetQty : expectedFulfilled);
           const resourcePicked = line.resources.reduce((sum, resource) => sum + resource.pickedQty, BigInt(0));
           const lotsMatchResources = line.resources.every((resource) =>

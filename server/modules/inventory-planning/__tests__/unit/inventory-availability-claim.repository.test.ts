@@ -841,14 +841,30 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       await expect(repository.pickClaimLine(partialFulfilledCommand)).resolves.toMatchObject({
         quantity: "2", totalCostMills: "250",
       });
-      const callsAfterFulfilledPick = writer.pickResources.mock.calls.length;
       await expect(repository.pickClaimLine({ ...partialFulfilledCommand, idempotencyKey: "pick:wrong-fulfilled-floor",
         wmsProgress: { ...partialFulfilledCommand.wmsProgress, expectedFulfilledQuantity: 0 } }))
         .rejects.toMatchObject({ code: "CLAIM_WMS_PICK_CUSTODY_MISMATCH" });
+      // #63891: label printing marked 2 of 3 fulfilled before the carrier scan
+      // consumed them, so the claim still holds those 2 picked units.
+      existingPicked = 2;
+      writer.pickResources.mockResolvedValue({ movements: [{
+        claimResourceId: BigInt(12), claimLotAllocationId: BigInt(21), inventoryLotId: 51,
+        quantity: BigInt(1), unitCostMills: BigInt(125), totalCostMills: BigInt(125),
+        orderItemCostId: 83, reversesPickMovementId: null,
+      }], totalCostMills: BigInt(125) });
+      const labelFulfilledCommand = { ...command, quantity: "1", idempotencyKey: "pick:after-label-fulfilled",
+        wmsProgress: { expectedStatus: "in_progress" as const, expectedPickedQuantity: 2,
+          expectedFulfilledQuantity: 2, targetStatus: "completed" as const, targetPickedQuantity: 3 } };
+      await expect(repository.pickClaimLine(labelFulfilledCommand)).resolves.toMatchObject({ quantity: "1" });
+      existingPicked = 1;
+      await expect(repository.pickClaimLine({ ...labelFulfilledCommand, idempotencyKey: "pick:custody-neither-floor" }))
+        .rejects.toMatchObject({ code: "CLAIM_WMS_PICK_CUSTODY_MISMATCH" });
+      existingPicked = 1;
+      const callsBeforeWrongBin = writer.pickResources.mock.calls.length;
       existingPickedLocation = 3;
       await expect(repository.pickClaimLine({ ...partialCommand, idempotencyKey: "pick:wrong-bin" }))
         .rejects.toMatchObject({ code: "CLAIM_PICK_PARTIAL_LOCATION_CONFLICT" });
-      expect(writer.pickResources).toHaveBeenCalledTimes(callsAfterFulfilledPick);
+      expect(writer.pickResources).toHaveBeenCalledTimes(callsBeforeWrongBin);
     }
 
   });
