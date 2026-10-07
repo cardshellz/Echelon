@@ -535,6 +535,8 @@ const HISTORICAL_CARRIER_DISPATCH_REPAIR_COHORTS = [
   "legacy_outbound_shipment_identity_conflict",
   "confirmed_historical_inventory_gap",
   "publication_revision_order",
+  "label_time_package_replay",
+  "split_sibling_relabel_misread",
 ] as const satisfies readonly HistoricalCarrierDispatchRepairCohort[];
 
 function historicalCarrierDispatchRepairCohort(
@@ -589,6 +591,21 @@ function historicalCarrierDispatchRepairCohortSql() {
         AND NULLIF(BTRIM(command.result_evidence ->> 'sourceMessage'), '') ~
           '^publication revision must be greater than existing revision [0-9]+$'
         THEN 'publication_revision_order'
+      -- Carrier dispatch re-recorded a package that label observation had
+      -- already recorded, so its units counted twice. Fixed 2026-10-06
+      -- (a7899a26: allocation replay); a rerun replays the record.
+      WHEN command.last_error_code = 'CARRIER_DISPATCH_APPLICATION_FAILED'
+        AND NULLIF(BTRIM(command.result_evidence ->> 'sourceCode'), '') = 'FULFILLMENT_AUTHORITY_EXCEEDED'
+        AND NULLIF(BTRIM(command.result_evidence ->> 'sourceMessage'), '') ~
+          '^Cannot allocate package [^ ]+ to OMS line [0-9]+: (physical_quantity_exceeds_paid_authority|physical_package_already_allocated)$'
+        THEN 'label_time_package_replay'
+      -- The second box of a ShipStation split line was measured against the
+      -- row its first sibling had already shrunk, and read as a relabel of
+      -- that sibling. Fixed 2026-10-06 (a7899a26: original source capacity).
+      WHEN command.last_error_code = 'CARRIER_DISPATCH_APPLICATION_FAILED'
+        AND NULLIF(BTRIM(command.result_evidence ->> 'sourceCode'), '') IS NULL
+        AND command.last_error_message = 'replaced_label_has_carrier_possession'
+        THEN 'split_sibling_relabel_misread'
       ELSE NULL
     END
   `;
@@ -616,7 +633,9 @@ function historicalCarrierDispatchRepairEligibilitySql(
         'aggregate_package_identity_conflict',
         'immutable_command_request_conflict',
         'legacy_outbound_shipment_identity_conflict',
-        'publication_revision_order'
+        'publication_revision_order',
+        'label_time_package_replay',
+        'split_sibling_relabel_misread'
       )
       OR (
         ${commandId}::bigint IS NOT NULL
