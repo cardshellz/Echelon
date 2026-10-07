@@ -1,0 +1,158 @@
+{
+  "id": "gid://shopify/CalculatedOrder/200",
+  "originalOrder": {
+    "id": "gid://shopify/Order/100"
+  },
+  "totalPriceSet": {
+    "presentmentMoney": {
+      "amount": "187.98",
+      "currencyCode": "USD"
+    },
+    "shopMoney": {
+      "amount": "187.98",
+      "currencyCode": "USD"
+    }
+  },
+  "totalOutstandingSet": {
+    "presentmentMoney": {
+      "amount": "0.0",
+      "currencyCode": "USD"
+    },
+    "shopMoney": {
+      "amount": "0.0",
+      "currencyCode": "USD"
+    }
+  },
+  "cartDiscountAmountSet": {
+    "presentmentMoney": {
+      "amount": "9.99",
+      "currencyCode": "USD"
+    },
+    "shopMoney": {
+      "amount": "9.99",
+      "currencyCode": "USD"
+    }
+  },
+  "subtotalPriceSet": {
+    "presentmentMoney": {
+      "amount": "187.98",
+      "currencyCode": "USD"
+    },
+    "shopMoney": {
+      "amount": "187.98",
+      "currencyCode": "USD"
+    }
+  },
+  "taxLines": [],
+  "shippingLines": [
+    {
+      "id": "gid://shopify/CalculatedShippingLine/900",
+      "price": {
+        "presentmentMoney": {
+          "amount": "9.99",
+          "currencyCode": "USD"
+        },
+        "shopMoney": {
+          "amount": "9.99",
+          "currencyCode": "USD"
+        }
+      },
+      "stagedStatus": "NONE"
+    }
+  ],
+  "lineItems": {
+    "nodes": [
+      {
+        "id": "gid://shopify/CalculatedLineItem/501",
+        "title": "Magnetic Holder 100PT",
+        "variantTitle": "Box of 25 Holders",
+        "quantity": 1,
+        "editableQuantityBeforeChanges": 1,
+        "editableSubtotalSet": {
+          "presentmentMoney": {
+            "amount": "47.99",
+            "currencyCode": "USD"
+          },
+          "shopMoney": {
+            "amount": "47.99",
+            "currencyCode": "USD"
+          }
+        },
+        "variant": {
+          "id": "gid://shopify/ProductVariant/10"
+        },
+        "originalUnitPriceSet": {
+          "presentmentMoney": {
+            "amount": "47.99",
+            "currencyCode": "USD"
+          },
+          "shopMoney": {
+            "amount": "47.99",
+            "currencyCode": "USD"
+          }
+        },
+        "discountedUnitPriceSet": {
+          "presentmentMoney": {
+            "amount": "47.99",
+            "currencyCode": "USD"
+          },
+          "shopMoney": {
+            "amount": "47.99",
+            "currencyCode": "USD"
+          }
+        },
+        "calculatedDiscountAllocations": []
+      },
+      {
+        "id": "gid://shopify/CalculatedLineItem/502",
+        "title": "35PT 3x4 Premium Toploader - UV Shield - Blue Hint",
+        "variantTitle": "Case of 1000 (40 packs of 25)",
+        "quantity": 1,
+        "editableQuantityBeforeChanges": 1,
+        "editableSubtotalSet": {
+          "presentmentMoney": {
+            "amount": "139.99",
+            "currencyCode": "USD"
+          },
+          "shopMoney": {
+            "amount": "139.99",
+            "currencyCode": "USD"
+          }
+        },
+        "variant": {
+          "id": "gid://shopify/ProductVariant/20"
+        },
+        "originalUnitPriceSet": {
+          "presentmentMoney": {
+            "amount": "139.99",
+            "currencyCode": "USD"
+          },
+          "shopMoney": {
+            "amount": "139.99",
+            "currencyCode": "USD"
+          }
+        },
+        "discountedUnitPriceSet": {
+          "presentmentMoney": {
+            "amount": "139.99",
+            "currencyCode": "USD"
+          },
+          "shopMoney": {
+            "amount": "139.99",
+            "currencyCode": "USD"
+          }
+        },
+        "calculatedDiscountAllocations": []
+      }
+    ],
+    "pageInfo": {
+      "hasNextPage": false
+    }
+  },
+  "addedLineItems": {
+    "nodes": [],
+    "pageInfo": {
+      "hasNextPage": false
+    }
+  }
+}

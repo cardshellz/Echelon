@@ -59,7 +59,7 @@ export const PRICING_PROVENANCE_QUERY = `query EchelonEditPricingProvenance {
   } } pageInfo { hasNextPage } }
 }`;
 export const CALCULATED_FIELDS = `id originalOrder { id } totalPriceSet { ${MONEY} } totalOutstandingSet { ${MONEY} }
-  subtotalPriceSet { ${MONEY} } cartDiscountAmountSet { ${MONEY} } taxLines { priceSet { ${MONEY} } }
+  subtotalPriceSet { ${MONEY} } taxLines { priceSet { ${MONEY} } }
   shippingLines { id price { ${MONEY} } stagedStatus }
   lineItems(first: 250) { nodes { id title variantTitle quantity editableQuantityBeforeChanges editableSubtotalSet { ${MONEY} } variant { id }
     originalUnitPriceSet { ${MONEY} } discountedUnitPriceSet { ${MONEY} }
