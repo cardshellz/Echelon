@@ -32,7 +32,7 @@ interface Props {
     onChange: (value: number | undefined) => boolean,
     accessibility: { id: string; describedBy?: string },
   ): React.ReactNode;
-  mode?: "item" | "patch";
+  mode?: "item" | "patch" | "maintenance";
   disabled?: boolean;
 }
 
@@ -525,7 +525,7 @@ export function SchemaFields({
         className={`rounded-lg border p-3 ${mode === "item" && model.missing.length ? "border-destructive/25 bg-destructive/5" : "border-primary/20 bg-primary/5"}`}
       >
         <p className="flex items-start gap-2 text-sm font-medium">
-          {mode === "patch" ? (
+          {mode !== "item" ? (
             <Info
               aria-hidden="true"
               className="mt-0.5 h-4 w-4 shrink-0 text-primary"
@@ -544,9 +544,11 @@ export function SchemaFields({
           <span>
             {mode === "patch"
               ? "Only fields you change here are applied. Required labels describe listing requirements; Review checks each item."
-              : model.missing.length
-                ? model.missing.length + " required fields need attention"
-                : "Required fields shown here are filled. Review checks the complete listing."}
+              : mode === "maintenance"
+                ? "All populated fields are included when you review this listing. Review checks Walmart's requirements."
+                : model.missing.length
+                  ? model.missing.length + " required fields need attention"
+                  : "Required fields shown here are filled. Review checks the complete listing."}
           </span>
         </p>
         {mode === "item" && model.missing.length > 0 && (

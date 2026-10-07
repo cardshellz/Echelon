@@ -11,6 +11,17 @@ const BASE = "/api/channels/77";
 const status = { channelId: 77, connectionId: 9, partnerId: "10002558022", partnerName: "Card Shellz", environment: "production",
   shipNodeId: "10002558022", warehouseId: 1, ordersEnabled: true, importSince: "2026-09-13T11:46:00.000Z",
   lastPollAt: null, lastSuccessAt: null, lastErrorCode: null, revision: 1, mappedSkus: 0 };
+const completeListingSubmission = {
+  priceCents: 2499,
+  title: "55PT Toploader Essentials Clear+ Easy Glide Combo Pack",
+  description: "A previous description",
+  brand: "Shellz",
+  images: ["https://example.com/front.jpg", "https://example.com/back.jpg"],
+  attributes: {
+    Orderable: { ShippingWeight: 2 },
+    Visible: { pieceCount: 200, keyFeatures: ["Clear sleeves", "Archival material", "Pack of 100"] },
+  },
+};
 const listing = (sku: string, matched = true): ChannelCatalogRow => ({ sku, title: `Product ${sku}`, externalProductId: `WPID-${sku}`,
   externalVariantId: sku, externalInventoryItemId: sku, lifecycleStatus: "ACTIVE", publishedStatus: "PUBLISHED",
   mappingStatus: matched ? "matched" : "unmatched", variant: matched ? { id: 11, sku, name: "Card sleeves", eligible: true } : null, message: null });
@@ -61,7 +72,7 @@ async function setup(page: Page, options: { readOnly?: boolean; connected?: bool
   await expect(page.getByText("Store Setup", { exact: true })).toBeVisible();
   return state;
 }
-test("existing listing edits review only changed prices and check the maintenance feed status", async ({ page }, info) => {
+test("existing listing edits include unchanged product content and shipping with a price edit", async ({ page }, info) => {
   const state = await setup(page, { remoteRows: [{ ...listing("CARD-P5"), mappingStatus: "linked", publishedStatus: "SYSTEM_PROBLEM" }] });
   state.publication.operations = [listingOperationSchema.parse({
     id: "22222222-2222-4222-8222-222222222222", channelId: 77, state: "processing", submissionId: "feed-1",
@@ -88,7 +99,10 @@ test("existing listing edits review only changed prices and check the maintenanc
   expect(state.updates.writes).toEqual([]);
   await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
   await expect(dialog.getByText("$27.49", { exact: true })).toBeVisible();
-  expect(state.updates.writes[0]).toEqual({ path: `${UPDATE_BASE}/review`, body: { sku: "CARD-P5", sourceHash: "a".repeat(64), productType: "Trading Card Sleeves & Holders", changes: { priceCents: 2749 } } });
+  expect(state.updates.writes[0]).toEqual({ path: `${UPDATE_BASE}/review`, body: {
+    sku: "CARD-P5", sourceHash: "a".repeat(64), productType: "Trading Card Sleeves & Holders",
+    changes: { ...completeListingSubmission, priceCents: 2749 },
+  } });
   expect(state.updates.updates).toEqual([]);
   await dialog.getByRole("button", { name: "Send changes to Walmart", exact: true }).click();
   await expect(dialog).toHaveCount(0);
@@ -114,7 +128,10 @@ test("existing listing edits show the actual category and edit shipping while pr
   await dialog.screenshot({ path: info.outputPath("existing-listing-shipping.png") });
   expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
-  expect(state.updates.reviews[0]).toMatchObject({ productType: "Trading Card Sleeves & Holders", changes: { attributes: { Orderable: { ShippingWeight: 3 } } } });
+  expect(state.updates.reviews[0].changes).toEqual({
+    ...completeListingSubmission,
+    attributes: { ...completeListingSubmission.attributes, Orderable: { ShippingWeight: 3 } },
+  });
   await dialog.getByRole("button", { name: "Back to edit", exact: true }).click();
   await expect(dialog.getByLabel("Walmart price (USD)", { exact: true })).toHaveValue("24.99");
   expect(state.updates.updates).toEqual([]); expect(state.errors).toEqual([]);
@@ -130,12 +147,8 @@ test("accepted feeds show category mismatch and recheck the item without another
   // Regression: a one-cent edit with the prefilled correct type previously sent
   // only price and an empty Visible object while Walmart still reported default.
   expect(state.updates.reviews[0].changes).toEqual({
+    ...completeListingSubmission,
     priceCents: 2498,
-    title: "55PT Toploader Essentials Clear+ Easy Glide Combo Pack",
-    description: "A previous description",
-    brand: "Shellz",
-    images: ["https://example.com/front.jpg", "https://example.com/back.jpg"],
-    attributes: { Visible: { pieceCount: 200, keyFeatures: ["Clear sleeves", "Archival material", "Pack of 100"] } },
   });
   await dialog.getByRole("button", { name: "Send changes to Walmart", exact: true }).click();
   const region = page.getByRole("region", { name: "Listing changes", exact: true });
@@ -161,22 +174,18 @@ test("accepted feeds show category mismatch and recheck the item without another
   expect(state.errors).toEqual([]);
 });
 
-test("existing listing edits resubmit retained content under the selected type without changing price or inventory", async ({ page }, info) => {
+for (const reportedType of ["Trading Card Sleeves & Holders", "default"]) {
+test(`existing listing edits send every populated field without edits when Walmart reports ${reportedType}`, async ({ page }, info) => {
   const state = await setup(page);
-  state.updates.reportedProductType = "default";
+  state.updates.reportedProductType = reportedType;
   await page.getByRole("button", { name: "Edit listing CARD-P5", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
-  expect(state.updates.reviews[0].changes).toEqual({
-    title: "55PT Toploader Essentials Clear+ Easy Glide Combo Pack",
-    description: "A previous description",
-    brand: "Shellz",
-    images: ["https://example.com/front.jpg", "https://example.com/back.jpg"],
-    attributes: { Visible: { pieceCount: 200, keyFeatures: ["Clear sleeves", "Archival material", "Pack of 100"] } },
-  });
+  expect(state.updates.reviews[0].changes).toEqual(completeListingSubmission);
   await expect(dialog.getByText("Stock quantities stay unchanged.", { exact: false })).toBeVisible();
   await expect(dialog.getByText("https://example.com/front.jpg", { exact: false })).toBeVisible();
-  await expect(dialog.getByText("Shipping Weight", { exact: false })).toHaveCount(0);
+  await expect(dialog.getByText("Shipping Weight (lbs)", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("$24.99", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Send changes to Walmart", exact: true })).toBeInViewport({ ratio: 0.99 });
   await dialog.screenshot({ path: info.outputPath("walmart-content-resubmission-review.png") });
   expect(state.updates.updates).toEqual([]);
@@ -185,6 +194,7 @@ test("existing listing edits resubmit retained content under the selected type w
   expect(state.publication.writes).toEqual([]);
   expect(state.errors).toEqual([]);
 });
+}
 
 test("existing listing edits reuse the command after a lost submission response and block a second in-flight update", async ({ page }) => {
   const state = await setup(page); state.updates.loseSubmissionResponse = true;
