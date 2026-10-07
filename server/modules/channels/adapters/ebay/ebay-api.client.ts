@@ -9,6 +9,7 @@
  * - Request/response logging for debugging
  */
 
+import { EbayApiRequestError, isMissingEbayInventoryResource } from "./ebay-api-error";
 import type { EbayAuthService } from "./ebay-auth.service";
 import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provider.error";
 import { replaceEbayPackageTracking, type EbayTrackingReplacementBatch } from "./ebay-package-tracking-replacement";
@@ -173,7 +174,7 @@ export class EbayApiClient {
         path: `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
       });
     } catch (err: any) {
-      if (err.message?.includes("404")) return null;
+      if (isMissingEbayInventoryResource(err)) return null;
       throw err;
     }
   }
@@ -317,11 +318,20 @@ export class EbayApiClient {
   // Inventory API — Inventory Item Groups (Multi-Variation)
   // -------------------------------------------------------------------------
 
-  /**
-   * Create or replace an inventory item group.
-   * PUT /sell/inventory/v1/inventory_item_group/{inventoryItemGroupKey}
-   * Idempotent.
-   */
+  /** Read current group photos; only a missing group returns null. */
+  async getInventoryItemGroup(groupKey: string): Promise<EbayInventoryItemGroup | null> {
+    try {
+      return await this.request<EbayInventoryItemGroup>({
+        method: "GET",
+        path: `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`,
+      });
+    } catch (error) {
+      if (isMissingEbayInventoryResource(error)) return null;
+      throw error;
+    }
+  }
+
+  /** Replace a group at its exact key, through the existing quantity admission boundary. */
   async createOrReplaceInventoryItemGroup(
     groupKey: string,
     group: Omit<EbayInventoryItemGroup, "inventoryItemGroupKey">,
@@ -1015,8 +1025,8 @@ export class EbayApiClient {
               .join("; ") || errorBody;
           } catch { /* use raw body */ }
 
-          throw new Error(
-            `eBay API ${method} ${path} failed (${response.status}): ${errorDetail}`,
+          throw new EbayApiRequestError(
+            response.status, `eBay API ${method} ${path} failed (${response.status}): ${errorDetail}`, errorBody,
           );
         }
 

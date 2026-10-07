@@ -7,6 +7,7 @@
  * 3. Listing Feed (products ready to list)
  */
 
+import { ebayProductSyncResultSchema } from "@shared/types/ebay-listing-sync";
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChannelWorkspaceHeader } from "@/components/channels/ChannelWorkspaceHeader";
@@ -691,18 +692,22 @@ export default function EbayChannelPage() {
   const syncProductMutation = useMutation({
     mutationFn: async (productId: number) => {
       const resp = await apiRequest("POST", `/api/ebay/listings/sync-product/${productId}`);
-      return resp.json();
+      return ebayProductSyncResultSchema.parse(await resp.json());
     },
-    onSuccess: (data: any, productId: number) => {
+    onSuccess: (data, productId: number) => {
       setSyncingProductIds((prev) => { const next = new Set(prev); next.delete(productId); return next; });
       const { synced, priceChanges, qtyChanges, errors } = data;
       const changes: string[] = [];
       if (priceChanges > 0) changes.push(`${priceChanges} price`);
       if (qtyChanges > 0) changes.push(`${qtyChanges} qty`);
       const changeStr = changes.length > 0 ? `: ${changes.join(", ")} updated` : "";
+      const errorMessage = data.details.find(detail => !detail.success && detail.error)?.error;
       toast({
-        title: "Product Synced",
-        description: `Synced ${synced} variant${synced !== 1 ? "s" : ""}${changeStr}`,
+        title: errors > 0 ? (synced > 0 ? "Sync Incomplete" : "Sync Failed") : (synced > 0 ? "Product Synced" : "Nothing to Sync"),
+        description: errors > 0
+          ? `${synced} variant${synced !== 1 ? "s" : ""} synced; ${errors} error${errors !== 1 ? "s" : ""}. ${errorMessage || "Check the listing error and retry."}`
+          : `Synced ${synced} variant${synced !== 1 ? "s" : ""}${changeStr}`,
+        ...(errors > 0 ? { variant: "destructive" as const } : {}),
       });
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });

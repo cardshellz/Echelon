@@ -78,11 +78,11 @@ const publicUrl = createCatalogPublicImageUrl({ CATALOG_PUBLIC_BASE_URL: "https:
     const reader = new PgCatalogVariantPublicationPhotoReader(database.pool, publicUrl);
     const photos = await reader.listPublicationPhotos({ productVariantIds: [10, 20], maxPhotosPerVariant: 20 });
     expect(photos.get(10)?.photos).toEqual([
-      { assetId: 2, url: `https://catalog.example.com/api/catalog/images/2/${sha256(png)}.png`, uploaded: true },
-      { assetId: 4, url: "https://cdn.example.com/size-10.jpg", uploaded: false },
-      { assetId: 1, url: "https://cdn.example.com/p-2.jpg", uploaded: false },
-      { assetId: 7, url: "https://cdn.example.com/both-4.jpg", uploaded: false },
-      { assetId: 8, url: `https://catalog.example.com/api/catalog/images/8/${sha256(gif)}.gif`, uploaded: true },
+      { assetId: 2, position: 0, url: `https://catalog.example.com/api/catalog/images/2/${sha256(png)}.png`, uploaded: true },
+      { assetId: 4, position: 1, url: "https://cdn.example.com/size-10.jpg", uploaded: false },
+      { assetId: 1, position: 3, url: "https://cdn.example.com/p-2.jpg", uploaded: false },
+      { assetId: 7, position: 5, url: "https://cdn.example.com/both-4.jpg", uploaded: false },
+      { assetId: 8, position: 6, url: `https://catalog.example.com/api/catalog/images/8/${sha256(gif)}.gif`, uploaded: true },
     ]);
     expect(photos.get(10)?.issues).toEqual([expect.objectContaining({ assetId: 6, code: "CATALOG_IMAGE_UNAVAILABLE" })]);
     expect(photos.get(20)).toEqual({ photos: [], issues: [expect.objectContaining({ assetId: 10, code: "IMAGE_FORMAT_UNSUPPORTED" })] });

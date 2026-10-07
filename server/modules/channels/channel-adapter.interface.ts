@@ -27,6 +27,8 @@ export interface ChannelListingPayload {
   status: "active" | "draft" | "archived";
   variants: ChannelVariantPayload[];
   images: ChannelImagePayload[];
+  /** Full-replacement APIs must preserve current photos when Echelon does not own this field. */
+  imageSyncMode?: "replace" | "preserve";
   /** Channel-specific metadata (item specifics, listing format, etc.) */
   metadata?: Record<string, unknown>;
 }

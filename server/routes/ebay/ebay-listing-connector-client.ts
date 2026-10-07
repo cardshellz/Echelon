@@ -15,6 +15,10 @@ import type {
 import { ebayApiRequest, ebayApiRequestWithRateNotify, getAuthService, EBAY_CHANNEL_ID } from "./ebay-utils";
 import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityHttpRequest, type EbayQuantityRequestAdmission } from "../../modules/channels/quantity-publication-request";
 
+import { isMissingEbayInventoryResource } from "../../modules/channels/adapters/ebay/ebay-api-error";
+import { readExistingEbayListingPhotos } from "../../modules/channels/adapters/ebay/ebay-listing-photos.reader";
+import type { EbayListingPhotoPlan, EbayPhotoVariant } from "../../modules/channels/ebay-listing-photos.domain";
+
 const ebayListingConnector = new EbayMarketplaceListingConnector();
 
 const ebayObservedOfferSchema = z.object({
@@ -96,8 +100,7 @@ export function createEbayRouteListingClient(
           `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
         );
       } catch (error: any) {
-        const message = String(error?.message ?? "");
-        if (message.includes("404") || message.includes("25710")) {
+        if (isMissingEbayInventoryResource(error)) {
           return null;
         }
         throw error;
@@ -181,8 +184,7 @@ export function createEbayRouteListingLifecycleClient(
           `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`,
         );
       } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (message.includes("404") || message.includes("25710")) return null;
+        if (isMissingEbayInventoryResource(error)) return null;
         throw error;
       }
     },
@@ -235,4 +237,11 @@ export async function getExistingEbayInventoryImageUrls(input: {
     client: createEbayRouteListingClient({ accessToken: input.accessToken }),
     sku: input.sku,
   });
+}
+
+/** Read each exact SKU and its listing group through the same external photo reader as the adapter. */
+export async function getExistingEbayListingPhotos(input: {
+  accessToken: string; groupKey: string; variants: readonly EbayPhotoVariant[];
+}): Promise<EbayListingPhotoPlan> {
+  return readExistingEbayListingPhotos(createEbayRouteListingLifecycleClient({ accessToken: input.accessToken }), input);
 }
