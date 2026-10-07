@@ -11,7 +11,7 @@ import { evaluateListingPriceAgainstCost } from "../domain/listing-price-cost";
 import { evaluateListingPricingPolicy, type DropshipListingPreviewRepository, type DropshipListingCatalogCandidate } from "./dropship-listing-preview-service";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
 import type { DropshipProductCostReader } from "./dropship-product-cost";
-import { pricingHash, resolveListingRulePrice } from "./dropship-rule-price";
+import { createRulePriceResolver, pricingHash } from "./dropship-rule-price";
 
 export interface StoredPricingReview {
   id: string; input: ReviewPricingRulesInput; rows: PricingImpactRow[]; hash: string; createdAt: Date;
@@ -112,18 +112,21 @@ export class DropshipPricingRulesService {
     const savedById = new Map(saved.map((row) => [row.productVariantId, row]));
     const listingById = new Map(listings.map((row) => [row.productVariantId, row]));
     const proposed: PricingProfileState = { revisionId: input.expectedRevisionId, profile: input.profile, updatedAt: null };
+    // One resolver per profile for the whole review: each hashes its profile once, not once per size.
+    const currentRules = createRulePriceResolver({ state: current });
+    const proposedRules = createRulePriceResolver({ state: proposed });
     return selected.map((candidate) => {
       const setting = savedById.get(candidate.productVariantId) ?? null;
       const existing = listingById.get(candidate.productVariantId)?.vendorRetailPriceCents ?? null;
       const cost = costs.get(candidate.productVariantId) ?? null;
       const productCostCents = cost?.status === "available" ? cost.unitCostCents : null;
-      const oldRule = current.profile ? resolveListingRulePrice({ state: current, candidate, cost }) : null;
+      const oldRule = currentRules.configured ? currentRules.price(candidate, cost) : null;
       const old = resolveListingPrice({ saved: setting, existingListingPriceCents: existing,
         defaultPriceCents: candidate.defaultRetailPriceCents, rulePrice: oldRule });
       // Only a typed price is preserved. A price an earlier push saved on the
       // listing was derived, not chosen, so the rules replace it.
       const preserved = !input.releaseFixedOverrides && isTypedListingPrice(setting);
-      const rule = resolveListingRulePrice({ state: proposed, candidate, cost });
+      const rule = proposedRules.price(candidate, cost);
       const priceCents = preserved ? old.effectivePriceCents : rule.priceCents;
       // A preserved row is not changed by applying, so like its issues, its
       // notes and basis describe nothing the vendor is about to do.
