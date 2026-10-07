@@ -327,7 +327,6 @@ export class WalmartListingProvider implements ListingPublicationProvider {
       );
     const offer = {
       ...orderable,
-      ...(feedType === "MP_ITEM" ? { specProductType: draft.productType } : {}),
       sku,
       productIdentifiers: {
         productIdType: identifier.type,

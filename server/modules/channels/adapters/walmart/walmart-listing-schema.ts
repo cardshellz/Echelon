@@ -67,64 +67,17 @@ export function itemSections(
   };
 }
 
-/** Walmart's new-item MP_ITEM example includes Orderable.specProductType, but its
- * 5.0.20260803-17_50_56-api spec endpoint and published schema omit that property
- * while disallowing additional properties (verified 2026-10-05). Admit only this
- * documented selector, bound to the selected Visible branch; retain every other
- * provider constraint. Do not modify the provider document or the editor schema.
- * https://developer.walmart.com/us-marketplace/docs/create-a-new-item-full-item-setup
- */
+/** Validate against the provider schema unchanged. Live MP_ITEM and maintenance
+ * feeds reject specProductType despite examples that include it. The selected
+ * product type belongs in the schema-declared Visible branch, not an invented
+ * Orderable field or a local exception to additionalProperties. */
 export function listingSubmissionSchema(
   schema: JsonObject,
   feedType: WalmartItemSchemaFeedType,
   productType: string,
 ): JsonObject {
-  if (feedType === "MP_ITEM_MATCH") return schema;
-  if (feedType === "MP_MAINTENANCE") {
-    // The live maintenance feed rejects specProductType (verified 2026-10-06).
-    // Validate the selected Visible branch exists, then use Walmart's schema
-    // unchanged. The new-item exception below must not relax update validation.
-    itemSections(schema, feedType, productType);
-    return schema;
-  }
-  const rootProperties = jsonObject(schema.properties);
-  const items = jsonObject(rootProperties.MPItem);
-  const item = jsonObject(items.items);
-  const properties = jsonObject(item.properties);
-  // Require the provider to recognize this exact product type before extending
-  // the orderable section. A UI label alone cannot authorize a new schema branch.
-  const { orderable } = itemSections(schema, feedType, productType);
-  const orderableProperties = jsonObject(orderable.properties);
-  const required = orderable.required === undefined ? [] : orderable.required;
-  if (!Array.isArray(required) || required.some((name) => typeof name !== "string")) {
-    throw new WalmartApiError("WALMART_LISTING_SCHEMA_INVALID", "Walmart returned invalid required listing fields", false);
-  }
-  const selector = orderableProperties.specProductType === undefined
-    ? { type: "string" }
-    : jsonObject(orderableProperties.specProductType);
-  return {
-    ...schema,
-    properties: {
-      ...rootProperties,
-      MPItem: {
-        ...items,
-        items: {
-          ...item,
-          properties: {
-            ...properties,
-            Orderable: {
-              ...orderable,
-              properties: {
-                ...orderableProperties,
-                specProductType: { allOf: [selector, { const: productType }] },
-              },
-              required: [...new Set([...required, "specProductType"])],
-            },
-          },
-        },
-      },
-    },
-  };
+  if (feedType !== "MP_ITEM_MATCH") itemSections(schema, feedType, productType);
+  return schema;
 }
 
 const EDITOR_SCHEMA_LIMITS = { depth: 32, nodes: 30_000 } as const;
