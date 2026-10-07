@@ -12,6 +12,8 @@ export interface CatalogPublicationImage {
   productId: number;
   productVariantId: number | null;
   position: number;
+  /** Catalog order assigned once across product/size images by the size publication query. */
+  publicationPosition?: number;
   url: string | null;
   storageType: string;
   mimeType: string | null;
@@ -68,6 +70,8 @@ export interface CatalogPublicationImageIssue {
 export interface CatalogPublicationPhoto {
   assetId: number;
   url: string;
+  /** Catalog gallery order, including primary status and channel position overlays. */
+  position: number;
   /** True when the URL is the public address of an uploaded file. */
   uploaded: boolean;
 }
@@ -82,7 +86,7 @@ export function resolveCatalogPublicationPhotos(
   for (const image of images) {
     try {
       const url = resolveCatalogPublicationImage(image, publicUrl);
-      if (url !== null) photos.push({ assetId: image.id, url, uploaded: image.url === null });
+      if (url !== null) photos.push({ assetId: image.id, url, position: image.publicationPosition ?? image.position, uploaded: image.url === null });
     } catch (error) {
       if (!(error instanceof ProductAssetError)) throw error;
       issues.push({ assetId: image.id, code: error.code, message: error.message });
@@ -100,6 +104,41 @@ export function resolveCatalogPublicationImages(
   return { images: photos.map((photo) => photo.url), issues };
 }
 
+/** An explicit audience selection; Catalog does not know which channel supplied it. */
+export interface CatalogPublicationImageOverride {
+  assetId: number;
+  included: boolean;
+  urlOverride: string | null;
+  positionOverride: number | null;
+}
+
+export interface CatalogPublicationPhotoSelection {
+  productVariantIds: readonly number[];
+  maxPhotosPerVariant: number;
+  productId?: number;
+  overrides?: readonly CatalogPublicationImageOverride[];
+}
+
+/** Identity-only read: other owners can load their own overlays without joining Catalog tables. */
+export async function readCatalogPublicationPhotoScope(
+  database: Pick<PoolClient, "query">,
+  productId: number,
+): Promise<{ variants: { variantId: number; sku: string | null }[]; assetIds: number[] }> {
+  if (!Number.isInteger(productId) || productId <= 0 || productId > MAX_CATALOG_ID) {
+    throw new ProductAssetError("CATALOG_IMAGE_SCOPE_INVALID", "Select a valid catalog product for its photos.", 422);
+  }
+  const result = await database.query<{ variants: { variantId: number; sku: string | null }[]; assetIds: number[] }>(`
+    SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('variantId', id, 'sku', sku) ORDER BY id)
+        FROM catalog.product_variants WHERE product_id=$1), '[]'::jsonb) AS variants,
+      ARRAY(SELECT id FROM catalog.product_assets WHERE product_id=$1 AND asset_type='image' ORDER BY id) AS "assetIds"
+    FROM catalog.products WHERE id=$1
+  `, [productId]);
+  if (result.rows.length !== 1) {
+    throw new ProductAssetError("CATALOG_IMAGE_SCOPE_INVALID", "The catalog product for these photos no longer exists.", 422);
+  }
+  return result.rows[0];
+}
+
 /** The largest catalog asset or variant id (PostgreSQL integer). */
 const MAX_CATALOG_ID = 2_147_483_647;
 
@@ -115,51 +154,75 @@ const MAX_CATALOG_ID = 2_147_483_647;
  */
 export async function readCatalogVariantPublicationImages(
   database: Pick<PoolClient, "query">,
-  input: { productVariantIds: readonly number[]; maxPhotosPerVariant: number },
+  input: CatalogPublicationPhotoSelection,
 ): Promise<Map<number, CatalogPublicationImage[]>> {
   if (input.productVariantIds.some((id) => !Number.isInteger(id) || id <= 0 || id > MAX_CATALOG_ID)
     || !Number.isSafeInteger(input.maxPhotosPerVariant) || input.maxPhotosPerVariant <= 0) {
     throw new ProductAssetError("CATALOG_IMAGE_READ_INVALID", "Catalog photos were requested with invalid sizes or an invalid photo limit.", 500);
   }
+  if (input.productId !== undefined && (!Number.isInteger(input.productId) || input.productId <= 0 || input.productId > MAX_CATALOG_ID)) {
+    throw new ProductAssetError("CATALOG_IMAGE_READ_INVALID", "Catalog photo product scope is invalid.", 500);
+  }
+  const overrides = input.overrides ?? [];
+  if (new Set(overrides.map(override => override.assetId)).size !== overrides.length || overrides.some(override =>
+    !Number.isInteger(override.assetId) || override.assetId <= 0 || override.assetId > MAX_CATALOG_ID
+    || typeof override.included !== "boolean"
+    || (override.urlOverride !== null && (typeof override.urlOverride !== "string" || !override.urlOverride.trim()))
+    || (override.positionOverride !== null && (!Number.isInteger(override.positionOverride) || override.positionOverride < 0)))) {
+    throw new ProductAssetError("CATALOG_IMAGE_READ_INVALID", "Catalog photo overrides are invalid.", 500);
+  }
   const productVariantIds = [...new Set(input.productVariantIds)];
   const byVariantId = new Map<number, CatalogPublicationImage[]>(productVariantIds.map((id) => [id, []]));
   if (productVariantIds.length === 0) return byVariantId;
   const result = await database.query<CatalogPublicationImage & { forProductVariantId: number }>(`
-    WITH ranked AS (
-      SELECT pv.id AS variant_id, pa.id AS asset_id,
-        ROW_NUMBER() OVER (
-          PARTITION BY pv.id ORDER BY pa.is_primary DESC, pa.position ASC, pa.id ASC
-        ) AS photo_rank
+    WITH overrides AS (
+      SELECT * FROM jsonb_to_recordset($4::jsonb)
+        AS o(asset_id integer, included boolean, url_override text, position_override integer)
+    ), candidates AS (
+      -- Assign Catalog order once. Per-size galleries and the listing group use this same order.
+      SELECT pa.id AS asset_id, pa.product_id, pa.product_variant_id,
+        ROW_NUMBER() OVER (ORDER BY pa.product_id, pa.is_primary DESC, COALESCE(o.position_override, pa.position) ASC, pa.id ASC) - 1 AS publication_position
+      FROM catalog.product_assets pa
+      LEFT JOIN overrides o ON o.asset_id = pa.id
+      WHERE pa.product_id IN (SELECT product_id FROM catalog.product_variants WHERE id = ANY($1::int[]))
+        AND pa.asset_type = 'image' AND ($5::int IS NULL OR pa.product_id = $5) AND COALESCE(o.included, true)
+        AND (COALESCE(o.url_override, NULLIF(BTRIM(pa.url), '')) IS NOT NULL OR pa.storage_type IN ('file', 'both'))
+    ), ranked AS (
+      SELECT pv.id AS variant_id, candidates.asset_id, candidates.publication_position,
+        ROW_NUMBER() OVER (PARTITION BY pv.id ORDER BY candidates.publication_position) AS photo_rank
       FROM catalog.product_variants pv
-      INNER JOIN catalog.product_assets pa ON pa.product_id = pv.product_id
-      WHERE pv.id = ANY($1::int[]) AND pa.asset_type = 'image'
-        AND (pa.product_variant_id IS NULL OR pa.product_variant_id = pv.id)
-        AND (NULLIF(BTRIM(pa.url), '') IS NOT NULL OR pa.storage_type IN ('file', 'both'))
+      INNER JOIN candidates ON candidates.product_id = pv.product_id
+      WHERE pv.id = ANY($1::int[])
+        AND (candidates.product_variant_id IS NULL OR candidates.product_variant_id = pv.id)
     ), kept AS (
-      SELECT variant_id, asset_id, photo_rank FROM ranked WHERE photo_rank <= $2
+      SELECT variant_id, asset_id, publication_position, photo_rank FROM ranked WHERE photo_rank <= $2
     ), photos AS MATERIALIZED (
       -- One row per photo: a product photo that several sizes share is hashed once.
-      SELECT pa.id, pa.product_id, pa.product_variant_id, pa.position, pa.storage_type, pa.mime_type,
-        CASE WHEN NULLIF(BTRIM(pa.url), '') IS NOT NULL THEN pa.url END AS url,
-        CASE WHEN NULLIF(BTRIM(pa.url), '') IS NULL AND pa.storage_type IN ('file', 'both')
+      SELECT pa.id, pa.product_id, pa.product_variant_id, COALESCE(o.position_override, pa.position) AS position, pa.storage_type, pa.mime_type,
+        COALESCE(o.url_override, NULLIF(BTRIM(pa.url), '')) AS url,
+        CASE WHEN COALESCE(o.url_override, NULLIF(BTRIM(pa.url), '')) IS NULL AND pa.storage_type IN ('file', 'both')
           THEN octet_length(pa.file_data) END AS file_bytes,
-        CASE WHEN NULLIF(BTRIM(pa.url), '') IS NULL AND pa.storage_type IN ('file', 'both')
+        CASE WHEN COALESCE(o.url_override, NULLIF(BTRIM(pa.url), '')) IS NULL AND pa.storage_type IN ('file', 'both')
           AND octet_length(pa.file_data) BETWEEN 1 AND $3
           THEN encode(sha256(pa.file_data), 'hex') END AS file_hash,
-        CASE WHEN NULLIF(BTRIM(pa.url), '') IS NULL AND pa.storage_type IN ('file', 'both')
+        CASE WHEN COALESCE(o.url_override, NULLIF(BTRIM(pa.url), '')) IS NULL AND pa.storage_type IN ('file', 'both')
           AND octet_length(pa.file_data) BETWEEN 1 AND $3
           THEN substring(pa.file_data FROM 1 FOR 12) END AS file_header
       FROM catalog.product_assets pa
+      LEFT JOIN overrides o ON o.asset_id = pa.id
       WHERE pa.id IN (SELECT asset_id FROM kept)
     )
     SELECT kept.variant_id AS "forProductVariantId", photos.id, photos.product_id AS "productId",
-      photos.product_variant_id AS "productVariantId", photos.position, photos.url,
+      photos.product_variant_id AS "productVariantId", photos.position,
+      kept.publication_position::int AS "publicationPosition", photos.url,
       photos.storage_type AS "storageType", photos.mime_type AS "mimeType",
       photos.file_bytes AS "fileBytes", photos.file_hash AS "fileHash", photos.file_header AS "fileHeader"
     FROM kept
     INNER JOIN photos ON photos.id = kept.asset_id
     ORDER BY kept.variant_id, kept.photo_rank
-  `, [productVariantIds, input.maxPhotosPerVariant, MAX_PRODUCT_IMAGE_BYTES]);
+  `, [productVariantIds, input.maxPhotosPerVariant, MAX_PRODUCT_IMAGE_BYTES,
+    JSON.stringify(overrides.map(override => ({ asset_id: override.assetId, included: override.included,
+      url_override: override.urlOverride, position_override: override.positionOverride }))), input.productId ?? null]);
   for (const { forProductVariantId, ...image } of result.rows) {
     byVariantId.get(forProductVariantId)?.push(image);
   }
@@ -174,10 +237,7 @@ export interface CatalogVariantPublicationPhotos {
 }
 
 export interface CatalogVariantPublicationPhotoReader {
-  listPublicationPhotos(input: {
-    productVariantIds: readonly number[];
-    maxPhotosPerVariant: number;
-  }): Promise<Map<number, CatalogVariantPublicationPhotos>>;
+  listPublicationPhotos(input: CatalogPublicationPhotoSelection): Promise<Map<number, CatalogVariantPublicationPhotos>>;
 }
 
 /** Catalog owns photos; marketplace URLs come from configuration, never a request's Host header. */
@@ -187,10 +247,7 @@ export class PgCatalogVariantPublicationPhotoReader implements CatalogVariantPub
     private readonly publicUrl: CatalogPublicImageUrl,
   ) {}
 
-  async listPublicationPhotos(input: {
-    productVariantIds: readonly number[];
-    maxPhotosPerVariant: number;
-  }): Promise<Map<number, CatalogVariantPublicationPhotos>> {
+  async listPublicationPhotos(input: CatalogPublicationPhotoSelection): Promise<Map<number, CatalogVariantPublicationPhotos>> {
     const images = await readCatalogVariantPublicationImages(this.database, input);
     return new Map([...images].map(([productVariantId, variantImages]) =>
       [productVariantId, resolveCatalogPublicationPhotos(variantImages, this.publicUrl)]));

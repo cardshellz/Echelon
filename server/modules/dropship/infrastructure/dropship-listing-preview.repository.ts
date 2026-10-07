@@ -97,7 +97,6 @@ interface CandidateRow {
   mpn: string | null;
   condition: string | null;
   item_specifics: Record<string, unknown> | null;
-  image_urls: string[] | null;
   weight_grams: number | null;
   product_is_active: boolean;
   variant_is_active: boolean;
@@ -364,7 +363,6 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
            pv.mpn,
            p.condition AS condition,
            p.item_specifics,
-           assets.image_urls,
            pv.weight_grams::float8 AS weight_grams,
            p.is_active AS product_is_active,
            pv.is_active AS variant_is_active,
@@ -394,19 +392,11 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
            HAVING COUNT(DISTINCT ecm.ebay_browse_category_id) = 1
          ) supplier_ebay_category ON true
          LEFT JOIN retail_cache ON retail_cache.product_variant_id = pv.id
-         LEFT JOIN LATERAL (
-           SELECT ARRAY_AGG(pa.url ORDER BY pa.is_primary DESC, pa.position ASC, pa.id ASC) AS image_urls
-           FROM catalog.product_assets pa
-           WHERE pa.product_id = p.id
-             AND (pa.product_variant_id IS NULL OR pa.product_variant_id = pv.id)
-             AND pa.asset_type = 'image'
-             AND NULLIF(BTRIM(pa.url), '') IS NOT NULL
-         ) assets ON true
          WHERE pv.id = ANY($1::int[])
             AND pv.requires_shipping = true
             AND COALESCE(pv.track_inventory, true) = true
             AND pv.sales_eligibility = 'sellable'
-         GROUP BY p.id, pv.id, retail_cache.price, assets.image_urls,
+         GROUP BY p.id, pv.id, retail_cache.price,
                   supplier_ebay_category.ebay_browse_category_id,
                   supplier_ebay_category.ebay_browse_category_name`,
         [productVariantIds],
@@ -958,7 +948,8 @@ function mapCandidateRow(row: CandidateRow): DropshipListingCatalogCandidate {
     mpn: row.mpn,
     condition: row.condition,
     itemSpecifics: row.item_specifics,
-    imageUrls: row.image_urls ?? [],
+    // Catalog's publication photo reader supplies photos after exposure checks.
+    imageUrls: [],
     weightGrams: row.weight_grams,
   };
 }

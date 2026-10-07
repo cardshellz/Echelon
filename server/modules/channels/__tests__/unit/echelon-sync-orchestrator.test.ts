@@ -840,6 +840,16 @@ describe("EchelonSyncOrchestrator", () => {
   // -----------------------------------------------------------------------
 
   describe("syncListingsForChannel", () => {
+    it.each([true,false])("sends eBay photo field authority explicitly (images locked: %s)", async ownsImages => {
+      const ebayAdapter = { ...createMockAdapter(), providerKey: "ebay" };
+      adapterRegistry.register(ebayAdapter);
+      sourceLockService.getLockedFields.mockResolvedValue(new Set(ownsImages ? ["images"] : ["title"]));
+      sourceLockService.getSyncableFields.mockResolvedValue(new Set());
+      db._selectQueue = [[{ id:67,name:"eBay",provider:"ebay",status:"active" }],[{ id:1,name:"Product",isActive:true }]];
+      await orchestrator.syncListingsForChannel(67,{ dryRun:false },[1]);
+      expect(productPushService.getResolvedProductForChannel).toHaveBeenCalledWith(1,67,{ includeImages:false });
+      expect(ebayAdapter.pushListings).toHaveBeenCalledWith(67,[expect.objectContaining({ imageSyncMode:ownsImages ? "replace" : "preserve" })]);
+    });
     it("should determine push/pull direction from source locks", async () => {
       db._selectResult = [
         { id: 1, name: "Shopify DTC", provider: "shopify", status: "active" },

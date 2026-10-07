@@ -32,6 +32,7 @@ import type {
   EbayInventoryItemGroup,
   EbayOffer,
 } from "../../channels/adapters/ebay/ebay-types";
+import { ebayListingImagesFromUrls } from "../../channels/ebay-listing-photos.domain";
 import type { ChannelListingPayload } from "../../channels/channel-adapter.interface";
 import {
   isEbayResourceAuthFailureStatus,
@@ -745,12 +746,7 @@ export function buildDropshipEbayListingDraft(
         externalInventoryItemId: null,
       },
     ],
-    images: intent.imageUrls.slice(0, 12).map((url, index) => ({
-      url,
-      altText: null,
-      position: index + 1,
-      variantSku: sku,
-    })),
+    images: ebayListingImagesFromUrls(intent.imageUrls),
     metadata: {
       itemSpecifics: buildEbayAspects(input),
     },

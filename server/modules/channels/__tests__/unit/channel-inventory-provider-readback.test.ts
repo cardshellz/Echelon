@@ -11,7 +11,7 @@ const shopifyRequest = { ...ebayRequest, providerScopeType: "location" as const,
 const offer = { sku: "SKU-101", marketplaceId: "EBAY_US", offerId: "offer-1", status: "PUBLISHED", availableQuantity: 38 };
 
 function ebayFixture() {
-  const adapter = new EbayAdapter(database);
+  const adapter = new EbayAdapter(database, { resolve: vi.fn(async () => ({ byVariantId: new Map(), groupImageUrls: [] })) });
   const client = {
     getInventoryItem: vi.fn(async () => ({ sku: "SKU-101", availability: { shipToLocationAvailability: { quantity: 50 } } })),
     getInventoryOffersPage: vi.fn(async () => ({ total: 1, offers: [offer] })),

@@ -5,10 +5,11 @@ import {
 } from "../../modules/channels/adapters/ebay/ebay-listing-builder";
 import type { EbayListingPolicies } from "../../modules/channels/adapters/ebay/ebay-types";
 import type {
-  ChannelImagePayload,
   ChannelListingPayload,
   ChannelVariantPayload,
 } from "../../modules/channels/channel-adapter.interface";
+
+import type { EbayListingPhotoPlan } from "../../modules/channels/ebay-listing-photos.domain";
 
 const EBAY_MAX_TITLE_LENGTH = 80;
 
@@ -46,7 +47,7 @@ interface EbayRouteListingDraftInput {
   productId: number;
   product: EbayRouteProductInput;
   variants: EbayRouteVariantInput[];
-  effectiveImageUrls: string[];
+  photoPlan: EbayListingPhotoPlan;
   aspects: Record<string, string[]>;
   isMultiVariant: boolean;
   variationAspectName: string;
@@ -122,7 +123,7 @@ export function buildEbayRouteListingDraft(
     tags: null,
     status: "active",
     variants,
-    images: buildImagePayloads(input.effectiveImageUrls),
+    images: [],
     metadata: {
       groupKey,
       itemSpecifics: input.aspects,
@@ -141,6 +142,7 @@ export function buildEbayRouteListingDraft(
   };
 
   return ebayListingBuilder.buildListingDraft(listing, config, {
+    photoPlan: input.photoPlan,
     availableQuantityByVariantId,
     requirePackageWeight: true,
     titleMaxLength: EBAY_MAX_TITLE_LENGTH,
@@ -158,15 +160,6 @@ export function buildEbayRouteListingDraft(
     includeOfferListingDescription: false,
     includeOfferTax: false,
   });
-}
-
-function buildImagePayloads(imageUrls: string[]): ChannelImagePayload[] {
-  return imageUrls.map((url, index) => ({
-    url,
-    altText: null,
-    position: index + 1,
-    variantSku: null,
-  }));
 }
 
 function resolveRequiredPolicies(policies: EbayRoutePoliciesInput): EbayListingPolicies {

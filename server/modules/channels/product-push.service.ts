@@ -105,6 +105,7 @@ export function createChannelProductPushService(db: any) {
   async function getResolvedProductForChannel(
     productId: number,
     channelId: number,
+    options: { includeImages?: boolean } = {},
   ): Promise<ResolvedChannelProduct | null> {
     const product = await storage.getProductById(productId);
     if (!product) return null;
@@ -112,10 +113,11 @@ export function createChannelProductPushService(db: any) {
     // Get channel overrides
     const productOverride = await storage.getChannelProductOverride(channelId, productId);
     const variants = await storage.getProductVariantsByProductId(productId);
-    const assets = await storage.getProductAssetsByProductId(productId);
+    // eBay's adapter resolves publication photos through Catalog; this projection remains for other channels.
+    const assets = options.includeImages === false ? [] : await storage.getProductAssetsByProductId(productId);
     const variantOverrides = await storage.getChannelVariantOverridesByProduct(channelId, productId);
     const pricingOverrides = await storage.getChannelPricingByProduct(channelId, productId);
-    const assetOverrides = await storage.getChannelAssetOverridesByProduct(channelId, productId);
+    const assetOverrides = options.includeImages === false ? [] : await storage.getChannelAssetOverridesByProduct(channelId, productId);
 
     // Build override maps
     const voMap = new Map(variantOverrides.map((vo) => [vo.productVariantId, vo]));

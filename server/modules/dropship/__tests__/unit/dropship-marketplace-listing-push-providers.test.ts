@@ -153,6 +153,30 @@ describe("dropship marketplace listing push providers", () => {
     });
   });
 
+  it("retains the supplied photo intent and reuses an offer after a failure following its creation", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([
+      jsonResponse({ offers: [] }), emptyResponse(), jsonResponse({ offerId: "offer-101" }),
+      new Response("provider unavailable after offer creation", { status: 503 }),
+      jsonResponse({ offers: [{ offerId: "offer-101" }] }), emptyResponse(), emptyResponse(),
+    ]);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
+    const request = makeRequest({ platform: "ebay", marketplaceConfig: ebayMarketplaceConfig() });
+    const uploaded = `https://catalog.example.com/api/catalog/images/9214/${"a".repeat(64)}.jpg`;
+    request.listingIntent.imageUrls = [uploaded, "https://cdn.example.test/catalog.jpg", uploaded];
+    const approvedInput = structuredClone(request);
+
+    await expect(provider.pushListing(request)).rejects.toMatchObject({ context: { status: 503, retryable: true } });
+    await provider.pushListing(request);
+
+    const inventoryWrites = fetcher.calls.filter(call => call.init.method === "PUT" && call.url.endsWith("/inventory_item/SKU-101"));
+    expect(inventoryWrites).toHaveLength(2);
+    expect(inventoryWrites.map(call => JSON.parse(String(call.init.body)).product.imageUrls))
+      .toEqual([[uploaded, "https://cdn.example.test/catalog.jpg"], [uploaded, "https://cdn.example.test/catalog.jpg"]]);
+    expect(fetcher.calls.filter(call => call.init.method === "POST" && call.url.endsWith("/offer"))).toHaveLength(1);
+    expect(request).toEqual(approvedInput);
+  });
+
   it("uses the product category and optional seller Store categories instead of a store-wide category", async () => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([
