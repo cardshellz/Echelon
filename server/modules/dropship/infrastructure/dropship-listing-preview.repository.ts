@@ -312,7 +312,33 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     const client = await this.dbPool.connect();
     try {
       const result = await client.query<CandidateRow>(
-        `SELECT
+        `WITH batch AS (
+           SELECT pv.id, pv.shopify_variant_id, pv.sku
+           FROM catalog.product_variants pv
+           WHERE pv.id = ANY($1::int[])
+         ),
+         -- The Card Shellz retail price from the Shopify variant cache: the
+         -- size's own Shopify variant first, else a variant with the same SKU
+         -- in any case. Matched once per batch (an index lookup and one hash
+         -- join), not with a scan of the whole cache for every size. Among
+         -- several SKU matches the lowest Shopify id wins, so the price never
+         -- depends on the query plan.
+         retail_matches AS (
+           SELECT b.id AS product_variant_id, 0 AS match_rank, sv.id AS shopify_variant_id, sv.price
+           FROM batch b
+           INNER JOIN public.shopify_variants sv ON sv.id::text = b.shopify_variant_id::text
+           UNION ALL
+           SELECT b.id, 1, sv.id, sv.price
+           FROM batch b
+           INNER JOIN public.shopify_variants sv ON UPPER(sv.sku) = UPPER(b.sku)
+           WHERE NULLIF(BTRIM(b.sku), '') IS NOT NULL
+         ),
+         retail_cache AS (
+           SELECT DISTINCT ON (product_variant_id) product_variant_id, price
+           FROM retail_matches
+           ORDER BY product_variant_id, match_rank, shopify_variant_id
+         )
+         SELECT
            p.id AS product_id,
            pv.id AS product_variant_id,
            ARRAY_REMOVE(ARRAY_AGG(DISTINCT plp.product_line_id), NULL) AS product_line_ids,
@@ -365,20 +391,7 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
              AND NULLIF(BTRIM(ecm.ebay_browse_category_id), '') IS NOT NULL
            HAVING COUNT(DISTINCT ecm.ebay_browse_category_id) = 1
          ) supplier_ebay_category ON true
-         LEFT JOIN LATERAL (
-           SELECT sv.price
-           FROM public.shopify_variants sv
-           WHERE (
-               pv.shopify_variant_id IS NOT NULL
-               AND sv.id::text = pv.shopify_variant_id::text
-             )
-             OR (
-               NULLIF(BTRIM(pv.sku), '') IS NOT NULL
-               AND UPPER(sv.sku) = UPPER(pv.sku)
-             )
-           ORDER BY CASE WHEN sv.id::text = pv.shopify_variant_id::text THEN 0 ELSE 1 END
-           LIMIT 1
-         ) retail_cache ON true
+         LEFT JOIN retail_cache ON retail_cache.product_variant_id = pv.id
          WHERE pv.id = ANY($1::int[])
             AND pv.requires_shipping = true
             AND COALESCE(pv.track_inventory, true) = true
