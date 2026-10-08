@@ -12,7 +12,7 @@ export const WALMART_INVENTORY_NOW = new Date("2026-09-27T12:00:00.000Z");
  * uniquely created disposable test database. This does not test global cutover. */
 export async function installWalmartPublicationInventoryFixture(
   pool: Pool,
-  options: { targetState?: "preview" | "live" } = {},
+  options: { targetState?: "preview" | "live"; includeWalmartMapping?: boolean } = {},
 ): Promise<void> {
   await installCutoverCompositionMigrations(pool);
   await pool.query(cutoverCompositionSeedSql);
@@ -44,11 +44,11 @@ export async function installWalmartPublicationInventoryFixture(
     INSERT INTO inventory.publication_source_binding_heads(publication_target_id,draft_binding_id,revision,updated_by,update_reason)
       VALUES(2,2,1,'operator','Reviewed source');
     INSERT INTO inventory.publication_source_binding_members(binding_id,publication_target_id,fulfillment_node_id,priority) VALUES(2,2,1,1);
-    INSERT INTO inventory.publication_variant_mapping_versions(publication_target_id,product_variant_id,version,external_inventory_item_id,external_sku,
+    ${options.includeWalmartMapping === false ? "" : `INSERT INTO inventory.publication_variant_mapping_versions(publication_target_id,product_variant_id,version,external_inventory_item_id,external_sku,
       definition_hash,change_reason,idempotency_key,request_hash,created_by)
       VALUES(2,101,1,'P5','P5',repeat('a',64),'Exact Walmart SKU','walmart-mapping',repeat('a',64),'operator');
     INSERT INTO inventory.publication_variant_mapping_heads(publication_target_id,product_variant_id,draft_mapping_id,revision,updated_by,update_reason)
-      VALUES(2,101,2,1,'operator','Reviewed item');
+      VALUES(2,101,2,1,'operator','Reviewed item');`}
     INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(36,101,'P5','P5');
     UPDATE inventory.inventory_publication_targets SET state='preview',revision=revision+1,activated_by='operator',activated_at=transaction_timestamp() WHERE id=2;
   `);

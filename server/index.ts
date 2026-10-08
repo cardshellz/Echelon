@@ -1,4 +1,5 @@
 import { startWalmartOrderPolling } from "./modules/channels/adapters/walmart/walmart-order-poll.service";
+import { startWalmartStockConnectionWorker } from "./modules/channels/adapters/walmart/walmart-stock-connection.service";
 import { createOrderEditService } from "./modules/order-edits/order-edit.composition";
 import { registerOrderEditRoutes } from "./modules/order-edits/interfaces/order-edit.routes";
 import { startOrderEditScheduler } from "./modules/order-edits/infrastructure/order-edit-scheduler";
@@ -495,6 +496,7 @@ function startEchelonSyncScheduler(
   setDropshipInventoryRuntimeAuthorityGate(services.dropshipInventoryRuntimeAuthority);
   startListingPublicationWorker(services.listingPublication);
   startListingPublicationWorker(services.listingUpdates, "listing_update_worker");
+  startWalmartStockConnectionWorker(services.walmartStockConnection);
 
   if (process.env.WALMART_ORDER_POLLING_ENABLED !== "false" && !schedulersDisabled("WALMART_ORDER_POLLING_DISABLED")) {
     startWalmartOrderPolling(services.walmartOrderPoll, services.walmart);
