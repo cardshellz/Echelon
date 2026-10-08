@@ -29,6 +29,9 @@ import {
   PUBLICATION_TARGET_SCOPE_LOCK_SEED,
 } from "./inventory-publication-target-stop.repository";
 import { quantityPublicationScopeLockKey } from "./quantity-publication-admission.repository";
+import type { VerifiedStockListing, VerifiedListingStockResult, VerifiedListingStockStore } from "../application/verified-listing-stock.service";
+import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
+import { prepareVerifiedStockMapping } from "./verified-listing-stock-mapping.repository";
 
 const id = z.number().int().positive();
 const targetSchema = z.object({
@@ -86,13 +89,62 @@ interface ReviewEvidence {
   includedIds: number[];
 }
 
-/** One inventory writer for membership only. Mapping/source/authority writers
- * are deliberately not duplicated. All current target work is replanned after
- * its revision changes, including products outside this command's changed set. */
+/** Inventory owns membership and verified listing enrollment. Enrollment uses
+ * the existing mapping promotion and canonical publication owners. All current
+ * target work is replanned after its revision changes, including other products. */
 export class PostgresInventoryPublicationMembershipStore
-  implements InventoryPublicationMembershipStore
+  implements InventoryPublicationMembershipStore, VerifiedListingStockStore
 {
   constructor(private readonly pool: Pick<Pool, "connect">) {}
+
+  /** Existing exclusions are operator decisions, not missing setup. */
+  pending(channelId: number, connectionId: number, variantIds: number[]): Promise<number[]> {
+    return this.transaction(false, async client => {
+      const targets = await readTargets(client, channelId, connectionId);
+      if (targets.length !== 1 || targets[0].provider_key !== "walmart"
+        || targetBlockers(targets[0]).length || targets[0].held_at) return [];
+      const result = await client.query<{ id: number }>(`SELECT candidate.id FROM unnest($2::integer[]) candidate(id)
+        WHERE NOT EXISTS (SELECT 1 FROM inventory.publication_membership_heads h
+          WHERE h.publication_target_id=$1 AND h.product_variant_id=candidate.id)
+        AND EXISTS (SELECT 1 FROM channels.sync_settings WHERE global_enabled=true)
+        ORDER BY candidate.id`, [targets[0].id, variantIds]);
+      return result.rows.map(row => row.id);
+    });
+  }
+
+  /** Atomically connects an already-linked, freshly verified listing to an
+   * enabled destination. A dry run exercises the same writes then rolls back. */
+  connect(input: VerifiedStockListing, now: Date, dryRun: boolean): Promise<VerifiedListingStockResult> {
+    return this.transaction("configuration", async (client, scopeKeys) => {
+      await acquireInventoryCutoverFenceInsideTransaction(client, {
+        expectedAuthority: "canonical", expectedConfigurationRunId: null,
+      });
+      const targets = await readTargets(client, input.channelId, input.connectionId, undefined, true);
+      if (targets.length !== 1 || targets[0].provider_key !== "walmart" || targets[0].external_scope_id !== input.externalScopeId) {
+        throw error("STOCK_LISTING_TARGET_MISMATCH", "The verified listing does not match one exact Walmart stock destination.");
+      }
+      const target = targets[0];
+      const blockers = targetBlockers(target);
+      if (blockers.length || target.held_at) {
+        throw error("STOCK_LISTING_TARGET_NOT_READY", blockers.map(row => row.message).join(" ") || "Stock for this account is on hold.");
+      }
+      const member = (await client.query<{ included: boolean }>(`SELECT v.included FROM inventory.publication_membership_heads h
+        JOIN inventory.publication_membership_versions v ON v.id=h.active_version_id
+        WHERE h.publication_target_id=$1 AND h.product_variant_id=$2`, [target.id, input.productVariantId])).rows[0];
+      if (member) return { state: member.included ? "already_connected" : "excluded", dryRun, receipt: null, quantities: [] };
+      const actor = "walmart-stock-connection";
+      const requestHash = digest({ targetId: target.id, channelId: input.channelId, connectionId: input.connectionId,
+        variantId: input.productVariantId, sku: input.sku, externalProductId: input.externalProductId, actor });
+      await prepareVerifiedStockMapping(client, target.id, input, requestHash, actor, now);
+      const command = { publicationTargetId: target.id, expectedTargetRevision: target.revision,
+        changes: [{ productVariantId: input.productVariantId, included: true }] };
+      const { review } = await captureReview(client, command, true);
+      if (!review.ready) throw error("STOCK_LISTING_ATP_NOT_READY", review.blockers.map(row => row.message).join(" "));
+      const receipt = await this.applyInsideTransaction(client, scopeKeys, { ...command,
+        expectedReviewHash: review.reviewHash, idempotencyKey: `verified-stock:${requestHash}` }, actor, requestHash, now);
+      return { state: "connected", dryRun, receipt, quantities: review.quantities };
+    }, dryRun);
+  }
 
   inspect(
     input: InspectPublicationMembership,
@@ -200,7 +252,11 @@ export class PostgresInventoryPublicationMembershipStore
     requestHash: string,
     now: Date,
   ): Promise<PublicationMembershipReceipt> {
-    return this.transaction(true, async (client, scopeKeys) => {
+    return this.transaction(true, (client, scopeKeys) => this.applyInsideTransaction(client, scopeKeys, input, actor, requestHash, now));
+  }
+
+  private async applyInsideTransaction(client: PoolClient, scopeKeys: string[], input: ApplyPublicationMembership,
+    actor: string, requestHash: string, now: Date): Promise<PublicationMembershipReceipt> {
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
         [`publication_membership:${input.idempotencyKey}`],
@@ -377,26 +433,26 @@ export class PostgresInventoryPublicationMembershipStore
         ],
       );
       return receipt;
-    });
   }
 
   private async transaction<T>(
-    write: boolean,
+    write: boolean | "configuration",
     work: (client: PoolClient, scopeKeys: string[]) => Promise<T>,
+    rollback = false,
   ): Promise<T> {
     const client = await this.pool.connect();
     const scopeKeys: string[] = [];
     let discard: Error | undefined;
     try {
       await client.query(
-        write
+        write === "configuration" ? "BEGIN ISOLATION LEVEL READ COMMITTED" : write
           ? "BEGIN ISOLATION LEVEL SERIALIZABLE"
           : "BEGIN ISOLATION LEVEL REPEATABLE READ",
       );
       await client.query("SET LOCAL lock_timeout='5s'");
       await client.query("SET LOCAL statement_timeout='60s'");
       const result = await work(client, scopeKeys);
-      await client.query("COMMIT");
+      await client.query(rollback ? "ROLLBACK" : "COMMIT");
       return result;
     } catch (failure) {
       try {
@@ -622,7 +678,9 @@ async function captureReview(
           target.provider_key === "walmart" &&
           row.sourceWarehouseBreakdown.some(
             (source) =>
-              !selected?.sourceBinding?.warehouseIds.includes(
+              // ATP includes zero rows for other warehouses in the promise
+              // group. Only a contributing warehouse can change the stock scope.
+              BigInt(source.canonicalAtpUnits) > BigInt(0) && !selected?.sourceBinding?.warehouseIds.includes(
                 source.warehouseId,
               ),
           )

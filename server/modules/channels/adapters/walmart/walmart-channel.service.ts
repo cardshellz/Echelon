@@ -6,7 +6,7 @@ import { WalmartUsApi, type WalmartShipNode, type WalmartUsApiPort } from "./wal
 import { WalmartConnectionRepository, type WalmartConnectionRecord } from "./walmart-connection.repository";
 import { WalmartListingApi } from "./walmart-listing-api";
 
-function isActiveSellerShipNode(node: WalmartShipNode): boolean {
+export function isActiveSellerShipNode(node: WalmartShipNode): boolean {
   // Walmart's default seller inventory location is VIRTUAL. Settings also
   // returns PHYSICAL and 3PL nodes; this connector supports seller fulfillment.
   // https://developer.walmart.com/us-marketplace/reference/getallfulfillmentcenters
