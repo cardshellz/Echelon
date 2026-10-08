@@ -1,4 +1,5 @@
 import type { Express, Request, Response } from "express";
+import { registerPoQuantityAmendmentRoutes } from './po-quantity-amendment.routes';
 import { procurementStorage } from "../procurement";
 import { catalogStorage } from "../catalog";
 import { warehouseStorage } from "../warehouse";
@@ -291,6 +292,7 @@ function mapPurchaseOrderWithLinesInput(
 }
 
 export function registerPurchaseOrderRoutes(app: Express) {
+  registerPoQuantityAmendmentRoutes(app);
   const { purchasing, shipmentTracking } = app.locals.services;
   const purchaseWorkspace = createPurchaseWorkspaceService(createPurchaseWorkspaceRepository(db));
 
