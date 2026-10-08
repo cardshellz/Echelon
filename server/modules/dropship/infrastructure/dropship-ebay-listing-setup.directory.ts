@@ -5,6 +5,10 @@ import type {
   DropshipEbayListingSetupOption,
 } from "../application/dropship-ebay-listing-setup-service";
 import type {
+  DropshipEbayReturnPaymentPolicyDirectory,
+  DropshipEbayReturnPaymentPolicyIds,
+} from "../application/dropship-ebay-return-payment-policy-check";
+import type {
   DropshipEbayFulfillmentPolicy,
 } from "../domain/ebay-fulfillment-policy-compatibility";
 import { DropshipError } from "../domain/errors";
@@ -29,7 +33,8 @@ interface ProviderResource {
   path: string;
 }
 
-export class EbayDropshipListingSetupDirectory implements DropshipEbayListingSetupDirectory {
+export class EbayDropshipListingSetupDirectory
+  implements DropshipEbayListingSetupDirectory, DropshipEbayReturnPaymentPolicyDirectory {
   constructor(
     private readonly credentials: DropshipEbayRegistrationCredentialProvider,
     private readonly fetchFn: FetchLike = fetch,
@@ -71,6 +76,59 @@ export class EbayDropshipListingSetupDirectory implements DropshipEbayListingSet
         storeConnectionId: input.storeConnectionId,
         fulfillmentPolicyId: input.fulfillmentPolicyId,
       }),
+    });
+  }
+
+  /**
+   * The ids of the store's return and payment policies for one marketplace:
+   * two reads under one credential load. The lists are parsed exactly as the
+   * listing setup parses them, so an id the setup would call missing (a
+   * motors-only policy included) is missing here too.
+   */
+  async listReturnAndPaymentPolicyIds(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    marketplaceId: string;
+  }): Promise<DropshipEbayReturnPaymentPolicyIds> {
+    const marketplaceId = requiredIdentifier(input.marketplaceId, "marketplaceId");
+    return withEbaySafeReadRecovery({
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+      credentials: this.credentials,
+      operation: "return_payment_policy_read",
+      reauthorizationCode: "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
+      read: async (credential) => {
+        const accessToken = credential.accessToken.trim();
+        if (!accessToken) {
+          throw new DropshipError(
+            "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_TOKEN_REQUIRED",
+            "eBay return and payment policy verification requires an access token.",
+            { storeConnectionId: input.storeConnectionId, retryable: false },
+          );
+        }
+        const baseUrl = EBAY_API_BASE_URLS[resolveDropshipEbayProviderEnvironment(credential)];
+        const query = `marketplace_id=${encodeURIComponent(marketplaceId)}`;
+        const [returnBody, paymentBody] = await Promise.all([
+          this.fetchResource({
+            accessToken,
+            baseUrl,
+            resource: { key: "returnPolicies", path: `/sell/account/v1/return_policy?${query}` },
+            storeConnectionId: input.storeConnectionId,
+          }),
+          this.fetchResource({
+            accessToken,
+            baseUrl,
+            resource: { key: "paymentPolicies", path: `/sell/account/v1/payment_policy?${query}` },
+            storeConnectionId: input.storeConnectionId,
+          }),
+        ]);
+        return {
+          returnPolicyIds: new Set(parseOptions("returnPolicies", returnBody, input.storeConnectionId)
+            .map((option) => option.id)),
+          paymentPolicyIds: new Set(parseOptions("paymentPolicies", paymentBody, input.storeConnectionId)
+            .map((option) => option.id)),
+        };
+      },
     });
   }
 

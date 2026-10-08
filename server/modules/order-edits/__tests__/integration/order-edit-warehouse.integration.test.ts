@@ -525,7 +525,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       ).rejects.toMatchObject({ code: "ORDER_EDIT_FULFILLED_CANCEL_INVALID" });
       expect(await physicalState()).toEqual(before);
     });
-    it("round-trips new discount and payment evidence alongside legacy operations", async () => {
+    it("round-trips shipping, discount and payment evidence alongside legacy operations", async () => {
       const store = new PostgresOrderEditStore(database.pool);
       expect((await store.get(OP)).baseline.financials).toBeUndefined();
       await database.pool.query(
@@ -564,6 +564,26 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
           ...snapshot(),
           orderId: "gid://shopify/Order/2",
           financials,
+          shippingContext: {
+            address: {
+              address1: "100 Test St",
+              address2: null,
+              city: "Test",
+              provinceCode: "PA",
+              zip: "16066",
+              countryCodeV2: "US",
+            },
+            lines: [
+              {
+                id: "gid://shopify/ShippingLine/1",
+                title: "Standard Shipping",
+                code: "standard",
+                source: "Echelon Shipping",
+                grossCents: 500,
+                netCents: 0,
+              },
+            ],
+          },
           discountsPresent: true,
           lines: [{ ...snapshot().lines[0], originalUnitPriceCents: 1100 }],
           paymentDates: {},
@@ -605,6 +625,15 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         status: "ready",
         version: 1,
         quote: {
+          shippingRepricing: {
+            title: "Standard Shipping",
+            code: "standard",
+            source: "Echelon Shipping",
+            grossCents: 799,
+            netCents: 0,
+            discountCents: 799,
+            discountLabels: ["Member free shipping"],
+          },
           connectionId: 4,
           channelId: 36,
           orderId: baseline.orderId,

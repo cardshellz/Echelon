@@ -2,6 +2,8 @@ import {
   matchesOrderEditQuote as matchesQuote,
   isUnpaidRecoveryRestored,
   unchangedOrderEditSnapshot,
+  recoveryFinancials,
+  shippingWasReplaced,
 } from "../application/order-edit-evidence";
 export { isUnpaidRecoveryRestored } from "../application/order-edit-evidence";
 import { createHash } from "node:crypto";
@@ -31,6 +33,11 @@ import { SHOPIFY_CALCULATED_LINE_ID_PATTERN } from "@shared/order-edits/shopify-
 import type { OrderEditDiscount } from "@shared/order-edits/order-edit-discounts";
 import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";
 import * as gql from "./shopify-order-edit.queries";
+import { ShopifyOrderEditShippingCalculator } from "./shopify-order-edit-shipping.calculator";
+import type {
+  OrderEditShippingCalculator,
+  OrderEditShippingItem,
+} from "../application/order-edit-shipping";
 import {
   orderEditSnapshotSchema,
   orderEditQuoteSchema,
@@ -161,6 +168,9 @@ const ORDER = z.object({
     nodes: z.array(
       z.object({
         id: TEXT.nullable(),
+        title: TEXT.optional(),
+        code: z.string().nullable().optional(),
+        source: z.string().nullable().optional(),
         isRemoved: z.boolean(),
         originalPriceSet: BAG,
         currentDiscountedPriceSet: BAG,
@@ -247,7 +257,12 @@ const CALCULATED = z.object({
   subtotalPriceSet: BAG.nullable(),
   taxLines: z.array(z.object({ priceSet: BAG })),
   shippingLines: z.array(
-    z.object({ id: z.string().nullable(), price: BAG, stagedStatus: TEXT }),
+    z.object({
+      id: z.string().nullable(),
+      title: TEXT.optional(),
+      price: BAG,
+      stagedStatus: z.enum(["NONE", "ADDED", "REMOVED"]),
+    }),
   ),
   lineItems: z.object({ nodes: z.array(CALCULATED_LINE), pageInfo: PAGE }),
   addedLineItems: z.object({ nodes: z.array(CALCULATED_LINE), pageInfo: PAGE }),
@@ -261,16 +276,28 @@ const MUTATION = z.object({ userErrors: USER_ERRORS }).passthrough();
 export class ShopifyOrderEditProvider implements OrderEditProvider {
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly shippingCalculator: OrderEditShippingCalculator;
   constructor(
     private readonly options: {
       credentials: OrderEditCredentialStore;
       clock: () => Date;
       fetch?: typeof fetch;
       timeoutMs?: number;
+      shippingCalculator?: OrderEditShippingCalculator;
     },
   ) {
     this.fetchImpl = options.fetch ?? fetch;
     this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.shippingCalculator =
+      options.shippingCalculator ??
+      new ShopifyOrderEditShippingCalculator(
+        async (snapshot, query, variables) => {
+          const credentials = await this.credentials(snapshot.connectionId);
+          if (credentials.channelId !== snapshot.channelId)
+            fail("CONNECTION_MISMATCH", "The connection's channel changed.");
+          return this.request(credentials, query, variables);
+        },
+      );
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs <= 0)
       fail("INVALID_CONFIGURATION", "A positive request timeout is required.");
   }
@@ -361,6 +388,27 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
       evidence,
     });
     const snapshot: OrderEditSnapshot = {
+      ...(order.shippingAddress &&
+      order.shippingLines.nodes.some((line) => !line.isRemoved) &&
+      order.shippingLines.nodes
+        .filter((line) => !line.isRemoved)
+        .every((line) => line.id && line.title)
+        ? {
+            shippingContext: {
+              address: structuredClone(order.shippingAddress),
+              lines: order.shippingLines.nodes
+                .filter((line) => !line.isRemoved)
+                .map((line) => ({
+                  id: line.id!,
+                  title: line.title!,
+                  code: line.code ?? null,
+                  source: line.source ?? null,
+                  grossCents: money(line.originalPriceSet),
+                  netCents: money(line.currentDiscountedPriceSet),
+                })),
+            },
+          }
+        : {}),
       connectionId,
       channelId: credentials.channelId,
       orderId,
@@ -835,7 +883,57 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
       );
     }
     verifyNativeOrderDiscounts(calculated, baseline, nativeDiscounts);
-    const financials = verifyCalculatedFinancials(calculated, baseline, true);
+    const itemFinancials = verifyCalculatedFinancials(
+      calculated,
+      baseline,
+      true,
+    );
+    if (!itemFinancials)
+      fail(
+        "SHIPPING_FINANCIALS_REQUIRED",
+        "A complete item breakdown is required before shipping can be recalculated.",
+      );
+    const shippingRepricing = await this.shippingCalculator.calculate(
+      baseline,
+      shippingItems(calculated, itemFinancials),
+    );
+    let shippingFinancials = {
+      grossCents: baseline.financials!.shippingGrossCents,
+      netCents: baseline.shippingCents,
+      discountLabels: baseline.financials!.shippingDiscountLabels,
+    };
+    if (
+      shippingRepricing.netCents !== baseline.shippingCents ||
+      (baseline.shippingContext &&
+        shippingRepricing.title !== baseline.shippingContext.lines[0]?.title)
+    ) {
+      // Admin Order Edit cannot apply a new checkout shipping Function discount.
+      // Store the verified net charge; preserve the native rate/benefit separately as audit evidence.
+      calculated = await this.replaceShipping(
+        credentials,
+        calculated,
+        shippingRepricing.title,
+        shippingRepricing.netCents,
+      );
+      shippingFinancials = {
+        grossCents: shippingRepricing.netCents,
+        netCents: shippingRepricing.netCents,
+        discountLabels: [],
+      };
+    }
+    verifyCalculated(
+      calculated,
+      expected,
+      baseline,
+      shippingFinancials.grossCents,
+    );
+    verifyNativeOrderDiscounts(calculated, baseline, nativeDiscounts);
+    const financials = verifyCalculatedFinancials(
+      calculated,
+      baseline,
+      true,
+      shippingFinancials,
+    );
     const totalCents = money(calculated.totalPriceSet);
     return {
       connectionId,
@@ -852,7 +950,8 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
       financials,
       outstandingCents: money(calculated.totalOutstandingSet, true),
       deltaCents: subtract(totalCents, baseline.totalCents),
-      shippingCents: baseline.shippingCents,
+      shippingCents: shippingRepricing.netCents,
+      shippingRepricing,
       createdAt: this.now().toISOString(),
       evidence: {
         calculated,
@@ -1079,6 +1178,30 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
     assertEditable(current);
     if (mode === "edit") {
       assertRecoveryLineage(quote);
+      if (quote.shippingRepricing) {
+        if (!quote.financials)
+          fail(
+            "SHIPPING_FINANCIALS_REQUIRED",
+            "The shipping quote is missing its item breakdown.",
+          );
+        const repriced = await this.shippingCalculator.calculate(
+          current,
+          quote.lines
+            .filter((line) => line.quantity > 0)
+            .map((line) => ({
+              variantId: line.variantId,
+              quantity: line.quantity,
+              netCents: quote.financials!.lines.find(
+                (entry) => entry.id === line.calculatedLineId,
+              )!.netCents,
+            })),
+        );
+        if (canonicalJson(repriced) !== canonicalJson(quote.shippingRepricing))
+          fail(
+            "SHIPPING_RATE_CHANGED",
+            "Shipping rates or benefits changed after review. Prepare a new quote before applying changes.",
+          );
+      }
       if (quote.deltaCents < 0)
         await this.refundMethod(connectionId, current, -quote.deltaCents);
     }
@@ -1107,7 +1230,71 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
           "Stock changed after this edit was quoted. Prepare a new quote.",
         );
     }
+    if (mode === "edit" && !quote.shippingRepricing)
+      fail(
+        "SHIPPING_REVIEW_REQUIRED",
+        "This saved quote predates shipping recalculation. Cancel it and review the changes again before applying them.",
+      );
     return this.credentials(connectionId);
+  }
+
+  private async replaceShipping(
+    credentials: OrderEditCredentials,
+    calculated: Calculated,
+    title: string,
+    grossCents: number,
+  ): Promise<Calculated> {
+    const originalId = calculated.originalOrder.id;
+    for (const line of calculated.shippingLines.filter(
+      (line) => line.stagedStatus !== "REMOVED",
+    )) {
+      if (!line.id)
+        fail(
+          "SHIPPING_LINE_IDENTITY_MISSING",
+          "The original shipping charge cannot be replaced safely.",
+        );
+      calculated = readCalculated(
+        (
+          await this.mutate(
+            credentials,
+            gql.REMOVE_SHIPPING_MUTATION,
+            { id: calculated.id, shippingLineId: line.id },
+            "orderEditRemoveShippingLine",
+          )
+        ).calculatedOrder,
+        originalId,
+      );
+    }
+    calculated = readCalculated(
+      (
+        await this.mutate(
+          credentials,
+          gql.ADD_SHIPPING_MUTATION,
+          {
+            id: calculated.id,
+            shippingLine: {
+              title,
+              price: { amount: decimal(grossCents), currencyCode: "USD" },
+            },
+          },
+          "orderEditAddShippingLine",
+        )
+      ).calculatedOrder,
+      originalId,
+    );
+    const active = calculated.shippingLines.filter(
+      (line) => line.stagedStatus !== "REMOVED",
+    );
+    if (
+      active.length !== 1 ||
+      active[0].title !== title ||
+      money(active[0].price) !== grossCents
+    )
+      fail(
+        "SHIPPING_REPLACEMENT_UNVERIFIED",
+        "Shopify did not stage the exact replacement shipping service and charge.",
+      );
+    return calculated;
   }
 
   async reconcileCommit(
@@ -1384,6 +1571,7 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
       baseline,
       changes,
       operationId,
+      quote,
     );
     if (restored.totalCents !== baseline.totalCents)
       fail(
@@ -1416,13 +1604,15 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
     connectionId: number,
     baseline: OrderEditSnapshot,
     operationId: string,
+    quote?: OrderEditQuote,
   ) {
     parse(orderEditSnapshotSchema, baseline);
     this.bind(connectionId, baseline);
     validateOperation(operationId);
     const snapshot = await this.readOrder(connectionId, baseline.orderId);
+    if (quote) this.bindQuote(connectionId, quote, quote.operationId);
     return {
-      status: isUnpaidRecoveryRestored(snapshot, baseline)
+      status: isUnpaidRecoveryRestored(snapshot, baseline, quote)
         ? ("restored" as const)
         : ("conflict" as const),
       snapshot,
@@ -1435,6 +1625,7 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
     baseline: OrderEditSnapshot,
     changes: OrderEditPlan["changes"],
     operationId: string,
+    originalQuote: OrderEditQuote,
   ): Promise<OrderEditQuote> {
     const credentials = await this.credentials(connectionId);
     const begin = await this.mutate(
@@ -1514,10 +1705,36 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
         totalCents: original?.totalCents ?? 0,
       });
     }
-    verifyCalculated(calculated, expected, baseline);
+    const restoredFinancials = recoveryFinancials(baseline, originalQuote);
+    const shippingReplaced = shippingWasReplaced(originalQuote);
+    if (shippingReplaced) {
+      if (
+        !baseline.shippingContext ||
+        baseline.shippingContext.lines.length !== 1 ||
+        !baseline.financials
+      )
+        fail(
+          "EXPIRY_SHIPPING_UNSUPPORTED",
+          "The original delivery charge cannot be restored exactly.",
+          "unknown",
+        );
+      calculated = await this.replaceShipping(
+        credentials,
+        calculated,
+        baseline.shippingContext.lines[0].title,
+        baseline.shippingCents,
+      );
+    }
+    verifyCalculated(
+      calculated,
+      expected,
+      baseline,
+      restoredFinancials?.shippingGrossCents,
+    );
     if (
+      !shippingReplaced &&
       canonicalJson(calculated.shippingLines) !==
-      canonicalJson(originalShippingLines)
+        canonicalJson(originalShippingLines)
     ) {
       fail(
         "SHIPPING_CHANGED",
@@ -1526,10 +1743,15 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
       );
     }
     verifyNativeOrderDiscounts(calculated, baseline, nativeDiscounts);
-    const financials = verifyCalculatedFinancials(calculated, baseline);
+    const financials = verifyCalculatedFinancials(calculated, baseline, false, {
+      grossCents:
+        restoredFinancials?.shippingGrossCents ?? baseline.shippingCents,
+      netCents: baseline.shippingCents,
+      discountLabels: restoredFinancials?.shippingDiscountLabels ?? [],
+    });
     if (
       financials &&
-      (!sameFinancialEvidence(financials, baseline.financials) ||
+      (!sameFinancialEvidence(financials, restoredFinancials) ||
         expected.some((line) => {
           const wanted =
             baseline.financials?.lines.find(
@@ -1565,6 +1787,19 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
       outstandingCents: money(calculated.totalOutstandingSet, true),
       deltaCents: subtract(money(calculated.totalPriceSet), current.totalCents),
       shippingCents: baseline.shippingCents,
+      ...(shippingReplaced && baseline.shippingContext
+        ? {
+            shippingRepricing: {
+              title: baseline.shippingContext.lines[0].title,
+              code: baseline.shippingContext.lines[0].code ?? "",
+              source: baseline.shippingContext.lines[0].source ?? "",
+              grossCents: baseline.financials!.shippingGrossCents,
+              netCents: baseline.shippingCents,
+              discountCents: baseline.financials!.shippingDiscountCents,
+              discountLabels: baseline.financials!.shippingDiscountLabels,
+            },
+          }
+        : {}),
       financials,
       createdAt: this.now().toISOString(),
       evidence: { calculated, compensationFor: baseline.orderId },
@@ -2034,6 +2269,8 @@ function verifyCalculated(
   calculated: Calculated,
   expected: OrderEditExpectedLine[],
   baseline: OrderEditSnapshot,
+  shippingGrossCents = baseline.financials?.shippingGrossCents ??
+    baseline.shippingCents,
 ) {
   const lines = [
     ...calculated.lineItems.nodes,
@@ -2073,13 +2310,12 @@ function verifyCalculated(
       "The quote contains unexpected items or would empty the order.",
     );
   const shippingLinePrice = sum(
-    calculated.shippingLines.map((line) => money(line.price)),
+    calculated.shippingLines
+      .filter((line) => line.stagedStatus !== "REMOVED")
+      .map((line) => money(line.price)),
   );
   // CalculatedShippingLine.price is before discounts; the order total uses net shipping.
-  if (
-    shippingLinePrice !==
-    (baseline.financials?.shippingGrossCents ?? baseline.shippingCents)
-  )
+  if (shippingLinePrice !== shippingGrossCents)
     fail(
       "SHIPPING_CHANGED",
       "The original shipping amount could not be preserved.",
@@ -2547,6 +2783,12 @@ function verifyCalculatedFinancials(
   calculated: Calculated,
   baseline: OrderEditSnapshot,
   requireSettledFixedCredit = false,
+  shipping = {
+    grossCents:
+      baseline.financials?.shippingGrossCents ?? baseline.shippingCents,
+    netCents: baseline.shippingCents,
+    discountLabels: baseline.financials?.shippingDiscountLabels ?? [],
+  },
 ): OrderEditFinancials | undefined {
   // Legacy persisted operations retain their existing proof contract during recovery.
   if (!baseline.financials) return undefined;
@@ -2598,13 +2840,34 @@ function verifyCalculatedFinancials(
         .filter((entry) => entry.description === "Echelon member pricing")
         .map((entry) => entry.description!),
     ],
-    shippingGrossCents: baseline.financials.shippingGrossCents,
-    shippingCents: baseline.shippingCents,
-    shippingDiscountLabels: [...baseline.financials.shippingDiscountLabels],
+    shippingGrossCents: shipping.grossCents,
+    shippingCents: shipping.netCents,
+    shippingDiscountLabels: [...shipping.discountLabels],
     taxCents: sum(calculated.taxLines.map((line) => money(line.priceSet))),
     taxesIncluded: baseline.financials.taxesIncluded,
     totalCents: money(calculated.totalPriceSet),
   });
+}
+
+function shippingItems(
+  calculated: Calculated,
+  financials: OrderEditFinancials,
+): OrderEditShippingItem[] {
+  return [...calculated.lineItems.nodes, ...calculated.addedLineItems.nodes]
+    .filter((line) => line.quantity > 0)
+    .map((line) => {
+      const financial = financials.lines.find((entry) => entry.id === line.id);
+      if (!financial || !line.variant)
+        fail(
+          "SHIPPING_ITEMS_INVALID",
+          "Shipping requires every revised item's verified discounted total and product identity.",
+        );
+      return {
+        variantId: line.variant.id,
+        quantity: line.quantity,
+        netCents: financial.netCents,
+      };
+    });
 }
 
 function assertRecoveryLineage(quote: OrderEditQuote): void {
