@@ -454,8 +454,8 @@ export function OrderDraft({
         </div>
         <p className="text-xs text-muted-foreground">
           Set quantity to 0 to remove a line. Prices, discounts and tax are
-          verified by the server. The original shipping charge stays the same
-          during this pilot.
+          verified by the server. Shipping and eligible free shipping are
+          recalculated when you review changes.
         </p>
         {canEdit && (
           <div className="space-y-2">
@@ -655,6 +655,38 @@ export function OrderEditOperationView({
             </div>
           ))}
         </div>
+        {operation.shippingRepricing &&
+          (!showCurrent || operation.status === "completed") && (
+            <div
+              className="rounded-md border p-4 text-sm"
+              aria-label="Recalculated shipping"
+            >
+              <p className="font-medium">
+                Recalculated shipping · {operation.shippingRepricing.title}
+              </p>
+              <dl className="mt-3 grid grid-cols-2 gap-2">
+                <dt>Current checkout rate</dt>
+                <dd className="text-right tabular-nums">
+                  {money(operation.shippingRepricing.grossCents)}
+                </dd>
+                {operation.shippingRepricing.discountCents > 0 && (
+                  <>
+                    <dt>
+                      {operation.shippingRepricing.discountLabels.join(", ") ||
+                        "Shipping benefit"}
+                    </dt>
+                    <dd className="text-right tabular-nums">
+                      −{money(operation.shippingRepricing.discountCents)}
+                    </dd>
+                  </>
+                )}
+                <dt className="font-medium">Shipping charged</dt>
+                <dd className="text-right font-medium tabular-nums">
+                  {money(operation.shippingRepricing.netCents)}
+                </dd>
+              </dl>
+            </div>
+          )}
         {totalsColumns.length > 0 ? (
           <OrderEditTotals columns={totalsColumns} />
         ) : (

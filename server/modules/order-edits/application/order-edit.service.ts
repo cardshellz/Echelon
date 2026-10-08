@@ -411,6 +411,7 @@ export class OrderEditService {
           record.connectionId,
           record.baseline,
           record.id,
+          record.quote ?? undefined,
         );
         if (recovery.status !== "restored")
           return this.review(
@@ -535,6 +536,7 @@ export class OrderEditService {
             record.connectionId,
             record.baseline,
             record.id,
+            quote,
           );
           if (
             recovery.status !== "restored" ||
@@ -926,6 +928,7 @@ export class OrderEditService {
       previousTotalCents: record.baseline.totalCents,
       updatedTotalCents: presentedTotal,
       quoteAvailable: quote !== null,
+      shippingRepricing: quote?.shippingRepricing ?? null,
       balanceDueCents: Math.max(0, presentedTotal - presentedPaid),
       refundDueCents: Math.max(0, presentedPaid - presentedTotal),
       financials: {
@@ -957,7 +960,9 @@ export class OrderEditService {
             })),
       warnings: [
         "Private staff testing. Customer access is disabled.",
-        "Shipping charges stay unchanged in this pilot; review the revised order before applying it.",
+        quote?.shippingRepricing
+          ? "Shipping is recalculated for the revised items using current checkout rates and eligible shipping benefits."
+          : "This saved edit predates shipping recalculation. Start a new edit to recheck shipping.",
       ],
       canAbandon:
         !record.commitStartedAt &&

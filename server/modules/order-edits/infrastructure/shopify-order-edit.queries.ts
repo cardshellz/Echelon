@@ -29,7 +29,7 @@ export const ORDER_QUERY = `query EchelonEditOrder($id: ID!) {
       sellingPlan { name } lineItemGroup { id } variant { id }
       discountAllocations { allocatedAmountSet { ${MONEY} } discountApplication { index } }
     } pageInfo { hasNextPage } }
-    shippingLines(first: 250) { nodes { id isRemoved originalPriceSet { ${MONEY} } currentDiscountedPriceSet { ${MONEY} } } pageInfo { hasNextPage } }
+    shippingLines(first: 250) { nodes { id title code source isRemoved originalPriceSet { ${MONEY} } currentDiscountedPriceSet { ${MONEY} } } pageInfo { hasNextPage } }
     transactions(first: 250) { ${TRANSACTION} }
     transactionsCount { count precision }
     refunds { ${REFUND_FIELDS} }
@@ -60,7 +60,7 @@ export const PRICING_PROVENANCE_QUERY = `query EchelonEditPricingProvenance {
 }`;
 export const CALCULATED_FIELDS = `id originalOrder { id } totalPriceSet { ${MONEY} } totalOutstandingSet { ${MONEY} }
   subtotalPriceSet { ${MONEY} } taxLines { priceSet { ${MONEY} } }
-  shippingLines { id price { ${MONEY} } stagedStatus }
+  shippingLines { id title price { ${MONEY} } stagedStatus }
   lineItems(first: 250) { nodes { id title variantTitle quantity editableQuantityBeforeChanges editableSubtotalSet { ${MONEY} } variant { id }
     originalUnitPriceSet { ${MONEY} } discountedUnitPriceSet { ${MONEY} }
     ${CALCULATED_ALLOCATION}
@@ -89,6 +89,16 @@ export const DISCOUNT_MUTATION = `mutation EchelonEditMemberPrice($id: ID!, $lin
 }`;
 export const COMMIT_MUTATION = `mutation EchelonEditCommit($id: ID!, $staffNote: String!) {
   orderEditCommit(id: $id, notifyCustomer: false, staffNote: $staffNote) { order { id } userErrors { field message } }
+}`;
+export const REMOVE_SHIPPING_MUTATION = `mutation EchelonEditRemoveShipping($id: ID!, $shippingLineId: ID!) {
+  orderEditRemoveShippingLine(id: $id, shippingLineId: $shippingLineId) {
+    calculatedOrder { ${CALCULATED_FIELDS} } userErrors { field message }
+  }
+}`;
+export const ADD_SHIPPING_MUTATION = `mutation EchelonEditAddShipping($id: ID!, $shippingLine: OrderEditAddShippingLineInput!) {
+  orderEditAddShippingLine(id: $id, shippingLine: $shippingLine) {
+    calculatedOrder { ${CALCULATED_FIELDS} } userErrors { field message }
+  }
 }`;
 export const REFUND_CAPACITY_QUERY = `query EchelonEditRefundCapacity($id: ID!) {
   order(id: $id) { id suggestedRefund(suggestFullRefund: true, refundMethodAllocation: ORIGINAL_PAYMENT_METHODS) {
