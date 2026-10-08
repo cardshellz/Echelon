@@ -394,27 +394,34 @@ export function createOmsService(db: any, reservationService?: any) {
         });
       }
 
-      const existingLines: OmsOrderLine[] = await db
-        .select()
-        .from(omsOrderLines)
-        .where(eq(omsOrderLines.orderId, existingOrder.id));
-
-      const existingLineByExternalId = new Map<string, OmsOrderLine>(
-        existingLines
-          .filter((line: OmsOrderLine) => line.externalLineItemId)
-          .map((line: OmsOrderLine) => [line.externalLineItemId!, line]),
-      );
       let insertedLines = 0;
       let updatedLines = 0;
 
-      for (const item of data.lineItems) {
-        const existingLine = item.externalLineItemId
-          ? existingLineByExternalId.get(item.externalLineItemId)
-          : undefined;
+      // One transaction for the whole order. Committing line by line let a
+      // concurrent sync see a half-authorized order: on #63964 (2026-10-06)
+      // orders/paid authorized line 1, failed before lines 2-4, and an
+      // orders/updated sync pushed a 1-item ShipStation order in between.
+      // Lines are locked in id order up front so concurrent ingests of the
+      // same order queue behind each other instead of interleaving.
+      await db.transaction(async (tx: any) => {
+        if ((await guardOrderEditShopifyIngress(tx,existingOrder.id,data.rawPayload,new Date())).skipLines) return;
+        const existingLines: OmsOrderLine[] = await tx
+          .select()
+          .from(omsOrderLines)
+          .where(eq(omsOrderLines.orderId, existingOrder.id))
+          .orderBy(omsOrderLines.id)
+          .for("update");
+        const existingLineByExternalId = new Map<string, OmsOrderLine>(
+          existingLines
+            .filter((line: OmsOrderLine) => line.externalLineItemId)
+            .map((line: OmsOrderLine) => [line.externalLineItemId!, line]),
+        );
+        for (const item of data.lineItems) {
+          const existingLine = item.externalLineItemId
+            ? existingLineByExternalId.get(item.externalLineItemId)
+            : undefined;
 
-        if (existingLine) {
-          await db.transaction(async (tx: any) => {
-            if ((await guardOrderEditShopifyIngress(tx,existingOrder.id,data.rawPayload,new Date())).skipLines) return;
+          if (existingLine) {
             const [lockedLine] = await tx
               .select()
               .from(omsOrderLines)
@@ -475,14 +482,11 @@ export function createOmsService(db: any, reservationService?: any) {
               previous: previousAuthority,
               authority,
             });
-          });
-          updatedLines += 1;
-          continue;
-        }
+            updatedLines += 1;
+            continue;
+          }
 
-        const authority = buildLineAuthorityState(data, item);
-        await db.transaction(async (tx: any) => {
-          if ((await guardOrderEditShopifyIngress(tx,existingOrder.id,data.rawPayload,new Date())).skipLines) return;
+          const authority = buildLineAuthorityState(data, item);
           const identity = await resolveOrderLineCatalogIdentity(tx, { ...item, channelId });
           const productVariantId = identity?.id ?? null;
           const variantCompareAtPrice = identity?.compareAtPriceCents ?? null;
@@ -530,9 +534,9 @@ export function createOmsService(db: any, reservationService?: any) {
               authority,
             });
           }
-        });
-        insertedLines += 1;
-      }
+          insertedLines += 1;
+        }
+      });
 
       if (insertedLines > 0 || updatedLines > 0) {
         console.log(
