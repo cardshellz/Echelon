@@ -125,6 +125,8 @@ type MaterializableOmsLine = {
 };
 
 const DEFAULT_FULFILLMENT_PARTITION_KEY = "default";
+/** Canonical claim refusal when an order's demand no longer matches its claim. */
+const ACTIVE_CLAIM_REPLACEMENT_REQUIRED_CODE = "ACTIVE_CLAIM_REPLACEMENT_REQUIRED";
 const UNAUTHORIZED_PAID_LINE_RECOVERY_PARTITION_KEY =
   "recovery:unauthorized-paid-lines:v1";
 
@@ -1847,6 +1849,45 @@ export class WmsSyncService {
    * different from an explicit shortfall: it leaves claim state unknown, so
    * this sync fails and retries instead of continuing toward the provider.
    */
+  /**
+   * Lines materialized after the order's first reservation (late payment
+   * authority, restored lines) make the order's demand differ from its active
+   * claim. reserveOrder deliberately refuses to change an existing claim, so
+   * that difference is replaced through reconcileOrderDemand, the same
+   * primitive order-edit propagation uses. Before 2026-10-08 the refusal
+   * aborted every retry of the sync before the ShipStation amend, so late
+   * lines never reached ShipStation (#63964).
+   */
+  private async reserveOrReplaceChangedClaim(
+    wmsOrderId: number,
+    omsOrderId: number | null,
+    context: string,
+  ): Promise<ReservationResult> {
+    try {
+      return await this.services.reservation.reserveOrder(wmsOrderId);
+    } catch (err: any) {
+      if (err?.code !== ACTIVE_CLAIM_REPLACEMENT_REQUIRED_CODE) throw err;
+      const replacedClaimId = String(err?.context?.claimId ?? "unknown");
+      const replacement = await this.services.reservation.reconcileOrderDemand({
+        orderId: wmsOrderId,
+        // One replacement per superseded claim: a retry replays it.
+        sourceEventId: `wms_sync_claim_replacement:${wmsOrderId}:${replacedClaimId}`,
+        demandChanged: true,
+        reason: `Order demand changed after its claim (${context}) — replacing inventory claim`,
+      });
+      logger.info("wms_sync_claim_replaced", {
+        outcome: "claim_replaced",
+        oms_order_id: omsOrderId,
+        wms_order_id: wmsOrderId,
+        replaced_claim_id: replacedClaimId,
+        context,
+        reserved: replacement?.reservation?.reserved ?? 0,
+        failed: replacement?.reservation?.failed?.length ?? 0,
+      });
+      return replacement.reservation;
+    }
+  }
+
   private async reserveBeforeShipmentProcessing(
     wmsOrderId: number,
     omsOrderId: number | null,
@@ -1854,7 +1895,7 @@ export class WmsSyncService {
   ): Promise<void> {
     let reserveResult: ReservationResult;
     try {
-      reserveResult = await this.services.reservation.reserveOrder(wmsOrderId);
+      reserveResult = await this.reserveOrReplaceChangedClaim(wmsOrderId, omsOrderId, context);
     } catch (err: any) {
       if (isPermanentOrderReservationDataError(err)) {
         // A bad order line fails the same way on every retry. Record it where it
