@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { ShopifyOrderEditProvider } from "../../infrastructure/shopify-order-edit.provider";
 import { isUnpaidRecoveryRestored } from "../../application/order-edit-evidence";
 import { orderEditQuoteSchema } from "../../application/order-edit-provider.schema";
+import type { OrderEditShippingCalculator } from "../../application/order-edit-shipping";
 import {
   OrderEditCommitNotSentError,
   type OrderEditQuote,
@@ -235,9 +236,82 @@ const refundCapacity = (amount = "20.00", gateway = "shopify_payments") => ({
   },
 });
 
+function shippingOrder(
+  total = "26.50",
+  shipping = "5.00",
+  tax = "1.50",
+  subtotal = "20.00",
+  outstanding = "0.00",
+  orderLines = [line()],
+) {
+  return rawOrder({
+    currentTotalPriceSet: bag(total),
+    currentSubtotalPriceSet: bag(subtotal),
+    currentTotalTaxSet: bag(tax),
+    currentShippingPriceSet: bag(shipping),
+    netPaymentSet: bag("26.50"),
+    totalOutstandingSet: bag(outstanding),
+    fullyPaid: outstanding === "0.00",
+    transactions: [tx(1, "26.50")],
+    lineItems: { nodes: orderLines, pageInfo: { hasNextPage: false } },
+    shippingLines: {
+      nodes: [
+        {
+          id: id("ShippingLine", shipping === "5.00" ? 1 : 2),
+          title: "Standard Shipping",
+          code: shipping === "5.00" ? "standard" : null,
+          source: shipping === "5.00" ? "Echelon Shipping" : null,
+          isRemoved: false,
+          originalPriceSet: bag(shipping),
+          currentDiscountedPriceSet: bag(shipping),
+        },
+      ],
+      pageInfo: { hasNextPage: false },
+    },
+  });
+}
+function shippingCalculated(
+  total = "26.50",
+  shipping = "5.00",
+  tax = "1.50",
+  subtotal = "20.00",
+  outstanding = "0.00",
+  lines = [calcLine()],
+  added: ReturnType<typeof calcLine>[] = [],
+  stagedStatus = "NONE",
+) {
+  return {
+    ...calculated(total, outstanding, lines, added),
+    subtotalPriceSet: bag(subtotal),
+    taxLines: [{ priceSet: bag(tax) }],
+    shippingLines: [
+      {
+        id: id("CalculatedShippingLine", 1),
+        title: "Standard Shipping",
+        price: bag(shipping),
+        stagedStatus,
+      },
+    ],
+  };
+}
+
 function harness(
   responses: Array<unknown>,
   credentialOverrides: Record<string, unknown> = {},
+  shippingCalculator: OrderEditShippingCalculator = {
+    calculate: async (snapshot) => ({
+      title: snapshot.shippingContext?.lines[0]?.title ?? "Standard Shipping",
+      code: "standard",
+      source: "Echelon Shipping",
+      grossCents:
+        snapshot.financials?.shippingGrossCents ?? snapshot.shippingCents,
+      netCents: snapshot.shippingCents,
+      discountCents:
+        (snapshot.financials?.shippingGrossCents ?? snapshot.shippingCents) -
+        snapshot.shippingCents,
+      discountLabels: snapshot.financials?.shippingDiscountLabels ?? [],
+    }),
+  },
 ) {
   const requests: Array<{ query: string; variables: Record<string, unknown> }> =
     [];
@@ -255,6 +329,7 @@ function harness(
     },
   );
   const provider = new ShopifyOrderEditProvider({
+    shippingCalculator,
     clock: () => NOW,
     fetch: fetchImpl as typeof fetch,
     credentials: {
@@ -417,7 +492,7 @@ function codeCalculated(
       {
         id: id("CalculatedShippingLine", 1),
         price: bag("12.99"),
-        stagedStatus: "UNCHANGED",
+        stagedStatus: "NONE",
       },
     ],
   };
@@ -642,6 +717,597 @@ function shippingOnlyCalculated(
     ],
   };
 }
+
+describe("shipping repricing, commit and payment recovery", () => {
+  const freeShipping = {
+    title: "Standard Shipping",
+    code: "standard",
+    source: "Echelon Shipping",
+    grossCents: 800,
+    netCents: 0,
+    discountCents: 800,
+    discountLabels: ["Member free shipping"],
+  };
+  async function increase(
+    shippingCalculator: OrderEditShippingCalculator,
+    extra: unknown[] = [],
+  ) {
+    const afterItems = shippingCalculated(
+      "36.50",
+      "5.00",
+      "1.50",
+      "30.00",
+      "10.00",
+      [calcLine()],
+      [calcLine(2, 10, 1)],
+    );
+    const removed = shippingCalculated(
+      "31.80",
+      "5.00",
+      "1.80",
+      "30.00",
+      "5.30",
+      [calcLine()],
+      [calcLine(2, 10, 1)],
+      "REMOVED",
+    );
+    const final = {
+      ...removed,
+      shippingLines: [
+        ...removed.shippingLines,
+        {
+          id: id("CalculatedShippingLine", 2),
+          title: "Standard Shipping",
+          price: bag("0.00"),
+          stagedStatus: "ADDED",
+        },
+      ],
+    };
+    const h = harness(
+      [
+        shippingOrder(),
+        shippingOrder(),
+        { nodes: [variant(10, "10.00")] },
+        begin(shippingCalculated()),
+        {
+          orderEditAddVariant: {
+            userErrors: [],
+            calculatedLineItem: { id: id("CalculatedLineItem", 2) },
+            calculatedOrder: afterItems,
+          },
+        },
+        {
+          orderEditRemoveShippingLine: {
+            userErrors: [],
+            calculatedOrder: removed,
+          },
+        },
+        {
+          orderEditAddShippingLine: { userErrors: [], calculatedOrder: final },
+        },
+        ...extra,
+      ],
+      {},
+      shippingCalculator,
+    );
+    const baseline = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      baseline,
+      { changes: [], additions: [{ variantId: "10", quantity: 1 }] },
+      "edit-shipping",
+    );
+    return { ...h, baseline, quote };
+  }
+  it("recalculates shipping and tax after an increase and includes the fee reduction in the payment difference", async () => {
+    const calculate = vi.fn(async () => freeShipping);
+    const h = await increase({ calculate });
+    expect(h.quote).toMatchObject({
+      totalCents: 3180,
+      outstandingCents: 530,
+      deltaCents: 530,
+      shippingCents: 0,
+      shippingRepricing: freeShipping,
+      financials: {
+        itemsNetCents: 3000,
+        shippingGrossCents: 0,
+        shippingCents: 0,
+        shippingDiscountCents: 0,
+        taxCents: 180,
+      },
+    });
+    // The checkout benefit is audited separately: Shopify receives its exact net charge, not an invented shipping allocation.
+    expect(calculate).toHaveBeenCalledWith(h.baseline, [
+      { variantId: id("ProductVariant", 10), quantity: 2, netCents: 2000 },
+      { variantId: id("ProductVariant", 10), quantity: 1, netCents: 1000 },
+    ]);
+    expect(
+      h.requests.find((request) =>
+        request.query.includes("orderEditAddShippingLine"),
+      )?.variables.shippingLine,
+    ).toEqual({
+      title: "Standard Shipping",
+      price: { amount: "0.00", currencyCode: "USD" },
+    });
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditCommit")),
+    ).toBe(false);
+  });
+  it("checks the current shipping rate again before committing and verifies the observed charge", async () => {
+    const calculate = vi.fn(async () => freeShipping);
+    const pending = shippingOrder("31.80", "0.00", "1.80", "30.00", "5.30", [
+      line(),
+      line(2, 10, 1),
+    ]);
+    const h = await increase({ calculate }, [
+      shippingOrder(),
+      { nodes: [variant(10, "10.00")] },
+      { orderEditCommit: { userErrors: [], order: { id: id("Order", 100) } } },
+      pending,
+    ]);
+    expect(
+      (await h.provider.commit(4, h.quote, "edit-shipping")).shippingCents,
+    ).toBe(0);
+    expect(calculate).toHaveBeenCalledTimes(2);
+    expect(
+      h.requests.find((request) => request.query.includes("orderEditCommit"))
+        ?.query,
+    ).toContain("notifyCustomer: false");
+  });
+  it("proves no commit was sent when the reviewed shipping rate or benefits become stale", async () => {
+    let calls = 0;
+    const h = await increase(
+      {
+        calculate: async () =>
+          ++calls === 1
+            ? freeShipping
+            : { ...freeShipping, grossCents: 900, discountCents: 900 },
+      },
+      [shippingOrder()],
+    );
+    await expect(
+      h.provider.commit(4, h.quote, "edit-shipping"),
+    ).rejects.toBeInstanceOf(OrderEditCommitNotSentError);
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditCommit")),
+    ).toBe(false);
+  });
+  it("blocks a legacy unsubmitted quote while keeping its cancellation and recovery contract readable", async () => {
+    const source = harness([rawOrder()]);
+    const baseline = await source.provider.readOrder(4, "100");
+    const quote = additionQuote(baseline);
+    const h = harness([rawOrder(), { nodes: [variant()] }]);
+    await expect(h.provider.commit(4, quote, "edit-1")).rejects.toMatchObject({
+      code: "SHIPPING_REVIEW_REQUIRED",
+      name: "OrderEditCommitNotSentError",
+    });
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditCommit")),
+    ).toBe(false);
+    expect(orderEditQuoteSchema.safeParse(quote).success).toBe(true);
+  });
+  it("accounts for a higher shipping charge and Shopify's revised tax in a reduction's refund preflight", async () => {
+    const reduced = shippingCalculated(
+      "16.50",
+      "5.00",
+      "1.50",
+      "10.00",
+      "-10.00",
+      [calcLine(1, 10, 1)],
+    );
+    const removed = shippingCalculated(
+      "11.50",
+      "5.00",
+      "1.50",
+      "10.00",
+      "-15.00",
+      [calcLine(1, 10, 1)],
+      [],
+      "REMOVED",
+    );
+    const final = shippingCalculated(
+      "19.80",
+      "8.00",
+      "1.80",
+      "10.00",
+      "-6.70",
+      [calcLine(1, 10, 1)],
+      [],
+      "ADDED",
+    );
+    const h = harness(
+      [
+        shippingOrder(),
+        shippingOrder(),
+        begin(shippingCalculated()),
+        quantity(reduced),
+        {
+          orderEditRemoveShippingLine: {
+            userErrors: [],
+            calculatedOrder: removed,
+          },
+        },
+        {
+          orderEditAddShippingLine: { userErrors: [], calculatedOrder: final },
+        },
+        refundCapacity("26.50"),
+      ],
+      {},
+      {
+        calculate: async () => ({
+          ...freeShipping,
+          netCents: 800,
+          discountCents: 0,
+          discountLabels: [],
+        }),
+      },
+    );
+    const baseline = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      baseline,
+      { changes: [{ lineItemId: "1", quantity: 1 }], additions: [] },
+      "shipping-reduction",
+    );
+    expect(quote).toMatchObject({
+      totalCents: 1980,
+      deltaCents: -670,
+      shippingCents: 800,
+      financials: { shippingGrossCents: 800, taxCents: 180 },
+    });
+    expect(h.requests.at(-1)?.query).toContain("suggestedRefund");
+    expect(
+      h.requests.some((request) => request.query.includes("refundCreate")),
+    ).toBe(false);
+  });
+  it("restores saved shipping and tax on unpaid expiry without rerating the old cart or requesting a refund", async () => {
+    const original = await increase({ calculate: async () => freeShipping });
+    const pending = shippingOrder("31.80", "0.00", "1.80", "30.00", "5.30", [
+      line(),
+      line(2, 10, 1),
+    ]);
+    const currentCalc = shippingCalculated(
+      "31.80",
+      "0.00",
+      "1.80",
+      "30.00",
+      "5.30",
+      [calcLine(), calcLine(2, 10, 1)],
+    );
+    const quantitiesRestored = shippingCalculated(
+      "21.50",
+      "0.00",
+      "1.50",
+      "20.00",
+      "-5.00",
+      [calcLine(), calcLine(2, 10, 0)],
+    );
+    const shippingRemoved = {
+      ...quantitiesRestored,
+      shippingLines: quantitiesRestored.shippingLines.map((line) => ({
+        ...line,
+        stagedStatus: "REMOVED",
+      })),
+    };
+    const restoredCalc = shippingCalculated(
+      "26.50",
+      "5.00",
+      "1.50",
+      "20.00",
+      "0.00",
+      [calcLine(), calcLine(2, 10, 0)],
+      [],
+      "ADDED",
+    );
+    const restored = shippingOrder("26.50", "5.00", "1.50", "20.00", "0.00", [
+      line(),
+      line(2, 10, 0),
+    ]);
+    const calculate = vi.fn(async () => {
+      throw new Error("Recovery must use saved original shipping");
+    });
+    const h = harness(
+      [
+        pending,
+        begin(currentCalc),
+        quantity(quantitiesRestored),
+        {
+          orderEditRemoveShippingLine: {
+            userErrors: [],
+            calculatedOrder: shippingRemoved,
+          },
+        },
+        {
+          orderEditAddShippingLine: {
+            userErrors: [],
+            calculatedOrder: restoredCalc,
+          },
+        },
+        pending,
+        {
+          orderEditCommit: { userErrors: [], order: { id: id("Order", 100) } },
+        },
+        restored,
+      ],
+      {},
+      { calculate },
+    );
+    const result = await h.provider.recoverUnpaid(
+      4,
+      original.baseline,
+      original.quote,
+      "shipping-expiry",
+    );
+    expect(result).toMatchObject({
+      totalCents: 2650,
+      shippingCents: 500,
+      taxCents: 150,
+      outstandingCents: 0,
+      netPaidCents: 2650,
+    });
+    expect(calculate).not.toHaveBeenCalled();
+    expect(
+      h.requests.find((request) =>
+        request.query.includes("orderEditAddShippingLine"),
+      )?.variables.shippingLine,
+    ).toEqual({
+      title: "Standard Shipping",
+      price: { amount: "5.00", currencyCode: "USD" },
+    });
+    expect(
+      h.requests.some((request) =>
+        /refundCreate|suggestedRefund|draftOrderCalculate|orderEditAddVariant/.test(
+          request.query,
+        ),
+      ),
+    ).toBe(false);
+  });
+  it("recovers a free-to-paid shipping change using the saved original net fee, with strict proof of every cent and the replaced shipping lineage", async () => {
+    const title = "Standard Shipping";
+    const base = rawOrder({
+      discountApplications: {
+        nodes: [
+          {
+            __typename: "AutomaticDiscountApplication",
+            index: 0,
+            targetType: "SHIPPING_LINE",
+            allocationMethod: "EACH",
+            targetSelection: "ALL",
+            title: "Member free shipping",
+            value: { __typename: "PricingPercentageValue", percentage: 100 },
+          },
+        ],
+        pageInfo: { hasNextPage: false },
+      },
+      shippingLines: {
+        nodes: [
+          {
+            id: id("ShippingLine", 1),
+            title,
+            code: "standard",
+            source: "Echelon Shipping",
+            isRemoved: false,
+            originalPriceSet: bag("5.00"),
+            currentDiscountedPriceSet: bag("0.00"),
+          },
+        ],
+        pageInfo: { hasNextPage: false },
+      },
+    });
+    const withShipping = (
+      total: string,
+      outstanding: string,
+      subtotal: string,
+      shipping: string,
+      lines: ReturnType<typeof calcLine>[],
+      added: ReturnType<typeof calcLine>[] = [],
+      stagedStatus = "NONE",
+    ) => ({
+      ...calculated(total, outstanding, lines, added),
+      subtotalPriceSet: bag(subtotal),
+      shippingLines: [
+        {
+          id: id("CalculatedShippingLine", 1),
+          title,
+          price: bag(shipping),
+          stagedStatus,
+        },
+      ],
+    });
+    const initial = withShipping("20.00", "0.00", "20.00", "5.00", [
+      calcLine(),
+    ]);
+    const itemsChanged = withShipping(
+      "25.00",
+      "5.00",
+      "25.00",
+      "5.00",
+      [calcLine()],
+      [calcLine(2, 20, 1, "5.00")],
+    );
+    const removed = withShipping(
+      "25.00",
+      "5.00",
+      "25.00",
+      "5.00",
+      [calcLine()],
+      [calcLine(2, 20, 1, "5.00")],
+      "REMOVED",
+    );
+    const repriced = withShipping(
+      "33.00",
+      "13.00",
+      "25.00",
+      "8.00",
+      [calcLine()],
+      [calcLine(2, 20, 1, "5.00")],
+      "ADDED",
+    );
+    const h = harness(
+      [
+        base,
+        base,
+        { nodes: [variant()] },
+        begin(initial),
+        {
+          orderEditAddVariant: {
+            userErrors: [],
+            calculatedLineItem: { id: id("CalculatedLineItem", 2) },
+            calculatedOrder: itemsChanged,
+          },
+        },
+        {
+          orderEditRemoveShippingLine: {
+            userErrors: [],
+            calculatedOrder: removed,
+          },
+        },
+        {
+          orderEditAddShippingLine: {
+            userErrors: [],
+            calculatedOrder: repriced,
+          },
+        },
+      ],
+      {},
+      {
+        calculate: async () => ({
+          ...freeShipping,
+          netCents: 800,
+          discountCents: 0,
+          discountLabels: [],
+        }),
+      },
+    );
+    const baseline = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      baseline,
+      { changes: [], additions: [{ variantId: "20", quantity: 1 }] },
+      "edit-free-to-paid",
+    );
+    expect(quote.deltaCents).toBe(1300);
+    const pending = rawOrder({
+      fullyPaid: false,
+      currentTotalPriceSet: bag("33.00"),
+      currentSubtotalPriceSet: bag("25.00"),
+      currentShippingPriceSet: bag("8.00"),
+      totalOutstandingSet: bag("13.00"),
+      lineItems: {
+        nodes: [line(), line(2, 20, 1, "5.00")],
+        pageInfo: { hasNextPage: false },
+      },
+      shippingLines: {
+        nodes: [
+          {
+            id: id("ShippingLine", 2),
+            title,
+            code: null,
+            source: null,
+            isRemoved: false,
+            originalPriceSet: bag("8.00"),
+            currentDiscountedPriceSet: bag("8.00"),
+          },
+        ],
+        pageInfo: { hasNextPage: false },
+      },
+    });
+    const restored = rawOrder({
+      lineItems: {
+        nodes: [line(), line(2, 20, 0, "5.00")],
+        pageInfo: { hasNextPage: false },
+      },
+      shippingLines: {
+        nodes: [
+          {
+            id: id("ShippingLine", 3),
+            title,
+            code: null,
+            source: null,
+            isRemoved: false,
+            originalPriceSet: bag("0.00"),
+            currentDiscountedPriceSet: bag("0.00"),
+          },
+        ],
+        pageInfo: { hasNextPage: false },
+      },
+    });
+    const current = withShipping("33.00", "13.00", "25.00", "8.00", [
+      calcLine(),
+      calcLine(2, 20, 1, "5.00"),
+    ]);
+    const quantityRestored = withShipping("28.00", "8.00", "20.00", "8.00", [
+      calcLine(),
+      calcLine(2, 20, 0, "5.00"),
+    ]);
+    const shippingRemoved = withShipping(
+      "20.00",
+      "0.00",
+      "20.00",
+      "8.00",
+      [calcLine(), calcLine(2, 20, 0, "5.00")],
+      [],
+      "REMOVED",
+    );
+    const final = withShipping(
+      "20.00",
+      "0.00",
+      "20.00",
+      "0.00",
+      [calcLine(), calcLine(2, 20, 0, "5.00")],
+      [],
+      "ADDED",
+    );
+    const recovery = harness([
+      pending,
+      begin(current),
+      quantity(quantityRestored),
+      {
+        orderEditRemoveShippingLine: {
+          userErrors: [],
+          calculatedOrder: shippingRemoved,
+        },
+      },
+      { orderEditAddShippingLine: { userErrors: [], calculatedOrder: final } },
+      pending,
+      { orderEditCommit: { userErrors: [], order: { id: id("Order", 100) } } },
+      restored,
+      restored,
+    ]);
+    const observed = await recovery.provider.recoverUnpaid(
+      4,
+      baseline,
+      quote,
+      "expire-free-to-paid",
+    );
+    expect(observed).toMatchObject({
+      totalCents: 2000,
+      netPaidCents: 2000,
+      shippingCents: 0,
+      outstandingCents: 0,
+      financials: { shippingGrossCents: 0, shippingDiscountCents: 0 },
+    });
+    expect(isUnpaidRecoveryRestored(observed, baseline, quote)).toBe(true);
+    expect(isUnpaidRecoveryRestored(observed, baseline)).toBe(false);
+    expect(
+      isUnpaidRecoveryRestored(
+        { ...observed, shippingCents: 1 },
+        baseline,
+        quote,
+      ),
+    ).toBe(false);
+    expect(
+      (
+        await recovery.provider.reconcileRecovery(
+          4,
+          baseline,
+          "expire-free-to-paid",
+          quote,
+        )
+      ).status,
+    ).toBe("restored");
+  });
+});
 
 describe("ShopifyOrderEditProvider", () => {
   it.each(["missing code", "duplicate index", "unknown index"])(

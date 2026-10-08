@@ -116,12 +116,10 @@ function document(
           quantity: target.lines[0].quantity,
         },
       ],
-      additions: target.lines
-        .slice(1)
-        .map((line) => ({
-          variantId: line.variantId,
-          quantity: line.quantity,
-        })),
+      additions: target.lines.slice(1).map((line) => ({
+        variantId: line.variantId,
+        quantity: line.quantity,
+      })),
     },
     lines: target.lines.map((line, index) => ({
       originalLineId: index === 0 ? line.id : null,
@@ -137,7 +135,18 @@ function document(
     totalCents: target.totalCents,
     outstandingCents: target.totalCents - baseline.netPaidCents,
     deltaCents: target.totalCents - baseline.totalCents,
-    shippingCents: 0,
+    shippingCents: target.shippingCents,
+    ...(target.financials
+      ? {
+          financials: {
+            ...target.financials,
+            lines: target.financials.lines.map((line, index) => ({
+              ...line,
+              id: `gid://shopify/CalculatedLineItem/${index + 1}`,
+            })),
+          },
+        }
+      : {}),
     createdAt: NOW.toISOString(),
     evidence: {},
   };
@@ -277,6 +286,104 @@ function document(
         { quantity: 1, paid_quantity: 1, authority_fulfillable_quantity: 1 },
       ]);
     });
+    it("projects the verified shipping fee, revised tax and order total together, with idempotent audit", async () => {
+      const target = snapshot();
+      target.shippingCents = 800;
+      target.taxCents = 180;
+      target.totalCents = 1980;
+      target.netPaidCents = 1980;
+      target.shippingContext = {
+        address: {
+          address1: "100 Test St",
+          address2: null,
+          city: "Test",
+          provinceCode: "PA",
+          zip: "16066",
+          countryCodeV2: "US",
+        },
+        lines: [
+          {
+            id: "gid://shopify/ShippingLine/1",
+            title: "Standard Shipping",
+            code: null,
+            source: null,
+            grossCents: 800,
+            netCents: 800,
+          },
+        ],
+      };
+      target.financials = {
+        itemsGrossCents: 1000,
+        itemsDiscountCents: 0,
+        itemsNetCents: 1000,
+        itemDiscountLabels: [],
+        shippingGrossCents: 800,
+        shippingDiscountCents: 0,
+        shippingCents: 800,
+        shippingDiscountLabels: [],
+        taxCents: 180,
+        taxesIncluded: false,
+        totalCents: 1980,
+        lines: [
+          {
+            id: target.lines[0].id,
+            grossCents: 1000,
+            discountCents: 0,
+            netCents: 1000,
+          },
+        ],
+      };
+      const operation = document(target);
+      operation.baseline.shippingContext = {
+        address: structuredClone(target.shippingContext.address),
+        lines: [
+          {
+            ...target.shippingContext.lines[0],
+            id: "gid://shopify/ShippingLine/2",
+            grossCents: 0,
+            netCents: 0,
+          },
+        ],
+      };
+      operation.quote.shippingRepricing = {
+        title: "Standard Shipping",
+        code: "standard",
+        source: "Echelon Shipping",
+        grossCents: 800,
+        discountCents: 0,
+        netCents: 800,
+        discountLabels: [],
+      };
+      await save(operation);
+      await projector.project(20, OP, target);
+      await projector.project(20, OP, target);
+      expect(
+        (
+          await database.pool.query(
+            "SELECT subtotal_cents,shipping_cents,tax_cents,total_cents FROM oms.oms_orders",
+          )
+        ).rows[0],
+      ).toEqual({
+        subtotal_cents: "1000",
+        shipping_cents: "800",
+        tax_cents: "180",
+        total_cents: "1980",
+      });
+      const events = (
+        await database.pool.query(
+          "SELECT after_state FROM oms.order_edit_events WHERE action='paid_current_projected'",
+        )
+      ).rows;
+      expect(events).toHaveLength(1);
+      expect(events[0].after_state).toMatchObject({
+        header: {
+          shipping_cents: "800",
+          tax_cents: "180",
+          total_cents: "1980",
+        },
+        snapshot: { shippingCents: 800, taxCents: 180, totalCents: 1980 },
+      });
+    });
     it("compares nested evidence structurally after PostgreSQL JSONB reorders object keys", async () => {
       const target = snapshot();
       target.evidence.discountApplications = [
@@ -365,6 +472,127 @@ function document(
         paid_quantity: 2,
         authority_fulfillable_quantity: 2,
       });
+    });
+    it("projects recovered free shipping only when the saved quote proves its original charge was replaced", async () => {
+      const baseline = snapshot(2);
+      baseline.shippingContext = {
+        address: {
+          address1: "100 Test St",
+          address2: null,
+          city: "Test",
+          provinceCode: "PA",
+          zip: "16066",
+          countryCodeV2: "US",
+        },
+        lines: [
+          {
+            id: "gid://shopify/ShippingLine/1",
+            title: "Standard Shipping",
+            code: "standard",
+            source: "Echelon Shipping",
+            grossCents: 500,
+            netCents: 0,
+          },
+        ],
+      };
+      baseline.financials = {
+        itemsGrossCents: 2000,
+        itemsDiscountCents: 0,
+        itemsNetCents: 2000,
+        itemDiscountLabels: [],
+        shippingGrossCents: 500,
+        shippingDiscountCents: 500,
+        shippingCents: 0,
+        shippingDiscountLabels: ["Member free shipping"],
+        taxCents: 0,
+        taxesIncluded: false,
+        totalCents: 2000,
+        lines: [
+          {
+            id: baseline.lines[0].id,
+            grossCents: 2000,
+            discountCents: 0,
+            netCents: 2000,
+          },
+        ],
+      };
+      const revised = snapshot(3);
+      revised.shippingCents = 800;
+      revised.totalCents = 3800;
+      revised.netPaidCents = 3800;
+      revised.financials = {
+        ...baseline.financials,
+        itemsGrossCents: 3000,
+        itemsNetCents: 3000,
+        shippingGrossCents: 800,
+        shippingDiscountCents: 0,
+        shippingCents: 800,
+        shippingDiscountLabels: [],
+        totalCents: 3800,
+        lines: [
+          {
+            id: revised.lines[0].id,
+            grossCents: 3000,
+            discountCents: 0,
+            netCents: 3000,
+          },
+        ],
+      };
+      const recovered = structuredClone(baseline);
+      recovered.shippingContext!.lines = [
+        {
+          ...baseline.shippingContext.lines[0],
+          id: "gid://shopify/ShippingLine/3",
+          code: null,
+          source: null,
+          grossCents: 0,
+          netCents: 0,
+        },
+      ];
+      recovered.financials = {
+        ...baseline.financials,
+        shippingGrossCents: 0,
+        shippingDiscountCents: 0,
+        shippingDiscountLabels: [],
+      };
+      const operation = document(revised, baseline, true);
+      operation.lastSnapshot = recovered;
+      await save(operation);
+      await expect(projector.project(20, OP, recovered)).rejects.toMatchObject({
+        code: "ORDER_EDIT_PROJECTION_UNPROVEN",
+      });
+      expect(
+        (
+          await database.pool.query(
+            "SELECT count(*)::int AS count FROM oms.order_edit_events",
+          )
+        ).rows[0].count,
+      ).toBe(0);
+      operation.quote.shippingRepricing = {
+        title: "Standard Shipping",
+        code: "standard",
+        source: "Echelon Shipping",
+        grossCents: 800,
+        discountCents: 0,
+        netCents: 800,
+        discountLabels: [],
+      };
+      await save(operation);
+      await projector.project(20, OP, recovered);
+      expect(
+        (
+          await database.pool.query(
+            "SELECT shipping_cents,total_cents FROM oms.oms_orders",
+          )
+        ).rows[0],
+      ).toEqual({ shipping_cents: "0", total_cents: "2000" });
+      expect(
+        (
+          await database.pool.query(
+            "SELECT count(*)::int AS count FROM oms.order_edit_events WHERE action='paid_current_projected'",
+          )
+        ).rows[0].count,
+      ).toBe(1);
     });
     it.each(["hold", "catalog", "disposition", "phase", "snapshot"])(
       "rejects unproven %s without partially changing finances",

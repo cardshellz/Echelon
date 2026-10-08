@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { orderEditFinancialsSchema } from "@shared/order-edits/order-edit-financials";
 import { SHOPIFY_CALCULATED_LINE_ID_PATTERN } from "@shared/order-edits/shopify-edit-identity";
+import { orderEditShippingRepricingSchema } from "@shared/order-edits/order-edit-shipping";
 import type {
   OrderEditSnapshot,
   OrderEditQuote,
@@ -90,6 +91,37 @@ const line = z
 
 export const orderEditSnapshotSchema: z.ZodType<OrderEditSnapshot> = z
   .object({
+    shippingContext: z
+      .object({
+        address: z
+          .object({
+            address1: z.string().nullable(),
+            address2: z.string().nullable(),
+            city: z.string().nullable(),
+            provinceCode: z.string().nullable(),
+            zip: z.string().nullable(),
+            countryCodeV2: z.string().nullable(),
+          })
+          .strict(),
+        lines: z
+          .array(
+            z
+              .object({
+                id: gid("ShippingLine"),
+                title: text,
+                code: z.string().nullable(),
+                source: z.string().nullable(),
+                grossCents: money,
+                netCents: money,
+              })
+              .strict()
+              .refine((value) => value.netCents <= value.grossCents),
+          )
+          .min(1)
+          .max(250),
+      })
+      .strict()
+      .optional(),
     financials: orderEditFinancialsSchema.optional(),
     discountRules: z
       .array(
@@ -168,6 +200,39 @@ export const orderEditSnapshotSchema: z.ZodType<OrderEditSnapshot> = z
   })
   .strict()
   .superRefine((value, context) => {
+    const shippingLines = value.shippingContext?.lines;
+    if (
+      shippingLines &&
+      Number.isSafeInteger(value.shippingCents) &&
+      (!value.financials ||
+        Number.isSafeInteger(value.financials.shippingGrossCents)) &&
+      shippingLines.every(
+        (line) =>
+          Number.isSafeInteger(line.grossCents) &&
+          Number.isSafeInteger(line.netCents),
+      )
+    ) {
+      const gross = shippingLines.reduce(
+        (total, line) => total + BigInt(line.grossCents),
+        BigInt(0),
+      );
+      const net = shippingLines.reduce(
+        (total, line) => total + BigInt(line.netCents),
+        BigInt(0),
+      );
+      if (
+        net !== BigInt(value.shippingCents) ||
+        (value.financials &&
+          gross !== BigInt(value.financials.shippingGrossCents)) ||
+        new Set(shippingLines.map((line) => line.id)).size !==
+          shippingLines.length
+      )
+        context.addIssue({
+          code: "custom",
+          message:
+            "Shipping context must have unique identities and reconcile to the financial shipping charge.",
+        });
+    }
     // Zod still runs refinements after an integer validation issue. Do not
     // convert malformed monetary or quantity input to BigInt and throw.
     if (
@@ -252,6 +317,7 @@ const plan = z
   .strict();
 export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
   .object({
+    shippingRepricing: orderEditShippingRepricingSchema.optional(),
     financials: orderEditFinancialsSchema.optional(),
     connectionId: connection,
     channelId: connection,
@@ -289,6 +355,16 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (
+      value.shippingRepricing &&
+      (value.shippingRepricing.netCents !== value.shippingCents ||
+        !value.financials)
+    )
+      context.addIssue({
+        code: "custom",
+        message:
+          "Shipping repricing must match the verified shipping charge and financial breakdown.",
+      });
     if (
       ![
         value.totalCents,

@@ -221,7 +221,11 @@ export class OrderEditPaidProjection {
         !matchesOrderEditQuote(snapshot, document.quote)) ||
       (document.status === "recovering" &&
         (!document.recoveryStartedAt ||
-          !isUnpaidRecoveryRestored(snapshot, document.baseline)))
+          !isUnpaidRecoveryRestored(
+            snapshot,
+            document.baseline,
+            document.quote,
+          )))
     )
       reject(
         "ORDER_EDIT_PROJECTION_UNPROVEN",
