@@ -20,6 +20,7 @@ import {
 import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
 import { guardOrderEditShopifyIngress } from "../order-edits/infrastructure/order-edit-ingress-guard";
 import { resolveOrderLineCatalogIdentity, recordOrderLineCatalogIdentity, orderLineInventoryIdentitySnapshot } from "./order-line-catalog-identity.service";
+import { isShopifyOrderSource, normalizeShopifyCustomerId, ShopifyCustomerIdentityError, validateShopifyCustomerIdentityCopy } from "./shopify-customer-identity";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -34,7 +35,7 @@ export interface OrderData {
   customerEmail?: string;
   customerPhone?: string;
   /** Channel-agnostic customer id in the source channel (Shopify customer id, eBay buyer id, …). */
-  externalCustomerId?: string;
+  externalCustomerId?: string | null;
   shipToName?: string;
   shipToCompany?: string | null;
   shipToAddress1?: string;
@@ -72,6 +73,11 @@ export interface OrderData {
   sourceTopic?: string;
   sourceEventId?: string | null;
   sourceInboxId?: number | null;
+}
+
+/** Shopify mappers must explicitly copy an ID or declare a genuine guest order. */
+export interface ShopifyOrderData extends OrderData {
+  externalCustomerId: string | null;
 }
 
 export interface LineItemData {
@@ -206,7 +212,8 @@ export function normalizeExternalOrderId(externalOrderId: string): string {
 // Service Factory
 // ---------------------------------------------------------------------------
 
-export function createOmsService(db: any, reservationService?: any) {
+export function createOmsService(db: any, reservationService?: any, options: { clock?: () => Date } = {}) {
+  const clock = options.clock ?? (() => new Date());
   /**
    * Ingest an order from any channel — idempotent by (channel_id, external_order_id).
    * Returns existing order if already ingested.
@@ -230,6 +237,18 @@ export function createOmsService(db: any, reservationService?: any) {
     // Canonicalize the external id so the bridge (GID) and webhook (numeric)
     // paths converge on a single dedup key. See normalizeExternalOrderId.
     const externalOrderId = normalizeExternalOrderId(externalOrderIdRaw);
+    let shopifyCustomerId: string | null;
+    try {
+      validateShopifyCustomerIdentityCopy(data);
+      shopifyCustomerId = isShopifyOrderSource(data.sourceTopic)
+        ? normalizeShopifyCustomerId(data.externalCustomerId)
+        : null;
+    } catch (error) {
+      if (error instanceof ShopifyCustomerIdentityError) {
+        console.error(JSON.stringify({ event: "oms_customer_identity_validation_failed", channelId, externalOrderId, code: error.code }));
+      }
+      throw error;
+    }
     // Atomic ingestion: order row + line items + created event in one transaction.
     // Without this, a concurrent webhook can see the order row before lines exist
     // and trigger a WMS sync against an incomplete order (zero line items).
@@ -246,7 +265,7 @@ export function createOmsService(db: any, reservationService?: any) {
           customerName: data.customerName,
           customerEmail: data.customerEmail,
           customerPhone: data.customerPhone,
-          externalCustomerId: data.externalCustomerId,
+          externalCustomerId: isShopifyOrderSource(data.sourceTopic) ? shopifyCustomerId : data.externalCustomerId,
           shipToName: data.shipToName,
           shipToCompany: data.shipToCompany ?? null,
           shipToAddress1: data.shipToAddress1,
@@ -283,7 +302,39 @@ export function createOmsService(db: any, reservationService?: any) {
         .onConflictDoNothing({ target: [omsOrders.channelId, omsOrders.externalOrderId] })
         .returning();
 
-      if (!inserted) return null;
+      if (!inserted) {
+        if (shopifyCustomerId !== null) {
+          // Lock the deduplicated order before filling a missing identity. A
+          // concurrent replay must never replace an already assigned customer.
+          const [existing] = await tx.select().from(omsOrders)
+            .where(and(eq(omsOrders.channelId, channelId), eq(omsOrders.externalOrderId, externalOrderId)))
+            .for("update").limit(1);
+          if (!existing) throw new ShopifyCustomerIdentityError("OMS_ORDER_IDENTITY_UNAVAILABLE",
+            "The OMS order could not be resolved after an ingestion conflict.", { channelId, externalOrderId });
+          const existingCustomerId = normalizeShopifyCustomerId(existing.externalCustomerId);
+          if (existingCustomerId !== null && existingCustomerId !== shopifyCustomerId) {
+            console.error(JSON.stringify({ event: "oms_customer_identity_conflict", orderId: existing.id, channelId, externalOrderId, code: "OMS_CUSTOMER_ID_CONFLICT" }));
+            throw new ShopifyCustomerIdentityError("OMS_CUSTOMER_ID_CONFLICT", "The existing OMS order belongs to a different Shopify customer.",
+              { orderId: existing.id, channelId, externalOrderId });
+          }
+          if (existingCustomerId === null) {
+            const observedAt = clock();
+            await tx.update(omsOrders).set({ externalCustomerId: shopifyCustomerId, updatedAt: observedAt })
+              .where(eq(omsOrders.id, existing.id));
+            await tx.insert(omsOrderEvents).values({
+              orderId: existing.id,
+              eventType: "external_customer_identity_backfilled",
+              createdAt: observedAt,
+              details: {
+                actor: "shopify_order_ingestion", source: data.sourceTopic,
+                sourceEventId: data.sourceEventId ?? null, sourceInboxId: data.sourceInboxId ?? null,
+                channelId, externalOrderId, before: null, after: shopifyCustomerId,
+              },
+            });
+          }
+        }
+        return null;
+      }
 
       for (const item of data.lineItems) {
         const identity = await resolveOrderLineCatalogIdentity(tx, { ...item, channelId });

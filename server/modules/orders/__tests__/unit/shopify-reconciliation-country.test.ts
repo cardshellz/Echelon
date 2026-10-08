@@ -27,6 +27,19 @@ beforeEach(() => {
 afterEach(() => { initReconciliation(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("Shopify reconciliation country boundary", () => {
+  it("carries the source customer ID into raw storage for the OMS bridge", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, headers: { get: () => null }, json: async () => ({ orders: [
+      { id: 1001, name: "#1001", shipping_address: { country_code: "US" }, line_items: [],
+        customer: { id: 3978054467743, first_name: "Test", last_name: "Customer" }, cancelled_at: null,
+        created_at: "2026-09-01T12:00:00.000Z", source_name: "web", currency: "USD" },
+    ] }) })));
+    expect(await runReconciliationNow()).toMatchObject({ reconciled: 1, failed: 0 });
+    const insert = queries().find(query => query.sql.includes("INSERT INTO shopify_orders"));
+    expect(insert?.sql).toContain("shopify_customer_id");
+    expect(insert?.params.at(-1)).toBe("3978054467743");
+    expect(ports.bridge).toHaveBeenCalledOnce();
+  });
+
   it.each([[{ country_code: " us ", country: "United States" }, "US"], [{ country: "Canada" }, "CA"], [null, null]])(
     "persists a canonical raw country for %j", async (address, expected) => {
       provider(address);

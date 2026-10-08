@@ -10,11 +10,12 @@ import { normalizeShopifyLineItems } from "../../shopify-line-item-normalizer";
 import { buildWmsLineItemFromOmsLine } from "../../wms-sync.service";
 import { createHistoricalOrderLineIdentityRepairService } from "../../application/historical-order-line-identity-repair.service";
 import { orderEditProjectionQueryFixtureSql } from "../../../order-edits/__tests__/fixtures/order-edit-projection.fixture";
+import { bridgeShopifyOrderToOms } from "../../shopify-bridge";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const describeDatabase = databaseUrl && disposable ? describe : describe.skip;
-const tables = [schema.products, schema.channelProductIdentities, schema.productVariants, schema.channelListings, schema.omsOrders, schema.omsOrderLines,
+const tables = [schema.products, schema.channels, schema.channelConnections, schema.channelProductIdentities, schema.productVariants, schema.channelListings, schema.omsOrders, schema.omsOrderLines,
   schema.omsOrderEvents, schema.omsOrderLineAuthorityEvents, schema.webhookInbox,
   schema.wmsOrders, schema.wmsOrderItems, schema.omsHistoricalLineIdentityRepairCommands,
   schema.productLocations, schema.warehouseLocations];
@@ -48,6 +49,9 @@ const fixtureSql = namespaces.map(name => `CREATE SCHEMA ${quote(name)};`).join(
     CREATE UNIQUE INDEX oms_authority_event_unique ON oms.oms_order_line_authority_events(event_key);
     CREATE UNIQUE INDEX oms_hist_identity_command_unique
       ON oms.historical_order_line_identity_repair_commands(idempotency_key);
+    CREATE TABLE public.shopify_orders(id text PRIMARY KEY, order_number text, shopify_customer_id text,
+      channel_id integer, shipping_country text, cancelled_at timestamptz, created_at timestamptz);
+    CREATE TABLE public.shopify_order_items(id integer PRIMARY KEY, order_id text);
   `;
 
 describeDatabase.sequential("order line identity PostgreSQL and WMS handoff", () => {
@@ -58,10 +62,10 @@ describeDatabase.sequential("order line identity PostgreSQL and WMS handoff", ()
     orm = drizzle(database.pool, { schema });
   });
   beforeEach(async () => {
-    await database.pool.query(`TRUNCATE catalog.products, channels.channel_product_identities, catalog.product_variants, channels.channel_listings,
+    await database.pool.query(`TRUNCATE catalog.products, channels.channels, channels.channel_connections, channels.channel_product_identities, catalog.product_variants, channels.channel_listings,
       oms.oms_orders, oms.oms_order_lines, oms.oms_order_events, oms.oms_order_line_authority_events,
       oms.webhook_inbox, oms.order_edit_paid_projections, wms.orders, wms.order_items,
-      oms.historical_order_line_identity_repair_commands RESTART IDENTITY`);
+      oms.historical_order_line_identity_repair_commands, public.shopify_orders, public.shopify_order_items RESTART IDENTITY`);
     await database.pool.query(`INSERT INTO catalog.products(id,name) VALUES(1,'Product');
       INSERT INTO catalog.product_variants(id,product_id,name,sku,compare_at_price_cents)
       VALUES (11,1,'Example pack','EXAMPLE-P5',2500), (12,1,'Example case','EXAMPLE-C25',10000);
@@ -74,6 +78,108 @@ describeDatabase.sequential("order line identity PostgreSQL and WMS handoff", ()
     title: "Example item", quantity: 2, price: "10.00", requires_shipping: true };
   const orderData = () => ({ orderedAt: new Date("2026-09-01T12:00:00Z"), sourceTopic: "orders/paid",
     sourceEventId: "fixture-paid-1", financialStatus: "paid", lineItems: normalizeShopifyLineItems([source], []) });
+  const customerData = (customerId: string | null) => ({ orderedAt: new Date("2026-10-08T12:00:00Z"),
+    sourceTopic: "orders/updated", sourceEventId: "fixture-customer-event", externalCustomerId: customerId,
+    rawPayload: { customer: customerId === null ? null : { id: customerId } }, lineItems: [] });
+
+  it("copies the raw Shopify customer ID through the real bridge into PostgreSQL", async () => {
+    await database.pool.query(`INSERT INTO channels.channels(id,name,provider) VALUES(36,'Shopify fixture','shopify');
+      INSERT INTO channels.channel_connections(channel_id,shop_domain) VALUES(36,'fixture.myshopify.com');
+      INSERT INTO public.shopify_orders(id,order_number,shopify_customer_id,channel_id,shipping_country,cancelled_at,created_at)
+      VALUES('gid://shopify/Order/1001','#1001','3978054467743',36,'US','2026-10-08T12:01:00Z','2026-10-08T12:00:00Z');`);
+    await bridgeShopifyOrderToOms(orm, createOmsService(orm), "gid://shopify/Order/1001");
+    expect((await database.pool.query("SELECT channel_id,external_order_id,external_customer_id FROM oms.oms_orders")).rows)
+      .toEqual([{ channel_id: 36, external_order_id: "1001", external_customer_id: "3978054467743" }]);
+  });
+
+  it("backfills a missing ID once, scopes it to the channel and records its source and timestamp", async () => {
+    const observedAt = new Date("2026-10-08T13:00:00Z");
+    const service = createOmsService(orm, undefined, { clock: () => observedAt });
+    await service.ingestOrder(2, "customer-copy-1", customerData(null));
+    await service.ingestOrder(3, "customer-copy-1", customerData(null));
+    const result = await service.ingestOrder(2, "customer-copy-1", customerData("111"));
+    expect(result.externalCustomerId).toBe("111");
+    await service.ingestOrder(2, "customer-copy-1", customerData("111"));
+    expect((await database.pool.query("SELECT channel_id,external_customer_id FROM oms.oms_orders ORDER BY channel_id")).rows)
+      .toEqual([{ channel_id: 2, external_customer_id: "111" }, { channel_id: 3, external_customer_id: null }]);
+    const audit = (await database.pool.query(`SELECT details,created_at FROM oms.oms_order_events
+      WHERE event_type='external_customer_identity_backfilled'`)).rows;
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ created_at: observedAt, details: {
+      actor: "shopify_order_ingestion", source: "orders/updated", sourceEventId: "fixture-customer-event",
+      channelId: 2, externalOrderId: "customer-copy-1", before: null, after: "111",
+    } });
+  });
+
+  it("serializes concurrent replays and creates only one backfill audit record", async () => {
+    const service = createOmsService(orm);
+    await service.ingestOrder(2, "customer-race", customerData(null));
+    await Promise.all([
+      service.ingestOrder(2, "customer-race", customerData("111")),
+      service.ingestOrder(2, "customer-race", customerData("111")),
+    ]);
+    expect((await database.pool.query("SELECT external_customer_id FROM oms.oms_orders")).rows)
+      .toEqual([{ external_customer_id: "111" }]);
+    expect((await database.pool.query(`SELECT id FROM oms.oms_order_events WHERE event_type='external_customer_identity_backfilled'`)).rows)
+      .toHaveLength(1);
+  });
+
+  it("refuses a different customer before changing any order lines or financial totals", async () => {
+    const service = createOmsService(orm);
+    const original = { ...orderData(), externalCustomerId: "111", rawPayload: { customer: { id: "111" } }, totalCents: 2000 };
+    await service.ingestOrder(2, "customer-conflict", original);
+    await expect(service.ingestOrder(2, "customer-conflict", { ...original, externalCustomerId: "222",
+      rawPayload: { customer: { id: "222" } }, totalCents: 9000, lineItems: [{ ...original.lineItems[0], quantity: 9 }] }))
+      .rejects.toMatchObject({ code: "OMS_CUSTOMER_ID_CONFLICT" });
+    expect((await database.pool.query("SELECT external_customer_id,total_cents FROM oms.oms_orders")).rows)
+      .toEqual([{ external_customer_id: "111", total_cents: "2000" }]);
+    expect((await orm.select().from(schema.omsOrderLines))[0].quantity).toBe(2);
+    expect((await database.pool.query(`SELECT id FROM oms.oms_order_events WHERE event_type='external_customer_identity_backfilled'`)).rows)
+      .toHaveLength(0);
+  });
+
+  it("prevents concurrent conflicting replays from overwriting the first verified identity", async () => {
+    const service = createOmsService(orm);
+    await service.ingestOrder(2, "customer-conflicting-race", customerData(null));
+    const results = await Promise.allSettled([
+      service.ingestOrder(2, "customer-conflicting-race", customerData("111")),
+      service.ingestOrder(2, "customer-conflicting-race", customerData("222")),
+    ]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    const failure = results.find(result => result.status === "rejected");
+    expect(failure?.status === "rejected" ? failure.reason : null).toMatchObject({ code: "OMS_CUSTOMER_ID_CONFLICT" });
+    const stored = (await database.pool.query("SELECT external_customer_id FROM oms.oms_orders")).rows[0].external_customer_id;
+    const audit = (await database.pool.query(`SELECT details FROM oms.oms_order_events WHERE event_type='external_customer_identity_backfilled'`)).rows;
+    expect(["111", "222"]).toContain(stored);
+    expect(audit).toHaveLength(1);
+    expect(audit[0].details.after).toBe(stored);
+  });
+
+  it("preserves an existing GID and does not clear the customer ID on a guest-shaped replay", async () => {
+    const service = createOmsService(orm);
+    const original = await service.ingestOrder(2, "customer-gid", customerData("111"));
+    await database.pool.query("UPDATE oms.oms_orders SET external_customer_id='gid://shopify/Customer/111' WHERE id=$1", [original.id]);
+    await service.ingestOrder(2, "customer-gid", customerData("111"));
+    await service.ingestOrder(2, "customer-gid", customerData(null));
+    expect((await database.pool.query("SELECT external_customer_id FROM oms.oms_orders")).rows)
+      .toEqual([{ external_customer_id: "gid://shopify/Customer/111" }]);
+    expect((await database.pool.query(`SELECT id FROM oms.oms_order_events WHERE event_type='external_customer_identity_backfilled'`)).rows)
+      .toHaveLength(0);
+  });
+
+  it("rolls back a customer backfill if the audit insert fails", async () => {
+    const service = createOmsService(orm);
+    await service.ingestOrder(2, "customer-audit-failure", customerData(null));
+    await database.pool.query(`ALTER TABLE oms.oms_order_events ADD CONSTRAINT fixture_customer_audit_failure
+      CHECK(event_type <> 'external_customer_identity_backfilled')`);
+    try {
+      await expect(service.ingestOrder(2, "customer-audit-failure", customerData("111"))).rejects.toThrow();
+      expect((await database.pool.query("SELECT external_customer_id FROM oms.oms_orders")).rows)
+        .toEqual([{ external_customer_id: null }]);
+    } finally {
+      await database.pool.query("ALTER TABLE oms.oms_order_events DROP CONSTRAINT fixture_customer_audit_failure");
+    }
+  });
 
   it("scopes the same external ID to its channel; an unmapped channel remains unresolved", async () => {
     await database.pool.query("UPDATE catalog.product_variants SET shopify_variant_id='1001' WHERE id=11");

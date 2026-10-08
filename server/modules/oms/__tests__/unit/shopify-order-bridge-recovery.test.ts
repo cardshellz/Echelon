@@ -35,6 +35,44 @@ function rawOrder(id: string, orderNumber: string) {
 }
 
 describe("Shopify raw-to-OMS bridge recovery", () => {
+  it.each(["3978054467743", "gid://shopify/Customer/3978054467743"])(
+    "copies raw customer identity %s into the OMS order", async customerId => {
+      const execute = vi.fn()
+        .mockResolvedValueOnce({ rows: [{ ...rawOrder("1001", "#1001"), shopify_customer_id: customerId }] })
+        .mockResolvedValueOnce({ rows: [{ channel_id: 36 }] })
+        .mockResolvedValueOnce({ rows: [] });
+      const ingestOrder = vi.fn().mockResolvedValue({ id: 10 });
+      await bridgeShopifyOrderToOms({ execute }, { ingestOrder } as any, "1001");
+      expect(ingestOrder).toHaveBeenCalledExactlyOnceWith(36, "1001", expect.objectContaining({
+        externalCustomerId: "3978054467743",
+      }));
+    },
+  );
+
+  it("explicitly preserves a guest order without inventing a customer identity", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ ...rawOrder("1001", "#1001"), shopify_customer_id: null }] })
+      .mockResolvedValueOnce({ rows: [{ channel_id: 36 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const ingestOrder = vi.fn().mockResolvedValue({ id: 10 });
+    await bridgeShopifyOrderToOms({ execute }, { ingestOrder } as any, "1001");
+    expect(ingestOrder).toHaveBeenCalledWith(36, "1001", expect.objectContaining({ externalCustomerId: null }));
+  });
+
+  it("rejects malformed source customer identity before OMS ingestion", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ ...rawOrder("1001", "#1001"), shopify_customer_id: "wrong-customer" }] })
+      .mockResolvedValueOnce({ rows: [{ channel_id: 36 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const ingestOrder = vi.fn();
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await expect(bridgeShopifyOrderToOms({ execute }, { ingestOrder } as any, "1001"))
+        .rejects.toMatchObject({ code: "OMS_CUSTOMER_ID_INVALID" });
+      expect(ingestOrder).not.toHaveBeenCalled();
+    } finally { log.mockRestore(); }
+  });
+
   it.each([["United States", "US"], ["Canada", "CA"], [null, null], [" ", null]])(
     "normalizes raw country %j before passing it to OMS", async (country, expected) => {
       const execute = vi.fn()
