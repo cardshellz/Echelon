@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../..", () => ({
+  createSharedProductPhotoImporter: () => ({ append: vi.fn().mockResolvedValue({ created: 0 }) }),
   catalogStorage: {
     getProductVariantBySku: mocks.getProductVariantBySku,
     createProduct: mocks.createProduct,

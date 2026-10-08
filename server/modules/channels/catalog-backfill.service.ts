@@ -1,4 +1,5 @@
 import { productMethods } from "../catalog/catalog.storage";
+import { createSharedProductPhotoImporter } from "../catalog";
 /**
  * Catalog Backfill Service
  *
@@ -27,7 +28,6 @@ import { eq, and, sql, inArray } from "drizzle-orm";
 import {
   products,
   productVariants,
-  productAssets,
   channels,
   channelFeeds,
   channelListings,
@@ -486,7 +486,7 @@ class CatalogBackfillService {
 
     // --- Backfill Assets ---
     if (backfillAssets && shopifyProduct.images.length > 0 && !isDryRun) {
-      await this.backfillAssets(echelonProduct.id, shopifyProduct, variantMappings, result);
+      await this.backfillAssets(echelonProduct.id, shopifyProduct, result);
     }
 
     return {
@@ -761,43 +761,17 @@ class CatalogBackfillService {
   private async backfillAssets(
     productId: number,
     shopifyProduct: ShopifyProductRaw,
-    variantMappings: BackfillResult["mappings"][0]["variants"],
     result: BackfillResult,
   ): Promise<void> {
-    // Build variant ID lookup: shopifyVariantId → echelonVariantId
-    const variantIdMap = new Map<number, number>();
-    for (const m of variantMappings) {
-      variantIdMap.set(Number(m.shopifyVariantId), m.echelonVariantId);
-    }
-
-    // Safety Check: Do not wipe Echelon's images if they already exist. Echelon is the source of truth.
-    const existingAssets = await this.db.select().from(productAssets).where(eq(productAssets.productId, productId));
-    if (existingAssets.length > 0) {
-      return;
-    }
-
-    if (shopifyProduct.images.length === 0) {
-      return;
-    }
-
-    for (const image of shopifyProduct.images) {
-      // Determine variant linkage
-      let variantId: number | null = null;
-      if (image.variant_ids?.length === 1) {
-        variantId = variantIdMap.get(image.variant_ids[0]) ?? null;
-      }
-
-      await this.db.insert(productAssets).values({
-        productId,
-        productVariantId: variantId,
-        assetType: "image",
-        url: image.src,
-        altText: image.alt,
-        position: image.position - 1, // Shopify is 1-based, Echelon is 0-based
-        isPrimary: image.position === 1 ? 1 : 0,
-      });
-      result.assets.created++;
-    }
+    const imported = await createSharedProductPhotoImporter(this.db, () => new Date()).append({
+      productId,
+      photos: shopifyProduct.images.map(image => ({
+        url: image.src, altText: image.alt,
+        position: image.position - 1, // Shopify is 1-based, Catalog is 0-based.
+      })),
+      actor: "service:shopify_catalog_backfill",
+    });
+    result.assets.created += imported.created;
   }
 
   // ---------------------------------------------------------------------------

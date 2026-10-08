@@ -107,6 +107,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/catalog/__tests__/integration/piece-variant-backfill.integration.test.ts",
   "server/modules/catalog/__tests__/integration/product-asset-order.integration.test.ts",
   "server/modules/catalog/__tests__/integration/product-asset-scope.integration.test.ts",
+  "server/modules/catalog/__tests__/integration/shared-product-photos.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-channel-publication-status.integration.test.ts",
   "server/modules/channels/__tests__/integration/walmart-connection.integration.test.ts",
   "server/modules/catalog/__tests__/integration/product-102-cleanup.integration.test.ts",
