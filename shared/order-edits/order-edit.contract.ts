@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { orderEditShippingRepricingSchema } from "./order-edit-shipping";
 import {
   orderEditFinancialsSchema,
   orderEditSettlementSchema,
@@ -158,6 +159,7 @@ export const orderEditQuoteInputSchema = z
   });
 export const orderEditOperationSchema = z
   .object({
+    shippingRepricing: orderEditShippingRepricingSchema.nullable().optional(),
     operationId: z.string().uuid(),
     orderNumber: z.string(),
     currency: z.literal("USD"),

@@ -12,6 +12,43 @@ import type {
 function hash(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
+function matchesShippingService(
+  snapshot: OrderEditSnapshot,
+  title: string,
+): boolean {
+  return (
+    snapshot.shippingContext?.lines.length === 1 &&
+    snapshot.shippingContext.lines[0].title === title
+  );
+}
+function shippingAmounts(snapshot: OrderEditSnapshot) {
+  return snapshot.shippingContext?.lines.map(
+    ({ title, grossCents, netCents }) => ({ title, grossCents, netCents }),
+  );
+}
+/** Shopify can restore a replaced shipping charge as a custom net fee, with the original benefit retained in the audit record. */
+export function recoveryFinancials(
+  baseline: OrderEditSnapshot,
+  quote?: OrderEditQuote,
+) {
+  if (!shippingWasReplaced(quote) || !baseline.financials)
+    return baseline.financials;
+  return {
+    ...baseline.financials,
+    shippingGrossCents: baseline.shippingCents,
+    shippingDiscountCents: 0,
+    shippingDiscountLabels: [],
+  };
+}
+export function shippingWasReplaced(quote?: OrderEditQuote): boolean {
+  return Boolean(
+    quote?.shippingRepricing &&
+      quote.baseline.shippingContext?.lines.length === 1 &&
+      (quote.shippingCents !== quote.baseline.shippingCents ||
+        quote.shippingRepricing.title !==
+          quote.baseline.shippingContext.lines[0].title),
+  );
+}
 function unresolved(transactions: OrderEditTransaction[]): boolean {
   return transactions.some((entry) =>
     ["PENDING", "AWAITING_RESPONSE", "UNKNOWN"].includes(entry.status),
@@ -31,17 +68,25 @@ export function unchangedOrderEditSnapshot(
     (!expected.discountRules ||
       (actual.discountRules !== undefined &&
         canonicalJson(actual.discountRules) ===
-          canonicalJson(expected.discountRules)))
+          canonicalJson(expected.discountRules))) &&
+    (!expected.shippingContext ||
+      canonicalJson(actual.shippingContext) ===
+        canonicalJson(expected.shippingContext))
   );
 }
 function preservesRecoveryDiscountRules(
   observed: OrderEditSnapshot,
   baseline: OrderEditSnapshot,
+  shippingReplaced = false,
 ): boolean {
   if (!baseline.discountRules) return true;
   if (!observed.discountRules) return false;
   const wanted = new Set(
-    baseline.discountRules.map((rule) => canonicalJson(rule)),
+    baseline.discountRules
+      .filter(
+        (rule) => !shippingReplaced || rule.targetType !== "SHIPPING_LINE",
+      )
+      .map((rule) => canonicalJson(rule)),
   );
   const actual = new Set(
     observed.discountRules.map((rule) => canonicalJson(rule)),
@@ -56,6 +101,11 @@ function preservesRecoveryDiscountRules(
   return observed.discountRules.every(
     (rule) =>
       wanted.has(canonicalJson(rule)) ||
+      (shippingReplaced &&
+        rule.targetType === "SHIPPING_LINE" &&
+        baseline.discountRules?.some(
+          (original) => canonicalJson(original) === canonicalJson(rule),
+        )) ||
       (historicalAddedLine &&
         rule.type === "ManualDiscountApplication" &&
         rule.targetType === "LINE_ITEM" &&
@@ -116,7 +166,10 @@ export function unchangedFulfilledOrderEdit(
     (!baseline.discountRules ||
       (current.discountRules !== undefined &&
         canonicalJson(current.discountRules) ===
-          canonicalJson(baseline.discountRules)))
+          canonicalJson(baseline.discountRules))) &&
+    (!baseline.shippingContext ||
+      canonicalJson(current.shippingContext) ===
+        canonicalJson(baseline.shippingContext))
   );
 }
 
@@ -137,9 +190,11 @@ export function matchesOrderEditQuote(
       (quote.baseline.discountRules ?? [])
         .filter(
           (rule) =>
-            rule.type === "DiscountCodeApplication" ||
-            rule.type === "AutomaticDiscountApplication" ||
-            rule.targetType === "SHIPPING_LINE",
+            (!shippingWasReplaced(quote) ||
+              rule.targetType !== "SHIPPING_LINE") &&
+            (rule.type === "DiscountCodeApplication" ||
+              rule.type === "AutomaticDiscountApplication" ||
+              rule.targetType === "SHIPPING_LINE"),
         )
         .some(
           (rule) =>
@@ -148,6 +203,9 @@ export function matchesOrderEditQuote(
             ),
         )) ||
     snapshot.shippingCents !== quote.shippingCents ||
+    (quote.shippingRepricing &&
+      quote.baseline.shippingContext &&
+      !matchesShippingService(snapshot, quote.shippingRepricing.title)) ||
     snapshot.evidence.shippingAddressFingerprint !==
       quote.baseline.evidence.shippingAddressFingerprint
   )
@@ -192,7 +250,15 @@ export function matchesOrderEditQuote(
 export function isUnpaidRecoveryRestored(
   observed: OrderEditSnapshot,
   baseline: OrderEditSnapshot,
+  originalQuote?: OrderEditQuote,
 ): boolean {
+  const replaced = shippingWasReplaced(originalQuote);
+  const financials = recoveryFinancials(baseline, originalQuote);
+  if (
+    originalQuote &&
+    originalQuote.baselineFingerprint !== baseline.fingerprint
+  )
+    return false;
   if (
     observed.orderId !== baseline.orderId ||
     observed.channelId !== baseline.channelId ||
@@ -200,10 +266,21 @@ export function isUnpaidRecoveryRestored(
     observed.customerId !== baseline.customerId ||
     observed.totalCents !== baseline.totalCents ||
     observed.shippingCents !== baseline.shippingCents ||
+    (baseline.shippingContext &&
+      canonicalJson(shippingAmounts(observed)) !==
+        canonicalJson(
+          replaced
+            ? baseline.shippingContext.lines.map((line) => ({
+                title: line.title,
+                grossCents: baseline.shippingCents,
+                netCents: baseline.shippingCents,
+              }))
+            : shippingAmounts(baseline),
+        )) ||
     observed.subtotalCents !== baseline.subtotalCents ||
     observed.taxCents !== baseline.taxCents ||
-    !matchesOrderEditFinancials(observed.financials, baseline.financials) ||
-    !preservesRecoveryDiscountRules(observed, baseline) ||
+    !matchesOrderEditFinancials(observed.financials, financials) ||
+    !preservesRecoveryDiscountRules(observed, baseline, replaced) ||
     observed.outstandingCents !== 0 ||
     observed.netPaidCents !== baseline.netPaidCents ||
     observed.capturableCents !== 0 ||
