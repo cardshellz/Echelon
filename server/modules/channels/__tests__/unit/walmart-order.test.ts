@@ -46,12 +46,21 @@ describe("Walmart order financial and quantity contracts", () => {
 });
 
 describe("Walmart US API boundary", () => {
-  it("validates returned inventory identity and reads after absolute updates", async () => {
-    const request = vi.fn().mockResolvedValueOnce({}).mockResolvedValueOnce({ sku: "SKU", quantity: { unit: "EACH", amount: 0 } });
+  it("validates the update acknowledgement without treating a later inventory read as part of that write", async () => {
+    const request = vi.fn().mockResolvedValueOnce({ sku: "SKU", quantity: { unit: "EACH", amount: 0 } });
     await new WalmartUsApi({ request }).setInventory("SKU", "NODE", 0);
-    expect(request.mock.calls).toEqual([["PUT", "/v3/inventory?sku=SKU&shipNode=NODE", { sku: "SKU", quantity: { unit: "EACH", amount: 0 } }], ["GET", "/v3/inventory?sku=SKU&shipNode=NODE"]]);
+    expect(request.mock.calls).toEqual([["PUT", "/v3/inventory?sku=SKU&shipNode=NODE", { sku: "SKU", quantity: { unit: "EACH", amount: 0 } }]]);
     request.mockResolvedValue({ sku: "OTHER", quantity: { unit: "EACH", amount: 1 } });
     await expect(new WalmartUsApi({ request }).inventory("SKU", "NODE")).rejects.toMatchObject({ code: "WALMART_SKU_MISMATCH" });
+  });
+  it.each([
+    { sku: "OTHER", quantity: { unit: "EACH", amount: 100 } },
+    { sku: "SKU", quantity: { unit: "EACH", amount: 99 } },
+    {},
+  ])("rejects malformed or mismatched stock acknowledgements: %j", async response => {
+    const request = vi.fn().mockResolvedValue(response);
+    await expect(new WalmartUsApi({ request }).setInventory("SKU", "NODE", 100)).rejects.toThrow();
+    expect(request).toHaveBeenCalledTimes(1);
   });
   it("confirms acknowledgment with a separate exact-order read", async () => {
     const request = vi.fn().mockResolvedValueOnce({}).mockResolvedValueOnce({ order: walmartOrderFixture("Acknowledged") });

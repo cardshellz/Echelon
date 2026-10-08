@@ -7,6 +7,14 @@ import { activateWalmartPublicationInventoryFixture, installWalmartPublicationIn
 import { VerifiedListingStockService } from "../../application/verified-listing-stock.service";
 import { PostgresInventoryPublicationMembershipStore } from "../../infrastructure/inventory-publication-membership.repository";
 import { installCutoverAdmissionFixturePrerequisites } from "../fixtures/inventory-cutover-admission.fixture";
+import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructure/inventory-publication-outbox.repository";
+import { PostgresQuantityPublicationAdmission } from "../../infrastructure/quantity-publication-admission.repository";
+import { InventoryPublicationOutboxService } from "../../application/inventory-publication-outbox.service";
+import { ChannelInventoryPublicationTransportAdapter } from "../../../channels/channel-inventory-publication-transport.adapter";
+import { WalmartAdapter } from "../../../channels/adapters/walmart/walmart.adapter";
+import { WalmartUsApi } from "../../../channels/adapters/walmart/walmart-us-api";
+import { WalmartClient } from "../../../channels/adapters/walmart/walmart-client";
+import type { WalmartChannelService } from "../../../channels/adapters/walmart/walmart-channel.service";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -59,6 +67,48 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
     expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0 });
     expect((await database.pool.query("SELECT revision::text FROM inventory.inventory_publication_targets WHERE id=2")).rows[0].revision).toBe("3");
     expect((await database.pool.query("SELECT * FROM public.audit_events WHERE actor='walmart-stock-connection'")).rows).toEqual([]);
+  });
+
+  it("keeps an acknowledged Walmart write retryable when the first inventory read is stale", async () => {
+    await service.connect(input());
+    let now = WALMART_INVENTORY_NOW;
+    let reads = 0;
+    const methods: string[] = [];
+    const api = new WalmartUsApi(new WalmartClient({ clientId: "test", clientSecret: "test",
+      market: "us", environment: "sandbox" }, {
+      now: () => now,
+      fetch: async (url, options) => {
+        if (String(url).endsWith("/v3/token")) return Response.json({ access_token: "test-token", expires_in: 3600 });
+        methods.push(options!.method!);
+        return Response.json({ sku: "P5", quantity: { unit: "EACH",
+          amount: options!.method === "GET" && ++reads === 1 ? 0 : 17 } });
+      },
+    }));
+    const channels = { connection: async () => ({ connection_id: 8, ship_node_id: "test-location", warehouse_id: 1 }),
+      requireRuntime: () => undefined, api: () => api,
+      repository: { mappings: async () => [{ product_variant_id: 101, channel_sku: "P5" }],
+        assertWarehouse: async () => undefined, withLock: async <T>(_channel: number, work: () => Promise<T>) => work() },
+    } as unknown as WalmartChannelService;
+    const transport = new ChannelInventoryPublicationTransportAdapter(new WalmartAdapter(channels,
+      { getSourceWarehouses: async () => [{ warehouseId: 1, isActive: true }] }));
+    const worker = new InventoryPublicationOutboxService(new PostgresInventoryPublicationOutboxRepository(database.pool),
+      { get: () => transport }, { now: () => now }, () => "walmart-delay-test",
+      new PostgresQuantityPublicationAdmission(database.pool, () => now));
+    const nextDue = async () => {
+      now = (await database.pool.query(`SELECT date_trunc('milliseconds',available_at)+interval '1 millisecond' AS due
+        FROM inventory.inventory_publication_outbox WHERE publication_target_id=2 AND state='queued'`)).rows[0].due;
+    };
+    await nextDue();
+    expect(await worker.processDue()).toMatchObject({ claimed: 1, verified: 0, failed: 1 });
+    expect(methods).toEqual(["PUT", "GET"]);
+    expect((await database.pool.query("SELECT state,error_code FROM inventory.quantity_publication_attempts WHERE owner_kind='outbox'")).rows)
+      .toEqual([{ state: "succeeded", error_code: null }]);
+    expect((await database.pool.query("SELECT observed_quantity::text,matches_desired FROM inventory.inventory_publication_readbacks WHERE publication_target_id=2")).rows)
+      .toEqual([{ observed_quantity: "0", matches_desired: false }]);
+    await nextDue();
+    expect(await worker.processDue()).toMatchObject({ claimed: 1, verified: 1, failed: 0 });
+    expect(methods).toEqual(["PUT", "GET", "PUT", "GET"]);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_publication_attempts WHERE state IN ('uncertain','running')")).rows[0].count).toBe(0);
   });
 
   it.each([

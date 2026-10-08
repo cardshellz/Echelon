@@ -52,6 +52,8 @@ export interface WalmartUsApiPort {
 const catalogItemSchema = z.object({ sku: id, mart: z.literal("WALMART_US").optional(),
   productName: z.string().min(1).max(1_000).optional(), wpid: id.nullish(),
   lifecycleStatus: z.string().min(1).max(100).optional(), publishedStatus: z.string().min(1).max(100).optional() });
+const inventoryResponseSchema = z.object({ sku: id, quantity: z.object({ unit: z.literal("EACH"),
+  amount: z.number().int().nonnegative().max(2_147_483_647) }) });
 function catalogItemView(item: z.infer<typeof catalogItemSchema>): ChannelCatalogItem {
   return { sku: item.sku, title: item.productName ?? item.sku, externalProductId: item.wpid ?? null,
     externalVariantId: item.sku, externalInventoryItemId: item.sku,
@@ -111,8 +113,7 @@ export class WalmartUsApi implements WalmartUsApiPort {
   }
   async inventory(sku: string, node: string) {
     const query = new URLSearchParams({ sku: id.parse(sku), shipNode: id.parse(node) });
-    const value = parse(z.object({ sku: id, quantity: z.object({ unit: z.literal("EACH"),
-      amount: z.number().int().nonnegative().max(2_147_483_647) }) }),
+    const value = parse(inventoryResponseSchema,
     await this.client.request("GET", `/v3/inventory?${query}`));
     if (value.sku !== sku) throw new WalmartApiError("WALMART_SKU_MISMATCH", "Walmart returned a different inventory SKU", false);
     return value.quantity.amount;
@@ -120,8 +121,15 @@ export class WalmartUsApi implements WalmartUsApiPort {
   async setInventory(sku: string, node: string, amount: number) {
     z.number().int().nonnegative().max(2_147_483_647).parse(amount);
     const query = new URLSearchParams({ sku: id.parse(sku), shipNode: id.parse(node) });
-    await this.client.request("PUT", `/v3/inventory?${query}`, { sku, quantity: { unit: "EACH", amount } });
-    if (await this.inventory(sku, node) !== amount) throw new WalmartApiError("WALMART_INVENTORY_UNCONFIRMED", "Walmart inventory readback differs from the requested quantity", true);
+    const response = parse(inventoryResponseSchema,
+      await this.client.request("PUT", `/v3/inventory?${query}`, { sku, quantity: { unit: "EACH", amount } }));
+    if (response.sku !== sku || response.quantity.amount !== amount) {
+      throw new WalmartApiError("WALMART_INVENTORY_RESPONSE_MISMATCH", "Walmart did not acknowledge the requested SKU and quantity", true);
+    }
+    // A successful PUT and a current GET are different evidence. The outbox
+    // verifies inventory after admission records this acknowledgement; a stale
+    // read must not turn a completed write into an unresolved provider request.
+    // https://developer.walmart.com/us-marketplace/reference/updateinventoryforanitem
   }
   async ship(purchaseOrderId: string, body: unknown) {
     await this.client.request("POST", `/v3/orders/${encodeURIComponent(id.parse(purchaseOrderId))}/shipping`, body);
