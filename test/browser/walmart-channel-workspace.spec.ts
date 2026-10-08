@@ -5,7 +5,7 @@ import type { ChannelCatalogRow } from "../../shared/types/channel-catalog";
 import { listingDraftItemSchema, listingOperationSchema } from "../../shared/types/channel-listing-publication";
 import { createMembershipMock, createPublicationMock, handleMembershipRequest, handlePublicationRequest, PUBLICATION_BASE } from "./walmart-publication-fixtures";
 import { editorSchema } from "../../server/modules/channels/adapters/walmart/walmart-listing-schema";
-import { createListingUpdateMock, handleListingUpdateRequest, UPDATE_BASE } from "./walmart-listing-update-fixtures";
+import { createListingUpdateMock, handleListingUpdateRequest, listingChangeHistory, UPDATE_BASE } from "./walmart-listing-update-fixtures";
 
 const BASE = "/api/channels/77";
 const status = { channelId: 77, connectionId: 9, partnerId: "10002558022", partnerName: "Card Shellz", environment: "production",
@@ -107,8 +107,12 @@ test("existing listing edits include unchanged product content and shipping with
   await dialog.getByRole("button", { name: "Send changes to Walmart", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Listing changes", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Listing changes", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("region", { name: "Publication activity", exact: true })).toHaveCount(0);
   await page.getByRole("region", { name: "Listing changes", exact: true }).getByRole("button", { name: "Check Walmart status", exact: true }).click();
   await expect(page.getByText("Feed accepted", { exact: true })).toBeVisible();
+  expect(state.updates.verificationReads).toEqual([]);
+  await page.getByRole("button", { name: /^Show change details/ }).click();
   await expect(page.getByText("Walmart reports the submitted product type. Listing status is shown separately above.")).toBeVisible();
   expect(state.updates.writes.at(-1)?.path).toMatch(/\/status$/);
   expect(state.publication.writes).toEqual([]); expect(state.membership.writes).toEqual([]);
@@ -154,6 +158,7 @@ test("accepted feeds show category mismatch and recheck the item without another
   const region = page.getByRole("region", { name: "Listing changes", exact: true });
   await region.getByRole("button", { name: "Check Walmart status", exact: true }).click();
   await expect(region.getByText("Feed accepted", { exact: true })).toBeVisible();
+  await region.getByRole("button", { name: /^Show change details/ }).click();
   await expect(region.getByText(/The product type is not confirmed/)).toBeVisible();
   await expect(region.getByText("default", { exact: true })).toBeVisible();
   await expect(region.getByText("SYSTEM_PROBLEM", { exact: true })).toBeVisible();
@@ -1787,6 +1792,9 @@ test("read-only publication activity expands results without exposing channel wr
 });
 test("publication retries reuse command identity and later batches preserve submitted prices", async ({ page }) => {
   const state = await setup(page);
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  await page.getByRole("tab", { name: "Listing changes", exact: true }).click();
+  await page.getByRole("tab", { name: "Listing Feed", exact: true }).click();
   await selectFirstProduct(page);
   await reviewSelectedDrafts(page, ["CARD-1"]);
   state.publication.loseSubmissionResponse = true;
@@ -1795,6 +1803,7 @@ test("publication retries reuse command identity and later batches preserve subm
   await page.getByRole("button", { name: "Publish 1 items", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   const submissions = state.publication.writes.filter(write => write.path === `${PUBLICATION_BASE}/operations`);
+  await expect(page.getByRole("tab", { name: "Publication activity", exact: true })).toHaveAttribute("aria-selected", "true");
   expect(submissions).toHaveLength(2); expect(submissions[0].body).toEqual(submissions[1].body);
   await expect(page.getByText("Walmart processing", { exact: true })).toBeVisible();
   await expect(page.getByText("Live", { exact: true })).toHaveCount(0);
@@ -1931,4 +1940,173 @@ test("stock review requires inventory activation permission and exposes missing 
   await expect(page.getByRole("link", { name: "Open Channel Inventory setup", exact: true })).toBeVisible();
   expect(state.membership.writes.filter(write => write.path.endsWith("/apply"))).toHaveLength(0);
   expect(state.errors).toEqual([]);
+});
+
+test("listing changes use compact expandable rows in a separate activity tab", async ({ page }, info) => {
+  const state = await setup(page);
+  state.updates.updates = listingChangeHistory();
+  state.updates.reportedProductType = "default";
+  state.publication.operations = activitySubmissions();
+  await page.reload();
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Publication activity", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Listing changes", exact: true })).toHaveCount(0);
+  const tabs = page.getByRole("tablist", { name: "Activity history", exact: true });
+  await tabs.getByRole("tab", { name: "Publication activity", exact: true }).focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(tabs.getByRole("tab", { name: "Listing changes", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("region", { name: "Publication activity", exact: true })).toHaveCount(0);
+  const activity = page.getByRole("region", { name: "Listing changes", exact: true });
+  const rows = activity.locator("[data-listing-update-id]");
+  await expect(rows).toHaveCount(7);
+  await expect(activity.getByRole("region", { name: /^Change details/ })).toHaveCount(0);
+  expect(state.updates.verificationReads).toEqual([]);
+  const rowHeights = await rows.evaluateAll(elements => elements.map(element => element.getBoundingClientRect().height));
+  expect(Math.max(...rowHeights)).toBeLessThan(info.project.name === "mobile" ? 135 : 80);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.getByRole("tabpanel", { name: "Activity", exact: true }).screenshot({ path: info.outputPath("listing-changes-collapsed.png") });
+
+  const [latest, historical, failed, processing, uncertain] = state.updates.updates;
+  const rowFor = (id: string) => activity.locator(`[data-listing-update-id="${id}"]`);
+  await rowFor(historical.id).getByRole("button", { name: /^Show change details/ }).click();
+  const historicalDetails = page.locator(`#listing-change-details-${historical.id}`);
+  await expect(historicalDetails.getByText(historical.submissionId!, { exact: true })).toBeVisible();
+  await expect(historicalDetails.getByText("Item result on Walmart", { exact: true })).toHaveCount(0);
+  expect(state.updates.verificationReads).toEqual([]);
+  await rowFor(historical.id).getByRole("button", { name: /^Hide change details/ }).click();
+
+  const latestDisclosure = rowFor(latest.id).getByRole("button", { name: /^Show change details/ });
+  await latestDisclosure.focus();
+  await page.keyboard.press("Enter");
+  const detailsId = await rowFor(latest.id).getByRole("button", { name: /^Hide change details/ }).getAttribute("aria-controls");
+  const latestDetails = page.locator(`[id="${detailsId}"]`);
+  await expect(latestDetails.getByText(latest.title, { exact: true })).toBeVisible();
+  await expect(latestDetails.getByText(/The product type is not confirmed/)).toBeVisible();
+  await expect(latestDetails.getByText("SYSTEM_PROBLEM", { exact: true })).toBeVisible();
+  expect(state.updates.verificationReads).toEqual([`${UPDATE_BASE}/${latest.id}/verification`]);
+  await rowFor(failed.id).getByRole("button", { name: /^Show change details/ }).click();
+  await expect(page.locator(`#listing-change-details-${failed.id}`).getByText(failed.message!, { exact: true })).toBeVisible();
+  await rowFor(uncertain.id).getByRole("button", { name: /^Show change details/ }).click();
+  await expect(page.locator(`#listing-change-details-${uncertain.id}`).getByText(uncertain.title, { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.getByRole("tabpanel", { name: "Activity", exact: true }).screenshot({ path: info.outputPath("listing-changes-expanded.png") });
+
+  await rowFor(processing.id).getByRole("button", { name: "Check Walmart status", exact: true }).click();
+  await expect(rowFor(processing.id).getByText("Feed accepted", { exact: true })).toBeVisible();
+  await expect(rowFor(latest.id).getByRole("button", { name: /^Hide change details/ })).toHaveAttribute("aria-expanded", "true");
+  await expect(latestDetails).toBeVisible();
+  expect(state.updates.writes).toEqual([{ path: `${UPDATE_BASE}/${processing.id}/status`, body: {} }]);
+  await rowFor(latest.id).getByRole("button", { name: /^Hide change details/ }).focus();
+  await page.keyboard.press("Space");
+  await expect(latestDetails).toHaveCount(0);
+  await rowFor(latest.id).getByRole("button", { name: `Edit listing ${latest.sku}`, exact: true }).click();
+  await expect(page.getByRole("dialog").getByRole("heading", { name: "Edit Walmart listing", exact: true })).toBeVisible();
+  expect(state.reads).toContain(`${UPDATE_BASE}/item?sku=${latest.sku}`);
+  await page.keyboard.press("Escape");
+  await page.getByRole("tab", { name: "Listing Feed", exact: true }).click();
+  await page.getByRole("button", { name: "View activity", exact: true }).first().click();
+  await expect(tabs.getByRole("tab", { name: "Publication activity", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(activity).toHaveCount(0);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("listing changes adapt beside an expanded sidebar", async ({ page }, info) => {
+  test.skip(info.project.name !== "desktop", "Desktop sidebar width regression");
+  const state = await setup(page);
+  state.updates.updates = listingChangeHistory();
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  await page.getByRole("tab", { name: "Listing changes", exact: true }).click();
+  await page.addStyleTag({ content: "#root { margin-left: 256px; }" });
+  const activity = page.getByRole("region", { name: "Listing changes", exact: true });
+  await expect(activity.locator("[data-listing-update-id]")).toHaveCount(7);
+  for (const width of [1024, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    const firstRow = activity.locator("[data-listing-update-id]").first();
+    await expect(firstRow.getByText(state.updates.updates[0].sku, { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.getByRole("tabpanel", { name: "Activity", exact: true }).screenshot({ path: info.outputPath(`listing-changes-sidebar-${width}.png`) });
+  }
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("listing changes show status failures and block duplicate checks while pending", async ({ page }) => {
+  const state = await setup(page);
+  state.updates.updates = listingChangeHistory();
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  await page.getByRole("tab", { name: "Listing changes", exact: true }).click();
+  const activity = page.getByRole("region", { name: "Listing changes", exact: true });
+  const processing = state.updates.updates[3];
+  const row = activity.locator(`[data-listing-update-id="${processing.id}"]`);
+  const path = `${UPDATE_BASE}/${processing.id}/status`;
+  let release!: () => void;
+  const responseReady = new Promise<void>(resolve => { release = resolve; });
+  let calls = 0;
+  await page.route(`**${path}`, async route => {
+    calls++;
+    await responseReady;
+    await route.fulfill({ status: 503, json: { message: "Walmart status temporarily unavailable" } });
+  });
+  try {
+    await row.getByRole("button", { name: "Check Walmart status", exact: true }).click();
+    await expect(row.getByRole("button", { name: "Checking Walmart status", exact: true })).toBeDisabled();
+    expect(calls).toBe(1);
+  } finally { release(); }
+  await expect(activity.getByRole("alert")).toHaveText("Walmart status temporarily unavailable");
+  await expect(row.getByRole("button", { name: "Check Walmart status", exact: true })).toBeEnabled();
+  await expect(row.getByText("Walmart processing", { exact: true })).toBeVisible();
+  await page.unroute(`**${path}`);
+  await row.getByRole("button", { name: "Check Walmart status", exact: true }).click();
+  await expect(row.getByText("Feed accepted", { exact: true })).toBeVisible();
+  await expect(activity.getByRole("alert")).toHaveCount(0);
+  expect(state.updates.writes).toEqual([{ path, body: {} }]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("read-only listing changes expand details without edit or submission controls", async ({ page }) => {
+  const state = await setup(page, { readOnly: true });
+  state.updates.updates = listingChangeHistory();
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  await page.getByRole("tab", { name: "Listing changes", exact: true }).click();
+  const activity = page.getByRole("region", { name: "Listing changes", exact: true });
+  const failed = state.updates.updates[2];
+  await activity.locator(`[data-listing-update-id="${failed.id}"]`).getByRole("button", { name: /^Show change details/ }).click();
+  await expect(activity.getByText(failed.message!, { exact: true })).toBeVisible();
+  await expect(activity.getByRole("button", { name: /^Edit listing/ })).toHaveCount(0);
+  await expect(activity.getByRole("button", { name: "Check Walmart status", exact: true })).toHaveCount(0);
+  expect(state.updates.writes).toEqual([]); expect(state.publication.writes).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("listing changes show loading and empty history without hiding the tabs", async ({ page }) => {
+  const state = await setup(page);
+  let release!: () => void;
+  const responseReady = new Promise<void>(resolve => { release = resolve; });
+  await page.route(`**${UPDATE_BASE}`, async route => {
+    await responseReady;
+    await route.fulfill({ json: [] });
+  });
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  await page.getByRole("tab", { name: "Listing changes", exact: true }).click();
+  const activity = page.getByRole("region", { name: "Listing changes", exact: true });
+  try { await expect(activity.getByRole("status")).toHaveText("Loading listing changes…"); }
+  finally { release(); }
+  await expect(activity.getByText("No listing changes yet. Edits sent to Walmart will appear here.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Publication activity", exact: true })).toBeVisible();
+  expect(state.updates.writes).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("listing changes load failures can be retried", async ({ page }) => {
+  const state = await setup(page);
+  await page.route(`**${UPDATE_BASE}`, route => route.fulfill({ status: 503, json: { message: "Listing history temporarily unavailable" } }));
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  await page.getByRole("tab", { name: "Listing changes", exact: true }).click();
+  const activity = page.getByRole("region", { name: "Listing changes", exact: true });
+  await expect(activity.getByRole("alert")).toHaveText("Listing history temporarily unavailable");
+  await expect(activity.getByText("No listing changes yet.", { exact: false })).toHaveCount(0);
+  state.updates.updates = listingChangeHistory();
+  await page.unroute(`**${UPDATE_BASE}`);
+  await activity.getByRole("button", { name: "Reload listing changes", exact: true }).click();
+  await expect(activity.locator("[data-listing-update-id]")).toHaveCount(7);
+  await expect(activity.getByRole("alert")).toHaveCount(0);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
