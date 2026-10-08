@@ -18,20 +18,27 @@ export interface CatalogStepRailProps {
   ticks: Readonly<Record<CatalogStep, CatalogStepTick | null>>;
   /** One short line under a step, such as "3 selected". */
   details: Readonly<Partial<Record<CatalogStep, string>>>;
+  /** A button after a step's line, such as "Try again" when its check failed. Kept outside the step's link. */
+  actions?: Readonly<Partial<Record<CatalogStep, { label: string; onClick: () => void }>>>;
   storeOptions: readonly CatalogStoreOption[];
   selectedStoreConnectionId: number | null;
   onStoreChange: (storeConnectionId: number) => void;
 }
 
-/** Read by screen readers after the step's name; the icon alone carries it visually. */
+/**
+ * Read by screen readers after the step's name; the icon alone carries it
+ * visually. "Not known yet" fits both a check still running and one that
+ * failed, which the step's own line then names.
+ */
 const TICK_TEXT: Readonly<Record<CatalogStepTick, string>> = {
   done: "done",
   todo: "not done yet",
-  unknown: "checking",
+  unknown: "not known yet",
 };
 
 /** The three steps, each ticked from saved server state, and the one store the page works on. */
 export function CatalogStepRail({
+  actions = {},
   current,
   details,
   hrefFor,
@@ -52,15 +59,17 @@ export function CatalogStepRail({
               const isCurrent = step === current;
               const tick = ticks[step];
               const detail = details[step];
+              const action = actions[step];
               return (
-                <li key={step}>
+                // A column, so a step's action sits inside its cell under the link, which fills the rest.
+                <li key={step} className="flex flex-col">
                   <GuardedLink
                     href={hrefFor(step)}
                     aria-current={isCurrent ? "step" : undefined}
                     data-testid={`catalog-step-${step}`}
                     className={isCurrent
-                      ? "flex h-full items-start gap-1.5 rounded-md bg-[#C060E0]/10 px-2 py-2 text-sm text-[#8c35aa] sm:gap-2 sm:px-3"
-                      : "flex h-full items-start gap-1.5 rounded-md px-2 py-2 text-sm text-zinc-700 hover:bg-zinc-100 sm:gap-2 sm:px-3"}
+                      ? "flex flex-1 items-start gap-1.5 rounded-md bg-[#C060E0]/10 px-2 py-2 text-sm text-[#8c35aa] sm:gap-2 sm:px-3"
+                      : "flex flex-1 items-start gap-1.5 rounded-md px-2 py-2 text-sm text-zinc-700 hover:bg-zinc-100 sm:gap-2 sm:px-3"}
                   >
                     <StepMarker tick={tick} />
                     <span>
@@ -71,6 +80,16 @@ export function CatalogStepRail({
                       {detail && <span className="block text-xs text-zinc-500">{detail}</span>}
                     </span>
                   </GuardedLink>
+                  {action && (
+                    <button
+                      type="button"
+                      className="ml-7 self-start pb-1 text-xs font-medium text-[#8c35aa] underline-offset-2 hover:underline sm:ml-9"
+                      data-testid={`catalog-step-${step}-action`}
+                      onClick={action.onClick}
+                    >
+                      {action.label}
+                    </button>
+                  )}
                 </li>
               );
             })}

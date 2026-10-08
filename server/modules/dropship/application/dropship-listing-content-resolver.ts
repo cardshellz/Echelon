@@ -43,16 +43,19 @@ export type PreparedContentProfile = ReturnType<typeof prepareContentProfile>;
 /**
  * The template a size's description uses: its first matching group by
  * priority, else the store template. Two groups that tie at the top leave no
- * template at all, so neither wins by accident.
+ * template at all, so neither wins by accident. `groupName` names the group
+ * that won; `templateName` is the label previews show, which a group may share.
  */
 export function resolveContentTemplate(prepared: PreparedContentProfile, candidate: DropshipListingCatalogCandidate): {
-  template: DescriptionTemplate | null; templateName: string | null; conflict: boolean;
+  template: DescriptionTemplate | null; templateName: string | null; groupName: string | null; conflict: boolean;
 } {
   const groups = prepared.groups.filter(({ group, variantIds }) => variantIds
     ? variantIds.has(candidate.productVariantId) : matchesCatalogScope(group.scope, candidate)).map(({ group }) => group);
   const conflict = groups.length > 1 && groups[0].priority === groups[1].priority;
-  const template = conflict ? null : groups[0]?.template ?? prepared.state.profile?.defaultTemplate ?? null;
-  return { template, templateName: conflict ? null : groups[0]?.name ?? (template ? "Store template" : null), conflict };
+  const winner = conflict ? null : groups[0] ?? null;
+  const template = conflict ? null : winner?.template ?? prepared.state.profile?.defaultTemplate ?? null;
+  return { template, templateName: conflict ? null : winner?.name ?? (template ? "Store template" : null),
+    groupName: winner?.name ?? null, conflict };
 }
 
 /** Own text saved against an older catalog version needs the vendor to check it still fits. */

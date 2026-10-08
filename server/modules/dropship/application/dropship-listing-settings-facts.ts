@@ -7,20 +7,24 @@ import {
   type ListingPriceSetting, type SavedListingPriceRevision,
 } from "../../../../shared/dropship/listing-price";
 import {
-  LISTING_SETTINGS_FIELDS, LISTING_SETTINGS_FIX_CODES, LISTING_SETTINGS_PAGE_SIZE, MAX_LISTING_SETTINGS_ATTENTION_ITEMS,
-  type ListingSettingsAttentionCode, type ListingSettingsField, type ListingSettingsFixCode,
+  LISTING_SETTINGS_FIELD_SETTINGS, LISTING_SETTINGS_FIELDS, LISTING_SETTINGS_FIX_CODES, LISTING_SETTINGS_PAGE_SIZE,
+  LISTING_SETTINGS_VALUE_SOURCES, MAX_LISTING_SETTINGS_ATTENTION_ITEMS,
+  type ListingSettingsAttentionCode, type ListingSettingsFixCode,
   type ListingSettingsPolicyKind, type ListingSettingsPriceIssue, type ListingSettingsPriceLimit,
   type ListingSettingsPriceRule, type ListingSettingsPriceSource, type ListingSettingsPricesInput,
-  type ListingSettingsProductRow, type ListingSettingsProductsInput, type ListingSettingsRailState,
-  type ListingSettingsSizePrice, type ListingSettingsSummary,
+  type ListingSettingsProductRow, type ListingSettingsProductSettings, type ListingSettingsProductsInput,
+  type ListingSettingsRailState, type ListingSettingsSettingKey, type ListingSettingsSizePrice, type ListingSettingsSummary,
+  type ListingSettingsValueSource,
 } from "../../../../shared/dropship/listing-settings";
 import { pricingBasisCents, type PricingProfile, type PricingProfileState, type RulePriceResult } from "../../../../shared/dropship/pricing-rules";
 import type { EbayCategoryRulesState } from "../../../../shared/dropship/ebay-category-rules";
+import type { DescriptionTemplate } from "../../../../shared/dropship/listing-content";
 import { evaluateListingPriceAgainstCost } from "../domain/listing-price-cost";
+import { computeDropshipMarketplaceQuantity, type DropshipVendorVariantOverride } from "../domain/vendor-selection";
 import type { ResolvedEbayListingCategory } from "./dropship-ebay-category-resolver";
 import type { DropshipEbayListingPolicyOverride } from "./dropship-ebay-listing-policy-override-service";
 import {
-  listingCatalogHash, needsListingCatalogReview, prepareContentProfile, resolveContentTemplate,
+  listingCatalogHash, needsListingCatalogReview, prepareContentProfile, resolveContentTemplate, textDescriptionHtml,
 } from "./dropship-listing-content-resolver";
 import {
   applyEbayListingPolicyOverride, pricingPolicyMatchesCandidate,
@@ -30,6 +34,7 @@ import {
 import type { DropshipStoreListingConfig } from "./dropship-marketplace-listing-provider";
 import type { DropshipProductCost } from "./dropship-product-cost";
 import { createRulePriceResolver } from "./dropship-rule-price";
+import type { DropshipAtpSnapshot } from "./dropship-selection-atp-service";
 
 /**
  * The listing settings read model (Listing settings design 8.4) as pure
@@ -64,10 +69,25 @@ export interface ListingSettingsInputs {
   pausedSince: ReadonlyMap<number, Date>;
 }
 
+/**
+ * One size's value for one setting and where the size gets it. Equal keys
+ * mean equal values. Sizes that agree share one frozen object (see
+ * `SizeValueInterner`), since the cache keeps every size's values.
+ */
+export interface ListingSettingsSizeValue<V> {
+  readonly key: string;
+  readonly value: Readonly<V>;
+  readonly source: ListingSettingsValueSource;
+  readonly ruleName: string | null;
+}
+
+export type ListingSettingsSizeValues = {
+  readonly [K in ListingSettingsSettingKey]: ListingSettingsSizeValue<ListingSettingsProductSettings[K][number]["value"]>;
+};
+
 export interface ListingSettingsSizeFacts {
   price: ListingSettingsSizePrice;
-  /** Each setting's value on this size, as a comparison key, and whether the size has its own value. */
-  values: Readonly<Record<ListingSettingsField, { key: string; own: boolean }>>;
+  values: ListingSettingsSizeValues;
   fixes: readonly ListingSettingsFixCode[];
 }
 
@@ -94,10 +114,10 @@ const LIMIT_MODE: Readonly<Record<Exclude<DropshipPricingPolicyRecord["mode"], "
 };
 const RULE_ISSUES: ReadonlySet<string> = new Set(["pricing_rule_priority_conflict", "pricing_basis_unavailable", "pricing_result_out_of_range"]);
 const POLICY_KEYS = [
-  { kind: "shipping", field: "shipping_policy", key: "fulfillmentPolicyId" },
-  { kind: "return", field: "return_policy", key: "returnPolicyId" },
-  { kind: "payment", field: "payment_policy", key: "paymentPolicyId" },
-] as const satisfies ReadonlyArray<{ kind: ListingSettingsPolicyKind; field: ListingSettingsField; key: string }>;
+  { kind: "shipping", setting: "shippingPolicy", key: "fulfillmentPolicyId" },
+  { kind: "return", setting: "returnPolicy", key: "returnPolicyId" },
+  { kind: "payment", setting: "paymentPolicy", key: "paymentPolicyId" },
+] as const satisfies ReadonlyArray<{ kind: ListingSettingsPolicyKind; setting: ListingSettingsSettingKey; key: string }>;
 /** Per-product attention lines, in the order a product's problems are named. */
 const PRODUCT_ATTENTION_FIXES = ["no_ebay_category", "size_cannot_be_priced", "description_group_conflict"] as const satisfies
   readonly (ListingSettingsFixCode & ListingSettingsAttentionCode)[];
@@ -108,6 +128,8 @@ const NAME_ORDER = new Intl.Collator(LOCALE, { sensitivity: "base", numeric: tru
 export function buildListingSettingsFacts(inputs: ListingSettingsInputs): ListingSettingsFacts {
   const resolver = createRulePriceResolver({ state: inputs.pricing });
   const preparedContent = prepareContentProfile(inputs.content);
+  const interner = new SizeValueInterner();
+  const templateTexts = new TemplateTexts();
   const sizes = [...inputs.candidates].sort(compareCandidates).map((candidate) => {
     const price = sizePriceFacts(candidate, inputs, resolver);
     const template = resolveContentTemplate(preparedContent, candidate);
@@ -122,7 +144,7 @@ export function buildListingSettingsFacts(inputs: ListingSettingsInputs): Listin
     if (template.conflict) fixes.add("description_group_conflict");
     return {
       price,
-      values: sizeValues(candidate, inputs, category, template.templateName, savedContent),
+      values: sizeValues({ candidate, inputs, category, template, savedContent, interner, templateTexts }),
       fixes: LISTING_SETTINGS_FIX_CODES.filter((code) => fixes.has(code)),
     } satisfies ListingSettingsSizeFacts;
   });
@@ -208,30 +230,143 @@ function priceLimits(candidate: DropshipListingCatalogCandidate, policies: reado
   });
 }
 
-function sizeValues(candidate: DropshipListingCatalogCandidate, inputs: ListingSettingsInputs,
-  category: ResolvedEbayListingCategory, templateName: string | null,
-  savedContent: SavedListingContent | null): ListingSettingsSizeFacts["values"] {
+/**
+ * Each setting's value on one size, with where the size gets it. The values
+ * are the ones the preview and the push use: the policy override applied to
+ * the store's policies, the resolved eBay category, the shelf names in their
+ * order (first shelf, then second), and the template and main text the
+ * description is built from.
+ */
+function sizeValues(input: {
+  candidate: DropshipListingCatalogCandidate;
+  inputs: ListingSettingsInputs;
+  category: ResolvedEbayListingCategory;
+  template: ReturnType<typeof resolveContentTemplate>;
+  savedContent: SavedListingContent | null;
+  interner: SizeValueInterner;
+  templateTexts: TemplateTexts;
+}): ListingSettingsSizeValues {
+  const { candidate, inputs, category, template, savedContent, interner } = input;
   const override = inputs.policyOverrides.get(candidate.productVariantId) ?? null;
   const effective = applyEbayListingPolicyOverride(inputs.listingConfig, override);
-  const shelf = [...(inputs.shelfAssignments.get(candidate.productVariantId) ?? [])].sort();
-  const ownPolicy = (key: (typeof POLICY_KEYS)[number]["key"]) => override !== null && override[key] !== null;
+  const policy = <K extends (typeof POLICY_KEYS)[number]>(entry: K) => {
+    const policyId = businessPolicyId(effective, entry.key);
+    // An override applies only over a listing config (applyEbayListingPolicyOverride), so only then is it the size's own.
+    const own = inputs.listingConfig !== null && override !== null && override[entry.key] !== null;
+    const source: ListingSettingsValueSource = policyId === null ? "none" : own ? "size" : "store_default";
+    return interner.get(entry.setting, policyId ?? "", source, null, { policyId });
+  };
+  const shelf = inputs.shelfAssignments.get(candidate.productVariantId) ?? [];
+  const texts = input.templateTexts.of(template.template);
+  const ownText = savedContent?.customText ?? null;
   return {
-    shipping_policy: { key: businessPolicyId(effective, "fulfillmentPolicyId") ?? "", own: ownPolicy("fulfillmentPolicyId") },
-    return_policy: { key: businessPolicyId(effective, "returnPolicyId") ?? "", own: ownPolicy("returnPolicyId") },
-    payment_policy: { key: businessPolicyId(effective, "paymentPolicyId") ?? "", own: ownPolicy("paymentPolicyId") },
+    shippingPolicy: policy(POLICY_KEYS[0]),
+    returnPolicy: policy(POLICY_KEYS[1]),
+    paymentPolicy: policy(POLICY_KEYS[2]),
     // Today a size gets its eBay category from the store's rules, its default or the catalog, never its own.
-    ebay_category: { key: category.categoryId ?? "", own: false },
-    store_shelf: { key: JSON.stringify(shelf), own: shelf.length > 0 },
-    description: { key: JSON.stringify([templateName, ownTextKey(savedContent?.customText ?? null)]), own: savedContent?.customText != null },
+    // The key is the category id, as eBay lists by it; the name is a label that can differ for the same id.
+    ebayCategory: interner.get("ebayCategory", category.categoryId ?? "", CATEGORY_SOURCE[category.source],
+      category.source === "rule" ? category.ruleName : null, { categoryId: category.categoryId, categoryName: category.categoryName }),
+    storeShelf: interner.get("storeShelf", JSON.stringify(shelf), shelf.length > 0 ? "size" : "none", null, { names: [...shelf] }),
+    descriptionTemplate: template.conflict
+      ? interner.get("descriptionTemplate", "conflict", "none", null, { hasIntroduction: false, hasFooter: false, groupConflict: true })
+      : interner.get("descriptionTemplate", texts.key, templateSource(template), template.groupName,
+        { hasIntroduction: texts.hasIntroduction, hasFooter: texts.hasFooter, groupConflict: false }),
+    mainText: ownText === null
+      ? interner.get("mainText", "catalog", "catalog", null, { own: false })
+      : interner.get("mainText", ownTextKey(ownText), "size", null, { own: true }),
   };
 }
 
+const CATEGORY_SOURCE: Readonly<Record<ResolvedEbayListingCategory["source"], ListingSettingsValueSource>> = {
+  rule: "group_rule", store_default: "store_default", catalog: "catalog", none: "none",
+};
+
+function templateSource(template: ReturnType<typeof resolveContentTemplate>): ListingSettingsValueSource {
+  if (template.groupName !== null) return "group_rule";
+  return template.template ? "store_default" : "none";
+}
+
 /**
- * A size's own description as a fixed-length key: the text itself can be
+ * A size's own main text as a fixed-length key: the text itself can be
  * 20,000 characters, and the cache keeps every size's keys.
  */
-function ownTextKey(customText: string | null): string | null {
-  return customText === null ? null : createHash("sha256").update(customText).digest("hex");
+function ownTextKey(customText: string): string {
+  return createHash("sha256").update(customText).digest("hex");
+}
+
+/**
+ * Hands out one frozen object per distinct setting, key, source, rule and
+ * value, so the sizes that agree share it instead of each keeping a copy. The
+ * value is part of the identity, so a shared object is always exactly the
+ * size's own value.
+ */
+class SizeValueInterner {
+  /** The distinct values seen for each setting, source, rule and key; almost always one. */
+  private readonly buckets = new Map<string, ListingSettingsSizeValue<object>[]>();
+
+  get<K extends ListingSettingsSettingKey>(setting: K, key: string, source: ListingSettingsValueSource,
+    ruleName: string | null, value: ListingSettingsProductSettings[K][number]["value"]): ListingSettingsSizeValues[K] {
+    // Built once per size and setting, so no JSON here: the setting and source are fixed words
+    // without ":", the rule name carries its length and the key comes last, so two identities
+    // never share a bucket id.
+    const bucketId = `${setting}:${source}:${ruleName === null ? "-" : `${ruleName.length}:${ruleName}`}:${key}`;
+    let bucket = this.buckets.get(bucketId);
+    if (!bucket) {
+      bucket = [];
+      this.buckets.set(bucketId, bucket);
+    }
+    let shared = bucket.find((entry) => sameFlatValue(entry.value, value));
+    if (!shared) {
+      shared = Object.freeze({ key, value: freezeValue(value), source, ruleName });
+      bucket.push(shared);
+    }
+    return shared as ListingSettingsSizeValues[K];
+  }
+}
+
+/** Values are flat: primitives and lists of primitives. Freezing those lists too keeps a shared value whole. */
+function freezeValue<V extends object>(value: V): Readonly<V> {
+  for (const field of Object.values(value)) if (Array.isArray(field)) Object.freeze(field);
+  return Object.freeze(value);
+}
+
+/** Two flat values (primitives and lists of primitives) with the same fields and the same contents. */
+function sameFlatValue(left: object, right: object): boolean {
+  const a = left as Readonly<Record<string, unknown>>;
+  const b = right as Readonly<Record<string, unknown>>;
+  const fields = Object.keys(a);
+  if (fields.length !== Object.keys(b).length) return false;
+  return fields.every((field) => {
+    if (!Object.prototype.hasOwnProperty.call(b, field)) return false;
+    const x = a[field];
+    const y = b[field];
+    if (Array.isArray(x) || Array.isArray(y)) {
+      return Array.isArray(x) && Array.isArray(y) && x.length === y.length && x.every((item, index) => Object.is(item, y[index]));
+    }
+    return Object.is(x, y);
+  });
+}
+
+/**
+ * The text above and below the main text as it is sent (textDescriptionHtml),
+ * keyed by that sent text, so two templates that send the same words are the
+ * same value. Worked out once per template, not once per size.
+ */
+class TemplateTexts {
+  private readonly byTemplate = new Map<DescriptionTemplate | null, { key: string; hasIntroduction: boolean; hasFooter: boolean }>();
+
+  of(template: DescriptionTemplate | null): { key: string; hasIntroduction: boolean; hasFooter: boolean } {
+    let texts = this.byTemplate.get(template);
+    if (!texts) {
+      const introduction = textDescriptionHtml(template?.introduction ?? "");
+      const footer = textDescriptionHtml(template?.footer ?? "");
+      texts = { key: createHash("sha256").update(JSON.stringify([introduction, footer])).digest("hex"),
+        hasIntroduction: introduction.length > 0, hasFooter: footer.length > 0 };
+      this.byTemplate.set(template, texts);
+    }
+    return texts;
+  }
 }
 
 function productFacts(sizes: readonly ListingSettingsSizeFacts[], inputs: ListingSettingsInputs): ListingSettingsProductFacts[] {
@@ -258,8 +393,10 @@ function productFacts(sizes: readonly ListingSettingsSizeFacts[], inputs: Listin
         sizesTotal,
         priceRange: prices.length ? { minCents: Math.min(...prices), maxCents: Math.max(...prices) } : null,
         exactPriceCount: productSizes.filter((size) => size.price.source === "exact").length,
-        ownSettings: LISTING_SETTINGS_FIELDS.filter((field) => productSizes.some((size) => size.values[field].own)),
-        sizesDiffer: LISTING_SETTINGS_FIELDS.filter((field) => new Set(productSizes.map((size) => size.values[field].key)).size > 1),
+        ownSettings: LISTING_SETTINGS_FIELDS.filter((field) => LISTING_SETTINGS_FIELD_SETTINGS[field]
+          .some((setting) => productSizes.some((size) => size.values[setting].source === "size"))),
+        sizesDiffer: LISTING_SETTINGS_FIELDS.filter((field) => LISTING_SETTINGS_FIELD_SETTINGS[field]
+          .some((setting) => new Set(productSizes.map((size) => size.values[setting].key)).size > 1)),
         fixes: LISTING_SETTINGS_FIX_CODES.filter((code) => fixes.has(code)),
       },
       sizes: productSizes,
@@ -378,6 +515,96 @@ function normalizeSearch(value: string): string {
 function pageOf<T>(rows: readonly T[], page: number): ListingSettingsPage<T> {
   const start = page * LISTING_SETTINGS_PAGE_SIZE;
   return { total: rows.length, rows: rows.slice(start, start + LISTING_SETTINGS_PAGE_SIZE) };
+}
+
+// ---------------------------------------------------------------------------
+// One product
+// ---------------------------------------------------------------------------
+
+export interface ListingSettingsProductSelection {
+  product: Omit<ListingSettingsProductRow, "matchedSize">;
+  settings: ListingSettingsProductSettings;
+  /** The chosen sizes, by size name. Stock is read separately, live. */
+  sizes: Array<{ price: ListingSettingsSizePrice; fixes: ListingSettingsFixCode[] }>;
+}
+
+/** One product's settings in full, or null when none of its sizes is chosen for this store. */
+export function selectListingSettingsProduct(facts: ListingSettingsFacts, productId: number): ListingSettingsProductSelection | null {
+  const product = facts.products.find((row) => row.row.productId === productId);
+  if (!product) return null;
+  const sizes = product.sizes;
+  return {
+    product: { ...product.row },
+    settings: {
+      shippingPolicy: settingValues(sizes, (values) => values.shippingPolicy),
+      returnPolicy: settingValues(sizes, (values) => values.returnPolicy),
+      paymentPolicy: settingValues(sizes, (values) => values.paymentPolicy),
+      ebayCategory: settingValues(sizes, (values) => values.ebayCategory),
+      storeShelf: settingValues(sizes, (values) => values.storeShelf),
+      descriptionTemplate: settingValues(sizes, (values) => values.descriptionTemplate),
+      mainText: settingValues(sizes, (values) => values.mainText),
+    },
+    sizes: sizes.map((size) => ({ price: size.price, fixes: [...size.fixes] })),
+  };
+}
+
+interface ValueSourceEntry { source: ListingSettingsValueSource; ruleName: string | null; productVariantIds: number[] }
+
+/**
+ * A setting's distinct values among the sizes, the most used first (ties in
+ * size order), each with the sizes that have it grouped by where they get it.
+ */
+function settingValues<V>(sizes: readonly ListingSettingsSizeFacts[],
+  pick: (values: ListingSettingsSizeValues) => ListingSettingsSizeValue<V>): Array<{ value: Readonly<V>; sources: ValueSourceEntry[] }> {
+  const byKey = new Map<string, { value: Readonly<V>; firstIndex: number; count: number; sources: Map<string, ValueSourceEntry> }>();
+  sizes.forEach((size, index) => {
+    const entry = pick(size.values);
+    let option = byKey.get(entry.key);
+    if (!option) {
+      option = { value: entry.value, firstIndex: index, count: 0, sources: new Map() };
+      byKey.set(entry.key, option);
+    }
+    option.count += 1;
+    const sourceId = JSON.stringify([entry.source, entry.ruleName]);
+    let from = option.sources.get(sourceId);
+    if (!from) {
+      from = { source: entry.source, ruleName: entry.ruleName, productVariantIds: [] };
+      option.sources.set(sourceId, from);
+    }
+    from.productVariantIds.push(size.price.productVariantId);
+  });
+  return [...byKey.values()]
+    .sort((a, b) => b.count - a.count || a.firstIndex - b.firstIndex)
+    .map((option) => ({ value: option.value, sources: [...option.sources.values()].sort(compareValueSources) }));
+}
+
+/** The closest source first, as the precedence reads: the size's own value, an older group rule, the store default, Card Shellz. */
+const SOURCE_ORDER: ReadonlyMap<ListingSettingsValueSource, number> = new Map(LISTING_SETTINGS_VALUE_SOURCES.map((source, index) => [source, index]));
+
+function compareValueSources(a: ValueSourceEntry, b: ValueSourceEntry): number {
+  return (SOURCE_ORDER.get(a.source) ?? 0) - (SOURCE_ORDER.get(b.source) ?? 0)
+    || NAME_ORDER.compare(a.ruleName ?? "", b.ruleName ?? "");
+}
+
+/**
+ * What Card Shellz would list for each size now, worked out as the preview
+ * does (evaluateDropshipVendorCatalogSelection): the size's stock, capped by
+ * the vendor's own quantity cap only under legacy authority, because
+ * canonical quantities already carry it. The listing tier check stays on
+ * step 3. A size the stock read did not answer for is a broken read, not 0.
+ */
+export function listingSettingsStockUnits(input: {
+  snapshot: DropshipAtpSnapshot;
+  overrides: readonly DropshipVendorVariantOverride[];
+  productVariantIds: readonly number[];
+}): Map<number, number> {
+  const overrides = new Map(input.overrides.map((row) => [row.productVariantId, row]));
+  return new Map(input.productVariantIds.map((productVariantId) => {
+    const units = input.snapshot.quantities.get(productVariantId);
+    if (units === undefined) throw new Error(`The stock read returned no quantity for size ${productVariantId}.`);
+    const cap = input.snapshot.authority === "legacy" ? overrides.get(productVariantId) ?? null : null;
+    return [productVariantId, computeDropshipMarketplaceQuantity(units, cap)];
+  }));
 }
 
 // ---------------------------------------------------------------------------

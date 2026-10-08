@@ -4,6 +4,7 @@
  * and which store the page works on. Pure except for the two storage helpers,
  * which only touch the browser storage they are handed.
  */
+import type { ListingSettingsPolicyKind, ListingSettingsSummary } from "@shared/dropship/listing-settings";
 import { formatStatus, type DropshipStoreConnectionSummary, type DropshipVendorSelectionRule } from "./dropship-ops-surface";
 
 export const CATALOG_STEPS = ["choose", "setup", "publish"] as const;
@@ -88,17 +89,71 @@ export function chooseStepTick(
   return rules.some((rule) => rule.action === "include" && rule.isActive !== false) ? "done" : "todo";
 }
 
-/** Step 2 is done once the store's eBay setup reports nothing missing. Rules, templates and category defaults are optional. */
-export function setupStepTick(setup: { missingFields: readonly string[] } | undefined): CatalogStepTick {
-  if (!setup) return "unknown";
-  return setup.missingFields.length === 0 ? "done" : "todo";
+export interface ListingSettingsRailInput {
+  /** False until the vendor's stores have loaded. */
+  storesLoaded: boolean;
+  /** An eBay store is chosen. */
+  storeChosen: boolean;
+  summary:
+    | { status: "loading" }
+    | { status: "failed" }
+    | { status: "ready"; rail: ListingSettingsSummary["rail"] };
+  /**
+   * The newest live eBay setup check for the store, or null before there is
+   * one. It runs on Listing settings only, and is the one source for what only
+   * eBay can tell: a saved policy gone or no longer fitting Card Shellz
+   * shipping, and the ship-from location.
+   */
+  liveSetup: { missingFields: readonly string[] } | null;
 }
 
-/** The line under Listing settings in the rail. */
-export function describeSetupStep(tick: CatalogStepTick, storeChosen: boolean): string {
-  if (tick === "unknown") return "Checking";
-  if (!storeChosen) return "No eBay store";
-  return tick === "done" ? "Setup complete" : "Needs setup";
+export interface ListingSettingsRailLine {
+  tick: CatalogStepTick;
+  line: string;
+  /** The check failed, so the rail offers "Try again". */
+  retry: boolean;
+}
+
+const POLICY_WORDS: Readonly<Record<ListingSettingsPolicyKind, string>> = { shipping: "shipping", return: "return", payment: "payment" };
+/** The live setup check's fields for each policy (dropship-ebay-listing-setup-service.ts, buildListingSetupResult). */
+const LIVE_POLICY_FIELDS: Readonly<Record<ListingSettingsPolicyKind, readonly string[]>> = {
+  shipping: ["fulfillmentPolicyId", "fulfillmentPolicyCompatibility"],
+  return: ["returnPolicyId"],
+  payment: ["paymentPolicyId"],
+};
+const POLICY_ORDER: readonly ListingSettingsPolicyKind[] = ["shipping", "return", "payment"];
+const LIVE_LOCATION_FIELD = "merchantLocationKey";
+const KNOWN_LIVE_FIELDS: ReadonlySet<string> = new Set([...Object.values(LIVE_POLICY_FIELDS).flat(), LIVE_LOCATION_FIELD]);
+
+/**
+ * The tick and line under Listing settings in the rail (design 3.7). It names
+ * the first thing to do, in the order it has to be done: reconnect eBay, the
+ * store's policies, where items ship from, then products that need a fix. The
+ * summary says what saved settings show; a live eBay check, when there is one,
+ * adds what only eBay can tell, so the rail never says "All set" over a
+ * problem the setup panel shows.
+ */
+export function describeListingSettingsRail(input: ListingSettingsRailInput): ListingSettingsRailLine {
+  if (!input.storesLoaded) return { tick: "unknown", line: "Checking…", retry: false };
+  if (!input.storeChosen) return { tick: "todo", line: "No eBay store", retry: false };
+  if (input.summary.status === "loading") return { tick: "unknown", line: "Checking…", retry: false };
+  if (input.summary.status === "failed") return { tick: "unknown", line: "Couldn't check", retry: true };
+  const { rail } = input.summary;
+  const todo = (line: string): ListingSettingsRailLine => ({ tick: "todo", line, retry: false });
+  if (rail.state === "reconnect_store") return todo("Reconnect eBay");
+  if (rail.state === "too_many_sizes") return todo("Too many sizes to check");
+  const live = new Set(input.liveSetup?.missingFields ?? []);
+  const policy = POLICY_ORDER.find((kind) => rail.missingPolicy === kind || LIVE_POLICY_FIELDS[kind].some((field) => live.has(field)));
+  if (policy) return todo(`Choose a ${POLICY_WORDS[policy]} policy`);
+  // A missing policy the summary names is always one of the three, so this is only a broken answer's fallback.
+  if (rail.state === "choose_policy") return todo("Choose your eBay policies");
+  if (live.has(LIVE_LOCATION_FIELD)) return todo("Ship-from location needs updating");
+  // A problem the live check names that this rail does not know yet still keeps "All set" off.
+  if ([...live].some((field) => !KNOWN_LIVE_FIELDS.has(field))) return todo("Finish your eBay setup");
+  if (rail.state === "products_need_fix") {
+    return todo(rail.productsNeedingFix === 1 ? "1 product needs a fix" : `${rail.productsNeedingFix} products need a fix`);
+  }
+  return { tick: "done", line: "All set", retry: false };
 }
 
 export interface CatalogActionBarContent {

@@ -7,7 +7,8 @@ import { pricingRecipeSchema } from "./pricing-rules";
 
 /**
  * The read-only listing settings views of one store (Listing settings design 8.4):
- * a summary, every chosen size's price, and one row per chosen product.
+ * a summary, every chosen size's price, one row per chosen product, and one
+ * product's settings in full.
  *
  * They read today's settings only: the store defaults and the values left on
  * single sizes by the current step 2 panels. Category settings, product
@@ -28,6 +29,7 @@ const search = z.string().trim().max(MAX_LISTING_SETTINGS_SEARCH_LENGTH);
 const page = z.number().int().min(0).max(MAX_LISTING_SETTINGS_PAGE);
 
 export const listingSettingsStoreInputSchema = z.object({ storeConnectionId: id }).strict();
+export const listingSettingsProductInputSchema = z.object({ storeConnectionId: id, productId: id }).strict();
 
 /** Which products the Products tab lists. */
 export const LISTING_SETTINGS_PRODUCT_FILTERS = [
@@ -147,6 +149,136 @@ const pageOf = <T extends z.ZodTypeAny>(row: T) => z.object({
 export const listingSettingsPricesResponseSchema = pageOf(listingSettingsSizePriceSchema);
 export const listingSettingsProductsResponseSchema = pageOf(listingSettingsProductRowSchema);
 
+// ---------------------------------------------------------------------------
+// One product's settings (GET …/products/:productId)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where a size gets a setting's value today, before product and category
+ * settings exist (design PRs 8 to 11):
+ * - `size`: a value left on this size by today's per-size settings;
+ * - `group_rule`: an older group rule, named in `ruleName`;
+ * - `store_default`: the store default;
+ * - `catalog`: Card Shellz (the eBay category it chose for the product, or its main text);
+ * - `none`: nothing is set.
+ */
+export const LISTING_SETTINGS_VALUE_SOURCES = ["size", "group_rule", "store_default", "catalog", "none"] as const;
+
+const valueSourceSchema = z.object({
+  source: z.enum(LISTING_SETTINGS_VALUE_SOURCES),
+  /** The older group rule's name; null for every other source. */
+  ruleName: z.string().min(1).nullable(),
+  /** The chosen sizes that get the value from here, in the order `sizes` lists them. */
+  productVariantIds: z.array(id).min(1),
+}).strict().refine((entry) => (entry.source === "group_rule") === (entry.ruleName !== null),
+  "A group rule is named, and no other source is.");
+
+/**
+ * Every distinct value of one setting among the product's chosen sizes, most
+ * used first. More than one means the sizes differ. Values are told apart by
+ * what is sent, which this view does not carry for the description, so two
+ * entries can read the same here: two sizes' own main texts, or two
+ * templates that each have text above and below.
+ */
+const settingOf = <T extends z.ZodTypeAny>(value: T) => z.array(z.object({
+  value,
+  sources: z.array(valueSourceSchema).min(1),
+}).strict()).min(1);
+
+/** A null id means no policy is set. Names are not stored yet, so a policy is shown by id and not checked on eBay. */
+export const listingSettingsPolicyValueSchema = z.object({ policyId: z.string().min(1).nullable() }).strict();
+export const listingSettingsEbayCategoryValueSchema = z.object({
+  categoryId: z.string().min(1).nullable(),
+  /** The name the first of these sizes resolves to; eBay lists by the id. */
+  categoryName: z.string().min(1).nullable(),
+}).strict();
+/** The first shelf, then the second; an empty list means none. */
+export const listingSettingsStoreShelfValueSchema = z.object({ names: z.array(z.string().min(1)).max(2) }).strict();
+/** The text above and below the main text, as it is sent. */
+export const listingSettingsDescriptionTemplateValueSchema = z.object({
+  hasIntroduction: z.boolean(),
+  hasFooter: z.boolean(),
+  /** Two older group rules tie for these sizes, so neither's text is used: a fix on this step. */
+  groupConflict: z.boolean(),
+}).strict();
+/** `own`: the size's own main text; otherwise the Card Shellz text. */
+export const listingSettingsMainTextValueSchema = z.object({ own: z.boolean() }).strict();
+
+export const LISTING_SETTINGS_SETTING_KEYS = [
+  "shippingPolicy", "returnPolicy", "paymentPolicy", "ebayCategory", "storeShelf", "descriptionTemplate", "mainText",
+] as const;
+export const listingSettingsProductSettingsSchema = z.object({
+  shippingPolicy: settingOf(listingSettingsPolicyValueSchema),
+  returnPolicy: settingOf(listingSettingsPolicyValueSchema),
+  paymentPolicy: settingOf(listingSettingsPolicyValueSchema),
+  ebayCategory: settingOf(listingSettingsEbayCategoryValueSchema),
+  storeShelf: settingOf(listingSettingsStoreShelfValueSchema),
+  descriptionTemplate: settingOf(listingSettingsDescriptionTemplateValueSchema),
+  mainText: settingOf(listingSettingsMainTextValueSchema),
+}).strict();
+
+/** The settings behind each field of a product row. The description has two parts. */
+export const LISTING_SETTINGS_FIELD_SETTINGS = {
+  shipping_policy: ["shippingPolicy"],
+  return_policy: ["returnPolicy"],
+  payment_policy: ["paymentPolicy"],
+  ebay_category: ["ebayCategory"],
+  store_shelf: ["storeShelf"],
+  description: ["descriptionTemplate", "mainText"],
+} as const satisfies Record<ListingSettingsField, readonly ListingSettingsSettingKey[]>;
+
+export const listingSettingsProductSizeSchema = z.object({
+  price: listingSettingsSizePriceSchema,
+  fixes: z.array(z.enum(LISTING_SETTINGS_FIX_CODES)),
+  /**
+   * What Card Shellz would list for this size on this store now: the quantity
+   * step 3 previews before its listing tier check. Null when stock could not be read.
+   */
+  stockUnits: count.nullable(),
+}).strict();
+
+const stockSchema = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("ok"), checkedAt: z.string().datetime() }).strict(),
+  /** `retryable`: trying again may work; otherwise Card Shellz has something to fix first. */
+  z.object({ state: z.literal("unavailable"), retryable: z.boolean(), checkedAt: z.string().datetime() }).strict(),
+]);
+
+export const listingSettingsProductDetailSchema = z.object({
+  storeConnectionId: id,
+  product: listingSettingsProductRowSchema.omit({ matchedSize: true }),
+  settings: listingSettingsProductSettingsSchema,
+  /** The product's chosen sizes, by size name. */
+  sizes: z.array(listingSettingsProductSizeSchema).min(1).max(MAX_NAMED_CATALOG_GROUP_ITEMS),
+  /** Stock is read live for this product; the settings are as of `generatedAt`. */
+  stock: stockSchema,
+  generatedAt: z.string().datetime(),
+}).strict().superRefine((detail, context) => {
+  const issue = (message: string, path: (string | number)[]) => context.addIssue({ code: z.ZodIssueCode.custom, message, path });
+  const ids = detail.sizes.map((size) => size.price.productVariantId);
+  const chosen = new Set(ids);
+  if (chosen.size !== ids.length || ids.length !== detail.product.sizesChosen) issue("Every chosen size is listed once.", ["sizes"]);
+  detail.sizes.forEach((size, index) => {
+    if (size.price.productId !== detail.product.productId) issue("The size belongs to another product.", ["sizes", index]);
+    if ((size.stockUnits === null) !== (detail.stock.state === "unavailable")) {
+      issue("Stock is given for every size exactly when it was read.", ["sizes", index, "stockUnits"]);
+    }
+  });
+  for (const key of LISTING_SETTINGS_SETTING_KEYS) {
+    const covered = detail.settings[key].flatMap((value) => value.sources.flatMap((entry) => entry.productVariantIds));
+    if (covered.length !== ids.length || new Set(covered).size !== covered.length || covered.some((sizeId) => !chosen.has(sizeId))) {
+      issue("Each chosen size has exactly one value.", ["settings", key]);
+    }
+  }
+  // The row's flags say the same as the settings in full.
+  for (const field of LISTING_SETTINGS_FIELDS) {
+    const settings = LISTING_SETTINGS_FIELD_SETTINGS[field].map((key) => detail.settings[key]);
+    const differ = settings.some((values) => values.length > 1);
+    const own = settings.some((values) => values.some((value) => value.sources.some((entry) => entry.source === "size")));
+    if (differ !== detail.product.sizesDiffer.includes(field)) issue(`Sizes differ for ${field} only when it has more than one value.`, ["product", "sizesDiffer"]);
+    if (own !== detail.product.ownSettings.includes(field)) issue(`${field} is an own setting only when a size has its own value.`, ["product", "ownSettings"]);
+  }
+});
+
 const policyDefaultSchema = z.object({
   policyId: z.string().min(1).nullable(),
   /** Names are not stored yet, and no view calls eBay, so a saved policy is not checked here. */
@@ -243,3 +375,14 @@ export type ListingSettingsAttentionCode = (typeof LISTING_SETTINGS_ATTENTION_CO
 export type ListingSettingsPolicyKind = (typeof LISTING_SETTINGS_POLICY_KINDS)[number];
 export type ListingSettingsRailState = (typeof LISTING_SETTINGS_RAIL_STATES)[number];
 export type ListingSettingsSummary = z.infer<typeof listingSettingsSummarySchema>;
+export type ListingSettingsProductInput = z.infer<typeof listingSettingsProductInputSchema>;
+export type ListingSettingsValueSource = (typeof LISTING_SETTINGS_VALUE_SOURCES)[number];
+export type ListingSettingsPolicyValue = z.infer<typeof listingSettingsPolicyValueSchema>;
+export type ListingSettingsEbayCategoryValue = z.infer<typeof listingSettingsEbayCategoryValueSchema>;
+export type ListingSettingsStoreShelfValue = z.infer<typeof listingSettingsStoreShelfValueSchema>;
+export type ListingSettingsDescriptionTemplateValue = z.infer<typeof listingSettingsDescriptionTemplateValueSchema>;
+export type ListingSettingsMainTextValue = z.infer<typeof listingSettingsMainTextValueSchema>;
+export type ListingSettingsProductSettings = z.infer<typeof listingSettingsProductSettingsSchema>;
+export type ListingSettingsSettingKey = keyof ListingSettingsProductSettings;
+export type ListingSettingsProductSize = z.infer<typeof listingSettingsProductSizeSchema>;
+export type ListingSettingsProductDetail = z.infer<typeof listingSettingsProductDetailSchema>;

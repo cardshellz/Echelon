@@ -5,11 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   LISTING_SETTINGS_PAGE_SIZE,
   listingSettingsPricesInputSchema,
+  listingSettingsProductInputSchema,
   listingSettingsProductsInputSchema,
   listingSettingsStoreInputSchema,
   type ListingSettingsPricesResponse,
+  type ListingSettingsProductDetail,
   type ListingSettingsProductsResponse,
   type ListingSettingsSummary,
+  type ListingSettingsValueSource,
 } from "../../../../../shared/dropship/listing-settings";
 import { DropshipError } from "../../domain/errors";
 
@@ -42,6 +45,31 @@ const pricesPage = (page: number): ListingSettingsPricesResponse =>
   ({ storeConnectionId: 22, page, pageSize: LISTING_SETTINGS_PAGE_SIZE, total: 0, rows: [], generatedAt: GENERATED_AT });
 const productsPage = (page: number): ListingSettingsProductsResponse =>
   ({ storeConnectionId: 22, page, pageSize: LISTING_SETTINGS_PAGE_SIZE, total: 0, rows: [], generatedAt: GENERATED_AT });
+/** One value, from one place, for the one size. */
+const only = <V>(value: V, source: ListingSettingsValueSource) => [{ value, sources: [{ source, ruleName: null, productVariantIds: [11] }] }];
+const productDetail: ListingSettingsProductDetail = {
+  storeConnectionId: 22,
+  product: { productId: 501, productName: "Toploader 35pt", category: null, sizesChosen: 1, sizesTotal: 1, priceRange: null,
+    exactPriceCount: 0, ownSettings: [], sizesDiffer: [], fixes: ["size_cannot_be_priced"] },
+  settings: {
+    shippingPolicy: only({ policyId: "F1" }, "store_default"),
+    returnPolicy: only({ policyId: "R1" }, "store_default"),
+    paymentPolicy: only({ policyId: null }, "none"),
+    ebayCategory: only({ categoryId: "183438", categoryName: "Toploaders" }, "catalog"),
+    storeShelf: only({ names: [] }, "none"),
+    descriptionTemplate: only({ hasIntroduction: false, hasFooter: false, groupConflict: false }, "none"),
+    mainText: only({ own: false }, "catalog"),
+  },
+  sizes: [{
+    price: { productVariantId: 11, productId: 501, productName: "Toploader 35pt", sizeName: "Pack of 25", sku: null, priceCents: null,
+      source: "none", rule: null, basis: null, basisAmountCents: null, issue: "price_unavailable", costCents: null,
+      belowCostByCents: null, limits: [], pausedSince: null, settingRevisionId: null },
+    fixes: ["size_cannot_be_priced"],
+    stockUnits: 3,
+  }],
+  stock: { state: "ok", checkedAt: GENERATED_AT },
+  generatedAt: GENERATED_AT,
+};
 
 describe("listing settings HTTP boundary", () => {
   let server: http.Server;
@@ -49,16 +77,18 @@ describe("listing settings HTTP boundary", () => {
   const getSummaryForMember = vi.fn(async (_member: string, input: unknown) => { listingSettingsStoreInputSchema.parse(input); return summary; });
   const listPricesForMember = vi.fn(async (_member: string, input: unknown) => pricesPage(listingSettingsPricesInputSchema.parse(input).page));
   const listProductsForMember = vi.fn(async (_member: string, input: unknown) => productsPage(listingSettingsProductsInputSchema.parse(input).page));
+  const getProductForMember = vi.fn(async (_member: string, input: unknown) => { listingSettingsProductInputSchema.parse(input); return productDetail; });
 
   beforeEach(async () => {
-    for (const fn of [getSummaryForMember, listPricesForMember, listProductsForMember, logged.info, logged.warn, logged.error]) fn.mockClear();
+    for (const fn of [getSummaryForMember, listPricesForMember, listProductsForMember, getProductForMember,
+      logged.info, logged.warn, logged.error]) fn.mockClear();
     const app = express();
     app.use((req, _res, next) => {
       const memberId = req.header("X-Test-Member");
       req.session = { ...(memberId ? { dropship: { memberId } } : {}) } as Request["session"];
       next();
     });
-    registerDropshipListingSettingsRoutes(app, { getSummaryForMember, listPricesForMember, listProductsForMember });
+    registerDropshipListingSettingsRoutes(app, { getSummaryForMember, listPricesForMember, listProductsForMember, getProductForMember });
     server = http.createServer(app);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/dropship/listings/stores`;
@@ -68,13 +98,39 @@ describe("listing settings HTTP boundary", () => {
   const get = (path: string, member: string | null = "member-1") =>
     fetch(`${base}${path}`, { headers: member ? { "X-Test-Member": member } : {} });
 
-  it.each(["/22/listing-settings/summary", "/22/listing-settings/prices", "/22/listing-settings/products"])(
+  it.each(["/22/listing-settings/summary", "/22/listing-settings/prices", "/22/listing-settings/products",
+    "/22/listing-settings/products/501"])(
     "requires a signed-in member for %s", async (path) => {
       expect((await get(path, null)).status).toBe(401);
       expect(getSummaryForMember).not.toHaveBeenCalled();
       expect(listPricesForMember).not.toHaveBeenCalled();
       expect(listProductsForMember).not.toHaveBeenCalled();
+      expect(getProductForMember).not.toHaveBeenCalled();
     });
+
+  it("returns one product's settings, never cached by the browser", async () => {
+    const response = await get("/22/listing-settings/products/501");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toEqual(productDetail);
+    expect(getProductForMember).toHaveBeenCalledWith("member-1", { storeConnectionId: 22, productId: 501 });
+  });
+
+  it("maps a product with no chosen size to 404, logged with the product", async () => {
+    getProductForMember.mockRejectedValueOnce(new DropshipError("DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND",
+      "None of this product's sizes is chosen for this store.", { storeConnectionId: 22, productId: 999 }));
+    const response = await get("/22/listing-settings/products/999");
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND",
+      message: "None of this product's sizes is chosen for this store.", context: { storeConnectionId: 22 } } });
+    expect(logged.info).toHaveBeenCalledWith("dropship.listing_settings.request_refused", expect.objectContaining({
+      error_code: "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", store_connection_id: 22, product_id: 999 }));
+  });
+
+  it("answers 500 when one product's settings disagree with its own row", async () => {
+    getProductForMember.mockResolvedValueOnce({ ...productDetail, product: { ...productDetail.product, ownSettings: ["store_shelf"] } });
+    expect((await get("/22/listing-settings/products/501")).status).toBe(500);
+  });
 
   it("returns the summary, never cached by the browser, for the signed-in member", async () => {
     const response = await get("/22/listing-settings/summary");
@@ -101,6 +157,9 @@ describe("listing settings HTTP boundary", () => {
     ["a page past the last", "/22/listing-settings/products?page=200"],
     ["a repeated search", "/22/listing-settings/products?search=a&search=b"],
     ["a search over 100 characters", `/22/listing-settings/products?search=${"x".repeat(101)}`],
+    ["a product id with letters", "/22/listing-settings/products/501x"],
+    ["a product id of 0", "/22/listing-settings/products/0"],
+    ["a product id beyond the integer column", "/22/listing-settings/products/2147483648"],
   ])("refuses %s with 400", async (_case, path) => {
     const response = await get(path);
     expect(response.status).toBe(400);
@@ -142,6 +201,8 @@ describe("listing settings HTTP boundary", () => {
     const limited = await get("/22/listing-settings/prices");
     expect(limited.status).toBe(429);
     expect((await limited.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_RATE_LIMITED");
+    // One product's read, stock included, spends the same budget.
+    expect((await get("/22/listing-settings/products/501")).status).toBe(429);
     expect((await get("/22/listing-settings/summary", "member-2")).status).toBe(200);
   });
 });

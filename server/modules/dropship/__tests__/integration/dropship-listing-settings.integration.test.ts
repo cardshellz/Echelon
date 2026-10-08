@@ -4,10 +4,11 @@ import { resolve } from "node:path";
 import { config } from "dotenv";
 import pg, { type Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { listingSettingsProductDetailSchema } from "../../../../../shared/dropship/listing-settings";
 import { listingCatalogHash } from "../../application/dropship-listing-content-resolver";
 import { DropshipListingPriceService } from "../../application/dropship-listing-price-service";
 import { buildListingSettingsFacts } from "../../application/dropship-listing-settings-facts";
-import type { ListingSettingsLoad } from "../../application/dropship-listing-settings-service";
+import { DropshipListingSettingsService, type ListingSettingsLoad } from "../../application/dropship-listing-settings-service";
 import { PgDropshipListingContentRepository } from "../../infrastructure/dropship-listing-content.repository";
 import { PgDropshipListingPreviewRepository } from "../../infrastructure/dropship-listing-preview.repository";
 import { PgDropshipListingPriceRepository } from "../../infrastructure/dropship-listing-price.repository";
@@ -530,6 +531,48 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
     const before = await fingerprint();
     await change();
     expect(await fingerprint()).toBe(before);
+  });
+
+  it("gives one product's settings from the same views as the lists, with its stock read live", async () => {
+    // The vendor's own cap on the 200 pack, which legacy quantity authority applies.
+    await execute(`INSERT INTO dropship.dropship_vendor_variant_overrides (vendor_id, product_variant_id, enabled_override, marketplace_quantity_cap)
+      VALUES (10, 103, true, 2)`);
+    const atpReads: unknown[] = [];
+    const service = new DropshipListingSettingsService({
+      repository: settings(),
+      stock: {
+        atp: { getVariantAtp: async (targets, scope) => {
+          atpReads.push({ targets, scope });
+          return { authority: "legacy", quantities: new Map([[101, 12], [102, 0], [103, 4]]) };
+        } },
+        overrides: new PgDropshipListingPreviewRepository(scopedPool()),
+      },
+      clock: { now: () => NOW },
+      logger,
+    });
+    const detail = await service.getProductForMember("member-1", { storeConnectionId: STORE_RULES, productId: 7 });
+    expect(listingSettingsProductDetailSchema.safeParse(detail).success).toBe(true);
+    expect(detail.sizes.map((size) => [size.price.productVariantId, size.stockUnits])).toEqual([[101, 12], [102, 0], [103, 2]]);
+    expect(atpReads).toEqual([{ targets: [101, 102, 103].map((productVariantId) => ({ productId: 7, productVariantId })),
+      scope: { storeConnectionId: STORE_RULES } }]);
+    expect(detail.settings.shippingPolicy).toEqual([
+      { value: { policyId: "ship-a" }, sources: [{ source: "store_default", ruleName: null, productVariantIds: [101, 103] }] },
+      { value: { policyId: "ship-b" }, sources: [{ source: "size", ruleName: null, productVariantIds: [102] }] },
+    ]);
+    expect(detail.settings.storeShelf).toEqual([
+      { value: { names: [] }, sources: [{ source: "none", ruleName: null, productVariantIds: [102, 103] }] },
+      { value: { names: ["Toploaders"] }, sources: [{ source: "size", ruleName: null, productVariantIds: [101] }] },
+    ]);
+    expect(detail.settings.ebayCategory).toEqual([{ value: { categoryId: "183438", categoryName: "Toploaders" },
+      sources: [{ source: "catalog", ruleName: null, productVariantIds: [101, 102, 103] }] }]);
+    expect(detail.product).toMatchObject({ productId: 7, sizesChosen: 3, sizesTotal: 4,
+      ownSettings: ["shipping_policy", "store_shelf"], sizesDiffer: ["shipping_policy", "store_shelf"] });
+    // The product's row and each size's price are the ones the lists give.
+    const products = await service.listProductsForMember("member-1", { storeConnectionId: STORE_RULES });
+    const row = products.rows.find((candidate) => candidate.productId === 7);
+    expect(row && { ...row, matchedSize: undefined }).toEqual({ ...detail.product, matchedSize: undefined });
+    const prices = await service.listPricesForMember("member-1", { storeConnectionId: STORE_RULES });
+    expect(detail.sizes.map((size) => size.price)).toEqual(prices.rows.filter((price) => price.productId === 7));
   });
 
   it("has every Dropship table a load reads in the fingerprint", async () => {

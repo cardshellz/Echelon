@@ -91,6 +91,7 @@ import { CatalogStepRail } from "./catalog/CatalogStepRail";
 import { CatalogActionBar, type CatalogNextStepAction } from "./catalog/CatalogActionBar";
 import { UnsavedChangesProvider, useLeaveGuard } from "./catalog/UnsavedChangesGuard";
 import { ebayListingSetupQueryOptions } from "@/lib/dropship-ebay-listing-query-sync";
+import { listingSettingsQueryKey, listingSettingsSummaryQueryOptions } from "@/lib/dropship-listing-settings";
 import {
   CATALOG_STEPS,
   CATALOG_STEP_LABELS,
@@ -101,13 +102,11 @@ import {
   chooseCatalogStore,
   chooseStepTick,
   describeCatalogActionBar,
-  describeSetupStep,
+  describeListingSettingsRail,
   isCatalogLocation,
   readRememberedCatalogStore,
   rememberCatalogStore,
-  setupStepTick,
   type CatalogStep,
-  type CatalogStepTick,
 } from "@/lib/dropship-catalog-steps";
 export { formatListingPreviewIssue as formatIssue } from "@/lib/dropship-listing-preview";
 
@@ -311,8 +310,11 @@ function DropshipPortalCatalogPage() {
     enabled: selectedStoreConnection?.platform === "ebay" && activeStep === "setup",
     staleTime: 60_000,
   });
-  // Shares its cache with EbayListingSetupPanel, so the rail's tick costs no extra request there.
-  const ebayListingSetupQuery = useQuery(ebayListingSetupQueryOptions(selectedStoreConnectionIdNumber));
+  // The rail's line under Listing settings comes from saved settings, read on every step without asking eBay.
+  const listingSettingsSummaryQuery = useQuery(listingSettingsSummaryQueryOptions(selectedStoreConnectionIdNumber));
+  // The live eBay setup check runs on Listing settings only, in EbayListingSetupPanel. This never
+  // fetches: it reads that panel's newest answer from the shared cache, for what only eBay can tell.
+  const liveListingSetupQuery = useQuery({ ...ebayListingSetupQueryOptions(selectedStoreConnectionIdNumber), enabled: false });
   const activeBulkPushProof = useMemo(() => {
     return isDropshipSensitiveProofActive({
       principal,
@@ -364,11 +366,19 @@ function DropshipPortalCatalogPage() {
       ]);
       setMessage(action === "include" ? "Catalog selection added." : "Catalog selection removed.");
       invalidateListingPreview();
+      refreshListingSettings();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Catalog selection update failed.");
     } finally {
       setPendingSelectionAction(null);
     }
+  }
+
+  /** A saved change moves the summary the rail reads, so read it again. */
+  function refreshListingSettings() {
+    if (selectedStoreConnectionIdNumber <= 0) return;
+    // Never rejects (throwOnError is off); a failed read shows "Couldn't check" in the rail.
+    void queryClient.invalidateQueries({ queryKey: listingSettingsQueryKey(selectedStoreConnectionIdNumber) });
   }
 
   function invalidateListingPreview(keepVisible = false) {
@@ -437,6 +447,7 @@ function DropshipPortalCatalogPage() {
     onSaveSettled: () => {
       pendingPriceSavesRef.current = Math.max(0, pendingPriceSavesRef.current - 1);
       setPendingPriceSaves(pendingPriceSavesRef.current);
+      refreshListingSettings();
     },
     onSaved: () => refreshListingPreview(previewContextKey),
   };
@@ -595,6 +606,7 @@ function DropshipPortalCatalogPage() {
         } : current,
       );
       invalidateListingPreview();
+      refreshListingSettings();
       setMessage(storeCategoryIds.length > 0
         ? "eBay Store category assignment saved."
         : "Optional eBay Store category assignment cleared.");
@@ -638,9 +650,15 @@ function DropshipPortalCatalogPage() {
   }
 
   const storeReady = selectedStoreConnection !== null;
-  const setupTick: CatalogStepTick = storeReady
-    ? setupStepTick(ebayListingSetupQuery.data)
-    : settingsQuery.data ? "todo" : "unknown";
+  const setupRail = describeListingSettingsRail({
+    storesLoaded: settingsQuery.data !== undefined,
+    storeChosen: storeReady,
+    // A failed read wins over older data, so the rail never vouches for a view it could not refresh.
+    summary: listingSettingsSummaryQuery.isError ? { status: "failed" }
+      : listingSettingsSummaryQuery.data ? { status: "ready", rail: listingSettingsSummaryQuery.data.rail }
+      : { status: "loading" },
+    liveSetup: liveListingSetupQuery.data ?? null,
+  });
   const selectedCount = selectedCatalogQuery.isLoading ? null : selectedCatalogRows.length;
   const actionBar = describeCatalogActionBar({
     step: activeStep,
@@ -668,11 +686,14 @@ function DropshipPortalCatalogPage() {
         <CatalogStepRail
           current={activeStep}
           hrefFor={stepHref}
-          ticks={{ choose: chooseStepTick(selectionRulesQuery.data?.rules), setup: setupTick, publish: null }}
+          ticks={{ choose: chooseStepTick(selectionRulesQuery.data?.rules), setup: setupRail.tick, publish: null }}
           details={{
             choose: selectedCount === null ? "Loading selection" : `${selectedCount} selected`,
-            setup: describeSetupStep(setupTick, storeReady),
+            setup: setupRail.line,
           }}
+          actions={setupRail.retry
+            ? { setup: { label: "Try again", onClick: () => void listingSettingsSummaryQuery.refetch() } }
+            : {}}
           storeOptions={storeOptions}
           selectedStoreConnectionId={storeReady ? selectedStoreConnectionIdNumber : null}
           onStoreChange={(storeConnectionId) => leaveGuard(() => chooseStore(storeConnectionId))}
@@ -817,6 +838,7 @@ function DropshipPortalCatalogPage() {
                   storeName={selectedStoreName}
                   onConfigurationChange={() => {
                     invalidateListingPreview();
+                    refreshListingSettings();
                   }}
                 />
                 <EbayListingPolicyOverridePanel
@@ -826,6 +848,7 @@ function DropshipPortalCatalogPage() {
                   rows={selectedCatalogRows}
                   onConfigurationChange={() => {
                     invalidateListingPreview();
+                    refreshListingSettings();
                   }}
                 />
                 <DropshipEbayCategoryRulesPanel
@@ -859,7 +882,7 @@ function DropshipPortalCatalogPage() {
             )}
 
             {selectedStoreConnectionIdNumber > 0 && <DropshipPricingRulesPanel storeConnectionId={selectedStoreConnectionIdNumber}
-              storeName={selectedStoreName} onConfigurationChange={() => invalidateListingPreview(true)}
+              storeName={selectedStoreName} onConfigurationChange={() => { invalidateListingPreview(true); refreshListingSettings(); }}
               priceSaveCallbacks={priceSaveCallbacks} />}
             {selectedStoreConnectionIdNumber > 0 && <DropshipContentTemplatesPanel storeConnectionId={selectedStoreConnectionIdNumber}
               storeName={selectedStoreName} {...priceSaveCallbacks} />}
