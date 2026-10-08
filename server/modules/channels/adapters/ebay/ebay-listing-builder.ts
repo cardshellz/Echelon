@@ -11,6 +11,7 @@
  * and description HTML generation.
  */
 
+import { centsToDollarString } from "@shared/utils/money";
 import { assertEbayListingPhotoPlan, buildEbayListingPhotoPlan, type EbayListingPhotoPlan } from "../../ebay-listing-photos.domain";
 
 import type {
@@ -342,8 +343,8 @@ export class EbayListingBuilder {
     categoryId: string,
     options: EbayListingBuildOptions,
   ): EbayOffer {
-    const priceCents = variant.priceCents || 0;
-    const price = (priceCents / 100).toFixed(2);
+    // A missing price is sent as "0.00", as before; every other value must be whole cents.
+    const price = this.formatOfferAmount(variant, "priceCents", variant.priceCents ?? 0);
     const listingPolicies = this.resolveListingPolicies(variant, config, options);
 
     const offer: EbayOffer = {
@@ -376,12 +377,31 @@ export class EbayListingBuilder {
     // Add compare-at price as original retail price
     if (variant.compareAtPriceCents) {
       offer.pricingSummary.originalRetailPrice = {
-        value: (variant.compareAtPriceCents / 100).toFixed(2),
+        value: this.formatOfferAmount(variant, "compareAtPriceCents", variant.compareAtPriceCents),
         currency: "USD",
       };
     }
 
     return offer;
+  }
+
+  /**
+   * An offer amount as eBay's 2-decimal string, built from integer cents. A
+   * negative, fractional or non-finite amount stops the build before any
+   * request, the same way a missing package weight does, so bad price data is
+   * never sent to eBay as a price.
+   */
+  private formatOfferAmount(
+    variant: ChannelVariantPayload,
+    field: "priceCents" | "compareAtPriceCents",
+    cents: number,
+  ): string {
+    if (!Number.isSafeInteger(cents) || cents < 0) {
+      throw new Error(
+        `eBay offer ${field} must be whole, non-negative cents for SKU ${variant.sku}; got ${cents}.`,
+      );
+    }
+    return centsToDollarString(cents);
   }
 
   // -------------------------------------------------------------------------
