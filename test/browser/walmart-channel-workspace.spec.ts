@@ -1635,6 +1635,156 @@ test("read-only draft rows cannot select items or open bulk editing", async ({ p
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
+const activityIds = {
+  processing: "11111111-1111-4111-8111-111111111111",
+  failed: "22222222-2222-4222-8222-222222222222",
+  batch: "33333333-3333-4333-8333-333333333333",
+  uncertain: "44444444-4444-4444-8444-444444444444",
+  queued: "55555555-5555-4555-8555-555555555555",
+};
+const activityError = "The title must state 500 sleeves and the images must show the same selling unit. "
+  + "Walmart content review details. ".repeat(8)
+  + "https://example.com/content-review/" + "x".repeat(180);
+function activitySubmissions() {
+  const item = { variantId: 265, sku: "EG-SLV-STD-5PCK-B500", priceCents: 1499, state: "processing",
+    externalProductId: null, error: null, stockState: "waiting_for_item" };
+  const operation = { channelId: 77, state: "processing", submissionId: "18DC6ACE719D542B947125C001FFA28D@AXkBBwA",
+    items: [item], createdAt: "2026-10-08T11:18:20.000Z", updatedAt: "2026-10-08T11:19:20.000Z", error: null };
+  return [
+    listingOperationSchema.parse({ ...operation, id: activityIds.processing }),
+    listingOperationSchema.parse({ ...operation, id: activityIds.failed, state: "needs_attention", createdAt: "2026-10-08T01:49:44.000Z",
+      items: [{ ...item, state: "needs_attention", canRetry: true, error: activityError }] }),
+    listingOperationSchema.parse({ ...operation, id: activityIds.batch, state: "partially_completed", error: "One item needs correction.",
+      items: [
+        { ...item, variantId: 1, sku: "CARD-1", priceCents: 499, state: "verified", stockState: "setup_required" },
+        { ...item, variantId: 26, sku: "CARD-26", priceCents: 999, state: "needs_attention", canRetry: true, error: "Invalid shipping weight" },
+      ] }),
+    listingOperationSchema.parse({ ...operation, id: activityIds.uncertain, state: "needs_reconciliation",
+      items: [{ ...item, variantId: 99, sku: "VERY-LONG-SKU-" + "X".repeat(100), state: "needs_reconciliation", error: "Walmart outcome is not confirmed." }] }),
+    listingOperationSchema.parse({ ...operation, id: activityIds.queued, state: "queued", submissionId: null, items: [] }),
+  ];
+}
+
+test("publication activity uses compact expandable rows for long errors and mixed submissions", async ({ page }, info) => {
+  const state = await setup(page, { inventoryAccess: "view" });
+  state.publication.operations = activitySubmissions();
+  await page.reload();
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  const activity = page.getByRole("region", { name: "Publication activity", exact: true });
+  const rows = activity.locator("[data-submission-id]");
+  await expect(rows).toHaveCount(5);
+  await expect(activity.getByRole("region", { name: /^Submission details/ })).toHaveCount(0);
+  await expect(activity.getByText(activityError, { exact: true })).toHaveCount(0);
+  const failedRow = activity.locator(`[data-submission-id="${activityIds.failed}"]`);
+  await expect(failedRow.getByText("Needs attention", { exact: true })).toBeVisible();
+  await expect(failedRow.getByText("$14.99", { exact: true })).toBeVisible();
+  const batchRow = activity.locator(`[data-submission-id="${activityIds.batch}"]`);
+  await expect(batchRow.getByText("2 items", { exact: true })).toBeVisible();
+  await expect(batchRow.getByText("Per item", { exact: true })).toBeVisible();
+  await expect(batchRow.getByText("1 item needs attention", { exact: true })).toBeVisible();
+  await expect(activity.locator(`[data-submission-id="${activityIds.queued}"]`).getByRole("button", { name: "Check Walmart status", exact: true })).toHaveCount(0);
+  const rowHeights = await rows.evaluateAll(elements => elements.map(element => element.getBoundingClientRect().height));
+  expect(Math.max(...rowHeights)).toBeLessThan(info.project.name === "mobile" ? 125 : 80);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await activity.screenshot({ path: info.outputPath("publication-activity-collapsed.png") });
+
+  const disclosure = failedRow.getByRole("button", { name: /^Show details/ });
+  await disclosure.focus();
+  await page.keyboard.press("Enter");
+  await expect(failedRow.getByRole("button", { name: /^Hide details/ })).toHaveAttribute("aria-expanded", "true");
+  const detailsId = await failedRow.getByRole("button", { name: /^Hide details/ }).getAttribute("aria-controls");
+  const details = page.locator(`[id="${detailsId}"]`);
+  await expect(details.getByText(activityError, { exact: true })).toBeVisible();
+  await expect(details.getByRole("button", { name: "Edit failed items", exact: true })).toBeVisible();
+  await expect(details.getByText(state.publication.operations[1].submissionId!, { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await activity.screenshot({ path: info.outputPath("publication-activity-expanded.png") });
+
+  await batchRow.getByRole("button", { name: /^Show details/ }).click();
+  const batchDetails = page.locator(`#publication-details-${activityIds.batch}`);
+  await expect(batchDetails.getByText("$4.99", { exact: true })).toBeVisible();
+  await expect(batchDetails.getByText("$9.99", { exact: true })).toBeVisible();
+  await expect(batchDetails.getByText("Item verified", { exact: true })).toBeVisible();
+  await expect(batchDetails.getByText("One item needs correction.", { exact: true })).toBeVisible();
+  await batchDetails.getByRole("button", { name: "Review stock publishing", exact: true }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  expect(state.membership.writes[0].body).toEqual({ channelId: 77, channelConnectionId: 9, productVariantIds: [1] });
+  await page.keyboard.press("Escape");
+  await activity.locator(`[data-submission-id="${activityIds.processing}"]`).getByRole("button", { name: "Check Walmart status", exact: true }).click();
+  await expect(activity.locator(`[data-submission-id="${activityIds.processing}"]`).getByText("Processed", { exact: true })).toBeVisible();
+  await expect(failedRow.getByRole("button", { name: /^Hide details/ })).toHaveAttribute("aria-expanded", "true");
+  await expect(batchDetails).toBeVisible();
+  expect(state.publication.writes).toEqual([{ path: `${PUBLICATION_BASE}/operations/${activityIds.processing}/reconcile`, body: {} }]);
+  await failedRow.getByRole("button", { name: /^Hide details/ }).focus();
+  await page.keyboard.press("Space");
+  await expect(details).toHaveCount(0);
+  await expect(batchDetails).toBeVisible();
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("publication activity adapts to the available width beside an expanded sidebar", async ({ page }, info) => {
+  test.skip(info.project.name !== "desktop", "Desktop sidebar width regression");
+  const state = await setup(page);
+  state.publication.operations = activitySubmissions();
+  await page.reload();
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  // The route harness omits AppShell; reserve its expanded sidebar width.
+  await page.addStyleTag({ content: "#root { margin-left: 256px; }" });
+  const activity = page.getByRole("region", { name: "Publication activity", exact: true });
+  for (const width of [1024, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    const sku = activity.locator(`[data-submission-id="${activityIds.processing}"]`).getByText("EG-SLV-STD-5PCK-B500", { exact: true });
+    await expect(sku).toBeVisible();
+    expect(await sku.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await activity.screenshot({ path: info.outputPath(`publication-activity-sidebar-${width}.png`) });
+  }
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+test("publication activity shows status request failures and prevents duplicate checks while pending", async ({ page }) => {
+  const state = await setup(page);
+  state.publication.operations = activitySubmissions();
+  await page.reload();
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  const activity = page.getByRole("region", { name: "Publication activity", exact: true });
+  const row = activity.locator(`[data-submission-id="${activityIds.processing}"]`);
+  let release!: () => void;
+  const responseReady = new Promise<void>(resolve => { release = resolve; });
+  const path = `${PUBLICATION_BASE}/operations/${activityIds.processing}/reconcile`;
+  await page.route(`**${path}`, async route => {
+    await responseReady;
+    await route.fulfill({ status: 503, json: { message: "Walmart status temporarily unavailable" } });
+  });
+  await row.getByRole("button", { name: "Check Walmart status", exact: true }).click();
+  await expect(row.getByRole("button", { name: "Checking Walmart status", exact: true })).toBeDisabled();
+  for (const button of await activity.getByRole("button", { name: "Check Walmart status", exact: true }).all()) {
+    await expect(button).toBeDisabled();
+  }
+  release();
+  await expect(activity.getByRole("alert")).toHaveText("Walmart status temporarily unavailable");
+  await expect(row.getByRole("button", { name: "Check Walmart status", exact: true })).toBeEnabled();
+  await expect(row.getByText("Walmart processing", { exact: true })).toBeVisible();
+  await expect(activity.getByRole("region", { name: /^Submission details/ })).toHaveCount(0);
+  await page.unroute(`**${path}`);
+  await row.getByRole("button", { name: "Check Walmart status", exact: true }).click();
+  await expect(row.getByText("Processed", { exact: true })).toBeVisible();
+  await expect(activity.getByRole("alert")).toHaveCount(0);
+  expect(state.publication.writes).toEqual([{ path, body: {} }]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("read-only publication activity expands results without exposing channel writes", async ({ page }) => {
+  const state = await setup(page, { readOnly: true });
+  state.publication.operations = activitySubmissions();
+  await page.reload();
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  const activity = page.getByRole("region", { name: "Publication activity", exact: true });
+  await activity.locator(`[data-submission-id="${activityIds.failed}"]`).getByRole("button", { name: /^Show details/ }).click();
+  await expect(activity.getByText(activityError, { exact: true })).toBeVisible();
+  await expect(activity.getByRole("button", { name: "Check Walmart status", exact: true })).toHaveCount(0);
+  await expect(activity.getByRole("button", { name: "Edit failed items", exact: true })).toHaveCount(0);
+  expect(state.publication.writes).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
 test("publication retries reuse command identity and later batches preserve submitted prices", async ({ page }) => {
   const state = await setup(page);
   await selectFirstProduct(page);
@@ -1653,6 +1803,7 @@ test("publication retries reuse command identity and later batches preserve subm
   const inventoryLink = activity.getByRole("link", { name: "Channel Inventory", exact: true });
   await expect(inventoryLink).toHaveCount(0);
   await activity.getByRole("button", { name: "Check Walmart status", exact: true }).click();
+  await activity.getByRole("button", { name: /^Show details for CARD-1,/ }).click();
   await expect(activity.getByText("Item verified", { exact: true })).toBeVisible();
   await expect(inventoryLink).toBeVisible();
   await expect(inventoryLink).toHaveAttribute("href", "/channels/inventory");
@@ -1724,6 +1875,7 @@ test("failed items return to the draft without overwriting unrelated unsaved edi
   await page.getByLabel("Fixed Walmart price (USD)", { exact: true }).fill("9.99");
   await page.getByRole("button", { name: "Update draft item", exact: true }).click();
   await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  await page.getByRole("button", { name: /^Show details for CARD-1,/ }).click();
   await page.getByRole("button", { name: "Edit failed items", exact: true }).click();
   await expect(page.getByText("$9.99", { exact: true })).toBeVisible();
   await expect(page.getByText("CARD-1", { exact: true })).toBeVisible();
@@ -1741,6 +1893,7 @@ async function verifyFirstPublication(page: Page) {
   await page.getByRole("button", { name: "Publish 1 items", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.getByRole("button", { name: "Check Walmart status", exact: true }).click();
+  await page.getByRole("button", { name: /^Show details for CARD-1,/ }).click();
 }
 
 test("stock selection reviews exact verified SKUs and queues canonical updates with activation permission", async ({ page }) => {

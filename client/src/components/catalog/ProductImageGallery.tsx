@@ -6,9 +6,14 @@ import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/auth";
 import { sortCatalogAssets, type CatalogGalleryAsset, type ReorderProductAssets } from "@shared/catalog/product-assets";
+import type { CatalogPhotoVariant } from "@shared/catalog/product-asset-scope";
+import type { ProductAssetScopeAttempt } from "@/lib/product-asset-scope";
+import { ProductPhotoScopeControl } from "./ProductPhotoScopeControl";
 
 interface Props {
   assets: readonly CatalogGalleryAsset[];
+  variants: readonly CatalogPhotoVariant[];
+  onScopeChange: (attempt: ProductAssetScopeAttempt) => Promise<void>;
   busy: boolean;
   onReorder: (command: ReorderProductAssets) => Promise<void>;
   onSetPrimary: (assetId: number) => void;
@@ -24,7 +29,7 @@ function imageSource(asset: CatalogGalleryAsset): string {
     ? `/api/product-assets/${asset.id}/file` : asset.url ?? "";
 }
 
-export function ProductImageGallery({ assets, busy, onReorder, onSetPrimary, onRemove }: Props) {
+export function ProductImageGallery({ assets, variants, busy, onScopeChange, onReorder, onSetPrimary, onRemove }: Props) {
   const { toast } = useToast();
   const { hasPermission } = useAuth();
   const canEdit = hasPermission("inventory", "edit");
@@ -154,6 +159,8 @@ export function ProductImageGallery({ assets, busy, onReorder, onSetPrimary, onR
               <img src={imageSource(asset)} alt={asset.altText || `Product photo ${index + 1}`} draggable={false} className="h-full w-full object-contain" />
             </div>
             <div className="space-y-2 border-t p-2">
+              <ProductPhotoScopeControl assetId={asset.id} productVariantId={asset.productVariantId}
+                variants={variants} disabled={locked} onSave={onScopeChange} />
               <Button type="button" variant="outline" size="sm" className="min-h-10 w-full" disabled={downloading.has(asset.id)}
                 aria-label={`Download image ${index + 1}`} onClick={() => void downloadImage(asset.id)}>
                 {downloading.has(asset.id) ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
