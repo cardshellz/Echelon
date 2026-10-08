@@ -7,7 +7,8 @@
 
 import { sql } from "drizzle-orm";
 import { CountryCodeValidationError, parseCountryCode } from "@shared/country-code";
-import type { OmsService, OrderData, LineItemData } from "./oms.service";
+import type { OmsService, ShopifyOrderData, LineItemData } from "./oms.service";
+import { normalizeShopifyCustomerId } from "./shopify-customer-identity";
 import { envPositiveInteger } from "../../infrastructure/scheduler-config";
 import { buildChannelLineDisplayName } from "./line-display-name";
 import { enqueueOmsWmsSyncRetry } from "./webhook-retry.worker";
@@ -193,7 +194,7 @@ export async function bridgeShopifyOrderToOms(
       status = "confirmed";
     }
 
-    const orderData: OrderData = {
+    const orderData: ShopifyOrderData = {
       sourceTopic: "shopify/bridge",
       externalOrderNumber: raw.order_number,
       status,
@@ -201,6 +202,7 @@ export async function bridgeShopifyOrderToOms(
       fulfillmentStatus,
       customerName: raw.customer_name || raw.shipping_name || "",
       customerEmail: raw.customer_email || "",
+      externalCustomerId: normalizeShopifyCustomerId(raw.shopify_customer_id),
       shipToName: raw.shipping_name,
       shipToCompany: raw.shipping_company || null,
       shipToAddress1: raw.shipping_address1,

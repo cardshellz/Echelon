@@ -17,7 +17,8 @@ import type { Request, Response, Express } from "express";
 import * as crypto from "crypto";
 import { sql, eq, and, ilike } from "drizzle-orm";
 import { CountryCodeValidationError, parseCountryCode, resolveProviderCountryCode } from "@shared/country-code";
-import type { OmsService, OrderData, LineItemData } from "./oms.service";
+import type { OmsService, OrderData, ShopifyOrderData, LineItemData } from "./oms.service";
+import { normalizeShopifyCustomerId } from "./shopify-customer-identity";
 import { omsOrders, omsOrderLines, omsOrderEvents, channelConnections } from "@shared/schema";
 import { db } from "../../db";
 import { pushToMissionControl } from "./mc-push";
@@ -540,7 +541,7 @@ export const __test__ = {
   canonicalShipToFromShopifyUpdate,
 };
 
-function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
+function mapShopifyOrderToOrderData(shopifyOrder: any): ShopifyOrderData {
   const shipping = shopifyOrder.shipping_address || {};
   const shipToCountry = resolveProviderCountryCode(shipping.country_code, shipping.country);
   const customer = shopifyOrder.customer || {};
@@ -609,7 +610,7 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
     customerEmail: shopifyOrder.email || customer.email,
     customerPhone: shipping.phone || customer.phone,
     // Channel-agnostic customer id — for Shopify this is the Shopify customer id.
-    externalCustomerId: customer.id != null ? String(customer.id) : undefined,
+    externalCustomerId: normalizeShopifyCustomerId(customer.id),
     shipToName: shipping.name,
     shipToCompany: shipping.company || null,
     shipToAddress1: shipping.address1,

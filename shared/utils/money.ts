@@ -35,6 +35,32 @@ export function dollarsToCents(dollars: string | number): number {
   return whole * 100 + (whole < 0 ? -cents : cents);
 }
 
+/**
+ * Format integer cents as a plain 2-decimal dollar string with integer math
+ * only. No currency symbol, no thousands separators: this is the wire format
+ * marketplaces take for a price (eBay's offer `pricingSummary.price.value`).
+ *
+ *   0      -> "0.00"
+ *   799    -> "7.99"
+ *   100000 -> "1000.00"
+ *
+ * Throws RangeError for a fractional, negative, non-finite or unsafe value, so
+ * a malformed amount is never turned into a price string.
+ */
+export function centsToDollarString(cents: number): string {
+  if (!Number.isSafeInteger(cents)) {
+    throw new RangeError(`centsToDollarString requires a safe integer (got ${cents})`);
+  }
+  if (cents < 0) {
+    throw new RangeError(`centsToDollarString requires a non-negative value (got ${cents})`);
+  }
+  // `%` and the division of an exact multiple of 100 are both exact for safe
+  // integers, so no floating-point rounding can reach the string.
+  const fractional = cents % 100;
+  const whole = (cents - fractional) / 100;
+  return `${whole}.${String(fractional).padStart(2, "0")}`;
+}
+
 // ─── Mills helpers (per-unit cost, 4-decimal precision) ───────────────
 
 /**
