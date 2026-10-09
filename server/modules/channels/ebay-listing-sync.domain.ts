@@ -62,6 +62,8 @@ export const storedEbayListingSyncJobSchema = ebayListingSyncJobSchema.extend({
   ownerToken: z.string().uuid().nullable(),
   attempts: z.number().int().nonnegative(),
   result: ebayProductSyncResultSchema.nullable(),
+  verificationIntentHash: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+  verificationRevision: z.string().regex(/^[1-9][0-9]*$/).nullable(),
 });
 export type StoredEbayListingSyncJob = z.infer<
   typeof storedEbayListingSyncJobSchema

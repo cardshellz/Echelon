@@ -69,6 +69,7 @@ const configured =
         "0709_walmart_quantity_admission.sql",
         "0716_inventory_publication_reconciliation.sql",
         "0729_ebay_listing_sync_recovery.sql",
+        "0731_ebay_listing_sync_verification_checkpoint.sql",
       ])
         await database.pool.query(
           readFileSync(resolve(process.cwd(), "migrations", file), "utf8"),
@@ -242,6 +243,7 @@ const configured =
         store,
         service,
         executor,
+        client,
         prepare,
         fail: (value: "response" | "timeout") => {
           failGroup = value;
@@ -339,6 +341,151 @@ const configured =
           .resolved,
       ).toEqual([]);
     });
+    it("persists accepted content, survives restart and concurrent workers, and verifies delayed readback without additional mutations", async () => {
+      const f = fixture();
+      const oldGroup = structuredClone(f.provider.currentGroup());
+      const read = f.client.getInventoryItemGroup;
+      let visible = false;
+      f.client.getInventoryItemGroup = vi.fn(async key => visible ? read(key) : structuredClone(oldGroup));
+      const job = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, job.id);
+      const waiting = await f.store.get(job.id);
+      expect(waiting).toMatchObject({ state: "recovering", code: "EBAY_SYNC_READBACK_PENDING", verificationRevision: "1" });
+      expect(waiting.verificationIntentHash).toMatch(/^[a-f0-9]{64}$/);
+      const count = f.mutations.length;
+      expect(count).toBe(3);
+      advance();
+      f.provider.setQuantity(1);
+      const restartedStore = new PostgresEbayListingSyncRepository(database.pool);
+      const restarted = new EbayListingSyncService(restartedStore, f.executor, clock, randomUUID);
+      await restarted.processDue(1, job.id);
+      expect((await restartedStore.get(job.id)).state).toBe("recovering");
+      expect(f.mutations).toHaveLength(count);
+      visible = true;
+      advance();
+      let release!: () => void, entered!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      f.client.getInventoryItemGroup = vi.fn(async key => { entered(); await gate; return read(key); });
+      const running = restarted.processDue(1, job.id);
+      await started;
+      try {
+        expect(await f.service.processDue(1, job.id)).toEqual({ processed: 0, failed: 0 });
+      } finally { release(); }
+      await running;
+      expect(await restartedStore.get(job.id)).toMatchObject({ state: "completed", result: { synced: 1, qtyChanges: 0 } });
+      expect(f.mutations).toHaveLength(count);
+      expect(f.provider.currentItem().availability.shipToLocationAvailability.quantity).toBe(7);
+      expect((await database.pool.query("SELECT last_synced_price,last_synced_qty,sync_status FROM channels.channel_listings")).rows[0])
+        .toEqual({ last_synced_price: 1149, last_synced_qty: 999, sync_status: "synced" });
+    });
+    it("recovers readback with a nullable saved offer ID without rewriting the accepted update", async () => {
+      identity.variants[0].offerId = null;
+      await database.pool.query("UPDATE channels.channel_listings SET external_variant_id=NULL");
+      try {
+        const f = fixture();
+        const prepared = await f.prepare();
+        delete prepared.draft.offers[0].payload.offerId;
+        f.prepare.mockResolvedValue(prepared);
+        const oldGroup = structuredClone(f.provider.currentGroup());
+        const read = f.client.getInventoryItemGroup;
+        f.client.getInventoryItemGroup = vi.fn(async () => structuredClone(oldGroup));
+        const job = await f.service.enqueue(identity, "operator");
+        await f.service.processDue(1, job.id);
+        expect(await f.store.get(job.id)).toMatchObject({
+          state: "recovering", code: "EBAY_SYNC_READBACK_PENDING", verificationRevision: "1",
+        });
+        f.client.getInventoryItemGroup = read;
+        advance();
+        const restarted = new EbayListingSyncService(
+          new PostgresEbayListingSyncRepository(database.pool), f.executor, clock, randomUUID,
+        );
+        await restarted.processDue(1, job.id);
+        expect((await f.store.get(job.id)).state).toBe("completed");
+        expect(f.mutations).toHaveLength(3);
+        expect((await database.pool.query("SELECT external_variant_id,sync_status FROM channels.channel_listings")).rows[0])
+          .toEqual({ external_variant_id: null, sync_status: "synced" });
+      } finally {
+        await database.pool.query("UPDATE channels.channel_listings SET external_variant_id='offer-101'");
+      }
+    });
+    it("binds a checkpoint to its requested revision and applies a newer content intent", async () => {
+      const f = fixture();
+      const oldGroup = structuredClone(f.provider.currentGroup());
+      const read = f.client.getInventoryItemGroup;
+      f.client.getInventoryItemGroup = vi.fn(async () => structuredClone(oldGroup));
+      const job = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, job.id);
+      const prior = await f.store.get(job.id);
+      await f.service.enqueue(identity, "operator");
+      const next = await f.prepare();
+      next.draft.inventoryItems[0].payload.product.imageUrls = ["https://example.com/new-request.jpg"];
+      next.draft.itemGroup!.payload.imageUrls = ["https://example.com/new-request.jpg"];
+      f.prepare.mockResolvedValue(next);
+      f.client.getInventoryItemGroup = read;
+      advance();
+      await f.service.processDue(1, job.id);
+      const completed = await f.store.get(job.id);
+      expect(completed).toMatchObject({ state: "completed", revision: "2", verificationRevision: "2" });
+      expect(completed.verificationIntentHash).not.toBe(prior.verificationIntentHash);
+      expect(f.mutations).toHaveLength(6);
+      expect(f.provider.currentGroup().imageUrls).toEqual(["https://example.com/new-request.jpg"]);
+    });
+    it("rolls the checkpoint and its stage evidence back together, then adopts accepted content without another write", async () => {
+      const f = fixture();
+      const job = await f.service.enqueue(identity, "operator");
+      await database.pool.query(`CREATE FUNCTION channels.test_checkpoint_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.verification_intent_hash IS DISTINCT FROM OLD.verification_intent_hash THEN RAISE EXCEPTION 'injected checkpoint failure'; END IF; RETURN NEW; END $$;
+        CREATE TRIGGER test_checkpoint_failure BEFORE UPDATE ON channels.ebay_listing_sync_jobs FOR EACH ROW EXECUTE FUNCTION channels.test_checkpoint_failure()`);
+      try {
+        await f.service.processDue(1, job.id);
+        expect(await f.store.get(job.id)).toMatchObject({ state: "recovering", verificationIntentHash: null, verificationRevision: null });
+        expect((await database.pool.query("SELECT id FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND evidence->>'key'='verification'", [job.id])).rows).toEqual([]);
+      } finally {
+        await database.pool.query("DROP TRIGGER test_checkpoint_failure ON channels.ebay_listing_sync_jobs");
+      }
+      const count = f.mutations.length;
+      expect(count).toBe(3);
+      advance();
+      await f.service.processDue(1, job.id);
+      expect((await f.store.get(job.id)).state).toBe("completed");
+      expect(f.mutations).toHaveLength(count);
+    });
+    it("rejects preseeded checkpoints, unfenced mutations, and checkpoints without owned stage evidence", async () => {
+      const f = fixture();
+      const job = await f.service.enqueue(identity, "operator");
+      const hash = "a".repeat(64);
+      await expect(database.pool.query(
+        `INSERT INTO channels.ebay_listing_sync_jobs(id,channel_id,connection_id,product_id,identity,identity_hash,
+          requested_by,created_at,updated_at,next_attempt_at,verification_intent_hash,verification_revision)
+         SELECT $2::uuid,channel_id,connection_id,product_id,identity,identity_hash,requested_by,
+          created_at,updated_at,next_attempt_at,$3,1 FROM channels.ebay_listing_sync_jobs WHERE id=$1`,
+        [job.id, randomUUID(), hash],
+      )).rejects.toMatchObject({ code: "23514" });
+      await expect(database.pool.query(
+        "UPDATE channels.ebay_listing_sync_jobs SET verification_intent_hash=$2,verification_revision=1 WHERE id=$1",
+        [job.id, hash],
+      )).rejects.toMatchObject({ code: "23514" });
+      const client = await database.pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SELECT pg_advisory_xact_lock($1,hashtext($2))", [918427, job.id]);
+        await client.query(
+          "UPDATE channels.ebay_listing_sync_jobs SET state='running',owner_token=$2,claimed_revision=1 WHERE id=$1",
+          [job.id, randomUUID()],
+        );
+        await expect(client.query(
+          "UPDATE channels.ebay_listing_sync_jobs SET verification_intent_hash=$2,verification_revision=1 WHERE id=$1",
+          [job.id, hash],
+        )).rejects.toMatchObject({ code: "23514" });
+      } finally {
+        await client.query("ROLLBACK");
+        client.release();
+      }
+      expect(await f.store.get(job.id)).toMatchObject({ verificationIntentHash: null, verificationRevision: null });
+      await f.service.processDue(1, job.id);
+      expect((await f.store.get(job.id)).state).toBe("completed");
+    });
     it("adopts the old incident shape of completed bulk quantity receipts followed by a group error, without an operator attestation", async () => {
       const f = fixture();
       await expect(
@@ -434,7 +581,10 @@ const configured =
         await f.service.processDue(1, job.id);
         expect((await f.store.get(job.id)).state).toBe("queued");
       }
-      f.prepare.mockImplementation(prepare);
+      const next = await prepare();
+      next.draft.inventoryItems[0].payload.product.imageUrls = ["https://example.com/next-pass.jpg"];
+      next.draft.itemGroup!.payload.imageUrls = ["https://example.com/next-pass.jpg"];
+      f.prepare.mockResolvedValue(next);
       f.fail("response");
       await f.service.processDue(1, job.id);
       expect(await f.store.get(job.id)).toMatchObject({
@@ -530,6 +680,7 @@ const configured =
       CREATE TRIGGER test_sync_audit_failure BEFORE INSERT ON channels.ebay_listing_sync_events FOR EACH ROW EXECUTE FUNCTION channels.test_sync_audit_failure()`);
       await f.service.processDue(1, job.id);
       expect((await f.store.get(job.id)).state).toBe("recovering");
+      const mutationCount = f.mutations.length;
       expect(
         (
           await database.pool.query(
@@ -543,6 +694,7 @@ const configured =
       advance();
       await f.service.processDue(1, job.id);
       expect((await f.store.get(job.id)).state).toBe("completed");
+      expect(f.mutations).toHaveLength(mutationCount);
     });
     it("keeps an unreceipted timeout fenced and exposes the exact unresolved attempt instead of blindly replaying", async () => {
       const f = fixture();

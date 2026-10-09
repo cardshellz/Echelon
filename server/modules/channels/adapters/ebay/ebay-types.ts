@@ -129,7 +129,8 @@ export type EbayMarketplaceId =
 export interface EbayInventoryItemGroup {
   aspects: Record<string, string[]>;
   description: string;
-  inventoryItemGroupKey: string;
+  /** The resource is identified by the request path; eBay's GET body omits this key. */
+  inventoryItemGroupKey?: string;
   imageUrls: string[];
   title: string;
   variantSKUs?: string[];

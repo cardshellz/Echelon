@@ -19,7 +19,8 @@ import type {
 const LOCK_NAMESPACE = 918427;
 const rowSql = `SELECT id::text,product_id AS "productId",state,error_code AS code,error_message AS message,
   next_attempt_at AS "nextAttemptAt",updated_at AS "updatedAt",identity,revision::text,claimed_revision::text AS "claimedRevision",
-  owner_token::text AS "ownerToken",attempts,result FROM channels.ebay_listing_sync_jobs`;
+  owner_token::text AS "ownerToken",attempts,result,verification_intent_hash AS "verificationIntentHash",
+  verification_revision::text AS "verificationRevision" FROM channels.ebay_listing_sync_jobs`;
 function decode(row: Record<string, unknown>): StoredEbayListingSyncJob {
   return storedEbayListingSyncJobSchema.parse({
     ...row,
@@ -247,6 +248,13 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         { key, preparedIntentHash: hash },
         now,
       );
+      if (key === "verification" && state === "started") {
+        await client.query(
+          `UPDATE channels.ebay_listing_sync_jobs SET verification_intent_hash=$3,verification_revision=claimed_revision
+           WHERE id=$1 AND owner_token=$2`,
+          [job.id, job.ownerToken, hash],
+        );
+      }
     });
   }
   async finish(

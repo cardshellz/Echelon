@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { EbayListingSyncError } from "../ebay-listing-sync.domain";
 
 import {
   EbayMarketplaceListingConnector,
@@ -59,6 +60,31 @@ const ebayOffersResponseSchema = z
     offers: z.array(ebayObservedOfferSchema).max(10_000).default([]),
   })
   .passthrough();
+
+const ebayObservedInventoryItemGroupSchema = z.object({
+  inventoryItemGroupKey: z.string().min(1).max(100).optional(),
+  title: z.string(),
+  description: z.string(),
+  aspects: z.record(z.array(z.string())),
+  imageUrls: z.array(z.string().url()),
+  variantSKUs: z.array(z.string().min(1)).max(250).optional(),
+  variesBy: z.object({
+    aspectsImageVariesBy: z.array(z.string()).optional(),
+    specifications: z.array(z.object({ name: z.string().min(1), values: z.array(z.string()) }).passthrough()),
+  }).passthrough(),
+}).passthrough();
+
+/** Validate the provider body without manufacturing an echoed request-path key. */
+export function normalizeEbayObservedInventoryItemGroup(response: unknown): EbayInventoryItemGroup {
+  const parsed = ebayObservedInventoryItemGroupSchema.safeParse(response);
+  if (!parsed.success) {
+    throw new EbayListingSyncError(
+      "EBAY_SYNC_PROVIDER_RESPONSE_INVALID",
+      `The eBay group response is invalid (fields ${parsed.error.issues.map(issue => issue.path.join(".")).join(", ").slice(0, 400)}).`,
+    );
+  }
+  return parsed.data;
+}
 
 export function normalizeEbayObservedOffers(
   response: unknown,
@@ -250,10 +276,10 @@ export function createEbayRouteListingLifecycleClient(
     ...createEbayRouteListingClient(input),
     getInventoryItemGroup: async (groupKey) => {
       try {
-        return await request<EbayInventoryItemGroup>(
+        return normalizeEbayObservedInventoryItemGroup(await request<unknown>(
           "GET",
           `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`,
-        );
+        ));
       } catch (error: unknown) {
         if (isMissingEbayInventoryResource(error)) return null;
         throw error;
