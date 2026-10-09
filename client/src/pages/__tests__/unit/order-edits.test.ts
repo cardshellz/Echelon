@@ -143,6 +143,45 @@ function renderOperation(
     }),
   );
 }
+describe("shipping recalculation review", () => {
+  it("shows the native rate, eligible benefit and exact charge without inventing a Shopify shipping discount", () => {
+    const html = renderOperation({
+      ...operation,
+      shippingRepricing: {
+        title: "Standard Shipping",
+        code: "standard",
+        source: "Echelon Shipping",
+        grossCents: 799,
+        discountCents: 799,
+        netCents: 0,
+        discountLabels: ["Member free shipping"],
+      },
+    });
+    expect(html).toContain("Recalculated shipping");
+    expect(html).toContain("Current checkout rate");
+    expect(html).toContain("Member free shipping");
+    expect(html).toContain("$7.99");
+    expect(html).toContain("Shipping charged");
+    expect(html).toContain("$0.00");
+  });
+  it("does not show the reverted edit's shipping benefit after payment expiry recovery", () => {
+    const html = renderOperation({
+      ...operation,
+      status: "recovered",
+      shippingRepricing: {
+        title: "Standard Shipping",
+        code: "standard",
+        source: "Echelon Shipping",
+        grossCents: 799,
+        discountCents: 799,
+        netCents: 0,
+        discountLabels: ["Member free shipping"],
+      },
+    });
+    expect(html).not.toContain("Recalculated shipping");
+  });
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   state.canEdit = true;

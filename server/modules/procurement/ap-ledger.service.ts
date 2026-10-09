@@ -2955,8 +2955,8 @@ async function persistInvoiceMatchResults(
   results: PersistedInvoiceMatchResult[],
   actorId?: string,
   context: Record<string, unknown> = {},
+  evaluatedAt = new Date(),
 ): Promise<void> {
-  const evaluatedAt = new Date();
   for (const result of results) {
     await client
       .update(vendorInvoiceLines)
@@ -3012,6 +3012,7 @@ export async function recomputePurchaseOrderInvoiceMatchesInTransaction(
   purchaseOrderId: number,
   client: ApLedgerDbClient,
   actorId?: string,
+  evaluatedAt = new Date(),
 ): Promise<PurchaseOrderInvoiceMatchTransactionResult> {
   const normalizedPoId = requireCommandId(purchaseOrderId, "purchaseOrderId");
   const poLines = await client
@@ -3104,7 +3105,7 @@ export async function recomputePurchaseOrderInvoiceMatchesInTransaction(
     purchaseOrderId: normalizedPoId,
     sourceFingerprint,
     source: "purchase_order",
-  });
+  }, evaluatedAt);
 
   return {
     purchaseOrderId: normalizedPoId,

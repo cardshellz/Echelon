@@ -1522,6 +1522,11 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
   app.patch("/api/product-assets/:id", requirePermission("inventory", "update"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
+      // Scope edits require an observed assignment and a durable command key.
+      // Keep the metadata endpoint from bypassing the Catalog scope owner.
+      if (Object.hasOwn(req.body, "productVariantId") || Object.hasOwn(req.body, "productId")) {
+        return res.status(400).json({ code: "ASSET_SCOPE_ENDPOINT_REQUIRED", error: "Change photo assignments using the product image scope endpoint." });
+      }
       const asset = await storage.updateProductAsset(id, req.body);
       if (!asset) {
         return res.status(404).json({ error: "Asset not found" });

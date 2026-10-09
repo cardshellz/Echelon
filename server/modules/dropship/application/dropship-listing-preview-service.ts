@@ -1,3 +1,4 @@
+import { EBAY_LISTING_MAX_PHOTOS } from "../../channels/ebay-listing-photos.domain";
 import { createHash } from "crypto";
 import { listingPriceFollowsRules, resolveListingPrice, type SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
 import { decideDropshipListingAccess } from "../../../../shared/dropship/listing-access";
@@ -60,6 +61,11 @@ import type {
 import type {
   DropshipEbayListingPolicyOverride,
 } from "./dropship-ebay-listing-policy-override-service";
+import type { DropshipEbayReturnPaymentPolicyChecker } from "./dropship-ebay-return-payment-policy-check";
+import {
+  ebayReturnPaymentPolicyBlockers,
+  type DropshipEbayReturnPaymentPolicyCheck,
+} from "../domain/ebay-return-payment-policy-blockers";
 import {
   createListingPushJobInputSchema,
   type ListingPushReviewMode,
@@ -70,15 +76,15 @@ import {
 } from "./dropship-use-case-dtos";
 
 /**
- * The most photos a listing carries, in catalog order. No push publishes
- * more: eBay sends the first 12 (dropship-ebay-listing-push.provider.ts) and
- * Shopify the first 20 (dropship-shopify-listing-push.provider.ts). The limit
- * also bounds how many uploaded files one preview fingerprints.
+ * Shopify's existing photo limit. eBay uses EBAY_LISTING_MAX_PHOTOS from
+ * the shared eBay photo contract. Both limits bound uploaded-file hashing.
  */
 export const DROPSHIP_LISTING_MAX_PHOTOS = 20;
 
 /** Uploaded photos that cannot be published are named in one log line, up to this many. */
 const MAX_LOGGED_UNPUBLISHABLE_PHOTOS = 100;
+
+const NOT_CHECKED_RETURN_PAYMENT_POLICIES: DropshipEbayReturnPaymentPolicyCheck = { status: "not_checked" };
 
 export interface DropshipListingStoreContext {
   vendorId: number;
@@ -273,10 +279,10 @@ export interface DropshipListingPreviewRepository {
 export interface DropshipListingPreviewServiceDependencies {
   presentation?: DropshipListingPresentationDependencies;
   /**
-   * The photos each size publishes, uploaded files included. Without it a
-   * listing publishes only the catalog's URL photos (listCatalogCandidates).
+   * Required Catalog publication photos, uploaded files included.
+   * Candidate metadata never supplies a second photo-selection path.
    */
-  listingPhotos?: CatalogVariantPublicationPhotoReader;
+  listingPhotos: CatalogVariantPublicationPhotoReader;
   /**
    * Cost of one sellable pack, for the below-cost warning. Falls back to the
    * presentation reader; with neither, the preview never warns about cost.
@@ -287,6 +293,8 @@ export interface DropshipListingPreviewServiceDependencies {
   atp: DropshipAtpProvider;
   marketplaceListing: DropshipMarketplaceListingProvider;
   ebayFulfillmentPolicyGuard: DropshipEbayFulfillmentPolicyGuard;
+  /** Whether the return and payment policy ids a listing sends still exist on eBay (S1). */
+  ebayReturnPaymentPolicies: DropshipEbayReturnPaymentPolicyChecker;
   /** Which of the vendor's listing tiers are on sale (wallet policy + wallet facts). */
   listingTiers: DropshipListingTierGateReader;
   clock: DropshipClock;
@@ -443,17 +451,28 @@ export class DropshipListingPreviewService {
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
       candidates: exposedCandidates,
+      platform: context.platform,
     });
     if (contents && ruleEligibleCandidates.some((candidate) => !contents.has(candidate.productVariantId))) {
       throw new Error("Listing content resolution returned an incomplete catalog result.");
     }
-    const ebayFulfillmentPreflights = context.platform === "ebay" && config
-      ? await this.loadEbayFulfillmentPreflights({
-          context,
-          config,
-          policyOverrides: ebayListingPolicyOverrides,
-        })
-      : new Map<string, DropshipEbayFulfillmentPolicyPreflight>();
+    const [ebayFulfillmentPreflights, ebayReturnPaymentPolicyCheck] = context.platform === "ebay" && config
+      ? await Promise.all([
+          this.loadEbayFulfillmentPreflights({
+            context,
+            config,
+            policyOverrides: ebayListingPolicyOverrides,
+          }),
+          this.loadEbayReturnPaymentPolicyCheck({
+            context,
+            config,
+            policyOverrides: ebayListingPolicyOverrides,
+          }),
+        ])
+      : [
+          new Map<string, DropshipEbayFulfillmentPolicyPreflight>(),
+          NOT_CHECKED_RETURN_PAYMENT_POLICIES,
+        ];
 
     const atp = await this.deps.atp.getVariantAtp(candidates.map((candidate) => ({
       productId: candidate.productId,
@@ -505,7 +524,8 @@ export class DropshipListingPreviewService {
         : null;
       return buildListingPreviewRow({
         candidate,
-        listingPhotos: listingPhotos?.get(productVariantId) ?? null,
+        // Hidden catalog rows are not read; their blocked preview carries no photos.
+        listingPhotos: listingPhotos.get(productVariantId) ?? { photos: [], issues: [] },
         resolvedContent: contents?.get(productVariantId),
         resolvedCategory: ebayCategories?.get(productVariantId) ?? null,
         queuedCategory: parsed.queuedEbayCategoriesByVariantId?.[String(productVariantId)] ?? null,
@@ -529,6 +549,15 @@ export class DropshipListingPreviewService {
         ebayFulfillmentPreflight: effectiveFulfillmentPolicyId
           ? ebayFulfillmentPreflights.get(effectiveFulfillmentPolicyId) ?? null
           : null,
+        ebayReturnPaymentPolicyBlockers: ebayReturnPaymentPolicyBlockers({
+          returnPolicyId: effectiveConfig
+            ? readNestedString(effectiveConfig.marketplaceConfig, "businessPolicies", "returnPolicyId")
+            : null,
+          paymentPolicyId: effectiveConfig
+            ? readNestedString(effectiveConfig.marketplaceConfig, "businessPolicies", "paymentPolicyId")
+            : null,
+          check: ebayReturnPaymentPolicyCheck,
+        }),
         ebayListingPolicyOverride: listingPolicyOverride,
       });
     });
@@ -566,13 +595,13 @@ export class DropshipListingPreviewService {
     vendorId: number;
     storeConnectionId: number;
     candidates: readonly DropshipListingCatalogCandidate[];
-  }): Promise<ReadonlyMap<number, CatalogVariantPublicationPhotos> | null> {
+    platform: DropshipSourcePlatform;
+  }): Promise<ReadonlyMap<number, CatalogVariantPublicationPhotos>> {
     const reader = this.deps.listingPhotos;
-    if (!reader) return null;
     if (input.candidates.length === 0) return new Map();
     const photos = await reader.listPublicationPhotos({
       productVariantIds: input.candidates.map((candidate) => candidate.productVariantId),
-      maxPhotosPerVariant: DROPSHIP_LISTING_MAX_PHOTOS,
+      maxPhotosPerVariant: input.platform === "ebay" ? EBAY_LISTING_MAX_PHOTOS : DROPSHIP_LISTING_MAX_PHOTOS,
     });
     if (input.candidates.some((candidate) => !photos.has(candidate.productVariantId))) {
       throw new Error("Listing photo resolution returned an incomplete catalog result.");
@@ -695,6 +724,54 @@ export class DropshipListingPreviewService {
           message: "Fulfillment policy compatibility could not be verified. Refresh the setup before pushing.",
         }],
       };
+    }
+  }
+
+  /**
+   * Checks the store default and the requested listings' own return and
+   * payment policy ids against eBay, the same scope as the fulfillment check.
+   * Like that check, an eBay failure blocks the listings it would affect
+   * (`verification_unavailable`) instead of failing the preview.
+   */
+  private async loadEbayReturnPaymentPolicyCheck(input: {
+    context: DropshipListingStoreContext;
+    config: DropshipStoreListingConfig;
+    policyOverrides: readonly DropshipEbayListingPolicyOverride[];
+  }): Promise<DropshipEbayReturnPaymentPolicyCheck> {
+    const marketplaceId = readNestedString(input.config.marketplaceConfig, "marketplaceId");
+    if (!marketplaceId) return NOT_CHECKED_RETURN_PAYMENT_POLICIES;
+    const returnPolicyIds = distinctPolicyIds([
+      readNestedString(input.config.marketplaceConfig, "businessPolicies", "returnPolicyId"),
+      ...input.policyOverrides.map((override) => override.returnPolicyId),
+    ]);
+    const paymentPolicyIds = distinctPolicyIds([
+      readNestedString(input.config.marketplaceConfig, "businessPolicies", "paymentPolicyId"),
+      ...input.policyOverrides.map((override) => override.paymentPolicyId),
+    ]);
+    if (returnPolicyIds.length === 0 && paymentPolicyIds.length === 0) return NOT_CHECKED_RETURN_PAYMENT_POLICIES;
+    try {
+      const result = await this.deps.ebayReturnPaymentPolicies.check({
+        vendorId: input.context.vendorId,
+        storeConnectionId: input.context.storeConnectionId,
+        marketplaceId,
+        returnPolicyIds,
+        paymentPolicyIds,
+      });
+      return { status: "checked", ...result };
+    } catch (error) {
+      if (!(error instanceof DropshipError)) throw error;
+      this.deps.logger.warn({
+        code: "DROPSHIP_EBAY_RETURN_PAYMENT_POLICY_CHECK_UNAVAILABLE",
+        message: "eBay return and payment policies could not be verified for the listing preview.",
+        context: {
+          vendorId: input.context.vendorId,
+          storeConnectionId: input.context.storeConnectionId,
+          returnPolicyIds,
+          paymentPolicyIds,
+          errorCode: error.code,
+        },
+      });
+      return { status: "unavailable" };
     }
   }
 
@@ -1018,8 +1095,8 @@ export const systemDropshipListingPreviewClock: DropshipClock = {
 };
 
 function buildListingPreviewRow(input: {
-  /** The size's photos, uploaded files included; null publishes the candidate's URL photos. */
-  listingPhotos?: CatalogVariantPublicationPhotos | null;
+  /** The size's resolved Catalog photos; hidden/blocked sizes carry an empty gallery. */
+  listingPhotos: CatalogVariantPublicationPhotos;
   resolvedContent?: import("../../../../shared/dropship/listing-content").ResolvedListingContent;
   resolvedCategory?: ResolvedEbayListingCategory | null;
   /** Push time only: the category the listing was queued with. */
@@ -1042,6 +1119,8 @@ function buildListingPreviewRow(input: {
   generatedAt: Date;
   storeCategoryNames: readonly string[];
   ebayFulfillmentPreflight: DropshipEbayFulfillmentPolicyPreflight | null;
+  /** From the live check of the listing's effective return and payment policy ids. */
+  ebayReturnPaymentPolicyBlockers: readonly string[];
   ebayListingPolicyOverride: DropshipEbayListingPolicyOverride | null;
 }): DropshipListingPreviewRow {
   const blockers: string[] = [...(input.resolvedContent?.issues ?? [])];
@@ -1100,7 +1179,7 @@ function buildListingPreviewRow(input: {
   const marketplaceValidation = input.config
     ? input.marketplaceListing.buildListingIntent({
         config: input.config,
-        content: listingIntentContent(input.candidate, input.resolvedContent, publishedCategory, input.listingPhotos ?? null),
+        content: listingIntentContent(input.candidate, input.resolvedContent, publishedCategory, input.listingPhotos),
         priceCents,
         quantity: marketplaceQuantity,
         storeCategoryNames: input.storeCategoryNames,
@@ -1108,12 +1187,13 @@ function buildListingPreviewRow(input: {
     : { intent: null, blockers: [], warnings: [] };
   blockers.push(...marketplaceValidation.blockers);
   warnings.push(...marketplaceValidation.warnings);
-  warnings.push(...unpublishablePhotoWarnings(input.listingPhotos ?? null));
+  warnings.push(...unpublishablePhotoWarnings(input.listingPhotos));
   if (input.ebayFulfillmentPreflight?.compatible === false) {
     blockers.push(...input.ebayFulfillmentPreflight.issues.map(
       (issue) => `ebay_fulfillment_policy:${issue.code}`,
     ));
   }
+  blockers.push(...input.ebayReturnPaymentPolicyBlockers);
 
   const previewStatus = blockers.length > 0
     ? "blocked"
@@ -1190,13 +1270,13 @@ function listingIntentContent(
   candidate: DropshipListingCatalogCandidate,
   resolvedContent: import("../../../../shared/dropship/listing-content").ResolvedListingContent | undefined,
   category: PublishedEbayCategory | null,
-  photos: CatalogVariantPublicationPhotos | null,
+  photos: CatalogVariantPublicationPhotos,
 ): DropshipListingCatalogCandidate {
   return {
     ...candidate,
     ...(resolvedContent ? { description: resolvedContent.descriptionHtml } : {}),
     ...(category ? { ebayBrowseCategoryId: category.categoryId, ebayBrowseCategoryName: category.categoryName } : {}),
-    ...(photos ? { imageUrls: photos.photos.map((photo) => photo.url) } : {}),
+    imageUrls: photos.photos.map((photo) => photo.url),
   };
 }
 
@@ -1307,9 +1387,10 @@ export function evaluateListingPricingPolicy(
   return { blockers, warnings };
 }
 
-function pricingPolicyMatchesCandidate(
+/** Whether a Card Shellz price limit covers this size. The listing settings views list the same limits. */
+export function pricingPolicyMatchesCandidate(
   policy: DropshipPricingPolicyRecord,
-  candidate: DropshipListingCatalogCandidate,
+  candidate: Pick<DropshipListingCatalogCandidate, "productLineIds" | "category" | "productId" | "productVariantId">,
 ): boolean {
   switch (policy.scopeType) {
     case "catalog":
@@ -1424,6 +1505,14 @@ function readNestedString(
       : undefined
   ), record);
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** Trimmed, non-empty and distinct, read the same way as `readNestedString`. */
+function distinctPolicyIds(values: ReadonlyArray<string | null>): string[] {
+  return [...new Set(values.flatMap((value) => {
+    const trimmed = value?.trim();
+    return trimmed ? [trimmed] : [];
+  }))];
 }
 
 function hashJson(value: unknown): string {

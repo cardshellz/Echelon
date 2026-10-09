@@ -26,6 +26,8 @@
  */
 
 import { createListingPublicationService } from "../listing-publication.composition";
+import { VerifiedListingStockService } from "../modules/inventory-planning/application/verified-listing-stock.service";
+import { WalmartStockConnectionService } from "../modules/channels/adapters/walmart/walmart-stock-connection.service";
 import { createListingUpdateService } from "../listing-update.composition";
 import { InventoryPublicationMembershipService } from "../modules/inventory-planning/application/inventory-publication-membership.service";
 import { InventoryPublicationInitialScopeService } from "../modules/inventory-planning/application/inventory-publication-initial-scope.service";
@@ -151,6 +153,8 @@ import { PostgresInventoryPublicationSupplyReader } from "../modules/inventory-p
 import { createWalmartFulfillmentExecutor } from "../modules/channels/adapters/walmart/walmart-fulfillment";
 import { AesGcmFulfillmentProviderCredentialCipher } from "../modules/shipping-engine/infrastructure/fulfillment-provider-credential-cipher";
 import { createEbayAdapter } from "../modules/channels/adapters/ebay.adapter";
+import { ChannelEbayListingPhotoResolver } from "../modules/channels/ebay-listing-photos.service";
+import { createCatalogPublicImageUrl } from "../modules/catalog/catalog-public-image";
 import { ChannelAdapterRegistry } from "../modules/channels/channel-adapter.interface";
 import { ChannelInventoryPublicationTransportAdapter } from "../modules/channels/channel-inventory-publication-transport.adapter";
 import {
@@ -393,7 +397,7 @@ export function createServices(
   const allocationEngine = createAllocationEngine(db, atp);
   const sourceLockService = createSourceLockService(db);
   const shopifyAdapter = createShopifyAdapter(db, quantityPublicationAdmission);
-  const ebayAdapter = createEbayAdapter(db);
+  const ebayAdapter = createEbayAdapter(db, new ChannelEbayListingPhotoResolver(databasePool, createCatalogPublicImageUrl(process.env)));
   const walmart = new WalmartChannelService(new WalmartConnectionRepository(databasePool),
     AesGcmFulfillmentProviderCredentialCipher.fromEnvOrNull({
       SHIPPING_PROVIDER_CREDENTIAL_ENCRYPTION_KEY: process.env.WALMART_CREDENTIAL_ENCRYPTION_KEY,
@@ -413,6 +417,8 @@ export function createServices(
   const listingPublication = createListingPublicationService({pool: databasePool, walmart, channelCatalog, quantityAdmission: quantityPublicationAdmission});
   const listingUpdates = createListingUpdateService(databasePool, walmart);
   const inventoryPublicationMembership = new InventoryPublicationMembershipService(new PostgresInventoryPublicationMembershipStore(databasePool));
+  const walmartStockConnection = new WalmartStockConnectionService(walmart,
+    new VerifiedListingStockService(new PostgresInventoryPublicationMembershipStore(databasePool)));
   const inventoryPublicationInitialScope = new InventoryPublicationInitialScopeService(new PostgresInitialPublicationScopeStore(databasePool));
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(shopifyAdapter);
@@ -739,6 +745,7 @@ export function createServices(
     channelCatalog,
     walmartOrderPoll,
     listingPublication,
+    walmartStockConnection,
     listingUpdates,
     inventoryPublicationMembership,
     inventoryPublicationInitialScope,

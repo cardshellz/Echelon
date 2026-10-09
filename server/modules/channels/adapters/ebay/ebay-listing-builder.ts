@@ -11,6 +11,9 @@
  * and description HTML generation.
  */
 
+import { centsToDollarString } from "@shared/utils/money";
+import { assertEbayListingPhotoPlan, buildEbayListingPhotoPlan, type EbayListingPhotoPlan } from "../../ebay-listing-photos.domain";
+
 import type {
   EbayInventoryItem,
   EbayOffer,
@@ -21,7 +24,6 @@ import type {
 import type {
   ChannelListingPayload,
   ChannelVariantPayload,
-  ChannelImagePayload,
 } from "../../channel-adapter.interface";
 import {
   resolveEbayCategoryMapping,
@@ -68,6 +70,8 @@ export interface BuiltItemGroup {
 }
 
 export interface EbayListingBuildOptions {
+  /** Resolved once before any provider write; retry blueprints keep their approved photos. */
+  photoPlan?: EbayListingPhotoPlan;
   availableQuantityByVariantId?: ReadonlyMap<number, number>;
   requirePackageWeight?: boolean;
   titleMaxLength?: number;
@@ -108,10 +112,15 @@ export class EbayListingBuilder {
     config: EbayListingConfig,
     options: EbayListingBuildOptions = {},
   ): BuiltEbayListingDraft {
+    const photoVariants = listing.variants.filter(variant => variant.isListed || options.retainUnlistedVariantsInGroup);
+    if (photoVariants.every(variant => !variant.sku)) return { inventoryItems: [], offers: [], itemGroup: null };
+    const photoPlan = options.photoPlan ?? buildEbayListingPhotoPlan(listing.images, photoVariants);
+    assertEbayListingPhotoPlan(photoPlan, listing.variants);
+    const resolvedOptions = { ...options, photoPlan };
     return {
-      inventoryItems: this.buildInventoryItems(listing, config, options),
-      offers: this.buildOffers(listing, config, options),
-      itemGroup: this.buildItemGroup(listing, config, options),
+      inventoryItems: this.buildInventoryItems(listing, config, resolvedOptions),
+      offers: this.buildOffers(listing, config, resolvedOptions),
+      itemGroup: this.buildItemGroup(listing, config, resolvedOptions),
     };
   }
 
@@ -131,6 +140,10 @@ export class EbayListingBuilder {
       config.channelOverrides?.itemSpecifics,
     );
 
+    if (!listing.variants.some(variant => variant.isListed && variant.sku)) return [];
+    const photoPlan = options.photoPlan ?? buildEbayListingPhotoPlan(listing.images, listing.variants);
+    assertEbayListingPhotoPlan(photoPlan, listing.variants);
+    const resolvedOptions = { ...options, photoPlan };
     return listing.variants
       .filter((v) => v.isListed && v.sku)
       .map((variant) => ({
@@ -139,7 +152,7 @@ export class EbayListingBuilder {
           variant,
           listing,
           productAspects,
-          options,
+          resolvedOptions,
         ),
       }));
   }
@@ -205,10 +218,7 @@ export class EbayListingBuilder {
       config.channelOverrides?.descriptionOverride ||
       this.resolveDescriptionHtml(listing, options);
 
-    const imageUrls = listing.images
-      .sort((a, b) => a.position - b.position)
-      .map((img) => img.url)
-      .slice(0, 12); // eBay max 12 for groups
+    const imageUrls = [...(options.photoPlan ?? buildEbayListingPhotoPlan(listing.images, groupVariants)).groupImageUrls];
 
     // Group key = product SKU or product ID
     const groupKey = options.itemGroupKey
@@ -254,10 +264,7 @@ export class EbayListingBuilder {
     aspects: Record<string, string[]>,
     options: EbayListingBuildOptions,
   ): Omit<EbayInventoryItem, "sku"> {
-    const imageUrls = listing.images
-      .sort((a, b) => a.position - b.position)
-      .map((img) => img.url)
-      .slice(0, 12);
+    const imageUrls = [...(options.photoPlan?.byVariantId.get(variant.variantId) ?? [])];
 
     // Add variant-specific aspects
     const variantAspects = { ...aspects };
@@ -336,8 +343,8 @@ export class EbayListingBuilder {
     categoryId: string,
     options: EbayListingBuildOptions,
   ): EbayOffer {
-    const priceCents = variant.priceCents || 0;
-    const price = (priceCents / 100).toFixed(2);
+    // A missing price is sent as "0.00", as before; every other value must be whole cents.
+    const price = this.formatOfferAmount(variant, "priceCents", variant.priceCents ?? 0);
     const listingPolicies = this.resolveListingPolicies(variant, config, options);
 
     const offer: EbayOffer = {
@@ -370,12 +377,31 @@ export class EbayListingBuilder {
     // Add compare-at price as original retail price
     if (variant.compareAtPriceCents) {
       offer.pricingSummary.originalRetailPrice = {
-        value: (variant.compareAtPriceCents / 100).toFixed(2),
+        value: this.formatOfferAmount(variant, "compareAtPriceCents", variant.compareAtPriceCents),
         currency: "USD",
       };
     }
 
     return offer;
+  }
+
+  /**
+   * An offer amount as eBay's 2-decimal string, built from integer cents. A
+   * negative, fractional or non-finite amount stops the build before any
+   * request, the same way a missing package weight does, so bad price data is
+   * never sent to eBay as a price.
+   */
+  private formatOfferAmount(
+    variant: ChannelVariantPayload,
+    field: "priceCents" | "compareAtPriceCents",
+    cents: number,
+  ): string {
+    if (!Number.isSafeInteger(cents) || cents < 0) {
+      throw new Error(
+        `eBay offer ${field} must be whole, non-negative cents for SKU ${variant.sku}; got ${cents}.`,
+      );
+    }
+    return centsToDollarString(cents);
   }
 
   // -------------------------------------------------------------------------

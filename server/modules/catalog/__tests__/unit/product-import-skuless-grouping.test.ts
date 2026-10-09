@@ -11,12 +11,14 @@ const mocks = vi.hoisted(() => ({
   updateProductVariant: vi.fn(),
   deleteProductAssetsByProductId: vi.fn(),
   createProductAsset: vi.fn(),
+  importSharedPhotos: vi.fn(),
   upsertProductLocationBySku: vi.fn(),
   fetchShopifyCatalogProducts: vi.fn(),
   repairShopifyProductMapping: vi.fn(),
 }));
 
 vi.mock("../..", () => ({
+  createSharedProductPhotoImporter: () => ({ append: mocks.importSharedPhotos }),
   catalogStorage: {
     getProductVariantBySku: mocks.getProductVariantBySku,
     getProductBySku: mocks.getProductBySku,
@@ -74,6 +76,7 @@ function skuLessVariant(shopifyProductId: number, variantId: number, variantTitl
 describe("Shopify import — SKU-less variant grouping", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.importSharedPhotos.mockResolvedValue({ created: 0 });
     mocks.getProductVariantBySku.mockResolvedValue(null);
     mocks.getProductBySku.mockResolvedValue(null);
     mocks.getProductById.mockResolvedValue(null);
@@ -326,6 +329,25 @@ describe("Shopify import — SKU-less variant grouping", () => {
     expect(result.canonicalMappings.failedProducts).toBe(0);
   });
 
+  it("content sync sends photos to the shared Catalog owner without deleting records or inferring a SKU assignment", async () => {
+    const source = [{ url:"https://cdn.example.com/shared.jpg",position:0 }];
+    mocks.fetchShopifyCatalogProducts.mockResolvedValue([
+      { ...skuLessVariant(666,9001,"Pack of 50"),sku:"ARM-P50",allImages:source },
+      { ...skuLessVariant(666,9002,"Case of 500"),sku:"ARM-C500",allImages:source },
+    ]);
+    mocks.getProductVariantBySku.mockImplementation(async (sku:string) => ({
+      id:sku === "ARM-P50" ? 10 : 11,productId:906,sku,salesEligibility:"sellable",
+    }));
+    mocks.getProductById.mockResolvedValue({id:906,sku:"ARM",shopifyProductId:"666"});
+    mocks.importSharedPhotos.mockResolvedValue({created:1});
+    const result=await createProductImportService({mappingOwner:{repair:mocks.repairShopifyProductMapping}})
+      .syncContentAndAssets({projectCanonicalMappings:false});
+    expect(mocks.importSharedPhotos).toHaveBeenCalledWith({productId:906,photos:[...source,...source],actor: "service:shopify_content_sync"});
+    expect(mocks.deleteProductAssetsByProductId).not.toHaveBeenCalled();
+    expect(mocks.createProductAsset).not.toHaveBeenCalled();
+    expect(result.assets).toBe(1);
+  });
+
   it("uses one Shopify snapshot for the combined product and content command", async () => {
     mocks.fetchShopifyCatalogProducts.mockResolvedValue([
       skuLessVariant(777, 9101, "Default Title"),
@@ -348,6 +370,7 @@ describe("Shopify import — SKU-less variant grouping", () => {
 describe("Shopify import — requires_shipping", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.importSharedPhotos.mockResolvedValue({ created: 0 });
     mocks.getProductVariantBySku.mockResolvedValue(null);
     mocks.getProductBySku.mockResolvedValue(null);
     mocks.getProductById.mockResolvedValue(null);

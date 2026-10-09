@@ -54,12 +54,23 @@ describe("catalog step rail", () => {
   it("says each tick in words and shows each step's line", () => {
     const markup = rail({ ticks: { choose: "done", setup: "unknown", publish: null }, details: { choose: "3 selected", setup: "Checking" } });
     expect(markup).toContain('<span class="sr-only">, done</span>');
-    expect(markup).toContain('<span class="sr-only">, checking</span>');
+    expect(markup).toContain('<span class="sr-only">, not known yet</span>');
     // Publish has no tick until publish runs exist, so nothing is claimed for it.
     expect(markup.match(/class="sr-only"/g)).toHaveLength(2);
     expect(markup).toContain("3 selected");
     expect(markup).toContain("Checking");
     expect(rail({ ticks: { choose: "todo", setup: "done", publish: null } })).toContain('<span class="sr-only">, not done yet</span>');
+  });
+
+  it("offers a step's action as its own button after the step's link, never inside it", () => {
+    const markup = rail({ details: { choose: "3 selected", setup: "Couldn't check" },
+      actions: { setup: { label: "Try again", onClick: noop } } });
+    const link = markup.indexOf('data-testid="catalog-step-setup"');
+    const linkEnd = markup.indexOf("</a>", link);
+    const action = markup.indexOf('data-testid="catalog-step-setup-action"');
+    expect(action).toBeGreaterThan(linkEnd);
+    expect(markup).toMatch(/<button type="button"[^>]*data-testid="catalog-step-setup-action"[^>]*>Try again<\/button>/);
+    expect(rail()).not.toContain("catalog-step-setup-action");
   });
 
   it("offers the store choice when an eBay store is ready", () => {

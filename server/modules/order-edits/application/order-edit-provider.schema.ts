@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { orderEditFinancialsSchema } from "@shared/order-edits/order-edit-financials";
+import { SHOPIFY_CALCULATED_LINE_ID_PATTERN } from "@shared/order-edits/shopify-edit-identity";
+import { orderEditShippingRepricingSchema } from "@shared/order-edits/order-edit-shipping";
 import type {
   OrderEditSnapshot,
   OrderEditQuote,
@@ -89,6 +91,37 @@ const line = z
 
 export const orderEditSnapshotSchema: z.ZodType<OrderEditSnapshot> = z
   .object({
+    shippingContext: z
+      .object({
+        address: z
+          .object({
+            address1: z.string().nullable(),
+            address2: z.string().nullable(),
+            city: z.string().nullable(),
+            provinceCode: z.string().nullable(),
+            zip: z.string().nullable(),
+            countryCodeV2: z.string().nullable(),
+          })
+          .strict(),
+        lines: z
+          .array(
+            z
+              .object({
+                id: gid("ShippingLine"),
+                title: text,
+                code: z.string().nullable(),
+                source: z.string().nullable(),
+                grossCents: money,
+                netCents: money,
+              })
+              .strict()
+              .refine((value) => value.netCents <= value.grossCents),
+          )
+          .min(1)
+          .max(250),
+      })
+      .strict()
+      .optional(),
     financials: orderEditFinancialsSchema.optional(),
     discountRules: z
       .array(
@@ -167,6 +200,39 @@ export const orderEditSnapshotSchema: z.ZodType<OrderEditSnapshot> = z
   })
   .strict()
   .superRefine((value, context) => {
+    const shippingLines = value.shippingContext?.lines;
+    if (
+      shippingLines &&
+      Number.isSafeInteger(value.shippingCents) &&
+      (!value.financials ||
+        Number.isSafeInteger(value.financials.shippingGrossCents)) &&
+      shippingLines.every(
+        (line) =>
+          Number.isSafeInteger(line.grossCents) &&
+          Number.isSafeInteger(line.netCents),
+      )
+    ) {
+      const gross = shippingLines.reduce(
+        (total, line) => total + BigInt(line.grossCents),
+        BigInt(0),
+      );
+      const net = shippingLines.reduce(
+        (total, line) => total + BigInt(line.netCents),
+        BigInt(0),
+      );
+      if (
+        net !== BigInt(value.shippingCents) ||
+        (value.financials &&
+          gross !== BigInt(value.financials.shippingGrossCents)) ||
+        new Set(shippingLines.map((line) => line.id)).size !==
+          shippingLines.length
+      )
+        context.addIssue({
+          code: "custom",
+          message:
+            "Shipping context must have unique identities and reconcile to the financial shipping charge.",
+        });
+    }
     // Zod still runs refinements after an integer validation issue. Do not
     // convert malformed monetary or quantity input to BigInt and throw.
     if (
@@ -251,6 +317,7 @@ const plan = z
   .strict();
 export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
   .object({
+    shippingRepricing: orderEditShippingRepricingSchema.optional(),
     financials: orderEditFinancialsSchema.optional(),
     connectionId: connection,
     channelId: connection,
@@ -267,7 +334,10 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
           title: text,
           variantTitle: z.string().nullable(),
           originalLineId: gid("LineItem").nullable(),
-          calculatedLineId: gid("CalculatedLineItem"),
+          quantityIncreaseOfLineId: gid("LineItem").optional(),
+          calculatedLineId: z
+            .string()
+            .regex(SHOPIFY_CALCULATED_LINE_ID_PATTERN),
           variantId: gid("ProductVariant"),
           quantity,
           originalUnitPriceCents: money,
@@ -285,6 +355,16 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (
+      value.shippingRepricing &&
+      (value.shippingRepricing.netCents !== value.shippingCents ||
+        !value.financials)
+    )
+      context.addIssue({
+        code: "custom",
+        message:
+          "Shipping repricing must match the verified shipping charge and financial breakdown.",
+      });
     if (
       ![
         value.totalCents,
@@ -382,6 +462,38 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
     const expectedOriginals = value.lines.filter(
       (entry) => entry.originalLineId !== null,
     );
+    const increases = value.lines.filter(
+      (entry) => entry.quantityIncreaseOfLineId !== undefined,
+    );
+    const increaseByOriginal = new Map(
+      increases.map((entry) => [entry.quantityIncreaseOfLineId!, entry]),
+    );
+    if (
+      increaseByOriginal.size !== increases.length ||
+      increases.some((entry) => {
+        const original = value.baseline.lines.find(
+          (line) => line.id === entry.quantityIncreaseOfLineId,
+        );
+        const requested = original && changes.get(original.id);
+        return (
+          entry.originalLineId !== null ||
+          !original ||
+          original.quantity <= 0 ||
+          requested === undefined ||
+          requested <= original.quantity ||
+          entry.variantId !== original.variantId ||
+          entry.quantity !==
+            requested -
+              original.quantity +
+              (additions.get(entry.variantId) ?? 0)
+        );
+      })
+    )
+      context.addIssue({
+        code: "custom",
+        message:
+          "Quoted quantity increases do not conserve the requested quantities",
+      });
     const requiredOriginals = value.baseline.lines.filter(
       (entry) => entry.quantity > 0 || changes.has(entry.id),
     );
@@ -395,7 +507,10 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
             (expected) =>
               expected.originalLineId === entry.id &&
               expected.variantId === entry.variantId &&
-              expected.quantity === (changes.get(entry.id) ?? entry.quantity) &&
+              expected.quantity ===
+                (increaseByOriginal.has(entry.id)
+                  ? entry.quantity
+                  : (changes.get(entry.id) ?? entry.quantity)) &&
               expected.originalUnitPriceCents === entry.originalUnitPriceCents,
           ),
       )
@@ -418,11 +533,17 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
       (entry) => entry.originalLineId === null,
     );
     if (
-      expectedAdditions.length !== additions.size ||
+      expectedAdditions.length !==
+        new Set([
+          ...additions.keys(),
+          ...increases.map((entry) => entry.variantId),
+        ]).size ||
       new Set(expectedAdditions.map((entry) => entry.variantId)).size !==
         expectedAdditions.length ||
       expectedAdditions.some(
-        (entry) => additions.get(entry.variantId) !== entry.quantity,
+        (entry) =>
+          !entry.quantityIncreaseOfLineId &&
+          additions.get(entry.variantId) !== entry.quantity,
       )
     )
       context.addIssue({

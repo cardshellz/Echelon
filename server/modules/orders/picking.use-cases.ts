@@ -3694,7 +3694,11 @@ export class PickingUseCases {
       metadata: claimSource ? { claimSource } : undefined,
     });
 
-    const items = await this.storage.getOrderItems(orderId);
+    // Only shipping lines go to the gun, as in the queue and getPickerOrder.
+    // Since 6a9f050c (2026-10-03) the gun merges this response over its queue
+    // order, so returning every line put digital items (CLUB-ANNUAL-US on
+    // #64031) on the pick screen.
+    const items = (await this.storage.getOrderItems(orderId)).filter(item => item.requiresShipping === 1);
     const scanDisplay = await this.loadScanDisplay(items);
     const plannedItems = (await this.planPickingItems(items, order.warehouseId ?? null))
       .map(item => withScanDisplay(item, scanDisplay));

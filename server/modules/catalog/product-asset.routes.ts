@@ -3,6 +3,10 @@ import { z } from "zod";
 import { db } from "../../db";
 import { requirePermission } from "../../routes/middleware";
 import { reorderProductAssetsSchema } from "@shared/catalog/product-assets";
+import { productAssetScopeSchema, productAssetScopeResultSchema } from "@shared/catalog/product-asset-scope";
+import { financialCommandFromRequest } from "../../platform/commands/http-command";
+import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
+import { createProductAssetScopeService } from "./product-asset-scope.service";
 import { reorderCatalogAssets } from "./product-asset-order.repository";
 import { ProductAssetError } from "./product-asset-errors";
 import { downloadProductImage } from "./product-image-download.service";
@@ -12,6 +16,11 @@ import { fetchProductImage } from "./product-image-download.transport";
 const idSchema = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().positive().max(2_147_483_647));
 
 function sendAssetError(res: Response, error: unknown, operation: string, id: number): void {
+  if (error instanceof FinancialCommandError) {
+    for (const [key, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(key, value);
+    res.status(error.statusCode).json({ code: error.code, error: error.message });
+    return;
+  }
   const known = error instanceof ProductAssetError;
   console.error(JSON.stringify({ event: `catalog.assets.${operation}_failed`, id,
     code: known ? error.code : "ASSET_OPERATION_FAILED" }));
@@ -22,6 +31,28 @@ function sendAssetError(res: Response, error: unknown, operation: string, id: nu
 }
 
 export function registerProductAssetRoutes(app: Express): void {
+  const scopeService = createProductAssetScopeService(db, () => new Date());
+  const scopePath = "/api/products/:id/assets/:assetId/scope";
+  app.put(scopePath, requirePermission("inventory", "edit"), async (req, res) => {
+    const productId = idSchema.safeParse(req.params.id);
+    const assetId = idSchema.safeParse(req.params.assetId);
+    const command = productAssetScopeSchema.safeParse(req.body);
+    if (!productId.success || !assetId.success || !command.success) {
+      return res.status(400).json({ code: "ASSET_SCOPE_INVALID", error: "Provide a valid photo assignment and its previous assignment." });
+    }
+    try {
+      const descriptor = financialCommandFromRequest(req, { routeTemplate: scopePath,
+        resourceKey: `product:${productId.data}:asset:${assetId.data}`, commandName: "catalog.asset.scope" });
+      const result = await scopeService.apply(productId.data, assetId.data, command.data, descriptor);
+      if (result.terminalState === "succeeded" && !productAssetScopeResultSchema.safeParse(result.body).success) {
+        throw new Error("Invalid photo assignment response");
+      }
+      res.setHeader("Idempotency-Replayed", String(result.replayed));
+      res.setHeader("Cache-Control", "no-store");
+      return res.status(result.httpStatus).json(result.body);
+    } catch (error) { sendAssetError(res, error, "scope", assetId.data); }
+  });
+
   app.put("/api/products/:id/assets/reorder", requirePermission("inventory", "edit"), async (req, res) => {
     const productId = idSchema.safeParse(req.params.id);
     const command = reorderProductAssetsSchema.safeParse(req.body);

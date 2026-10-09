@@ -32,6 +32,7 @@ import type {
   EbayInventoryItemGroup,
   EbayOffer,
 } from "../../channels/adapters/ebay/ebay-types";
+import { ebayListingImagesFromUrls } from "../../channels/ebay-listing-photos.domain";
 import type { ChannelListingPayload } from "../../channels/channel-adapter.interface";
 import {
   isEbayResourceAuthFailureStatus,
@@ -656,7 +657,7 @@ function assertEbayReady(
       },
     );
   }
-  if (!Number.isInteger(intent.weightGrams) || (intent.weightGrams ?? 0) <= 0) {
+  if (!isPublishableEbayWeightGrams(intent.weightGrams)) {
     throw new DropshipError(
       "DROPSHIP_EBAY_PACKAGE_WEIGHT_REQUIRED",
       "eBay listing push requires a positive catalog variant weight.",
@@ -682,6 +683,18 @@ function assertEbayReady(
       },
     );
   }
+}
+
+/**
+ * Any weight above 0 can be listed. The catalog keeps fractions of a gram
+ * (`weight_grams` is numeric(10,2) since migration 185, so 1 lb is 453.59 g),
+ * and the eBay builder sends whole grams, never less than 1
+ * (`ebay-listing-builder.ts`). The listing preview accepts the same weights
+ * (`weight_grams > 0`, `getPackageReadiness`). Not finite would serialize as
+ * null, so it is refused.
+ */
+function isPublishableEbayWeightGrams(weightGrams: number | null): weightGrams is number {
+  return typeof weightGrams === "number" && Number.isFinite(weightGrams) && weightGrams > 0;
 }
 
 export function buildDropshipEbayListingDraft(
@@ -733,12 +746,7 @@ export function buildDropshipEbayListingDraft(
         externalInventoryItemId: null,
       },
     ],
-    images: intent.imageUrls.slice(0, 12).map((url, index) => ({
-      url,
-      altText: null,
-      position: index + 1,
-      variantSku: sku,
-    })),
+    images: ebayListingImagesFromUrls(intent.imageUrls),
     metadata: {
       itemSpecifics: buildEbayAspects(input),
     },

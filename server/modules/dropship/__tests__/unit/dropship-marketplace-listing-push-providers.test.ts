@@ -153,6 +153,30 @@ describe("dropship marketplace listing push providers", () => {
     });
   });
 
+  it("retains the supplied photo intent and reuses an offer after a failure following its creation", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([
+      jsonResponse({ offers: [] }), emptyResponse(), jsonResponse({ offerId: "offer-101" }),
+      new Response("provider unavailable after offer creation", { status: 503 }),
+      jsonResponse({ offers: [{ offerId: "offer-101" }] }), emptyResponse(), emptyResponse(),
+    ]);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
+    const request = makeRequest({ platform: "ebay", marketplaceConfig: ebayMarketplaceConfig() });
+    const uploaded = `https://catalog.example.com/api/catalog/images/9214/${"a".repeat(64)}.jpg`;
+    request.listingIntent.imageUrls = [uploaded, "https://cdn.example.test/catalog.jpg", uploaded];
+    const approvedInput = structuredClone(request);
+
+    await expect(provider.pushListing(request)).rejects.toMatchObject({ context: { status: 503, retryable: true } });
+    await provider.pushListing(request);
+
+    const inventoryWrites = fetcher.calls.filter(call => call.init.method === "PUT" && call.url.endsWith("/inventory_item/SKU-101"));
+    expect(inventoryWrites).toHaveLength(2);
+    expect(inventoryWrites.map(call => JSON.parse(String(call.init.body)).product.imageUrls))
+      .toEqual([[uploaded, "https://cdn.example.test/catalog.jpg"], [uploaded, "https://cdn.example.test/catalog.jpg"]]);
+    expect(fetcher.calls.filter(call => call.init.method === "POST" && call.url.endsWith("/offer"))).toHaveLength(1);
+    expect(request).toEqual(approvedInput);
+  });
+
   it("uses the product category and optional seller Store categories instead of a store-wide category", async () => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([
@@ -455,7 +479,13 @@ describe("dropship marketplace listing push providers", () => {
     });
   });
 
-  it("fails before calling eBay when the persisted listing intent lacks catalog weight", async () => {
+  it.each([
+    ["no catalog weight", null],
+    ["a zero weight", 0],
+    ["a negative weight", -5],
+    ["a weight that is not a number", Number.NaN],
+    ["an infinite weight", Number.POSITIVE_INFINITY],
+  ])("fails before calling eBay when the persisted listing intent has %s", async (_case, weightGrams) => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([]);
     const provider = createEbayProvider(credentials, fetcher.fetch);
@@ -463,12 +493,40 @@ describe("dropship marketplace listing push providers", () => {
     await expect(provider.pushListing(makeRequest({
       platform: "ebay",
       marketplaceConfig: ebayMarketplaceConfig(),
-      weightGrams: null,
+      weightGrams,
     }))).rejects.toMatchObject({
       code: "DROPSHIP_EBAY_PACKAGE_WEIGHT_REQUIRED",
       context: { productVariantId: 101, retryable: false },
     });
     expect(fetcher.calls).toHaveLength(0);
+  });
+
+  // Catalog weights keep fractions of a gram (numeric(10,2) since migration
+  // 185), so 1 lb is stored as 453.59 g. eBay gets whole grams, at least 1.
+  it.each([
+    [453.59, 454],
+    [12.5, 13],
+    [12.49, 12],
+    [0.4, 1],
+    [100, 100],
+  ])("sends a catalog weight of %s g to eBay as %s g", async (weightGrams, sentGrams) => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([
+      jsonResponse({ offers: [] }),
+      emptyResponse(),
+      jsonResponse({ offerId: "offer-101" }),
+      emptyResponse(),
+    ]);
+    const provider = createEbayProvider(credentials, fetcher.fetch);
+
+    await expect(provider.pushListing(makeRequest({
+      platform: "ebay",
+      marketplaceConfig: ebayMarketplaceConfig(),
+      weightGrams,
+    }))).resolves.toMatchObject({ status: "created", externalOfferId: "offer-101" });
+
+    const inventoryBody = JSON.parse(String(fetcher.calls[1]?.init.body));
+    expect(inventoryBody.packageWeightAndSize.weight).toEqual({ value: sentGrams, unit: "GRAM" });
   });
 
   it("forces an access-token refresh without deleting the grant on an eBay listing API 401", async () => {

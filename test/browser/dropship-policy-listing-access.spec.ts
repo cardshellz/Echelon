@@ -75,6 +75,17 @@ function onboardingJson(state: StubState) {
   };
 }
 
+/** The listing settings summary the rail reads (shared/dropship/listing-settings.ts), all set. */
+function listingSettingsSummary() {
+  const policy = (policyId: string) => ({ policyId, verification: "not_checked" });
+  return { storeConnectionId: STORE_ID, storeStatus: "connected", access: { allowed: true }, catalog: { state: "ok", products: 1, sizes: 1 },
+    storeDefaults: { price: { recipe: null, groupRules: 0 }, shippingPolicy: policy("ground"), returnPolicy: policy("returns"),
+      paymentPolicy: policy("payments"), ebayCategory: { category: null, groupRules: 0 },
+      description: { hasIntroduction: false, hasFooter: false, groupRules: 0 } },
+    counts: { productsNeedingFix: 0, productsWithSizesDiffer: 0, productsWithOwnSettings: 0, exactPrices: 0, belowCost: 0, cannotPrice: 0, paused: 0 },
+    attention: { items: [], total: 0 }, rail: { state: "all_set", productsNeedingFix: 0, missingPolicy: null }, generatedAt: STAMP };
+}
+
 function settingsJson(state: StubState) {
   const vendor = onboardingJson(state).vendor;
   return { settings: {
@@ -107,9 +118,9 @@ async function setup(page: Page, initial: Partial<StubState> = {}) {
       return route.fulfill({ json: onboardingJson(state) });
     }
     if (path === "/api/dropship/settings" && method === "GET") return route.fulfill({ json: settingsJson(state) });
-    // The step rail ticks Listing settings from the store's eBay setup.
-    if (path === `/api/dropship/ebay/listing-setup/${STORE_ID}` && method === "GET") {
-      return route.fulfill({ json: { storeConnectionId: STORE_ID, marketplaceId: "EBAY_US", complete: true, missingFields: [] } });
+    // The step rail's line under Listing settings comes from the saved-settings summary, on every step.
+    if (path === `/api/dropship/listings/stores/${STORE_ID}/listing-settings/summary` && method === "GET") {
+      return route.fulfill({ json: listingSettingsSummary() });
     }
     if (path === "/api/dropship/catalog" && method === "GET") {
       return route.fulfill({ json: { rows: [SELECTED_ROW], total: 1, page: 1, limit: Number(url.searchParams.get("limit") ?? 50),

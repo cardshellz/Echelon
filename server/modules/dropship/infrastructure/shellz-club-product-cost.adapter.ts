@@ -38,8 +38,10 @@ function groupBy<T, Key>(rows: readonly T[], key: (row: T) => Key): Map<Key, T[]
  * Repeatable read keeps identity, exclusions and overrides from different edits apart. */
 export class PgShellzClubProductCostAdapter implements DropshipProductCostReader {
   /** The caller owns the transaction/snapshot and commit. No nested BEGIN/COMMIT. */
-  static forTransaction(client: Pick<PoolClient, "query">): PgShellzClubProductCostAdapter {
-    return new PgShellzClubProductCostAdapter({ connect: async () => ({ query: client.query.bind(client), release: () => undefined }) }, undefined, false);
+  static forTransaction(client: Pick<PoolClient, "query">,
+    reportReadFailure?: ConstructorParameters<typeof PgShellzClubProductCostAdapter>[1]): PgShellzClubProductCostAdapter {
+    return new PgShellzClubProductCostAdapter({ connect: async () => ({ query: client.query.bind(client), release: () => undefined }) },
+      reportReadFailure, false);
   }
   constructor(
     private readonly dbPool: CostPool = defaultPool,

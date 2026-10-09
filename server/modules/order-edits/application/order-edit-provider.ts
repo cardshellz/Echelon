@@ -43,6 +43,8 @@ export interface OrderEditRefund {
 
 /** JSON-safe persisted evidence. Amounts are exact USD integer cents. */
 export interface OrderEditSnapshot {
+  /** Optional only for operations saved before shipping repricing was introduced. */
+  shippingContext?: import("./order-edit-shipping").OrderEditShippingContext;
   /** Optional for legacy saved operations; enrichment does not alter their identity fingerprint. */
   financials?: OrderEditFinancials;
   discountRules?: OrderEditDiscountRule[];
@@ -87,6 +89,8 @@ export interface OrderEditExpectedLine {
   title: string;
   variantTitle: string | null;
   originalLineId: string | null;
+  /** The added quantity fulfills an increase on this unchanged original line. */
+  quantityIncreaseOfLineId?: string;
   calculatedLineId: string;
   variantId: string;
   quantity: number;
@@ -96,6 +100,7 @@ export interface OrderEditExpectedLine {
 }
 
 export interface OrderEditQuote {
+  shippingRepricing?: import("@shared/order-edits/order-edit-shipping").OrderEditShippingRepricing;
   financials?: OrderEditFinancials;
   connectionId: number;
   channelId: number;
@@ -218,6 +223,7 @@ export interface OrderEditProvider {
     connectionId: number,
     baseline: OrderEditSnapshot,
     operationId: string,
+    quote?: OrderEditQuote,
   ): Promise<{ status: "restored" | "conflict"; snapshot: OrderEditSnapshot }>;
 }
 import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";

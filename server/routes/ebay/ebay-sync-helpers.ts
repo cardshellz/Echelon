@@ -1,10 +1,9 @@
 import { db } from "../../db";
-import { EBAY_CHANNEL_ID, getAuthService, getChannelConnection, atpService } from "./ebay-utils";
+import { EBAY_CHANNEL_ID, getAuthService, getChannelConnection, atpService, ebayListingPhotoResolver } from "./ebay-utils";
 import {
   channelListings,
   productVariants,
   products,
-  productAssets,
   ebayCategoryMappings,
   ebayTypeAspectDefaults,
   ebayProductAspectOverrides,
@@ -16,7 +15,7 @@ import { EbayMarketplaceListingConnector } from "../../modules/channels/listing-
 import { buildEbayRouteListingDraft } from "./ebay-listing-draft-builder";
 import {
   createEbayRouteListingClient,
-  getExistingEbayInventoryImageUrls,
+  getExistingEbayListingPhotos,
 } from "./ebay-listing-connector-client";
 import {
   resolveChannelListingPrice,
@@ -428,32 +427,6 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
         .where(eq(ebayProductAspectOverrides.productId, productId));
       for (const po of prodOverrides) aspects[po.aspectName] = [po.aspectValue];
 
-      // Get images
-      const imgResult = await db.select({ url: productAssets.url })
-        .from(productAssets)
-        .where(eq(productAssets.productId, productId))
-        .orderBy(asc(productAssets.position));
-      const imageUrls = imgResult
-        .map((r: any) => r.url)
-        .filter((url: string) => url && url.startsWith("https://"))
-        .slice(0, 12);
-
-      // If no images in Echelon, fetch existing images from eBay to avoid wiping them
-      let effectiveImageUrls = imageUrls;
-      if (effectiveImageUrls.length === 0) {
-        try {
-          const firstSku = variants[0]?.variant_sku;
-          if (firstSku) {
-            const existingImageUrls = await getExistingEbayInventoryImageUrls({ accessToken, sku: firstSku });
-            if (existingImageUrls.length > 0) {
-              effectiveImageUrls = existingImageUrls;
-              console.log(`[eBay Sync] Using ${effectiveImageUrls.length} existing eBay images for product (no Echelon assets)`);
-            }
-          }
-        } catch (e: any) {
-          console.warn(`[eBay Sync] Could not fetch existing images from eBay:`, e.message);
-        }
-      }
 
       const isMultiVariant = variants.length > 1;
       const variationAspectName = isMultiVariant ? determineVariationAspectName(variants) : "";
@@ -495,6 +468,16 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
         routeVariants.filter((variant) => variant.isListed).map((variant) => variant.id),
       );
 
+      const photoVariants = routeVariants.filter(variant => variant.isListed)
+        .map(variant => ({ variantId: variant.id, sku: variant.sku }));
+      const retainedVariants = variants.map((variant: any) => ({ variantId: variant.variant_id, sku: variant.variant_sku }));
+      const photoPlan = await ebayListingPhotoResolver.resolve({
+        productId, channelId: EBAY_CHANNEL_ID,
+        variants: photoVariants.length ? photoVariants : retainedVariants,
+        mode: photoVariants.length ? "catalog" : "preserve",
+        readExistingPhotos: () => getExistingEbayListingPhotos({ accessToken, groupKey: product.product_sku || `PROD-${productId}`, variants: retainedVariants }),
+      });
+
       const variantPrices: Map<number, number> = new Map();
       const variantChangeState = new Map<number, { priceChanged: boolean; qtyChanged: boolean }>();
       for (const variant of variants) {
@@ -520,7 +503,7 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
         productId,
         product: routeProduct,
         variants: routeVariants,
-        effectiveImageUrls,
+        photoPlan,
         aspects,
         isMultiVariant,
         variationAspectName,

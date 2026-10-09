@@ -97,7 +97,6 @@ interface CandidateRow {
   mpn: string | null;
   condition: string | null;
   item_specifics: Record<string, unknown> | null;
-  image_urls: string[] | null;
   weight_grams: number | null;
   product_is_active: boolean;
   variant_is_active: boolean;
@@ -313,7 +312,33 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     const client = await this.dbPool.connect();
     try {
       const result = await client.query<CandidateRow>(
-        `SELECT
+        `WITH batch AS (
+           SELECT pv.id, pv.shopify_variant_id, pv.sku
+           FROM catalog.product_variants pv
+           WHERE pv.id = ANY($1::int[])
+         ),
+         -- The Card Shellz retail price from the Shopify variant cache: the
+         -- size's own Shopify variant first, else a variant with the same SKU
+         -- in any case. Matched once per batch (an index lookup and one hash
+         -- join), not with a scan of the whole cache for every size. Among
+         -- several SKU matches the lowest Shopify id wins, so the price never
+         -- depends on the query plan.
+         retail_matches AS (
+           SELECT b.id AS product_variant_id, 0 AS match_rank, sv.id AS shopify_variant_id, sv.price
+           FROM batch b
+           INNER JOIN public.shopify_variants sv ON sv.id::text = b.shopify_variant_id::text
+           UNION ALL
+           SELECT b.id, 1, sv.id, sv.price
+           FROM batch b
+           INNER JOIN public.shopify_variants sv ON UPPER(sv.sku) = UPPER(b.sku)
+           WHERE NULLIF(BTRIM(b.sku), '') IS NOT NULL
+         ),
+         retail_cache AS (
+           SELECT DISTINCT ON (product_variant_id) product_variant_id, price
+           FROM retail_matches
+           ORDER BY product_variant_id, match_rank, shopify_variant_id
+         )
+         SELECT
            p.id AS product_id,
            pv.id AS product_variant_id,
            ARRAY_REMOVE(ARRAY_AGG(DISTINCT plp.product_line_id), NULL) AS product_line_ids,
@@ -338,7 +363,6 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
            pv.mpn,
            p.condition AS condition,
            p.item_specifics,
-           assets.image_urls,
            pv.weight_grams::float8 AS weight_grams,
            p.is_active AS product_is_active,
            pv.is_active AS variant_is_active,
@@ -367,33 +391,12 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
              AND NULLIF(BTRIM(ecm.ebay_browse_category_id), '') IS NOT NULL
            HAVING COUNT(DISTINCT ecm.ebay_browse_category_id) = 1
          ) supplier_ebay_category ON true
-         LEFT JOIN LATERAL (
-           SELECT sv.price
-           FROM public.shopify_variants sv
-           WHERE (
-               pv.shopify_variant_id IS NOT NULL
-               AND sv.id::text = pv.shopify_variant_id::text
-             )
-             OR (
-               NULLIF(BTRIM(pv.sku), '') IS NOT NULL
-               AND UPPER(sv.sku) = UPPER(pv.sku)
-             )
-           ORDER BY CASE WHEN sv.id::text = pv.shopify_variant_id::text THEN 0 ELSE 1 END
-           LIMIT 1
-         ) retail_cache ON true
-         LEFT JOIN LATERAL (
-           SELECT ARRAY_AGG(pa.url ORDER BY pa.is_primary DESC, pa.position ASC, pa.id ASC) AS image_urls
-           FROM catalog.product_assets pa
-           WHERE pa.product_id = p.id
-             AND (pa.product_variant_id IS NULL OR pa.product_variant_id = pv.id)
-             AND pa.asset_type = 'image'
-             AND NULLIF(BTRIM(pa.url), '') IS NOT NULL
-         ) assets ON true
+         LEFT JOIN retail_cache ON retail_cache.product_variant_id = pv.id
          WHERE pv.id = ANY($1::int[])
             AND pv.requires_shipping = true
             AND COALESCE(pv.track_inventory, true) = true
             AND pv.sales_eligibility = 'sellable'
-         GROUP BY p.id, pv.id, retail_cache.price, assets.image_urls,
+         GROUP BY p.id, pv.id, retail_cache.price,
                   supplier_ebay_category.ebay_browse_category_id,
                   supplier_ebay_category.ebay_browse_category_name`,
         [productVariantIds],
@@ -945,7 +948,8 @@ function mapCandidateRow(row: CandidateRow): DropshipListingCatalogCandidate {
     mpn: row.mpn,
     condition: row.condition,
     itemSpecifics: row.item_specifics,
-    imageUrls: row.image_urls ?? [],
+    // Catalog's publication photo reader supplies photos after exposure checks.
+    imageUrls: [],
     weightGrams: row.weight_grams,
   };
 }

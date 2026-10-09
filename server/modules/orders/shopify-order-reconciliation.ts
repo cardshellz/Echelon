@@ -27,6 +27,7 @@ import { eq } from "drizzle-orm";
 import type { OmsService } from "../oms/oms.service";
 import type { WmsSyncService } from "../oms/wms-sync.service";
 import { bridgeShopifyOrderToOms } from "../oms/shopify-bridge";
+import { normalizeShopifyCustomerId } from "../oms/shopify-customer-identity";
 import { reconcileShopifyLineReadiness } from "../oms/shopify-line-readiness.service";
 import { readShopifyLineCurrentQuantity } from "../oms/shopify-line-item-normalizer";
 import { envPositiveInteger } from "../../infrastructure/scheduler-config";
@@ -387,6 +388,7 @@ async function reconcileExistingOmsOrderReadiness(
 async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
   const shopifyId = normalizeShopifyOrderGid(order.id);
   const shippingCountry = resolveProviderCountryCode(order.shipping_address?.country_code, order.shipping_address?.country);
+  const shopifyCustomerId = normalizeShopifyCustomerId(order.customer?.id);
 
   // Check if already exists
   const existing = await db.execute<{ id: string }>(sql`
@@ -413,7 +415,7 @@ async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
       total_price_cents, subtotal_price_cents, total_shipping_cents,
       total_tax_cents, total_discounts_cents,
       currency, order_date, financial_status, fulfillment_status,
-      cancelled_at, shop_domain, source_name, tax_exempt
+      cancelled_at, shop_domain, source_name, tax_exempt, shopify_customer_id
     ) VALUES (
       ${shopifyId},
       ${order.name || `#${order.order_number}`},
@@ -437,7 +439,8 @@ async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
       ${order.cancelled_at ? new Date(order.cancelled_at) : null},
       ${null},
       ${order.source_name || "web"},
-      ${order.tax_exempt || false}
+      ${order.tax_exempt || false},
+      ${shopifyCustomerId}
     )
     ON CONFLICT (id) DO NOTHING
   `);

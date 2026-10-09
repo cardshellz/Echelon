@@ -525,7 +525,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       ).rejects.toMatchObject({ code: "ORDER_EDIT_FULFILLED_CANCEL_INVALID" });
       expect(await physicalState()).toEqual(before);
     });
-    it("round-trips new discount and payment evidence alongside legacy operations", async () => {
+    it("round-trips shipping, discount and payment evidence alongside legacy operations", async () => {
       const store = new PostgresOrderEditStore(database.pool);
       expect((await store.get(OP)).baseline.financials).toBeUndefined();
       await database.pool.query(
@@ -564,6 +564,26 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
           ...snapshot(),
           orderId: "gid://shopify/Order/2",
           financials,
+          shippingContext: {
+            address: {
+              address1: "100 Test St",
+              address2: null,
+              city: "Test",
+              provinceCode: "PA",
+              zip: "16066",
+              countryCodeV2: "US",
+            },
+            lines: [
+              {
+                id: "gid://shopify/ShippingLine/1",
+                title: "Standard Shipping",
+                code: "standard",
+                source: "Echelon Shipping",
+                grossCents: 500,
+                netCents: 0,
+              },
+            ],
+          },
           discountsPresent: true,
           lines: [{ ...snapshot().lines[0], originalUnitPriceCents: 1100 }],
           paymentDates: {},
@@ -590,6 +610,119 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
           )
         ).rows[0].count,
       ).toBe(2);
+    });
+    it("persists protected quantity lineage and UUID calculated identities without altering purchased or warehouse quantities", async () => {
+      const store = new PostgresOrderEditStore(database.pool);
+      await gateway.acquire(20, OP);
+      const before = await physicalState();
+      const baseline = snapshot();
+      const original = baseline.lines[0];
+      const calculatedOriginal = "gid://shopify/CalculatedLineItem/101";
+      const calculatedAddition =
+        "gid://shopify/CalculatedLineItem/385de2d5-a4b7-49f3-9a8f-10a609b835fe";
+      const next: OrderEditRecord = {
+        ...record(),
+        status: "ready",
+        version: 1,
+        quote: {
+          shippingRepricing: {
+            title: "Standard Shipping",
+            code: "standard",
+            source: "Echelon Shipping",
+            grossCents: 799,
+            netCents: 0,
+            discountCents: 799,
+            discountLabels: ["Member free shipping"],
+          },
+          connectionId: 4,
+          channelId: 36,
+          orderId: baseline.orderId,
+          operationId: OP,
+          calculatedOrderId: "gid://shopify/CalculatedOrder/1",
+          sessionId: "gid://shopify/OrderEditSession/1",
+          baseline,
+          baselineFingerprint: baseline.fingerprint,
+          plan: { changes: record().input.changes, additions: [] },
+          lines: [
+            {
+              title: original.title,
+              variantTitle: original.variantTitle,
+              originalLineId: original.id,
+              calculatedLineId: calculatedOriginal,
+              variantId: original.variantId,
+              quantity: 1,
+              originalUnitPriceCents: 1000,
+              discountedUnitPriceCents: 1000,
+              totalCents: 1000,
+            },
+            {
+              title: original.title,
+              variantTitle: original.variantTitle,
+              originalLineId: null,
+              quantityIncreaseOfLineId: original.id,
+              calculatedLineId: calculatedAddition,
+              variantId: original.variantId,
+              quantity: 1,
+              originalUnitPriceCents: 1000,
+              discountedUnitPriceCents: 900,
+              totalCents: 900,
+            },
+          ],
+          totalCents: 1900,
+          outstandingCents: 900,
+          deltaCents: 900,
+          shippingCents: 0,
+          createdAt: record().createdAt,
+          evidence: {},
+          financials: buildOrderEditFinancials({
+            lines: [
+              { id: calculatedOriginal, grossCents: 1000, netCents: 1000 },
+              { id: calculatedAddition, grossCents: 1000, netCents: 900 },
+            ],
+            itemsNetCents: 1900,
+            itemDiscountLabels: ["Echelon member pricing"],
+            itemDiscounts: [
+              {
+                key: "product",
+                label: "Product discounts",
+                amountCents: 100,
+                value: { type: "allocated" },
+              },
+            ],
+            shippingGrossCents: 0,
+            shippingCents: 0,
+            shippingDiscountLabels: [],
+            taxCents: 0,
+            taxesIncluded: false,
+            totalCents: 1900,
+          }),
+        },
+      };
+      await store.save(next, 0, "staff", "quoted");
+      expect((await store.get(OP)).quote).toEqual(next.quote);
+      expect(await physicalState()).toEqual(before);
+      const corrupted = structuredClone(next);
+      corrupted.version = 2;
+      corrupted.quote!.lines[1].quantity = 2;
+      await expect(
+        store.save(corrupted, 1, "staff", "quoted"),
+      ).rejects.toThrow();
+      expect(await store.get(OP)).toEqual(next);
+      expect(
+        (
+          await database.pool.query(
+            "SELECT action FROM oms.order_edit_events WHERE operation_id=$1 ORDER BY id",
+            [OP],
+          )
+        ).rows,
+      ).toEqual([{ action: "created" }, { action: "quoted" }]);
+      expect(
+        (
+          await database.pool.query(
+            "SELECT order_edit_operation_id FROM wms.orders WHERE id=10",
+          )
+        ).rows[0].order_edit_operation_id,
+      ).toBe(OP);
     });
     it.each(["completed", "recovered"] as const)(
       "synchronizes paid contents and atomically releases %s against the real WMS identity columns",

@@ -7,6 +7,19 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createCatalogBackfillService, type CatalogBackfillService } from "../../catalog-backfill.service";
 
+const photoMocks = vi.hoisted(() => ({ append: vi.fn(), createImporter: vi.fn() }));
+vi.mock("../../../catalog", () => ({
+  createSharedProductPhotoImporter: photoMocks.createImporter,
+}));
+
+interface PhotoBackfillStep {
+  backfillAssets(
+    productId: number,
+    source: { images: Array<{ src: string; alt: string | null; position: number; variant_ids: number[] }> },
+    result: { assets: { created: number } },
+  ): Promise<void>;
+}
+
 // ---------------------------------------------------------------------------
 // Mock DB
 // ---------------------------------------------------------------------------
@@ -60,8 +73,41 @@ describe("CatalogBackfillService", () => {
   let service: CatalogBackfillService;
 
   beforeEach(() => {
+    vi.clearAllMocks();
+    photoMocks.append.mockResolvedValue({ created: 0 });
+    photoMocks.createImporter.mockReturnValue({ append: photoMocks.append });
     db = createMockDb();
     service = createCatalogBackfillService(db as any);
+  });
+
+  it("routes Shopify photos through Catalog without passing external variant restrictions", async () => {
+    const source = {
+      images: [{ src: "https://cdn.example.com/shared.jpg", alt: "Front", position: 2, variant_ids: [1001] }],
+    };
+    const result = { assets: { created: 4 } };
+    photoMocks.append.mockResolvedValue({ created: 1 });
+
+    await (service as unknown as PhotoBackfillStep).backfillAssets(34, source, result);
+
+    expect(photoMocks.createImporter).toHaveBeenCalledWith(db, expect.any(Function));
+    expect(photoMocks.append).toHaveBeenCalledWith({
+      productId: 34,
+      photos: [{ url: "https://cdn.example.com/shared.jpg", altText: "Front", position: 1 }],
+      actor: "service:shopify_catalog_backfill",
+    });
+    expect(result.assets.created).toBe(5);
+    expect(db.insert).not.toHaveBeenCalled();
+    expect(db.delete).not.toHaveBeenCalled();
+  });
+
+  it("propagates a failed photo transaction without reporting created assets", async () => {
+    const result = { assets: { created: 4 } };
+    photoMocks.append.mockRejectedValue(new Error("audit unavailable"));
+
+    await expect((service as unknown as PhotoBackfillStep).backfillAssets(34, {
+      images: [{ src: "https://cdn.example.com/shared.jpg", alt: null, position: 1, variant_ids: [1001] }],
+    }, result)).rejects.toThrow("audit unavailable");
+    expect(result.assets.created).toBe(4);
   });
 
   it("should return error if channel not found", async () => {

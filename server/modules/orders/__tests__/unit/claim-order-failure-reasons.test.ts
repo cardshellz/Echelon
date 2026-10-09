@@ -38,6 +38,17 @@ describe("claimOrder failure reasons", () => {
     expect(result.order).toEqual(claimed);
   });
 
+  it("returns only shipping lines, so digital items never reach the gun (#64031)", async () => {
+    const claimed = { id: 1, orderNumber: "64031", warehouseStatus: "in_progress", assignedPickerId: "me",
+      warehouseId: 1, onHold: 0, startedAt: new Date("2026-10-08T12:00:00Z") };
+    const { service, storage } = makeService({ claimResult: claimed, currentOrder: claimed });
+    storage.getOrderItems.mockResolvedValue([{ id: 323569, orderId: 1, sku: "CLUB-ANNUAL-US", quantity: 1,
+      pickedQuantity: 0, fulfilledQuantity: 0, status: "completed", requiresShipping: 0,
+      inventoryTracking: false, catalogProductId: 316, productId: 465 }] as any);
+    const result = await service.claimOrder(1, "me");
+    expect(result.items).toEqual([]);
+  });
+
   it("throws not_found when the order does not exist", async () => {
     const { service } = makeService({ claimResult: null, currentOrder: null });
     await expect(service.claimOrder(999, "me")).rejects.toMatchObject({

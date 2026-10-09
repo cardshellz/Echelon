@@ -48,7 +48,7 @@ export function createListingPublicationService(input: {
           targetId: inspection.publicationTargetId?.toString() ?? null,
           targetRevision: inspection.targetRevision,
           message: inspection.ready
-            ? "Items will be created with zero stock. Review their stock mappings in Channel Inventory after acceptance."
+            ? "Items start with zero stock. Once Walmart publishes them, automatic stock updates use your Channel Inventory rules while updates are on."
             : [
                 ...new Set([
                   ...inspection.blockers.map((blocker) => blocker.message),

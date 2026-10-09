@@ -10,12 +10,12 @@ import {
   chooseCatalogStore,
   chooseStepTick,
   describeCatalogActionBar,
-  describeSetupStep,
+  describeListingSettingsRail,
   isCatalogLocation,
   nextCatalogStep,
   readRememberedCatalogStore,
   rememberCatalogStore,
-  setupStepTick,
+  type ListingSettingsRailInput,
 } from "../dropship-catalog-steps";
 
 function connection(overrides: Partial<DropshipStoreConnectionSummary>): DropshipStoreConnectionSummary {
@@ -70,22 +70,57 @@ describe("catalog step ticks", () => {
     expect(chooseStepTick([{ action: "exclude" }, { action: "include" }])).toBe("done");
   });
 
-  it("ticks Listing settings once eBay setup reports nothing missing", () => {
-    expect(setupStepTick(undefined)).toBe("unknown");
-    expect(setupStepTick({ missingFields: ["merchantLocationKey"] })).toBe("todo");
-    expect(setupStepTick({ missingFields: [] })).toBe("done");
+});
+
+describe("the rail's line under Listing settings", () => {
+  type Rail = Extract<ListingSettingsRailInput["summary"], { status: "ready" }>["rail"];
+  const ready = (rail: Partial<Rail> = {}): ListingSettingsRailInput["summary"] =>
+    ({ status: "ready", rail: { state: "all_set", productsNeedingFix: 0, missingPolicy: null, ...rail } });
+  const rail = (input: Partial<ListingSettingsRailInput> = {}) => describeListingSettingsRail({
+    storesLoaded: true, storeChosen: true, summary: ready(), liveSetup: null, ...input });
+
+  it("claims nothing while the stores or the summary load, and says when no eBay store is ready", () => {
+    expect(rail({ storesLoaded: false, storeChosen: false })).toEqual({ tick: "unknown", line: "Checking…", retry: false });
+    expect(rail({ summary: { status: "loading" } })).toEqual({ tick: "unknown", line: "Checking…", retry: false });
+    expect(rail({ storeChosen: false, summary: { status: "loading" } })).toEqual({ tick: "todo", line: "No eBay store", retry: false });
+  });
+
+  it("offers Try again when the summary could not be read", () => {
+    expect(rail({ summary: { status: "failed" } })).toEqual({ tick: "unknown", line: "Couldn't check", retry: true });
+  });
+
+  it("ticks only when everything is set", () => {
+    expect(rail()).toEqual({ tick: "done", line: "All set", retry: false });
+    expect(rail({ liveSetup: { missingFields: [] } })).toEqual({ tick: "done", line: "All set", retry: false });
+  });
+
+  it("names the first thing to do: reconnect, then policies, then ship-from, then products", () => {
+    expect(rail({ summary: ready({ state: "reconnect_store" }), liveSetup: { missingFields: ["fulfillmentPolicyId"] } }).line)
+      .toBe("Reconnect eBay");
+    expect(rail({ summary: ready({ state: "choose_policy", missingPolicy: "return" }) }))
+      .toEqual({ tick: "todo", line: "Choose a return policy", retry: false });
+    expect(rail({ summary: ready({ state: "choose_policy", missingPolicy: "payment" }), liveSetup: { missingFields: ["fulfillmentPolicyCompatibility"] } }).line)
+      .toBe("Choose a shipping policy");
+    expect(rail({ summary: ready({ state: "products_need_fix", productsNeedingFix: 2 }), liveSetup: { missingFields: ["merchantLocationKey"] } }).line)
+      .toBe("Ship-from location needs updating");
+    expect(rail({ summary: ready({ state: "products_need_fix", productsNeedingFix: 1 }) }).line).toBe("1 product needs a fix");
+    expect(rail({ summary: ready({ state: "products_need_fix", productsNeedingFix: 3 }) }).line).toBe("3 products need a fix");
+    expect(rail({ summary: ready({ state: "too_many_sizes" }) }).line).toBe("Too many sizes to check");
+  });
+
+  it("never says All set over a problem the live eBay check found", () => {
+    expect(rail({ liveSetup: { missingFields: ["fulfillmentPolicyCompatibility"] } }).line).toBe("Choose a shipping policy");
+    expect(rail({ liveSetup: { missingFields: ["paymentPolicyId"] } }).line).toBe("Choose a payment policy");
+    expect(rail({ liveSetup: { missingFields: ["merchantLocationKey"] } }).line).toBe("Ship-from location needs updating");
+    expect(rail({ liveSetup: { missingFields: ["somethingNew"] } })).toEqual({ tick: "todo", line: "Finish your eBay setup", retry: false });
+  });
+
+  it("still asks for policies when a broken answer names none", () => {
+    expect(rail({ summary: ready({ state: "choose_policy", missingPolicy: null }) }).line).toBe("Choose your eBay policies");
   });
 });
 
 describe("catalog step lines and action bar", () => {
-  it("says where setup stands, and never claims setup without a store", () => {
-    expect(describeSetupStep("done", true)).toBe("Setup complete");
-    expect(describeSetupStep("todo", true)).toBe("Needs setup");
-    expect(describeSetupStep("todo", false)).toBe("No eBay store");
-    expect(describeSetupStep("unknown", true)).toBe("Checking");
-    expect(describeSetupStep("unknown", false)).toBe("Checking");
-  });
-
   it("lets Choose continue only once something is selected", () => {
     expect(describeCatalogActionBar({ step: "choose", selectedCount: 3, storeName: "Marz Cards" })).toEqual({
       summary: "3 selected", next: { step: "setup", label: "Next: Listing settings", disabled: false },

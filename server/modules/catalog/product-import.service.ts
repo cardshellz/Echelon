@@ -9,7 +9,7 @@
  *   2. syncProductsWithMultiUOM() — Full SKU-based product/variant creation with hierarchy parsing
  */
 
-import { catalogStorage } from "../catalog";
+import { catalogStorage, createSharedProductPhotoImporter } from "../catalog";
 import { warehouseStorage } from "../warehouse";
 const storage = { ...catalogStorage, ...warehouseStorage };
 import { fetchShopifyCatalogProducts, type ShopifyCatalogProduct } from "../integrations/shopify";
@@ -252,6 +252,7 @@ export function createProductImportService(
   dependencies: ProductImportDependencies = {},
 ) {
   const mappingOwner = dependencies.mappingOwner ?? createShopifyProductMappingService();
+  const photoImporter = createSharedProductPhotoImporter(db, () => new Date());
 
   async function projectCanonicalMapping(input: {
     productId: number;
@@ -448,34 +449,17 @@ export function createProductImportService(
         });
         productsUpdated++;
 
-        // Sync product_assets — clear existing and recreate
-        await storage.deleteProductAssetsByProductId(echelonProduct.id);
-
-        const seenUrls = new Set<string>();
+        // Append shared imports through Catalog; retain IDs, stored files,
+        // manual variant assignments, ordering and channel references.
+        const importedPhotos = await photoImporter.append({
+          productId: echelonProduct.id,
+          photos: variants.flatMap(variant => variant.allImages.map(image => ({
+            url: image.url, position: image.position,
+          }))),
+          actor: "service:shopify_content_sync",
+        });
+        assetsCreated += importedPhotos.created;
         for (const variant of variants) {
-          for (let i = 0; i < variant.allImages.length; i++) {
-            const img = variant.allImages[i];
-            if (!seenUrls.has(img.url)) {
-              seenUrls.add(img.url);
-
-              let variantId: number | null = null;
-              const assetVariant = await storage.getProductVariantBySku(
-                resolveImportedVariantSku(variant),
-              );
-              if (assetVariant) variantId = assetVariant.id;
-
-              await storage.createProductAsset({
-                productId: echelonProduct.id,
-                productVariantId: variantId,
-                assetType: "image",
-                url: img.url,
-                position: img.position,
-                isPrimary: seenUrls.size === 1 ? 1 : 0,
-              });
-              assetsCreated++;
-            }
-          }
-
           // TODO: Boundary cross — writes to product_locations (WMS table) directly instead of
           // routing through a warehouse/bin assignment service. Acceptable for now since
           // product_locations is configuration data (bin assignments), not transactional inventory.

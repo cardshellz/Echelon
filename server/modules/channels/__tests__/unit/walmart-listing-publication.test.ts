@@ -192,14 +192,15 @@ describe("Walmart listing provider", () => {
     expect(prepared.issues).toEqual([]);
     expect(prepared.payload.Orderable).toMatchObject({
       sku: "SLEEVES-100",
-      specProductType: type,
       price: 12.99,
       inventory: [{ quantity: 0, fulfillmentCenterID: "12345" }],
     });
+    expect(prepared.payload.Orderable).not.toHaveProperty("specProductType");
+    expect(Object.keys(jsonObject(prepared.payload.Visible))).toEqual([type]);
     expect(prepared.schemaHash).toHaveLength(64);
   });
 
-  it("binds the documented selector without changing the provider schema or admitting other extra fields", async () => {
+  it("uses the unmodified provider schema and rejects specProductType from outdated examples", async () => {
     const original = structuredClone(createSchema);
     const { provider } = setup();
     const prepared = await provider.prepare(account, { catalog, draft: draft(), priceCents: 1299 });
@@ -209,31 +210,32 @@ describe("Walmart listing provider", () => {
     expect(validate(payload)).toBe(true);
     const orderable = prepared.payload.Orderable as Record<string, unknown>;
     const withOffer = (offer: Record<string, unknown>) => ({ ...payload, MPItem: [{ ...prepared.payload, Orderable: offer }] });
-    expect(validate(withOffer({ ...orderable, specProductType: "default" }))).toBe(false);
+    expect(validate(withOffer({ ...orderable, specProductType: type }))).toBe(false);
+    expect(validate.errors).toContainEqual(expect.objectContaining({ keyword: "additionalProperties", params: { additionalProperty: "specProductType" } }));
     expect(validate(withOffer({ ...orderable, unknownField: "unexpected" }))).toBe(false);
     expect(validate(withOffer({ ...orderable, ShippingWeight: -1 }))).toBe(false);
     expect(createSchema).toEqual(original);
+    expect(listingSubmissionSchema(createSchema, "MP_ITEM", type)).toBe(createSchema);
     expect(listingSubmissionSchema(matchSchema, "MP_ITEM_MATCH", "")).toBe(matchSchema);
     expect(() => listingSubmissionSchema(createSchema, "MP_ITEM", "Unknown type")).toThrow();
     expect(() => listingSubmissionSchema(createSchema, "MP_ITEM", "__proto__")).toThrow();
   });
 
-  it("retains any provider-supplied selector constraints", async () => {
+  it("retains provider-supplied field constraints", async () => {
     const schema = structuredClone(createSchema);
     const orderable = jsonObject(schema.properties.MPItem.items.properties.Orderable);
-    orderable.properties = { ...jsonObject(orderable.properties), specProductType: { type: "string", enum: ["Other type"] } };
+    orderable.properties = { ...jsonObject(orderable.properties), ShippingWeight: { type: "number", minimum: 1 } };
     const { provider } = setup();
     const item = await provider.prepare(account, { catalog, draft: draft(), priceCents: 1299 });
     const validate = compileListingSchema(listingSubmissionSchema(schema, "MP_ITEM", type));
     expect(validate({ MPItemFeedHeader: { businessUnit: "WALMART_US", locale: "en", version: WALMART_LISTING_SPEC.MP_ITEM }, MPItem: [item.payload] })).toBe(false);
   });
 
-  it.each([undefined, "default"])("blocks a missing or conflicting approved selector (%s) before sending", async (selector) => {
+  it.each([type, "default"])("blocks a previously prepared payload containing specProductType (%s) before sending", async (selector) => {
     const { provider, api } = setup();
     const item = await provider.prepare(account, { catalog, draft: draft(), priceCents: 1299 });
     const offer = item.payload.Orderable as Record<string, unknown>;
-    if (selector === undefined) delete offer.specProductType;
-    else offer.specProductType = selector;
+    offer.specProductType = selector;
     const beforeSubmit = vi.fn();
     await expect(runWithListingSetupZeroAdmission(intent(), () => provider.submit(account, {
       operationId, correlationId, items: [item], zeroStockAdmission: intent(), beforeSubmit,
@@ -254,7 +256,8 @@ describe("Walmart listing provider", () => {
     }, { fetch: fetchMock as typeof fetch, now: () => new Date("2026-10-05T12:00:00Z"), correlationId: () => correlationId }));
     const { channels } = setup();
     const provider = new WalmartListingProvider({ ...channels, listingApi: () => api } as unknown as WalmartChannelService);
-    const item = await provider.prepare(account, { catalog, draft: draft(), priceCents: 1299 });
+    const images = Array.from({ length: 5 }, (_, index) => `https://example.com/sleeves-${index}.jpg`);
+    const item = await provider.prepare(account, { catalog: { ...catalog, images }, draft: draft(), priceCents: 1299 });
     expect(item.issues).toEqual([]);
     const store = { start: vi.fn().mockResolvedValue("request-1"), finish: vi.fn().mockResolvedValue(undefined) };
     const collector = new QuantityProviderEvidenceCollector(store, () => new Date("2026-10-05T12:00:00Z"));
@@ -270,9 +273,12 @@ describe("Walmart listing provider", () => {
     expect(file).toBeInstanceOf(Blob);
     const sent = JSON.parse(await (file as Blob).text());
     expect(sent.MPItem).toEqual([item.payload]);
-    expect(sent.MPItem[0].Orderable.specProductType).toBe(type);
+    expect(sent.MPItem[0].Orderable).not.toHaveProperty("specProductType");
     expect(Object.keys(sent.MPItem[0].Visible)).toEqual([type]);
     expect(sent.MPItem[0].Visible[type].productName).toBe(catalog.title);
+    expect(sent.MPItem[0].Visible[type]).toMatchObject({ brand: catalog.brand, shortDescription: catalog.description,
+      keyFeatures: jsonObject(draft().attributes.Visible).keyFeatures, mainImageUrl: images[0], productSecondaryImageURL: images.slice(1) });
+    expect(compileListingSchema(createSchema)(sent)).toBe(true);
     expect(sent.MPItemFeedHeader.version).toBe(WALMART_LISTING_SPEC.MP_ITEM);
     expect(request.headers["Content-Type"]).toBeUndefined();
     expect(fetchMock.mock.calls[2][1].headers["Content-Type"]).toBe("application/json");

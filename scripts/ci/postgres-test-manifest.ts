@@ -7,6 +7,7 @@
 export const POSTGRES_SHARD_COUNT = 8;
 
 export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
+  "server/modules/procurement/__tests__/integration/po-quantity-amendment.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/canonical-pick-case-break.integration.test.ts",
   "server/modules/marketplace-listings/__tests__/integration/listing-replacement-recovery.integration.test.ts",
   "server/modules/catalog/__tests__/integration/inventory-tracking-policy.integration.test.ts",
@@ -105,6 +106,8 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/inventory/__tests__/integration/build-order-transformation-authority.integration.test.ts",
   "server/modules/catalog/__tests__/integration/piece-variant-backfill.integration.test.ts",
   "server/modules/catalog/__tests__/integration/product-asset-order.integration.test.ts",
+  "server/modules/catalog/__tests__/integration/product-asset-scope.integration.test.ts",
+  "server/modules/catalog/__tests__/integration/shared-product-photos.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-channel-publication-status.integration.test.ts",
   "server/modules/channels/__tests__/integration/walmart-connection.integration.test.ts",
   "server/modules/catalog/__tests__/integration/product-102-cleanup.integration.test.ts",
@@ -126,6 +129,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/marketplace-listings/__tests__/integration/pg-listing-update.integration.test.ts",
   "server/modules/marketplace-listings/__tests__/integration/channel-listing-catalog.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/walmart-publication-membership.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/verified-listing-stock.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-publication-scope.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-publication-initial-scope.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-cost-schedule.integration.test.ts",
@@ -141,4 +145,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/order-edits/__tests__/integration/order-edit-warehouse.integration.test.ts",
   "server/modules/oms/__tests__/integration/order-edit-paid-projection.integration.test.ts",
   "server/modules/catalog/__tests__/integration/catalog-variant-publication-photos.integration.test.ts",
+  "server/modules/dropship/__tests__/integration/dropship-listing-settings.integration.test.ts",
+  "server/modules/dropship/__tests__/integration/dropship-catalog-retail-price.integration.test.ts",
+  "server/modules/channels/__tests__/integration/ebay-listing-photos.integration.test.ts",
 ]);

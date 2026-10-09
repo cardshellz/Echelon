@@ -61,11 +61,30 @@ function listingSetupWithNothingSaved(storeConnectionId: number) {
       paymentPolicies: [...setup.options.paymentPolicies, { id: "payments-other", name: "Other payments" }] } };
 }
 
+type SummaryRail = { state: string; productsNeedingFix: number; missingPolicy: string | null };
+
+/** The listing settings summary the rail reads (shared/dropship/listing-settings.ts). */
+function listingSettingsSummary(storeConnectionId: number, rail: SummaryRail = { state: "all_set", productsNeedingFix: 0, missingPolicy: null }) {
+  const policy = (policyId: string) => ({ policyId, verification: "not_checked" });
+  return { storeConnectionId, storeStatus: "connected", access: { allowed: true }, catalog: { state: "ok", products: 1, sizes: 1 },
+    storeDefaults: { price: { recipe: null, groupRules: 0 }, shippingPolicy: policy("ground"), returnPolicy: policy("returns"),
+      paymentPolicy: policy("payments"), ebayCategory: { category: null, groupRules: 0 },
+      description: { hasIntroduction: false, hasFooter: false, groupRules: 0 } },
+    counts: { productsNeedingFix: rail.productsNeedingFix, productsWithSizesDiffer: 0, productsWithOwnSettings: 0, exactPrices: 0,
+      belowCost: 0, cannotPrice: 0, paused: 0 },
+    attention: { items: [], total: 0 }, rail, generatedAt: STAMP };
+}
+
 interface StubState {
   stores: StoreFixture[];
   selected: boolean;
   previewCalls: number;
   setupReads: number[];
+  summaryReads: number[];
+  /** The listing settings summary by store; a store left out gets listingSettingsSummary(). */
+  summaries: Record<number, unknown>;
+  /** How many summary reads still fail before they answer. */
+  summaryFailures: number;
   /** eBay listing setup by store; a store left out gets listingSetup(). */
   listingSetups: Record<number, unknown>;
   /** Saved pricing rules by store; a store left out has none. */
@@ -123,7 +142,8 @@ function settingsJson(state: StubState) {
 }
 
 async function openCatalog(page: Page, path: string, initial: Partial<StubState> = {}) {
-  const state: StubState = { stores: [MARZ], selected: true, previewCalls: 0, setupReads: [], listingSetups: {}, pricingRules: {}, unexpected: [], errors: [], ...initial };
+  const state: StubState = { stores: [MARZ], selected: true, previewCalls: 0, setupReads: [], summaryReads: [], summaries: {},
+    summaryFailures: 0, listingSetups: {}, pricingRules: {}, unexpected: [], errors: [], ...initial };
   page.on("pageerror", (error) => state.errors.push(error.message));
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
   await page.route("**/api/**", async (route) => {
@@ -153,6 +173,15 @@ async function openCatalog(page: Page, path: string, initial: Partial<StubState>
       if (path === `/api/dropship/ebay/listing-setup/${storeId}`) {
         state.setupReads.push(storeId);
         return route.fulfill({ json: state.listingSetups[storeId] ?? listingSetup(storeId) });
+      }
+      if (path === `/api/dropship/listings/stores/${storeId}/listing-settings/summary`) {
+        state.summaryReads.push(storeId);
+        if (state.summaryFailures > 0) {
+          state.summaryFailures -= 1;
+          return route.fulfill({ status: 500, json: { error: { code: "DROPSHIP_LISTING_SETTINGS_INTERNAL_ERROR",
+            message: "Listing settings could not be loaded. Please retry." } } });
+        }
+        return route.fulfill({ json: state.summaries[storeId] ?? listingSettingsSummary(storeId) });
       }
       if (path === `/api/dropship/ebay/listing-policy-overrides/${storeId}/saved`) {
         return route.fulfill({ json: { storeConnectionId: storeId, verification: "not_checked",
@@ -215,19 +244,22 @@ test("a bare Catalog address opens Choose, and moving between steps keeps the ve
   await expect(page.getByRole("heading", { name: "Listing preview and push" })).toHaveCount(0);
   await expect(page.getByTestId("portal-nav").getByRole("button", { name: "Catalog" })).toHaveAttribute("aria-current", "page");
   await expect(page.getByTestId("catalog-action-summary")).toHaveText("1 selected");
+  // The rail's line comes from saved settings: eBay is not asked off Listing settings.
+  await expect(step(page, "setup")).toContainText("All set");
+  expect(state.setupReads).toEqual([]);
   await shot(page, testInfo, "catalog-step-choose");
 
   await page.getByRole("link", { name: "Next: Listing settings" }).click();
   await expect(page).toHaveURL(`${CATALOG_PATH}/setup`);
   await expect(step(page, "setup")).toHaveAttribute("aria-current", "step");
-  await expect(step(page, "setup")).toContainText("Setup complete");
+  await expect(step(page, "setup")).toContainText("All set");
   await expect(page.getByRole("heading", { name: "eBay listing setup" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "eBay categories" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Listing pricing rules" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Available catalog" })).toHaveCount(0);
   await expect(page.getByTestId("catalog-action-summary")).toHaveText("Settings for Marz Cards");
   await shot(page, testInfo, "catalog-step-setup");
-  // The rail and the setup panel read the store's eBay setup once between them.
+  // Only the setup panel asks eBay, once; the rail reads its answer.
   expect(state.setupReads).toEqual([5]);
 
   await page.getByRole("link", { name: "Next: Publish" }).click();
@@ -442,6 +474,46 @@ test("a vendor whose only store is on another platform is told so, and nothing a
   await expect(page.getByRole("heading", { name: "eBay listing setup" })).toHaveCount(0);
   await expect(page.getByTestId("catalog-action-summary")).toHaveText("No eBay store ready");
   expect(state.setupReads).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
+test("the rail names what saved settings need, says Couldn't check when it can't read them, and Try again reads them again", async ({ page }, testInfo) => {
+  const state = await openCatalog(page, `${CATALOG_PATH}/choose`, { summaryFailures: 1, summaries: {
+    [MARZ.storeConnectionId]: listingSettingsSummary(MARZ.storeConnectionId, { state: "products_need_fix", productsNeedingFix: 2, missingPolicy: null }) } });
+  const retry = page.getByTestId("catalog-step-setup-action");
+
+  await expect(step(page, "setup")).toContainText("Couldn't check");
+  await expect(step(page, "setup")).toContainText("not known yet");
+  await expect(retry).toHaveText("Try again");
+  await shot(page, testInfo, "catalog-rail-couldnt-check");
+  await retry.click();
+  await expect(step(page, "setup")).toContainText("2 products need a fix");
+  await expect(step(page, "setup")).toContainText("not done yet");
+  await expect(retry).toHaveCount(0);
+  expect(state.summaryReads).toEqual([MARZ.storeConnectionId, MARZ.storeConnectionId]);
+  expect(state.setupReads).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
+test("the live eBay check on Listing settings keeps the rail from saying All set over a policy that no longer fits", async ({ page }) => {
+  const setup = listingSetup(MARZ.storeConnectionId);
+  const noLongerFits = { ...setup, complete: false, missingFields: ["fulfillmentPolicyCompatibility"],
+    options: { ...setup.options, fulfillmentPolicies: [{ id: "ground", name: "USPS Ground Advantage", compatible: false,
+      compatibilityIssues: [{ code: "handling_time_too_short", message: "Handling time must be 1 business day or more." }] }] } };
+  const state = await openCatalog(page, `${CATALOG_PATH}/choose`, { listingSetups: { [MARZ.storeConnectionId]: noLongerFits } });
+
+  // Saved settings alone look complete, and eBay has not been asked yet.
+  await expect(step(page, "setup")).toContainText("All set");
+  await step(page, "setup").click();
+  await expect(page.getByRole("heading", { name: /^eBay listing setup/ })).toBeVisible();
+  await expect(step(page, "setup")).toContainText("Choose a shipping policy");
+  // Back on Choose, the rail keeps eBay's newest answer without asking again.
+  await step(page, "choose").click();
+  await expect(page.getByRole("heading", { name: "Available catalog" })).toBeVisible();
+  await expect(step(page, "setup")).toContainText("Choose a shipping policy");
+  expect(state.setupReads).toEqual([MARZ.storeConnectionId]);
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
 });

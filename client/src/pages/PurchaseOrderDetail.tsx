@@ -1,5 +1,6 @@
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview } from "@/lib/shipment-receipt-units";
 import React from "react";
+import { PoQuantityAmendment } from '@/features/purchasing/PoQuantityAmendment';
 import { useAuth } from "@/lib/auth";
 import { createShipmentLineCommandClient, createShipmentLineRecoveryStore } from "@/lib/shipment-line-command";
 import {
@@ -2772,6 +2773,7 @@ export default function PurchaseOrderDetail() {
               Receive
             </Button>
           )}
+          {poId !== null && <PoQuantityAmendment purchaseOrderId={poId} status={po.status} />}
           {canClosePo && (
             <Button onClick={() => closeMutation.mutate()} disabled={closeMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Archive className="h-4 w-4 mr-2" />

@@ -12,5 +12,7 @@ export const catalogStorage: IProductStorage = productMethods;
 
 export { readInventoryCostDisplay, type InventoryCostDisplay } from "./inventory-cost-display.reader";
 
+export { createSharedProductPhotoImporter, type SharedImportedPhoto } from "./shared-product-photos.service";
+
 // Service types
 export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "./product-import.service";

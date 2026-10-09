@@ -40,6 +40,7 @@ import type {
 } from "../../application/dropship-selection-atp-service";
 import type { DropshipStoreListingConfig } from "../../application/dropship-marketplace-listing-provider";
 import type { DropshipEbayListingPolicyOverride } from "../../application/dropship-ebay-listing-policy-override-service";
+import type { DropshipEbayReturnPaymentPolicyCheckInput } from "../../application/dropship-ebay-return-payment-policy-check";
 import type {
   DropshipProvisionVendorRepositoryResult,
   DropshipProvisionedVendorProfile,
@@ -88,6 +89,11 @@ describe("DropshipListingPreviewService", () => {
     issues: Array<{ code: string; message: string }>;
   };
   let evaluatedFulfillmentPolicyIds: string[];
+  /** Ids the fake eBay account no longer lists; empty means every checked id exists. */
+  let goneReturnPolicyIds: Set<string>;
+  let gonePaymentPolicyIds: Set<string>;
+  let returnPaymentPolicyCheckFailure: unknown;
+  let checkedReturnPaymentPolicies: DropshipEbayReturnPaymentPolicyCheckInput[];
   let listingTierEligibility: DropshipListingTierEligibility;
   let productCosts: Map<number, DropshipProductCost>;
   let productCostReader: DropshipProductCostReader;
@@ -111,9 +117,16 @@ describe("DropshipListingPreviewService", () => {
       issues: [],
     };
     evaluatedFulfillmentPolicyIds = [];
+    goneReturnPolicyIds = new Set();
+    gonePaymentPolicyIds = new Set();
+    returnPaymentPolicyCheckFailure = null;
+    checkedReturnPaymentPolicies = [];
     serviceDeps = {
       vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
       repository,
+      listingPhotos: { listPublicationPhotos: async ({ productVariantIds }) => new Map(productVariantIds.map(id => [id, {
+        photos: repository.candidate.imageUrls.map((url, index) => ({ assetId: index + 1, position:index, url, uploaded: false })), issues: [],
+      }])) },
       productCosts: { loadProductCosts: (input) => productCostReader.loadProductCosts(input) },
       atp: new FakeAtpProvider(),
       marketplaceListing: new ConfigDrivenDropshipMarketplaceListingProvider(),
@@ -123,6 +136,16 @@ describe("DropshipListingPreviewService", () => {
           return { ...ebayPolicyPreflight, fulfillmentPolicyId: input.fulfillmentPolicyId };
         },
         evaluateWithAccessToken: async () => ebayPolicyPreflight,
+      },
+      ebayReturnPaymentPolicies: {
+        check: async (input) => {
+          checkedReturnPaymentPolicies.push(input);
+          if (returnPaymentPolicyCheckFailure) throw returnPaymentPolicyCheckFailure;
+          return {
+            missingReturnPolicyIds: new Set(input.returnPolicyIds.filter((id) => goneReturnPolicyIds.has(id))),
+            missingPaymentPolicyIds: new Set(input.paymentPolicyIds.filter((id) => gonePaymentPolicyIds.has(id))),
+          };
+        },
       },
       listingTiers: { resolveForVendor: async () => ({ eligibility: listingTierEligibility }) },
       clock: { now: () => now },
@@ -354,7 +377,7 @@ describe("DropshipListingPreviewService", () => {
       repository.config = { ...repository.config!, requiredProductFields: ["description", "brand", "imageUrls"] };
       // Today's catalog read keeps URL photos only: this product's only photo is uploaded.
       repository.candidate.imageUrls = [];
-      photos = new Map([[101, { photos: [{ assetId: 31, url: uploadedUrl, uploaded: true }], issues: [] }]]);
+      photos = new Map([[101, { photos: [{ assetId: 31, position:0, url: uploadedUrl, uploaded: true }], issues: [] }]]);
     });
 
     it("lists a product whose only photo is uploaded, which the URL-only catalog read blocks", async () => {
@@ -373,8 +396,8 @@ describe("DropshipListingPreviewService", () => {
     it("publishes the catalog's photo order, uploaded and linked photos together", async () => {
       repository.candidate.imageUrls = [linkedUrl];
       photos.set(101, { photos: [
-        { assetId: 31, url: uploadedUrl, uploaded: true },
-        { assetId: 7, url: linkedUrl, uploaded: false },
+        { assetId: 31, position:0, url: uploadedUrl, uploaded: true },
+        { assetId: 7, position:1, url: linkedUrl, uploaded: false },
       ], issues: [] });
 
       const preview = await withPhotoReader().previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
@@ -387,7 +410,7 @@ describe("DropshipListingPreviewService", () => {
     });
 
     it("leaves out uploaded photos it cannot publish, warns once per reason, and still queues the listing", async () => {
-      photos.set(101, { photos: [{ assetId: 7, url: linkedUrl, uploaded: false }], issues: [
+      photos.set(101, { photos: [{ assetId: 7, position:1, url: linkedUrl, uploaded: false }], issues: [
         { assetId: 31, code: "CATALOG_PUBLIC_URL_REQUIRED", message: "not configured" },
         { assetId: 32, code: "CATALOG_IMAGE_UNAVAILABLE", message: "missing file" },
         { assetId: 33, code: "IMAGE_FORMAT_UNSUPPORTED", message: "mislabeled" },
@@ -463,7 +486,7 @@ describe("DropshipListingPreviewService", () => {
     });
 
     it("names at most 100 photos it cannot publish in one log line, and says how many there were", async () => {
-      photos.set(101, { photos: [{ assetId: 7, url: linkedUrl, uploaded: false }], issues: Array.from({ length: 101 }, (_, index) => ({
+      photos.set(101, { photos: [{ assetId: 7, position:1, url: linkedUrl, uploaded: false }], issues: Array.from({ length: 101 }, (_, index) => ({
         assetId: 1000 + index, code: "CATALOG_IMAGE_UNAVAILABLE", message: "missing file",
       })) });
 
@@ -968,6 +991,126 @@ describe("DropshipListingPreviewService", () => {
           },
         },
       },
+    });
+  });
+
+  describe("live eBay return and payment policy check (S1)", () => {
+    function ebayStoreWithPolicies(businessPolicies: Record<string, string>, marketplaceId: string | null = "EBAY_US") {
+      repository.context = { ...repository.context, platform: "ebay" };
+      repository.config = {
+        ...repository.config!,
+        platform: "ebay",
+        marketplaceConfig: {
+          profileId: "profile-1",
+          ...(marketplaceId ? { marketplaceId } : {}),
+          businessPolicies: { fulfillmentPolicyId: "fulfillment-policy", ...businessPolicies },
+        },
+      };
+    }
+    const preview = () => service.previewForMember("member-1", {
+      storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1299,
+    });
+    const policyBlockers = (blockers: readonly string[]) => blockers.filter((blocker) => (
+      blocker.startsWith("ebay_return_policy:") || blocker.startsWith("ebay_payment_policy:")
+    ));
+
+    it("checks the store's policy ids once for the preview and passes a listing whose policies exist", async () => {
+      ebayStoreWithPolicies({ returnPolicyId: "return-default", paymentPolicyId: "payment-default" });
+
+      const result = await preview();
+
+      expect(checkedReturnPaymentPolicies).toEqual([{
+        vendorId: repository.context.vendorId,
+        storeConnectionId: 22,
+        marketplaceId: "EBAY_US",
+        returnPolicyIds: ["return-default"],
+        paymentPolicyIds: ["payment-default"],
+      }]);
+      expect(result.rows[0].previewStatus).toBe("ready");
+      expect(policyBlockers(result.rows[0].blockers)).toEqual([]);
+    });
+
+    it("blocks a listing whose return or payment policy is no longer on eBay", async () => {
+      ebayStoreWithPolicies({ returnPolicyId: "return-default", paymentPolicyId: "payment-default" });
+      goneReturnPolicyIds = new Set(["return-default"]);
+      gonePaymentPolicyIds = new Set(["payment-default"]);
+
+      const result = await preview();
+
+      expect(result.rows[0].previewStatus).toBe("blocked");
+      expect(policyBlockers(result.rows[0].blockers)).toEqual([
+        "ebay_return_policy:not_found",
+        "ebay_payment_policy:not_found",
+      ]);
+    });
+
+    it("checks a listing's own policy ids with the defaults, and judges the listing by the ids it sends", async () => {
+      ebayStoreWithPolicies({ returnPolicyId: "return-default", paymentPolicyId: "payment-default" });
+      repository.listingPolicyOverrides = [{
+        productVariantId: 101, revisionId: 3, fulfillmentPolicyId: null,
+        returnPolicyId: "return-override", paymentPolicyId: null, updatedAt: now,
+      }];
+      goneReturnPolicyIds = new Set(["return-default"]);
+
+      const unaffected = await preview();
+      expect(checkedReturnPaymentPolicies[0]).toMatchObject({
+        returnPolicyIds: ["return-default", "return-override"],
+        paymentPolicyIds: ["payment-default"],
+      });
+      expect(policyBlockers(unaffected.rows[0].blockers)).toEqual([]);
+
+      goneReturnPolicyIds = new Set(["return-override"]);
+      const blocked = await preview();
+      expect(policyBlockers(blocked.rows[0].blockers)).toEqual(["ebay_return_policy:not_found"]);
+    });
+
+    it("blocks the listing as unverified and logs a WARN when eBay can't be read", async () => {
+      ebayStoreWithPolicies({ returnPolicyId: "return-default", paymentPolicyId: "payment-default" });
+      returnPaymentPolicyCheckFailure = new DropshipError(
+        "DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE", "eBay did not answer.", { retryable: true },
+      );
+
+      const result = await preview();
+
+      expect(result.rows[0].previewStatus).toBe("blocked");
+      expect(policyBlockers(result.rows[0].blockers)).toEqual([
+        "ebay_return_policy:verification_unavailable",
+        "ebay_payment_policy:verification_unavailable",
+      ]);
+      expect(logs).toContainEqual(expect.objectContaining({
+        code: "DROPSHIP_EBAY_RETURN_PAYMENT_POLICY_CHECK_UNAVAILABLE",
+        context: expect.objectContaining({
+          storeConnectionId: 22,
+          returnPolicyIds: ["return-default"],
+          paymentPolicyIds: ["payment-default"],
+          errorCode: "DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE",
+        }),
+      }));
+    });
+
+    it("fails the preview on an unexpected error instead of hiding it", async () => {
+      ebayStoreWithPolicies({ returnPolicyId: "return-default", paymentPolicyId: "payment-default" });
+      returnPaymentPolicyCheckFailure = new Error("database connection lost");
+
+      await expect(preview()).rejects.toThrow("database connection lost");
+    });
+
+    it("does not call eBay without a marketplace or without any id to check", async () => {
+      ebayStoreWithPolicies({ returnPolicyId: "return-default", paymentPolicyId: "payment-default" }, null);
+      await preview();
+      ebayStoreWithPolicies({});
+      const noIds = await preview();
+
+      expect(checkedReturnPaymentPolicies).toEqual([]);
+      // A missing id is the listing config check's to report (missing_config:…), not this one's.
+      expect(policyBlockers(noIds.rows[0].blockers)).toEqual([]);
+    });
+
+    it("never checks a store that is not on eBay", async () => {
+      await preview();
+
+      expect(repository.context.platform).not.toBe("ebay");
+      expect(checkedReturnPaymentPolicies).toEqual([]);
     });
   });
 

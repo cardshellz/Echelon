@@ -3,6 +3,7 @@ import { useInventoryCommand } from "@/lib/inventory-command";
 import { InventoryTrackingHistory } from "@/components/catalog/InventoryTrackingHistory";
 import { ProductImageGallery } from "@/components/catalog/ProductImageGallery";
 import { invalidateCatalogImages } from "@/lib/catalog-image-queries";
+import { saveProductAssetScope, type ProductAssetScopeAttempt } from "@/lib/product-asset-scope";
 import type { CatalogGalleryAsset, ReorderProductAssets } from "@shared/catalog/product-assets";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation, useSearch } from "wouter";
@@ -1882,6 +1883,10 @@ export default function ProductDetail() {
 
   // --- Asset mutations ---
   const refreshImageReferences = () => invalidateCatalogImages(queryClient, productId);
+  const scopeMutation = useMutation({
+    mutationFn: (attempt: ProductAssetScopeAttempt) => saveProductAssetScope(product!.productId, attempt),
+    onSettled: refreshImageReferences,
+  });
   const addAssetMutation = useMutation({
     mutationFn: async ({ url, altText }: { url: string; altText: string }) => {
       const res = await fetch(`/api/products/${product?.productId}/assets`, {
@@ -3147,11 +3152,12 @@ export default function ProductDetail() {
                   <div>
                     <CardTitle className="text-base md:text-lg">Product Images</CardTitle>
                     <CardDescription className="text-xs md:text-sm">
-                      Manage product images across all channels
+                      Shared photos apply to all variants. Variant photos apply only to the selected SKU.
                     </CardDescription>
                   </div>
                 </CardHeader>
                 <CardContent className="p-3 md:p-6 pt-0 md:pt-0 space-y-4">
+                  <p className="text-xs text-muted-foreground">New photos are shared with all variants. Use Applies to on a photo to assign it to one variant.</p>
                   {/* Add image by URL */}
                   <div className="flex flex-col sm:flex-row gap-2">
                     <Input
@@ -3209,7 +3215,9 @@ export default function ProductDetail() {
                   {product.assets && product.assets.length > 0 ? (
                     <ProductImageGallery
                       assets={product.assets}
-                      busy={reorderMutation.isPending || deleteAssetMutation.isPending || setPrimaryMutation.isPending || uploadFileMutation.isPending || addAssetMutation.isPending}
+                      variants={product.variants}
+                      onScopeChange={attempt => scopeMutation.mutateAsync(attempt)}
+                      busy={scopeMutation.isPending || reorderMutation.isPending || deleteAssetMutation.isPending || setPrimaryMutation.isPending || uploadFileMutation.isPending || addAssetMutation.isPending}
                       onReorder={command => reorderMutation.mutateAsync(command)}
                       onSetPrimary={assetId => setPrimaryMutation.mutate(assetId)}
                       onRemove={assetId => deleteAssetMutation.mutate(assetId)}

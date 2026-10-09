@@ -5,9 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerProductAssetRoutes } from "../../product-asset.routes";
 import { ProductAssetError } from "../../product-asset-errors";
 
-const mocks = vi.hoisted(() => ({ reorder: vi.fn(), read: vi.fn(), fetchImage: vi.fn(), allowed: true, permissions: [] as string[] }));
+const mocks = vi.hoisted(() => ({ reorder: vi.fn(), read: vi.fn(), fetchImage: vi.fn(), scope: vi.fn(), allowed: true, permissions: [] as string[] }));
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../product-asset-order.repository", () => ({ reorderCatalogAssets: mocks.reorder }));
+vi.mock("../../product-asset-scope.service", () => ({ createProductAssetScopeService: () => ({ apply: mocks.scope }) }));
 vi.mock("../../product-image-download.repository", () => ({ readProductImageDownload: mocks.read }));
 vi.mock("../../product-image-download.transport", () => ({ fetchProductImage: mocks.fetchImage }));
 vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: string, action: string) => {
@@ -32,10 +33,12 @@ describe("catalog asset HTTP boundary", () => {
     method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
   it("requires catalog view to download and edit to reorder", async () => {
-    expect(mocks.permissions).toEqual(["inventory:edit", "inventory:view"]);
+    expect(mocks.permissions).toEqual(["inventory:edit", "inventory:edit", "inventory:view"]);
     mocks.allowed = false;
     expect((await reorder(base, { orderedIds: [1] })).status).toBe(403);
     expect((await fetch(base + "/api/product-assets/1/download")).status).toBe(403);
+    expect((await fetch(base + "/api/products/1/assets/2/scope", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ productVariantId: null, expectedProductVariantId: 10 }) })).status).toBe(403);
+    expect(mocks.scope).not.toHaveBeenCalled();
     expect(mocks.reorder).not.toHaveBeenCalled(); expect(mocks.read).not.toHaveBeenCalled();
   });
   it.each(["0", "1.5", "1suffix", "2147483648"])("rejects invalid identity %s", async id => {
@@ -55,6 +58,43 @@ describe("catalog asset HTTP boundary", () => {
     mocks.reorder.mockRejectedValueOnce(new Error("private database password"));
     const response = await reorder(base, { orderedIds: [1] });
     expect(response.status).toBe(500); expect(await response.text()).not.toContain("private database");
+  });
+  const scope = (base: string, body: unknown, key: string | null = "photo-command-123", productId = "1", assetId = "2") =>
+    fetch(`${base}/api/products/${productId}/assets/${assetId}/scope`, {
+      method: "PUT", headers: { "Content-Type": "application/json", ...(key ? { "Idempotency-Key": key } : {}) }, body: JSON.stringify(body),
+    });
+  it("validates scope identity, snapshot and explicit null at the HTTP boundary", async () => {
+    for (const id of ["0", "1.5", "2suffix", "2147483648"]) {
+      expect((await scope(base, { productVariantId: null, expectedProductVariantId: 10 }, "photo-command-123", id)).status).toBe(400);
+      expect((await scope(base, { productVariantId: null, expectedProductVariantId: 10 }, "photo-command-123", "1", id)).status).toBe(400);
+    }
+    for (const body of [{ productVariantId: null }, { productVariantId: "10", expectedProductVariantId: null },
+      { productVariantId: null, expectedProductVariantId: 10, productId: 2 }]) expect((await scope(base,body)).status).toBe(400);
+    expect(mocks.scope).not.toHaveBeenCalled();
+  });
+  it("requires a stable command key and propagates the authenticated actor", async () => {
+    const command = { productVariantId:null,expectedProductVariantId:10 };
+    expect((await scope(base,command,null)).status).toBe(400);
+    expect((await scope(base,command,"bad")).status).toBe(400);
+    expect(mocks.scope).not.toHaveBeenCalled();
+    mocks.scope.mockResolvedValue({ terminalState:"succeeded",replayed:true,httpStatus:200,
+      body:{ productId:1,assetId:2,productVariantId:null,changed:true } });
+    const response = await scope(base,command);
+    expect(response.status).toBe(200); expect(response.headers.get("idempotency-replayed")).toBe("true");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(mocks.scope).toHaveBeenCalledWith(1,2,command,expect.objectContaining({
+      actorId:"operator",idempotencyKey:"photo-command-123",resourceKey:"product:1:asset:2",commandName:"catalog.asset.scope",
+    }));
+  });
+  it("returns durable rejections and rejects a corrupt success contract", async () => {
+    const command = { productVariantId:null,expectedProductVariantId:10 };
+    mocks.scope.mockResolvedValueOnce({ terminalState:"rejected",replayed:false,httpStatus:409,body:{ code:"ASSET_SCOPE_CHANGED",error:"Refresh assignment." } });
+    expect((await scope(base,command)).status).toBe(409);
+    mocks.scope.mockResolvedValueOnce({ terminalState:"succeeded",replayed:false,httpStatus:200,body:{} });
+    expect((await scope(base,command)).status).toBe(500);
+    mocks.scope.mockRejectedValueOnce(new Error("private password"));
+    const failed = await scope(base,command);
+    expect(failed.status).toBe(500); expect(await failed.text()).not.toContain("private password");
   });
   it("sends original stored bytes as an authenticated attachment", async () => {
     const data = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);

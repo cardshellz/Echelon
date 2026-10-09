@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import sanitizeHtml from "sanitize-html";
 import { matchesCatalogScope } from "../../../../shared/dropship/catalog-scope";
 import { MAX_DESCRIPTION_HTML_LENGTH, resolvedListingContentSchema, type ContentProfileState,
-  type ResolvedListingContent, type SavedListingContent } from "../../../../shared/dropship/listing-content";
+  type DescriptionTemplate, type ResolvedListingContent, type SavedListingContent } from "../../../../shared/dropship/listing-content";
 import type { DropshipListingCatalogCandidate } from "./dropship-listing-preview-service";
 import { descriptionAsPlainText } from "./dropship-listing-presentation";
 
@@ -38,6 +38,30 @@ export function prepareContentProfile(profile: ContentProfileState) {
       .map((group) => ({ group, variantIds: group.scope.type === "listings" ? new Set(group.scope.productVariantIds) : null })),
   };
 }
+export type PreparedContentProfile = ReturnType<typeof prepareContentProfile>;
+
+/**
+ * The template a size's description uses: its first matching group by
+ * priority, else the store template. Two groups that tie at the top leave no
+ * template at all, so neither wins by accident. `groupName` names the group
+ * that won; `templateName` is the label previews show, which a group may share.
+ */
+export function resolveContentTemplate(prepared: PreparedContentProfile, candidate: DropshipListingCatalogCandidate): {
+  template: DescriptionTemplate | null; templateName: string | null; groupName: string | null; conflict: boolean;
+} {
+  const groups = prepared.groups.filter(({ group, variantIds }) => variantIds
+    ? variantIds.has(candidate.productVariantId) : matchesCatalogScope(group.scope, candidate)).map(({ group }) => group);
+  const conflict = groups.length > 1 && groups[0].priority === groups[1].priority;
+  const winner = conflict ? null : groups[0] ?? null;
+  const template = conflict ? null : winner?.template ?? prepared.state.profile?.defaultTemplate ?? null;
+  return { template, templateName: conflict ? null : winner?.name ?? (template ? "Store template" : null),
+    groupName: winner?.name ?? null, conflict };
+}
+
+/** Own text saved against an older catalog version needs the vendor to check it still fits. */
+export function needsListingCatalogReview(saved: Pick<SavedListingContent, "customText" | "catalogHash"> | null, catalogHash: string): boolean {
+  return saved?.customText != null && saved.catalogHash !== catalogHash;
+}
 export function resolveListingContent(input: {
   candidate: DropshipListingCatalogCandidate; profile: ContentProfileState;
   saved: (Omit<SavedListingContent, "revisionId"> & { revisionId: number | null }) | null;
@@ -52,12 +76,9 @@ export function resolveListingContent(input: {
   const catalogTooLarge = (candidate.description?.length ?? 0) > MAX_DESCRIPTION_HTML_LENGTH;
   const catalogHtml = catalogTooLarge ? "" : sanitizeListingDescription(candidate.description ?? "");
   if (catalogTooLarge) issues.push("listing_content_catalog_too_large");
-  const groups = prepared.groups.filter(({ group, variantIds }) => variantIds
-    ? variantIds.has(candidate.productVariantId) : matchesCatalogScope(group.scope, candidate)).map(({ group }) => group);
-  const conflict = groups.length > 1 && groups[0].priority === groups[1].priority;
+  const { template, templateName, conflict } = resolveContentTemplate(prepared, candidate);
   if (conflict) issues.push("listing_content_template_conflict");
-  const template = conflict ? null : groups[0]?.template ?? profile.profile?.defaultTemplate ?? null;
-  const needsCatalogReview = saved?.customText != null && saved.catalogHash !== catalogHash;
+  const needsCatalogReview = needsListingCatalogReview(saved, catalogHash);
   if (needsCatalogReview) issues.push("listing_content_catalog_review_required");
   const body = saved?.customText != null ? textDescriptionHtml(saved.customText) : catalogHtml;
   if (!descriptionAsPlainText(body).trim()) issues.push("listing_content_description_required");
@@ -71,7 +92,7 @@ export function resolveListingContent(input: {
     catalogHtml, catalogText: descriptionAsPlainText(catalogHtml), catalogHash, facts,
     evidenceHash: contentHash({ renderer: CONTENT_RENDERER_VERSION, catalogHash, profileRevisionId: profile.revisionId,
       profileHash: prepared.hash, saved, descriptionHtml, issues }),
-    source: saved?.customText != null ? "custom" : "catalog", templateName: conflict ? null : groups[0]?.name ?? (template ? "Store template" : null),
+    source: saved?.customText != null ? "custom" : "catalog", templateName,
     revisionId: saved?.revisionId ?? null, profileRevisionId: profile.revisionId, needsCatalogReview, issues,
   });
 }
