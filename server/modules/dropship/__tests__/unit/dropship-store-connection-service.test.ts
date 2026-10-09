@@ -178,6 +178,8 @@ describe("PgDropshipStoreConnectionRepository", () => {
             required_config_keys: [],
             required_product_fields: [],
             is_active: true,
+            // Migration 0728: a freshly inserted config row starts at the trigger-owned revision 1.
+            revision: 1,
             created_at: now,
             updated_at: now,
           }],
@@ -221,6 +223,10 @@ describe("PgDropshipStoreConnectionRepository", () => {
     }));
     expect(result.storeConnectionId).toBe(21);
     expect(result.orderProcessingConfig.defaultWarehouseId).toBe(3);
+    // The config mapper requires the trigger-owned revision (migration 0728),
+    // so the default-config insert must return it.
+    const listingConfigInsert = queries.find((entry) => entry.sql.includes("INSERT INTO dropship.dropship_store_listing_configs"));
+    expect(listingConfigInsert?.sql).toMatch(/RETURNING[\s\S]*\brevision\b/);
   });
 
   it("rejects a reauthorization write when the exact target changed after OAuth started", async () => {

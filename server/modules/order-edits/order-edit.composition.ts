@@ -23,6 +23,13 @@ export function createOrderEditService(
   const clock = () => new Date();
   const provider = new ShopifyOrderEditProvider({
     clock,
+    report: (event) =>
+      console.error(
+        JSON.stringify({
+          event: "order_edit_quote_preflight_failure",
+          ...event,
+        }),
+      ),
     credentials: {
       async get(connectionId) {
         const rows = (

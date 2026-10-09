@@ -219,6 +219,8 @@ export function OrderDraft({
   onQuote,
   onLock,
   onConfigure,
+  reviewBlocked = false,
+  closedOperationId,
 }: {
   order: OrderEditOrder;
   api: OrderEditTransport;
@@ -227,6 +229,9 @@ export function OrderDraft({
   onQuote(operation: OrderEditOperation): void;
   onLock(locked: boolean): void;
   onConfigure?: () => void;
+  /** Keep item entry responsive while closing a prior quote; submission waits for confirmation. */
+  reviewBlocked?: boolean;
+  closedOperationId?: string;
 }) {
   const [quantities, setQuantities] = useState<Record<string, string>>(() =>
     Object.fromEntries(
@@ -243,6 +248,12 @@ export function OrderDraft({
   const [locked, setLocked] = useState(false);
   const inflight = useRef(false);
   const command = useRef<OrderEditQuoteInput | null>(null);
+  useEffect(() => {
+    // Preserve quantities/additions, but never replay an abandoned quote's key.
+    command.current = null;
+    setLocked(false);
+    setError(null);
+  }, [closedOperationId]);
   const canEdit = order.eligibility.editable && enabled;
   const variants = useQuery({
     queryKey: [
@@ -290,7 +301,7 @@ export function OrderDraft({
       ? `Check the item quantities: ${validation.error.issues[0]?.message ?? "Enter valid whole numbers."}`
       : null;
   async function quote() {
-    if (!canEdit || !valid || inflight.current) return;
+    if (!canEdit || !valid || reviewBlocked || inflight.current) return;
     inflight.current = true;
     setPending(true);
     setError(null);
@@ -554,7 +565,7 @@ export function OrderDraft({
           </p>
           <Button
             type="button"
-            disabled={!canEdit || !valid || pending}
+            disabled={!canEdit || !valid || pending || reviewBlocked}
             onClick={quote}
           >
             {pending
@@ -838,6 +849,8 @@ export default function OrderEdits() {
   const [operationError, setOperationError] = useState<string | null>(null);
   const [isUncertain, setIsUncertain] = useState(false);
   const [draftLocked, setDraftLocked] = useState(false);
+  const [changingItems, setChangingItems] = useState(false);
+  const [closedOperationId, setClosedOperationId] = useState<string>();
   const settingsRef = useRef<HTMLDetailsElement>(null);
   const [savedQuote, setSavedQuote] = useState<OrderEditQuoteInput | null>(
     null,
@@ -846,6 +859,7 @@ export default function OrderEdits() {
   const [savedQuoteLoaded, setSavedQuoteLoaded] = useState(false);
   const [savedQuoteRejected, setSavedQuoteRejected] = useState(false);
   const inflight = useRef(false);
+  const draftOperationId = useRef<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 10_000);
@@ -856,6 +870,8 @@ export default function OrderEdits() {
     setSavedQuote(null);
     setSavedQuoteError(null);
     setSavedQuoteRejected(false);
+    draftOperationId.current = null;
+    setChangingItems(false);
     if (!canEdit || !user) return;
     try {
       setSavedQuote(loadPendingOrderEditQuote(user.id, sessionStorage));
@@ -899,6 +915,9 @@ export default function OrderEdits() {
   });
   const detail = useQuery({
     queryKey: [ORDER_EDITS_API, user?.id, "order", selectedId, orderId],
+    // Returning from a verified cancellation reuses the existing draft. Quote
+    // and commit each revalidate its revision against Shopify independently.
+    staleTime: Infinity,
     enabled:
       canEdit &&
       !!connection &&
@@ -922,7 +941,9 @@ export default function OrderEdits() {
       return api.operation(operationId, signal);
     },
     refetchInterval: (query) =>
-      query.state.data && !finished.has(query.state.data.status)
+      query.state.data &&
+      query.state.data.status !== "ready" &&
+      !finished.has(query.state.data.status)
         ? 5_000
         : false,
   });
@@ -938,6 +959,7 @@ export default function OrderEdits() {
       { replace: true },
     );
     if (resolvesQuote) {
+      draftOperationId.current = detail.data ? result.operationId : null;
       setDraftLocked(false);
       setSavedQuote(null);
     }
@@ -999,6 +1021,18 @@ export default function OrderEdits() {
     inflight.current = true;
     setBusy(true);
     setOperationError(null);
+    if (
+      action === "abandon" &&
+      operation.data.status === "ready" &&
+      draftOperationId.current === operationId &&
+      detail.data &&
+      detail.data.orderNumber === operation.data.orderNumber &&
+      !detail.data.activeOperationId
+    ) {
+      // Show the still-mounted draft now; retain the operation URL until its
+      // cancellation succeeds so a reload can reconcile an unknown outcome.
+      setChangingItems(true);
+    }
     try {
       const result = await api[action](operationId);
       received(result);
@@ -1006,9 +1040,12 @@ export default function OrderEdits() {
         action === "abandon" &&
         (result.status === "expired" || result.status === "recovered")
       ) {
-        await client.invalidateQueries({
-          queryKey: [ORDER_EDITS_API, user?.id, "order"],
-        });
+        setClosedOperationId(result.operationId);
+        setChangingItems(false);
+        // Cancellation verified that the original order is unchanged. Reuse
+        // the draft; the next quote checks its revision again server-side.
+        setDraftLocked(false);
+        if (draftOperationId.current !== result.operationId) setOrderId(null);
         navigate(ORDER_EDITS_PATH, { replace: true });
       }
     } catch (failure) {
@@ -1042,7 +1079,7 @@ export default function OrderEdits() {
       </header>
       {invalidLink ? (
         <ErrorMessage text="This operation link is invalid. Use the exact saved operation link." />
-      ) : operationId ? (
+      ) : operationId && !changingItems ? (
         <>
           {operation.isLoading && <p role="status">Loading order edit…</p>}
           <ErrorMessage
@@ -1079,6 +1116,31 @@ export default function OrderEdits() {
               </Button>
             )}
         </>
+      ) : changingItems ? (
+        <div className="space-y-3">
+          <p role="status" className="text-sm text-muted-foreground">
+            {busy
+              ? "Closing the previous quote. You can change items while this finishes."
+              : "The previous quote must be closed before reviewing new totals."}
+          </p>
+          <ErrorMessage
+            text={operationError ?? operation.data?.error?.message ?? null}
+          />
+          {!busy && (
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                disabled={isUncertain}
+                onClick={() => void progress("abandon")}
+              >
+                Retry closing quote
+              </Button>
+              <Button variant="outline" onClick={() => setChangingItems(false)}>
+                Back to review
+              </Button>
+            </div>
+          )}
+        </div>
       ) : savedQuote || savedQuoteError ? (
         <Card>
           <CardHeader>
@@ -1311,38 +1373,48 @@ export default function OrderEdits() {
               </CardContent>
             </Card>
           )}
-          {detail.data &&
-            !detail.data.activeOperationId &&
-            connection &&
-            user &&
-            savedQuoteLoaded && (
-              <OrderDraft
-                key={`${detail.data.omsOrderId}:${detail.data.revision}`}
-                order={detail.data}
-                api={api}
-                enabled={connection.enabled}
-                staffId={user.id}
-                onLock={setDraftLocked}
-                onConfigure={
-                  canConfigure && !draftLocked
-                    ? () => {
-                        const settings = settingsRef.current;
-                        if (!settings) return;
-                        settings.open = true;
-                        settings.scrollIntoView({ block: "center" });
-                        settings
-                          .querySelector<HTMLInputElement>(
-                            "#edit-payment-window",
-                          )
-                          ?.focus({ preventScroll: true });
-                      }
-                    : undefined
-                }
-                onQuote={(result) => received(result, true)}
-              />
-            )}
         </>
       )}
+      {detail.data &&
+        !detail.data.activeOperationId &&
+        connection &&
+        user &&
+        canEdit &&
+        savedQuoteLoaded &&
+        !invalidLink && (
+          <div
+            hidden={
+              (!!operationId && !changingItems) ||
+              !!savedQuote ||
+              !!savedQuoteError
+            }
+          >
+            <OrderDraft
+              key={`${detail.data.omsOrderId}:${detail.data.revision}`}
+              order={detail.data}
+              api={api}
+              enabled={connection.enabled}
+              staffId={user.id}
+              reviewBlocked={!!operationId || busy}
+              closedOperationId={closedOperationId}
+              onLock={setDraftLocked}
+              onConfigure={
+                canConfigure && !draftLocked
+                  ? () => {
+                      const settings = settingsRef.current;
+                      if (!settings) return;
+                      settings.open = true;
+                      settings.scrollIntoView({ block: "center" });
+                      settings
+                        .querySelector<HTMLInputElement>("#edit-payment-window")
+                        ?.focus({ preventScroll: true });
+                    }
+                  : undefined
+              }
+              onQuote={(result) => received(result, true)}
+            />
+          </div>
+        )}
     </div>
   );
 }

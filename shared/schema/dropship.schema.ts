@@ -611,6 +611,9 @@ export const dropshipStoreListingConfigs = dropshipSchema.table(
       .notNull()
       .default([]),
     isActive: boolean("is_active").notNull().default(true),
+    // Compare-and-set version, owned by a trigger: 1 on insert, +1 on every
+    // update that changes the config (migration 0728).
+    revision: integer("revision").notNull().default(1),
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
@@ -641,6 +644,10 @@ export const dropshipStoreListingConfigs = dropshipSchema.table(
     check(
       "dropship_store_listing_config_price_chk",
       sql`${table.priceMode} IN ('vendor_defined','connection_default','disabled')`,
+    ),
+    check(
+      "dropship_store_listing_config_revision_chk",
+      sql`${table.revision} > 0`,
     ),
   ],
 );
@@ -875,6 +882,40 @@ export const dropshipListingPriceRevisions = dropshipSchema.table("dropship_list
   check("dropship_listing_price_revision_key_chk", sql`${table.idempotencyKey} ~ '^[A-Za-z0-9:_-]+$'`),
   check("dropship_listing_price_revision_hash_chk", sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`),
   check("dropship_listing_price_revision_actor_chk", sql`btrim(${table.actorId}) <> ''`),
+]);
+
+/**
+ * Append-only ledger of keyed listing config requests (migration 0728): one
+ * row per vendor and request key, so a retried request is answered from its
+ * first outcome. A trigger refuses UPDATE and DELETE.
+ */
+export const dropshipListingConfigRequests = dropshipSchema.table("dropship_listing_config_requests", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
+  storeConnectionId: integer("store_connection_id").notNull(),
+  operation: varchar("operation", { length: 60 }).notNull(),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  actorType: varchar("actor_type", { length: 40 }).notNull(),
+  actorId: varchar("actor_id", { length: 255 }).notNull(),
+  revisionBefore: integer("revision_before").notNull(),
+  revisionAfter: integer("revision_after").notNull(),
+  outcome: varchar("outcome", { length: 20 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  foreignKey({ name: "dropship_listing_config_requests_owner_fk", columns: [table.storeConnectionId, table.vendorId],
+    foreignColumns: [dropshipStoreConnections.id, dropshipStoreConnections.vendorId] }),
+  uniqueIndex("dropship_listing_config_requests_key_idx").on(table.vendorId, table.idempotencyKey),
+  index("dropship_listing_config_requests_store_idx").on(table.storeConnectionId, table.createdAt),
+  check("dropship_listing_config_requests_actor_id_chk", sql`btrim(${table.actorId}) <> ''`),
+  check("dropship_listing_config_requests_operation_chk",
+    sql`${table.operation} IN ('ebay_listing_setup_save', 'ebay_ship_from_repair')`),
+  check("dropship_listing_config_requests_key_chk", sql`${table.idempotencyKey} ~ '^[A-Za-z0-9:_-]{8,200}$'`),
+  check("dropship_listing_config_requests_hash_chk", sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`),
+  check("dropship_listing_config_requests_actor_chk", sql`${table.actorType} IN ('vendor', 'admin', 'system')`),
+  check("dropship_listing_config_requests_outcome_chk", sql`${table.revisionBefore} > 0 AND (
+    (${table.outcome} = 'changed' AND ${table.revisionAfter} = ${table.revisionBefore} + 1)
+    OR (${table.outcome} = 'unchanged' AND ${table.revisionAfter} = ${table.revisionBefore}))`),
 ]);
 
 export const dropshipListingPriceSettings = dropshipSchema.table("dropship_listing_price_settings", {

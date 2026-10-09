@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it } from "vitest";
 import {
   DROPSHIP_DEFAULT_INSURANCE_POOL_FEE_BPS,
@@ -12,6 +13,7 @@ import {
   dropshipOrderIntake,
   dropshipShippingMarkupConfig,
   dropshipShippingQuoteSnapshots,
+  dropshipListingConfigRequests,
   dropshipListingPushJobs,
   dropshipStoreConnectionTokens,
   dropshipStoreListingConfigs,
@@ -102,6 +104,10 @@ const perFeeResponsibilityMigrationSql = readFileSync(
     process.cwd(),
     "migrations/0611_dropship_rma_per_fee_responsibility.sql",
   ),
+  "utf8",
+);
+const listingConfigRevisionMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0728_dropship_listing_config_revision.sql"),
   "utf8",
 );
 const releaseScript = readFileSync(
@@ -338,6 +344,9 @@ describe("Dropship V2 schema contract", () => {
     expect((dropshipStoreListingConfigs as any).marketplaceConfig.name).toBe(
       "marketplace_config",
     );
+    // Compare-and-set version read by every listing-config writer (migration 0728).
+    expect((dropshipStoreListingConfigs as any).revision.name).toBe("revision");
+    expect((dropshipStoreListingConfigs as any).revision.notNull).toBe(true);
     expect((dropshipListingPushJobs as any).requestHash.name).toBe(
       "request_hash",
     );
@@ -362,6 +371,140 @@ describe("Dropship V2 schema contract", () => {
     expect(listingConfigBackfillMigrationSql).toContain(
       "ON CONFLICT (store_connection_id) DO NOTHING",
     );
+  });
+
+  describe("dropship_listing_config_requests (migration 0728)", () => {
+    const LEDGER_TABLE = "dropship.dropship_listing_config_requests";
+    const config = () => getTableConfig(dropshipListingConfigRequests);
+    const ledgerSql = () => {
+      const match = /CREATE TABLE IF NOT EXISTS dropship\.dropship_listing_config_requests \(([\s\S]*?)\n\);/
+        .exec(listingConfigRevisionMigrationSql);
+      if (!match) throw new Error("CREATE TABLE dropship_listing_config_requests not found in 0728");
+      return match[1]!.replace(/--[^\n]*/g, "");
+    };
+    const foreignKeys = () => config().foreignKeys.map((foreignKey) => {
+      const reference = foreignKey.reference();
+      return {
+        name: foreignKey.getName(),
+        columns: reference.columns.map((column) => column.name),
+        foreignTable: getTableConfig(reference.foreignTable).name,
+        foreignColumns: reference.foreignColumns.map((column) => column.name),
+      };
+    });
+    /** The CHECKs the migration names, with each expression in parentheses-insensitive spacing. */
+    const migrationChecks = () => {
+      const checks = new Map<string, string>();
+      const body = ledgerSql();
+      for (const match of body.matchAll(/CONSTRAINT (\w+)\s+CHECK\s*\(/g)) {
+        // No CHECK in 0728 has a parenthesis inside a string literal, so depth counting is enough.
+        let depth = 1;
+        let index = match.index! + match[0].length;
+        const start = index;
+        while (depth > 0) {
+          if (body[index] === "(") depth += 1;
+          if (body[index] === ")") depth -= 1;
+          index += 1;
+        }
+        checks.set(match[1]!, comparableSql(body.slice(start, index - 1)));
+      }
+      return checks;
+    };
+    const drizzleChecks = () => {
+      const dialect = new PgDialect();
+      return new Map(config().checks.map((check) => [
+        check.name,
+        comparableSql(dialect.sqlToQuery(check.value).sql.replaceAll(`"dropship"."dropship_listing_config_requests".`, "")
+          .replace(/"(\w+)"/g, "$1")),
+      ]));
+    };
+
+    it("is declared on the dropship schema under the migration's table name", () => {
+      expect(config()).toMatchObject({ schema: "dropship", name: "dropship_listing_config_requests" });
+      expect(listingConfigRevisionMigrationSql).toContain(`CREATE TABLE IF NOT EXISTS ${LEDGER_TABLE} (`);
+    });
+
+    it("declares exactly the migration's columns, all NOT NULL, actor_id included", () => {
+      const columns = config().columns.map((column) => column.name);
+      const migrationColumns = ledgerSql()
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => /^[a-z_]+ (bigint|integer|varchar\(\d+\)|timestamptz)(?=\s|,|$)/.test(line))
+        .map((line) => line.split(" ")[0]!);
+      expect(columns).toEqual(migrationColumns);
+      expect(config().columns.filter((column) => !column.notNull).map((column) => column.name)).toEqual([]);
+      expect((dropshipListingConfigRequests as any).actorId.name).toBe("actor_id");
+      expect((dropshipListingConfigRequests as any).actorId.notNull).toBe(true);
+      expect(ledgerSql()).toContain("actor_id varchar(255) NOT NULL,");
+    });
+
+    it("ties the store to its vendor with the composite owner FK and has no single-column store FK", () => {
+      expect(foreignKeys()).toContainEqual({
+        name: "dropship_listing_config_requests_owner_fk",
+        columns: ["store_connection_id", "vendor_id"],
+        foreignTable: "dropship_store_connections",
+        foreignColumns: ["id", "vendor_id"],
+      });
+      expect(ledgerSql()).toContain(
+        "CONSTRAINT dropship_listing_config_requests_owner_fk FOREIGN KEY (store_connection_id, vendor_id)\n"
+        + "    REFERENCES dropship.dropship_store_connections(id, vendor_id)",
+      );
+      // The vendor is referenced on its own as well, as the migration's inline
+      // REFERENCES does (unnamed there, so compared by columns, not by name).
+      expect(foreignKeys().filter((foreignKey) => foreignKey.name !== "dropship_listing_config_requests_owner_fk")
+        .map(({ columns, foreignTable, foreignColumns }) => ({ columns, foreignTable, foreignColumns })))
+        .toEqual([{ columns: ["vendor_id"], foreignTable: "dropship_vendors", foreignColumns: ["id"] }]);
+      expect(ledgerSql()).toContain("vendor_id integer NOT NULL REFERENCES dropship.dropship_vendors(id),");
+      expect(foreignKeys().filter((foreignKey) => foreignKey.foreignTable === "dropship_store_connections"))
+        .toHaveLength(1);
+      expect(ledgerSql()).toContain("store_connection_id integer NOT NULL,");
+    });
+
+    it("keeps one request per vendor key in a unique (vendor_id, idempotency_key) index, and a store history index", () => {
+      expect(config().indexes.map((index) => ({
+        name: index.config.name,
+        unique: index.config.unique,
+        columns: index.config.columns.map((column) => (column as { name: string }).name),
+      }))).toEqual([
+        { name: "dropship_listing_config_requests_key_idx", unique: true, columns: ["vendor_id", "idempotency_key"] },
+        { name: "dropship_listing_config_requests_store_idx", unique: false, columns: ["store_connection_id", "created_at"] },
+      ]);
+      expect(listingConfigRevisionMigrationSql).toContain(
+        `CREATE UNIQUE INDEX IF NOT EXISTS dropship_listing_config_requests_key_idx\n  ON ${LEDGER_TABLE}(vendor_id, idempotency_key);`,
+      );
+      expect(listingConfigRevisionMigrationSql).toContain(
+        `CREATE INDEX IF NOT EXISTS dropship_listing_config_requests_store_idx\n  ON ${LEDGER_TABLE}(store_connection_id, created_at);`,
+      );
+    });
+
+    it("declares every CHECK the migration names, with the same expression", () => {
+      expect([...drizzleChecks().keys()].sort()).toEqual([
+        "dropship_listing_config_requests_actor_chk",
+        "dropship_listing_config_requests_actor_id_chk",
+        "dropship_listing_config_requests_hash_chk",
+        "dropship_listing_config_requests_key_chk",
+        "dropship_listing_config_requests_operation_chk",
+        "dropship_listing_config_requests_outcome_chk",
+      ]);
+      expect(drizzleChecks()).toEqual(migrationChecks());
+      expect(drizzleChecks().get("dropship_listing_config_requests_actor_id_chk"))
+        .toBe(comparableSql("btrim(actor_id) <> ''"));
+    });
+
+    it("names in Drizzle every constraint and index the migration names for the ledger", () => {
+      const migrationNames = [
+        ...[...ledgerSql().matchAll(/CONSTRAINT (\w+)/g)].map((match) => match[1]!),
+        ...[...listingConfigRevisionMigrationSql.matchAll(
+          /CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)\s+ON dropship\.dropship_listing_config_requests\(/g,
+        )].map((match) => match[1]!),
+      ].sort();
+      const drizzleNames = [
+        ...config().checks.map((check) => check.name),
+        ...foreignKeys().map((foreignKey) => foreignKey.name),
+        ...config().indexes.map((index) => index.config.name!),
+      ];
+      expect(migrationNames).toHaveLength(9);
+      expect(drizzleNames).toEqual(expect.arrayContaining(migrationNames));
+    });
   });
 
   it("models revisioned eBay listing policy overrides at store-variant scope", () => {
@@ -436,6 +579,11 @@ describe("Dropship V2 schema contract", () => {
     expect(releaseScript).toContain("RUN_DRIZZLE_PUSH_ON_RELEASE");
   });
 });
+
+/** SQL with its spacing normalized, and no space beside a parenthesis, so two layouts of one expression compare equal. */
+function comparableSql(sql: string): string {
+  return sql.replace(/\s+/g, " ").replace(/\s*([()])\s*/g, "$1").trim();
+}
 
 describe("Dropship V2 prototype retirement contract", () => {
   it("does not keep Phase 0 startup DDL or route registration live", () => {

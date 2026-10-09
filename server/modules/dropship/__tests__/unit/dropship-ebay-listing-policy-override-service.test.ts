@@ -1,6 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 import { DropshipError } from "../../domain/errors";
-import type { DropshipEbayListingSetupResult } from "../../application/dropship-ebay-listing-setup-service";
+import type {
+  DropshipEbayFulfillmentCapability,
+  DropshipEbayFulfillmentPolicy,
+} from "../../domain/ebay-fulfillment-policy-compatibility";
+import {
+  DropshipEbayListingSetupService,
+  type DropshipEbayListingSetupDirectory,
+  type DropshipEbayListingSetupDiscovery,
+  type DropshipEbayListingSetupResult,
+} from "../../application/dropship-ebay-listing-setup-service";
+import {
+  buildDefaultDropshipStoreListingConfig,
+  decideDropshipListingConfigAccess,
+  type DropshipStoreListingConfigRecord,
+} from "../../application/dropship-listing-config-service";
+import type { DropshipLogEvent } from "../../application/dropship-ports";
 import {
   DropshipEbayListingPolicyOverrideService,
   hashEbayListingPolicyOverride,
@@ -227,6 +242,57 @@ describe("DropshipEbayListingPolicyOverrideService", () => {
       paymentPolicyId: null,
     });
   });
+
+  it("fails closed on a fulfillment policy that was never checked, should such a setup reach validation", async () => {
+    // getForMember throws when Card Shellz shipping can't be read, so this
+    // setup does not reach the override path today. If it ever did, an
+    // unchecked policy is not compatible and the override is refused.
+    const fixture = makeFixture();
+    fixture.listingSetup.getForMember.mockResolvedValue(setupResultWithoutShippingCheck());
+
+    await expect(fixture.service.replaceForMember("member-1", {
+      storeConnectionId: 44,
+      productVariantId: 501,
+      fulfillmentPolicyId: "fulfillment-compatible",
+      returnPolicyId: null,
+      paymentPolicyId: null,
+      idempotencyKey: "listing-policy-004",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_LISTING_POLICY_OVERRIDE_INVALID",
+      context: { productVariantId: 501, invalidFields: ["fulfillmentPolicyId"] },
+    });
+    await expect(fixture.service.replaceManyForMember("member-1", bulkInput())).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_LISTING_POLICY_OVERRIDE_INVALID",
+      context: { productVariantId: 502, invalidFields: ["fulfillmentPolicyId"] },
+    });
+    expect(fixture.repository.lastReplaceInput).toBeNull();
+    expect(fixture.repository.lastBulkInput).toBeNull();
+  });
+
+  it("passes the listing settings read-only refusal through before any persistence", async () => {
+    // getForMember refuses read-only setups (closed, lapsed or suspended
+    // vendors) instead of returning a view, so per-size writers cannot save.
+    const fixture = makeFixture();
+    const readOnly = new DropshipError(
+      "DROPSHIP_LISTING_CONFIG_VENDOR_BLOCKED",
+      "Dropship vendor status does not allow listing configuration changes.",
+      { vendorId: 10, storeConnectionId: 44, retryable: false },
+    );
+    fixture.listingSetup.getForMember.mockRejectedValue(readOnly);
+
+    await expect(fixture.service.replaceForMember("member-1", {
+      storeConnectionId: 44,
+      productVariantId: 501,
+      fulfillmentPolicyId: "fulfillment-compatible",
+      returnPolicyId: null,
+      paymentPolicyId: null,
+      idempotencyKey: "listing-policy-006",
+    })).rejects.toBe(readOnly);
+    await expect(fixture.service.replaceManyForMember("member-1", bulkInput())).rejects.toBe(readOnly);
+    await expect(fixture.service.listForMember("member-1", { storeConnectionId: 44 })).rejects.toBe(readOnly);
+    expect(fixture.repository.lastReplaceInput).toBeNull();
+    expect(fixture.repository.lastBulkInput).toBeNull();
+  });
 });
 
 class FakeRepository implements DropshipEbayListingPolicyOverrideRepository {
@@ -311,12 +377,13 @@ function setupResult(): DropshipEbayListingSetupResult {
     options: {
       merchantLocations: [{ id: "managed-location", name: "Managed" }],
       fulfillmentPolicies: [
-        { id: "fulfillment-default", name: "Default", compatible: true, compatibilityIssues: [] },
-        { id: "fulfillment-compatible", name: "Compatible", compatible: true, compatibilityIssues: [] },
+        { id: "fulfillment-default", name: "Default", compatible: true, compatibilityChecked: true, compatibilityIssues: [] },
+        { id: "fulfillment-compatible", name: "Compatible", compatible: true, compatibilityChecked: true, compatibilityIssues: [] },
         {
           id: "fulfillment-incompatible",
           name: "Too fast",
           compatible: false,
+          compatibilityChecked: true,
           compatibilityIssues: [{ code: "handling_time_too_short", message: "Too fast." }],
         },
       ],
@@ -325,6 +392,44 @@ function setupResult(): DropshipEbayListingSetupResult {
         { id: "return-override", name: "Override" },
       ],
       paymentPolicies: [{ id: "payment-default", name: "Default" }],
+    },
+    revision: 3,
+    access: { canEdit: true, reason: null },
+    checks: { ebay: "checked", fulfillment: { status: "checked" } },
+    storedNames: {
+      fulfillmentPolicyName: "Default",
+      returnPolicyName: "Default",
+      paymentPolicyName: "Default",
+    },
+    storeShelfDefault: null,
+  };
+}
+
+/**
+ * A setup whose Card Shellz shipping could not be read, as the page read
+ * (getViewForMember) reports it: eBay's lists are current, but no fulfillment
+ * policy was judged, so each one is unchecked and not compatible.
+ * getForMember never answers this way; it throws the shipping failure instead.
+ */
+function setupResultWithoutShippingCheck(): DropshipEbayListingSetupResult {
+  const setup = setupResult();
+  return {
+    ...setup,
+    complete: false,
+    fulfillmentCapability: null,
+    checks: {
+      ebay: "checked",
+      fulfillment: { status: "unavailable", reference: "DROPSHIP_EBAY_FULFILLMENT_ROUTING_UNAVAILABLE", kind: "temporary" },
+    },
+    options: {
+      ...setup.options,
+      fulfillmentPolicies: setup.options.fulfillmentPolicies.map((policy) => ({
+        id: policy.id,
+        name: policy.name,
+        compatible: false,
+        compatibilityChecked: false,
+        compatibilityIssues: [],
+      })),
     },
   };
 }
@@ -423,5 +528,276 @@ function bulkInput(): {
       { productVariantId: 502, expectedRevisionId: null, fulfillmentPolicyId: "fulfillment-compatible", returnPolicyId: "return-override", paymentPolicyId: null },
       { productVariantId: 501, expectedRevisionId: 90, fulfillmentPolicyId: null, returnPolicyId: null, paymentPolicyId: "payment-default" },
     ],
+  };
+}
+
+/**
+ * One Card Shellz shipping failure of each kind the listing setup tells apart
+ * (classifyCapabilityFailure): a passing outage, a Card Shellz setup still
+ * being finished, and a store on an eBay site Card Shellz does not list on.
+ * Built fresh per test so no test sees another's error object.
+ */
+const CAPABILITY_FAILURES: ReadonlyArray<{
+  kind: "temporary" | "setup_incomplete" | "marketplace_unsupported";
+  error: () => DropshipError;
+}> = [
+  {
+    kind: "temporary",
+    error: () => new DropshipError(
+      "DROPSHIP_EBAY_FULFILLMENT_ROUTING_UNAVAILABLE",
+      "Card Shellz fulfillment routing could not be verified.",
+      { serviceLevelId: 7, routingCode: null, retryable: true },
+    ),
+  },
+  {
+    kind: "setup_incomplete",
+    error: () => new DropshipError(
+      "DROPSHIP_EBAY_FULFILLMENT_RATE_TABLE_REQUIRED",
+      "Exactly one active Standard dropship rate table is required.",
+      { rateBookId: 34, activeTableIds: [], retryable: false },
+    ),
+  },
+  {
+    kind: "marketplace_unsupported",
+    error: () => new DropshipError(
+      "DROPSHIP_EBAY_FULFILLMENT_MARKETPLACE_UNSUPPORTED",
+      "Card Shellz fulfillment capability validation currently supports EBAY_US only.",
+      { storeConnectionId: 44, marketplaceId: "EBAY_US", retryable: false },
+    ),
+  },
+];
+
+describe("per-size overrides on the live listing setup (getForMember)", () => {
+  it("saves an override when eBay and Card Shellz shipping were both read", async () => {
+    // The control for the refusals below: the same wiring, with shipping read.
+    const fixture = makeLiveSetupFixture({ capability: async () => liveCapability() });
+
+    await fixture.service.replaceForMember("member-1", {
+      storeConnectionId: 44,
+      productVariantId: 501,
+      fulfillmentPolicyId: "fulfillment-compatible",
+      returnPolicyId: "return-override",
+      paymentPolicyId: null,
+      idempotencyKey: "listing-policy-live-001",
+    });
+
+    expect(fixture.getCapability).toHaveBeenCalledExactlyOnceWith({ storeConnectionId: 44, marketplaceId: "EBAY_US" });
+    expect(fixture.repository.lastReplaceInput).toMatchObject({
+      productVariantId: 501,
+      fulfillmentPolicyId: "fulfillment-compatible",
+      returnPolicyId: "return-override",
+    });
+  });
+
+  it.each(CAPABILITY_FAILURES)(
+    "refuses every override with Card Shellz shipping's own error when it is $kind, without writing",
+    async ({ error }) => {
+      const failure = error();
+      const fixture = makeLiveSetupFixture({ capability: async () => { throw failure; } });
+
+      // A fulfillment override, a return/payment-only override, a clear, a
+      // bulk save and the live list: none of them goes on without the check.
+      await expect(fixture.service.replaceForMember("member-1", {
+        storeConnectionId: 44,
+        productVariantId: 501,
+        fulfillmentPolicyId: "fulfillment-compatible",
+        returnPolicyId: null,
+        paymentPolicyId: null,
+        idempotencyKey: "listing-policy-live-002",
+      })).rejects.toBe(failure);
+      await expect(fixture.service.replaceForMember("member-1", {
+        storeConnectionId: 44,
+        productVariantId: 501,
+        fulfillmentPolicyId: null,
+        returnPolicyId: "return-override",
+        paymentPolicyId: "payment-default",
+        idempotencyKey: "listing-policy-live-003",
+      })).rejects.toBe(failure);
+      await expect(fixture.service.replaceForMember("member-1", {
+        storeConnectionId: 44,
+        productVariantId: 501,
+        fulfillmentPolicyId: null,
+        returnPolicyId: null,
+        paymentPolicyId: null,
+        idempotencyKey: "listing-policy-live-004",
+      })).rejects.toBe(failure);
+      await expect(fixture.service.replaceManyForMember("member-1", bulkInput())).rejects.toBe(failure);
+      await expect(fixture.service.listForMember("member-1", { storeConnectionId: 44 })).rejects.toBe(failure);
+
+      expect(fixture.repository.lastReplaceInput).toBeNull();
+      expect(fixture.repository.lastBulkInput).toBeNull();
+      expect(fixture.getCapability).toHaveBeenCalledTimes(5);
+      // Thrown, not shown: the page read's "shown without the shipping check" event is not logged.
+      expect(fixture.setupLogs.map((event) => event.code))
+        .not.toContain("DROPSHIP_EBAY_LISTING_SETUP_CAPABILITY_UNAVAILABLE");
+      fixture.expectNoListingSetupWrites();
+    },
+  );
+
+  it.each([
+    ["an inactive vendor", "closed", "connected", "DROPSHIP_LISTING_CONFIG_VENDOR_BLOCKED"],
+    ["a refresh-failed store of an inactive vendor", "suspended", "refresh_failed", "DROPSHIP_LISTING_CONFIG_VENDOR_BLOCKED"],
+  ] as const)(
+    "refuses with the read-only error for %s, before asking eBay or Card Shellz shipping",
+    async (_label, vendorStatus, storeStatus, code) => {
+      const fixture = makeLiveSetupFixture({ capability: async () => liveCapability(), vendorStatus, storeStatus });
+
+      await expect(fixture.service.replaceForMember("member-1", {
+        storeConnectionId: 44,
+        productVariantId: 501,
+        fulfillmentPolicyId: "fulfillment-compatible",
+        returnPolicyId: null,
+        paymentPolicyId: null,
+        idempotencyKey: "listing-policy-live-005",
+      })).rejects.toMatchObject({ code, context: { vendorId: 10, storeConnectionId: 44, retryable: false } });
+      await expect(fixture.service.replaceManyForMember("member-1", bulkInput())).rejects.toMatchObject({ code });
+
+      expect(fixture.discover).not.toHaveBeenCalled();
+      expect(fixture.getCapability).not.toHaveBeenCalled();
+      expect(fixture.repository.lastReplaceInput).toBeNull();
+      expect(fixture.repository.lastBulkInput).toBeNull();
+      fixture.expectNoListingSetupWrites();
+    },
+  );
+});
+
+/**
+ * The override service on the real listing setup service, faked only at the
+ * setup's edges: the store's saved listing config, eBay's lists and Card
+ * Shellz shipping. The setup's writers, shelves and ship-from location are
+ * spies, so a test sees any call to them.
+ */
+function makeLiveSetupFixture(input: {
+  capability: () => Promise<DropshipEbayFulfillmentCapability>;
+  vendorStatus?: string;
+  storeStatus?: "connected" | "refresh_failed";
+}) {
+  const vendorStatus = input.vendorStatus ?? "active";
+  const storeStatus = input.storeStatus ?? "connected";
+  const config: DropshipStoreListingConfigRecord = {
+    id: 9,
+    storeConnectionId: 44,
+    ...buildDefaultDropshipStoreListingConfig("ebay"),
+    marketplaceConfig: {
+      marketplaceId: "EBAY_US",
+      merchantLocationKey: "cardshellz-dropship-wh-1",
+      businessPolicies: {
+        fulfillmentPolicyId: "fulfillment-default",
+        returnPolicyId: "return-default",
+        paymentPolicyId: "payment-default",
+      },
+    },
+    revision: 3,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+  const listingConfig = {
+    getViewForMember: vi.fn(async (_memberId: string, storeConnectionId: number) => ({
+      vendor: { vendorId: 10, status: vendorStatus },
+      storeConnection: { vendorId: 10, storeConnectionId, platform: "ebay", status: storeStatus, setupStatus: "ready" },
+      config,
+      access: decideDropshipListingConfigAccess(vendorStatus, storeStatus),
+    })),
+    getForMember: vi.fn(),
+    findKeyedRequest: vi.fn(),
+    findConfig: vi.fn(),
+    replaceForMember: vi.fn(),
+    getForAdmin: vi.fn(),
+    replaceForAdmin: vi.fn(),
+  };
+  const discovery: DropshipEbayListingSetupDiscovery = {
+    marketplaceId: "EBAY_US",
+    merchantLocations: [{ id: "cardshellz-dropship-wh-1", name: "Card Shellz Dropship - HQ" }],
+    fulfillmentPolicies: [
+      ebayFulfillmentPolicy("fulfillment-default", "Default"),
+      ebayFulfillmentPolicy("fulfillment-compatible", "Compatible"),
+    ],
+    returnPolicies: [
+      { id: "return-default", name: "Default" },
+      { id: "return-override", name: "Override" },
+    ],
+    paymentPolicies: [{ id: "payment-default", name: "Default" }],
+  };
+  const discover = vi.fn<DropshipEbayListingSetupDirectory["discoverForStoreConnection"]>(async () => discovery);
+  const directory = {
+    discoverForStoreConnection: discover,
+    discoverWithAccessToken: vi.fn(),
+    getFulfillmentPolicyForStoreConnection: vi.fn(),
+    getFulfillmentPolicyWithAccessToken: vi.fn(),
+  } as unknown as DropshipEbayListingSetupDirectory;
+  const getCapability = vi.fn(async (_input: { storeConnectionId: number; marketplaceId: string }) => input.capability());
+  const listLeafCategories = vi.fn();
+  const ensureForStoreConnection = vi.fn();
+  const ensureWithAccessToken = vi.fn();
+  const setupLogs: DropshipLogEvent[] = [];
+  const listingSetup = new DropshipEbayListingSetupService({
+    listingConfig: listingConfig as unknown as ConstructorParameters<typeof DropshipEbayListingSetupService>[0]["listingConfig"],
+    directory,
+    storeShelves: { listLeafCategories },
+    fulfillmentCapabilities: { getForStoreConnection: getCapability },
+    managedLocations: { ensureForStoreConnection, ensureWithAccessToken },
+    logger: {
+      info: (event) => setupLogs.push(event),
+      warn: (event) => setupLogs.push(event),
+      error: (event) => setupLogs.push(event),
+    },
+  });
+  const repository = new FakeRepository();
+  repository.context!.status = storeStatus;
+  const vendorProvisioning = {
+    provisionForMember: vi.fn(async (memberId: string) => ({
+      vendor: { vendorId: 10, memberId },
+      created: false,
+      changedFields: [],
+    })),
+  } as unknown as DropshipVendorProvisioningService;
+  const service = new DropshipEbayListingPolicyOverrideService({
+    vendorProvisioning,
+    repository,
+    listingSetup,
+    clock: { now: () => NOW },
+    logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+  });
+  return {
+    service,
+    repository,
+    discover,
+    getCapability,
+    setupLogs,
+    /** The per-size path only reads the store's listing setup; it never saves it. */
+    expectNoListingSetupWrites(): void {
+      expect(listingConfig.replaceForMember).not.toHaveBeenCalled();
+      expect(listingConfig.replaceForAdmin).not.toHaveBeenCalled();
+      expect(ensureForStoreConnection).not.toHaveBeenCalled();
+      expect(ensureWithAccessToken).not.toHaveBeenCalled();
+      expect(listLeafCategories).not.toHaveBeenCalled();
+    },
+  };
+}
+
+/** An eBay fulfillment policy Card Shellz shipping can honour: one handling day, a service it ships. */
+function ebayFulfillmentPolicy(id: string, name: string): DropshipEbayFulfillmentPolicy {
+  return {
+    id,
+    name,
+    marketplaceId: "EBAY_US",
+    handlingTime: { value: 1, unit: "DAY" },
+    shippingOptions: [{ optionType: "DOMESTIC", shippingServiceCodes: ["USPSParcel"] }],
+    localPickup: false,
+    freightShipping: false,
+    pickupDropOff: false,
+  };
+}
+
+function liveCapability(): DropshipEbayFulfillmentCapability {
+  return {
+    ...setupResult().fulfillmentCapability!,
+    supportedServices: [{
+      carrier: "USPS",
+      ebayServiceCode: "USPSParcel",
+      serviceName: "USPS Ground Advantage",
+      shipStationCarrierCode: "usps",
+      shipStationServiceCode: "usps_ground_advantage",
+    }],
   };
 }

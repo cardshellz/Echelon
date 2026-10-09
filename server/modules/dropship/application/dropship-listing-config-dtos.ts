@@ -39,3 +39,24 @@ export const replaceDropshipStoreListingConfigInputSchema = z.object({
 export type ReplaceDropshipStoreListingConfigInput = z.infer<
   typeof replaceDropshipStoreListingConfigInputSchema
 >;
+
+/**
+ * A whole-config replacement as a writer sends it: the config plus the
+ * revision it was read at. The save is a compare-and-set on that revision
+ * (migration 0728), so a writer that read an older config is refused instead
+ * of overwriting a save it never saw.
+ */
+export const replaceDropshipStoreListingConfigRequestSchema = replaceDropshipStoreListingConfigInputSchema.extend({
+  expectedRevision: z.number().int().positive().max(2_147_483_647),
+}).strict();
+
+export type ReplaceDropshipStoreListingConfigRequest = z.infer<
+  typeof replaceDropshipStoreListingConfigRequestSchema
+>;
+
+/** Request keys are recorded in a ledger whose CHECK allows only these characters (migration 0728). */
+export const dropshipListingConfigIdempotencyKeySchema = z.string()
+  .trim()
+  .min(8)
+  .max(200)
+  .regex(/^[A-Za-z0-9:_-]+$/, "Request keys may only contain letters, numbers, colons, underscores, and hyphens.");

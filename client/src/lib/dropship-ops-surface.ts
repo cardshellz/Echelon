@@ -1500,6 +1500,8 @@ export interface DropshipStoreListingConfigProfileResponse {
   requiredConfigKeys: string[];
   requiredProductFields: DropshipListingRequiredProductField[];
   isActive: boolean;
+  /** Compare-and-set version; every whole-config save sends the one it read (migration 0728). */
+  revision: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -1556,6 +1558,11 @@ export interface DropshipStoreListingConfigInput {
   requiredConfigKeys: string[];
   requiredProductFields: DropshipListingRequiredProductField[];
   isActive: boolean;
+}
+
+/** The whole-config PUT's body: the config and the revision it was read at. */
+export interface DropshipStoreListingConfigReplaceRequest extends DropshipStoreListingConfigInput {
+  expectedRevision: number;
 }
 
 export interface DropshipStoreListingConfigResponse {
@@ -1758,7 +1765,10 @@ export interface DropshipEbayListingSetupOption {
 
 export interface DropshipEbayFulfillmentPolicyOption
 extends DropshipEbayListingSetupOption {
+  /** False whenever compatibility could not be checked. */
   compatible: boolean;
+  /** False when Card Shellz shipping could not be read. Absent from servers before it existed, which always checked. */
+  compatibilityChecked?: boolean;
   compatibilityIssues: Array<{ code: string; message: string }>;
 }
 
@@ -1794,12 +1804,29 @@ export interface DropshipEbayListingSetupSelection {
   paymentPolicyId: string | null;
 }
 
+/** Why a vendor sees a store's listing settings without being able to change them (server: decideDropshipListingConfigAccess). */
+export type DropshipListingConfigReadOnlyReason =
+  | "vendor_not_active"
+  | "store_paused"
+  | "store_disconnecting"
+  | "store_disconnected";
+
+export type DropshipListingConfigAccess =
+  | { canEdit: true; reason: null }
+  | { canEdit: false; reason: DropshipListingConfigReadOnlyReason };
+
+export type DropshipEbayListingSetupFulfillmentCheck =
+  | { status: "checked" }
+  | { status: "unavailable"; reference: string; kind: "temporary" | "setup_incomplete" | "marketplace_unsupported" }
+  | { status: "not_checked" };
+
 export interface DropshipEbayListingSetupResponse {
   storeConnectionId: number;
   marketplaceId: string;
   complete: boolean;
   missingFields: string[];
-  fulfillmentCapability: DropshipEbayFulfillmentCapability;
+  /** Null when Card Shellz shipping was not read for this answer (see checks.fulfillment). */
+  fulfillmentCapability: DropshipEbayFulfillmentCapability | null;
   selection: DropshipEbayListingSetupSelection;
   options: {
     merchantLocations: DropshipEbayListingSetupOption[];
@@ -1807,12 +1834,47 @@ export interface DropshipEbayListingSetupResponse {
     returnPolicies: DropshipEbayListingSetupOption[];
     paymentPolicies: DropshipEbayListingSetupOption[];
   };
+  /**
+   * The fields below came with the listing config revision (migration 0728).
+   * They are optional so a page also reads an answer from a server deployed
+   * before it; a save without a revision is refused and asks for a reload.
+   */
+  revision?: number | null;
+  access?: DropshipListingConfigAccess;
+  checks?: {
+    ebay: "checked" | "not_checked";
+    fulfillment: DropshipEbayListingSetupFulfillmentCheck;
+  };
+  storedNames?: {
+    fulfillmentPolicyName: string | null;
+    returnPolicyName: string | null;
+    paymentPolicyName: string | null;
+  };
+  storeShelfDefault?: { ids: string[]; names: string[] } | null;
+  /** On a save's answer: changed, unchanged (it already said this) or replayed (this request key was saved before). */
+  outcome?: "changed" | "unchanged" | "replayed";
 }
 
 export interface ReplaceDropshipEbayListingSetupInput {
   fulfillmentPolicyId: string;
   returnPolicyId: string;
   paymentPolicyId: string;
+}
+
+/** The setup PUT's body: the policies, the revision they were chosen against, and a request key. */
+export interface DropshipEbayListingSetupSaveRequest {
+  expectedRevision: number;
+  idempotencyKey: string;
+  fulfillmentPolicyId?: string;
+  returnPolicyId?: string;
+  paymentPolicyId?: string;
+  storeShelfDefault?: { ids: string[] } | null;
+}
+
+/** W10, the ship-from repair's body. */
+export interface DropshipEbayShipFromRepairRequest {
+  expectedRevision: number;
+  idempotencyKey: string;
 }
 
 export interface DropshipEbayListingPolicyOverride {
@@ -2760,8 +2822,11 @@ export class DropshipApiError extends Error {
   }
 }
 
-export async function fetchJson<T>(url: string, options?: { signal?: AbortSignal }): Promise<T> {
-  const response = await fetch(url, { credentials: "include", signal: options?.signal });
+export async function fetchJson<T>(
+  url: string,
+  options?: { signal?: AbortSignal; headers?: Record<string, string> },
+): Promise<T> {
+  const response = await fetch(url, { credentials: "include", signal: options?.signal, headers: options?.headers });
   if (!response.ok) {
     throw await responseError(response);
   }
@@ -3397,14 +3462,23 @@ export function parseDropshipListingMode(
  * mode changed. The admin route replaces the whole config, so every other
  * field is carried over from the config just read; nothing is invented.
  */
+/**
+ * The staff listing-mode change: the config exactly as it was read, with only
+ * the mode changed, sent against the revision it was read at, so a save made
+ * in between is refused instead of overwritten.
+ */
 export function buildStoreListingModeChangeInput(
   config: DropshipStoreListingConfigProfileResponse,
   listingMode: DropshipListingMode,
-): DropshipStoreListingConfigInput {
+): DropshipStoreListingConfigReplaceRequest {
   if (!allDropshipListingModes.includes(listingMode)) {
     throw new Error("listingMode is not supported.");
   }
+  if (!Number.isSafeInteger(config.revision) || config.revision <= 0) {
+    throw new Error("The listing config was read without a revision. Reload the page and try again.");
+  }
   return {
+    expectedRevision: config.revision,
     listingMode,
     inventoryMode: config.inventoryMode,
     priceMode: config.priceMode,
