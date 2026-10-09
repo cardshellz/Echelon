@@ -13,6 +13,33 @@ import { editorSchema } from "../../server/modules/channels/adapters/walmart/wal
 
 export const UPDATE_BASE = "/api/channels/77/listing-updates";
 const productType = "Trading Card Sleeves & Holders";
+export function listingChangeHistory(): ListingUpdateView[] {
+  const base = {
+    sku: "ESS-TOP-55PT-SLV-CLR-P100",
+    title: "55PT 3x4 Toploader Essentials Clear+ Easy Glide Combo Pack",
+    reviewHash: "b".repeat(64), productType, changes: { priceCents: 2499 }, issues: [],
+    message: null, createdAt: "2026-10-08T12:00:00.000Z", updatedAt: "2026-10-08T12:00:00.000Z",
+    expiresAt: "2026-10-08T12:15:00.000Z",
+  };
+  return (["accepted", "accepted", "needs_attention", "processing", "uncertain", "queued", "sending"] as const).map((state, index) =>
+    listingUpdateViewSchema.parse({
+      ...base, state,
+      id: `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      submissionId: state === "queued" || state === "sending" ? null : `18DC6ACE719D542B947125C001FFA28D-${index}@AXkBBwA`,
+      updatedAt: new Date(Date.parse(base.updatedAt) - index * 3_600_000).toISOString(),
+      ...(state === "needs_attention" ? {
+        sku: "EG-SLV-STD-5PCK-B500",
+        title: "Easy Glide Soft Sleeves Standard - 500 Count (5 Packs of 100)",
+        message: "The title and images must show the same selling unit. " + "Walmart content review details. ".repeat(15) + "https://example.com/review/" + "x".repeat(180),
+      } : {}),
+      ...(state === "uncertain" ? {
+        sku: "LONG-SKU-" + "X".repeat(40),
+        title: "Long product title ".repeat(25),
+        message: "Walmart has not confirmed whether it received these changes.",
+      } : {}),
+    }),
+  );
+}
 const maintenanceSchema = JSON.parse(
   readFileSync(
     resolve(

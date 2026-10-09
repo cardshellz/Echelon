@@ -78,6 +78,7 @@ export function ChannelListingPublicationWorkspace({
   const bulkPath = `${overviewPath}/listings/bulk`;
   const workbench = location === bulkPath;
   const [tab, setTab] = useState("listings");
+  const [activityTab, setActivityTab] = useState("publications");
   const [draft, setDraft] = useState<ListingDraft | null>(null);
   const [dirty, setDirty] = useState(false);
   const [picking, setPicking] = useState(false);
@@ -458,6 +459,7 @@ export function ChannelListingPublicationWorkspace({
       command.current = null;
       setDirty(false);
       setPickedMetadata(new Map());
+      setActivityTab("publications");
       setTab("activity");
       setNotice(
         "Submission queued. Follow each item's status in the listing feed or Activity.",
@@ -663,7 +665,10 @@ export function ChannelListingPublicationWorkspace({
               }
               onSave={() => void saveDraft()}
               onReview={() => void reviewDraft()}
-              onActivity={() => setTab("activity")}
+              onActivity={() => {
+                setActivityTab("publications");
+                setTab("activity");
+              }}
               onMappingsChanged={async () => {
                 await client.invalidateQueries({ queryKey: [base] });
                 await onMappingsChanged?.();
@@ -680,16 +685,26 @@ export function ChannelListingPublicationWorkspace({
               onSave={savePricing}
             />
           </TabsContent>
-          <TabsContent value="activity" className="space-y-4">
-            <ListingUpdateActivity channelId={channelId} canEdit={canEdit} onEdit={setEditingExistingSku} />
-            <ListingActivity
-              channelId={channelId}
-              connectionId={connectionId}
-              operations={workspace.data.operations}
-              canEdit={canEdit}
-              onReconcile={reconcile}
-              onEditFailed={editFailed}
-            />
+          <TabsContent value="activity">
+            <Tabs value={activityTab} onValueChange={setActivityTab}>
+              <TabsList aria-label="Activity history" className="grid h-auto w-full grid-cols-2 gap-1 sm:w-fit">
+                <TabsTrigger value="publications" className="px-2 sm:px-3">Publication activity</TabsTrigger>
+                <TabsTrigger value="changes" className="px-2 sm:px-3">Listing changes</TabsTrigger>
+              </TabsList>
+              <TabsContent value="publications">
+                <ListingActivity
+                  channelId={channelId}
+                  connectionId={connectionId}
+                  operations={workspace.data.operations}
+                  canEdit={canEdit}
+                  onReconcile={reconcile}
+                  onEditFailed={editFailed}
+                />
+              </TabsContent>
+              <TabsContent value="changes">
+                <ListingUpdateActivity channelId={channelId} canEdit={canEdit} onEdit={setEditingExistingSku} />
+              </TabsContent>
+            </Tabs>
           </TabsContent>
         </Tabs>
         {picking && canEdit && (
@@ -742,6 +757,7 @@ export function ChannelListingPublicationWorkspace({
             onClose={() => setEditingExistingSku(null)}
             onSubmitted={() => {
               setEditingExistingSku(null);
+              setActivityTab("changes");
               setTab("activity");
               setNotice("Listing changes queued. Follow the update in Activity.");
               void client.invalidateQueries({ queryKey: [`/api/channels/${channelId}/listing-updates`] });
