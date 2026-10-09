@@ -2,7 +2,7 @@ import type { Express, Response } from "express";
 import type { z } from "zod";
 import { requirePermission } from "../../../../routes/middleware";
 import type { DropshipListingConfigService } from "../../application/dropship-listing-config-service";
-import { replaceDropshipStoreListingConfigInputSchema } from "../../application/dropship-listing-config-dtos";
+import { replaceDropshipStoreListingConfigRequestSchema } from "../../application/dropship-listing-config-dtos";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipListingConfigServiceFromEnv } from "../../infrastructure/dropship-listing-config.factory";
 import {
@@ -37,7 +37,7 @@ export function registerDropshipListingConfigRoutes(
     async (req, res) => {
       try {
         const storeConnectionId = parsePositiveInteger(req.params.storeConnectionId, "storeConnectionId");
-        const input = parseBody(replaceDropshipStoreListingConfigInputSchema, req.body);
+        const input = parseBody(replaceDropshipStoreListingConfigRequestSchema, req.body);
         const result = await service.replaceForAdmin(storeConnectionId, input, {
           actorType: "admin",
           actorId: sessionUserId(req),
@@ -70,7 +70,7 @@ export function registerDropshipListingConfigRoutes(
     async (req, res) => {
       try {
         const storeConnectionId = parsePositiveInteger(req.params.storeConnectionId, "storeConnectionId");
-        const input = parseBody(replaceDropshipStoreListingConfigInputSchema, req.body);
+        const input = parseBody(replaceDropshipStoreListingConfigRequestSchema, req.body);
         const result = await service.replaceForMember(req.session.dropship!.memberId, storeConnectionId, input);
         return res.json(result);
       } catch (error) {
@@ -83,6 +83,17 @@ export function registerDropshipListingConfigRoutes(
 function parseBody<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, body: unknown): T {
   const result = schema.safeParse(body);
   if (!result.success) {
+    // Every writer now sends the revision it read (migration 0728). A page
+    // loaded before this release does not, and must reload instead of
+    // overwriting a change it never saw.
+    if (result.error.issues.some((issue) => issue.code === "invalid_type"
+      && issue.received === "undefined" && issue.path[0] === "expectedRevision")) {
+      throw new DropshipError(
+        "DROPSHIP_LISTING_CONFIG_REVISION_REQUIRED",
+        "Reload the page to load the latest listing config, then save again.",
+        { retryable: false },
+      );
+    }
     throw new DropshipError("DROPSHIP_INVALID_LISTING_CONFIG_REQUEST", "Dropship listing config request failed validation.", {
       issues: result.error.issues.map((issue) => ({
         path: issue.path.join("."),
@@ -123,6 +134,8 @@ function statusForDropshipListingConfigError(code: string): number {
   switch (code) {
     case "DROPSHIP_INVALID_LISTING_CONFIG_REQUEST":
       return 400;
+    case "DROPSHIP_LISTING_CONFIG_REVISION_REQUIRED":
+      return 428;
     case "DROPSHIP_AUTH_REQUIRED":
       return 401;
     case "DROPSHIP_ENTITLEMENT_REQUIRED":
@@ -131,6 +144,10 @@ function statusForDropshipListingConfigError(code: string): number {
     case "DROPSHIP_STORE_CONNECTION_NOT_FOUND":
       return 404;
     case "DROPSHIP_LISTING_CONFIG_STORE_DISCONNECTED":
+    case "DROPSHIP_LISTING_CONFIG_STORE_PAUSED":
+    case "DROPSHIP_LISTING_CONFIG_STORE_DISCONNECTING":
+    case "DROPSHIP_LISTING_CONFIG_STORE_NOT_WRITABLE":
+    case "DROPSHIP_LISTING_CONFIG_REVISION_CONFLICT":
       return 409;
     default:
       return 500;

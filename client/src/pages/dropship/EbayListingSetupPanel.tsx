@@ -17,14 +17,28 @@ import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
+  postJson,
   putJson,
   queryErrorCode,
   queryErrorMessage,
   DropshipApiError,
+  type DropshipEbayFulfillmentPolicyOption,
   type DropshipEbayListingSetupOption,
   type DropshipEbayListingSetupResponse,
   type ReplaceDropshipEbayListingSetupInput,
 } from "@/lib/dropship-ops-surface";
+import {
+  ListingSetupRequestKeys,
+  buildEbayListingSetupSaveRequest,
+  buildEbayShipFromRepairRequest,
+  listingSetupReadOnlyMessage,
+  listingSetupSaveErrorMessage,
+  listingSetupSavedOption,
+  listingSetupShippingCheckNotice,
+  listingSetupShippingChecked,
+  listingSetupShowsSavedValuesOnly,
+} from "@/lib/dropship-ebay-listing-setup";
+import { fulfillmentPolicyOptionDescription } from "@/lib/dropship-ebay-policy-assignment";
 import { cn } from "@/lib/utils";
 import {
   ebayListingSetupQueryOptions,
@@ -57,10 +71,20 @@ export function EbayListingSetupPanel({
   const [savedMessage, setSavedMessage] = useState("");
   const [savedStoreToRefresh, setSavedStoreToRefresh] = useState<number | null>(null);
   const inFlight = useRef(false);
+  // One key per save attempt; a retry of the same choices reuses it, so a
+  // save whose answer was lost is never applied twice.
+  const saveKeys = useRef(new ListingSetupRequestKeys("ebay-setup"));
+  const repairKeys = useRef(new ListingSetupRequestKeys("ebay-ship-from"));
+  // The answer the draft was last built from, so a newer one keeps the
+  // vendor's unsaved picks (a refetch, or a reload after a revision conflict).
+  const draftBase = useRef<DropshipEbayListingSetupResponse | null>(null);
 
   useEffect(() => {
-    if (!setupQuery.data) return;
-    setDraft(buildEbayListingSetupDraft(setupQuery.data));
+    const next = setupQuery.data;
+    if (!next) return;
+    const previous = draftBase.current;
+    draftBase.current = next;
+    setDraft((current) => rebaseEbayListingSetupDraft(previous, current, next));
   }, [setupQuery.data]);
 
   useEffect(() => {
@@ -70,49 +94,71 @@ export function EbayListingSetupPanel({
     setSavedStoreToRefresh(null);
   }, [storeConnectionId]);
 
-  const draftComplete = Object.values(draft).every((value) => value.trim().length > 0);
-  const draftChanged = useMemo(
-    () => setupQuery.data ? !listingSetupSelectionMatches(setupQuery.data, draft) : false,
-    [draft, setupQuery.data],
-  );
   // A policy Card Shellz filled in because eBay offers only one is a suggestion
   // until saved, so it counts as an unsaved change and is marked as such.
   const suggestedFields = useMemo(
     () => setupQuery.data ? suggestedListingSetupFields(setupQuery.data, draft) : new Set<ListingSetupPolicyField>(),
     [draft, setupQuery.data],
   );
-  // Not draftChanged: a field with nothing saved and nothing chosen differs
-  // from the saved null without holding anything to lose. While a confirmed
-  // save is refreshing, the draft is what was saved and the fields are locked.
+  // Only a picked policy counts: an empty field holds nothing to lose. While a
+  // confirmed save is refreshing, the draft is what was saved and the fields
+  // are locked.
   const unsavedPolicy = useMemo(
     () => savedStoreToRefresh === null && setupQuery.data !== undefined
       && listingSetupHasUnsavedPolicy(setupQuery.data, draft),
     [draft, savedStoreToRefresh, setupQuery.data],
   );
   useUnsavedDraft(`listing-setup:${storeConnectionId}`, "eBay listing setup", unsavedPolicy);
-  const managedLocationNeedsReconciliation = Boolean(
-    setupQuery.data?.missingFields.includes("merchantLocationKey"),
+  // The ship-from repair reloads the setup, so it waits for a policy the
+  // vendor picked. A Card Shellz suggestion does not hold it up: the vendor
+  // can't undo it, and the reload fills it in again.
+  const unsavedPick = useMemo(
+    () => unsavedPolicy && setupQuery.data !== undefined
+      && LISTING_SETUP_POLICY_FIELDS.some((field) => draft[field] !== ""
+        && draft[field] !== (setupQuery.data?.selection[field] ?? "")
+        && !suggestedFields.has(field)),
+    [draft, setupQuery.data, suggestedFields, unsavedPolicy],
   );
+  // A save sends only the policies that changed (the server keeps the rest),
+  // so any one changed policy can be saved, even while another field is empty.
+  const canSave = setupQuery.data !== undefined && listingSetupHasUnsavedPolicy(setupQuery.data, draft);
   const verificationAvailable = setupQuery.isSuccess && !setupQuery.isFetching;
+  const readOnlyMessage = setupQuery.data ? listingSetupReadOnlyMessage(setupQuery.data, storeName) : null;
+  const shippingCheckNotice = setupQuery.data ? listingSetupShippingCheckNotice(setupQuery.data) : null;
+  // Without eBay's lists (a read-only view) each field shows the saved policy only.
+  const savedValuesOnly = setupQuery.data ? listingSetupShowsSavedValuesOnly(setupQuery.data) : false;
+  // The repair needs Card Shellz shipping (it names the warehouse eBay ships
+  // from), so it is offered only when that was read for this answer.
+  const offerShipFromRepair = Boolean(
+    setupQuery.data
+      && setupQuery.data.missingFields.includes("merchantLocationKey")
+      && listingSetupShippingChecked(setupQuery.data)
+      && !savedValuesOnly
+      && !readOnlyMessage,
+  );
 
   async function saveSetup(): Promise<void> {
-    if (!verificationAvailable || !draftComplete || inFlight.current || savedStoreToRefresh !== null) return;
+    if (!verificationAvailable || !canSave || inFlight.current || savedStoreToRefresh !== null) return;
+    if (!setupQuery.data || readOnlyMessage) return;
     inFlight.current = true;
     setSaving(true);
     setSaveError("");
     setSaveAuthorizationError(null);
     setSavedMessage("");
     try {
+      const attempt = { revision: setupQuery.data.revision ?? null, draft };
+      const body = buildEbayListingSetupSaveRequest(setupQuery.data, draft, saveKeys.current.keyFor(attempt));
       const result = await putJson<DropshipEbayListingSetupResponse>(
         `/api/dropship/ebay/listing-setup/${storeConnectionId}`,
-        draft,
+        body,
       );
+      saveKeys.current.settled();
       setDraft(buildEbayListingSetupDraft(result));
       setSavedStoreToRefresh(result.storeConnectionId);
       onConfigurationChange();
       await refreshAfterConfirmedSave(() => synchronizeSavedEbayListingSetup(queryClient, result));
     } catch (caught) {
-      setSaveError(caught instanceof Error ? caught.message : "eBay listing setup could not be saved.");
+      setSaveError(listingSetupSaveErrorMessage(caught, "eBay listing setup could not be saved."));
       setSaveAuthorizationError(
         ["DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED", "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED"].includes(queryErrorCode(caught) ?? "")
           ? caught
@@ -124,12 +170,54 @@ export function EbayListingSetupPanel({
     }
   }
 
-  async function refreshAfterConfirmedSave(refresh: () => Promise<void>): Promise<void> {
+  /**
+   * W10: points this store's listings at the Card Shellz-managed eBay location
+   * again. Changes no policy, and reloads the setup, so it waits until an
+   * unsaved policy change is saved or undone rather than drop it.
+   */
+  async function repairShipFrom(): Promise<void> {
+    if (!verificationAvailable || inFlight.current || savedStoreToRefresh !== null || unsavedPick) return;
+    if (!setupQuery.data || readOnlyMessage) return;
+    inFlight.current = true;
+    setSaving(true);
+    setSaveError("");
+    setSaveAuthorizationError(null);
+    setSavedMessage("");
+    try {
+      const attempt = { revision: setupQuery.data.revision ?? null };
+      const result = await postJson<DropshipEbayListingSetupResponse>(
+        `/api/dropship/ebay/listing-setup/${storeConnectionId}/ship-from/repair`,
+        buildEbayShipFromRepairRequest(setupQuery.data, repairKeys.current.keyFor(attempt)),
+      );
+      repairKeys.current.settled();
+      setSavedStoreToRefresh(result.storeConnectionId);
+      onConfigurationChange();
+      await refreshAfterConfirmedSave(
+        () => synchronizeSavedEbayListingSetup(queryClient, result),
+        "Ship-from location updated. Queue any listing that failed for it again.",
+      );
+    } catch (caught) {
+      setSaveError(listingSetupSaveErrorMessage(caught, "The ship-from location could not be updated.", "ship_from_repair"));
+      setSaveAuthorizationError(
+        ["DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED", "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED"].includes(queryErrorCode(caught) ?? "")
+          ? caught
+          : null,
+      );
+    } finally {
+      inFlight.current = false;
+      setSaving(false);
+    }
+  }
+
+  async function refreshAfterConfirmedSave(
+    refresh: () => Promise<void>,
+    confirmedMessage = "Store defaults saved and listing policies updated. Generate a new preview to use them.",
+  ): Promise<void> {
     try {
       await refresh();
       setSavedStoreToRefresh(null);
       setSaveError("");
-      setSavedMessage("Store defaults saved and listing policies updated. Generate a new preview to use them.");
+      setSavedMessage(confirmedMessage);
     } catch {
       setSaveError("Your store defaults were saved, but listing policies could not be refreshed. Retry the refresh below; your saved changes will not be submitted again.");
     }
@@ -169,7 +257,7 @@ export function EbayListingSetupPanel({
               ? "w-fit border-emerald-200 bg-emerald-50 text-emerald-800"
               : "w-fit border-amber-300 bg-amber-50 text-amber-900"}
           >
-            {!verificationAvailable ? "Verification pending" : setupQuery.data.complete ? "Ready" : "Setup required"}
+            {listingSetupStatusLabel(setupQuery.data, { verificationAvailable, readOnly: readOnlyMessage !== null })}
           </Badge>
         )}
       </div>
@@ -205,52 +293,78 @@ export function EbayListingSetupPanel({
             <span className="text-zinc-500">Marketplace</span>
             <span className="ml-2 font-medium">{setupQuery.data.marketplaceId}</span>
           </div>
+          {readOnlyMessage && (
+            <div role="status" className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+              {readOnlyMessage}
+            </div>
+          )}
+          {shippingCheckNotice && (
+            <div role="status" className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+              <p>{shippingCheckNotice.message}</p>
+              <p className="mt-1 text-xs text-amber-900">Reference: {shippingCheckNotice.reference}</p>
+            </div>
+          )}
           <FulfillmentCapabilitySummary setup={setupQuery.data} />
           <div className="grid gap-4 md:grid-cols-2">
             <ListingSetupField
-              disabled={saving || savedStoreToRefresh !== null}
+              disabled={saving || savedStoreToRefresh !== null || readOnlyMessage !== null}
               label="Fulfillment policy"
-              placeholder="Choose a fulfillment policy"
+              placeholder={savedValuesOnly ? "None saved" : "Choose a fulfillment policy"}
               searchPlaceholder="Search fulfillment policies..."
               emptyMessage="No matching fulfillment policies."
-              options={setupQuery.data.options.fulfillmentPolicies.map((policy) => ({
-                ...policy,
-                disabled: !policy.compatible,
-                description: policy.compatible
-                  ? "Compatible with Card Shellz fulfillment"
-                  : policy.compatibilityIssues[0]?.message ?? "Not compatible",
-              }))}
+              savedValuesOnly={savedValuesOnly}
+              options={savedValuesOnly
+                ? listingSetupSavedOption(setupQuery.data, "fulfillmentPolicyId")
+                : fulfillmentPolicyDisplayOptions(setupQuery.data.options.fulfillmentPolicies)}
               value={draft.fulfillmentPolicyId}
               suggested={suggestedFields.has("fulfillmentPolicyId")}
               onValueChange={(value) => setDraft((current) => ({ ...current, fulfillmentPolicyId: value }))}
             />
             <ListingSetupField
-              disabled={saving || savedStoreToRefresh !== null}
+              disabled={saving || savedStoreToRefresh !== null || readOnlyMessage !== null}
               label="Return policy"
-              placeholder="Choose a return policy"
+              placeholder={savedValuesOnly ? "None saved" : "Choose a return policy"}
               searchPlaceholder="Search return policies..."
               emptyMessage="No matching return policies."
-              options={setupQuery.data.options.returnPolicies}
+              savedValuesOnly={savedValuesOnly}
+              options={savedValuesOnly
+                ? listingSetupSavedOption(setupQuery.data, "returnPolicyId")
+                : setupQuery.data.options.returnPolicies}
               value={draft.returnPolicyId}
               suggested={suggestedFields.has("returnPolicyId")}
               onValueChange={(value) => setDraft((current) => ({ ...current, returnPolicyId: value }))}
             />
             <ListingSetupField
-              disabled={saving || savedStoreToRefresh !== null}
+              disabled={saving || savedStoreToRefresh !== null || readOnlyMessage !== null}
               label="Payment policy"
-              placeholder="Choose a payment policy"
+              placeholder={savedValuesOnly ? "None saved" : "Choose a payment policy"}
               searchPlaceholder="Search payment policies..."
               emptyMessage="No matching payment policies."
-              options={setupQuery.data.options.paymentPolicies}
+              savedValuesOnly={savedValuesOnly}
+              options={savedValuesOnly
+                ? listingSetupSavedOption(setupQuery.data, "paymentPolicyId")
+                : setupQuery.data.options.paymentPolicies}
               value={draft.paymentPolicyId}
               suggested={suggestedFields.has("paymentPolicyId")}
               onValueChange={(value) => setDraft((current) => ({ ...current, paymentPolicyId: value }))}
             />
           </div>
 
-          {managedLocationNeedsReconciliation && (
-            <div className="mt-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
-              Card Shellz needs to create or repair the eBay warehouse destination for this store. Save setup to reconcile it automatically; the destination remains managed by Card Shellz.
+          {offerShipFromRepair && (
+            <div className="mt-4 flex flex-col gap-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 sm:flex-row sm:items-center sm:justify-between">
+              <span>
+                Card Shellz needs to update where your items ship from. It changes no policy.
+                {unsavedPick && <span className="mt-1 block text-xs">Save or undo your policy change first.</span>}
+              </span>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-fit"
+                disabled={!verificationAvailable || saving || savedStoreToRefresh !== null || unsavedPick}
+                onClick={() => void repairShipFrom()}
+              >
+                {saving ? "Updating ship-from location" : "Update ship-from location"}
+              </Button>
             </div>
           )}
           {hasMissingVendorOptions(setupQuery.data) && (
@@ -301,7 +415,7 @@ export function EbayListingSetupPanel({
             <Button
               type="button"
               className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-              disabled={!verificationAvailable || saving || savedStoreToRefresh !== null || !draftComplete || (!draftChanged && !managedLocationNeedsReconciliation)}
+              disabled={!verificationAvailable || saving || savedStoreToRefresh !== null || !canSave || readOnlyMessage !== null}
               onClick={saveSetup}
             >
               <Save className="h-4 w-4" />
@@ -366,6 +480,9 @@ function FulfillmentCapabilitySummary({
   setup: DropshipEbayListingSetupResponse;
 }) {
   const capability = setup.fulfillmentCapability;
+  // Not read for this answer (read-only, or Card Shellz shipping unavailable,
+  // which the notice above explains).
+  if (!capability) return null;
   const carriers = [...new Set(
     capability.supportedServices.map((service) => service.carrier),
   )];
@@ -441,6 +558,7 @@ function ListingSetupField({
   onValueChange,
   options,
   placeholder,
+  savedValuesOnly,
   searchPlaceholder,
   suggested,
   value,
@@ -451,6 +569,8 @@ function ListingSetupField({
   onValueChange: (value: string) => void;
   options: readonly ListingSetupDisplayOption[];
   placeholder: string;
+  /** The options are the saved policy only, not eBay's list, so an empty list says nothing about eBay. */
+  savedValuesOnly: boolean;
   searchPlaceholder: string;
   /** Card Shellz filled this in because eBay offers only one choice; it is not saved yet. */
   suggested: boolean;
@@ -472,7 +592,7 @@ function ListingSetupField({
         />
       </div>
       {suggested && <p className="mt-1 text-xs text-amber-800">Suggested · not saved</p>}
-      {options.length === 0 && (
+      {options.length === 0 && !savedValuesOnly && (
         <p className="mt-1 text-xs text-amber-800">No eligible options were returned by eBay.</p>
       )}
     </div>
@@ -580,17 +700,55 @@ export function ListingSetupCombobox({
   );
 }
 
+/**
+ * The draft a loaded answer starts from: each saved policy that eBay still
+ * offers (and, for shipping, that fits or could not be checked), else the
+ * only choice eBay offers. Without eBay's lists it is the saved selection.
+ */
 export function buildEbayListingSetupDraft(
   setup: DropshipEbayListingSetupResponse,
 ): ReplaceDropshipEbayListingSetupInput {
+  if (listingSetupShowsSavedValuesOnly(setup)) {
+    return {
+      fulfillmentPolicyId: setup.selection.fulfillmentPolicyId ?? "",
+      returnPolicyId: setup.selection.returnPolicyId ?? "",
+      paymentPolicyId: setup.selection.paymentPolicyId ?? "",
+    };
+  }
   return {
-    fulfillmentPolicyId: selectedOrOnly(
+    fulfillmentPolicyId: savedFulfillmentPolicyOrOnly(
       setup.selection.fulfillmentPolicyId,
-      setup.options.fulfillmentPolicies.filter((policy) => policy.compatible),
+      setup.options.fulfillmentPolicies,
     ),
     returnPolicyId: selectedOrOnly(setup.selection.returnPolicyId, setup.options.returnPolicies),
     paymentPolicyId: selectedOrOnly(setup.selection.paymentPolicyId, setup.options.paymentPolicies),
   };
+}
+
+/** Choosable shipping policies: only those checked and found to fit Card Shellz shipping. */
+function fulfillmentPolicyDisplayOptions(
+  policies: readonly DropshipEbayFulfillmentPolicyOption[],
+): ListingSetupDisplayOption[] {
+  return policies.map((policy) => ({
+    ...policy,
+    disabled: !policy.compatible,
+    description: fulfillmentPolicyOptionDescription(policy),
+  }));
+}
+
+/**
+ * The saved shipping policy stays when eBay still offers it and it fits, or
+ * when it could not be checked (Card Shellz shipping unavailable): not being
+ * able to check it is no reason to drop it. Only a checked, fitting policy is
+ * ever filled in on the vendor's behalf.
+ */
+function savedFulfillmentPolicyOrOnly(
+  savedId: string | null,
+  policies: readonly DropshipEbayFulfillmentPolicyOption[],
+): string {
+  const saved = savedId ? policies.find((policy) => policy.id === savedId) : undefined;
+  if (saved && (saved.compatible || saved.compatibilityChecked === false)) return saved.id;
+  return selectedOrOnly(null, policies.filter((policy) => policy.compatible));
 }
 
 type ListingSetupPolicyField = keyof ReplaceDropshipEbayListingSetupInput;
@@ -635,17 +793,70 @@ function selectedOrOnly(
   return options.length === 1 ? options[0].id : "";
 }
 
-function listingSetupSelectionMatches(
-  setup: DropshipEbayListingSetupResponse,
+/**
+ * The draft for a newly loaded answer. Each policy the vendor picked and has
+ * not saved (it differs from what the previous answer had saved, and Card
+ * Shellz did not fill it in) stays picked while the new answer still lets it
+ * be chosen; every other field starts from the new answer. So a refetch, or a
+ * reload after another window saved, never throws a pick away. Another store's
+ * answer starts over.
+ */
+export function rebaseEbayListingSetupDraft(
+  previous: DropshipEbayListingSetupResponse | null,
   draft: ReplaceDropshipEbayListingSetupInput,
-): boolean {
-  return setup.selection.fulfillmentPolicyId === draft.fulfillmentPolicyId
-    && setup.selection.returnPolicyId === draft.returnPolicyId
-    && setup.selection.paymentPolicyId === draft.paymentPolicyId;
+  next: DropshipEbayListingSetupResponse,
+): ReplaceDropshipEbayListingSetupInput {
+  const rebuilt = buildEbayListingSetupDraft(next);
+  if (!previous || previous.storeConnectionId !== next.storeConnectionId) return rebuilt;
+  const suggested = suggestedListingSetupFields(previous, draft);
+  const result = { ...rebuilt };
+  for (const field of LISTING_SETUP_POLICY_FIELDS) {
+    const picked = draft[field];
+    if (picked === "" || picked === (previous.selection[field] ?? "") || suggested.has(field)) continue;
+    if (listingSetupPolicyChoosable(next, field, picked)) result[field] = picked;
+  }
+  return result;
 }
 
-function hasMissingVendorOptions(setup: DropshipEbayListingSetupResponse): boolean {
-  return !setup.options.fulfillmentPolicies.some((policy) => policy.compatible)
+/** Whether this answer lets the vendor pick this policy: eBay lists it, and a shipping policy was checked and fits. */
+function listingSetupPolicyChoosable(
+  setup: DropshipEbayListingSetupResponse,
+  field: ListingSetupPolicyField,
+  id: string,
+): boolean {
+  if (listingSetupShowsSavedValuesOnly(setup)) return false;
+  if (field === "fulfillmentPolicyId") {
+    return setup.options.fulfillmentPolicies.some((policy) => policy.id === id && policy.compatible);
+  }
+  const options = field === "returnPolicyId" ? setup.options.returnPolicies : setup.options.paymentPolicies;
+  return options.some((option) => option.id === id);
+}
+
+/**
+ * The badge words. "Setup required" only when the setup was fully checked and
+ * something is missing: a view-only store, or one whose shipping could not be
+ * checked, is not known to need setup.
+ */
+export function listingSetupStatusLabel(
+  setup: DropshipEbayListingSetupResponse,
+  state: { verificationAvailable: boolean; readOnly: boolean },
+): string {
+  if (!state.verificationAvailable) return "Verification pending";
+  if (state.readOnly || listingSetupShowsSavedValuesOnly(setup)) return "View only";
+  if (!listingSetupShippingChecked(setup)) return "Not checked";
+  return setup.complete ? "Ready" : "Setup required";
+}
+
+/**
+ * Whether eBay lacks a policy the vendor must create in Seller Hub. Says
+ * nothing without eBay's lists, and does not call shipping policies missing
+ * when they could not be checked.
+ */
+export function hasMissingVendorOptions(setup: DropshipEbayListingSetupResponse): boolean {
+  if (listingSetupShowsSavedValuesOnly(setup)) return false;
+  const fulfillmentMissing = setup.options.fulfillmentPolicies.length === 0
+    || (listingSetupShippingChecked(setup) && !setup.options.fulfillmentPolicies.some((policy) => policy.compatible));
+  return fulfillmentMissing
     || setup.options.returnPolicies.length === 0
     || setup.options.paymentPolicies.length === 0;
 }

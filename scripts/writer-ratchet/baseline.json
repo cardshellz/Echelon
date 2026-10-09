@@ -230,6 +230,9 @@
   "dropship.dropship_insurance_pool_ledger": [
     "modules/dropship"
   ],
+  "dropship.dropship_listing_config_requests": [
+    "modules/dropship"
+  ],
   "dropship.dropship_listing_content_revisions": [
     "modules/dropship"
   ],

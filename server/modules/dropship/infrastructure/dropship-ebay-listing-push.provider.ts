@@ -306,7 +306,9 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     if (location.merchantLocationKey !== input.config.merchantLocationKey) {
       throw new DropshipError(
         "DROPSHIP_EBAY_MANAGED_LOCATION_CONFIG_MISMATCH",
-        "Save eBay listing setup before pushing so it uses the Card Shellz-managed inventory location.",
+        // This text reaches the vendor's failure email as is
+        // (dropship-listing-push-worker-service.ts, describeFailedListingPushJob).
+        "Card Shellz needs to update where your eBay listings ship from. Open Listing settings, choose Update ship-from location, then queue the listing again.",
         {
           storeConnectionId: input.credential.storeConnectionId,
           originWarehouseId,

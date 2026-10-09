@@ -5,7 +5,12 @@ const defaults = { fulfillmentPolicyId: "ground", returnPolicyId: "returns", pay
 const saved = { storeConnectionId: 1, verification: "not_checked", defaults,
   assignments: [{ productVariantId: 101, revisionId: 4, fulfillmentPolicyId: null, returnPolicyId: "return-override",
     paymentPolicyId: null, updatedAt: "2026-09-08T12:00:00.000Z" }], fetchedAt: "2026-09-08T12:00:00.000Z" };
+// The setup GET as the server answers since listing config revisions (migration 0728): a save
+// sends this revision back, so the panel can save from this answer.
 const setup = { storeConnectionId: 1, marketplaceId: "EBAY_US", complete: true, missingFields: [],
+  revision: 3, access: { canEdit: true, reason: null }, checks: { ebay: "checked", fulfillment: { status: "checked" } },
+  storedNames: { fulfillmentPolicyName: "USPS Ground Advantage", returnPolicyName: "30-day returns", paymentPolicyName: "Managed payments" },
+  storeShelfDefault: null,
   selection: { merchantLocationKey: "managed", ...defaults },
   fulfillmentCapability: { marketplaceId: "EBAY_US", requiredHandlingTimeBusinessDays: 1, destinationCountry: "US",
     destinationRegions: ["PA"], destinationCoverageComplete: true, supportedServices: [], evidenceHash: "fixture",

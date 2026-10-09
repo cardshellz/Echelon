@@ -12,6 +12,7 @@ import { createDropshipEbayRegistrationCredentialProviderFromEnv } from "./drops
 import { EbayDropshipListingSetupDirectory } from "./dropship-ebay-listing-setup.directory";
 import { createDropshipEbayFulfillmentCapabilityProviderFromEnv } from "./dropship-ebay-fulfillment-capability.provider";
 import { PgDropshipEbayManagedLocationProvider } from "./dropship-ebay-managed-location.provider";
+import { EbayDropshipStoreCategoryDirectory } from "./dropship-ebay-store-category.directory";
 import { createDropshipListingConfigServiceFromEnv } from "./dropship-listing-config.factory";
 
 export function createDropshipEbayListingSetupServiceFromEnv(): DropshipEbayListingSetupService {
@@ -21,6 +22,7 @@ export function createDropshipEbayListingSetupServiceFromEnv(): DropshipEbayList
     directory: new EbayDropshipListingSetupDirectory(
       credentials,
     ),
+    storeShelves: new EbayDropshipStoreCategoryDirectory(credentials),
     fulfillmentCapabilities: createDropshipEbayFulfillmentCapabilityProviderFromEnv(),
     managedLocations: new PgDropshipEbayManagedLocationProvider({ credentials }),
     logger: makeDropshipListingConfigLogger(),
@@ -57,6 +59,16 @@ export class EbayDropshipListingSetupPostConnectProvider
         });
       }
     } catch (error) {
+      // A save that landed while this ran wins: the compare-and-set refused
+      // the automatic setup so it could not overwrite it. Expected, not a fault.
+      if (error instanceof DropshipError && error.code === "DROPSHIP_LISTING_CONFIG_REVISION_CONFLICT") {
+        this.logger.info({
+          code: "DROPSHIP_EBAY_LISTING_SETUP_AUTO_CONFIG_SUPERSEDED",
+          message: "Automatic eBay listing setup was skipped because the store's settings changed while it ran.",
+          context: { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId },
+        });
+        return;
+      }
       // Listing setup is a push prerequisite, not a reason to discard otherwise
       // valid OAuth credentials. Catalog remains available and exposes the
       // actionable setup error to the vendor.

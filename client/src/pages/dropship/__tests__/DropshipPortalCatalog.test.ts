@@ -131,7 +131,11 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(overrideSource).toContain("Check listings on this page");
     expect(overrideSource).toContain("checked across pages and filters");
     expect(overrideSource).toContain("<EbayListingPolicyBulkDialog");
-    expect(catalogSource).toContain("key={selectedStoreConnectionIdNumber}");
+    // Each store-scoped panel is keyed by the store, with keys unique among
+    // the siblings, so a store switch unmounts the previous store's panels.
+    expect(catalogSource).toContain("key={`listing-setup-${selectedStoreConnectionIdNumber}`}");
+    expect(catalogSource).toContain("key={`policy-override-${selectedStoreConnectionIdNumber}`}");
+    expect(catalogSource).not.toContain("key={selectedStoreConnectionIdNumber}");
     expect(overrideSource).toContain("Refresh policies");
     expect(overrideSource).not.toContain("putJson");
   });

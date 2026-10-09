@@ -53,7 +53,7 @@ export function ebayPolicyDisplayOptions(data: DropshipEbayListingPolicyOverride
   if (field === "fulfillmentPolicyId") return data.options.fulfillmentPolicies.map((option) => ({
     ...option,
     disabled: !option.compatible,
-    description: option.compatible ? "Compatible with Card Shellz fulfillment" : option.compatibilityIssues[0]?.message ?? "Not compatible",
+    description: fulfillmentPolicyOptionDescription(option),
   }));
   return field === "returnPolicyId" ? data.options.returnPolicies : data.options.paymentPolicies;
 }
@@ -61,3 +61,19 @@ export function ebayPolicyDisplayOptions(data: DropshipEbayListingPolicyOverride
 export const EBAY_POLICY_LABELS: Record<EbayPolicyField, string> = {
   fulfillmentPolicyId: "Fulfillment policy", returnPolicyId: "Return policy", paymentPolicyId: "Payment policy",
 };
+
+/**
+ * What a shipping policy option says: fits, does not fit (and why), or could
+ * not be checked because Card Shellz shipping could not be read. An unchecked
+ * policy is never called "Not compatible".
+ */
+export function fulfillmentPolicyOptionDescription(option: {
+  compatible: boolean;
+  compatibilityChecked?: boolean;
+  compatibilityIssues: ReadonlyArray<{ message: string }>;
+}): string {
+  if (option.compatibilityChecked === false) return "Can't check with Card Shellz shipping right now";
+  return option.compatible
+    ? "Compatible with Card Shellz fulfillment"
+    : option.compatibilityIssues[0]?.message ?? "Not compatible";
+}

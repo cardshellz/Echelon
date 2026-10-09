@@ -151,6 +151,28 @@ describe("listingPushNextStep", () => {
     expect(listingPushNextStep("SOMETHING_NEW", true)).toContain("Queue the listing again in a few minutes.");
     expect(listingPushNextStep(null, null)).toBe("Fix the reason above and queue the listing again, or contact support with this message.");
   });
+
+  it("sends a vendor whose listing ships from an outdated warehouse to the ship-from update, retryable or not", () => {
+    const step = "Card Shellz changed the warehouse your listings ship from. In Listing settings, choose Update ship-from location, then queue the listing again.";
+    for (const retryable of [true, false, null]) {
+      expect(listingPushNextStep("DROPSHIP_EBAY_MANAGED_LOCATION_CONFIG_MISMATCH", retryable)).toBe(step);
+    }
+  });
+});
+
+describe("ship-from location mismatch", () => {
+  it("shows the server's vendor words as the reason and the ship-from update as the step", () => {
+    const outcome = describeListingPushOutcome(job({ status: "failed", items: [item({ status: "failed",
+      errorCode: "DROPSHIP_EBAY_MANAGED_LOCATION_CONFIG_MISMATCH", retryable: false, listingUrl: null,
+      errorMessage: "Card Shellz needs to update where your eBay listings ship from. Open Listing settings, choose Update ship-from location, then queue the listing again.",
+    })] }), "marz_cards");
+    expect(outcome.tone).toBe("failed");
+    expect(outcome.items[0]).toMatchObject({
+      state: "failed",
+      line: "Could not list: Card Shellz needs to update where your eBay listings ship from. Open Listing settings, choose Update ship-from location, then queue the listing again.",
+      nextStep: "Card Shellz changed the warehouse your listings ship from. In Listing settings, choose Update ship-from location, then queue the listing again.",
+    });
+  });
 });
 
 describe("listingPushStoreLabel", () => {

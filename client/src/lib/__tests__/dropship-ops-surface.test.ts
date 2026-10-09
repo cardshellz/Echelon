@@ -161,6 +161,31 @@ describe("dropship ops surface client helpers", () => {
     expect(queryErrorCode(new Error("Unstructured error"))).toBeNull();
   });
 
+  it("forwards the caller's headers and abort signal on a read, with the session cookie", async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ ok: true }) }) as Response);
+    vi.stubGlobal("fetch", fetchMock);
+    const signal = new AbortController().signal;
+
+    await expect(fetchJson("/api/dropship/ebay/listing-setup/44", {
+      signal, headers: { "X-Dropship-Listing-Setup-Contract": "2" },
+    })).resolves.toEqual({ ok: true });
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/dropship/ebay/listing-setup/44", {
+      credentials: "include", signal, headers: { "X-Dropship-Listing-Setup-Contract": "2" },
+    });
+  });
+
+  it("adds no headers to a read whose caller sent none", async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => [] }) as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchJson("/api/dropship/orders");
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/dropship/orders", {
+      credentials: "include", signal: undefined, headers: undefined,
+    });
+  });
+
   it("treats price and content conflicts as a stale listing preview", () => {
     const apiError = (code: string) => new DropshipApiError({ message: code, status: 409, code });
     expect(isStaleListingPreviewError(apiError("DROPSHIP_LISTING_PRICE_VERSION_CONFLICT"))).toBe(true);
@@ -2728,12 +2753,14 @@ describe("store listing mode change", () => {
     requiredConfigKeys: ["marketplaceId"],
     requiredProductFields: ["sku" as const],
     isActive: true,
+    revision: 4,
     createdAt: "2026-09-01T00:00:00.000Z",
     updatedAt: "2026-09-01T00:00:00.000Z",
   };
 
-  it("changes only the listing mode and carries every other field over", () => {
+  it("changes only the listing mode and carries every other field over, against the revision it was read at", () => {
     expect(buildStoreListingModeChangeInput(config, "live")).toEqual({
+      expectedRevision: 4,
       listingMode: "live",
       inventoryMode: "managed_quantity_sync",
       priceMode: "vendor_defined",
@@ -2749,6 +2776,29 @@ describe("store listing mode change", () => {
     expect(input.marketplaceConfig).not.toBe(config.marketplaceConfig);
     expect(input.requiredConfigKeys).not.toBe(config.requiredConfigKeys);
     expect(input.requiredProductFields).not.toBe(config.requiredProductFields);
+  });
+
+  it("sends the revision exactly as read, however many saves came before", () => {
+    expect(buildStoreListingModeChangeInput({ ...config, revision: 1 }, "manual_only").expectedRevision).toBe(1);
+    expect(buildStoreListingModeChangeInput({ ...config, revision: Number.MAX_SAFE_INTEGER }, "live").expectedRevision)
+      .toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  it("refuses to build a change from a config read without a revision, so a save in between is never overwritten", () => {
+    const reload = "The listing config was read without a revision. Reload the page and try again.";
+    // A server from before revisions sends none; the rest are values no read can carry.
+    const { revision: _omitted, ...withoutRevision } = config;
+    expect(() => buildStoreListingModeChangeInput(withoutRevision as typeof config, "live")).toThrow(reload);
+    for (const revision of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, null]) {
+      expect(() => buildStoreListingModeChangeInput({ ...config, revision: revision as number }, "live"), String(revision))
+        .toThrow(reload);
+    }
+  });
+
+  it("does not change the config it was read from", () => {
+    const frozen = Object.freeze({ ...config, marketplaceConfig: Object.freeze({ ...config.marketplaceConfig }) });
+    buildStoreListingModeChangeInput(frozen, "live");
+    expect(frozen).toEqual(config);
   });
 
   it("refuses a mode the server does not know", () => {

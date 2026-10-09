@@ -1,3 +1,4 @@
+import { marketplaceConfigForListingIntent } from "../domain/ebay-listing-setup-config";
 import type {
   DropshipCanonicalListingContent,
   DropshipMarketplaceListingProvider,
@@ -96,7 +97,8 @@ export class ConfigDrivenDropshipMarketplaceListingProvider implements DropshipM
         weightGrams: input.content.weightGrams,
         priceCents: input.priceCents,
         quantity: input.quantity,
-        marketplaceConfig: input.config.marketplaceConfig,
+        // Display-only names and the shelf default stay out of the hashed intent.
+        marketplaceConfig: marketplaceConfigForListingIntent(input.config.marketplaceConfig),
       },
       blockers,
       warnings,
