@@ -247,6 +247,38 @@ const scope = () => {
   return s;
 };
 describe("preview scope and read-only cache", () => {
+  it("reuses the warmed verified customer context for catalog pricing and isolates customer mappings, actors and expiry", async () => {
+    const h = harness();
+    await h.service.warm(scope(), "staff-a");
+    const [one, two] = await Promise.all([
+      h.service.catalogSnapshot(scope(), "staff-a"),
+      h.service.catalogSnapshot(scope(), "staff-a"),
+    ]);
+    expect(one).toEqual(h.context.snapshot);
+    expect(two).toEqual(one);
+    one.memberPlan = "mutated-browser-copy";
+    expect(
+      (await h.service.catalogSnapshot(scope(), "staff-a")).memberPlan,
+    ).toBe(h.context.snapshot.memberPlan);
+    expect(h.provider.readOrder).toHaveBeenCalledTimes(1);
+    await h.service.catalogSnapshot(scope(), "staff-b");
+    expect(h.provider.readOrder).toHaveBeenCalledTimes(2);
+    h.reference.externalCustomerId = "999";
+    await expect(
+      h.service.catalogSnapshot(scope(), "staff-a"),
+    ).rejects.toMatchObject({ code: "ORDER_EDIT_IDENTITY_CHANGED" });
+    h.reference.externalCustomerId = "8";
+    h.advance(ORDER_EDIT_PREVIEW_TTL_MS);
+    await h.service.catalogSnapshot(scope(), "staff-a");
+    expect(h.provider.readOrder).toHaveBeenCalledTimes(4);
+    h.reference.activeOperationId = "active-edit";
+    await expect(
+      h.service.catalogSnapshot(scope(), "staff-a"),
+    ).rejects.toMatchObject({ code: "ORDER_EDIT_ALREADY_ACTIVE" });
+    expect(h.provider.preview).not.toHaveBeenCalled();
+    expect(h.provider.commit).not.toHaveBeenCalled();
+    expect(h.warehouse.acquire).not.toHaveBeenCalled();
+  });
   it("warms once, deduplicates identical previews and never acquires holds or creates operations", async () => {
     const h = harness();
     await h.service.warm(scope(), "staff-a");

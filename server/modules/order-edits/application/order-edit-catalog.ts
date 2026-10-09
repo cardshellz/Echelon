@@ -6,6 +6,12 @@ import type {
   OrderEditCatalogVariants,
   OrderEditCatalogVariantsInput,
 } from "@shared/order-edits/order-edit-catalog";
+import type { OrderEditSnapshot } from "./order-edit-provider";
+
+export type OrderEditCatalogPricingContext = Pick<
+  OrderEditSnapshot,
+  "connectionId" | "customerId" | "memberPlan" | "memberPricingEnabled"
+>;
 
 /** Discovery only. Quote and commit must re-read prices, discounts and stock. */
 export interface OrderEditCatalog {
@@ -20,5 +26,6 @@ export interface OrderEditCatalog {
   productVariants(
     connectionId: number,
     input: OrderEditCatalogVariantsInput,
+    pricingContext?: OrderEditCatalogPricingContext,
   ): Promise<OrderEditCatalogVariants>;
 }

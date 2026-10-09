@@ -131,6 +131,9 @@ async function installFixtures(
     paginateCatalog?: boolean;
     rejectCatalogProductsOnce?: boolean;
     rejectCatalogVariantsOnce?: boolean;
+    rejectCatalogVariantsPage?: number;
+    catalogMemberPricing?: boolean;
+    soldOutCatalogProduct?: boolean;
     delayedCatalog?: { search: string; response: Promise<void> };
   } = {},
 ) {
@@ -151,6 +154,7 @@ async function installFixtures(
   let loseCommit = options.loseCommitResponse === true;
   let rejectProducts = options.rejectCatalogProductsOnce === true;
   let rejectVariants = options.rejectCatalogVariantsOnce === true;
+  let rejectVariantsPage = options.rejectCatalogVariantsPage;
   let connection: OrderEditConnection = {
     connectionId: 3,
     channelId: 8,
@@ -316,8 +320,13 @@ async function installFixtures(
       }
       if (path.endsWith("/variants")) {
         const productId = url.searchParams.get("productId");
-        if (rejectVariants) {
+        expect(url.searchParams.get("omsOrderId")).toBe("51");
+        expect(url.searchParams.get("expectedRevision")).toBe("revision-7");
+        expect(url.searchParams.has("customerId")).toBe(false);
+        expect(url.searchParams.has("memberPlan")).toBe(false);
+        if (rejectVariants || rejectVariantsPage === start) {
           rejectVariants = false;
+          rejectVariantsPage = undefined;
           return route.fulfill({
             status: 503,
             json: {
@@ -331,16 +340,45 @@ async function installFixtures(
         const result = paged(
           catalogVariants
             .filter((variant) => variant.productId === productId)
-            .map(({ productId: _parent, ...variant }) => variant),
+            .map(({ productId: _parent, ...variant }) => ({
+              ...variant,
+              retailPriceCents: variant.priceCents,
+              priceCents:
+                options.catalogMemberPricing &&
+                variant.variantId.endsWith("/902")
+                  ? 2999
+                  : variant.priceCents,
+              available:
+                options.soldOutCatalogProduct && _parent.endsWith("/70")
+                  ? false
+                  : variant.available,
+            })),
         );
         return route.fulfill({
           json: {
             connectionId: 3,
-            input: { productId, after },
+            input: {
+              productId,
+              after,
+              omsOrderId: 51,
+              expectedRevision: "revision-7",
+            },
             product: catalogProducts.find(
               (product) => product.productId === productId,
             ),
             variants: result.values,
+            memberPlan: result.values.some(
+              (variant) => variant.priceCents < variant.retailPriceCents,
+            )
+              ? {
+                  planId: "5f966934-9ff2-4966-9e8f-d4292ca3290e",
+                  name: ".club",
+                  badgeText: ".club",
+                  memberPriceColor: "#4A8A3A",
+                  primaryColor: "#4A8A3A",
+                  iconUrl: null,
+                }
+              : null,
             pageInfo: result.pageInfo,
           },
         });
@@ -605,11 +643,10 @@ test("product discovery searches names and SKUs and keeps pack sizes under their
   await expect(
     picker.getByText("SKU: SHLZ-TOP-35PT-P25", { exact: true }),
   ).toBeVisible();
-  await expect(
-    picker.getByRole("button", {
-      name: "Case of 1000 · SHLZ-TOP-35PT-C1000 unavailable",
-    }),
-  ).toBeDisabled();
+  await expect(picker.getByText("Case of 1000", { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(picker.getByText("Unavailable", { exact: true })).toHaveCount(0);
   await picker
     .getByRole("button", { name: "Add Pack of 25 · SHLZ-TOP-35PT-P25" })
     .click();
@@ -660,6 +697,140 @@ test("product discovery searches names and SKUs and keeps pack sizes under their
     ],
   });
   expect(quote?.body).not.toHaveProperty("priceCents");
+  expect(fixture.failures).toEqual([]);
+});
+
+test("shows the storefront member-price treatment on the correct pack, including later pages", async ({
+  page,
+}, testInfo) => {
+  const fixture = await installFixtures(page, {
+    catalogMemberPricing: true,
+    paginateCatalog: true,
+  });
+  await chooseOrder(page);
+  await page
+    .getByRole("button", { name: "Search or browse products", exact: true })
+    .click();
+  const picker = page.getByRole("dialog");
+  await picker.getByLabel("Product name or SKU").fill("premium");
+  await picker
+    .getByRole("button", { name: /35PT 3x4 Premium Toploader/ })
+    .click();
+  await expect(picker.getByText("$4.99", { exact: true })).toBeVisible();
+  await expect(picker.locator(".cardshellz-collection-price")).toHaveCount(0);
+  await picker
+    .getByRole("button", { name: "Load more pack sizes", exact: true })
+    .click();
+  const memberPrice = picker.getByLabel(
+    ".club member price $29.99; retail $39.99",
+    { exact: true },
+  );
+  await expect(memberPrice).toBeVisible();
+  await expect(
+    memberPrice.locator(".cardshellz-retail-strikethrough"),
+  ).toHaveText("$39.99");
+  await expect(
+    memberPrice.locator(".cardshellz-member-price-value"),
+  ).toHaveText("$29.99");
+  await expect(memberPrice.locator(".cardshellz-member-price-value")).toHaveCSS(
+    "color",
+    "rgb(74, 138, 58)",
+  );
+  await expect(memberPrice.locator(".cardshellz-member-tag--only")).toHaveText(
+    ".club",
+  );
+  await expect(picker.getByText("$4.99", { exact: true })).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath("member-product-picker.png"),
+    fullPage: true,
+  });
+  await assertFitsScreen(page);
+  await picker
+    .getByRole("button", { name: "Add Box of 250 · SHLZ-TOP-35PT-B250" })
+    .click();
+  await picker.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(
+    page.getByRole("spinbutton", {
+      name: "Quantity for added 35PT 3x4 Premium Toploader · Box of 250 · SHLZ-TOP-35PT-B250",
+    }),
+  ).toHaveValue("1");
+  expect(
+    fixture.requests.filter((request) =>
+      /\/(quotes|commit)$/.test(request.path),
+    ),
+  ).toHaveLength(0);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("does not offer cached pack prices while a later stock/pricing page has failed", async ({
+  page,
+}) => {
+  const fixture = await installFixtures(page, {
+    paginateCatalog: true,
+    catalogMemberPricing: true,
+    rejectCatalogVariantsPage: 1,
+  });
+  await chooseOrder(page);
+  await page
+    .getByRole("button", { name: "Search or browse products", exact: true })
+    .click();
+  const picker = page.getByRole("dialog");
+  await picker.getByLabel("Product name or SKU").fill("premium");
+  await picker
+    .getByRole("button", { name: /35PT 3x4 Premium Toploader/ })
+    .click();
+  await expect(
+    picker.getByRole("button", { name: "Add Pack of 25 · SHLZ-TOP-35PT-P25" }),
+  ).toBeEnabled();
+  await picker
+    .getByRole("button", { name: "Load more pack sizes", exact: true })
+    .click();
+  await expect(
+    picker.getByText("Pack sizes temporarily unavailable.", { exact: true }),
+  ).toBeVisible();
+  await expect(picker.getByRole("button", { name: /^Add / })).toHaveCount(0);
+  await picker
+    .getByRole("button", { name: "Retry pack sizes", exact: true })
+    .click();
+  await expect(
+    picker.getByRole("button", { name: "Add Pack of 25 · SHLZ-TOP-35PT-P25" }),
+  ).toBeEnabled();
+  await expect(
+    picker.getByLabel(".club member price $29.99; retail $39.99", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  expect(
+    fixture.requests.filter((request) =>
+      /\/(quotes|commit)$/.test(request.path),
+    ),
+  ).toHaveLength(0);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("hides a product when its pack read confirms stock became unavailable", async ({
+  page,
+}) => {
+  const fixture = await installFixtures(page, { soldOutCatalogProduct: true });
+  await chooseOrder(page);
+  await page
+    .getByRole("button", { name: "Search or browse products", exact: true })
+    .click();
+  const picker = page.getByRole("dialog");
+  await picker.getByRole("button", { name: /Card Storage Box/ }).click();
+  await expect(
+    picker.getByRole("button", { name: /Card Storage Box/ }),
+  ).toHaveCount(0);
+  await expect(picker.getByText("White", { exact: true })).toHaveCount(0);
+  await expect(picker.getByText("Unavailable", { exact: true })).toHaveCount(0);
+  await expect(
+    picker.getByRole("button", { name: /Toploader Binder Pages/ }),
+  ).toBeVisible();
+  expect(
+    fixture.requests.filter((request) =>
+      /\/(quotes|commit)$/.test(request.path),
+    ),
+  ).toHaveLength(0);
   expect(fixture.failures).toEqual([]);
 });
 

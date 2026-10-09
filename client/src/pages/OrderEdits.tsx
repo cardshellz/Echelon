@@ -535,6 +535,8 @@ export function OrderDraft({
             api={api}
             connectionId={order.connectionId}
             staffId={staffId}
+            omsOrderId={order.omsOrderId}
+            expectedRevision={order.revision}
             enabled={mutable && active}
             includedVariantIds={
               new Set([

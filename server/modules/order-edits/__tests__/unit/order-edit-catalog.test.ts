@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { ShopifyOrderEditProvider } from "../../infrastructure/shopify-order-edit.provider";
 import {
+  MemberPlanPresentationError,
+  type MemberPlanPresentationReader,
+} from "../../../membership";
+import type { OrderEditCatalogPricingContext } from "../../application/order-edit-catalog";
+import {
   orderEditCatalogProductsInputSchema,
   orderEditCatalogVariantsSchema,
 } from "@shared/order-edits/order-edit-catalog";
@@ -20,6 +25,7 @@ const product = (overrides: Record<string, unknown> = {}) => ({
   requiresSellingPlan: false,
   onlineStoreUrl: "https://test.example/products/toploader",
   featuredImage: null,
+  variants: { nodes: [variant()], pageInfo },
   ...overrides,
 });
 const variant = (overrides: Record<string, unknown> = {}) => ({
@@ -44,13 +50,18 @@ const variant = (overrides: Record<string, unknown> = {}) => ({
   planPrices: null,
   ...overrides,
 });
-function harness(response: unknown, credentials: Record<string, unknown> = {}) {
+function harness(
+  response: unknown,
+  credentials: Record<string, unknown> = {},
+  memberPresentation?: MemberPlanPresentationReader,
+) {
   const request = vi
     .fn<typeof fetch>()
     .mockResolvedValue(new Response(JSON.stringify({ data: response })));
   const provider = new ShopifyOrderEditProvider({
     clock: () => new Date("2026-10-09T12:00:00.000Z"),
     fetch: request,
+    memberPresentation,
     credentials: {
       get: async () => ({
         connectionId: 4,
@@ -210,7 +221,7 @@ describe("order edit catalog discovery", () => {
     expect(h.wire().variables).toEqual({ first: 250, after: "first-types" });
     expect(JSON.stringify(result)).not.toContain("synthetic-test-token");
   });
-  it("groups SKU options by verified parent identity with exact cents and independent availability", async () => {
+  it("groups available SKU options by verified parent identity and hides unavailable options", async () => {
     const h = harness(
       variants([
         variant(),
@@ -235,14 +246,6 @@ describe("order edit catalog discovery", () => {
         sku: "SHLZ-TOP-35PT-P25",
         priceCents: 279,
         available: true,
-      },
-      {
-        variantId: "gid://shopify/ProductVariant/21",
-        title: "35PT 3x4 Premium Toploader",
-        variantTitle: "Case of 1000",
-        sku: "SHLZ-TOP-35PT-C1000",
-        priceCents: 11999,
-        available: false,
       },
     ]);
     expect(h.wire().variables).toEqual({
@@ -276,9 +279,8 @@ describe("order edit catalog discovery", () => {
   ])("shares the current stock gate: %j", async (patch) => {
     const h = harness(variants([variant(patch)]));
     expect(
-      (await h.catalog.productVariants(4, { productId, after: null }))
-        .variants[0].available,
-    ).toBe(false);
+      (await h.catalog.productVariants(4, { productId, after: null })).variants,
+    ).toEqual([]);
   });
   it("allows a free SKU and safely represents the maximum integer-cent price", async () => {
     for (const [price, expected] of [
@@ -449,5 +451,301 @@ describe("order edit catalog discovery", () => {
     await expect(
       h.provider.searchVariants(4, "toploader"),
     ).rejects.toMatchObject({ code: "SHOPIFY_RESPONSE_INVALID" });
+  });
+
+  it("hides fully unavailable products but keeps products with an available supported pack", async () => {
+    const soldOut = variant({ sellableOnlineQuantity: 0 });
+    const h = harness(
+      products([
+        product({
+          id: "gid://shopify/Product/11",
+          variants: { nodes: [soldOut], pageInfo },
+        }),
+        product({
+          variants: {
+            nodes: [
+              soldOut,
+              variant({ id: "gid://shopify/ProductVariant/21" }),
+            ],
+            pageInfo,
+          },
+        }),
+      ]),
+    );
+    const result = await h.catalog.products(4, {
+      search: "",
+      category: null,
+      after: null,
+    });
+    expect(result.products.map((entry) => entry.productId)).toEqual([
+      productId,
+    ]);
+    expect(h.request).toHaveBeenCalledTimes(1);
+  });
+  it("reads further stock pages rather than hiding a product whose sixth option is available", async () => {
+    const probe = {
+      nodes: Array.from({ length: 5 }, (_unused, index) =>
+        variant({
+          id: `gid://shopify/ProductVariant/${20 + index}`,
+          sellableOnlineQuantity: 0,
+        }),
+      ),
+      pageInfo: { hasNextPage: true, endCursor: "stock-next" },
+    };
+    const h = harness(products([product({ variants: probe })]));
+    h.request
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ data: products([product({ variants: probe })]) }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: variants([
+              variant({ id: "gid://shopify/ProductVariant/26" }),
+            ]),
+          }),
+        ),
+      );
+    const result = await h.catalog.products(4, {
+      search: "",
+      category: null,
+      after: null,
+    });
+    expect(result.products).toHaveLength(1);
+    const second = JSON.parse(String(h.request.mock.calls[1][1]?.body));
+    expect(second.variables).toEqual({
+      id: productId,
+      first: 50,
+      after: "stock-next",
+    });
+    expect(second.query.trim().startsWith("query ")).toBe(true);
+  });
+  it("preserves product pagination after stock filtering removes the whole page", async () => {
+    const h = harness(
+      products([product({ variants: { nodes: [], pageInfo } })], {
+        hasNextPage: true,
+        endCursor: "next-product",
+      }),
+    );
+    expect(
+      await h.catalog.products(4, { search: "", category: null, after: null }),
+    ).toMatchObject({
+      products: [],
+      pageInfo: { hasNextPage: true, endCursor: "next-product" },
+    });
+  });
+  it.each(["repeat-option", "repeat-cursor", "wrong-parent", "missing-stock"])(
+    "rejects inconsistent stock continuation: %s",
+    async (failure) => {
+      const probe = {
+        nodes: [variant({ sellableOnlineQuantity: 0 })],
+        pageInfo: { hasNextPage: true, endCursor: "stock-next" },
+      };
+      const h = harness(products());
+      const next = variants(
+        failure === "repeat-option"
+          ? probe.nodes
+          : failure === "missing-stock"
+            ? [variant({ availableForSale: undefined })]
+            : [],
+        failure === "wrong-parent" ? { id: "gid://shopify/Product/999" } : {},
+        failure === "repeat-cursor" ? probe.pageInfo : pageInfo,
+      );
+      h.request
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ data: products([product({ variants: probe })]) }),
+          ),
+        )
+        .mockResolvedValueOnce(new Response(JSON.stringify({ data: next })));
+      await expect(
+        h.catalog.products(4, { search: "", category: null, after: null }),
+      ).rejects.toMatchObject({ code: "SHOPIFY_RESPONSE_INVALID" });
+    },
+  );
+  it("does not turn failed stock reads into an empty successful catalog", async () => {
+    const probe = {
+      nodes: [],
+      pageInfo: { hasNextPage: true, endCursor: "stock-next" },
+    };
+    const h = harness(products());
+    h.request
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ data: products([product({ variants: probe })]) }),
+        ),
+      )
+      .mockRejectedValueOnce(new Error("synthetic network failure"));
+    await expect(
+      h.catalog.products(4, { search: "", category: null, after: null }),
+    ).rejects.toMatchObject({ code: "SHOPIFY_UNAVAILABLE" });
+  });
+});
+
+const CLUB_PLAN = "5f966934-9ff2-4966-9e8f-d4292ca3290e";
+const OTHER_PLAN = "14d8698f-09d8-4dea-8089-fa9a1ec0fb28";
+const clubPresentation = {
+  planId: CLUB_PLAN,
+  name: ".club",
+  badgeText: ".club",
+  memberPriceColor: "#4A8A3A",
+  primaryColor: "#4A8A3A",
+  iconUrl: null,
+};
+const memberContext = (
+  overrides: Partial<OrderEditCatalogPricingContext> = {},
+): OrderEditCatalogPricingContext => ({
+  connectionId: 4,
+  customerId: "gid://shopify/Customer/8",
+  memberPlan: CLUB_PLAN,
+  memberPricingEnabled: true,
+  ...overrides,
+});
+const scopedInput = {
+  productId,
+  omsOrderId: 1,
+  expectedRevision: "baseline",
+  after: null,
+};
+const pricedVariant = (
+  prices: unknown = {
+    [CLUB_PLAN]: { cents: 233 },
+    [OTHER_PLAN]: { cents: 99 },
+  },
+) => variant({ planPrices: { value: JSON.stringify(prices) } });
+
+describe("order-scoped catalog member pricing", () => {
+  it("uses the same exact-cent checkout projection for the verified customer's plan, with storefront display settings", async () => {
+    const reader = { read: vi.fn(async () => clubPresentation) };
+    const h = harness(variants([pricedVariant()]), {}, reader);
+    const result = await h.catalog.productVariants(
+      4,
+      scopedInput,
+      memberContext(),
+    );
+    expect(result.variants[0]).toMatchObject({
+      priceCents: 233,
+      retailPriceCents: 279,
+      available: true,
+    });
+    expect(result.memberPlan).toEqual(clubPresentation);
+    expect(reader.read).toHaveBeenCalledExactlyOnceWith(CLUB_PLAN);
+    expect(h.wire().query).toContain('key: "plan_prices"');
+    expect(h.wire().query).not.toContain("mutation");
+    expect(h.wire().variables).not.toHaveProperty("customerId");
+  });
+  it.each([
+    { memberPricingEnabled: false },
+    { memberPlan: null },
+    { memberPlan: OTHER_PLAN },
+  ])("does not apply a different/disabled member plan: %j", async (patch) => {
+    const reader = { read: vi.fn(async () => clubPresentation) };
+    const h = harness(
+      variants([pricedVariant({ [CLUB_PLAN]: { cents: 233 } })]),
+      {},
+      reader,
+    );
+    const result = await h.catalog.productVariants(
+      4,
+      scopedInput,
+      memberContext(patch),
+    );
+    expect(result.variants[0]).toMatchObject({
+      priceCents: 279,
+      retailPriceCents: 279,
+    });
+    expect(result.memberPlan).toBeNull();
+    expect(reader.read).not.toHaveBeenCalled();
+  });
+  it.each([
+    null,
+    { [CLUB_PLAN]: { cents: 279 } },
+    { [CLUB_PLAN]: { cents: 300 } },
+    {},
+  ])(
+    "keeps retail when the projection has no better member price: %j",
+    async (projection) => {
+      const reader = { read: vi.fn(async () => clubPresentation) };
+      const h = harness(
+        variants([projection === null ? variant() : pricedVariant(projection)]),
+        {},
+        reader,
+      );
+      const result = await h.catalog.productVariants(
+        4,
+        scopedInput,
+        memberContext(),
+      );
+      expect(result.variants[0]).toMatchObject({
+        priceCents: 279,
+        retailPriceCents: 279,
+      });
+      expect(reader.read).not.toHaveBeenCalled();
+    },
+  );
+  it("supports a zero-cent member price without losing its badge", async () => {
+    const h = harness(
+      variants([pricedVariant({ [CLUB_PLAN]: { cents: 0 } })]),
+      {},
+      { read: async () => clubPresentation },
+    );
+    expect(
+      await h.catalog.productVariants(4, scopedInput, memberContext()),
+    ).toMatchObject({
+      variants: [{ priceCents: 0, retailPriceCents: 279 }],
+      memberPlan: clubPresentation,
+    });
+  });
+  it.each([
+    "not-json",
+    JSON.stringify({ [CLUB_PLAN]: { cents: -1 } }),
+    JSON.stringify({ [CLUB_PLAN]: { cents: 2.33 } }),
+    JSON.stringify({ [CLUB_PLAN]: { cents: Number.MAX_SAFE_INTEGER + 1 } }),
+  ])(
+    "rejects malformed member pricing instead of inventing a price: %s",
+    async (value) => {
+      const h = harness(variants([variant({ planPrices: { value } })]));
+      await expect(
+        h.catalog.productVariants(4, scopedInput, memberContext()),
+      ).rejects.toMatchObject({
+        code:
+          value === "not-json"
+            ? "MEMBER_PRICE_INVALID"
+            : "SHOPIFY_RESPONSE_INVALID",
+      });
+    },
+  );
+  it("rejects missing order context, foreign-store context and membership without a verified customer", async () => {
+    const h = harness(variants());
+    await expect(
+      h.catalog.productVariants(4, scopedInput),
+    ).rejects.toMatchObject({ code: "SHOPIFY_RESPONSE_INVALID" });
+    for (const context of [
+      memberContext({ connectionId: 99 }),
+      memberContext({ customerId: null }),
+    ])
+      await expect(
+        h.catalog.productVariants(4, scopedInput, context),
+      ).rejects.toMatchObject({ code: "SHOPIFY_RESPONSE_INVALID" });
+    expect(h.request).not.toHaveBeenCalled();
+  });
+  it("refuses missing, foreign or failed presentation rather than showing another plan's treatment", async () => {
+    const readers = [
+      undefined,
+      { read: async () => ({ ...clubPresentation, planId: OTHER_PLAN }) },
+      {
+        read: async () => {
+          throw new MemberPlanPresentationError("READ_FAILED");
+        },
+      },
+    ];
+    for (const reader of readers) {
+      const h = harness(variants([pricedVariant()]), {}, reader);
+      await expect(
+        h.catalog.productVariants(4, scopedInput, memberContext()),
+      ).rejects.toMatchObject({ outcome: "rejected" });
+    }
   });
 });

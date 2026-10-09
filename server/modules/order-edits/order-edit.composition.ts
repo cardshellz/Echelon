@@ -9,6 +9,7 @@ import { OrderEditWarehouseGateway } from "./infrastructure/order-edit-warehouse
 import { OrderEditOmsSynchronizer } from "./infrastructure/order-edit-oms-synchronizer";
 import { OrderEditPaidProjection } from "../oms/order-edit-paid-projection";
 import { OrderEditPreviewService } from "./application/order-edit-preview.service";
+import { createMemberPlanPresentationReader } from "../membership";
 
 const credentialSchema = z.object({
   connectionId: z.number().int().positive(),
@@ -24,6 +25,7 @@ export function createOrderEditService(
   const clock = () => new Date();
   const provider = new ShopifyOrderEditProvider({
     clock,
+    memberPresentation: createMemberPlanPresentationReader(pool),
     report: (event) =>
       console.error(
         JSON.stringify({
