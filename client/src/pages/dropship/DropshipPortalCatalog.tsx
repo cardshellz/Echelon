@@ -89,7 +89,11 @@ import { DropshipContentTemplatesPanel } from "./DropshipContentTemplatesPanel";
 import { DropshipEbayCategoryRulesPanel } from "./DropshipEbayCategoryRulesPanel";
 import { CatalogStepRail } from "./catalog/CatalogStepRail";
 import { CatalogActionBar, type CatalogNextStepAction } from "./catalog/CatalogActionBar";
-import { UnsavedChangesProvider, useLeaveGuard } from "./catalog/UnsavedChangesGuard";
+import { UnsavedChangesProvider, useLeaveGuard, useUnsavedDrafts } from "./catalog/UnsavedChangesGuard";
+import { ListingSettingsDraftsProvider } from "./listing-settings/ListingSettingsDraftsProvider";
+import { ListingSettingsActionBar, ListingSettingsStep, countEbayStores } from "./listing-settings/ListingSettingsStep";
+import { OlderListingSettings } from "./listing-settings/OlderListingSettings";
+import { countOlderSettingsDrafts } from "@/lib/dropship-listing-settings-drafts";
 import { ebayListingSetupQueryOptions } from "@/lib/dropship-ebay-listing-query-sync";
 import { listingSettingsQueryKey, listingSettingsSummaryQueryOptions } from "@/lib/dropship-listing-settings";
 import {
@@ -215,6 +219,10 @@ function DropshipPortalCatalogPage() {
   const [pendingStoreCategoryVariantIds, setPendingStoreCategoryVariantIds] = useState<Set<number>>(
     () => new Set(),
   );
+  // "Older settings" on Listing settings starts closed and stays as the vendor left it across steps and stores (A1).
+  const [olderOpen, setOlderOpen] = useState(false);
+  // Every leave-guard draft other than the new step's own belongs to an older panel.
+  const olderUnsaved = countOlderSettingsDrafts(useUnsavedDrafts()) > 0;
   const catalogUrl = useMemo(() => buildQueryUrl("/api/dropship/catalog", {
     search: applied.search,
     category: applied.category === ALL_FILTER_VALUE ? undefined : applied.category,
@@ -451,6 +459,9 @@ function DropshipPortalCatalogPage() {
     },
     onSaved: () => refreshListingPreview(previewContextKey),
   };
+  // The new step keeps the pending-save counter (D10) but never posts a preview after a save:
+  // it marks step 3's preview stale instead, and step 3 checks again when the vendor gets there (D9).
+  const listingSettingsSaveCallbacks: ListingPriceSaveCallbacks = { ...priceSaveCallbacks, onSaved: async () => undefined };
 
   async function pushListings() {
     // Blocked accounts never reach verification, so no code is emailed for a
@@ -650,6 +661,8 @@ function DropshipPortalCatalogPage() {
   }
 
   const storeReady = selectedStoreConnection !== null;
+  // Counted from every store the vendor has, so a second store that needs a sign-in still counts (C28).
+  const ebayStoreCount = countEbayStores(settingsQuery.data?.settings.storeConnections ?? []);
   const setupRail = describeListingSettingsRail({
     storesLoaded: settingsQuery.data !== undefined,
     storeChosen: storeReady,
@@ -677,7 +690,7 @@ function DropshipPortalCatalogPage() {
     ? { label: actionBar.next.label, href: stepHref(actionBar.next.step), disabled: actionBar.next.disabled }
     : null;
 
-  return (
+  const page = (
     <DropshipPortalShell>
       <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6">
         <div>
@@ -832,6 +845,24 @@ function DropshipPortalCatalogPage() {
 
         {activeStep === "setup" && (
           <>
+            {storeReady && (
+              <ListingSettingsStep
+                key={`listing-settings-${selectedStoreConnectionIdNumber}`}
+                storeConnectionId={selectedStoreConnectionIdNumber}
+                storeName={selectedStoreName}
+                ebayStoreCount={ebayStoreCount}
+                account={listingAccount}
+                summary={listingSettingsSummaryQuery}
+                shelves={ebayStoreCategoryQuery}
+                saveCallbacks={listingSettingsSaveCallbacks}
+                onSettingsSaved={() => { invalidateListingPreview(true); refreshListingSettings(); }}
+                goToStep={(target) => leaveGuard(() => navigate(stepHref(target)))}
+              />
+            )}
+            {/* Today's step 2 panels under "Older settings" (A1): still mounted while closed, so their
+                reads, drafts and leave guard work as before. The lines inside keep their indentation,
+                so their text stays as it was (plan D2); only the setup panel takes one prop (L2). */}
+            <OlderListingSettings collapsible={storeReady} open={olderOpen} onOpenChange={setOlderOpen} unsaved={olderUnsaved}>
             <CatalogStepIntro step="setup" detail={storeReady ? `These settings apply to ${selectedStoreName}.` : null} />
             {/* Only once the stores have loaded, so a slow load never tells the vendor to connect a store they have. */}
             {settingsQuery.data && !storeReady && (
@@ -853,6 +884,7 @@ function DropshipPortalCatalogPage() {
                     invalidateListingPreview();
                     refreshListingSettings();
                   }}
+                  suggestionsCountAsUnsaved={olderOpen}
                 />
                 <EbayListingPolicyOverridePanel
                   key={`policy-override-${selectedStoreConnectionIdNumber}`}
@@ -899,6 +931,7 @@ function DropshipPortalCatalogPage() {
               priceSaveCallbacks={priceSaveCallbacks} />}
             {selectedStoreConnectionIdNumber > 0 && <DropshipContentTemplatesPanel storeConnectionId={selectedStoreConnectionIdNumber}
               storeName={selectedStoreName} {...priceSaveCallbacks} />}
+            </OlderListingSettings>
           </>
         )}
 
@@ -928,10 +961,16 @@ function DropshipPortalCatalogPage() {
           </>
         )}
 
-        <CatalogActionBar summary={actionBar.summary} next={nextAction} />
+        {activeStep === "setup" && storeReady
+          ? <ListingSettingsActionBar next={nextAction} saving={pendingPriceSaves > 0} />
+          : <CatalogActionBar summary={actionBar.summary} next={nextAction} />}
       </div>
     </DropshipPortalShell>
   );
+  // The Listing settings step's one draft lives at page level, so moving between steps keeps it
+  // (plan 4.1). Not keyed by store: a key would remount every step on a store switch; the
+  // provider drops its draft itself when the store changes, after the store picker asked.
+  return <ListingSettingsDraftsProvider storeConnectionId={selectedStoreConnectionIdNumber}>{page}</ListingSettingsDraftsProvider>;
 }
 
 /** The step's name and one line of context, above its panels. */

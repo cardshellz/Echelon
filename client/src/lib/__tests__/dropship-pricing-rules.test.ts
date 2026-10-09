@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describePriceBasis, describeReviewedSize, parseNonnegativeHundredths, parseProfileDraft, pricingDraftsMatch, profileDraft, SUGGESTED_PRICING_RECIPE } from "../dropship-pricing-rules";
+import { describePriceBasis, describeReviewedSize, parseNonnegativeHundredths, parseProfileDraft, pricingDraftsMatch, pricingFormTakesSavedRules, profileDraft, SUGGESTED_PRICING_RECIPE, type PricingFormState } from "../dropship-pricing-rules";
 import { draftFromListingPrice, isListingPriceDirty, prepareListingPriceSave } from "../dropship-listing-price";
 import type { ListingPriceSetting } from "@shared/dropship/listing-price";
 describe("pricing rule form contracts", () => {
@@ -54,5 +54,36 @@ describe("pricing drafts", () => {
     expect(pricingDraftsMatch(saved, { ...saved, defaultRecipe: { ...saved.defaultRecipe, basis: "catalog_retail" } })).toBe(false);
     // The text is compared, so the same value typed another way is a change.
     expect(pricingDraftsMatch(saved, { ...saved, defaultRecipe: { ...saved.defaultRecipe, percentage: "20" } })).toBe(false);
+  });
+});
+describe("the pricing rules form when the saved rules change under it", () => {
+  // Listing settings PR 7: a store price saved in the new step changes the saved rules this form shares.
+  const before = profileDraft({ defaultRecipe: { basis: "catalog_retail", markupBps: 1500, flatCents: 0, rounding: "cent" }, groups: [] });
+  const untouched: PricingFormState = { draft: before, formSource: before, reviewShown: false, releaseFixed: false, editing: true };
+  it("sets an empty form from the first read", () => {
+    expect(pricingFormTakesSavedRules({ ...untouched, draft: null, formSource: null })).toBe(true);
+    // Even mid-flight: there is nothing in the form to keep.
+    expect(pricingFormTakesSavedRules({ ...untouched, draft: null, formSource: null, editing: false })).toBe(true);
+  });
+  it("follows the newer saved rules while it still holds the ones it was set from, untouched", () => {
+    expect(pricingFormTakesSavedRules(untouched)).toBe(true);
+    // The suggested start of a store with no saved rules is untouched too.
+    expect(pricingFormTakesSavedRules({ ...untouched, draft: profileDraft(null), formSource: profileDraft(null) })).toBe(true);
+  });
+  it("never replaces a form the vendor changed, so the change is kept", () => {
+    const edited = { ...before, defaultRecipe: { ...before.defaultRecipe, percentage: "20.00" } };
+    expect(pricingFormTakesSavedRules({ ...untouched, draft: edited })).toBe(false);
+    // The same value typed another way is still the vendor's change.
+    expect(pricingFormTakesSavedRules({ ...untouched, draft: { ...before, defaultRecipe: { ...before.defaultRecipe, percentage: "15" } } })).toBe(false);
+    expect(pricingFormTakesSavedRules({ ...untouched, draft: { ...before, groups: [{ id: "g", name: "New group", priority: "10",
+      scope: { type: "category", category: "" }, recipe: before.defaultRecipe }] } })).toBe(false);
+  });
+  it("keeps a shown review, the fixed-price choice and anything in flight", () => {
+    expect(pricingFormTakesSavedRules({ ...untouched, reviewShown: true })).toBe(false);
+    expect(pricingFormTakesSavedRules({ ...untouched, releaseFixed: true })).toBe(false);
+    expect(pricingFormTakesSavedRules({ ...untouched, editing: false })).toBe(false);
+  });
+  it("does not follow without knowing what the form was set from", () => {
+    expect(pricingFormTakesSavedRules({ ...untouched, formSource: null })).toBe(false);
   });
 });

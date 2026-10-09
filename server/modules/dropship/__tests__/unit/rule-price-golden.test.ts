@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MAX_LISTING_PRICE_CENTS } from "../../../../../shared/dropship/listing-price";
 import { pricingProfileStateSchema, type PricingProfileState } from "../../../../../shared/dropship/pricing-rules";
 import { createRulePriceResolver, pricingHash, type ListingRulePrice } from "../../application/dropship-rule-price";
 import { classifyListing, type CostActionVendorFacts } from "../../application/dropship-cost-change-listing-action-service";
@@ -195,4 +196,39 @@ describe("every price path gives the golden rule prices", () => {
       if (golden.priceCents !== null) expect(classification.followsCost).toBe(golden.basis === "product_cost");
     },
   );
+
+  it.each(cases.filter(([, row]) => row.cost?.status === "available"))(
+    "cost-change classifier: an inherit listing takes the golden price when the rules give one, else retail (L1): %s",
+    (_name, row, golden) => {
+      const classify = (pricingMode: "rules" | "inherit") => classifyListing({
+        listings: [], profiles: new Map([[STORE_ID, GOLDEN_RULE_PROFILE_STATE]]),
+        savedPrices: [{ storeConnectionId: STORE_ID, productVariantId: row.candidate.productVariantId, overridePriceCents: null, pricingMode }],
+        candidates: new Map([[row.candidate.productVariantId, row.candidate]]),
+      }, { listingId: 1, storeConnectionId: STORE_ID, productVariantId: row.candidate.productVariantId, status: "active",
+        // An earlier push saved this price; inherit never falls back to it.
+        vendorRetailPriceCents: 4_321, platform: "ebay", variantSku: null, variantName: "Size", productName: row.name }, row.cost!.unitCostCents!);
+
+      const inherit = classify("inherit");
+      if (golden.priceCents !== null) {
+        expect(inherit).toEqual(classify("rules"));
+        expect(inherit).toMatchObject({ priceCents: golden.priceCents, followsCost: golden.basis === "product_cost" });
+        return;
+      }
+      const retail = row.candidate.defaultRetailPriceCents;
+      const retailUsable = retail !== null && retail > 0 && retail <= MAX_LISTING_PRICE_CENTS;
+      expect(inherit).toEqual(retailUsable ? { source: "catalog_default", priceCents: retail, followsCost: false }
+        : { source: "unavailable", priceCents: null, followsCost: false });
+    },
+  );
+
+  it("cost-change classifier: with no profile, inherit is the catalog retail price, not the price an earlier push saved", () => {
+    const [, row] = cases[0];
+    const classification = classifyListing({
+      listings: [], profiles: new Map(),
+      savedPrices: [{ storeConnectionId: STORE_ID, productVariantId: row.candidate.productVariantId, overridePriceCents: null, pricingMode: "inherit" }],
+      candidates: new Map([[row.candidate.productVariantId, row.candidate]]),
+    }, { listingId: 1, storeConnectionId: STORE_ID, productVariantId: row.candidate.productVariantId, status: "active",
+      vendorRetailPriceCents: 4_321, platform: "ebay", variantSku: null, variantName: "Size", productName: row.name }, 809);
+    expect(classification).toEqual({ source: "catalog_default", priceCents: row.candidate.defaultRetailPriceCents, followsCost: false });
+  });
 });

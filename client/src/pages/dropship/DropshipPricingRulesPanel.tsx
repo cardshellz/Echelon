@@ -2,14 +2,14 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { pricingProfileStateSchema, pricingReviewResponseSchema,
-  PRICING_REVIEW_PAGE_SIZE, type PricingProfile, type PricingReviewResponse } from "@shared/dropship/pricing-rules";
+  PRICING_REVIEW_PAGE_SIZE, type PricingProfile, type PricingProfileState, type PricingReviewResponse } from "@shared/dropship/pricing-rules";
 import { Button } from "@/components/ui/button";
 import { DropshipCatalogScopePicker as ScopePicker } from "./DropshipCatalogScopePicker";
 import { Input } from "@/components/ui/input";
 import { createDropshipIdempotencyKey, DropshipApiError, fetchJson, postJson, queryErrorMessage } from "@/lib/dropship-ops-surface";
 import { displayListingPrice } from "@/lib/dropship-listing-price";
 import { formatListingPreviewIssue } from "@/lib/dropship-listing-preview";
-import { describePriceBasis, describeReviewedSize, parseProfileDraft, pricingDraftsMatch, profileDraft, type ProfileDraft, type RecipeDraft } from "@/lib/dropship-pricing-rules";
+import { describePriceBasis, describeReviewedSize, parseProfileDraft, pricingDraftsMatch, pricingFormTakesSavedRules, profileDraft, type ProfileDraft, type RecipeDraft } from "@/lib/dropship-pricing-rules";
 import { LISTING_SETTINGS_SEND_TIMING } from "@/lib/dropship-catalog-steps";
 import { NotSavedBadge, useUnsavedDraft } from "./catalog/UnsavedChangesGuard";
 import { DropshipExactPriceBox } from "./DropshipExactPriceBox";
@@ -39,9 +39,18 @@ function PricingRulesSession({ storeConnectionId, storeName, onConfigurationChan
   const inFlight = useRef(false);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  // The saved rules the form was last set from. The form follows newer saved
+  // rules only while it still holds these untouched (pricingFormTakesSavedRules).
+  const formSource = useRef<{ state: PricingProfileState; draft: ProfileDraft } | null>(null);
   useEffect(() => {
-    if (query.data && draft === null) { setDraft(profileDraft(query.data.profile)); setRevisionId(query.data.revisionId); }
-  }, [query.data, draft]);
+    const data = query.data;
+    if (!data || data === formSource.current?.state) return;
+    const next = profileDraft(data.profile);
+    const takes = pricingFormTakesSavedRules({ draft, formSource: formSource.current?.draft ?? null,
+      reviewShown: review !== null, releaseFixed, editing: phase === "editing" });
+    formSource.current = { state: data, draft: next };
+    if (takes) { setDraft(next); setRevisionId(data.revisionId); }
+  }, [query.data, draft, review, releaseFixed, phase]);
   const disabled = phase !== "editing";
   // What is saved, as a draft. With no saved rules this is the suggested
   // starting point, which is not counted as a change until it is edited.

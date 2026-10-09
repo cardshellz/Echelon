@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DropshipListingPriceService, type ListingPriceTransaction } from "../../application/dropship-listing-price-service";
-import { listingPriceTargetSchema, saveListingPriceInputSchema, resolveListingPrice, MAX_LISTING_PRICE_CENTS } from "../../../../../shared/dropship/listing-price";
+import { listingPriceTargetSchema, saveListingPriceInputSchema, resolveListingPrice, MAX_LISTING_PRICE_CENTS,
+  type ListingPricingMode } from "../../../../../shared/dropship/listing-price";
+import { DropshipError } from "../../domain/errors";
 import type { DropshipListingCatalogCandidate, DropshipListingStoreContext, DropshipPricingPolicyRecord } from "../../application/dropship-listing-preview-service";
 import type { DropshipProductCost } from "../../application/dropship-product-cost";
 import type { ListingRulePrice } from "../../application/dropship-rule-price";
@@ -264,11 +266,143 @@ describe("a price save never leaves a size without a price it can be listed at",
   });
 });
 
+describe("inherit: a size with no price of its own (A3, L1)", () => {
+  let tx: ListingPriceTransaction;
+  let service: DropshipListingPriceService;
+  let candidate: DropshipListingCatalogCandidate;
+  let logger: { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> };
+  const inherit = { priceCents: null, pricingMode: "inherit" as const, expectedRevisionId: 4, idempotencyKey: "inherit-1" };
+  beforeEach(() => {
+    const context: DropshipListingStoreContext = { vendorId: 10, vendorStatus: "active", entitlementStatus: "active",
+      storeConnectionId: 22, storeStatus: "connected", setupStatus: "complete", platform: "ebay", storeLaunchReady: true };
+    candidate = { productId: 7, productVariantId: 101, productLineIds: [], category: "Mailers",
+      productIsActive: true, variantIsActive: true, variantUomType: "pack", defaultRetailPriceCents: 899 } as DropshipListingCatalogCandidate;
+    // The repository keeps one request hash per key and refuses a key reused for another change, as the PostgreSQL one does.
+    const hashes = new Map<string, string>();
+    tx = {
+      vendorId: 10,
+      catalog: {
+        loadStoreContext: vi.fn(async () => context),
+        listCatalogCandidates: vi.fn(async () => [candidate]),
+        listCatalogExposureRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
+        listSelectionRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
+        listVariantOverrides: vi.fn(async () => []),
+        // An earlier push saved $9.99 on the listing; inherit never falls back to it.
+        listExistingListings: vi.fn(async () => [{ productVariantId: 101, listingId: 1,
+          vendorRetailPriceCents: 999, status: "live", quantityCap: null, externalListingId: null }]),
+        listPricingPolicies: vi.fn(async () => []),
+      },
+      loadSaved: vi.fn(async () => saved({ revisionId: 4, overridePriceCents: 1499, pricingMode: "fixed" })),
+      loadProductCost: vi.fn(async () => null),
+      loadReplay: vi.fn(async ({ idempotencyKey, requestHash }) => {
+        const first = hashes.get(idempotencyKey);
+        if (first !== undefined && first !== requestHash) {
+          throw new DropshipError("DROPSHIP_IDEMPOTENCY_CONFLICT", "This save key was already used for a different price change.");
+        }
+        return null;
+      }),
+      save: vi.fn(async (value) => {
+        hashes.set(value.idempotencyKey, value.requestHash);
+        return { saved: { productVariantId: 101, revisionId: 5, overridePriceCents: value.priceCents,
+          pricingMode: value.pricingMode ?? (value.priceCents === null ? "catalog_default" : "fixed"), updatedAt: value.now.toISOString() },
+          idempotentReplay: false };
+      }),
+    };
+    logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    service = new DropshipListingPriceService({ repository: { execute: async (_request, operation) => operation(tx) },
+      clock: { now: () => now }, logger });
+  });
+
+  it("saves inherit on a store without rules: the retail price, not the price an earlier push saved", async () => {
+    const result = await service.saveForMember("member-1", target, inherit);
+    expect(tx.save).toHaveBeenCalledWith(expect.objectContaining({ priceCents: null, pricingMode: "inherit", expectedRevisionId: 4 }));
+    expect(result).toMatchObject({ idempotentReplay: false, price: { revisionId: 5, overridePriceCents: null, pricingMode: "inherit",
+      effectivePriceCents: 899, source: "catalog_default", rulesConfigured: false } });
+  });
+
+  it("projects inherit on a store with rules as rule-priced", async () => {
+    tx.loadRulePrice = vi.fn(async () => rulePrice({ priceCents: 1152 }));
+    const result = await service.saveForMember("member-1", target, inherit);
+    expect(result.price).toMatchObject({ pricingMode: "inherit", effectivePriceCents: 1152, source: "rules", rulePriceCents: 1152,
+      rulesConfigured: true, ruleName: "Store default rule" });
+  });
+
+  it.each(["pricing_rule_priority_conflict", "pricing_basis_unavailable", "pricing_result_out_of_range"])(
+    "saves inherit when the rules can't price the size (%s): it uses the retail price and is not refused", async (issue) => {
+      tx.loadRulePrice = vi.fn(async () => rulePrice({ priceCents: null, issue, ruleName: null }));
+      const result = await service.saveForMember("member-1", target, inherit);
+      expect(result.price).toMatchObject({ pricingMode: "inherit", effectivePriceCents: 899, source: "catalog_default",
+        rulesConfigured: true, pricingIssue: issue });
+      expect(tx.save).toHaveBeenCalledTimes(1);
+    });
+
+  it("refuses inherit as WOULD_BE_LOST when there are no rules and no retail price, and the size had a price", async () => {
+    candidate.defaultRetailPriceCents = null;
+    await expect(service.saveForMember("member-1", target, inherit)).rejects.toMatchObject({
+      code: "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST",
+      context: expect.objectContaining({ beforePriceCents: 1499, afterPriceCents: null, pricingMode: "inherit" }),
+    });
+    expect(tx.save).not.toHaveBeenCalled();
+  });
+
+  it("refuses inherit as WOULD_BE_LOST when its retail fallback breaks a blocking Card Shellz limit, naming the limit", async () => {
+    // L1 is read as "a usable retail price": $8.99 under a $10.00 blocking minimum could not be listed.
+    // The client shows these server words as they are (classifyWriteFailure, W9).
+    tx.loadRulePrice = vi.fn(async () => rulePrice({ priceCents: null, issue: "pricing_basis_unavailable" }));
+    vi.mocked(tx.catalog.listPricingPolicies).mockResolvedValue([limit({ id: 11, floorPriceCents: 1000 })]);
+    await expect(service.saveForMember("member-1", target, inherit)).rejects.toMatchObject({
+      code: "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST",
+      message: expect.stringContaining("move to $8.99, below the Card Shellz minimum of $10.00 for this item"),
+      context: expect.objectContaining({ beforePriceCents: 1499, afterPriceCents: 899, pricingMode: "inherit" }),
+    });
+    expect(tx.save).not.toHaveBeenCalled();
+  });
+
+  it("refuses inherit as WOULD_BE_LOST when the rules can't price the size and there is no retail price", async () => {
+    candidate.defaultRetailPriceCents = null;
+    tx.loadRulePrice = vi.fn(async () => rulePrice({ priceCents: null, issue: "pricing_basis_unavailable" }));
+    await expect(service.saveForMember("member-1", target, inherit)).rejects.toMatchObject({ code: "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST" });
+    expect(tx.save).not.toHaveBeenCalled();
+  });
+
+  it("refuses the same key reused for rules and then inherit", async () => {
+    tx.loadRulePrice = vi.fn(async () => rulePrice({ priceCents: 1152 }));
+    await service.saveForMember("member-1", target, { ...inherit, pricingMode: "rules" });
+    await expect(service.saveForMember("member-1", target, inherit)).rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT" });
+    const hashes = vi.mocked(tx.loadReplay).mock.calls.map(([call]) => call.requestHash);
+    expect(hashes[0]).not.toBe(hashes[1]);
+    expect(tx.save).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a replayed inherit save as first written, without the refusal check", async () => {
+    candidate.defaultRetailPriceCents = null; // a fresh save would now be refused
+    vi.mocked(tx.loadReplay).mockResolvedValue(saved({ revisionId: 5, overridePriceCents: null, pricingMode: "inherit" }));
+    const result = await service.saveForMember("member-1", target, inherit);
+    expect(result).toMatchObject({ idempotentReplay: true, price: { revisionId: 5, pricingMode: "inherit", source: "unavailable" } });
+    expect(tx.catalog.listPricingPolicies).not.toHaveBeenCalled();
+    expect(tx.save).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(expect.objectContaining({ code: "DROPSHIP_LISTING_PRICE_REPLAYED",
+      context: expect.objectContaining({ pricingMode: "inherit", revisionId: 5, idempotentReplay: true }) }));
+  });
+
+  it("logs the saved mode", async () => {
+    await service.saveForMember("member-1", target, inherit);
+    expect(logger.info).toHaveBeenCalledWith(expect.objectContaining({ code: "DROPSHIP_LISTING_PRICE_SAVED",
+      context: expect.objectContaining({ ...target, revisionId: 5, pricingMode: "inherit", actorId: "member-1", idempotentReplay: false }) }));
+  });
+
+  it("reads a saved inherit setting back as inherit", async () => {
+    vi.mocked(tx.loadSaved).mockResolvedValue(saved({ revisionId: 5, overridePriceCents: null, pricingMode: "inherit" }));
+    expect(await service.getForMember("member-1", target)).toMatchObject({ revisionId: 5, pricingMode: "inherit",
+      effectivePriceCents: 899, source: "catalog_default" });
+  });
+});
+
 function limit(overrides: Partial<DropshipPricingPolicyRecord> & { id: number }): DropshipPricingPolicyRecord {
   return { scopeType: "catalog", productLineId: null, productId: null, productVariantId: null, category: null,
     mode: "block_listing_push", floorPriceCents: null, ceilingPriceCents: null, ...overrides };
 }
-function saved(overrides: { revisionId: number; overridePriceCents: number | null; pricingMode: "fixed" | "catalog_default" | "rules" }) {
+function saved(overrides: { revisionId: number; overridePriceCents: number | null; pricingMode: ListingPricingMode }) {
   return { productVariantId: 101, updatedAt: now.toISOString(), ...overrides };
 }
 function cost(unitCostCents: number): DropshipProductCost {

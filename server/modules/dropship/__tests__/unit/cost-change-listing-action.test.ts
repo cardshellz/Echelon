@@ -46,6 +46,25 @@ describe("classifyCostChangeListingPrice", () => {
     })).toEqual({ source: "rules_cost", priceCents: 1152, followsCost: true });
   });
 
+  it("classifies an inherit listing by the rules when they give a price, else at retail (A3, L1)", () => {
+    const inherit = { overridePriceCents: null, pricingMode: "inherit" as const };
+    expect(classifyCostChangeListingPrice({
+      saved: inherit, existingListingPriceCents: 999, defaultPriceCents: 899, rulePrice: { priceCents: 1152, basis: "product_cost" },
+    })).toEqual({ source: "rules_cost", priceCents: 1152, followsCost: true });
+    expect(classifyCostChangeListingPrice({
+      saved: inherit, existingListingPriceCents: 999, defaultPriceCents: 899, rulePrice: { priceCents: 1099, basis: "catalog_retail" },
+    })).toEqual({ source: "rules_retail", priceCents: 1099, followsCost: false });
+    // No rules: the retail price, not the $9.99 an earlier push saved.
+    expect(classifyCostChangeListingPrice({ saved: inherit, existingListingPriceCents: 999, defaultPriceCents: 899, rulePrice: null }))
+      .toEqual({ source: "catalog_default", priceCents: 899, followsCost: false });
+    // Rules that can't price it (no cost on file): retail too, so the cost does not decide its price.
+    expect(classifyCostChangeListingPrice({
+      saved: inherit, existingListingPriceCents: 999, defaultPriceCents: 899, rulePrice: { priceCents: null, basis: "product_cost" },
+    })).toEqual({ source: "catalog_default", priceCents: 899, followsCost: false });
+    expect(classifyCostChangeListingPrice({ saved: inherit, existingListingPriceCents: 999, defaultPriceCents: null, rulePrice: null }))
+      .toEqual({ source: "unavailable", priceCents: null, followsCost: false });
+  });
+
   it("reports an unavailable price rather than inventing one", () => {
     expect(classifyCostChangeListingPrice({
       saved: { overridePriceCents: null, pricingMode: "rules" }, existingListingPriceCents: null, defaultPriceCents: null,

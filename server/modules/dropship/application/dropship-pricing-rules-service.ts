@@ -32,6 +32,8 @@ export interface PricingRulesRepository {
   execute<T>(memberId: string, storeConnectionId: number, operation: (tx: PricingRulesTransaction) => Promise<T>): Promise<T>;
 }
 const targetSchema = z.number().int().positive().max(2_147_483_647);
+/** The review's rule name for a size that follows the store's pricing but no rule can price. */
+const RETAIL_FALLBACK_RULE_NAME = "Retail price (no rule prices this size)";
 
 export class DropshipPricingRulesService {
   constructor(private readonly deps: { repository: PricingRulesRepository; clock: DropshipClock; newId: () => string; logger: DropshipLogger }) {}
@@ -127,24 +129,34 @@ export class DropshipPricingRulesService {
       // listing was derived, not chosen, so the rules replace it.
       const preserved = !input.releaseFixedOverrides && isTypedListingPrice(setting);
       const rule = proposedRules.price(candidate, cost);
-      const priceCents = preserved ? old.effectivePriceCents : rule.priceCents;
+      // A size that follows the store's pricing keeps doing so (applying does
+      // not re-save it). It is priced as its listing will be: the new rule
+      // price when the rules give one, else the retail price, so a rule that
+      // cannot price it is not a blocker while a retail price exists.
+      const inherited = setting?.pricingMode === "inherit"
+        ? resolveListingPrice({ saved: setting, existingListingPriceCents: existing,
+          defaultPriceCents: candidate.defaultRetailPriceCents, rulePrice: rule })
+        : null;
+      const onRetail = inherited !== null && inherited.source !== "rules" && inherited.effectivePriceCents !== null;
+      const priceCents = preserved ? old.effectivePriceCents : inherited ? inherited.effectivePriceCents : rule.priceCents;
       // A preserved row is not changed by applying, so like its issues, its
       // notes and basis describe nothing the vendor is about to do.
       const policy = preserved ? null : evaluateListingPricingPolicy(candidate, guardrails, priceCents);
-      const issues = policy ? [rule.issue, ...policy.blockers].filter((issue): issue is string => issue !== null) : [];
+      const ruleIssue = onRetail ? null : rule.issue;
+      const issues = policy ? [ruleIssue, ...policy.blockers].filter((issue): issue is string => issue !== null) : [];
       const warnings = policy
         ? [...policy.warnings, ...evaluateListingPriceAgainstCost({ priceCents, unitCostCents: productCostCents }).warnings]
         : [];
-      const basis = preserved ? null : rule.basis;
+      const basis = preserved ? null : onRetail ? "catalog_retail" : rule.basis;
       return pricingImpactRowSchema.parse({ productVariantId: candidate.productVariantId,
         title: candidate.title?.trim() || candidate.productName, sku: candidate.sku,
         previousPriceCents: old.effectivePriceCents, priceCents, productCostCents,
-        ruleName: preserved ? "Fixed override preserved" : rule.ruleName, preserved, issues,
+        ruleName: preserved ? "Fixed override preserved" : onRetail ? RETAIL_FALLBACK_RULE_NAME : rule.ruleName, preserved, issues,
         settingRevisionId: setting?.revisionId ?? null,
         evidenceHash: pricingHash({ rule: rule.evidenceHash, oldRule: oldRule?.evidenceHash ?? null, setting, existing, guardrails }),
         sizeName: candidate.variantName, basis,
         basisCents: basisAmountCents(basis, { productCostCents, catalogRetailCents: candidate.defaultRetailPriceCents }),
-        warnings });
+        warnings, ...(inherited ? { followsStorePricing: true as const } : {}) });
     });
   }
 }

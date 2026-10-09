@@ -172,6 +172,9 @@ function sizePriceFacts(candidate: DropshipListingCatalogCandidate, inputs: List
   const resolved = resolveListingPrice({ saved, rulePrice, defaultPriceCents: candidate.defaultRetailPriceCents,
     existingListingPriceCents: inputs.existingListings.get(id)?.vendorRetailPriceCents ?? null });
   const priceCents = resolved.effectivePriceCents;
+  // An `inherit` size the rules give no price uses the retail price (owner
+  // decisions A3 and L1). The vendor sees that it is a fallback, and why.
+  const retailFallback = saved?.pricingMode === "inherit" && resolved.source === "catalog_default";
   const basis = ruleOwned ? rulePrice?.basis ?? null : null;
   const paused = inputs.pausedSince.get(id);
   return {
@@ -181,11 +184,11 @@ function sizePriceFacts(candidate: DropshipListingCatalogCandidate, inputs: List
     sizeName: candidate.variantName,
     sku: candidate.sku,
     priceCents,
-    source: PRICE_SOURCE[resolved.source],
+    source: retailFallback ? "retail_fallback" : PRICE_SOURCE[resolved.source],
     rule: ruleOwned && rulePrice ? describeRule(rulePrice, inputs.pricing.profile) : null,
     basis,
     basisAmountCents: basis ? validAmount(pricingBasisCents(basis, { productCostCents: costCents, catalogRetailCents: candidate.defaultRetailPriceCents })) : null,
-    issue: priceIssue({ ruleOwned, rulePrice, priceCents }),
+    issue: retailFallback ? ruleIssue(rulePrice) : priceIssue({ ruleOwned, rulePrice, priceCents }),
     costCents,
     belowCostByCents: belowCostBy(priceCents, costCents),
     limits: priceLimits(candidate, inputs.pricingPolicies, priceCents),
@@ -208,6 +211,18 @@ function priceIssue(input: { ruleOwned: boolean; rulePrice: RulePriceResult | nu
     if (issue !== null && RULE_ISSUES.has(issue)) return issue as ListingSettingsPriceIssue;
   }
   return "price_unavailable";
+}
+
+/**
+ * Why the store's rules give a `retail_fallback` size no price: null when the
+ * store has no rules, so none covers the size. A configured store's rules
+ * always name why (`resolvePricingRule`), so any other answer is a code fault.
+ */
+function ruleIssue(rulePrice: RulePriceResult | null): ListingSettingsPriceIssue | null {
+  if (rulePrice === null) return null;
+  const issue = rulePrice.issue;
+  if (issue !== null && RULE_ISSUES.has(issue)) return issue as ListingSettingsPriceIssue;
+  throw new Error(`Pricing rules gave a size no price without a known reason (${issue ?? "none"}).`);
 }
 
 /** The rule that won, with the recipe it priced by. A tie names no rule: none of them priced the size. */
@@ -465,6 +480,7 @@ export function selectListingSettingsPrices(facts: ListingSettingsFacts,
       case "below_cost": return price.belowCostByCents !== null;
       case "cannot_price": return price.priceCents === null;
       case "paused": return price.pausedSince !== null;
+      case "retail_fallback": return price.source === "retail_fallback";
     }
   });
   return pageOf(matching, input.page);

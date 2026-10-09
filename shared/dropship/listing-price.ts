@@ -8,13 +8,25 @@ export const listingPriceCentsSchema = z.number().int().positive().max(MAX_LISTI
 export const listingAmountCentsSchema = z.number().int().min(0).max(MAX_LISTING_PRICE_CENTS);
 /** What a pricing rule starts from: the vendor's .ops cost or the catalog reference retail. */
 export const listingPriceBasisSchema = z.enum(["product_cost", "catalog_retail"]);
+/**
+ * How one size's price is chosen (`dropship_listing_price_settings.pricing_mode`):
+ * - `fixed`: a price the vendor typed (the only mode with a price of its own);
+ * - `catalog_default`: the Card Shellz retail price;
+ * - `rules`: the store's pricing rules, and no price when they can't give one;
+ * - `inherit`: no price of its own. The store's pricing rules when they give a
+ *   price, otherwise the Card Shellz retail price, never the price an earlier
+ *   push saved (migration 0732; owner decisions A3 and L1, 2026-10-09).
+ */
+export const LISTING_PRICING_MODES = ["fixed", "catalog_default", "rules", "inherit"] as const;
+export type ListingPricingMode = (typeof LISTING_PRICING_MODES)[number];
+export const listingPricingModeSchema = z.enum(LISTING_PRICING_MODES);
 export const listingPriceTargetSchema = z.object({
   storeConnectionId: z.number().int().positive().max(2_147_483_647),
   productVariantId: z.number().int().positive().max(2_147_483_647),
 }).strict();
 export const saveListingPriceInputSchema = z.object({
   priceCents: listingPriceCentsSchema.nullable(),
-  pricingMode: z.enum(["fixed", "catalog_default", "rules"]).optional(),
+  pricingMode: listingPricingModeSchema.optional(),
   expectedRevisionId: z.number().int().positive().max(2_147_483_647).nullable(),
   idempotencyKey: z.string().min(1).max(200).regex(/^[A-Za-z0-9:_-]+$/),
 }).strict().refine((input) => !input.pricingMode || (input.pricingMode === "fixed") === (input.priceCents !== null),
@@ -25,7 +37,7 @@ export const listingPriceSettingSchema = listingPriceTargetSchema.extend({
   effectivePriceCents: listingPriceCentsSchema.nullable(),
   defaultPriceCents: listingPriceCentsSchema.nullable(),
   source: z.enum(["override", "catalog_default", "saved_listing", "rules", "unavailable"]),
-  pricingMode: z.enum(["fixed", "catalog_default", "rules"]).optional(),
+  pricingMode: listingPricingModeSchema.optional(),
   ruleName: z.string().nullable().optional(),
   pricingIssue: z.string().nullable().optional(),
   rulePriceCents: listingPriceCentsSchema.nullable().optional(),
@@ -47,7 +59,7 @@ export interface SavedListingPriceRevision {
   productVariantId: number;
   revisionId: number;
   overridePriceCents: number | null;
-  pricingMode?: "fixed" | "catalog_default" | "rules";
+  pricingMode?: ListingPricingMode;
   updatedAt: string;
 }
 
@@ -60,11 +72,18 @@ export interface SavedListingPriceRevision {
  * was derived at push time, not chosen by the vendor, so it does not shield
  * the listing from the rules; only a typed price does (owner decision,
  * 2026-09-28).
+ *
+ * `inherit` follows the rules only when they give the size a usable price.
+ * A store with no rules, two group rules that tie, a missing cost or a price
+ * out of range leave it on the retail price instead (owner decision L1,
+ * 2026-10-09), so an `inherit` size is never blocked by a rule that can't
+ * price it. `rules` keeps today's meaning: no price when the rules give none.
  */
 export function listingPriceFollowsRules(input: {
   saved: Pick<SavedListingPriceRevision, "pricingMode"> | null;
   rulePrice?: { priceCents: number | null } | null;
 }): boolean {
+  if (input.saved?.pricingMode === "inherit") return listingPriceCentsSchema.safeParse(input.rulePrice?.priceCents).success;
   if (input.saved) return input.saved.pricingMode === "rules";
   return input.rulePrice != null;
 }
@@ -78,6 +97,11 @@ export function isTypedListingPrice(saved: Pick<SavedListingPriceRevision, "over
  * Precedence: the saved setting (rules, typed price or catalog default), then
  * the store's rules, then the price an earlier push saved on the listing,
  * then the catalog default.
+ *
+ * An `inherit` setting takes the rule price when the rules give one (see
+ * `listingPriceFollowsRules`), and otherwise the catalog default with source
+ * `catalog_default`. Its saved price is always null, so it never falls back to
+ * the price an earlier push saved: that price is only used with no saved setting.
  */
 export function resolveListingPrice(input: {
   saved: Pick<SavedListingPriceRevision, "overridePriceCents" | "pricingMode"> | null;

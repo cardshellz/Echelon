@@ -218,6 +218,65 @@ describe("listing settings facts: the price of one size", () => {
     ]);
   });
 
+  it("prices an inherit size without rules at retail, as a retail fallback, never at the last published price (A3)", () => {
+    const price = onlyPrice(inputs([candidate()], {
+      savedPrices: new Map([[101, savedPrice(101, { pricingMode: "inherit" })]]),
+      existingListings: new Map([[101, { listingId: 1, productVariantId: 101, status: "active", vendorRetailPriceCents: 1_350, quantityCap: null, externalListingId: "x" }]]),
+      costs: new Map([[101, cost(800)]]),
+    }));
+    expect(price).toMatchObject({ priceCents: 1_199, source: "retail_fallback", rule: null, basis: null, basisAmountCents: null,
+      issue: null, costCents: 800, belowCostByCents: null, settingRevisionId: 1_001 });
+  });
+
+  it("prices an inherit size by the store's rules when they give a price", () => {
+    const price = onlyPrice(inputs([candidate()], {
+      savedPrices: new Map([[101, savedPrice(101, { pricingMode: "inherit" })]]),
+      pricing: pricing({ defaultRecipe: COST_RECIPE, groups: [] }),
+      costs: new Map([[101, cost(800)]]),
+    }));
+    expect(price).toMatchObject({ priceCents: 1_200, source: "rules", basis: "product_cost", basisAmountCents: 800, issue: null,
+      rule: { kind: "store_default", name: "Store default rule", recipe: COST_RECIPE } });
+  });
+
+  it("falls back to retail for an inherit size its rules can't price, and says why (L1)", () => {
+    const tie = onlyPrice(inputs([candidate()], {
+      savedPrices: new Map([[101, savedPrice(101, { pricingMode: "inherit" })]]),
+      pricing: pricing({ defaultRecipe: COST_RECIPE, groups: [
+        { id: "a", name: "A", priority: 1, scope: { type: "category", category: "Toploaders" }, recipe: RETAIL_RECIPE },
+        { id: "b", name: "B", priority: 1, scope: { type: "product", productId: 501 }, recipe: RETAIL_RECIPE },
+      ] }),
+    }));
+    expect(tie).toMatchObject({ priceCents: 1_199, source: "retail_fallback", rule: null, basis: null, issue: "pricing_rule_priority_conflict" });
+    const noCost = onlyPrice(inputs([candidate()], {
+      savedPrices: new Map([[101, savedPrice(101, { pricingMode: "inherit" })]]),
+      pricing: pricing({ defaultRecipe: COST_RECIPE, groups: [] }),
+      costs: new Map([[101, cost(null)]]),
+    }));
+    expect(noCost).toMatchObject({ priceCents: 1_199, source: "retail_fallback", rule: null, basis: null, issue: "pricing_basis_unavailable" });
+    // A fallback has a price, so it is no fix and no "can't price" count.
+    const facts = buildListingSettingsFacts(inputs([candidate()], {
+      savedPrices: new Map([[101, savedPrice(101, { pricingMode: "inherit" })]]),
+      pricing: pricing({ defaultRecipe: COST_RECIPE, groups: [] }),
+    }));
+    expect(facts.sizes[0].fixes).toEqual([]);
+    expect(buildListingSettingsSummary(facts, GENERATED_AT).counts).toMatchObject({ cannotPrice: 0, productsNeedingFix: 0 });
+  });
+
+  it("has no price for an inherit size with no rule price and no retail price", () => {
+    const price = onlyPrice(inputs([candidate({ defaultRetailPriceCents: null })], {
+      savedPrices: new Map([[101, savedPrice(101, { pricingMode: "inherit" })]]),
+      existingListings: new Map([[101, { listingId: 1, productVariantId: 101, status: "active", vendorRetailPriceCents: 1_350, quantityCap: null, externalListingId: "x" }]]),
+    }));
+    expect(price).toMatchObject({ priceCents: null, source: "none", issue: "price_unavailable" });
+  });
+
+  it("still reports a never-saved size without rules as the catalog or last published price", () => {
+    expect(onlyPrice(inputs([candidate()]))).toMatchObject({ source: "catalog_price", settingRevisionId: null });
+    expect(onlyPrice(inputs([candidate()], {
+      existingListings: new Map([[101, { listingId: 1, productVariantId: 101, status: "active", vendorRetailPriceCents: 1_350, quantityCap: null, externalListingId: "x" }]]),
+    }))).toMatchObject({ source: "last_published", priceCents: 1_350 });
+  });
+
   it("reports a size paused by a cost change", () => {
     const price = onlyPrice(inputs([candidate()], { pausedSince: new Map([[101, new Date("2026-10-02T09:30:00.000Z")]]) }));
     expect(price.pausedSince).toBe("2026-10-02T09:30:00.000Z");
@@ -573,6 +632,27 @@ describe("listing settings facts: lists", () => {
       selectListingSettingsPrices(facts, { search: "", show, page: 0 }).rows.map((row) => row.productVariantId);
     expect(prices("paused")).toEqual([31]);
     expect(prices("cannot_price")).toEqual([21]);
+    expect(prices("retail_fallback")).toEqual([]);
+  });
+
+  it("lists only the retail fallbacks under retail_fallback", () => {
+    const facts = buildListingSettingsFacts(inputs([
+      candidate({ productId: 1, productVariantId: 11, productName: "A" }),
+      candidate({ productId: 2, productVariantId: 21, productName: "B" }),
+      candidate({ productId: 3, productVariantId: 31, productName: "C" }),
+      candidate({ productId: 4, productVariantId: 41, productName: "D", defaultRetailPriceCents: null }),
+    ], {
+      savedPrices: new Map([
+        [11, savedPrice(11, { pricingMode: "inherit" })],
+        [21, savedPrice(21, { pricingMode: "catalog_default" })],
+        [41, savedPrice(41, { pricingMode: "inherit" })],
+      ]),
+    }));
+    const page = selectListingSettingsPrices(facts, { search: "", show: "retail_fallback", page: 0 });
+    expect(page.rows.map((row) => [row.productVariantId, row.source])).toEqual([[11, "retail_fallback"]]);
+    expect(page.total).toBe(1);
+    expect(listingSettingsPricesResponseSchema.safeParse({ storeConnectionId: 5, page: 0, pageSize: 50, total: page.total,
+      rows: page.rows, generatedAt: GENERATED_AT.toISOString() }).success).toBe(true);
   });
 });
 

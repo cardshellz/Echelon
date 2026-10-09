@@ -143,6 +143,13 @@ export interface DropshipListingPreviewRow {
   marketplaceCategoryFallback?: "queued";
   rulePriceEvidenceHash?: string | null;
   pricingRuleName?: string | null;
+  /**
+   * Present (true) only when the size is saved as "follow the store's
+   * pricing" (`inherit`). Its price belongs to the rules even while it falls
+   * back to the retail price, so the push-time review gate treats it as
+   * rule priced. Not part of the preview hash: the saved revision id is.
+   */
+  followsStorePricing?: true;
   /** Local setting revision used to reject stale queue creation. */
   priceSettingRevisionId?: number | null;
   presentation?: DropshipListingPresentation;
@@ -1238,6 +1245,7 @@ function buildListingPreviewRow(input: {
     } : {}),
     ...(publishedCategory?.fromQueue ? { marketplaceCategoryFallback: "queued" as const } : {}),
     ...(ruleOwned ? { rulePriceEvidenceHash: input.rulePrice?.evidenceHash ?? null, pricingRuleName: input.rulePrice?.ruleName ?? null } : {}),
+    ...(input.savedListingPrice?.pricingMode === "inherit" ? { followsStorePricing: true as const } : {}),
     productVariantId: input.candidate.productVariantId,
     productId: input.candidate.productId,
     sku: input.candidate.sku,

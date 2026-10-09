@@ -77,6 +77,50 @@ describe("store pricing review and approval", () => {
     expect(result.rows[1]).toMatchObject({ preserved: true, previousPriceCents: 1299, priceCents: 1299, ruleName: "Fixed override preserved" });
     expect(result.summary.preserved).toBe(1);
   });
+  it("does not preserve an inherit setting, and takes its previous price from the shared resolver", async () => {
+    vi.mocked(tx.catalog.listExistingListings).mockResolvedValue([
+      { productVariantId: 1, listingId: 1, vendorRetailPriceCents: 999, status: "live", quantityCap: null, externalListingId: null },
+    ]);
+    settings = [{ productVariantId: 1, revisionId: 7, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }];
+    // No rules yet: the inherit size was on the retail price ($8.99), never the $9.99 an earlier push saved.
+    const first = await review();
+    expect(first.rows[0]).toMatchObject({ preserved: false, previousPriceCents: 899, priceCents: 1152, ruleName: "Store default rule",
+      settingRevisionId: 7, followsStorePricing: true, basis: "product_cost" });
+    expect(first.rows[1]).not.toHaveProperty("followsStorePricing");
+    expect(first.summary.preserved).toBe(0);
+    // With rules in force, its previous price is the current rule price.
+    state = { profile: { ...profile, defaultRecipe: { ...profile.defaultRecipe, markupBps: 0, flatCents: 0 } }, revisionId: 3, updatedAt: now.toISOString() };
+    const second = await service.reviewForMember("member-1", 22, { ...input, expectedRevisionId: 3 });
+    expect(second.rows[0]).toMatchObject({ preserved: false, previousPriceCents: 809, priceCents: 1152 });
+  });
+  it("prices an inherit size the rules cannot price at retail, without blocking the apply", async () => {
+    candidates = candidates.slice(0, 2);
+    currentCost = { ...cost, status: "unavailable", unitCostCents: null, issue: "source_read_failed" };
+    settings = [{ productVariantId: 1, revisionId: 7, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }];
+    const result = await review();
+    expect(result.rows[0]).toMatchObject({ preserved: false, previousPriceCents: 899, priceCents: 899, issues: [],
+      ruleName: "Retail price (no rule prices this size)", basis: "catalog_retail", basisCents: 899, followsStorePricing: true });
+    // A size without the inherit setting still has no price and blocks.
+    expect(result.rows[1]).toMatchObject({ priceCents: null, issues: ["pricing_basis_unavailable", "vendor_retail_price_required"] });
+    expect(result.summary.blocked).toBe(1);
+  });
+  it("keeps an inherit size blocked when neither the rules nor a retail price can price it", async () => {
+    candidates = [{ ...candidates[0], defaultRetailPriceCents: null }];
+    currentCost = { ...cost, status: "unavailable", unitCostCents: null, issue: "source_read_failed" };
+    settings = [{ productVariantId: 1, revisionId: 7, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }];
+    const result = await review();
+    expect(result.rows[0]).toMatchObject({ priceCents: null, followsStorePricing: true,
+      issues: ["pricing_basis_unavailable", "vendor_retail_price_required"] });
+    await expect(service.applyForMember("member-1", 22, { reviewId, reviewHash: result.reviewHash, idempotencyKey: "apply-1" }))
+      .rejects.toMatchObject({ code: "DROPSHIP_PRICING_REVIEW_BLOCKED" });
+  });
+  it("hands the apply the inherit marker so the size is not re-saved as rules-only", async () => {
+    candidates = candidates.slice(0, 2);
+    settings = [{ productVariantId: 1, revisionId: 7, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }];
+    await apply();
+    const reviewed = vi.mocked(tx.applyReview).mock.calls[0][0];
+    expect(reviewed.rows.map((row) => row.followsStorePricing ?? false)).toEqual([true, false]);
+  });
   it("can explicitly release fixed overrides in the reviewed request", async () => {
     settings = [{ productVariantId: 1, revisionId: 7, overridePriceCents: 999, updatedAt: now.toISOString() }];
     const result = await service.reviewForMember("member-1", 22, { ...input, releaseFixedOverrides: true });

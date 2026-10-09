@@ -42,8 +42,8 @@ export const listingSettingsProductsInputSchema = z.object({
   page: page.default(0),
 }).strict();
 
-/** Which sizes the Prices tab lists. */
-export const LISTING_SETTINGS_PRICE_FILTERS = ["all", "exact_prices", "below_cost", "cannot_price", "paused"] as const;
+/** Which sizes the Prices tab lists. `retail_fallback`: sizes whose price source is `retail_fallback`. */
+export const LISTING_SETTINGS_PRICE_FILTERS = ["all", "exact_prices", "below_cost", "cannot_price", "paused", "retail_fallback"] as const;
 export const listingSettingsPricesInputSchema = z.object({
   storeConnectionId: id,
   search: search.default(""),
@@ -57,10 +57,16 @@ export const listingSettingsPricesInputSchema = z.object({
  * - `rules`: the store's pricing rules;
  * - `catalog_price`: the Card Shellz retail price;
  * - `last_published`: the price an earlier push saved on the listing;
+ * - `retail_fallback`: the Card Shellz retail price, because the size follows
+ *   the pricing rules (`inherit`) and they give it no price: the store has none
+ *   (`issue` null), or they can't price it (`issue` says why);
  * - `none`: no price can be worked out.
  */
-export const LISTING_SETTINGS_PRICE_SOURCES = ["exact", "rules", "catalog_price", "last_published", "none"] as const;
-/** Why a size has no price. The first three come from the rules (`resolvePricingRule`). */
+export const LISTING_SETTINGS_PRICE_SOURCES = ["exact", "rules", "catalog_price", "last_published", "retail_fallback", "none"] as const;
+/**
+ * Why a size has no price. The first three come from the rules (`resolvePricingRule`).
+ * On a `retail_fallback` size, which has a price, it is why the rules can't price it.
+ */
 export const LISTING_SETTINGS_PRICE_ISSUES = [
   "pricing_rule_priority_conflict", "pricing_basis_unavailable", "pricing_result_out_of_range",
   "pricing_rules_not_configured", "price_unavailable",
@@ -99,6 +105,7 @@ export const listingSettingsSizePriceSchema = z.object({
   /** What the rule starts from, and that amount; null when the rules don't own the price. */
   basis: listingPriceBasisSchema.nullable(),
   basisAmountCents: listingAmountCentsSchema.nullable(),
+  /** Null when the size has a price, except on a `retail_fallback` size whose rules can't price it. */
   issue: z.enum(LISTING_SETTINGS_PRICE_ISSUES).nullable(),
   /** The vendor's live .ops cost for one sellable pack; null when it is not known. */
   costCents: listingAmountCentsSchema.nullable(),

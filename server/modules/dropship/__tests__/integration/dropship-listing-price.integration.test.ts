@@ -12,7 +12,7 @@ import { resolveListingContent, listingCatalogHash } from "../../application/dro
 import { contentCandidate, noContentProfile } from "../fixtures/listing-content.fixture";
 import type { StoredPricingReview } from "../../application/dropship-pricing-rules-service";
 import type { CreateDropshipListingPushJobRepositoryInput } from "../../application/dropship-listing-preview-service";
-import type { SaveListingPriceInput } from "../../../../../shared/dropship/listing-price";
+import type { ListingPricingMode, SaveListingPriceInput } from "../../../../../shared/dropship/listing-price";
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 config({ path: resolve(process.cwd(), ".env.test") });
 const testUrl = process.env.ECHELON_TEST_DATABASE_URL;
@@ -71,6 +71,10 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
     await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations/0657_dropship_listing_price_settings.sql"), "utf8")));
     await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations/0659_dropship_store_pricing_rules.sql"), "utf8")));
     await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations/0660_dropship_vendor_listing_content.sql"), "utf8")));
+    // 0732 runs twice to prove it can be re-run (each check is dropped if present and added again).
+    const inheritMigration = qualify(readFileSync(resolve(process.cwd(), "migrations/0732_dropship_listing_price_inherit_mode.sql"), "utf8"));
+    await pool.query(inheritMigration);
+    await pool.query(inheritMigration);
     const scopedPool = { connect: async () => { const client = await pool!.connect();
       return { query: (sql: string, values?: unknown[]) => client.query(qualify(sql), values), release: () => client.release() }; } } as unknown as Pool;
     repository = new PgDropshipListingPriceRepository(scopedPool);
@@ -87,8 +91,9 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
     dropship.dropship_listing_content_settings, dropship.dropship_listing_content_revisions RESTART IDENTITY`)); });
   afterAll(async () => { if (created && pool) await pool.query(`DROP SCHEMA "${schema}" CASCADE`); await pool?.end(); });
 
-  function save(key: string, priceCents: number | null = 1299, expectedRevisionId: number | null = null, variant = 101, store = 22) {
-    const input: SaveListingPriceInput = { idempotencyKey: key, priceCents, expectedRevisionId };
+  function save(key: string, priceCents: number | null = 1299, expectedRevisionId: number | null = null, variant = 101, store = 22,
+    pricingMode?: ListingPricingMode) {
+    const input: SaveListingPriceInput = { idempotencyKey: key, priceCents, expectedRevisionId, ...(pricingMode ? { pricingMode } : {}) };
     return repository.execute({ memberId: "member-1", storeConnectionId: store, productVariantId: variant, idempotencyKey: key },
       (tx) => tx.save({ ...input, now, requestHash: createHash("sha256").update(JSON.stringify({ ...input, variant, store })).digest("hex") }));
   }
@@ -306,6 +311,103 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
     expect(items.rows[0].result.listingIntent.description).toBe(resolved.descriptionHtml);
     expect(items.rows[0].result.listingIntent.description).toBe("<p>Reviewed copy</p>");
     expect(resolved.facts).toContainEqual({ name: "SKU", value: "ARM-50" });
+  });
+  describe("the inherit price mode (migration 0732)", () => {
+    /** A revision written straight to the table, skipping the repository, to test the checks alone. */
+    function insertRevision(key: string, pricingMode: string | null, overridePriceCents: number | null) {
+      return pool!.query(qualify(`INSERT INTO dropship.dropship_listing_price_revisions
+        (vendor_id,store_connection_id,product_variant_id,override_price_cents,idempotency_key,request_hash,actor_id,created_at,pricing_mode)
+        VALUES (10,22,102,$1,$2,$3,'member-1',$4,$5) RETURNING id`), [overridePriceCents, key, "c".repeat(64), now, pricingMode]);
+    }
+
+    it("allows inherit in both checks after running twice, and keeps the other modes", async () => {
+      const checks = await pool!.query(`SELECT c.conname, pg_get_constraintdef(c.oid) AS definition
+        FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace
+        WHERE n.nspname = $1 AND c.conname IN ('listing_price_revision_mode_chk', 'listing_price_setting_mode_chk') ORDER BY c.conname`, [schema]);
+      expect(checks.rows.map((row) => row.conname)).toEqual(["listing_price_revision_mode_chk", "listing_price_setting_mode_chk"]);
+      for (const row of checks.rows) {
+        for (const mode of ["fixed", "catalog_default", "rules", "inherit"]) expect(row.definition).toContain(`'${mode}'`);
+      }
+    });
+
+    it("saves inherit through the repository: one revision, the setting, and an audit row with the mode before and after", async () => {
+      const typed = await save("typed-first", 1299);
+      const cleared = await save("clear-to-inherit", null, typed.saved.revisionId, 101, 22, "inherit");
+      expect(cleared).toMatchObject({ idempotentReplay: false, saved: { revisionId: 2, overridePriceCents: null, pricingMode: "inherit" } });
+      const result = await state();
+      expect(result.settings).toHaveLength(1);
+      expect(result.settings[0]).toMatchObject({ product_variant_id: 101, revision_id: 2, override_price_cents: null, pricing_mode: "inherit" });
+      expect(result.revisions).toHaveLength(2);
+      expect(result.revisions[1]).toMatchObject({ id: 2, previous_revision_id: 1, override_price_cents: null, pricing_mode: "inherit" });
+      expect(result.audits).toHaveLength(2);
+      expect(result.audits[1].payload).toMatchObject({ before: { pricingMode: "fixed", overridePriceCents: 1299 },
+        after: { pricingMode: "inherit", overridePriceCents: null } });
+      // Read back through the repository and through the preview's reader.
+      const loaded = await repository.execute({ memberId: "member-1", storeConnectionId: 22, productVariantId: 101 }, (tx) => tx.loadSaved());
+      expect(loaded).toMatchObject({ revisionId: 2, overridePriceCents: null, pricingMode: "inherit" });
+      const reader = new PgDropshipListingPreviewRepository({ query: (sql: string, values?: unknown[]) => pool!.query(qualify(sql), values) } as unknown as Pool);
+      expect(await reader.listSavedListingPrices({ vendorId: 10, storeConnectionId: 22, productVariantIds: [101] }))
+        .toEqual([{ productVariantId: 101, revisionId: 2, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }]);
+    });
+
+    it("applying store rules leaves an inherit size as inherit and re-saves only the others", async () => {
+      const inherit = await save("inherit-before-rules", null, null, 101, 22, "inherit");
+      const review = ruleReview();
+      review.rows[0] = { ...review.rows[0], settingRevisionId: inherit.saved.revisionId, followsStorePricing: true };
+      await storeRuleReview(review); await applyRuleReview(review);
+      const result = await state();
+      expect(result.settings[0]).toMatchObject({ product_variant_id: 101, revision_id: inherit.saved.revisionId,
+        override_price_cents: null, pricing_mode: "inherit" });
+      expect(result.settings[1]).toMatchObject({ product_variant_id: 102, pricing_mode: "rules", override_price_cents: null });
+      // One revision for the inherit save, one for the adopted size; none rewrites the inherit size.
+      expect(result.revisions.map((row) => [row.product_variant_id, row.pricing_mode])).toEqual([[101, "inherit"], [102, "rules"]]);
+      expect(result.audits.at(-1)!.payload).toMatchObject({ adoptedCount: 1, preservedCount: 0, followsStorePricingCount: 1 });
+    });
+
+    it("replays an inherit save by its key and refuses the key for rules", async () => {
+      const first = await save("inherit-once", null, null, 101, 22, "inherit");
+      const before = await state();
+      expect(await save("inherit-once", null, null, 101, 22, "inherit")).toEqual({ idempotentReplay: true, saved: first.saved });
+      await expect(save("inherit-once", null, null, 101, 22, "rules")).rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT" });
+      expect(await state()).toEqual(before);
+    });
+
+    it("refuses inherit with a price, and an unknown mode, in the revision check", async () => {
+      await expect(insertRevision("inherit-with-price", "inherit", 1299))
+        .rejects.toMatchObject({ code: "23514", constraint: "listing_price_revision_mode_chk" });
+      await expect(insertRevision("unknown-mode", "auction", null))
+        .rejects.toMatchObject({ code: "23514", constraint: "listing_price_revision_mode_chk" });
+      expect((await state()).revisions).toEqual([]);
+    });
+
+    it("refuses inherit with a price in the setting check too", async () => {
+      const revision = await insertRevision("fixed-row", "fixed", 1299);
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        // The coherence trigger would refuse the mismatch first; switch it off inside this transaction to reach the check.
+        await client.query(qualify("ALTER TABLE dropship.dropship_listing_price_settings DISABLE TRIGGER dropship_listing_price_setting_coherence"));
+        await expect(client.query(qualify(`INSERT INTO dropship.dropship_listing_price_settings
+          (vendor_id,store_connection_id,product_variant_id,revision_id,override_price_cents,updated_at,pricing_mode)
+          VALUES (10,22,102,$1,1299,$2,'inherit')`), [revision.rows[0].id, now]))
+          .rejects.toMatchObject({ code: "23514", constraint: "listing_price_setting_mode_chk" });
+      } finally {
+        await client.query("ROLLBACK");
+        client.release();
+      }
+      const trigger = await pool!.query(`SELECT t.tgenabled FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND t.tgname = 'dropship_listing_price_setting_coherence'`, [schema]);
+      expect(trigger.rows).toEqual([{ tgenabled: "O" }]);
+    });
+
+    it("still accepts every existing mode and the legacy null mode", async () => {
+      const rows: Array<[string, string | null, number | null]> = [
+        ["rules-row", "rules", null], ["catalog-row", "catalog_default", null], ["fixed-ok", "fixed", 1299],
+        ["legacy-reset", null, null], ["legacy-price", null, 1299], ["inherit-row", "inherit", null],
+      ];
+      for (const [key, mode, cents] of rows) await expect(insertRevision(key, mode, cents)).resolves.toBeDefined();
+      expect((await state()).revisions.map((row) => row.pricing_mode)).toEqual(["rules", "catalog_default", "fixed", null, null, "inherit"]);
+    });
   });
   it("saves do not rewrite an already queued publication snapshot or applied listing price", async () => {
     const first = await save("queue-price");

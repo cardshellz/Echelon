@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { requireSuccessfulJobs } from "../../../scripts/ci/require-success.mjs";
@@ -15,6 +15,29 @@ function job(workflow: string, name: string): string {
   let end = start + 1;
   while (end < lines.length && !/^  [a-z][a-z0-9-]*:/.test(lines[end])) end++;
   return lines.slice(start, end).join("\n");
+}
+
+// The paths one job step hands to `npx vitest run`, in order. The step must be
+// a folded `run: >-` block with one path per line and no other arguments.
+function vitestStepFiles(jobText: string, stepName: string): string[] {
+  const lines = jobText.split(/\r?\n/);
+  const start = lines.indexOf("      - name: " + stepName);
+  expect(start, "Missing workflow step: " + stepName).toBeGreaterThanOrEqual(0);
+  let end = start + 1;
+  while (end < lines.length && /^ {8,}\S/.test(lines[end])) end++;
+  const [run, command, ...paths] = lines.slice(start + 1, end);
+  expect(run).toBe("        run: >-");
+  expect(command).toBe("          npx vitest run");
+  for (const line of paths) expect(line, "Not a test path: " + line).toMatch(/^ {10}[\w./-]+\.test\.ts$/);
+  return paths.map((line) => line.trim());
+}
+
+// Repository-relative test files in one directory whose names match.
+function testFilesIn(directory: string, name: RegExp): string[] {
+  return readdirSync(new URL(directory, repositoryRoot))
+    .filter((file) => name.test(file))
+    .map((file) => directory + file)
+    .sort();
 }
 
 describe("parallel CI required-check aggregation", () => {
@@ -140,6 +163,25 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/lib/__tests__/dropship-ebay-category-rules.test.ts",
       "client/src/pages/dropship/__tests__/DropshipEbayCategoryRulesPanel.test.ts",
       "client/src/lib/__tests__/dropship-unsaved-changes.test.ts",
+      "client/src/lib/__tests__/dropship-listing-settings-price-words.test.ts",
+      "client/src/lib/__tests__/dropship-listing-settings-drafts.test.ts",
+      "client/src/pages/dropship/__tests__/ListingSettingsFramework.test.ts",
+      "client/src/lib/__tests__/dropship-listing-settings-access.test.ts",
+      "client/src/lib/__tests__/dropship-listing-settings-words.test.ts",
+      "client/src/lib/__tests__/dropship-listing-settings-store-requests.test.ts",
+      "client/src/pages/dropship/__tests__/ListingSettingsPolicyShelf.test.ts",
+      "client/src/lib/__tests__/dropship-listing-settings-content-requests.test.ts",
+      "client/src/pages/dropship/__tests__/ListingSettingsCategoryDescription.test.ts",
+      "client/src/lib/__tests__/dropship-listing-settings-recipe.test.ts",
+      "client/src/pages/dropship/__tests__/ListingSettingsPriceRow.test.ts",
+      "client/src/pages/dropship/__tests__/ListingSettingsTabs.test.ts",
+      "client/src/lib/__tests__/dropship-listing-settings-drawer.test.ts",
+      "client/src/pages/dropship/__tests__/ListingSettingsProductDrawer.test.ts",
+      "client/src/lib/__tests__/dropship-listing-settings-attention.test.ts",
+      "client/src/pages/dropship/__tests__/ListingSettingsHeaderBannerStrip.test.ts",
+      "client/src/pages/dropship/__tests__/ListingSettingsStep.test.ts",
+      "client/src/lib/__tests__/dropship-ebay-listing-setup.test.ts",
+      "client/src/lib/__tests__/dropship-ebay-listing-query-sync.test.ts",
       "shared/dropship/__tests__/program-finance-money.test.ts",
       "shared/dropship/__tests__/program-finance-contract.test.ts",
       "shared/dropship/__tests__/program-finance-definitions.test.ts",
@@ -147,6 +189,29 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/pages/__tests__/dropship-finance-panel.test.ts",
     ]) expect(contracts).toContain(file);
     expect(contracts).toContain("--strict --types node scripts/inventory-cutover-records-*.ts");
+  });
+
+  // `vitest run` treats each path as a filter and exits 0 when one matches no
+  // file, so a misspelt or deleted path would drop that suite from CI quietly.
+  it("names only real, distinct files in the dropship listing UI step", () => {
+    const files = vitestStepFiles(job(workflow, "contracts"), "Dropship listing policy UI contracts");
+    expect(files.length).toBeGreaterThan(0);
+    expect(new Set(files).size).toBe(files.length);
+    for (const file of files) {
+      expect(existsSync(new URL(file, repositoryRoot)), "Missing test file: " + file).toBe(true);
+    }
+  });
+
+  // test:unit is `vitest run unit`, which matches none of these paths, so they
+  // run in CI only because this step names them.
+  it("runs every Listing settings client test in the dropship listing UI step", () => {
+    const registered = new Set(vitestStepFiles(job(workflow, "contracts"), "Dropship listing policy UI contracts"));
+    const onDisk = [
+      ...testFilesIn("client/src/lib/__tests__/", /^dropship-listing-settings(?:-[a-z]+)*\.test\.ts$/),
+      ...testFilesIn("client/src/pages/dropship/__tests__/", /^ListingSettings[A-Za-z]*\.test\.ts$/),
+    ];
+    expect(onDisk.length).toBeGreaterThan(0);
+    for (const file of onDisk) expect(registered.has(file), "Not run in CI: " + file).toBe(true);
   });
 
   it("retains the existing required core check and fails closed on every dependency", () => {

@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
+import { LISTING_PRICING_MODES } from "../../../../shared/dropship/listing-price";
 import { pricingProfileStateSchema, type PricingProfileState } from "../../../../shared/dropship/pricing-rules";
 import {
   costChangeHoldReleaseDetails,
@@ -528,7 +529,7 @@ function mapListingRow(row: ListingRow): CostActionListing {
 }
 
 function mapSavedPriceRow(row: SavedPriceRow): CostActionSavedPrice {
-  if (row.pricing_mode !== null && !["fixed", "catalog_default", "rules"].includes(row.pricing_mode)) {
+  if (row.pricing_mode !== null && !(LISTING_PRICING_MODES as readonly string[]).includes(row.pricing_mode)) {
     throw invalidStoredValue("pricing_mode", row.pricing_mode);
   }
   return {

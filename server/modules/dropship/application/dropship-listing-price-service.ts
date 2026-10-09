@@ -83,7 +83,8 @@ export class DropshipListingPriceService {
     this.deps.logger.info({
       code: result.idempotentReplay ? "DROPSHIP_LISTING_PRICE_REPLAYED" : "DROPSHIP_LISTING_PRICE_SAVED",
       message: "Local listing price setting saved; no marketplace publication was requested.",
-      context: { ...parsedTarget, revisionId: result.price.revisionId, actorId: memberId, idempotentReplay: result.idempotentReplay },
+      context: { ...parsedTarget, revisionId: result.price.revisionId, pricingMode: result.price.pricingMode ?? null,
+        actorId: memberId, idempotentReplay: result.idempotentReplay },
     });
     return result;
   }

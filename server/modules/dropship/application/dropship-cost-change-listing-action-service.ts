@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { DropshipCostChangePolicySettings } from "../../../../shared/dropship/cost-change-policy";
+import type { ListingPricingMode } from "../../../../shared/dropship/listing-price";
 import type { PricingProfileState } from "../../../../shared/dropship/pricing-rules";
 import {
   classifyCostChangeListingPrice,
@@ -100,7 +101,7 @@ export interface CostActionSavedPrice {
   storeConnectionId: number;
   productVariantId: number;
   overridePriceCents: number | null;
-  pricingMode: "fixed" | "catalog_default" | "rules" | null;
+  pricingMode: ListingPricingMode | null;
 }
 
 export interface CostActionCandidate {

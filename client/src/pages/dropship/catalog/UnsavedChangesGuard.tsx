@@ -10,14 +10,35 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { describeUnsavedDrafts, updateUnsavedDrafts, type UnsavedDraft } from "@/lib/dropship-unsaved-changes";
+import {
+  describeLeavePrompt,
+  scopeUnsavedDrafts,
+  updateUnsavedDrafts,
+  type UnsavedDraft,
+  type UnsavedDraftExtra,
+} from "@/lib/dropship-unsaved-changes";
+
+/**
+ * Runs `leave` at once when nothing is unsaved, or after the vendor chooses
+ * "Discard and leave". With `scope`, only the drafts with those ids count
+ * (closing or switching one editor asks about that editor only).
+ */
+export type LeaveGuard = (leave: () => void, scope?: readonly string[]) => void;
 
 interface UnsavedChangesContextValue {
-  setDraft: (id: string, label: string, dirty: boolean) => void;
-  guard: (leave: () => void) => void;
+  setDraft: (id: string, label: string, dirty: boolean, extra?: UnsavedDraftExtra) => void;
+  guard: LeaveGuard;
+}
+
+interface PendingLeave {
+  leave: () => void;
+  /** Null asks about every draft on the page. */
+  scope: readonly string[] | null;
 }
 
 const UnsavedChangesContext = createContext<UnsavedChangesContextValue | null>(null);
+/** The drafts themselves, apart from the setters, so an editor reporting a draft does not re-render on every other draft. */
+const UnsavedDraftsContext = createContext<readonly UnsavedDraft[]>([]);
 
 /**
  * One leave guard for every editor on the page. Editors report unsaved
@@ -29,17 +50,20 @@ const UnsavedChangesContext = createContext<UnsavedChangesContextValue | null>(n
  */
 export function UnsavedChangesProvider({ children }: { children: ReactNode }) {
   const [drafts, setDrafts] = useState<readonly UnsavedDraft[]>([]);
-  const [pendingLeave, setPendingLeave] = useState<(() => void) | null>(null);
-  // Read inside `guard` so its identity stays stable while drafts change.
+  const [pendingLeave, setPendingLeave] = useState<PendingLeave | null>(null);
+  // Read inside `guard` and `leaveNow` so the guard's identity stays stable while drafts change.
   const draftsRef = useRef(drafts);
   draftsRef.current = drafts;
 
-  const setDraft = useCallback((id: string, label: string, dirty: boolean) => {
-    setDrafts((current) => updateUnsavedDrafts(current, id, dirty ? { id, label } : null));
+  const setDraft = useCallback((id: string, label: string, dirty: boolean, extra?: UnsavedDraftExtra) => {
+    const entry: UnsavedDraft | null = !dirty ? null
+      : extra ? { id, label, changes: extra.changes, discard: extra.discard } : { id, label };
+    setDrafts((current) => updateUnsavedDrafts(current, id, entry));
   }, []);
-  const guard = useCallback((leave: () => void) => {
-    if (draftsRef.current.length === 0) leave();
-    else setPendingLeave(() => leave);
+  const guard = useCallback<LeaveGuard>((leave, scope) => {
+    const asking = scopeUnsavedDrafts(draftsRef.current, scope ?? null);
+    if (asking.length === 0) leave();
+    else setPendingLeave({ leave, scope: scope ?? null });
   }, []);
 
   const hasDrafts = drafts.length > 0;
@@ -56,19 +80,29 @@ export function UnsavedChangesProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo(() => ({ setDraft, guard }), [setDraft, guard]);
   const leaveNow = () => {
-    const leave = pendingLeave;
+    const pending = pendingLeave;
     setPendingLeave(null);
-    leave?.();
+    if (!pending) return;
+    // Editors that can drop their own changes do so; the older panels keep
+    // theirs until they unmount, as before.
+    for (const draft of scopeUnsavedDrafts(draftsRef.current, pending.scope)) draft.discard?.();
+    pending.leave();
   };
+  // The question keeps its scope while the dialog animates closed, so its words don't change under the vendor.
+  const askedScope = useRef<readonly string[] | null>(null);
+  if (pendingLeave) askedScope.current = pendingLeave.scope;
+  const asking = scopeUnsavedDrafts(drafts, askedScope.current);
 
   return (
     <UnsavedChangesContext.Provider value={value}>
-      {children}
+      <UnsavedDraftsContext.Provider value={drafts}>
+        {children}
+      </UnsavedDraftsContext.Provider>
       <AlertDialog open={pendingLeave !== null} onOpenChange={(open) => { if (!open) setPendingLeave(null); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Leave without saving?</AlertDialogTitle>
-            <AlertDialogDescription>{describeUnsavedDrafts(drafts) ?? "Your changes aren't saved."}</AlertDialogDescription>
+            <AlertDialogDescription>{describeLeavePrompt(asking) ?? "Your changes aren't saved."}</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Keep editing</AlertDialogCancel>
@@ -83,20 +117,30 @@ export function UnsavedChangesProvider({ children }: { children: ReactNode }) {
 /**
  * Reports this editor's unsaved changes while `dirty` is true, and clears
  * them when the editor unmounts. Does nothing outside an UnsavedChangesProvider.
+ * An editor that counts its changes passes `extra`: the count words the leave
+ * prompt ("You have 2 changes that aren't saved."), and `discard`, which must
+ * keep one identity across renders, drops them on "Discard and leave".
  */
-export function useUnsavedDraft(id: string, label: string, dirty: boolean): void {
+export function useUnsavedDraft(id: string, label: string, dirty: boolean, extra?: UnsavedDraftExtra): void {
   const context = useContext(UnsavedChangesContext);
+  const changes = extra?.changes;
+  const discard = extra?.discard;
   useEffect(() => {
-    context?.setDraft(id, label, dirty);
-  }, [context, id, label, dirty]);
+    context?.setDraft(id, label, dirty, changes !== undefined && discard !== undefined ? { changes, discard } : undefined);
+  }, [context, id, label, dirty, changes, discard]);
   useEffect(() => () => context?.setDraft(id, label, false), [context, id, label]);
+}
+
+/** Every editor's unsaved draft on the page (the bar and "Older settings" read them). Empty outside an UnsavedChangesProvider. */
+export function useUnsavedDrafts(): readonly UnsavedDraft[] {
+  return useContext(UnsavedDraftsContext);
 }
 
 /**
  * Runs `leave` at once when nothing is unsaved, or after the vendor chooses
  * "Discard and leave". Outside an UnsavedChangesProvider it always runs at once.
  */
-export function useLeaveGuard(): (leave: () => void) => void {
+export function useLeaveGuard(): LeaveGuard {
   return useContext(UnsavedChangesContext)?.guard ?? leaveAtOnce;
 }
 

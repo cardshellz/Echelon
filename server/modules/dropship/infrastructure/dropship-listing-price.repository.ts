@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import type { ListingPriceTarget, SaveListingPriceInput, SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
+import type { ListingPriceTarget, ListingPricingMode, SaveListingPriceInput, SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
 import type { ListingPriceRepository, ListingPriceTransaction } from "../application/dropship-listing-price-service";
 import { DropshipError } from "../domain/errors";
 import { pool as defaultPool } from "../../../db";
@@ -9,7 +9,7 @@ import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapt
 
 interface PriceRow {
   product_variant_id: number; revision_id: number; override_price_cents: number | null; updated_at: Date;
-  pricing_mode?: "fixed" | "catalog_default" | "rules" | null;
+  pricing_mode?: ListingPricingMode | null;
 }
 interface RevisionRow extends PriceRow { request_hash: string; store_connection_id: number }
 

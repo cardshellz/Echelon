@@ -561,6 +561,43 @@ describe("DropshipListingPreviewService", () => {
     const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
     expect(preview.rows[0].priceCents).toBeNull(); expect(preview.rows[0].blockers).toContain("pricing_basis_unavailable");
   });
+  it("prices an inherit size by the store's rules: rule-owned, with its evidence, never a request-local price", async () => {
+    repository.rulePrices.set(101, rulePrice());
+    repository.savedPrices = [{ productVariantId: 101, revisionId: 7, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }];
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1 });
+    expect(preview.rows[0]).toMatchObject({ priceCents: 1152, rulePriceEvidenceHash: "a".repeat(64), pricingRuleName: "Store default rule",
+      priceSettingRevisionId: 7, followsStorePricing: true });
+    expect(preview.rows[0].blockers).not.toContain("pricing_rules_not_configured");
+    expect(preview.rows[0].listingIntent).toMatchObject({ priceCents: 1152 });
+  });
+  it("prices an inherit size without rules at retail, not at the price an earlier push saved", async () => {
+    repository.existingListings = [{ productVariantId: 101, listingId: 1, status: "live", vendorRetailPriceCents: 2799,
+      quantityCap: null, externalListingId: null }];
+    repository.savedPrices = [{ productVariantId: 101, revisionId: 7, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }];
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(preview.rows[0]).toMatchObject({ priceCents: repository.candidate.defaultRetailPriceCents, priceSettingRevisionId: 7 });
+    expect(preview.rows[0].rulePriceEvidenceHash).toBeUndefined();
+    expect(preview.rows[0].blockers).not.toContain("pricing_rules_not_configured");
+  });
+  it("prices an inherit size its rules can't price at retail, without blocking it (L1)", async () => {
+    repository.rulePrices.set(101, { ...rulePrice(), priceCents: null, issue: "pricing_basis_unavailable" });
+    repository.savedPrices = [{ productVariantId: 101, revisionId: 7, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }];
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(preview.rows[0]).toMatchObject({ priceCents: repository.candidate.defaultRetailPriceCents });
+    expect(preview.rows[0].blockers).not.toContain("pricing_basis_unavailable");
+    expect(preview.rows[0].rulePriceEvidenceHash).toBeUndefined();
+    // Still the rules' price to move: the push-time review gate reads this marker.
+    expect(preview.rows[0].followsStorePricing).toBe(true);
+  });
+  it("marks only inherit sizes as following the store's pricing", async () => {
+    repository.rulePrices.set(101, rulePrice());
+    for (const pricingMode of ["rules", "catalog_default", "fixed"] as const) {
+      repository.savedPrices = [{ productVariantId: 101, revisionId: 7, overridePriceCents: pricingMode === "fixed" ? 1299 : null,
+        pricingMode, updatedAt: now.toISOString() }];
+      const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+      expect(preview.rows[0]).not.toHaveProperty("followsStorePricing");
+    }
+  });
   it("does not request wholesale-derived prices for unavailable catalog candidates", async () => {
     repository.candidate.variantIsActive = false;
     repository.rulePrices.set(101, rulePrice());

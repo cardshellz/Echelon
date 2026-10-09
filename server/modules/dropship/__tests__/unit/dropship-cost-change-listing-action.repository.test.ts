@@ -79,6 +79,23 @@ describe("PgDropshipCostChangeListingActionRepository", () => {
     expect(facts.profiles.size).toBe(0);
   });
 
+  it("maps every stored pricing mode, including inherit and a legacy null", async () => {
+    const { pool } = fakePool([
+      result([]),
+      result([
+        { store_connection_id: 9, product_variant_id: 61, override_price_cents: null, pricing_mode: "inherit" },
+        { store_connection_id: 9, product_variant_id: 62, override_price_cents: 1299, pricing_mode: "fixed" },
+        { store_connection_id: 9, product_variant_id: 63, override_price_cents: null, pricing_mode: null },
+      ]),
+    ]);
+    const facts = await repository(pool).loadVendorFacts({ vendorId: 5, productVariantIds: [61, 62, 63] });
+    expect(facts.savedPrices).toEqual([
+      { storeConnectionId: 9, productVariantId: 61, overridePriceCents: null, pricingMode: "inherit" },
+      { storeConnectionId: 9, productVariantId: 62, overridePriceCents: 1299, pricingMode: "fixed" },
+      { storeConnectionId: 9, productVariantId: 63, overridePriceCents: null, pricingMode: null },
+    ]);
+  });
+
   it("refuses a stored pricing mode or profile outside its contract", async () => {
     const bad = fakePool([result([]), result([{ store_connection_id: 9, product_variant_id: 61, override_price_cents: null, pricing_mode: "auction" }]), result([])]);
     await expect(repository(bad.pool).loadVendorFacts({ vendorId: 5, productVariantIds: [61] }))

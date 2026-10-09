@@ -66,6 +66,23 @@ describe("listing settings contracts", () => {
 
   it("refuses a price filter the Prices tab does not have", () => {
     expect(listingSettingsPricesInputSchema.safeParse({ storeConnectionId: 5, show: "sizes_differ" }).success).toBe(false);
+    expect(listingSettingsPricesInputSchema.safeParse({ storeConnectionId: 5, show: "nope" }).success).toBe(false);
+  });
+
+  it("lists the retail fallbacks on the Prices tab only (A3)", () => {
+    expect(listingSettingsPricesInputSchema.parse({ storeConnectionId: 5, show: "retail_fallback" }))
+      .toEqual({ storeConnectionId: 5, search: "", show: "retail_fallback", page: 0 });
+    expect(listingSettingsProductsInputSchema.safeParse({ storeConnectionId: 5, show: "retail_fallback" }).success).toBe(false);
+  });
+
+  it("accepts a size on its retail price as a fallback, with or without the rules' reason, and refuses an unknown source", () => {
+    const fallback = { ...sizePrice, priceCents: 1_199, source: "retail_fallback", settingRevisionId: 4 };
+    expect(listingSettingsSizePriceSchema.parse(fallback)).toEqual(fallback);
+    const tie = { ...fallback, issue: "pricing_rule_priority_conflict" };
+    expect(listingSettingsSizePriceSchema.parse(tie)).toEqual(tie);
+    expect(listingSettingsSizePriceSchema.safeParse({ ...sizePrice, source: "inherit" }).success).toBe(false);
+    expect(listingSettingsSizePriceSchema.safeParse({ ...sizePrice, source: "retail" }).success).toBe(false);
+    expect(listingSettingsSizePriceSchema.safeParse({ ...fallback, issue: "no_rules" }).success).toBe(false);
   });
 
   it("accepts a priced size and refuses a loss of zero cents or a money value in dollars", () => {

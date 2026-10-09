@@ -154,6 +154,25 @@ jobs:
           client/src/lib/__tests__/dropship-ebay-category-rules.test.ts
           client/src/pages/dropship/__tests__/DropshipEbayCategoryRulesPanel.test.ts
           client/src/lib/__tests__/dropship-unsaved-changes.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-price-words.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-drafts.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsFramework.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-access.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-words.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-store-requests.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsPolicyShelf.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-content-requests.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsCategoryDescription.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-recipe.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsPriceRow.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsTabs.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-drawer.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsProductDrawer.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-attention.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsHeaderBannerStrip.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsStep.test.ts
+          client/src/lib/__tests__/dropship-ebay-listing-setup.test.ts
+          client/src/lib/__tests__/dropship-ebay-listing-query-sync.test.ts
       # These paths have no "unit" in them, so test:unit never selects them.
       - name: Dropship program finance contracts
         run: >-

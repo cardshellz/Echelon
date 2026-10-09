@@ -52,6 +52,14 @@ export const pricingImpactRowSchema = z.object({
   basisCents: pricingAmountCentsSchema.nullable().optional(),
   /** Notes on the new price that never block applying: below the .ops cost, warn-only price limits. */
   warnings: z.array(z.string()).optional(),
+  /**
+   * Present (true) only for a size saved as "follow the store's pricing"
+   * (`inherit`). Applying keeps that setting instead of re-saving the size as
+   * `rules`, and its price is the new rule price when the rules give one,
+   * else the retail price. Omitted otherwise, so a review stored before this
+   * field existed hashes the same.
+   */
+  followsStorePricing: z.literal(true).optional(),
 }).strict();
 export const pricingReviewSummarySchema = z.object({
   total: z.number().int().nonnegative(), changed: z.number().int().nonnegative(),
