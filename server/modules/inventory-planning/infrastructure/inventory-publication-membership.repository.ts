@@ -16,8 +16,7 @@ import {
   InventoryPublicationMembershipError,
   type InventoryPublicationMembershipStore,
 } from "../application/inventory-publication-membership.service";
-import { planInventoryChannelExposureProduct } from "../application/inventory-channel-exposure-runtime.service";
-import { resolvePromiseWarehouseIds } from "../domain/inventory-warehouse-scope";
+import { reviewInventoryPublicationQuantities } from "../application/inventory-publication-quantity-review";
 import { loadAndLockRuntimeAuthority } from "./inventory-availability-runtime-atp.repository";
 import { captureActiveSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
 import {
@@ -604,7 +603,7 @@ async function captureReview(
       422,
     );
   const quantities: PublicationMembershipReview["quantities"] = [];
-  const plans: unknown[] = [];
+  const planEvidenceHashes: string[] = [];
   if (blockers.length === 0) {
     for (const productId of affectedProductIds) {
       const snapshot = await captureActiveSupplySnapshotInsideTransaction(
@@ -637,7 +636,7 @@ async function captureReview(
             }
           : candidate,
       );
-      const plan = planInventoryChannelExposureProduct(
+      const plan = reviewInventoryPublicationQuantities(
         {
           ...authority,
           supplySnapshot: snapshot,
@@ -646,10 +645,7 @@ async function captureReview(
         },
         productId,
       );
-      // Capture time is observational metadata, not a configuration change.
-      // Stable review identity still includes stock fingerprint and every row.
-      const { snapshotCapturedAt: _capturedAt, ...stablePlan } = plan;
-      plans.push(stablePlan);
+      planEvidenceHashes.push(plan.evidenceHash);
       const selected = plan.targets.find(
         (candidate) => candidate.publicationTargetId === target.id,
       );
@@ -665,13 +661,6 @@ async function captureReview(
         blockers.push(
           issue(problem.code, problem.message, "configure_inventory"),
         );
-      // ATP reports physical contributions from the hub and its active reserves.
-      // Validate SKU overrides against that same group, not just the binding's
-      // root IDs; an unrelated warehouse must still block enrollment.
-      const configuredPromiseWarehouseIds = new Set(resolvePromiseWarehouseIds(
-        snapshot.warehouses,
-        selected?.sourceBinding?.warehouseIds ?? [],
-      ));
       for (const row of selected?.rows ?? []) {
         for (const problem of row.blockers)
           blockers.push(
@@ -682,26 +671,9 @@ async function captureReview(
               row.productVariantId,
             ),
           );
-        if (
-          target.provider_key === "walmart" &&
-          row.sourceWarehouseBreakdown.some(
-            (source) =>
-              BigInt(source.canonicalAtpUnits) > BigInt(0) &&
-              !configuredPromiseWarehouseIds.has(source.warehouseId),
-          )
-        ) {
-          blockers.push(
-            issue(
-              "WALMART_SOURCE_OVERRIDE_MISMATCH",
-              "The selected SKU's source must match its configured Walmart fulfillment warehouse or an active reserve linked to it.",
-              "review_source",
-              row.productVariantId,
-            ),
-          );
-        }
         quantities.push({
           productVariantId: row.productVariantId,
-          desiredQuantity: row.publishedUnits,
+          desiredQuantity: row.desiredQuantity,
         });
       }
     }
@@ -720,7 +692,7 @@ async function captureReview(
     target,
     variants,
     includedIds: [...included].sort((a, b) => a - b),
-    review: { ...body, reviewHash: digest({ body, target, variants, plans }) },
+    review: { ...body, reviewHash: digest({ body, target, variants, planEvidenceHashes }) },
   };
 }
 

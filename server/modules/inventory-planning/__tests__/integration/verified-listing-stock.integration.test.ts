@@ -170,6 +170,15 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
     expect(await counts()).toEqual({ mappings: 1, members: 1, updates: 1, receipts: 1 });
   });
 
+  it("connects a valid warehouse with zero ATP and queues zero instead of treating it as a configuration failure", async () => {
+    await database.pool.query("UPDATE inventory.inventory_levels SET variant_qty=reserved_qty WHERE warehouse_location_id=100");
+    expect(await service.connect(input())).toMatchObject({ state: "connected",
+      quantities: [{ productVariantId: 101, desiredQuantity: "0" }] });
+    expect(await counts()).toEqual({ mappings: 1, members: 1, updates: 1, receipts: 1 });
+    expect((await database.pool.query("SELECT desired_quantity::text FROM inventory.inventory_publication_outbox WHERE publication_target_id=2")).rows)
+      .toEqual([{ desired_quantity: "0" }]);
+  });
+
   it.each([
     { source: "inactive reserve", hubWarehouseId: 1, active: false },
     { source: "unrelated warehouse", hubWarehouseId: null, active: true },
@@ -180,8 +189,9 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
     expect(await counts()).toEqual({ mappings: 1, members: 1, updates: 1, receipts: 1 });
   });
 
-  it("rejects a SKU override drawing stock from outside the configured warehouse's ATP group", async () => {
+  it.each([0, 5])("rejects a different configured warehouse before ATP even when it has %i units", async quantity => {
     await addWarehouseStock(null);
+    await database.pool.query("UPDATE inventory.inventory_levels SET variant_qty=$1 WHERE warehouse_location_id=200", [quantity]);
     await database.pool.query(`INSERT INTO warehouse.fulfillment_nodes(code,name,node_type,warehouse_id,inventory_authority,fulfillment_authority,created_by)
         VALUES('UNRELATED','Unrelated warehouse','internal_warehouse',2,'echelon','echelon','operator');
       UPDATE warehouse.fulfillment_nodes SET lifecycle_status='active',activated_by='operator',activated_at=transaction_timestamp() WHERE warehouse_id=2;
@@ -197,7 +207,7 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
       UPDATE inventory.channel_exposure_policy_heads SET active_policy_id=draft_policy_id,draft_policy_id=NULL,revision=revision+1
         WHERE scope_key='channel:36:variant:101'`);
     await expect(service.connect(input())).rejects.toMatchObject({ code: "STOCK_LISTING_ATP_NOT_READY",
-      message: expect.stringContaining("source must match") });
+      message: "This SKU's stock source must match the destination's configured fulfillment warehouse." });
     expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0 });
   });
 
