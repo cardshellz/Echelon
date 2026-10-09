@@ -1,4 +1,5 @@
 import { invoiceCostReviewCommands } from "./invoice-cost-review.service";
+import { registerInvoiceQuantityCorrectionRoutes } from "./invoice-quantity-correction.routes";
 ﻿import type { Express } from "express";
 import { requirePermission, upload } from "../../routes/middleware";
 import { requireIdempotency } from "../../middleware/idempotency";
@@ -38,6 +39,7 @@ function sendFinancialCommandError(res: any, error: FinancialCommandError): any 
 }
 
 export function registerApLedgerRoutes(app: Express) {
+  registerInvoiceQuantityCorrectionRoutes(app);
   // ============================================================
   // AP LEDGER - Vendor invoices
   // ============================================================

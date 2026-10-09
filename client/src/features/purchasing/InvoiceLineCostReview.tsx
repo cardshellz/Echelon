@@ -100,19 +100,19 @@ function ReviewEditor({ line, currency, blockedReason, onSaved, onDiscard, onClo
   }
   return <form onSubmit={submit} className="space-y-4">
     <div className="grid gap-2 rounded border bg-muted/30 p-3 sm:grid-cols-2">
-      <div><p className="text-xs text-muted-foreground">Recorded invoice line total</p><p className="font-mono font-semibold">{validTotal ? exactMoneyAsInput(line.lineTotalCents, 2) : "Unavailable"} {currency}</p></div>
-      <div><p className="text-xs text-muted-foreground">Reviewed component total</p><p className="font-mono font-semibold">{componentTotal === null ? "Incomplete" : `${exactMoneyAsInput(componentTotal, 4)} ${currency}`}</p></div>
+      <div><p className="text-xs text-muted-foreground">Amount on the invoice</p><p className="font-mono font-semibold">{validTotal ? exactMoneyAsInput(line.lineTotalCents, 2) : "Unavailable"} {currency}</p></div>
+      <div><p className="text-xs text-muted-foreground">Total entered below</p><p className="font-mono font-semibold">{componentTotal === null ? "Enter the amounts below" : `${exactMoneyAsInput(componentTotal, 4)} ${currency}`}</p></div>
     </div>
-    {!known && !saved && <p className="text-sm text-amber-700 dark:text-amber-300">Component amounts are unknown. Enter the supplier evidence, including explicit zero amounts where applicable.</p>}
+    {!known && !saved && <p className="text-sm text-amber-700 dark:text-amber-300">The product and packaging amounts are missing. Check the supplier's invoice. Enter totals for this whole line, using 0 for amounts not charged.</p>}
     {blockedReason && <p className="text-sm text-muted-foreground">{blockedReason}</p>}
     <fieldset disabled={locked || stale} className="grid gap-3 sm:grid-cols-2">
-      <div className="sm:col-span-2"><Label htmlFor={`${prefix}-treatment`}>Packaging treatment</Label><Select value={form.packagingTreatment} onValueChange={(value) => field("packagingTreatment", value)} disabled={locked || stale}><SelectTrigger id={`${prefix}-treatment`}><SelectValue placeholder="Select from supplier evidence" /></SelectTrigger><SelectContent><SelectItem value="separate">Separate amount confirmed</SelectItem><SelectItem value="included_in_product">Included in product amount</SelectItem></SelectContent></Select></div>
-      <div><Label htmlFor={`${prefix}-product`}>Extended product cost ({currency})</Label><Input id={`${prefix}-product`} inputMode="decimal" value={form.product} onChange={(event) => field("product", event.target.value)} /></div>
-      <div><Label htmlFor={`${prefix}-packaging`}>Extended packaging cost ({currency})</Label><Input id={`${prefix}-packaging`} inputMode="decimal" value={form.packaging} onChange={(event) => field("packaging", event.target.value)} /></div>
+      <div className="sm:col-span-2"><Label htmlFor={`${prefix}-treatment`}>Is packaging included in the product price?</Label><Select value={form.packagingTreatment} onValueChange={(value) => field("packagingTreatment", value)} disabled={locked || stale}><SelectTrigger id={`${prefix}-treatment`}><SelectValue placeholder="Check how the supplier billed packaging" /></SelectTrigger><SelectContent><SelectItem value="separate">No, packaging is charged separately</SelectItem><SelectItem value="included_in_product">Yes, packaging is included</SelectItem></SelectContent></Select></div>
+      <div><Label htmlFor={`${prefix}-product`}>Product total ({currency})</Label><Input id={`${prefix}-product`} inputMode="decimal" value={form.product} onChange={(event) => field("product", event.target.value)} /></div>
+      <div><Label htmlFor={`${prefix}-packaging`}>Packaging total ({currency})</Label><Input id={`${prefix}-packaging`} inputMode="decimal" value={form.packaging} onChange={(event) => field("packaging", event.target.value)} /></div>
       <div className="sm:col-span-2"><Label htmlFor={`${prefix}-adjustment`}>Other adjustments / credits ({currency})</Label><Input id={`${prefix}-adjustment`} inputMode="decimal" value={form.adjustment} onChange={(event) => field("adjustment", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Enter credits as negative amounts. Adjustments are preserved and may require further cost review.</p></div>
-      {!blockedReason && <div className="sm:col-span-2"><Label htmlFor={`${prefix}-reason`}>Review reason / supplier reference</Label><Textarea id={`${prefix}-reason`} maxLength={2000} value={form.reason} onChange={(event) => field("reason", event.target.value)} /></div>}
+      {!blockedReason && <div className="sm:col-span-2"><Label htmlFor={`${prefix}-reason`}>Notes / supplier invoice reference</Label><Textarea id={`${prefix}-reason`} maxLength={2000} value={form.reason} onChange={(event) => field("reason", event.target.value)} /></div>}
     </fieldset>
-    {componentTotal !== null && !balanced && <p className="text-sm text-amber-700 dark:text-amber-300">The component total must equal the recorded invoice line total exactly.</p>}
+    {componentTotal !== null && !balanced && <p className="text-sm text-amber-700 dark:text-amber-300">The amounts must add up to this line's invoice amount exactly.</p>}
     {(validationError || mutation.error) && <p role="alert" className="text-sm text-destructive">{validationError ?? mutation.error?.message}</p>}
     {saved && <ReviewResult result={saved} />}
     <div className="flex flex-wrap gap-2">
@@ -137,11 +137,11 @@ export function InvoiceLineCostReview({ line, currency, invoiceStatus, onSaved }
         : !Number.isSafeInteger(line.lineTotalCents) || !costFingerprintSchema.safeParse(line.costReviewVersion).success ? "Current invoice evidence is unavailable. Reload the invoice before reviewing costs." : null;
   return <>
     <Button size="sm" variant="outline" className="h-auto whitespace-normal py-1 text-xs" onClick={() => setSnapshot({ ...line })} aria-label={`Review costs for ${line.sku || `line ${line.lineNumber}`}`}>
-      {known ? "View cost evidence" : "Review cost components"}
+      {known ? "View cost breakdown" : "Review cost breakdown"}
     </Button>
     <Dialog open={snapshot !== null} onOpenChange={(open) => { if (!open && !busy) setSnapshot(null); }}>
       <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-xl" onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }} onInteractOutside={(event) => { if (busy) event.preventDefault(); }}>
-        <DialogHeader><DialogTitle>Invoice cost review · {snapshot?.sku || `Line ${snapshot?.lineNumber}`}</DialogTitle><DialogDescription>Record product and packaging evidence for this invoice line. Saving preserves the document amount and checks linked inventory costs.</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>Invoice cost breakdown · {snapshot?.sku || `Line ${snapshot?.lineNumber}`}</DialogTitle><DialogDescription>Split this line's invoice amount into product, packaging and any adjustments. These totals are used to review inventory costs.</DialogDescription></DialogHeader>
         {snapshot && <ReviewEditor line={snapshot} currency={currency} blockedReason={blockedReason} onSaved={onSaved} setBusy={setBusy} onClose={() => setSnapshot(null)} onDiscard={() => { setSnapshot(null); onSaved(); }} />}
       </DialogContent>
     </Dialog>

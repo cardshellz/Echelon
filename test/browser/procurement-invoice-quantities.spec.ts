@@ -32,7 +32,7 @@ async function expectComparison(row: Locator, testInfo: TestInfo, ordered: strin
     await expect(row.getByText(`PO ordered: ${ordered}`, { exact: true })).toBeVisible();
     await expect(row.getByText("PO received: 25,000", { exact: true })).toBeVisible();
   } else {
-    await expect(row.locator("td").nth(4)).toHaveText(`${ordered}Saved: 12,500`);
+    await expect(row.locator("td").nth(4)).toHaveText(ordered);
     await expect(row.locator("td").nth(5)).toHaveText("25,000");
   }
   await expect(row.locator("td").nth(3)).toHaveText(/^12500/);

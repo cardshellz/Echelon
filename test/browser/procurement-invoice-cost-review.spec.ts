@@ -37,20 +37,20 @@ async function setup(page: Page, options: { canApprove?: boolean; currency?: str
 }
 
 async function fill(page: Page, options: { product?: string; packaging?: string; adjustment?: string } = {}) {
-  await page.getByLabel("Packaging treatment", { exact: true }).click();
-  await page.getByRole("option", { name: "Separate amount confirmed" }).click();
-  await page.getByLabel(/^Extended product cost/).fill(options.product ?? "100.0000");
-  await page.getByLabel(/^Extended packaging cost/).fill(options.packaging ?? "18.0000");
+  await page.getByLabel("Is packaging included in the product price?", { exact: true }).click();
+  await page.getByRole("option", { name: "No, packaging is charged separately" }).click();
+  await page.getByLabel(/^Product total/).fill(options.product ?? "100.0000");
+  await page.getByLabel(/^Packaging total/).fill(options.packaging ?? "18.0000");
   await page.getByLabel(/^Other adjustments/).fill(options.adjustment ?? "0");
-  await page.getByLabel("Review reason / supplier reference").fill("Final supplier breakdown reviewed");
+  await page.getByLabel("Notes / supplier invoice reference").fill("Final supplier breakdown reviewed");
 }
 
 test("reviews unknown amounts, retries a lost acknowledgement and preserves the invoice", async ({ page }, testInfo) => {
   const { commands, invoice, failures } = await setup(page, { lostResponse: true });
-  await expect(page.getByLabel(/^Extended product cost/)).toHaveValue("");
-  await expect(page.getByLabel(/^Extended packaging cost/)).toHaveValue("");
+  await expect(page.getByLabel(/^Product total/)).toHaveValue("");
+  await expect(page.getByLabel(/^Packaging total/)).toHaveValue("");
   await expect(page.getByLabel(/^Other adjustments/)).toHaveValue("");
-  await expect(page.getByText("Component amounts are unknown.", { exact: false })).toBeVisible();
+  await expect(page.getByText("The product and packaging amounts are missing.", { exact: false })).toBeVisible();
   await fill(page);
   await page.getByRole("button", { name: "Save cost review", exact: true }).click();
   await expect(page.getByText("Cost evidence saved. The invoice line total is unchanged.")).toBeVisible();
@@ -71,8 +71,8 @@ test("requires exact reconciliation and explicit packaging treatment before savi
   await expect(page.getByRole("alert")).toContainText("exactly");
   expect(commands).toEqual([]);
   await page.getByLabel(/^Other adjustments/).fill("0");
-  await page.getByLabel("Packaging treatment", { exact: true }).click();
-  await page.getByRole("option", { name: "Included in product amount" }).click();
+  await page.getByLabel("Is packaging included in the product price?", { exact: true }).click();
+  await page.getByRole("option", { name: "Yes, packaging is included" }).click();
   await page.getByRole("button", { name: "Save cost review", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("zero");
   expect(commands).toEqual([]);
@@ -94,7 +94,7 @@ test("keeps the reviewed snapshot on a stale response and requires explicit relo
   await fill(page);
   await page.getByRole("button", { name: "Save cost review", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Invoice line changed");
-  await expect(page.getByLabel(/^Extended product cost/)).toHaveValue("100.0000");
+  await expect(page.getByLabel(/^Product total/)).toHaveValue("100.0000");
   await expect(page.getByRole("button", { name: "Save cost review", exact: true })).toBeDisabled();
   await page.getByRole("button", { name: "Discard review and reload invoice" }).click();
   await expect(page.getByRole("dialog")).not.toBeVisible();
@@ -110,7 +110,7 @@ test("keeps the reviewed snapshot on a stale response and requires explicit relo
 test("view permission permits inspection and approval permission gates the command", async ({ page }) => {
   const { commands, failures } = await setup(page, { canApprove: false });
   await expect(page.getByText("Purchasing approval permission is required", { exact: false })).toBeVisible();
-  await expect(page.getByLabel(/^Extended product cost/)).toBeDisabled();
+  await expect(page.getByLabel(/^Product total/)).toBeDisabled();
   await expect(page.getByRole("button", { name: "Save cost review", exact: true })).toHaveCount(0);
   expect(commands).toEqual([]); expect(failures).toEqual([]);
 });
