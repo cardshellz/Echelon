@@ -3,6 +3,7 @@ import {
   ORDER_EDIT_CATALOG_CATEGORY_PAGE_SIZE,
   ORDER_EDIT_CATALOG_PRODUCT_PAGE_SIZE,
   ORDER_EDIT_CATALOG_VARIANT_PAGE_SIZE,
+  ORDER_EDIT_CATALOG_AVAILABILITY_SAMPLE_SIZE,
   orderEditCatalogCategoriesInputSchema,
   orderEditCatalogCategoriesSchema,
   orderEditCatalogProductsInputSchema,
@@ -15,11 +16,20 @@ import {
   type OrderEditCatalogProductsInput,
   type OrderEditCatalogVariantsInput,
 } from "@shared/order-edits/order-edit-catalog";
-import type { OrderEditCatalog } from "../application/order-edit-catalog";
+import type {
+  OrderEditCatalog,
+  OrderEditCatalogPricingContext,
+} from "../application/order-edit-catalog";
 import {
   OrderEditProviderError,
   type OrderEditVariant,
 } from "../application/order-edit-provider";
+import {
+  MemberPlanPresentationError,
+  type MemberPlanPresentationReader,
+} from "../../membership";
+import { memberPlanPresentationSchema } from "@shared/membership/member-plan-presentation";
+import { memberPrice } from "./shopify-order-edit-member-price";
 import {
   stockAvailable,
   supportedVariant,
@@ -47,6 +57,28 @@ const variant = shopifyOrderEditVariantSchema.extend({
     title: z.string().min(1),
   }),
 });
+const availabilityVariant = variant.pick({
+  id: true,
+  requiresComponents: true,
+  availableForSale: true,
+  inventoryPolicy: true,
+  sellableOnlineQuantity: true,
+  inventoryItem: true,
+  membershipVariant: true,
+});
+const availabilityPage = z.object({
+  nodes: z.array(availabilityVariant).max(ORDER_EDIT_CATALOG_VARIANT_PAGE_SIZE),
+  pageInfo: orderEditCatalogPageSchema,
+});
+const productWithAvailability = product.extend({
+  variants: availabilityPage.extend({
+    nodes: z
+      .array(availabilityVariant)
+      .max(ORDER_EDIT_CATALOG_AVAILABILITY_SAMPLE_SIZE),
+  }),
+});
+// Only products requiring further stock pages make additional requests, at most four at once.
+const AVAILABILITY_READ_CONCURRENCY = 4;
 
 type CatalogRequest = (
   connectionId: number,
@@ -56,7 +88,10 @@ type CatalogRequest = (
 
 /** Uses the provider's scoped transport. These GraphQL queries cannot stage an edit or touch money. */
 export class ShopifyOrderEditCatalog implements OrderEditCatalog {
-  constructor(private readonly request: CatalogRequest) {}
+  constructor(
+    private readonly request: CatalogRequest,
+    private readonly presentation?: MemberPlanPresentationReader,
+  ) {}
 
   async categories(connectionId: number, raw: OrderEditCatalogCategoriesInput) {
     const input = orderEditCatalogCategoriesInputSchema.parse(raw);
@@ -96,7 +131,9 @@ export class ShopifyOrderEditCatalog implements OrderEditCatalog {
       z.object({
         shop,
         products: z.object({
-          nodes: z.array(product).max(ORDER_EDIT_CATALOG_PRODUCT_PAGE_SIZE),
+          nodes: z
+            .array(productWithAvailability)
+            .max(ORDER_EDIT_CATALOG_PRODUCT_PAGE_SIZE),
           pageInfo: orderEditCatalogPageSchema,
         }),
       }),
@@ -108,17 +145,31 @@ export class ShopifyOrderEditCatalog implements OrderEditCatalog {
     );
     assertCursorProgress(data.products.pageInfo, input.after);
     assertUnique(data.products.nodes.map((entry) => entry.id));
+    const candidates = data.products.nodes.filter(
+      (entry) =>
+        supportedCatalogProduct(entry) &&
+        (input.category === null ||
+          entry.productType.trim() === input.category),
+    );
+    const available: z.infer<typeof productWithAvailability>[] = [];
+    for (
+      let offset = 0;
+      offset < candidates.length;
+      offset += AVAILABILITY_READ_CONCURRENCY
+    ) {
+      const batch = candidates.slice(
+        offset,
+        offset + AVAILABILITY_READ_CONCURRENCY,
+      );
+      const checks = await Promise.all(
+        batch.map((entry) => this.hasAvailableOption(connectionId, entry)),
+      );
+      available.push(...batch.filter((_entry, index) => checks[index]));
+    }
     return read(orderEditCatalogProductsSchema, {
       connectionId,
       input,
-      products: data.products.nodes
-        .filter(
-          (entry) =>
-            supportedCatalogProduct(entry) &&
-            (input.category === null ||
-              entry.productType.trim() === input.category),
-        )
-        .map(summary),
+      products: available.map(summary),
       pageInfo: data.products.pageInfo,
     });
   }
@@ -126,8 +177,18 @@ export class ShopifyOrderEditCatalog implements OrderEditCatalog {
   async productVariants(
     connectionId: number,
     raw: OrderEditCatalogVariantsInput,
+    pricingContext?: OrderEditCatalogPricingContext,
   ) {
     const input = orderEditCatalogVariantsInputSchema.parse(raw);
+    if (input.omsOrderId !== null && !pricingContext)
+      invalid("The selected order's customer pricing could not be verified.");
+    if (
+      pricingContext &&
+      (pricingContext.connectionId !== connectionId ||
+        (pricingContext.memberPlan !== null &&
+          pricingContext.customerId === null))
+    )
+      invalid("The customer pricing does not belong to this store and order.");
     const data = read(
       z.object({
         shop,
@@ -160,22 +221,106 @@ export class ShopifyOrderEditCatalog implements OrderEditCatalog {
       if (entry.product.id !== input.productId)
         invalid("A SKU does not belong to the selected product.");
     const selectedProduct = data.product;
-    return read(orderEditCatalogVariantsSchema, {
-      connectionId,
-      input,
-      product: summary(data.product),
-      variants: data.product.variants.nodes
-        .filter(supportedVariant)
-        .map((entry) => ({
+    const options = data.product.variants.nodes
+      .filter((entry) => supportedVariant(entry) && stockAvailable(entry, 1))
+      .map((entry) => {
+        const retailPriceCents = cents(entry.price);
+        return {
           variantId: entry.id,
           title: selectedProduct.title,
           variantTitle: entry.title === "Default Title" ? null : entry.title,
           sku: entry.sku,
-          priceCents: cents(entry.price),
-          available: stockAvailable(entry, 1),
-        })),
+          priceCents: pricingContext
+            ? memberPrice(entry, pricingContext)
+            : retailPriceCents,
+          ...(pricingContext ? { retailPriceCents } : {}),
+          available: true,
+        };
+      });
+    let memberPlan = null;
+    if (
+      options.some(
+        (option) =>
+          option.retailPriceCents !== undefined &&
+          option.priceCents < option.retailPriceCents,
+      )
+    ) {
+      if (!this.presentation || !pricingContext?.memberPlan)
+        invalid("The member plan's storefront presentation is unavailable.");
+      try {
+        memberPlan = read(
+          memberPlanPresentationSchema,
+          await this.presentation.read(pricingContext.memberPlan),
+        );
+      } catch (error) {
+        if (error instanceof MemberPlanPresentationError)
+          throw new OrderEditProviderError(
+            error.code,
+            error.message,
+            "rejected",
+            { reason: error.reason },
+          );
+        throw error;
+      }
+      if (memberPlan.planId !== pricingContext.memberPlan)
+        invalid("The storefront presentation belongs to another member plan.");
+    }
+    return read(orderEditCatalogVariantsSchema, {
+      connectionId,
+      input,
+      product: summary(data.product),
+      variants: options,
+      ...(pricingContext ? { memberPlan } : {}),
       pageInfo: data.product.variants.pageInfo,
     });
+  }
+
+  private async hasAvailableOption(
+    connectionId: number,
+    initial: z.infer<typeof productWithAvailability>,
+  ): Promise<boolean> {
+    let page: z.infer<typeof availabilityPage> = initial.variants;
+    let parent: z.infer<typeof product> = initial;
+    const seenIds = new Set<string>();
+    const seenCursors = new Set<string>();
+    while (true) {
+      for (const option of page.nodes) {
+        if (seenIds.has(option.id))
+          invalid("Shopify returned duplicate stock-probe identities.");
+        seenIds.add(option.id);
+      }
+      if (
+        page.nodes.some(
+          (option) =>
+            supportedVariant({ ...option, product: parent }) &&
+            stockAvailable({ ...option, product: parent }, 1),
+        )
+      )
+        return true;
+      if (!page.pageInfo.hasNextPage) return false;
+      const after = page.pageInfo.endCursor!;
+      if (seenCursors.has(after))
+        invalid("Shopify returned a repeated stock-probe cursor.");
+      seenCursors.add(after);
+      const next = read(
+        z.object({
+          shop,
+          product: product.extend({ variants: availabilityPage }).nullable(),
+        }),
+        await this.request(connectionId, gql.CATALOG_AVAILABILITY_QUERY, {
+          id: initial.id,
+          first: ORDER_EDIT_CATALOG_VARIANT_PAGE_SIZE,
+          after,
+        }),
+      );
+      if (!next.product) return false;
+      if (next.product.id !== initial.id)
+        invalid("The stock probe belongs to another product.");
+      if (!supportedCatalogProduct(next.product)) return false;
+      assertCursorProgress(next.product.variants.pageInfo, after);
+      parent = next.product;
+      page = next.product.variants;
+    }
   }
 
   async searchVariants(

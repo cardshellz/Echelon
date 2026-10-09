@@ -2,6 +2,7 @@ import { OrderEditPreviewService } from "../../application/order-edit-preview.se
 import { OrderEditService } from "../../application/order-edit.service";
 import { ShopifyOrderEditProvider } from "../../infrastructure/shopify-order-edit.provider";
 import type { OrderEditCatalog } from "../../application/order-edit-catalog";
+import { orderEditCatalogVariantsInputSchema } from "@shared/order-edits/order-edit-catalog";
 import {
   previewContext,
   previewInput,
@@ -343,7 +344,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         productVariants: vi.fn<OrderEditCatalog["productVariants"]>(
           async (connectionId, input) => ({
             connectionId,
-            input,
+            input: orderEditCatalogVariantsInputSchema.parse(input),
             product: {
               productId: input.productId,
               title: "Toploader",
@@ -443,6 +444,10 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       const before = await persistedState();
       const { changes, additions, ...scope } = input;
       await service.warm(scope, "staff");
+      const catalogCustomer = await service.catalogSnapshot(scope, "staff");
+      expect(catalogCustomer.customerId).toBe("gid://shopify/Customer/8");
+      expect(catalogCustomer.memberPlan).toBe(context.snapshot.memberPlan);
+      expect(provider.readOrder).toHaveBeenCalledTimes(1);
       const result = await service.preview(input, "staff");
       expect(result.financials.totalCents).toBe(22098);
       expect(await persistedState()).toEqual(before);

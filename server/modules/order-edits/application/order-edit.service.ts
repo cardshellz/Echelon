@@ -5,6 +5,7 @@ import {
 } from "./order-edit-identity";
 import type { OrderEditPreviewService } from "./order-edit-preview.service";
 import type { OrderEditCatalog } from "./order-edit-catalog";
+import { orderEditCatalogVariantsInputSchema } from "@shared/order-edits/order-edit-catalog";
 import type {
   OrderEditCatalogCategoriesInput,
   OrderEditCatalogProductsInput,
@@ -160,9 +161,55 @@ export class OrderEditService {
   async catalogVariants(
     connectionId: number,
     input: OrderEditCatalogVariantsInput,
+    actorId?: string,
   ) {
-    await this.store.settings(connectionId);
-    return this.requireCatalog().productVariants(connectionId, input);
+    const settings = await this.store.settings(connectionId);
+    const parsed = orderEditCatalogVariantsInputSchema.parse(input);
+    if (parsed.omsOrderId === null)
+      return this.requireCatalog().productVariants(connectionId, parsed);
+    if (!settings.enabled || settings.paymentWindowMinutes === null || !actorId)
+      throw new OrderEditError(
+        "ORDER_EDIT_CATALOG_UNAVAILABLE",
+        "Customer pricing is unavailable for this order.",
+        409,
+      );
+    const scope = {
+      connectionId,
+      omsOrderId: parsed.omsOrderId,
+      expectedRevision: parsed.expectedRevision!,
+    };
+    let snapshot: OrderEditSnapshot;
+    if (this.previews)
+      snapshot = await this.previews.catalogSnapshot(scope, actorId);
+    else {
+      const reference = await this.store.orderReference(
+        connectionId,
+        parsed.omsOrderId,
+      );
+      if (reference.activeOperationId)
+        throw new OrderEditError(
+          "ORDER_EDIT_ALREADY_ACTIVE",
+          "Close or resume the current edit before browsing products.",
+          409,
+        );
+      snapshot = await this.provider.readOrder(
+        connectionId,
+        reference.externalOrderId,
+      );
+      assertOrderEditIdentity(reference, snapshot);
+      if (snapshot.fingerprint !== parsed.expectedRevision)
+        throw new OrderEditError(
+          "ORDER_EDIT_ORDER_CHANGED",
+          "The order changed. Refresh it before browsing products.",
+          409,
+        );
+    }
+    return this.requireCatalog().productVariants(connectionId, parsed, {
+      connectionId: snapshot.connectionId,
+      customerId: snapshot.customerId,
+      memberPlan: snapshot.memberPlan,
+      memberPricingEnabled: snapshot.memberPricingEnabled,
+    });
   }
   private requireCatalog(): OrderEditCatalog {
     if (!this.catalog)

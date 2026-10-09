@@ -63,6 +63,92 @@ describe("order edit product catalog transport", () => {
     imageUrl: null,
   };
   const pageInfo = { hasNextPage: false, endCursor: null };
+  it("requests pricing for the selected order/revision without sending a customer, plan or price", async () => {
+    const input = {
+      productId,
+      after: null,
+      omsOrderId: 51,
+      expectedRevision: "revision-7",
+    };
+    const request = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        connectionId: 3,
+        input,
+        product,
+        variants: [],
+        memberPlan: null,
+        pageInfo,
+      }),
+    );
+    await createOrderEditTransport(request).catalogVariants(3, input);
+    const [path, options] = request.mock.calls[0];
+    const params = new URL(String(path), "https://app.example").searchParams;
+    expect(Object.fromEntries(params)).toEqual({
+      connectionId: "3",
+      productId,
+      omsOrderId: "51",
+      expectedRevision: "revision-7",
+    });
+    expect(options?.method).toBe("GET");
+    expect(options?.body).toBeUndefined();
+    expect(params.has("customerId")).toBe(false);
+    expect(params.has("memberPlan")).toBe(false);
+  });
+  it.each([
+    { omsOrderId: 52, expectedRevision: "revision-7" },
+    { omsOrderId: 51, expectedRevision: "revision-8" },
+  ])(
+    "rejects another customer's order/revision response: %j",
+    async (wrongScope) => {
+      const input = {
+        productId,
+        after: null,
+        omsOrderId: 51,
+        expectedRevision: "revision-7",
+      };
+      const request = vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          connectionId: 3,
+          input: { ...input, ...wrongScope },
+          product,
+          variants: [],
+          memberPlan: null,
+          pageInfo,
+        }),
+      );
+      await expect(
+        createOrderEditTransport(request).catalogVariants(3, input),
+      ).rejects.toMatchObject({
+        code: "ORDER_EDIT_IDENTITY_MISMATCH",
+        uncertain: false,
+      });
+    },
+  );
+  it("rejects an order-scoped response missing verified price metadata", async () => {
+    const input = {
+      productId,
+      after: null,
+      omsOrderId: 51,
+      expectedRevision: "revision-7",
+    };
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        jsonResponse({
+          connectionId: 3,
+          input,
+          product,
+          variants: [],
+          pageInfo,
+        }),
+      );
+    await expect(
+      createOrderEditTransport(request).catalogVariants(3, input),
+    ).rejects.toMatchObject({
+      code: "ORDER_EDIT_RESPONSE_INVALID",
+      uncertain: false,
+    });
+  });
   it("uses read-only authenticated requests with literal search/category parameters and abort signals", async () => {
     const input = {
       search: "toploader blue",

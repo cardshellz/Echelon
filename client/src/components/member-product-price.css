@@ -1,0 +1,42 @@
+/* Collection price treatment from the deployed cardshellz-membership.js.
+   Scoped to the picker so storefront class names can also coexist on account pages. */
+.cardshellz-catalog-price {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.cardshellz-catalog-price .cardshellz-collection-price__top,
+.cardshellz-catalog-price .cardshellz-collection-price__bottom {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.1;
+  font-family: var(--font-body-family, inherit);
+}
+.cardshellz-catalog-price .cardshellz-retail-strikethrough {
+  text-decoration: line-through;
+  color: rgba(var(--csz-foreground, 148, 163, 184), 0.45);
+  /* Fit the modal's text scale while preserving the storefront's price hierarchy. */
+  font-family: var(--font-tech, inherit);
+  font-size: 1rem;
+  font-weight: 600;
+}
+.cardshellz-catalog-price .cardshellz-member-price-value {
+  font-family: var(--font-tech, inherit);
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--csz-member-price-color, var(--csz-plan-accent, #16a34a));
+}
+.cardshellz-catalog-price .cardshellz-member-tag--only {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+.cardshellz-catalog-price .cardshellz-member-tag img {
+  height: 18px;
+  width: auto;
+  max-width: 80px;
+  object-fit: contain;
+}

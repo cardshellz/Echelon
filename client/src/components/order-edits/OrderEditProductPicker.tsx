@@ -1,8 +1,9 @@
-import { useId, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { ChevronDown, Package, Plus, Search } from "lucide-react";
 import type { OrderEditVariant } from "@shared/order-edits/order-edit.contract";
 import type { OrderEditCatalogProduct } from "@shared/order-edits/order-edit-catalog";
+import { MemberProductPrice } from "@/components/MemberProductPrice";
 import { orderEditCatalogSearchSchema } from "@shared/order-edits/order-edit-catalog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,11 +18,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { useDebounce } from "@/hooks/use-debounce";
-import {
-  formatOrderEditMoney,
-  ORDER_EDITS_API,
-  type OrderEditTransport,
-} from "@/lib/order-edits";
+import { ORDER_EDITS_API, type OrderEditTransport } from "@/lib/order-edits";
 
 // Cache discovery briefly when returning to the picker. Financial review always re-reads Shopify.
 const CATALOG_STALE_MS = 30_000;
@@ -30,6 +27,8 @@ type PickerProps = {
   api: OrderEditTransport;
   connectionId: number;
   staffId: string;
+  omsOrderId: number;
+  expectedRevision: string;
   enabled: boolean;
   includedVariantIds: ReadonlySet<string>;
   onAdd(variant: OrderEditVariant): void;
@@ -67,8 +66,8 @@ export function OrderEditProductPicker(props: PickerProps) {
           <CatalogBrowser {...props} />
           <div className="flex shrink-0 items-center justify-between gap-3 border-t pt-3">
             <p className="text-xs text-muted-foreground">
-              Prices shown are before discounts. Review changes calculates
-              discounts, shipping and tax.
+              Prices include this customer's applicable club pricing. Review
+              changes verifies coupons, rewards, shipping and tax.
             </p>
             <DialogClose asChild>
               <Button type="button">Done</Button>
@@ -85,6 +84,12 @@ function CatalogBrowser(props: PickerProps) {
   const [text, setText] = useState("");
   const [category, setCategory] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [unavailableProducts, setUnavailableProducts] = useState<
+    ReadonlySet<string>
+  >(new Set());
+  const hideUnavailableProduct = useCallback((productId: string) => {
+    setUnavailableProducts((current) => new Set([...current, productId]));
+  }, []);
   const search = useDebounce(text.trim(), SEARCH_DEBOUNCE_MS);
   const currentSearch = search === text.trim();
   const validSearch = orderEditCatalogSearchSchema.safeParse(search).success;
@@ -132,7 +137,7 @@ function CatalogBrowser(props: PickerProps) {
         .flatMap((page) => page.products)
         .map((product) => [product.productId, product]) ?? [],
     ).values(),
-  ];
+  ].filter((product) => !unavailableProducts.has(product.productId));
   return (
     <>
       <div className="shrink-0 space-y-2">
@@ -241,6 +246,7 @@ function CatalogBrowser(props: PickerProps) {
                 {...props}
                 product={product}
                 expanded={expanded === product.productId}
+                onUnavailable={hideUnavailableProduct}
                 onToggle={() =>
                   setExpanded((current) =>
                     current === product.productId ? null : product.productId,
@@ -275,6 +281,7 @@ function ProductOptions(
     product: OrderEditCatalogProduct;
     expanded: boolean;
     onToggle(): void;
+    onUnavailable(productId: string): void;
   },
 ) {
   const id = useId();
@@ -328,7 +335,10 @@ function ProductOptions(
 }
 
 function VariantOptions(
-  props: PickerProps & { product: OrderEditCatalogProduct },
+  props: PickerProps & {
+    product: OrderEditCatalogProduct;
+    onUnavailable(productId: string): void;
+  },
 ) {
   const variants = useInfiniteQuery({
     queryKey: [
@@ -336,6 +346,8 @@ function VariantOptions(
       props.staffId,
       "catalog",
       props.connectionId,
+      props.omsOrderId,
+      props.expectedRevision,
       "variants",
       props.product.productId,
     ],
@@ -343,7 +355,12 @@ function VariantOptions(
     queryFn: ({ pageParam, signal }) =>
       props.api.catalogVariants(
         props.connectionId,
-        { productId: props.product.productId, after: pageParam },
+        {
+          productId: props.product.productId,
+          after: pageParam,
+          omsOrderId: props.omsOrderId,
+          expectedRevision: props.expectedRevision,
+        },
         signal,
       ),
     getNextPageParam: (last) =>
@@ -353,11 +370,27 @@ function VariantOptions(
   });
   const options = [
     ...new Map(
-      variants.data?.pages
-        .flatMap((page) => page.variants)
-        .map((variant) => [variant.variantId, variant]) ?? [],
+      variants.data?.pages.flatMap((page) =>
+        page.variants
+          .filter((variant) => variant.available)
+          .map(
+            (variant) =>
+              [
+                variant.variantId,
+                { variant, plan: page.memberPlan ?? null },
+              ] as const,
+          ),
+      ) ?? [],
     ).values(),
   ];
+  const noAvailableOptions =
+    variants.isSuccess &&
+    !variants.isFetching &&
+    !variants.hasNextPage &&
+    options.length === 0;
+  useEffect(() => {
+    if (noAvailableOptions) props.onUnavailable(props.product.productId);
+  }, [noAvailableOptions, props.onUnavailable, props.product.productId]);
   return (
     <div
       className="space-y-2 border-t bg-muted/20 p-3 sm:pl-[4.5rem]"
@@ -384,7 +417,7 @@ function VariantOptions(
           No eligible pack sizes on this page.
         </p>
       )}
-      {options.map((variant) => {
+      {(variants.isError ? [] : options).map(({ variant, plan }) => {
         const included = props.includedVariantIds.has(variant.variantId);
         const label = [variant.variantTitle ?? "Standard option", variant.sku]
           .filter(Boolean)
@@ -402,28 +435,23 @@ function VariantOptions(
                 {variant.sku ? `SKU: ${variant.sku}` : "SKU not assigned"}
               </p>
             </div>
-            <p className="text-sm tabular-nums">
-              {formatOrderEditMoney(variant.priceCents, "USD")}
-              <span className="sr-only"> before discounts</span>
-            </p>
+            <MemberProductPrice
+              priceCents={variant.priceCents}
+              retailPriceCents={variant.retailPriceCents}
+              plan={plan}
+            />
             <Button
               type="button"
               size="sm"
               variant="outline"
               aria-label={
-                included
-                  ? `${label} already in order`
-                  : variant.available
-                    ? `Add ${label}`
-                    : `${label} unavailable`
+                included ? `${label} already in order` : `Add ${label}`
               }
               disabled={!props.enabled || included || !variant.available}
               onClick={() => props.onAdd(variant)}
             >
               {included ? (
                 "Added / in order"
-              ) : !variant.available ? (
-                "Unavailable"
               ) : (
                 <>
                   <Plus className="mr-1 h-3.5 w-3.5" aria-hidden="true" />

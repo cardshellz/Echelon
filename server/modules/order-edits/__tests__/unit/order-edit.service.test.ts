@@ -13,6 +13,7 @@ import type {
 } from "../../application/order-edit-store";
 import type { OrderEditQuoteInput } from "@shared/order-edits/order-edit.contract";
 import { OrderEditError } from "../../domain/order-edit-error";
+import { orderEditCatalogVariantsInputSchema } from "@shared/order-edits/order-edit-catalog";
 import { buildOrderEditFinancials } from "../../domain/order-edit-financials";
 import {
   OrderEditCommitNotSentError,
@@ -316,7 +317,7 @@ describe("private order edit orchestration", () => {
       })),
       productVariants: vi.fn(async (connectionId, input) => ({
         connectionId,
-        input,
+        input: orderEditCatalogVariantsInputSchema.parse(input),
         product: {
           productId: input.productId,
           title: "Toploader",
@@ -369,6 +370,105 @@ describe("private order edit orchestration", () => {
       status: 503,
     });
     expect(h.provider.searchVariants).not.toHaveBeenCalled();
+  });
+  it("derives catalog membership from the verified order customer without any financial or inventory command", async () => {
+    const productVariants =
+      vi.fn<
+        import("../../application/order-edit-catalog").OrderEditCatalog["productVariants"]
+      >();
+    const catalog = { categories: vi.fn(), products: vi.fn(), productVariants };
+    const h = serviceHarness(3, catalog);
+    const planId = "5f966934-9ff2-4966-9e8f-d4292ca3290e";
+    h.setCurrent({ memberPlan: planId, memberPricingEnabled: true });
+    const input = {
+      productId: "gid://shopify/Product/10",
+      after: null,
+      omsOrderId: 1,
+      expectedRevision: "baseline",
+    };
+    await h.service.catalogVariants(4, input, "staff-a");
+    expect(h.provider.readOrder).toHaveBeenCalledExactlyOnceWith(4, "100");
+    expect(productVariants).toHaveBeenCalledExactlyOnceWith(4, input, {
+      connectionId: 4,
+      customerId: "gid://shopify/Customer/8",
+      memberPlan: planId,
+      memberPricingEnabled: true,
+    });
+    expect(h.provider.quote).not.toHaveBeenCalled();
+    expect(h.provider.commit).not.toHaveBeenCalled();
+    expect(h.warehouse.acquire).not.toHaveBeenCalled();
+    expect(h.events).toEqual([]);
+  });
+  it.each([
+    { customerId: "gid://shopify/Customer/999" },
+    { connectionId: 99 },
+    { channelId: 99 },
+    { orderId: "gid://shopify/Order/999" },
+    { fingerprint: "changed" },
+  ])(
+    "cannot price products using a different customer, store, order or revision: %j",
+    async (patch) => {
+      const catalog = {
+        categories: vi.fn(),
+        products: vi.fn(),
+        productVariants: vi.fn(),
+      };
+      const h = serviceHarness(3, catalog);
+      h.setCurrent(patch);
+      await expect(
+        h.service.catalogVariants(
+          4,
+          {
+            productId: "gid://shopify/Product/10",
+            omsOrderId: 1,
+            expectedRevision: "baseline",
+          },
+          "staff-a",
+        ),
+      ).rejects.toMatchObject({
+        code: patch.fingerprint
+          ? "ORDER_EDIT_ORDER_CHANGED"
+          : "ORDER_EDIT_IDENTITY_CHANGED",
+      });
+      expect(catalog.productVariants).not.toHaveBeenCalled();
+      expect(h.events).toEqual([]);
+    },
+  );
+  it("rejects unpaired scope, missing actor, disabled editing and an active edit before catalog pricing", async () => {
+    const catalog = {
+      categories: vi.fn(),
+      products: vi.fn(),
+      productVariants: vi.fn(),
+    };
+    const h = serviceHarness(3, catalog);
+    const input = {
+      productId: "gid://shopify/Product/10",
+      omsOrderId: 1,
+      expectedRevision: "baseline",
+    };
+    await expect(
+      h.service.catalogVariants(
+        4,
+        { productId: input.productId, omsOrderId: 1 },
+        "staff-a",
+      ),
+    ).rejects.toThrow();
+    await expect(h.service.catalogVariants(4, input)).rejects.toMatchObject({
+      code: "ORDER_EDIT_CATALOG_UNAVAILABLE",
+    });
+    const reference = await h.store.orderReference(4, 1);
+    vi.spyOn(h.store, "orderReference").mockResolvedValue({
+      ...reference,
+      activeOperationId: OP,
+    });
+    await expect(
+      h.service.catalogVariants(4, input, "staff-a"),
+    ).rejects.toMatchObject({ code: "ORDER_EDIT_ALREADY_ACTIVE" });
+    h.disable();
+    await expect(
+      h.service.catalogVariants(4, input, "staff-a"),
+    ).rejects.toMatchObject({ code: "ORDER_EDIT_CATALOG_UNAVAILABLE" });
+    expect(catalog.productVariants).not.toHaveBeenCalled();
   });
   it("presents exact after-discount line totals instead of Shopify's pre-code legacy totals", async () => {
     const h = serviceHarness();

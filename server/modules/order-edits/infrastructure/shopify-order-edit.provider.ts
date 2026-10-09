@@ -34,6 +34,8 @@ import { supportedVariant, stockAvailable } from "../domain/order-edit-variant";
 import { shopifyOrderEditVariantSchema as VARIANT } from "./shopify-order-edit-variant";
 import { cents } from "./shopify-order-edit-money";
 import { ShopifyOrderEditCatalog } from "./shopify-order-edit-catalog";
+import { memberPrice } from "./shopify-order-edit-member-price";
+import type { MemberPlanPresentationReader } from "../../membership";
 import { toOrderEditPreviewPricingInput } from "../application/order-edit-preview-pricing-input";
 import type {
   OrderEditPreviewProvider,
@@ -282,6 +284,7 @@ export class ShopifyOrderEditProvider
       timeoutMs?: number;
       shippingCalculator?: OrderEditShippingCalculator;
       report?: (event: { operationId: string; code: string }) => void;
+      memberPresentation?: MemberPlanPresentationReader;
     },
   ) {
     this.fetchImpl = options.fetch ?? fetch;
@@ -289,6 +292,7 @@ export class ShopifyOrderEditProvider
     this.catalog = new ShopifyOrderEditCatalog(
       async (connectionId, query, variables) =>
         this.request(await this.credentials(connectionId), query, variables),
+      options.memberPresentation,
     );
     this.shippingCalculator =
       options.shippingCalculator ??
@@ -2329,30 +2333,6 @@ function additionalDemand(
   for (const addition of plan.additions)
     add(gid("ProductVariant", addition.variantId), addition.quantity);
   return [...totals].map(([variantId, quantity]) => ({ variantId, quantity }));
-}
-function memberPrice(
-  variant: z.infer<typeof VARIANT>,
-  snapshot: OrderEditSnapshot,
-): number {
-  const retail = cents(variant.price);
-  if (
-    !snapshot.memberPricingEnabled ||
-    !snapshot.memberPlan ||
-    !variant.planPrices
-  )
-    return retail;
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(variant.planPrices.value);
-  } catch {
-    return fail(
-      "MEMBER_PRICE_INVALID",
-      "Member pricing is not valid for this product.",
-    );
-  }
-  const values = parse(z.record(z.object({ cents: INTEGER })), decoded);
-  const member = values[snapshot.memberPlan]?.cents;
-  return member !== undefined && member < retail ? member : retail;
 }
 function readCalculated(value: unknown, orderId: string): Calculated {
   const result = parse(CALCULATED, value);
