@@ -9,12 +9,21 @@ export function ebayListingSetupQueryKey(storeConnectionId: number) {
   return ["/api/dropship/ebay/listing-setup", storeConnectionId] as const;
 }
 
+/**
+ * Tells the server this page reads the setup answer with its read-only and
+ * "shipping check unavailable" states (server: LISTING_SETUP_CONTRACT_HEADER).
+ * Without it the server answers those states with the older errors.
+ */
+export const EBAY_LISTING_SETUP_CONTRACT_HEADERS: Readonly<Record<string, string>> = {
+  "X-Dropship-Listing-Setup-Contract": "2",
+};
+
 /** Both panels observe one provider read. Server retries are bounded; do not multiply them here. */
 export function ebayListingSetupQueryOptions(storeConnectionId: number) {
   return {
     queryKey: ebayListingSetupQueryKey(storeConnectionId),
     queryFn: ({ signal }: { signal: AbortSignal }) => fetchJson<DropshipEbayListingSetupResponse>(
-      `/api/dropship/ebay/listing-setup/${storeConnectionId}`, { signal }),
+      `/api/dropship/ebay/listing-setup/${storeConnectionId}`, { signal, headers: { ...EBAY_LISTING_SETUP_CONTRACT_HEADERS } }),
     enabled: Number.isInteger(storeConnectionId) && storeConnectionId > 0,
     staleTime: 60_000,
     refetchOnMount: true,
@@ -60,7 +69,26 @@ export async function synchronizeSavedEbayListingSetup(
     queryClient.cancelQueries({ queryKey: setupKey, exact: true }),
     queryClient.cancelQueries({ queryKey: policyKey, exact: true }),
   ]);
-  queryClient.setQueryData(setupKey, setup);
+  // A save that did not read everything (a shelf-only or return-only change,
+  // or a replayed request) answers with empty option lists or unchecked
+  // shipping policies. It must not replace the loaded view, so the setup is
+  // read again instead.
+  if (setup.checks && (setup.checks.ebay !== "checked" || setup.checks.fulfillment.status !== "checked")) {
+    // Both reads together, as refreshEbayListingConfiguration does, so a failed
+    // setup read still leaves the policy view marked stale.
+    const refreshed = await Promise.allSettled([
+      queryClient.invalidateQueries({ queryKey: setupKey, exact: true }, { throwOnError: true }),
+      queryClient.invalidateQueries({ queryKey: policyKey, exact: true }, { throwOnError: true }),
+    ]);
+    for (const result of refreshed) {
+      if (result.status === "rejected") throw result.reason;
+    }
+    return;
+  }
+  // Cached in the shape a read answers (no save outcome), so an unchanged
+  // refetch keeps the same data and the panel's draft.
+  const { outcome: _outcome, ...setupView } = setup;
+  queryClient.setQueryData<DropshipEbayListingSetupResponse>(setupKey, setupView);
   queryClient.setQueryData<DropshipEbayListingPolicyOverrideResponse>(policyKey, (existing) => {
     // Do not invent assignments or revision tokens if this view has not loaded.
     if (!existing) return existing;

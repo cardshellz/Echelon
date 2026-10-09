@@ -604,6 +604,9 @@ describe("dropship marketplace listing push providers", () => {
       marketplaceConfig: ebayMarketplaceConfig(),
     }))).rejects.toMatchObject({
       code: "DROPSHIP_EBAY_MANAGED_LOCATION_CONFIG_MISMATCH",
+      // The message reaches the vendor's push-failure email as is, so it names
+      // the Listing settings action (W10) instead of asking for a full re-save.
+      message: "Card Shellz needs to update where your eBay listings ship from. Open Listing settings, choose Update ship-from location, then queue the listing again.",
       context: {
         storeConnectionId: 22,
         originWarehouseId: 1,
