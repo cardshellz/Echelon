@@ -31,10 +31,37 @@ describe("order edit staff HTTP boundary", () => {
   const quote = vi.fn();
   const preview = vi.fn();
   const warmPreview = vi.fn();
+  const catalogCategories = vi.fn();
+  const catalogProducts = vi.fn();
+  const catalogVariants = vi.fn();
   beforeEach(async () => {
     vi.clearAllMocks();
     permission.mockResolvedValue(true);
     loggedIn = true;
+    catalogCategories.mockImplementation(async (connectionId, input) => ({
+      connectionId,
+      input,
+      categories: ["Toploaders"],
+      pageInfo: { hasNextPage: false, endCursor: null },
+    }));
+    catalogProducts.mockImplementation(async (connectionId, input) => ({
+      connectionId,
+      input,
+      products: [],
+      pageInfo: { hasNextPage: false, endCursor: null },
+    }));
+    catalogVariants.mockImplementation(async (connectionId, input) => ({
+      connectionId,
+      input,
+      product: {
+        productId: input.productId,
+        title: "Toploader",
+        category: "Toploaders",
+        imageUrl: null,
+      },
+      variants: [],
+      pageInfo: { hasNextPage: false, endCursor: null },
+    }));
     preview.mockImplementation(async (input) => ({
       phase: "preview",
       input,
@@ -60,6 +87,9 @@ describe("order edit staff HTTP boundary", () => {
         quote,
         preview,
         warmPreview,
+        catalogCategories,
+        catalogProducts,
+        catalogVariants,
       } as unknown as OrderEditService,
       hasPermission: permission,
       report: vi.fn(),
@@ -84,6 +114,62 @@ describe("order edit staff HTTP boundary", () => {
     },
     body: JSON.stringify({ paymentWindowMinutes: 30, enabled: true }),
   });
+  it("uses staff permissions for every catalog read and does not stage a financial command", async () => {
+    const paths = [
+      "categories?connectionId=4",
+      "products?connectionId=4&search=toploader",
+      `variants?connectionId=4&productId=${encodeURIComponent("gid://shopify/Product/10")}`,
+    ];
+    for (const path of paths) {
+      loggedIn = false;
+      expect(
+        (await fetch(`${url}/api/order-edits/admin/catalog/${path}`)).status,
+      ).toBe(401);
+      loggedIn = true;
+      permission.mockResolvedValue(false);
+      expect(
+        (await fetch(`${url}/api/order-edits/admin/catalog/${path}`)).status,
+      ).toBe(403);
+      permission.mockResolvedValue(true);
+      const result = await fetch(
+        `${url}/api/order-edits/admin/catalog/${path}`,
+      );
+      expect(result.status).toBe(200);
+      expect(result.headers.get("cache-control")).toBe("no-store");
+      expect((await result.json()).connectionId).toBe(4);
+    }
+    expect(catalogCategories).toHaveBeenCalledTimes(1);
+    expect(catalogProducts).toHaveBeenCalledWith(4, {
+      search: "toploader",
+      category: null,
+      after: null,
+    });
+    expect(catalogVariants).toHaveBeenCalledWith(4, {
+      productId: "gid://shopify/Product/10",
+      after: null,
+    });
+    expect(quote).not.toHaveBeenCalled();
+  });
+  it.each([
+    "products?connectionId=0",
+    "products?connectionId=4&priceCents=1",
+    "products?connectionId=4&search=toploader&search=other",
+    "products?connectionId=4&search=*",
+    "products?connectionId=4&category=",
+    "categories?connectionId=4&after=",
+    "variants?connectionId=4&productId=123",
+    "variants?connectionId=4&productId=gid%3A%2F%2Fshopify%2FOrder%2F10",
+  ])(
+    "rejects invalid catalog input before calling a reader: %s",
+    async (path) => {
+      expect(
+        (await fetch(`${url}/api/order-edits/admin/catalog/${path}`)).status,
+      ).toBe(400);
+      expect(catalogProducts).not.toHaveBeenCalled();
+      expect(catalogCategories).not.toHaveBeenCalled();
+      expect(catalogVariants).not.toHaveBeenCalled();
+    },
+  );
   it("denies customers/anonymous sessions and current staff without orders:edit", async () => {
     loggedIn = false;
     expect((await fetch(`${url}/api/order-edits/admin/state`)).status).toBe(

@@ -29,12 +29,22 @@ export const answerPickCorrectionSchema = z.object({
   expectedRevision: id,
   answer: z.enum(["yes", "no"]),
 }).strict();
+/** "manual" mirrors the normal pick screen's mark-picked-without-scan. */
 export const completeCorrectivePickSchema = z.object({
   commandId: z.string().uuid(),
   expectedRevision: id,
   pickedQuantity: id,
-  barcode: z.string().trim().min(1).max(200),
-}).strict();
+  method: z.enum(["scan", "manual"]).default("scan"),
+  barcode: z.string().trim().min(1).max(200).optional(),
+}).strict().refine((command) => command.method === "manual" || command.barcode !== undefined, {
+  message: "A scanned pick needs the scanned code.", path: ["barcode"],
+});
+
+/** Codes are compared trimmed and case-insensitively, as scanners and typing vary. */
+export function normalizeScanCode(value: string | null | undefined): string | null {
+  const code = value?.trim().toUpperCase();
+  return code ? code : null;
+}
 
 /**
  * A "No" locks its corrective scan to the picker who answered. If that picker

@@ -54,6 +54,152 @@ const operation: OrderEditOperation = {
 };
 const jsonResponse = (value: unknown) => new Response(JSON.stringify(value));
 
+describe("order edit product catalog transport", () => {
+  const productId = "gid://shopify/Product/10";
+  const product = {
+    productId,
+    title: "Toploader",
+    category: "Toploaders",
+    imageUrl: null,
+  };
+  const pageInfo = { hasNextPage: false, endCursor: null };
+  it("uses read-only authenticated requests with literal search/category parameters and abort signals", async () => {
+    const input = {
+      search: "toploader blue",
+      category: "Binders & Pages",
+      after: "cursor+123",
+    };
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        jsonResponse({ connectionId: 3, input, products: [product], pageInfo }),
+      );
+    const signal = new AbortController().signal;
+    const result = await createOrderEditTransport(request).catalogProducts(
+      3,
+      input,
+      signal,
+    );
+    expect(result.products[0].productId).toBe(productId);
+    const [path, options] = request.mock.calls[0];
+    const url = new URL(String(path), "https://app.example");
+    expect(url.pathname).toBe("/api/order-edits/admin/catalog/products");
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      connectionId: "3",
+      ...input,
+    });
+    expect(options).toMatchObject({
+      method: "GET",
+      credentials: "include",
+      cache: "no-store",
+      signal,
+    });
+    expect(new Headers(options?.headers).has("Idempotency-Key")).toBe(false);
+    expect(options?.body).toBeUndefined();
+  });
+  it("validates parent IDs and category pages and matches every response to its requested cursor", async () => {
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          connectionId: 3,
+          input: { after: null },
+          categories: ["Toploaders"],
+          pageInfo,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          connectionId: 3,
+          input: { productId, after: "second" },
+          product,
+          variants: [],
+          pageInfo,
+        }),
+      );
+    const api = createOrderEditTransport(request);
+    expect(
+      (await api.catalogCategories(3, { after: null })).categories,
+    ).toEqual(["Toploaders"]);
+    expect(
+      (await api.catalogVariants(3, { productId, after: "second" })).product,
+    ).toEqual(product);
+    expect(String(request.mock.calls[1][0])).toContain(
+      encodeURIComponent(productId),
+    );
+    expect(() =>
+      api.catalogVariants(3, {
+        productId: "gid://shopify/Order/10",
+        after: null,
+      }),
+    ).toThrow();
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+  it.each([
+    {
+      connectionId: 4,
+      input: { search: "toploader", category: null, after: null },
+    },
+    {
+      connectionId: 3,
+      input: { search: "binder", category: null, after: null },
+    },
+    {
+      connectionId: 3,
+      input: { search: "toploader", category: "Binders", after: null },
+    },
+    {
+      connectionId: 3,
+      input: { search: "toploader", category: null, after: "different-page" },
+    },
+  ])(
+    "rejects another store, query, category or cursor without mutation uncertainty: %j",
+    async (scope) => {
+      const request = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          jsonResponse({ ...scope, products: [product], pageInfo }),
+        );
+      await expect(
+        createOrderEditTransport(request).catalogProducts(3, {
+          search: "toploader",
+          category: null,
+          after: null,
+        }),
+      ).rejects.toMatchObject({
+        code: "ORDER_EDIT_IDENTITY_MISMATCH",
+        uncertain: false,
+      });
+    },
+  );
+  it("rejects malformed catalog data and preserves cancelled reads without retries", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        connectionId: 3,
+        input: { productId, after: null },
+        product,
+        variants: [{ variantId: "bad-id", priceCents: 2.79 }],
+        pageInfo,
+      }),
+    );
+    await expect(
+      createOrderEditTransport(request).catalogVariants(3, {
+        productId,
+        after: null,
+      }),
+    ).rejects.toMatchObject({
+      code: "ORDER_EDIT_RESPONSE_INVALID",
+      uncertain: false,
+    });
+    const aborted = new DOMException("Stopped", "AbortError");
+    request.mockRejectedValueOnce(aborted);
+    await expect(
+      createOrderEditTransport(request).catalogCategories(3, { after: null }),
+    ).rejects.toBe(aborted);
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("order edit transport", () => {
   it("forwards staff cookies, abort signals and an explicit idempotency key without retries", async () => {
     const request = vi
@@ -517,14 +663,12 @@ describe("calculation-only preview transport", () => {
       { connectionId: 7 },
       { changes: [{ lineItemId: "gid://shopify/LineItem/123", quantity: 3 }] },
     ]) {
-      const request = vi
-        .fn<typeof fetch>()
-        .mockResolvedValue(
-          jsonResponse({
-            ...previewResult(),
-            input: { ...previewInput, ...change },
-          }),
-        );
+      const request = vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          ...previewResult(),
+          input: { ...previewInput, ...change },
+        }),
+      );
       await expect(
         createOrderEditTransport(request).preview(previewInput),
       ).rejects.toMatchObject({

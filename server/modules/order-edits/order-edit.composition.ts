@@ -72,5 +72,6 @@ export function createOrderEditService(
         JSON.stringify({ event: "order_edit_requires_attention", ...event }),
       ),
     new OrderEditPreviewService(store, provider, warehouse, clock),
+    provider.catalog,
   );
 }

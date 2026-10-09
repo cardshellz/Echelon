@@ -79,7 +79,10 @@ function baseline(): OrderEditSnapshot {
   };
 }
 
-export function serviceHarness(quantity = 3) {
+export function serviceHarness(
+  quantity = 3,
+  catalog?: import("../../application/order-edit-catalog").OrderEditCatalog,
+) {
   let now = START;
   let current = baseline();
   let saved: OrderEditRecord | null = null;
@@ -270,6 +273,8 @@ export function serviceHarness(quantity = 3) {
     () => new Date(now),
     () => (uuidCount++ === 0 ? OP : REFUND_KEY),
     report,
+    undefined,
+    catalog,
   );
   return {
     service,
@@ -294,6 +299,77 @@ export function serviceHarness(quantity = 3) {
 }
 
 describe("private order edit orchestration", () => {
+  it("validates the connection before catalog discovery without changing orders, holds or money", async () => {
+    const pageInfo = { hasNextPage: false, endCursor: null };
+    const catalog = {
+      categories: vi.fn(async (connectionId, input) => ({
+        connectionId,
+        input,
+        categories: ["Toploaders"],
+        pageInfo,
+      })),
+      products: vi.fn(async (connectionId, input) => ({
+        connectionId,
+        input,
+        products: [],
+        pageInfo,
+      })),
+      productVariants: vi.fn(async (connectionId, input) => ({
+        connectionId,
+        input,
+        product: {
+          productId: input.productId,
+          title: "Toploader",
+          category: "Toploaders",
+          imageUrl: null,
+        },
+        variants: [],
+        pageInfo,
+      })),
+    } satisfies import("../../application/order-edit-catalog").OrderEditCatalog;
+    const h = serviceHarness(3, catalog);
+    const settings = vi.spyOn(h.store, "settings");
+    await h.service.catalogCategories(4, { after: null });
+    await h.service.catalogProducts(4, {
+      search: "toploader",
+      category: "Toploaders",
+      after: null,
+    });
+    await h.service.catalogVariants(4, {
+      productId: "gid://shopify/Product/10",
+      after: null,
+    });
+    expect(settings).toHaveBeenCalledTimes(3);
+    expect(h.events).toEqual([]);
+    expect(h.warehouse.acquire).not.toHaveBeenCalled();
+    expect(h.provider.quote).not.toHaveBeenCalled();
+    expect(h.provider.readOrder).not.toHaveBeenCalled();
+    settings.mockRejectedValue(
+      new OrderEditError("CONNECTION_INVALID", "Connection unavailable"),
+    );
+    await expect(
+      h.service.catalogProducts(999, {
+        search: "toploader",
+        category: null,
+        after: null,
+      }),
+    ).rejects.toMatchObject({ code: "CONNECTION_INVALID" });
+    expect(catalog.products).toHaveBeenCalledTimes(1);
+  });
+  it("reports an unavailable catalog without falling back to another store", async () => {
+    const h = serviceHarness();
+    await expect(
+      h.service.catalogProducts(4, {
+        search: "toploader",
+        category: null,
+        after: null,
+      }),
+    ).rejects.toMatchObject({
+      code: "ORDER_EDIT_CATALOG_UNAVAILABLE",
+      status: 503,
+    });
+    expect(h.provider.searchVariants).not.toHaveBeenCalled();
+  });
   it("presents exact after-discount line totals instead of Shopify's pre-code legacy totals", async () => {
     const h = serviceHarness();
     const financials = buildOrderEditFinancials({
@@ -722,13 +798,11 @@ describe("private order edit orchestration", () => {
       closed: true,
       fingerprint: "fulfilled",
       contentFingerprint: "fulfilled-contents",
-      lines: h
-        .snapshot()
-        .lines.map((line) => ({
-          ...line,
-          unfulfilledQuantity: 0,
-          totalCents: 0,
-        })),
+      lines: h.snapshot().lines.map((line) => ({
+        ...line,
+        unfulfilledQuantity: 0,
+        totalCents: 0,
+      })),
       financials: buildOrderEditFinancials({
         lines: [
           { id: h.snapshot().lines[0].id, grossCents: 2000, netCents: 2000 },
@@ -816,13 +890,11 @@ describe("private order edit orchestration", () => {
     h.setCurrent({
       closed: true,
       fingerprint: "fulfilled",
-      lines: h
-        .snapshot()
-        .lines.map((line) => ({
-          ...line,
-          unfulfilledQuantity: 0,
-          totalCents: 0,
-        })),
+      lines: h.snapshot().lines.map((line) => ({
+        ...line,
+        unfulfilledQuantity: 0,
+        totalCents: 0,
+      })),
     });
     h.warehouse.releaseFulfilledUnsubmitted.mockRejectedValueOnce(
       new OrderEditError(
