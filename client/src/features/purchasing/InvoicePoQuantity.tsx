@@ -5,11 +5,10 @@ function isPieceCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-export function InvoicePoQuantity({ comparison, recordedQuantity, quantity, compact = false }: {
+export function InvoicePoQuantity({ comparison, recordedQuantity, quantity }: {
   comparison: unknown;
   recordedQuantity: number | null | undefined;
   quantity: "ordered" | "received";
-  compact?: boolean;
 }) {
   if (comparison === undefined) {
     // A cached response from an older server contains only the saved comparison.
@@ -26,9 +25,5 @@ export function InvoicePoQuantity({ comparison, recordedQuantity, quantity, comp
   if (parsed.data.status === "unlinked") return <span>—</span>;
 
   const current = quantity === "ordered" ? parsed.data.orderedQty : parsed.data.receivedQty;
-  const previousOrdered = !compact && quantity === "ordered" && isPieceCount(recordedQuantity) && recordedQuantity !== current;
-  return <>
-    <span>{current.toLocaleString("en-US")}</span>
-    {previousOrdered && <span className="block text-xs font-normal font-sans whitespace-nowrap" title="Ordered quantity recorded on this invoice">Saved: {recordedQuantity.toLocaleString("en-US")}</span>}
-  </>;
+  return <span>{current.toLocaleString("en-US")}</span>;
 }

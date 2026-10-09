@@ -1,4 +1,5 @@
 import { InvoiceLineCostReview } from "@/features/purchasing/InvoiceLineCostReview";
+import { InvoiceQuantityCorrection } from "@/features/purchasing/InvoiceQuantityCorrection";
 import { InvoicePoQuantity } from "@/features/purchasing/InvoicePoQuantity";
 import { centsToMills, dollarsToCents, dollarsToMills, formatMills } from "@shared/utils/money";
 import React, { useState, useRef } from "react";
@@ -716,8 +717,8 @@ export default function APInvoiceDetail() {
                           <TableCell className="text-right font-mono">
                             {line.qtyInvoiced}
                             {line.purchaseOrderLineId != null && <div className="md:hidden mt-1 text-xs text-muted-foreground font-normal font-sans">
-                              <div>PO ordered: <InvoicePoQuantity comparison={line.poQuantities} recordedQuantity={line.qtyOrdered} quantity="ordered" compact /></div>
-                              <div>PO received: <InvoicePoQuantity comparison={line.poQuantities} recordedQuantity={line.qtyReceived} quantity="received" compact /></div>
+                              <div>PO ordered: <InvoicePoQuantity comparison={line.poQuantities} recordedQuantity={line.qtyOrdered} quantity="ordered" /></div>
+                              <div>PO received: <InvoicePoQuantity comparison={line.poQuantities} recordedQuantity={line.qtyReceived} quantity="received" /></div>
                             </div>}
                           </TableCell>
                           <TableCell className="text-right font-mono text-muted-foreground hidden md:table-cell">
@@ -730,8 +731,9 @@ export default function APInvoiceDetail() {
                           <TableCell className="text-right font-mono font-medium">{formatCents(line.lineTotalCents)}</TableCell>
                           <TableCell>
                             <span className={`text-xs px-1.5 py-0.5 rounded ${match.className}`}>{match.label}</span>
+                            <InvoiceQuantityCorrection lineId={line.id} lineNumber={line.lineNumber} needsCorrection={["qty_discrepancy", "over_billed"].includes(line.matchStatus)} onSaved={invalidate} />
                           </TableCell>
-                          <TableCell><InvoiceLineCostReview line={line} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} /></TableCell>
+                          <TableCell>{["qty_discrepancy", "over_billed"].includes(line.matchStatus) ? <span className="text-xs text-muted-foreground">Review quantity first</span> : <InvoiceLineCostReview line={line} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} />}</TableCell>
                           {canEdit && (
                             <TableCell>
                               <Button size="sm" variant="ghost" className="h-7 text-muted-foreground"

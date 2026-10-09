@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import {
   poApprovalTiers, poEvents, poExceptions, poReceipts, poRevisions, poStatusHistory,
   purchaseOrders, purchaseOrderLines, purchasingRecommendationPoHandoffs,
@@ -12,7 +12,7 @@ import type { PurchaseApprovalSnapshot } from "./purchase-order-approval.policy"
 import { readPurchaseApprovalActor } from "../identity/infrastructure/purchase-approval-access.repository";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { recomputePurchaseOrderInvoiceMatchesInTransaction } from "./ap-ledger.service";
-import { computePayloadHash } from "./po-exceptions.service";
+import { replacePurchaseOrderMatchExceptions } from "./purchase-order-match-exceptions.repository";
 import { PoQuantityAmendmentError, type AmendmentPlan } from "./po-quantity-amendment.policy";
 import type { db } from "../../db";
 
@@ -91,31 +91,9 @@ export async function persistQuantityAmendment(
     notes: `Admin approved quantity correction (revision ${revisionNumber})${statusChanged ? "; receiving status recalculated" : ""}: ${plan.preview.reason}`,
   });
   const match = await recomputePurchaseOrderInvoiceMatchesInTransaction(header.id, tx, actorId, approvedAt);
-  const superseded = source.exceptions.filter((exception) => exception.status !== "dismissed");
-  // Dismiss (never resolve) old match evidence. A previously accepted variance
-  // must not authorize this revision, including a later return to old quantities.
-  if (superseded.length) await tx.update(poExceptions).set({
-    status: "dismissed", dismissedBy: actorId, dismissedAt: approvedAt,
-    dismissNote: `Superseded by admin-approved quantity revision ${revisionNumber}.`, updatedAt: approvedAt,
-  }).where(and(eq(poExceptions.poId, header.id), eq(poExceptions.kind, "match_mismatch"), ne(poExceptions.status, "dismissed")));
-  for (const invoiceId of match.activeInvoiceIds) {
-    const issues = match.results.filter((line) => line.vendorInvoiceId === invoiceId && line.matchStatus !== "matched");
-    if (!issues.length && !match.invoicesWithoutMappedLines.includes(invoiceId)) continue;
-    const invoiceNumber = match.invoiceNumbersById.get(invoiceId) ?? `#${invoiceId}`;
-    const statuses = [...new Set(issues.map((line) => line.matchStatus))];
-    const payload = {
-      invoiceId, invoiceNumber, revisionNumber, sourceVersion: 1, sourceFingerprint: match.sourceFingerprint,
-      mismatchedLineCount: issues.length, mismatchedLineIds: issues.map((line) => line.id).sort((a, b) => a - b), matchStatuses: statuses,
-      unmappedInvoice: match.invoicesWithoutMappedLines.includes(invoiceId),
-    };
-    await tx.insert(poExceptions).values({
-      poId: header.id, kind: "match_mismatch", severity: "warn", status: "open", payload,
-      payloadHash: computePayloadHash(header.id, "match_mismatch", payload),
-      title: `3-way match discrepancy — Invoice ${invoiceNumber}`.slice(0, 120),
-      message: `Quantity revision ${revisionNumber} leaves ${issues.length} invoice line issue(s): ${statuses.join(", ") || "unmapped invoice"}. Review the current invoice evidence.`,
-      detectedBy: "system", detectedAt: approvedAt, updatedAt: approvedAt,
-    });
-  }
+  const superseded = await replacePurchaseOrderMatchExceptions({ tx, purchaseOrderId: header.id, exceptions: source.exceptions, match,
+    actorId, at: approvedAt, supersessionNote: `Superseded by admin-approved quantity revision ${revisionNumber}.`,
+    messagePrefix: `Quantity revision ${revisionNumber}`, revisionNumber });
   const afterLines = await tx.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.purchaseOrderId, header.id)).orderBy(asc(purchaseOrderLines.id));
   const [event] = await tx.insert(poEvents).values({
     poId: header.id, eventType: "quantity_amendment_approved", actorType: "user", actorId, createdAt: approvedAt,

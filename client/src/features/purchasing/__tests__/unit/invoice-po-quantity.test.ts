@@ -3,18 +3,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { InvoicePoQuantity } from "../../InvoicePoQuantity";
 
-function text(comparison: unknown, quantity: "ordered" | "received" = "ordered", recordedQuantity: number | null = 12500, compact = false) {
-  return renderToStaticMarkup(createElement(InvoicePoQuantity, { comparison, recordedQuantity, quantity, compact })).replace(/<[^>]*>/g, "");
+function text(comparison: unknown, quantity: "ordered" | "received" = "ordered", recordedQuantity: number | null = 12500) {
+  return renderToStaticMarkup(createElement(InvoicePoQuantity, { comparison, recordedQuantity, quantity })).replace(/<[^>]*>/g, "");
 }
 const comparison = { status: "current", purchaseOrderId: 113, purchaseOrderLineId: 160, orderedQty: 25000, receivedQty: 20000 };
 
 describe("invoice PO comparison presentation", () => {
-  it("shows the current ordered quantity and identifies the older recorded comparison", () => {
-    expect(text(comparison)).toBe("25,000Saved: 12,500");
+  it("shows the current ordered quantity without a confusing second quantity", () => {
+    expect(text(comparison)).toBe("25,000");
     expect(text(comparison, "received")).toBe("20,000");
-  });
-  it("keeps the compact mobile comparison readable", () => {
-    expect(text(comparison, "ordered", 12500, true)).toBe("25,000");
   });
   it("does not present a missing PO or a malformed response as a current saved value", () => {
     expect(text({ status: "unavailable" })).toBe("PO comparison unavailable");

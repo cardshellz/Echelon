@@ -13,6 +13,8 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { fixtureTable, fixtureForeignKeys } from "./shipment-line-fixture";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import type { PoQuantityApprovalRequest } from "@shared/procurement/po-quantity-amendment";
+import type { InvoiceQuantityApprovalRequest } from "@shared/procurement/invoice-quantity-correction";
+import { validatePostgresTestEnvironment } from "../../../../../scripts/ci/postgres-tests";
 
 const connection = vi.hoisted(() => ({ database: null as ReturnType<typeof drizzle<typeof schema>> | null }));
 vi.mock("../../../../db", () => ({ db: new Proxy({}, { get(_target, property) {
@@ -22,6 +24,8 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, { get(_target, property) {
 } }) }));
 import { createPoQuantityAmendmentService } from "../../po-quantity-amendment.service";
 import { registerPoQuantityAmendmentRoutes } from "../../po-quantity-amendment.routes";
+import { createInvoiceQuantityCorrectionService } from "../../invoice-quantity-correction.service";
+import { registerInvoiceQuantityCorrectionRoutes } from "../../invoice-quantity-correction.routes";
 
 const TEST_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = TEST_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
@@ -31,6 +35,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
   let pool: pg.Pool;
   let database: ReturnType<typeof drizzle<typeof schema>>;
   let service: ReturnType<typeof createPoQuantityAmendmentService>;
+  let invoiceService: ReturnType<typeof createInvoiceQuantityCorrectionService>;
   let server: Server;
   let url: string;
   let requestActor: string | null = "admin-user";
@@ -64,6 +69,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     return { status: response.status, body: await response.json(), replayed: response.headers.get("Idempotency-Replayed") };
   };
   beforeAll(async () => {
+    validatePostgresTestEnvironment(process.env);
     if ([process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL].includes(TEST_URL)) throw new Error("Requires a separate disposable database.");
     pool = new pg.Pool({ connectionString: TEST_URL, max: 8, ssl: false });
     for (const name of ["identity", "procurement", "inventory"]) await pool.query(`CREATE SCHEMA ${name}`);
@@ -85,9 +91,11 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     for (const file of migrations.slice(0, 2)) await pool.query(readFileSync(resolve(process.cwd(), "migrations", file), "utf8"));
     database = drizzle(pool, { schema }); connection.database = database;
     service = createPoQuantityAmendmentService(database, () => NOW);
+    invoiceService = createInvoiceQuantityCorrectionService(database, () => NOW);
     const app = express(); app.use(express.json());
     app.use((req, _res, next) => { (req as unknown as { session: unknown }).session = { user: requestActor ? { id: requestActor, role: "admin" } : undefined }; next(); });
     registerPoQuantityAmendmentRoutes(app, service);
+    registerInvoiceQuantityCorrectionRoutes(app, invoiceService);
     server = createServer(app); await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
@@ -233,5 +241,141 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       expect(blocked).toBe(true); await holder.query("COMMIT");
       expect((await pending).httpStatus).toBe(403); expect(await evidence()).toEqual(before);
     } finally { await holder.query("ROLLBACK"); holder.release(); await pending; }
+  });
+  describe("admin-approved invoice quantity corrections", () => {
+    beforeEach(async () => {
+      // The PO has already been corrected; receiving and the paid bill remain intact.
+      await pool.query("UPDATE procurement.purchase_order_lines SET order_qty=20,total_product_cost_cents=2000,line_total_cents=2100 WHERE id=11; UPDATE procurement.purchase_orders SET subtotal_cents=2100,total_cents=2100 WHERE id=1");
+    });
+    const invoiceBody = async (quantityPieces = 20, actorId = "admin-user"): Promise<InvoiceQuantityApprovalRequest> => ({
+      sourceVersion: (await invoiceService.context(81, actorId)).sourceVersion, quantityPieces,
+      reason: "Supplier confirmed the invoice piece quantity", approvalConfirmed: true,
+    });
+    const invoiceDescriptor = (request: unknown, key = randomUUID(), actorId = "admin-user"): FinancialCommandDescriptor => ({
+      actorType: "user", actorId, method: "POST", routeTemplate: "/api/vendor-invoice-lines/:lineId/quantity-correction", resourceKey: "vendor_invoice_line:81",
+      idempotencyKey: key, requestHash: createHash("sha256").update(canonicalJson(request)).digest("hex"), commandName: "ap.invoice.quantity_correction", contractVersion: 1,
+    });
+    const invoicePost = async (request: unknown, key = randomUUID()) => {
+      const response = await fetch(`${url}/api/vendor-invoice-lines/81/quantity-correction`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(request) });
+      return { status: response.status, body: await response.json(), replayed: response.headers.get("Idempotency-Replayed") };
+    };
+    const invoiceProtected = async () => ({
+      ...await protectedRecords(),
+      invoiceEconomics: (await pool.query("SELECT id,vendor_invoice_id,purchase_order_line_id,unit_cost_cents,unit_cost_mills,line_total_cents,cost_component_evidence FROM procurement.vendor_invoice_lines ORDER BY id")).rows,
+      po: (await pool.query("SELECT * FROM procurement.purchase_orders ORDER BY id")).rows,
+      poLines: (await pool.query("SELECT * FROM procurement.purchase_order_lines ORDER BY id")).rows,
+    });
+    it("prefills agreed PO/receipt quantities and previews the changed average without any writes", async () => {
+      const before = await evidence(), protectedBefore = await protectedRecords();
+      const context = await invoiceService.context(81, "admin-user");
+      expect(context).toMatchObject({ canApprove: true, suggestedQuantity: 20, current: { beforeQuantity: 10 }, suggested: {
+        afterQuantity: 20, beforeAmountPerPiece: "1.000000", afterAmountPerPiece: "0.500000", invoiceLineAmountCents: 1000,
+        invoiceAmountCents: 1000, paidAmountCents: 1000, balanceCents: 0, recordedUnitCostMills: 10000, beforeMatch: "qty_discrepancy", afterMatch: "matched",
+      } });
+      const preview = await invoiceService.preview(81, { sourceVersion: context.sourceVersion, quantityPieces: 15 }, "admin-user");
+      expect(preview).toMatchObject({ afterQuantity: 15, afterMatch: "qty_discrepancy", afterAmountPerPiece: "0.666667" });
+      expect(await evidence()).toEqual(before); expect(await protectedRecords()).toEqual(protectedBefore);
+    });
+    it("preserves all money, payment, PO, receiving and inventory facts and commits a complete immutable audit", async () => {
+      const request = await invoiceBody(), protectedBefore = await invoiceProtected();
+      const result = await invoicePost(request);
+      expect(result).toMatchObject({ status: 200, replayed: "false", body: { invoiceLineId: 81, preview: { beforeQuantity: 10, afterQuantity: 20, afterMatch: "matched", remainingIssues: [] } } });
+      expect(await invoiceProtected()).toEqual(protectedBefore);
+      expect((await pool.query("SELECT qty_invoiced,match_status FROM procurement.vendor_invoice_lines WHERE id=81")).rows[0]).toEqual({ qty_invoiced: 20, match_status: "matched" });
+      expect((await pool.query("SELECT status FROM procurement.po_exceptions ORDER BY id")).rows).toEqual([{ status: "dismissed" }]);
+      const events = (await pool.query("SELECT event_type,actor_id,payload_json FROM procurement.po_events")).rows;
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ event_type: "invoice_quantity_corrected", actor_id: "admin-user", payload_json: {
+        reason: request.reason, approvalConfirmed: true, reviewedSourceVersion: request.sourceVersion, approvalAuthority: { active: true },
+        before: { qtyInvoiced: 10, lineTotalCents: 1000 }, after: { qtyInvoiced: 20, lineTotalCents: 1000, matchStatus: "matched" },
+      } });
+      expect((await pool.query("SELECT changes,context FROM public.audit_events WHERE action='procurement.invoice.quantity_corrected'")).rows[0]).toMatchObject({
+        changes: { before: { qtyInvoiced: 10 }, after: { qtyInvoiced: 20 } }, context: { supersededMatchExceptions: [{ status: "resolved" }] },
+      });
+      await expect(pool.query("UPDATE procurement.po_events SET actor_id='forged'")).rejects.toMatchObject({ code: "23514" });
+      await expect(pool.query("DELETE FROM procurement.po_events")).rejects.toMatchObject({ code: "23514" });
+    });
+    it("replays exactly once even after later changes and rejects a different request using the same key", async () => {
+      const request = await invoiceBody(), key = randomUUID(); const first = await invoicePost(request, key);
+      await pool.query("UPDATE procurement.purchase_order_lines SET received_qty=21 WHERE id=11");
+      expect(await invoicePost(request, key)).toEqual({ ...first, replayed: "true" });
+      expect((await invoicePost({ ...request, quantityPieces: 30 }, key)).status).toBe(422);
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_events WHERE event_type='invoice_quantity_corrected'")).rows[0].count).toBe(1);
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM public.audit_events WHERE action='procurement.invoice.quantity_corrected'")).rows[0].count).toBe(1);
+    });
+    it("serializes competing invoice corrections and allows only one from a source version", async () => {
+      const request = await invoiceBody(), other = { ...request, quantityPieces: 15 };
+      const results = await Promise.all([invoiceService.approve(81, request, "admin-user", invoiceDescriptor(request)), invoiceService.approve(81, other, "admin-user", invoiceDescriptor(other))]);
+      expect(results.map((result) => result.httpStatus).sort()).toEqual([200, 409]);
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_events")).rows[0].count).toBe(1);
+    });
+    it.each(["lead-user", "custom-user", "scoped-user"])("rejects noncanonical admin authority for %s", async (actor) => {
+      const request = await invoiceBody(20, actor); requestActor = actor;
+      const before = await evidence(), protectedBefore = await protectedRecords();
+      expect((await invoicePost(request)).status).toBe(403);
+      expect(await evidence()).toEqual(before); expect(await protectedRecords()).toEqual(protectedBefore);
+    });
+    it("rechecks active membership and approval permission rather than trusting a cached admin session", async () => {
+      const request = await invoiceBody();
+      await pool.query("DELETE FROM identity.auth_user_roles WHERE user_id='admin-user'");
+      expect((await invoiceService.approve(81, request, "admin-user", invoiceDescriptor(request))).httpStatus).toBe(403);
+      await pool.query("INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES('admin-user',1); UPDATE identity.users SET active=0 WHERE id='admin-user'");
+      expect((await invoicePost(request)).status).toBe(403);
+      requestActor = null; expect((await invoicePost(request)).status).toBe(401);
+      expect((await pool.query("SELECT qty_invoiced FROM procurement.vendor_invoice_lines WHERE id=81")).rows[0].qty_invoiced).toBe(10);
+    });
+    it.each([
+      "UPDATE procurement.purchase_order_lines SET received_qty=21 WHERE id=11",
+      "UPDATE procurement.vendor_invoice_lines SET qty_invoiced=11 WHERE id=81",
+      "UPDATE procurement.vendor_invoices SET invoiced_amount_cents=1100,paid_amount_cents=1100 WHERE id=71",
+      "UPDATE procurement.vendor_invoices SET status='voided' WHERE id=71",
+      "UPDATE procurement.purchase_orders SET status='closed',closed_at=now() WHERE id=1",
+      "UPDATE inventory.warehouse_settings SET require_approval=true",
+    ])("rejects a stale invoice correction after source changes: %s", async (sqlText) => {
+      const request = await invoiceBody(); await pool.query(sqlText);
+      const before = await evidence(), protectedBefore = await protectedRecords();
+      expect((await invoicePost(request)).status).toBe(409);
+      expect(await evidence()).toEqual(before); expect(await protectedRecords()).toEqual(protectedBefore);
+    });
+    it("subtracts other active bills from the default and recomputes the entire linked PO", async () => {
+      await pool.query("INSERT INTO procurement.vendor_invoices(id,invoice_number,vendor_id,status,invoiced_amount_cents,balance_cents) VALUES(73,'OTHER-INV',2,'received',500,500); INSERT INTO procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id,allocated_amount_cents) VALUES(73,1,500); INSERT INTO procurement.vendor_invoice_lines(id,vendor_invoice_id,line_number,purchase_order_line_id,qty_invoiced,unit_cost_cents,unit_cost_mills,line_total_cents,match_status) VALUES(83,73,1,11,5,100,10000,500,'qty_discrepancy')");
+      expect(await invoiceService.context(81, "admin-user")).toMatchObject({ suggestedQuantity: 15, suggested: { otherInvoicedQuantity: 5, afterMatch: "matched", remainingIssues: [] } });
+      expect((await invoicePost(await invoiceBody(15))).status).toBe(200);
+      expect((await pool.query("SELECT match_status FROM procurement.vendor_invoice_lines ORDER BY id")).rows).toEqual([{ match_status: "matched" }, { match_status: "matched" }]);
+    });
+    it("retains an explicit override's remaining mismatch as a fresh exception with new evidence", async () => {
+      const request = await invoiceBody(15);
+      expect(await invoicePost(request)).toMatchObject({ status: 200, body: { preview: { afterMatch: "qty_discrepancy" } } });
+      expect((await pool.query("SELECT status,payload FROM procurement.po_exceptions ORDER BY id")).rows).toMatchObject([
+        { status: "dismissed" }, { status: "open", payload: { quantityCorrectionInvoiceLineId: 81, invoiceId: 71, mismatchedLineIds: [81], matchStatuses: ["qty_discrepancy"] } },
+      ]);
+    });
+    it("requires a command key, explicit approval and valid whole quantities and rejects mismatched command scope", async () => {
+      const request = await invoiceBody(), before = await evidence();
+      const noKey = await fetch(`${url}/api/vendor-invoice-lines/81/quantity-correction`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) });
+      expect(noKey.status).toBe(400);
+      for (const invalid of [{ approvalConfirmed: false }, { quantityPieces: 0 }, { quantityPieces: 1.5 }, { quantityPieces: 2147483648 }, { reason: "short" }]) {
+        expect((await invoicePost({ ...request, ...invalid })).status).toBe(400);
+      }
+      await expect(invoiceService.approve(81, request, "admin-user", { ...invoiceDescriptor(request), resourceKey: "vendor_invoice_line:999" })).rejects.toMatchObject({ code: "INVOICE_QUANTITY_SCOPE_INVALID" });
+      expect((await fetch(`${url}/api/vendor-invoice-lines/1e2/quantity-correction`)).status).toBe(400);
+      expect(await evidence()).toEqual(before);
+    });
+    it("rolls back the quantity, matches, exceptions and audit together when audit append fails", async () => {
+      const request = await invoiceBody(), command = invoiceDescriptor(request), before = await evidence(), protectedBefore = await protectedRecords();
+      await pool.query("CREATE OR REPLACE FUNCTION procurement.amendment_test_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Injected audit failure'; END; $$; CREATE TRIGGER amendment_test_failure BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION procurement.amendment_test_fail()");
+      await expect(invoiceService.approve(81, request, "admin-user", command)).rejects.toThrow();
+      expect(await evidence()).toEqual(before); expect(await protectedRecords()).toEqual(protectedBefore);
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM public.audit_events WHERE action='procurement.invoice.quantity_corrected'")).rows[0].count).toBe(0);
+      await pool.query("DROP TRIGGER amendment_test_failure ON procurement.po_events");
+      const deadline = Date.now() + 10000;
+      while (true) {
+        const state = await pool.query("SELECT next_attempt_at <= clock_timestamp() AS eligible FROM public.financial_command_results WHERE idempotency_key=$1", [command.idempotencyKey]);
+        if (state.rows[0].eligible) break;
+        if (Date.now() > deadline) throw new Error("Correction retry did not become eligible.");
+        await new Promise((done) => setTimeout(done, 20));
+      }
+      expect((await invoiceService.approve(81, request, "admin-user", command)).httpStatus).toBe(200);
+    });
   });
 });
