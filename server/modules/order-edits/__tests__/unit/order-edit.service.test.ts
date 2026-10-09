@@ -430,7 +430,7 @@ describe("private order edit orchestration", () => {
     expect(h.warehouse.acquire).not.toHaveBeenCalled();
     expect(h.record()).toBeNull();
   });
-  it("does not stage when picking wins acquisition", async () => {
+  it("never exposes or commits a staged preview when picking wins acquisition", async () => {
     const h = serviceHarness();
     h.warehouse.acquire.mockRejectedValue(
       new OrderEditError("ORDER_EDIT_PICKING_CUTOFF", "Picking started"),
@@ -438,7 +438,72 @@ describe("private order edit orchestration", () => {
     expect((await h.service.quote(h.input, "staff")).status).toBe(
       "review_required",
     );
-    expect(h.provider.quote).not.toHaveBeenCalled();
+    expect(h.provider.quote).toHaveBeenCalledOnce();
+    expect(h.record().quote).toBeNull();
+    expect(h.record().error?.code).toBe("ORDER_EDIT_PICKING_CUTOFF");
+    await h.service.commit(OP, OP, "staff");
+    expect(h.provider.commit).not.toHaveBeenCalled();
+    expect(h.provider.refund).not.toHaveBeenCalled();
+  });
+  it("overlaps preview and hold acquisition but exposes neither before both finish", async () => {
+    const h = serviceHarness();
+    let releaseHold!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      releaseHold = resolve;
+    });
+    h.warehouse.acquire.mockReturnValueOnce(hold);
+    const pending = h.service.quote(h.input, "staff");
+    await vi.waitFor(() => expect(h.provider.quote).toHaveBeenCalledOnce());
+    expect(h.record().status).toBe("preparing");
+    expect(h.record().quote).toBeNull();
+    releaseHold();
+    expect((await pending).status).toBe("ready");
+    expect(h.record().quote).not.toBeNull();
+  });
+  it("waits for a late hold after preview failure before unlocking cancellation", async () => {
+    const h = serviceHarness();
+    let releaseHold!: () => void;
+    h.warehouse.acquire.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        releaseHold = resolve;
+      }),
+    );
+    h.provider.quote.mockRejectedValueOnce(
+      new OrderEditProviderError("QUOTE_REJECTED", "Invalid quote"),
+    );
+    const pending = h.service.quote(h.input, "staff");
+    await vi.waitFor(() => expect(h.provider.quote).toHaveBeenCalledOnce());
+    expect(h.record().status).toBe("preparing");
+    await expect(h.service.abandon(OP, "staff")).rejects.toMatchObject({
+      code: "ORDER_EDIT_BUSY",
+    });
+    releaseHold();
+    expect((await pending).status).toBe("review_required");
+    expect(h.record().error?.code).toBe("QUOTE_REJECTED");
+    expect((await h.service.abandon(OP, "staff")).status).toBe("expired");
+    expect(h.warehouse.releaseUnchanged).toHaveBeenCalledOnce();
+  });
+  it("waits for a late preview after hold failure and retains the hold error", async () => {
+    const h = serviceHarness();
+    const staged = await h.provider.quote();
+    h.provider.quote.mockClear();
+    let releasePreview!: (quote: OrderEditQuote) => void;
+    h.provider.quote.mockReturnValueOnce(
+      new Promise<OrderEditQuote>((resolve) => {
+        releasePreview = resolve;
+      }),
+    );
+    h.warehouse.acquire.mockRejectedValueOnce(
+      new OrderEditError("HOLD_FAILED", "Hold unavailable"),
+    );
+    const pending = h.service.quote(h.input, "staff");
+    await vi.waitFor(() => expect(h.provider.quote).toHaveBeenCalledOnce());
+    expect(h.record().status).toBe("preparing");
+    releasePreview(staged);
+    expect((await pending).status).toBe("review_required");
+    expect(h.record().quote).toBeNull();
+    expect(h.record().error?.code).toBe("HOLD_FAILED");
+    expect(h.provider.commit).not.toHaveBeenCalled();
   });
   it("rechecks warehouse cutoff and quote revision at commit", async () => {
     const h = serviceHarness();
@@ -449,6 +514,24 @@ describe("private order edit orchestration", () => {
     await expect(h.service.commit(OP, OP, "staff")).rejects.toMatchObject({
       code: "ORDER_EDIT_PICKING_CUTOFF",
     });
+    expect(h.provider.commit).not.toHaveBeenCalled();
+  });
+  it("audits the hold error and also reports the preview error when both fail", async () => {
+    const h = serviceHarness();
+    h.warehouse.acquire.mockRejectedValueOnce(
+      new OrderEditError("HOLD_FAILED", "Hold unavailable"),
+    );
+    h.provider.quote.mockRejectedValueOnce(
+      new OrderEditProviderError("QUOTE_REJECTED", "Invalid quote"),
+    );
+    await h.service.quote(h.input, "staff");
+    expect(h.record().error?.code).toBe("HOLD_FAILED");
+    expect(h.record().quote).toBeNull();
+    expect(h.report).toHaveBeenCalledWith({
+      operationId: OP,
+      code: "QUOTE_REJECTED",
+    });
+    expect(h.events.at(-1)?.action).toBe("quote_failed_held");
     expect(h.provider.commit).not.toHaveBeenCalled();
   });
   it("persists a commit intent before the provider write and never commits again on retries", async () => {
