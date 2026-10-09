@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import type { PickCorrection } from "../../shared/pick-corrections";
+import { pickCorrectionSchema, type PickCorrection } from "../../shared/pick-corrections";
 import { resolve } from "node:path";
 
 const path = "/__pick-corrections";
@@ -10,9 +10,10 @@ test.beforeEach(async ({ page }) => {
     </head><body><div id="root"></div><script type="module" src="/@fs/${resolve("test/browser/fixtures/pick-corrections-harness.tsx").replaceAll("\\", "/")}"></script></body></html>` }));
 });
 function correction(): PickCorrection {
-  return { id: 1, orderId: 42, orderItemId: 80, orderNumber: "#63085", sku: "P5", name: "Pack of five",
+  return pickCorrectionSchema.parse({ id: 1, orderId: 42, orderItemId: 80, orderNumber: "#63085", sku: "P5", name: "Pack of five",
     barcode: "12345", location: "A-01", declaredQuantity: 3, pickedQuantity: 1, revision: 1,
-    state: "confirmation_required", answer: null, assignedPickerId: null, reviewReason: null };
+    state: "confirmation_required", answer: null, assignedPickerId: null, reviewReason: null,
+    updatedAt: new Date("2026-10-09T12:00:00.000Z") });
 }
 
 test("Yes/No only, No survives refresh, partial scans preserve the earlier pick", async ({ page }) => {
@@ -73,14 +74,48 @@ test("Yes uses confirmation, not a new barcode scan or a shipping command", asyn
   await expect(page.getByLabel("Scan item barcode or SKU")).toHaveCount(0);
 });
 
-test("a saved Yes with an inventory failure is actionable after reload", async ({ page }) => {
-  const item = { ...correction(), state: "picking_required" as const, answer: "yes" as const,
-    assignedPickerId: "picker", reviewReason: "Shipping already deducted units; inventory review is required.", revision: 3 };
-  await page.route("**/api/picking/corrections", route => route.fulfill({ json: [item] }));
+test("a saved Yes awaiting inventory recovery stays off the picker after reload", async ({ page }) => {
+  let item = correction();
+  const writes: Array<{ path: string; body: unknown }> = [];
+  await page.route("**/api/picking/corrections**", async route => {
+    const request = route.request();
+    if (request.method() === "GET") {
+      // readPickCorrections excludes saved Yes answers; the system retries their inventory record.
+      return route.fulfill({ json: item.answer === "yes" ? [] : [item] });
+    }
+    writes.push({ path: new URL(request.url()).pathname, body: request.postDataJSON() });
+    item = { ...item, state: "picking_required", answer: "yes", assignedPickerId: "picker",
+      reviewReason: "Shipping already deducted units; inventory review is required.", revision: 3 };
+    return route.fulfill({ status: 500, json: { code: "CORRECTIVE_PICK_NOT_SAVED",
+      error: "The correction remains open. Refresh it to see the inventory review details." } });
+  });
   await page.goto(path);
-  await expect(page.getByRole("alert")).toContainText("inventory review");
-  await expect(page.getByRole("button", { name: "Retry recording confirmed pick" })).toBeVisible();
+  await page.getByRole("button", { name: "Yes", exact: true }).click();
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  expect(item).toMatchObject({ answer: "yes", state: "picking_required", pickedQuantity: 1 });
+  expect(writes).toEqual([{ path: "/api/picking/corrections/1/answer",
+    body: { commandId: expect.any(String), answer: "yes", expectedRevision: 1 } }]);
+
+  const reloadedCorrections = page.waitForResponse(response =>
+    new URL(response.url()).pathname === "/api/picking/corrections" && response.request().method() === "GET");
+  await page.reload();
+  expect(await (await reloadedCorrections).json()).toEqual([]);
+  await expect(page.getByRole("heading", { name: "Picking queue", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Pick corrections" })).toHaveCount(0);
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Retry recording confirmed pick" })).toHaveCount(0);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(writes).toHaveLength(1);
+});
+
+test("an invalid correction response shows a load error instead of pick actions", async ({ page }) => {
+  const { updatedAt: _updatedAt, ...invalidCorrection } = correction();
+  await page.route("**/api/picking/corrections", route => route.fulfill({ json: [invalidCorrection] }));
+  await page.goto(path);
+  await expect(page.getByRole("alert")).toContainText("Pick corrections could not be loaded.");
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Yes", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Record corrective pick" })).toHaveCount(0);
 });
 
 test("read-only users cannot answer or make corrective picks", async ({ page }) => {
