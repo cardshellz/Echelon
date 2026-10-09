@@ -95,16 +95,22 @@ function CorrectionAction({ item, onChanged }: { item: PickCorrection; onChanged
   // An uncertain response retries the identical command, not a second inventory request.
   const pending = useRef<{ endpoint: string; body: Record<string, unknown> } | null>(null);
   const missing = item.declaredQuantity - item.pickedQuantity;
-  const submit = async (action: "yes" | "no" | "pick") => {
+  const submit = async (action: "yes" | "no" | "pick" | "manual") => {
     if (busy) return;
     const amount = Number(quantity);
-    if (!pending.current && action === "pick" && (!Number.isSafeInteger(amount) || amount < 1 || amount > missing || !barcode.trim())) {
-      setError(`Scan the item and enter between 1 and ${missing} units.`); return;
+    const picking = action === "pick" || action === "manual";
+    if (!pending.current && picking && (!Number.isSafeInteger(amount) || amount < 1 || amount > missing)) {
+      setError(`Enter between 1 and ${missing} units.`); return;
+    }
+    if (!pending.current && action === "pick" && !barcode.trim()) {
+      setError("Scan the item, or use Mark picked without scan."); return;
     }
     const command = pending.current ?? {
-      endpoint: `${queryKey[0]}/${item.id}/${action === "pick" ? "pick" : "answer"}`,
+      endpoint: `${queryKey[0]}/${item.id}/${picking ? "pick" : "answer"}`,
       body: { commandId: crypto.randomUUID(), expectedRevision: item.revision,
-        ...(action === "pick" ? { pickedQuantity: item.pickedQuantity + amount, barcode: barcode.trim() } : { answer: action }) },
+        ...(action === "pick" ? { pickedQuantity: item.pickedQuantity + amount, method: "scan", barcode: barcode.trim() }
+          : action === "manual" ? { pickedQuantity: item.pickedQuantity + amount, method: "manual" }
+            : { answer: action }) },
     };
     pending.current = command; setBusy(true); setError(null);
     try {
@@ -153,6 +159,9 @@ function CorrectionAction({ item, onChanged }: { item: PickCorrection; onChanged
         <Input type="number" inputMode="numeric" min={1} max={missing} step={1} value={quantity} onChange={event => setQuantity(event.target.value)} disabled={busy} />
       </label>
       <Button className="h-12 w-full" type="submit" disabled={busy}>Record corrective pick</Button>
+      {/* Same as the normal pick screen's manual mark-picked when a label won't scan. */}
+      <Button className="h-12 w-full" type="button" variant="outline" disabled={busy}
+        onClick={() => void submit("manual")}>Mark picked without scan</Button>
     </form>}
     {(error || item.reviewReason) && <p role="alert" className="text-sm text-destructive">{error || item.reviewReason}</p>}
   </div>;

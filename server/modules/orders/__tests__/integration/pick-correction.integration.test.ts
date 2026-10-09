@@ -14,9 +14,13 @@ const suite = url && disposable ? describe : describe.skip;
 const now = new Date("2026-09-24T12:00:00Z");
 const foundation = `CREATE SCHEMA wms;
 CREATE TABLE wms.orders(id integer PRIMARY KEY,order_number text,warehouse_status text,on_hold integer,held_at timestamptz);
+CREATE SCHEMA catalog;
+-- Corrective scans also match the catalog variant's barcode and SKU.
+CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,sku text,barcode text);
 CREATE TABLE wms.order_items(id integer PRIMARY KEY,order_id integer REFERENCES wms.orders,
   sku text,name text,barcode text,location text,quantity integer,picked_quantity integer,
-  fulfilled_quantity integer NOT NULL DEFAULT 0,on_hold boolean NOT NULL DEFAULT false,hold_reason text);
+  fulfilled_quantity integer NOT NULL DEFAULT 0,on_hold boolean NOT NULL DEFAULT false,hold_reason text,
+  product_id integer);
 -- The line-hold columns the hold release reads and writes.
 CREATE TABLE wms.outbound_shipments(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   order_id integer REFERENCES wms.orders,status text NOT NULL,held boolean NOT NULL DEFAULT false,held_at timestamptz,
