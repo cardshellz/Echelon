@@ -17,14 +17,15 @@ export function registerPickCorrectionRoutes(app: Express, service: PickCorrecti
     try { res.set("Cache-Control", "no-store").json(pickCorrectionListSchema.parse(await service.list())); }
     catch (error) { failure(res, error); }
   });
-  for (const action of ["answer", "pick"] as const) {
+  for (const action of ["answer", "pick", "take-over"] as const) {
     app.post(`/api/picking/corrections/:id/${action}`, requireAuth, requirePermission("picking", "perform"), async (req, res) => {
       try {
         const actor = req.session.user?.id;
         if (!actor) return res.status(401).json({ error: "Sign in to resolve picks." });
-        const result = action === "answer"
-          ? await service.answer(Number(req.params.id), req.body, actor)
-          : await service.complete(Number(req.params.id), req.body, actor);
+        const id = Number(req.params.id);
+        const result = action === "answer" ? await service.answer(id, req.body, actor)
+          : action === "pick" ? await service.complete(id, req.body, actor)
+            : await service.takeOver(id, req.body, actor);
         res.json(pickCorrectionSchema.parse(result));
       } catch (error) { failure(res, error); }
     });

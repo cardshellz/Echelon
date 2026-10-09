@@ -5,7 +5,8 @@ import { type PickCorrection } from "@shared/pick-corrections";
 
 const correction: PickCorrection = { id: 1, orderId: 70, orderItemId: 71, orderNumber: "#70", sku: "P5",
   name: "Pack", location: "A-01", barcode: "123", declaredQuantity: 3, pickedQuantity: 1,
-  state: "picking_required", answer: "yes", revision: 2, assignedPickerId: "picker", reviewReason: null };
+  state: "picking_required", answer: "yes", revision: 2, assignedPickerId: "picker", reviewReason: null,
+  updatedAt: new Date("2026-10-07T14:00:00Z") };
 
 describe("existing inventory owner corrective-pick fences", () => {
   it("allows a shipped non-stock item to confirm its pick without inventory movement", async () => {

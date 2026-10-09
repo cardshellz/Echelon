@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { pickCorrectionListSchema, pickCorrectionSchema, type PickCorrection } from "@shared/pick-corrections";
+import { canTakeOverPickCorrection, pickCorrectionListSchema, pickCorrectionSchema, type PickCorrection } from "@shared/pick-corrections";
 import { AlertDialog, AlertDialogContent, AlertDialogDescription, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,7 +34,9 @@ export function PickCorrections({ userId, canPerform }: { userId: string; canPer
         <h3 className="font-semibold">{item.orderNumber} · {item.sku}</h3>
         <p className="text-sm">{item.declaredQuantity - item.pickedQuantity} still need a pick record · {item.location || "Source bin missing"}</p>
         {item.assignedPickerId !== null && item.assignedPickerId !== userId
-          ? <p className="text-sm">Being resolved by another picker.</p>
+          ? canPerform && canTakeOverPickCorrection(item, userId, new Date())
+            ? <TakeOver item={item} />
+            : <p className="text-sm">Being resolved by another picker.</p>
           : canPerform && item.state === "picking_required"
             ? <CorrectionAction key={`${item.id}:${item.revision}:${item.pickedQuantity}`} item={item} onChanged={changed} />
             : <p className="text-sm">Waiting for the picker’s Yes / No confirmation.</p>}
@@ -52,6 +54,38 @@ export function PickCorrections({ userId, canPerform }: { userId: string; canPer
   </>;
 }
 
+/** An idle "No" whose corrective scan another picker never did. */
+function TakeOver({ item }: { item: PickCorrection }) {
+  const client = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const commandId = useRef(crypto.randomUUID());
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true); setError(null);
+    try {
+      const response = await fetch(`${queryKey[0]}/${item.id}/take-over`, { method: "POST", credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ commandId: commandId.current, expectedRevision: item.revision }) });
+      const result: unknown = await response.json();
+      if (!response.ok) {
+        setError(typeof result === "object" && result && "error" in result ? String((result as { error: unknown }).error)
+          : "Could not take over this correction. Refresh and try again.");
+        return;
+      }
+      pickCorrectionSchema.parse(result);
+      await client.invalidateQueries({ queryKey });
+    } catch {
+      setError("Could not take over this correction. Refresh and try again.");
+    } finally { setBusy(false); }
+  };
+  return <div className="space-y-2">
+    <p className="text-sm">Another picker answered No but never scanned it.</p>
+    <Button variant="outline" disabled={busy} onClick={() => void submit()}>Take over</Button>
+    {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+  </div>;
+}
+
 function CorrectionAction({ item, onChanged }: { item: PickCorrection; onChanged(item: PickCorrection): void }) {
   const client = useQueryClient();
   const [barcode, setBarcode] = useState("");
@@ -61,16 +95,22 @@ function CorrectionAction({ item, onChanged }: { item: PickCorrection; onChanged
   // An uncertain response retries the identical command, not a second inventory request.
   const pending = useRef<{ endpoint: string; body: Record<string, unknown> } | null>(null);
   const missing = item.declaredQuantity - item.pickedQuantity;
-  const submit = async (action: "yes" | "no" | "pick") => {
+  const submit = async (action: "yes" | "no" | "pick" | "manual") => {
     if (busy) return;
     const amount = Number(quantity);
-    if (!pending.current && action === "pick" && (!Number.isSafeInteger(amount) || amount < 1 || amount > missing || !barcode.trim())) {
-      setError(`Scan the item and enter between 1 and ${missing} units.`); return;
+    const picking = action === "pick" || action === "manual";
+    if (!pending.current && picking && (!Number.isSafeInteger(amount) || amount < 1 || amount > missing)) {
+      setError(`Enter between 1 and ${missing} units.`); return;
+    }
+    if (!pending.current && action === "pick" && !barcode.trim()) {
+      setError("Scan the item, or use Mark picked without scan."); return;
     }
     const command = pending.current ?? {
-      endpoint: `${queryKey[0]}/${item.id}/${action === "pick" ? "pick" : "answer"}`,
+      endpoint: `${queryKey[0]}/${item.id}/${picking ? "pick" : "answer"}`,
       body: { commandId: crypto.randomUUID(), expectedRevision: item.revision,
-        ...(action === "pick" ? { pickedQuantity: item.pickedQuantity + amount, barcode: barcode.trim() } : { answer: action }) },
+        ...(action === "pick" ? { pickedQuantity: item.pickedQuantity + amount, method: "scan", barcode: barcode.trim() }
+          : action === "manual" ? { pickedQuantity: item.pickedQuantity + amount, method: "manual" }
+            : { answer: action }) },
     };
     pending.current = command; setBusy(true); setError(null);
     try {
@@ -119,6 +159,9 @@ function CorrectionAction({ item, onChanged }: { item: PickCorrection; onChanged
         <Input type="number" inputMode="numeric" min={1} max={missing} step={1} value={quantity} onChange={event => setQuantity(event.target.value)} disabled={busy} />
       </label>
       <Button className="h-12 w-full" type="submit" disabled={busy}>Record corrective pick</Button>
+      {/* Same as the normal pick screen's manual mark-picked when a label won't scan. */}
+      <Button className="h-12 w-full" type="button" variant="outline" disabled={busy}
+        onClick={() => void submit("manual")}>Mark picked without scan</Button>
     </form>}
     {(error || item.reviewReason) && <p role="alert" className="text-sm text-destructive">{error || item.reviewReason}</p>}
   </div>;

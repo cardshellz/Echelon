@@ -1,12 +1,13 @@
 import { sql } from "drizzle-orm";
 import {
-  answerPickCorrectionSchema, completeCorrectivePickSchema, type PickCorrection,
+  answerPickCorrectionSchema, canTakeOverPickCorrection, completeCorrectivePickSchema,
+  normalizeScanCode, takeOverPickCorrectionSchema, type PickCorrection,
 } from "@shared/pick-corrections";
 import {
   correctionHash, PickCorrectionError, readPickCorrection, readPickCorrections,
   recordCorrectionEvent, resolveCorrectivePick, savePickCorrectionAnswer, savePickCorrectionReview,
   saveCorrectivePickIntent, hasNewerPickDeclaration, readConfirmedCorrectionsDueForRetry,
-  touchPickCorrectionRetry, type CorrectionExecutor,
+  touchPickCorrectionRetry, reassignPickCorrection, readCorrectionScanCodes, type CorrectionExecutor,
 } from "../wms/pick-correction.repository";
 import type { PickingUseCases } from "./picking.use-cases";
 import { confirmedShipmentHoldRelease } from "../wms/confirmed-shipment-holds";
@@ -30,7 +31,7 @@ export interface CorrectionDatabase extends CorrectionExecutor {
   transaction<T>(work: (tx: CorrectionExecutor) => Promise<T>): Promise<T>;
 }
 export interface CorrectivePicker {
-  (input: { correction: PickCorrection; targetQuantity: number; actor: string; method: "scan" | "missed_pick_confirmation" }): Promise<void>;
+  (input: { correction: PickCorrection; targetQuantity: number; actor: string; method: "scan" | "manual" | "missed_pick_confirmation" }): Promise<void>;
 }
 
 /** Durable answer first; inventory movement is then committed by the existing picker owner.
@@ -91,6 +92,30 @@ export class PickCorrectionService {
     }
     await this.finishIfPicked(id, actor);
     return readPickCorrection(this.db, id);
+  }
+
+  /** Moves an idle "No" (corrective scan not done) to the requesting picker. */
+  async takeOver(id: number, raw: unknown, actor: string): Promise<PickCorrection> {
+    const command = takeOverPickCorrectionSchema.parse(raw);
+    if (!actor.trim()) throw new PickCorrectionError("INVALID_ACTOR", "A signed-in picker is required.");
+    const hash = correctionHash({ id, actor, command, action: "take_over" });
+    return this.db.transaction(async tx => {
+      const before = await this.lock(tx, id, "record_despite_hold");
+      const replay = await tx.execute(sql`SELECT request_hash FROM wms.pick_correction_events WHERE command_id=${command.commandId}`);
+      if (replay.rows.length) {
+        if (replay.rows[0].request_hash !== hash) throw new PickCorrectionError("IDEMPOTENCY_CONFLICT", "This command was already used.");
+        return before;
+      }
+      const now = this.clock();
+      if (before.revision !== command.expectedRevision || !canTakeOverPickCorrection(before, actor, now)) {
+        throw new PickCorrectionError("CORRECTION_CHANGED", "This correction changed or is not idle long enough to take over. Refresh it.");
+      }
+      await reassignPickCorrection(tx, id, actor, now);
+      const after = await readPickCorrection(tx, id);
+      await recordCorrectionEvent(tx, { correctionId: id, commandId: command.commandId, requestHash: hash,
+        actor, action: "corrective_pick_taken_over", before, after, occurredAt: now });
+      return after;
+    });
   }
 
   /**
@@ -154,15 +179,20 @@ export class PickCorrectionService {
         || command.pickedQuantity <= before.pickedQuantity || command.pickedQuantity > before.declaredQuantity) {
         throw new PickCorrectionError("CORRECTION_CHANGED", "Refresh the correction before confirming this pick.");
       }
-      if (command.barcode !== before.barcode && command.barcode !== before.sku)
-        throw new PickCorrectionError("WRONG_ITEM", "That barcode does not match the item that needs picking.");
+      if (command.method === "scan") {
+        const scanned = normalizeScanCode(command.barcode);
+        const accepted = await readCorrectionScanCodes(tx, before.orderItemId);
+        if (scanned === null || !accepted.includes(scanned))
+          throw new PickCorrectionError("WRONG_ITEM", "That barcode does not match the item that needs picking.");
+      }
       await saveCorrectivePickIntent(tx, id, this.clock());
       await recordCorrectionEvent(tx, { correctionId: id, commandId: command.commandId, requestHash: hash,
-        actor, action: "corrective_pick_scanned", before, after: command, occurredAt: this.clock() });
+        actor, action: command.method === "manual" ? "corrective_pick_marked_manually" : "corrective_pick_scanned",
+        before, after: command, occurredAt: this.clock() });
       return readPickCorrection(tx, id);
     });
     if (correction.state !== "resolved" && correction.pickedQuantity < command.pickedQuantity)
-      await this.applyPick(correction, command.pickedQuantity, actor, "scan");
+      await this.applyPick(correction, command.pickedQuantity, actor, command.method);
     await this.finishIfPicked(id, actor);
     return readPickCorrection(this.db, id);
   }
@@ -220,7 +250,7 @@ export class PickCorrectionService {
   }
 
   private async applyPick(correction: PickCorrection, targetQuantity: number, actor: string,
-    method: "scan" | "missed_pick_confirmation", options: { quietRepeat?: boolean } = {}): Promise<void> {
+    method: "scan" | "manual" | "missed_pick_confirmation", options: { quietRepeat?: boolean } = {}): Promise<void> {
     try {
       await this.pick({ correction, targetQuantity, actor, method });
     } catch (error) {
