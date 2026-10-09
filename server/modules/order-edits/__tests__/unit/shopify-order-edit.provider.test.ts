@@ -328,10 +328,13 @@ function harness(
       });
     },
   );
+  const reports =
+    vi.fn<(event: { operationId: string; code: string }) => void>();
   const provider = new ShopifyOrderEditProvider({
     shippingCalculator,
     clock: () => NOW,
     fetch: fetchImpl as typeof fetch,
+    report: reports,
     credentials: {
       get: async () => ({
         connectionId: 4,
@@ -342,7 +345,7 @@ function harness(
       }),
     },
   });
-  return { provider, requests, fetchImpl };
+  return { provider, requests, fetchImpl, reports };
 }
 async function reduction() {
   const h = harness([
@@ -3734,6 +3737,126 @@ describe("member function pricing on protected quantity increases", () => {
       (await h.provider.reconcileCommit(4, snapshot, quote, "edit-1")).status,
     ).toBe("conflict");
     expect(h.requests).toHaveLength(1);
+  });
+  it("overlaps current product and promotion reads, and waits for both before staging", async () => {
+    const h = harness(memberQuoteResponses());
+    const snapshot = await h.provider.readOrder(4, "100");
+    const originalFetch = h.fetchImpl.getMockImplementation()!;
+    let releasePromotion!: () => void;
+    let releaseVariants!: () => void;
+    const promotion = new Promise<void>((resolve) => {
+      releasePromotion = resolve;
+    });
+    const variants = new Promise<void>((resolve) => {
+      releaseVariants = resolve;
+    });
+    h.fetchImpl.mockImplementation(async (url, init) => {
+      const response = originalFetch(url, init);
+      const query = JSON.parse(String(init?.body)).query as string;
+      if (query.includes("EchelonEditPricingProvenance")) await promotion;
+      if (query.includes("EchelonEditVariantPrices")) await variants;
+      return response;
+    });
+    const pending = h.provider.quote(
+      4,
+      snapshot,
+      { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+      "edit-1",
+    );
+    await vi.waitFor(() =>
+      expect(
+        h.requests.some((request) =>
+          request.query.includes("EchelonEditVariantPrices"),
+        ),
+      ).toBe(true),
+    );
+    expect(
+      h.requests.some((request) =>
+        request.query.includes("EchelonEditPricingProvenance"),
+      ),
+    ).toBe(true);
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditBegin")),
+    ).toBe(false);
+    releaseVariants();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditBegin")),
+    ).toBe(false);
+    releasePromotion();
+    expect((await pending).totalCents).toBe(22098);
+  });
+  it("awaits an outstanding product read after promotion failure and never stages", async () => {
+    const responses: unknown[] = memberQuoteResponses();
+    responses[2] = new Error("Promotion read unavailable");
+    const h = harness(responses);
+    const snapshot = await h.provider.readOrder(4, "100");
+    const originalFetch = h.fetchImpl.getMockImplementation()!;
+    let releaseVariants!: () => void;
+    const variants = new Promise<void>((resolve) => {
+      releaseVariants = resolve;
+    });
+    h.fetchImpl.mockImplementation(async (url, init) => {
+      const query = JSON.parse(String(init?.body)).query as string;
+      if (query.includes("EchelonEditVariantPrices")) {
+        await variants;
+      }
+      return originalFetch(url, init);
+    });
+    let settled = false;
+    const outcome = h.provider
+      .quote(
+        4,
+        snapshot,
+        { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+        "edit-1",
+      )
+      .then(
+        () => {
+          settled = true;
+          return null;
+        },
+        (error) => {
+          settled = true;
+          return error;
+        },
+      );
+    await vi.waitFor(() =>
+      expect(
+        h.requests.some((request) =>
+          request.query.includes("EchelonEditPricingProvenance"),
+        ),
+      ).toBe(true),
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    releaseVariants();
+    expect(await outcome).toMatchObject({ code: "SHOPIFY_UNAVAILABLE" });
+    expect(
+      h.requests.some((request) => request.query.includes("mutation")),
+    ).toBe(false);
+  });
+  it("reports both failed preflight reads without starting an edit", async () => {
+    const responses: unknown[] = memberQuoteResponses();
+    responses[2] = new Error("Promotion read unavailable");
+    responses[3] = new Error("Product read unavailable");
+    const h = harness(responses);
+    const snapshot = await h.provider.readOrder(4, "100");
+    await expect(
+      h.provider.quote(
+        4,
+        snapshot,
+        { changes: [{ lineItemId: "1", quantity: 2 }], additions: [] },
+        "edit-1",
+      ),
+    ).rejects.toMatchObject({ code: "SHOPIFY_UNAVAILABLE" });
+    expect(h.reports).toHaveBeenCalledExactlyOnceWith({
+      operationId: "edit-1",
+      code: "SHOPIFY_UNAVAILABLE",
+    });
+    expect(
+      h.requests.some((request) => request.query.includes("mutation")),
+    ).toBe(false);
   });
   it("quotes the observed 1 -> 2 case on the same order, with the fixed reward used once", async () => {
     const { quote, requests } = await quoteMemberIncrease();

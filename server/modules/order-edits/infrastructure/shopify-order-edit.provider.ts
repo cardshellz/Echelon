@@ -216,6 +216,10 @@ const VARIANT = z.object({
   membershipVariant: META,
   planPrices: META,
 });
+interface VariantPricing {
+  variants: Array<z.infer<typeof VARIANT> | null>;
+  prices: Map<string, number>;
+}
 const CALCULATED_DISCOUNT = z.object({
   __typename: z.enum([
     "CalculatedDiscountCodeApplication",
@@ -284,6 +288,7 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
       fetch?: typeof fetch;
       timeoutMs?: number;
       shippingCalculator?: OrderEditShippingCalculator;
+      report?: (event: { operationId: string; code: string }) => void;
     },
   ) {
     this.fetchImpl = options.fetch ?? fetch;
@@ -554,10 +559,34 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
         "EXISTING_REFUND_UNSUPPORTED",
         "Orders with previous refunds require staff review before editing.",
       );
-    const pricingProvenance = fresh.discountsPresent
-      ? await this.verifyExistingPromotions(connectionId, fresh)
-      : null;
-    const quote = await this.stage(connectionId, fresh, plan, operationId);
+    // These existing read-only checks are independent. Wait for both even on
+    // failure; no edit session is opened until both have been validated.
+    const [promotionCheck, variantCheck] = await Promise.allSettled([
+      fresh.discountsPresent
+        ? this.verifyExistingPromotions(connectionId, fresh)
+        : Promise.resolve(null),
+      this.variantPricing(connectionId, fresh, plan),
+    ]);
+    if (promotionCheck.status === "rejected") {
+      if (variantCheck.status === "rejected")
+        this.options.report?.({
+          operationId,
+          code:
+            variantCheck.reason instanceof OrderEditProviderError
+              ? variantCheck.reason.code
+              : "VARIANT_PRICING_READ_FAILED",
+        });
+      throw promotionCheck.reason;
+    }
+    if (variantCheck.status === "rejected") throw variantCheck.reason;
+    const pricingProvenance = promotionCheck.value;
+    const quote = await this.stage(
+      connectionId,
+      fresh,
+      plan,
+      operationId,
+      variantCheck.value,
+    );
     assertRecoveryLineage(quote);
     // Establish financial eligibility while the order is still unchanged. A
     // successful edit must not discover only afterwards that its refund is unsupported.
@@ -583,6 +612,7 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
     baseline: OrderEditSnapshot,
     plan: OrderEditPlan,
     operationId: string,
+    pricing: VariantPricing,
   ): Promise<OrderEditQuote> {
     const credentials = await this.credentials(connectionId);
     if (credentials.channelId !== baseline.channelId)
@@ -610,39 +640,7 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
           "Only existing, unfulfilled physical lines can be changed.",
         );
     }
-    const demand = additionalDemand(baseline, plan);
-    const variants = demand.length
-      ? parse(
-          z.object({ nodes: z.array(VARIANT.nullable()) }),
-          await this.request(credentials, gql.VARIANTS_QUERY, {
-            ids: demand.map((line) => line.variantId),
-          }),
-        ).nodes
-      : [];
-    const prices = new Map<string, number>();
-    for (let index = 0; index < variants.length; index++) {
-      const variant = variants[index];
-      if (
-        !variant ||
-        variant.id !== demand[index]?.variantId ||
-        !supportedVariant(variant)
-      )
-        fail(
-          "VARIANT_UNSUPPORTED",
-          "The selected product cannot be added by this pilot.",
-        );
-      if (!stockAvailable(variant, demand[index].quantity))
-        fail(
-          "STOCK_UNAVAILABLE",
-          "The selected additional quantity is not currently in stock.",
-        );
-      prices.set(variant.id, memberPrice(variant, baseline));
-    }
-    if (variants.length !== demand.length)
-      fail(
-        "INCOMPLETE_VARIANTS",
-        "Shopify did not return every selected product.",
-      );
+    const { variants, prices } = pricing;
     const begin = await this.mutate(
       credentials,
       gql.BEGIN_MUTATION,
@@ -969,6 +967,49 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
         },
       },
     };
+  }
+
+  private async variantPricing(
+    connectionId: number,
+    baseline: OrderEditSnapshot,
+    plan: OrderEditPlan,
+  ): Promise<VariantPricing> {
+    const demand = additionalDemand(baseline, plan);
+    if (demand.length === 0) return { variants: [], prices: new Map() };
+    const credentials = await this.credentials(connectionId);
+    if (credentials.channelId !== baseline.channelId)
+      fail("CONNECTION_MISMATCH", "The connection's channel changed.");
+    const variants = parse(
+      z.object({ nodes: z.array(VARIANT.nullable()) }),
+      await this.request(credentials, gql.VARIANTS_QUERY, {
+        ids: demand.map((line) => line.variantId),
+      }),
+    ).nodes;
+    const prices = new Map<string, number>();
+    for (let index = 0; index < variants.length; index++) {
+      const variant = variants[index];
+      if (
+        !variant ||
+        variant.id !== demand[index]?.variantId ||
+        !supportedVariant(variant)
+      )
+        fail(
+          "VARIANT_UNSUPPORTED",
+          "The selected product cannot be added by this pilot.",
+        );
+      if (!stockAvailable(variant, demand[index].quantity))
+        fail(
+          "STOCK_UNAVAILABLE",
+          "The selected additional quantity is not currently in stock.",
+        );
+      prices.set(variant.id, memberPrice(variant, baseline));
+    }
+    if (variants.length !== demand.length)
+      fail(
+        "INCOMPLETE_VARIANTS",
+        "Shopify did not return every selected product.",
+      );
+    return { variants, prices };
   }
 
   private async verifyExistingPromotions(
