@@ -10,13 +10,14 @@ export interface EbayListingPhotoReadClient {
 /** The external snapshot is scoped to each SKU; group pictures never stand in for a different SKU. */
 export async function readExistingEbayListingPhotos(
   client: EbayListingPhotoReadClient,
-  input: { groupKey: string; variants: readonly EbayPhotoVariant[] },
+  input: { groupKey: string | null; variants: readonly EbayPhotoVariant[] },
 ): Promise<EbayListingPhotoPlan> {
   assertEbayPhotoVariants(input.variants);
-  if (typeof input.groupKey !== "string" || !input.groupKey || input.groupKey.trim() !== input.groupKey) {
+  if (input.groupKey === null ? input.variants.length !== 1
+    : typeof input.groupKey !== "string" || !input.groupKey || input.groupKey.trim() !== input.groupKey) {
     throw new Error("An exact eBay listing group key is required.");
   }
-  const group = await client.getInventoryItemGroup(input.groupKey);
+  const group = input.groupKey === null ? null : await client.getInventoryItemGroup(input.groupKey);
   if (group?.inventoryItemGroupKey !== undefined && group.inventoryItemGroupKey !== input.groupKey) {
     throw new Error("eBay returned another listing group while reading photos.");
   }

@@ -149,7 +149,7 @@ async function retainCatchup(client: Client, scope: QuantityPublicationScope,
   return retainCatchupScopes(client, [scope], runId, reason, timestamp);
 }
 
-async function retainCatchupScopes(client: Client, scopes: readonly QuantityPublicationScope[],
+export async function retainCatchupScopes(client: Client, scopes: readonly QuantityPublicationScope[],
   runId: string | null, reason: string, timestamp: Date): Promise<void> {
   // One atomic statement retains every known group member even when no caller
   // transaction exists (capacity/scope-lock rejection precedes provider I/O).

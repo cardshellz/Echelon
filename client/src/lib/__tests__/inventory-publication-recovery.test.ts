@@ -21,7 +21,7 @@ describe("attestationPrefill", () => {
       terminalOutcome: "completed",
       evidenceReference: "Stored provider request 9002: POST /sell/inventory/v1/offer/77/publish answered HTTP 400 (codes 25002) at 2026-09-29T09:30:00.000Z",
       evidenceHash: "b".repeat(64),
-      reason: "eBay answered every request of attempt 482; the last answer was HTTP 400 with codes 25002, a refusal that wrote no quantity.",
+      reason: "eBay answered every request of attempt 482; the last answer was HTTP 400 with codes 25002. Historical quantity effects have not been verified.",
       summary: "eBay answered HTTP 400 (codes 25002) to POST /sell/inventory/v1/offer/77/publish at 2026-09-29T09:30:00.000Z. " +
         "That is a refusal: nothing was written, so this request can no longer change quantities. The fields below are filled from that stored answer.",
     });

@@ -4,7 +4,7 @@ import { ChannelIdentityService } from "../../channel-identity.service";
 import { createChannelFulfillmentProviderClients, createFulfillmentEbayAuth } from "../../channel-fulfillment-provider-clients.service";
 import type { ShopifyIdentityConnection } from "../../adapters/shopify-identity.reader";
 import { EbayFulfillmentIdempotencyConflictError } from "../../adapters/ebay/ebay-api.client";
-import { EbayProviderAccountIdentityConflictError, type EbayObservedProviderAccount } from "../../adapters/ebay/ebay-auth.service";
+import { EbayAuthError, EbayProviderAccountIdentityConflictError, type EbayObservedProviderAccount } from "../../adapters/ebay/ebay-auth.service";
 import type { EbayShippingFulfillmentRequest } from "../../adapters/ebay/ebay-types";
 
 vi.mock("../../../../infrastructure/auditLogger", () => ({
@@ -477,6 +477,15 @@ describe("channel-owned eBay fulfillment accounts", () => {
 });
 
 describe("fulfillment eBay authorization transport", () => {
+  it.each([
+    ["EBAY_AUTH_EXPIRED", "permanent"],
+    ["EBAY_AUTH_UNAVAILABLE", "transient"],
+  ] as const)("retains the auth owner's classification for %s", async (code, failureClass) => {
+    const h = harness(); h.channels.getChannelById.mockResolvedValue(channel(31, "ebay"));
+    h.auth.getAccessToken.mockRejectedValueOnce(new EbayAuthError(code, "Safe account authorization error"));
+    await expect(h.clients.ebay(31)).rejects.toMatchObject({ code: "EBAY_FULFILLMENT_AUTHORIZATION_REJECTED", failureClass });
+    expect(h.auth.observeProviderAccount).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+  });
   function configuredAuth(request: typeof fetch) {
     vi.stubEnv("EBAY_CLIENT_ID", "test-only-client");
     vi.stubEnv("EBAY_CLIENT_SECRET", "test-only-secret");
@@ -520,6 +529,23 @@ describe("fulfillment eBay authorization transport", () => {
     expect(request).toHaveBeenCalledTimes(1);
     expect(request.mock.calls[0][1]?.signal).toBe(controller.signal);
     expect(request.mock.calls[0][1]?.redirect).toBe("error");
+  });
+
+  it("keeps token exchange on the same 15-second deadline and refuses redirects", async () => {
+    vi.useFakeTimers();
+    try {
+      const request = vi.fn<typeof fetch>(async (_url, init) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      }));
+      const { auth, db } = configuredAuth(request);
+      const result = expect(auth.exchangeAuthorizationCode(31, "test-code")).rejects.toMatchObject({ code: "EBAY_FULFILLMENT_AUTHORIZATION_FAILED", failureClass: "transient" });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await result;
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request.mock.calls[0][1]?.signal?.aborted).toBe(true);
+      expect(request.mock.calls[0][1]?.redirect).toBe("error");
+      for (const method of Object.values(db)) expect(method).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
   });
 
   it.each([

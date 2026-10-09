@@ -5,11 +5,15 @@
  * - Progress bar
  * - Live log of results per product
  * - Running counts (succeeded, failed, skipped)
- * - Cancel button
- * - On completion: summary, retry failed button
+ * - Close the progress view without claiming a remote request was cancelled
+ * - On completion: summary, server-authorized retry actions
  */
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { type EbayListingIssue } from "@shared/types/ebay-listing-issue";
+import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
+import { EbayListingIssueCard } from "./EbayListingIssueCard";
+import { ebayPushProgressEventSchema, type EbayPushProgressEvent } from "@/lib/ebay-listing-progress";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -28,8 +32,6 @@ import {
   X,
   RefreshCw,
   Clock,
-  ChevronDown,
-  ChevronRight,
   ExternalLink,
 } from "lucide-react";
 
@@ -37,53 +39,7 @@ import {
 // Types
 // ============================================================================
 
-interface ProgressEvent {
-  type: "progress";
-  product: string;
-  productId: number;
-  status: "success" | "error" | "skipped";
-  error?: string;
-  variantsListed?: number;
-  listingId?: string;
-  current: number;
-  total: number;
-  variantDetails?: Array<{ sku: string; success: boolean; error?: string }>;
-}
-
-interface RateLimitEvent {
-  type: "rate_limited";
-  waitSeconds: number;
-  product: string;
-  productId: number;
-}
-
-interface CompleteEvent {
-  type: "complete";
-  summary: {
-    succeeded: number;
-    failed: number;
-    skipped: number;
-    total: number;
-  };
-  cancelled: boolean;
-}
-
-interface ErrorEvent {
-  type: "error";
-  error: string;
-}
-
-type PushEvent = ProgressEvent | RateLimitEvent | CompleteEvent | ErrorEvent;
-
-interface PushResult {
-  product: string;
-  productId: number;
-  status: "success" | "error" | "skipped";
-  error?: string;
-  variantsListed?: number;
-  listingId?: string;
-  variantDetails?: Array<{ sku: string; success: boolean; error?: string }>;
-}
+type PushResult = Omit<Extract<EbayPushProgressEvent, { type: "progress" }>, "type" | "current" | "total">;
 
 // ============================================================================
 // Props
@@ -94,6 +50,7 @@ interface PushProgressModalProps {
   onClose: () => void;
   productIds: number[];
   onRetryFailed?: (failedIds: number[]) => void;
+  onIssueAction?: (issue: EbayListingIssue, productId: number) => void;
 }
 
 // ============================================================================
@@ -105,6 +62,7 @@ export function PushProgressModal({
   onClose,
   productIds,
   onRetryFailed,
+  onIssueAction,
 }: PushProgressModalProps) {
   const queryClient = useQueryClient();
   const [results, setResults] = useState<PushResult[]>([]);
@@ -113,11 +71,12 @@ export function PushProgressModal({
   const [isComplete, setIsComplete] = useState(false);
   const [isCancelled, setIsCancelled] = useState(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
+  const [globalIssue, setGlobalIssue] = useState<EbayListingIssue | null>(null);
   const [rateLimitMessage, setRateLimitMessage] = useState<string | null>(null);
-  const [expandedErrors, setExpandedErrors] = useState<Set<number>>(new Set());
   const [summary, setSummary] = useState<{ succeeded: number; failed: number; skipped: number; total: number } | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
+  const finishedRef = useRef(false);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to latest result
@@ -136,9 +95,10 @@ export function PushProgressModal({
     setIsComplete(false);
     setIsCancelled(false);
     setGlobalError(null);
+    setGlobalIssue(null);
     setRateLimitMessage(null);
-    setExpandedErrors(new Set());
     setSummary(null);
+    finishedRef.current = false;
 
     const idsParam = productIds.join(",");
     const es = new EventSource(`/api/ebay/listings/push-stream?productIds=${idsParam}`);
@@ -146,7 +106,7 @@ export function PushProgressModal({
 
     es.onmessage = (event) => {
       try {
-        const data: PushEvent = JSON.parse(event.data);
+        const data = ebayPushProgressEventSchema.parse(JSON.parse(event.data));
 
         switch (data.type) {
           case "progress":
@@ -160,6 +120,7 @@ export function PushProgressModal({
                 productId: data.productId,
                 status: data.status,
                 error: data.error,
+                issue: data.issue,
                 variantsListed: data.variantsListed,
                 listingId: data.listingId,
                 variantDetails: data.variantDetails,
@@ -172,6 +133,7 @@ export function PushProgressModal({
             break;
 
           case "complete":
+            finishedRef.current = true;
             setIsComplete(true);
             setSummary(data.summary);
             setIsCancelled(data.cancelled);
@@ -183,20 +145,27 @@ export function PushProgressModal({
             break;
 
           case "error":
+            finishedRef.current = true;
             setGlobalError(data.error);
+            setGlobalIssue(data.issue ?? resolveEbayListingIssue({ message: data.error }));
             setIsComplete(true);
             es.close();
             break;
         }
-      } catch (e) {
-        console.error("[PushProgress] Failed to parse SSE event:", e);
+      } catch {
+        finishedRef.current = true;
+        setGlobalError("Publishing progress could not be read. Close this window and refresh the listing feed before trying again.");
+        setIsComplete(true);
+        es.close();
       }
     };
 
     es.onerror = () => {
-      if (!isComplete) {
-        setGlobalError("Connection lost. Check server logs for push status.");
+      if (!finishedRef.current) {
+        finishedRef.current = true;
+        setGlobalError("The progress connection closed before completion was confirmed. Close this window and refresh the listing feed to see which products were published before trying again.");
         setIsComplete(true);
+        queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
       }
       es.close();
     };
@@ -208,7 +177,9 @@ export function PushProgressModal({
   }, [open, productIds.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleCancel = useCallback(() => {
+    finishedRef.current = true;
     setIsCancelled(true);
+    setIsComplete(true);
     eventSourceRef.current?.close();
     // The server will detect the closed connection and stop processing
   }, []);
@@ -220,7 +191,7 @@ export function PushProgressModal({
 
   const handleRetryFailed = useCallback(() => {
     const failedIds = results
-      .filter((r) => r.status === "error")
+      .filter((r) => r.status === "error" && r.issue?.retryable === true)
       .map((r) => r.productId);
     if (failedIds.length > 0 && onRetryFailed) {
       handleClose();
@@ -228,17 +199,9 @@ export function PushProgressModal({
     }
   }, [results, onRetryFailed, handleClose]);
 
-  const toggleErrorExpanded = (productId: number) => {
-    setExpandedErrors((prev) => {
-      const next = new Set(prev);
-      if (next.has(productId)) next.delete(productId);
-      else next.add(productId);
-      return next;
-    });
-  };
-
   const succeeded = results.filter((r) => r.status === "success").length;
   const failed = results.filter((r) => r.status === "error").length;
+  const retryableCount = results.filter((result) => result.status === "error" && result.issue?.retryable === true).length;
   const skippedCount = results.filter((r) => r.status === "skipped").length;
   const progressPercent = total > 0 ? (current / total) * 100 : 0;
 
@@ -249,10 +212,10 @@ export function PushProgressModal({
           <DialogTitle className="text-base sm:text-lg">
             {isComplete
               ? isCancelled
-                ? "Push Cancelled"
+                ? "Progress View Closed"
                 : globalError
                 ? "Push Error"
-                : "Push Complete"
+                : summary?.failed ? "Publishing needs attention" : "Push Complete"
               : "Pushing to eBay..."
             }
           </DialogTitle>
@@ -272,17 +235,14 @@ export function PushProgressModal({
                 {summary.failed > 0 && `${summary.succeeded > 0 ? "," : ""} ${summary.failed} failed`}
                 {summary.skipped > 0 && `, ${summary.skipped} skipped`}
               </p>
-              {isCancelled && <p className="text-xs mt-1 opacity-75">Push was cancelled before completion.</p>}
+              {isCancelled && <p className="text-xs mt-1 opacity-75">Refresh the listing feed to check the final status of any request already sent to eBay.</p>}
             </div>
           )}
 
           {/* Global error */}
-          {globalError && (
-            <div className="rounded-lg p-3 bg-red-50 dark:bg-red-950/30 text-red-800 dark:text-red-300 text-sm">
-              <p className="font-medium">Error</p>
-              <p className="text-xs mt-1">{globalError}</p>
-            </div>
-          )}
+          {globalError && (globalIssue
+            ? <EbayListingIssueCard issue={globalIssue} />
+            : <div role="alert" className="rounded-lg p-3 bg-amber-50 text-amber-900 text-sm">{globalError}</div>)}
 
           {/* Progress bar */}
           {!isComplete && (
@@ -329,7 +289,7 @@ export function PushProgressModal({
           </div>
 
           {/* Results log */}
-          <div className="flex-1 overflow-y-auto border rounded-lg min-h-[150px] max-h-[400px]">
+          {(results.length > 0 || !isComplete) && <div className="flex-1 overflow-y-auto border rounded-lg min-h-[150px] max-h-[400px]">
             <div className="divide-y">
               {results.map((result, i) => (
                 <div key={`${result.productId}-${i}`} className="px-3 py-2">
@@ -365,26 +325,10 @@ export function PushProgressModal({
                           <span className="text-xs text-muted-foreground">— {result.error}</span>
                         )}
                       </div>
-                      {result.status === "error" && result.error && (
-                        <div className="mt-1">
-                          <button
-                            className="flex items-center gap-1 text-xs text-red-600 hover:text-red-700"
-                            onClick={() => toggleErrorExpanded(result.productId)}
-                          >
-                            {expandedErrors.has(result.productId) ? (
-                              <ChevronDown className="h-3 w-3" />
-                            ) : (
-                              <ChevronRight className="h-3 w-3" />
-                            )}
-                            {expandedErrors.has(result.productId) ? "Hide error" : "Show error"}
-                          </button>
-                          {expandedErrors.has(result.productId) && (
-                            <p className="text-xs text-red-600/80 mt-1 font-mono break-all bg-red-50 dark:bg-red-950/20 rounded p-2">
-                              {result.error}
-                            </p>
-                          )}
-                        </div>
-                      )}
+                      {result.status === "error" && <div className="mt-2"><EbayListingIssueCard
+                        issue={result.issue ?? resolveEbayListingIssue({ message: result.error, productId: result.productId })}
+                        onAction={onIssueAction ? (issue) => { handleClose(); onIssueAction(issue, result.productId); } : undefined}
+                      /></div>}
                     </div>
                   </div>
                 </div>
@@ -397,7 +341,7 @@ export function PushProgressModal({
               )}
               <div ref={logEndRef} />
             </div>
-          </div>
+          </div>}
 
           {/* Action buttons */}
           <div className="flex items-center gap-2 flex-wrap">
@@ -409,10 +353,10 @@ export function PushProgressModal({
                 onClick={handleCancel}
               >
                 <X className="h-4 w-4 mr-1" />
-                Cancel
+                Stop viewing
               </Button>
             )}
-            {isComplete && failed > 0 && onRetryFailed && (
+            {isComplete && retryableCount > 0 && onRetryFailed && (
               <Button
                 variant="default"
                 size="sm"
@@ -420,7 +364,7 @@ export function PushProgressModal({
                 onClick={handleRetryFailed}
               >
                 <RefreshCw className="h-4 w-4 mr-1" />
-                Retry Failed ({failed})
+                Retry temporary failures ({retryableCount})
               </Button>
             )}
             {isComplete && (

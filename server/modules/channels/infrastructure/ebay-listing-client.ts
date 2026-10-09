@@ -35,6 +35,13 @@ import type {
 
 const ebayListingConnector = new EbayMarketplaceListingConnector();
 
+function normalizePublishedListingResponse(response: unknown): { listingId: string } {
+  const parsed = z.object({ listingId: z.string().trim().min(1).max(255) }).safeParse(response);
+  if (!parsed.success) throw new EbayListingSyncError("EBAY_SYNC_PROVIDER_RESPONSE_INVALID",
+    "eBay publish did not return a valid listing id. Publication may have completed; review the existing listing before another publication attempt.");
+  return parsed.data;
+}
+
 const ebayObservedOfferSchema = z
   .object({
     offerId: z.string().trim().min(1).max(255),
@@ -57,7 +64,7 @@ const ebayObservedOfferSchema = z
 
 const ebayOffersResponseSchema = z
   .object({
-    offers: z.array(ebayObservedOfferSchema).max(10_000).default([]),
+    offers: z.array(ebayObservedOfferSchema).max(10_000),
   })
   .passthrough();
 
@@ -89,7 +96,10 @@ export function normalizeEbayObservedInventoryItemGroup(response: unknown): Ebay
 export function normalizeEbayObservedOffers(
   response: unknown,
 ): EbayObservedOffer[] {
-  return ebayOffersResponseSchema.parse(response).offers.map((offer) => {
+  const parsed = ebayOffersResponseSchema.safeParse(response);
+  if (!parsed.success) throw new EbayListingSyncError("EBAY_SYNC_PROVIDER_RESPONSE_INVALID",
+    "eBay returned an invalid offer response. Review the current listing identity before another write.");
+  return parsed.data.offers.map((offer) => {
     const listingId = offer.listingId ?? offer.listing?.listingId;
     return {
       ...offer,
@@ -155,19 +165,14 @@ function createEbayRouteRequest(input: EbayRouteClientInput) {
           const account =
             await getAuthService()?.getVerifiedProviderAccount(EBAY_CHANNEL_ID);
           if (!account)
-            throw new Error(
+            throw new EbayListingSyncError("EBAY_SYNC_AUTH_REQUIRED",
               "Provider-verified eBay account identity is required for listing publication.",
             );
           if (
             input.expectedAccountId &&
             account.externalAccountId !== input.expectedAccountId
           )
-            throw Object.assign(
-              new Error(
-                "The verified eBay account changed before the listing write.",
-              ),
-              { code: "EBAY_SYNC_IDENTITY_CHANGED" },
-            );
+            throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The verified eBay account changed before the listing write.");
           const { createChannelEbayQuantityRequestAdmission } = await import(
         "../../inventory-planning/quantity-publication"
           );
@@ -225,15 +230,15 @@ export function createEbayRouteListingClient(
       }
     },
     createOffer: async (offer) => {
-      const response = await request<{ offerId?: string }>(
+      const response = await request<unknown>(
         "POST",
         "/sell/inventory/v1/offer",
         offer,
       );
-      if (!response.offerId) {
-        throw new Error("eBay create offer did not return an offer id.");
-      }
-      return response.offerId;
+      const parsed = z.object({ offerId: z.string().trim().min(1).max(255) }).safeParse(response);
+      if (!parsed.success) throw new EbayListingSyncError("EBAY_SYNC_PROVIDER_RESPONSE_INVALID",
+        "eBay create offer did not return a valid offer id. The offer may exist; review the existing listing before another publication attempt.");
+      return parsed.data.offerId;
     },
     updateOffer: async (offerId, offer) => {
       await request(
@@ -250,20 +255,20 @@ export function createEbayRouteListingClient(
       );
     },
     publishOffer: async (offerId) => {
-      return await request<{ listingId?: string }>(
+      return normalizePublishedListingResponse(await request<unknown>(
         "POST",
         `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`,
-      );
+      ));
     },
     publishOfferByInventoryItemGroup: async (
       inventoryItemGroupKey,
       marketplaceId,
     ) => {
-      return await request<{ listingId?: string }>(
+      return normalizePublishedListingResponse(await request<unknown>(
         "POST",
         "/sell/inventory/v1/offer/publish_by_inventory_item_group",
         { inventoryItemGroupKey, marketplaceId },
-      );
+      ));
     },
   };
 }
@@ -339,7 +344,7 @@ export async function getExistingEbayInventoryImageUrls(input: {
 /** Read each exact SKU and its listing group through the same external photo reader as the adapter. */
 export async function getExistingEbayListingPhotos(input: {
   accessToken: string;
-  groupKey: string;
+  groupKey: string | null;
   variants: readonly EbayPhotoVariant[];
 }): Promise<EbayListingPhotoPlan> {
   return readExistingEbayListingPhotos(

@@ -115,6 +115,27 @@ describe("publication recovery bounded owner transaction", () => {
       .toEqual([["19", null, null], ["21", null, null]]);
   });
 
+  it.each([400, 408])("does not present historical eBay bulk plus HTTP%s as proved provider completion or timeout termination", async status => {
+    const proof = completionDrain();
+    proof.unresolvedAttempts = [{ attemptId: "19", owner: "legacy", state: "uncertain", outboxId: null,
+      scope: { ...proof.latestAttemptsByScope[0].scope, providerKey: "ebay", providerScopeType: "account", externalScopeId: "seller", externalInventoryItemId: "SKU" } }];
+    capture.mockResolvedValueOnce(proof);
+    const { repository, client } = fixture();
+    const at = new Date(NOW.getTime() - 2 * 60 * 60 * 1000);
+    const rows = [
+      { attempt_id: "19", request_id: "9001", ordinal: 1, method: "POST", path: "/sell/inventory/v1/bulk_update_price_quantity", started_at: at,
+        outcome: "completed", http_status: 200, response_hash: "a".repeat(64), error_codes: [], recorded_at: at },
+      { attempt_id: "19", request_id: "9002", ordinal: 2, method: "PUT", path: "/sell/inventory/v1/inventory_item/SKU", started_at: at,
+        outcome: "uncertain", http_status: status, response_hash: "b".repeat(64), error_codes: ["25002"], recorded_at: at },
+    ];
+    client.query.mockImplementation(async (sql: string) => ({ rowCount: 0, rows:
+      sql.includes("FROM inventory.availability_activation_runs") ? [{ id: "1" }]
+      : sql.includes("FROM inventory.quantity_provider_requests") ? rows
+      : sql.includes("FROM inventory.quantity_publication_attempts") ? [{ id: "19", started_at: at }] : [] }));
+    const result = await repository.pending("1", NOW);
+    expect(result.unresolvedAttempts[0]).toMatchObject({ providerKey: "ebay", providerAnswer: null, requestTermination: null });
+  });
+
   it("does not read receipts when nothing is unresolved, and offers no answer for an attempt without one", async () => {
     const { repository, client } = fixture();
     await repository.pending("1", NOW);

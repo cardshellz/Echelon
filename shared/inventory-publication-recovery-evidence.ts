@@ -31,7 +31,7 @@ export function formatProviderErrorCodes(codes: readonly string[]): string {
   return codes.length > 0 ? codes.join(", ") : "none supplied";
 }
 
-/** The provider refused the last request with a 4xx and its own codes: it wrote nothing. */
+/** Preserve the actual error response without claiming historical quantity effects. */
 export function providerAnswerEvidence(
   attempt: Pick<UnresolvedAttempt, "attemptId" | "providerKey">,
   answer: QuantityPublicationProviderAnswer,
@@ -45,7 +45,7 @@ export function providerAnswerEvidence(
       `Stored provider request ${answer.requestId}: ${answer.method} ${answer.path} answered HTTP ${answer.httpStatus} (codes ${codes}) at ${answer.recordedAt}`,
     evidenceHash: answer.responseHash,
     reason:
-      `${provider} answered every request of attempt ${attempt.attemptId}; the last answer was HTTP ${answer.httpStatus} with codes ${codes}, a refusal that wrote no quantity.`,
+      `${provider} answered every request of attempt ${attempt.attemptId}; the last answer was HTTP ${answer.httpStatus} with codes ${codes}. Historical quantity effects have not been verified.`,
   };
 }
 

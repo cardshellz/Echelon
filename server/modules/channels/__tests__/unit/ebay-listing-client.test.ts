@@ -9,7 +9,9 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({
   getAuthService: () => null,
   EBAY_CHANNEL_ID: 67,
 }));
-import { createEbayRouteListingLifecycleClient, normalizeEbayObservedInventoryItemGroup } from "../../infrastructure/ebay-listing-client";
+import { createEbayRouteListingLifecycleClient, normalizeEbayObservedInventoryItemGroup, normalizeEbayObservedOffers } from "../../infrastructure/ebay-listing-client";
+import { ebayListingPushFailure } from "../../ebay-listing-push.service";
+import type { EbayQuantityRequestAdmission } from "../../quantity-publication-request";
 
 describe("eBay inventory group read response contract", () => {
   beforeEach(() => api.request.mockReset());
@@ -31,5 +33,29 @@ describe("eBay inventory group read response contract", () => {
     expect(() => normalizeEbayObservedInventoryItemGroup({ ...capturedGroup, ...invalid })).toThrowError(
       expect.objectContaining({ code: "EBAY_SYNC_PROVIDER_RESPONSE_INVALID" }),
     );
+  });
+  it.each([{}, { offers: [{ offerId: "secret-provider-value", status: "BROKEN" }] }])("classifies malformed offer reads without exposing the response body", response => {
+    let failure;
+    try { normalizeEbayObservedOffers(response); }
+    catch (error) { failure = ebayListingPushFailure(20, error); }
+    expect(failure).toMatchObject({ code: "EBAY_SYNC_PROVIDER_RESPONSE_INVALID", issue: { action: { kind: "review_mapping" } } });
+    expect(JSON.stringify(failure)).not.toContain("secret-provider-value");
+  });
+  it.each([null, {}, { offerId: 42 }, { offerId: " " }])("classifies incomplete offer creation without claiming creation failed", async response => {
+    api.request.mockResolvedValue(response);
+    const admission: EbayQuantityRequestAdmission = { item: async (_sku, work) => work(0), group: async (_key, _skus, work) => work(new Map()), reducing: async (_identity, work) => work() };
+    const client = createEbayRouteListingLifecycleClient({ accessToken: "test-only", quantityAdmission: async () => admission });
+    const failure = await client.createOffer({ sku: "SKU", marketplaceId: "EBAY_US", format: "FIXED_PRICE", availableQuantity: 0, categoryId: "123",
+      listingPolicies: { paymentPolicyId: "pay", fulfillmentPolicyId: "ship", returnPolicyId: "return" }, merchantLocationKey: "HQ",
+      pricingSummary: { price: { value: "1.00", currency: "USD" } } }).catch(error => ebayListingPushFailure(20, error));
+    expect(failure).toMatchObject({ code: "EBAY_SYNC_PROVIDER_RESPONSE_INVALID", issue: { action: { kind: "review_mapping" } } });
+    expect(typeof failure !== "string" && failure.error).toContain("offer may exist");
+    expect(api.request).toHaveBeenCalledOnce();
+  });
+  it("classifies absent verified account before the listing write", async () => {
+    const client = createEbayRouteListingLifecycleClient({ accessToken: "test-only" });
+    await expect(client.createOrReplaceInventoryItem("SKU", { condition: "NEW", product: { title: "Product", imageUrls: [] },
+      availability: { shipToLocationAvailability: { quantity: 1 } } })).rejects.toMatchObject({ code: "EBAY_SYNC_AUTH_REQUIRED" });
+    expect(api.request).not.toHaveBeenCalled();
   });
 });

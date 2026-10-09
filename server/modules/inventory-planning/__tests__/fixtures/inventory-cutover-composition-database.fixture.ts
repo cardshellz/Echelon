@@ -85,6 +85,7 @@ export async function installCutoverCompositionMigrations(pool: Pool): Promise<v
     "235_inventory_cutover_commit_evidence.sql",
     "237_inventory_quantity_publication_admission.sql",
     "0663_quantity_provider_request_evidence.sql",
+    "0733_ebay_provider_response_finality.sql",
     "0677_inventory_publication_target_hold.sql",
     "0684_inventory_publication_target_variant_holds.sql",
     "0687_inventory_channel_definition_completion.sql",

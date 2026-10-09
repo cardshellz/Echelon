@@ -5,7 +5,7 @@ import { ChannelIdentityError } from "./channel-identity.domain";
 import { ChannelFulfillmentProviderError } from "./channel-fulfillment-provider.error";
 import { createShopifyFulfillmentClient } from "./adapters/shopify-fulfillment.client";
 import { EbayApiClient, EbayFulfillmentIdempotencyConflictError } from "./adapters/ebay/ebay-api.client";
-import { createEbayAuthConfig, EbayAuthService, EbayProviderAccountIdentityConflictError } from "./adapters/ebay/ebay-auth.service";
+import { createEbayAuthConfig, EbayAuthError, EbayAuthService, EbayProviderAccountIdentityConflictError } from "./adapters/ebay/ebay-auth.service";
 
 const EBAY_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -57,8 +57,7 @@ export function createChannelFulfillmentProviderClients(dependencies: {
     },
     async ebay(channelId) {
       await requireChannel(channelId, "ebay");
-      // Auth instances are channel-local: the legacy auth owner's refresh promise
-      // must not be shared across different accounts.
+      // Each fulfillment resolves its own credential owner before pinning the account.
       const auth = dependencies.ebayAuth();
       const before = await auth.getVerifiedProviderAccount(channelId);
       if (!before) throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_ACCOUNT_UNVERIFIED", "The originating eBay account needs verified OAuth identity");
@@ -71,6 +70,10 @@ export function createChannelFulfillmentProviderClients(dependencies: {
         if (error instanceof ChannelFulfillmentProviderError) throw error;
         if (error instanceof EbayProviderAccountIdentityConflictError) {
           throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_ACCOUNT_CHANGED", "The eBay credential account changed during fulfillment authorization");
+        }
+        if (error instanceof EbayAuthError) {
+          const transient = error.code === "EBAY_AUTH_UNAVAILABLE" || error.code === "EBAY_AUTH_REFRESH_SUPERSEDED";
+          throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_AUTHORIZATION_REJECTED", "eBay account authorization could not be verified", transient ? "transient" : "permanent");
         }
         // The legacy auth owner may include raw provider bodies. Do not persist
         // them in fulfillment attempts; an unavailable observation is retryable.
@@ -120,7 +123,10 @@ export function createFulfillmentEbayAuth(
   try { config = createEbayAuthConfig(); } catch {
     throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_CONFIG_MISSING", "eBay fulfillment OAuth configuration is unavailable");
   }
-  return new EbayAuthService(db, config, { fetch: createBoundedEbayRequest(request, "authorization") });
+  return new EbayAuthService(db, config, {
+    fetch: createBoundedEbayRequest(request, "authorization"),
+    requestTimeoutMs: EBAY_REQUEST_TIMEOUT_MS,
+  });
 }
 
 function createBoundedEbayRequest(request: typeof fetch, scope: "authorization" | "fulfillment"): typeof fetch {
@@ -131,7 +137,10 @@ function createBoundedEbayRequest(request: typeof fetch, scope: "authorization" 
     let response: Response;
     try {
       response = await request(input, {
-        ...init, redirect: "error", signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS),
+        ...init, redirect: "error",
+        // The auth owner supplies this composition's 15-second deadline for both
+        // token exchange and identity body reads. Preserve its cancellation signal.
+        signal: scope === "authorization" && init?.signal ? init.signal : AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS),
       });
     } catch {
       throw new ChannelFulfillmentProviderError(transportCode, `${description} did not complete`, "transient");

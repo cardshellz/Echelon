@@ -17,6 +17,7 @@ export const terminalRequestReceiptSchema = z
       .nullable(),
     errorCodes: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,100}$/)).max(25),
     recordedAt: z.string().datetime().nullable(),
+    requestTerminated: z.boolean().nullable().optional(),
   })
   .strict();
 export type TerminalRequestReceipt = z.infer<
@@ -41,6 +42,7 @@ export function terminalEbayResponseEvidence(
   const receipts = parsed.data;
   if (
     receipts.some((row, index) => {
+      const bulk = row.method === "POST" && row.path === "/sell/inventory/v1/bulk_update_price_quantity";
       const supported =
         (row.method === "PUT" &&
           /^\/sell\/inventory\/v1\/(inventory_item|inventory_item_group|offer)\/[^/?#\s]+$/.test(
@@ -50,7 +52,15 @@ export function terminalEbayResponseEvidence(
           row.path === "/sell/inventory/v1/bulk_update_price_quantity");
       const completed =
         row.outcome === "completed" &&
-        [200, 201, 204].includes(row.httpStatus ?? 0);
+        [200, 201, 204].includes(row.httpStatus ?? 0) &&
+        // Historical bulk writers treated HTTP 200 as completion without
+        // validating each SKU/offer response. A body hash cannot reconstruct
+        // those missing operation receipts. Only instrumented finality proves
+        // bulk completion; legacy synchronous PUT success remains supported.
+        (!bulk || row.requestTerminated === true);
+      const instrumentedFinal = row.requestTerminated === true
+        && row.outcome !== null && row.httpStatus !== null
+        && ([200,201,204,207].includes(row.httpStatus) || (row.httpStatus >= 400 && row.httpStatus !== 408));
       // errorCodes are extracted ONLY from a validated top-level eBay errors array,
       // never inferred from status or arbitrary text (including historical receipts).
       const stopped =
@@ -63,7 +73,8 @@ export function terminalEbayResponseEvidence(
         row.ordinal !== index + 1 ||
         !row.responseHash ||
         !row.recordedAt ||
-        !(completed || stopped)
+        row.requestTerminated === false ||
+        !(completed || stopped || instrumentedFinal)
       );
     }) ||
     new Set(receipts.map((row) => row.requestId)).size !== receipts.length
