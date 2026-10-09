@@ -57,12 +57,12 @@ export function ProductPhotoScopeControl({ assetId, productVariantId, variants, 
           void save({ assetId, command: { productVariantId: next, expectedProductVariantId: productVariantId },
             idempotencyKey: crypto.randomUUID() });
         }}>
-        <option value="all">All variants (shared)</option>
+        <option value="all">All variants (default)</option>
         {productVariantId !== null && !variant && <option value={productVariantId} disabled>Unknown variant #{productVariantId}</option>}
         {variants.map(item => <option key={item.id} value={item.id}>{item.name} — {item.sku}</option>)}
       </select>
       <p id={detailId} className="break-words text-xs text-muted-foreground">
-        {productVariantId === null ? "Shared across this product" : variant ? `${variant.name} · ${variant.sku}` : `Unknown assignment: variant #${productVariantId}`}
+        {productVariantId === null ? "Applies to all variants of this product" : variant ? `${variant.name} · ${variant.sku}` : `Unknown assignment: variant #${productVariantId}`}
       </p>
       {saving && <p role="status" className="text-xs">Saving assignment…</p>}
       {error && <p role="alert" className="break-words text-xs text-destructive">{error}</p>}

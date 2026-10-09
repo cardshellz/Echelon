@@ -15,8 +15,10 @@ async function setup(page: Page, canEdit = true) {
   const state = { assets, orders: [] as ReorderProductAssets[], downloads: [] as number[], errors: [] as string[], rejectOrder: false, rejectDownload: false, delayOrder: false,
     scopeCalls: [] as { assetId:number; command:ProductAssetScopeCommand; key:string }[], scopeWrites:0,
     rejectScope:false, loseScopeResponse:false, editAfterCommit:false,
-    receipts:new Map<string,{ productId:number; assetId:number; productVariantId:number|null; changed:boolean }>() };
+    receipts:new Map<string,{ productId:number; assetId:number; productVariantId:number|null; changed:boolean }>(),
+    additions: [] as { path:string; body:unknown }[] };
   page.on("pageerror", error => state.errors.push(error.message));
+  await page.route("https://cdn.example.com/**", route => route.fulfill({ contentType:"image/png",body:photoBytes }));
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "operator", role: "staff", username: "operator" }, permissions: canEdit ? ["inventory:view", "inventory:edit"] : ["inventory:view"], roles: [] } });
@@ -28,6 +30,17 @@ async function setup(page: Page, canEdit = true) {
         { id:11,sku:"ESS-TOP-55PT-SLV-CLR-C500",name:"Case of 500",isActive:true,unitsPerVariant:500,hierarchyLevel:2 },
       ], assets: state.assets,
     } });
+    if (request.method() === "POST" && ["/api/products/1/assets","/api/product-assets/upload"].includes(path)) {
+      const uploaded = path === "/api/product-assets/upload";
+      const body = uploaded ? request.postDataBuffer()?.toString() : request.postDataJSON();
+      state.additions.push({ path,body });
+      const asset: CatalogGalleryAsset = { id: Math.max(...state.assets.map(item => item.id)) + 1,
+        url: uploaded ? null : body.url, altText: null, assetType: "image", isPrimary:0,
+        position:state.assets.length, productVariantId: uploaded ? null : body.productVariantId,
+        storageType: uploaded ? "file" : "url" };
+      state.assets.push(asset);
+      return route.fulfill({ status:201,json:asset });
+    }
     const scope = path.match(/^\/api\/products\/1\/assets\/(\d+)\/scope$/);
     if (scope) {
       const assetId = Number(scope[1]), command = request.postDataJSON() as ProductAssetScopeCommand;
@@ -70,6 +83,7 @@ async function setup(page: Page, canEdit = true) {
       return route.fulfill({ contentType: "image/png", body: photoBytes, headers: { "Content-Disposition": `attachment; filename="ESS-TOP-55PT-image-${id}.png"` } });
     }
     if (path === "/api/product-assets/4/file") return route.fulfill({ contentType: "image/svg+xml", body: decodeURIComponent(preview(4).split(",")[1]) });
+    if (/^\/api\/product-assets\/\d+\/file$/.test(path)) return route.fulfill({ contentType:"image/png",body:photoBytes });
     if (path === "/api/settings") return route.fulfill({ json: {} });
     if (path.includes("runtime-authority")) return route.fulfill({ json: { authority: "legacy" } });
     if (["/api/product-categories", "/api/shipping-groups", "/api/vendors", "/api/products/1/locations", "/api/products/1/vendors"].includes(path)) return route.fulfill({ json: [] });
@@ -84,6 +98,33 @@ async function setup(page: Page, canEdit = true) {
 }
 
 async function imageOrder(page: Page) { return page.locator("[data-catalog-image]").evaluateAll(elements => elements.map(element => Number((element as HTMLElement).dataset.catalogImage))); }
+
+test("new URL and uploaded photos default to all variants and can later be assigned to a specific SKU", async ({ page },info) => {
+  const state = await setup(page);
+  await page.getByPlaceholder("Image URL",{ exact:true }).fill("https://cdn.example.com/new-photo.png");
+  await page.getByRole("button",{ name:"Add",exact:true }).click();
+  const urlPhoto = page.getByRole("combobox",{ name:"Applies to image 5",exact:true });
+  await expect(urlPhoto).toHaveValue("all");
+  await expect(urlPhoto.locator('option:checked')).toHaveText("All variants (default)");
+  expect(state.additions[0]).toEqual({ path:"/api/products/1/assets",body:{ url:"https://cdn.example.com/new-photo.png",altText:null,assetType:"image",productVariantId:null } });
+
+  await page.locator('input[type="file"]').setInputFiles({ name:"uploaded-photo.png",mimeType:"image/png",buffer:photoBytes });
+  const uploadedPhoto = page.getByRole("combobox",{ name:"Applies to image 6",exact:true });
+  await expect(uploadedPhoto).toHaveValue("all");
+  expect(state.additions[1].path).toBe("/api/product-assets/upload");
+  expect(state.additions[1].body).toContain('name="productId"\r\n\r\n1');
+  expect(state.additions[1].body).not.toContain('name="productVariantId"');
+  await page.reload();
+  await expect(urlPhoto).toHaveValue("all"); await expect(uploadedPhoto).toHaveValue("all");
+  await expect(page.locator('[data-catalog-image="5"]').getByText("Applies to all variants of this product",{ exact:true })).toBeVisible();
+  await uploadedPhoto.selectOption("11");
+  await expect(uploadedPhoto).toHaveValue("11");
+  await expect(urlPhoto).toHaveValue("all");
+  expect(state.scopeCalls[0].command).toEqual({ productVariantId:11,expectedProductVariantId:null });
+  await page.screenshot({ path:info.outputPath("all-variants-default.png"),fullPage:true });
+  await expectPageFitsViewport(page);
+  expect(state.errors).toEqual([]);
+});
 
 async function expectPageFitsViewport(page: Page) {
   const layout = await page.evaluate(() => ({

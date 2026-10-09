@@ -1892,7 +1892,7 @@ export default function ProductDetail() {
       const res = await fetch(`/api/products/${product?.productId}/assets`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, altText: altText || null, assetType: "image" }),
+        body: JSON.stringify({ url, altText: altText || null, assetType: "image", productVariantId: null }),
       });
       if (!res.ok) throw new Error("Failed to add image");
       return res.json();

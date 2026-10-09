@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@shared/schema";
 import type { ProductAssetScopeCommand } from "@shared/catalog/product-asset-scope";
@@ -12,6 +12,7 @@ import { createProductAssetScopeService } from "../../product-asset-scope.servic
 import { createCatalogPublicImageUrl } from "../../catalog-public-image";
 import { PgCatalogVariantPublicationPhotoReader } from "../../catalog-publication-images.reader";
 import { ChannelEbayListingPhotoResolver } from "../../../channels/ebay-listing-photos.service";
+import { executeMigrationWithRetry } from "../../../../../migrations/migration-executor";
 
 // Never connect the application singleton to a production DATABASE_URL.
 vi.mock("../../../../db", () => ({ db: {} }));
@@ -35,6 +36,7 @@ const fixture = `
     id bigserial PRIMARY KEY, timestamp timestamptz NOT NULL DEFAULT now(), level text NOT NULL DEFAULT 'AUDIT',
     actor text NOT NULL, action text NOT NULL, target text, changes jsonb, context jsonb
   );
+  CREATE TABLE public._migrations (filename text PRIMARY KEY, content_hash text NOT NULL);
   CREATE TABLE channels.channel_asset_overrides (
     channel_id integer NOT NULL, product_asset_id integer NOT NULL REFERENCES catalog.product_assets,
     is_included integer NOT NULL DEFAULT 1, url_override text, position_override integer,
@@ -52,6 +54,8 @@ const fixture = `
   .map(name => readFileSync(resolve(process.cwd(), "migrations", name), "utf8")).join("\n");
 const publicUrl = createCatalogPublicImageUrl({ CATALOG_PUBLIC_BASE_URL: "https://catalog.example.com" });
 const now = new Date("2026-10-07T12:00:00Z");
+const defaultsFile = "0730_catalog_existing_photo_defaults.sql";
+const defaultsSql = readFileSync(resolve(process.cwd(), "migrations", defaultsFile), "utf8");
 
 (url && disposable ? describe : describe.skip).sequential("audited Catalog photo assignment (PostgreSQL)", () => {
   let database: InventoryCutoverTestDatabase;
@@ -66,7 +70,8 @@ const now = new Date("2026-10-07T12:00:00Z");
   });
   afterAll(async () => { await database?.close(); });
   beforeEach(async () => {
-    await database.pool.query(`TRUNCATE public.financial_command_results CASCADE;
+    await database.pool.query(`TRUNCATE public._migrations;
+      TRUNCATE public.financial_command_results CASCADE;
       TRUNCATE public.audit_events, catalog.product_assets CASCADE;
       INSERT INTO catalog.product_assets(id,product_id,product_variant_id,url,position,is_primary) VALUES
       (1,1,10,'https://cdn.example.com/front.jpg',0,1),
@@ -91,6 +96,122 @@ const now = new Date("2026-10-07T12:00:00Z");
   }
   async function audit() { return (await database.pool.query("SELECT * FROM public.audit_events ORDER BY id")).rows; }
   const request = { productId: 1, channelId: 67, variants: [{ variantId: 10, sku: "PACK" }, { variantId: 11, sku: "CASE" }] };
+  async function applyDefaults() {
+    const client = await database.pool.connect();
+    try {
+      await executeMigrationWithRetry({ client, file: defaultsFile, sql: defaultsSql,
+        contentHash: createHash("sha256").update(defaultsSql).digest("hex"),
+        options: { maxAttempts: 1, retryBaseDelayMs: 0, retryMaxDelayMs: 0, lockTimeoutMs: 2000 } });
+    } finally { client.release(); }
+  }
+
+  it("initializes every existing image to all variants with exact audit evidence and the same publication resolver", async () => {
+    await database.pool.query(`INSERT INTO catalog.product_assets(id,product_id,product_variant_id,asset_type,url,position,is_primary)
+      VALUES (5,1,10,'document','https://cdn.example.com/instructions.pdf',3,0)`);
+    const before = await scopes();
+    await expect(ebay.resolve(request)).rejects.toMatchObject({ code: "EBAY_CATALOG_PHOTO_REQUIRED" });
+    await applyDefaults();
+    const after = await scopes();
+    expect(after.map(row => ({ ...row, product_variant_id: before.find(old => old.id === row.id)!.product_variant_id }))).toEqual(before);
+    expect(after.map(row => [row.id, row.product_variant_id])).toEqual([[1,null],[2,null],[3,null],[4,null],[5,10]]);
+    const photos = await ebay.resolve(request);
+    expect(photos.byVariantId.get(10)).toEqual(photos.byVariantId.get(11));
+    expect(photos.byVariantId.get(11)).toEqual([
+      "https://cdn.example.com/front.jpg", "https://cdn.example.com/back.jpg", expect.stringContaining("/api/catalog/images/4/"),
+    ]);
+    expect(photos.groupImageUrls).not.toContain("https://cdn.example.com/foreign.jpg");
+    expect(photos.groupImageUrls).not.toContain("https://cdn.example.com/instructions.pdf");
+    expect(await audit()).toEqual([1,2,4].map(assetId => expect.objectContaining({
+      actor: "migration:0730_catalog_existing_photo_defaults", action: "catalog.asset.shared_default_applied",
+      target: `catalog.product_assets:${assetId}`,
+      changes: { before: { productId: 1, productVariantId: 10 }, after: { productId: 1, productVariantId: null } },
+      context: expect.objectContaining({ migration: defaultsFile }),
+    })));
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY variant_id")).rows)
+      .toEqual([{ variant_id:10,quantity:31 },{ variant_id:11,quantity:9 }]);
+    expect((await database.pool.query("SELECT filename FROM public._migrations")).rows).toEqual([{ filename: defaultsFile }]);
+  });
+
+  it("preserves deliberate variant choices and allows a new exception after the shared default", async () => {
+    await apply(1,10,11);
+    await applyDefaults();
+    expect((await scopes()).map(row => [row.id, row.product_variant_id])).toEqual([[1,11],[2,null],[3,null],[4,null]]);
+    expect((await apply(2,null,10)).httpStatus).toBe(200);
+    const photos = await ebay.resolve(request);
+    expect(photos.byVariantId.get(10)).not.toContain("https://cdn.example.com/front.jpg");
+    expect(photos.byVariantId.get(11)).not.toContain("https://cdn.example.com/back.jpg");
+    expect((await apply(4,null,20)).body).toMatchObject({ code: "ASSET_VARIANT_INVALID" });
+  });
+
+  it("does not duplicate the migration audit or erase later intentional exceptions when its SQL is replayed", async () => {
+    await applyDefaults();
+    await apply(1,null,11);
+    const before = await scopes(), events = await audit();
+    const client = await database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(defaultsSql);
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+    expect(await scopes()).toEqual(before);
+    expect(await audit()).toEqual(events);
+  });
+
+  it("clears pre-constraint cross-product variant links without moving photos or weakening ownership protection", async () => {
+    // Reproduce the legacy state admitted before 0727, then install the real
+    // NOT VALID constraint: legacy rows survive but new mistakes are rejected.
+    await database.pool.query("ALTER TABLE catalog.product_assets DROP CONSTRAINT product_assets_variant_product_fk");
+    await database.pool.query(`INSERT INTO catalog.product_assets(id,product_id,product_variant_id,url,position,is_primary)
+      VALUES (6,1,20,'https://cdn.example.com/legacy.jpg',3,0)`);
+    await database.pool.query(readFileSync(resolve(process.cwd(), "migrations/0727_product_asset_variant_ownership.sql"), "utf8"));
+    await applyDefaults();
+    expect((await scopes()).find(row => row.id === 6)).toMatchObject({ product_id:1,product_variant_id:null,url:"https://cdn.example.com/legacy.jpg" });
+    const photos = await ebay.resolve(request);
+    expect(photos.byVariantId.get(11)).toContain("https://cdn.example.com/legacy.jpg");
+    expect(photos.groupImageUrls).not.toContain("https://cdn.example.com/foreign.jpg");
+    await expect(database.pool.query(`INSERT INTO catalog.product_assets(id,product_id,product_variant_id,position,is_primary)
+      VALUES (7,1,20,4,0)`)).rejects.toMatchObject({ code:"23503" });
+  });
+
+  it("rolls back the entire default conversion and release receipt when audit storage fails, then safely retries", async () => {
+    const before = await scopes();
+    await database.pool.query(`CREATE FUNCTION public.reject_defaults_audit() RETURNS trigger LANGUAGE plpgsql AS
+      $$ BEGIN RAISE EXCEPTION 'default audit unavailable'; END $$;
+      CREATE TRIGGER reject_defaults_audit BEFORE INSERT ON public.audit_events FOR EACH ROW EXECUTE FUNCTION public.reject_defaults_audit()`);
+    try {
+      await expect(applyDefaults()).rejects.toThrow("default audit unavailable");
+      expect(await scopes()).toEqual(before);
+      expect(await audit()).toEqual([]);
+      expect((await database.pool.query("SELECT * FROM public._migrations")).rows).toEqual([]);
+    } finally { await database.pool.query("DROP TRIGGER reject_defaults_audit ON public.audit_events; DROP FUNCTION public.reject_defaults_audit()"); }
+    await applyDefaults();
+    expect((await scopes())[0].product_variant_id).toBe(null);
+    expect(await audit()).toHaveLength(3);
+  });
+
+  it("serializes a simultaneous stale editor behind the default conversion and returns a conflict", async () => {
+    const client = await database.pool.connect();
+    let editing: ReturnType<typeof apply> | undefined;
+    try {
+      await client.query("BEGIN");
+      await client.query(defaultsSql);
+      editing = apply(1,10,11);
+      await vi.waitFor(async () => {
+        const waiting = await database.pool.query(`SELECT count(*)::int AS count FROM pg_locks
+          WHERE relation = 'catalog.product_assets'::regclass AND mode = 'RowShareLock' AND NOT granted`);
+        expect(waiting.rows[0].count).toBe(1);
+      }, { timeout:5000,interval:20 });
+      await client.query("COMMIT");
+      expect(await editing).toMatchObject({ httpStatus:409,body:{ code:"ASSET_SCOPE_CHANGED" } });
+      expect((await scopes())[0].product_variant_id).toBe(null);
+      expect(await audit()).toHaveLength(3);
+    } finally {
+      await client.query("ROLLBACK"); client.release();
+      // Release the migration lock before awaiting a failed/blocked editor.
+      await editing;
+    }
+  });
 
   it("makes an existing pack photo shared, then keeps a case photo specific through the one eBay resolver", async () => {
     const before = await scopes();
