@@ -36,14 +36,50 @@ export const ORDER_QUERY = `query EchelonEditOrder($id: ID!) {
   }
 }`;
 
-export const VARIANT_FIELDS = `id displayName title sku price requiresComponents availableForSale inventoryPolicy sellableOnlineQuantity
+export function variantFields(
+  productFields = "status isGiftCard requiresSellingPlan",
+): string {
+  return `id displayName title sku price requiresComponents availableForSale inventoryPolicy sellableOnlineQuantity
   inventoryItem { requiresShipping tracked }
-  product { status isGiftCard requiresSellingPlan }
+  product { ${productFields} }
   membershipVariant: metafield(namespace: "cardshellz", key: "is_membership_variant") { value }
   planPrices: metafield(namespace: "cardshellz", key: "plan_prices") { value }`;
-export const SEARCH_QUERY = `query EchelonEditVariants($query: String!) {
+}
+export const VARIANT_FIELDS = variantFields();
+const CATALOG_VARIANT_FIELDS = variantFields(
+  "id title status isGiftCard requiresSellingPlan",
+);
+const CATALOG_PRODUCT_FIELDS = `id title productType status isGiftCard requiresSellingPlan onlineStoreUrl featuredImage { url }`;
+const CATALOG_PAGE_FIELDS = `pageInfo { hasNextPage endCursor }`;
+// Keep the legacy flat response within its 50-option contract while retaining exact SKU discovery.
+export const LEGACY_SKU_RESULTS = 25;
+export const LEGACY_PRODUCT_RESULTS = 5;
+export const LEGACY_OPTIONS_PER_PRODUCT = 5;
+export const CATALOG_CATEGORIES_QUERY = `query EchelonEditCategories($first: Int!, $after: String) {
   shop { currencyCode }
-  productVariants(first: 25, query: $query) { nodes { ${VARIANT_FIELDS} } }
+  productTypes(first: $first, after: $after) { edges { node } ${CATALOG_PAGE_FIELDS} }
+}`;
+export const CATALOG_PRODUCTS_QUERY = `query EchelonEditProducts($first: Int!, $after: String, $query: String!) {
+  shop { currencyCode }
+  products(first: $first, after: $after, query: $query, sortKey: TITLE) {
+    nodes { ${CATALOG_PRODUCT_FIELDS} } ${CATALOG_PAGE_FIELDS}
+  }
+}`;
+export const CATALOG_VARIANTS_QUERY = `query EchelonEditProductOptions($id: ID!, $first: Int!, $after: String) {
+  shop { currencyCode }
+  product(id: $id) { ${CATALOG_PRODUCT_FIELDS}
+    variants(first: $first, after: $after) { nodes { ${CATALOG_VARIANT_FIELDS} } ${CATALOG_PAGE_FIELDS} }
+  }
+}`;
+// Compatibility endpoint only; the picker uses both paginated catalog endpoints.
+export const SEARCH_QUERY = `query EchelonEditVariants($query: String!, $skuQuery: String!) {
+  shop { currencyCode }
+  productVariants(first: ${LEGACY_SKU_RESULTS}, query: $skuQuery) {
+    nodes { ${variantFields("id title status isGiftCard requiresSellingPlan onlineStoreUrl")} }
+  }
+  products(first: ${LEGACY_PRODUCT_RESULTS}, query: $query, sortKey: TITLE) { nodes { ${CATALOG_PRODUCT_FIELDS}
+    variants(first: ${LEGACY_OPTIONS_PER_PRODUCT}) { nodes { ${CATALOG_VARIANT_FIELDS} } }
+  } }
 }`;
 export const VARIANTS_QUERY = `query EchelonEditVariantPrices($ids: [ID!]!) {
   nodes(ids: $ids) { ... on ProductVariant { ${VARIANT_FIELDS} } }

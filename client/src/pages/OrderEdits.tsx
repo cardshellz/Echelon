@@ -23,6 +23,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { OrderEditProductPicker } from "@/components/order-edits/OrderEditProductPicker";
 import { useAuth } from "@/lib/auth";
 import { useDebounce } from "@/hooks/use-debounce";
 import {
@@ -252,8 +253,6 @@ export function OrderDraft({
   const [additions, setAdditions] = useState<
     Array<{ variant: OrderEditVariant; quantity: string }>
   >([]);
-  const [productSearch, setProductSearch] = useState("");
-  const search = useDebounce(productSearch.trim(), 300);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
@@ -269,17 +268,6 @@ export function OrderDraft({
     setError(null);
   }, [closedOperationId]);
   const canEdit = order.eligibility.editable && enabled;
-  const variants = useQuery({
-    queryKey: [
-      ORDER_EDITS_API,
-      staffId,
-      "variants",
-      order.connectionId,
-      search,
-    ],
-    queryFn: ({ signal }) => api.variants(order.connectionId, search, signal),
-    enabled: canEdit && search.length >= 2 && !locked,
-  });
   const mutable = canEdit && !pending && !locked;
   function updateQuantity(id: string, value: string) {
     command.current = null;
@@ -504,7 +492,7 @@ export function OrderDraft({
                 type="number"
                 min={1}
                 step={1}
-                aria-label={`Quantity for added ${item.variant.title}`}
+                aria-label={`Quantity for added ${[item.variant.title, item.variant.variantTitle, item.variant.sku].filter(Boolean).join(" · ")}`}
                 value={item.quantity}
                 disabled={!mutable}
                 onChange={(event) => {
@@ -543,79 +531,37 @@ export function OrderDraft({
           recalculated when you review changes.
         </p>
         {canEdit && (
-          <div className="space-y-2">
-            <Label htmlFor="edit-add-products">Add products</Label>
-            <Input
-              id="edit-add-products"
-              value={productSearch}
-              maxLength={100}
-              disabled={!mutable}
-              placeholder="Search product name or SKU"
-              onChange={(event) => setProductSearch(event.target.value)}
-            />
-            {search.length >= 2 && (
-              <div className="max-h-64 overflow-y-auto rounded-md border">
-                {variants.isFetching && (
-                  <p role="status" className="p-3 text-sm">
-                    Searching Shopify products…
-                  </p>
-                )}
-                <ErrorMessage
-                  text={variants.error ? message(variants.error) : null}
-                />
-                {!variants.isFetching &&
-                  !variants.isError &&
-                  variants.data?.variants.length === 0 && (
-                    <p className="p-3 text-sm text-muted-foreground">
-                      No matching Shopify variants.
-                    </p>
-                  )}
-                {variants.data?.variants.map((variant) => {
-                  const included =
-                    order.lines.some(
-                      (line) => line.variantId === variant.variantId,
-                    ) ||
-                    additions.some(
-                      (item) => item.variant.variantId === variant.variantId,
-                    );
-                  return (
-                    <div
-                      key={variant.variantId}
-                      className="flex items-center gap-3 border-b p-3 last:border-0"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm">{variant.title}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {[variant.variantTitle, variant.sku]
-                            .filter(Boolean)
-                            .join(" · ")}
-                        </p>
-                      </div>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={!mutable || included || !variant.available}
-                        onClick={() => {
-                          command.current = null;
-                          setAdditions((current) => [
-                            ...current,
-                            { variant, quantity: "1" },
-                          ]);
-                        }}
-                      >
-                        {included
-                          ? "Already in order"
-                          : !variant.available
-                            ? "Cannot add"
-                            : "Add"}
-                      </Button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+          <OrderEditProductPicker
+            api={api}
+            connectionId={order.connectionId}
+            staffId={staffId}
+            enabled={mutable && active}
+            includedVariantIds={
+              new Set([
+                ...order.lines
+                  .map((line) => line.variantId)
+                  .filter((id): id is string => id !== null),
+                ...additions.map((item) => item.variant.variantId),
+              ])
+            }
+            onAdd={(variant) => {
+              if (
+                !mutable ||
+                !variant.available ||
+                order.lines.some((line) => line.variantId === variant.variantId)
+              )
+                return;
+              command.current = null;
+              setError(null);
+              setAdditions((current) =>
+                current.some(
+                  (item) => item.variant.variantId === variant.variantId,
+                )
+                  ? current
+                  : [...current, { variant, quantity: "1" }],
+              );
+            }}
+          />
         )}
         <p className="text-xs text-muted-foreground">
           Shipping address changes are not supported in this pilot.

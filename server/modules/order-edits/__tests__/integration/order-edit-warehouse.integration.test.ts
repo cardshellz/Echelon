@@ -1,4 +1,7 @@
 import { OrderEditPreviewService } from "../../application/order-edit-preview.service";
+import { OrderEditService } from "../../application/order-edit.service";
+import { ShopifyOrderEditProvider } from "../../infrastructure/shopify-order-edit.provider";
+import type { OrderEditCatalog } from "../../application/order-edit-catalog";
 import {
   previewContext,
   previewInput,
@@ -295,6 +298,101 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       INSERT INTO inventory.availability_claim_lines VALUES(1,1,40,100,1,1,0,0,0,0);`);
     });
 
+    async function persistedState() {
+      const result: Record<string, unknown> = {};
+      // Constant, test-owned table identities; compare full rows, not just counts.
+      for (const table of [
+        "oms.oms_orders",
+        "oms.oms_order_lines",
+        "wms.orders",
+        "wms.order_items",
+        "wms.outbound_shipments",
+        "inventory.availability_claims",
+        "inventory.availability_claim_lines",
+        "oms.order_edit_settings",
+        "oms.order_edit_operations",
+        "oms.order_edit_events",
+        "oms.order_edit_provider_holds",
+      ])
+        result[table] = (
+          await database.pool.query(
+            `SELECT COALESCE(jsonb_agg(to_jsonb(row) ORDER BY to_jsonb(row)::text), '[]'::jsonb) AS rows FROM ${table} row`,
+          )
+        ).rows[0].rows;
+      return result;
+    }
+    it("catalog discovery reads the selected connection without changing persisted orders, inventory or edit records", async () => {
+      const pageInfo = { hasNextPage: false, endCursor: null };
+      const catalog: OrderEditCatalog = {
+        categories: vi.fn<OrderEditCatalog["categories"]>(
+          async (connectionId, input) => ({
+            connectionId,
+            input,
+            categories: ["Toploaders"],
+            pageInfo,
+          }),
+        ),
+        products: vi.fn<OrderEditCatalog["products"]>(
+          async (connectionId, input) => ({
+            connectionId,
+            input,
+            products: [],
+            pageInfo,
+          }),
+        ),
+        productVariants: vi.fn<OrderEditCatalog["productVariants"]>(
+          async (connectionId, input) => ({
+            connectionId,
+            input,
+            product: {
+              productId: input.productId,
+              title: "Toploader",
+              category: "Toploaders",
+              imageUrl: null,
+            },
+            variants: [],
+            pageInfo,
+          }),
+        ),
+      };
+      const request = vi.fn<typeof fetch>();
+      const provider = new ShopifyOrderEditProvider({
+        clock: () => new Date(PREVIEW_NOW),
+        credentials: { get: async () => null },
+        fetch: request,
+      });
+      const service = new OrderEditService(
+        new PostgresOrderEditStore(database.pool),
+        provider,
+        gateway,
+        () => new Date(PREVIEW_NOW),
+        () => OP,
+        vi.fn(),
+        undefined,
+        catalog,
+      );
+      const before = await persistedState();
+      await service.catalogCategories(4, { after: null });
+      await service.catalogProducts(4, {
+        search: "toploader",
+        category: "Toploaders",
+        after: null,
+      });
+      await service.catalogVariants(4, {
+        productId: "gid://shopify/Product/10",
+        after: null,
+      });
+      await expect(
+        service.catalogProducts(999, {
+          search: "toploader",
+          category: null,
+          after: null,
+        }),
+      ).rejects.toMatchObject({ code: "ORDER_EDIT_CONNECTION_UNAVAILABLE" });
+      expect(catalog.products).toHaveBeenCalledTimes(1);
+      expect(request).not.toHaveBeenCalled();
+      expect(await persistedState()).toEqual(before);
+    });
     it("background preview preserves every persisted source, warehouse, inventory and edit record", async () => {
       const store = new PostgresOrderEditStore(database.pool);
       const proof = await gateway.releaseUnchanged(20, OP);
@@ -342,35 +440,12 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         inspectOnly,
         () => new Date(PREVIEW_NOW),
       );
-      async function state() {
-        const result: Record<string, unknown> = {};
-        // Constant, test-owned table identities; compare full rows, not just counts.
-        for (const table of [
-          "oms.oms_orders",
-          "oms.oms_order_lines",
-          "wms.orders",
-          "wms.order_items",
-          "wms.outbound_shipments",
-          "inventory.availability_claims",
-          "inventory.availability_claim_lines",
-          "oms.order_edit_settings",
-          "oms.order_edit_operations",
-          "oms.order_edit_events",
-          "oms.order_edit_provider_holds",
-        ])
-          result[table] = (
-            await database.pool.query(
-              `SELECT COALESCE(jsonb_agg(to_jsonb(row) ORDER BY to_jsonb(row)::text), '[]'::jsonb) AS rows FROM ${table} row`,
-            )
-          ).rows[0].rows;
-        return result;
-      }
-      const before = await state();
+      const before = await persistedState();
       const { changes, additions, ...scope } = input;
       await service.warm(scope, "staff");
       const result = await service.preview(input, "staff");
       expect(result.financials.totalCents).toBe(22098);
-      expect(await state()).toEqual(before);
+      expect(await persistedState()).toEqual(before);
       expect(provider.quote).not.toHaveBeenCalled();
       expect(provider.commit).not.toHaveBeenCalled();
       expect(provider.refund).not.toHaveBeenCalled();

@@ -15,6 +15,73 @@ import {
 
 const operationId = "7862fe7b-a70b-42e8-9ae7-4e2fb16448d0";
 const lineId = "gid://shopify/LineItem/123";
+const catalogProducts = [
+  {
+    productId: "gid://shopify/Product/70",
+    title: "Card Storage Box",
+    category: "Storage",
+    imageUrl: null,
+  },
+  {
+    productId: "gid://shopify/Product/80",
+    title: "Toploader Binder Pages",
+    category: "Binders",
+    imageUrl: null,
+  },
+  {
+    productId: "gid://shopify/Product/90",
+    title: "35PT 3x4 Premium Toploader",
+    category: "Toploaders",
+    imageUrl: null,
+  },
+];
+const catalogVariants = [
+  {
+    productId: "gid://shopify/Product/70",
+    variantId: "gid://shopify/ProductVariant/777",
+    title: "Card Storage Box",
+    variantTitle: "White",
+    sku: "BOX-WHITE",
+    priceCents: 1500,
+    available: true,
+  },
+  {
+    productId: "gid://shopify/Product/80",
+    variantId: "gid://shopify/ProductVariant/345",
+    title: "Toploader Binder Pages",
+    variantTitle: "Black · 1 Binder",
+    sku: "BINDER-BLACK",
+    priceCents: 1000,
+    available: true,
+  },
+  {
+    productId: "gid://shopify/Product/90",
+    variantId: "gid://shopify/ProductVariant/901",
+    title: "35PT 3x4 Premium Toploader",
+    variantTitle: "Pack of 25",
+    sku: "SHLZ-TOP-35PT-P25",
+    priceCents: 499,
+    available: true,
+  },
+  {
+    productId: "gid://shopify/Product/90",
+    variantId: "gid://shopify/ProductVariant/902",
+    title: "35PT 3x4 Premium Toploader",
+    variantTitle: "Box of 250",
+    sku: "SHLZ-TOP-35PT-B250",
+    priceCents: 3999,
+    available: true,
+  },
+  {
+    productId: "gid://shopify/Product/90",
+    variantId: "gid://shopify/ProductVariant/903",
+    title: "35PT 3x4 Premium Toploader",
+    variantTitle: "Case of 1000",
+    sku: "SHLZ-TOP-35PT-C1000",
+    priceCents: 11999,
+    available: false,
+  },
+];
 const order: OrderEditOrder = {
   connectionId: 3,
   omsOrderId: 51,
@@ -61,6 +128,10 @@ async function installFixtures(
     quoteResponse?: Promise<void>;
     previewResponse?: Promise<void>;
     rejectPreview?: boolean;
+    paginateCatalog?: boolean;
+    rejectCatalogProductsOnce?: boolean;
+    rejectCatalogVariantsOnce?: boolean;
+    delayedCatalog?: { search: string; response: Promise<void> };
   } = {},
 ) {
   const failures: string[] = [];
@@ -78,6 +149,8 @@ async function installFixtures(
       : null;
   let loseQuote = options.loseQuoteResponse === true;
   let loseCommit = options.loseCommitResponse === true;
+  let rejectProducts = options.rejectCatalogProductsOnce === true;
+  let rejectVariants = options.rejectCatalogVariantsOnce === true;
   let connection: OrderEditConnection = {
     connectionId: 3,
     channelId: 8,
@@ -172,6 +245,107 @@ async function installFixtures(
       return route.fulfill({
         json: { ...order, activeOperationId: activeOperationId() },
       });
+    if (path.startsWith(`${ORDER_EDIT_API}/catalog/`)) {
+      expect(method).toBe("GET");
+      expect(url.searchParams.get("connectionId")).toBe("3");
+      expect(key).toBeUndefined();
+      const after = url.searchParams.get("after");
+      const start = after === null ? 0 : Number(after);
+      const paged = <T>(values: T[]) => {
+        const page = options.paginateCatalog
+          ? values.slice(start, start + 1)
+          : values;
+        const next = start + page.length;
+        return {
+          values: page,
+          pageInfo: {
+            hasNextPage:
+              options.paginateCatalog === true && next < values.length,
+            endCursor: page.length ? String(next) : null,
+          },
+        };
+      };
+      if (path.endsWith("/categories")) {
+        const result = paged(["Storage", "Toploaders", "Binders"]);
+        return route.fulfill({
+          json: {
+            connectionId: 3,
+            input: { after },
+            categories: result.values,
+            pageInfo: result.pageInfo,
+          },
+        });
+      }
+      if (path.endsWith("/products")) {
+        const search = url.searchParams.get("search") ?? "";
+        const category = url.searchParams.get("category");
+        if (options.delayedCatalog?.search === search)
+          await options.delayedCatalog.response;
+        if (rejectProducts) {
+          rejectProducts = false;
+          return route.fulfill({
+            status: 503,
+            json: {
+              error: {
+                code: "CATALOG_UNAVAILABLE",
+                message: "Catalog temporarily unavailable.",
+              },
+            },
+          });
+        }
+        const matching = catalogProducts.filter(
+          (product) =>
+            (!category || product.category === category) &&
+            (!search ||
+              product.title.toLowerCase().includes(search.toLowerCase()) ||
+              catalogVariants.some(
+                (variant) =>
+                  variant.productId === product.productId &&
+                  variant.sku.toLowerCase().includes(search.toLowerCase()),
+              )),
+        );
+        const result = paged(matching);
+        return route.fulfill({
+          json: {
+            connectionId: 3,
+            input: { search, category, after },
+            products: result.values,
+            pageInfo: result.pageInfo,
+          },
+        });
+      }
+      if (path.endsWith("/variants")) {
+        const productId = url.searchParams.get("productId");
+        if (rejectVariants) {
+          rejectVariants = false;
+          return route.fulfill({
+            status: 503,
+            json: {
+              error: {
+                code: "CATALOG_UNAVAILABLE",
+                message: "Pack sizes temporarily unavailable.",
+              },
+            },
+          });
+        }
+        const result = paged(
+          catalogVariants
+            .filter((variant) => variant.productId === productId)
+            .map(({ productId: _parent, ...variant }) => variant),
+        );
+        return route.fulfill({
+          json: {
+            connectionId: 3,
+            input: { productId, after },
+            product: catalogProducts.find(
+              (product) => product.productId === productId,
+            ),
+            variants: result.values,
+            pageInfo: result.pageInfo,
+          },
+        });
+      }
+    }
     if (path === `${ORDER_EDIT_API}/variants`)
       return route.fulfill({
         json: {
@@ -390,6 +564,261 @@ async function assertFitsScreen(page: Page) {
     ),
   ).toBe(true);
 }
+async function addStorageBox(page: Page) {
+  await page
+    .getByRole("button", { name: "Search or browse products", exact: true })
+    .click();
+  const picker = page.getByRole("dialog");
+  await picker.getByLabel("Product name or SKU", { exact: true }).fill("box");
+  await picker.getByRole("button", { name: /Card Storage Box/ }).click();
+  await picker
+    .getByRole("button", { name: "Add White · BOX-WHITE", exact: true })
+    .click();
+  await picker.getByRole("button", { name: "Done", exact: true }).click();
+}
+
+test("product discovery searches names and SKUs and keeps pack sizes under their product", async ({
+  page,
+}, testInfo) => {
+  const fixture = await installFixtures(page);
+  await chooseOrder(page);
+  await page
+    .getByRole("button", { name: "Search or browse products", exact: true })
+    .click();
+  const picker = page.getByRole("dialog");
+  await expect(picker.getByLabel("Product name or SKU")).toBeFocused();
+  await picker.getByLabel("Product name or SKU").fill("toploader");
+  await expect(
+    picker.getByRole("button", { name: /35PT 3x4 Premium Toploader/ }),
+  ).toBeVisible();
+  await expect(
+    picker.getByRole("button", { name: /Card Storage Box/ }),
+  ).toHaveCount(0);
+  await picker
+    .getByLabel("Category", { exact: true })
+    .selectOption("Toploaders");
+  await picker
+    .getByRole("button", { name: /35PT 3x4 Premium Toploader/ })
+    .click();
+  await expect(picker.getByText("Pack of 25", { exact: true })).toBeVisible();
+  await expect(picker.getByText("Box of 250", { exact: true })).toBeVisible();
+  await expect(
+    picker.getByText("SKU: SHLZ-TOP-35PT-P25", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    picker.getByRole("button", {
+      name: "Case of 1000 · SHLZ-TOP-35PT-C1000 unavailable",
+    }),
+  ).toBeDisabled();
+  await picker
+    .getByRole("button", { name: "Add Pack of 25 · SHLZ-TOP-35PT-P25" })
+    .click();
+  await expect(
+    picker.getByRole("button", {
+      name: "Pack of 25 · SHLZ-TOP-35PT-P25 already in order",
+    }),
+  ).toBeDisabled();
+  await page.screenshot({
+    path: testInfo.outputPath("product-picker.png"),
+    fullPage: true,
+  });
+  await assertFitsScreen(page);
+  await picker.getByLabel("Product name or SKU").fill("SHLZ-TOP-35PT-B250");
+  await picker
+    .getByRole("button", { name: /35PT 3x4 Premium Toploader/ })
+    .click();
+  await picker
+    .getByRole("button", { name: "Add Box of 250 · SHLZ-TOP-35PT-B250" })
+    .click();
+  await picker.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(
+    page.getByRole("spinbutton", {
+      name: "Quantity for added 35PT 3x4 Premium Toploader · Pack of 25 · SHLZ-TOP-35PT-P25",
+    }),
+  ).toHaveValue("1");
+  await expect(
+    page.getByRole("spinbutton", {
+      name: "Quantity for added 35PT 3x4 Premium Toploader · Box of 250 · SHLZ-TOP-35PT-B250",
+    }),
+  ).toHaveValue("1");
+  expect(
+    fixture.requests.filter((request) =>
+      /\/(quotes|commit)$/.test(request.path),
+    ),
+  ).toHaveLength(0);
+  await page
+    .getByRole("button", { name: "Review changes", exact: true })
+    .click();
+  await expect(page.getByText("Ready to apply", { exact: true })).toBeVisible();
+  const quote = fixture.requests.find((request) =>
+    request.path.endsWith("/quotes"),
+  );
+  expect(quote?.body).toMatchObject({
+    additions: [
+      { variantId: "gid://shopify/ProductVariant/901", quantity: 1 },
+      { variantId: "gid://shopify/ProductVariant/902", quantity: 1 },
+    ],
+  });
+  expect(quote?.body).not.toHaveProperty("priceCents");
+  expect(fixture.failures).toEqual([]);
+});
+
+test("category, product and SKU pagination keep the whole catalog reachable and block duplicate additions", async ({
+  page,
+}) => {
+  const fixture = await installFixtures(page, { paginateCatalog: true });
+  await chooseOrder(page);
+  await page
+    .getByRole("button", { name: "Search or browse products", exact: true })
+    .click();
+  const picker = page.getByRole("dialog");
+  await picker
+    .getByRole("button", { name: "Load more categories", exact: true })
+    .click();
+  await expect(
+    picker
+      .getByLabel("Category")
+      .getByRole("option", { name: "Toploaders", exact: true }),
+  ).toHaveCount(1);
+  await picker
+    .getByRole("button", { name: "Load more products", exact: true })
+    .click();
+  await picker.getByRole("button", { name: /Toploader Binder Pages/ }).click();
+  await expect(
+    picker.getByRole("button", {
+      name: "Black · 1 Binder · BINDER-BLACK already in order",
+    }),
+  ).toBeDisabled();
+  await picker.getByLabel("Category").selectOption("Toploaders");
+  await picker
+    .getByRole("button", { name: /35PT 3x4 Premium Toploader/ })
+    .click();
+  await picker
+    .getByRole("button", { name: "Load more pack sizes", exact: true })
+    .click();
+  await expect(picker.getByText("Pack of 25", { exact: true })).toBeVisible();
+  await expect(picker.getByText("Box of 250", { exact: true })).toBeVisible();
+  await picker
+    .getByRole("button", { name: "Add Box of 250 · SHLZ-TOP-35PT-B250" })
+    .click();
+  await expect(
+    picker.getByRole("button", {
+      name: "Box of 250 · SHLZ-TOP-35PT-B250 already in order",
+    }),
+  ).toBeDisabled();
+  await picker.getByRole("button", { name: "Done", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Search or browse products", exact: true })
+    .click();
+  await picker.getByLabel("Category").selectOption("Toploaders");
+  await picker
+    .getByRole("button", { name: /35PT 3x4 Premium Toploader/ })
+    .click();
+  await expect(
+    picker.getByRole("button", {
+      name: "Box of 250 · SHLZ-TOP-35PT-B250 already in order",
+    }),
+  ).toBeDisabled();
+  await assertFitsScreen(page);
+  expect(
+    fixture.requests.filter((request) =>
+      /\/(quotes|commit)$/.test(request.path),
+    ),
+  ).toHaveLength(0);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("product and pack-size read failures retry without locking the edit or issuing financial commands", async ({
+  page,
+}) => {
+  const fixture = await installFixtures(page, {
+    rejectCatalogProductsOnce: true,
+    rejectCatalogVariantsOnce: true,
+  });
+  await chooseOrder(page);
+  await page
+    .getByRole("button", { name: "Search or browse products", exact: true })
+    .click();
+  const picker = page.getByRole("dialog");
+  await expect(picker.getByRole("alert")).toContainText(
+    "Catalog temporarily unavailable",
+  );
+  await picker
+    .getByRole("button", { name: "Retry products", exact: true })
+    .click();
+  await picker.getByRole("button", { name: /Card Storage Box/ }).click();
+  await expect(picker.getByRole("alert")).toContainText(
+    "Pack sizes temporarily unavailable",
+  );
+  await picker
+    .getByRole("button", { name: "Retry pack sizes", exact: true })
+    .click();
+  await picker
+    .getByRole("button", { name: "Add White · BOX-WHITE", exact: true })
+    .click();
+  await picker.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Review changes", exact: true }),
+  ).toBeEnabled();
+  expect(
+    fixture.requests.filter((request) =>
+      /\/(quotes|commit)$/.test(request.path),
+    ),
+  ).toHaveLength(0);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("typing a new search hides previous results and ignores a late response", async ({
+  page,
+}) => {
+  let release!: () => void;
+  const response = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const fixture = await installFixtures(page, {
+    delayedCatalog: { search: "toploader", response },
+  });
+  await chooseOrder(page);
+  await page
+    .getByRole("button", { name: "Search or browse products", exact: true })
+    .click();
+  const picker = page.getByRole("dialog");
+  const search = picker.getByLabel("Product name or SKU");
+  await expect(
+    picker.getByRole("button", { name: /Card Storage Box/ }),
+  ).toBeVisible();
+  await search.fill("toploader");
+  await expect(
+    picker.getByRole("button", { name: /Card Storage Box/ }),
+  ).toHaveCount(0);
+  await expect(
+    picker.getByText("Searching products…", { exact: true }),
+  ).toBeVisible();
+  await search.fill("box");
+  await expect(
+    picker.getByRole("button", { name: /Card Storage Box/ }),
+  ).toBeVisible();
+  release();
+  await expect(
+    picker.getByRole("button", { name: /35PT 3x4 Premium Toploader/ }),
+  ).toHaveCount(0);
+  await search.fill("no-matching-product");
+  await expect(
+    picker.getByText(
+      "No matching products. Try another name or SKU, or choose All categories.",
+    ),
+  ).toBeVisible();
+  await search.fill("*");
+  await expect(
+    picker.getByText("Enter a product name or SKU.", { exact: true }),
+  ).toBeVisible();
+  expect(
+    fixture.requests.filter((request) =>
+      /\/(quotes|commit)$/.test(request.path),
+    ),
+  ).toHaveLength(0);
+  expect(fixture.failures).toEqual([]);
+});
 
 test("Change items returns immediately, keeps the draft and blocks new totals until the prior quote closes", async ({
   page,
@@ -404,8 +833,7 @@ test("Change items returns immediately, keeps the draft and blocks new totals un
     name: "Quantity for Toploader Binder Pages Black · 1 Binder",
   });
   await quantity.fill("3");
-  await page.getByLabel("Add products", { exact: true }).fill("box");
-  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await addStorageBox(page);
   await page
     .getByRole("button", { name: "Review changes", exact: true })
     .click();
@@ -737,8 +1165,7 @@ test("staff can configure a payment window, quote quantity/addition changes and 
       name: "Quantity for Toploader Binder Pages Black · 1 Binder",
     })
     .fill("3");
-  await page.getByLabel("Add products", { exact: true }).fill("box");
-  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await addStorageBox(page);
   await page
     .getByRole("button", { name: "Review changes", exact: true })
     .click();
@@ -1030,7 +1457,12 @@ test("an active edit discovered after stale search results replaces the editing 
   await expect(
     page.getByRole("button", { name: "Review changes", exact: true }),
   ).toHaveCount(0);
-  await expect(page.getByLabel("Add products", { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByRole("button", {
+      name: "Search or browse products",
+      exact: true,
+    }),
+  ).toHaveCount(0);
   await page.getByRole("button", { name: "Resume edit", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`operationId=${operationId}$`));
   await expect(

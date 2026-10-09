@@ -12,6 +12,14 @@ import {
   orderEditSettingsInputSchema,
 } from "@shared/order-edits/order-edit.contract";
 import type { OrderEditService } from "../application/order-edit.service";
+import {
+  orderEditCatalogCategoriesInputSchema,
+  orderEditCatalogCategoriesSchema,
+  orderEditCatalogProductsInputSchema,
+  orderEditCatalogProductsSchema,
+  orderEditCatalogVariantsInputSchema,
+  orderEditCatalogVariantsSchema,
+} from "@shared/order-edits/order-edit-catalog";
 import { OrderEditError } from "../domain/order-edit-error";
 import { OrderEditProviderError } from "../application/order-edit-provider";
 import {
@@ -188,6 +196,45 @@ export function registerOrderEditRoutes(
       res.json(
         orderEditVariantsSchema.parse(
           await service.variants(query.connectionId, query.search),
+        ),
+      );
+    }),
+  );
+  app.get(
+    `${ORDER_EDIT_API}/catalog/categories`,
+    handle(false, async (req, res) => {
+      const { connectionId, ...input } = orderEditCatalogCategoriesInputSchema
+        .extend({ connectionId: positiveId })
+        .parse(req.query);
+      res.json(
+        orderEditCatalogCategoriesSchema.parse(
+          await service.catalogCategories(connectionId, input),
+        ),
+      );
+    }),
+  );
+  app.get(
+    `${ORDER_EDIT_API}/catalog/products`,
+    handle(false, async (req, res) => {
+      const { connectionId, ...input } = orderEditCatalogProductsInputSchema
+        .extend({ connectionId: positiveId })
+        .parse(req.query);
+      res.json(
+        orderEditCatalogProductsSchema.parse(
+          await service.catalogProducts(connectionId, input),
+        ),
+      );
+    }),
+  );
+  app.get(
+    `${ORDER_EDIT_API}/catalog/variants`,
+    handle(false, async (req, res) => {
+      const { connectionId, ...input } = orderEditCatalogVariantsInputSchema
+        .extend({ connectionId: positiveId })
+        .parse(req.query);
+      res.json(
+        orderEditCatalogVariantsSchema.parse(
+          await service.catalogVariants(connectionId, input),
         ),
       );
     }),
