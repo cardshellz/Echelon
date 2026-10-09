@@ -10,6 +10,7 @@ import {
 } from "../../application/inventory-channel-exposure-runtime.service";
 import { sealSupplySnapshot } from "../../domain/inventory-availability-planner";
 import { hubReserveSupply } from "../fixtures/inventory-hub-reserve.fixture";
+import { reviewInventoryPublicationQuantities } from "../../application/inventory-publication-quantity-review";
 
 const HASH = "a".repeat(64);
 
@@ -27,6 +28,67 @@ describe("linked-reserve channel supply", () => {
   function plan(configured: ActiveInventoryPublicationTargetSnapshot[]) {
     return planInventoryChannelExposureProduct(hubContext(configured), 10, { warn: vi.fn() });
   }
+
+  it("gives enrollment only final quantities and readiness errors, without warehouse composition", () => {
+    const configured = hubTarget();
+    configured.channelProvider = "walmart";
+    const result = reviewInventoryPublicationQuantities(hubContext([configured]), 10);
+    expect(result).toEqual({ evidenceHash: expect.stringMatching(/^[a-f0-9]{64}$/), targets: [{
+      publicationTargetId: 91, blockers: [], rows: [
+        { productVariantId: 173, desiredQuantity: "1985", blockers: [] },
+        { productVariantId: 174, desiredQuantity: "198", blockers: [] },
+      ],
+    }] });
+  });
+
+  it("keeps stock and rule changes in opaque review evidence without changing quantity consumers' contract", () => {
+    const configured = hubTarget({ policy: policyValue({ maxPublish: { mode: "units", units: "100" } }) });
+    const context = hubContext([configured]);
+    const initial = reviewInventoryPublicationQuantities(context, 10);
+    const later = { ...context, supplySnapshot: sealSupplySnapshot({ ...hubReserveSupply(), capturedAt: "2026-10-02T12:01:00.000Z" }) };
+    expect(reviewInventoryPublicationQuantities(later, 10)).toEqual(initial);
+
+    const changedStock = hubReserveSupply();
+    changedStock.inventoryPositions = changedStock.inventoryPositions.map(position => position.inventoryLevelId === 3
+      ? { ...position, variantQty: "149" } : position);
+    const changed = reviewInventoryPublicationQuantities({ ...context, supplySnapshot: sealSupplySnapshot(changedStock) }, 10);
+    expect(changed.targets).toEqual(initial.targets);
+    expect(changed.evidenceHash).not.toBe(initial.evidenceHash);
+
+    const changedPolicy = hubTarget({ policy: policyValue({ shareBps: 9000, maxPublish: { mode: "units", units: "100" } }) });
+    const revised = reviewInventoryPublicationQuantities(hubContext([changedPolicy]), 10);
+    expect(revised.targets).toEqual(initial.targets);
+    expect(revised.evidenceHash).not.toBe(initial.evidenceHash);
+  });
+
+  it("forwards readiness errors without exposing internal planner context", () => {
+    const configured = hubTarget();
+    configured.mappings = [];
+    const result = reviewInventoryPublicationQuantities(hubContext([configured]), 10, { warn: vi.fn() });
+    expect(result.targets[0].rows[0]).toEqual({ productVariantId: 173, desiredQuantity: "1985", blockers: [{
+      code: "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING",
+      message: "The SKU has no active exact provider inventory identity for this publication target.",
+    }] });
+  });
+
+  it.each([1, 2, 3])("validates requested warehouse %i before ATP, without checking ATP's physical contributions", warehouseId => {
+    const configured = hubTarget();
+    configured.channelProvider = "walmart";
+    configured.sourceOverrideMembers = [{ fulfillmentNodeId: 12, warehouseId, fulfillmentNodeLifecycleStatus: "active" }];
+    configured.policies = [...configured.policies, {
+      scopeKey: "channel:7:variant:173", scopeType: "variant", policyId: 500, version: 1, definitionHash: HASH,
+      value: { allocationSemantics: null, eligible: null, shareBps: null, holdbackSellableUnits: null,
+        maxPublish: null, minPublishSellableUnits: null, sourceFulfillmentNodeIds: [12] },
+    }];
+    const result = reviewInventoryPublicationQuantities(hubContext([configured]), 10, { warn: vi.fn() });
+    expect(result.targets[0].rows[0]).toEqual({ productVariantId: 173,
+      desiredQuantity: warehouseId === 1 ? "1985" : "0", blockers: warehouseId === 1 ? [] : [{
+        code: "CHANNEL_SOURCE_OVERRIDE_OUTSIDE_BINDING",
+        message: "This SKU's stock source must match the destination's configured fulfillment warehouse.",
+      }],
+    });
+    expect(result.targets[0].rows[1]).toEqual({ productVariantId: 174, desiredQuantity: "198", blockers: [] });
+  });
 
   it.each(["shopify", "ebay", "tiktok", "walmart", "dropship-ebay"])(
     "includes reserve stock through the existing hub binding for %s", provider => {
@@ -432,6 +494,15 @@ describe("InventoryChannelExposureRuntimeService", () => {
       context: { blockerCodes: ["INVALID_TRANSFORMATION_MODEL"] },
     }]);
     expect(plan.targets[0]!.publishable).toBe(true);
+  });
+
+  it("passes ATP's remaining physical quantity to enrollment when conversion stock is unavailable", () => {
+    const context = canonicalContext([target()]);
+    context.supplySnapshot = canonicalSnapshot({ invalidModel: true });
+    const quantities = reviewInventoryPublicationQuantities(context, 10, { warn: vi.fn() });
+    expect(quantities.targets[0].rows.find(row => row.productVariantId === 102)).toEqual({
+      productVariantId: 102, desiredQuantity: "2", blockers: [],
+    });
   });
 
   it("fails every overlapping partitioned target closed when active shares exceed 100 percent", async () => {

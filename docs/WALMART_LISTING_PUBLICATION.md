@@ -16,6 +16,14 @@ Once Walmart accepts an item, Echelon verifies its SKU, price, lifecycle and pro
 
 ## Ownership and contracts
 
+Inventory enrollment consumes `reviewInventoryPublicationQuantities`: final per-SKU quantities,
+readiness errors, and an opaque hash used to reject stale reviews. ATP owns the configured
+warehouse's supply, including its linked reserves and permitted conversions; enrollment must
+not inspect or revalidate physical warehouse contributions. The inventory owner applies channel
+limits before returning the quantity. A SKU override requesting a different Walmart fulfillment
+warehouse is a configuration error checked before ATP, independent of stock levels. Provider
+transport receives the final quantity and exact item/destination identity only.
+
 | Owner | Responsibilities | Primary code |
 | --- | --- | --- |
 | Channels | Catalog projection, shared price rules, verified listing/feed identity | `server/modules/channels/channel-listing-catalog.repository.ts`, `channel-catalog.service.ts` |

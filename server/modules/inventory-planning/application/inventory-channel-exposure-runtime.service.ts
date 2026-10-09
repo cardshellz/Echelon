@@ -340,6 +340,15 @@ function planTarget(
         productVariantId: variant.id, scopeKey: sourceOverride.scopeKey,
       }));
     }
+    // Walmart's destination is assigned a fulfillment warehouse. Validate that
+    // requested input before ATP runs; reserve composition belongs solely to ATP.
+    const sourceOverrideOutsideBinding = target.channelProvider === "walmart" && sourceOverride !== null
+      && rowWarehouseIds.some(warehouseId => !sourceWarehouseIds.includes(warehouseId));
+    if (sourceOverrideOutsideBinding) {
+      blockers.push(issue("CHANNEL_SOURCE_OVERRIDE_OUTSIDE_BINDING",
+        "This SKU's stock source must match the destination's configured fulfillment warehouse.",
+        { publicationTargetId: target.publicationTargetId, productVariantId: variant.id }));
+    }
     const resolution = resolveChannelExposurePolicy({
       channelId: target.channelId,
       productId,
@@ -376,7 +385,8 @@ function planTarget(
       ));
     }
 
-    const sourceWarehouseBreakdown = projectCanonicalAtpWarehouseBreakdown(snapshot, variant.id, rowWarehouseIds)
+    const sourceWarehouseBreakdown = (sourceOverrideOutsideBinding ? []
+      : projectCanonicalAtpWarehouseBreakdown(snapshot, variant.id, rowWarehouseIds))
       .map(({ warehouseId, projection }) => {
         if (projection.blockers.length > 0) {
           warnings.push(issue(
