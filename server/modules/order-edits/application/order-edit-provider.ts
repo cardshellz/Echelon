@@ -43,6 +43,12 @@ export interface OrderEditRefund {
 
 /** JSON-safe persisted evidence. Amounts are exact USD integer cents. */
 export interface OrderEditSnapshot {
+  /** Optional read-only pricing evidence for provisional previews; excluded from legacy fingerprints. */
+  previewProductDiscounts?: Array<{
+    lineId: string;
+    amountCents: number;
+    automaticCents: number;
+  }>;
   /** Optional only for operations saved before shipping repricing was introduced. */
   shippingContext?: import("./order-edit-shipping").OrderEditShippingContext;
   /** Optional for legacy saved operations; enrichment does not alter their identity fingerprint. */

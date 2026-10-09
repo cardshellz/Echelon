@@ -4,6 +4,11 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { registerOrderEditRoutes } from "../../interfaces/order-edit.routes";
 import type { OrderEditService } from "../../application/order-edit.service";
+import {
+  previewInput,
+  previewCalculation,
+  PREVIEW_NOW,
+} from "../fixtures/order-edit-preview.fixture";
 
 const KEY = "22222222-2222-4222-8222-222222222222";
 describe("order edit staff HTTP boundary", () => {
@@ -24,10 +29,23 @@ describe("order edit staff HTTP boundary", () => {
     enabled: true,
   }));
   const quote = vi.fn();
+  const preview = vi.fn();
+  const warmPreview = vi.fn();
   beforeEach(async () => {
     vi.clearAllMocks();
     permission.mockResolvedValue(true);
     loggedIn = true;
+    preview.mockImplementation(async (input) => ({
+      phase: "preview",
+      input,
+      calculatedAt: new Date(PREVIEW_NOW).toISOString(),
+      expiresAt: new Date(PREVIEW_NOW + 60000).toISOString(),
+      ...previewCalculation(),
+    }));
+    warmPreview.mockImplementation(async (scope) => ({
+      scope,
+      expiresAt: new Date(PREVIEW_NOW + 60000).toISOString(),
+    }));
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
@@ -36,7 +54,13 @@ describe("order edit staff HTTP boundary", () => {
       next();
     });
     registerOrderEditRoutes(app, {
-      service: { state, settings, quote } as unknown as OrderEditService,
+      service: {
+        state,
+        settings,
+        quote,
+        preview,
+        warmPreview,
+      } as unknown as OrderEditService,
       hasPermission: permission,
       report: vi.fn(),
     });
@@ -146,5 +170,45 @@ describe("order edit staff HTTP boundary", () => {
     });
     expect(result.status).toBe(400);
     expect(quote).not.toHaveBeenCalled();
+  });
+  it("allows only authenticated same-origin calculation input without an edit command key", async () => {
+    const request = {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: url },
+      body: JSON.stringify(previewInput()),
+    };
+    const result = await fetch(
+      `${url}/api/order-edits/admin/previews`,
+      request,
+    );
+    expect(result.status).toBe(200);
+    expect(result.headers.get("cache-control")).toBe("no-store");
+    expect((await result.json()).phase).toBe("preview");
+    expect(preview).toHaveBeenCalledWith(previewInput(), "staff");
+    expect(quote).not.toHaveBeenCalled();
+    preview.mockClear();
+    for (const changed of [
+      {
+        ...request,
+        headers: { ...request.headers, Origin: "https://evil.example" },
+      },
+      {
+        ...request,
+        body: JSON.stringify({ ...previewInput(), totalCents: 1 }),
+      },
+    ])
+      expect(
+        (await fetch(`${url}/api/order-edits/admin/previews`, changed)).ok,
+      ).toBe(false);
+    permission.mockResolvedValue(false);
+    expect(
+      (await fetch(`${url}/api/order-edits/admin/previews`, request)).status,
+    ).toBe(403);
+    permission.mockResolvedValue(true);
+    loggedIn = false;
+    expect(
+      (await fetch(`${url}/api/order-edits/admin/previews`, request)).status,
+    ).toBe(401);
+    expect(preview).not.toHaveBeenCalled();
   });
 });

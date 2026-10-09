@@ -1,5 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
+  orderEditPreviewInputSchema,
+  orderEditPreviewScopeSchema,
+} from "../../shared/order-edits/order-edit-preview";
+import {
   ORDER_EDIT_API,
   orderEditQuoteInputSchema,
   orderEditSettingsInputSchema,
@@ -54,6 +58,9 @@ async function installFixtures(
     abandonResponse?: Promise<void>;
     loseAbandonResponse?: boolean;
     rejectAbandon?: boolean;
+    quoteResponse?: Promise<void>;
+    previewResponse?: Promise<void>;
+    rejectPreview?: boolean;
   } = {},
 ) {
   const failures: string[] = [];
@@ -121,7 +128,8 @@ async function installFixtures(
     if (method !== "GET") {
       expect(request.headers()["content-type"]).toBe("application/json");
       expect(request.headers().origin).toBe(url.origin);
-      expect(key).toMatch(/^[0-9a-f-]{36}$/);
+      if (!path.startsWith(`${ORDER_EDIT_API}/previews`))
+        expect(key).toMatch(/^[0-9a-f-]{36}$/);
     }
     if (path === `${ORDER_EDIT_API}/state`)
       return route.fulfill({
@@ -179,7 +187,89 @@ async function installFixtures(
           ],
         },
       });
+    if (path === `${ORDER_EDIT_API}/previews/warm`) {
+      const scope = orderEditPreviewScopeSchema.parse(body);
+      expect(key).toBeUndefined();
+      return route.fulfill({
+        json: { scope, expiresAt: "2026-10-05T12:01:00.000Z" },
+      });
+    }
+    if (path === `${ORDER_EDIT_API}/previews`) {
+      const input = orderEditPreviewInputSchema.parse(body);
+      expect(key).toBeUndefined();
+      await options.previewResponse;
+      if (options.rejectPreview)
+        return route.fulfill({
+          status: 503,
+          json: {
+            error: {
+              code: "PREVIEW_UNAVAILABLE",
+              message: "Background preview unavailable",
+            },
+          },
+        });
+      const quantity = input.changes[0]?.quantity ?? 2;
+      const lines = [
+        ...(quantity
+          ? [
+              {
+                id: lineId,
+                title: "Toploader Binder Pages",
+                variantTitle: "Black · 1 Binder",
+                quantity,
+                totalCents: quantity * 1000,
+              },
+            ]
+          : []),
+        ...input.additions.map((item) => ({
+          id: item.variantId,
+          title: "Card Storage Box",
+          variantTitle: "White",
+          quantity: item.quantity,
+          totalCents: item.quantity * 1500,
+        })),
+      ];
+      const total = lines.reduce((sum, line) => sum + line.totalCents, 0);
+      return route.fulfill({
+        json: {
+          phase: "preview",
+          input,
+          calculatedAt: "2026-10-05T12:00:00.000Z",
+          expiresAt: "2026-10-05T12:01:00.000Z",
+          lines,
+          financials: {
+            itemsGrossCents: total,
+            itemsNetCents: total,
+            itemsDiscountCents: 0,
+            itemDiscountLabels: [],
+            shippingGrossCents: 0,
+            shippingDiscountCents: 0,
+            shippingCents: 0,
+            shippingDiscountLabels: [],
+            taxCents: 0,
+            taxesIncluded: false,
+            totalCents: total,
+            lines: lines.map((line) => ({
+              id: line.id,
+              grossCents: line.totalCents,
+              netCents: line.totalCents,
+              discountCents: 0,
+            })),
+          },
+          shippingRepricing: {
+            title: "Standard",
+            code: "standard",
+            source: "Echelon",
+            grossCents: 0,
+            discountCents: 0,
+            netCents: 0,
+            discountLabels: [],
+          },
+        },
+      });
+    }
     if (path === `${ORDER_EDIT_API}/quotes`) {
+      await options.quoteResponse;
       const input = orderEditQuoteInputSchema.parse(body);
       expect(input.expectedRevision).toBe(order.revision);
       expect(key).toBe(input.requestKey);
@@ -487,7 +577,9 @@ test("disabled connection guides setup and unlocks the selected order only after
     fullPage: true,
   });
   const mutations = fixture.requests.filter(
-    (request) => request.method !== "GET",
+    (request) =>
+      request.method !== "GET" &&
+      !request.path.startsWith(`${ORDER_EDIT_API}/previews`),
   );
   expect(mutations).toHaveLength(1);
   expect(mutations[0]).toMatchObject({
@@ -554,9 +646,13 @@ test("decimal hours preserve loaded settings and save exact minutes", async ({
     await input.fill(value);
     await expect(save).toBeDisabled();
   }
-  expect(fixture.requests.every((request) => request.method === "GET")).toBe(
-    true,
-  );
+  expect(
+    fixture.requests.every(
+      (request) =>
+        request.method === "GET" ||
+        request.path.startsWith(`${ORDER_EDIT_API}/previews`),
+    ),
+  ).toBe(true);
   await input.fill("1.25");
   await save.click();
   await expect(page.getByText("Settings saved.")).toBeVisible();
@@ -565,7 +661,11 @@ test("decimal hours preserve loaded settings and save exact minutes", async ({
     page.getByText("Payment window: 1.25 hours", { exact: true }),
   ).toBeVisible();
   expect(
-    fixture.requests.filter((request) => request.method !== "GET"),
+    fixture.requests.filter(
+      (request) =>
+        request.method !== "GET" &&
+        !request.path.startsWith(`${ORDER_EDIT_API}/previews`),
+    ),
   ).toEqual([
     expect.objectContaining({
       method: "PUT",
@@ -939,5 +1039,137 @@ test("an active edit discovered after stale search results replaces the editing 
   expect(fixture.requests.every((request) => request.method === "GET")).toBe(
     true,
   );
+  expect(fixture.failures).toEqual([]);
+});
+
+test("warms pricing on open, calculates after a pause and shows preview immediately while Apply remains blocked", async ({
+  page,
+}, testInfo) => {
+  let finishQuote!: () => void;
+  const quoteResponse = new Promise<void>((resolve) => {
+    finishQuote = resolve;
+  });
+  const fixture = await installFixtures(page, { quoteResponse });
+  await chooseOrder(page);
+  await expect
+    .poll(
+      () =>
+        fixture.requests.filter((r) => r.path.endsWith("/previews/warm"))
+          .length,
+    )
+    .toBe(1);
+  expect(
+    fixture.requests.some((r) => /\/(quotes|commit|abandon)$/.test(r.path)),
+  ).toBe(false);
+  const quantity = page.getByRole("spinbutton", {
+    name: "Quantity for Toploader Binder Pages Black · 1 Binder",
+  });
+  await quantity.fill("3");
+  await expect(
+    page.getByText("Updated total preview: $30.00", { exact: false }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Review changes", exact: true })
+    .click();
+  await expect(
+    page.getByText("Preview · verifying", { exact: true }),
+  ).toBeVisible({ timeout: 1500 });
+  await expect(
+    page.getByRole("button", { name: "Verifying changes…", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: /^Apply changes/ }),
+  ).toHaveCount(0);
+  expect(
+    fixture.requests.filter((r) => r.path.endsWith("/quotes")),
+  ).toHaveLength(1);
+  expect(fixture.requests.some((r) => r.path.endsWith("/commit"))).toBe(false);
+  await page.screenshot({
+    path: testInfo.outputPath("preview-verifying.png"),
+    fullPage: true,
+  });
+  await assertFitsScreen(page);
+  finishQuote();
+  await expect(page.getByText("Ready to apply", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Apply changes/ }),
+  ).toBeEnabled();
+  expect(fixture.failures).toEqual([]);
+});
+
+test("a delayed old preview is discarded after quantities change", async ({
+  page,
+}) => {
+  let finishPreview!: () => void;
+  let finishQuote!: () => void;
+  const fixture = await installFixtures(page, {
+    previewResponse: new Promise<void>((resolve) => {
+      finishPreview = resolve;
+    }),
+    quoteResponse: new Promise<void>((resolve) => {
+      finishQuote = resolve;
+    }),
+  });
+  await chooseOrder(page);
+  const quantity = page.getByRole("spinbutton", {
+    name: "Quantity for Toploader Binder Pages Black · 1 Binder",
+  });
+  await quantity.fill("3");
+  await expect
+    .poll(
+      () => fixture.requests.filter((r) => r.path.endsWith("/previews")).length,
+    )
+    .toBe(1);
+  await quantity.fill("4");
+  await page
+    .getByRole("button", { name: "Review changes", exact: true })
+    .click();
+  await expect(
+    page.getByText("Verifying changes", { exact: true }),
+  ).toBeVisible({ timeout: 1500 });
+  finishPreview();
+  await expect(
+    page.getByText("Preview · verifying", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: /^Apply changes/ }),
+  ).toHaveCount(0);
+  expect(
+    fixture.requests.find((r) => r.path.endsWith("/quotes"))?.body,
+  ).toMatchObject({ changes: [{ lineItemId: lineId, quantity: 4 }] });
+  finishQuote();
+  await expect(
+    page.getByRole("button", {
+      name: "Apply changes · $20.00 payment due",
+      exact: true,
+    }),
+  ).toBeEnabled();
+  expect(fixture.failures).toEqual([]);
+});
+
+test("background calculation failure leaves Review available and never locks a financial command", async ({
+  page,
+}) => {
+  const fixture = await installFixtures(page, { rejectPreview: true });
+  await chooseOrder(page);
+  await page
+    .getByRole("spinbutton", {
+      name: "Quantity for Toploader Binder Pages Black · 1 Binder",
+    })
+    .fill("3");
+  await expect(
+    page.getByText("Background totals are unavailable.", { exact: false }),
+  ).toBeVisible();
+  const review = page.getByRole("button", {
+    name: "Review changes",
+    exact: true,
+  });
+  await expect(review).toBeEnabled();
+  expect(fixture.requests.some((r) => r.path.endsWith("/quotes"))).toBe(false);
+  await review.click();
+  await expect(page.getByText("Ready to apply", { exact: true })).toBeVisible();
+  expect(
+    fixture.requests.filter((r) => r.path.endsWith("/quotes")),
+  ).toHaveLength(1);
   expect(fixture.failures).toEqual([]);
 });

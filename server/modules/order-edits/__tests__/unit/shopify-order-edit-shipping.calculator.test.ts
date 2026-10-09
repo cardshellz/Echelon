@@ -370,3 +370,57 @@ describe("native checkout shipping calculation", () => {
     ).rejects.toMatchObject({ code: "SHIPPING_RESPONSE_INVALID" });
   });
 });
+
+describe("preview checkout tax and total proof", () => {
+  it("reuses native shipping benefits and reconciles tax to exact net item prices", async () => {
+    const value = calculation();
+    const draft = {
+      ...value.draftOrderCalculate.calculatedDraftOrder,
+      totalTaxSet: bag("5.59"),
+      totalPriceSet: bag("98.79"),
+    };
+    const h = harness([
+      options(),
+      {
+        draftOrderCalculate: {
+          ...value.draftOrderCalculate,
+          calculatedDraftOrder: draft,
+        },
+      },
+    ]);
+    const result = await h.calculator.calculatePreview(snapshot(), items);
+    expect(result.taxCents).toBe(559);
+    expect(result.totalCents).toBe(9879);
+    expect(result.shippingRepricing.netCents).toBe(0);
+    expect(h.request.mock.calls[1][1]).toContain("draftOrderCalculate");
+    expect(
+      h.request.mock.calls.some((r) =>
+        /draftOrderCreate|orderEdit|refundCreate/.test(r[1]),
+      ),
+    ).toBe(false);
+  });
+  it("rejects missing or unreconciled taxes and total rather than inventing a tax estimate", async () => {
+    const missing = harness([options(), calculation()]);
+    await expect(
+      missing.calculator.calculatePreview(snapshot(), items),
+    ).rejects.toMatchObject({ code: "ORDER_EDIT_PREVIEW_TOTALS_MISSING" });
+    const value = calculation();
+    const bad = {
+      ...value.draftOrderCalculate.calculatedDraftOrder,
+      totalTaxSet: bag("5.59"),
+      totalPriceSet: bag("98.78"),
+    };
+    const h = harness([
+      options(),
+      {
+        draftOrderCalculate: {
+          ...value.draftOrderCalculate,
+          calculatedDraftOrder: bad,
+        },
+      },
+    ]);
+    await expect(
+      h.calculator.calculatePreview(snapshot(), items),
+    ).rejects.toMatchObject({ code: "ORDER_EDIT_PREVIEW_TOTALS_MISMATCH" });
+  });
+});

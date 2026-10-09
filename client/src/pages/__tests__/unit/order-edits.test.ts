@@ -11,6 +11,7 @@ import OrderEdits, {
   ConnectionSettings,
   OrderDraft,
   OrderEditOperationView,
+  OrderEditPreviewReview,
 } from "../../OrderEdits";
 import { createOrderEditTransport } from "@/lib/order-edits";
 import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";
@@ -669,5 +670,55 @@ describe("verified order edit review", () => {
     expect(html).toContain("Picking has started.");
     expect(html).not.toContain("Configure staff editing</button>");
     expect(html).toMatch(/<input[^>]+disabled=""/);
+  });
+});
+
+describe("immediate preliminary review", () => {
+  it("shows a clearly provisional breakdown and keeps every action disabled during authoritative verification", () => {
+    const preview = {
+      phase: "preview" as const,
+      input: {
+        connectionId: 3,
+        omsOrderId: 51,
+        expectedRevision: "revision-7",
+        changes: [{ lineItemId: "gid://shopify/LineItem/123", quantity: 2 }],
+        additions: [],
+      },
+      calculatedAt: "2026-10-09T12:00:00.000Z",
+      expiresAt: "2026-10-09T12:01:00.000Z",
+      financials: discountedFinancials,
+      shippingRepricing: {
+        title: "Standard",
+        code: "standard",
+        source: "Echelon",
+        grossCents: 1299,
+        netCents: 0,
+        discountCents: 1299,
+        discountLabels: ["Free shipping"],
+      },
+      lines: discountedFinancials.lines.map((line) => ({
+        id: line.id,
+        title: "Binder",
+        variantTitle: null,
+        quantity: 1,
+        totalCents: line.netCents,
+      })),
+    };
+    const html = renderToStaticMarkup(
+      createElement(OrderEditPreviewReview, { order, preview }),
+    );
+    expect(html).toContain("Preview · verifying");
+    expect(html).toContain("Verifying changes");
+    expect(html).toContain("disabled");
+    expect(html).not.toContain("Apply changes");
+    expect(html).not.toContain("Pay additional balance");
+  });
+  it("opens a verification view immediately even when no matching background result exists", () => {
+    const html = renderToStaticMarkup(
+      createElement(OrderEditPreviewReview, { order, preview: null }),
+    );
+    expect(html).toContain("calculating discounts, shipping and tax");
+    expect(html).toContain("disabled");
+    expect(html).not.toContain("After changes");
   });
 });

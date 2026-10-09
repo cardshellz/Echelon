@@ -46,6 +46,8 @@ const calculationSchema = z.object({
         presentmentCurrencyCode: z.literal("USD"),
         acceptAutomaticDiscounts: z.literal(true),
         taxesIncluded: z.boolean(),
+        totalTaxSet: bag.optional(),
+        totalPriceSet: bag.optional(),
         shippingLine: z
           .object({
             title: z.string(),
@@ -79,6 +81,8 @@ const SHIPPING_OPTIONS_QUERY = `query EchelonEditShippingOptions($input: DraftOr
 const SHIPPING_CALCULATION = `mutation EchelonEditShippingCalculate($input: DraftOrderInput!) {
   draftOrderCalculate(input: $input) { userErrors { field message } calculatedDraftOrder {
     currencyCode presentmentCurrencyCode acceptAutomaticDiscounts taxesIncluded
+    totalTaxSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } }
+    totalPriceSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } }
     lineItems { quantity variant { id } discountedTotalSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } } }
     platformDiscounts { title code discountClasses totalAmountPriceSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } } }
     shippingLine { title originalPriceSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } }
@@ -143,6 +147,45 @@ export class ShopifyOrderEditShippingCalculator
     snapshot: OrderEditSnapshot,
     items: OrderEditShippingItem[],
   ): Promise<OrderEditShippingRepricing> {
+    return (await this.calculation(snapshot, items)).shippingRepricing;
+  }
+
+  async calculatePreview(
+    snapshot: OrderEditSnapshot,
+    items: OrderEditShippingItem[],
+  ) {
+    const result = await this.calculation(snapshot, items);
+    if (result.taxCents === null || result.totalCents === null)
+      fail(
+        "ORDER_EDIT_PREVIEW_TOTALS_MISSING",
+        "Shopify did not return complete tax and total amounts for the preview.",
+      );
+    const itemsCents = items.reduce(
+      (total, item) => total + BigInt(item.netCents),
+      BigInt(0),
+    );
+    const expected =
+      itemsCents +
+      BigInt(result.shippingRepricing.netCents) +
+      (snapshot.financials!.taxesIncluded
+        ? BigInt(0)
+        : BigInt(result.taxCents));
+    if (expected !== BigInt(result.totalCents))
+      fail(
+        "ORDER_EDIT_PREVIEW_TOTALS_MISMATCH",
+        "The preview items, shipping and tax do not reconcile to Shopify's total.",
+      );
+    return {
+      shippingRepricing: result.shippingRepricing,
+      taxCents: result.taxCents,
+      totalCents: result.totalCents,
+    };
+  }
+
+  private async calculation(
+    snapshot: OrderEditSnapshot,
+    items: OrderEditShippingItem[],
+  ) {
     const context = snapshot.shippingContext;
     if (
       !context ||
@@ -296,7 +339,7 @@ export class ShopifyOrderEditShippingCalculator
         "SHIPPING_DISCOUNT_UNVERIFIED",
         "Shipping discounts do not reconcile to the checkout charge.",
       );
-    return parse(orderEditShippingRepricingSchema, {
+    const shippingRepricing = parse(orderEditShippingRepricingSchema, {
       title: selected.title,
       code: selected.code,
       source: selected.source,
@@ -309,5 +352,12 @@ export class ShopifyOrderEditShippingCalculator
         ),
       ],
     });
+    return {
+      shippingRepricing,
+      taxCents: calculated.totalTaxSet ? amount(calculated.totalTaxSet) : null,
+      totalCents: calculated.totalPriceSet
+        ? amount(calculated.totalPriceSet)
+        : null,
+    };
   }
 }

@@ -10,6 +10,7 @@ import {
   savePendingOrderEditQuote,
   loadPendingOrderEditQuote,
   clearPendingOrderEditQuote,
+  matchingOrderEditPreview,
 } from "../../order-edits";
 import type {
   OrderEditOperation,
@@ -420,5 +421,172 @@ describe("interrupted quote recovery", () => {
       }),
     ).toThrow("could not be verified");
     expect(removeItem).not.toHaveBeenCalled();
+  });
+});
+
+const previewInput = {
+  connectionId: 3,
+  omsOrderId: 51,
+  expectedRevision: "revision-7",
+  changes: [{ lineItemId: "gid://shopify/LineItem/123", quantity: 2 }],
+  additions: [],
+};
+const previewResult = () => ({
+  phase: "preview" as const,
+  input: previewInput,
+  calculatedAt: "2026-10-09T12:00:00.000Z",
+  expiresAt: "2026-10-09T12:01:00.000Z",
+  financials: {
+    itemsGrossCents: 2000,
+    itemsDiscountCents: 0,
+    itemsNetCents: 2000,
+    itemDiscountLabels: [],
+    shippingGrossCents: 550,
+    shippingDiscountCents: 0,
+    shippingCents: 550,
+    shippingDiscountLabels: [],
+    taxCents: 60,
+    taxesIncluded: false,
+    totalCents: 2610,
+    lines: [{ id: "line", grossCents: 2000, discountCents: 0, netCents: 2000 }],
+  },
+  shippingRepricing: {
+    title: "Standard",
+    code: "standard",
+    source: "Echelon",
+    grossCents: 550,
+    discountCents: 0,
+    netCents: 550,
+    discountLabels: [],
+  },
+  lines: [
+    {
+      id: "line",
+      title: "Binder",
+      variantTitle: null,
+      quantity: 2,
+      totalCents: 2000,
+    },
+  ],
+});
+describe("calculation-only preview transport", () => {
+  it("cannot classify edit commands or keyed requests as read-only calculations", async () => {
+    const request = vi.fn<typeof fetch>();
+    for (const options of [
+      { path: "/quotes", method: "POST" as const },
+      { path: "/operations/id/commit", method: "POST" as const },
+      { path: "/previews", method: "PUT" as const },
+      { path: "/previews", method: "POST" as const, key },
+    ]) {
+      await expect(
+        orderEditRequest(
+          options.path,
+          schema,
+          { ...options, calculationOnly: true },
+          request,
+        ),
+      ).rejects.toMatchObject({
+        code: "ORDER_EDIT_PREVIEW_ENDPOINT_INVALID",
+        uncertain: false,
+      });
+    }
+    expect(request).not.toHaveBeenCalled();
+  });
+  it("sends abortable private calculations without a financial command key or saved operation", async () => {
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(previewResult()));
+    const signal = new AbortController().signal;
+    await createOrderEditTransport(request).preview(previewInput, signal);
+    expect(request).toHaveBeenCalledTimes(1);
+    const [url, options] = request.mock.calls[0];
+    expect(url).toBe("/api/order-edits/admin/previews");
+    expect(options).toMatchObject({
+      method: "POST",
+      signal,
+      credentials: "include",
+      cache: "no-store",
+    });
+    expect(new Headers(options?.headers).get("Idempotency-Key")).toBeNull();
+    expect(JSON.parse(String(options?.body))).toEqual(previewInput);
+  });
+  it("rejects mismatched cart/revision/shop identities and incomplete success responses", async () => {
+    for (const change of [
+      { omsOrderId: 999 },
+      { expectedRevision: "stale" },
+      { connectionId: 7 },
+      { changes: [{ lineItemId: "gid://shopify/LineItem/123", quantity: 3 }] },
+    ]) {
+      const request = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          jsonResponse({
+            ...previewResult(),
+            input: { ...previewInput, ...change },
+          }),
+        );
+      await expect(
+        createOrderEditTransport(request).preview(previewInput),
+      ).rejects.toMatchObject({
+        code: "ORDER_EDIT_IDENTITY_MISMATCH",
+        uncertain: false,
+      });
+    }
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(operation));
+    await expect(
+      createOrderEditTransport(request).preview(previewInput),
+    ).rejects.toMatchObject({
+      code: "ORDER_EDIT_RESPONSE_INVALID",
+      uncertain: false,
+    });
+  });
+  it("treats preview cancellation/disconnection as read-only; financial mutation uncertainty remains unchanged", async () => {
+    const aborted = vi
+      .fn<typeof fetch>()
+      .mockRejectedValue(new DOMException("aborted", "AbortError"));
+    await expect(
+      createOrderEditTransport(aborted).preview(previewInput),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    const disconnected = vi
+      .fn<typeof fetch>()
+      .mockRejectedValue(new TypeError("disconnected"));
+    await expect(
+      createOrderEditTransport(disconnected).preview(previewInput),
+    ).rejects.toMatchObject({ uncertain: false });
+    await expect(
+      createOrderEditTransport(disconnected).quote(quote),
+    ).rejects.toMatchObject({ uncertain: true });
+  });
+  it("accepts a preview only for the exact current intent and before its expiry", () => {
+    const now = Date.parse("2026-10-09T12:00:30.000Z");
+    expect(
+      matchingOrderEditPreview(previewResult(), previewInput, now),
+    ).not.toBeNull();
+    expect(
+      matchingOrderEditPreview(
+        previewResult(),
+        { ...previewInput, changes: [] },
+        now,
+      ),
+    ).toBeNull();
+    expect(
+      matchingOrderEditPreview(
+        previewResult(),
+        { ...previewInput, expectedRevision: "new" },
+        now,
+      ),
+    ).toBeNull();
+    expect(
+      matchingOrderEditPreview(
+        previewResult(),
+        previewInput,
+        Date.parse("2026-10-09T12:01:00.000Z"),
+      ),
+    ).toBeNull();
+    expect(
+      matchingOrderEditPreview(previewResult(), previewInput, Number.NaN),
+    ).toBeNull();
   });
 });

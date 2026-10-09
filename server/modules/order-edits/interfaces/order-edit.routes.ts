@@ -14,6 +14,12 @@ import {
 import type { OrderEditService } from "../application/order-edit.service";
 import { OrderEditError } from "../domain/order-edit-error";
 import { OrderEditProviderError } from "../application/order-edit-provider";
+import {
+  orderEditPreviewInputSchema,
+  orderEditPreviewScopeSchema,
+  orderEditPreviewSchema,
+  orderEditPreviewWarmSchema,
+} from "@shared/order-edits/order-edit-preview";
 
 const positiveId = z.coerce.number().int().positive().safe();
 const operationId = z.string().uuid();
@@ -45,6 +51,7 @@ export function registerOrderEditRoutes(
     (
       settings: boolean,
       work: (req: Request, res: Response, actorId: string) => Promise<void>,
+      calculationOnly = false,
     ) =>
     async (req: Request, res: Response): Promise<void> => {
       res.setHeader("Cache-Control", "no-store");
@@ -86,7 +93,7 @@ export function registerOrderEditRoutes(
               403,
             );
           }
-          operationId.parse(req.get("Idempotency-Key"));
+          if (!calculationOnly) operationId.parse(req.get("Idempotency-Key"));
         }
         await work(req, res, actorId);
       } catch (error) {
@@ -184,6 +191,40 @@ export function registerOrderEditRoutes(
         ),
       );
     }),
+  );
+  app.post(
+    `${ORDER_EDIT_API}/previews/warm`,
+    handle(
+      false,
+      async (req, res, actor) => {
+        res.json(
+          orderEditPreviewWarmSchema.parse(
+            await service.warmPreview(
+              orderEditPreviewScopeSchema.parse(req.body),
+              actor,
+            ),
+          ),
+        );
+      },
+      true,
+    ),
+  );
+  app.post(
+    `${ORDER_EDIT_API}/previews`,
+    handle(
+      false,
+      async (req, res, actor) => {
+        res.json(
+          orderEditPreviewSchema.parse(
+            await service.preview(
+              orderEditPreviewInputSchema.parse(req.body),
+              actor,
+            ),
+          ),
+        );
+      },
+      true,
+    ),
   );
   app.post(
     `${ORDER_EDIT_API}/quotes`,

@@ -1,3 +1,11 @@
+import { OrderEditPreviewService } from "../../application/order-edit-preview.service";
+import {
+  previewContext,
+  previewInput,
+  previewCalculation,
+  PREVIEW_NOW,
+} from "../fixtures/order-edit-preview.fixture";
+import type { OrderEditPlan } from "../../application/order-edit-provider";
 import {
   afterAll,
   beforeAll,
@@ -285,6 +293,88 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       await database.pool
         .query(`INSERT INTO inventory.availability_claims VALUES(1,10,'active',1,'satisfied',1,1,repeat('f',64));
       INSERT INTO inventory.availability_claim_lines VALUES(1,1,40,100,1,1,0,0,0,0);`);
+    });
+
+    it("background preview preserves every persisted source, warehouse, inventory and edit record", async () => {
+      const store = new PostgresOrderEditStore(database.pool);
+      const proof = await gateway.releaseUnchanged(20, OP);
+      await store.save(
+        { ...record(), version: 1, status: "expired" },
+        0,
+        "staff",
+        "fixture_closed",
+        proof,
+      );
+      await store.saveSettings(
+        4,
+        { enabled: true, paymentWindowMinutes: 30 },
+        "staff",
+        new Date(PREVIEW_NOW),
+      );
+      await database.pool.query(
+        "UPDATE oms.oms_orders SET external_customer_id='8' WHERE id=20",
+      );
+      const context = previewContext();
+      context.snapshot.orderId = "gid://shopify/Order/1";
+      const input = { ...previewInput(), omsOrderId: 20 };
+      const provider = {
+        readOrder: vi.fn(async () => structuredClone(context.snapshot)),
+        preparePreview: vi.fn(async () => structuredClone(context)),
+        preview: vi.fn(async (_context: unknown, plan: OrderEditPlan) =>
+          previewCalculation(context, { ...input, ...plan }),
+        ),
+        quote: vi.fn(),
+        commit: vi.fn(),
+        refund: vi.fn(),
+      };
+      const shipmentWrite = vi.fn();
+      const inspectOnly = new OrderEditWarehouseGateway(
+        database.pool,
+        {
+          isConfigured: () => true,
+          synchronizeOrderEditShipment: shipmentWrite,
+        },
+        vi.fn(),
+      );
+      const service = new OrderEditPreviewService(
+        store,
+        provider,
+        inspectOnly,
+        () => new Date(PREVIEW_NOW),
+      );
+      async function state() {
+        const result: Record<string, unknown> = {};
+        // Constant, test-owned table identities; compare full rows, not just counts.
+        for (const table of [
+          "oms.oms_orders",
+          "oms.oms_order_lines",
+          "wms.orders",
+          "wms.order_items",
+          "wms.outbound_shipments",
+          "inventory.availability_claims",
+          "inventory.availability_claim_lines",
+          "oms.order_edit_settings",
+          "oms.order_edit_operations",
+          "oms.order_edit_events",
+          "oms.order_edit_provider_holds",
+        ])
+          result[table] = (
+            await database.pool.query(
+              `SELECT COALESCE(jsonb_agg(to_jsonb(row) ORDER BY to_jsonb(row)::text), '[]'::jsonb) AS rows FROM ${table} row`,
+            )
+          ).rows[0].rows;
+        return result;
+      }
+      const before = await state();
+      const { changes, additions, ...scope } = input;
+      await service.warm(scope, "staff");
+      const result = await service.preview(input, "staff");
+      expect(result.financials.totalCents).toBe(22098);
+      expect(await state()).toEqual(before);
+      expect(provider.quote).not.toHaveBeenCalled();
+      expect(provider.commit).not.toHaveBeenCalled();
+      expect(provider.refund).not.toHaveBeenCalled();
+      expect(shipmentWrite).not.toHaveBeenCalled();
     });
     function synchronizer() {
       const reservation = vi.fn(async () => inventoryProjection());
