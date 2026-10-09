@@ -7,7 +7,8 @@
  * 3. Listing Feed (products ready to list)
  */
 
-import { ebayProductSyncResultSchema } from "@shared/types/ebay-listing-sync";
+import { ebayProductSyncResultSchema, ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
+import { z } from "zod";
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChannelWorkspaceHeader } from "@/components/channels/ChannelWorkspaceHeader";
@@ -383,6 +384,19 @@ export default function EbayChannelPage() {
     queryKey: ["/api/ebay/listing-feed"],
     enabled: !!config?.connected,
   });
+  const syncJobsQuery = useQuery({
+    queryKey: ["/api/ebay/listings/sync-jobs"],
+    queryFn: async () => z.array(ebayListingSyncJobSchema).parse(await (await apiRequest("GET", "/api/ebay/listings/sync-jobs")).json()),
+    enabled: !!config?.connected, refetchInterval: 10_000,
+  });
+  const latestSyncJobs = useMemo(() => {
+    const jobs = new Map<number, z.infer<typeof ebayListingSyncJobSchema>>();
+    for (const job of syncJobsQuery.data ?? []) if (!jobs.has(job.productId)) jobs.set(job.productId,job);
+    return jobs;
+  }, [syncJobsQuery.data]);
+  useEffect(() => {
+    queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+  }, [syncJobsQuery.dataUpdatedAt, queryClient]);
 
   const registrationStatusProductIds = useMemo(
     () => [...new Set(
@@ -690,29 +704,31 @@ export default function EbayChannelPage() {
   const [syncingProductIds, setSyncingProductIds] = useState<Set<number>>(new Set());
 
   const syncProductMutation = useMutation({
-    mutationFn: async (productId: number) => {
-      const resp = await apiRequest("POST", `/api/ebay/listings/sync-product/${productId}`);
+    mutationFn: async ({ productId, commandKey }: { productId: number; commandKey: string }) => {
+      const resp = await apiRequest("POST", `/api/ebay/listings/sync-product/${productId}`, { commandKey });
       return ebayProductSyncResultSchema.parse(await resp.json());
     },
-    onSuccess: (data, productId: number) => {
+    onSuccess: (data, { productId }) => {
       setSyncingProductIds((prev) => { const next = new Set(prev); next.delete(productId); return next; });
-      const { synced, priceChanges, qtyChanges, errors } = data;
+      const { synced, priceChanges, qtyChanges, errors, pending } = data;
       const changes: string[] = [];
       if (priceChanges > 0) changes.push(`${priceChanges} price`);
       if (qtyChanges > 0) changes.push(`${qtyChanges} qty`);
       const changeStr = changes.length > 0 ? `: ${changes.join(", ")} updated` : "";
       const errorMessage = data.details.find(detail => !detail.success && detail.error)?.error;
       toast({
-        title: errors > 0 ? (synced > 0 ? "Sync Incomplete" : "Sync Failed") : (synced > 0 ? "Product Synced" : "Nothing to Sync"),
+        title: errors > 0 ? (synced > 0 ? "Sync Incomplete" : "Sync Needs Attention") : pending > 0 ? "Sync Saved" : (synced > 0 ? "Product Synced" : "Nothing to Sync"),
         description: errors > 0
           ? `${synced} variant${synced !== 1 ? "s" : ""} synced; ${errors} error${errors !== 1 ? "s" : ""}. ${errorMessage || "Check the listing error and retry."}`
+          : pending > 0 ? "Your update is saved. Echelon will process it and recover interrupted work automatically. Progress remains available after you leave this page."
           : `Synced ${synced} variant${synced !== 1 ? "s" : ""}${changeStr}`,
         ...(errors > 0 ? { variant: "destructive" as const } : {}),
       });
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/listings/sync-jobs"] });
     },
-    onError: (err: Error, productId: number) => {
+    onError: (err: Error, { productId }) => {
       setSyncingProductIds((prev) => { const next = new Set(prev); next.delete(productId); return next; });
       const raw = err.message || "Unknown error";
       const isHtml = raw.includes("<!DOCTYPE") || raw.includes("<html");
@@ -723,7 +739,7 @@ export default function EbayChannelPage() {
 
   const handleSyncProduct = (productId: number) => {
     setSyncingProductIds((prev) => new Set([...prev, productId]));
-    syncProductMutation.mutate(productId);
+    syncProductMutation.mutate({ productId, commandKey: crypto.randomUUID() });
   };
 
   // ---- Verify / Reconcile Listings ----
@@ -1875,6 +1891,8 @@ export default function EbayChannelPage() {
                   </TableHeader>
                   <TableBody>
                     {filteredFeed.map((item) => {
+                      const syncJob = latestSyncJobs.get(item.id);
+                      const syncPending = syncJob && ["queued","running","recovering"].includes(syncJob.state);
                       const isExcluded = item.status === "excluded";
                       const isExpanded = expandedProducts.has(item.id);
                       const hasVariants = item.variants && item.variants.length > 0;
@@ -1965,6 +1983,12 @@ export default function EbayChannelPage() {
                             <span className={`font-medium text-sm ${isExcluded ? "line-through text-muted-foreground" : ""}`}>
                               {item.name}
                             </span>
+                            {syncJob && syncJob.state !== "completed" && (
+                              <p role="status" aria-label={`Sync status for ${item.name}`} className="text-xs mt-1" title={syncJob.message ?? undefined}>
+                                {syncJob.state === "queued" ? "Sync saved — waiting to run" : syncJob.state === "running" ? "Sync in progress" : syncJob.state === "recovering" ? "Sync saved — recovering automatically" : syncJob.state === "awaiting_evidence" ? "Sync needs evidence" : "Sync needs attention"}
+                                {syncJob.message && <span className="block text-muted-foreground">{syncJob.message}</span>}
+                              </p>
+                            )}
                             <div className="flex flex-wrap gap-1.5 mt-0.5">
                               {/* Variant count with inclusion info */}
                               {allIncluded ? (
@@ -2012,7 +2036,7 @@ export default function EbayChannelPage() {
                                   </Button>
                                 </>
                               )}
-                              {item.status === "error" && (
+                              {item.status === "error" && !syncPending && (
                                 <>
                                   <Badge variant="destructive" className="text-xs py-1 px-2">Error</Badge>
                                   <Button
@@ -2090,7 +2114,7 @@ export default function EbayChannelPage() {
                               )}
                             </div>
                             {/* Error message inline on mobile */}
-                            {item.syncError && (item.status === "error") && (
+                            {item.syncError && item.status === "error" && (!syncJob || syncJob.state === "completed") && (
                               <p className="text-xs text-red-600 mt-1 sm:hidden line-clamp-2" title={item.syncError}>
                                 {item.syncError}
                               </p>
@@ -2148,7 +2172,7 @@ export default function EbayChannelPage() {
                                     </Button>
                                   </>
                                 )}
-                                {item.status === "error" && (
+                                {item.status === "error" && !syncPending && (
                                   <>
                                     <Badge variant="destructive" className="text-xs" title={item.syncError || undefined}>Error</Badge>
                                     <Button
@@ -2238,7 +2262,7 @@ export default function EbayChannelPage() {
                                 )}
                               </div>
                               {/* Error message inline — desktop */}
-                              {item.syncError && item.status === "error" && (
+                              {item.syncError && item.status === "error" && (!syncJob || syncJob.state === "completed") && (
                                 <p className="text-[10px] text-red-600 max-w-[180px] truncate" title={item.syncError}>
                                   {item.syncError}
                                 </p>

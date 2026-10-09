@@ -65,8 +65,7 @@
     "modules/channels",
     "server/routes/ebay/ebay-listing-state.ts",
     "server/routes/ebay/ebay-listings.routes.ts",
-    "server/routes/ebay/ebay-policies.routes.ts",
-    "server/routes/ebay/ebay-sync-helpers.ts"
+    "server/routes/ebay/ebay-policies.routes.ts"
   ],
   "channels.channel_pricing": [
     "modules/channels"
@@ -110,6 +109,15 @@
     "modules/identity",
     "server/routes/ebay-oauth.routes.ts",
     "server/routes/pick-priority.routes.ts"
+  ],
+  "channels.ebay_listing_sync_commands": [
+    "modules/channels"
+  ],
+  "channels.ebay_listing_sync_events": [
+    "modules/channels"
+  ],
+  "channels.ebay_listing_sync_jobs": [
+    "modules/channels"
   ],
   "channels.partner_profiles": [
     "modules/channels"
@@ -748,6 +756,9 @@
     "modules/inventory-planning"
   ],
   "inventory.quantity_publication_reconciliations": [
+    "modules/inventory-planning"
+  ],
+  "inventory.quantity_publication_response_recoveries": [
     "modules/inventory-planning"
   ],
   "inventory.replen_followups": [

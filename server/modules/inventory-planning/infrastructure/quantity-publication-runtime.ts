@@ -4,9 +4,11 @@ import { QuantityPublicationAdmissionError, type QuantityPublicationScope } from
 import { createAuthorityAwareInventoryPublicationService } from "./inventory-availability-runtime-publication.repository";
 import { QuantityPublicationCatchupService } from "../application/quantity-publication-admission.port";
 import type { EbayQuantityRequestAdmission } from "../../channels/quantity-publication-request";
+import { PostgresQuantityProviderResponseRecovery } from "./quantity-provider-response-recovery.repository";
 
 /** Shared production instance bounds nested provider connections across the known quantity owners. */
 export const quantityPublicationAdmission = new PostgresQuantityPublicationAdmission(pool);
+export const quantityProviderResponseRecovery = new PostgresQuantityProviderResponseRecovery(pool, () => new Date());
 
 function ebayRequestAdmission(base: Omit<QuantityPublicationScope, "externalInventoryItemId">): EbayQuantityRequestAdmission {
   const scope = (identity: string): QuantityPublicationScope => ({ ...base, externalInventoryItemId: identity });
@@ -18,13 +20,15 @@ function ebayRequestAdmission(base: Omit<QuantityPublicationScope, "externalInve
 }
 
 export async function createChannelEbayQuantityRequestAdmission(input: {
-  channelId: number; externalAccountId: string;
+  channelId: number; externalAccountId: string; expectedConnectionId?: number;
 }): Promise<EbayQuantityRequestAdmission> {
   const connections = (await pool.query<{ id: number }>(
     "SELECT id FROM channels.channel_connections WHERE channel_id=$1 ORDER BY id LIMIT 2", [input.channelId],
   )).rows;
   if (connections.length !== 1) throw new QuantityPublicationAdmissionError(
     "PUBLICATION_CONNECTION_AMBIGUOUS", "An exact channel credential connection is required before quantity publication.");
+  if(input.expectedConnectionId!==undefined && connections[0].id!==input.expectedConnectionId) throw new QuantityPublicationAdmissionError(
+    "EBAY_SYNC_IDENTITY_CHANGED","The listing sync credential connection changed before publication.");
   return ebayRequestAdmission({ destinationKind: "channel_connection", connectionId: connections[0].id,
     providerKey: "ebay", providerScopeType: "account", externalScopeId: input.externalAccountId, productId: null, productVariantId: null });
 }
@@ -101,5 +105,5 @@ export function createQuantityPublicationCatchupService(input: {
     // failure before provider I/O must not manufacture an uncertain write.
     // The adapter still owns the gate, authority recheck and attempt journal.
     await quantityPublicationAdmission.withLegacyCatchupScope(scope, () => input.refreshLegacyChannelScope(scope), claim);
-  });
+  }, limit => quantityProviderResponseRecovery.reconcile(undefined,limit));
 }

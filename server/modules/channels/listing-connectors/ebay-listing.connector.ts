@@ -1,4 +1,11 @@
 import { createHash } from "node:crypto";
+import Decimal from "decimal.js";
+import { canonicalJson } from "@shared/utils/canonical-json";
+import {
+  EbayListingSyncError,
+  syncStageHash,
+  type EbayListingSyncIdentity,
+} from "../ebay-listing-sync.domain";
 import type {
   BuiltInventoryItem,
   BuiltItemGroup,
@@ -131,6 +138,73 @@ interface ResolvedPushOffer {
   existingOfferId: string | null;
 }
 
+async function runSyncStage(
+  stage:
+    | ((key: string, hash: string, work: () => Promise<void>) => Promise<void>)
+    | undefined,
+  key: string,
+  payload: unknown,
+  work: () => Promise<void>,
+): Promise<void> {
+  if (stage) return stage(key, syncStageHash(payload), work);
+  await work();
+}
+function readbackPending(resource: string): EbayListingSyncError {
+  return new EbayListingSyncError(
+    "EBAY_SYNC_READBACK_PENDING",
+    `Waiting for eBay to expose the requested content and published identity of ${resource}.`,
+  );
+}
+function matchesSyncContent(actual: unknown, expected: unknown): boolean {
+  if (
+    expected &&
+    typeof expected === "object" &&
+    "currency" in expected &&
+    "value" in expected
+  ) {
+    const observed =
+      actual && typeof actual === "object"
+        ? (actual as Record<string, unknown>)
+        : null;
+    if (
+      !observed ||
+      observed.currency !== expected.currency ||
+      typeof observed.value !== "string" ||
+      typeof expected.value !== "string" ||
+      !/^[0-9]+(?:\.[0-9]+)?$/.test(observed.value) ||
+      !/^[0-9]+(?:\.[0-9]+)?$/.test(expected.value)
+    )
+      return false;
+    return new Decimal(observed.value).equals(new Decimal(expected.value));
+  }
+  if (expected === null || typeof expected !== "object")
+    return actual === expected;
+  if (Array.isArray(expected))
+    return (
+      Array.isArray(actual) && canonicalJson(actual) === canonicalJson(expected)
+    );
+  return (
+    actual !== null &&
+    typeof actual === "object" &&
+    !Array.isArray(actual) &&
+    Object.entries(expected).every(
+      ([key, value]) =>
+        value === undefined ||
+        (key === "variantSKUs" && Array.isArray(value)
+          ? Array.isArray((actual as Record<string, unknown>)[key]) &&
+            canonicalJson(
+              [
+                ...((actual as Record<string, unknown>)[key] as unknown[]),
+              ].sort(),
+            ) === canonicalJson([...value].sort())
+          : matchesSyncContent(
+              (actual as Record<string, unknown>)[key],
+              value,
+            )),
+    )
+  );
+}
+
 export class EbayMarketplaceListingConnector {
   private readonly delay: (ms: number) => Promise<void>;
   private readonly inventoryDelayMs: number;
@@ -141,7 +215,9 @@ export class EbayMarketplaceListingConnector {
     this.delay = options.delay ?? (() => Promise.resolve());
     this.inventoryDelayMs = options.inventoryDelayMs ?? 0;
     this.offerDelayMs = options.offerDelayMs ?? 0;
-    this.groupPublishRetryDelaysMs = options.groupPublishRetryDelaysMs ?? [250, 750, 1_500];
+    this.groupPublishRetryDelaysMs = options.groupPublishRetryDelaysMs ?? [
+      250, 750, 1_500,
+    ];
   }
 
   async pushListing(input: {
@@ -155,14 +231,19 @@ export class EbayMarketplaceListingConnector {
     let firstListingId: string | undefined;
 
     for (const offer of input.draft.offers) {
-      let existingOfferId = input.draft.existingOfferIdsByVariantId?.[offer.variantId] ?? null;
+      let existingOfferId =
+        input.draft.existingOfferIdsByVariantId?.[offer.variantId] ?? null;
       if (!existingOfferId) {
-        const existingOffers = await input.client.getOffers(offer.sku, input.draft.marketplaceId);
+        const existingOffers = await input.client.getOffers(
+          offer.sku,
+          input.draft.marketplaceId,
+        );
         const existingOffer = existingOffers.offers[0];
         existingOfferId = existingOffer?.offerId ?? null;
-        const existingListingId = existingOffer === undefined
-          ? undefined
-          : observedOfferListingId(existingOffer);
+        const existingListingId =
+          existingOffer === undefined
+            ? undefined
+            : observedOfferListingId(existingOffer);
         if (existingListingId && !firstListingId) {
           firstListingId = existingListingId;
         }
@@ -196,7 +277,10 @@ export class EbayMarketplaceListingConnector {
 
       const offerId = await input.client.createOffer(offer.payload);
       if (input.draft.updateOfferAfterCreate) {
-        await input.client.updateOffer(offerId, withOfferId(offer.payload, offerId));
+        await input.client.updateOffer(
+          offerId,
+          withOfferId(offer.payload, offerId),
+        );
       }
       offerIdsByVariantId[offer.variantId] = offerId;
       await this.delay(this.offerDelayMs);
@@ -226,7 +310,9 @@ export class EbayMarketplaceListingConnector {
   }): Promise<EbayListingRebuildPreview> {
     validateRebuildInput(input.draft, input.currentExternalListingId);
     const itemGroup = input.draft.itemGroup!;
-    const remoteGroup = await input.client.getInventoryItemGroup(itemGroup.groupKey);
+    const remoteGroup = await input.client.getInventoryItemGroup(
+      itemGroup.groupKey,
+    );
     if (!remoteGroup) {
       throw new Error("The current eBay variation group could not be found.");
     }
@@ -234,7 +320,9 @@ export class EbayMarketplaceListingConnector {
     const currentSkus = normalizedSkus(remoteGroup.variantSKUs);
     const desiredSkus = normalizedSkus(itemGroup.payload.variantSKUs);
     if (currentSkus.length === 0 || desiredSkus.length === 0) {
-      throw new Error("Current and desired eBay variation groups must contain at least one SKU.");
+      throw new Error(
+        "Current and desired eBay variation groups must contain at least one SKU.",
+      );
     }
     const currentPublication = await inspectListingPublication({
       client: input.client,
@@ -242,9 +330,10 @@ export class EbayMarketplaceListingConnector {
       marketplaceId: input.draft.marketplaceId,
       expectedListingId: input.currentExternalListingId,
     });
-    const activeSkus = currentPublication.state === "active"
-      ? normalizedSkus([...currentPublication.offerIdsBySku.keys()])
-      : [];
+    const activeSkus =
+      currentPublication.state === "active"
+        ? normalizedSkus([...currentPublication.offerIdsBySku.keys()])
+        : [];
     const active = new Set(activeSkus);
     const inactiveSkus = currentSkus.filter((sku) => !active.has(sku));
     const desired = new Set(desiredSkus);
@@ -262,7 +351,9 @@ export class EbayMarketplaceListingConnector {
     };
     return {
       ...previewWithoutToken,
-      rebuildRequired: previewWithoutToken.removedSkus.length > 0 || previewWithoutToken.sourceState === "withdrawn",
+      rebuildRequired:
+        previewWithoutToken.removedSkus.length > 0 ||
+        previewWithoutToken.sourceState === "withdrawn",
       confirmationToken: rebuildConfirmationToken(previewWithoutToken),
     };
   }
@@ -279,7 +370,9 @@ export class EbayMarketplaceListingConnector {
     }
 
     const itemGroup = input.draft.itemGroup!;
-    const remoteGroup = await input.client.getInventoryItemGroup(itemGroup.groupKey);
+    const remoteGroup = await input.client.getInventoryItemGroup(
+      itemGroup.groupKey,
+    );
     if (remoteGroup) {
       const observedSkus = normalizedSkus(remoteGroup.variantSKUs);
       if (sameStrings(observedSkus, input.preview.currentSkus)) {
@@ -303,14 +396,21 @@ export class EbayMarketplaceListingConnector {
           marketplaceId: input.draft.marketplaceId,
         });
         if (targetPublication.state === "active") {
-          if (targetPublication.listingId === input.preview.currentExternalListingId) {
-            throw new Error("eBay still associates the desired variation group with the old listing identity.");
+          if (
+            targetPublication.listingId ===
+            input.preview.currentExternalListingId
+          ) {
+            throw new Error(
+              "eBay still associates the desired variation group with the old listing identity.",
+            );
           }
           const externalOfferIds: Record<number, string> = {};
           for (const offer of input.draft.offers) {
             const offerId = targetPublication.offerIdsBySku.get(offer.sku);
             if (!offerId) {
-              throw new Error(`The published replacement is missing an offer for ${offer.sku}.`);
+              throw new Error(
+                `The published replacement is missing an offer for ${offer.sku}.`,
+              );
             }
             externalOfferIds[offer.variantId] = offerId;
           }
@@ -326,7 +426,9 @@ export class EbayMarketplaceListingConnector {
           };
         }
       } else {
-        throw new Error("The eBay variation group changed after rebuild confirmation. Preview it again.");
+        throw new Error(
+          "The eBay variation group changed after rebuild confirmation. Preview it again.",
+        );
       }
     }
 
@@ -339,8 +441,13 @@ export class EbayMarketplaceListingConnector {
         existingExternalProductId: null,
       },
     });
-    if (!result.externalProductId || result.externalProductId === input.preview.currentExternalListingId) {
-      throw new Error("eBay did not return a new listing identity after rebuilding the listing.");
+    if (
+      !result.externalProductId ||
+      result.externalProductId === input.preview.currentExternalListingId
+    ) {
+      throw new Error(
+        "eBay did not return a new listing identity after rebuilding the listing.",
+      );
     }
     return {
       ...result,
@@ -361,15 +468,23 @@ export class EbayMarketplaceListingConnector {
       currentExternalListingId: input.preview.currentExternalListingId,
     });
     if (currentPreview.confirmationToken !== input.preview.confirmationToken) {
-      throw new Error("The live eBay listing changed after review. Read eBay again before updating it.");
+      throw new Error(
+        "The live eBay listing changed after review. Read eBay again before updating it.",
+      );
     }
     if (currentPreview.sourceState !== "active") {
-      throw new Error("The current eBay listing is no longer active and cannot be updated in place.");
+      throw new Error(
+        "The current eBay listing is no longer active and cannot be updated in place.",
+      );
     }
 
-    const liveGroup = await input.client.getInventoryItemGroup(currentPreview.groupKey);
+    const liveGroup = await input.client.getInventoryItemGroup(
+      currentPreview.groupKey,
+    );
     if (!liveGroup) {
-      throw new Error("The current eBay variation group could not be found after review.");
+      throw new Error(
+        "The current eBay variation group could not be found after review.",
+      );
     }
     const alignedDraft = alignDraftVariationSchemaToLiveGroup({
       draft: {
@@ -388,7 +503,9 @@ export class EbayMarketplaceListingConnector {
       removedSkus: currentPreview.removedSkus,
     });
     if (result.externalProductId !== currentPreview.currentExternalListingId) {
-      throw new Error("eBay did not preserve the reviewed listing id during the in-place update.");
+      throw new Error(
+        "eBay did not preserve the reviewed listing id during the in-place update.",
+      );
     }
     return { ...result, removedSkus: [...currentPreview.removedSkus] };
   }
@@ -405,7 +522,10 @@ export class EbayMarketplaceListingConnector {
     addedSkus: readonly string[];
     removedSkus: readonly string[];
   }): Promise<EbayListingConnectorResult> {
-    const resolvedOffers = await this.resolvePushOffers(input.client, input.draft);
+    const resolvedOffers = await this.resolvePushOffers(
+      input.client,
+      input.draft,
+    );
     const offerIdsByVariantId: Record<number, string> = {};
     const originalGroup = toWritableGroupPayload(input.currentGroup);
     let workingGroup = input.currentGroup;
@@ -419,10 +539,16 @@ export class EbayMarketplaceListingConnector {
     try {
       for (const item of inventoryItemsToPrepare) {
         try {
-          await input.client.createOrReplaceInventoryItem(item.sku, item.payload);
+          await input.client.createOrReplaceInventoryItem(
+            item.sku,
+            item.payload,
+          );
         } catch (error) {
           const currentMembers = normalizedSkus(workingGroup.variantSKUs);
-          if (!isVariationSpecificsMismatchError(error) || !currentMembers.includes(item.sku)) {
+          if (
+            !isVariationSpecificsMismatchError(error) ||
+            !currentMembers.includes(item.sku)
+          ) {
             throw error;
           }
 
@@ -439,7 +565,10 @@ export class EbayMarketplaceListingConnector {
             ...transitionGroup,
             inventoryItemGroupKey: input.draft.itemGroup.groupKey,
           };
-          await input.client.createOrReplaceInventoryItem(item.sku, item.payload);
+          await input.client.createOrReplaceInventoryItem(
+            item.sku,
+            item.payload,
+          );
         }
         await this.delay(this.inventoryDelayMs);
       }
@@ -452,7 +581,10 @@ export class EbayMarketplaceListingConnector {
         );
         targetGroupApplied = true;
       } catch (error) {
-        if (input.removedSkus.length === 0 || !isInvalidInventoryItemGroupError(error)) {
+        if (
+          input.removedSkus.length === 0 ||
+          !isInvalidInventoryItemGroupError(error)
+        ) {
           throw error;
         }
         const currentGroup = await input.client.getInventoryItemGroup(
@@ -477,14 +609,21 @@ export class EbayMarketplaceListingConnector {
           ? existingOfferId
           : await input.client.createOffer(offer.payload);
         if (existingOfferId || input.draft.updateOfferAfterCreate) {
-          await input.client.updateOffer(offerId, withOfferId(offer.payload, offerId));
+          await input.client.updateOffer(
+            offerId,
+            withOfferId(offer.payload, offerId),
+          );
         }
         offerIdsByVariantId[offer.variantId] = offerId;
         await this.delay(this.offerDelayMs);
       }
 
       for (const sku of retainedRemovedSkus) {
-        await this.disableRetainedVariation(input.client, sku, input.draft.marketplaceId);
+        await this.disableRetainedVariation(
+          input.client,
+          sku,
+          input.draft.marketplaceId,
+        );
       }
     } catch (error) {
       if (temporaryTransitionApplied && !targetGroupApplied) {
@@ -494,9 +633,10 @@ export class EbayMarketplaceListingConnector {
             originalGroup,
           );
         } catch (recoveryError) {
-          const recoveryMessage = recoveryError instanceof Error
-            ? recoveryError.message
-            : String(recoveryError);
+          const recoveryMessage =
+            recoveryError instanceof Error
+              ? recoveryError.message
+              : String(recoveryError);
           throw new Error(
             `eBay variation schema transition failed and the original group could not be restored: ${recoveryMessage}`,
             { cause: error },
@@ -514,7 +654,10 @@ export class EbayMarketplaceListingConnector {
     return {
       productId: input.draft.productId,
       status: "updated",
-      externalProductId: publishResult.listingId ?? input.draft.existingExternalProductId ?? undefined,
+      externalProductId:
+        publishResult.listingId ??
+        input.draft.existingExternalProductId ??
+        undefined,
       externalVariantIds: offerIdsByVariantId,
       externalOfferIds: offerIdsByVariantId,
       published: true,
@@ -528,25 +671,35 @@ export class EbayMarketplaceListingConnector {
     const resolved: ResolvedPushOffer[] = [];
     const expectedListingId = draft.existingExternalProductId?.trim();
     for (const offer of draft.offers) {
-      let existingOfferId = draft.existingOfferIdsByVariantId?.[offer.variantId] ?? null;
+      let existingOfferId =
+        draft.existingOfferIdsByVariantId?.[offer.variantId] ?? null;
       if (!existingOfferId) {
         const response = await client.getOffers(offer.sku, draft.marketplaceId);
         const conflictingPublishedOffer = response.offers.find((candidate) => {
           const listingId = observedOfferListingId(candidate);
-          return isPublishedObservedOffer(candidate)
-            && listingId !== undefined
-            && listingId !== expectedListingId;
+          return (
+            isPublishedObservedOffer(candidate) &&
+            listingId !== undefined &&
+            listingId !== expectedListingId
+          );
         });
         if (conflictingPublishedOffer) {
-          throw new Error(`The eBay variation ${offer.sku} belongs to a different active listing.`);
+          throw new Error(
+            `The eBay variation ${offer.sku} belongs to a different active listing.`,
+          );
         }
 
         const candidates = response.offers.filter((candidate) => {
           const listingId = observedOfferListingId(candidate);
-          return listingId === expectedListingId || !isPublishedObservedOffer(candidate);
+          return (
+            listingId === expectedListingId ||
+            !isPublishedObservedOffer(candidate)
+          );
         });
         if (candidates.length > 1) {
-          throw new Error(`The eBay variation ${offer.sku} has multiple offers that could be updated.`);
+          throw new Error(
+            `The eBay variation ${offer.sku} has multiple offers that could be updated.`,
+          );
         }
         existingOfferId = candidates[0]?.offerId ?? null;
       }
@@ -562,30 +715,84 @@ export class EbayMarketplaceListingConnector {
   ): Promise<void> {
     const inventoryItem = await client.getInventoryItem(sku);
     if (!inventoryItem) {
-      throw new Error(`Cannot retain removed eBay variation ${sku} because its inventory item was not found.`);
+      throw new Error(
+        `Cannot retain removed eBay variation ${sku} because its inventory item was not found.`,
+      );
     }
     const response = await client.getOffers(sku, marketplaceId);
-    const inventoryQuantity = inventoryItem.availability.shipToLocationAvailability.quantity;
-    const offersAlreadyZero = response.offers.every((offer) => offer.availableQuantity === 0);
+    const inventoryQuantity =
+      inventoryItem.availability.shipToLocationAvailability.quantity;
+    const offersAlreadyZero = response.offers.every(
+      (offer) => offer.availableQuantity === 0,
+    );
     if (inventoryQuantity === 0 && offersAlreadyZero) return;
 
     const result = await client.bulkUpdatePriceQuantity({
-      requests: [{
-        sku,
-        shipToLocationAvailability: { quantity: 0 },
-        offers: response.offers.map((offer) => ({
-          offerId: offer.offerId,
-          availableQuantity: 0,
-        })),
-      }],
+      requests: [
+        {
+          sku,
+          shipToLocationAvailability: { quantity: 0 },
+          offers: response.offers.map((offer) => ({
+            offerId: offer.offerId,
+            availableQuantity: 0,
+          })),
+        },
+      ],
     });
     assertBulkQuantityUpdateSucceeded(result, sku);
   }
 
   async syncExistingListing(input: {
     client: EbayListingConnectorClient;
-    draft: Pick<EbayListingConnectorDraft, "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup">;
+    draft: Pick<
+      EbayListingConnectorDraft,
+      "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup"
+    >;
+    identity?: EbayListingSyncIdentity;
+    stage?: (
+      key: string,
+      hash: string,
+      work: () => Promise<void>,
+    ) => Promise<void>;
   }): Promise<EbayExistingListingSyncResult> {
+    if (input.identity) {
+      const identity = input.identity,
+        skus = new Set(identity.variants.map((member) => member.sku));
+      if (
+        input.draft.productId !== identity.productId ||
+        input.draft.marketplaceId !== identity.marketplaceId ||
+        input.draft.inventoryItems.length !== skus.size ||
+        new Set(input.draft.inventoryItems.map((item) => item.sku)).size !==
+          skus.size ||
+        input.draft.inventoryItems.some((item) => !skus.has(item.sku)) ||
+        input.draft.offers.length !== identity.variants.length ||
+        new Set(input.draft.offers.map((offer) => offer.variantId)).size !==
+          identity.variants.length ||
+        input.draft.offers.some(
+          (offer) =>
+            !identity.variants.some(
+              (member) =>
+                member.variantId === offer.variantId &&
+                member.sku === offer.sku,
+            ),
+        ) ||
+        (identity.variants.length > 1 && !input.draft.itemGroup) ||
+        (input.draft.itemGroup &&
+          (input.draft.itemGroup.groupKey !== identity.groupKey ||
+            !Array.isArray(input.draft.itemGroup.payload.variantSKUs) ||
+            input.draft.itemGroup.payload.variantSKUs.length !== skus.size ||
+            new Set(input.draft.itemGroup.payload.variantSKUs).size !==
+              skus.size ||
+            input.draft.itemGroup.payload.variantSKUs.some(
+              (sku) => !skus.has(sku),
+            )))
+      ) {
+        throw new EbayListingSyncError(
+          "EBAY_SYNC_DRAFT_SCOPE_INVALID",
+          "The prepared update contains a different listing, group or SKU identity.",
+        );
+      }
+    }
     validateMaintenanceDraft(input.draft);
 
     const updatedInventorySkus: string[] = [];
@@ -595,26 +802,59 @@ export class EbayMarketplaceListingConnector {
     let itemGroupUpdated = false;
 
     for (const offer of input.draft.offers) {
-      const existingOffers = await input.client.getOffers(offer.sku, input.draft.marketplaceId);
-      const existingOffer = existingOffers.offers[0];
+      const existingOffers = await input.client.getOffers(
+        offer.sku,
+        input.draft.marketplaceId,
+      );
+      const expected = input.identity?.variants.find(
+        (member) =>
+          member.variantId === offer.variantId && member.sku === offer.sku,
+      );
+      const matches = expected
+        ? existingOffers.offers.filter(
+            (candidate) =>
+              candidate.sku === expected.sku &&
+              (!expected.offerId || candidate.offerId === expected.offerId) &&
+              (!expected.listingId ||
+                (candidate.listingId ?? candidate.listing?.listingId) ===
+                  expected.listingId) &&
+              candidate.status === "PUBLISHED",
+          )
+        : existingOffers.offers;
+      if (input.identity && (!expected || matches.length !== 1))
+        throw new EbayListingSyncError(
+          "EBAY_SYNC_OFFER_IDENTITY_CHANGED",
+          "The published offer no longer matches this saved SKU and listing identity.",
+        );
+      const existingOffer = matches[0];
       if (!existingOffer?.offerId) {
         missingOfferVariantIds.push(offer.variantId);
         continue;
       }
 
-      if (listingPoliciesChanged(existingOffer.listingPolicies, offer.payload.listingPolicies)) {
+      if (
+        listingPoliciesChanged(
+          existingOffer.listingPolicies,
+          offer.payload.listingPolicies,
+        )
+      ) {
         policyChangedVariantIds.push(offer.variantId);
       }
-      await input.client.updateOffer(
-        existingOffer.offerId,
-        withOfferId(offer.payload, existingOffer.offerId),
+      const payload = withOfferId(offer.payload, existingOffer.offerId);
+      await runSyncStage(
+        input.stage,
+        `offer:${existingOffer.offerId}`,
+        payload,
+        () => input.client.updateOffer(existingOffer.offerId, payload),
       );
       updatedOfferIds[offer.variantId] = existingOffer.offerId;
       await this.delay(this.offerDelayMs);
     }
 
     for (const item of input.draft.inventoryItems) {
-      await input.client.createOrReplaceInventoryItem(item.sku, item.payload);
+      await runSyncStage(input.stage, `item:${item.sku}`, item.payload, () =>
+        input.client.createOrReplaceInventoryItem(item.sku, item.payload),
+      );
       updatedInventorySkus.push(item.sku);
       await this.delay(this.inventoryDelayMs);
     }
@@ -624,9 +864,16 @@ export class EbayMarketplaceListingConnector {
     // Do not replace group membership when any sellable offer is missing;
     // doing so can partially rewrite an active multi-variation listing.
     if (input.draft.itemGroup && missingOfferVariantIds.length === 0) {
-      await input.client.createOrReplaceInventoryItemGroup(
-        input.draft.itemGroup.groupKey,
-        input.draft.itemGroup.payload,
+      const group = input.draft.itemGroup;
+      await runSyncStage(
+        input.stage,
+        `group:${group.groupKey}`,
+        group.payload,
+        () =>
+          input.client.createOrReplaceInventoryItemGroup(
+            group.groupKey,
+            group.payload,
+          ),
       );
       itemGroupUpdated = true;
     }
@@ -639,6 +886,64 @@ export class EbayMarketplaceListingConnector {
       policyChangedVariantIds,
       itemGroupUpdated,
     };
+  }
+
+  /** Current resource content plus the exact PUBLISHED offer/listing identity,
+   * not just a successful PUT. Quantity is intentionally omitted: its admission
+   * owner may have refreshed canonical ATP since the draft was prepared. */
+  async verifyExistingListing(input: {
+    client: EbayListingConnectorClient &
+      Pick<EbayListingLifecycleClient, "getInventoryItemGroup">;
+    draft: Pick<
+      EbayListingConnectorDraft,
+      "inventoryItems" | "offers" | "itemGroup" | "marketplaceId"
+    >;
+    identity: EbayListingSyncIdentity;
+    offerIds: Record<number, string>;
+  }): Promise<void> {
+    for (const item of input.draft.inventoryItems) {
+      const current = await input.client.getInventoryItem(item.sku);
+      const { availability: _quantity, ...expected } = item.payload;
+      if (
+        !current ||
+        current.sku !== item.sku ||
+        !matchesSyncContent(current, expected)
+      )
+        throw readbackPending(`inventory item ${item.sku}`);
+    }
+    for (const offer of input.draft.offers) {
+      const offers = await input.client.getOffers(
+        offer.sku,
+        input.draft.marketplaceId,
+      );
+      const current = offers.offers.find(
+        (row) => row.offerId === input.offerIds[offer.variantId],
+      );
+      const expectedIdentity = input.identity.variants.find(
+        (row) => row.variantId === offer.variantId,
+      );
+      const { availableQuantity: _quantity, ...expected } = offer.payload;
+      if (
+        !current ||
+        current.status !== "PUBLISHED" ||
+        current.sku !== offer.sku ||
+        (expectedIdentity?.listingId &&
+          (current.listingId ?? current.listing?.listingId) !==
+            expectedIdentity.listingId) ||
+        !matchesSyncContent(current, expected)
+      )
+        throw readbackPending(`offer for ${offer.sku}`);
+    }
+    if (input.draft.itemGroup) {
+      const group = input.draft.itemGroup;
+      const current = await input.client.getInventoryItemGroup(group.groupKey);
+      if (
+        !current ||
+        current.inventoryItemGroupKey !== group.groupKey ||
+        !matchesSyncContent(current, group.payload)
+      )
+        throw readbackPending(`group ${group.groupKey}`);
+    }
   }
 
   async getExistingInventoryImageUrls(input: {
@@ -656,15 +961,23 @@ export class EbayMarketplaceListingConnector {
   }): Promise<EbayListingStatusInspection> {
     const inventoryItem = await input.client.getInventoryItem(input.sku);
     if (!inventoryItem) {
-      return { inventoryItemExists: false, hasActiveOffer: false, availableQuantity: null };
+      return {
+        inventoryItemExists: false,
+        hasActiveOffer: false,
+        availableQuantity: null,
+      };
     }
 
     const offers = await input.client.getOffers(input.sku, input.marketplaceId);
     const activeOffers = offers.offers.filter(isPublishedObservedOffer);
     const quantities = activeOffers
       .map((offer) => offer.availableQuantity)
-      .filter((quantity): quantity is number => Number.isSafeInteger(quantity) && quantity >= 0);
-    const availableQuantity = quantities.length > 0 ? Math.max(...quantities) : 0;
+      .filter(
+        (quantity): quantity is number =>
+          Number.isSafeInteger(quantity) && quantity >= 0,
+      );
+    const availableQuantity =
+      quantities.length > 0 ? Math.max(...quantities) : 0;
     return {
       inventoryItemExists: true,
       hasActiveOffer: activeOffers.length > 0,
@@ -679,9 +992,11 @@ export class EbayMarketplaceListingConnector {
     firstListingId?: string;
   }): Promise<string | undefined> {
     if (input.draft.publishMode === "stage") {
-      return input.draft.existingExternalProductId
-        ?? input.firstListingId
-        ?? firstValue(input.offerIdsByVariantId);
+      return (
+        input.draft.existingExternalProductId ??
+        input.firstListingId ??
+        firstValue(input.offerIdsByVariantId)
+      );
     }
 
     if (input.draft.itemGroup) {
@@ -694,7 +1009,11 @@ export class EbayMarketplaceListingConnector {
         groupKey: input.draft.itemGroup.groupKey,
         marketplaceId: input.draft.marketplaceId,
       });
-      return publishResult.listingId ?? input.draft.existingExternalProductId ?? input.firstListingId;
+      return (
+        publishResult.listingId ??
+        input.draft.existingExternalProductId ??
+        input.firstListingId
+      );
     }
 
     const offerId = firstValue(input.offerIdsByVariantId);
@@ -702,7 +1021,11 @@ export class EbayMarketplaceListingConnector {
       throw new Error("Cannot publish eBay listing without an offer id.");
     }
     const publishResult = await input.client.publishOffer(offerId);
-    return publishResult.listingId ?? input.draft.existingExternalProductId ?? input.firstListingId;
+    return (
+      publishResult.listingId ??
+      input.draft.existingExternalProductId ??
+      input.firstListingId
+    );
   }
 
   private async publishGroupWithConsistencyRetry(input: {
@@ -719,7 +1042,10 @@ export class EbayMarketplaceListingConnector {
         );
       } catch (error) {
         const delayMs = this.groupPublishRetryDelaysMs[attempt];
-        if (delayMs === undefined || !isRetryableGroupPublishConsistencyError(error)) {
+        if (
+          delayMs === undefined ||
+          !isRetryableGroupPublishConsistencyError(error)
+        ) {
           throw error;
         }
         attempt += 1;
@@ -746,7 +1072,10 @@ function toWritableGroupPayload(
 ): Omit<EbayInventoryItemGroup, "inventoryItemGroupKey"> {
   return {
     aspects: Object.fromEntries(
-      Object.entries(group.aspects).map(([name, values]) => [name, [...values]]),
+      Object.entries(group.aspects).map(([name, values]) => [
+        name,
+        [...values],
+      ]),
     ),
     description: group.description,
     imageUrls: [...group.imageUrls],
@@ -769,7 +1098,9 @@ function buildGroupWithoutVariation(input: {
   item: BuiltInventoryItem;
 }): Omit<EbayInventoryItemGroup, "inventoryItemGroupKey"> {
   const currentMembers = normalizedSkus(input.currentGroup.variantSKUs);
-  const remainingMembers = currentMembers.filter((sku) => sku !== input.item.sku);
+  const remainingMembers = currentMembers.filter(
+    (sku) => sku !== input.item.sku,
+  );
   if (remainingMembers.length < 2) {
     throw new Error(
       `Cannot transition eBay variation ${input.item.sku} because temporarily detaching it would leave fewer than two group members.`,
@@ -777,21 +1108,25 @@ function buildGroupWithoutVariation(input: {
   }
 
   const itemAspects = input.item.payload.product.aspects ?? {};
-  const specifications = input.currentGroup.variesBy.specifications.map((specification) => {
-    const itemValues = normalizedSkus(itemAspects[specification.name]);
-    if (itemValues.length !== 1) {
-      throw new Error(
-        `Cannot transition eBay variation ${input.item.sku} because it does not define exactly one ${specification.name} value.`,
+  const specifications = input.currentGroup.variesBy.specifications.map(
+    (specification) => {
+      const itemValues = normalizedSkus(itemAspects[specification.name]);
+      if (itemValues.length !== 1) {
+        throw new Error(
+          `Cannot transition eBay variation ${input.item.sku} because it does not define exactly one ${specification.name} value.`,
+        );
+      }
+      const values = specification.values.filter(
+        (value) => value !== itemValues[0],
       );
-    }
-    const values = specification.values.filter((value) => value !== itemValues[0]);
-    if (values.length === 0) {
-      throw new Error(
-        `Cannot transition eBay variation ${input.item.sku} because removing its ${specification.name} value would empty the group schema.`,
-      );
-    }
-    return { ...specification, values };
-  });
+      if (values.length === 0) {
+        throw new Error(
+          `Cannot transition eBay variation ${input.item.sku} because removing its ${specification.name} value would empty the group schema.`,
+        );
+      }
+      return { ...specification, values };
+    },
+  );
 
   const writableGroup = toWritableGroupPayload(input.currentGroup);
   return {
@@ -808,10 +1143,15 @@ function alignDraftVariationSchemaToLiveGroup(input: {
   draft: EbayListingConnectorDraft & { itemGroup: BuiltItemGroup };
   liveGroup: EbayInventoryItemGroup & { variantSKUs?: string[] };
 }): EbayListingConnectorDraft & { itemGroup: BuiltItemGroup } {
-  const desiredSpecifications = input.draft.itemGroup.payload.variesBy.specifications;
+  const desiredSpecifications =
+    input.draft.itemGroup.payload.variesBy.specifications;
   const liveSpecifications = input.liveGroup.variesBy.specifications;
-  const desiredNames = desiredSpecifications.map((specification) => specification.name);
-  const liveNames = liveSpecifications.map((specification) => specification.name);
+  const desiredNames = desiredSpecifications.map(
+    (specification) => specification.name,
+  );
+  const liveNames = liveSpecifications.map(
+    (specification) => specification.name,
+  );
   if (sameStrings([...desiredNames].sort(), [...liveNames].sort())) {
     return input.draft;
   }
@@ -826,7 +1166,11 @@ function alignDraftVariationSchemaToLiveGroup(input: {
   const alignedValues: string[] = [];
   const inventoryItems = input.draft.inventoryItems.map((item) => {
     const desiredValues = item.payload.product.aspects?.[desiredName];
-    if (!desiredValues || desiredValues.length !== 1 || !desiredValues[0]?.trim()) {
+    if (
+      !desiredValues ||
+      desiredValues.length !== 1 ||
+      !desiredValues[0]?.trim()
+    ) {
       throw new Error(
         `The desired eBay inventory item ${item.sku} does not define exactly one ${desiredName} variation value.`,
       );
@@ -834,8 +1178,9 @@ function alignDraftVariationSchemaToLiveGroup(input: {
     const value = desiredValues[0];
     if (!alignedValues.includes(value)) alignedValues.push(value);
     const aspects = Object.fromEntries(
-      Object.entries(item.payload.product.aspects ?? {})
-        .filter(([name]) => name !== desiredName && name !== liveName),
+      Object.entries(item.payload.product.aspects ?? {}).filter(
+        ([name]) => name !== desiredName && name !== liveName,
+      ),
     );
     return {
       ...item,
@@ -849,8 +1194,9 @@ function alignDraftVariationSchemaToLiveGroup(input: {
     };
   });
   const groupAspects = Object.fromEntries(
-    Object.entries(input.draft.itemGroup.payload.aspects)
-      .filter(([name]) => name !== desiredName && name !== liveName),
+    Object.entries(input.draft.itemGroup.payload.aspects).filter(
+      ([name]) => name !== desiredName && name !== liveName,
+    ),
   );
 
   return {
@@ -863,8 +1209,10 @@ function alignDraftVariationSchemaToLiveGroup(input: {
         aspects: groupAspects,
         variesBy: {
           ...input.draft.itemGroup.payload.variesBy,
-          aspectsImageVariesBy: input.draft.itemGroup.payload.variesBy.aspectsImageVariesBy
-            ?.map((name) => name === desiredName ? liveName : name),
+          aspectsImageVariesBy:
+            input.draft.itemGroup.payload.variesBy.aspectsImageVariesBy?.map(
+              (name) => (name === desiredName ? liveName : name),
+            ),
           specifications: [{ name: liveName, values: alignedValues }],
         },
       },
@@ -880,10 +1228,17 @@ function buildRetainedVariationGroupPayload(input: {
   const desiredSpecifications = input.desiredGroup.variesBy.specifications;
   const currentSpecifications = input.currentGroup.variesBy.specifications;
   const currentByName = new Map(
-    currentSpecifications.map((specification) => [specification.name, specification.values]),
+    currentSpecifications.map((specification) => [
+      specification.name,
+      specification.values,
+    ]),
   );
-  const desiredNames = new Set(desiredSpecifications.map((specification) => specification.name));
-  const currentNames = new Set(currentSpecifications.map((specification) => specification.name));
+  const desiredNames = new Set(
+    desiredSpecifications.map((specification) => specification.name),
+  );
+  const currentNames = new Set(
+    currentSpecifications.map((specification) => specification.name),
+  );
   if (!sameStrings([...desiredNames].sort(), [...currentNames].sort())) {
     throw new Error(
       "The live and desired eBay listings use different variation aspect names and cannot be updated in place.",
@@ -900,10 +1255,12 @@ function buildRetainedVariationGroupPayload(input: {
       ...input.desiredGroup.variesBy,
       specifications: desiredSpecifications.map((specification) => ({
         ...specification,
-        values: [...new Set([
-          ...specification.values,
-          ...(currentByName.get(specification.name) ?? []),
-        ])],
+        values: [
+          ...new Set([
+            ...specification.values,
+            ...(currentByName.get(specification.name) ?? []),
+          ]),
+        ],
       })),
     },
   };
@@ -913,33 +1270,43 @@ function assertBulkQuantityUpdateSucceeded(
   response: EbayBulkPriceQuantityResponse,
   sku: string,
 ): void {
-  const failures = response.responses.filter((result) =>
-    result.statusCode < 200
-    || result.statusCode >= 300
-    || (result.errors?.length ?? 0) > 0
-    || (result.offers?.some((offer) =>
-      offer.statusCode < 200
-      || offer.statusCode >= 300
-      || (offer.errors?.length ?? 0) > 0
-    ) ?? false),
+  const failures = response.responses.filter(
+    (result) =>
+      result.statusCode < 200 ||
+      result.statusCode >= 300 ||
+      (result.errors?.length ?? 0) > 0 ||
+      (result.offers?.some(
+        (offer) =>
+          offer.statusCode < 200 ||
+          offer.statusCode >= 300 ||
+          (offer.errors?.length ?? 0) > 0,
+      ) ??
+        false),
   );
   if (response.responses.length > 0 && failures.length === 0) return;
 
-  const messages = failures.flatMap((result) => [
-    ...(result.errors ?? []).map((error) => error.message),
-    ...(result.offers ?? []).flatMap((offer) =>
-      (offer.errors ?? []).map((error) => error.message),
-    ),
-  ]).filter(Boolean);
-  const detail = messages.length > 0
-    ? messages.join("; ")
-    : "eBay returned no successful quantity result";
-  throw new Error(`eBay could not set retained variation ${sku} to zero: ${detail}.`);
+  const messages = failures
+    .flatMap((result) => [
+      ...(result.errors ?? []).map((error) => error.message),
+      ...(result.offers ?? []).flatMap((offer) =>
+        (offer.errors ?? []).map((error) => error.message),
+      ),
+    ])
+    .filter(Boolean);
+  const detail =
+    messages.length > 0
+      ? messages.join("; ")
+      : "eBay returned no successful quantity result";
+  throw new Error(
+    `eBay could not set retained variation ${sku} to zero: ${detail}.`,
+  );
 }
 
 function isInvalidInventoryItemGroupError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /(?:errorId["']?\s*:\s*25013|\b25013\b|invalid data in the inventory item group)/i.test(message);
+  return /(?:errorId["']?\s*:\s*25013|\b25013\b|invalid data in the inventory item group)/i.test(
+    message,
+  );
 }
 
 function isVariationSpecificsMismatchError(error: unknown): boolean {
@@ -949,7 +1316,10 @@ function isVariationSpecificsMismatchError(error: unknown): boolean {
 }
 
 function validateMaintenanceDraft(
-  draft: Pick<EbayListingConnectorDraft, "marketplaceId" | "inventoryItems" | "offers">,
+  draft: Pick<
+    EbayListingConnectorDraft,
+    "marketplaceId" | "inventoryItems" | "offers"
+  >,
 ): void {
   if (!draft.marketplaceId.trim()) {
     throw new Error("eBay marketplace id is required.");
@@ -974,9 +1344,11 @@ function listingPoliciesChanged(
   existing: EbayOffer["listingPolicies"] | undefined,
   next: EbayOffer["listingPolicies"],
 ): boolean {
-  return existing?.fulfillmentPolicyId !== next.fulfillmentPolicyId
-    || existing?.returnPolicyId !== next.returnPolicyId
-    || existing?.paymentPolicyId !== next.paymentPolicyId;
+  return (
+    existing?.fulfillmentPolicyId !== next.fulfillmentPolicyId ||
+    existing?.returnPolicyId !== next.returnPolicyId ||
+    existing?.paymentPolicyId !== next.paymentPolicyId
+  );
 }
 
 function validateRebuildInput(
@@ -988,7 +1360,9 @@ function validateRebuildInput(
     throw new Error("Only published eBay variation groups can be rebuilt.");
   }
   if (!currentExternalListingId.trim()) {
-    throw new Error("The current eBay listing id is required for rebuild confirmation.");
+    throw new Error(
+      "The current eBay listing id is required for rebuild confirmation.",
+    );
   }
 }
 
@@ -1006,7 +1380,8 @@ function validateConfirmedPreview(
   const desired = new Set(desiredSkus);
   const expectedAddedSkus = desiredSkus.filter((sku) => !active.has(sku));
   const expectedRemovedSkus = activeSkus.filter((sku) => !desired.has(sku));
-  const expectedRebuildRequired = expectedRemovedSkus.length > 0 || preview.sourceState === "withdrawn";
+  const expectedRebuildRequired =
+    expectedRemovedSkus.length > 0 || preview.sourceState === "withdrawn";
   const expectedToken = rebuildConfirmationToken({
     productId: draft.productId,
     groupKey: draft.itemGroup!.groupKey,
@@ -1020,19 +1395,21 @@ function validateConfirmedPreview(
     removedSkus: expectedRemovedSkus,
   });
   if (
-    preview.productId !== draft.productId
-    || preview.groupKey !== draft.itemGroup!.groupKey
-    || (preview.sourceState !== "active" && preview.sourceState !== "withdrawn")
-    || activeSkus.some((sku) => !current.has(sku) || inactive.has(sku))
-    || inactiveSkus.some((sku) => !current.has(sku))
-    || currentSkus.some((sku) => !active.has(sku) && !inactive.has(sku))
-    || !sameStrings(normalizedSkus(preview.desiredSkus), desiredSkus)
-    || !sameStrings(normalizedSkus(preview.addedSkus), expectedAddedSkus)
-    || !sameStrings(normalizedSkus(preview.removedSkus), expectedRemovedSkus)
-    || preview.rebuildRequired !== expectedRebuildRequired
-    || preview.confirmationToken !== expectedToken
+    preview.productId !== draft.productId ||
+    preview.groupKey !== draft.itemGroup!.groupKey ||
+    (preview.sourceState !== "active" && preview.sourceState !== "withdrawn") ||
+    activeSkus.some((sku) => !current.has(sku) || inactive.has(sku)) ||
+    inactiveSkus.some((sku) => !current.has(sku)) ||
+    currentSkus.some((sku) => !active.has(sku) && !inactive.has(sku)) ||
+    !sameStrings(normalizedSkus(preview.desiredSkus), desiredSkus) ||
+    !sameStrings(normalizedSkus(preview.addedSkus), expectedAddedSkus) ||
+    !sameStrings(normalizedSkus(preview.removedSkus), expectedRemovedSkus) ||
+    preview.rebuildRequired !== expectedRebuildRequired ||
+    preview.confirmationToken !== expectedToken
   ) {
-    throw new Error("The eBay listing rebuild confirmation is stale or invalid.");
+    throw new Error(
+      "The eBay listing rebuild confirmation is stale or invalid.",
+    );
   }
 }
 
@@ -1063,16 +1440,24 @@ async function inspectListingPublication(input: {
       return listingId === undefined ? [] : [{ offer, listingId }];
     });
     const matchingOffers = expectedListingId
-      ? identifiableActiveOffers.filter(({ listingId }) => listingId === expectedListingId)
+      ? identifiableActiveOffers.filter(
+          ({ listingId }) => listingId === expectedListingId,
+        )
       : identifiableActiveOffers;
     const conflictingOffers = expectedListingId
-      ? identifiableActiveOffers.filter(({ listingId }) => listingId !== expectedListingId)
+      ? identifiableActiveOffers.filter(
+          ({ listingId }) => listingId !== expectedListingId,
+        )
       : [];
     if (conflictingOffers.length > 0) {
-      throw new Error(`The active eBay variation ${sku} belongs to a different listing.`);
+      throw new Error(
+        `The active eBay variation ${sku} belongs to a different listing.`,
+      );
     }
     if (matchingOffers.length > 1) {
-      throw new Error(`The eBay variation ${sku} has multiple active offers for the same listing.`);
+      throw new Error(
+        `The eBay variation ${sku} has multiple active offers for the same listing.`,
+      );
     }
     const [activeOffer] = matchingOffers;
     if (!activeOffer) {
@@ -1096,7 +1481,9 @@ async function inspectListingPublication(input: {
   if (activeMemberCount === 0) {
     return { state: "withdrawn" };
   }
-  throw new Error("The eBay variation group resolves to multiple active listings.");
+  throw new Error(
+    "The eBay variation group resolves to multiple active listings.",
+  );
 }
 function isPublishedObservedOffer(offer: EbayObservedOffer): boolean {
   return offer.status?.trim().toUpperCase() === "PUBLISHED";
@@ -1111,15 +1498,24 @@ function observedOfferListingId(offer: EbayObservedOffer): string | undefined {
 
 function normalizedSkus(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
-  return [...new Set(value
-    .filter((sku): sku is string => typeof sku === "string")
-    .map((sku) => sku.trim())
-    .filter(Boolean))]
-    .sort();
+  return [
+    ...new Set(
+      value
+        .filter((sku): sku is string => typeof sku === "string")
+        .map((sku) => sku.trim())
+        .filter(Boolean),
+    ),
+  ].sort();
 }
 
-function sameStrings(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
+function sameStrings(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
 }
 
 function rebuildConfirmationToken(input: {
