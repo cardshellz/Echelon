@@ -20,6 +20,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useSearch } from "wouter";
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { parseProcurementJourney, procurementRecordHref } from "@/lib/procurement-navigation";
+import { getPoExceptionLinks } from "@/lib/po-exception-navigation";
 import { ProcurementContext } from "@/components/procurement-context";
 import { PurchaseLifecycleWorkspace } from "@/features/purchasing/PurchaseLifecycleWorkspace";
 import { formatProcurementScheduleDate, procurementScheduleDateInput } from "@/lib/procurement-schedule-date";
@@ -667,6 +668,8 @@ const STATUS_BADGES: Record<string, { variant: "default" | "secondary" | "outlin
 // that a full dialog isn't worth the weight).
 function ExceptionCard({
   ex,
+  purchaseOrderId,
+  childHref,
   onAcknowledge,
   onResolve,
   onDismiss,
@@ -674,6 +677,8 @@ function ExceptionCard({
   relatedUsers,
 }: {
   ex: any;
+  purchaseOrderId: number | null;
+  childHref: (destination: string) => string;
   onAcknowledge: () => void;
   onResolve: (note: string) => void;
   onDismiss: (note: string) => void;
@@ -699,6 +704,8 @@ function ExceptionCard({
     return `${dt.toLocaleDateString()} ${dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
   })();
   const isMatchMismatch = ex.kind === "match_mismatch";
+  const links = getPoExceptionLinks(ex, purchaseOrderId);
+  const reviewHref = links ? childHref(links.invoiceHref ?? links.purchaseOrderHref) : null;
   const handleResolve = () => {
     const note = window.prompt(
       isMatchMismatch
@@ -731,12 +738,19 @@ function ExceptionCard({
           <div className="flex-1 min-w-0">
             <div className="flex items-baseline justify-between gap-2 flex-wrap">
               <h3 className="text-sm font-semibold">{ex.title}</h3>
-              <Badge
-                variant="outline"
-                className="text-[10px] uppercase"
-              >
-                {ex.status === "acknowledged" ? "acknowledged" : "open"}
-              </Badge>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-muted-foreground">
+                  Status: {ex.status === "acknowledged" ? "Acknowledged" : "Open"}
+                </span>
+                {reviewHref && (
+                  <Button asChild size="sm" variant="outline" className="min-h-10">
+                    <Link href={reviewHref}>
+                      <ExternalLink className="h-4 w-4 mr-2" aria-hidden="true" />
+                      {links?.invoiceHref ? "Open invoice issues" : "View PO lines"}
+                    </Link>
+                  </Button>
+                )}
+              </div>
             </div>
             {detectedLabel && (
               <div className="text-xs text-muted-foreground mt-0.5">
@@ -747,7 +761,17 @@ function ExceptionCard({
             {ex.message && (
               <p className="text-sm mt-2">{ex.message}</p>
             )}
+            {isMatchMismatch && links && !links.invoiceHref && (
+              <p className="text-xs text-muted-foreground mt-2">
+                Invoice link unavailable for this exception. Review the PO lines or open the invoice from the Invoices tab.
+              </p>
+            )}
             <div className="flex flex-wrap gap-2 mt-3">
+              {links?.invoiceHref && (
+                <Button asChild size="sm" variant="outline" className="min-h-10">
+                  <Link href={childHref(links.purchaseOrderHref)}>View PO lines</Link>
+                </Button>
+              )}
               {ex.status === "open" && (
                 <Button
                   size="sm"
@@ -3711,6 +3735,8 @@ export default function PurchaseOrderDetail() {
                 <ExceptionCard
                   key={ex.id}
                   ex={ex}
+                  purchaseOrderId={poId}
+                  childHref={procurementNavigation.childHref}
                   onAcknowledge={() => ackExceptionMutation.mutate(ex.id)}
                   onResolve={(note) =>
                     resolveExceptionMutation.mutate({ id: ex.id, resolutionNote: note })
