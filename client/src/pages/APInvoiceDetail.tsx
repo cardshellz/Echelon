@@ -1,4 +1,5 @@
 import { InvoiceLineCostReview } from "@/features/purchasing/InvoiceLineCostReview";
+import { InvoicePoQuantity } from "@/features/purchasing/InvoicePoQuantity";
 import { centsToMills, dollarsToCents, dollarsToMills, formatMills } from "@shared/utils/money";
 import React, { useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -695,8 +696,8 @@ export default function APInvoiceDetail() {
                       <TableHead>SKU</TableHead>
                       <TableHead className="hidden md:table-cell">Product</TableHead>
                       <TableHead className="text-right">Qty Invoiced</TableHead>
-                      <TableHead className="text-right hidden md:table-cell">Qty Ordered</TableHead>
-                      <TableHead className="text-right hidden md:table-cell">Qty Received</TableHead>
+                      <TableHead className="text-right hidden md:table-cell">PO Qty Ordered</TableHead>
+                      <TableHead className="text-right hidden md:table-cell">PO Qty Received</TableHead>
                       <TableHead className="text-right">Unit Cost</TableHead>
                       <TableHead className="text-right">Line Total</TableHead>
                       <TableHead>Match</TableHead>
@@ -712,9 +713,19 @@ export default function APInvoiceDetail() {
                           <TableCell className="text-muted-foreground text-xs">{line.lineNumber}</TableCell>
                           <TableCell className="font-mono text-xs">{line.sku || "—"}</TableCell>
                           <TableCell className="hidden md:table-cell text-sm max-w-[200px] truncate">{line.productName || "—"}</TableCell>
-                          <TableCell className="text-right font-mono">{line.qtyInvoiced}</TableCell>
-                          <TableCell className="text-right font-mono text-muted-foreground hidden md:table-cell">{line.qtyOrdered ?? "—"}</TableCell>
-                          <TableCell className="text-right font-mono text-muted-foreground hidden md:table-cell">{line.qtyReceived ?? "—"}</TableCell>
+                          <TableCell className="text-right font-mono">
+                            {line.qtyInvoiced}
+                            {line.purchaseOrderLineId != null && <div className="md:hidden mt-1 text-xs text-muted-foreground font-normal font-sans">
+                              <div>PO ordered: <InvoicePoQuantity comparison={line.poQuantities} recordedQuantity={line.qtyOrdered} quantity="ordered" compact /></div>
+                              <div>PO received: <InvoicePoQuantity comparison={line.poQuantities} recordedQuantity={line.qtyReceived} quantity="received" compact /></div>
+                            </div>}
+                          </TableCell>
+                          <TableCell className="text-right font-mono text-muted-foreground hidden md:table-cell">
+                            <InvoicePoQuantity comparison={line.poQuantities} recordedQuantity={line.qtyOrdered} quantity="ordered" />
+                          </TableCell>
+                          <TableCell className="text-right font-mono text-muted-foreground hidden md:table-cell">
+                            <InvoicePoQuantity comparison={line.poQuantities} recordedQuantity={line.qtyReceived} quantity="received" />
+                          </TableCell>
                           <TableCell className="text-right font-mono text-sm">{formatUnitCost(line.unitCostMills, line.unitCostCents)}</TableCell>
                           <TableCell className="text-right font-mono font-medium">{formatCents(line.lineTotalCents)}</TableCell>
                           <TableCell>

@@ -1,6 +1,7 @@
 import { summarizeInvoiceCostReconciliation } from "./domain/invoice-cost-reconciliation-summary";
 import { costFingerprint, costInteger, lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { reconcilePurchaseCostEvidence } from "./purchase-cost-application.service";
+import { getInvoiceLinesWithPoQuantities } from "./invoice-po-quantities.repository";
 /**
  * AP Ledger Service
  * Handles vendor invoice lifecycle, payment recording, and invoice balance tracking.
@@ -1176,11 +1177,7 @@ export async function getInvoiceById(id: number) {
     .where(eq(apPaymentAllocations.vendorInvoiceId, id))
     .orderBy(desc(apPayments.paymentDate));
 
-  const lines = await db
-    .select()
-    .from(vendorInvoiceLines)
-    .where(eq(vendorInvoiceLines.vendorInvoiceId, id))
-    .orderBy(asc(vendorInvoiceLines.lineNumber));
+  const lines = await getInvoiceLinesWithPoQuantities(invoice.id);
 
   const attachments = await db
     .select()
