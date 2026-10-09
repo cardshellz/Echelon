@@ -60,6 +60,7 @@ describe("order edit staff HTTP boundary", () => {
         imageUrl: null,
       },
       variants: [],
+      memberPlan: null,
       pageInfo: { hasNextPage: false, endCursor: null },
     }));
     preview.mockImplementation(async (input) => ({
@@ -144,10 +145,16 @@ describe("order edit staff HTTP boundary", () => {
       category: null,
       after: null,
     });
-    expect(catalogVariants).toHaveBeenCalledWith(4, {
-      productId: "gid://shopify/Product/10",
-      after: null,
-    });
+    expect(catalogVariants).toHaveBeenCalledWith(
+      4,
+      {
+        productId: "gid://shopify/Product/10",
+        after: null,
+        omsOrderId: null,
+        expectedRevision: null,
+      },
+      "staff",
+    );
     expect(quote).not.toHaveBeenCalled();
   });
   it.each([
@@ -159,6 +166,10 @@ describe("order edit staff HTTP boundary", () => {
     "categories?connectionId=4&after=",
     "variants?connectionId=4&productId=123",
     "variants?connectionId=4&productId=gid%3A%2F%2Fshopify%2FOrder%2F10",
+    "variants?connectionId=4&productId=gid%3A%2F%2Fshopify%2FProduct%2F10&omsOrderId=1",
+    "variants?connectionId=4&productId=gid%3A%2F%2Fshopify%2FProduct%2F10&expectedRevision=baseline",
+    "variants?connectionId=4&productId=gid%3A%2F%2Fshopify%2FProduct%2F10&customerId=8",
+    "variants?connectionId=4&productId=gid%3A%2F%2Fshopify%2FProduct%2F10&memberPlan=club",
   ])(
     "rejects invalid catalog input before calling a reader: %s",
     async (path) => {
@@ -170,6 +181,30 @@ describe("order edit staff HTTP boundary", () => {
       expect(catalogVariants).not.toHaveBeenCalled();
     },
   );
+  it("passes only the order/revision scope and authenticated actor to customer-priced discovery", async () => {
+    const parent = "gid://shopify/Product/10";
+    const params = new URLSearchParams({
+      connectionId: "4",
+      productId: parent,
+      omsOrderId: "1",
+      expectedRevision: "baseline",
+    });
+    const result = await fetch(
+      `${url}/api/order-edits/admin/catalog/variants?${params}`,
+    );
+    expect(result.status).toBe(200);
+    expect(catalogVariants).toHaveBeenCalledExactlyOnceWith(
+      4,
+      {
+        productId: parent,
+        after: null,
+        omsOrderId: 1,
+        expectedRevision: "baseline",
+      },
+      "staff",
+    );
+    expect(quote).not.toHaveBeenCalled();
+  });
   it("denies customers/anonymous sessions and current staff without orders:edit", async () => {
     loggedIn = false;
     expect((await fetch(`${url}/api/order-edits/admin/state`)).status).toBe(

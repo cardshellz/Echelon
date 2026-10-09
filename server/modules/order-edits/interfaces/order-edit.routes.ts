@@ -228,13 +228,15 @@ export function registerOrderEditRoutes(
   );
   app.get(
     `${ORDER_EDIT_API}/catalog/variants`,
-    handle(false, async (req, res) => {
+    handle(false, async (req, res, actor) => {
       const { connectionId, ...input } = orderEditCatalogVariantsInputSchema
+        .innerType()
         .extend({ connectionId: positiveId })
         .parse(req.query);
+      const validated = orderEditCatalogVariantsInputSchema.parse(input);
       res.json(
         orderEditCatalogVariantsSchema.parse(
-          await service.catalogVariants(connectionId, input),
+          await service.catalogVariants(connectionId, validated, actor),
         ),
       );
     }),

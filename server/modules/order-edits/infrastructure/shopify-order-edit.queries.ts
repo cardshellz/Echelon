@@ -1,3 +1,5 @@
+import { ORDER_EDIT_CATALOG_AVAILABILITY_SAMPLE_SIZE } from "@shared/order-edits/order-edit-catalog";
+
 const MONEY = `presentmentMoney { amount currencyCode } shopMoney { amount currencyCode }`;
 const TRANSACTION = `id kind status gateway manualPaymentGateway processedAt parentTransaction { id } amountSet { ${MONEY} }`;
 const DISCOUNT_VALUE = `value { __typename ... on PricingPercentageValue { percentage } ... on MoneyV2 { amount currencyCode } }`;
@@ -51,6 +53,9 @@ const CATALOG_VARIANT_FIELDS = variantFields(
 );
 const CATALOG_PRODUCT_FIELDS = `id title productType status isGiftCard requiresSellingPlan onlineStoreUrl featuredImage { url }`;
 const CATALOG_PAGE_FIELDS = `pageInfo { hasNextPage endCursor }`;
+const CATALOG_AVAILABILITY_FIELDS = `id requiresComponents availableForSale inventoryPolicy sellableOnlineQuantity
+  inventoryItem { requiresShipping tracked }
+  membershipVariant: metafield(namespace: "cardshellz", key: "is_membership_variant") { value }`;
 // Keep the legacy flat response within its 50-option contract while retaining exact SKU discovery.
 export const LEGACY_SKU_RESULTS = 25;
 export const LEGACY_PRODUCT_RESULTS = 5;
@@ -62,13 +67,21 @@ export const CATALOG_CATEGORIES_QUERY = `query EchelonEditCategories($first: Int
 export const CATALOG_PRODUCTS_QUERY = `query EchelonEditProducts($first: Int!, $after: String, $query: String!) {
   shop { currencyCode }
   products(first: $first, after: $after, query: $query, sortKey: TITLE) {
-    nodes { ${CATALOG_PRODUCT_FIELDS} } ${CATALOG_PAGE_FIELDS}
+    nodes { ${CATALOG_PRODUCT_FIELDS}
+      variants(first: ${ORDER_EDIT_CATALOG_AVAILABILITY_SAMPLE_SIZE}) { nodes { ${CATALOG_AVAILABILITY_FIELDS} } ${CATALOG_PAGE_FIELDS} }
+    } ${CATALOG_PAGE_FIELDS}
   }
 }`;
 export const CATALOG_VARIANTS_QUERY = `query EchelonEditProductOptions($id: ID!, $first: Int!, $after: String) {
   shop { currencyCode }
   product(id: $id) { ${CATALOG_PRODUCT_FIELDS}
     variants(first: $first, after: $after) { nodes { ${CATALOG_VARIANT_FIELDS} } ${CATALOG_PAGE_FIELDS} }
+  }
+}`;
+export const CATALOG_AVAILABILITY_QUERY = `query EchelonEditProductAvailability($id: ID!, $first: Int!, $after: String) {
+  shop { currencyCode }
+  product(id: $id) { ${CATALOG_PRODUCT_FIELDS}
+    variants(first: $first, after: $after) { nodes { ${CATALOG_AVAILABILITY_FIELDS} } ${CATALOG_PAGE_FIELDS} }
   }
 }`;
 // Compatibility endpoint only; the picker uses both paginated catalog endpoints.

@@ -9,7 +9,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { validatePostgresTestEnvironment } from "../../../../../scripts/ci/postgres-tests";
-import { createMemberResolver, MembershipResolverError, type MemberResolver } from "../..";
+import { createMemberResolver, createMemberPlanPresentationReader, MembershipResolverError, type MemberResolver } from "../..";
 import { PgMemberDirectory } from "../../infrastructure/member-directory.repository";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
@@ -39,6 +39,12 @@ const fixture = `
     id varchar PRIMARY KEY,
     name text NOT NULL,
     primary_color text,
+    storefront_name text,
+    storefront_badge_text text,
+    member_price_color text,
+    pill_right_bg text,
+    icon_url text,
+    is_active boolean NOT NULL DEFAULT TRUE,
     priority_modifier integer NOT NULL DEFAULT 0
   );
   CREATE TABLE membership.members (
@@ -105,6 +111,22 @@ integration("shared member resolver with real PostgreSQL", () => {
   }
 
   const shopifyKey = { kind: "shopify_customer", shopifyCustomerId: CUSTOMER_ID } as const;
+
+  it("reads the same plan display configuration without changing membership or selecting another plan", async () => {
+    await database.pool.query(`UPDATE membership.plans SET storefront_name = '.club', storefront_badge_text = '.club',
+      member_price_color = '#4A8A3A', pill_right_bg = '#2b362c', icon_url = 'https://static.example.invalid/club.png'
+      WHERE id = $1`, [CLUB_PLAN_ID]);
+    const before = (await database.pool.query("SELECT * FROM membership.plans ORDER BY id")).rows;
+    const reader = createMemberPlanPresentationReader(database.pool);
+    expect(await reader.read(CLUB_PLAN_ID)).toEqual({
+      planId: CLUB_PLAN_ID, name: ".club", badgeText: ".club", memberPriceColor: "#4A8A3A",
+      primaryColor: "#2E86DE", iconUrl: "https://static.example.invalid/club.png",
+    });
+    expect((await database.pool.query("SELECT * FROM membership.plans ORDER BY id")).rows).toEqual(before);
+    expect((await database.pool.query("SELECT * FROM membership.members")).rows).toEqual([]);
+    await database.pool.query("UPDATE membership.plans SET is_active = FALSE WHERE id = $1", [CLUB_PLAN_ID]);
+    await expect(reader.read(CLUB_PLAN_ID)).rejects.toMatchObject({ code: "MEMBERSHIP_PRESENTATION_UNAVAILABLE" });
+  });
 
   it("finds a member stored under the numeric id and returns its current plan", async () => {
     await member("member-1", CUSTOMER_ID);

@@ -465,7 +465,7 @@ export function createOrderEditTransport(request: typeof fetch = fetch) {
   >(
     endpoint: "categories" | "products" | "variants",
     connectionId: number,
-    input: Record<string, string | null>,
+    input: Record<string, string | number | null>,
     schema: z.ZodType<T, z.ZodTypeDef, unknown>,
     signal?: AbortSignal,
   ): Promise<T> {
@@ -473,7 +473,7 @@ export function createOrderEditTransport(request: typeof fetch = fetch) {
       connectionId: String(positiveId.parse(connectionId)),
     });
     for (const [key, value] of Object.entries(input))
-      if (value !== null) params.set(key, value);
+      if (value !== null) params.set(key, String(value));
     const result = await read(`/catalog/${endpoint}?${params}`, schema, signal);
     if (
       result.connectionId !== connectionId ||

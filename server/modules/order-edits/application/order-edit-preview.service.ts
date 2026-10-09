@@ -65,6 +65,14 @@ export class OrderEditPreviewService {
       expiresAt: new Date(context.expiresAt).toISOString(),
     });
   }
+  /** Reuse the verified, expiring customer/order context already warmed for financial previews. */
+  async catalogSnapshot(raw: OrderEditPreviewScope, actorId: string) {
+    const scope = orderEditPreviewScopeSchema.parse(raw);
+    const reference = await this.reference(scope);
+    return structuredClone(
+      (await this.context(scope, reference, actorId)).value.snapshot,
+    );
+  }
   async preview(
     raw: OrderEditPreviewInput,
     actorId: string,
