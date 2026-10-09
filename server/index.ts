@@ -1,3 +1,4 @@
+import { ebayListingSyncService } from './modules/channels/ebay-listing-sync';
 import { startWalmartOrderPolling } from "./modules/channels/adapters/walmart/walmart-order-poll.service";
 import { startWalmartStockConnectionWorker } from "./modules/channels/adapters/walmart/walmart-stock-connection.service";
 import { createOrderEditService } from "./modules/order-edits/order-edit.composition";
@@ -494,6 +495,7 @@ function startEchelonSyncScheduler(
   });
   setDropshipFulfillmentSync(services.wmsSync);
   setDropshipInventoryRuntimeAuthorityGate(services.dropshipInventoryRuntimeAuthority);
+  startListingPublicationWorker(ebayListingSyncService, "ebay_listing_sync_worker");
   startListingPublicationWorker(services.listingPublication);
   startListingPublicationWorker(services.listingUpdates, "listing_update_worker");
   startWalmartStockConnectionWorker(services.walmartStockConnection);

@@ -1,0 +1,295 @@
+import { z } from "zod";
+import type {
+  EbayProductSyncResult,
+  EbayListingSyncJob,
+} from "@shared/types/ebay-listing-sync";
+import { ebayProductSyncResultSchema } from "@shared/types/ebay-listing-sync";
+import {
+  ebayListingSyncIdentitySchema,
+  EbayListingSyncError,
+  syncIdentityHash,
+  syncStageHash,
+  syncFailure,
+  type EbayListingSyncIdentity,
+  type StoredEbayListingSyncJob,
+} from "./ebay-listing-sync.domain";
+import {
+  EbayMarketplaceListingConnector,
+  type EbayListingConnectorDraft,
+  type EbayListingLifecycleClient,
+} from "./listing-connectors/ebay-listing.connector";
+import type { QuantityPublicationScope } from "../inventory-planning/domain/quantity-publication-admission";
+
+export interface PreparedEbayListingSync {
+  identity: EbayListingSyncIdentity;
+  client: EbayListingLifecycleClient;
+  draft: Pick<
+    EbayListingConnectorDraft,
+    "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup"
+  >;
+  variants: Array<{
+    variantId: number;
+    sku: string;
+    productName: string;
+    priceCents: number;
+    priceChanged: boolean;
+  }>;
+}
+export class EbayExistingListingSyncExecution
+  implements EbayListingSyncExecution
+{
+  constructor(
+    private readonly prepare: (
+      identity: EbayListingSyncIdentity,
+    ) => Promise<PreparedEbayListingSync>,
+    private readonly recovery: {
+      reconcile(
+        scopes: readonly QuantityPublicationScope[],
+      ): Promise<{ busy: boolean; resolved: string[]; unresolved: string[] }>;
+    },
+    private readonly connector: EbayMarketplaceListingConnector,
+  ) {}
+  async execute(
+    identity: EbayListingSyncIdentity,
+    stage: Parameters<EbayListingSyncExecution["execute"]>[1],
+  ): Promise<EbayProductSyncResult> {
+    const prepared = await this.prepare(identity);
+    if (
+      syncIdentityHash(
+        ebayListingSyncIdentitySchema.parse(prepared.identity),
+      ) !== syncIdentityHash(identity)
+    )
+      throw new EbayListingSyncError(
+        "EBAY_SYNC_IDENTITY_CHANGED",
+        "The account, group or exact listing members changed. Review this listing before another sync.",
+      );
+    const scope = (item: string): QuantityPublicationScope => ({
+      destinationKind: "channel_connection",
+      connectionId: identity.connectionId,
+      providerKey: "ebay",
+      providerScopeType: "account",
+      externalScopeId: identity.accountId,
+      externalInventoryItemId: item,
+      productId: null,
+      productVariantId: null,
+    });
+    const recovery = await this.recovery.reconcile([
+      scope(`group:${identity.groupKey}`),
+      ...identity.variants.map((member) => scope(member.sku)),
+    ]);
+    if (recovery.busy)
+      throw new EbayListingSyncError(
+        "PUBLICATION_SCOPE_BUSY",
+        "Waiting for an active quantity publisher before checking prior response evidence.",
+      );
+    if (recovery.unresolved.length)
+      throw new EbayListingSyncError(
+        "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED",
+        `A prior request has no provable final response (attempts ${recovery.unresolved.join(", ")}). Reconcile that request before another write.`,
+      );
+    const updated = await this.connector.syncExistingListing({
+      client: prepared.client,
+      draft: prepared.draft,
+      identity,
+      stage,
+    });
+    if (updated.missingOfferVariantIds.length)
+      throw new EbayListingSyncError(
+        "EBAY_SYNC_OFFER_MISSING",
+        "A required existing offer is missing. Review the listing identity.",
+      );
+    await stage("verification", syncStageHash(prepared.draft), () =>
+      this.connector.verifyExistingListing({
+        client: prepared.client,
+        draft: prepared.draft,
+        identity,
+        offerIds: updated.updatedOfferIds,
+      }),
+    );
+    const policyChanges = new Set(updated.policyChangedVariantIds);
+    return ebayProductSyncResultSchema.parse({
+      synced: prepared.variants.length,
+      priceChanges: prepared.variants.filter((member) => member.priceChanged)
+        .length,
+      qtyChanges: 0,
+      policyChanges: policyChanges.size,
+      errors: 0,
+      details: prepared.variants.map((member) => ({
+        productId: identity.productId,
+        productName: member.productName,
+        variantId: member.variantId,
+        variantSku: member.sku,
+        success: true,
+        lastSyncedPriceCents: member.priceCents,
+        priceChanged: member.priceChanged,
+        policyChanged: policyChanges.has(member.variantId),
+      })),
+    });
+  }
+}
+
+export interface EbayListingSyncClaim {
+  job: StoredEbayListingSyncJob;
+  release(): Promise<void>;
+}
+export interface EbayListingSyncStore {
+  enqueue(
+    identity: EbayListingSyncIdentity,
+    commandKey: string,
+    actor: string,
+    now: Date,
+  ): Promise<StoredEbayListingSyncJob>;
+  list(channelId: number): Promise<EbayListingSyncJob[]>;
+  get(id: string): Promise<StoredEbayListingSyncJob>;
+  claim(
+    now: Date,
+    token: string,
+    id?: string,
+  ): Promise<EbayListingSyncClaim | null>;
+  stage(
+    job: StoredEbayListingSyncJob,
+    key: string,
+    hash: string,
+    state: "started" | "completed",
+    now: Date,
+  ): Promise<void>;
+  finish(
+    job: StoredEbayListingSyncJob,
+    outcome: {
+      state:
+        | "completed"
+        | "recovering"
+        | "awaiting_evidence"
+        | "needs_attention";
+      result: EbayProductSyncResult | null;
+      code: string | null;
+      message: string | null;
+      nextAttemptAt: Date;
+      resetAttempts?: boolean;
+    },
+    now: Date,
+  ): Promise<void>;
+}
+export interface EbayListingSyncExecution {
+  execute(
+    identity: EbayListingSyncIdentity,
+    stage: (
+      key: string,
+      hash: string,
+      work: () => Promise<void>,
+    ) => Promise<void>,
+  ): Promise<EbayProductSyncResult>;
+}
+
+/** One application owner from request to verified completion. The external adapter
+ * owns listing primitives; inventory admission owns every quantity-bearing write. */
+export class EbayListingSyncService {
+  private running = false;
+  constructor(
+    private readonly store: EbayListingSyncStore,
+    private readonly executor: EbayListingSyncExecution,
+    private readonly clock: () => Date,
+    private readonly uuid: () => string,
+  ) {}
+  enqueue(
+    identity: unknown,
+    actor: unknown,
+    commandKey?: string,
+  ): Promise<StoredEbayListingSyncJob> {
+    return this.store.enqueue(
+      ebayListingSyncIdentitySchema.parse(identity),
+      z
+        .string()
+        .uuid()
+        .parse(commandKey ?? this.uuid()),
+      z.string().trim().min(1).max(200).parse(actor),
+      this.now(),
+    );
+  }
+  list(channelId: number): Promise<EbayListingSyncJob[]> {
+    return this.store.list(z.number().int().positive().parse(channelId));
+  }
+  async processDue(
+    limit = 5,
+    id?: string,
+  ): Promise<{ processed: number; failed: number }> {
+    z.number().int().min(1).max(20).parse(limit);
+    if (id) z.string().uuid().parse(id);
+    if (this.running) return { processed: 0, failed: 0 };
+    this.running = true;
+    const result = { processed: 0, failed: 0 };
+    try {
+      for (let index = 0; index < limit; index++) {
+        const claim = await this.store.claim(
+          this.now(),
+          z.string().uuid().parse(this.uuid()),
+          id,
+        );
+        if (!claim) break;
+        const { job } = claim;
+        try {
+          const output = ebayProductSyncResultSchema.parse(
+            await this.executor.execute(
+              job.identity,
+              async (key, hash, work) => {
+                await this.store.stage(job, key, hash, "started", this.now());
+                await work();
+                await this.store.stage(job, key, hash, "completed", this.now());
+              },
+            ),
+          );
+          await this.store.finish(
+            job,
+            {
+              state: output.errors ? "needs_attention" : "completed",
+              result: output,
+              code: output.errors ? "EBAY_LISTING_SYNC_INCOMPLETE" : null,
+              message: output.details.find((d) => !d.success)?.error ?? null,
+              nextAttemptAt: this.now(),
+              // A newer command can requeue this successful pass. Only failures
+              // consume its retry budget; every stage remains in the audit trail.
+              resetAttempts: output.errors === 0,
+            },
+            this.now(),
+          );
+          result.processed++;
+        } catch (error) {
+          result.failed++;
+          // A failed final commit is retained as running. Never overwrite a newer
+          // owner's progress after losing this connection or its fencing token.
+          await this.store.finish(
+            job,
+            { ...syncFailure(error, job.attempts, this.now()), result: null },
+            this.now(),
+          );
+          console.error(
+            JSON.stringify({
+              event: "ebay_listing_sync_followup",
+              jobId: job.id,
+              productId: job.productId,
+              code:
+                error instanceof Error && "code" in error
+                  ? error.code
+                  : "EBAY_LISTING_SYNC_FAILED",
+            }),
+          );
+        } finally {
+          await claim.release();
+        }
+        if (id) break;
+      }
+      return result;
+    } finally {
+      this.running = false;
+    }
+  }
+  get(id: string): Promise<StoredEbayListingSyncJob> {
+    return this.store.get(z.string().uuid().parse(id));
+  }
+  private now(): Date {
+    const value = this.clock();
+    if (!(value instanceof Date) || !Number.isFinite(value.getTime()))
+      throw new Error("Invalid listing sync clock.");
+    return new Date(value.getTime());
+  }
+}

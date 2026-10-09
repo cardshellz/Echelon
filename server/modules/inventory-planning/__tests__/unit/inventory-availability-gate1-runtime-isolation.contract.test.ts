@@ -63,7 +63,7 @@ describe("inventory availability Phase 1 runtime isolation", () => {
       "server/modules/dropship/infrastructure/dropship-atp.provider.ts",
       "server/modules/dropship/application/dropship-selection-atp-service.ts",
       "server/routes/ebay/ebay-listings.routes.ts",
-      "server/routes/ebay/ebay-sync-helpers.ts",
+      "server/modules/channels/infrastructure/ebay-active-listing-sync.ts",
       "server/routes/ebay-settings.routes.ts",
       "server/routes/shopify.routes.ts",
       "server/modules/catalog/catalog.routes.ts",
