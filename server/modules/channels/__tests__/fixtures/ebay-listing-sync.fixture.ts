@@ -56,7 +56,6 @@ export function syncProviderFixture() {
     pricingSummary: { price: { value: "11.49", currency: "USD" } },
   };
   let group: EbayInventoryItemGroup = {
-    inventoryItemGroupKey: "PACK",
     title: "Pack",
     description: "Description",
     imageUrls: ["https://example.com/pack.jpg"],
@@ -79,8 +78,9 @@ export function syncProviderFixture() {
         listingId: "listing-20",
       };
     }),
-    createOrReplaceInventoryItemGroup: vi.fn(async (key, payload) => {
-      group = { ...structuredClone(payload), inventoryItemGroupKey: key };
+    createOrReplaceInventoryItemGroup: vi.fn(async (_key, payload) => {
+      const { inventoryItemGroupKey: _requestKey, ...content } = structuredClone(payload) as EbayInventoryItemGroup;
+      group = content;
     }),
     createOffer: vi.fn(),
     publishOffer: vi.fn(),

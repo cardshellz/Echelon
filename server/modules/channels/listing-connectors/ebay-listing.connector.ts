@@ -1,11 +1,16 @@
 import { createHash } from "node:crypto";
-import Decimal from "decimal.js";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   EbayListingSyncError,
   syncStageHash,
   type EbayListingSyncIdentity,
 } from "../ebay-listing-sync.domain";
+import {
+  findEbaySyncContentMismatch,
+  inventoryItemSyncContent,
+  itemGroupSyncContent,
+  offerSyncContent,
+} from "../ebay-listing-sync-content";
 import type {
   BuiltInventoryItem,
   BuiltItemGroup,
@@ -149,59 +154,26 @@ async function runSyncStage(
   if (stage) return stage(key, syncStageHash(payload), work);
   await work();
 }
-function readbackPending(resource: string): EbayListingSyncError {
+function readbackPending(resource: string, field: string): EbayListingSyncError {
   return new EbayListingSyncError(
     "EBAY_SYNC_READBACK_PENDING",
-    `Waiting for eBay to expose the requested content and published identity of ${resource}.`,
+    `Waiting for eBay to expose the requested content and published identity of ${resource} (field ${field}).`,
   );
 }
-function matchesSyncContent(actual: unknown, expected: unknown): boolean {
-  if (
-    expected &&
-    typeof expected === "object" &&
-    "currency" in expected &&
-    "value" in expected
-  ) {
-    const observed =
-      actual && typeof actual === "object"
-        ? (actual as Record<string, unknown>)
-        : null;
-    if (
-      !observed ||
-      observed.currency !== expected.currency ||
-      typeof observed.value !== "string" ||
-      typeof expected.value !== "string" ||
-      !/^[0-9]+(?:\.[0-9]+)?$/.test(observed.value) ||
-      !/^[0-9]+(?:\.[0-9]+)?$/.test(expected.value)
-    )
-      return false;
-    return new Decimal(observed.value).equals(new Decimal(expected.value));
-  }
-  if (expected === null || typeof expected !== "object")
-    return actual === expected;
-  if (Array.isArray(expected))
-    return (
-      Array.isArray(actual) && canonicalJson(actual) === canonicalJson(expected)
-    );
-  return (
-    actual !== null &&
-    typeof actual === "object" &&
-    !Array.isArray(actual) &&
-    Object.entries(expected).every(
-      ([key, value]) =>
-        value === undefined ||
-        (key === "variantSKUs" && Array.isArray(value)
-          ? Array.isArray((actual as Record<string, unknown>)[key]) &&
-            canonicalJson(
-              [
-                ...((actual as Record<string, unknown>)[key] as unknown[]),
-              ].sort(),
-            ) === canonicalJson([...value].sort())
-          : matchesSyncContent(
-              (actual as Record<string, unknown>)[key],
-              value,
-            )),
-    )
+
+function publishedOffersForSyncMember(
+  offers: readonly EbayObservedOffer[],
+  member: EbayListingSyncIdentity["variants"][number],
+  resolvedOfferId?: string,
+): EbayObservedOffer[] {
+  return offers.filter(
+    (candidate) =>
+      candidate.sku === member.sku &&
+      (!member.offerId || candidate.offerId === member.offerId) &&
+      (!resolvedOfferId || candidate.offerId === resolvedOfferId) &&
+      (!member.listingId ||
+        (candidate.listingId ?? candidate.listing?.listingId) === member.listingId) &&
+      candidate.status === "PUBLISHED",
   );
 }
 
@@ -742,19 +714,13 @@ export class EbayMarketplaceListingConnector {
     assertBulkQuantityUpdateSucceeded(result, sku);
   }
 
-  async syncExistingListing(input: {
-    client: EbayListingConnectorClient;
+  private validateExistingListingSyncDraft(input: {
     draft: Pick<
       EbayListingConnectorDraft,
       "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup"
     >;
     identity?: EbayListingSyncIdentity;
-    stage?: (
-      key: string,
-      hash: string,
-      work: () => Promise<void>,
-    ) => Promise<void>;
-  }): Promise<EbayExistingListingSyncResult> {
+  }): void {
     if (input.identity) {
       const identity = input.identity,
         skus = new Set(identity.variants.map((member) => member.sku));
@@ -794,6 +760,22 @@ export class EbayMarketplaceListingConnector {
       }
     }
     validateMaintenanceDraft(input.draft);
+  }
+
+  async syncExistingListing(input: {
+    client: EbayListingConnectorClient;
+    draft: Pick<
+      EbayListingConnectorDraft,
+      "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup"
+    >;
+    identity?: EbayListingSyncIdentity;
+    stage?: (
+      key: string,
+      hash: string,
+      work: () => Promise<void>,
+    ) => Promise<void>;
+  }): Promise<EbayExistingListingSyncResult> {
+    this.validateExistingListingSyncDraft(input);
 
     const updatedInventorySkus: string[] = [];
     const updatedOfferIds: Record<number, string> = {};
@@ -811,15 +793,7 @@ export class EbayMarketplaceListingConnector {
           member.variantId === offer.variantId && member.sku === offer.sku,
       );
       const matches = expected
-        ? existingOffers.offers.filter(
-            (candidate) =>
-              candidate.sku === expected.sku &&
-              (!expected.offerId || candidate.offerId === expected.offerId) &&
-              (!expected.listingId ||
-                (candidate.listingId ?? candidate.listing?.listingId) ===
-                  expected.listingId) &&
-              candidate.status === "PUBLISHED",
-          )
+        ? publishedOffersForSyncMember(existingOffers.offers, expected)
         : existingOffers.offers;
       if (input.identity && (!expected || matches.length !== 1))
         throw new EbayListingSyncError(
@@ -896,53 +870,55 @@ export class EbayMarketplaceListingConnector {
       Pick<EbayListingLifecycleClient, "getInventoryItemGroup">;
     draft: Pick<
       EbayListingConnectorDraft,
-      "inventoryItems" | "offers" | "itemGroup" | "marketplaceId"
+      "productId" | "inventoryItems" | "offers" | "itemGroup" | "marketplaceId"
     >;
     identity: EbayListingSyncIdentity;
     offerIds: Record<number, string>;
   }): Promise<void> {
+    this.validateExistingListingSyncDraft(input);
     for (const item of input.draft.inventoryItems) {
       const current = await input.client.getInventoryItem(item.sku);
-      const { availability: _quantity, ...expected } = item.payload;
-      if (
-        !current ||
-        current.sku !== item.sku ||
-        !matchesSyncContent(current, expected)
-      )
-        throw readbackPending(`inventory item ${item.sku}`);
+      if (!current) throw readbackPending(`inventory item ${item.sku}`, "resource");
+      if (current.sku !== item.sku) throw readbackPending(`inventory item ${item.sku}`, "sku");
+      const mismatch = findEbaySyncContentMismatch(current, inventoryItemSyncContent(item.payload));
+      if (mismatch) throw readbackPending(`inventory item ${item.sku}`, mismatch);
     }
     for (const offer of input.draft.offers) {
       const offers = await input.client.getOffers(
         offer.sku,
         input.draft.marketplaceId,
       );
-      const current = offers.offers.find(
-        (row) => row.offerId === input.offerIds[offer.variantId],
-      );
       const expectedIdentity = input.identity.variants.find(
         (row) => row.variantId === offer.variantId,
       );
-      const { availableQuantity: _quantity, ...expected } = offer.payload;
-      if (
-        !current ||
-        current.status !== "PUBLISHED" ||
-        current.sku !== offer.sku ||
-        (expectedIdentity?.listingId &&
-          (current.listingId ?? current.listing?.listingId) !==
-            expectedIdentity.listingId) ||
-        !matchesSyncContent(current, expected)
-      )
-        throw readbackPending(`offer for ${offer.sku}`);
+      // A saved offer ID is optional in the existing identity contract. Both
+      // writing and readback require one exact published match; never choose
+      // arbitrarily when two offers claim that same SKU/listing identity.
+      const matches = expectedIdentity
+        ? publishedOffersForSyncMember(
+            offers.offers,
+            expectedIdentity,
+            input.offerIds[offer.variantId],
+          )
+        : [];
+      if (matches.length !== 1) {
+        throw readbackPending(`offer for ${offer.sku}`, "publishedIdentity");
+      }
+      const current = matches[0];
+      const mismatch = findEbaySyncContentMismatch(current, offerSyncContent(offer.payload));
+      if (mismatch) throw readbackPending(`offer for ${offer.sku}`, mismatch);
     }
     if (input.draft.itemGroup) {
       const group = input.draft.itemGroup;
       const current = await input.client.getInventoryItemGroup(group.groupKey);
-      if (
-        !current ||
-        current.inventoryItemGroupKey !== group.groupKey ||
-        !matchesSyncContent(current, group.payload)
-      )
-        throw readbackPending(`group ${group.groupKey}`);
+      // The exact group was requested by path. eBay does not echo its key in the
+      // GET body; still reject a conflicting key from a legacy client if present.
+      if (!current) throw readbackPending(`group ${group.groupKey}`, "resource");
+      if (current.inventoryItemGroupKey !== undefined && current.inventoryItemGroupKey !== group.groupKey) {
+        throw readbackPending(`group ${group.groupKey}`, "inventoryItemGroupKey");
+      }
+      const mismatch = findEbaySyncContentMismatch(current, itemGroupSyncContent(group.payload));
+      if (mismatch) throw readbackPending(`group ${group.groupKey}`, mismatch);
     }
   }
 
