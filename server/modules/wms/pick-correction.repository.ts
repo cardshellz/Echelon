@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
-import { missingPickQuantity, pickCorrectionSchema, type PickCorrection } from "@shared/pick-corrections";
+import { missingPickQuantity, normalizeScanCode, pickCorrectionSchema, type PickCorrection } from "@shared/pick-corrections";
 import { canonicalJson } from "@shared/utils/canonical-json";
 
 export interface CorrectionExecutor {
@@ -40,6 +40,22 @@ export async function readPickCorrection(db: CorrectionExecutor, id: number): Pr
   const result = await db.execute(sql`${correctionView} WHERE c.id = ${id}`);
   if (result.rows.length !== 1) throw new PickCorrectionError("CORRECTION_NOT_FOUND", "Pick correction was not found.");
   return pickCorrectionSchema.parse(result.rows[0]);
+}
+
+/**
+ * Every code a correct scan of this line may produce: the line's SKU and stored
+ * barcode, and its catalog variant's current barcode and SKU. The line copy of
+ * the barcode is often blank (2026-10-09: scans of the real product barcode on
+ * #63936/#63938 were refused as the wrong item).
+ */
+export async function readCorrectionScanCodes(db: CorrectionExecutor, orderItemId: number): Promise<string[]> {
+  const result = await db.execute(sql`SELECT oi.sku, oi.barcode, variant.barcode AS catalog_barcode, variant.sku AS catalog_sku
+    FROM wms.order_items oi LEFT JOIN catalog.product_variants variant ON variant.id = oi.product_id
+    WHERE oi.id = ${orderItemId}`);
+  const row = result.rows[0] ?? {};
+  return [row.sku, row.barcode, row.catalog_barcode, row.catalog_sku]
+    .map((value: unknown) => normalizeScanCode(typeof value === "string" ? value : null))
+    .filter((value): value is string => value !== null);
 }
 
 /** A repeated command may recover a failure, but never authorize a later declaration. */

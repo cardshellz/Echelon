@@ -1,13 +1,13 @@
 import { sql } from "drizzle-orm";
 import {
   answerPickCorrectionSchema, canTakeOverPickCorrection, completeCorrectivePickSchema,
-  takeOverPickCorrectionSchema, type PickCorrection,
+  normalizeScanCode, takeOverPickCorrectionSchema, type PickCorrection,
 } from "@shared/pick-corrections";
 import {
   correctionHash, PickCorrectionError, readPickCorrection, readPickCorrections,
   recordCorrectionEvent, resolveCorrectivePick, savePickCorrectionAnswer, savePickCorrectionReview,
   saveCorrectivePickIntent, hasNewerPickDeclaration, readConfirmedCorrectionsDueForRetry,
-  touchPickCorrectionRetry, reassignPickCorrection, type CorrectionExecutor,
+  touchPickCorrectionRetry, reassignPickCorrection, readCorrectionScanCodes, type CorrectionExecutor,
 } from "../wms/pick-correction.repository";
 import type { PickingUseCases } from "./picking.use-cases";
 import { confirmedShipmentHoldRelease } from "../wms/confirmed-shipment-holds";
@@ -31,7 +31,7 @@ export interface CorrectionDatabase extends CorrectionExecutor {
   transaction<T>(work: (tx: CorrectionExecutor) => Promise<T>): Promise<T>;
 }
 export interface CorrectivePicker {
-  (input: { correction: PickCorrection; targetQuantity: number; actor: string; method: "scan" | "missed_pick_confirmation" }): Promise<void>;
+  (input: { correction: PickCorrection; targetQuantity: number; actor: string; method: "scan" | "manual" | "missed_pick_confirmation" }): Promise<void>;
 }
 
 /** Durable answer first; inventory movement is then committed by the existing picker owner.
@@ -179,15 +179,20 @@ export class PickCorrectionService {
         || command.pickedQuantity <= before.pickedQuantity || command.pickedQuantity > before.declaredQuantity) {
         throw new PickCorrectionError("CORRECTION_CHANGED", "Refresh the correction before confirming this pick.");
       }
-      if (command.barcode !== before.barcode && command.barcode !== before.sku)
-        throw new PickCorrectionError("WRONG_ITEM", "That barcode does not match the item that needs picking.");
+      if (command.method === "scan") {
+        const scanned = normalizeScanCode(command.barcode);
+        const accepted = await readCorrectionScanCodes(tx, before.orderItemId);
+        if (scanned === null || !accepted.includes(scanned))
+          throw new PickCorrectionError("WRONG_ITEM", "That barcode does not match the item that needs picking.");
+      }
       await saveCorrectivePickIntent(tx, id, this.clock());
       await recordCorrectionEvent(tx, { correctionId: id, commandId: command.commandId, requestHash: hash,
-        actor, action: "corrective_pick_scanned", before, after: command, occurredAt: this.clock() });
+        actor, action: command.method === "manual" ? "corrective_pick_marked_manually" : "corrective_pick_scanned",
+        before, after: command, occurredAt: this.clock() });
       return readPickCorrection(tx, id);
     });
     if (correction.state !== "resolved" && correction.pickedQuantity < command.pickedQuantity)
-      await this.applyPick(correction, command.pickedQuantity, actor, "scan");
+      await this.applyPick(correction, command.pickedQuantity, actor, command.method);
     await this.finishIfPicked(id, actor);
     return readPickCorrection(this.db, id);
   }
@@ -245,7 +250,7 @@ export class PickCorrectionService {
   }
 
   private async applyPick(correction: PickCorrection, targetQuantity: number, actor: string,
-    method: "scan" | "missed_pick_confirmation", options: { quietRepeat?: boolean } = {}): Promise<void> {
+    method: "scan" | "manual" | "missed_pick_confirmation", options: { quietRepeat?: boolean } = {}): Promise<void> {
     try {
       await this.pick({ correction, targetQuantity, actor, method });
     } catch (error) {
