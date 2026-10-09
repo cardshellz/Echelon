@@ -8,6 +8,7 @@ import { ShopifyOrderEditProvider } from "./infrastructure/shopify-order-edit.pr
 import { OrderEditWarehouseGateway } from "./infrastructure/order-edit-warehouse.gateway";
 import { OrderEditOmsSynchronizer } from "./infrastructure/order-edit-oms-synchronizer";
 import { OrderEditPaidProjection } from "../oms/order-edit-paid-projection";
+import { OrderEditPreviewService } from "./application/order-edit-preview.service";
 
 const credentialSchema = z.object({
   connectionId: z.number().int().positive(),
@@ -53,20 +54,23 @@ export function createOrderEditService(
     (orderId, operationId, snapshot) =>
       paidProjection.project(orderId, operationId, snapshot),
   );
+  const store = new PostgresOrderEditStore(pool);
+  const warehouse = new OrderEditWarehouseGateway(
+    pool,
+    services.shipStation,
+    (id, snapshot, operationId) =>
+      synchronize.synchronize(id, snapshot, operationId),
+  );
   return new OrderEditService(
-    new PostgresOrderEditStore(pool),
+    store,
     provider,
-    new OrderEditWarehouseGateway(
-      pool,
-      services.shipStation,
-      (id, snapshot, operationId) =>
-        synchronize.synchronize(id, snapshot, operationId),
-    ),
+    warehouse,
     clock,
     randomUUID,
     (event) =>
       console.error(
         JSON.stringify({ event: "order_edit_requires_attention", ...event }),
       ),
+    new OrderEditPreviewService(store, provider, warehouse, clock),
   );
 }

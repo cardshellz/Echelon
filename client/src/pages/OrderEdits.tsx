@@ -1,4 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { canonicalJson } from "@shared/utils/canonical-json";
+import {
+  ORDER_EDIT_PREVIEW_DEBOUNCE_MS,
+  ORDER_EDIT_PREVIEW_TTL_MS,
+  orderEditPreviewInputSchema,
+  type OrderEditPreview,
+} from "@shared/order-edits/order-edit-preview";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
 import {
@@ -42,6 +49,7 @@ import {
   savePendingOrderEditQuote,
   loadPendingOrderEditQuote,
   clearPendingOrderEditQuote,
+  matchingOrderEditPreview,
   type OrderEditTransport,
 } from "@/lib/order-edits";
 
@@ -221,6 +229,7 @@ export function OrderDraft({
   onConfigure,
   reviewBlocked = false,
   closedOperationId,
+  active = true,
 }: {
   order: OrderEditOrder;
   api: OrderEditTransport;
@@ -232,6 +241,8 @@ export function OrderDraft({
   /** Keep item entry responsive while closing a prior quote; submission waits for confirmation. */
   reviewBlocked?: boolean;
   closedOperationId?: string;
+  /** Retained drafts stay mounted during review, but do not keep requesting background calculations. */
+  active?: boolean;
 }) {
   const [quantities, setQuantities] = useState<Record<string, string>>(() =>
     Object.fromEntries(
@@ -246,6 +257,9 @@ export function OrderDraft({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
+  const [reviewPreview, setReviewPreview] = useState<OrderEditPreview | null>(
+    null,
+  );
   const inflight = useRef(false);
   const command = useRef<OrderEditQuoteInput | null>(null);
   useEffect(() => {
@@ -290,19 +304,77 @@ export function OrderDraft({
       quantity: item.quantity.trim() ? Number(item.quantity) : Number.NaN,
     })),
   };
-  // The placeholder validates the draft without minting a new command identity during render.
-  const validation = orderEditQuoteInputSchema.safeParse({
-    ...input,
-    requestKey: "00000000-0000-4000-8000-000000000000",
-  });
+  const validation = orderEditPreviewInputSchema.safeParse(input);
   const valid = validation.success;
   const validationMessage =
     !validation.success && changes.length + additions.length > 0
       ? `Check the item quantities: ${validation.error.issues[0]?.message ?? "Enter valid whole numbers."}`
       : null;
+  const draftKey = valid ? canonicalJson(input) : "";
+  const previewKey = useDebounce(draftKey, ORDER_EDIT_PREVIEW_DEBOUNCE_MS);
+  const preview = useQuery({
+    queryKey: [ORDER_EDITS_API, staffId, "preview", previewKey],
+    queryFn: ({ signal }) =>
+      api.preview(
+        orderEditPreviewInputSchema.parse(JSON.parse(previewKey)),
+        signal,
+      ),
+    enabled:
+      active &&
+      mutable &&
+      !reviewBlocked &&
+      !!previewKey &&
+      previewKey === draftKey,
+    retry: false,
+    gcTime: ORDER_EDIT_PREVIEW_TTL_MS,
+    staleTime: (query) =>
+      Math.max(
+        0,
+        Date.parse(query.state.data?.expiresAt ?? "") -
+          query.state.dataUpdatedAt,
+      ) || 0,
+  });
+  useEffect(() => {
+    if (!active || !canEdit || reviewBlocked || locked) return;
+    const controller = new AbortController();
+    // Warm pricing/provenance before the first change; errors are shown by the preview query and never block Review.
+    void api
+      .warmPreview(
+        {
+          connectionId: order.connectionId,
+          omsOrderId: order.omsOrderId,
+          expectedRevision: order.revision,
+        },
+        controller.signal,
+      )
+      .catch((failure) => {
+        if (!controller.signal.aborted)
+          console.warn(
+            "order_edit_preview_warm_failed",
+            failure instanceof OrderEditRequestError
+              ? failure.code
+              : "PREVIEW_UNAVAILABLE",
+          );
+      });
+    return () => controller.abort();
+  }, [
+    active,
+    canEdit,
+    reviewBlocked,
+    locked,
+    api,
+    order.connectionId,
+    order.omsOrderId,
+    order.revision,
+  ]);
+  const currentPreview =
+    valid && draftKey === previewKey
+      ? matchingOrderEditPreview(preview.data, input, Date.now())
+      : null;
   async function quote() {
     if (!canEdit || !valid || reviewBlocked || inflight.current) return;
     inflight.current = true;
+    setReviewPreview(currentPreview);
     setPending(true);
     setError(null);
     onLock(true);
@@ -335,6 +407,8 @@ export function OrderDraft({
       setPending(false);
     }
   }
+  if (pending)
+    return <OrderEditPreviewReview order={order} preview={reviewPreview} />;
   return (
     <Card>
       <CardHeader className="space-y-2">
@@ -548,6 +622,17 @@ export function OrderDraft({
         </p>
         <ErrorMessage text={validationMessage} />
         <ErrorMessage text={error} />
+        {valid && active && (
+          <p role="status" className="text-xs text-muted-foreground">
+            {currentPreview
+              ? `Updated total preview: ${formatOrderEditMoney(currentPreview.financials.totalCents, order.currency)}. Review verifies these totals before applying changes.`
+              : preview.isFetching
+                ? "Preparing updated totals…"
+                : preview.isError
+                  ? "Background totals are unavailable. Review will verify your changes."
+                  : "Updated totals will appear after you finish changing items."}
+          </p>
+        )}
         {order.financials && (
           <OrderEditTotals
             columns={[{ label: "Current order", financials: order.financials }]}
@@ -574,6 +659,74 @@ export function OrderDraft({
                 ? "Retry same quote request"
                 : "Review changes"}
           </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function OrderEditPreviewReview({
+  order,
+  preview,
+}: {
+  order: OrderEditOrder;
+  preview: OrderEditPreview | null;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>
+          <h2>Order {order.orderNumber}</h2>
+        </CardTitle>
+        <div>
+          <Badge variant="outline">Verifying changes</Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4" aria-busy="true">
+        <p role="status" className="text-sm text-muted-foreground">
+          {preview
+            ? "Preview totals are shown below. Checking the current order, stock and shipping before changes can be applied."
+            : "Checking your changes and calculating discounts, shipping and tax…"}
+        </p>
+        {preview && (
+          <>
+            <div className="divide-y rounded-md border">
+              {preview.lines.map((line) => (
+                <div
+                  key={line.id}
+                  className="flex flex-wrap items-center gap-3 p-3 text-sm"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium">{line.title}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {line.variantTitle}
+                    </p>
+                  </div>
+                  <p>Qty {line.quantity}</p>
+                  <p className="tabular-nums">
+                    {formatOrderEditMoney(line.totalCents, order.currency)}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <OrderEditTotals
+              columns={[
+                ...(order.financials
+                  ? [{ label: "Before edit", financials: order.financials }]
+                  : []),
+                {
+                  label: "Preview · verifying",
+                  financials: preview.financials,
+                },
+              ]}
+            />
+          </>
+        )}
+        <div className="flex flex-wrap gap-2 border-t pt-4">
+          <Button disabled>Verifying changes…</Button>
+          <p className="self-center text-xs text-muted-foreground">
+            Changes can be applied after verification finishes.
+          </p>
         </div>
       </CardContent>
     </Card>
@@ -1397,6 +1550,7 @@ export default function OrderEdits() {
               staffId={user.id}
               reviewBlocked={!!operationId || busy}
               closedOperationId={closedOperationId}
+              active={!operationId && !savedQuote && !savedQuoteError}
               onLock={setDraftLocked}
               onConfigure={
                 canConfigure && !draftLocked

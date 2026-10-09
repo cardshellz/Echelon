@@ -29,6 +29,14 @@ import {
 import { buildOrderEditFinancials } from "../domain/order-edit-financials";
 import { priceOrderEditDiscounts } from "../domain/order-edit-discount-engine";
 import { resolveOrderEditLinePlan } from "../domain/order-edit-line-plan";
+import { priceOrderEditPreviewItems } from "../domain/order-edit-preview-pricing";
+import { toOrderEditPreviewPricingInput } from "../application/order-edit-preview-pricing-input";
+import type {
+  OrderEditPreviewProvider,
+  OrderEditPreviewContext,
+  OrderEditPreviewCalculation,
+  OrderEditPreviewVariant,
+} from "../application/order-edit-preview-provider";
 import { SHOPIFY_CALCULATED_LINE_ID_PATTERN } from "@shared/order-edits/shopify-edit-identity";
 import type { OrderEditDiscount } from "@shared/order-edits/order-edit-discounts";
 import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";
@@ -277,7 +285,9 @@ const USER_ERRORS = z.array(
 );
 const MUTATION = z.object({ userErrors: USER_ERRORS }).passthrough();
 
-export class ShopifyOrderEditProvider implements OrderEditProvider {
+export class ShopifyOrderEditProvider
+  implements OrderEditProvider, OrderEditPreviewProvider
+{
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
   private readonly shippingCalculator: OrderEditShippingCalculator;
@@ -447,6 +457,7 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
       contentFingerprint,
       fingerprint: "",
       evidence,
+      previewProductDiscounts: readPreviewProductDiscounts(order),
       financials: readOrderFinancials(order),
       discountRules: order.discountApplications.nodes.map((entry) => ({
         index: entry.index,
@@ -523,6 +534,136 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
         available: stockAvailable(variant, 1),
         availableQuantity: Math.max(0, variant.sellableOnlineQuantity),
       }));
+  }
+
+  async preparePreview(
+    snapshot: OrderEditSnapshot,
+  ): Promise<OrderEditPreviewContext> {
+    parse(orderEditSnapshotSchema, snapshot);
+    assertEditable(snapshot);
+    const ids = [
+      ...new Set(
+        snapshot.lines
+          .filter((line) => line.quantity > 0)
+          .map((line) => line.variantId),
+      ),
+    ];
+    const [promotions, variants] = await Promise.allSettled([
+      this.verifyExistingPromotions(snapshot.connectionId, snapshot),
+      this.previewVariants(snapshot, ids),
+    ]);
+    if (promotions.status === "rejected") throw promotions.reason;
+    if (variants.status === "rejected") throw variants.reason;
+    return { snapshot: structuredClone(snapshot), variants: variants.value };
+  }
+
+  async preview(
+    context: OrderEditPreviewContext,
+    plan: OrderEditPlan,
+  ): Promise<OrderEditPreviewCalculation> {
+    parse(orderEditSnapshotSchema, context.snapshot);
+    validatePlan(plan);
+    const existing = new Set(context.variants.map((v) => v.variantId));
+    const missing = additionalDemand(context.snapshot, plan)
+      .map((v) => v.variantId)
+      .filter((id) => !existing.has(id));
+    const variants = [
+      ...context.variants,
+      ...(await this.previewVariants(context.snapshot, missing)),
+    ];
+    const pricing = priceOrderEditPreviewItems(
+      toOrderEditPreviewPricingInput({ snapshot: context.snapshot, variants }),
+      plan,
+    );
+    if (!this.shippingCalculator.calculatePreview)
+      fail(
+        "ORDER_EDIT_PREVIEW_UNAVAILABLE",
+        "The shipping calculator does not support background totals.",
+      );
+    const { shippingRepricing, taxCents, totalCents } =
+      await this.shippingCalculator.calculatePreview(
+        context.snapshot,
+        pricing.lines.map((line) => ({
+          variantId: line.variantId,
+          quantity: line.quantity,
+          netCents: line.netCents,
+        })),
+      );
+    const financials = buildOrderEditFinancials({
+      lines: pricing.lines.map((line) => ({
+        id: line.id,
+        grossCents: line.grossCents,
+        netCents: line.netCents,
+      })),
+      itemsNetCents: pricing.itemsNetCents,
+      itemDiscounts: pricing.discounts,
+      itemDiscountLabels: pricing.discounts.map((d) => d.label),
+      shippingGrossCents: shippingRepricing.grossCents,
+      shippingCents: shippingRepricing.netCents,
+      shippingDiscountLabels: shippingRepricing.discountLabels,
+      taxCents,
+      taxesIncluded: context.snapshot.financials!.taxesIncluded,
+      totalCents,
+    });
+    return {
+      financials,
+      shippingRepricing,
+      lines: pricing.lines.map((line) => ({
+        id: line.id,
+        title: line.title,
+        variantTitle: line.variantTitle,
+        quantity: line.quantity,
+        totalCents: line.netCents,
+      })),
+    };
+  }
+
+  private async previewVariants(
+    snapshot: OrderEditSnapshot,
+    ids: string[],
+  ): Promise<OrderEditPreviewVariant[]> {
+    if (!ids.length) return [];
+    const variants = await this.readPricingVariants(
+      snapshot.connectionId,
+      snapshot,
+      ids,
+    );
+    return variants.map((variant) => ({
+      variantId: variant.id,
+      title: variant.displayName,
+      variantTitle: variant.title,
+      retailCents: cents(variant.price),
+      memberCents: memberPrice(variant, snapshot),
+      availableQuantity: variant.sellableOnlineQuantity,
+      available: stockAvailable(variant, 1),
+    }));
+  }
+
+  private async readPricingVariants(
+    connectionId: number,
+    snapshot: OrderEditSnapshot,
+    ids: string[],
+  ) {
+    const credentials = await this.credentials(connectionId);
+    if (credentials.channelId !== snapshot.channelId)
+      fail("CONNECTION_MISMATCH", "The connection's channel changed.");
+    const variants = parse(
+      z.object({ nodes: z.array(VARIANT.nullable()) }),
+      await this.request(credentials, gql.VARIANTS_QUERY, { ids }),
+    ).nodes;
+    if (variants.length !== ids.length)
+      fail(
+        "INCOMPLETE_VARIANTS",
+        "Shopify did not return every selected product.",
+      );
+    return variants.map((variant, index) => {
+      if (!variant || variant.id !== ids[index] || !supportedVariant(variant))
+        fail(
+          "VARIANT_UNSUPPORTED",
+          "The selected product cannot be added by this pilot.",
+        );
+      return variant;
+    });
   }
 
   async quote(
@@ -976,15 +1117,11 @@ export class ShopifyOrderEditProvider implements OrderEditProvider {
   ): Promise<VariantPricing> {
     const demand = additionalDemand(baseline, plan);
     if (demand.length === 0) return { variants: [], prices: new Map() };
-    const credentials = await this.credentials(connectionId);
-    if (credentials.channelId !== baseline.channelId)
-      fail("CONNECTION_MISMATCH", "The connection's channel changed.");
-    const variants = parse(
-      z.object({ nodes: z.array(VARIANT.nullable()) }),
-      await this.request(credentials, gql.VARIANTS_QUERY, {
-        ids: demand.map((line) => line.variantId),
-      }),
-    ).nodes;
+    const variants = await this.readPricingVariants(
+      connectionId,
+      baseline,
+      demand.map((line) => line.variantId),
+    );
     const prices = new Map<string, number>();
     for (let index = 0; index < variants.length; index++) {
       const variant = variants[index];
@@ -2550,6 +2687,48 @@ function readOrderItemDiscounts(
     "discount display identities",
   );
   return sortDiscounts(discounts);
+}
+
+/** Display-only enrichment. Old/removal allocations that do not reconcile cannot seed a preview. */
+function readPreviewProductDiscounts(
+  order: z.infer<typeof ORDER>,
+): OrderEditSnapshot["previewProductDiscounts"] {
+  const applications = new Map(
+    order.discountApplications.nodes.map((d) => [d.index, d]),
+  );
+  const result: NonNullable<OrderEditSnapshot["previewProductDiscounts"]> = [];
+  for (const line of order.lineItems.nodes.filter(
+    (line) => line.currentQuantity > 0,
+  )) {
+    const gross = multiply(
+      money(line.originalUnitPriceSet),
+      line.currentQuantity,
+    );
+    if (
+      sum(line.discountAllocations.map((a) => money(a.allocatedAmountSet))) !==
+      gross - money(line.priceAfterAllDiscountsBeforeTaxesSet)
+    )
+      return undefined;
+    let amountCents = 0;
+    let automaticCents = 0;
+    for (const allocation of line.discountAllocations) {
+      const rule = applications.get(allocation.discountApplication.index);
+      if (!rule || rule.targetType !== "LINE_ITEM") return undefined;
+      if (rule.__typename === "DiscountCodeApplication") continue;
+      if (
+        !["AutomaticDiscountApplication", "ManualDiscountApplication"].includes(
+          rule.__typename,
+        )
+      )
+        return undefined;
+      const value = money(allocation.allocatedAmountSet);
+      amountCents = sum([amountCents, value]);
+      if (rule.__typename === "AutomaticDiscountApplication")
+        automaticCents = sum([automaticCents, value]);
+    }
+    result.push({ lineId: line.id, amountCents, automaticCents });
+  }
+  return result;
 }
 
 /** Shopify reports function PRODUCT allocations as appliedTo ORDER, excluding them from editableSubtotalSet. */
