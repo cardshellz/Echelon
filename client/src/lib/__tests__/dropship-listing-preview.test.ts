@@ -34,6 +34,22 @@ describe("product-cost preview issues", () => {
   });
 });
 
+describe("eBay return and payment policy issues", () => {
+  it("says a policy gone from eBay must be chosen again, and where", () => {
+    expect(formatListingPreviewIssue("ebay_return_policy:not_found"))
+      .toBe("Your return policy is no longer on eBay. Choose a return policy in step 2, Listing settings.");
+    expect(formatListingPreviewIssue("ebay_payment_policy:not_found"))
+      .toBe("Your payment policy is no longer on eBay. Choose a payment policy in step 2, Listing settings.");
+  });
+  it("says a policy that could not be checked is not known to be wrong", () => {
+    for (const kind of ["return", "payment"]) {
+      const label = formatListingPreviewIssue(`ebay_${kind}_policy:verification_unavailable`);
+      expect(label).toBe(`Your ${kind} policy couldn't be checked with eBay. Refresh the preview; contact support if this continues.`);
+      expect(label).not.toMatch(/no longer|choose/i);
+    }
+  });
+});
+
 describe("listing photo preview issues", () => {
   it("says an uploaded photo is left out and that the vendor cannot fix it", () => {
     expect(formatListingPreviewIssue("catalog_photo_public_address_missing"))
