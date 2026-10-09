@@ -6,6 +6,7 @@ import { cutoverCompositionBaseSql } from "../fixtures/inventory-cutover-composi
 import { activateWalmartPublicationInventoryFixture, installWalmartPublicationInventoryFixture, WALMART_INVENTORY_NOW } from "../fixtures/walmart-publication-inventory.fixture";
 import { VerifiedListingStockService } from "../../application/verified-listing-stock.service";
 import { PostgresInventoryPublicationMembershipStore } from "../../infrastructure/inventory-publication-membership.repository";
+import { PostgresInventoryPublicationSupplyReader } from "../../infrastructure/inventory-publication-supply-read.repository";
 import { installCutoverAdmissionFixturePrerequisites } from "../fixtures/inventory-cutover-admission.fixture";
 import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructure/inventory-publication-outbox.repository";
 import { PostgresQuantityPublicationAdmission } from "../../infrastructure/quantity-publication-admission.repository";
@@ -31,6 +32,13 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
     (SELECT count(*)::int FROM inventory.publication_membership_heads WHERE publication_target_id=2) AS members,
     (SELECT count(*)::int FROM inventory.inventory_publication_outbox WHERE publication_target_id=2) AS updates,
     (SELECT count(*)::int FROM inventory.publication_membership_applications WHERE publication_target_id=2) AS receipts`)).rows[0];
+  const addWarehouseStock = async (hubWarehouseId: number | null, active = true) => {
+    await database.pool.query("INSERT INTO warehouse.warehouses(id,code,hub_warehouse_id,is_active) VALUES(2,'SECONDARY',$1,$2)",
+      [hubWarehouseId, active ? 1 : 0]);
+    await database.pool.query(`INSERT INTO warehouse.warehouse_locations(id,warehouse_id) VALUES(200,2);
+      INSERT INTO inventory.inventory_levels(id,warehouse_location_id,product_variant_id,variant_qty,reserved_qty,picked_qty,packed_qty)
+        VALUES(20,200,101,5,0,0,0)`);
+  };
   beforeEach(async () => {
     database = await createInventoryCutoverTestDatabase(url, disposable, cutoverCompositionBaseSql);
     await installWalmartPublicationInventoryFixture(database.pool, { includeWalmartMapping: false });
@@ -69,8 +77,19 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
     expect((await database.pool.query("SELECT * FROM public.audit_events WHERE actor='walmart-stock-connection'")).rows).toEqual([]);
   });
 
-  it("keeps an acknowledged Walmart write retryable when the first inventory read is stale", async () => {
-    await service.connect(input());
+  it.each([
+    { source: "hub stock", reserve: false, reserveOnly: false, quantity: 17 },
+    { source: "hub and linked reserve stock", reserve: true, reserveOnly: false, quantity: 22 },
+    { source: "linked reserve stock only", reserve: true, reserveOnly: true, quantity: 5 },
+  ])("enrolls and verifies $source through Walmart, retrying a stale first read", async ({ reserve, reserveOnly, quantity }) => {
+    if (reserve) await addWarehouseStock(1);
+    if (reserveOnly) {
+      // All physical hub stock is already reserved; only its reserve can supply this SKU.
+      await database.pool.query("UPDATE inventory.inventory_levels SET variant_qty=reserved_qty WHERE warehouse_location_id=100");
+    }
+    expect(await service.connect(input())).toMatchObject({ state: "connected",
+      quantities: [{ productVariantId: 101, desiredQuantity: String(quantity) }] });
+    expect(await counts()).toEqual({ mappings: 1, members: 1, updates: 1, receipts: 1 });
     let now = WALMART_INVENTORY_NOW;
     let reads = 0;
     const methods: string[] = [];
@@ -79,9 +98,14 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
       now: () => now,
       fetch: async (url, options) => {
         if (String(url).endsWith("/v3/token")) return Response.json({ access_token: "test-token", expires_in: 3600 });
+        expect(new URL(String(url)).searchParams.get("sku")).toBe("P5");
+        expect(new URL(String(url)).searchParams.get("shipNode")).toBe("test-location");
         methods.push(options!.method!);
+        if (options!.method === "PUT") {
+          expect(JSON.parse(String(options!.body))).toEqual({ sku: "P5", quantity: { unit: "EACH", amount: quantity } });
+        }
         return Response.json({ sku: "P5", quantity: { unit: "EACH",
-          amount: options!.method === "GET" && ++reads === 1 ? 0 : 17 } });
+          amount: options!.method === "GET" && ++reads === 1 ? 0 : quantity } });
       },
     }));
     const channels = { connection: async () => ({ connection_id: 8, ship_node_id: "test-location", warehouse_id: 1 }),
@@ -90,7 +114,7 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
         assertWarehouse: async () => undefined, withLock: async <T>(_channel: number, work: () => Promise<T>) => work() },
     } as unknown as WalmartChannelService;
     const transport = new ChannelInventoryPublicationTransportAdapter(new WalmartAdapter(channels,
-      { getSourceWarehouses: async () => [{ warehouseId: 1, isActive: true }] }));
+      new PostgresInventoryPublicationSupplyReader(database.pool)));
     const worker = new InventoryPublicationOutboxService(new PostgresInventoryPublicationOutboxRepository(database.pool),
       { get: () => transport }, { now: () => now }, () => "walmart-delay-test",
       new PostgresQuantityPublicationAdmission(database.pool, () => now));
@@ -108,6 +132,8 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
     await nextDue();
     expect(await worker.processDue()).toMatchObject({ claimed: 1, verified: 1, failed: 0 });
     expect(methods).toEqual(["PUT", "GET", "PUT", "GET"]);
+    expect((await database.pool.query("SELECT observed_quantity::text,matches_desired FROM inventory.inventory_publication_readbacks WHERE publication_target_id=2 ORDER BY id")).rows)
+      .toEqual([{ observed_quantity: "0", matches_desired: false }, { observed_quantity: String(quantity), matches_desired: true }]);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_publication_attempts WHERE state IN ('uncertain','running')")).rows[0].count).toBe(0);
   });
 
@@ -144,11 +170,32 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
     expect(await counts()).toEqual({ mappings: 1, members: 1, updates: 1, receipts: 1 });
   });
 
-  it("still rejects contributing stock outside the configured Walmart supply binding", async () => {
-    await database.pool.query(`INSERT INTO warehouse.warehouses(id,code,hub_warehouse_id) VALUES(2,'RESERVE',1);
-      INSERT INTO warehouse.warehouse_locations(id,warehouse_id) VALUES(200,2);
-      INSERT INTO inventory.inventory_levels(id,warehouse_location_id,product_variant_id,variant_qty,reserved_qty,picked_qty,packed_qty)
-        VALUES(20,200,101,5,0,0,0)`);
+  it.each([
+    { source: "inactive reserve", hubWarehouseId: 1, active: false },
+    { source: "unrelated warehouse", hubWarehouseId: null, active: true },
+  ])("excludes stock in an $source from the Walmart ATP quantity", async ({ hubWarehouseId, active }) => {
+    await addWarehouseStock(hubWarehouseId, active);
+    expect(await service.connect(input())).toMatchObject({ state: "connected",
+      quantities: [{ productVariantId: 101, desiredQuantity: "17" }] });
+    expect(await counts()).toEqual({ mappings: 1, members: 1, updates: 1, receipts: 1 });
+  });
+
+  it("rejects a SKU override drawing stock from outside the configured warehouse's ATP group", async () => {
+    await addWarehouseStock(null);
+    await database.pool.query(`INSERT INTO warehouse.fulfillment_nodes(code,name,node_type,warehouse_id,inventory_authority,fulfillment_authority,created_by)
+        VALUES('UNRELATED','Unrelated warehouse','internal_warehouse',2,'echelon','echelon','operator');
+      UPDATE warehouse.fulfillment_nodes SET lifecycle_status='active',activated_by='operator',activated_at=transaction_timestamp() WHERE warehouse_id=2;
+      INSERT INTO inventory.channel_exposure_policy_versions(scope_key,channel_id,scope_type,product_id,product_variant_id,version,
+        source_fulfillment_node_ids,definition_hash,change_reason,idempotency_key,request_hash,created_by)
+        SELECT 'channel:36:variant:101',36,'variant',20,101,1,ARRAY[id],repeat('b',64),'Wrong source fixture','source-override',repeat('b',64),'operator'
+        FROM warehouse.fulfillment_nodes WHERE warehouse_id=2;
+      INSERT INTO inventory.channel_exposure_policy_heads(scope_key,channel_id,draft_policy_id,revision,updated_by,update_reason)
+        SELECT scope_key,channel_id,id,1,'operator','Reviewed source fixture' FROM inventory.channel_exposure_policy_versions
+        WHERE scope_key='channel:36:variant:101';
+      UPDATE inventory.channel_exposure_policy_versions SET lifecycle_status='sealed',sealed_by='operator',sealed_at=transaction_timestamp()
+        WHERE scope_key='channel:36:variant:101';
+      UPDATE inventory.channel_exposure_policy_heads SET active_policy_id=draft_policy_id,draft_policy_id=NULL,revision=revision+1
+        WHERE scope_key='channel:36:variant:101'`);
     await expect(service.connect(input())).rejects.toMatchObject({ code: "STOCK_LISTING_ATP_NOT_READY",
       message: expect.stringContaining("source must match") });
     expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0 });

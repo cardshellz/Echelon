@@ -17,6 +17,7 @@ import {
   type InventoryPublicationMembershipStore,
 } from "../application/inventory-publication-membership.service";
 import { planInventoryChannelExposureProduct } from "../application/inventory-channel-exposure-runtime.service";
+import { resolvePromiseWarehouseIds } from "../domain/inventory-warehouse-scope";
 import { loadAndLockRuntimeAuthority } from "./inventory-availability-runtime-atp.repository";
 import { captureActiveSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
 import {
@@ -664,6 +665,13 @@ async function captureReview(
         blockers.push(
           issue(problem.code, problem.message, "configure_inventory"),
         );
+      // ATP reports physical contributions from the hub and its active reserves.
+      // Validate SKU overrides against that same group, not just the binding's
+      // root IDs; an unrelated warehouse must still block enrollment.
+      const configuredPromiseWarehouseIds = new Set(resolvePromiseWarehouseIds(
+        snapshot.warehouses,
+        selected?.sourceBinding?.warehouseIds ?? [],
+      ));
       for (const row of selected?.rows ?? []) {
         for (const problem of row.blockers)
           blockers.push(
@@ -678,17 +686,14 @@ async function captureReview(
           target.provider_key === "walmart" &&
           row.sourceWarehouseBreakdown.some(
             (source) =>
-              // ATP includes zero rows for other warehouses in the promise
-              // group. Only a contributing warehouse can change the stock scope.
-              BigInt(source.canonicalAtpUnits) > BigInt(0) && !selected?.sourceBinding?.warehouseIds.includes(
-                source.warehouseId,
-              ),
+              BigInt(source.canonicalAtpUnits) > BigInt(0) &&
+              !configuredPromiseWarehouseIds.has(source.warehouseId),
           )
         ) {
           blockers.push(
             issue(
               "WALMART_SOURCE_OVERRIDE_MISMATCH",
-              "The selected SKU's source must match its configured Walmart fulfillment warehouse.",
+              "The selected SKU's source must match its configured Walmart fulfillment warehouse or an active reserve linked to it.",
               "review_source",
               row.productVariantId,
             ),
