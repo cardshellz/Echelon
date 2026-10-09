@@ -18,7 +18,8 @@ const correctionView = sql`
   SELECT c.id, oi.order_id AS "orderId", oi.id AS "orderItemId", o.order_number AS "orderNumber",
     oi.sku, oi.name, oi.barcode, oi.location, c.declared_quantity AS "declaredQuantity",
     oi.picked_quantity AS "pickedQuantity", c.revision, c.state, c.answer,
-    c.assigned_picker_id AS "assignedPickerId", c.review_reason AS "reviewReason"
+    c.assigned_picker_id AS "assignedPickerId", c.review_reason AS "reviewReason",
+    c.updated_at AS "updatedAt"
   FROM wms.pick_corrections c JOIN wms.order_items oi ON oi.id = c.order_item_id
   JOIN wms.orders o ON o.id = oi.order_id`;
 
@@ -145,6 +146,12 @@ export async function savePickCorrectionAnswer(db: CorrectionExecutor, id: numbe
   answer: "yes" | "no", actor: string, occurredAt: Date): Promise<void> {
   await db.execute(sql`UPDATE wms.pick_corrections SET state='picking_required',answer=${answer},
     assigned_picker_id=${actor},review_reason=NULL,revision=revision+1,updated_at=${occurredAt} WHERE id=${id}`);
+}
+
+export async function reassignPickCorrection(db: CorrectionExecutor, id: number,
+  actor: string, occurredAt: Date): Promise<void> {
+  await db.execute(sql`UPDATE wms.pick_corrections SET assigned_picker_id=${actor},
+    revision=revision+1,updated_at=${occurredAt} WHERE id=${id}`);
 }
 
 /**
