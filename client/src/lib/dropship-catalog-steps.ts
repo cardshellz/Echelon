@@ -104,7 +104,19 @@ export interface ListingSettingsRailInput {
    * eBay can tell: a saved policy gone or no longer fitting Card Shellz
    * shipping, and the ship-from location.
    */
-  liveSetup: { missingFields: readonly string[] } | null;
+  liveSetup: {
+    missingFields: readonly string[];
+    /** Whether the vendor may change these settings; absent from servers before it was reported. */
+    access?: { canEdit: boolean };
+    /** Which checks ran for this answer; absent from servers before they were reported, which always ran both. */
+    checks?: {
+      ebay: "checked" | "not_checked";
+      fulfillment:
+        | { status: "checked" }
+        | { status: "unavailable"; kind: "temporary" | "setup_incomplete" | "marketplace_unsupported" }
+        | { status: "not_checked" };
+    };
+  } | null;
 }
 
 export interface ListingSettingsRailLine {
@@ -142,18 +154,52 @@ export function describeListingSettingsRail(input: ListingSettingsRailInput): Li
   const todo = (line: string): ListingSettingsRailLine => ({ tick: "todo", line, retry: false });
   if (rail.state === "reconnect_store") return todo("Reconnect eBay");
   if (rail.state === "too_many_sizes") return todo("Too many sizes to check");
+  // A view-only store (paused, disconnected, account not active) has nothing
+  // the vendor can do here, so no policy line and no retry.
+  if (input.liveSetup?.access?.canEdit === false) return { tick: "unknown", line: "View only", retry: false };
+  const checks = input.liveSetup?.checks;
+  // Card Shellz doesn't list on this eBay site, which blocks every listing,
+  // so it comes before anything else the vendor could do.
+  if (checks?.fulfillment.status === "unavailable" && checks.fulfillment.kind === "marketplace_unsupported") {
+    return todo("Contact support");
+  }
+  // While Card Shellz shipping can't be read, the shipping policy can't be
+  // chosen and the ship-from location can't be fixed, so the rail does not
+  // ask for either; it says why once the other policies are done.
+  const shippingUnchecked = checks !== undefined && checks.fulfillment.status !== "checked";
   const live = new Set(input.liveSetup?.missingFields ?? []);
-  const policy = POLICY_ORDER.find((kind) => rail.missingPolicy === kind || LIVE_POLICY_FIELDS[kind].some((field) => live.has(field)));
+  const policyMissing = (kind: ListingSettingsPolicyKind) =>
+    rail.missingPolicy === kind || LIVE_POLICY_FIELDS[kind].some((field) => live.has(field));
+  const policy = POLICY_ORDER.find((kind) => !(shippingUnchecked && kind === "shipping") && policyMissing(kind));
   if (policy) return todo(`Choose a ${POLICY_WORDS[policy]} policy`);
+  if (shippingUnchecked && policyMissing("shipping")) return uncheckedShippingLine(checks.fulfillment);
   // A missing policy the summary names is always one of the three, so this is only a broken answer's fallback.
-  if (rail.state === "choose_policy") return todo("Choose your eBay policies");
-  if (live.has(LIVE_LOCATION_FIELD)) return todo("Ship-from location needs updating");
+  if (rail.state === "choose_policy" && rail.missingPolicy === null) return todo("Choose your eBay policies");
+  if (live.has(LIVE_LOCATION_FIELD) && !shippingUnchecked) return todo("Ship-from location needs updating");
   // A problem the live check names that this rail does not know yet still keeps "All set" off.
   if ([...live].some((field) => !KNOWN_LIVE_FIELDS.has(field))) return todo("Finish your eBay setup");
   if (rail.state === "products_need_fix") {
     return todo(rail.productsNeedingFix === 1 ? "1 product needs a fix" : `${rail.productsNeedingFix} products need a fix`);
   }
+  // A live answer that could not check eBay or Card Shellz shipping found no
+  // problem only because those checks did not run, so it cannot vouch either.
+  if (shippingUnchecked) return uncheckedShippingLine(checks.fulfillment);
+  if (checks && checks.ebay !== "checked") return { tick: "unknown", line: "Couldn't check", retry: true };
   return { tick: "done", line: "All set", retry: false };
+}
+
+/**
+ * Why Card Shellz shipping wasn't checked, for the rail. Only a passing outage
+ * is worth a retry; a store whose shipping Card Shellz is still setting up
+ * waits on Card Shellz.
+ */
+function uncheckedShippingLine(
+  fulfillment: NonNullable<NonNullable<ListingSettingsRailInput["liveSetup"]>["checks"]>["fulfillment"],
+): ListingSettingsRailLine {
+  if (fulfillment.status === "unavailable" && fulfillment.kind === "setup_incomplete") {
+    return { tick: "unknown", line: "Card Shellz is finishing setup", retry: false };
+  }
+  return { tick: "unknown", line: "Couldn't check", retry: true };
 }
 
 export interface CatalogActionBarContent {

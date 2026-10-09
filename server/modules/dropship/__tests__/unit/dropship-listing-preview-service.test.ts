@@ -38,7 +38,10 @@ import {
 import type {
   DropshipAtpProvider,
 } from "../../application/dropship-selection-atp-service";
-import type { DropshipStoreListingConfig } from "../../application/dropship-marketplace-listing-provider";
+import type {
+  DropshipCanonicalListingContent,
+  DropshipStoreListingConfig,
+} from "../../application/dropship-marketplace-listing-provider";
 import type { DropshipEbayListingPolicyOverride } from "../../application/dropship-ebay-listing-policy-override-service";
 import type { DropshipEbayReturnPaymentPolicyCheckInput } from "../../application/dropship-ebay-return-payment-policy-check";
 import type {
@@ -1370,6 +1373,214 @@ describe("DropshipListingPreviewService", () => {
     expect(replay.job.jobId).toBe(first.job.jobId); expect(replay.idempotentReplay).toBe(true);
     await expect(service.createListingPushJobForMember("member-1", { ...request, expectedPriceCentsByVariantId: undefined }))
       .rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT" });
+  });
+
+  describe("display-only eBay settings in the store's listing config (PR 6)", () => {
+    const listingKeys = {
+      profileId: "profile-1",
+      marketplaceId: "EBAY_US",
+      merchantLocationKey: "cardshellz-dropship-22",
+      businessPolicies: {
+        fulfillmentPolicyId: "fulfillment-policy",
+        returnPolicyId: "return-default",
+        paymentPolicyId: "payment-default",
+      },
+    };
+    const shelfDefault = { ids: ["101"], names: ["Toploaders"] };
+    function ebayStore(extra: Record<string, unknown>) {
+      repository.context = { ...repository.context, platform: "ebay" };
+      repository.config = {
+        ...repository.config!,
+        platform: "ebay",
+        marketplaceConfig: { ...structuredClone(listingKeys), ...extra },
+      };
+    }
+    const preview = () => service.previewForMember("member-1", {
+      storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1299,
+    });
+
+    /** Names as the setup save stores them: keyed by policy field, each with the id it names. */
+    function storedNames(overrides: Record<string, { id: string; name: string }> = {}) {
+      return {
+        fulfillmentPolicyId: { id: "fulfillment-policy", name: "Free shipping" },
+        returnPolicyId: { id: "return-default", name: "30 day returns" },
+        paymentPolicyId: { id: "payment-default", name: "Immediate payment" },
+        ...overrides,
+      };
+    }
+
+    it("keeps policy names and the shelf default out of the listing intent, so an eBay rename leaves the preview as it was", async () => {
+      ebayStore({ businessPolicyNames: storedNames(), storeShelfDefault: shelfDefault });
+      const named = await preview();
+      expect(named.rows[0].previewStatus).toBe("ready");
+      expect(named.rows[0].listingIntent?.marketplaceConfig).toEqual(listingKeys);
+
+      ebayStore({
+        businessPolicyNames: storedNames({ fulfillmentPolicyId: { id: "fulfillment-policy", name: "Free shipping (renamed)" } }),
+        storeShelfDefault: shelfDefault,
+      });
+      const renamed = await preview();
+      ebayStore({ storeShelfDefault: shelfDefault });
+      const unnamed = await preview();
+
+      expect(renamed.rows[0].listingIntent?.marketplaceConfig).toEqual(listingKeys);
+      expect(renamed.rows[0].previewHash).toBe(named.rows[0].previewHash);
+      expect(unnamed.rows[0].previewHash).toBe(named.rows[0].previewHash);
+      // The repository's stored config still has both keys.
+      expect(repository.config?.marketplaceConfig).toHaveProperty("storeShelfDefault", shelfDefault);
+    });
+
+    it("leaves the preview as it was when a stored name is left over from another policy id", async () => {
+      // A staff writer can change a policy id without touching the names; the
+      // stale entry is display-only and must not reach the listing or its hash.
+      ebayStore({ businessPolicyNames: storedNames() });
+      const current = await preview();
+      ebayStore({
+        businessPolicyNames: storedNames({ fulfillmentPolicyId: { id: "fulfillment-old", name: "Old shipping" } }),
+      });
+      const stale = await preview();
+
+      expect(stale.rows[0].listingIntent?.marketplaceConfig).toEqual(listingKeys);
+      expect(stale.rows[0].listingIntent?.marketplaceConfig).not.toHaveProperty("businessPolicyNames");
+      expect(stale.rows[0].previewHash).toBe(current.rows[0].previewHash);
+    });
+
+    it("leaves the preview as it was when the shelf default changes or is removed", async () => {
+      ebayStore({ businessPolicyNames: storedNames(), storeShelfDefault: shelfDefault });
+      const first = await preview();
+      ebayStore({
+        businessPolicyNames: storedNames(),
+        storeShelfDefault: { ids: ["202", "101"], names: ["Supplies > Sleeves", "Toploaders"] },
+      });
+      const changed = await preview();
+      ebayStore({ businessPolicyNames: storedNames() });
+      const removed = await preview();
+
+      for (const result of [changed, removed]) {
+        expect(result.rows[0].listingIntent?.marketplaceConfig).toEqual(listingKeys);
+        expect(result.rows[0].listingIntent?.marketplaceConfig).not.toHaveProperty("storeShelfDefault");
+        expect(result.rows[0].previewHash).toBe(first.rows[0].previewHash);
+      }
+    });
+
+    it("still changes the preview when a key the listing does use changes", async () => {
+      ebayStore({ businessPolicyNames: storedNames() });
+      const before = await preview();
+      ebayStore({ businessPolicyNames: storedNames(), merchantLocationKey: "another-location" });
+      const after = await preview();
+
+      expect(after.rows[0].listingIntent?.marketplaceConfig).toMatchObject({ merchantLocationKey: "another-location" });
+      expect(after.rows[0].previewHash).not.toBe(before.rows[0].previewHash);
+    });
+  });
+});
+
+describe("ConfigDrivenDropshipMarketplaceListingProvider", () => {
+  const provider = new ConfigDrivenDropshipMarketplaceListingProvider();
+  const listingKeys = {
+    marketplaceId: "EBAY_US",
+    merchantLocationKey: "cardshellz-dropship-22",
+    businessPolicies: {
+      fulfillmentPolicyId: "fulfillment-1",
+      returnPolicyId: "return-1",
+      paymentPolicyId: "payment-1",
+    },
+    profileId: "profile-1",
+  };
+
+  function ebayConfig(marketplaceConfig: Record<string, unknown>): DropshipStoreListingConfig {
+    return {
+      id: 7,
+      storeConnectionId: 22,
+      platform: "ebay",
+      listingMode: "live",
+      inventoryMode: "managed_quantity_sync",
+      priceMode: "vendor_defined",
+      marketplaceConfig,
+      requiredConfigKeys: ["marketplaceId"],
+      requiredProductFields: [],
+      isActive: true,
+    };
+  }
+
+  function listingContent(): DropshipCanonicalListingContent {
+    const candidate = makeCandidate();
+    return {
+      productId: candidate.productId,
+      productVariantId: candidate.productVariantId,
+      sku: candidate.sku,
+      productName: candidate.productName,
+      variantName: candidate.variantName,
+      title: candidate.title,
+      description: candidate.description,
+      category: candidate.category,
+      ebayBrowseCategoryId: candidate.ebayBrowseCategoryId,
+      ebayBrowseCategoryName: candidate.ebayBrowseCategoryName,
+      brand: candidate.brand,
+      gtin: candidate.gtin,
+      mpn: candidate.mpn,
+      condition: candidate.condition,
+      itemSpecifics: candidate.itemSpecifics,
+      imageUrls: candidate.imageUrls,
+      weightGrams: candidate.weightGrams,
+    };
+  }
+
+  function build(config: DropshipStoreListingConfig) {
+    return provider.buildListingIntent({
+      config,
+      content: listingContent(),
+      priceCents: 1299,
+      quantity: 4,
+      storeCategoryNames: ["Toploaders"],
+    });
+  }
+
+  it("builds the intent's marketplace config without the policy names and the shelf default, keeping every other key", () => {
+    const result = build(ebayConfig({
+      ...structuredClone(listingKeys),
+      businessPolicyNames: {
+        fulfillmentPolicyId: { id: "fulfillment-1", name: "Free shipping" },
+        returnPolicyId: { id: "return-1", name: "30 day returns" },
+      },
+      storeShelfDefault: { ids: ["101", "202"], names: ["Toploaders", "Sleeves"] },
+    }));
+
+    expect(result.blockers).toEqual([]);
+    expect(result.intent?.marketplaceConfig).toEqual(listingKeys);
+    // The listing's own shelves still reach the intent, as storeCategoryNames.
+    expect(result.intent?.storeCategoryNames).toEqual(["Toploaders"]);
+  });
+
+  it("does not change the store's config while building the intent", () => {
+    const marketplaceConfig = Object.freeze({
+      ...structuredClone(listingKeys),
+      businessPolicyNames: Object.freeze({
+        fulfillmentPolicyId: Object.freeze({ id: "fulfillment-1", name: "Free shipping" }),
+      }),
+      storeShelfDefault: Object.freeze({ ids: Object.freeze(["101"]), names: Object.freeze(["Toploaders"]) }),
+    });
+    const config = Object.freeze(ebayConfig(marketplaceConfig));
+    const before = structuredClone(config);
+
+    const result = build(config);
+
+    expect(config).toEqual(before);
+    expect(config.marketplaceConfig).toHaveProperty("businessPolicyNames");
+    expect(config.marketplaceConfig).toHaveProperty("storeShelfDefault");
+    expect(result.intent?.marketplaceConfig).not.toBe(config.marketplaceConfig);
+    expect(result.intent?.marketplaceConfig).toEqual(listingKeys);
+  });
+
+  it("gives the same intent whatever names or shelf default are stored", () => {
+    const plain = build(ebayConfig(structuredClone(listingKeys)));
+    const named = build(ebayConfig({
+      ...structuredClone(listingKeys),
+      businessPolicyNames: { paymentPolicyId: { id: "payment-1", name: "Immediate payment" } },
+      storeShelfDefault: { ids: ["101"], names: ["Toploaders"] },
+    }));
+
+    expect(JSON.stringify(named.intent)).toBe(JSON.stringify(plain.intent));
   });
 });
 

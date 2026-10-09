@@ -189,6 +189,8 @@ export function listingPushNextStep(errorCode: string | null, retryable: boolean
       return "Its price moved after it was queued. Check the price on this page, then queue the listing again.";
     case "DROPSHIP_LISTING_PREVIEW_DRIFT":
       return "The listing changed while it was queued. Queue it again.";
+    case "DROPSHIP_EBAY_MANAGED_LOCATION_CONFIG_MISMATCH":
+      return "Card Shellz changed the warehouse your listings ship from. In Listing settings, choose Update ship-from location, then queue the listing again.";
     case "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED":
     case "DROPSHIP_LISTING_STORE_BLOCKED":
     case "DROPSHIP_LISTING_VENDOR_BLOCKED":

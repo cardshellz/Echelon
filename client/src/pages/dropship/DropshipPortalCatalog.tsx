@@ -657,7 +657,14 @@ function DropshipPortalCatalogPage() {
     summary: listingSettingsSummaryQuery.isError ? { status: "failed" }
       : listingSettingsSummaryQuery.data ? { status: "ready", rail: listingSettingsSummaryQuery.data.rail }
       : { status: "loading" },
-    liveSetup: liveListingSetupQuery.data ?? null,
+    // A failed live read cannot vouch either; the problems the last good
+    // answer named still show.
+    liveSetup: liveListingSetupQuery.isError
+      ? {
+        missingFields: liveListingSetupQuery.data?.missingFields ?? [],
+        checks: { ebay: "not_checked", fulfillment: { status: "not_checked" } },
+      }
+      : liveListingSetupQuery.data ?? null,
   });
   const selectedCount = selectedCatalogQuery.isLoading ? null : selectedCatalogRows.length;
   const actionBar = describeCatalogActionBar({
@@ -692,7 +699,11 @@ function DropshipPortalCatalogPage() {
             setup: setupRail.line,
           }}
           actions={setupRail.retry
-            ? { setup: { label: "Try again", onClick: () => void listingSettingsSummaryQuery.refetch() } }
+            ? { setup: { label: "Try again", onClick: () => {
+              void listingSettingsSummaryQuery.refetch();
+              // The live check is read again only where it was read before (Listing settings).
+              if (liveListingSetupQuery.data || liveListingSetupQuery.isError) void liveListingSetupQuery.refetch();
+            } } }
             : {}}
           storeOptions={storeOptions}
           selectedStoreConnectionId={storeReady ? selectedStoreConnectionIdNumber : null}
@@ -832,8 +843,10 @@ function DropshipPortalCatalogPage() {
             )}
             {selectedStoreConnection?.platform === "ebay" && (
               <>
+                {/* Keys unique among these siblings: a shared key would leave the
+                    previous store's panel mounted after a store switch. */}
                 <EbayListingSetupPanel
-                  key={selectedStoreConnectionIdNumber}
+                  key={`listing-setup-${selectedStoreConnectionIdNumber}`}
                   storeConnectionId={selectedStoreConnectionIdNumber}
                   storeName={selectedStoreName}
                   onConfigurationChange={() => {
@@ -842,7 +855,7 @@ function DropshipPortalCatalogPage() {
                   }}
                 />
                 <EbayListingPolicyOverridePanel
-                  key={selectedStoreConnectionIdNumber}
+                  key={`policy-override-${selectedStoreConnectionIdNumber}`}
                   storeConnectionId={selectedStoreConnectionIdNumber}
                   storeName={selectedStoreName}
                   rows={selectedCatalogRows}
