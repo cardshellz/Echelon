@@ -11,6 +11,7 @@ import {
   syncProviderFixture,
 } from "../fixtures/ebay-listing-sync.fixture";
 import { safeEbayErrorMessage } from "../../adapters/ebay/ebay-quantity-http";
+import { syncContentIntentHash } from "../../ebay-listing-sync-content";
 describe("existing eBay listing sync execution", () => {
   const recovered = () => ({
     reconcile: vi.fn(async () => ({
@@ -39,6 +40,7 @@ describe("existing eBay listing sync execution", () => {
     expect(result.synced).toBe(1);
     expect(result.errors).toBe(0);
     expect(stages).toEqual([
+      "start:inspection",
       "start:offer:offer-101",
       "done:offer:offer-101",
       "start:item:P5",
@@ -220,6 +222,147 @@ describe("existing eBay listing sync execution", () => {
         });
     },
   );
+  it("retries only readback after accepted writes, even while ATP changes, then completes without additional writes", async () => {
+    const fixture = syncProviderFixture();
+    const oldGroup = structuredClone(fixture.currentGroup());
+    const read = fixture.client.getInventoryItemGroup;
+    let visible = false;
+    fixture.client.getInventoryItemGroup = vi.fn(async key => visible ? read(key) : structuredClone(oldGroup));
+    const executor = new EbayExistingListingSyncExecution(fixture.prepare, recovered(), new EbayMarketplaceListingConnector());
+    let checkpoint: string | null = null;
+    const stage = async (key: string, hash: string, work: () => Promise<void>) => {
+      if (key === "verification") checkpoint = hash;
+      await work();
+    };
+    await expect(executor.execute(syncIdentity, stage)).rejects.toMatchObject({ code: "EBAY_SYNC_READBACK_PENDING" });
+    expect(checkpoint).toMatch(/^[a-f0-9]{64}$/);
+    fixture.setQuantity(1);
+    await expect(executor.execute(syncIdentity, stage, checkpoint)).rejects.toMatchObject({ code: "EBAY_SYNC_READBACK_PENDING" });
+    visible = true;
+    await expect(executor.execute(syncIdentity, stage, checkpoint)).resolves.toMatchObject({ synced: 1 });
+    expect(fixture.client.updateOffer).toHaveBeenCalledTimes(1);
+    expect(fixture.client.createOrReplaceInventoryItem).toHaveBeenCalledTimes(1);
+    expect(fixture.client.createOrReplaceInventoryItemGroup).toHaveBeenCalledTimes(1);
+    // This content retry neither reposts stale quantities nor claims a quantity update.
+    expect(fixture.currentItem().availability.shipToLocationAvailability.quantity).toBe(7);
+  });
+  it("adopts already-current content after a lost checkpoint without performing new writes", async () => {
+    const fixture = syncProviderFixture();
+    const executor = new EbayExistingListingSyncExecution(fixture.prepare, recovered(), new EbayMarketplaceListingConnector());
+    await executor.execute(syncIdentity, async (_key, _hash, work) => work());
+    vi.mocked(fixture.client.updateOffer).mockClear();
+    vi.mocked(fixture.client.createOrReplaceInventoryItem).mockClear();
+    vi.mocked(fixture.client.createOrReplaceInventoryItemGroup).mockClear();
+    await expect(executor.execute(syncIdentity, async (_key, _hash, work) => work())).resolves.toMatchObject({ synced: 1 });
+    expect(fixture.client.updateOffer).not.toHaveBeenCalled();
+    expect(fixture.client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
+    expect(fixture.client.createOrReplaceInventoryItemGroup).not.toHaveBeenCalled();
+  });
+  it("recovers a saved listing with no local offer ID through its unique exact published SKU and listing", async () => {
+    const fixture = syncProviderFixture();
+    const identity = structuredClone(syncIdentity);
+    identity.variants[0].offerId = null;
+    const prepared = await fixture.prepare();
+    prepared.identity = identity;
+    delete prepared.draft.offers[0].payload.offerId;
+    fixture.prepare.mockResolvedValue(prepared);
+    const oldGroup = structuredClone(fixture.currentGroup());
+    const read = fixture.client.getInventoryItemGroup;
+    let visible = false;
+    fixture.client.getInventoryItemGroup = vi.fn(async (key) =>
+      visible ? read(key) : structuredClone(oldGroup),
+    );
+    const executor = new EbayExistingListingSyncExecution(
+      fixture.prepare,
+      recovered(),
+      new EbayMarketplaceListingConnector(),
+    );
+    let checkpoint: string | null = null;
+    const stage = async (key: string, hash: string, work: () => Promise<void>) => {
+      if (key === "verification") checkpoint = hash;
+      await work();
+    };
+    await expect(executor.execute(identity, stage)).rejects.toMatchObject({
+      code: "EBAY_SYNC_READBACK_PENDING",
+    });
+    visible = true;
+    await expect(executor.execute(identity, stage, checkpoint)).resolves.toMatchObject({
+      synced: 1,
+    });
+    expect(fixture.client.updateOffer).toHaveBeenCalledTimes(1);
+    expect(fixture.client.createOrReplaceInventoryItemGroup).toHaveBeenCalledTimes(1);
+  });
+  it("applies new content instead of reusing a checkpoint from an earlier intent", async () => {
+    const fixture = syncProviderFixture();
+    const prepared = await fixture.prepare();
+    const checkpoint = syncContentIntentHash(prepared.draft);
+    const executor = new EbayExistingListingSyncExecution(fixture.prepare, recovered(), new EbayMarketplaceListingConnector());
+    await executor.execute(syncIdentity, async (_key, _hash, work) => work());
+    const next = await fixture.prepare();
+    next.draft.inventoryItems[0].payload.product.imageUrls = ["https://example.com/replacement.jpg"];
+    next.draft.itemGroup!.payload.imageUrls = ["https://example.com/replacement.jpg"];
+    fixture.prepare.mockResolvedValue(next);
+    await executor.execute(syncIdentity, async (_key, _hash, work) => work(), checkpoint);
+    expect(fixture.client.createOrReplaceInventoryItemGroup).toHaveBeenCalledTimes(2);
+    expect(fixture.currentGroup().imageUrls).toEqual(["https://example.com/replacement.jpg"]);
+  });
+  it("does not adopt an ambiguous published offer when the saved offer ID is absent", async () => {
+    const fixture = syncProviderFixture();
+    const identity = structuredClone(syncIdentity);
+    identity.variants[0].offerId = null;
+    const prepared = await fixture.prepare();
+    prepared.identity = identity;
+    delete prepared.draft.offers[0].payload.offerId;
+    fixture.prepare.mockResolvedValue(prepared);
+    const executor = new EbayExistingListingSyncExecution(
+      fixture.prepare,
+      recovered(),
+      new EbayMarketplaceListingConnector(),
+    );
+    await executor.execute(identity, async (_key, _hash, work) => work());
+    const read = fixture.client.getOffers;
+    fixture.client.getOffers = async (sku, marketplaceId) => {
+      const result = await read(sku, marketplaceId);
+      return { offers: [...result.offers, { ...result.offers[0], offerId: "another-offer" }] };
+    };
+    await expect(executor.execute(
+      identity,
+      async (_key, _hash, work) => work(),
+      syncContentIntentHash(prepared.draft),
+    )).rejects.toMatchObject({ code: "EBAY_SYNC_READBACK_PENDING" });
+    expect(fixture.client.updateOffer).toHaveBeenCalledTimes(1);
+    expect(fixture.client.createOrReplaceInventoryItemGroup).toHaveBeenCalledTimes(1);
+  });
+  it.each(["members", "legacy key", "published identity"])("rejects a changed %s during verification without rewriting accepted content", async field => {
+    const fixture = syncProviderFixture();
+    const executor = new EbayExistingListingSyncExecution(fixture.prepare, recovered(), new EbayMarketplaceListingConnector());
+    await executor.execute(syncIdentity, async (_key, _hash, work) => work());
+    const prepared = await fixture.prepare();
+    const checkpoint = syncContentIntentHash(prepared.draft);
+    if (field === "members") vi.mocked(fixture.client.getInventoryItemGroup).mockResolvedValue({ ...fixture.currentGroup(), variantSKUs: ["FOREIGN"] });
+    if (field === "legacy key") vi.mocked(fixture.client.getInventoryItemGroup).mockResolvedValue({ ...fixture.currentGroup(), inventoryItemGroupKey: "FOREIGN" });
+    if (field === "published identity") {
+      const read = fixture.client.getOffers;
+      fixture.client.getOffers = async (sku, marketplaceId) => {
+        const result = await read(sku, marketplaceId);
+        return { offers: result.offers.map(offer => ({ ...offer, listingId: "foreign-listing" })) };
+      };
+    }
+    await expect(executor.execute(syncIdentity, async (_key, _hash, work) => work(), checkpoint))
+      .rejects.toMatchObject({ code: "EBAY_SYNC_READBACK_PENDING" });
+    expect(fixture.client.createOrReplaceInventoryItemGroup).toHaveBeenCalledTimes(1);
+  });
+  it("does not let an accepted checkpoint bypass unresolved response evidence", async () => {
+    const fixture = syncProviderFixture();
+    const executor = new EbayExistingListingSyncExecution(fixture.prepare, {
+      reconcile: vi.fn(async () => ({ busy: false, resolved: [], unresolved: ["17348"] })),
+    }, new EbayMarketplaceListingConnector());
+    const checkpoint = syncContentIntentHash((await fixture.prepare()).draft);
+    await expect(executor.execute(syncIdentity, async (_key, _hash, work) => work(), checkpoint))
+      .rejects.toMatchObject({ code: "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" });
+    expect(fixture.client.getInventoryItem).not.toHaveBeenCalled();
+    expect(fixture.client.updateOffer).not.toHaveBeenCalled();
+  });
   it("enforces a finite retry budget and provider cooldown, and never retries missing proof", () => {
     const now = new Date("2026-10-09T12:00:00Z"),
       uncertain = Object.assign(new Error("uncertain"), {

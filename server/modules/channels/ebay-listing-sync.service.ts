@@ -8,7 +8,6 @@ import {
   ebayListingSyncIdentitySchema,
   EbayListingSyncError,
   syncIdentityHash,
-  syncStageHash,
   syncFailure,
   type EbayListingSyncIdentity,
   type StoredEbayListingSyncJob,
@@ -18,6 +17,7 @@ import {
   type EbayListingConnectorDraft,
   type EbayListingLifecycleClient,
 } from "./listing-connectors/ebay-listing.connector";
+import { syncContentIntentHash } from "./ebay-listing-sync-content";
 import type { QuantityPublicationScope } from "../inventory-planning/domain/quantity-publication-admission";
 
 export interface PreparedEbayListingSync {
@@ -52,6 +52,7 @@ export class EbayExistingListingSyncExecution
   async execute(
     identity: EbayListingSyncIdentity,
     stage: Parameters<EbayListingSyncExecution["execute"]>[1],
+    verificationIntentHash: string | null = null,
   ): Promise<EbayProductSyncResult> {
     const prepared = await this.prepare(identity);
     if (
@@ -87,6 +88,34 @@ export class EbayExistingListingSyncExecution
         "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED",
         `A prior request has no provable final response (attempts ${recovery.unresolved.join(", ")}). Reconcile that request before another write.`,
       );
+    const contentHash = syncContentIntentHash(prepared.draft);
+    const offerIds: Record<number, string> = {};
+    for (const member of identity.variants) {
+      if (member.offerId) offerIds[member.variantId] = member.offerId;
+    }
+    const verify = (): Promise<void> => this.connector.verifyExistingListing({
+      client: prepared.client,
+      draft: prepared.draft,
+      identity,
+      offerIds,
+    });
+    // A committed post-write checkpoint binds retries to accepted content. ATP
+    // changes do not invalidate it; new content or a new command revision does.
+    if (verificationIntentHash === contentHash) {
+      await stage("verification", contentHash, verify);
+      return this.completedResult(prepared, new Set());
+    }
+    // Also adopt already-current content after a lost checkpoint or final local
+    // commit. This read never substitutes for the response evidence checked above.
+    try {
+      await stage("inspection", contentHash, verify);
+      return this.completedResult(prepared, new Set());
+    } catch (error) {
+      if (
+        !(error instanceof EbayListingSyncError) ||
+        error.code !== "EBAY_SYNC_READBACK_PENDING"
+      ) throw error;
+    }
     const updated = await this.connector.syncExistingListing({
       client: prepared.client,
       draft: prepared.draft,
@@ -98,7 +127,7 @@ export class EbayExistingListingSyncExecution
         "EBAY_SYNC_OFFER_MISSING",
         "A required existing offer is missing. Review the listing identity.",
       );
-    await stage("verification", syncStageHash(prepared.draft), () =>
+    await stage("verification", contentHash, () =>
       this.connector.verifyExistingListing({
         client: prepared.client,
         draft: prepared.draft,
@@ -106,7 +135,12 @@ export class EbayExistingListingSyncExecution
         offerIds: updated.updatedOfferIds,
       }),
     );
-    const policyChanges = new Set(updated.policyChangedVariantIds);
+    return this.completedResult(prepared, new Set(updated.policyChangedVariantIds));
+  }
+  private completedResult(
+    prepared: PreparedEbayListingSync,
+    policyChanges: ReadonlySet<number>,
+  ): EbayProductSyncResult {
     return ebayProductSyncResultSchema.parse({
       synced: prepared.variants.length,
       priceChanges: prepared.variants.filter((member) => member.priceChanged)
@@ -115,7 +149,7 @@ export class EbayExistingListingSyncExecution
       policyChanges: policyChanges.size,
       errors: 0,
       details: prepared.variants.map((member) => ({
-        productId: identity.productId,
+        productId: prepared.identity.productId,
         productName: member.productName,
         variantId: member.variantId,
         variantSku: member.sku,
@@ -178,6 +212,7 @@ export interface EbayListingSyncExecution {
       hash: string,
       work: () => Promise<void>,
     ) => Promise<void>,
+    verificationIntentHash?: string | null,
   ): Promise<EbayProductSyncResult>;
 }
 
@@ -236,6 +271,9 @@ export class EbayListingSyncService {
                 await work();
                 await this.store.stage(job, key, hash, "completed", this.now());
               },
+              job.verificationRevision === job.claimedRevision
+                ? job.verificationIntentHash
+                : null,
             ),
           );
           await this.store.finish(
