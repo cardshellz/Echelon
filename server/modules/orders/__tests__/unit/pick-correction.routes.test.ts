@@ -22,7 +22,8 @@ describe("pick correction HTTP role boundary", () => {
   let server: Server; let url: string;
   const item: PickCorrection = { id: 1, orderId: 2, orderItemId: 3, orderNumber: "#2", sku: "P5", name: "Pack",
     barcode: "123", location: "A-01", declaredQuantity: 1, pickedQuantity: 0, revision: 2,
-    state: "picking_required", answer: "no", assignedPickerId: "session-picker", reviewReason: null };
+    state: "picking_required", answer: "no", assignedPickerId: "session-picker", reviewReason: null,
+    updatedAt: new Date("2026-10-07T14:00:00Z") };
   const service = { list: vi.fn(), answer: vi.fn(), complete: vi.fn() };
   beforeEach(async () => {
     service.list.mockReset().mockResolvedValue([item]);
