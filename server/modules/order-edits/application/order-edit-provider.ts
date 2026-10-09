@@ -182,6 +182,7 @@ export interface OrderEditProvider {
     connectionId: number,
     search: string,
   ): Promise<OrderEditVariant[]>;
+  /** Stage and verify a preview only; never commit the order or move money. */
   quote(
     connectionId: number,
     snapshot: OrderEditSnapshot,

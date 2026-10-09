@@ -229,13 +229,31 @@ export class OrderEditService {
       };
       await this.store.create(record);
       try {
-        await this.warehouse.acquire(record.omsOrderId, record.id);
-        const quote = await this.provider.quote(
-          record.connectionId,
-          baseline,
-          { changes: input.changes, additions: input.additions },
-          record.id,
-        );
+        // Staging only calculates an uncommitted Shopify edit. It does not
+        // change the order or move money, so it can overlap hold acquisition.
+        // Await BOTH outcomes before releasing the order lock or exposing a
+        // quote: a late hold must never outlive a failed preparation request.
+        const [hold, preparation] = await Promise.allSettled([
+          this.warehouse.acquire(record.omsOrderId, record.id),
+          this.provider.quote(
+            record.connectionId,
+            baseline,
+            { changes: input.changes, additions: input.additions },
+            record.id,
+          ),
+        ]);
+        if (hold.status === "rejected") {
+          // Hold failure determines the persisted outcome. Keep the independent
+          // preview failure observable as well when both branches fail.
+          if (preparation.status === "rejected")
+            this.report({
+              operationId: record.id,
+              code: this.failure(preparation.reason).code,
+            });
+          throw hold.reason;
+        }
+        if (preparation.status === "rejected") throw preparation.reason;
+        const quote = preparation.value;
         if (
           quote.operationId !== record.id ||
           quote.orderId !== baseline.orderId ||

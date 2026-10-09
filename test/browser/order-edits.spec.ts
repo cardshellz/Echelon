@@ -51,6 +51,9 @@ async function installFixtures(
     rejectQuote?: boolean;
     existingOperation?: OrderEditOperation;
     staleSearch?: boolean;
+    abandonResponse?: Promise<void>;
+    loseAbandonResponse?: boolean;
+    rejectAbandon?: boolean;
   } = {},
 ) {
   const failures: string[] = [];
@@ -180,13 +183,18 @@ async function installFixtures(
       const input = orderEditQuoteInputSchema.parse(body);
       expect(input.expectedRevision).toBe(order.revision);
       expect(key).toBe(input.requestKey);
-      if (!current) {
+      if (
+        !current ||
+        ["expired", "recovered", "completed", "failed"].includes(current.status)
+      ) {
         const quantity = input.changes[0]?.quantity ?? 2;
         const total =
           quantity * 1000 +
           input.additions.reduce((sum, item) => sum + item.quantity * 1500, 0);
         current = {
-          operationId,
+          operationId: current
+            ? "22222222-3333-4444-8555-666666666666"
+            : operationId,
           orderNumber: order.orderNumber,
           currency: "USD",
           previousTotalCents: 2000,
@@ -230,8 +238,8 @@ async function installFixtures(
       return route.fulfill({ json: current });
     }
     if (
-      path.startsWith(`${ORDER_EDIT_API}/operations/${operationId}`) &&
-      current
+      current &&
+      path.startsWith(`${ORDER_EDIT_API}/operations/${current.operationId}`)
     ) {
       if (path.endsWith("/commit")) {
         current = {
@@ -252,7 +260,17 @@ async function installFixtures(
       }
       if (path.endsWith("/abandon")) {
         expect(current.canAbandon).toBe(true);
+        await options.abandonResponse;
+        if (options.rejectAbandon)
+          return route.fulfill({
+            status: 409,
+            json: {
+              code: "ORDER_EDIT_ABANDON_CONFLICT",
+              message: "The previous quote could not be closed.",
+            },
+          });
         current = { ...current, status: "expired", canAbandon: false };
+        if (options.loseAbandonResponse) return route.abort("failed");
       }
       return route.fulfill({ json: current });
     }
@@ -281,6 +299,131 @@ async function assertFitsScreen(page: Page) {
       () => document.documentElement.scrollWidth <= window.innerWidth + 1,
     ),
   ).toBe(true);
+}
+
+test("Change items returns immediately, keeps the draft and blocks new totals until the prior quote closes", async ({
+  page,
+}, testInfo) => {
+  let releaseAbandon!: () => void;
+  const abandonResponse = new Promise<void>((resolve) => {
+    releaseAbandon = resolve;
+  });
+  const fixture = await installFixtures(page, { abandonResponse });
+  await chooseOrder(page);
+  const quantity = page.getByRole("spinbutton", {
+    name: "Quantity for Toploader Binder Pages Black · 1 Binder",
+  });
+  await quantity.fill("3");
+  await page.getByLabel("Add products", { exact: true }).fill("box");
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Review changes", exact: true })
+    .click();
+  await expect(page.getByText("Ready to apply", { exact: true })).toBeVisible();
+  const readsBefore = fixture.requests.filter((request) =>
+    request.path.endsWith("/orders/51"),
+  ).length;
+  await page.getByRole("button", { name: "Change items", exact: true }).click();
+  // The request is deliberately unresolved; these assertions cannot pass if
+  // the transition waits for Shopify/ShipStation or remounts an empty draft.
+  await expect(quantity).toBeVisible({ timeout: 500 });
+  await expect(quantity).toHaveValue("3");
+  await expect(quantity).toBeEnabled();
+  await expect(
+    page.getByText("BOX-WHITE", { exact: false }).first(),
+  ).toBeVisible();
+  const review = page.getByRole("button", {
+    name: "Review changes",
+    exact: true,
+  });
+  await expect(review).toBeDisabled();
+  await expect(page).toHaveURL(new RegExp(`operationId=${operationId}$`));
+  await quantity.fill("4");
+  await page.screenshot({
+    path: testInfo.outputPath("change-items-closing.png"),
+    fullPage: true,
+  });
+  expect(
+    fixture.requests.filter((request) => request.path.endsWith("/quotes")),
+  ).toHaveLength(1);
+  releaseAbandon();
+  await expect(page).toHaveURL(/\/order-edits$/);
+  await expect(review).toBeEnabled();
+  await expect(quantity).toHaveValue("4");
+  expect(
+    fixture.requests.filter((request) => request.path.endsWith("/orders/51")),
+  ).toHaveLength(readsBefore);
+  await review.click();
+  await expect(page.getByText("Ready to apply", { exact: true })).toBeVisible();
+  const quotes = fixture.requests.filter((request) =>
+    request.path.endsWith("/quotes"),
+  );
+  expect(quotes).toHaveLength(2);
+  expect(quotes[1].key).not.toBe(quotes[0].key);
+  expect(quotes[1].body).toMatchObject({
+    changes: [{ lineItemId: lineId, quantity: 4 }],
+    additions: [{ variantId: "gid://shopify/ProductVariant/777", quantity: 1 }],
+  });
+  expect(
+    fixture.requests.filter((request) => request.path.endsWith("/commit")),
+  ).toHaveLength(0);
+  expect(fixture.failures).toEqual([]);
+  await assertFitsScreen(page);
+});
+
+for (const failure of ["rejected", "lost"] as const) {
+  test(`Change items keeps the operation reference and blocks new totals after ${failure} cancellation`, async ({
+    page,
+  }) => {
+    const fixture = await installFixtures(page, {
+      rejectAbandon: failure === "rejected",
+      loseAbandonResponse: failure === "lost",
+    });
+    await chooseOrder(page);
+    const quantity = page.getByRole("spinbutton", {
+      name: "Quantity for Toploader Binder Pages Black · 1 Binder",
+    });
+    await quantity.fill("3");
+    await page
+      .getByRole("button", { name: "Review changes", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Change items", exact: true })
+      .click();
+    await expect(quantity).toBeVisible();
+    await expect(quantity).toHaveValue("3");
+    await expect(page.getByRole("alert").last()).toContainText(
+      failure === "lost" ? "outcome is unknown" : "could not be closed",
+    );
+    await expect(
+      page.getByRole("button", { name: "Review changes", exact: true }),
+    ).toBeDisabled();
+    await expect(page).toHaveURL(new RegExp(`operationId=${operationId}$`));
+    expect(
+      fixture.requests.filter((request) => request.path.endsWith("/quotes")),
+    ).toHaveLength(1);
+    expect(
+      fixture.requests.filter((request) => request.path.endsWith("/commit")),
+    ).toHaveLength(0);
+    await page
+      .getByRole("button", { name: "Back to review", exact: true })
+      .click();
+    if (failure === "lost") {
+      await expect(
+        page.getByRole("button", {
+          name: "Apply changes · $10.00 payment due",
+          exact: true,
+        }),
+      ).toBeDisabled();
+      await page
+        .getByRole("button", { name: "Check status", exact: true })
+        .click();
+      await expect(
+        page.getByText("Edit closed", { exact: true }),
+      ).toBeVisible();
+    }
+    expect(fixture.failures).toEqual([]);
+  });
 }
 
 test("disabled connection guides setup and unlocks the selected order only after a successful save", async ({
