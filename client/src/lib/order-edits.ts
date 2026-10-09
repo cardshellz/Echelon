@@ -1,4 +1,14 @@
 import { z } from "zod";
+import { canonicalJson } from "@shared/utils/canonical-json";
+import {
+  orderEditPreviewInputSchema,
+  orderEditPreviewScopeSchema,
+  orderEditPreviewSchema,
+  orderEditPreviewWarmSchema,
+  type OrderEditPreview,
+  type OrderEditPreviewInput,
+  type OrderEditPreviewScope,
+} from "@shared/order-edits/order-edit-preview";
 import {
   ORDER_EDIT_API,
   ORDER_EDIT_PAGE,
@@ -54,11 +64,25 @@ export async function orderEditRequest<T>(
     body?: unknown;
     key?: string;
     signal?: AbortSignal;
+    /** Only the two calculation-only endpoints may use this; actual edit commands remain uncertain on lost responses. */
+    calculationOnly?: boolean;
   } = {},
   request: typeof fetch = fetch,
 ): Promise<T> {
   const method = options.method ?? "GET";
-  const mutation = method !== "GET";
+  if (
+    options.calculationOnly &&
+    (method !== "POST" ||
+      !["/previews", "/previews/warm"].includes(path) ||
+      options.key !== undefined)
+  )
+    throw new OrderEditRequestError(
+      "Calculation-only handling is restricted to background preview requests.",
+      "ORDER_EDIT_PREVIEW_ENDPOINT_INVALID",
+      null,
+      false,
+    );
+  const mutation = method !== "GET" && !options.calculationOnly;
   const headers = new Headers({ Accept: "application/json" });
   if (options.body !== undefined)
     headers.set("Content-Type", "application/json");
@@ -108,7 +132,9 @@ export async function orderEditRequest<T>(
   const parsed = schema.safeParse(body);
   if (!parsed.success) {
     throw new OrderEditRequestError(
-      "The order edit response could not be verified. Check status before continuing.",
+      options.calculationOnly
+        ? "The background preview could not be verified. Review can still verify changes."
+        : "The order edit response could not be verified. Check status before continuing.",
       "ORDER_EDIT_RESPONSE_INVALID",
       response.status,
       mutation,
@@ -273,6 +299,40 @@ export function createOrderEditTransport(request: typeof fetch = fetch) {
     return result;
   };
   return {
+    warmPreview: async (scope: OrderEditPreviewScope, signal?: AbortSignal) => {
+      const body = orderEditPreviewScopeSchema.parse(scope);
+      const result = await orderEditRequest(
+        "/previews/warm",
+        orderEditPreviewWarmSchema,
+        { method: "POST", body, signal, calculationOnly: true },
+        request,
+      );
+      if (canonicalJson(result.scope) !== canonicalJson(body))
+        throw new OrderEditRequestError(
+          "The preview context did not match this order.",
+          "ORDER_EDIT_IDENTITY_MISMATCH",
+          null,
+          false,
+        );
+      return result;
+    },
+    preview: async (input: OrderEditPreviewInput, signal?: AbortSignal) => {
+      const body = orderEditPreviewInputSchema.parse(input);
+      const result = await orderEditRequest(
+        "/previews",
+        orderEditPreviewSchema,
+        { method: "POST", body, signal, calculationOnly: true },
+        request,
+      );
+      if (canonicalJson(result.input) !== canonicalJson(body))
+        throw new OrderEditRequestError(
+          "The preview did not match the current items.",
+          "ORDER_EDIT_IDENTITY_MISMATCH",
+          null,
+          false,
+        );
+      return result;
+    },
     state: (signal?: AbortSignal) =>
       read("/state", orderEditStateSchema, signal),
     saveSettings: async (
@@ -356,6 +416,19 @@ export function createOrderEditTransport(request: typeof fetch = fetch) {
 }
 
 export type OrderEditTransport = ReturnType<typeof createOrderEditTransport>;
+
+export function matchingOrderEditPreview(
+  preview: OrderEditPreview | undefined,
+  input: OrderEditPreviewInput,
+  now: number,
+): OrderEditPreview | null {
+  return preview &&
+    Number.isFinite(now) &&
+    Date.parse(preview.expiresAt) > now &&
+    canonicalJson(preview.input) === canonicalJson(input)
+    ? preview
+    : null;
+}
 
 type QuoteStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 const pendingQuoteKey = (staffId: string) =>

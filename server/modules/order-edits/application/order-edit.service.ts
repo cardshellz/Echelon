@@ -1,3 +1,13 @@
+import {
+  assertOrderEditIdentity,
+  orderEditEligibilityReasons,
+  orderEditHasUnresolvedPayment,
+} from "./order-edit-identity";
+import type { OrderEditPreviewService } from "./order-edit-preview.service";
+import type {
+  OrderEditPreviewScope,
+  OrderEditPreviewInput,
+} from "@shared/order-edits/order-edit-preview";
 import { createHash } from "node:crypto";
 import { presentOrderEditSettlement } from "../domain/order-edit-financials";
 import {
@@ -41,13 +51,6 @@ const retryableProviderReadback = new Set([
   "SHOPIFY_GRAPHQL_ERROR",
   "SHOPIFY_RESPONSE_INVALID",
 ]);
-const unresolvedPayment = (snapshot: OrderEditSnapshot) =>
-  snapshot.transactions.some(
-    (transaction) =>
-      ["SALE", "CAPTURE", "AUTHORIZATION", "REFUND"].includes(
-        transaction.kind,
-      ) && !["SUCCESS", "FAILURE", "ERROR"].includes(transaction.status),
-  );
 export class OrderEditService {
   constructor(
     private readonly store: OrderEditStore,
@@ -59,8 +62,27 @@ export class OrderEditService {
       operationId: string;
       code: string;
     }) => void,
+    private readonly previews?: OrderEditPreviewService,
   ) {}
 
+  async warmPreview(input: OrderEditPreviewScope, actorId: string) {
+    if (!this.previews)
+      throw new OrderEditError(
+        "ORDER_EDIT_PREVIEW_UNAVAILABLE",
+        "Background preview is unavailable. Review can still verify changes.",
+        503,
+      );
+    return this.previews.warm(input, actorId);
+  }
+  async preview(input: OrderEditPreviewInput, actorId: string) {
+    if (!this.previews)
+      throw new OrderEditError(
+        "ORDER_EDIT_PREVIEW_UNAVAILABLE",
+        "Background preview is unavailable. Review can still verify changes.",
+        503,
+      );
+    return this.previews.preview(input, actorId);
+  }
   async state() {
     return {
       connections: await this.store.connections(),
@@ -120,9 +142,12 @@ export class OrderEditService {
       connectionId,
       reference.externalOrderId,
     );
-    this.assertIdentity(reference, snapshot);
+    assertOrderEditIdentity(reference, snapshot);
     const warehouse = await this.warehouse.inspect(omsOrderId);
-    const reasons = [...warehouse.reasons, ...this.orderReasons(snapshot)];
+    const reasons = [
+      ...warehouse.reasons,
+      ...orderEditEligibilityReasons(snapshot),
+    ];
     return orderEditOrderSchema.parse({
       omsOrderId,
       connectionId,
@@ -189,13 +214,13 @@ export class OrderEditService {
         input.connectionId,
         reference.externalOrderId,
       );
-      this.assertIdentity(reference, baseline);
+      assertOrderEditIdentity(reference, baseline);
       if (baseline.fingerprint !== input.expectedRevision)
         throw new OrderEditError(
           "ORDER_EDIT_STALE_ORDER",
           "This order changed. Reload it before editing.",
         );
-      const reasons = this.orderReasons(baseline);
+      const reasons = orderEditEligibilityReasons(baseline);
       if (reasons.length)
         throw new OrderEditError("ORDER_EDIT_INELIGIBLE", reasons.join(" "));
       const now = this.clock();
@@ -493,7 +518,7 @@ export class OrderEditService {
       // Even if the balance is now zero, reconcile OUR persisted refund before
       // releasing. An unrelated refund is not proof this command succeeded.
       if (record.refundIntent) return await this.settleRefund(record, actorId);
-      if (unresolvedPayment(snapshot)) {
+      if (orderEditHasUnresolvedPayment(snapshot)) {
         if (
           snapshot.transactions.some(
             (transaction) => transaction.status === "UNKNOWN",
@@ -560,7 +585,7 @@ export class OrderEditService {
             recovery.status !== "restored" ||
             recovered.netPaidCents !== record.baseline.netPaidCents ||
             !recovered.fullyPaid ||
-            unresolvedPayment(recovered)
+            orderEditHasUnresolvedPayment(recovered)
           )
             return this.review(
               record,
@@ -733,7 +758,7 @@ export class OrderEditService {
     if (
       refunded.netPaidCents !== refunded.totalCents ||
       !refunded.fullyPaid ||
-      unresolvedPayment(refunded)
+      orderEditHasUnresolvedPayment(refunded)
     )
       return this.update(
         record,
@@ -875,60 +900,6 @@ export class OrderEditService {
             "This order edit needs verification. Check its status before trying again.",
         };
   }
-  private orderReasons(snapshot: OrderEditSnapshot) {
-    const reasons = [...snapshot.editableErrors];
-    if (
-      snapshot.evidence.countryCode !== "US" ||
-      snapshot.lines.some((line) => line.quantity > 0 && line.unsupported)
-    ) {
-      reasons.push(
-        "This pilot supports US physical-product orders with supported item pricing.",
-      );
-    }
-    if (snapshot.refunds.length > 0)
-      reasons.push(
-        "Orders with previous refunds require staff review before editing.",
-      );
-    if (!snapshot.editable || snapshot.cancelled || snapshot.closed)
-      reasons.push("Shopify does not allow editing this order.");
-    if (
-      !snapshot.fullyPaid ||
-      snapshot.outstandingCents !== 0 ||
-      snapshot.netPaidCents !== snapshot.totalCents ||
-      snapshot.capturableCents !== 0 ||
-      unresolvedPayment(snapshot)
-    )
-      reasons.push(
-        "The original order must be fully paid with no payment or refund still processing.",
-      );
-    if (
-      snapshot.lines.some((line) => line.quantity !== line.unfulfilledQuantity)
-    )
-      reasons.push("Picking or fulfillment has already started.");
-    return reasons;
-  }
-  private assertIdentity(
-    reference: {
-      connectionId: number;
-      channelId: number;
-      externalOrderId: string;
-      externalCustomerId: string | null;
-    },
-    snapshot: OrderEditSnapshot,
-  ) {
-    const externalId = reference.externalOrderId.split("/").at(-1);
-    const customerId = reference.externalCustomerId?.split("/").at(-1) ?? null;
-    if (
-      snapshot.connectionId !== reference.connectionId ||
-      snapshot.channelId !== reference.channelId ||
-      snapshot.orderId !== `gid://shopify/Order/${externalId}` ||
-      (snapshot.customerId?.split("/").at(-1) ?? null) !== customerId
-    )
-      throw new OrderEditError(
-        "ORDER_EDIT_IDENTITY_CHANGED",
-        "The Shopify order identity does not match Echelon.",
-      );
-  }
   private present(record: OrderEditRecord): OrderEditOperation {
     const snapshot = record.lastSnapshot ?? record.baseline;
     const quote = record.quote;
@@ -996,7 +967,7 @@ export class OrderEditService {
       paymentDeadline: record.paymentDeadline,
       paymentUrl:
         record.status === "awaiting_payment" &&
-        !unresolvedPayment(snapshot) &&
+        !orderEditHasUnresolvedPayment(snapshot) &&
         record.paymentDeadline !== null &&
         this.clock().getTime() < Date.parse(record.paymentDeadline)
           ? snapshot.paymentUrl

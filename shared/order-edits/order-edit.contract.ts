@@ -139,24 +139,38 @@ export const orderEditQuoteInputSchema = z
       .max(100),
   })
   .strict()
-  .superRefine((input, context) => {
-    if (input.changes.length + input.additions.length === 0)
+  .superRefine(validateOrderEditPlan);
+
+// Read-only previews and financial quotes validate the same commercial plan.
+export const orderEditPlanInputSchema = orderEditQuoteInputSchema
+  .innerType()
+  .pick({ changes: true, additions: true })
+  .superRefine(validateOrderEditPlan);
+
+function validateOrderEditPlan(
+  input: {
+    changes: Array<{ lineItemId: string }>;
+    additions: Array<{ variantId: string }>;
+  },
+  context: z.RefinementCtx,
+): void {
+  if (input.changes.length + input.additions.length === 0)
+    context.addIssue({
+      code: "custom",
+      message: "Choose at least one change.",
+    });
+  for (const [values, field] of [
+    [input.changes.map((line) => line.lineItemId), "changes"],
+    [input.additions.map((line) => line.variantId), "additions"],
+  ] as const) {
+    if (new Set(values).size !== values.length)
       context.addIssue({
         code: "custom",
-        message: "Choose at least one change.",
+        path: [field],
+        message: "Duplicate line identifiers are not allowed.",
       });
-    for (const [values, field] of [
-      [input.changes.map((line) => line.lineItemId), "changes"],
-      [input.additions.map((line) => line.variantId), "additions"],
-    ] as const) {
-      if (new Set(values).size !== values.length)
-        context.addIssue({
-          code: "custom",
-          path: [field],
-          message: "Duplicate line identifiers are not allowed.",
-        });
-    }
-  });
+  }
+}
 export const orderEditOperationSchema = z
   .object({
     shippingRepricing: orderEditShippingRepricingSchema.nullable().optional(),

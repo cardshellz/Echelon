@@ -4176,3 +4176,95 @@ describe("member function pricing on protected quantity increases", () => {
     ).toBe(false);
   });
 });
+
+describe("calculation-only background order previews", () => {
+  it("warms product metadata and calculates revised totals without opening an edit session", async () => {
+    const calculatePreview = vi.fn(async () => ({
+      shippingRepricing: {
+        title: "Standard Shipping",
+        code: "standard",
+        source: "Echelon Shipping",
+        grossCents: 500,
+        netCents: 500,
+        discountCents: 0,
+        discountLabels: [],
+      },
+      taxCents: 180,
+      totalCents: 3680,
+    }));
+    const h = harness(
+      [shippingOrder(), { nodes: [variant(10, "10.00")] }],
+      {},
+      {
+        calculate: vi.fn(async () => {
+          throw new Error("Not an authoritative quote");
+        }),
+        calculatePreview,
+      },
+    );
+    const snapshot = await h.provider.readOrder(4, "100");
+    const context = await h.provider.preparePreview(snapshot);
+    const result = await h.provider.preview(context, {
+      changes: [{ lineItemId: id("LineItem", 1), quantity: 3 }],
+      additions: [],
+    });
+    expect(result.financials.totalCents).toBe(3680);
+    expect(result.financials.itemsNetCents).toBe(3000);
+    expect(calculatePreview).toHaveBeenCalledWith(snapshot, [
+      { variantId: id("ProductVariant", 10), quantity: 3, netCents: 3000 },
+    ]);
+    expect(h.requests.map((r) => r.query)).toHaveLength(2);
+    expect(
+      h.requests.every(
+        (r) =>
+          !/orderEditBegin|orderEditCommit|orderEditSetQuantity|refundCreate|draftOrderCreate|draftOrderComplete/.test(
+            r.query,
+          ),
+      ),
+    ).toBe(true);
+    expect(snapshot.previewProductDiscounts).toEqual([
+      { lineId: id("LineItem", 1), amountCents: 0, automaticCents: 0 },
+    ]);
+  });
+  it("reads pricing for a newly selected variant without mutating the warm context", async () => {
+    const calculatePreview = vi.fn(async () => ({
+      shippingRepricing: {
+        title: "Standard Shipping",
+        code: "standard",
+        source: "Echelon Shipping",
+        grossCents: 500,
+        netCents: 500,
+        discountCents: 0,
+        discountLabels: [],
+      },
+      taxCents: 150,
+      totalCents: 3150,
+    }));
+    const h = harness(
+      [
+        shippingOrder(),
+        { nodes: [variant(10, "10.00")] },
+        { nodes: [variant(20, "5.00")] },
+      ],
+      {},
+      { calculate: vi.fn(), calculatePreview },
+    );
+    const snapshot = await h.provider.readOrder(4, "100");
+    const context = await h.provider.preparePreview(snapshot);
+    const before = structuredClone(context);
+    const result = await h.provider.preview(context, {
+      changes: [],
+      additions: [{ variantId: id("ProductVariant", 20), quantity: 1 }],
+    });
+    expect(result.financials.itemsNetCents).toBe(2500);
+    expect(context).toEqual(before);
+    expect(h.requests[2].variables).toEqual({
+      ids: [id("ProductVariant", 20)],
+    });
+    expect(
+      h.requests.some((r) =>
+        /orderEditBegin|orderEditCommit|refundCreate/.test(r.query),
+      ),
+    ).toBe(false);
+  });
+});

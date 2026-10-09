@@ -91,6 +91,19 @@ const line = z
 
 export const orderEditSnapshotSchema: z.ZodType<OrderEditSnapshot> = z
   .object({
+    previewProductDiscounts: z
+      .array(
+        z
+          .object({
+            lineId: gid("LineItem"),
+            amountCents: money,
+            automaticCents: money,
+          })
+          .strict()
+          .refine((line) => line.automaticCents <= line.amountCents),
+      )
+      .max(250)
+      .optional(),
     shippingContext: z
       .object({
         address: z
