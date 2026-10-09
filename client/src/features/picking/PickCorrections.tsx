@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { pickCorrectionListSchema, pickCorrectionSchema, type PickCorrection } from "@shared/pick-corrections";
+import { canTakeOverPickCorrection, pickCorrectionListSchema, pickCorrectionSchema, type PickCorrection } from "@shared/pick-corrections";
 import { AlertDialog, AlertDialogContent, AlertDialogDescription, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,7 +34,9 @@ export function PickCorrections({ userId, canPerform }: { userId: string; canPer
         <h3 className="font-semibold">{item.orderNumber} · {item.sku}</h3>
         <p className="text-sm">{item.declaredQuantity - item.pickedQuantity} still need a pick record · {item.location || "Source bin missing"}</p>
         {item.assignedPickerId !== null && item.assignedPickerId !== userId
-          ? <p className="text-sm">Being resolved by another picker.</p>
+          ? canPerform && canTakeOverPickCorrection(item, userId, new Date())
+            ? <TakeOver item={item} />
+            : <p className="text-sm">Being resolved by another picker.</p>
           : canPerform && item.state === "picking_required"
             ? <CorrectionAction key={`${item.id}:${item.revision}:${item.pickedQuantity}`} item={item} onChanged={changed} />
             : <p className="text-sm">Waiting for the picker’s Yes / No confirmation.</p>}
@@ -50,6 +52,38 @@ export function PickCorrections({ userId, canPerform }: { userId: string; canPer
       </AlertDialogContent>
     </AlertDialog>
   </>;
+}
+
+/** An idle "No" whose corrective scan another picker never did. */
+function TakeOver({ item }: { item: PickCorrection }) {
+  const client = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const commandId = useRef(crypto.randomUUID());
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true); setError(null);
+    try {
+      const response = await fetch(`${queryKey[0]}/${item.id}/take-over`, { method: "POST", credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ commandId: commandId.current, expectedRevision: item.revision }) });
+      const result: unknown = await response.json();
+      if (!response.ok) {
+        setError(typeof result === "object" && result && "error" in result ? String((result as { error: unknown }).error)
+          : "Could not take over this correction. Refresh and try again.");
+        return;
+      }
+      pickCorrectionSchema.parse(result);
+      await client.invalidateQueries({ queryKey });
+    } catch {
+      setError("Could not take over this correction. Refresh and try again.");
+    } finally { setBusy(false); }
+  };
+  return <div className="space-y-2">
+    <p className="text-sm">Another picker answered No but never scanned it.</p>
+    <Button variant="outline" disabled={busy} onClick={() => void submit()}>Take over</Button>
+    {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+  </div>;
 }
 
 function CorrectionAction({ item, onChanged }: { item: PickCorrection; onChanged(item: PickCorrection): void }) {
