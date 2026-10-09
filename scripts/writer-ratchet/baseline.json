@@ -1,7 +1,6 @@
 {
   "catalog.product_assets": [
     "modules/catalog",
-    "modules/channels",
     "server/routes/ebay/ebay-policies.routes.ts"
   ],
   "catalog.product_categories": [
