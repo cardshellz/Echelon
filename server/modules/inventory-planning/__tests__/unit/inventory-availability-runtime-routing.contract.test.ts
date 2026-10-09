@@ -28,7 +28,7 @@ describe("inventory availability runtime ATP routing contract", () => {
     }
 
     const ebayCompositionFiles = [
-      "server/routes/ebay/ebay-utils.ts",
+      "server/modules/channels/infrastructure/ebay-api-runtime.ts",
       "server/modules/channels/adapters/ebay/ebay-marketplace-registration-owner.pg-repository.ts",
     ];
     for (const file of ebayCompositionFiles) {

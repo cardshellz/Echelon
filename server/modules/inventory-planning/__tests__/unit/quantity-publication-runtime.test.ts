@@ -4,7 +4,7 @@ vi.mock("../../../../db", () => ({ pool: { query: f.query } }));
 vi.mock("../../infrastructure/inventory-availability-runtime-publication.repository", () => ({
   createAuthorityAwareInventoryPublicationService: () => ({ publishProduct: f.publish }),
 }));
-import { planCurrentCanonicalListingQuantity, createQuantityPublicationCatchupService, quantityPublicationAdmission } from "../../infrastructure/quantity-publication-runtime";
+import { planCurrentCanonicalListingQuantity, createQuantityPublicationCatchupService, quantityPublicationAdmission, quantityProviderResponseRecovery } from "../../infrastructure/quantity-publication-runtime";
 
 const scope = { destinationKind: "channel_connection" as const, connectionId: 7, providerKey: "ebay" as const,
   providerScopeType: "account" as const, externalScopeId: "verified", externalInventoryItemId: "P5", productId: null, productVariantId: null };
@@ -42,6 +42,7 @@ describe("legacy channel catch-up runtime boundary", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.resetAllMocks();
+    vi.spyOn(quantityProviderResponseRecovery, "reconcile").mockResolvedValue({busy:false,resolved:[],unresolved:[]});
     vi.spyOn(quantityPublicationAdmission, "listDue").mockResolvedValue([claim]);
     vi.spyOn(quantityPublicationAdmission, "complete").mockResolvedValueOnce(false).mockResolvedValue(true);
     vi.spyOn(quantityPublicationAdmission, "fail").mockResolvedValue();
@@ -60,6 +61,9 @@ describe("legacy channel catch-up runtime boundary", () => {
     expect(refresh).toHaveBeenCalledExactlyOnceWith(scope);
     expect(quantityPublicationAdmission.withLegacyCatchupScope).toHaveBeenCalledWith(scope, expect.any(Function), claim);
     expect(f.query).toHaveBeenCalledOnce();
+    expect(quantityProviderResponseRecovery.reconcile).toHaveBeenCalledWith(undefined,25);
+    expect(vi.mocked(quantityProviderResponseRecovery.reconcile).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(quantityPublicationAdmission.listDue).mock.invocationCallOrder[0]);
   });
 
   it("does not invoke a legacy publisher if authority changes before admission", async () => {

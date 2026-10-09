@@ -10,6 +10,7 @@ export * from "./orders.schema";
 export * from "./inventory.schema";
 export * from "./notifications.schema";
 export * from "./ebay.schema";
+export * from "./ebay-listing-sync.schema";
 export * from "./oms.schema";
 export * from "./membership.schema";
 export * from "./dropship.schema";

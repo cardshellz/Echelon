@@ -41,10 +41,14 @@ export interface QuantityPublicationCatchupStore {
 /** Rebuilds from CURRENT authoritative data. Stored quantity/listing payloads are not replay input. */
 export class QuantityPublicationCatchupService {
   constructor(private readonly store: QuantityPublicationCatchupStore,
-    private readonly replan: (scope: QuantityPublicationScope, claim: QuantityPublicationCatchup) => Promise<void | { outboxId: string }>) {}
+    private readonly replan: (scope: QuantityPublicationScope, claim: QuantityPublicationCatchup) => Promise<void | { outboxId: string }>,
+    private readonly recoverResponses?: (limit: number) => Promise<unknown>) {}
 
   async processDue(limit = 25): Promise<{ completed: number; failed: number }> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid catch-up batch size.");
+    // The due-work query intentionally excludes unresolved attempts. Recover
+    // provable final responses first, so safe follow-up work becomes eligible.
+    await this.recoverResponses?.(limit);
     const result = { completed: 0, failed: 0 };
     for (const claim of await this.store.listDue(limit)) {
       try {

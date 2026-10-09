@@ -49,7 +49,9 @@ The new persistence has explicit module ownership, enforced by the writer ratche
    values or fractional-minute durations are rejected instead of rounded.
 2. Search for an exact order number, with or without `#`. Existing active edits
    appear with **Resume edit**, including after closing the original browser tab.
-3. Adjust quantities or add a supported product. Review the Shopify-calculated
+3. Adjust quantities or select **Search or browse products**. Search by product
+   name or SKU, or choose a category and expand a product to pick its actual
+   pack, box or case SKU. Review the Shopify-calculated
    total before applying the change. The review compares original and proposed
    product prices, named product discounts, shipping charges and discounts, tax,
    and the final total. Payment history shows payments and refunds already
@@ -72,20 +74,43 @@ unsubmitted edit blocked by the former discount restriction, cancel that saved
 edit and create a fresh quote after deploying discount support. Do not replace
 its stored baseline or remove its hold directly in the database.
 
+## Product discovery
+
+The picker uses the selected connection's published, active Shopify products.
+Categories are that store's existing product types. Product/pack relationships use
+Shopify product and variant IDs; SKU strings are labels, not a guessed hierarchy.
+Name search targets the parent product title and SKU search targets its variants.
+Each search term is a prefix, so partial names and SKU prefixes are supported.
+Categories, products and options all support pagination.
+
+Catalog reads are authenticated GET requests. They do not create edit operations,
+change holds, adjust inventory or send financial commands. Discovery results are
+cached briefly for the current staff member and connection; stale search results
+are hidden immediately while the next search loads. Errors offer a read-only
+retry. Duplicate or unavailable variants cannot be added. The displayed unit
+price is before discounts: preview and financial review still verify current
+pricing, stock, discount eligibility, shipping and tax independently.
+
+Local tests cover name/SKU queries, category and SKU pagination, parent identity,
+stock restrictions, literal query construction, stale responses, retries and
+desktop/mobile entry into the existing review flow. Live catalog search and
+publication/category coverage must also be checked on the deployed connection.
+
 ## Pilot boundaries
 
 - USD, domestic US physical orders only; Shopify and warehouse eligibility are
   rechecked. Orders with prior refunds or unsupported promotion/tender/lineage
   combinations fail closed.
-- Shipping charges remain unchanged. Address editing is not included.
+- Shipping is recalculated for revised items using current checkout rates and
+  eligible shipping benefits. Address editing is not included.
 - Existing-line pricing is verified; added products use verified current member
   pricing when applicable. Native order-wide percentage and fixed discount codes are
-  supported alongside unchanged shipping discounts, including free shipping.
+  supported alongside verified shipping benefits, including free shipping.
   Shopify's exact line allocations determine net prices and totals; rounded
   discounted unit prices are not multiplied to invent a line total.
   Product-specific codes, scripts, unverified automatic product
   discounts, and orders with nonzero tax included in prices require staff review.
-  The pilot does not recalculate shipping or assume a promotion is still valid.
+  The pilot does not assume a promotion is still valid.
 - An edit requiring extra payment cannot completely remove an original line;
   restoring that line's identity on expiry has not been proven. Partial quantity
   reductions are supported. Emptying the entire order is rejected.

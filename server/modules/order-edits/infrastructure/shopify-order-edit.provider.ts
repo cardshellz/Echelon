@@ -30,6 +30,10 @@ import { buildOrderEditFinancials } from "../domain/order-edit-financials";
 import { priceOrderEditDiscounts } from "../domain/order-edit-discount-engine";
 import { resolveOrderEditLinePlan } from "../domain/order-edit-line-plan";
 import { priceOrderEditPreviewItems } from "../domain/order-edit-preview-pricing";
+import { supportedVariant, stockAvailable } from "../domain/order-edit-variant";
+import { shopifyOrderEditVariantSchema as VARIANT } from "./shopify-order-edit-variant";
+import { cents } from "./shopify-order-edit-money";
+import { ShopifyOrderEditCatalog } from "./shopify-order-edit-catalog";
 import { toOrderEditPreviewPricingInput } from "../application/order-edit-preview-pricing-input";
 import type {
   OrderEditPreviewProvider,
@@ -202,28 +206,6 @@ const READ = z.object({
   }),
   order: ORDER.nullable(),
 });
-const VARIANT = z.object({
-  id: TEXT,
-  displayName: TEXT,
-  title: TEXT,
-  sku: z.string().nullable(),
-  price: TEXT,
-  requiresComponents: z.boolean(),
-  availableForSale: z.boolean(),
-  inventoryPolicy: z.enum(["DENY", "CONTINUE"]),
-  sellableOnlineQuantity: z.number().int().safe(),
-  inventoryItem: z.object({
-    requiresShipping: z.boolean(),
-    tracked: z.boolean(),
-  }),
-  product: z.object({
-    status: TEXT,
-    isGiftCard: z.boolean(),
-    requiresSellingPlan: z.boolean(),
-  }),
-  membershipVariant: META,
-  planPrices: META,
-});
 interface VariantPricing {
   variants: Array<z.infer<typeof VARIANT> | null>;
   prices: Map<string, number>;
@@ -291,6 +273,7 @@ export class ShopifyOrderEditProvider
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
   private readonly shippingCalculator: OrderEditShippingCalculator;
+  readonly catalog: ShopifyOrderEditCatalog;
   constructor(
     private readonly options: {
       credentials: OrderEditCredentialStore;
@@ -303,6 +286,10 @@ export class ShopifyOrderEditProvider
   ) {
     this.fetchImpl = options.fetch ?? fetch;
     this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.catalog = new ShopifyOrderEditCatalog(
+      async (connectionId, query, variables) =>
+        this.request(await this.credentials(connectionId), query, variables),
+    );
     this.shippingCalculator =
       options.shippingCalculator ??
       new ShopifyOrderEditShippingCalculator(
@@ -504,36 +491,7 @@ export class ShopifyOrderEditProvider
     connectionId: number,
     search: string,
   ): Promise<OrderEditVariant[]> {
-    const term = z
-      .string()
-      .trim()
-      .min(2)
-      .max(100)
-      .parse(search)
-      .replace(/[\\"]/g, "\\$&");
-    const data = parse(
-      z.object({
-        shop: z.object({ currencyCode: z.literal("USD") }),
-        productVariants: z.object({ nodes: z.array(VARIANT) }),
-      }),
-      await this.request(
-        await this.credentials(connectionId),
-        gql.SEARCH_QUERY,
-        {
-          query: `product_status:active AND (title:"${term}" OR sku:"${term}")`,
-        },
-      ),
-    );
-    return data.productVariants.nodes
-      .filter(supportedVariant)
-      .map((variant) => ({
-        id: variant.id,
-        title: variant.displayName,
-        sku: variant.sku,
-        priceCents: cents(variant.price),
-        available: stockAvailable(variant, 1),
-        availableQuantity: Math.max(0, variant.sellableOnlineQuantity),
-      }));
+    return this.catalog.searchVariants(connectionId, search);
   }
 
   async preparePreview(
@@ -2195,24 +2153,6 @@ function gid(resource: string, value: string): string {
     `A valid Shopify ${resource} identity is required.`,
   );
 }
-function cents(value: string, signed = false): number {
-  if (!(signed ? /^-?\d+(?:\.\d{1,2})?$/ : /^\d+(?:\.\d{1,2})?$/).test(value))
-    fail(
-      "MONEY_INVALID",
-      "The amount cannot be represented exactly in USD cents.",
-    );
-  const negative = value.startsWith("-");
-  const [whole, fraction = ""] = value.replace(/^-/, "").split(".");
-  const exact =
-    (BigInt(whole) * BigInt(100) + BigInt(fraction.padEnd(2, "0"))) *
-    BigInt(negative ? -1 : 1);
-  if (
-    exact > BigInt(Number.MAX_SAFE_INTEGER) ||
-    exact < BigInt(Number.MIN_SAFE_INTEGER)
-  )
-    fail("MONEY_OVERFLOW", "The amount exceeds the safe integer-cents range.");
-  return Number(exact);
-}
 function decimal(value: number): string {
   if (!Number.isSafeInteger(value) || value < 0)
     fail("MONEY_INVALID", "A nonnegative integer-cents amount is required.");
@@ -2356,24 +2296,6 @@ function assertEditable(snapshot: OrderEditSnapshot) {
       "ORDER_EDIT_UNSUPPORTED",
       "Only editable, unfulfilled US physical orders with supported payment terms can use this pilot.",
     );
-}
-function supportedVariant(variant: z.infer<typeof VARIANT>) {
-  return (
-    !variant.requiresComponents &&
-    variant.inventoryItem.requiresShipping &&
-    variant.product.status === "ACTIVE" &&
-    !variant.product.isGiftCard &&
-    !variant.product.requiresSellingPlan &&
-    variant.membershipVariant?.value !== "true"
-  );
-}
-function stockAvailable(variant: z.infer<typeof VARIANT>, quantity: number) {
-  return (
-    variant.availableForSale &&
-    variant.inventoryItem.tracked &&
-    variant.inventoryPolicy === "DENY" &&
-    variant.sellableOnlineQuantity >= quantity
-  );
 }
 function additionalDemand(
   baseline: OrderEditSnapshot,

@@ -26,7 +26,7 @@ interface SyncProgressEvent {
   type: "progress";
   product: string;
   productId: number;
-  status: "success" | "error";
+  status: "success" | "error" | "pending";
   changes?: string[];
   error?: string;
   current: number;
@@ -41,6 +41,7 @@ interface SyncCompleteEvent {
     qtyChanges: number;
     policyChanges: number;
     errors: number;
+    pending?: number;
     total: number;
   };
   cancelled: boolean;
@@ -56,7 +57,7 @@ type SyncEvent = SyncProgressEvent | SyncCompleteEvent | SyncErrorEvent;
 interface SyncResult {
   product: string;
   productId: number;
-  status: "success" | "error";
+  status: "success" | "error" | "pending";
   changes?: string[];
   error?: string;
 }
@@ -130,6 +131,7 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
             es.close();
             queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
             queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/ebay/listings/sync-jobs"] });
             break;
           case "error":
             setGlobalError(data.error);
@@ -144,7 +146,7 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
 
     es.onerror = () => {
       if (!isComplete) {
-        setGlobalError("Connection lost. Check server logs for sync status.");
+        setGlobalError("Progress connection closed. Accepted sync jobs continue in the background; check the listing for saved status.");
         setIsComplete(true);
       }
       es.close();
@@ -186,10 +188,10 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
           <DialogTitle className="text-base sm:text-lg">
             {isComplete
               ? isCancelled
-                ? "Sync Cancelled"
+                ? "Progress View Closed"
                 : globalError
                 ? "Sync Error"
-                : "Sync Complete"
+                : summary?.pending ? "Sync Saved — Recovering" : "Sync Complete"
               : "Syncing eBay Listings..."}
           </DialogTitle>
         </DialogHeader>
@@ -218,7 +220,7 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
                   ` · ${summary.errors} error${summary.errors !== 1 ? "s" : ""}`}
               </p>
               {isCancelled && (
-                <p className="text-xs mt-1 opacity-75">Sync was cancelled before completion.</p>
+                <p className="text-xs mt-1 opacity-75">Saved sync jobs continue in the background.</p>
               )}
             </div>
           )}
@@ -271,6 +273,8 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
                   <div className="flex items-start gap-2">
                     {result.status === "success" ? (
                       <CheckCircle2 className="h-4 w-4 text-green-600 shrink-0 mt-0.5" />
+                    ) : result.status === "pending" ? (
+                      <Loader2 className="h-4 w-4 text-blue-600 shrink-0 mt-0.5 animate-spin" />
                     ) : (
                       <XCircle className="h-4 w-4 text-red-500 shrink-0 mt-0.5" />
                     )}
@@ -289,6 +293,7 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
                             <span className="text-xs text-muted-foreground">— no changes</span>
                           )}
                       </div>
+                      {result.status === "pending" && <p className="text-xs mt-1">Update saved. Recovery will continue automatically.</p>}
                       {result.status === "error" && result.error && (
                         <div className="mt-1">
                           <button
@@ -333,7 +338,7 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
                 onClick={handleCancel}
               >
                 <X className="h-4 w-4 mr-1" />
-                Cancel
+                Stop viewing
               </Button>
             )}
             {isComplete && (

@@ -10,6 +10,7 @@ export const EBAY_ITEM_REVISION_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 export const EBAY_REJECTION_RETRY_MS = 60 * 1000;
 const errorsSchema = z.object({ errors: z.array(z.object({
   errorId: z.number().int().nonnegative().safe(), category: z.string().optional(), message: z.string(),
+  longMessage: z.string().optional(),
 })).min(1).max(25) });
 
 export function ebayRetryNotBefore(value: string | null, observedAt: Date, minimumMs: number): string {
@@ -37,7 +38,7 @@ export function ebayRetryNotBefore(value: string | null, observedAt: Date, minim
  * identifier at publish): nothing was written, so a 400 carrying only these
  * is a rejection. APPLICATION is an eBay-side failure whose effect is unknown,
  * and a missing category proves nothing; both stay uncertain and block the
- * scope until an operator reconciles it.
+ * scope until retained response evidence or explicit recovery permits a fresh write.
  */
 const PROVIDER_REFUSAL_CATEGORIES: ReadonlySet<string> = new Set(["REQUEST", "BUSINESS"]);
 
@@ -82,6 +83,7 @@ export async function executeEbayQuantityHttpResponse<T>(input: EbayQuantityHttp
     let body: unknown = null; let validJson = text.length === 0;
     if (text) { try { body = JSON.parse(text); validJson = true; } catch { /* Persist hash; malformed response is not terminal success. */ } }
     const classification = classifyEbayQuantityResponse(response.status, body);
+    const diagnostics = safeEbayErrorMessage(body);
     // 202 is acceptance, not completion; unexpected multi-status/partial responses
     // cannot prove a quantity mutation finished merely because Response.ok is true.
     const topLevelErrors = body && typeof body === "object" && "errors" in body
@@ -104,9 +106,9 @@ export async function executeEbayQuantityHttpResponse<T>(input: EbayQuantityHttp
     if (!response.ok) await input.onFailure?.(response.status,text);
     if (classification.rejected) throw new QuantityProviderRejectionError(
       classification.dailyLimit ? "EBAY_QUANTITY_DAILY_LIMIT" : "EBAY_QUANTITY_REJECTED",
-      `eBay quantity request rejected (HTTP ${response.status}; codes ${classification.errorCodes.join(",") || "not supplied"}).`);
+      `eBay quantity request rejected (HTTP ${response.status}; codes ${classification.errorCodes.join(",") || "not supplied"}).${diagnostics}`);
     if (!completed) {
-      throw Object.assign(new Error(`eBay quantity request has an uncertain outcome (HTTP ${response.status}).`),
+      throw Object.assign(new Error(`eBay quantity request has an uncertain outcome (HTTP ${response.status}; codes ${classification.errorCodes.join(",") || "not supplied"}).${diagnostics}`),
         { code: "EBAY_QUANTITY_RESPONSE_UNCERTAIN" });
     }
     return { value: (text ? body : undefined) as T, status: response.status };
@@ -116,4 +118,15 @@ export async function executeEbayQuantityHttpResponse<T>(input: EbayQuantityHttp
     if (deadline.signal.aborted) throw deadline.signal.reason;
     throw error;
   } finally { deadline.dispose(); }
+}
+
+/** Retain actionable provider diagnostics in the listing job's immutable failure
+ * event. Never retain raw response bodies, headers, credentials or parameter values. */
+export function safeEbayErrorMessage(body: unknown): string {
+  const parsed = errorsSchema.safeParse(body);
+  if(!parsed.success) return "";
+  return " " + parsed.data.errors.map(error => `${error.errorId} ${error.category ?? "UNKNOWN"}: ${error.longMessage ?? error.message}`)
+    .join("; ").replace(/https?:\/\/\S+/gi,"[URL]").replace(/Bearer\s+\S+/gi,"Bearer [redacted]")
+    .replace(/(access_token|refresh_token|client_secret|authorization)[\s:=]+[^\s,;]+/gi,"$1 [redacted]")
+    .replace(/[\u0000-\u001f\u007f]/g," ").slice(0,700);
 }

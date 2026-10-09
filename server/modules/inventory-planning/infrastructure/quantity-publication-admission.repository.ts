@@ -96,7 +96,7 @@ export async function captureQuantityPublicationDrainInsideTransaction(client: C
   )).rows;
   if (unresolved.length > 1000) fail("PUBLICATION_DRAIN_EVIDENCE_LIMIT", "Resolve the outstanding publication attempt backlog before capture.");
   const latest = (await client.query<{ id: string; outbox_id: string | null; gate_epoch: string; owner_kind: "legacy" | "outbox" | "listing_setup_zero"; scope: unknown;
-    completed_at: Date | null; resolution_basis: "owner_completion" | "operator_attestation" | "provider_rejection" | "owner_preflight_no_request" | null }>(
+    completed_at: Date | null; resolution_basis: "owner_completion" | "operator_attestation" | "provider_rejection" | "owner_preflight_no_request" | "provider_response_terminal" | null }>(
     `SELECT DISTINCT ON (member.scope_key) a.id::text,a.outbox_id::text,a.gate_epoch::text,a.owner_kind,
        a.affected_scopes->(member.ordinality::int-1) AS scope,a.completed_at,a.resolution_basis
      FROM inventory.quantity_publication_attempts a

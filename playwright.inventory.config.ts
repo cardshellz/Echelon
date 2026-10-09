@@ -22,6 +22,7 @@ export default defineConfig({
     "walmart-channel-workspace.spec.ts",
     "catalog-images.spec.ts",
     "ebay-listing-photos.spec.ts",
+    "ebay-listing-sync-recovery.spec.ts",
   ],
   fullyParallel: false,
   workers: 1,
