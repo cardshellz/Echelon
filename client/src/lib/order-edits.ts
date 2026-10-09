@@ -1,6 +1,17 @@
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
+  orderEditCatalogCategoriesInputSchema,
+  orderEditCatalogCategoriesSchema,
+  orderEditCatalogProductsInputSchema,
+  orderEditCatalogProductsSchema,
+  orderEditCatalogVariantsInputSchema,
+  orderEditCatalogVariantsSchema,
+  type OrderEditCatalogCategoriesInput,
+  type OrderEditCatalogProductsInput,
+  type OrderEditCatalogVariantsInput,
+} from "@shared/order-edits/order-edit-catalog";
+import {
   orderEditPreviewInputSchema,
   orderEditPreviewScopeSchema,
   orderEditPreviewSchema,
@@ -299,6 +310,42 @@ export function createOrderEditTransport(request: typeof fetch = fetch) {
     return result;
   };
   return {
+    catalogCategories: (
+      connectionId: number,
+      input: OrderEditCatalogCategoriesInput,
+      signal?: AbortSignal,
+    ) =>
+      catalogRead(
+        "categories",
+        connectionId,
+        orderEditCatalogCategoriesInputSchema.parse(input),
+        orderEditCatalogCategoriesSchema,
+        signal,
+      ),
+    catalogProducts: (
+      connectionId: number,
+      input: OrderEditCatalogProductsInput,
+      signal?: AbortSignal,
+    ) =>
+      catalogRead(
+        "products",
+        connectionId,
+        orderEditCatalogProductsInputSchema.parse(input),
+        orderEditCatalogProductsSchema,
+        signal,
+      ),
+    catalogVariants: (
+      connectionId: number,
+      input: OrderEditCatalogVariantsInput,
+      signal?: AbortSignal,
+    ) =>
+      catalogRead(
+        "variants",
+        connectionId,
+        orderEditCatalogVariantsInputSchema.parse(input),
+        orderEditCatalogVariantsSchema,
+        signal,
+      ),
     warmPreview: async (scope: OrderEditPreviewScope, signal?: AbortSignal) => {
       const body = orderEditPreviewScopeSchema.parse(scope);
       const result = await orderEditRequest(
@@ -413,6 +460,33 @@ export function createOrderEditTransport(request: typeof fetch = fetch) {
     reconcile: (id: string) => operation(id, "reconcile"),
     abandon: (id: string) => operation(id, "abandon"),
   };
+  async function catalogRead<
+    T extends { connectionId: number; input: unknown },
+  >(
+    endpoint: "categories" | "products" | "variants",
+    connectionId: number,
+    input: Record<string, string | null>,
+    schema: z.ZodType<T, z.ZodTypeDef, unknown>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const params = new URLSearchParams({
+      connectionId: String(positiveId.parse(connectionId)),
+    });
+    for (const [key, value] of Object.entries(input))
+      if (value !== null) params.set(key, value);
+    const result = await read(`/catalog/${endpoint}?${params}`, schema, signal);
+    if (
+      result.connectionId !== connectionId ||
+      canonicalJson(result.input) !== canonicalJson(input)
+    )
+      throw new OrderEditRequestError(
+        "The product results did not match this store or search.",
+        "ORDER_EDIT_IDENTITY_MISMATCH",
+        null,
+        false,
+      );
+    return result;
+  }
 }
 
 export type OrderEditTransport = ReturnType<typeof createOrderEditTransport>;

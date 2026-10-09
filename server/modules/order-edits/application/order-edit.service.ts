@@ -4,6 +4,12 @@ import {
   orderEditHasUnresolvedPayment,
 } from "./order-edit-identity";
 import type { OrderEditPreviewService } from "./order-edit-preview.service";
+import type { OrderEditCatalog } from "./order-edit-catalog";
+import type {
+  OrderEditCatalogCategoriesInput,
+  OrderEditCatalogProductsInput,
+  OrderEditCatalogVariantsInput,
+} from "@shared/order-edits/order-edit-catalog";
 import type {
   OrderEditPreviewScope,
   OrderEditPreviewInput,
@@ -63,6 +69,7 @@ export class OrderEditService {
       code: string;
     }) => void,
     private readonly previews?: OrderEditPreviewService,
+    private readonly catalog?: OrderEditCatalog,
   ) {}
 
   async warmPreview(input: OrderEditPreviewScope, actorId: string) {
@@ -135,6 +142,36 @@ export class OrderEditService {
         }),
       ),
     };
+  }
+  async catalogCategories(
+    connectionId: number,
+    input: OrderEditCatalogCategoriesInput,
+  ) {
+    await this.store.settings(connectionId);
+    return this.requireCatalog().categories(connectionId, input);
+  }
+  async catalogProducts(
+    connectionId: number,
+    input: OrderEditCatalogProductsInput,
+  ) {
+    await this.store.settings(connectionId);
+    return this.requireCatalog().products(connectionId, input);
+  }
+  async catalogVariants(
+    connectionId: number,
+    input: OrderEditCatalogVariantsInput,
+  ) {
+    await this.store.settings(connectionId);
+    return this.requireCatalog().productVariants(connectionId, input);
+  }
+  private requireCatalog(): OrderEditCatalog {
+    if (!this.catalog)
+      throw new OrderEditError(
+        "ORDER_EDIT_CATALOG_UNAVAILABLE",
+        "Product browsing is unavailable. Try again.",
+        503,
+      );
+    return this.catalog;
   }
   async order(connectionId: number, omsOrderId: number) {
     const reference = await this.store.orderReference(connectionId, omsOrderId);
