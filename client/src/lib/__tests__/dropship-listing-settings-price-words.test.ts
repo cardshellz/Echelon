@@ -97,6 +97,14 @@ describe("builtFromWords", () => {
     expect(retailFallbackFixWords(size())).toBeNull();
   });
 
+  it("says when the rules' price is outside a Card Shellz limit, so the size uses its retail price (L1)", () => {
+    const fallback = size({ source: "retail_fallback", priceCents: 1_250, issue: "pricing_rule_outside_limit" });
+    expect(builtFromWords(fallback))
+      .toBe("Your pricing rules give this size a price outside a Card Shellz price limit, so it uses the retail price ($12.50).");
+    // The rules cover the size, so no "set a store price" fix; the reason is in the words above.
+    expect(retailFallbackFixWords(fallback)).toBeNull();
+  });
+
   it("says why a size can't be priced", () => {
     const none = (issue: ListingSettingsPriceIssue | null, basis: ListingSettingsSizePrice["basis"] = null) =>
       builtFromWords(size({ source: "none", priceCents: null, issue, basis }));
@@ -165,6 +173,8 @@ describe("w9OriginWords", () => {
       .toBe("Your pricing rules can't price this size (two older group rules tie), so it uses the retail price ($12.50).");
     expect(w9OriginWords({ ...fallback, rulesConfigured: true, pricingIssue: "pricing_basis_unavailable" }))
       .toBe("Your pricing rules can't price this size (your cost isn't on file), so it uses the retail price ($12.50).");
+    expect(w9OriginWords({ ...fallback, rulesConfigured: true, pricingIssue: "pricing_rule_outside_limit" }))
+      .toBe("Your pricing rules give this size a price outside a Card Shellz price limit, so it uses the retail price ($12.50).");
     // An unknown reason from a newer server is not shown raw.
     expect(w9OriginWords({ ...fallback, rulesConfigured: true, pricingIssue: "some_new_issue" }))
       .toBe("Your pricing rules can't price this size, so it uses the retail price ($12.50).");

@@ -20,9 +20,13 @@ export interface CatalogStepRailProps {
   details: Readonly<Partial<Record<CatalogStep, string>>>;
   /** A button after a step's line, such as "Try again" when its check failed. Kept outside the step's link. */
   actions?: Readonly<Partial<Record<CatalogStep, { label: string; onClick: () => void }>>>;
+  /** By step, the drafts its link's leave question is about (see GuardedLink); a step not named asks about every draft. */
+  leaveScopes?: Readonly<Partial<Record<CatalogStep, readonly string[]>>>;
   storeOptions: readonly CatalogStoreOption[];
   selectedStoreConnectionId: number | null;
   onStoreChange: (storeConnectionId: number) => void;
+  /** Off while a save is in flight: another store drops the step's draft, and with it the save's answer. */
+  storeDisabled?: boolean;
 }
 
 /**
@@ -42,8 +46,10 @@ export function CatalogStepRail({
   current,
   details,
   hrefFor,
+  leaveScopes = {},
   onStoreChange,
   selectedStoreConnectionId,
+  storeDisabled = false,
   storeOptions,
   ticks,
 }: CatalogStepRailProps) {
@@ -65,6 +71,7 @@ export function CatalogStepRail({
                 <li key={step} className="flex flex-col">
                   <GuardedLink
                     href={hrefFor(step)}
+                    scope={leaveScopes[step]}
                     aria-current={isCurrent ? "step" : undefined}
                     data-testid={`catalog-step-${step}`}
                     className={isCurrent
@@ -99,6 +106,7 @@ export function CatalogStepRail({
           options={storeOptions}
           selectedStoreConnectionId={selectedStoreConnectionId}
           onStoreChange={onStoreChange}
+          disabled={storeDisabled}
         />
       </div>
     </div>
@@ -112,6 +120,7 @@ function StepMarker({ tick }: { tick: CatalogStepTick | null }) {
 }
 
 function CatalogStoreSelect({
+  disabled,
   onStoreChange,
   options,
   selectedStoreConnectionId,
@@ -119,6 +128,7 @@ function CatalogStoreSelect({
   options: readonly CatalogStoreOption[];
   selectedStoreConnectionId: number | null;
   onStoreChange: (storeConnectionId: number) => void;
+  disabled: boolean;
 }) {
   const unsupported = options.filter((option) => !option.selectable);
   if (!options.some((option) => option.selectable)) {
@@ -133,6 +143,7 @@ function CatalogStoreSelect({
     <div className="flex items-center gap-2 text-sm">
       <span className="text-zinc-600" id="catalog-store-label">Store</span>
       <Select
+        disabled={disabled}
         value={selectedStoreConnectionId === null ? "" : String(selectedStoreConnectionId)}
         onValueChange={(value) => onStoreChange(Number(value))}
       >

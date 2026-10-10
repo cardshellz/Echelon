@@ -83,6 +83,25 @@ describe("deterministic vendor pricing rules", () => {
     expect(resolveListingPrice({ ...sources, saved: inherit, rulePrice: { priceCents: null }, defaultPriceCents: null }))
       .toEqual({ effectivePriceCents: null, source: "unavailable" });
   });
+  it("puts an inherit size on its retail price when a blocking Card Shellz limit refuses the rule price (L1)", () => {
+    const sources = { existingListingPriceCents: 999, defaultPriceCents: 899 };
+    const inherit = { overridePriceCents: null, pricingMode: "inherit" as const };
+    const blocked = { priceCents: 500, blockedByLimit: true };
+    expect(listingPriceFollowsRules({ saved: inherit, rulePrice: blocked })).toBe(false);
+    expect(resolveListingPrice({ ...sources, saved: inherit, rulePrice: blocked })).toEqual({ effectivePriceCents: 899, source: "catalog_default" });
+    // With no retail price either, the size has no price; the earlier push's $9.99 is never used.
+    expect(resolveListingPrice({ ...sources, saved: inherit, rulePrice: blocked, defaultPriceCents: null }))
+      .toEqual({ effectivePriceCents: null, source: "unavailable" });
+    // Not blocked, or not said: the rule price.
+    expect(resolveListingPrice({ ...sources, saved: inherit, rulePrice: { priceCents: 500, blockedByLimit: false } }))
+      .toEqual({ effectivePriceCents: 500, source: "rules" });
+    // `rules`, a size with no setting and a typed price never read the flag.
+    expect(resolveListingPrice({ ...sources, saved: { overridePriceCents: null, pricingMode: "rules" }, rulePrice: blocked }))
+      .toEqual({ effectivePriceCents: 500, source: "rules" });
+    expect(resolveListingPrice({ ...sources, saved: null, rulePrice: blocked })).toEqual({ effectivePriceCents: 500, source: "rules" });
+    expect(resolveListingPrice({ ...sources, saved: { overridePriceCents: 1399, pricingMode: "fixed" }, rulePrice: blocked }))
+      .toEqual({ effectivePriceCents: 1399, source: "override" });
+  });
   it("leaves rules and catalog default as they were next to inherit", () => {
     const sources = { existingListingPriceCents: 999, defaultPriceCents: 899, rulePrice: { priceCents: null } };
     expect(resolveListingPrice({ ...sources, saved: { overridePriceCents: null, pricingMode: "rules" } })).toEqual({ effectivePriceCents: null, source: "unavailable" });

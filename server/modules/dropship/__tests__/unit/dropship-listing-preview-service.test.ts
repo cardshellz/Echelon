@@ -579,6 +579,12 @@ describe("DropshipListingPreviewService", () => {
     expect(preview.rows[0].rulePriceEvidenceHash).toBeUndefined();
     expect(preview.rows[0].blockers).not.toContain("pricing_rules_not_configured");
   });
+  it("never lets a request-local price replace the retail fallback of an inherit size", async () => {
+    repository.rulePrices.set(101, { ...rulePrice(), priceCents: null, issue: "pricing_basis_unavailable" });
+    repository.savedPrices = [{ productVariantId: 101, revisionId: 7, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }];
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1 });
+    expect(preview.rows[0].priceCents).toBe(repository.candidate.defaultRetailPriceCents);
+  });
   it("prices an inherit size its rules can't price at retail, without blocking it (L1)", async () => {
     repository.rulePrices.set(101, { ...rulePrice(), priceCents: null, issue: "pricing_basis_unavailable" });
     repository.savedPrices = [{ productVariantId: 101, revisionId: 7, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }];
@@ -588,6 +594,41 @@ describe("DropshipListingPreviewService", () => {
     expect(preview.rows[0].rulePriceEvidenceHash).toBeUndefined();
     // Still the rules' price to move: the push-time review gate reads this marker.
     expect(preview.rows[0].followsStorePricing).toBe(true);
+  });
+  it("prices an inherit size at retail, unblocked, when a blocking Card Shellz limit refuses its rule price (L1)", async () => {
+    // The rule price is $11.52 and the catalog retail $11.99; a $11.75 blocking minimum refuses only the rule price.
+    repository.rulePrices.set(101, rulePrice());
+    repository.pricingPolicies = [{ id: 31, scopeType: "catalog", productLineId: null, productId: null, productVariantId: null,
+      category: null, mode: "block_listing_push", floorPriceCents: 1175, ceilingPriceCents: null }];
+    repository.savedPrices = [{ productVariantId: 101, revisionId: 7, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }];
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(preview.rows[0]).toMatchObject({ priceCents: 1199, previewStatus: "ready", followsStorePricing: true });
+    expect(preview.rows[0].blockers).toEqual([]);
+    expect(preview.rows[0].rulePriceEvidenceHash).toBeUndefined();
+    expect(preview.rows[0].listingIntent).toMatchObject({ priceCents: 1199 });
+    // A `rules` size keeps the rule price, and the limit blocks it as before.
+    repository.savedPrices = [{ productVariantId: 101, revisionId: 7, overridePriceCents: null, pricingMode: "rules", updatedAt: now.toISOString() }];
+    const rules = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(rules.rows[0]).toMatchObject({ priceCents: 1152, previewStatus: "blocked" });
+    expect(rules.rows[0].blockers).toContain("pricing:below_floor:policy_31");
+  });
+  it("blocks an inherit size when the limit refuses its retail price too", async () => {
+    repository.rulePrices.set(101, rulePrice());
+    repository.pricingPolicies = [{ id: 32, scopeType: "catalog", productLineId: null, productId: null, productVariantId: null,
+      category: null, mode: "block_listing_push", floorPriceCents: 1500, ceilingPriceCents: null }];
+    repository.savedPrices = [{ productVariantId: 101, revisionId: 7, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }];
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(preview.rows[0]).toMatchObject({ priceCents: 1199, previewStatus: "blocked", followsStorePricing: true });
+    expect(preview.rows[0].blockers).toContain("pricing:below_floor:policy_32");
+  });
+  it("keeps an inherit size on a rule price that only a warn-only limit flags", async () => {
+    repository.rulePrices.set(101, rulePrice());
+    repository.pricingPolicies = [{ id: 33, scopeType: "catalog", productLineId: null, productId: null, productVariantId: null,
+      category: null, mode: "warn_only", floorPriceCents: 1175, ceilingPriceCents: null }];
+    repository.savedPrices = [{ productVariantId: 101, revisionId: 7, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }];
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(preview.rows[0]).toMatchObject({ priceCents: 1152, rulePriceEvidenceHash: "a".repeat(64) });
+    expect(preview.rows[0].warnings).toContain("pricing:below_floor:policy_33");
   });
   it("marks only inherit sizes as following the store's pricing", async () => {
     repository.rulePrices.set(101, rulePrice());
@@ -1648,6 +1689,7 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
   }
   savedPrices: SavedListingPriceRevision[] = [];
   existingListings: DropshipExistingVendorListing[] = [];
+  pricingPolicies: DropshipPricingPolicyRecord[] = [];
   async listSavedListingPrices(): Promise<SavedListingPriceRevision[]> { return this.savedPrices; }
   candidate = makeCandidate();
   storeCategoryAssignments: Array<{
@@ -1721,7 +1763,7 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
   }
 
   async listPricingPolicies(): Promise<DropshipPricingPolicyRecord[]> {
-    return [];
+    return this.pricingPolicies;
   }
 
   async listEbayStoreCategoryAssignments(): Promise<Array<{

@@ -217,6 +217,28 @@ describe("reduceListingSettingsDraft", () => {
     expect(decideOpen(uncertain, "price")).toBe("ask");
   });
 
+  it("lets another editor open over an unconfirmed ship-from repair (W10), which holds no change", () => {
+    const repair = Object.freeze({ signature: '{"v":1,"writer":"W10","body":{"expectedRevision":7}}', key: "ls-ship-from:first" });
+    const opened = run([
+      { type: "open", editor: "shipFrom", place: "Ship-from location", base: {} },
+      { type: "startSave", attempt: repair },
+    ]);
+    // While it is sent, nothing else opens.
+    expect(decideOpen(opened, "return")).toBe("refuse");
+    const uncertain = run([{ type: "failure", key: repair.key, failure: failure("uncertain") }], opened);
+    expect(uncertain).toMatchObject({ editor: "shipFrom", phase: "uncertain", changes: 0, attempt: repair });
+    expect(isDraftDirty(uncertain)).toBe(false);
+    // Check again resends the same request with the same key.
+    expect(nextSaveAttempt(uncertain, repair.signature, () => "ls-ship-from:new")).toBe(repair);
+    expect(decideOpen(uncertain, "shipFrom")).toBe("open");
+    // There is nothing to ask about, so another editor opens without a word and the repair's key
+    // goes: the next "Update now" reads the setup again first (readShipFromRepairStart).
+    expect(decideOpen(uncertain, "return")).toBe("open");
+    expect(decideOpen(uncertain, productEditorId(5))).toBe("open");
+    expect(run([{ type: "open", editor: "return", place: "Return policy", base: { policyId: "ret-1" } }], uncertain))
+      .toMatchObject({ editor: "return", phase: "editing", attempt: null });
+  });
+
   it("clears the request key after a conflict, a refusal, a block or a reload answer, and keeps the draft", () => {
     for (const phase of ["conflict", "refused", "blocked", "reload_required"] as const) {
       const failed = run([{ type: "failure", key: ATTEMPT.key, failure: failure(phase) }], savingDraft());

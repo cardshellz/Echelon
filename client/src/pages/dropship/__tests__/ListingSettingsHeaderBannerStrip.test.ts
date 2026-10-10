@@ -202,7 +202,7 @@ const BANNERS: Readonly<Record<ConnectionBannerKind, BannerExpectation>> = {
   },
   other_site: { message: "Card Shellz lists on eBay US only. Marz Cards is set up for another eBay site. Contact support.", ...SUPPORT },
   selling_paused: {
-    message: "Selling is paused on your account. You can still change your policies and store shelf. Prices, eBay categories and descriptions can't be changed until it resumes.",
+    message: "Selling is paused on your account. Prices, eBay categories and descriptions can't be changed until it resumes.",
     button: "Go to Wallet", href: "/dropship-portal/wallet",
   },
   ops_inactive: {
@@ -342,6 +342,19 @@ describe("AttentionStrip", () => {
       { kind: "open_product", label: "Fix", productId: 11, fix: "no_ebay_category" },
       { kind: "show_products", label: "See all", show: "needs_fix" },
     ]);
+  });
+
+  it("names only the two policies that aren't set", () => {
+    const onAction = vi.fn();
+    const base = summary([item("choose_store_policies", { count: 2 })], 1, "return");
+    // The shipping policy is set; return and payment are not.
+    const shippingSet = listingSettingsSummarySchema.parse({
+      ...base, storeDefaults: { ...base.storeDefaults, shippingPolicy: { policyId: "ship-1", verification: "not_checked" } },
+    });
+    const markup = strip({ summary: { data: shippingSet }, onAction });
+    expect(visibleText(markup)).toBe("Needs your attention ● Choose your return and payment policies. Nothing can be listed until you do. Choose");
+    button("Choose").onClick?.();
+    expect(onAction).toHaveBeenCalledWith({ kind: "open_store_default", label: "Choose", field: "return" });
   });
 
   it("leaves out the reconnect line while a banner shows, and keeps it as a link when none does", () => {

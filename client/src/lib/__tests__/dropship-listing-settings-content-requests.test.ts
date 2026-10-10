@@ -421,6 +421,17 @@ describe("the editor's footer", () => {
     expect(footer.cancelDisabled).toBe(false);
   });
 
+  it("turns Load latest off while its read runs, so a second press can't cancel the first read", () => {
+    // The rows pass `reading` in `busy`; a cancelled first read would show "Couldn't load what's saved" over a load that worked.
+    const reading = storeDefaultEditorFooter({ ...base, busy: true, draft: draft("conflict", 1, null, LISTING_SETTINGS_SAVE_WORDS.conflict) });
+    expect(reading.primary).toEqual({ label: "Load latest and keep my changes", action: "load_latest", disabled: true });
+    // Cancel stays on: the vendor may still drop the draft.
+    expect(reading.cancelDisabled).toBe(false);
+    // Load latest only reads, so a row that can't be saved still offers it.
+    expect(storeDefaultEditorFooter({ ...base, editable: false, draft: draft("conflict", 1, null, LISTING_SETTINGS_SAVE_WORDS.conflict) }).primary.disabled)
+      .toBe(false);
+  });
+
   it("shows a refusal as an alert and the Load latest line as a status", () => {
     expect(storeDefaultEditorFooter({ ...base, draft: draft("refused", 1, null, "Pick a final eBay category.") }).message)
       .toEqual({ text: "Pick a final eBay category.", tone: "alert" });

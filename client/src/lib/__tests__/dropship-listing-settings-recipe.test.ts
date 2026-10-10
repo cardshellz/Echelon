@@ -5,6 +5,7 @@ import type { ListingSettingsSizePrice } from "@shared/dropship/listing-settings
 import {
   applyPricingRulesInputSchema,
   pricingReviewResponseSchema,
+  RETAIL_FALLBACK_RULE_NAME,
   reviewPricingRulesInputSchema,
   type PricingImpactRow,
   type PricingProfile,
@@ -697,6 +698,28 @@ describe("the check's words (M3)", () => {
     expect(reviewRowBuiltFrom(row({ ruleName: "Gone", basis: null, basisCents: null }), PROFILE)).toBe("From your older group rule “Gone”");
   });
 
+  it("says a size that follows the store's pricing is on its retail price, and why, never the server's rule name (L1)", () => {
+    // The server's row for an inherit size the checked rules give no usable price (dropship-pricing-rules-service.ts).
+    const fallback = row({ ruleName: RETAIL_FALLBACK_RULE_NAME, basis: "catalog_retail", basisCents: 899, priceCents: 899,
+      followsStorePricing: true, issues: [], retailFallbackIssue: "pricing_basis_unavailable" });
+    expect(reviewRowBuiltFrom(fallback, PROFILE))
+      .toBe("Your pricing rules can't price this size (your cost isn't on file), so it uses the retail price ($8.99).");
+    expect(reviewRowBuiltFrom({ ...fallback, retailFallbackIssue: "pricing_rule_outside_limit" }, PROFILE))
+      .toBe("Your pricing rules give this size a price outside a Card Shellz price limit, so it uses the retail price ($8.99).");
+    // A reason from an older or newer server that this client does not know is never shown raw.
+    expect(reviewRowBuiltFrom({ ...fallback, retailFallbackIssue: undefined }, PROFILE))
+      .toBe("Your pricing rules can't price this size, so it uses the retail price ($8.99).");
+    expect(reviewRowBuiltFrom({ ...fallback, retailFallbackIssue: "something_new" }, PROFILE))
+      .toBe("Your pricing rules can't price this size, so it uses the retail price ($8.99).");
+    // The same words as the drawer's Built from line for that size.
+    expect(reviewRowBuiltFrom(fallback, PROFILE)).toBe(builtFromWords(sizePrice({ source: "retail_fallback", priceCents: 899,
+      issue: "pricing_basis_unavailable", basis: null, basisAmountCents: null })));
+    expect(reviewRowNotes(fallback)).toEqual([]);
+    // Only a row that follows the store's pricing is read this way.
+    expect(reviewRowBuiltFrom({ ...fallback, followsStorePricing: undefined }, PROFILE))
+      .toBe(`From your older group rule “${RETAIL_FALLBACK_RULE_NAME}”: retail $8.99`);
+  });
+
   it("says Exact price for a kept exact price, never the server's rule name (C9)", () => {
     const kept = row({ preserved: true, ruleName: "Fixed override preserved", basis: null, basisCents: null, priceCents: 1499 });
     expect(reviewRowBuiltFrom(kept, PROFILE)).toBe("Exact price");
@@ -727,6 +750,8 @@ describe("the check's words (M3)", () => {
       row({ priceCents: null, ruleName: null, issues: ["vendor_retail_price_required"] }),
       row({ priceCents: null, issues: ["pricing_basis_unavailable", "vendor_retail_price_required"], basis: null }),
       row({ issues: ["pricing:below_floor:policy_3"], warnings: ["price_below_product_cost", "pricing:above_ceiling:policy_4"] }),
+      row({ ruleName: RETAIL_FALLBACK_RULE_NAME, followsStorePricing: true, retailFallbackIssue: "pricing_rule_outside_limit" }),
+      row({ ruleName: RETAIL_FALLBACK_RULE_NAME, followsStorePricing: true, retailFallbackIssue: "pricing_rule_priority_conflict" }),
     ];
     for (const item of rows) {
       const words = [reviewRowBuiltFrom(item, PROFILE), ...reviewRowNotes(item).map((note) => note.text)];
@@ -752,9 +777,12 @@ describe("the check's words (M3)", () => {
     expect(reviewCountsWords({ total: 1240, changed: 1180, preserved: 36, blocked: 0 })).toBe("1,240 sizes · 1,180 change · 36 keep their own price");
     expect(reviewCountsWords({ total: 1, changed: 1, preserved: 1, blocked: 0 })).toBe("1 size · 1 change · 1 keeps its own price");
     expect(reviewCountsWords({ total: 4, changed: 0, preserved: 0, blocked: 0 })).toBe("4 sizes · no price changes");
-    expect(reviewBlockedWords(0)).toBeNull();
-    expect(reviewBlockedWords(1)).toBe("● 1 size can't be priced this way. Give it an exact price in Products, or start from Your cost.");
-    expect(reviewBlockedWords(1200)).toBe("● 1,200 sizes can't be priced this way. Give them an exact price in Products, or start from Your cost.");
+    expect(reviewBlockedWords(0, "catalog_retail")).toBeNull();
+    expect(reviewBlockedWords(1, "catalog_retail")).toBe("● 1 size can't be priced this way. Give it an exact price in Products, or start from Your cost.");
+    expect(reviewBlockedWords(1200, "catalog_retail")).toBe("● 1,200 sizes can't be priced this way. Give them an exact price in Products, or start from Your cost.");
+    // A check that already starts from Your cost is offered the other start (its blocked sizes have no cost on file).
+    expect(reviewBlockedWords(3, "product_cost")).toBe("● 3 sizes can't be priced this way. Give them an exact price in Products, or start from Retail price.");
+    expect(reviewBlockedWords(1, "product_cost")).toBe("● 1 size can't be priced this way. Give it an exact price in Products, or start from Retail price.");
     const summary = { total: 1240, changed: 10, preserved: 0, blocked: 0 };
     expect(reviewPageWords({ page: 0, summary }, 50)).toBe("1–50 of 1,240");
     expect(reviewPageWords({ page: 24, summary }, 50)).toBe("1,201–1,240 of 1,240");

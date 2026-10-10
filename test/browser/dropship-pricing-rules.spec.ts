@@ -119,7 +119,9 @@ test("reviews 1,000 listings with bounded scrolling and applies once without pub
   // Once applied, nothing is left unsaved.
   await expect(heading).not.toContainText("Not saved");
   expect(state.applies).toHaveLength(1); expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
-  expect(await page.evaluate(() => (window as unknown as { __pricingChanged: number }).__pricingChanged)).toBe(1);
+  // Twice for one apply: once as it is sent (the preview is stale at once) and
+  // once when it is confirmed (the listing settings summary reads the saved rules).
+  expect(await page.evaluate(() => (window as unknown as { __pricingChanged: number }).__pricingChanged)).toBe(2);
 });
 test("keeps named groups editable and invalidates a review when the recipe changes", async ({ page }) => {
   const state = await setup(page); await enterRecipe(page);

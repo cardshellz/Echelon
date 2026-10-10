@@ -1,6 +1,14 @@
+import { CancelledError, QueryClient, QueryObserver } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import { LISTING_SETUP_RELOAD_MESSAGE } from "../dropship-ebay-listing-setup";
-import { nextSaveAttempt, type ListingSettingsDraft } from "../dropship-listing-settings-drafts";
+import {
+  decideOpen,
+  nextSaveAttempt,
+  reduceListingSettingsDraft,
+  type EditorId,
+  type ListingSettingsDraft,
+  type ListingSettingsDraftAction,
+} from "../dropship-listing-settings-drafts";
 import {
   DropshipApiError,
   createDropshipIdempotencyKey,
@@ -22,6 +30,7 @@ import {
   planStoreDefaultPolicySave,
   planStoreShelfDefaultSave,
   policyEditorChoices,
+  readShipFromRepairStart,
   runStoreSetupSave,
   savedPolicyProblem,
   savedPolicyProblemWords,
@@ -526,8 +535,180 @@ describe("shelf editor rules", () => {
 });
 
 describe("ship-from", () => {
+  const MISSING = ["merchantLocationKey"];
+
   it("is needed only when eBay's listing location is missing", () => {
     expect(shipFromRepairNeeded(setup())).toBe(false);
-    expect(shipFromRepairNeeded(setup({ missingFields: ["merchantLocationKey"] }))).toBe(true);
+    expect(shipFromRepairNeeded(setup({ missingFields: MISSING }))).toBe(true);
+  });
+
+  it("plans a new repair only from the setup read again at the click", async () => {
+    // The cached read says revision 7; the server is at 8 and the location is still missing.
+    const fresh = setup({ revision: 8, missingFields: MISSING });
+    const read = vi.fn(async () => ({ data: fresh, error: null }));
+    const start = await readShipFromRepairStart(read);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(start).toEqual({ kind: "repair", setup: fresh });
+    if (start.kind !== "repair") throw new Error("expected a repair");
+    expect(buildStoreShipFromRepair(start.setup, REPAIR_KEY)).toEqual({ expectedRevision: 8, idempotencyKey: REPAIR_KEY });
+  });
+
+  it("sends nothing when the read says the location is right now (an earlier repair landed)", async () => {
+    expect(await readShipFromRepairStart(async () => ({ data: setup({ revision: 8 }) }))).toEqual({ kind: "not_needed" });
+  });
+
+  it("sends nothing when the read fails, even with an older answer beside the error", async () => {
+    const failure = new DropshipApiError({ status: 503, code: "DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE", message: "x" });
+    // React Query keeps the older answer (revision 7, location missing) next to the failed read's error.
+    expect(await readShipFromRepairStart(async () => ({ data: setup({ missingFields: MISSING }), error: failure })))
+      .toEqual({ kind: "read_failed", error: failure });
+    expect(await readShipFromRepairStart(async () => ({}))).toEqual({ kind: "read_failed", error: null });
+    const dropped = new TypeError("Failed to fetch");
+    await expect(readShipFromRepairStart(async () => { throw dropped; })).resolves.toEqual({ kind: "read_failed", error: dropped });
+    expect(STORE_DEFAULT_EDITOR_WORDS.shipFromCheckFailed).toBe("Couldn't check where your items ship from. Nothing was changed. Try again.");
+  });
+
+  it("counts a read cancelled in flight as failed, never as the cached answer", async () => {
+    // The cached read: revision 7, location missing. The server may be at 8 (this window's own shelf save).
+    const cached = setup({ missingFields: MISSING });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    const queryKey = ["listing-setup"];
+    client.setQueryData(queryKey, cached);
+    const answers: Array<(value: DropshipEbayListingSetupResponse) => void> = [];
+    const observer = new QueryObserver<DropshipEbayListingSetupResponse>(client, {
+      queryKey,
+      queryFn: () => new Promise<DropshipEbayListingSetupResponse>((resolve) => { answers.push(resolve); }),
+    });
+
+    // Without throwOnError, React Query hands a cancelled read back as the cached answer, no error.
+    const quiet = observer.refetch();
+    await client.cancelQueries({ queryKey });
+    expect(await quiet).toMatchObject({ data: cached, error: null });
+
+    // A save's cache sync cancels the read and puts the cached answer back (cancelQueries reverts).
+    const synced = readShipFromRepairStart(() => observer.refetch({ throwOnError: true }));
+    await client.cancelQueries({ queryKey });
+    const afterSync = await synced;
+    expect(afterSync.kind).toBe("read_failed");
+    if (afterSync.kind === "read_failed") expect(afterSync.error).toBeInstanceOf(CancelledError);
+
+    // Another refetch (the banner's Try again) cancels the read in flight and starts its own.
+    const replaced = readShipFromRepairStart(() => observer.refetch({ throwOnError: true }));
+    const other = observer.refetch();
+    const afterOther = await replaced;
+    expect(afterOther.kind).toBe("read_failed");
+    if (afterOther.kind === "read_failed") expect(afterOther.error).toBeInstanceOf(CancelledError);
+    answers[answers.length - 1](setup({ revision: 8, missingFields: MISSING }));
+    await other;
+    // A read that finishes is still trusted.
+    const finished = readShipFromRepairStart(() => observer.refetch({ throwOnError: true }));
+    answers[answers.length - 1](setup({ revision: 9, missingFields: MISSING }));
+    expect(await finished).toMatchObject({ kind: "repair", setup: { revision: 9 } });
+    client.clear();
+  });
+
+  /** The step's one draft, run by the real reducer, as the provider runs it. */
+  function step() {
+    let draft: ListingSettingsDraft | null = null;
+    let made = 0;
+    const apply = (action: ListingSettingsDraftAction) => { draft = reduceListingSettingsDraft(draft, action); };
+    return {
+      get draft() { return draft; },
+      open: (editor: EditorId = "shipFrom") => {
+        if (decideOpen(draft, editor) !== "open") return false;
+        apply({ type: "open", editor, place: editor === "shipFrom" ? STORE_DEFAULT_EDITOR_WORDS.shipFromPlace : editor, base: {} });
+        return true;
+      },
+      startSave: (signature: string, keyPrefix: string) => {
+        const attempt = nextSaveAttempt(draft, signature, () => `${keyPrefix}:0f8a1c2e-1111-4222-8333-94445555666${++made}`);
+        if (attempt === null) return null;
+        apply({ type: "startSave", attempt });
+        return attempt.key;
+      },
+      settle: (key: string, settlement: StoreSetupSettlement) => {
+        apply(settlement.kind === "failure"
+          ? { type: "failure", key, failure: settlement.failure }
+          : { type: "saved", key, nowMs: 0, viewStale: settlement.kind === "saved_view_stale" });
+      },
+    };
+  }
+
+  function repairRun(drafts: ReturnType<typeof step>, plan: ReturnType<typeof planShipFromRepair>, send: RunStoreSetupSaveInput["send"]): RunStoreSetupSaveInput {
+    return {
+      plan,
+      callbacks: { onSaveStarted: vi.fn(), onSaveSettled: vi.fn() },
+      startSave: drafts.startSave,
+      settle: drafts.settle,
+      send,
+      synchronize: vi.fn(async () => undefined),
+      refresh: vi.fn(async () => undefined),
+      onSaved: vi.fn(),
+    };
+  }
+
+  it("after a 409, the next Update now reads again and sends the server's revision, not the refused one", async () => {
+    const drafts = step();
+    const cached = setup({ missingFields: MISSING }); // revision 7
+    const sent: StoreSetupRequest[] = [];
+    const conflict = new DropshipApiError({ status: 409, code: "DROPSHIP_LISTING_CONFIG_REVISION_CONFLICT", message: "x" });
+    expect(drafts.open()).toBe(true);
+    await runStoreSetupSave(repairRun(drafts, planShipFromRepair(cached), async (request) => { sent.push(request); throw conflict; }));
+    expect(drafts.draft).toMatchObject({ editor: "shipFrom", phase: "conflict", message: "This changed in another window.", attempt: null });
+
+    // Another window saved: the server is at revision 8. The click reads first.
+    const start = await readShipFromRepairStart(async () => ({ data: setup({ revision: 8, missingFields: MISSING }) }));
+    if (start.kind !== "repair") throw new Error("expected a repair");
+    expect(drafts.open()).toBe(true);
+    await runStoreSetupSave(repairRun(drafts, planShipFromRepair(start.setup), async (request) => {
+      sent.push(request);
+      return setup({ revision: 9 });
+    }));
+    expect(sent.map((request) => request.body.expectedRevision)).toEqual([7, 8]);
+    expect(sent[0].body.idempotencyKey).not.toBe(sent[1].body.idempotencyKey);
+    expect(drafts.draft).toMatchObject({ phase: "saved", attempt: null });
+  });
+
+  it("keeps a repair whose answer was lost until Check again, which resends the same key", async () => {
+    const drafts = step();
+    const cached = setup({ missingFields: MISSING });
+    const sent: StoreSetupRequest[] = [];
+    expect(drafts.open()).toBe(true);
+    // The server commits 7 → 8, but the answer never arrives.
+    await runStoreSetupSave(repairRun(drafts, planShipFromRepair(cached), async (request) => { sent.push(request); throw new TypeError("Failed to fetch"); }));
+    const uncertain = drafts.draft;
+    expect(uncertain).toMatchObject({ editor: "shipFrom", phase: "uncertain", changes: 0 });
+    // Check again: the same request with the same key, which the server answers from the first one.
+    const attempt = uncertain?.attempt;
+    if (!attempt) throw new Error("expected the attempt to be kept");
+    await runStoreSetupSave(repairRun(drafts, planFromSignature(attempt.signature), async (request) => {
+      sent.push(request);
+      return { ...setup({ revision: 8 }), outcome: "replayed" };
+    }));
+    expect(sent.map((request) => request.body)).toEqual([
+      { expectedRevision: 7, idempotencyKey: attempt.key },
+      { expectedRevision: 7, idempotencyKey: attempt.key },
+    ]);
+    expect(drafts.draft).toMatchObject({ phase: "saved" });
+    // Had the draft gone (a reload), a new click reads first and sees the repair landed: nothing is sent.
+    expect(await readShipFromRepairStart(async () => ({ data: setup({ revision: 8 }) }))).toEqual({ kind: "not_needed" });
+  });
+
+  it("sends nothing again when another editor took an unconfirmed repair's draft and the repair landed", async () => {
+    const drafts = step();
+    const sent: StoreSetupRequest[] = [];
+    expect(drafts.open()).toBe(true);
+    // The server commits 7 → 8, but the answer never arrives.
+    await runStoreSetupSave(repairRun(drafts, planShipFromRepair(setup({ missingFields: MISSING })), async (request) => {
+      sent.push(request);
+      throw new TypeError("Failed to fetch");
+    }));
+    expect(drafts.draft).toMatchObject({ editor: "shipFrom", phase: "uncertain" });
+    // The repair holds no change, so the Return policy editor opens over it, and its key goes.
+    expect(drafts.open("return")).toBe(true);
+    expect(drafts.draft).toMatchObject({ editor: "return", attempt: null });
+    // The cached read still says the location is missing, so the note offers Update now again.
+    // The click reads first and sees the repair landed: nothing is sent.
+    expect(await readShipFromRepairStart(async () => ({ data: setup({ revision: 8 }) }))).toEqual({ kind: "not_needed" });
+    expect(sent).toHaveLength(1);
   });
 });

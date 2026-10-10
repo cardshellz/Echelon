@@ -1162,16 +1162,20 @@ function buildListingPreviewRow(input: {
     blockers.push("active_rate_table_required");
   }
 
-  const ruleOwned = listingPriceFollowsRules({ saved: input.savedListingPrice, rulePrice: input.rulePrice });
+  // An `inherit` size whose rule price a blocking limit refuses takes its retail price (L1).
+  const checkedRulePrice = withRulePriceLimitCheck(input.candidate, input.pricingPolicies, input.rulePrice);
+  const ruleOwned = listingPriceFollowsRules({ saved: input.savedListingPrice, rulePrice: checkedRulePrice });
   const resolvedPrice = resolveListingPrice({
     saved: input.savedListingPrice,
     existingListingPriceCents: input.existingListing?.vendorRetailPriceCents ?? null,
     defaultPriceCents: input.candidate.defaultRetailPriceCents,
-    rulePrice: input.rulePrice,
+    rulePrice: checkedRulePrice,
   }).effectivePriceCents;
-  // Request-local legacy prices cannot silently override adopted pricing rules.
-  // An exception must be saved explicitly as a fixed listing price.
-  const priceCents = ruleOwned ? resolvedPrice : input.requestedRetailPriceCents ?? resolvedPrice;
+  // Request-local legacy prices cannot silently override adopted pricing rules,
+  // nor a size saved as "follow the store's pricing", even while it falls back
+  // to retail. An exception must be saved explicitly as a fixed listing price.
+  const followsStorePricing = input.savedListingPrice?.pricingMode === "inherit";
+  const priceCents = ruleOwned || followsStorePricing ? resolvedPrice : input.requestedRetailPriceCents ?? resolvedPrice;
   if (ruleOwned && input.rulePrice?.issue) blockers.push(input.rulePrice.issue);
   if (ruleOwned && !input.rulePrice) blockers.push("pricing_rules_not_configured");
   const pricingDecision = evaluateListingPricingPolicy(input.candidate, input.pricingPolicies, priceCents);
@@ -1364,8 +1368,11 @@ function missingCatalogPreviewRow(input: {
   };
 }
 
+/** What a Card Shellz price limit is matched on (`pricingPolicyMatchesCandidate`). */
+export type DropshipPricingPolicyCandidate = Pick<DropshipListingCatalogCandidate, "productLineIds" | "category" | "productId" | "productVariantId">;
+
 export function evaluateListingPricingPolicy(
-  candidate: DropshipListingCatalogCandidate,
+  candidate: DropshipPricingPolicyCandidate,
   policies: readonly DropshipPricingPolicyRecord[],
   priceCents: number | null,
 ): { blockers: string[]; warnings: string[] } {
@@ -1395,10 +1402,29 @@ export function evaluateListingPricingPolicy(
   return { blockers, warnings };
 }
 
+/**
+ * The rule price as the shared price resolvers read it, with `blockedByLimit`
+ * set when a blocking Card Shellz price limit refuses its price. An `inherit`
+ * size then takes its retail price, since the rules give it no usable price
+ * (`listingPriceFollowsRules`, owner decision L1). Every path that resolves a
+ * size's price passes the rule price through here, so they all agree. A new
+ * object: the rule price and its evidence hash are left as they are.
+ */
+export function withRulePriceLimitCheck<T extends { priceCents: number | null }>(
+  candidate: DropshipPricingPolicyCandidate,
+  policies: readonly DropshipPricingPolicyRecord[],
+  rulePrice: T | null,
+): (T & { blockedByLimit: boolean }) | null {
+  if (rulePrice === null) return null;
+  const blockedByLimit = rulePrice.priceCents !== null
+    && evaluateListingPricingPolicy(candidate, policies, rulePrice.priceCents).blockers.length > 0;
+  return { ...rulePrice, blockedByLimit };
+}
+
 /** Whether a Card Shellz price limit covers this size. The listing settings views list the same limits. */
 export function pricingPolicyMatchesCandidate(
   policy: DropshipPricingPolicyRecord,
-  candidate: Pick<DropshipListingCatalogCandidate, "productLineIds" | "category" | "productId" | "productVariantId">,
+  candidate: DropshipPricingPolicyCandidate,
 ): boolean {
   switch (policy.scopeType) {
     case "catalog":

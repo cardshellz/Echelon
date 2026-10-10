@@ -262,6 +262,35 @@ describe("listing settings facts: the price of one size", () => {
     expect(buildListingSettingsSummary(facts, GENERATED_AT).counts).toMatchObject({ cannotPrice: 0, productsNeedingFix: 0 });
   });
 
+  it("falls back to retail for an inherit size whose rule price a blocking Card Shellz limit refuses, and says why (L1)", () => {
+    // The rules give $9.00 (cost $6.00 + 50%), under a $10.00 blocking minimum; the $11.99 retail price clears it.
+    const blocking = policy({ id: 7, mode: "block_listing_push", floorPriceCents: 1_000 });
+    const sources = {
+      savedPrices: new Map([[101, savedPrice(101, { pricingMode: "inherit" })]]),
+      pricing: pricing({ defaultRecipe: COST_RECIPE, groups: [] }),
+      costs: new Map([[101, cost(600)]]),
+    };
+    const facts = buildListingSettingsFacts(inputs([candidate()], { ...sources, pricingPolicies: [blocking] }));
+    expect(facts.sizes[0].price).toMatchObject({ priceCents: 1_199, source: "retail_fallback", rule: null, basis: null,
+      basisAmountCents: null, issue: "pricing_rule_outside_limit", costCents: 600,
+      limits: [{ policyId: 7, floorCents: 1_000, ceilingCents: null, mode: "block_listing", breached: null }] });
+    expect(facts.sizes[0].fixes).toEqual([]);
+    expect(buildListingSettingsSummary(facts, GENERATED_AT).counts).toMatchObject({ cannotPrice: 0, productsNeedingFix: 0 });
+    expect(listingSettingsPricesResponseSchema.safeParse({ storeConnectionId: 5, page: 0, pageSize: 50, total: 1,
+      rows: [facts.sizes[0].price], generatedAt: GENERATED_AT.toISOString() }).success).toBe(true);
+    // When the minimum refuses the retail price too, the size is still on its retail price, and the limit shows as broken.
+    expect(onlyPrice(inputs([candidate()], { ...sources, pricingPolicies: [{ ...blocking, floorPriceCents: 1_250 }] })))
+      .toMatchObject({ priceCents: 1_199, source: "retail_fallback", issue: "pricing_rule_outside_limit",
+        limits: [{ policyId: 7, mode: "block_listing", breached: "below_floor" }] });
+    // A warn-only limit leaves the rule price in place.
+    expect(onlyPrice(inputs([candidate()], { ...sources, pricingPolicies: [policy({ id: 8, floorPriceCents: 1_000 })] })))
+      .toMatchObject({ priceCents: 900, source: "rules", issue: null, limits: [{ policyId: 8, mode: "warn", breached: "below_floor" }] });
+    // A `rules` size keeps the rule price, and the limit shows as broken.
+    expect(onlyPrice(inputs([candidate()], { ...sources, pricingPolicies: [blocking],
+      savedPrices: new Map([[101, savedPrice(101, { pricingMode: "rules" })]]) })))
+      .toMatchObject({ priceCents: 900, source: "rules", issue: null, limits: [{ policyId: 7, breached: "below_floor" }] });
+  });
+
   it("has no price for an inherit size with no rule price and no retail price", () => {
     const price = onlyPrice(inputs([candidate({ defaultRetailPriceCents: null })], {
       savedPrices: new Map([[101, savedPrice(101, { pricingMode: "inherit" })]]),
@@ -625,6 +654,9 @@ describe("listing settings facts: lists", () => {
     const products = (show: Parameters<typeof selectListingSettingsProducts>[1]["show"]) =>
       selectListingSettingsProducts(facts, { search: "", show, page: 0 }).rows.map((row) => row.productId);
     expect(products("exact_prices")).toEqual([1]);
+    // An exact price is the product's own setting: the Products tab's Own settings column names it first.
+    expect(products("own_settings")).toEqual([1]);
+    expect(buildListingSettingsSummary(facts, GENERATED_AT).counts?.productsWithOwnSettings).toBe(1);
     expect(products("below_cost")).toEqual([1]);
     expect(products("cannot_price")).toEqual([2]);
     expect(products("needs_fix")).toEqual([2]);

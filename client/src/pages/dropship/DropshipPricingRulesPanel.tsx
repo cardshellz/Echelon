@@ -103,6 +103,10 @@ function PricingRulesSession({ storeConnectionId, storeName, onConfigurationChan
         reviewId: review.reviewId, reviewHash: review.reviewHash, idempotencyKey: applyKey.current,
       }));
       saved = true;
+      // Again now the rules are saved: the call above marked the preview stale at once, but
+      // its listing-settings re-read ran beside the apply and can hold the old store price.
+      // Before reloadRules, so a failed reload still leaves the summary re-read.
+      onConfigurationChange();
       await reloadRules();
       if (!mounted.current) return;
       setPhase("editing"); setMessage("Pricing rules saved. Nothing was sent to eBay now: each listing gets its new price the next time it is sent. Make a new listing preview to see the prices.");

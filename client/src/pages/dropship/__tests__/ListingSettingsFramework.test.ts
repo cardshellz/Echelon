@@ -1,12 +1,26 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Router } from "wouter";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SM_MIN_WIDTH_PX, minWidthQuery, useMinWidth } from "@/hooks/use-min-width";
+import {
+  reduceListingSettingsDraft,
+  type ListingSettingsDraft,
+  type ListingSettingsDraftAction,
+  type WriteFailurePhase,
+} from "@/lib/dropship-listing-settings-drafts";
 import { CatalogActionBar } from "../catalog/CatalogActionBar";
 import { UnsavedChangesProvider, useLeaveGuard, useUnsavedDrafts } from "../catalog/UnsavedChangesGuard";
 import { EditorSurface, type EditorSurfaceProps } from "../listing-settings/EditorSurface";
-import { ListingSettingsDraftsProvider, useListingSettingsDrafts } from "../listing-settings/ListingSettingsDraftsProvider";
+import {
+  ListingSettingsDraftsProvider,
+  asksBeforeClosingTab,
+  asksBeforeLeaving,
+  discardsOnLeave,
+  useListingSettingsDrafts,
+} from "../listing-settings/ListingSettingsDraftsProvider";
 import { StoreDefaultRow, type StoreDefaultRowProps } from "../listing-settings/StoreDefaultRow";
 import { StoreDefaultsCard } from "../listing-settings/StoreDefaultsCard";
 
@@ -232,6 +246,24 @@ describe("CatalogActionBar", () => {
     const quiet = render(React.createElement(CatalogActionBar, { summary: "Not saved · 1 change in Price", next }));
     expect(live.replace(' role="status" aria-live="polite"', "")).toBe(quiet);
   });
+
+  it("gives its link's leave question a scope without putting it in the markup", () => {
+    const plain = render(React.createElement(CatalogActionBar, { summary: "1 selected", next }));
+    expect(render(React.createElement(CatalogActionBar, { summary: "1 selected", next: { ...next, scope: [] } }))).toBe(plain);
+    expect(render(React.createElement(CatalogActionBar, { summary: "1 selected", next: { ...next, scope: ["pricing-rules:22"] } }))).toBe(plain);
+    expect(plain).not.toContain("scope");
+  });
+});
+
+describe("GuardedLink", () => {
+  const guardSource = readFileSync(join(process.cwd(), "client/src/pages/dropship/catalog/UnsavedChangesGuard.tsx"), "utf8");
+
+  it("asks the guard with the link's own scope, so a link onto a step that holds a draft can leave that draft out", () => {
+    // A static render never clicks, so the hand-off is checked on the source (the browser journey clicks it).
+    expect(guardSource).toContain("export function GuardedLink({ href, onClick, scope, ...props }");
+    expect(guardSource).toContain("guard(() => navigate(href), scope);");
+    expect(guardSource).not.toContain("guard(() => navigate(href));");
+  });
 });
 
 describe("ListingSettingsDraftsProvider", () => {
@@ -249,6 +281,103 @@ describe("ListingSettingsDraftsProvider", () => {
   it("refuses an editor outside the provider", () => {
     vi.spyOn(console, "error").mockImplementation(noop);
     expect(() => render(React.createElement(Probe))).toThrow(/needs a ListingSettingsDraftsProvider/);
+  });
+});
+
+describe("the step's draft and the page's leave guard", () => {
+  const ATTEMPT = Object.freeze({ signature: '{"fulfillmentPolicyId":"ship-b"}', key: "ls-policy:first" });
+  const open: ListingSettingsDraftAction = { type: "open", editor: "shipping", place: "Shipping policy", base: { policyId: "ship-a" } };
+  const pickB: ListingSettingsDraftAction = { type: "edit", value: { policyId: "ship-b" } };
+
+  /** Applies actions in order, freezing every draft on the way so a mutation would throw. */
+  function run(actions: readonly ListingSettingsDraftAction[], start: ListingSettingsDraft | null = null): ListingSettingsDraft | null {
+    return actions.reduce<ListingSettingsDraft | null>((draft, action) => {
+      const next = reduceListingSettingsDraft(draft === null ? null : Object.freeze(draft), Object.freeze(action));
+      return next === null ? null : Object.freeze(next);
+    }, start);
+  }
+
+  function failure(phase: WriteFailurePhase): ListingSettingsDraftAction {
+    return { type: "failure", key: ATTEMPT.key, failure: { phase, message: `words for ${phase}`, code: null, status: null } };
+  }
+
+  /** The guard's "Discard and leave", as the provider runs it on the live draft. */
+  function discardAndLeave(draft: ListingSettingsDraft | null): ListingSettingsDraft | null {
+    return discardsOnLeave(draft) ? run([{ type: "discard" }], draft) : draft;
+  }
+
+  it("asks about a draft with changes and drops it on Discard and leave; nothing to ask about without changes", () => {
+    const editing = run([open, pickB]);
+    expect(asksBeforeLeaving(editing)).toBe(true);
+    expect(discardAndLeave(editing)).toBeNull();
+    const unchanged = run([open]);
+    expect(asksBeforeLeaving(unchanged)).toBe(false);
+    expect(asksBeforeLeaving(null)).toBe(false);
+    expect(discardsOnLeave(null)).toBe(false);
+  });
+
+  it("never asks about a save in flight, nor drops it, so the save's answer still settles the draft", () => {
+    const saving = run([open, pickB, { type: "startSave", attempt: ATTEMPT }]);
+    expect(saving).toMatchObject({ phase: "saving", changes: 1 });
+    // The change is being saved, so "isn't saved" would not be true; leaving keeps the draft.
+    expect(asksBeforeLeaving(saving)).toBe(false);
+    expect(discardsOnLeave(saving)).toBe(false);
+    const kept = discardAndLeave(saving);
+    expect(kept).toBe(saving);
+    // Closing or reloading the tab would lose the save's answer, so the browser still asks.
+    expect(asksBeforeClosingTab(saving)).toBe(true);
+
+    // Confirmed: the kept draft shows Saved, with nothing left to ask about.
+    const saved = run([{ type: "saved", key: ATTEMPT.key, nowMs: 1_000 }], kept);
+    expect(saved).toMatchObject({ phase: "saved", changes: 0, savedAtMs: 1_000 });
+    expect(asksBeforeLeaving(saved)).toBe(false);
+    expect(asksBeforeClosingTab(saved)).toBe(false);
+
+    // Refused or unconfirmed: the kept draft shows the failure with the change still there, and is asked about again.
+    for (const phase of ["refused", "uncertain"] as const) {
+      const failed = run([failure(phase)], kept);
+      expect(failed).toMatchObject({ phase, message: `words for ${phase}`, changes: 1, value: { policyId: "ship-b" } });
+      expect(asksBeforeLeaving(failed)).toBe(true);
+      expect(discardsOnLeave(failed)).toBe(true);
+      // The page's guard asks again, so the step's own browser prompt is off.
+      expect(asksBeforeClosingTab(failed)).toBe(false);
+    }
+
+    // What the guard did before: a dropped draft ignores the answer, so a failure was never shown.
+    const dropped = run([{ type: "discard" }], saving);
+    expect(dropped).toBeNull();
+    expect(run([failure("uncertain")], dropped)).toBeNull();
+  });
+
+  it("has the browser ask before the tab closes in every phase that holds changes or a save in flight", () => {
+    const saving = run([open, pickB, { type: "startSave", attempt: ATTEMPT }]);
+    const drafts: ReadonlyArray<readonly [string, ListingSettingsDraft | null, boolean]> = [
+      ["none", null, false],
+      ["opened, unchanged", run([open]), false],
+      ["changed", run([open, pickB]), true],
+      ["saving", saving, true],
+      ["saved", run([{ type: "saved", key: ATTEMPT.key, nowMs: 1_000 }], saving), false],
+      ["refused", run([failure("refused")], saving), true],
+      ["uncertain", run([failure("uncertain")], saving), true],
+    ];
+    for (const [name, draft, asks] of drafts) {
+      // The page's guard asks for a draft it holds; the step asks for one being saved. Never both.
+      expect({ name, asks: asksBeforeLeaving(draft) || asksBeforeClosingTab(draft) }).toEqual({ name, asks });
+      expect({ name, both: asksBeforeLeaving(draft) && asksBeforeClosingTab(draft) }).toEqual({ name, both: false });
+    }
+  });
+
+  it("reports the step's draft to the guard with the leave-only discard, never the editors' own", () => {
+    const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/listing-settings/ListingSettingsDraftsProvider.tsx"), "utf8");
+    expect(source).toContain("if (discardsOnLeave(stateRef.current.draft)) apply({ type: \"discard\" });");
+    expect(source).toContain("useUnsavedDraft(guardId, draft?.place ?? NO_PLACE_LABEL, asksBeforeLeaving(draft), { changes: draft?.changes ?? 0, discard: discardOnLeave });");
+    expect(source).toContain("useBrowserLeavePrompt(asksBeforeClosingTab(draft));");
+  });
+
+  it("asks the browser with one prompt, for the page's drafts and for a save in flight alike", () => {
+    const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/catalog/UnsavedChangesGuard.tsx"), "utf8");
+    expect(source).toContain("useBrowserLeavePrompt(drafts.length > 0);");
+    expect(source.match(/addEventListener\("beforeunload"/g)).toHaveLength(1);
   });
 });
 

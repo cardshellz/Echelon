@@ -353,7 +353,7 @@ function ProductDrawerBody(props: ProductDrawerBodyProps) {
           {detail && (
             <>
               <p className="text-sm text-zinc-700">{compact ? drawerPhoneSummary(detail.product) : drawerCategoryLine(detail.product)}</p>
-              <p className="text-sm text-zinc-600">{drawerOwnSettingsLine(detail.product)}</p>
+              <p className="text-sm text-zinc-600">{drawerOwnSettingsLine(detail)}</p>
             </>
           )}
         </div>

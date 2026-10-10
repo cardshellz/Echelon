@@ -254,7 +254,9 @@ describe("a price save never leaves a size without a price it can be listed at",
     const result = await service.saveForMember("member-1", target, { ...input, priceCents: 999 });
     expect(result).toMatchObject({ idempotentReplay: true, price: { revisionId: 9, effectivePriceCents: 999 } });
     expect(tx.loadReplay).toHaveBeenCalledWith({ idempotencyKey: input.idempotencyKey, requestHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
-    expect(tx.catalog.listPricingPolicies).not.toHaveBeenCalled();
+    // The limits are read for every answer (an inherit size's price depends on them), but the
+    // refusal check, which starts from the size's current setting, never runs for a replay.
+    expect(tx.loadSaved).not.toHaveBeenCalled();
     expect(tx.save).not.toHaveBeenCalled();
   });
 
@@ -336,6 +338,69 @@ describe("inherit: a size with no price of its own (A3, L1)", () => {
       expect(tx.save).toHaveBeenCalledTimes(1);
     });
 
+  it("saves inherit at the retail price when a blocking Card Shellz limit refuses the rule price, and says why (L1)", async () => {
+    // The rules price the size at $5.00, under a $10.00 blocking minimum; its $12.00 retail price clears it.
+    candidate.defaultRetailPriceCents = 1200;
+    tx.loadRulePrice = vi.fn(async () => rulePrice({ priceCents: 500 }));
+    vi.mocked(tx.catalog.listPricingPolicies).mockResolvedValue([limit({ id: 11, floorPriceCents: 1000 })]);
+    const result = await service.saveForMember("member-1", target, inherit);
+    expect(tx.save).toHaveBeenCalledTimes(1);
+    expect(result.price).toMatchObject({ pricingMode: "inherit", effectivePriceCents: 1200, source: "catalog_default",
+      rulePriceCents: 500, rulesConfigured: true, pricingIssue: "pricing_rule_outside_limit" });
+  });
+
+  it("does the same for a blocking maximum, and reads the saved size back on its retail price", async () => {
+    candidate.defaultRetailPriceCents = 1200;
+    tx.loadRulePrice = vi.fn(async () => rulePrice({ priceCents: 3000 }));
+    vi.mocked(tx.catalog.listPricingPolicies).mockResolvedValue([limit({ id: 12, ceilingPriceCents: 2000 })]);
+    await expect(service.saveForMember("member-1", target, inherit)).resolves.toMatchObject({
+      price: { effectivePriceCents: 1200, source: "catalog_default", pricingIssue: "pricing_rule_outside_limit" } });
+    vi.mocked(tx.loadSaved).mockResolvedValue(saved({ revisionId: 5, overridePriceCents: null, pricingMode: "inherit" }));
+    expect(await service.getForMember("member-1", target)).toMatchObject({ pricingMode: "inherit", effectivePriceCents: 1200,
+      source: "catalog_default", rulePriceCents: 3000, pricingIssue: "pricing_rule_outside_limit" });
+  });
+
+  it("refuses inherit as WOULD_BE_LOST when the limit refuses the rule price and the retail price too", async () => {
+    // $5.00 from the rules and the $8.99 retail price are both under the $10.00 blocking minimum.
+    tx.loadRulePrice = vi.fn(async () => rulePrice({ priceCents: 500 }));
+    vi.mocked(tx.catalog.listPricingPolicies).mockResolvedValue([limit({ id: 11, floorPriceCents: 1000 })]);
+    await expect(service.saveForMember("member-1", target, inherit)).rejects.toMatchObject({
+      code: "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST",
+      message: expect.stringContaining("move to $8.99, below the Card Shellz minimum of $10.00 for this item"),
+      context: expect.objectContaining({ beforePriceCents: 1499, afterPriceCents: 899, pricingMode: "inherit" }),
+    });
+    expect(tx.save).not.toHaveBeenCalled();
+  });
+
+  it("keeps inherit on a rule price that only a warn-only limit flags", async () => {
+    tx.loadRulePrice = vi.fn(async () => rulePrice({ priceCents: 500 }));
+    vi.mocked(tx.catalog.listPricingPolicies).mockResolvedValue([limit({ id: 13, floorPriceCents: 1000, mode: "warn_only" })]);
+    const result = await service.saveForMember("member-1", target, inherit);
+    expect(result.price).toMatchObject({ effectivePriceCents: 500, source: "rules", pricingIssue: null });
+  });
+
+  it("leaves rules as it was: a rules size keeps the rule price a blocking limit refuses", async () => {
+    tx.loadRulePrice = vi.fn(async () => rulePrice({ priceCents: 500 }));
+    vi.mocked(tx.catalog.listPricingPolicies).mockResolvedValue([limit({ id: 11, floorPriceCents: 1000 })]);
+    vi.mocked(tx.loadSaved).mockResolvedValue(saved({ revisionId: 5, overridePriceCents: null, pricingMode: "rules" }));
+    expect(await service.getForMember("member-1", target)).toMatchObject({ pricingMode: "rules", effectivePriceCents: 500,
+      source: "rules", pricingIssue: "pricing_rule_outside_limit" });
+  });
+
+  it.each([
+    ["a typed size", saved({ revisionId: 4, overridePriceCents: 1499, pricingMode: "fixed" }), "fixed", 1499, "override"],
+    ["an unsaved size", null, "rules", 500, "rules"],
+  ] as const)("names a limit-refused rule price on %s too, so the client can tell clearing it gives the retail price", async (
+    _label, current, pricingMode, effectivePriceCents, source) => {
+    // The drawer's × and "would be" words read this to say inherit would give the $12.00 retail price, not $5.00.
+    candidate.defaultRetailPriceCents = 1200;
+    tx.loadRulePrice = vi.fn(async () => rulePrice({ priceCents: 500 }));
+    vi.mocked(tx.catalog.listPricingPolicies).mockResolvedValue([limit({ id: 11, floorPriceCents: 1000 })]);
+    vi.mocked(tx.loadSaved).mockResolvedValue(current);
+    expect(await service.getForMember("member-1", target)).toMatchObject({ pricingMode, effectivePriceCents, source,
+      rulePriceCents: 500, defaultPriceCents: 1200, pricingIssue: "pricing_rule_outside_limit" });
+  });
+
   it("refuses inherit as WOULD_BE_LOST when there are no rules and no retail price, and the size had a price", async () => {
     candidate.defaultRetailPriceCents = null;
     await expect(service.saveForMember("member-1", target, inherit)).rejects.toMatchObject({
@@ -379,7 +444,7 @@ describe("inherit: a size with no price of its own (A3, L1)", () => {
     vi.mocked(tx.loadReplay).mockResolvedValue(saved({ revisionId: 5, overridePriceCents: null, pricingMode: "inherit" }));
     const result = await service.saveForMember("member-1", target, inherit);
     expect(result).toMatchObject({ idempotentReplay: true, price: { revisionId: 5, pricingMode: "inherit", source: "unavailable" } });
-    expect(tx.catalog.listPricingPolicies).not.toHaveBeenCalled();
+    expect(tx.loadSaved).not.toHaveBeenCalled();
     expect(tx.save).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith(expect.objectContaining({ code: "DROPSHIP_LISTING_PRICE_REPLAYED",
       context: expect.objectContaining({ pricingMode: "inherit", revisionId: 5, idempotentReplay: true }) }));

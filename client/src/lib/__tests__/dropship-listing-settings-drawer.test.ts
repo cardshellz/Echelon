@@ -275,8 +275,26 @@ describe("header words", () => {
   it("has a short phone line and the own settings sentence", () => {
     expect(drawerPhoneSummary(DETAIL.product)).toBe("2 sizes · Sizes differ");
     expect(drawerPhoneSummary({ ...DETAIL.product, sizesChosen: 1, sizesDiffer: [] })).toBe("1 size · No fixes needed");
-    expect(drawerOwnSettingsLine(DETAIL.product)).toBe("Own settings: 1 exact price, shipping policy. Everything else uses your store defaults.");
-    expect(drawerOwnSettingsLine({ ...DETAIL.product, exactPriceCount: 0, ownSettings: [] })).toBe("Everything uses your store defaults.");
+    // DETAIL's description comes from the older group rule "Sleeves text", so the rest is not all store defaults.
+    expect(drawerOwnSettingsLine(DETAIL)).toBe("Own settings: 1 exact price, shipping policy. Everything else uses your store defaults or older group rules.");
+    expect(drawerOwnSettingsLine({ ...DETAIL, product: { ...DETAIL.product, exactPriceCount: 0, ownSettings: [] } }))
+      .toBe("Everything uses your store defaults or older group rules.");
+  });
+
+  it("says store defaults alone only when no older group rule gives a setting or a price", () => {
+    const storeDefaultText = listingSettingsProductDetailSchema.parse({ ...DETAIL, settings: { ...DETAIL.settings, descriptionTemplate: [{
+      value: { hasIntroduction: true, hasFooter: false, groupConflict: false },
+      sources: [{ source: "store_default", ruleName: null, productVariantIds: [SIZE_A, SIZE_B] }],
+    }] } });
+    expect(drawerOwnSettingsLine(storeDefaultText)).toBe("Own settings: 1 exact price, shipping policy. Everything else uses your store defaults.");
+    expect(drawerOwnSettingsLine({ ...storeDefaultText, product: { ...storeDefaultText.product, exactPriceCount: 0, ownSettings: [] } }))
+      .toBe("Everything uses your store defaults.");
+
+    // A size priced by an older group rule ("From your older group rule …" in the Price section).
+    const groupPriced = { ...storeDefaultText, sizes: [size(EXACT_A), size(sizePrice({ ...RULES_B,
+      rule: { kind: "group", name: "Toploaders", recipe: { basis: "catalog_retail", markupBps: 3000, flatCents: 0, rounding: "up_99" } } }), 120)] };
+    expect(drawerOwnSettingsLine(listingSettingsProductDetailSchema.parse(groupPriced)))
+      .toBe("Own settings: 1 exact price, shipping policy. Everything else uses your store defaults or older group rules.");
   });
 
   it("shows the store price, or says there is none yet", () => {

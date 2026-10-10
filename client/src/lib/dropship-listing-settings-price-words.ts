@@ -1,5 +1,5 @@
 import type { ListingPriceSetting } from "@shared/dropship/listing-price";
-import type { ListingSettingsPriceIssue, ListingSettingsSizePrice } from "@shared/dropship/listing-settings";
+import { LISTING_SETTINGS_PRICE_ISSUES, type ListingSettingsPriceIssue, type ListingSettingsSizePrice } from "@shared/dropship/listing-settings";
 import type { PricingRecipe } from "@shared/dropship/pricing-rules";
 import { displayListingPrice } from "./dropship-listing-price";
 
@@ -78,7 +78,9 @@ const RULE_FAILURE_REASON: Readonly<Partial<Record<ListingSettingsPriceIssue, st
  * Built from words for an `inherit` size on its retail price, with the reason
  * (owner decision L1):
  * - no rule covers it: "No pricing rule covers this size, so it uses the retail price ($12.50).";
- * - the rules can't price it: "Your pricing rules can't price this size (two older group rules tie), so it uses the retail price ($12.50)."
+ * - the rules can't price it: "Your pricing rules can't price this size (two older group rules tie), so it uses the retail price ($12.50).";
+ * - a blocking Card Shellz limit refuses the rules' price: "Your pricing rules
+ *   give this size a price outside a Card Shellz price limit, so it uses the retail price ($12.50)." Interim.
  *
  * `pricing_basis_unavailable` is a missing cost here: a retail fallback has a
  * retail price, so a rule starting from retail always had its amount.
@@ -86,6 +88,9 @@ const RULE_FAILURE_REASON: Readonly<Partial<Record<ListingSettingsPriceIssue, st
 function retailFallbackWords(issue: ListingSettingsPriceIssue | null, retailCents: number | null): string {
   const retail = retailCents === null ? "the retail price" : `the retail price (${formatCents(retailCents)})`;
   if (issue === null || issue === "pricing_rules_not_configured") return `No pricing rule covers this size, so it uses ${retail}.`;
+  if (issue === "pricing_rule_outside_limit") {
+    return `Your pricing rules give this size a price outside a Card Shellz price limit, so it uses ${retail}.`;
+  }
   const reason = RULE_FAILURE_REASON[issue];
   return `Your pricing rules can't price this size${reason ? ` (${reason})` : ""}, so it uses ${retail}.`;
 }
@@ -111,6 +116,8 @@ function cannotPriceWords(issue: ListingSettingsPriceIssue | null, basis: Listin
     case "pricing_result_out_of_range": return "Can't price: the rule's price is out of range"; // interim
     case "pricing_rules_not_configured": return "Can't price: no store price yet"; // interim
     case "price_unavailable": return "Can't price: Card Shellz has no retail price for this size";
+    // Interim; the server sends this reason only on a retail fallback, which has a price.
+    case "pricing_rule_outside_limit": return "Can't price: the store price is outside a Card Shellz price limit";
     case null: return "Can't price this size"; // interim; the server always names an issue for a size with no price
   }
 }
@@ -132,14 +139,22 @@ export function builtFromWords(price: ListingSettingsSizePrice): string {
   }
 }
 
-const KNOWN_ISSUES: ReadonlySet<string> = new Set<ListingSettingsPriceIssue>([
-  "pricing_rule_priority_conflict", "pricing_basis_unavailable", "pricing_result_out_of_range",
-  "pricing_rules_not_configured", "price_unavailable",
-]);
+const KNOWN_ISSUES: ReadonlySet<string> = new Set<string>(LISTING_SETTINGS_PRICE_ISSUES);
 
 /** The W9 answer's rule issue as a known issue; anything else is treated as no price at all. */
 function knownIssue(code: string | null | undefined): ListingSettingsPriceIssue {
   return code != null && KNOWN_ISSUES.has(code) ? code as ListingSettingsPriceIssue : "price_unavailable";
+}
+
+/**
+ * The Built from words of a price check row (W1) for a size that follows the
+ * store's pricing and is on its retail price (ruleName RETAIL_FALLBACK_RULE_NAME),
+ * with the reason the server sends (`retailFallbackIssue`). A checked profile
+ * always has a store default rule, so an unknown or missing reason reads
+ * "Your pricing rules can't price this size, so it uses the retail price (…)."
+ */
+export function reviewRetailFallbackWords(issue: string | null | undefined, retailCents: number | null): string {
+  return retailFallbackWords(knownIssue(issue), retailCents);
 }
 
 /** True when a W9 answer is an `inherit` size on its retail price because the rules give it none (L1). */

@@ -6,6 +6,7 @@ import {
   pricingProfileStateSchema,
   pricingRecipeSchema,
   pricingReviewResponseSchema,
+  RETAIL_FALLBACK_RULE_NAME,
   reviewPricingRulesInputSchema,
   type ApplyPricingRulesInput,
   type PricingImpactRow,
@@ -27,7 +28,7 @@ import {
   type SavePhase,
   type WriteFailure,
 } from "./dropship-listing-settings-drafts";
-import { formatCents, percentText } from "./dropship-listing-settings-price-words";
+import { formatCents, percentText, reviewRetailFallbackWords } from "./dropship-listing-settings-price-words";
 import { listingPriceInput } from "./dropship-listing-price";
 import { fetchJson, postJson, queryErrorMessage, DropshipApiError } from "./dropship-ops-surface";
 import { parseNonnegativeHundredths, SUGGESTED_PRICING_RECIPE } from "./dropship-pricing-rules";
@@ -851,6 +852,9 @@ function cannotPriceWords(row: Pick<PricingImpactRow, "issues" | "basis">): stri
  * - a kept exact price: "Exact price" (never "Fixed override preserved", C9);
  * - the store default: "Store default: retail $12.50 + 20%, up to .99";
  * - an older group rule: "From your older group rule “Envelopes”: retail $6.25 + 30%";
+ * - a size that follows the store's pricing on its retail price because the
+ *   checked rules give it no usable price, with why (L1): "Your pricing rules
+ *   can't price this size (your cost isn't on file), so it uses the retail price ($8.99).";
  * - no price: "Can't price: …".
  * `profile` is the profile the check was made with. A group rule's recipe is
  * found by its name; when two groups share the name, only the starting amount is shown.
@@ -858,6 +862,10 @@ function cannotPriceWords(row: Pick<PricingImpactRow, "issues" | "basis">): stri
 export function reviewRowBuiltFrom(row: PricingImpactRow, profile: PricingProfile): string {
   if (row.preserved) return CHECK_NEW_PRICES_WORDS.exactPrice;
   if (row.priceCents === null) return cannotPriceWords(row);
+  // The server's name for this row is not a rule of the store's (dropship-pricing-rules-service.ts).
+  if (row.followsStorePricing === true && row.ruleName === RETAIL_FALLBACK_RULE_NAME) {
+    return reviewRetailFallbackWords(row.retailFallbackIssue, row.priceCents);
+  }
   const name = row.ruleName;
   if (name === null) return "Your pricing rules"; // interim; a rule price always names its rule
   if (name === STORE_DEFAULT_RULE_NAME) {
@@ -919,12 +927,18 @@ export function reviewCountsWords(summary: PricingReviewResponse["summary"]): st
   return parts.join(" · ");
 }
 
-/** The footer line while sizes block the save (C9; interim words). Null when none do. */
-export function reviewBlockedWords(blocked: number): string | null {
+/**
+ * The footer line while sizes block the save (C9; interim words). Null when
+ * none do. It offers the other starting point than the checked one (`basis`,
+ * the checked store default's): a check that starts from Your cost is told to
+ * start from Retail price, and the other way round.
+ */
+export function reviewBlockedWords(blocked: number, basis: PricingRecipe["basis"]): string | null {
   if (blocked <= 0) return null;
+  const other = basis === "product_cost" ? PRICE_DEFAULT_WORDS.retailPrice : PRICE_DEFAULT_WORDS.yourCost;
   return blocked === 1
-    ? "● 1 size can't be priced this way. Give it an exact price in Products, or start from Your cost."
-    : `● ${count(blocked)} sizes can't be priced this way. Give them an exact price in Products, or start from Your cost.`;
+    ? `● 1 size can't be priced this way. Give it an exact price in Products, or start from ${other}.`
+    : `● ${count(blocked)} sizes can't be priced this way. Give them an exact price in Products, or start from ${other}.`;
 }
 
 /** "1–50 of 1,240"; null for a check with no sizes. */

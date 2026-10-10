@@ -115,7 +115,7 @@ export interface CheckNewPricesBodyProps extends Omit<CheckNewPricesSheetProps, 
 export function CheckNewPricesBody({ checked, compact, footer, message, paging, onBack, onSave, onResend, onPage }: CheckNewPricesBodyProps) {
   const { review, profile } = checked;
   const pageWords = reviewPageWords(review, PRICING_REVIEW_PAGE_SIZE);
-  const blocked = reviewBlockedWords(review.summary.blocked);
+  const blocked = reviewBlockedWords(review.summary.blocked, profile.defaultRecipe.basis);
   return (
     <>
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-4 py-3 sm:px-6">

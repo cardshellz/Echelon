@@ -51,7 +51,8 @@ export interface ListingSetupRead {
   data?: DropshipEbayListingSetupResponse;
   error?: unknown;
   isFetching: boolean;
-  refetch: () => Promise<{ data?: DropshipEbayListingSetupResponse; error?: unknown }>;
+  /** React Query's refetch; `throwOnError` makes a failed or cancelled read reject. */
+  refetch: (options?: { throwOnError?: boolean }) => Promise<{ data?: DropshipEbayListingSetupResponse; error?: unknown }>;
 }
 
 /** A read failed when its latest attempt failed (React Query keeps the older answer beside the error). */
@@ -150,7 +151,9 @@ export function useStoreSetupSave(options: {
   }, [queryClient, startSave, settle, close]);
 
   const clearProblem = useCallback(() => setProblem(null), []);
-  return { run, prepare, problem, clearProblem };
+  /** Words for a problem found before anything was sent (the ship-from repair's own setup read). */
+  const showProblem = useCallback((words: string) => setProblem(words), []);
+  return { run, prepare, problem, clearProblem, showProblem };
 }
 
 /**

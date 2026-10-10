@@ -1,6 +1,7 @@
-import { expect, test } from "playwright/test";
+import { expect, test, type Page } from "playwright/test";
 import {
   CATALOG_PATH,
+  ENVELOPE,
   HANDLING_TIME_ISSUE,
   MARZ,
   MEMBER_ID,
@@ -195,6 +196,160 @@ test("asks before leaving with an exact price that isn't saved, and before choos
   await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
+});
+
+/** The new Listing settings step's bar, open Store defaults editor and product drawer (as its own journeys name them). */
+function bar(page: Page) {
+  return page.getByTestId("catalog-action-summary");
+}
+
+function policyEditor(page: Page) {
+  return page.getByTestId("editor-surface");
+}
+
+function productDrawer(page: Page) {
+  return page.getByTestId("product-drawer");
+}
+
+test("a change kept after the browser's Back is still there when Next or the rail goes back to Listing settings, with nothing asked", async ({ page }) => {
+  const state = await openCatalog(page, `${CATALOG_PATH}/choose`, { liveSummary: true });
+  const dialog = page.getByRole("alertdialog");
+  const changed = `Not saved · 1 change in ${ENVELOPE.productName}`;
+  const exactPrice = productDrawer(page).getByLabel("Exact price for Pack of 50 · ENV-SGL-P50", { exact: true });
+  const openEnvelope = async () => {
+    await page.getByTestId("listing-settings-product-11").getByRole("button", { name: new RegExp(`^${ENVELOPE.productName}`) }).click();
+    await expect(productDrawer(page)).toBeVisible();
+  };
+
+  await page.getByRole("link", { name: "Next: Listing settings" }).click();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/setup`);
+  await openEnvelope();
+  await exactPrice.fill("9.99");
+  // Back closes the drawer and keeps its change; Back again goes to step 1, which the guard does not catch.
+  await page.goBack();
+  await expect(productDrawer(page)).toHaveCount(0);
+  await expect(bar(page)).toHaveText(changed);
+  await page.goBack();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/choose`);
+  await expect(page.getByRole("heading", { name: "Available catalog" })).toBeVisible();
+
+  // Going back to finish the change drops nothing, so Next asks nothing and the change is there.
+  await page.getByRole("link", { name: "Next: Listing settings" }).click();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/setup`);
+  await expect(dialog).toHaveCount(0);
+  await expect(bar(page)).toHaveText(changed);
+  await openEnvelope();
+  await expect(exactPrice).toHaveValue("9.99");
+  await page.goBack();
+  await page.goBack();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/choose`);
+
+  // So does the rail's Listing settings link.
+  await step(page, "setup").click();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/setup`);
+  await expect(dialog).toHaveCount(0);
+  await expect(bar(page)).toHaveText(changed);
+
+  // Leaving the step with the change still asks, and Keep editing keeps it.
+  await step(page, "choose").click();
+  await expect(dialog).toContainText("You have 1 change that isn't saved.");
+  await dialog.getByRole("button", { name: "Keep editing" }).click();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/setup`);
+  await expect(bar(page)).toHaveText(changed);
+  expect(state.priceWrites).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
+test("a save in flight is not asked about when leaving, the store stays put meanwhile, and its outcome shows when the vendor comes back from Publish", async ({ page }, testInfo) => {
+  // From 640 px a Store defaults editor opens in place, so the bar and the rail stay in reach during a save.
+  test.skip(testInfo.project.name === "mobile", "Below 640 px the editor is a sheet that covers the page's ways off.");
+  const store = MARZ.storeConnectionId;
+  const state = await openCatalog(page, `${CATALOG_PATH}/choose`, { liveSummary: true,
+    listingSetups: { [store]: listingSetupWithAnotherShippingPolicy(store) } });
+  const dialog = page.getByRole("alertdialog");
+  const storeSelect = page.getByTestId("catalog-store-select");
+  const shippingPick = policyEditor(page).locator("label")
+    .filter({ has: page.getByText("USPS Priority Mail", { exact: true }) }).getByRole("radio");
+
+  // Choose -> Listing settings -> Publish, then Back, so the browser's Forward returns to Publish.
+  await page.getByRole("link", { name: "Next: Listing settings" }).click();
+  await page.getByRole("link", { name: "Next: Publish" }).click();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
+  await page.goBack();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/setup`);
+  await page.getByTestId("store-default-row-shipping").getByRole("button", { name: "Change Shipping policy" }).click();
+  await shippingPick.check();
+  await expect(bar(page)).toHaveText("Not saved · 1 change in Shipping policy");
+
+  // Forward to Publish is not caught; the rail's way back asks nothing and the change is there.
+  await page.goForward();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
+  await step(page, "setup").click();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/setup`);
+  await expect(dialog).toHaveCount(0);
+  await expect(bar(page)).toHaveText("Not saved · 1 change in Shipping policy");
+  await expect(shippingPick).toBeChecked();
+
+  // The save's answer is held, then lost (nobody can confirm it).
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(`**/api/dropship/ebay/listing-setup/${store}`, async (route) => {
+    if (route.request().method() === "PUT") await held;
+    await route.fallback();
+  });
+  state.setupWriteAnswers = ["drop"];
+  await policyEditor(page).getByRole("button", { name: "Save", exact: true }).click();
+  await expect(bar(page)).toHaveText("Saving…");
+  // Another store would drop the draft and the save's answer with it, so the picker waits.
+  await expect(storeSelect).toBeDisabled();
+
+  // A change being saved is not "unsaved": Next goes on at once and the save keeps going.
+  await page.getByRole("link", { name: "Next: Publish" }).click();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
+  await expect(dialog).toHaveCount(0);
+  release();
+  await expect(storeSelect).toBeEnabled();
+
+  // Back on Listing settings the editor says what happened, with the change kept for Check again.
+  await step(page, "setup").click();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/setup`);
+  await expect(dialog).toHaveCount(0);
+  await expect(policyEditor(page)).toContainText("We couldn't confirm your save.");
+  await expect(policyEditor(page).getByRole("button", { name: "Check again" })).toBeVisible();
+  await expect(bar(page)).toHaveText("Not saved · 1 change in Shipping policy");
+  expect(state.setupWrites).toEqual([{ method: "PUT", path: `/api/dropship/ebay/listing-setup/${store}`,
+    body: { expectedRevision: SETUP_REVISION, idempotencyKey: expect.stringMatching(/^ls-policy:/), fulfillmentPolicyId: "priority" } }]);
+  expect(state.unexpected).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
+test("closing the tab while a save is in flight still gets the browser's own question", async ({ page }) => {
+  const store = MARZ.storeConnectionId;
+  const state = await openCatalog(page, `${CATALOG_PATH}/setup`,
+    { listingSetups: { [store]: listingSetupWithAnotherShippingPolicy(store) } });
+  const shippingPick = policyEditor(page).locator("label")
+    .filter({ has: page.getByText("USPS Priority Mail", { exact: true }) }).getByRole("radio");
+  await page.getByTestId("store-default-row-shipping").getByRole("button", { name: "Change Shipping policy" }).click();
+  await shippingPick.check();
+  await expect(bar(page)).toHaveText("Not saved · 1 change in Shipping policy");
+
+  // The save is never answered, so it is still in flight when the tab closes.
+  await page.route(`**/api/dropship/ebay/listing-setup/${store}`, async (route) => {
+    if (route.request().method() === "PUT") return;
+    await route.fallback();
+  });
+  await policyEditor(page).getByRole("button", { name: "Save", exact: true }).click();
+  await expect(bar(page)).toHaveText("Saving…");
+  expect(state.unexpected).toEqual([]);
+  expect(state.errors).toEqual([]);
+
+  // Leaving the step keeps the save going, but closing the tab would lose its answer, so the browser asks.
+  const asked = page.waitForEvent("dialog");
+  await page.close({ runBeforeUnload: true });
+  const unload = await asked;
+  expect(unload.type()).toBe("beforeunload");
+  await unload.accept();
 });
 
 test("eBay listing setup with nothing saved is not a change until the vendor picks a policy", async ({ page }) => {

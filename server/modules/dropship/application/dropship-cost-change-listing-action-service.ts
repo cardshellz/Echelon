@@ -25,6 +25,7 @@ import type { DropshipCostChangePolicyReader } from "./dropship-cost-detection-s
 import type { DropshipListingVariantHoldGate } from "./dropship-listing-tier-service";
 import { formatNotificationCurrency } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
+import { withRulePriceLimitCheck, type DropshipPricingPolicyRecord } from "./dropship-listing-preview-service";
 import { createRulePriceResolver } from "./dropship-rule-price";
 import type { DropshipClock, DropshipLogger, DropshipNotificationSender } from "./dropship-ports";
 
@@ -119,6 +120,8 @@ export interface CostActionVendorFacts {
   /** Pricing rules per store connection; absent when the store has none. */
   profiles: Map<number, PricingProfileState>;
   candidates: Map<number, CostActionCandidate>;
+  /** The active Card Shellz price limits, which decide whether an `inherit` listing can use its rule price. */
+  pricingPolicies: readonly DropshipPricingPolicyRecord[];
 }
 
 export interface NewCostChangeListingHold {
@@ -703,13 +706,15 @@ export function classifyListing(facts: CostActionVendorFacts, listing: CostActio
     candidate.storeConnectionId === listing.storeConnectionId && candidate.productVariantId === listing.productVariantId) ?? null;
   const candidate = facts.candidates.get(listing.productVariantId) ?? null;
   const profile = facts.profiles.get(listing.storeConnectionId) ?? null;
-  // The shared resolver the listing preview prices through, at the cost being judged.
-  const rulePrice = profile && candidate ? createRulePriceResolver({ state: profile }).priceAtCost(candidate, costCents) : null;
+  // The shared resolver the listing preview prices through, at the cost being judged, checked against the same limits.
+  const rulePrice = profile && candidate
+    ? withRulePriceLimitCheck(candidate, facts.pricingPolicies, createRulePriceResolver({ state: profile }).priceAtCost(candidate, costCents))
+    : null;
   return classifyCostChangeListingPrice({
     saved: saved ? { overridePriceCents: saved.overridePriceCents, pricingMode: saved.pricingMode ?? undefined } : null,
     existingListingPriceCents: listing.vendorRetailPriceCents,
     defaultPriceCents: candidate?.defaultRetailPriceCents ?? null,
-    rulePrice: rulePrice ? { priceCents: rulePrice.priceCents, basis: rulePrice.basis } : null,
+    rulePrice: rulePrice ? { priceCents: rulePrice.priceCents, basis: rulePrice.basis, blockedByLimit: rulePrice.blockedByLimit } : null,
   });
 }
 
@@ -812,7 +817,7 @@ function emptyPassResult(): DropshipCostListingActionPassResult {
 }
 
 function emptyFacts(): CostActionVendorFacts {
-  return { listings: [], savedPrices: [], profiles: new Map(), candidates: new Map() };
+  return { listings: [], savedPrices: [], profiles: new Map(), candidates: new Map(), pricingPolicies: [] };
 }
 
 function groupByVendor(entries: readonly EffectiveCostIncrease[]): Map<number, EffectiveCostIncrease[]> {

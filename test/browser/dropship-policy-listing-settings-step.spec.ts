@@ -710,6 +710,7 @@ test("a paused account shows the selling-paused banner: policies stay editable a
   const state = await openStep(page, { vendor: { status: "paused", entitlementStatus: "active" }, pricingRules: { [STORE]: SAVED_PRICING_RULES } });
   await expect(banner(page)).toHaveCount(1);
   await expect(banner(page)).toHaveAttribute("data-kind", "selling_paused");
+  await expect(banner(page)).toHaveText(/^Selling is paused on your account\. Prices, eBay categories and descriptions can't be changed until it resumes\./);
   await expect(banner(page).getByRole("link", { name: "Go to Wallet" })).toBeVisible();
   await expect(row(page, "shipping").getByRole("button", { name: "Change Shipping policy" })).toBeVisible();
   await expect(row(page, "price")).toContainText(rowValue(testInfo, "Retail price + 15%, to the cent", "Retail + 15%, to the cent"));
@@ -733,16 +734,27 @@ test("a policy save refused because the store is paused shows the banner and kee
   expectNothingUnexpected(state);
 });
 
-test("an exact price refused because the store is blocked shows the banner and keeps the change", async ({ page }) => {
+test("an exact price refused because the store is blocked reads the summary again, shows its banner and keeps the change", async ({ page }) => {
+  // The price route answers this refusal with its code and message only, no context
+  // (dropship-listing-price.routes.ts respondError; dropship-listing-price-service.ts authorize),
+  // so the code names no single cause and the banner comes from the summary read again.
   const state = await openStep(page, { priceWriteAnswers: [{ status: 403, code: "DROPSHIP_LISTING_STORE_BLOCKED",
-    message: "Listings can't be changed for this store now.", context: { storeConnectionId: STORE, status: "paused" } }] },
+    message: "This store is not available for listing-price changes." }] },
   `${SETUP_PATH}?product=11&size=101`);
   const box = exactBox(page, "Pack of 50 · ENV-SGL-P50");
   await expect(box).toBeFocused();
   await box.fill("9.99");
+  await expect(banner(page)).toHaveCount(0);
+  const summaryReads = state.summaryReads.length;
+  // Card Shellz paused the store after the page loaded: the summary now says so.
+  state.storeStatuses[STORE] = "paused";
   await drawerSave(page).click();
   await expect(banner(page)).toHaveCount(1);
   await expect(banner(page)).toHaveAttribute("data-kind", "store_paused");
+  await expect(banner(page)).toHaveText(new RegExp(`${MARZ.name} is paused, so its settings can't be changed now\\.`));
+  expect(state.summaryReads.length).toBeGreaterThan(summaryReads);
+  expect(state.priceWrites).toHaveLength(1);
+  await expect(page.getByTestId("product-drawer-footer")).toContainText("Nothing was saved.");
   await expect(bar(page)).toHaveText(`Not saved · 1 change in ${ENVELOPE.productName}`);
   await expect(box).toHaveValue("9.99");
   expectGatedReads(state);

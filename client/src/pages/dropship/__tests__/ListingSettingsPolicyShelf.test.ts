@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider, type UseQueryResult } from "@tanstack/react-query";
@@ -537,11 +539,26 @@ describe("ShipFromRepairNote", () => {
     drafts(draft({ editor: "shipFrom", place: "Ship-from location", phase: "uncertain", message: "We couldn't confirm your save.", attempt: { signature: "{}", key: "ls-ship-from:abc12345" } }));
     const uncertain = note();
     expect(uncertain).toMatch(/<button[^>]*>Check again<\/button>/);
+    expect(uncertain).not.toMatch(/<button[^>]*disabled=""[^>]*>Check again<\/button>/);
     expect(uncertain).toContain("We couldn&#x27;t confirm your save.");
+    // The other editors are not held up by it (decideOpen), so the note promises no wait.
+    expect(uncertain).not.toContain("Other settings can be changed");
+    // A newer read that says the location is right (the repair may have landed) still offers Check
+    // again: it is the only way out of the unconfirmed repair.
+    const landed = note({ setup: read(setup()), right: { editable: false, reason: "not_needed" } });
+    expect(landed).toMatch(/<button[^>]*>Check again<\/button>/);
+    expect(landed).not.toMatch(/<button[^>]*disabled=""[^>]*>Check again<\/button>/);
+    expect(landed).not.toContain("Card Shellz needs to update where your items ship from.");
     drafts(draft({ editor: "shipFrom", place: "Ship-from location", open: false, phase: "saved", savedAtMs: 0 }), true);
     const saved = note({ setup: read(setup()), right: { editable: false, reason: "not_needed" } });
     expect(saved).toMatch(/<p role="status"[^>]*>Saved<\/p>/);
     expect(saved).not.toContain("Update now");
+  });
+
+  it("reads the setup with throwOnError, so a read cancelled in flight counts as failed, not as the cached answer", () => {
+    const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/listing-settings/ShipFromRepairNote.tsx"), "utf8");
+    expect(source).toContain("readShipFromRepairStart(() => setup.refetch({ throwOnError: true }))");
+    expect(source).not.toContain("readShipFromRepairStart(() => setup.refetch())");
   });
 
   it("gives the reason and no button while eBay needs a sign-in", () => {

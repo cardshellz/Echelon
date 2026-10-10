@@ -1,5 +1,5 @@
-import { listingPriceCentsSchema, listingPriceTargetSchema, listingPriceResponseSchema, saveListingPriceInputSchema, saveListingPriceResponseSchema,
-  type ListingPriceSetting, type SaveListingPriceInput } from "@shared/dropship/listing-price";
+import { RULE_PRICE_OUTSIDE_LIMIT_ISSUE, listingPriceCentsSchema, listingPriceTargetSchema, listingPriceResponseSchema, saveListingPriceInputSchema,
+  saveListingPriceResponseSchema, type ListingPriceSetting, type SaveListingPriceInput } from "@shared/dropship/listing-price";
 
 export type ListingPriceIdentity = { storeConnectionId: number; productVariantId: number };
 export type ListingPriceDraft = { useDefault: boolean; useRules?: boolean; value: string; baseline: ListingPriceSetting };
@@ -76,15 +76,20 @@ export function followsRulesNow(price: Pick<ListingPriceSetting, "pricingMode" |
 
 /**
  * The price a size would get once saved as `inherit` (owner decision L1): the
- * rule price when the store's rules give one, otherwise the retail price, and
- * null when neither exists (the server then refuses the save as
+ * rule price when the store's rules give a usable one, otherwise the retail
+ * price, and null when neither exists (the server then refuses the save as
  * DROPSHIP_LISTING_PRICE_WOULD_BE_LOST if the size has a price today).
- * Card Shellz price limits are checked by the server only.
+ * The server checks the Card Shellz price limits: W9 names a rule price a
+ * blocking limit refuses (`pricingIssue` RULE_PRICE_OUTSIDE_LIMIT_ISSUE), and
+ * such a size takes its retail price. Whether the retail price itself is
+ * allowed is the server's to say on save.
  */
-export function inheritedListingPrice(price: Pick<ListingPriceSetting, "rulePriceCents" | "defaultPriceCents">): {
+export function inheritedListingPrice(price: Pick<ListingPriceSetting, "rulePriceCents" | "defaultPriceCents" | "pricingIssue">): {
   priceCents: number | null; from: "rules" | "retail" | null;
 } {
-  if (price.rulePriceCents != null) return { priceCents: price.rulePriceCents, from: "rules" };
+  if (price.rulePriceCents != null && price.pricingIssue !== RULE_PRICE_OUTSIDE_LIMIT_ISSUE) {
+    return { priceCents: price.rulePriceCents, from: "rules" };
+  }
   if (price.defaultPriceCents !== null) return { priceCents: price.defaultPriceCents, from: "retail" };
   return { priceCents: null, from: null };
 }

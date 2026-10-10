@@ -70,6 +70,17 @@ export function scopeUnsavedDrafts(
   return drafts.filter((draft) => ids.has(draft.id));
 }
 
+/**
+ * The scope of a way onto a step whose own drafts the page keeps while the
+ * vendor is on another step (the Listing settings step's draft, whose ids
+ * start with `ownPrefix`): every other draft's id. Going back to that step
+ * drops nothing of its own, so the question leaves its drafts out, and an
+ * empty scope leaves at once.
+ */
+export function scopeWithoutPrefix(drafts: readonly UnsavedDraft[], ownPrefix: string): string[] {
+  return drafts.filter((draft) => !draft.id.startsWith(ownPrefix)).map((draft) => draft.id);
+}
+
 /** The leave prompt's sentence naming every editor with unsaved changes, or null when there are none. */
 export function describeUnsavedDrafts(drafts: readonly UnsavedDraft[]): string | null {
   const labels = Array.from(new Set(drafts.map((draft) => draft.label)));

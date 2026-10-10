@@ -93,7 +93,8 @@ import { UnsavedChangesProvider, useLeaveGuard, useUnsavedDrafts } from "./catal
 import { ListingSettingsDraftsProvider } from "./listing-settings/ListingSettingsDraftsProvider";
 import { ListingSettingsActionBar, ListingSettingsStep, countEbayStores } from "./listing-settings/ListingSettingsStep";
 import { OlderListingSettings } from "./listing-settings/OlderListingSettings";
-import { countOlderSettingsDrafts } from "@/lib/dropship-listing-settings-drafts";
+import { LISTING_SETTINGS_GUARD_ID_PREFIX, countOlderSettingsDrafts } from "@/lib/dropship-listing-settings-drafts";
+import { scopeWithoutPrefix } from "@/lib/dropship-unsaved-changes";
 import { ebayListingSetupQueryOptions } from "@/lib/dropship-ebay-listing-query-sync";
 import { listingSettingsQueryKey, listingSettingsSummaryQueryOptions } from "@/lib/dropship-listing-settings";
 import {
@@ -221,8 +222,12 @@ function DropshipPortalCatalogPage() {
   );
   // "Older settings" on Listing settings starts closed and stays as the vendor left it across steps and stores (A1).
   const [olderOpen, setOlderOpen] = useState(false);
+  const guardDrafts = useUnsavedDrafts();
   // Every leave-guard draft other than the new step's own belongs to an older panel.
-  const olderUnsaved = countOlderSettingsDrafts(useUnsavedDrafts()) > 0;
+  const olderUnsaved = countOlderSettingsDrafts(guardDrafts) > 0;
+  // The ways onto Listing settings leave the step's own draft out of their question: the page keeps
+  // that draft on the other steps, so going back to finish it drops nothing (browser Back to step 1, then Next).
+  const toSetupScope = scopeWithoutPrefix(guardDrafts, LISTING_SETTINGS_GUARD_ID_PREFIX);
   const catalogUrl = useMemo(() => buildQueryUrl("/api/dropship/catalog", {
     search: applied.search,
     category: applied.category === ALL_FILTER_VALUE ? undefined : applied.category,
@@ -687,7 +692,12 @@ function DropshipPortalCatalogPage() {
   });
   const stepHref = (target: CatalogStep) => dropshipPortalPath(catalogStepPath(target));
   const nextAction: CatalogNextStepAction | null = actionBar.next
-    ? { label: actionBar.next.label, href: stepHref(actionBar.next.step), disabled: actionBar.next.disabled }
+    ? {
+      label: actionBar.next.label,
+      href: stepHref(actionBar.next.step),
+      disabled: actionBar.next.disabled,
+      ...(actionBar.next.step === "setup" ? { scope: toSetupScope } : {}),
+    }
     : null;
 
   const page = (
@@ -718,9 +728,12 @@ function DropshipPortalCatalogPage() {
               if (liveListingSetupQuery.data || liveListingSetupQuery.isError) void liveListingSetupQuery.refetch();
             } } }
             : {}}
+          leaveScopes={{ setup: toSetupScope }}
           storeOptions={storeOptions}
           selectedStoreConnectionId={storeReady ? selectedStoreConnectionIdNumber : null}
           onStoreChange={(storeConnectionId) => leaveGuard(() => chooseStore(storeConnectionId))}
+          // Another store drops the Listing settings draft, so a save in flight would never show its answer: the store waits for it.
+          storeDisabled={pendingPriceSaves > 0}
         />
 
         {error && (

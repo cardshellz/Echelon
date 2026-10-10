@@ -45,8 +45,9 @@ const UnsavedDraftsContext = createContext<readonly UnsavedDraft[]>([]);
  * changes with `useUnsavedDraft`; ways off the step (the Next button, the step
  * links, the store picker) go through `useLeaveGuard`, which asks first while
  * anything is unsaved. Closing or reloading the tab gets the browser's own
- * prompt. Leaving through the portal's menu or the browser's Back button is
- * not caught here.
+ * prompt (and, from an editor whose save is in flight, `useBrowserLeavePrompt`).
+ * Leaving through the portal's menu or the browser's Back button is not
+ * caught here.
  */
 export function UnsavedChangesProvider({ children }: { children: ReactNode }) {
   const [drafts, setDrafts] = useState<readonly UnsavedDraft[]>([]);
@@ -66,17 +67,7 @@ export function UnsavedChangesProvider({ children }: { children: ReactNode }) {
     else setPendingLeave({ leave, scope: scope ?? null });
   }, []);
 
-  const hasDrafts = drafts.length > 0;
-  useEffect(() => {
-    if (!hasDrafts) return;
-    const askBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      // Older browsers show the prompt only when returnValue is set.
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", askBeforeUnload);
-    return () => window.removeEventListener("beforeunload", askBeforeUnload);
-  }, [hasDrafts]);
+  useBrowserLeavePrompt(drafts.length > 0);
 
   const value = useMemo(() => ({ setDraft, guard }), [setDraft, guard]);
   const leaveNow = () => {
@@ -131,6 +122,25 @@ export function useUnsavedDraft(id: string, label: string, dirty: boolean, extra
   useEffect(() => () => context?.setDraft(id, label, false), [context, id, label]);
 }
 
+/**
+ * While `asking` is true, closing or reloading the tab gets the browser's own
+ * prompt. The page's guard asks while anything is unsaved; an editor asks too
+ * while a save is in flight that the guard leaves out, since closing the tab
+ * loses the save's answer.
+ */
+export function useBrowserLeavePrompt(asking: boolean): void {
+  useEffect(() => {
+    if (!asking) return undefined;
+    const askBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      // Older browsers show the prompt only when returnValue is set.
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", askBeforeUnload);
+    return () => window.removeEventListener("beforeunload", askBeforeUnload);
+  }, [asking]);
+}
+
 /** Every editor's unsaved draft on the page (the bar and "Older settings" read them). Empty outside an UnsavedChangesProvider. */
 export function useUnsavedDrafts(): readonly UnsavedDraft[] {
   return useContext(UnsavedDraftsContext);
@@ -152,9 +162,11 @@ function leaveAtOnce(leave: () => void): void {
  * A wouter Link that goes through the leave guard. wouter itself leaves a
  * click that opens a new tab or window (modifier keys, other buttons) to the
  * browser without calling onClick, so the current tab and its unsaved
- * changes stay as they are.
+ * changes stay as they are. With `scope`, only the drafts with those ids
+ * count, as for `useLeaveGuard` (a link onto the step that holds a draft
+ * leaves that draft out, since going there drops nothing).
  */
-export function GuardedLink({ href, onClick, ...props }: ComponentProps<typeof Link> & { href: string }) {
+export function GuardedLink({ href, onClick, scope, ...props }: ComponentProps<typeof Link> & { href: string; scope?: readonly string[] }) {
   const guard = useLeaveGuard();
   const [location, navigate] = useLocation();
   return (
@@ -167,7 +179,7 @@ export function GuardedLink({ href, onClick, ...props }: ComponentProps<typeof L
         if (event.defaultPrevented || href === location) return;
         // Stops wouter's own navigation; the guard navigates once it may.
         event.preventDefault();
-        guard(() => navigate(href));
+        guard(() => navigate(href), scope);
       }}
     />
   );

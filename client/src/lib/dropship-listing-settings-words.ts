@@ -108,10 +108,11 @@ export function connectionBannerWords(banner: ConnectionBanner, store: string): 
     case "other_site":
       return { message: `Card Shellz lists on eBay US only. ${capitalize(name)} is set up for another eBay site. Contact support.`, action: SUPPORT };
     case "selling_paused":
-      // Interim (C5): the record has no words for a paused account on this step.
+      // Interim (C5): the record has no words for a paused account on this step. It names only
+      // what the pause locks: an eBay sign-in, an eBay refusal or eBay not answering can lock the
+      // policies and the shelf too, and those rows then say so on their own line.
       return {
-        message: "Selling is paused on your account. You can still change your policies and store shelf. "
-          + "Prices, eBay categories and descriptions can't be changed until it resumes.",
+        message: "Selling is paused on your account. Prices, eBay categories and descriptions can't be changed until it resumes.",
         action: WALLET,
       };
     case "ops_inactive":
@@ -576,10 +577,15 @@ export function ownSettingsWords(row: Pick<ListingSettingsProductRow, "ownSettin
   return text.startsWith("eBay") ? text : capitalize(text);
 }
 
-/** The drawer header's line (R:591): "Own settings: …. Everything else uses your store defaults." */
-export function ownSettingsSentence(row: Pick<ListingSettingsProductRow, "ownSettings" | "exactPriceCount">): string {
+/**
+ * The drawer header's line (R:591): "Own settings: …. Everything else uses your store defaults."
+ * `olderGroupRules`: an older group rule gives the product one of its values (a setting or a
+ * size's price), so the rest is not all store defaults and the line says so (interim words).
+ */
+export function ownSettingsSentence(row: Pick<ListingSettingsProductRow, "ownSettings" | "exactPriceCount">, olderGroupRules: boolean): string {
   const parts = ownSettingsList(row);
+  const rest = olderGroupRules ? "your store defaults or older group rules" : "your store defaults";
   return parts.length === 0
-    ? "Everything uses your store defaults."
-    : `Own settings: ${parts.join(", ")}. Everything else uses your store defaults.`;
+    ? `Everything uses ${rest}.`
+    : `Own settings: ${parts.join(", ")}. Everything else uses ${rest}.`;
 }

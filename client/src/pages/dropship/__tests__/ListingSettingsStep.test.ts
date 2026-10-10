@@ -264,7 +264,8 @@ describe("Catalog page wiring of the Listing settings step", () => {
     expect(source).toContain("return <ListingSettingsDraftsProvider storeConnectionId={selectedStoreConnectionIdNumber}>{page}</ListingSettingsDraftsProvider>;");
     expect(source).not.toMatch(/<ListingSettingsDraftsProvider\s+key=/);
     expect(source).toContain('{activeStep === "setup" && storeReady\n          ? <ListingSettingsActionBar next={nextAction} saving={pendingPriceSaves > 0} />\n          : <CatalogActionBar summary={actionBar.summary} next={nextAction} />}');
-    expect(source).toContain("const olderUnsaved = countOlderSettingsDrafts(useUnsavedDrafts()) > 0;");
+    expect(source).toContain("const guardDrafts = useUnsavedDrafts();");
+    expect(source).toContain("const olderUnsaved = countOlderSettingsDrafts(guardDrafts) > 0;");
   });
 });
 

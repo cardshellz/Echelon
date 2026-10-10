@@ -1,7 +1,8 @@
-import type {
-  ListingSettingsAttentionCode,
-  ListingSettingsPolicyKind,
-  ListingSettingsSummary,
+import {
+  LISTING_SETTINGS_POLICY_KINDS,
+  type ListingSettingsAttentionCode,
+  type ListingSettingsPolicyKind,
+  type ListingSettingsSummary,
 } from "@shared/dropship/listing-settings";
 import { LISTING_SETTINGS_SEND_TIMING } from "./dropship-catalog-steps";
 import { listingAccessLink, type ListingAccessLink } from "./dropship-listing-access";
@@ -141,11 +142,36 @@ function productName(name: string | null): string {
 }
 
 type AttentionItem = ListingSettingsSummary["attention"]["items"][number];
+/** What the strip reads from the summary: its lines, the rail's first missing policy, and which store policies are set. */
+type AttentionSummary = Pick<ListingSettingsSummary, "attention" | "rail" | "storeDefaults">;
+
+function policyDefault(defaults: ListingSettingsSummary["storeDefaults"], kind: ListingSettingsPolicyKind) {
+  return kind === "shipping" ? defaults.shippingPolicy : kind === "return" ? defaults.returnPolicy : defaults.paymentPolicy;
+}
+
+/** "shipping", "return and payment", "shipping, return and payment". */
+function policyList(kinds: readonly ListingSettingsPolicyKind[]): string {
+  const words = kinds.map((kind) => POLICY_WORDS[kind]);
+  return words.length === 1 ? words[0] : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
+}
+
+/**
+ * The store policies `choose_store_policies` counts, by name, in the order
+ * shipping, return, payment; null when the summary doesn't say which. The
+ * count, the rail and the store defaults come from one answer, so they agree;
+ * if they ever don't, the line names none rather than one that is set.
+ */
+function missingPolicies(count: number, summary: Pick<AttentionSummary, "rail" | "storeDefaults">): ListingSettingsPolicyKind[] | null {
+  if (count >= LISTING_SETTINGS_POLICY_KINDS.length) return [...LISTING_SETTINGS_POLICY_KINDS];
+  if (count === 1 && summary.rail.missingPolicy !== null) return [summary.rail.missingPolicy];
+  const unset = LISTING_SETTINGS_POLICY_KINDS.filter((kind) => policyDefault(summary.storeDefaults, kind).policyId === null);
+  return unset.length === count ? unset : null;
+}
 
 /** One line's words and button, or null for a line the strip leaves out. */
 function attentionLine(
   item: AttentionItem,
-  summary: Pick<ListingSettingsSummary, "rail">,
+  summary: Pick<AttentionSummary, "rail" | "storeDefaults">,
   options: AttentionOptions,
 ): AttentionLine | null {
   const key = item.productId === null ? item.code : `${item.code}:${item.productId}`;
@@ -162,11 +188,15 @@ function attentionLine(
       return { key, code: item.code, text: `Reconnect eBay for ${storeName(options.storeName)}.`, action: { kind: "link", link: reconnectLink() } };
     case "choose_store_policies": {
       const missing = summary.rail.missingPolicy;
-      // Interim: with one policy missing, the line names it.
-      const text = item.count === 1 && missing !== null
-        ? `Choose your ${POLICY_WORDS[missing]} policy. Nothing can be listed until you do.`
-        : "Choose your shipping, return and payment policies. Nothing can be listed until you do.";
-      return { key, code: item.code, text, action: { kind: "open_store_default", label: "Choose", field: missing ?? FIRST_POLICY } };
+      // Interim: the line names the policies that aren't set, and only those.
+      const named = missingPolicies(item.count, summary);
+      const choose = named === null ? "Choose your missing store policies."
+        : named.length === 1 ? `Choose your ${policyList(named)} policy.`
+          : `Choose your ${policyList(named)} policies.`;
+      const text = `${choose} Nothing can be listed until you do.`;
+      // Choose opens the rail's policy when the line names it, else the first one the line names, so the words and the button agree.
+      const field = missing !== null && (named === null || named.includes(missing)) ? missing : named?.[0] ?? FIRST_POLICY;
+      return { key, code: item.code, text, action: { kind: "open_store_default", label: "Choose", field } };
     }
     case "own_text_needs_check": {
       const text = item.count === 1
@@ -193,7 +223,7 @@ function attentionLine(
  * (a store whose sign-in refresh failed has none) the line stays.
  */
 export function attentionLines(
-  summary: Pick<ListingSettingsSummary, "attention" | "rail">,
+  summary: AttentionSummary,
   options: AttentionOptions,
 ): { lines: AttentionLine[]; more: AttentionMore | null } {
   const lines: AttentionLine[] = [];
@@ -212,7 +242,7 @@ export function attentionLines(
  * refetch failed, the older answer it replaced is not shown as current.
  */
 export function attentionStripContent(
-  read: ListingSettingsReadState<Pick<ListingSettingsSummary, "attention" | "rail" | "catalog">>,
+  read: ListingSettingsReadState<Pick<ListingSettingsSummary, "attention" | "rail" | "storeDefaults" | "catalog">>,
   options: AttentionOptions,
 ): AttentionStripContent {
   if (read.error !== undefined && read.error !== null) {

@@ -141,6 +141,14 @@ describe("an inherit size in the old price editors (A3, L1)", () => {
     expect(inheritedListingPrice({ defaultPriceCents: 899 })).toEqual({ priceCents: 899, from: "retail" });
     expect(inheritedListingPrice({ rulePriceCents: null, defaultPriceCents: null })).toEqual({ priceCents: null, from: null });
   });
+  it("says an inherit save takes the retail price when a blocking Card Shellz limit refuses the rule price (L1)", () => {
+    // W9 names the refused rule price; the server then saves inherit at the retail price.
+    expect(inheritedListingPrice({ rulePriceCents: 500, defaultPriceCents: 1200, pricingIssue: "pricing_rule_outside_limit" }))
+      .toEqual({ priceCents: 1200, from: "retail" });
+    expect(inheritedListingPrice({ rulePriceCents: 500, defaultPriceCents: null, pricingIssue: "pricing_rule_outside_limit" }))
+      .toEqual({ priceCents: null, from: null });
+    expect(inheritedListingPrice({ rulePriceCents: 500, defaultPriceCents: 1200, pricingIssue: null })).toEqual({ priceCents: 500, from: "rules" });
+  });
 });
 
 describe("price response boundary", () => {

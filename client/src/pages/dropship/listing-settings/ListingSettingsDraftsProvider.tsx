@@ -14,7 +14,7 @@ import {
   type ListingSettingsDraftAction,
   type WriteFailure,
 } from "@/lib/dropship-listing-settings-drafts";
-import { useLeaveGuard, useUnsavedDraft } from "../catalog/UnsavedChangesGuard";
+import { useBrowserLeavePrompt, useLeaveGuard, useUnsavedDraft } from "../catalog/UnsavedChangesGuard";
 
 /** How a save ended, as the row that sent it reports it. */
 export type ListingSettingsSaveSettlement =
@@ -73,11 +73,42 @@ interface DraftsState {
 const NO_PLACE_LABEL = "Listing settings";
 
 /**
+ * Whether "Discard and leave" drops the step's draft. A save in flight is
+ * never dropped, as closing never drops one: the draft stays here at page
+ * level, and the save's answer settles it.
+ */
+export function discardsOnLeave(draft: Pick<ListingSettingsDraft, "phase"> | null): boolean {
+  return draft !== null && draft.phase !== "saving";
+}
+
+/**
+ * Whether the page's leave guard asks about the step's draft: while it holds
+ * changes, but not while they are being saved, since leaving keeps that draft
+ * (`discardsOnLeave`) and "isn't saved" would not be true yet.
+ */
+export function asksBeforeLeaving(draft: Pick<ListingSettingsDraft, "changes" | "phase"> | null): boolean {
+  return isDraftDirty(draft) && discardsOnLeave(draft);
+}
+
+/**
+ * Whether closing or reloading the tab asks about the step's draft itself:
+ * while it is being saved. The page's guard leaves such a draft out, since
+ * moving between steps keeps it (`asksBeforeLeaving`), but closing the tab
+ * loses the save's answer, so a refused or unconfirmed save would never be
+ * shown. In every other phase the page's guard asks when there are changes.
+ */
+export function asksBeforeClosingTab(draft: Pick<ListingSettingsDraft, "phase"> | null): boolean {
+  return draft !== null && draft.phase === "saving";
+}
+
+/**
  * Holds the Listing settings step's one draft at page level (plan 4.1, 4.6),
  * so moving between catalog steps keeps it. It is not keyed by store: it
  * drops its draft when `storeConnectionId` changes (the store picker asked
- * first). It reports the draft to the page's leave guard with its change
- * count and a stable `discard`.
+ * first, and is off while a save is in flight). It reports the draft to the
+ * page's leave guard with its change count and a stable `discard`, except
+ * while it is being saved (`asksBeforeLeaving`); then it has the browser ask
+ * before the tab closes itself (`asksBeforeClosingTab`).
  *
  * The draft lives in a ref that every callback reads and writes at once, and
  * React state mirrors it for rendering. So a second click before React
@@ -126,9 +157,14 @@ export function ListingSettingsDraftsProvider({
   }, []);
 
   const guard = useLeaveGuard();
-  // Stable on purpose: the guard keeps the first `discard` it is given (updateUnsavedDrafts).
   const discard = useCallback(() => apply({ type: "discard" }), [apply]);
-  useUnsavedDraft(guardId, draft?.place ?? NO_PLACE_LABEL, isDraftDirty(draft), { changes: draft?.changes ?? 0, discard });
+  // Stable on purpose: the guard keeps the first `discard` it is given (updateUnsavedDrafts).
+  // It reads the live draft, so "Discard and leave" never drops a save in flight.
+  const discardOnLeave = useCallback(() => {
+    if (discardsOnLeave(stateRef.current.draft)) apply({ type: "discard" });
+  }, [apply]);
+  useUnsavedDraft(guardId, draft?.place ?? NO_PLACE_LABEL, asksBeforeLeaving(draft), { changes: draft?.changes ?? 0, discard: discardOnLeave });
+  useBrowserLeavePrompt(asksBeforeClosingTab(draft));
 
   // "Saved" goes away after SAVED_FLASH_MS. The clock decides; the timer only wakes the render.
   const savedAtMs = draft?.phase === "saved" ? draft.savedAtMs : null;

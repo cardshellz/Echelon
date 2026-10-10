@@ -32,7 +32,8 @@ import {
  * The record gives no order (HYPOTHESIS). Kinds that block every change come
  * first, so the banner never says something can still be changed when it
  * can't: a paused vendor whose store is also paused sees the store banner, not
- * "you can still change your policies".
+ * the selling-paused one, which locks only prices, eBay categories and
+ * descriptions.
  */
 export const CONNECTION_BANNER_KINDS = [
   /** The vendor account is closed, lapsed or suspended: nothing can be changed. */

@@ -247,6 +247,13 @@ describe("ProductDrawer", () => {
     expect(markup).not.toContain('aria-label="Back"');
   });
 
+  it("says older group rules set some of the rest when one prices a size", () => {
+    const groupPriced = sizePrice({ ...RULES_B, rule: { kind: "group", name: "Toploaders", recipe: RETAIL_20_UP } });
+    const words = text(renderDrawer({ detail: detailWith([sizePrice(), groupPriced]) }));
+    expect(words).toContain("Own settings: 1 exact price. Everything else uses your store defaults or older group rules.");
+    expect(words).not.toContain("Everything else uses your store defaults.");
+  });
+
   it("shows every other setting read-only, with where it comes from (C17)", () => {
     const words = text(renderDrawer());
     for (const label of ["Shipping policy", "Return policy", "Payment policy", "eBay category", "Store shelf", "Description"]) {

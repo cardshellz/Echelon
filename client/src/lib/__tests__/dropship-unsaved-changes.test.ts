@@ -3,6 +3,7 @@ import {
   describeLeavePrompt,
   describeUnsavedDrafts,
   scopeUnsavedDrafts,
+  scopeWithoutPrefix,
   updateUnsavedDrafts,
   type UnsavedDraft,
 } from "../dropship-unsaved-changes";
@@ -81,6 +82,21 @@ describe("unsaved changes that count themselves (the new Listing settings step)"
     expect(scopeUnsavedDrafts(drafts, [step.id])).toEqual([step]);
     expect(scopeUnsavedDrafts(drafts, ["listing-settings:99"])).toEqual([]);
     expect(scopeUnsavedDrafts(drafts, [])).toEqual([]);
+    expect(drafts).toEqual([step, pricing, categories]);
+  });
+
+  it("leaves a step's own drafts out of the way back onto it, and asks about every other draft", () => {
+    const drafts = Object.freeze([step, pricing, categories]) as readonly UnsavedDraft[];
+    const scope = scopeWithoutPrefix(drafts, "listing-settings:");
+    expect(scope).toEqual([pricing.id, categories.id]);
+    expect(scopeUnsavedDrafts(drafts, scope)).toEqual([pricing, categories]);
+    // With only the step's own draft held (browser Back to step 1), the scope is empty, so Next goes at once and keeps it.
+    expect(scopeWithoutPrefix([step], "listing-settings:")).toEqual([]);
+    expect(scopeUnsavedDrafts([step], scopeWithoutPrefix([step], "listing-settings:"))).toEqual([]);
+    expect(scopeWithoutPrefix([], "listing-settings:")).toEqual([]);
+    // Only a prefix counts: an id that merely contains it elsewhere is another editor's.
+    const lookalike: UnsavedDraft = { id: "older:listing-settings:22", label: "Older" };
+    expect(scopeWithoutPrefix([lookalike], "listing-settings:")).toEqual([lookalike.id]);
     expect(drafts).toEqual([step, pricing, categories]);
   });
 });

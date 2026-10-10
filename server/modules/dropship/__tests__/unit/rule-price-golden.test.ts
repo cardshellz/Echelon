@@ -185,7 +185,7 @@ describe("every price path gives the golden rule prices", () => {
       const facts: CostActionVendorFacts = {
         listings: [], profiles: new Map([[STORE_ID, GOLDEN_RULE_PROFILE_STATE]]),
         savedPrices: [{ storeConnectionId: STORE_ID, productVariantId: row.candidate.productVariantId, overridePriceCents: null, pricingMode: "rules" }],
-        candidates: new Map([[row.candidate.productVariantId, row.candidate]]),
+        candidates: new Map([[row.candidate.productVariantId, row.candidate]]), pricingPolicies: [],
       };
       const listing = { listingId: 1, storeConnectionId: STORE_ID, productVariantId: row.candidate.productVariantId,
         status: "active", vendorRetailPriceCents: null, platform: "ebay", variantSku: null, variantName: "Size", productName: row.name };
@@ -203,7 +203,7 @@ describe("every price path gives the golden rule prices", () => {
       const classify = (pricingMode: "rules" | "inherit") => classifyListing({
         listings: [], profiles: new Map([[STORE_ID, GOLDEN_RULE_PROFILE_STATE]]),
         savedPrices: [{ storeConnectionId: STORE_ID, productVariantId: row.candidate.productVariantId, overridePriceCents: null, pricingMode }],
-        candidates: new Map([[row.candidate.productVariantId, row.candidate]]),
+        candidates: new Map([[row.candidate.productVariantId, row.candidate]]), pricingPolicies: [],
       }, { listingId: 1, storeConnectionId: STORE_ID, productVariantId: row.candidate.productVariantId, status: "active",
         // An earlier push saved this price; inherit never falls back to it.
         vendorRetailPriceCents: 4_321, platform: "ebay", variantSku: null, variantName: "Size", productName: row.name }, row.cost!.unitCostCents!);
@@ -226,7 +226,7 @@ describe("every price path gives the golden rule prices", () => {
     const classification = classifyListing({
       listings: [], profiles: new Map(),
       savedPrices: [{ storeConnectionId: STORE_ID, productVariantId: row.candidate.productVariantId, overridePriceCents: null, pricingMode: "inherit" }],
-      candidates: new Map([[row.candidate.productVariantId, row.candidate]]),
+      candidates: new Map([[row.candidate.productVariantId, row.candidate]]), pricingPolicies: [],
     }, { listingId: 1, storeConnectionId: STORE_ID, productVariantId: row.candidate.productVariantId, status: "active",
       vendorRetailPriceCents: 4_321, platform: "ebay", variantSku: null, variantName: "Size", productName: row.name }, 809);
     expect(classification).toEqual({ source: "catalog_default", priceCents: row.candidate.defaultRetailPriceCents, followsCost: false });

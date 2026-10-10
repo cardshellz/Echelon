@@ -5,6 +5,7 @@ import { Router } from "wouter";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   pricingReviewResponseSchema,
+  RETAIL_FALLBACK_RULE_NAME,
   type PricingImpactRow,
   type PricingProfile,
   type PricingRecipe,
@@ -292,6 +293,28 @@ describe("Check new prices (M3)", () => {
     const markup = sheet({ checked: { review: review({ summary: { total: 120, changed: 2, preserved: 1, blocked: 3 } }), profile: PROFILE, expectedRevisionId: 7, stale: false } });
     expect(text(markup)).toContain("● 3 sizes can't be priced this way. Give them an exact price in Products, or start from Your cost.");
     expect(buttonDisabled(markup, "Save new prices")).toBe(true);
+  });
+
+  it("offers starting from Retail price when the blocked check already starts from Your cost", () => {
+    const cost = { ...PROFILE, defaultRecipe: { basis: "product_cost" as const, markupBps: 3500, flatCents: 0, rounding: "cent" as const } };
+    const markup = sheet({ checked: { review: review({ summary: { total: 120, changed: 2, preserved: 1, blocked: 3 } }), profile: cost, expectedRevisionId: 7, stale: false } });
+    expect(text(markup)).toContain("● 3 sizes can't be priced this way. Give them an exact price in Products, or start from Retail price.");
+    expect(text(markup)).not.toContain("start from Your cost");
+  });
+
+  it("says a size that follows the store's pricing uses its retail price, and why, in the table and on the phone (L1)", () => {
+    const fallback = impactRow({ productVariantId: 105, title: "Toploaders", sizeName: "Pack of 25", sku: "TL-25", previousPriceCents: 899,
+      priceCents: 899, ruleName: RETAIL_FALLBACK_RULE_NAME, basis: "catalog_retail", basisCents: 899, followsStorePricing: true,
+      retailFallbackIssue: "pricing_rule_outside_limit" });
+    const checked = { review: review({ rows: [fallback] }), profile: PROFILE, expectedRevisionId: 7, stale: false };
+    const words = "Your pricing rules give this size a price outside a Card Shellz price limit, so it uses the retail price ($8.99).";
+    for (const wide of [true, false]) {
+      stubWidth(wide);
+      const markup = sheet({ checked });
+      expect(text(markup)).toContain(words);
+      expect(text(markup)).not.toContain("older group rule");
+      expect(text(markup)).not.toContain(RETAIL_FALLBACK_RULE_NAME);
+    }
   });
 
   it("is full screen on a phone, as cards, with the short footer (R:471-488)", () => {

@@ -271,6 +271,11 @@ export function isSavedFlashVisible(
  * - `open`: nothing to lose (no draft, an unchanged one, or this editor's own draft, which reopens);
  * - `ask`: another editor holds changes, so the vendor is asked first;
  * - `refuse`: another editor is saving; nothing opens until it ends.
+ *
+ * The ship-from repair (W10) holds no change, so another editor opens over it even
+ * when nobody could confirm it, and its key goes. That is safe: "Update now" reads
+ * the setup again before it plans (`readShipFromRepairStart`), so a repair that
+ * landed is not sent again, and the revision check stops a second write.
  */
 export type OpenDecision = "open" | "ask" | "refuse";
 

@@ -14,7 +14,7 @@ import { GuardedLink } from "../catalog/UnsavedChangesGuard";
 
 export interface AttentionStripProps {
   /** The summary read, as React Query holds it. */
-  summary: ListingSettingsReadState<Pick<ListingSettingsSummary, "attention" | "rail" | "catalog">>;
+  summary: ListingSettingsReadState<Pick<ListingSettingsSummary, "attention" | "rail" | "storeDefaults" | "catalog">>;
   /** A connection banner is shown; it already says to reconnect eBay. */
   bannerShown: boolean;
   storeName: string;

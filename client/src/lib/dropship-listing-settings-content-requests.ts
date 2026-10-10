@@ -405,7 +405,7 @@ export interface StoreDefaultEditorFooterInput {
   ready: boolean;
   /** The writer would take a save (plan 4.3). */
   editable: boolean;
-  /** Another listing action is running, so the page holds saves back. */
+  /** Another listing action is running, so the page holds saves back, or the editor is reading what's saved. */
   busy: boolean;
   /** The value can be sent (the eBay category editor needs a pick for "One eBay category"). */
   complete: boolean;
@@ -432,7 +432,9 @@ export function storeDefaultEditorFooter(input: StoreDefaultEditorFooterInput): 
     case "rate_limited":
       return { primary: { label: words.save, action: "resend", disabled: input.busy || !input.editable || !resendable }, cancelDisabled: false, message };
     case "conflict":
-      return { primary: { label: words.loadLatest, action: "load_latest", disabled: false }, cancelDisabled: false, message };
+      // Off while the read runs: a second press cancels the first read, whose failure then shows
+      // "Couldn't load what's saved" over a load that worked.
+      return { primary: { label: words.loadLatest, action: "load_latest", disabled: input.busy }, cancelDisabled: false, message };
     default:
       return {
         primary: {

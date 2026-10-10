@@ -6,6 +6,8 @@ export interface CatalogNextStepAction {
   label: string;
   href: string;
   disabled: boolean;
+  /** The drafts its leave question is about (see GuardedLink); every draft when left out. */
+  scope?: readonly string[];
 }
 
 /** Puts the summary in a polite live region, so "Not saved", "Saving…" and "All saved" are read out as they change (R:97). */
@@ -32,7 +34,7 @@ export function CatalogActionBar({ next, summary, live = false }: { summary: str
           </Button>
         ) : (
           <Button asChild className="shrink-0 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]">
-            <GuardedLink href={next.href}>
+            <GuardedLink href={next.href} scope={next.scope}>
               {next.label}
               <ArrowRight className="h-4 w-4" />
             </GuardedLink>

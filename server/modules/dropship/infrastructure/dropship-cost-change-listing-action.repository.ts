@@ -27,6 +27,7 @@ import type {
   EffectiveCostIncrease,
   NewCostChangeListingHold,
 } from "../application/dropship-cost-change-listing-action-service";
+import type { DropshipPricingPolicyRecord } from "../application/dropship-listing-preview-service";
 import { mapCostScheduleError } from "./dropship-cost-schedule.repository";
 
 /**
@@ -40,6 +41,8 @@ export interface CostActionCatalogReader {
   listCatalogCandidates(productVariantIds: readonly number[]): Promise<Array<{
     productVariantId: number; productId: number; category: string | null; productLineIds: readonly number[]; defaultRetailPriceCents: number | null;
   }>>;
+  /** The active Card Shellz price limits, as the listing preview reads them. */
+  listPricingPolicies(): Promise<DropshipPricingPolicyRecord[]>;
 }
 
 interface IncreaseRow {
@@ -207,7 +210,7 @@ export class PgDropshipCostChangeListingActionRepository implements DropshipCost
     assertPositiveInteger(input.vendorId, "vendorId");
     const productVariantIds = [...new Set(input.productVariantIds)];
     for (const id of productVariantIds) assertPositiveInteger(id, "productVariantId");
-    if (productVariantIds.length === 0) return { listings: [], savedPrices: [], profiles: new Map(), candidates: new Map() };
+    if (productVariantIds.length === 0) return { listings: [], savedPrices: [], profiles: new Map(), candidates: new Map(), pricingPolicies: [] };
     try {
       const listings = await this.dbPool.query<ListingRow>(
         `SELECT l.id, l.store_connection_id, l.product_variant_id, l.status, l.vendor_retail_price_cents, l.platform,
@@ -220,7 +223,7 @@ export class PgDropshipCostChangeListingActionRepository implements DropshipCost
         [input.vendorId, productVariantIds],
       );
       const storeConnectionIds = [...new Set(listings.rows.map((row) => row.store_connection_id))];
-      const [savedPrices, profiles, candidates] = await Promise.all([
+      const [savedPrices, profiles, candidates, pricingPolicies] = await Promise.all([
         this.dbPool.query<SavedPriceRow>(
           `SELECT store_connection_id, product_variant_id, override_price_cents, pricing_mode
            FROM dropship.dropship_listing_price_settings
@@ -238,6 +241,7 @@ export class PgDropshipCostChangeListingActionRepository implements DropshipCost
             [input.vendorId, storeConnectionIds],
           ),
         this.catalog.listCatalogCandidates(productVariantIds),
+        this.catalog.listPricingPolicies(),
       ]);
       return {
         listings: listings.rows.map(mapListingRow),
@@ -247,6 +251,7 @@ export class PgDropshipCostChangeListingActionRepository implements DropshipCost
           productVariantId: candidate.productVariantId, productId: candidate.productId, category: candidate.category,
           productLineIds: candidate.productLineIds, defaultRetailPriceCents: candidate.defaultRetailPriceCents,
         }])),
+        pricingPolicies,
       };
     } catch (error) {
       throw mapCostScheduleError(error);

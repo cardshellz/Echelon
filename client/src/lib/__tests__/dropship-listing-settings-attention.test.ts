@@ -31,8 +31,11 @@ function summary(overrides: {
   total?: number;
   missingPolicy?: ListingSettingsSummary["rail"]["missingPolicy"];
   storeStatus?: string;
+  /** The store policies that are set, by kind; a kind left out is not set. */
+  policyIds?: Partial<Record<"shipping" | "return" | "payment", string>>;
 } = {}): ListingSettingsSummary {
   const items = overrides.items ?? [];
+  const policy = (kind: "shipping" | "return" | "payment") => ({ policyId: overrides.policyIds?.[kind] ?? null, verification: "not_checked" });
   return listingSettingsSummarySchema.parse({
     storeConnectionId: 22,
     storeStatus: overrides.storeStatus ?? "connected",
@@ -40,9 +43,9 @@ function summary(overrides: {
     catalog: { state: "ok", products: 3, sizes: 9 },
     storeDefaults: {
       price: { recipe: null, groupRules: 0 },
-      shippingPolicy: { policyId: null, verification: "not_checked" },
-      returnPolicy: { policyId: null, verification: "not_checked" },
-      paymentPolicy: { policyId: null, verification: "not_checked" },
+      shippingPolicy: policy("shipping"),
+      returnPolicy: policy("return"),
+      paymentPolicy: policy("payment"),
       ebayCategory: { category: null, groupRules: 0 },
       description: { hasIntroduction: false, hasFooter: false, groupRules: 0 },
     },
@@ -132,14 +135,42 @@ describe("attentionLines", () => {
     ]);
   });
 
-  it("names the one missing policy, and opens Shipping when the summary names none", () => {
-    const one = attentionLines(summary({ items: [item("choose_store_policies", { count: 1 })], missingPolicy: "payment" }), NO_BANNER).lines[0];
+  it("names the one missing policy and opens it, and opens Shipping when the line names none", () => {
+    const one = attentionLines(summary({ items: [item("choose_store_policies", { count: 1 })], missingPolicy: "payment",
+      policyIds: { shipping: "ship-1", return: "return-1" } }), NO_BANNER).lines[0];
     expect(one.text).toBe("Choose your payment policy. Nothing can be listed until you do.");
     expect(one.action).toEqual({ kind: "open_store_default", label: "Choose", field: "payment" });
 
+    // The store defaults name the one missing policy when the rail doesn't.
+    const fromDefaults = attentionLines(summary({ items: [item("choose_store_policies", { count: 1 })], missingPolicy: null,
+      policyIds: { shipping: "ship-1", payment: "pay-1" } }), NO_BANNER).lines[0];
+    expect(fromDefaults.text).toBe("Choose your return policy. Nothing can be listed until you do.");
+    expect(fromDefaults.action).toEqual({ kind: "open_store_default", label: "Choose", field: "return" });
+
+    // A summary that says one is missing but doesn't say which names none, rather than one that is set.
     const unnamed = attentionLines(summary({ items: [item("choose_store_policies", { count: 1 })], missingPolicy: null }), NO_BANNER).lines[0];
-    expect(unnamed.text).toBe("Choose your shipping, return and payment policies. Nothing can be listed until you do.");
+    expect(unnamed.text).toBe("Choose your missing store policies. Nothing can be listed until you do.");
     expect(unnamed.action).toEqual({ kind: "open_store_default", label: "Choose", field: "shipping" });
+  });
+
+  it("names exactly the two missing policies, never one that is set", () => {
+    const line = (policyIds: Partial<Record<"shipping" | "return" | "payment", string>>, missingPolicy: "shipping" | "return") =>
+      attentionLines(summary({ items: [item("choose_store_policies", { count: 2 })], missingPolicy, policyIds }), NO_BANNER).lines[0];
+    const returnAndPayment = line({ shipping: "ship-1" }, "return");
+    expect(returnAndPayment.text).toBe("Choose your return and payment policies. Nothing can be listed until you do.");
+    expect(returnAndPayment.action).toEqual({ kind: "open_store_default", label: "Choose", field: "return" });
+    expect(line({ return: "return-1" }, "shipping").text).toBe("Choose your shipping and payment policies. Nothing can be listed until you do.");
+    expect(line({ payment: "pay-1" }, "shipping").text).toBe("Choose your shipping and return policies. Nothing can be listed until you do.");
+
+    // A rail that names a policy the store defaults show as set: Choose opens the first one the line names.
+    const railSet = line({ shipping: "ship-1" }, "shipping");
+    expect(railSet.text).toBe("Choose your return and payment policies. Nothing can be listed until you do.");
+    expect(railSet.action).toEqual({ kind: "open_store_default", label: "Choose", field: "return" });
+
+    // Two counted while the store defaults show another number: no policy is named.
+    const disagree = attentionLines(summary({ items: [item("choose_store_policies", { count: 2 })], missingPolicy: "shipping" }), NO_BANNER).lines[0];
+    expect(disagree.text).toBe("Choose your missing store policies. Nothing can be listed until you do.");
+    expect(disagree.action).toEqual({ kind: "open_store_default", label: "Choose", field: "shipping" });
   });
 
   it("says one product in the singular", () => {

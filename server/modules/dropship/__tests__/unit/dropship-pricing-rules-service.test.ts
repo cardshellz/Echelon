@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DropshipPricingRulesService, type PricingRulesTransaction, type StoredPricingReview } from "../../application/dropship-pricing-rules-service";
 import type { DropshipListingCatalogCandidate, DropshipListingPreviewRepository } from "../../application/dropship-listing-preview-service";
 import type { DropshipProductCost } from "../../application/dropship-product-cost";
-import type { PricingProfileState } from "../../../../../shared/dropship/pricing-rules";
+import { RETAIL_FALLBACK_RULE_NAME, type PricingProfileState } from "../../../../../shared/dropship/pricing-rules";
 import type { SavedListingPriceRevision } from "../../../../../shared/dropship/listing-price";
 import { pricingHash } from "../../application/dropship-rule-price";
 
@@ -99,10 +99,40 @@ describe("store pricing review and approval", () => {
     settings = [{ productVariantId: 1, revisionId: 7, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }];
     const result = await review();
     expect(result.rows[0]).toMatchObject({ preserved: false, previousPriceCents: 899, priceCents: 899, issues: [],
-      ruleName: "Retail price (no rule prices this size)", basis: "catalog_retail", basisCents: 899, followsStorePricing: true });
+      ruleName: "Retail price (no rule prices this size)", basis: "catalog_retail", basisCents: 899, followsStorePricing: true,
+      retailFallbackIssue: "pricing_basis_unavailable" });
     // A size without the inherit setting still has no price and blocks.
     expect(result.rows[1]).toMatchObject({ priceCents: null, issues: ["pricing_basis_unavailable", "vendor_retail_price_required"] });
     expect(result.summary.blocked).toBe(1);
+  });
+  it("prices an inherit size at retail when a blocking Card Shellz limit refuses the new rule price, and applies (L1)", async () => {
+    // The new rule price is $11.52, above a $10.00 blocking maximum; the $8.99 retail price is under it.
+    candidates = candidates.slice(0, 1);
+    vi.mocked(tx.catalog.listPricingPolicies).mockResolvedValue([{ id: 9, scopeType: "catalog", productLineId: null, productId: null,
+      productVariantId: null, category: null, mode: "block_listing_push", floorPriceCents: null, ceilingPriceCents: 1000 }]);
+    settings = [{ productVariantId: 1, revisionId: 7, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }];
+    const result = await review();
+    expect(result.rows[0]).toMatchObject({ preserved: false, previousPriceCents: 899, priceCents: 899, issues: [], warnings: [],
+      ruleName: RETAIL_FALLBACK_RULE_NAME, basis: "catalog_retail", basisCents: 899, followsStorePricing: true,
+      retailFallbackIssue: "pricing_rule_outside_limit" });
+    expect(result.summary.blocked).toBe(0);
+    await expect(service.applyForMember("member-1", 22, { reviewId, reviewHash: result.reviewHash, idempotencyKey: "apply-1" }))
+      .resolves.toMatchObject({ revisionId: 1, idempotentReplay: false });
+    // Without the inherit setting, the same size takes the rule price and the limit blocks it.
+    settings = [];
+    const rules = await review();
+    expect(rules.rows[0]).toMatchObject({ priceCents: 1152, issues: ["pricing:above_ceiling:policy_9"] });
+    expect(rules.rows[0]).not.toHaveProperty("retailFallbackIssue");
+  });
+  it("keeps an inherit size blocked when the limit refuses the rule price and the retail price too", async () => {
+    candidates = candidates.slice(0, 1);
+    vi.mocked(tx.catalog.listPricingPolicies).mockResolvedValue([{ id: 9, scopeType: "catalog", productLineId: null, productId: null,
+      productVariantId: null, category: null, mode: "block_listing_push", floorPriceCents: null, ceilingPriceCents: 800 }]);
+    settings = [{ productVariantId: 1, revisionId: 7, overridePriceCents: null, pricingMode: "inherit", updatedAt: now.toISOString() }];
+    const result = await review();
+    expect(result.rows[0]).toMatchObject({ priceCents: 899, followsStorePricing: true, issues: ["pricing:above_ceiling:policy_9"] });
+    await expect(service.applyForMember("member-1", 22, { reviewId, reviewHash: result.reviewHash, idempotencyKey: "apply-1" }))
+      .rejects.toMatchObject({ code: "DROPSHIP_PRICING_REVIEW_BLOCKED" });
   });
   it("keeps an inherit size blocked when neither the rules nor a retail price can price it", async () => {
     candidates = [{ ...candidates[0], defaultRetailPriceCents: null }];

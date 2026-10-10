@@ -5,13 +5,14 @@ import {
   type ListingPriceSetting,
   type SaveListingPriceInput,
 } from "@shared/dropship/listing-price";
-import type {
-  ListingSettingsFixCode,
-  ListingSettingsPriceLimit,
-  ListingSettingsProductDetail,
-  ListingSettingsProductSize,
-  ListingSettingsSettingKey,
-  ListingSettingsSizePrice,
+import {
+  LISTING_SETTINGS_SETTING_KEYS,
+  type ListingSettingsFixCode,
+  type ListingSettingsPriceLimit,
+  type ListingSettingsProductDetail,
+  type ListingSettingsProductSize,
+  type ListingSettingsSettingKey,
+  type ListingSettingsSizePrice,
 } from "@shared/dropship/listing-settings";
 import type { PricingRecipe } from "@shared/dropship/pricing-rules";
 import { DropshipApiError, fetchJson, queryErrorMessage } from "./dropship-ops-surface";
@@ -243,9 +244,19 @@ export function drawerPhoneSummary(product: ListingSettingsProductDetail["produc
   return `${countText(product.sizesChosen)} ${sizesWord(product.sizesChosen)} · ${productStatusWords(product).text}`;
 }
 
-/** "Own settings: 1 exact price. Everything else uses your store defaults." (1C). */
-export function drawerOwnSettingsLine(product: ListingSettingsProductDetail["product"]): string {
-  return ownSettingsSentence(product);
+/**
+ * "Own settings: 1 exact price. Everything else uses your store defaults." (1C), or "… your store
+ * defaults or older group rules." when an older group rule gives a setting or a size's price, as
+ * the Price section and the rows below then say.
+ */
+export function drawerOwnSettingsLine(detail: ListingSettingsProductDetail): string {
+  return ownSettingsSentence(detail.product, usesOlderGroupRule(detail));
+}
+
+function usesOlderGroupRule(detail: ListingSettingsProductDetail): boolean {
+  const setting = LISTING_SETTINGS_SETTING_KEYS.some((key) =>
+    detail.settings[key].some((entry) => entry.sources.some((source) => source.source === "group_rule")));
+  return setting || detail.sizes.some((size) => size.price.rule?.kind === "group");
 }
 
 /** The PRICE head (R:245): the store default recipe; "Checking…" until the summary answers. */
@@ -461,7 +472,7 @@ export function parseExactPrice(text: string): ExactPriceParse {
   }
 }
 
-type W9PriceFacts = Pick<ListingPriceSetting, "rulePriceCents" | "defaultPriceCents" | "ruleName">;
+type W9PriceFacts = Pick<ListingPriceSetting, "rulePriceCents" | "defaultPriceCents" | "ruleName" | "pricingIssue">;
 
 /** "the store default" or "your older group rule “Envelopes”": who gives a rule price. */
 function ruleOwner(ruleName: string | null | undefined): { storeDefault: boolean; name: string | null } {
@@ -502,9 +513,11 @@ export type ClearOutcome =
 
 /**
  * What × ("Use the price above") gives the size (owner decision L1): the rule
- * price while the store's rules give one, otherwise its retail price, and
- * nothing when it has neither. Card Shellz's price limits are checked by the
- * server only.
+ * price while the store's rules give a usable one, otherwise its retail price,
+ * and nothing when it has neither. W9 names a rule price that a blocking Card
+ * Shellz limit refuses (pricing_rule_outside_limit); such a size takes its
+ * retail price. Whether the retail price itself is allowed is checked by the
+ * server on save.
  */
 export function clearOutcome(setting: ListingPriceSetting | null | undefined): ClearOutcome {
   if (!setting) return { kind: "checking" };

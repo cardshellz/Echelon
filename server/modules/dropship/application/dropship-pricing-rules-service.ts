@@ -1,14 +1,15 @@
 import { z } from "zod";
 import { loadSelectedCandidates, selectedCatalogTargets } from "./dropship-selected-catalog";
-import { isTypedListingPrice, resolveListingPrice } from "../../../../shared/dropship/listing-price";
+import { RULE_PRICE_OUTSIDE_LIMIT_ISSUE, isTypedListingPrice, resolveListingPrice } from "../../../../shared/dropship/listing-price";
 import { applyPricingRulesInputSchema, reviewPricingRulesInputSchema, pricingImpactRowSchema,
-  PRICING_REVIEW_PAGE_SIZE, MAX_PRICING_REVIEW_ITEMS, pricingAmountCentsSchema, pricingBasisCents,
+  PRICING_REVIEW_PAGE_SIZE, MAX_PRICING_REVIEW_ITEMS, RETAIL_FALLBACK_RULE_NAME, pricingAmountCentsSchema, pricingBasisCents,
   type PricingProfileState, type ReviewPricingRulesInput, type RulePriceBasis,
   type PricingImpactRow, type PricingReviewResponse, type ApplyPricingRulesInput } from "../../../../shared/dropship/pricing-rules";
 import { pricingTargetsInputSchema } from "../../../../shared/dropship/pricing-rules";
 import { DropshipError } from "../domain/errors";
 import { evaluateListingPriceAgainstCost } from "../domain/listing-price-cost";
-import { evaluateListingPricingPolicy, type DropshipListingPreviewRepository, type DropshipListingCatalogCandidate } from "./dropship-listing-preview-service";
+import { evaluateListingPricingPolicy, withRulePriceLimitCheck, type DropshipListingPreviewRepository,
+  type DropshipListingCatalogCandidate } from "./dropship-listing-preview-service";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
 import type { DropshipProductCostReader } from "./dropship-product-cost";
 import { createRulePriceResolver, pricingHash } from "./dropship-rule-price";
@@ -32,8 +33,6 @@ export interface PricingRulesRepository {
   execute<T>(memberId: string, storeConnectionId: number, operation: (tx: PricingRulesTransaction) => Promise<T>): Promise<T>;
 }
 const targetSchema = z.number().int().positive().max(2_147_483_647);
-/** The review's rule name for a size that follows the store's pricing but no rule can price. */
-const RETAIL_FALLBACK_RULE_NAME = "Retail price (no rule prices this size)";
 
 export class DropshipPricingRulesService {
   constructor(private readonly deps: { repository: PricingRulesRepository; clock: DropshipClock; newId: () => string; logger: DropshipLogger }) {}
@@ -124,20 +123,26 @@ export class DropshipPricingRulesService {
       const productCostCents = cost?.status === "available" ? cost.unitCostCents : null;
       const oldRule = currentRules.configured ? currentRules.price(candidate, cost) : null;
       const old = resolveListingPrice({ saved: setting, existingListingPriceCents: existing,
-        defaultPriceCents: candidate.defaultRetailPriceCents, rulePrice: oldRule });
+        defaultPriceCents: candidate.defaultRetailPriceCents, rulePrice: withRulePriceLimitCheck(candidate, guardrails, oldRule) });
       // Only a typed price is preserved. A price an earlier push saved on the
       // listing was derived, not chosen, so the rules replace it.
       const preserved = !input.releaseFixedOverrides && isTypedListingPrice(setting);
       const rule = proposedRules.price(candidate, cost);
       // A size that follows the store's pricing keeps doing so (applying does
       // not re-save it). It is priced as its listing will be: the new rule
-      // price when the rules give one, else the retail price, so a rule that
-      // cannot price it is not a blocker while a retail price exists.
-      const inherited = setting?.pricingMode === "inherit"
+      // price when the rules give a usable one, else the retail price, so a
+      // rule that cannot price it, or whose price a blocking Card Shellz limit
+      // refuses, is not a blocker while a retail price exists.
+      const checkedRule = setting?.pricingMode === "inherit" ? withRulePriceLimitCheck(candidate, guardrails, rule) : null;
+      const inherited = checkedRule
         ? resolveListingPrice({ saved: setting, existingListingPriceCents: existing,
-          defaultPriceCents: candidate.defaultRetailPriceCents, rulePrice: rule })
+          defaultPriceCents: candidate.defaultRetailPriceCents, rulePrice: checkedRule })
         : null;
       const onRetail = inherited !== null && inherited.source !== "rules" && inherited.effectivePriceCents !== null;
+      // Why it is on its retail price, so the check can tell the vendor (L1).
+      const retailFallbackIssue = onRetail
+        ? rule.issue ?? (checkedRule?.blockedByLimit ? RULE_PRICE_OUTSIDE_LIMIT_ISSUE : null)
+        : null;
       const priceCents = preserved ? old.effectivePriceCents : inherited ? inherited.effectivePriceCents : rule.priceCents;
       // A preserved row is not changed by applying, so like its issues, its
       // notes and basis describe nothing the vendor is about to do.
@@ -156,7 +161,8 @@ export class DropshipPricingRulesService {
         evidenceHash: pricingHash({ rule: rule.evidenceHash, oldRule: oldRule?.evidenceHash ?? null, setting, existing, guardrails }),
         sizeName: candidate.variantName, basis,
         basisCents: basisAmountCents(basis, { productCostCents, catalogRetailCents: candidate.defaultRetailPriceCents }),
-        warnings, ...(inherited ? { followsStorePricing: true as const } : {}) });
+        warnings, ...(inherited ? { followsStorePricing: true as const } : {}),
+        ...(retailFallbackIssue ? { retailFallbackIssue } : {}) });
     });
   }
 }

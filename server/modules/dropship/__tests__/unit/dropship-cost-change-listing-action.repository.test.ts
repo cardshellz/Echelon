@@ -29,8 +29,11 @@ function result<T extends QueryResultRow>(rows: T[], rowCount = rows.length): Qu
   return { rows, rowCount, command: "", oid: 0, fields: [] };
 }
 
+const POLICY = { id: 4, scopeType: "catalog" as const, productLineId: null, productId: null, productVariantId: null, category: null,
+  mode: "block_listing_push" as const, floorPriceCents: 1000, ceilingPriceCents: null };
 const catalog = {
   listCatalogCandidates: vi.fn(async (ids: readonly number[]) => ids.map((id) => ({ productVariantId: id, productId: 1, category: "Envelopes", productLineIds: [3], defaultRetailPriceCents: 899 }))),
+  listPricingPolicies: vi.fn(async () => [POLICY]),
 };
 
 function repository(pool: Pool) {
@@ -68,11 +71,13 @@ describe("PgDropshipCostChangeListingActionRepository", () => {
     expect(facts.savedPrices).toEqual([{ storeConnectionId: 9, productVariantId: 61, overridePriceCents: null, pricingMode: "rules" }]);
     expect(facts.profiles.get(9)).toEqual({ revisionId: 7, profile, updatedAt: EFFECTIVE.toISOString() });
     expect(facts.candidates.get(62)).toEqual({ productVariantId: 62, productId: 1, category: "Envelopes", productLineIds: [3], defaultRetailPriceCents: 899 });
+    // The limits decide whether an `inherit` listing can use its rule price, as in the preview.
+    expect(facts.pricingPolicies).toEqual([POLICY]);
   });
 
   it("answers without a query when no variant is named, and skips the profile read when no listing names a store", async () => {
     const { pool, calls } = fakePool([result([]), result([])]);
-    expect(await repository(pool).loadVendorFacts({ vendorId: 5, productVariantIds: [] })).toEqual({ listings: [], savedPrices: [], profiles: new Map(), candidates: new Map() });
+    expect(await repository(pool).loadVendorFacts({ vendorId: 5, productVariantIds: [] })).toEqual({ listings: [], savedPrices: [], profiles: new Map(), candidates: new Map(), pricingPolicies: [] });
     expect(calls).toEqual([]);
     const facts = await repository(pool).loadVendorFacts({ vendorId: 5, productVariantIds: [61] });
     expect(calls.map((call) => call.sql.slice(0, 40))).toEqual(["SELECT l.id, l.store_connection_id, l.pr", "SELECT store_connection_id, product_vari"]);

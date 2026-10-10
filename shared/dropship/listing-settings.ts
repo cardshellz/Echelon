@@ -2,7 +2,7 @@ import { z } from "zod";
 import { MAX_NAMED_CATALOG_GROUP_ITEMS } from "./catalog-scope";
 import { ebayCategoryIdSchema } from "./ebay-category-rules";
 import { DROPSHIP_LISTING_ACCESS_BLOCK_CODES, DROPSHIP_LISTING_ACCESS_RESOLUTIONS } from "./listing-access";
-import { listingAmountCentsSchema, listingPriceBasisSchema, listingPriceCentsSchema } from "./listing-price";
+import { RULE_PRICE_OUTSIDE_LIMIT_ISSUE, listingAmountCentsSchema, listingPriceBasisSchema, listingPriceCentsSchema } from "./listing-price";
 import { pricingRecipeSchema } from "./pricing-rules";
 
 /**
@@ -31,7 +31,10 @@ const page = z.number().int().min(0).max(MAX_LISTING_SETTINGS_PAGE);
 export const listingSettingsStoreInputSchema = z.object({ storeConnectionId: id }).strict();
 export const listingSettingsProductInputSchema = z.object({ storeConnectionId: id, productId: id }).strict();
 
-/** Which products the Products tab lists. */
+/**
+ * Which products the Products tab lists. `own_settings`: products with a size
+ * that has its own value for a setting or an exact price.
+ */
 export const LISTING_SETTINGS_PRODUCT_FILTERS = [
   "all", "needs_fix", "sizes_differ", "own_settings", "exact_prices", "below_cost", "cannot_price",
 ] as const;
@@ -58,18 +61,21 @@ export const listingSettingsPricesInputSchema = z.object({
  * - `catalog_price`: the Card Shellz retail price;
  * - `last_published`: the price an earlier push saved on the listing;
  * - `retail_fallback`: the Card Shellz retail price, because the size follows
- *   the pricing rules (`inherit`) and they give it no price: the store has none
- *   (`issue` null), or they can't price it (`issue` says why);
+ *   the pricing rules (`inherit`) and they give it no usable price: the store
+ *   has none (`issue` null), or they can't price it or a blocking Card Shellz
+ *   limit refuses their price (`issue` says why);
  * - `none`: no price can be worked out.
  */
 export const LISTING_SETTINGS_PRICE_SOURCES = ["exact", "rules", "catalog_price", "last_published", "retail_fallback", "none"] as const;
 /**
  * Why a size has no price. The first three come from the rules (`resolvePricingRule`).
- * On a `retail_fallback` size, which has a price, it is why the rules can't price it.
+ * On a `retail_fallback` size, which has a price, it is why the rules can't price it;
+ * only there, `pricing_rule_outside_limit` says the rules give a price that a
+ * blocking Card Shellz price limit refuses (`listingPriceFollowsRules`).
  */
 export const LISTING_SETTINGS_PRICE_ISSUES = [
   "pricing_rule_priority_conflict", "pricing_basis_unavailable", "pricing_result_out_of_range",
-  "pricing_rules_not_configured", "price_unavailable",
+  "pricing_rules_not_configured", "price_unavailable", RULE_PRICE_OUTSIDE_LIMIT_ISSUE,
 ] as const;
 /**
  * How Card Shellz applies a price limit: `warn` only warns, `block_listing`
@@ -105,7 +111,7 @@ export const listingSettingsSizePriceSchema = z.object({
   /** What the rule starts from, and that amount; null when the rules don't own the price. */
   basis: listingPriceBasisSchema.nullable(),
   basisAmountCents: listingAmountCentsSchema.nullable(),
-  /** Null when the size has a price, except on a `retail_fallback` size whose rules can't price it. */
+  /** Null when the size has a price, except on a `retail_fallback` size whose rules give it no usable price. */
   issue: z.enum(LISTING_SETTINGS_PRICE_ISSUES).nullable(),
   /** The vendor's live .ops cost for one sellable pack; null when it is not known. */
   costCents: listingAmountCentsSchema.nullable(),
@@ -341,6 +347,7 @@ export const listingSettingsSummarySchema = z.object({
   counts: z.object({
     productsNeedingFix: count,
     productsWithSizesDiffer: count,
+    /** Products the `own_settings` filter lists: a size with its own value for a setting or an exact price. */
     productsWithOwnSettings: count,
     exactPrices: count,
     belowCost: count,

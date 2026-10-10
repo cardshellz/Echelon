@@ -84,6 +84,8 @@ export const STORE_DEFAULT_EDITOR_WORDS = Object.freeze({
   shelfSearchEmpty: "No matching shelves.",
   // Interim: the ship-from repair named in the bar and the leave prompt.
   shipFromPlace: "Ship-from location",
+  // Interim: "Update now" reads the setup first; that read failed, so no repair was sent.
+  shipFromCheckFailed: "Couldn't check where your items ship from. Nothing was changed. Try again.",
   // Interim (C20): beside a field the vendor and another window both changed.
   changedElsewhereToo: "Changed in another window too",
 } as const);
@@ -856,4 +858,40 @@ const SHIP_FROM_FIELD = "merchantLocationKey";
 /** Whether the store's listings must be pointed at the Card Shellz-managed eBay location again (R:513). */
 export function shipFromRepairNeeded(setup: Pick<DropshipEbayListingSetupResponse, "missingFields">): boolean {
   return setup.missingFields.includes(SHIP_FROM_FIELD);
+}
+
+/**
+ * What "Update now" may do, from the setup read again at the click (W10).
+ * A new repair is never planned from the cached read: after a 409 it still
+ * holds the revision the server refused, so every click would be refused
+ * again; after a repair whose answer was lost it still says the location is
+ * missing, so the repair would go again with a stale revision and the vendor
+ * would be told "This changed in another window." about their own save.
+ * - `repair`: the location is still missing; plan from this read.
+ * - `not_needed`: it is right now (an earlier repair landed, or another window made it).
+ * - `read_failed`: the read failed; nothing may be sent.
+ */
+export type ShipFromRepairStart =
+  | { kind: "repair"; setup: DropshipEbayListingSetupResponse }
+  | { kind: "not_needed" }
+  | { kind: "read_failed"; error: unknown };
+
+/**
+ * Reads the setup again and decides `ShipFromRepairStart`. Never rejects.
+ * `read` must reject when the read does not finish (React Query: `refetch({ throwOnError: true })`);
+ * a refetch cancelled in flight otherwise resolves with the cached answer and no error.
+ */
+export async function readShipFromRepairStart(
+  read: () => Promise<{ data?: DropshipEbayListingSetupResponse; error?: unknown }>,
+): Promise<ShipFromRepairStart> {
+  let answer: { data?: DropshipEbayListingSetupResponse; error?: unknown };
+  try {
+    answer = await read();
+  } catch (error) {
+    return { kind: "read_failed", error };
+  }
+  // React Query keeps the older answer beside a failed read's error; that answer is not this read's.
+  if (answer.error !== undefined && answer.error !== null) return { kind: "read_failed", error: answer.error };
+  if (answer.data === undefined) return { kind: "read_failed", error: null };
+  return shipFromRepairNeeded(answer.data) ? { kind: "repair", setup: answer.data } : { kind: "not_needed" };
 }

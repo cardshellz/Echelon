@@ -155,6 +155,7 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/lib/__tests__/dropship-listing-preview.test.ts",
       "client/src/lib/__tests__/dropship-listing-price.test.ts",
       "client/src/lib/__tests__/dropship-pricing-rules.test.ts",
+      "client/src/pages/dropship/__tests__/DropshipPricingRulesPanel.test.ts",
       "client/src/pages/dropship/__tests__/DropshipListingPreview.test.ts",
       "client/src/pages/dropship/__tests__/DropshipListingPriceEditor.test.ts",
       "client/src/lib/__tests__/dropship-catalog-steps.test.ts",

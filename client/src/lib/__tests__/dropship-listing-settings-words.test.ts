@@ -6,8 +6,14 @@ import {
   LISTING_SETTINGS_VALUE_SOURCES,
 } from "@shared/dropship/listing-settings";
 import { evaluateDropshipEbayFulfillmentPolicyCompatibility } from "../../../../server/modules/dropship/domain/ebay-fulfillment-policy-compatibility";
-import { CONNECTION_BANNER_KINDS, LISTING_SETTINGS_RIGHT_REASONS } from "../dropship-listing-settings-access";
-import type { DropshipEbayFulfillmentCapability, DropshipEbayListingSetupResponse } from "../dropship-ops-surface";
+import {
+  CONNECTION_BANNER_KINDS,
+  LISTING_SETTINGS_RIGHT_REASONS,
+  chooseConnectionBanner,
+  listingSettingsEditRights,
+  type ListingSettingsRightsInput,
+} from "../dropship-listing-settings-access";
+import { DropshipApiError, type DropshipEbayFulfillmentCapability, type DropshipEbayListingSetupResponse } from "../dropship-ops-surface";
 import {
   CHECKING_EBAY,
   GROUP_RULE_ORDER_NOTE,
@@ -80,7 +86,7 @@ describe("connection banner words (plan 4.4)", () => {
     expect(say("store_disconnected").message).toBe("MyShop is disconnected, so its settings can't be changed now.");
     expect(say("too_large").message).toBe("You've chosen more than 10,000 sizes. Settings can't be checked until you choose 10,000 or fewer.");
     expect(say("other_site").message).toBe("Card Shellz lists on eBay US only. MyShop is set up for another eBay site. Contact support.");
-    expect(say("selling_paused").message).toBe("Selling is paused on your account. You can still change your policies and store shelf. Prices, eBay categories and descriptions can't be changed until it resumes.");
+    expect(say("selling_paused").message).toBe("Selling is paused on your account. Prices, eBay categories and descriptions can't be changed until it resumes.");
     expect(say("ops_inactive").message).toBe("Your Shellz Club .ops access is inactive, so prices, eBay categories and descriptions can't be changed. Contact support.");
     expect(say("sign_in").message).toBe("eBay needs you to sign in again for MyShop. Your settings are safe. Until you do, you can still change prices and descriptions.");
     expect(say("access_denied", "8d1c7f0e-2b8b").message).toBe("eBay won't let Card Shellz read MyShop. Signing in again won't fix this. Contact support and give this code: 8d1c7f0e-2b8b.");
@@ -104,6 +110,35 @@ describe("connection banner words (plan 4.4)", () => {
     expect(action("sign_in")).toEqual({ kind: "link", link: { label: "Reconnect eBay", href: "/onboarding", external: false } });
     expect(action("access_denied")).toEqual(support);
     expect(action("unreachable")).toEqual({ kind: "retry", label: "Try again" });
+  });
+
+  it("never says the policies or the shelf can be changed when eBay has locked them under a paused account", () => {
+    const paused = (overrides: Partial<ListingSettingsRightsInput>): ListingSettingsRightsInput => ({
+      account: { status: "paused", entitlementStatus: "active" },
+      summary: { storeStatus: "connected", catalog: { state: "ok", products: 3, sizes: 9 } },
+      setup: { data: { access: { canEdit: true, reason: null }, revision: 4, checks: { ebay: "checked", fulfillment: { status: "checked" } }, missingFields: [] }, error: null },
+      shelves: { data: { categories: [] }, error: null },
+      blocked: null,
+      ...overrides,
+    });
+    const refused = (status: number, code: string) => new DropshipApiError({ message: `refused: ${code}`, status, code });
+    const cells = {
+      alone: paused({}),
+      signIn: paused({ summary: { storeStatus: "needs_reauth", catalog: { state: "ok", products: 3, sizes: 9 } } }),
+      accessDenied: paused({ setup: { error: refused(403, "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED") } }),
+      unreachable: paused({ setup: { error: refused(502, "DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE") } }),
+    };
+    const message = "Selling is paused on your account. Prices, eBay categories and descriptions can't be changed until it resumes.";
+    for (const [name, cell] of Object.entries(cells)) {
+      const shown = chooseConnectionBanner(cell);
+      expect(shown?.kind, name).toBe("selling_paused");
+      expect(connectionBannerWords(shown!, "MyShop").message, name).toBe(message);
+    }
+    // The banner leaves the policies to their rows, which say why on their own line when eBay locks them.
+    expect(listingSettingsEditRights(cells.alone).policies).toEqual({ editable: true, reason: null });
+    expect(listingSettingsEditRights(cells.signIn).policies).toEqual({ editable: false, reason: "sign_in" });
+    expect(listingSettingsEditRights(cells.accessDenied).policies).toEqual({ editable: false, reason: "ebay_access_denied" });
+    expect(listingSettingsEditRights(cells.unreachable).shelfPick).toEqual({ editable: false, reason: "unreachable" });
   });
 
   it("reads well without a store name", () => {
@@ -374,8 +409,15 @@ describe("Products list words (C15)", () => {
     expect(ownSettingsWords({ ownSettings: ["store_shelf", "shipping_policy"], exactPriceCount: 0 })).toBe("Shipping policy, store shelf");
     expect(ownSettingsWords({ ownSettings: ["ebay_category"], exactPriceCount: 0 })).toBe("eBay category");
     for (const field of LISTING_SETTINGS_FIELDS) expectPlain(ownSettingsWords({ ownSettings: [field], exactPriceCount: 0 }));
-    expect(ownSettingsSentence({ ownSettings: [], exactPriceCount: 0 })).toBe("Everything uses your store defaults.");
-    expect(ownSettingsSentence({ ownSettings: ["store_shelf"], exactPriceCount: 1 }))
+    expect(ownSettingsSentence({ ownSettings: [], exactPriceCount: 0 }, false)).toBe("Everything uses your store defaults.");
+    expect(ownSettingsSentence({ ownSettings: ["store_shelf"], exactPriceCount: 1 }, false))
       .toBe("Own settings: 1 exact price, store shelf. Everything else uses your store defaults.");
+  });
+
+  it("names older group rules beside the store defaults when one gives the product a value", () => {
+    expect(ownSettingsSentence({ ownSettings: [], exactPriceCount: 0 }, true)).toBe("Everything uses your store defaults or older group rules.");
+    expect(ownSettingsSentence({ ownSettings: ["store_shelf"], exactPriceCount: 1 }, true))
+      .toBe("Own settings: 1 exact price, store shelf. Everything else uses your store defaults or older group rules.");
+    expectPlain(ownSettingsSentence({ ownSettings: [...LISTING_SETTINGS_FIELDS], exactPriceCount: 2 }, true));
   });
 });
