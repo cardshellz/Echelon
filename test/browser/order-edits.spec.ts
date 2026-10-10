@@ -426,6 +426,8 @@ async function installFixtures(
           ? [
               {
                 id: lineId,
+                variantId: "gid://shopify/ProductVariant/345",
+                added: false,
                 title: "Toploader Binder Pages",
                 variantTitle: "Black · 1 Binder",
                 quantity,
@@ -435,6 +437,8 @@ async function installFixtures(
           : []),
         ...input.additions.map((item) => ({
           id: item.variantId,
+          variantId: item.variantId,
+          added: true,
           title: "Card Storage Box",
           variantTitle: "White",
           quantity: item.quantity,
@@ -506,6 +510,8 @@ async function installFixtures(
           lines: [
             {
               id: "calculated-1",
+              variantId: "gid://shopify/ProductVariant/345",
+              added: false,
               title: "Toploader Binder Pages",
               variantTitle: "Black · 1 Binder",
               quantity,
@@ -513,6 +519,8 @@ async function installFixtures(
             },
             ...input.additions.map((item) => ({
               id: item.variantId,
+              variantId: item.variantId,
+              added: true,
               title: "Card Storage Box",
               variantTitle: "White",
               quantity: item.quantity,
@@ -604,7 +612,7 @@ async function assertFitsScreen(page: Page) {
 }
 async function addStorageBox(page: Page) {
   await page
-    .getByRole("button", { name: "Search or browse products", exact: true })
+    .getByRole("button", { name: "Add products", exact: true })
     .click();
   const picker = page.getByRole("dialog");
   await picker.getByLabel("Product name or SKU", { exact: true }).fill("box");
@@ -615,13 +623,102 @@ async function addStorageBox(page: Page) {
   await picker.getByRole("button", { name: "Done", exact: true }).click();
 }
 
+test("review groups each SKU and rolls financial detail up without hiding the verified amount due", async ({ page }, testInfo) => {
+  const before = {
+    itemsGrossCents: 2000,
+    itemsDiscountCents: 0,
+    itemsNetCents: 2000,
+    itemDiscountLabels: [],
+    shippingGrossCents: 0,
+    shippingDiscountCents: 0,
+    shippingCents: 0,
+    shippingDiscountLabels: [],
+    taxCents: 0,
+    taxesIncluded: false,
+    totalCents: 2000,
+    lines: [{ id: lineId, grossCents: 2000, discountCents: 0, netCents: 2000 }],
+  };
+  const after = {
+    ...before,
+    itemsGrossCents: 5500,
+    itemsDiscountCents: 300,
+    itemsNetCents: 5200,
+    itemDiscountLabels: ["TEN"],
+    shippingGrossCents: 500,
+    shippingCents: 500,
+    taxCents: 300,
+    totalCents: 6000,
+    lines: [
+      { id: "original", grossCents: 1000, discountCents: 0, netCents: 1000 },
+      { id: "increase", grossCents: 3000, discountCents: 300, netCents: 2700 },
+      { id: "new-product", grossCents: 1500, discountCents: 0, netCents: 1500 },
+    ],
+  };
+  const fixture = await installFixtures(page, {
+    existingOperation: {
+      operationId,
+      orderNumber: order.orderNumber,
+      currency: "USD",
+      canAbandon: true,
+      previousTotalCents: 2000,
+      updatedTotalCents: 6000,
+      balanceDueCents: 4000,
+      refundDueCents: 0,
+      quoteAvailable: true,
+      status: "ready",
+      expiresAt: "2026-10-05T13:00:00.000Z",
+      paymentDeadline: null,
+      paymentUrl: null,
+      error: null,
+      warnings: [],
+      financials: { before, quoted: after, current: before },
+      settlement: {
+        receivedCents: 2000, refundedCents: 0, netPaidCents: 2000, outstandingCents: 0,
+        activity: [{ id: "paid", kind: "payment", status: "SUCCESS", amountCents: 2000, processedAt: "2026-10-04T12:00:00.000Z" }],
+      },
+      lines: [
+        { id: "original", variantId: "gid://shopify/ProductVariant/345", title: "Toploader Binder Pages", variantTitle: "Black · 1 Binder", quantity: 1, totalCents: 1000, added: false },
+        { id: "increase", variantId: "gid://shopify/ProductVariant/345", title: "Toploader Binder Pages", variantTitle: "Black · 1 Binder", quantity: 3, totalCents: 2700, added: false },
+        { id: "new-product", variantId: "gid://shopify/ProductVariant/777", title: "Card Storage Box", variantTitle: "White", quantity: 1, totalCents: 1500, added: true },
+      ],
+    },
+  });
+  await chooseOrder(page);
+  const items = page.getByRole("region", { name: "Items in your order", exact: true });
+  await expect(items.getByRole("listitem")).toHaveCount(2);
+  await expect(items.getByText("Qty 4", { exact: true })).toBeVisible();
+  await expect(items.getByText("$37.00", { exact: true })).toBeVisible();
+  await expect(items.getByText("Added", { exact: true })).toHaveCount(1);
+  const summary = page.getByRole("region", { name: "Order summary", exact: true });
+  await expect(summary.getByText("$60.00", { exact: true })).toBeVisible();
+  await expect(summary.getByText("$40.00", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Apply changes · $40.00 payment due", exact: true })).toBeEnabled();
+  const calculations = page.locator("details").filter({ has: page.locator("summary", { hasText: "Discounts, shipping and tax" }) });
+  const payments = page.locator("details").filter({ has: page.locator("summary", { hasText: "Payments and refunds" }) });
+  await expect(calculations).not.toHaveAttribute("open");
+  await expect(payments).not.toHaveAttribute("open");
+  await expect(calculations.getByRole("table")).not.toBeVisible();
+  await expect(payments.getByText("Payment history", { exact: true })).not.toBeVisible();
+  await assertFitsScreen(page);
+  await page.screenshot({ path: testInfo.outputPath("order-review-collapsed.png"), fullPage: true });
+  await calculations.locator("summary").click();
+  await expect(calculations.getByRole("table")).toBeVisible();
+  await expect(calculations.getByText("TEN", { exact: true })).toBeVisible();
+  await expect(calculations.getByText("−$3.00", { exact: true })).toBeVisible();
+  await payments.locator("summary").click();
+  await expect(payments.getByText("Payment · Succeeded", { exact: true })).toBeVisible();
+  await assertFitsScreen(page);
+  expect(fixture.requests.some((request) => /\/(quotes|commit|abandon)$/.test(request.path))).toBe(false);
+  expect(fixture.failures).toEqual([]);
+});
+
 test("product discovery searches names and SKUs and keeps pack sizes under their product", async ({
   page,
 }, testInfo) => {
   const fixture = await installFixtures(page);
   await chooseOrder(page);
   await page
-    .getByRole("button", { name: "Search or browse products", exact: true })
+    .getByRole("button", { name: "Add products", exact: true })
     .click();
   const picker = page.getByRole("dialog");
   await expect(picker.getByLabel("Product name or SKU")).toBeFocused();
@@ -709,7 +806,7 @@ test("shows the storefront member-price treatment on the correct pack, including
   });
   await chooseOrder(page);
   await page
-    .getByRole("button", { name: "Search or browse products", exact: true })
+    .getByRole("button", { name: "Add products", exact: true })
     .click();
   const picker = page.getByRole("dialog");
   await picker.getByLabel("Product name or SKU").fill("premium");
@@ -754,6 +851,13 @@ test("shows the storefront member-price treatment on the correct pack, including
       name: "Quantity for added 35PT 3x4 Premium Toploader · Box of 250 · SHLZ-TOP-35PT-B250",
     }),
   ).toHaveValue("1");
+  const addedMemberPrice = page.getByLabel(
+    ".club member price $29.99; retail $39.99", { exact: true },
+  );
+  await expect(addedMemberPrice).toBeVisible();
+  await expect(addedMemberPrice.locator(".cardshellz-member-price-value"))
+    .toHaveCSS("color", "rgb(74, 138, 58)");
+  await assertFitsScreen(page);
   expect(
     fixture.requests.filter((request) =>
       /\/(quotes|commit)$/.test(request.path),
@@ -772,7 +876,7 @@ test("does not offer cached pack prices while a later stock/pricing page has fai
   });
   await chooseOrder(page);
   await page
-    .getByRole("button", { name: "Search or browse products", exact: true })
+    .getByRole("button", { name: "Add products", exact: true })
     .click();
   const picker = page.getByRole("dialog");
   await picker.getByLabel("Product name or SKU").fill("premium");
@@ -814,7 +918,7 @@ test("hides a product when its pack read confirms stock became unavailable", asy
   const fixture = await installFixtures(page, { soldOutCatalogProduct: true });
   await chooseOrder(page);
   await page
-    .getByRole("button", { name: "Search or browse products", exact: true })
+    .getByRole("button", { name: "Add products", exact: true })
     .click();
   const picker = page.getByRole("dialog");
   await picker.getByRole("button", { name: /Card Storage Box/ }).click();
@@ -840,7 +944,7 @@ test("category, product and SKU pagination keep the whole catalog reachable and 
   const fixture = await installFixtures(page, { paginateCatalog: true });
   await chooseOrder(page);
   await page
-    .getByRole("button", { name: "Search or browse products", exact: true })
+    .getByRole("button", { name: "Add products", exact: true })
     .click();
   const picker = page.getByRole("dialog");
   await picker
@@ -879,7 +983,7 @@ test("category, product and SKU pagination keep the whole catalog reachable and 
   ).toBeDisabled();
   await picker.getByRole("button", { name: "Done", exact: true }).click();
   await page
-    .getByRole("button", { name: "Search or browse products", exact: true })
+    .getByRole("button", { name: "Add products", exact: true })
     .click();
   await picker.getByLabel("Category").selectOption("Toploaders");
   await picker
@@ -908,7 +1012,7 @@ test("product and pack-size read failures retry without locking the edit or issu
   });
   await chooseOrder(page);
   await page
-    .getByRole("button", { name: "Search or browse products", exact: true })
+    .getByRole("button", { name: "Add products", exact: true })
     .click();
   const picker = page.getByRole("dialog");
   await expect(picker.getByRole("alert")).toContainText(
@@ -951,7 +1055,7 @@ test("typing a new search hides previous results and ignores a late response", a
   });
   await chooseOrder(page);
   await page
-    .getByRole("button", { name: "Search or browse products", exact: true })
+    .getByRole("button", { name: "Add products", exact: true })
     .click();
   const picker = page.getByRole("dialog");
   const search = picker.getByLabel("Product name or SKU");
@@ -1630,7 +1734,7 @@ test("an active edit discovered after stale search results replaces the editing 
   ).toHaveCount(0);
   await expect(
     page.getByRole("button", {
-      name: "Search or browse products",
+      name: "Add products",
       exact: true,
     }),
   ).toHaveCount(0);
@@ -1669,13 +1773,14 @@ test("warms pricing on open, calculates after a pause and shows preview immediat
   });
   await quantity.fill("3");
   await expect(
-    page.getByText("Updated total preview: $30.00", { exact: false }),
+    page.getByText("Updated totals are ready.", { exact: false }),
   ).toBeVisible();
   await page
     .getByRole("button", { name: "Review changes", exact: true })
     .click();
   await expect(
-    page.getByText("Preview · verifying", { exact: true }),
+    page.getByRole("region", { name: "Order summary", exact: true })
+      .getByText("Preview total · verifying", { exact: true }),
   ).toBeVisible({ timeout: 1500 });
   await expect(
     page.getByRole("button", { name: "Verifying changes…", exact: true }),

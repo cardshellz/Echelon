@@ -994,6 +994,11 @@ export class OrderEditService {
     const presentedPaid = useCurrent
       ? snapshot.netPaidCents
       : record.baseline.netPaidCents;
+    const originalVariants = new Set(
+      record.baseline.lines
+        .filter((line) => line.quantity > 0 && line.variantId !== null)
+        .map((line) => line.variantId),
+    );
     return orderEditOperationSchema.parse({
       operationId: record.id,
       orderNumber: record.baseline.name,
@@ -1014,6 +1019,9 @@ export class OrderEditService {
         quote && !useCurrent
           ? quote.lines.map((line) => ({
               id: line.calculatedLineId,
+              variantId: line.variantId,
+              added:
+                line.variantId !== null && !originalVariants.has(line.variantId),
               title: line.title,
               variantTitle: line.variantTitle,
               quantity: line.quantity,
@@ -1024,6 +1032,9 @@ export class OrderEditService {
             }))
           : snapshot.lines.map((line) => ({
               id: line.id,
+              variantId: line.variantId,
+              added:
+                line.variantId !== null && !originalVariants.has(line.variantId),
               title: line.title,
               variantTitle: line.variantTitle,
               quantity: line.quantity,

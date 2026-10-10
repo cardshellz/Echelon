@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useId, useState } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { ChevronDown, Package, Plus, Search } from "lucide-react";
-import type { OrderEditVariant } from "@shared/order-edits/order-edit.contract";
-import type { OrderEditCatalogProduct } from "@shared/order-edits/order-edit-catalog";
+import type {
+  OrderEditCatalogProduct,
+  OrderEditCatalogVariant,
+} from "@shared/order-edits/order-edit-catalog";
+import type { MemberPlanPresentation } from "@shared/membership/member-plan-presentation";
 import { MemberProductPrice } from "@/components/MemberProductPrice";
 import { orderEditCatalogSearchSchema } from "@shared/order-edits/order-edit-catalog";
 import { Button } from "@/components/ui/button";
@@ -31,30 +34,27 @@ type PickerProps = {
   expectedRevision: string;
   enabled: boolean;
   includedVariantIds: ReadonlySet<string>;
-  onAdd(variant: OrderEditVariant): void;
+  onAdd(
+    variant: OrderEditCatalogVariant,
+    plan: MemberPlanPresentation | null,
+  ): void;
 };
 
 export function OrderEditProductPicker(props: PickerProps) {
   const [open, setOpen] = useState(false);
   return (
     <Dialog open={open && props.enabled} onOpenChange={setOpen}>
-      <div className="space-y-2">
-        <p className="text-sm font-medium">Add products</p>
-        <DialogTrigger asChild>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={!props.enabled}
-            className="h-auto min-h-11 w-full justify-start gap-2 whitespace-normal py-3 text-left"
-          >
-            <Search className="h-4 w-4 shrink-0" aria-hidden="true" />
-            Search or browse products
-          </Button>
-        </DialogTrigger>
-        <p className="text-xs text-muted-foreground">
-          Find a product by name or SKU, or browse categories and pack sizes.
-        </p>
-      </div>
+      <DialogTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={!props.enabled}
+          className="gap-2"
+        >
+          <Plus className="h-4 w-4" aria-hidden="true" />
+          Add products
+        </Button>
+      </DialogTrigger>
       {open && props.enabled && (
         <DialogContent className="flex max-h-[90dvh] max-w-4xl flex-col overflow-hidden p-4 sm:p-6">
           <DialogHeader className="shrink-0 pr-6 text-left">
@@ -448,7 +448,7 @@ function VariantOptions(
                 included ? `${label} already in order` : `Add ${label}`
               }
               disabled={!props.enabled || included || !variant.available}
-              onClick={() => props.onAdd(variant)}
+              onClick={() => props.onAdd(variant, plan)}
             >
               {included ? (
                 "Added / in order"
