@@ -1,4 +1,4 @@
--- 0732: the `inherit` price mode for one size (Listing settings design M1,
+-- 0735: the `inherit` price mode for one size (Listing settings design M1,
 -- PR 7; owner decisions A3 and L1, 2026-10-09).
 --
 -- A size saved as `inherit` has no price of its own. It takes the price the

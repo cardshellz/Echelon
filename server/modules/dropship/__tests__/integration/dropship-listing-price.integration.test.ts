@@ -71,8 +71,8 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
     await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations/0657_dropship_listing_price_settings.sql"), "utf8")));
     await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations/0659_dropship_store_pricing_rules.sql"), "utf8")));
     await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations/0660_dropship_vendor_listing_content.sql"), "utf8")));
-    // 0732 runs twice to prove it can be re-run (each check is dropped if present and added again).
-    const inheritMigration = qualify(readFileSync(resolve(process.cwd(), "migrations/0732_dropship_listing_price_inherit_mode.sql"), "utf8"));
+    // 0735 runs twice to prove it can be re-run (each check is dropped if present and added again).
+    const inheritMigration = qualify(readFileSync(resolve(process.cwd(), "migrations/0735_dropship_listing_price_inherit_mode.sql"), "utf8"));
     await pool.query(inheritMigration);
     await pool.query(inheritMigration);
     const scopedPool = { connect: async () => { const client = await pool!.connect();
@@ -312,7 +312,7 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
     expect(items.rows[0].result.listingIntent.description).toBe("<p>Reviewed copy</p>");
     expect(resolved.facts).toContainEqual({ name: "SKU", value: "ARM-50" });
   });
-  describe("the inherit price mode (migration 0732)", () => {
+  describe("the inherit price mode (migration 0735)", () => {
     /** A revision written straight to the table, skipping the repository, to test the checks alone. */
     function insertRevision(key: string, pricingMode: string | null, overridePriceCents: number | null) {
       return pool!.query(qualify(`INSERT INTO dropship.dropship_listing_price_revisions

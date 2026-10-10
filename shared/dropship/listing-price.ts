@@ -15,7 +15,7 @@ export const listingPriceBasisSchema = z.enum(["product_cost", "catalog_retail"]
  * - `rules`: the store's pricing rules, and no price when they can't give one;
  * - `inherit`: no price of its own. The store's pricing rules when they give a
  *   usable price (`listingPriceFollowsRules`), otherwise the Card Shellz retail
- *   price, never the price an earlier push saved (migration 0732; owner
+ *   price, never the price an earlier push saved (migration 0735; owner
  *   decisions A3 and L1, 2026-10-09).
  */
 export const LISTING_PRICING_MODES = ["fixed", "catalog_default", "rules", "inherit"] as const;
