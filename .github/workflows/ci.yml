@@ -59,6 +59,12 @@ jobs:
       # Separate runners keep TypeScript heaps and incremental caches isolated.
       - name: Application types
         if: matrix.project == 'application'
+        # A full check of this program needs ~4.2 GB (tsc --extendedDiagnostics
+        # --incremental false, Oct 2026: main 4,170,245K), at Node's ~4 GB
+        # default, so tsc dies out of memory on some runs. Same headroom as
+        # the server test types below.
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: npm run check
       - name: Server test types
         if: matrix.project == 'server-tests'
