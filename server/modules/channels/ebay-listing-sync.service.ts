@@ -7,8 +7,8 @@ import { ebayProductSyncResultSchema } from "@shared/types/ebay-listing-sync";
 import {
   ebayListingSyncIdentitySchema,
   EbayListingSyncError,
-  syncIdentityHash,
   syncFailure,
+  syncIdentityHash,
   type EbayListingSyncIdentity,
   type StoredEbayListingSyncJob,
 } from "./ebay-listing-sync.domain";
@@ -19,8 +19,11 @@ import {
 } from "./listing-connectors/ebay-listing.connector";
 import { syncContentIntentHash } from "./ebay-listing-sync-content";
 import type { QuantityPublicationScope } from "../inventory-planning/domain/quantity-publication-admission";
+import { assertEbayListingSourceIdentityUnchanged } from "./ebay-existing-listing-identity";
+import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 
 export interface PreparedEbayListingSync {
+  sourceIdentity?: EbayListingSyncIdentity;
   identity: EbayListingSyncIdentity;
   client: EbayListingLifecycleClient;
   draft: Pick<
@@ -53,17 +56,20 @@ export class EbayExistingListingSyncExecution
     identity: EbayListingSyncIdentity,
     stage: Parameters<EbayListingSyncExecution["execute"]>[1],
     verificationIntentHash: string | null = null,
+    bindProviderIdentity?: (identity: EbayListingSyncIdentity) => Promise<void>,
   ): Promise<EbayProductSyncResult> {
     const prepared = await this.prepare(identity);
-    if (
-      syncIdentityHash(
-        ebayListingSyncIdentitySchema.parse(prepared.identity),
-      ) !== syncIdentityHash(identity)
-    )
-      throw new EbayListingSyncError(
-        "EBAY_SYNC_IDENTITY_CHANGED",
-        "The account, group or exact listing members changed. Review this listing before another sync.",
-      );
+    if (prepared.sourceIdentity) {
+      assertEbayListingSourceIdentityUnchanged(identity, prepared.sourceIdentity);
+    } else if (syncIdentityHash(identity) !== syncIdentityHash(prepared.identity)) {
+      // Legacy callers provide an already resolved identity. Its group is part
+      // of the provider identity and cannot be treated as a catalog hint.
+      throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The listing mapping changed. Start a new sync with the current mapping.");
+    }
+    const resolvedIdentity = ebayListingSyncIdentitySchema.parse(prepared.identity);
+    // Persist the exact observed provider resources before any provider mutation.
+    // A later retry cannot silently switch this job to another group or offer.
+    await bindProviderIdentity?.(resolvedIdentity);
     const scope = (item: string): QuantityPublicationScope => ({
       destinationKind: "channel_connection",
       connectionId: identity.connectionId,
@@ -75,8 +81,8 @@ export class EbayExistingListingSyncExecution
       productVariantId: null,
     });
     const recovery = await this.recovery.reconcile([
-      scope(`group:${identity.groupKey}`),
-      ...identity.variants.map((member) => scope(member.sku)),
+      ...(resolvedIdentity.groupKey === null ? [] : [scope(`group:${resolvedIdentity.groupKey}`)]),
+      ...resolvedIdentity.variants.map((member) => scope(member.sku)),
     ]);
     if (recovery.busy)
       throw new EbayListingSyncError(
@@ -90,13 +96,13 @@ export class EbayExistingListingSyncExecution
       );
     const contentHash = syncContentIntentHash(prepared.draft);
     const offerIds: Record<number, string> = {};
-    for (const member of identity.variants) {
+    for (const member of resolvedIdentity.variants) {
       if (member.offerId) offerIds[member.variantId] = member.offerId;
     }
     const verify = (): Promise<void> => this.connector.verifyExistingListing({
       client: prepared.client,
       draft: prepared.draft,
-      identity,
+      identity: resolvedIdentity,
       offerIds,
     });
     // A committed post-write checkpoint binds retries to accepted content. ATP
@@ -119,7 +125,7 @@ export class EbayExistingListingSyncExecution
     const updated = await this.connector.syncExistingListing({
       client: prepared.client,
       draft: prepared.draft,
-      identity,
+      identity: resolvedIdentity,
       stage,
     });
     if (updated.missingOfferVariantIds.length)
@@ -131,7 +137,7 @@ export class EbayExistingListingSyncExecution
       this.connector.verifyExistingListing({
         client: prepared.client,
         draft: prepared.draft,
-        identity,
+        identity: resolvedIdentity,
         offerIds: updated.updatedOfferIds,
       }),
     );
@@ -167,6 +173,8 @@ export interface EbayListingSyncClaim {
   release(): Promise<void>;
 }
 export interface EbayListingSyncStore {
+  recordAdmissionFailure(input: EbaySyncAdmissionFailure, now: Date): Promise<EbayListingSyncJob>;
+  bindProviderIdentity(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date): Promise<void>;
   enqueue(
     identity: EbayListingSyncIdentity,
     commandKey: string,
@@ -175,6 +183,8 @@ export interface EbayListingSyncStore {
   ): Promise<StoredEbayListingSyncJob>;
   list(channelId: number): Promise<EbayListingSyncJob[]>;
   get(id: string): Promise<StoredEbayListingSyncJob>;
+  getByCommand(commandKey: string, channelId: number): Promise<StoredEbayListingSyncJob | null>;
+  getAdmission(id: string, channelId: number): Promise<EbayListingSyncJob | null>;
   claim(
     now: Date,
     token: string,
@@ -213,8 +223,17 @@ export interface EbayListingSyncExecution {
       work: () => Promise<void>,
     ) => Promise<void>,
     verificationIntentHash?: string | null,
+    bindProviderIdentity?: (identity: EbayListingSyncIdentity) => Promise<void>,
   ): Promise<EbayProductSyncResult>;
 }
+
+export const ebaySyncAdmissionFailureSchema = z.object({
+  channelId: z.number().int().positive(), productId: z.number().int().positive(),
+  variantIds: z.array(z.number().int().positive()).max(250),
+  actor: z.string().trim().min(1).max(200), commandKey: z.string().uuid(),
+  code: z.string().min(1).max(100), message: z.string().min(1).max(1000),
+}).strict();
+export type EbaySyncAdmissionFailure = z.infer<typeof ebaySyncAdmissionFailureSchema>;
 
 /** One application owner from request to verified completion. The external adapter
  * owns listing primitives; inventory admission owns every quantity-bearing write. */
@@ -241,8 +260,12 @@ export class EbayListingSyncService {
       this.now(),
     );
   }
-  list(channelId: number): Promise<EbayListingSyncJob[]> {
-    return this.store.list(z.number().int().positive().parse(channelId));
+  async recordAdmissionFailure(input: Omit<EbaySyncAdmissionFailure, "commandKey" | "variantIds"> & { commandKey?: string; variantIds: readonly number[] }): Promise<EbayListingSyncJob> {
+    const parsed = ebaySyncAdmissionFailureSchema.parse({ ...input, commandKey: input.commandKey ?? this.uuid() });
+    return this.withIssue(await this.store.recordAdmissionFailure(parsed, this.now()));
+  }
+  async list(channelId: number): Promise<EbayListingSyncJob[]> {
+    return (await this.store.list(z.number().int().positive().parse(channelId))).map(job => this.withIssue(job));
   }
   async processDue(
     limit = 5,
@@ -274,6 +297,7 @@ export class EbayListingSyncService {
               job.verificationRevision === job.claimedRevision
                 ? job.verificationIntentHash
                 : null,
+              resolved => this.store.bindProviderIdentity(job, resolved, this.now()),
             ),
           );
           await this.store.finish(
@@ -323,6 +347,18 @@ export class EbayListingSyncService {
   }
   get(id: string): Promise<StoredEbayListingSyncJob> {
     return this.store.get(z.string().uuid().parse(id));
+  }
+  getByCommand(commandKey: string, channelId: number): Promise<StoredEbayListingSyncJob | null> {
+    return this.store.getByCommand(z.string().uuid().parse(commandKey), z.number().int().positive().max(2147483647).parse(channelId));
+  }
+  async getAdmission(id: string, channelId: number): Promise<EbayListingSyncJob | null> {
+    const job = await this.store.getAdmission(z.string().uuid().parse(id), z.number().int().positive().parse(channelId));
+    return job ? this.withIssue(job) : null;
+  }
+  private withIssue<T extends EbayListingSyncJob>(job: T): T {
+    return job.code || job.state === "needs_attention" || job.state === "awaiting_evidence"
+      ? { ...job, issue: resolveEbayListingIssue({ ...job, jobId: job.id }) }
+      : job;
   }
   private now(): Date {
     const value = this.clock();

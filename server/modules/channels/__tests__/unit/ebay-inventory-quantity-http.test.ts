@@ -77,7 +77,7 @@ describe("eBay quantity protocol through the actual HTTP client and admission bo
   it("does not pass admission when a bulk response omits the selected offer", async () => {
     const request = vi.fn<typeof fetch>().mockResolvedValueOnce(json(page())).mockResolvedValueOnce(json({ responses: [{ sku, statusCode: 200 }] }));
     const f = fixture(request);
-    await expect(publishEbayInventoryQuantity(f.client, sku, "EBAY_GB", 7)).rejects.toThrow("not confirmed");
+    await expect(publishEbayInventoryQuantity(f.client, sku, "EBAY_GB", 7)).rejects.toMatchObject({ code: "EBAY_QUANTITY_RESPONSE_UNCERTAIN" });
     expect(request).toHaveBeenCalledTimes(2);
   });
 });

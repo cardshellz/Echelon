@@ -59,6 +59,9 @@ import type {
 import crypto from "crypto";
 import { readExistingEbayListingPhotos } from "./ebay/ebay-listing-photos.reader";
 import type { EbayListingPhotoResolver } from "../ebay-listing-photos.service";
+import { createEbayMarketplaceRegistrationAdapters } from "./ebay/ebay-marketplace-registration.factory";
+import { observeExistingEbayPublication } from "../ebay-existing-listing-identity";
+import { EbayListingSyncError } from "../ebay-listing-sync.domain";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -223,6 +226,17 @@ export class EbayAdapter implements IChannelAdapter {
     );
     const pushResult = await this.listingConnector.pushListing({
       client,
+      resolvePublishedIdentity: async discovered => {
+        const authService = await this.getAuthService(channelId);
+        const account = await authService.getVerifiedProviderAccount(channelId);
+        if (!account) throw new EbayListingSyncError("EBAY_AUTH_REQUIRED", "A verified eBay account connection is required before updating an existing publication.");
+        return observeExistingEbayPublication({
+          owner: { kind: "channel", channelId, productId: listing.productId, provider: "ebay", marketplaceId: config.marketplaceId },
+          locator: { externalListingId: discovered.listingId, providerPublicationKey: null },
+          memberCandidates: offers.map(offer => ({ productVariantId: offer.variantId, sku: offer.sku,
+            isActive: true, availableQuantity: offer.payload.availableQuantity })),
+        }, createEbayMarketplaceRegistrationAdapters({ authService }).observer, account.externalAccountId);
+      },
       draft: {
         productId: listing.productId,
         marketplaceId: config.marketplaceId,
@@ -231,6 +245,7 @@ export class EbayAdapter implements IChannelAdapter {
         itemGroup,
         publishMode: "publish",
         hasExistingExternalIds: hasExistingIds,
+        existingOfferIdsByVariantId: Object.fromEntries(listing.variants.map(variant => [variant.variantId, variant.externalVariantId])),
       },
     });
 

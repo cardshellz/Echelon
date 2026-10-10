@@ -4,4 +4,6 @@ export {
   syncActiveListings,
   triggerPricingRuleSync,
   ebayListingSyncService,
+  readExistingEbayListingIdentityForProduct,
 } from "./infrastructure/ebay-active-listing-sync";
+export { EbayListingRecoveryService } from "./ebay-listing-recovery.service";

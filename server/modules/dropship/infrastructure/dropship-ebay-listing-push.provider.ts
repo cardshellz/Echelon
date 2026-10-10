@@ -39,6 +39,7 @@ import {
   recordEbayAccessTokenRejection,
 } from "./dropship-ebay-auth-failure";
 import { DropshipEbayTokenOwner, resolveDropshipEbayProviderEnvironment } from "./dropship-ebay-token-owner";
+import type { DropshipEbayPushPublicationReader } from "./dropship-ebay-push-publication.reader";
 import type {
   DropshipEbayFulfillmentPolicyGuard,
   DropshipEbayFulfillmentPolicyPreflight,
@@ -114,6 +115,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     private readonly fulfillmentPolicyGuard?: DropshipEbayFulfillmentPolicyGuard,
     private readonly managedLocations?: DropshipEbayManagedLocationProvider,
     private readonly quantityAdmission?: (credential: DropshipMarketplaceStoreCredentials) => EbayQuantityRequestAdmission,
+    private readonly existingPublication?: DropshipEbayPushPublicationReader,
   ) {
     this.tokenOwner = new DropshipEbayTokenOwner({ credentials, fetchFn: fetchImpl, clock });
   }
@@ -145,6 +147,10 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     );
     const connectorResult = await this.listingConnector.pushListing({
       client: this.createConnectorClient({ credential, config, baseUrl }),
+      resolvePublishedIdentity: this.existingPublication
+        ? discovered => this.existingPublication!.resolve({ ...input,
+            listingIntent: { ...input.listingIntent, marketplaceConfig: { ...input.listingIntent.marketplaceConfig, marketplaceId: config.marketplaceId } } }, credential, discovered)
+        : undefined,
       draft: {
         productId: input.productVariantId,
         marketplaceId: config.marketplaceId,
@@ -204,12 +210,15 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
   async executeListingRebuild(
     input: DropshipEbayListingRebuildRequest & { readonly preview: EbayListingRebuildPreview },
   ): Promise<EbayListingRebuildResult> {
-    const session = await this.createReplacementLifecycleClient(input);
+    const session = await this.createReplacementSession(input);
     assertRebuildMarketplaceMatches(input.draft, session.marketplaceId);
     return this.listingConnector.executeListingRebuild({
       client: session.client,
       draft: input.draft,
       preview: input.preview,
+      resolvePublishedIdentity: this.existingPublication
+        ? discovered => this.existingPublication!.resolveRebuild(input, session.credential, discovered)
+        : undefined,
     });
   }
   async createReplacementLifecycleClient(input: {
@@ -217,6 +226,14 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     storeConnectionId: number;
     marketplaceConfig: Record<string, unknown>;
   }): Promise<DropshipEbayReplacementSession> {
+    const { marketplaceId,client } = await this.createReplacementSession(input);
+    return { marketplaceId,client };
+  }
+  private async createReplacementSession(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    marketplaceConfig: Record<string, unknown>;
+  }): Promise<DropshipEbayReplacementSession & { credential: DropshipMarketplaceStoreCredentials }> {
     const credential = await this.tokenOwner.loadFreshForStoreConnection({
       vendorId: input.vendorId,
       storeConnectionId: input.storeConnectionId,
@@ -231,6 +248,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     };
     await this.assertFulfillmentPolicyCompatible({ credential, config });
     return {
+      credential,
       marketplaceId: config.marketplaceId,
       client: this.createConnectorClient({
         credential,

@@ -8,6 +8,7 @@ import { cutoverCompositionBaseSql, cutoverCompositionLegacyChannelSeedSql, cuto
 import { PostgresQuantityPublicationAdmission } from "../../infrastructure/quantity-publication-admission.repository";
 import type { QuantityPublicationScope } from "../../domain/quantity-publication-admission";
 import { EbayApiClient } from "../../../channels/adapters/ebay/ebay-api.client";
+import { PostgresQuantityProviderResponseRecovery } from "../../infrastructure/quantity-provider-response-recovery.repository";
 
 vi.mock("../../../../db", () => ({ pool: {} }));
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
@@ -21,7 +22,8 @@ dbDescribe.sequential("durable eBay terminal evidence with actual migration0663"
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl,disposable,cutoverCompositionBaseSql);
     await installCutoverCompositionMigrations(database.pool);
-    for (const migration of ["0709_walmart_quantity_admission.sql", "0716_inventory_publication_reconciliation.sql"]) {
+    for (const migration of ["0709_walmart_quantity_admission.sql", "0716_inventory_publication_reconciliation.sql",
+      "0729_ebay_listing_sync_recovery.sql", "0733_ebay_provider_response_finality.sql"]) {
       await database.pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     }
     await database.pool.query(cutoverCompositionSeedSql);
@@ -43,8 +45,32 @@ dbDescribe.sequential("durable eBay terminal evidence with actual migration0663"
       { product: { title: "Test",imageUrls: [] },condition: "NEW",availability: { shipToLocationAvailability: { quantity } } }));
     const attempts = async () => (await database.pool.query(`SELECT id::text,state,resolution_basis,completed_at FROM inventory.quantity_publication_attempts
       WHERE scope->>'externalInventoryItemId'=$1 ORDER BY id`,[scope.externalInventoryItemId])).rows;
-    return { scope,clock,admission,publish,attempts,advance: (ms: number) => { timestamp += ms; } };
+    return { scope,clock,admission,api,publish,attempts,advance: (ms: number) => { timestamp += ms; } };
   }
+
+  it("recovers a final partial bulk response without pretending its quantity was delivered", async () => {
+    const request=vi.fn<typeof fetch>(async()=>new Response(JSON.stringify({responses:[
+      {sku:test.scope.externalInventoryItemId,statusCode:200},
+      {sku:test.scope.externalInventoryItemId,offerId:"offer-1",statusCode:400,
+        errors:[{errorId:25004,category:"REQUEST",message:"Invalid quantity"}]},
+    ]}),{status:207}));
+    const test=setup(request);
+    await expect(test.admission.run(test.scope,()=>test.api.bulkUpdatePriceQuantity({requests:[{
+      sku:test.scope.externalInventoryItemId,shipToLocationAvailability:{quantity:4},offers:[{offerId:"offer-1",availableQuantity:4}],
+    }]}))).rejects.toMatchObject({code:"EBAY_QUANTITY_RESPONSE_UNCERTAIN"});
+    const original=(await test.attempts())[0];
+    expect(original.state).toBe("uncertain");
+    const recorded=(await database.pool.query("SELECT r.* FROM inventory.quantity_provider_request_results r JOIN inventory.quantity_provider_requests q ON q.id=r.request_id WHERE q.attempt_id=$1",[original.id])).rows[0];
+    expect(recorded).toMatchObject({outcome:"uncertain",http_status:207,request_terminated:true,error_codes:["25004"]});
+    expect(await new PostgresQuantityProviderResponseRecovery(database.pool,test.clock).reconcile([test.scope]))
+      .toEqual({resolved:[original.id],unresolved:[],busy:false});
+    expect((await test.attempts())[0]).toMatchObject({state:"resolved",resolution_basis:"provider_response_terminal"});
+    expect((await database.pool.query("SELECT r.* FROM inventory.quantity_provider_request_results r JOIN inventory.quantity_provider_requests q ON q.id=r.request_id WHERE q.attempt_id=$1",[original.id])).rows[0]).toEqual(recorded);
+    request.mockImplementation(async()=>new Response(null,{status:204}));
+    await test.publish(23);
+    expect(JSON.parse(String(request.mock.calls.at(-1)![1]!.body)).availability.shipToLocationAvailability.quantity).toBe(23);
+    expect(request).toHaveBeenCalledTimes(2);
+  });
 
   it("records a terminal rejection and durable cooldown; restart and new events cannot bypass it", async () => {
     const request = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(daily),{ status: 400,headers: { "x-ebay-c-request-id": "receipt-1" } }));
@@ -82,7 +108,7 @@ dbDescribe.sequential("durable eBay terminal evidence with actual migration0663"
   it("records 429 retry-after beyond the worker interval without another HTTP call", async () => {
     const request = vi.fn<typeof fetch>(async () => new Response("{}",{ status: 429,headers: { "Retry-After": "172800" } }));
     const test = setup(request);
-    await expect(test.publish()).rejects.toMatchObject({ code: "EBAY_QUANTITY_REJECTED" });
+    await expect(test.publish()).rejects.toMatchObject({ code: "EBAY_PROVIDER_RATE_LIMITED" });
     const forbidden = vi.fn();
     await expect(test.admission.run({ ...test.scope,externalInventoryItemId: "OTHER-SKU" },forbidden))
       .rejects.toMatchObject({ code: "PUBLICATION_PROVIDER_COOLDOWN" });

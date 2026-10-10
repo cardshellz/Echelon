@@ -83,6 +83,8 @@ export interface EbayListingBuildOptions {
   variationAspectName?: string;
   variationValueByVariantId?: ReadonlyMap<number, string>;
   itemGroupKey?: string;
+  /** Maintenance must keep a provider group even if it has only one remaining member. */
+  preserveExistingGroup?: boolean;
   itemGroupAspects?: Record<string, string[]>;
   includeVariantSkusInGroup?: boolean;
   /**
@@ -205,7 +207,7 @@ export class EbayListingBuilder {
     );
 
     // Single variant — no group needed
-    if (groupVariants.length <= 1) return null;
+    if (groupVariants.length <= 1 && options.preserveExistingGroup !== true) return null;
 
     // Determine variation aspect name and values
     const { aspectName, aspectValues } =
