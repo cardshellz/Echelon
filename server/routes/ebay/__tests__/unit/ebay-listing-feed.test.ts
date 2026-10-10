@@ -17,6 +17,8 @@ vi.mock("../../../../modules/inventory-planning/quantity-publication", () => ({ 
 vi.mock("../../../../modules/channels/variant-availability-sync.service", () => ({ queueVariantAvailabilityRepair: vi.fn() }));
 vi.mock("../../ebay-listing-connector-client", () => ({ createEbayRouteListingClient: vi.fn() }));
 vi.mock("../../ebay-listing-recovery.routes", () => ({ registerEbayListingRecoveryRoutes: vi.fn() }));
+vi.mock("../../../../modules/channels/ebay-listing-mapping", () => ({ ebayListingMappingService: {} }));
+vi.mock("../../ebay-listing-mapping.routes", () => ({ registerEbayListingMappingRoutes: vi.fn() }));
 import { router } from "../../ebay-listings.routes";
 
 describe("eBay listing feed current content intent", () => {

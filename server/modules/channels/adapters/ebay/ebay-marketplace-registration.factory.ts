@@ -24,6 +24,7 @@ import {
 export interface EbayMarketplaceRegistrationAdapters {
   readonly ownerReader: MarketplaceListingRegistrationOwnerReader;
   readonly observer: MarketplaceListingRegistrationObserver;
+  readonly inspector: Pick<EbayMarketplaceRegistrationObserver, "inspectExistingPublication">;
   readonly accountClaimer: MarketplaceListingProviderAccountClaimer;
 }
 
@@ -55,13 +56,11 @@ export function createEbayMarketplaceRegistrationAdapters(
   const credentials = new EbayChannelRegistrationCredentialProvider(
     input.authService,
   );
+  const observer = new EbayMarketplaceRegistrationObserver(credentials, transport, { now: input.now });
   return {
     ownerReader: new EbayMarketplaceRegistrationOwnerReader(ownerRepository),
-    observer: new EbayMarketplaceRegistrationObserver(
-      credentials,
-      transport,
-      { now: input.now },
-    ),
+    observer,
+    inspector: observer,
     accountClaimer: new EbayMarketplaceListingProviderAccountClaimer(
       input.authService,
     ),

@@ -15,6 +15,7 @@ const fixture = vi.hoisted(() => ({
   recovery: vi.fn(async () => ({ busy: false, resolved: [], unresolved: [] })),
   readCount: 0,
   changeSource: false,
+  atp: vi.fn(),
 }));
 vi.mock("../../../../db", () => ({ pool: {}, db: { select: () => {
   const query = { from: () => query, innerJoin: () => query, leftJoin: () => query, where: () => query,
@@ -28,8 +29,8 @@ vi.mock("../../../../db", () => ({ pool: {}, db: { select: () => {
   return query;
 } } }));
 vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
-  getAuthService: () => ({ getVerifiedProviderAccount: async () => ({ externalAccountId: "seller" }), getAccessToken: async () => "test-only" }),
-  atpService: { getAtpPerVariant: async () => fixture.rows.map(row => ({ productVariantId: row.variant_id, atpUnits: 17 })) },
+  getAuthService: () => ({ getVerifiedProviderAccount: async () => ({ externalAccountId: "seller" }), getAccessToken: async () => "test-only", getEnvironment: () => "production" }),
+  atpService: { getAtpPerVariant: fixture.atp },
   ebayListingPhotoResolver: { resolve: async (input: { variants: Array<{ variantId: number; sku: string }> }) => {
     fixture.photoRequests.push(input);
     return { byVariantId: new Map(input.variants.map(member => [member.variantId, [`https://example.com/${member.variantId}.jpg`]])), groupImageUrls: ["https://example.com/shared.jpg"] };
@@ -53,7 +54,7 @@ vi.mock("../../ebay-listing-sync.service", async importOriginal => ({
   ...await importOriginal<typeof import("../../ebay-listing-sync.service")>(),
   EbayListingSyncService: class { constructor(_repository: unknown, execution: EbayListingSyncExecution) { fixture.execution = execution; } },
 }));
-import { readExistingEbayListingIdentityForProduct } from "../../infrastructure/ebay-active-listing-sync";
+import { readExistingEbayListingIdentityForProduct, readExistingEbayListingMappingIdentity, readExistingEbayListingMappingSource } from "../../infrastructure/ebay-active-listing-sync";
 
 const cases = [
   { productId: 3, catalog: "SHLZ-TOP-180PT-CLR", group: "SHLZ-TOP-180PT", suffixes: ["P10", "C500"], ids: [5, 6], listing: "298148206427", offers: ["136406510011", "136406511011"] },
@@ -97,9 +98,32 @@ function provider(example: typeof cases[number]) {
   }) };
   return { source, client };
 }
-beforeEach(() => { fixture.readCount = 0; fixture.changeSource = false; fixture.photoRequests = []; fixture.recovery.mockClear(); });
+beforeEach(() => {
+  fixture.readCount = 0; fixture.changeSource = false; fixture.photoRequests = []; fixture.recovery.mockClear();
+  fixture.atp.mockReset().mockImplementation(async () => fixture.rows.map(row => ({ productVariantId: row.variant_id, atpUnits: 17 })));
+});
 
 describe("production existing-listing prepare through verified completion", () => {
+  it("reads the transaction mapping identity without ATP or provider calls, retaining disabled members", async () => {
+    const { source, client } = provider(cases[0]);
+    fixture.rows[1].variant_is_active = false;
+    const snapshot = await readExistingEbayListingMappingIdentity(cases[0].productId);
+    expect(snapshot).toMatchObject({ environment: "production", identity: { variants: [
+      expect.objectContaining({ variantId: source.variants[0].variantId, sku: source.variants[0].sku }),
+      expect.objectContaining({ variantId: source.variants[1].variantId, sku: source.variants[1].sku, contentSyncEnabled: false }),
+    ] } });
+    expect(fixture.atp).not.toHaveBeenCalled();
+    expect(fixture.transport!.get).not.toHaveBeenCalled();
+    expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
+  });
+  it("adds quantity candidates through the canonical ATP reader without provider reads or writes", async () => {
+    const { source, client } = provider(cases[0]);
+    const snapshot = await readExistingEbayListingMappingSource(cases[0].productId);
+    expect(snapshot.candidates).toEqual(source.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku, availableQuantity: 17, isActive: true })));
+    expect(fixture.atp).toHaveBeenCalledExactlyOnceWith(cases[0].productId);
+    expect(fixture.transport!.get).not.toHaveBeenCalled();
+    expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
+  });
   it.each(cases)("uses the same provider identity reader for product $productId preview, including disabled members", async example => {
     const { source, client } = provider(example);
     fixture.rows[1].variant_is_active = false;

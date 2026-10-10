@@ -268,28 +268,6 @@ test("feed failures offer reload instead of claiming there are no listings", asy
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
-test("mapping review shows catalog and provider identities and verifies through the canonical sync action", async ({ page }) => {
-  const state = await setupEbayChannelPage(page);
-  state.jobs = [{ ...job, state: "needs_attention", code: "EBAY_SYNC_PROVIDER_IDENTITY_CHANGED", message: "The offer identity needs verification." }];
-  const sourceIdentity = { groupKey: null, variants: [{ variantId: 101, sku: "SHLZ-TOP-180PT-CLR-P10", externalSku: "SHLZ-TOP-180PT-P10", offerId: "offer-101", listingId: "listing-101" }] };
-  const providerIdentity = { groupKey: "SHLZ-TOP-180PT", variants: [{ ...sourceIdentity.variants[0], sku: "SHLZ-TOP-180PT-P10", catalogSku: "SHLZ-TOP-180PT-CLR-P10" }] };
-  await page.route(`**/api/ebay/listings/sync-jobs/${job.id}`, (route) => route.fulfill({ json: { job: state.jobs[0], sourceIdentity, providerIdentity } }));
-  await page.reload();
-  await page.getByRole("button", { name: "Review listing mapping", exact: true }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog).toContainText("Saved source mapping");
-  await expect(dialog).toContainText("Group: No group saved");
-  await expect(dialog).toContainText("Resolved eBay mapping");
-  await expect(dialog).toContainText("Catalog SKU: SHLZ-TOP-180PT-CLR-P10");
-  await expect(dialog).toContainText("eBay SKU: SHLZ-TOP-180PT-P10");
-  await expect(dialog).toContainText("Offer: offer-101");
-  expect(state.requests).toEqual([]);
-  state.response = pending;
-  await dialog.getByRole("button", { name: "Verify mapping again" }).click();
-  await expect.poll(() => state.requests.length).toBe(1);
-  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
-});
-
 test("a stale recovery preview needs a new acknowledgement and does not claim success", async ({ page }) => {
   const state = await setupEbayChannelPage(page); state.jobs = [blockedJob];
   let currentPreview = preview;

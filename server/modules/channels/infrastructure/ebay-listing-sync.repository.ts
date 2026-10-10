@@ -45,95 +45,7 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
     try {
       await client.query("BEGIN");
       await client.query("SET LOCAL lock_timeout='2s'");
-      // Product command serialization is distinct from quantity admission. Joining
-      // a pending job records a new requested revision without taking its HTTP lock.
-      await client.query("SELECT pg_advisory_xact_lock($1,hashtext($2))", [
-        LOCK_NAMESPACE,
-        `enqueue:${identity.channelId}:${identity.productId}`,
-      ]);
-      await client.query("SELECT pg_advisory_xact_lock($1,hashtext($2))", [LOCK_NAMESPACE, `command:${commandKey}`]);
-      if ((await client.query("SELECT 1 FROM channels.ebay_listing_sync_admission_failures WHERE command_key=$1", [commandKey])).rowCount)
-        throw new EbayListingSyncError("EBAY_SYNC_REPLAY_CONFLICT", "This request was already saved as a rejected admission. Start a new sync after correcting its issue.");
-      const replay = (
-        await client.query<{
-          job_id: string;
-          identity_hash: string;
-          actor: string;
-        }>(
-          `SELECT job_id::text,identity_hash,actor
-        FROM channels.ebay_listing_sync_commands WHERE command_key=$1`,
-          [commandKey],
-        )
-      ).rows[0];
-      if (replay) {
-        if (
-          replay.identity_hash !== syncIdentityHash(identity) ||
-          replay.actor !== actor
-        )
-          throw new EbayListingSyncError(
-            "EBAY_SYNC_REPLAY_CONFLICT",
-            "This sync command belongs to a different listing identity or requester.",
-          );
-        const job = decode(
-          (await client.query(rowSql + " WHERE id=$1", [replay.job_id]))
-            .rows[0],
-        );
-        await client.query("COMMIT");
-        return job;
-      }
-      const active = (
-        await client.query<{ id: string; identity: EbayListingSyncIdentity }>(
-          `SELECT id::text,identity FROM channels.ebay_listing_sync_jobs
-        WHERE channel_id=$1 AND product_id=$2 AND state IN ('queued','running','recovering','awaiting_evidence') FOR UPDATE`,
-          [identity.channelId, identity.productId],
-        )
-      ).rows[0];
-      let id: string;
-      let reusable = !!active;
-      if (active) {
-        try { assertEbayListingSourceIdentityUnchanged(active.identity, identity); }
-        catch (error) {
-          if (!(error instanceof EbayListingSyncError)) throw error;
-          const locked = (await client.query<{ acquired: boolean }>("SELECT pg_try_advisory_xact_lock($1,hashtext($2)) AS acquired", [LOCK_NAMESPACE, active.id])).rows[0]?.acquired;
-          if (!locked) throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY", "An update using the earlier mapping is still running. The new mapping can be synced after that update finishes.");
-          // Retain the old command and its provider evidence; only an idle job can
-          // be superseded. Quantity admission independently fences unresolved writes.
-          await client.query("UPDATE channels.ebay_listing_sync_jobs SET state='needs_attention',owner_token=NULL,claimed_revision=NULL,error_code='EBAY_SYNC_SOURCE_SUPERSEDED',error_message='A newer sync request replaced the changed source mapping.',updated_at=$2 WHERE id=$1", [active.id, now.toISOString()]);
-          await client.query("INSERT INTO channels.ebay_listing_sync_events(job_id,revision,event,evidence,created_at) SELECT id,revision,'needs_attention',$2::jsonb,$3 FROM channels.ebay_listing_sync_jobs WHERE id=$1", [active.id, canonicalJson({ code: "EBAY_SYNC_SOURCE_SUPERSEDED", commandKey, actor }), now.toISOString()]);
-          reusable = false;
-        }
-      }
-      if (active && reusable) {
-        id = active.id;
-        await client.query(
-          `UPDATE channels.ebay_listing_sync_jobs SET revision=revision+1,updated_at=$2,next_attempt_at=$2 WHERE id=$1`,
-          [id, now.toISOString()],
-        );
-      } else {
-        id = commandKey;
-        await client.query(
-          `INSERT INTO channels.ebay_listing_sync_jobs(id,channel_id,connection_id,product_id,identity,identity_hash,requested_by,created_at,updated_at,next_attempt_at)
-          VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$8,$8)`,
-          [
-            id,
-            identity.channelId,
-            identity.connectionId,
-            identity.productId,
-            JSON.stringify(identity),
-            syncIdentityHash(identity),
-            actor,
-            now.toISOString(),
-          ],
-        );
-      }
-      await client.query(
-        `INSERT INTO channels.ebay_listing_sync_commands(command_key,job_id,identity_hash,actor,created_at) VALUES($1,$2,$3,$4,$5)`,
-        [commandKey, id, syncIdentityHash(identity), actor, now.toISOString()],
-      );
-      const job = decode(
-        (await client.query(rowSql + " WHERE id=$1", [id])).rows[0],
-      );
-      await this.event(client, job, "requested", { commandKey, actor }, now);
+      const job = await this.enqueueInsideTransaction(client, identity, commandKey, actor, now);
       await client.query("COMMIT");
       return job;
     } catch (error) {
@@ -142,6 +54,112 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
     } finally {
       client.release();
     }
+  }
+
+  /** Channels-owned composition boundary. The caller owns BEGIN/COMMIT/ROLLBACK;
+   * use this for atomic local mapping repair plus its durable follow-up request. */
+  async enqueueInsideTransaction(
+    client: PoolClient,
+    identity: EbayListingSyncIdentity,
+    commandKey: string,
+    actor: string,
+    now: Date,
+    verifiedProviderIdentity?: EbayListingSyncIdentity,
+  ): Promise<StoredEbayListingSyncJob> {
+    // Product command serialization is distinct from quantity admission. Joining
+    // a pending job records a new requested revision without taking its HTTP lock.
+    await client.query("SELECT pg_advisory_xact_lock($1,hashtext($2))", [
+      LOCK_NAMESPACE,
+      `enqueue:${identity.channelId}:${identity.productId}`,
+    ]);
+    await client.query("SELECT pg_advisory_xact_lock($1,hashtext($2))", [LOCK_NAMESPACE, `command:${commandKey}`]);
+    if ((await client.query("SELECT 1 FROM channels.ebay_listing_sync_admission_failures WHERE command_key=$1", [commandKey])).rowCount)
+      throw new EbayListingSyncError("EBAY_SYNC_REPLAY_CONFLICT", "This request was already saved as a rejected admission. Start a new sync after correcting its issue.");
+    const replay = (
+      await client.query<{
+        job_id: string;
+        identity_hash: string;
+        actor: string;
+      }>(
+        `SELECT job_id::text,identity_hash,actor
+      FROM channels.ebay_listing_sync_commands WHERE command_key=$1`,
+        [commandKey],
+      )
+    ).rows[0];
+    if (replay) {
+      if (
+        replay.identity_hash !== syncIdentityHash(identity) ||
+        replay.actor !== actor
+      )
+        throw new EbayListingSyncError(
+          "EBAY_SYNC_REPLAY_CONFLICT",
+          "This sync command belongs to a different listing identity or requester.",
+        );
+      const job = decode(
+        (await client.query(rowSql + " WHERE id=$1", [replay.job_id]))
+          .rows[0],
+      );
+      return job;
+    }
+    const active = (
+      await client.query<{ id: string; identity: EbayListingSyncIdentity; providerIdentity: EbayListingSyncIdentity | null }>(
+        `SELECT id::text,identity,provider_identity AS "providerIdentity" FROM channels.ebay_listing_sync_jobs
+      WHERE channel_id=$1 AND product_id=$2 AND state IN ('queued','running','recovering','awaiting_evidence') FOR UPDATE`,
+        [identity.channelId, identity.productId],
+      )
+    ).rows[0];
+    let id: string;
+    let reusable = !!active;
+    if (active) {
+      try {
+        assertEbayListingSourceIdentityUnchanged(active.identity, identity);
+        if (verifiedProviderIdentity && active.providerIdentity
+          && syncIdentityHash(active.providerIdentity) !== syncIdentityHash(verifiedProviderIdentity))
+          throw new EbayListingSyncError("EBAY_SYNC_PROVIDER_IDENTITY_CHANGED", "The verified provider resources changed. A fresh owned sync request is required.");
+      }
+      catch (error) {
+        if (!(error instanceof EbayListingSyncError)) throw error;
+        const locked = (await client.query<{ acquired: boolean }>("SELECT pg_try_advisory_xact_lock($1,hashtext($2)) AS acquired", [LOCK_NAMESPACE, active.id])).rows[0]?.acquired;
+        if (!locked) throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY", "An update using the earlier mapping is still running. The new mapping can be synced after that update finishes.");
+        // Retain the old command and its provider evidence; only an idle job can
+        // be superseded. Quantity admission independently fences unresolved writes.
+        await client.query("UPDATE channels.ebay_listing_sync_jobs SET state='needs_attention',owner_token=NULL,claimed_revision=NULL,error_code='EBAY_SYNC_SOURCE_SUPERSEDED',error_message='A newer sync request replaced the changed source mapping.',updated_at=$2 WHERE id=$1", [active.id, now.toISOString()]);
+        await client.query("INSERT INTO channels.ebay_listing_sync_events(job_id,revision,event,evidence,created_at) SELECT id,revision,'needs_attention',$2::jsonb,$3 FROM channels.ebay_listing_sync_jobs WHERE id=$1", [active.id, canonicalJson({ code: "EBAY_SYNC_SOURCE_SUPERSEDED", commandKey, actor }), now.toISOString()]);
+        reusable = false;
+      }
+    }
+    if (active && reusable) {
+      id = active.id;
+      await client.query(
+        `UPDATE channels.ebay_listing_sync_jobs SET revision=revision+1,updated_at=$2,next_attempt_at=$2 WHERE id=$1`,
+        [id, now.toISOString()],
+      );
+    } else {
+      id = commandKey;
+      await client.query(
+        `INSERT INTO channels.ebay_listing_sync_jobs(id,channel_id,connection_id,product_id,identity,identity_hash,requested_by,created_at,updated_at,next_attempt_at)
+        VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$8,$8)`,
+        [
+          id,
+          identity.channelId,
+          identity.connectionId,
+          identity.productId,
+          JSON.stringify(identity),
+          syncIdentityHash(identity),
+          actor,
+          now.toISOString(),
+        ],
+      );
+    }
+    await client.query(
+      `INSERT INTO channels.ebay_listing_sync_commands(command_key,job_id,identity_hash,actor,created_at) VALUES($1,$2,$3,$4,$5)`,
+      [commandKey, id, syncIdentityHash(identity), actor, now.toISOString()],
+    );
+    const job = decode(
+      (await client.query(rowSql + " WHERE id=$1", [id])).rows[0],
+    );
+    await this.event(client, job, "requested", { commandKey, actor }, now);
+    return job;
   }
   async list(channelId: number): Promise<EbayListingSyncJob[]> {
     return (
