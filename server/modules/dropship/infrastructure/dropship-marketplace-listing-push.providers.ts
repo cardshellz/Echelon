@@ -12,6 +12,9 @@ import { createDropshipEbayFulfillmentPolicyGuardFromEnv } from "./dropship-ebay
 import { createDropshipEbayRegistrationCredentialProviderFromEnv } from "./dropship-ebay-registration-credentials";
 import { PgDropshipEbayManagedLocationProvider } from "./dropship-ebay-managed-location.provider";
 import { createDropshipEbayQuantityRequestAdmission } from "../../inventory-planning/infrastructure/quantity-publication-runtime";
+import { pool } from "../../../db";
+import { PostgresDropshipEbayPushPublicationReader } from "./dropship-ebay-push-publication.reader";
+import { createDropshipMarketplaceRegistrationOwnerAdaptersFromEnv } from "./dropship-marketplace-registration.factory";
 
 export class DropshipMarketplaceListingPushProviderRouter implements DropshipMarketplaceListingPushProvider {
   constructor(
@@ -43,6 +46,7 @@ export function createDropshipMarketplaceListingPushProviderFromEnv(): DropshipM
         credentials: createDropshipEbayRegistrationCredentialProviderFromEnv(),
       }),
       createDropshipEbayQuantityRequestAdmission,
+      new PostgresDropshipEbayPushPublicationReader(pool, createDropshipMarketplaceRegistrationOwnerAdaptersFromEnv().observer),
     ),
     shopify: new ShopifyDropshipListingPushProvider(credentials),
   });

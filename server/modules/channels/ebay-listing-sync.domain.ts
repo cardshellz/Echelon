@@ -14,13 +14,15 @@ export const ebayListingSyncIdentitySchema = z
     productId: pgId,
     accountId: z.string().trim().min(1).max(240),
     marketplaceId: z.string().trim().min(1).max(100),
-    groupKey: z.string().trim().min(1).max(100),
+    groupKey: z.string().trim().min(1).max(255).nullable(),
     variants: z
       .array(
         z
           .object({
             variantId: pgId,
             sku: z.string().trim().min(1).max(100),
+            catalogSku: z.string().trim().min(1).max(100).optional(),
+            contentSyncEnabled: z.boolean().optional(),
             externalSku: z.string().min(1).max(100).nullable(),
             offerId: z.string().min(1).max(255).nullable(),
             listingId: z.string().min(1).max(255).nullable(),
@@ -54,6 +56,7 @@ export const syncStageHash = (value: unknown): string =>
   createHash("sha256").update(canonicalJson(value)).digest("hex");
 export const storedEbayListingSyncJobSchema = ebayListingSyncJobSchema.extend({
   identity: ebayListingSyncIdentitySchema,
+  providerIdentity: ebayListingSyncIdentitySchema.nullable().default(null),
   revision: z.string().regex(/^[1-9][0-9]*$/),
   claimedRevision: z
     .string()
@@ -79,6 +82,7 @@ export class EbayListingSyncError extends Error {
   }
 }
 const WAIT_CODES = new Set([
+  "EBAY_PROVIDER_RATE_LIMITED",
   "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED",
   "PUBLICATION_PROVIDER_COOLDOWN",
   "PUBLICATION_SCOPE_BUSY",
@@ -100,6 +104,10 @@ const RETRY_CODES = new Set([
   "ECONNRESET",
   "ETIMEDOUT",
   "ECONNREFUSED",
+  "EBAY_REGISTRATION_READ_TIMEOUT",
+  "EBAY_REGISTRATION_READ_FAILED",
+  "EBAY_AUTH_UNAVAILABLE",
+  "EBAY_AUTH_REFRESH_SUPERSEDED",
 ]);
 export const SYNC_RETRY_LIMIT = 5;
 export function syncFailure(

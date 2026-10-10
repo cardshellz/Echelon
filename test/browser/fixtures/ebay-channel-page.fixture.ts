@@ -1,5 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 import { resolve } from "node:path";
+import type { EbayListingIssue } from "../../../shared/types/ebay-listing-issue";
 const missingPhoto =
   "Replace uploaded catalog image 42: its file is missing, empty or larger than 10 MB.";
 const success = {
@@ -16,10 +17,12 @@ export async function setupEbayChannelPage(page: Page) {
       ...success,
       synced: 0,
       errors: 1,
-      details: [{ success: false, error: missingPhoto }],
+      details: [{ success: false, error: missingPhoto, code: "EBAY_CATALOG_PHOTO_UNAVAILABLE" }],
     } as unknown,
     jobs: [] as unknown[],
     feedStatus: "listed",
+    connectionHealth: "verified" as "verified" | "needs_attention" | "not_connected",
+    connectionIssue: null as EbayListingIssue | null,
     syncError: null as string | null,
     commands: [] as string[],
     requests: [] as string[],
@@ -47,6 +50,8 @@ export async function setupEbayChannelPage(page: Page) {
       return route.fulfill({
         json: {
           connected: true,
+          connectionHealth: state.connectionHealth,
+          connectionIssue: state.connectionIssue,
           channel: { id: 67, name: "eBay", status: "active" },
           ebayUsername: "test-store",
           tokenInfo: null,
@@ -78,6 +83,12 @@ export async function setupEbayChannelPage(page: Page) {
       return route.fulfill({ json: { rules: [] } });
     if (path === "/api/ebay/listings/sync-jobs")
       return route.fulfill({ json: state.jobs });
+    if (/^\/api\/ebay\/listings\/sync-jobs\/[a-f0-9-]{36}$/i.test(path)) {
+      const job = state.jobs.find((value) => (value as { id: string }).id === path.split("/").at(-1));
+      return job
+        ? route.fulfill({ json: { job, sourceIdentity: null, providerIdentity: null } })
+        : route.fulfill({ status: 404, json: { code: "EBAY_SYNC_JOB_NOT_FOUND", error: "No saved command receipt was found." } });
+    }
     if (path === "/api/ebay/effective-prices")
       return route.fulfill({ json: { prices: {} } });
     if (path === "/api/ebay/product-type-defaults")

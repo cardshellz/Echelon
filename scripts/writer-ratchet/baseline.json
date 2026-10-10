@@ -64,8 +64,7 @@
     "modules/catalog",
     "modules/channels",
     "server/routes/ebay/ebay-listing-state.ts",
-    "server/routes/ebay/ebay-listings.routes.ts",
-    "server/routes/ebay/ebay-policies.routes.ts"
+    "server/routes/ebay/ebay-listings.routes.ts"
   ],
   "channels.channel_pricing": [
     "modules/channels"
@@ -107,8 +106,10 @@
     "modules/channels",
     "modules/dropship",
     "modules/identity",
-    "server/routes/ebay-oauth.routes.ts",
     "server/routes/pick-priority.routes.ts"
+  ],
+  "channels.ebay_listing_sync_admission_failures": [
+    "modules/channels"
   ],
   "channels.ebay_listing_sync_commands": [
     "modules/channels"
@@ -750,6 +751,12 @@
     "modules/inventory-planning"
   ],
   "inventory.quantity_publication_gate": [
+    "modules/inventory-planning"
+  ],
+  "inventory.quantity_publication_operator_resume_attempts": [
+    "modules/inventory-planning"
+  ],
+  "inventory.quantity_publication_operator_resumes": [
     "modules/inventory-planning"
   ],
   "inventory.quantity_publication_reconciliation_attempts": [

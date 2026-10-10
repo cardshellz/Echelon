@@ -57,10 +57,19 @@ export function EbayListingSetupPanel({
   onConfigurationChange,
   storeConnectionId,
   storeName,
+  suggestionsCountAsUnsaved = true,
 }: {
   onConfigurationChange: () => void;
   storeConnectionId: number;
   storeName: string;
+  /**
+   * Whether a policy Card Shellz filled in (eBay offers only one) counts as
+   * an unsaved change. True by default. The Catalog page passes false while
+   * the panel sits in the closed "Older settings" section, so the leave prompt
+   * and the bar never report a change the vendor can't see and didn't make
+   * (Listing settings PR 7, L2). A policy the vendor picked always counts.
+   */
+  suggestionsCountAsUnsaved?: boolean;
 }) {
   const queryClient = useQueryClient();
   const setupQuery = useQuery(ebayListingSetupQueryOptions(storeConnectionId));
@@ -103,10 +112,12 @@ export function EbayListingSetupPanel({
   // Only a picked policy counts: an empty field holds nothing to lose. While a
   // confirmed save is refreshing, the draft is what was saved and the fields
   // are locked.
+  // With `suggestionsCountAsUnsaved` false (the closed "Older settings"
+  // section, L2), a suggestion alone is not counted.
   const unsavedPolicy = useMemo(
     () => savedStoreToRefresh === null && setupQuery.data !== undefined
-      && listingSetupHasUnsavedPolicy(setupQuery.data, draft),
-    [draft, savedStoreToRefresh, setupQuery.data],
+      && listingSetupHasUnsavedChange(setupQuery.data, draft, { countSuggestions: suggestionsCountAsUnsaved }),
+    [draft, savedStoreToRefresh, setupQuery.data, suggestionsCountAsUnsaved],
   );
   useUnsavedDraft(`listing-setup:${storeConnectionId}`, "eBay listing setup", unsavedPolicy);
   // The ship-from repair reloads the setup, so it waits for a policy the
@@ -769,6 +780,24 @@ export function suggestedListingSetupFields(
   return new Set(LISTING_SETUP_POLICY_FIELDS.filter((field) => filled[field] !== ""
     && filled[field] !== (setup.selection[field] ?? "")
     && draft[field] === filled[field]));
+}
+
+/**
+ * Whether the panel reports an unsaved change, to the leave guard and with
+ * its "● Not saved" badge. With `countSuggestions` (the panel's default) it
+ * is `listingSetupHasUnsavedPolicy`: any policy that isn't the saved one.
+ * Without it, a policy Card Shellz filled in on its own is not a change; one
+ * the vendor picked still is (Listing settings PR 7, L2).
+ */
+export function listingSetupHasUnsavedChange(
+  setup: DropshipEbayListingSetupResponse,
+  draft: ReplaceDropshipEbayListingSetupInput,
+  options: { countSuggestions: boolean },
+): boolean {
+  const suggested = options.countSuggestions ? null : suggestedListingSetupFields(setup, draft);
+  return LISTING_SETUP_POLICY_FIELDS.some((field) => draft[field] !== ""
+    && draft[field] !== (setup.selection[field] ?? "")
+    && !(suggested?.has(field) ?? false));
 }
 
 /**

@@ -8,13 +8,26 @@ export const listingPriceCentsSchema = z.number().int().positive().max(MAX_LISTI
 export const listingAmountCentsSchema = z.number().int().min(0).max(MAX_LISTING_PRICE_CENTS);
 /** What a pricing rule starts from: the vendor's .ops cost or the catalog reference retail. */
 export const listingPriceBasisSchema = z.enum(["product_cost", "catalog_retail"]);
+/**
+ * How one size's price is chosen (`dropship_listing_price_settings.pricing_mode`):
+ * - `fixed`: a price the vendor typed (the only mode with a price of its own);
+ * - `catalog_default`: the Card Shellz retail price;
+ * - `rules`: the store's pricing rules, and no price when they can't give one;
+ * - `inherit`: no price of its own. The store's pricing rules when they give a
+ *   usable price (`listingPriceFollowsRules`), otherwise the Card Shellz retail
+ *   price, never the price an earlier push saved (migration 0735; owner
+ *   decisions A3 and L1, 2026-10-09).
+ */
+export const LISTING_PRICING_MODES = ["fixed", "catalog_default", "rules", "inherit"] as const;
+export type ListingPricingMode = (typeof LISTING_PRICING_MODES)[number];
+export const listingPricingModeSchema = z.enum(LISTING_PRICING_MODES);
 export const listingPriceTargetSchema = z.object({
   storeConnectionId: z.number().int().positive().max(2_147_483_647),
   productVariantId: z.number().int().positive().max(2_147_483_647),
 }).strict();
 export const saveListingPriceInputSchema = z.object({
   priceCents: listingPriceCentsSchema.nullable(),
-  pricingMode: z.enum(["fixed", "catalog_default", "rules"]).optional(),
+  pricingMode: listingPricingModeSchema.optional(),
   expectedRevisionId: z.number().int().positive().max(2_147_483_647).nullable(),
   idempotencyKey: z.string().min(1).max(200).regex(/^[A-Za-z0-9:_-]+$/),
 }).strict().refine((input) => !input.pricingMode || (input.pricingMode === "fixed") === (input.priceCents !== null),
@@ -25,8 +38,15 @@ export const listingPriceSettingSchema = listingPriceTargetSchema.extend({
   effectivePriceCents: listingPriceCentsSchema.nullable(),
   defaultPriceCents: listingPriceCentsSchema.nullable(),
   source: z.enum(["override", "catalog_default", "saved_listing", "rules", "unavailable"]),
-  pricingMode: z.enum(["fixed", "catalog_default", "rules"]).optional(),
+  pricingMode: listingPricingModeSchema.optional(),
   ruleName: z.string().nullable().optional(),
+  /**
+   * Why the store's rule price can't price this size: the rules' issue, or
+   * `pricing_rule_outside_limit` (RULE_PRICE_OUTSIDE_LIMIT_ISSUE) when a
+   * blocking Card Shellz price limit refuses the rule price. Null otherwise.
+   * Sent in every pricing mode, not only `inherit`: a client reads it to tell
+   * what saving `inherit` would give a size (client inheritedListingPrice).
+   */
   pricingIssue: z.string().nullable().optional(),
   rulePriceCents: listingPriceCentsSchema.nullable().optional(),
   rulesConfigured: z.boolean().optional(),
@@ -47,9 +67,25 @@ export interface SavedListingPriceRevision {
   productVariantId: number;
   revisionId: number;
   overridePriceCents: number | null;
-  pricingMode?: "fixed" | "catalog_default" | "rules";
+  pricingMode?: ListingPricingMode;
   updatedAt: string;
 }
+
+/**
+ * A store's rule price for one size as the price resolvers read it.
+ * `blockedByLimit` is true when a blocking Card Shellz price limit refuses
+ * `priceCents`; the caller evaluates the limits (the shared code does not see
+ * them). Only an `inherit` setting reads it: see `listingPriceFollowsRules`.
+ */
+export interface ListingRulePriceInput { priceCents: number | null; blockedByLimit?: boolean }
+
+/**
+ * Why an `inherit` size is on its retail price although its rules give it a
+ * price: a blocking Card Shellz price limit refuses that price. The per-size
+ * price answer sends it as `pricingIssue` and the listing settings views as a
+ * size's `issue`, so the vendor is told why (owner decision L1).
+ */
+export const RULE_PRICE_OUTSIDE_LIMIT_ISSUE = "pricing_rule_outside_limit" as const;
 
 /**
  * Whether the store's pricing rules own this listing's price.
@@ -60,11 +96,23 @@ export interface SavedListingPriceRevision {
  * was derived at push time, not chosen by the vendor, so it does not shield
  * the listing from the rules; only a typed price does (owner decision,
  * 2026-09-28).
+ *
+ * `inherit` follows the rules only when they give the size a usable price:
+ * one in range that no blocking Card Shellz price limit refuses, the same
+ * "usable" as the per-size save guard (listing-price-save-guard.ts). A store
+ * with no rules, two group rules that tie, a missing cost, a price out of
+ * range or a rule price a blocking limit refuses leave it on the retail price
+ * instead (owner decision L1, 2026-10-09), so an `inherit` size is never
+ * blocked by a rule price while its retail price could be listed. `rules`
+ * keeps today's meaning: the rule price, or no price when the rules give none.
  */
 export function listingPriceFollowsRules(input: {
   saved: Pick<SavedListingPriceRevision, "pricingMode"> | null;
-  rulePrice?: { priceCents: number | null } | null;
+  rulePrice?: ListingRulePriceInput | null;
 }): boolean {
+  if (input.saved?.pricingMode === "inherit") {
+    return listingPriceCentsSchema.safeParse(input.rulePrice?.priceCents).success && input.rulePrice?.blockedByLimit !== true;
+  }
   if (input.saved) return input.saved.pricingMode === "rules";
   return input.rulePrice != null;
 }
@@ -78,12 +126,17 @@ export function isTypedListingPrice(saved: Pick<SavedListingPriceRevision, "over
  * Precedence: the saved setting (rules, typed price or catalog default), then
  * the store's rules, then the price an earlier push saved on the listing,
  * then the catalog default.
+ *
+ * An `inherit` setting takes the rule price when the rules give a usable one
+ * (see `listingPriceFollowsRules`), and otherwise the catalog default with source
+ * `catalog_default`. Its saved price is always null, so it never falls back to
+ * the price an earlier push saved: that price is only used with no saved setting.
  */
 export function resolveListingPrice(input: {
   saved: Pick<SavedListingPriceRevision, "overridePriceCents" | "pricingMode"> | null;
   existingListingPriceCents: number | null;
   defaultPriceCents: number | null;
-  rulePrice?: { priceCents: number | null } | null;
+  rulePrice?: ListingRulePriceInput | null;
 }): Pick<ListingPriceSetting, "effectivePriceCents" | "source"> {
   if (listingPriceFollowsRules(input)) {
     const parsed = listingPriceCentsSchema.safeParse(input.rulePrice?.priceCents);

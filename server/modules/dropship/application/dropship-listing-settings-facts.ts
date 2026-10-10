@@ -3,7 +3,7 @@ import { MAX_NAMED_CATALOG_GROUP_ITEMS } from "../../../../shared/dropship/catal
 import { decideDropshipListingAccess, type DropshipListingAccessDecision } from "../../../../shared/dropship/listing-access";
 import type { ContentProfileState, SavedListingContent } from "../../../../shared/dropship/listing-content";
 import {
-  listingAmountCentsSchema, listingPriceFollowsRules, resolveListingPrice,
+  RULE_PRICE_OUTSIDE_LIMIT_ISSUE, listingAmountCentsSchema, listingPriceFollowsRules, resolveListingPrice,
   type ListingPriceSetting, type SavedListingPriceRevision,
 } from "../../../../shared/dropship/listing-price";
 import {
@@ -27,7 +27,7 @@ import {
   listingCatalogHash, needsListingCatalogReview, prepareContentProfile, resolveContentTemplate, textDescriptionHtml,
 } from "./dropship-listing-content-resolver";
 import {
-  applyEbayListingPolicyOverride, pricingPolicyMatchesCandidate,
+  applyEbayListingPolicyOverride, pricingPolicyMatchesCandidate, withRulePriceLimitCheck,
   type DropshipExistingVendorListing, type DropshipListingCatalogCandidate,
   type DropshipListingStoreContext, type DropshipPricingPolicyRecord,
 } from "./dropship-listing-preview-service";
@@ -167,11 +167,16 @@ function sizePriceFacts(candidate: DropshipListingCatalogCandidate, inputs: List
   const cost = inputs.costs.get(id) ?? null;
   const costCents = cost?.status === "available" ? validAmount(cost.unitCostCents) : null;
   // Without rules there is no rule price, as in the preview and the per-size price.
-  const rulePrice = resolver.configured ? resolver.priceAtCost(candidate, costCents) : null;
+  const rulePrice = resolver.configured
+    ? withRulePriceLimitCheck(candidate, inputs.pricingPolicies, resolver.priceAtCost(candidate, costCents))
+    : null;
   const ruleOwned = listingPriceFollowsRules({ saved, rulePrice });
   const resolved = resolveListingPrice({ saved, rulePrice, defaultPriceCents: candidate.defaultRetailPriceCents,
     existingListingPriceCents: inputs.existingListings.get(id)?.vendorRetailPriceCents ?? null });
   const priceCents = resolved.effectivePriceCents;
+  // An `inherit` size the rules give no usable price uses the retail price
+  // (owner decisions A3 and L1). The vendor sees that it is a fallback, and why.
+  const retailFallback = saved?.pricingMode === "inherit" && resolved.source === "catalog_default";
   const basis = ruleOwned ? rulePrice?.basis ?? null : null;
   const paused = inputs.pausedSince.get(id);
   return {
@@ -181,11 +186,11 @@ function sizePriceFacts(candidate: DropshipListingCatalogCandidate, inputs: List
     sizeName: candidate.variantName,
     sku: candidate.sku,
     priceCents,
-    source: PRICE_SOURCE[resolved.source],
+    source: retailFallback ? "retail_fallback" : PRICE_SOURCE[resolved.source],
     rule: ruleOwned && rulePrice ? describeRule(rulePrice, inputs.pricing.profile) : null,
     basis,
     basisAmountCents: basis ? validAmount(pricingBasisCents(basis, { productCostCents: costCents, catalogRetailCents: candidate.defaultRetailPriceCents })) : null,
-    issue: priceIssue({ ruleOwned, rulePrice, priceCents }),
+    issue: retailFallback ? ruleIssue(rulePrice) : priceIssue({ ruleOwned, rulePrice, priceCents }),
     costCents,
     belowCostByCents: belowCostBy(priceCents, costCents),
     limits: priceLimits(candidate, inputs.pricingPolicies, priceCents),
@@ -208,6 +213,21 @@ function priceIssue(input: { ruleOwned: boolean; rulePrice: RulePriceResult | nu
     if (issue !== null && RULE_ISSUES.has(issue)) return issue as ListingSettingsPriceIssue;
   }
   return "price_unavailable";
+}
+
+/**
+ * Why the store's rules give a `retail_fallback` size no usable price: null
+ * when the store has no rules, so none covers the size. A configured store's
+ * rules always name why they give no price (`resolvePricingRule`); a price
+ * they give is unusable only when a blocking Card Shellz limit refuses it.
+ * Any other answer is a code fault.
+ */
+function ruleIssue(rulePrice: (RulePriceResult & { blockedByLimit: boolean }) | null): ListingSettingsPriceIssue | null {
+  if (rulePrice === null) return null;
+  const issue = rulePrice.issue;
+  if (issue !== null && RULE_ISSUES.has(issue)) return issue as ListingSettingsPriceIssue;
+  if (issue === null && rulePrice.blockedByLimit) return RULE_PRICE_OUTSIDE_LIMIT_ISSUE;
+  throw new Error(`Pricing rules gave a size no price without a known reason (${issue ?? "none"}).`);
 }
 
 /** The rule that won, with the recipe it priced by. A tie names no rule: none of them priced the size. */
@@ -465,6 +485,7 @@ export function selectListingSettingsPrices(facts: ListingSettingsFacts,
       case "below_cost": return price.belowCostByCents !== null;
       case "cannot_price": return price.priceCents === null;
       case "paused": return price.pausedSince !== null;
+      case "retail_fallback": return price.source === "retail_fallback";
     }
   });
   return pageOf(matching, input.page);
@@ -496,11 +517,21 @@ function productShown(product: ListingSettingsProductFacts, show: ListingSetting
     case "all": return true;
     case "needs_fix": return product.row.fixes.length > 0;
     case "sizes_differ": return product.row.sizesDiffer.length > 0;
-    case "own_settings": return product.row.ownSettings.length > 0;
+    case "own_settings": return hasOwnSettings(product);
     case "exact_prices": return product.row.exactPriceCount > 0;
     case "below_cost": return product.sizes.some((size) => size.price.belowCostByCents !== null);
     case "cannot_price": return product.sizes.some((size) => size.price.priceCents === null);
   }
+}
+
+/**
+ * A product with a size that has its own value for a setting or an exact
+ * price: what the Products tab lists under "Own settings" (its Own settings
+ * column names exact prices first, ownSettingsWords), so the chip, its count
+ * and the column agree.
+ */
+function hasOwnSettings(product: ListingSettingsProductFacts): boolean {
+  return product.row.ownSettings.length > 0 || product.row.exactPriceCount > 0;
 }
 
 function sizeMatches(price: Pick<ListingSettingsSizePrice, "sizeName" | "sku">, search: string): boolean {
@@ -624,7 +655,7 @@ export function buildListingSettingsSummary(facts: ListingSettingsFacts, generat
     counts: {
       productsNeedingFix,
       productsWithSizesDiffer: facts.products.filter((product) => product.row.sizesDiffer.length > 0).length,
-      productsWithOwnSettings: facts.products.filter((product) => product.row.ownSettings.length > 0).length,
+      productsWithOwnSettings: facts.products.filter(hasOwnSettings).length,
       exactPrices: facts.sizes.filter((size) => size.price.source === "exact").length,
       belowCost: facts.sizes.filter((size) => size.price.belowCostByCents !== null).length,
       cannotPrice: facts.sizes.filter((size) => size.price.priceCents === null).length,

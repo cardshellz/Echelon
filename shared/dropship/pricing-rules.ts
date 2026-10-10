@@ -52,7 +52,24 @@ export const pricingImpactRowSchema = z.object({
   basisCents: pricingAmountCentsSchema.nullable().optional(),
   /** Notes on the new price that never block applying: below the .ops cost, warn-only price limits. */
   warnings: z.array(z.string()).optional(),
+  /**
+   * Present (true) only for a size saved as "follow the store's pricing"
+   * (`inherit`). Applying keeps that setting instead of re-saving the size as
+   * `rules`, and its price is the new rule price when the rules give one,
+   * else the retail price. Omitted otherwise, so a review stored before this
+   * field existed hashes the same.
+   */
+  followsStorePricing: z.literal(true).optional(),
+  /**
+   * Present only on a `followsStorePricing` row on its retail price (ruleName
+   * RETAIL_FALLBACK_RULE_NAME): why the checked rules give the size no usable
+   * price, the rule's issue or `pricing_rule_outside_limit` (a blocking Card
+   * Shellz price limit refuses the rule price). Omitted otherwise.
+   */
+  retailFallbackIssue: z.string().min(1).optional(),
 }).strict();
+/** The review's rule name for a size that follows the store's pricing but whose rules give it no usable price, so it uses its retail price. */
+export const RETAIL_FALLBACK_RULE_NAME = "Retail price (no rule prices this size)";
 export const pricingReviewSummarySchema = z.object({
   total: z.number().int().nonnegative(), changed: z.number().int().nonnegative(),
   preserved: z.number().int().nonnegative(), blocked: z.number().int().nonnegative(),

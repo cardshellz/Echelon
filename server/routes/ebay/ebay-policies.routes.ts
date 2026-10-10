@@ -16,7 +16,7 @@ import {
   productAssets,
 } from "@shared/schema";
 import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
-import { upsertChannelListing, upsertPushError, clearPushError, resolveChannelPrice, applyPricingRule, determineVariationAspectName, delay } from "../../modules/channels/infrastructure/ebay-listing-helpers";
+import { delay } from "../../modules/channels/infrastructure/ebay-listing-helpers";
 import {
   createEbayRouteListingLifecycleClient,
   getExistingEbayInventoryImageUrls,
@@ -38,7 +38,7 @@ async function getEbayRouteMarketplaceId(): Promise<string> {
 }
 
   // -----------------------------------------------------------------------
-  router.put("/api/ebay/product-exclusion/:productId", requireAuth, async (req: Request, res: Response) => {
+  router.put("/api/ebay/product-exclusion/:productId", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
       const productId = parseInt(req.params.productId);
       if (isNaN(productId)) {
@@ -86,7 +86,7 @@ async function getEbayRouteMarketplaceId(): Promise<string> {
   // PUT /api/ebay/product-policies/:productId — Set policy overrides for a product
 
   // -----------------------------------------------------------------------
-  router.put("/api/ebay/product-policies/:productId", requireAuth, async (req: Request, res: Response) => {
+  router.put("/api/ebay/product-policies/:productId", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
       const productId = parseInt(req.params.productId);
       if (isNaN(productId)) {
@@ -118,7 +118,7 @@ async function getEbayRouteMarketplaceId(): Promise<string> {
   // PUT /api/ebay/variant-policies/:variantId — Set policy overrides for a variant
 
   // -----------------------------------------------------------------------
-  router.put("/api/ebay/variant-policies/:variantId", requireAuth, async (req: Request, res: Response) => {
+  router.put("/api/ebay/variant-policies/:variantId", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
       const variantId = parseInt(req.params.variantId);
       if (isNaN(variantId)) {
@@ -222,7 +222,7 @@ async function getEbayRouteMarketplaceId(): Promise<string> {
   // POST /api/ebay/import-images — Import product images from eBay into product_assets
 
   // -----------------------------------------------------------------------
-  router.post("/api/ebay/import-images", requireAuth, async (_req: Request, res: Response) => {
+  router.post("/api/ebay/import-images", requireAuth, requirePermission("channels", "edit"), async (_req: Request, res: Response) => {
     try {
       const authService = getAuthService();
       if (!authService) {
@@ -317,88 +317,5 @@ async function getEbayRouteMarketplaceId(): Promise<string> {
     } catch (err: any) {
       console.error("[eBay Import Images] Error:", err.message);
       res.status(500).json({ error: err.message });
-    }
-  });
-
-  // -----------------------------------------------------------------------
-  // POST /api/ebay/admin/cleanup-prod60 — One-time cleanup of PROD-60 group
-
-  // -----------------------------------------------------------------------
-  router.post("/api/ebay/admin/cleanup-prod60", requireAuth, async (_req: Request, res: Response) => {
-    const log: string[] = [];
-    try {
-      const authService = getAuthService();
-      if (!authService) {
-        res.status(500).json({ error: "eBay OAuth not configured" });
-        return;
-      }
-      const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
-      const marketplaceId = await getEbayRouteMarketplaceId();
-      const ebayClient = createEbayRouteListingLifecycleClient({ accessToken });
-      log.push("Got eBay access token");
-
-      const skus = ["HERO-GRD-PSA-P1", "HERO-GRD-PSA-B5", "HERO-GRD-PSA-C50"];
-
-      // Delete offers for each SKU
-      for (const sku of skus) {
-        try {
-          const offers = await ebayClient.getOffers(sku, marketplaceId);
-          if (offers?.offers && offers.offers.length > 0) {
-            for (const offer of offers.offers) {
-              try {
-                await ebayClient.deleteOffer(offer.offerId);
-                log.push(`Deleted offer ${offer.offerId} for ${sku}`);
-              } catch (err: any) {
-                log.push(`Failed to delete offer ${offer.offerId}: ${err.message}`);
-              }
-            }
-          } else {
-            log.push(`No offers found for ${sku}`);
-          }
-        } catch (err: any) {
-          log.push(`Error fetching offers for ${sku}: ${err.message}`);
-        }
-      }
-
-      // Delete the inventory item group PROD-60
-      try {
-        await ebayClient.deleteInventoryItemGroup("PROD-60");
-        log.push("Deleted inventory item group PROD-60");
-      } catch (err: any) {
-        log.push(`Failed to delete group PROD-60: ${err.message}`);
-      }
-
-      // Delete individual inventory items
-      for (const sku of skus) {
-        try {
-          await ebayClient.deleteInventoryItem(sku);
-          log.push(`Deleted inventory item ${sku}`);
-        } catch (err: any) {
-          log.push(`Failed to delete inventory item ${sku}: ${err.message}`);
-        }
-      }
-
-      // Clean up channel_listings rows
-      const variantsList = await db.select({ id: productVariants.id }).from(productVariants).where(eq(productVariants.productId, 60));
-      if (variantsList.length > 0) {
-        const variantIds = variantsList.map(v => v.id);
-        const deletedRows = await db.delete(channelListings)
-          .where(
-            and(
-              eq(channelListings.channelId, EBAY_CHANNEL_ID),
-              inArray(channelListings.productVariantId, variantIds)
-            )
-          )
-          .returning({ id: channelListings.id, productVariantId: channelListings.productVariantId, externalSku: channelListings.externalSku });
-        log.push(`Deleted ${deletedRows.length} channel_listings rows`);
-        for (const row of deletedRows) {
-          log.push(`  - listing ${row.id}: variant ${row.productVariantId} (${row.externalSku})`);
-        }
-      }
-
-      res.json({ success: true, log });
-    } catch (err: any) {
-      console.error("[eBay PROD-60 Cleanup] Error:", err.message);
-      res.status(500).json({ error: err.message, log });
     }
   });

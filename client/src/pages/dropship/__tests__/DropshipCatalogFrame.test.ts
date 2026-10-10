@@ -78,6 +78,20 @@ describe("catalog step rail", () => {
     expect(markup).toContain('data-testid="catalog-store-select"');
     expect(markup).toContain('aria-labelledby="catalog-store-label"');
     expect(markup).not.toContain("No eBay store ready");
+    expect(markup).not.toMatch(/<button[^>]*disabled=""[^>]*data-testid="catalog-store-select"/);
+  });
+
+  it("turns the store choice off while a save is in flight, and changes nothing else", () => {
+    const markup = rail({ storeDisabled: true });
+    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*data-testid="catalog-store-select"/);
+    expect(rail({ storeDisabled: false })).toBe(rail());
+    // The step links stay: leaving to another step keeps the save's draft at page level.
+    expect(markup).toContain('href="/dropship-portal/catalog/choose"');
+  });
+
+  it("gives a step link's leave question its scope without putting it in the markup", () => {
+    expect(rail({ current: "choose", leaveScopes: { setup: [] } })).toBe(rail({ current: "choose" }));
+    expect(rail({ current: "choose", leaveScopes: { setup: ["pricing-rules:5"] } })).not.toContain("scope");
   });
 
   it("says no eBay store is ready, and names the stores that are not supported, instead of offering a choice", () => {
@@ -148,6 +162,15 @@ describe("catalog page steps", () => {
     expect(publish).toContain("<ListingPreviewPanel");
     expect(choose).not.toContain("<ListingPreviewPanel");
     expect(setup).not.toContain("<ListingPreviewPanel");
+  });
+
+  it("leaves the Listing settings draft out of the question on the ways back onto that step, and holds the store still while a save is in flight", () => {
+    expect(source).toContain("const toSetupScope = scopeWithoutPrefix(guardDrafts, LISTING_SETTINGS_GUARD_ID_PREFIX);");
+    // Next from Choose and the rail's Listing settings link; the other ways off still ask about every draft.
+    expect(source).toContain('...(actionBar.next.step === "setup" ? { scope: toSetupScope } : {}),');
+    expect(source).toContain("leaveScopes={{ setup: toSetupScope }}");
+    expect(source).toContain("onStoreChange={(storeConnectionId) => leaveGuard(() => chooseStore(storeConnectionId))}");
+    expect(source).toContain("storeDisabled={pendingPriceSaves > 0}");
   });
 
   it("chooses the store in the rail only, and asks eBay for store categories only on the step that shows them", () => {

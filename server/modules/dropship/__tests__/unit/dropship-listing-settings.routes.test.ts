@@ -147,12 +147,19 @@ describe("listing settings HTTP boundary", () => {
     expect(listProductsForMember).toHaveBeenCalledWith("member-1", { storeConnectionId: 22, search: undefined, show: undefined, page: undefined });
   });
 
+  it("passes the retail fallback filter through to the service (A3)", async () => {
+    expect((await get("/22/listing-settings/prices?show=retail_fallback")).status).toBe(200);
+    expect(listPricesForMember).toHaveBeenCalledWith("member-1", { storeConnectionId: 22, search: undefined, show: "retail_fallback", page: undefined });
+  });
+
   it.each([
     ["a store id with letters", "/22oops/listing-settings/summary"],
     ["a store id in exponent form", "/2e1/listing-settings/summary"],
     ["a store id of 0", "/0/listing-settings/summary"],
     ["a store id beyond the integer column", "/2147483648/listing-settings/summary"],
     ["an unknown filter", "/22/listing-settings/prices?show=everything"],
+    ["another unknown filter", "/22/listing-settings/prices?show=nope"],
+    ["a price filter on the Products tab", "/22/listing-settings/products?show=retail_fallback"],
     ["a page that is not a whole number", "/22/listing-settings/prices?page=1.5"],
     ["a page past the last", "/22/listing-settings/products?page=200"],
     ["a repeated search", "/22/listing-settings/products?search=a&search=b"],

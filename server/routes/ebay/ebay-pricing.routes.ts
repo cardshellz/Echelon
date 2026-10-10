@@ -15,7 +15,6 @@ import {
   channelPricingRules,
 } from "@shared/schema";
 import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, ebayApiRequest, ebayApiRequestWithRateNotify, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
-import { upsertChannelListing, upsertPushError, clearPushError, resolveChannelPrice, applyPricingRule, determineVariationAspectName, delay } from "../../modules/channels/infrastructure/ebay-listing-helpers";
 import { resolveChannelListingPrice } from "../../modules/channels/channel-pricing-resolver";
 
 export const router = express.Router();
@@ -66,7 +65,7 @@ export const router = express.Router();
   });
 
 
-  router.put("/api/ebay/pricing-rules", requireAuth, async (req: Request, res: Response) => {
+  router.put("/api/ebay/pricing-rules", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
       const { scope, scopeId, ruleType, value } = req.body as {
         scope: string;
@@ -134,7 +133,7 @@ export const router = express.Router();
   });
 
 
-  router.delete("/api/ebay/pricing-rules/:id", requireAuth, async (req: Request, res: Response) => {
+  router.delete("/api/ebay/pricing-rules/:id", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
       if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }

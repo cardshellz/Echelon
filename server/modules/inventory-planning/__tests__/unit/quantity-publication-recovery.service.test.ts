@@ -126,7 +126,7 @@ describe("one-click confirmation of stored provider answers", () => {
     expect(store.attest.mock.calls[0][0]).toEqual({ attemptId: "9", idempotencyKey: `provider-answer:9:${"b".repeat(64)}`, actor: "operator", now: NOW,
       evidenceKind: "provider_terminal_request_record", terminalOutcome: "completed", evidenceHash: "b".repeat(64),
       evidenceReference: "Stored provider request 9002: POST /sell/inventory/v1/offer/77/publish answered HTTP 400 (codes 25002) at 2026-09-29T09:30:00.000Z",
-      reason: "eBay answered every request of attempt 9; the last answer was HTTP 400 with codes 25002, a refusal that wrote no quantity." });
+      reason: "eBay answered every request of attempt 9; the last answer was HTTP 400 with codes 25002. Historical quantity effects have not been verified." });
     expect(store.pending).toHaveBeenCalledExactlyOnceWith("1", NOW);
   });
 

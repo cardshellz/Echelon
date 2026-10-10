@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import {
-  listingAmountCentsSchema, listingPriceCentsSchema, listingPriceSettingSchema, listingPriceTargetSchema,
+  RULE_PRICE_OUTSIDE_LIMIT_ISSUE, listingAmountCentsSchema, listingPriceCentsSchema, listingPriceSettingSchema, listingPriceTargetSchema,
   saveListingPriceInputSchema, type ListingPriceSetting, type ListingPriceTarget,
   type SaveListingPriceInput, type SavedListingPriceRevision, resolveListingPrice,
 } from "../../../../shared/dropship/listing-price";
@@ -8,8 +8,8 @@ import { evaluateDropshipCatalogExposure } from "../domain/catalog-exposure";
 import { evaluateDropshipVendorCatalogSelection } from "../domain/vendor-selection";
 import { DropshipError } from "../domain/errors";
 import { refuseListingPriceSave, type ListingPriceSaveRefusal } from "../domain/listing-price-save-guard";
-import { evaluateListingPricingPolicy, type DropshipListingPreviewRepository, type DropshipListingCatalogCandidate,
-  type DropshipPricingPolicyRecord } from "./dropship-listing-preview-service";
+import { evaluateListingPricingPolicy, withRulePriceLimitCheck, type DropshipListingPreviewRepository,
+  type DropshipListingCatalogCandidate, type DropshipPricingPolicyRecord } from "./dropship-listing-preview-service";
 import type { DropshipProductCost } from "./dropship-product-cost";
 import type { ListingRulePrice } from "./dropship-rule-price";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
@@ -65,7 +65,7 @@ export class DropshipListingPriceService {
       ...(parsed.pricingMode ? { pricingMode: parsed.pricingMode } : {}),
     })).digest("hex");
     const result = await this.deps.repository.execute({ ...parsedTarget, memberId, idempotencyKey: parsed.idempotencyKey }, async (tx) => {
-      const { candidate, sources } = await this.authorize(tx, parsedTarget, now);
+      const { candidate, sources, policies } = await this.authorize(tx, parsedTarget, now);
       // A retried save returns what the first one wrote and is not checked again:
       // it already happened, and the rules below may have changed since.
       const replay = await tx.loadReplay({ idempotencyKey: parsed.idempotencyKey, requestHash });
@@ -75,7 +75,7 @@ export class DropshipListingPriceService {
       if (parsed.pricingMode === "rules" && !sources.rulePrice) {
         throw new DropshipError("DROPSHIP_PRICING_RULES_NOT_CONFIGURED", "Configure store pricing rules before using them for this listing.");
       }
-      await assertPriceKept(tx, parsedTarget, candidate, sources, parsed);
+      await assertPriceKept(tx, parsedTarget, candidate, sources, policies, parsed);
       const saved = await tx.save({ ...parsed, requestHash, now });
       return { price: projectSetting(parsedTarget, sources, saved.saved, await loadCost(tx, candidate, sources)),
         idempotentReplay: saved.idempotentReplay };
@@ -83,13 +83,14 @@ export class DropshipListingPriceService {
     this.deps.logger.info({
       code: result.idempotentReplay ? "DROPSHIP_LISTING_PRICE_REPLAYED" : "DROPSHIP_LISTING_PRICE_SAVED",
       message: "Local listing price setting saved; no marketplace publication was requested.",
-      context: { ...parsedTarget, revisionId: result.price.revisionId, actorId: memberId, idempotentReplay: result.idempotentReplay },
+      context: { ...parsedTarget, revisionId: result.price.revisionId, pricingMode: result.price.pricingMode ?? null,
+        actorId: memberId, idempotentReplay: result.idempotentReplay },
     });
     return result;
   }
 
   private async authorize(tx: ListingPriceTransaction, target: ListingPriceTarget, now: Date): Promise<{
-    candidate: DropshipListingCatalogCandidate; sources: PriceSources;
+    candidate: DropshipListingCatalogCandidate; sources: PriceSources; policies: DropshipPricingPolicyRecord[];
   }> {
     const context = await tx.catalog.loadStoreContext({ vendorId: tx.vendorId, storeConnectionId: target.storeConnectionId });
     if (!context) throw new DropshipError("DROPSHIP_STORE_CONNECTION_REQUIRED", "Store connection was not found.");
@@ -104,11 +105,14 @@ export class DropshipListingPriceService {
     if (!["connected", "needs_reauth", "refresh_failed"].includes(context.storeStatus)) {
       throw new DropshipError("DROPSHIP_LISTING_STORE_BLOCKED", "This store is not available for listing-price changes.");
     }
-    const [candidates, rules, selections, overrides, listings] = await Promise.all([
+    const [candidates, rules, selections, overrides, listings, policies] = await Promise.all([
       tx.catalog.listCatalogCandidates([target.productVariantId]),
       tx.catalog.listCatalogExposureRules(), tx.catalog.listSelectionRules(tx.vendorId),
       tx.catalog.listVariantOverrides({ vendorId: tx.vendorId, productVariantIds: [target.productVariantId] }),
       tx.catalog.listExistingListings({ storeConnectionId: target.storeConnectionId, productVariantIds: [target.productVariantId] }),
+      // Every answer needs the limits, not only a save: an `inherit` size whose
+      // rule price a blocking limit refuses is on its retail price (L1).
+      tx.catalog.listPricingPolicies(),
     ]);
     const candidate = candidates.find((row) => row.productVariantId === target.productVariantId);
     if (!candidate) throw new DropshipError("DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "Listing price is not available for this item.");
@@ -120,13 +124,17 @@ export class DropshipListingPriceService {
     if (!exposure.exposed || !selection.selected) {
       throw new DropshipError("DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "Select an available catalog item before setting its listing price.");
     }
-    return { candidate, sources: { defaultPriceCents: candidate.defaultRetailPriceCents,
-      rulePrice: await tx.loadRulePrice?.(candidate) ?? null,
+    return { candidate, policies, sources: { defaultPriceCents: candidate.defaultRetailPriceCents,
+      rulePrice: withRulePriceLimitCheck(candidate, policies, await tx.loadRulePrice?.(candidate) ?? null),
       existingListingPriceCents: listings.find((row) => row.productVariantId === target.productVariantId)?.vendorRetailPriceCents ?? null } };
   }
 }
 
-interface PriceSources { defaultPriceCents: number | null; existingListingPriceCents: number | null; rulePrice: ListingRulePrice | null }
+interface PriceSources {
+  defaultPriceCents: number | null; existingListingPriceCents: number | null;
+  /** With `blockedByLimit` from the Card Shellz price limits (withRulePriceLimitCheck). */
+  rulePrice: (ListingRulePrice & { blockedByLimit: boolean }) | null;
+}
 
 /** A store with rules loaded the cost with the rule price; read it once either way. */
 async function loadCost(tx: ListingPriceTransaction, candidate: DropshipListingCatalogCandidate,
@@ -139,9 +147,9 @@ async function loadCost(tx: ListingPriceTransaction, candidate: DropshipListingC
  * (see refuseListingPriceSave). Before and after are resolved the same way the
  * preview and the push resolve them, and checked against the same limits.
  */
-async function assertPriceKept(tx: ListingPriceTransaction, target: ListingPriceTarget,
-  candidate: DropshipListingCatalogCandidate, sources: PriceSources, input: SaveListingPriceInput): Promise<void> {
-  const [current, policies] = await Promise.all([tx.loadSaved(), tx.catalog.listPricingPolicies()]);
+async function assertPriceKept(tx: ListingPriceTransaction, target: ListingPriceTarget, candidate: DropshipListingCatalogCandidate,
+  sources: PriceSources, policies: readonly DropshipPricingPolicyRecord[], input: SaveListingPriceInput): Promise<void> {
+  const current = await tx.loadSaved();
   // An out-of-date request is refused by the save's version check instead: the
   // vendor first needs to see the price as it is now.
   if ((current?.revisionId ?? null) !== input.expectedRevisionId) return;
@@ -204,11 +212,16 @@ function projectSetting(target: ListingPriceTarget, sources: PriceSources, saved
     defaultPriceCents: defaultPrice.success ? defaultPrice.data : null,
     pricingMode: saved?.pricingMode ?? (saved ? (saved.overridePriceCents === null ? "catalog_default" : "fixed")
       : sources.rulePrice ? "rules" : sources.existingListingPriceCents !== null ? "fixed" : "catalog_default"),
-    ruleName: sources.rulePrice?.ruleName ?? null, pricingIssue: sources.rulePrice?.issue ?? null,
+    ruleName: sources.rulePrice?.ruleName ?? null, pricingIssue: rulePriceIssue(sources.rulePrice),
     rulePriceCents: sources.rulePrice?.priceCents ?? null, rulesConfigured: sources.rulePrice !== null,
     ruleBasis: sources.rulePrice?.basis ?? null, productCostCents: costCents.success ? costCents.data : null,
     ...resolveListingPrice({ ...sources, saved }), updatedAt: saved?.updatedAt ?? null,
   });
+}
+/** Why the rule price can't price the size: the rules' issue, or a blocking Card Shellz limit that refuses it. */
+function rulePriceIssue(rulePrice: PriceSources["rulePrice"]): string | null {
+  if (!rulePrice) return null;
+  return rulePrice.issue ?? (rulePrice.blockedByLimit ? RULE_PRICE_OUTSIDE_LIMIT_ISSUE : null);
 }
 function assertMember(memberId: string): void {
   if (!memberId.trim()) throw new DropshipError("DROPSHIP_AUTH_REQUIRED", "Dropship authentication is required.");

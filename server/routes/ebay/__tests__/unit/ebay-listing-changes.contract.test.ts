@@ -1,65 +1,69 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-
 import { describe, expect, it } from "vitest";
-
+import { ebayListingPushRequestSchema } from "../../../../modules/channels/ebay-listing-push.service";
 import { normalizeEbayObservedOffers } from "../../ebay-listing-connector-client";
 
-describe("eBay reviewed listing-change route contract", () => {
-  const source = readFileSync(
-    resolve(process.cwd(), "server/routes/ebay/ebay-listings.routes.ts"),
-    "utf8",
-  );
+const preview = {
+  productId: 20,
+  groupKey: "provider-group",
+  currentExternalListingId: "listing-20",
+  sourceState: "active",
+  currentSkus: ["PACK", "CASE"],
+  activeSkus: ["PACK", "CASE"],
+  inactiveSkus: [],
+  desiredSkus: ["PACK"],
+  addedSkus: [],
+  removedSkus: ["CASE"],
+  rebuildRequired: true,
+  confirmationToken: "a".repeat(64),
+};
 
-  it("requires a read-only preview before explicit update or replacement", () => {
-    expect(source).toContain('mode: z.literal("preview")');
-    expect(source).toContain('updateExisting: z.object({');
-    expect(source).toContain("preview: ebayListingRebuildPreviewSchema");
-    expect(source).toContain('sourceState: z.enum(["active", "withdrawn"])');
-    expect(source).toContain("previewListingRebuild");
-    expect(source).toContain("updateExistingListing");
-    expect(source).toContain("executeListingRebuild");
+// The shared application service owns this contract after route extraction.
+// Mapping removal, rollback and concurrent edits run against real PostgreSQL in
+// ebay-listing-push.integration.test.ts rather than matching SQL source text.
+describe("eBay reviewed listing-change request contract", () => {
+  it("accepts a read-only preview without accepting an unreviewed execution", () => {
+    expect(ebayListingPushRequestSchema.parse({ productIds: [20], rebuild: { mode: "preview" } }).rebuild)
+      .toEqual({ mode: "preview" });
+    for (const field of ["rebuild", "updateExisting"]) {
+      expect(ebayListingPushRequestSchema.safeParse({ productIds: [20], [field]: { mode: "execute" } }).success)
+        .toBe(false);
+    }
+  });
+
+  it.each(["active", "withdrawn"])("accepts a complete reviewed %s source for resumption", sourceState => {
+    expect(ebayListingPushRequestSchema.safeParse({
+      productIds: [20], rebuild: { mode: "execute", preview: { ...preview, sourceState } },
+    }).success).toBe(true);
   });
 
   it("makes in-place update and replacement mutually exclusive", () => {
-    expect(source).toContain("if (value.rebuild && value.updateExisting)");
-    expect(source).toContain("Choose either an in-place update or a rebuild, not both.");
+    expect(ebayListingPushRequestSchema.safeParse({
+      productIds: [20], updateExisting: { mode: "execute", preview }, rebuild: { mode: "execute", preview },
+    }).success).toBe(false);
   });
 
-  it("never turns an ordinary listing push into a destructive rebuild", () => {
-    expect(source).toContain("if (rebuild || updateExisting)");
-    expect(source).toContain("connectorResult = await ebayListingConnector.pushListing");
+  it("binds an execution to exactly the reviewed product", () => {
+    for (const productIds of [[21], [20, 21]]) {
+      expect(ebayListingPushRequestSchema.safeParse({
+        productIds, rebuild: { mode: "execute", preview },
+      }).success).toBe(false);
+    }
   });
 
-  it("clears only marketplace mappings for variants removed by replacement", () => {
-    expect(source).toContain("SET external_product_id = NULL");
-    expect(source).toContain("external_variant_id = NULL");
-    expect(source).toContain("cl.external_sku = ANY($3::text[])");
-    expect(source).not.toContain("SET inventory_quantity = 0");
+  it("never adds destructive options to an ordinary publication request", () => {
+    expect(ebayListingPushRequestSchema.parse({ productIds: [20] })).toEqual({ productIds: [20] });
+    expect(ebayListingPushRequestSchema.safeParse({ productIds: [20], forceRebuild: true }).success).toBe(false);
   });
 
-  it("does not persist a failed read-only preview as a listing sync failure", () => {
-    expect(source).toContain('if (rebuild?.mode !== "preview")');
-  });
   it("normalizes the real nested eBay listing identity", () => {
     const [offer] = normalizeEbayObservedOffers({
       offers: [{
-        offerId: "offer-c750",
-        sku: "ARM-ENV-SGL-C750",
-        status: "PUBLISHED",
-        availableQuantity: 870,
-        listing: {
-          listingId: "298569307307",
-          listingStatus: "ACTIVE",
-        },
+        offerId: "offer-c750", sku: "ARM-ENV-SGL-C750", status: "PUBLISHED", availableQuantity: 870,
+        listing: { listingId: "298569307307", listingStatus: "ACTIVE" },
       }],
     });
-
     expect(offer).toMatchObject({
-      offerId: "offer-c750",
-      status: "PUBLISHED",
-      listingId: "298569307307",
-      availableQuantity: 870,
+      offerId: "offer-c750", status: "PUBLISHED", listingId: "298569307307", availableQuantity: 870,
     });
   });
 });

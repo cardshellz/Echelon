@@ -3,6 +3,10 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { type EbayListingIssue } from "@shared/types/ebay-listing-issue";
+import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
+import { EbayListingIssueCard } from "./EbayListingIssueCard";
+import { ebaySyncProgressEventSchema, type EbaySyncProgressEvent } from "@/lib/ebay-listing-progress";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -18,57 +22,19 @@ import {
   XCircle,
   Loader2,
   X,
-  ChevronDown,
-  ChevronRight,
 } from "lucide-react";
 
-interface SyncProgressEvent {
-  type: "progress";
-  product: string;
-  productId: number;
-  status: "success" | "error" | "pending";
-  changes?: string[];
-  error?: string;
-  current: number;
-  total: number;
-}
-
-interface SyncCompleteEvent {
-  type: "complete";
-  summary: {
-    synced: number;
-    priceChanges: number;
-    qtyChanges: number;
-    policyChanges: number;
-    errors: number;
-    pending?: number;
-    total: number;
-  };
-  cancelled: boolean;
-}
-
-interface SyncErrorEvent {
-  type: "error";
-  error: string;
-}
-
-type SyncEvent = SyncProgressEvent | SyncCompleteEvent | SyncErrorEvent;
-
-interface SyncResult {
-  product: string;
-  productId: number;
-  status: "success" | "error" | "pending";
-  changes?: string[];
-  error?: string;
-}
+type SyncCompleteEvent = Extract<EbaySyncProgressEvent, { type: "complete" }>;
+type SyncResult = Omit<Extract<EbaySyncProgressEvent, { type: "progress" }>, "type" | "current" | "total">;
 
 interface SyncProgressModalProps {
   open: boolean;
   onClose: () => void;
   productIds?: number[];
+  onIssueAction?: (issue: EbayListingIssue, productId: number, jobId?: string) => void;
 }
 
-export function SyncProgressModal({ open, onClose, productIds }: SyncProgressModalProps) {
+export function SyncProgressModal({ open, onClose, productIds, onIssueAction }: SyncProgressModalProps) {
   const queryClient = useQueryClient();
   const [results, setResults] = useState<SyncResult[]>([]);
   const [current, setCurrent] = useState(0);
@@ -76,10 +42,12 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
   const [isComplete, setIsComplete] = useState(false);
   const [isCancelled, setIsCancelled] = useState(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
+  const [globalIssue, setGlobalIssue] = useState<EbayListingIssue | null>(null);
   const [summary, setSummary] = useState<SyncCompleteEvent["summary"] | null>(null);
-  const [expandedErrors, setExpandedErrors] = useState<Set<number>>(new Set());
 
   const eventSourceRef = useRef<EventSource | null>(null);
+  // Event handlers outlive the render that opened the stream.
+  const finishedRef = useRef(false);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -95,8 +63,9 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
     setIsComplete(false);
     setIsCancelled(false);
     setGlobalError(null);
+    setGlobalIssue(null);
     setSummary(null);
-    setExpandedErrors(new Set());
+    finishedRef.current = false;
 
     const url =
       productIds && productIds.length > 0
@@ -108,7 +77,7 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
 
     es.onmessage = (event) => {
       try {
-        const data: SyncEvent = JSON.parse(event.data);
+        const data = ebaySyncProgressEventSchema.parse(JSON.parse(event.data));
         switch (data.type) {
           case "progress":
             setCurrent(data.current);
@@ -121,10 +90,28 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
                 status: data.status,
                 changes: data.changes,
                 error: data.error,
+                issue: data.issue,
+                jobId: data.jobId,
               },
             ]);
             break;
           case "complete":
+            finishedRef.current = true;
+            // Admission/storage failure can prevent a job (and a progress event)
+            // from existing. Its per-product result still needs a visible fix path.
+            setResults((previous) => {
+              const result = [...previous];
+              const included = new Set(result.map((entry) => entry.productId));
+              for (const detail of data.summary.details ?? []) {
+                if (detail.success || !detail.productId || included.has(detail.productId)) continue;
+                included.add(detail.productId);
+                result.push({ productId: detail.productId, product: detail.productName ?? `Product ${detail.productId}`,
+                  status: "error", error: detail.error,
+                  issue: detail.issue ?? resolveEbayListingIssue({ code: detail.code, message: detail.error, productId: detail.productId }),
+                });
+              }
+              return result;
+            });
             setIsComplete(true);
             setSummary(data.summary);
             setIsCancelled(data.cancelled);
@@ -134,20 +121,28 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
             queryClient.invalidateQueries({ queryKey: ["/api/ebay/listings/sync-jobs"] });
             break;
           case "error":
+            finishedRef.current = true;
             setGlobalError(data.error);
+            setGlobalIssue(data.issue ?? resolveEbayListingIssue({ message: data.error }));
             setIsComplete(true);
             es.close();
             break;
         }
-      } catch (e) {
-        console.error("[SyncProgress] Failed to parse SSE event:", e);
+      } catch {
+        finishedRef.current = true;
+        setGlobalError("Sync progress could not be read. Close this window and refresh the saved sync status before trying again.");
+        setIsComplete(true);
+        es.close();
       }
     };
 
     es.onerror = () => {
-      if (!isComplete) {
+      if (!finishedRef.current) {
+        finishedRef.current = true;
         setGlobalError("Progress connection closed. Accepted sync jobs continue in the background; check the listing for saved status.");
         setIsComplete(true);
+        queryClient.invalidateQueries({ queryKey: ["/api/ebay/listings/sync-jobs"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
       }
       es.close();
     };
@@ -159,7 +154,9 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
   }, [open, productIds?.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleCancel = useCallback(() => {
+    finishedRef.current = true;
     setIsCancelled(true);
+    setIsComplete(true);
     eventSourceRef.current?.close();
   }, []);
 
@@ -167,15 +164,6 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
     eventSourceRef.current?.close();
     onClose();
   }, [onClose]);
-
-  const toggleErrorExpanded = (productId: number) => {
-    setExpandedErrors((prev) => {
-      const next = new Set(prev);
-      if (next.has(productId)) next.delete(productId);
-      else next.add(productId);
-      return next;
-    });
-  };
 
   const succeeded = results.filter((r) => r.status === "success").length;
   const failed = results.filter((r) => r.status === "error").length;
@@ -191,7 +179,7 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
                 ? "Progress View Closed"
                 : globalError
                 ? "Sync Error"
-                : summary?.pending ? "Sync Saved — Recovering" : "Sync Complete"
+                : summary?.errors ? "Sync needs attention" : summary?.pending ? "Sync Saved — Processing" : "Sync Complete"
               : "Syncing eBay Listings..."}
           </DialogTitle>
         </DialogHeader>
@@ -218,6 +206,7 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
                   ` · ${summary.policyChanges} policy update${summary.policyChanges !== 1 ? "s" : ""}`}
                 {summary.errors > 0 &&
                   ` · ${summary.errors} error${summary.errors !== 1 ? "s" : ""}`}
+                {(summary.pending ?? 0) > 0 && ` · ${summary.pending} saved for processing`}
               </p>
               {isCancelled && (
                 <p className="text-xs mt-1 opacity-75">Saved sync jobs continue in the background.</p>
@@ -226,12 +215,9 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
           )}
 
           {/* Global error */}
-          {globalError && (
-            <div className="rounded-lg p-3 bg-red-50 dark:bg-red-950/30 text-red-800 dark:text-red-300 text-sm">
-              <p className="font-medium">Error</p>
-              <p className="text-xs mt-1">{globalError}</p>
-            </div>
-          )}
+          {globalError && (globalIssue
+            ? <EbayListingIssueCard issue={globalIssue} />
+            : <div role="alert" className="rounded-lg p-3 bg-amber-50 text-amber-900 text-sm">{globalError}</div>)}
 
           {/* Progress bar */}
           {!isComplete && (
@@ -266,7 +252,7 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
           </div>
 
           {/* Results log */}
-          <div className="flex-1 overflow-y-auto border rounded-lg min-h-[150px] max-h-[400px]">
+          {(results.length > 0 || !isComplete) && <div className="flex-1 overflow-y-auto border rounded-lg min-h-[150px] max-h-[400px]">
             <div className="divide-y">
               {results.map((result, i) => (
                 <div key={`${result.productId}-${i}`} className="px-3 py-2">
@@ -293,27 +279,11 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
                             <span className="text-xs text-muted-foreground">— no changes</span>
                           )}
                       </div>
-                      {result.status === "pending" && <p className="text-xs mt-1">Update saved. Recovery will continue automatically.</p>}
-                      {result.status === "error" && result.error && (
-                        <div className="mt-1">
-                          <button
-                            className="flex items-center gap-1 text-xs text-red-600 hover:text-red-700"
-                            onClick={() => toggleErrorExpanded(result.productId)}
-                          >
-                            {expandedErrors.has(result.productId) ? (
-                              <ChevronDown className="h-3 w-3" />
-                            ) : (
-                              <ChevronRight className="h-3 w-3" />
-                            )}
-                            {expandedErrors.has(result.productId) ? "Hide error" : "Show error"}
-                          </button>
-                          {expandedErrors.has(result.productId) && (
-                            <p className="text-xs text-red-600/80 mt-1 font-mono break-all bg-red-50 dark:bg-red-950/20 rounded p-2">
-                              {result.error}
-                            </p>
-                          )}
-                        </div>
-                      )}
+                      {result.status === "pending" && <p className="text-xs mt-1">Update saved. Check the listing for progress; you can close this window.</p>}
+                      {result.status === "error" && <div className="mt-2"><EbayListingIssueCard
+                        issue={result.issue ?? resolveEbayListingIssue({ message: result.error, productId: result.productId, jobId: result.jobId })}
+                        onAction={onIssueAction ? (issue) => { handleClose(); onIssueAction(issue, result.productId, result.jobId); } : undefined}
+                      /></div>}
                     </div>
                   </div>
                 </div>
@@ -326,7 +296,7 @@ export function SyncProgressModal({ open, onClose, productIds }: SyncProgressMod
               )}
               <div ref={logEndRef} />
             </div>
-          </div>
+          </div>}
 
           {/* Actions */}
           <div className="flex items-center gap-2 flex-wrap">

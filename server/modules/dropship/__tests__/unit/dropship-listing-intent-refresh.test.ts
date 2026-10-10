@@ -111,6 +111,29 @@ describe("refreshQueuedListingIntent", () => {
     });
   });
 
+  it("waits for review when a size that follows the store's pricing fell back to retail since queueing", async () => {
+    // Queued at the rule price ($12.99); the rules cannot price it now, so it is on retail ($14.99) with no rule evidence.
+    const { deps } = setup({ rulePricedListings: "wait_for_review",
+      rows: [row({ followsStorePricing: true, listingIntent: intent({ priceCents: 1499 }) })] });
+
+    await expect(refreshQueuedListingIntent(deps, baseInput)).rejects.toMatchObject({
+      code: "DROPSHIP_LISTING_PRICE_AWAITING_REVIEW",
+      context: { queuedPriceCents: 1299, currentPriceCents: 1499, followsStorePricing: true, classification: "permanent" },
+    });
+  });
+
+  it("publishes a size that follows the store's pricing when its price did not move", async () => {
+    const { deps } = setup({ rulePricedListings: "wait_for_review", rows: [row({ followsStorePricing: true })] });
+
+    await expect(refreshQueuedListingIntent(deps, baseInput)).resolves.toMatchObject({ priceCents: 1299 });
+  });
+
+  it("publishes a moved price for a size with a price of its own: only rule-owned prices wait", async () => {
+    const { deps } = setup({ rulePricedListings: "wait_for_review", rows: [row({ listingIntent: intent({ priceCents: 1499 }) })] });
+
+    await expect(refreshQueuedListingIntent(deps, baseInput)).resolves.toMatchObject({ priceCents: 1499 });
+  });
+
   it("publishes a moved rule price when the policy reprices automatically", async () => {
     const { deps } = setup({ rows: [row({ rulePriceEvidenceHash: "a".repeat(64), listingIntent: intent({ priceCents: 1499 }) })] });
 

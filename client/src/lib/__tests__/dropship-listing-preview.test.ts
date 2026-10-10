@@ -16,6 +16,7 @@ describe("product-cost preview issues", () => {
     ["pricing_configuration_invalid", "Your .ops price list configuration needs support review."],
     ["source_read_failed", "The .ops product cost could not be loaded. Refresh the preview; contact support if this continues."],
     ["product_cost_source_unavailable", "The .ops product cost could not be loaded. Refresh the preview; contact support if this continues."],
+    ["pricing_rule_outside_limit", "Your pricing rules give this size a price outside a Card Shellz price limit, so it can't be listed at that price."],
   ])("gives an actionable pricing explanation for %s", (code, label) => {
     expect(formatListingPreviewIssue(code)).toBe(label);
     expect(formatListingPreviewIssue(code)).not.toMatch(/reauth|eBay|channel discount/i);

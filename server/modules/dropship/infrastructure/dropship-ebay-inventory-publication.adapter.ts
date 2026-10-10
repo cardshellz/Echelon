@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { ebaySellRequestHeaders } from "./ebay-sell-headers";
-import { executeEbayQuantityHttpResponse } from "../../channels/adapters/ebay/ebay-quantity-http";
+import { executeEbayQuantityHttpResponse, EbayQuantityResponseUncertainError } from "../../channels/adapters/ebay/ebay-quantity-http";
 import { PROVIDER_REQUEST_TIMEOUT_MS } from "../../channels/provider-request-limits";
 import {
   EbayInventoryQuantityError, ebayInventoryMarketplace, ebayInventoryOffersPath,
@@ -264,6 +264,12 @@ export class EbayDropshipInventoryPublicationTransportAdapter
         });
       } catch (error) {
         if (error instanceof InventoryPublicationTransportError) throw error;
+        // The shared transport now validates acknowledgements before returning.
+        // Preserve this adapter's established failure contract without reparsing
+        // the response or mistaking an incomplete HTTP success for a network loss.
+        if (error instanceof EbayQuantityResponseUncertainError && error.httpStatus >= 200 && error.httpStatus < 300)
+          throw new InventoryPublicationTransportError("EBAY_INVENTORY_ACKNOWLEDGEMENT_INVALID",
+            "eBay did not confirm the exact SKU/offer quantity operation.", true, {}, { cause: error });
         throw new InventoryPublicationTransportError("DROPSHIP_EBAY_INVENTORY_NETWORK_ERROR",
           "eBay inventory publication did not yield a conclusive response.",true,
           { errorName: error instanceof Error ? error.name : "UnknownError" },{ cause: error });

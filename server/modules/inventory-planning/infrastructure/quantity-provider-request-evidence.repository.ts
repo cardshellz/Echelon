@@ -25,12 +25,12 @@ export class PostgresQuantityProviderRequestEvidenceStore implements QuantityPro
     const evidence = quantityProviderResponseEvidenceSchema.parse(raw);
     await this.transaction(async () => {
       const inserted = await this.client.query(`INSERT INTO inventory.quantity_provider_request_results
-        (request_id,outcome,http_status,provider_request_id,response_hash,error_codes,retry_not_before,recorded_at,cooldown_scope)
-        SELECT r.id,$4,$5,$6,$7,$8,$9,$10,$11 FROM inventory.quantity_provider_requests r
+        (request_id,outcome,http_status,provider_request_id,response_hash,error_codes,retry_not_before,recorded_at,cooldown_scope,request_terminated)
+        SELECT r.id,$4,$5,$6,$7,$8,$9,$10,$11,$12 FROM inventory.quantity_provider_requests r
         JOIN inventory.quantity_publication_attempts a ON a.id=r.attempt_id
         WHERE r.id=$1 AND a.id=$2 AND a.owner_token=$3 AND a.state='running' RETURNING request_id`,
       [requestId,this.attemptId,this.ownerToken,evidence.outcome,evidence.httpStatus,evidence.providerRequestId,
-        evidence.responseHash,evidence.errorCodes,evidence.retryNotBefore,recordedAt,evidence.cooldownScope]);
+        evidence.responseHash,evidence.errorCodes,evidence.retryNotBefore,recordedAt,evidence.cooldownScope,evidence.requestTerminated ?? null]);
       if (inserted.rowCount !== 1) throw new QuantityProviderEvidenceError();
       if (evidence.retryNotBefore) {
         // Empty item is the explicit account-wide key; real provider SKUs are

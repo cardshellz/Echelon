@@ -100,6 +100,7 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
     notices = new PgDropshipCostChangeNoticeRepository(qualifiedPool());
     actions = new PgDropshipCostChangeListingActionRepository(qualifiedPool(), {
       listCatalogCandidates: async (ids) => ids.map((id) => ({ productVariantId: id, productId: 1, category: null, productLineIds: [], defaultRetailPriceCents: 899 })),
+      listPricingPolicies: async () => [],
     });
   });
 

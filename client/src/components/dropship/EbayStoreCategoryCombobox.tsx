@@ -13,6 +13,11 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { cn } from "@/lib/utils";
 import type { DropshipEbayStoreCategoryOption } from "@/lib/dropship-ops-surface";
 
+/**
+ * A searchable picker of the vendor's eBay store shelves ("Store categories").
+ * The optional props let the Listing settings step use its own words (plan
+ * 2A); left out, the picker reads exactly as it always has.
+ */
 export function EbayStoreCategoryCombobox({
   ariaLabel,
   categories,
@@ -20,6 +25,10 @@ export function EbayStoreCategoryCombobox({
   onValueChange,
   placeholder,
   value,
+  hideIds = false,
+  clearLabel = "Clear optional category",
+  searchPlaceholder = "Search your eBay Store categories...",
+  emptyMessage = "No matching Store categories.",
 }: {
   ariaLabel: string;
   categories: readonly DropshipEbayStoreCategoryOption[];
@@ -27,6 +36,12 @@ export function EbayStoreCategoryCombobox({
   onValueChange: (categoryId: string | null) => void;
   placeholder: string;
   value: string | null;
+  /** Leaves out the "Store category <id>" line under each choice: vendors never see ids. */
+  hideIds?: boolean;
+  /** The choice that clears the value. */
+  clearLabel?: string;
+  searchPlaceholder?: string;
+  emptyMessage?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -73,15 +88,15 @@ export function EbayStoreCategoryCombobox({
           <CommandInput
             value={search}
             onValueChange={setSearch}
-            placeholder="Search your eBay Store categories..."
-            aria-label="Search your eBay Store categories"
+            placeholder={searchPlaceholder}
+            aria-label={searchPlaceholder.replace(/\.+$/, "")}
             autoComplete="off"
             autoCorrect="off"
             autoCapitalize="off"
             spellCheck={false}
           />
           <CommandList className="max-h-64 overflow-y-auto overscroll-contain">
-            <CommandEmpty>No matching Store categories.</CommandEmpty>
+            <CommandEmpty>{emptyMessage}</CommandEmpty>
             <CommandGroup>
               {value !== null && (
                 <CommandItem
@@ -91,7 +106,7 @@ export function EbayStoreCategoryCombobox({
                     close();
                   }}
                 >
-                  Clear optional category
+                  {clearLabel}
                 </CommandItem>
               )}
               {categories.map((category) => (
@@ -113,9 +128,11 @@ export function EbayStoreCategoryCombobox({
                   />
                   <span className="min-w-0">
                     <span className="block truncate font-medium">{category.path}</span>
-                    <span className="block truncate font-mono text-xs text-muted-foreground">
-                      Store category {category.categoryId}
-                    </span>
+                    {!hideIds && (
+                      <span className="block truncate font-mono text-xs text-muted-foreground">
+                        Store category {category.categoryId}
+                      </span>
+                    )}
                   </span>
                 </CommandItem>
               ))}

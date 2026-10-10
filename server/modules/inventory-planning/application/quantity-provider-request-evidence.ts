@@ -12,12 +12,18 @@ export const quantityProviderResponseEvidenceSchema = z.object({
   errorCodes: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,100}$/)).max(25),
   retryNotBefore: z.string().datetime().nullable(),
   cooldownScope: z.enum(["item","account"]).nullable(),
+  /** Absent for historical/uninstrumented writers. True proves request finality, not successful delivery. */
+  requestTerminated: z.boolean().nullable().optional(),
 }).strict().superRefine((value,context) => {
   if ((value.retryNotBefore === null) !== (value.cooldownScope === null)) context.addIssue({
     code: z.ZodIssueCode.custom,message: "A retry deadline and its cooldown scope must be supplied together.",
   });
   if (value.outcome === "rejected" && (value.httpStatus === null || value.responseHash === null)) context.addIssue({
     code: z.ZodIssueCode.custom,message: "Terminal rejection requires a completed HTTP response record.",
+  });
+  if (value.requestTerminated === true && (value.httpStatus === null || value.responseHash === null
+    || !([200,201,204,207].includes(value.httpStatus) || (value.httpStatus >= 400 && value.httpStatus !== 408)))) context.addIssue({
+    code: z.ZodIssueCode.custom,message: "Request finality requires a completed synchronous HTTP response.",
   });
 });
 export type QuantityProviderResponseEvidence = z.infer<typeof quantityProviderResponseEvidenceSchema>;

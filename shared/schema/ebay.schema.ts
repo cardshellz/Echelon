@@ -14,14 +14,14 @@ import { products } from "./catalog.schema";
 export const ebaySchema = pgSchema("ebay");
 
 // ---------------------------------------------------------------------------
-// eBay OAuth Tokens — rotating token storage
+// eBay OAuth Tokens — channel and environment scoped token storage
 // ---------------------------------------------------------------------------
 
 /**
  * Stores eBay OAuth2 tokens with support for token rotation.
  *
- * CRITICAL: eBay refresh tokens change on every refresh call.
- * The new refresh token must be persisted immediately or access is lost.
+ * A refresh response can omit refresh_token; preserve the saved refresh token
+ * and its original expiry unless eBay explicitly supplies a replacement.
  * One row per channel + environment combination.
  */
 export const ebayOauthTokens = ebaySchema.table("ebay_oauth_tokens", {

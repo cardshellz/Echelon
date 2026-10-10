@@ -17,7 +17,6 @@ import {
   ebayProductAspectOverrides,
 } from "@shared/schema";
 import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, ebayApiRequest, ebayApiRequestWithRateNotify, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
-import { upsertChannelListing, upsertPushError, clearPushError, resolveChannelPrice, applyPricingRule, determineVariationAspectName, delay } from "../../modules/channels/infrastructure/ebay-listing-helpers";
 
 export const router = express.Router();
 
@@ -380,7 +379,7 @@ export const router = express.Router();
   // PUT /api/ebay/type-aspect-defaults/:productTypeSlug
 
   // -----------------------------------------------------------------------
-  router.put("/api/ebay/type-aspect-defaults/:productTypeSlug", requireAuth, async (req: Request, res: Response) => {
+  router.put("/api/ebay/type-aspect-defaults/:productTypeSlug", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
       const { productTypeSlug } = req.params;
       const { defaults } = req.body as { defaults: Record<string, string> };
@@ -453,7 +452,7 @@ export const router = express.Router();
   // PUT /api/ebay/product-aspects/:productId
 
   // -----------------------------------------------------------------------
-  router.put("/api/ebay/product-aspects/:productId", requireAuth, async (req: Request, res: Response) => {
+  router.put("/api/ebay/product-aspects/:productId", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
       const productId = parseInt(req.params.productId);
       if (isNaN(productId)) {
