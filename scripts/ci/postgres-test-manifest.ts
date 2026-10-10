@@ -151,4 +151,6 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/channels/__tests__/integration/ebay-listing-photos.integration.test.ts",
   "server/modules/channels/__tests__/integration/ebay-listing-sync-recovery.integration.test.ts",
   "server/modules/procurement/__tests__/integration/invoice-po-quantities.integration.test.ts",
+  "server/modules/dropship/__tests__/integration/dropship-product-category-listing-settings.integration.test.ts",
+  "server/modules/dropship/__tests__/integration/dropship-ebay-category-rules.integration.test.ts",
 ]);

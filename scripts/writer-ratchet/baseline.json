@@ -176,6 +176,12 @@
   "dropship.dropship_catalog_rules": [
     "modules/dropship"
   ],
+  "dropship.dropship_category_listing_setting_revisions": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_category_listing_settings": [
+    "modules/dropship"
+  ],
   "dropship.dropship_channel_connection_branding_revisions": [
     "modules/dropship"
   ],
@@ -300,6 +306,18 @@
     "modules/dropship"
   ],
   "dropship.dropship_pricing_reviews": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_product_category_seen": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_product_listing_setting_requests": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_product_listing_setting_revisions": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_product_listing_settings": [
     "modules/dropship"
   ],
   "dropship.dropship_rate_table_rows": [
