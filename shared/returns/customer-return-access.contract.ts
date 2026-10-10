@@ -5,6 +5,11 @@ export const CUSTOMER_RETURNS_PAGE = "/customer-returns";
 export const CUSTOMER_RETURNS_API = "/api/returns/customer";
 export const CUSTOMER_RETURNS_SHOPIFY_PROXY = "/api/returns/shopify/proxy";
 export const RETURN_CUSTOMER_SESSION_HEADER = "X-Return-Session";
+export const customerReturnCustomerProfileSchema = z.object({
+  name: z.string().trim().min(1).max(511).nullable(),
+  email: z.string().trim().email().max(320).nullable(),
+}).strict();
+export type CustomerReturnCustomerProfile = z.infer<typeof customerReturnCustomerProfileSchema>;
 export const customerReturnSessionStateSchema = z.object({
   authenticated: z.boolean(),
   privateTesting: z.boolean(),

@@ -78,6 +78,12 @@ export class CustomerReturnLiveService {
     return this.boundary(async () => (await this.load(parseInput(customerReturnCanonicalOrderScopeSchema, scope))).order);
   }
 
+  /** The chooser needs verified eligibility, not parcel measurements. Selecting
+   * an order performs the full lookup before the customer packs any items. */
+  async lookupCanonicalSummary(scope: CustomerReturnCanonicalOrderScope): Promise<CustomerReturnLiveOrder> {
+    return this.boundary(async () => (await this.load(parseInput(customerReturnCanonicalOrderScopeSchema, scope), false)).order);
+  }
+
   async inspectCanonicalForIntake(scope: CustomerReturnCanonicalOrderScope): Promise<CustomerReturnIntakeInspection> {
     return this.boundary(() => this.load(parseInput(customerReturnCanonicalOrderScopeSchema, scope)));
   }
@@ -119,18 +125,19 @@ export class CustomerReturnLiveService {
     return shops;
   }
 
-  private async load(input: CustomerReturnLiveLookupInput | CustomerReturnCanonicalOrderScope): Promise<CustomerReturnIntakeInspection> {
+  private async load(input: CustomerReturnLiveLookupInput | CustomerReturnCanonicalOrderScope, includeBoxMeasurements = true): Promise<CustomerReturnIntakeInspection> {
     const canonicalScope = "omsOrderId" in input ? input : null;
     const requestedReference = "orderReference" in input ? normalizeCustomerReturnOrderReference(input.orderReference) : null;
     const shop = (await this.readShops()).find(candidate => candidate.channelId === input.channelId);
     if (!shop) throw new CustomerReturnLiveError("RETURN_LIVE_SHOP_UNAVAILABLE", "Select a configured returns store.", 409);
-    const firstPolicy = await this.readPolicy(shop.channelId);
     const lookup = canonicalScope
       ? { channelId: shop.channelId, connectionId: shop.connectionId, canonicalOrder: {
         omsOrderId: canonicalScope.omsOrderId, externalOrderId: canonicalScope.externalOrderId,
         externalCustomerId: canonicalScope.externalCustomerId } }
       : { channelId: shop.channelId, connectionId: shop.connectionId, orderReference: "orderReference" in input ? input.orderReference : "" };
-    const firstRaw = await this.dependencies.local.read(lookup);
+    const [firstPolicy, firstRaw] = await Promise.all([
+      this.readPolicy(shop.channelId), this.dependencies.local.read(lookup),
+    ]);
     if (firstRaw === null) throw new CustomerReturnLiveError("RETURN_LIVE_ORDER_NOT_FOUND", "We couldn't find that order in the selected store.", 404);
     const first = customerReturnLocalInspectionSnapshotSchema.parse(firstRaw);
     if (canonicalScope) verifyCanonicalOwnership(first, canonicalScope);
@@ -144,13 +151,19 @@ export class CustomerReturnLiveService {
     }));
     if (canonicalScope) verifyProviderOwnership(provider, canonicalScope);
     verifyIdentity(first, provider, reference);
-    const boxOptions = await readCustomerReturnOriginalBoxes(first, this.dependencies.dimensions, this.dependencies.reportBoxDiagnostic);
-    const finalRaw = await this.dependencies.local.read(lookup);
+    // Only read optional package measurements after both local and provider
+    // ownership pass. They don't affect eligibility; final source/policy reads
+    // can run alongside them and are checked again against the observation TTL.
+    const [finalRaw, operationalPolicy, boxOptions] = await Promise.all([
+      this.dependencies.local.read(lookup), this.readPolicy(shop.channelId),
+      includeBoxMeasurements
+        ? readCustomerReturnOriginalBoxes(first, this.dependencies.dimensions, this.dependencies.reportBoxDiagnostic)
+        : Promise.resolve([]),
+    ]);
     if (finalRaw === null) throw changed();
     const local = customerReturnLocalInspectionSnapshotSchema.parse(finalRaw);
     if (canonicalScope) verifyCanonicalOwnership(local, canonicalScope);
     if (canonical(first) !== canonical(local)) throw changed();
-    const operationalPolicy = await this.readPolicy(shop.channelId);
     if (canonical(firstPolicy) !== canonical(operationalPolicy)) throw changed();
     const now = this.dependencies.now();
     if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw unavailable();

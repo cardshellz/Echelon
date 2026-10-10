@@ -13,6 +13,7 @@ import {
 } from "../application/customer-return-local-inspection.ports";
 import { buildCustomerReturnOrderNumberAliases, CustomerReturnOrderReferenceError } from "../domain/customer-return-order-reference";
 import { inspectionQueries as queries } from "./customer-return-local-inspection.queries";
+import { CUSTOMER_RETURN_INSPECTION_SNAPSHOT_QUERY } from "./customer-return-local-inspection.snapshot-query";
 import { deriveLocalInspectionIssues } from "./customer-return-local-inspection.issues";
 
 const positiveId = z.number().int().positive().safe();
@@ -24,6 +25,13 @@ const configuredShopSchema = customerReturnInspectionShopSchema.extend({
   connectionCount: positiveId, hasCredentials: z.boolean(), isDropship: z.boolean(),
 }).strict();
 const localOrderRowSchema = customerReturnLocalOrderSchema.extend({ isDropship: z.boolean() }).strict();
+const snapshotCollectionsSchema = z.object({
+  lines: z.array(z.unknown()), wmsItems: z.array(z.unknown()), rootClaims: z.array(z.unknown()),
+  legacyClaims: z.array(z.unknown()), unallocatedReturns: z.array(z.unknown()), inventoryReturnEvidence: z.array(z.unknown()),
+  fulfillmentBindings: z.array(z.unknown()), packageItems: z.array(z.unknown()), packageLabels: z.array(z.unknown()),
+  carrierEvents: z.array(z.unknown()),
+}).strict();
+const timestampSchema = z.string().datetime({ offset: true });
 // Bounded local reads cannot wait indefinitely behind a migration or a saturated DB.
 const STATEMENT_TIMEOUT_MS = 5_000;
 
@@ -99,37 +107,31 @@ export class PostgresCustomerReturnLocalInspectionReader implements CustomerRetu
   private async loadOrderEvidence(client: PoolClient, shop: CustomerReturnInspectionShop,
     order: z.infer<typeof customerReturnLocalOrderSchema>): Promise<Omit<CustomerReturnLocalInspectionSnapshot, "observedAt" | "issues">> {
     const orderId = order.omsOrderId;
-    const lines = await readRows(client, customerReturnLocalLineSchema, queries.lines, [orderId, limits.lines + 1], limits.lines,
+    const result = await client.query(CUSTOMER_RETURN_INSPECTION_SNAPSHOT_QUERY, [orderId, String(orderId), shop.channelId,
+      orderIdAliases(order.externalOrderId), limits.lines + 1, limits.wmsItems + 1, limits.claims + 1,
+      limits.bindings + 1, limits.packageItems + 1, limits.labels + 1, limits.events + 1]);
+    if (!Array.isArray(result?.rows) || result.rows.length !== 1) throw new z.ZodError([]);
+    const raw = snapshotCollectionsSchema.parse(result.rows[0]);
+    const lines = parseRows(customerReturnLocalLineSchema, raw.lines, limits.lines,
       ["omsOrderLineId", "quantity"], [], ["unitWeightGrams"]);
-    const wmsItems = await readRows(client, customerReturnLocalWmsItemSchema, queries.wmsItems,
-      [orderId, String(orderId), limits.wmsItems + 1], limits.wmsItems,
+    const wmsItems = parseRows(customerReturnLocalWmsItemSchema, raw.wmsItems, limits.wmsItems,
       ["wmsOrderId", "wmsOrderItemId", "omsOrderLineId", "channelId", "quantity", "fulfilledQuantity"]);
-    const itemIds = wmsItems.map(item => item.wmsOrderItemId);
-    const rootClaims = await readRows(client, customerReturnLocalRootClaimSchema, queries.rootClaims,
-      [orderId, itemIds, limits.claims + 1], limits.claims,
+    const rootClaims = parseRows(customerReturnLocalRootClaimSchema, raw.rootClaims, limits.claims,
       ["claimId", "authorizationId", "authorizationLineId", "channelId", "omsOrderId", "omsOrderLineId", "wmsOrderItemId", "quantity"]);
-    const legacyClaims = await readRows(client, customerReturnLocalLegacyClaimSchema, queries.legacyClaims,
-      [orderId, String(orderId), itemIds, unique(wmsItems.map(item => item.wmsOrderId)), limits.claims + 1], limits.claims,
+    const legacyClaims = parseRows(customerReturnLocalLegacyClaimSchema, raw.legacyClaims, limits.claims,
       ["returnId", "returnItemId", "wmsOrderId", "wmsOrderItemId", "omsOrderLineId", "expectedQuantity", "receivedQuantity"]);
-    const unallocatedReturns = await readRows(client, customerReturnLocalUnallocatedReturnSchema, queries.unallocatedReturns,
-      [String(orderId), unique(wmsItems.map(item => item.wmsOrderId)), limits.claims + 1], limits.claims,
+    const unallocatedReturns = parseRows(customerReturnLocalUnallocatedReturnSchema, raw.unallocatedReturns, limits.claims,
       ["returnId", "wmsOrderId"]);
-    const inventoryReturnEvidence = await readRows(client, customerReturnLocalInventoryReturnSchema, queries.inventoryReturns,
-      [unique(wmsItems.map(item => item.wmsOrderId)), itemIds, String(orderId), limits.claims + 1], limits.claims,
+    const inventoryReturnEvidence = parseRows(customerReturnLocalInventoryReturnSchema, raw.inventoryReturnEvidence, limits.claims,
       ["transactionId", "wmsOrderId", "wmsOrderItemId", "quantityDelta"], ["occurredAt"]);
-    const fulfillmentBindings = await readRows(client, customerReturnLocalBindingSchema, queries.bindings,
-      [orderId, shop.channelId, orderIdAliases(order.externalOrderId), limits.bindings + 1], limits.bindings,
+    const fulfillmentBindings = parseRows(customerReturnLocalBindingSchema, raw.fulfillmentBindings, limits.bindings,
       ["bindingId", "parentId", "sourceChannelId", "omsOrderLineId", "wmsOrderItemId", "physicalShipmentId", "physicalShipmentItemId", "quantity"]);
-    const packageItems = await readRows(client, customerReturnLocalPackageItemSchema, queries.packageItems,
-      [itemIds, lines.map(line => line.omsOrderLineId), uniquePresent(fulfillmentBindings.map(binding => binding.physicalShipmentItemId)),
-        uniquePresent(fulfillmentBindings.map(binding => binding.physicalShipmentId)), limits.packageItems + 1], limits.packageItems,
+    const packageItems = parseRows(customerReturnLocalPackageItemSchema, raw.packageItems, limits.packageItems,
       ["physicalShipmentItemId", "physicalShipmentId", "wmsOrderItemId", "omsOrderLineId", "legacyShipmentItemId", "legacyShipmentId",
         "replacementForOrderItemId", "correctionForPhysicalShipmentItemId", "originalQuantity", "effectiveQuantity"]);
-    const packageLabels = await readRows(client, customerReturnLocalPackageLabelSchema, queries.labels,
-      [unique(packageItems.map(item => item.physicalShipmentId)), limits.labels + 1], limits.labels,
+    const packageLabels = parseRows(customerReturnLocalPackageLabelSchema, raw.packageLabels, limits.labels,
       ["linkId", "labelId", "physicalShipmentId"], ["voidedAt"]);
-    const carrierEvents = await readRows(client, customerReturnLocalCarrierEventSchema, queries.events,
-      [unique(packageLabels.map(label => label.labelId)), limits.events + 1], limits.events,
+    const carrierEvents = parseRows(customerReturnLocalCarrierEventSchema, raw.carrierEvents, limits.events,
       ["eventId", "matchId", "labelId"], ["occurredAt", "actualDeliveryAt", "receivedAt"]);
     return { shop, order, lines, wmsItems, rootClaims, legacyClaims, unallocatedReturns, inventoryReturnEvidence,
       fulfillmentBindings, packageItems, packageLabels, carrierEvents };
@@ -175,10 +177,16 @@ async function readRows<T extends z.ZodTypeAny>(client: PoolClient, schema: T, t
   nullableWeightKeys: readonly string[] = []): Promise<z.output<T>[]> {
   const result = await client.query(text, values);
   if (!result || !Array.isArray(result.rows)) throw new z.ZodError([]);
-  if (result.rows.length > maximum) throw failure("RETURN_INSPECTION_EVIDENCE_LIMIT", "This order has more evidence than private inspection can safely review.");
-  return result.rows.map(raw => {
+  return parseRows(schema, result.rows, maximum, integerKeys, timestampKeys, nullableWeightKeys);
+}
+
+function parseRows<T extends z.ZodTypeAny>(schema: T, rows: readonly unknown[], maximum: number,
+  integerKeys: readonly string[] = [], timestampKeys: readonly string[] = [],
+  nullableWeightKeys: readonly string[] = []): z.output<T>[] {
+  if (rows.length > maximum) throw failure("RETURN_INSPECTION_EVIDENCE_LIMIT", "This order has more evidence than private inspection can safely review.");
+  return rows.map(raw => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new z.ZodError([]);
-    const row = { ...raw };
+    const row: Record<string, unknown> = { ...raw };
     for (const key of integerKeys) {
       const value = row[key];
       if (typeof value === "string" && /^-?\d+$/.test(value)) row[key] = Number(value);
@@ -186,6 +194,7 @@ async function readRows<T extends z.ZodTypeAny>(client: PoolClient, schema: T, t
     for (const key of timestampKeys) {
       const value = row[key];
       if (value instanceof Date && Number.isFinite(value.getTime())) row[key] = value.toISOString();
+      else if (timestampSchema.safeParse(value).success) row[key] = new Date(value as string).toISOString();
     }
     for (const key of nullableWeightKeys) {
       // Catalog numeric(10,2) values are product-only grams. Missing, zero,
@@ -199,8 +208,6 @@ async function readRows<T extends z.ZodTypeAny>(client: PoolClient, schema: T, t
   });
 }
 
-function unique(values: readonly number[]): number[] { return [...new Set(values)]; }
-function uniquePresent(values: readonly (number | null)[]): number[] { return unique(values.filter((value): value is number => value !== null)); }
 function orderIdAliases(value: string): string[] {
   const digits = /^gid:\/\/shopify\/Order\/(\d+)$/.exec(value)?.[1] ?? (/^\d+$/.test(value) ? value : null);
   return digits === null ? [value] : [...new Set([digits, `gid://shopify/Order/${digits}`])];

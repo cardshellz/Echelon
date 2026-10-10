@@ -86,6 +86,47 @@ function begin(s: ReturnType<typeof setup>) {
 }
 
 describe("customer return transport", () => {
+  it("reads only the verified session's profile without a customer identifier or command", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          name: "Taylor Sample",
+          email: "taylor@example.test",
+        }),
+      ),
+    );
+    await expect(
+      createCustomerReturnTransport(request, identity).profile(
+        new AbortController().signal,
+      ),
+    ).resolves.toEqual({ name: "Taylor Sample", email: "taylor@example.test" });
+    expect(request).toHaveBeenCalledWith(
+      "/api/returns/customer/profile",
+      expect.objectContaining({
+        method: "GET",
+        credentials: "include",
+        cache: "no-store",
+        headers: { "X-Return-Session": identity },
+      }),
+    );
+    expect(request.mock.calls[0][1]).not.toHaveProperty("body");
+  });
+  it("rejects a malformed profile rather than displaying unchecked identity", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          name: 123,
+          email: "taylor@example.test",
+          customerId: "browser-supplied",
+        }),
+      ),
+    );
+    await expect(
+      createCustomerReturnTransport(request, identity).profile(
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ code: "CUSTOMER_RETURN_RESPONSE_INVALID" });
+  });
   it("uses customer-only routes and explicit JSON command protection", async () => {
     const request = vi
       .fn<typeof fetch>()
@@ -127,22 +168,21 @@ describe("customer return transport", () => {
     expect(request).not.toHaveBeenCalled();
   });
   it("requires a bound session for workspace requests but permits sign-in discovery", async () => {
-    const request = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            authenticated: false,
-            privateTesting: true,
-            sessionKey: null,
-          }),
-        ),
-      );
+    const request = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          authenticated: false,
+          privateTesting: true,
+          sessionKey: null,
+        }),
+      ),
+    );
     const api = createCustomerReturnTransport(request);
     await api.session(new AbortController().signal);
     await expect(
       api.orders(null, new AbortController().signal),
     ).rejects.toThrow();
+    await expect(api.profile(new AbortController().signal)).rejects.toThrow();
     expect(request).toHaveBeenCalledOnce();
   });
   it.each([401, 403])("requires new sign-in on status %i", async (code) => {
@@ -157,19 +197,17 @@ describe("customer return transport", () => {
     ).rejects.toBeInstanceOf(PreviewAccessError);
   });
   it("sanitizes unknown server details while retaining the ambiguous 404 classification", async () => {
-    const request = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            error: {
-              code: "CUSTOMER_RETURN_UNAVAILABLE",
-              message: "private-sql-secret",
-            },
-          }),
-          { status: 404 },
-        ),
-      );
+    const request = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "CUSTOMER_RETURN_UNAVAILABLE",
+            message: "private-sql-secret",
+          },
+        }),
+        { status: 404 },
+      ),
+    );
     await expect(
       createCustomerReturnTransport(request, identity).byCommand(
         commandKey,
@@ -220,13 +258,11 @@ describe("customer return transport", () => {
     }
   });
   it("downloads only a verified customer PDF", async () => {
-    const request = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(
-        new Response("%PDF-test", {
-          headers: { "Content-Type": "application/pdf" },
-        }),
-      );
+    const request = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response("%PDF-test", {
+        headers: { "Content-Type": "application/pdf" },
+      }),
+    );
     expect(
       (
         await downloadCustomerReturnLabel(
