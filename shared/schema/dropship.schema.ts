@@ -13,13 +13,15 @@ import {
   primaryKey,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   varchar,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { channels } from "./channels.schema";
-import { productLines, products, productVariants } from "./catalog.schema";
+import { productCategories, productLines, products, productVariants } from "./catalog.schema";
 import { members, memberSubscriptions, plans } from "./membership.schema";
 import { omsOrders } from "./oms.schema";
 import { orders as wmsOrders, outboundShipments } from "./orders.schema";
@@ -935,6 +937,253 @@ export const dropshipListingPriceSettings = dropshipSchema.table("dropship_listi
       dropshipListingPriceRevisions.storeConnectionId, dropshipListingPriceRevisions.productVariantId] }),
   index("dropship_listing_price_setting_vendor_idx").on(table.vendorId, table.storeConnectionId),
   check("dropship_listing_price_setting_cents_chk", sql`${table.overridePriceCents} IS NULL OR ${table.overridePriceCents} > 0`),
+]);
+
+/**
+ * The value columns product and category listing setting revisions share
+ * (migrations 0736, 0737), in the migrations' column order. A null value
+ * follows the default. A function, because a Drizzle column belongs to one table.
+ */
+function listingSettingValueColumns() {
+  return {
+    priceBasis: varchar("price_basis", { length: 20 }),
+    priceMarkupBps: integer("price_markup_bps"),
+    priceFlatCents: integer("price_flat_cents"),
+    priceRounding: varchar("price_rounding", { length: 10 }),
+    ebayCategoryId: varchar("ebay_category_id", { length: 20 }),
+    ebayCategoryName: varchar("ebay_category_name", { length: 200 }),
+    ebayCategoryPath: jsonb("ebay_category_path"),
+    shelfMode: varchar("shelf_mode", { length: 10 }),
+    shelfIds: jsonb("shelf_ids"),
+    shelfNames: jsonb("shelf_names"),
+    fulfillmentPolicyId: varchar("fulfillment_policy_id", { length: 100 }),
+    fulfillmentPolicyName: varchar("fulfillment_policy_name", { length: 200 }),
+    returnPolicyId: varchar("return_policy_id", { length: 100 }),
+    returnPolicyName: varchar("return_policy_name", { length: 200 }),
+    paymentPolicyId: varchar("payment_policy_id", { length: 100 }),
+    paymentPolicyName: varchar("payment_policy_name", { length: 200 }),
+    textAboveMode: varchar("text_above_mode", { length: 10 }),
+    textAbove: text("text_above"),
+    textBelowMode: varchar("text_below_mode", { length: 10 }),
+    textBelow: text("text_below"),
+  };
+}
+
+type ListingSettingValueTable = { [K in keyof ReturnType<typeof listingSettingValueColumns>]: AnyPgColumn };
+
+/**
+ * The value CHECKs both revision tables share, named `<prefix>_<purpose>_chk`
+ * as in the migrations. Each group is all or none, counted with num_nonnulls,
+ * and each "set" branch tests IS NOT NULL first: a CHECK that evaluates to
+ * NULL accepts the row. The PostgreSQL suite proves what they refuse.
+ */
+function listingSettingValueChecks(prefix: string, table: ListingSettingValueTable) {
+  const price = sql`${table.priceBasis}, ${table.priceMarkupBps}, ${table.priceFlatCents}, ${table.priceRounding}`;
+  const ebayCategory = sql`${table.ebayCategoryId}, ${table.ebayCategoryName}, ${table.ebayCategoryPath}`;
+  return [
+    check(`${prefix}_price_chk`, sql`num_nonnulls(${price}) = 0
+      OR (num_nonnulls(${price}) = 4
+        AND ${table.priceBasis} IN ('product_cost', 'catalog_retail')
+        AND ${table.priceMarkupBps} BETWEEN 0 AND 1000000
+        AND ${table.priceFlatCents} BETWEEN 0 AND 2147483647
+        AND ${table.priceRounding} IN ('cent', 'up_99'))`),
+    check(`${prefix}_ebay_category_chk`, sql`num_nonnulls(${ebayCategory}) = 0
+      OR (num_nonnulls(${ebayCategory}) = 3
+        AND ${table.ebayCategoryId} ~ '^[1-9][0-9]{0,19}$'
+        AND btrim(${table.ebayCategoryName}) <> ''
+        AND jsonb_typeof(${table.ebayCategoryPath}) = 'array'
+        AND jsonb_array_length(${table.ebayCategoryPath}) BETWEEN 1 AND 12)`),
+    check(`${prefix}_shelf_chk`, sql`((${table.shelfMode} IS NULL OR ${table.shelfMode} = 'none')
+        AND ${table.shelfIds} IS NULL AND ${table.shelfNames} IS NULL)
+      OR (${table.shelfMode} IS NOT NULL AND ${table.shelfMode} = 'own'
+        AND ${table.shelfIds} IS NOT NULL AND ${table.shelfNames} IS NOT NULL
+        AND jsonb_typeof(${table.shelfIds}) = 'array' AND jsonb_array_length(${table.shelfIds}) BETWEEN 1 AND 2
+        AND jsonb_typeof(${table.shelfNames}) = 'array'
+        AND jsonb_array_length(${table.shelfNames}) = jsonb_array_length(${table.shelfIds}))`),
+    check(`${prefix}_policy_chk`, sql`(${table.fulfillmentPolicyId} IS NOT NULL OR ${table.fulfillmentPolicyName} IS NULL)
+      AND (${table.returnPolicyId} IS NOT NULL OR ${table.returnPolicyName} IS NULL)
+      AND (${table.paymentPolicyId} IS NOT NULL OR ${table.paymentPolicyName} IS NULL)
+      AND (${table.fulfillmentPolicyId} IS NULL OR btrim(${table.fulfillmentPolicyId}) <> '')
+      AND (${table.returnPolicyId} IS NULL OR btrim(${table.returnPolicyId}) <> '')
+      AND (${table.paymentPolicyId} IS NULL OR btrim(${table.paymentPolicyId}) <> '')
+      AND (${table.fulfillmentPolicyName} IS NULL OR btrim(${table.fulfillmentPolicyName}) <> '')
+      AND (${table.returnPolicyName} IS NULL OR btrim(${table.returnPolicyName}) <> '')
+      AND (${table.paymentPolicyName} IS NULL OR btrim(${table.paymentPolicyName}) <> '')`),
+    check(`${prefix}_text_chk`, sql`(((${table.textAboveMode} IS NULL OR ${table.textAboveMode} = 'none') AND ${table.textAbove} IS NULL)
+        OR (${table.textAboveMode} IS NOT NULL AND ${table.textAboveMode} = 'own' AND ${table.textAbove} IS NOT NULL
+          AND length(btrim(${table.textAbove})) > 0 AND length(${table.textAbove}) <= 4000))
+      AND (((${table.textBelowMode} IS NULL OR ${table.textBelowMode} = 'none') AND ${table.textBelow} IS NULL)
+        OR (${table.textBelowMode} IS NOT NULL AND ${table.textBelowMode} = 'own' AND ${table.textBelow} IS NOT NULL
+          AND length(btrim(${table.textBelow})) > 0 AND length(${table.textBelow}) <= 4000))`),
+  ];
+}
+
+/**
+ * Append-only ledger of keyed many-products listing setting requests
+ * (migration 0736): one row per vendor and request key, so a retried request
+ * is answered from its first outcome. A trigger refuses UPDATE and DELETE.
+ */
+export const dropshipProductListingSettingRequests = dropshipSchema.table("dropship_product_listing_setting_requests", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
+  storeConnectionId: integer("store_connection_id").notNull(),
+  operation: varchar("operation", { length: 60 }).notNull(),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  /** The rows the request wrote (changed products, or acknowledged marks); zero is allowed. */
+  productCount: integer("product_count").notNull(),
+  actorType: varchar("actor_type", { length: 40 }).notNull(),
+  actorId: varchar("actor_id", { length: 255 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  foreignKey({ name: "dropship_product_listing_setting_requests_owner_fk", columns: [table.storeConnectionId, table.vendorId],
+    foreignColumns: [dropshipStoreConnections.id, dropshipStoreConnections.vendorId] }),
+  unique("dropship_product_listing_setting_requests_identity_uk").on(table.id, table.vendorId, table.storeConnectionId),
+  uniqueIndex("dropship_product_listing_setting_requests_key_idx").on(table.vendorId, table.idempotencyKey),
+  index("dropship_product_listing_setting_requests_store_idx").on(table.storeConnectionId, table.createdAt),
+  check("dropship_product_listing_setting_requests_operation_chk",
+    sql`${table.operation} IN ('product_settings_bulk', 'category_settings_clear', 'category_moves_acknowledge')`),
+  check("dropship_product_listing_setting_requests_count_chk", sql`${table.productCount} BETWEEN 0 AND 10000`),
+  check("dropship_product_listing_setting_requests_key_chk", sql`${table.idempotencyKey} ~ '^[A-Za-z0-9:_-]{8,200}$'`),
+  check("dropship_product_listing_setting_requests_hash_chk", sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`),
+  check("dropship_product_listing_setting_requests_actor_chk", sql`${table.actorType} IN ('vendor', 'admin', 'system')`),
+  check("dropship_product_listing_setting_requests_actor_id_chk", sql`btrim(${table.actorId}) <> ''`),
+]);
+
+/** Immutable revisions of a vendor's own listing settings for one product (migration 0736). */
+export const dropshipProductListingSettingRevisions = dropshipSchema.table("dropship_product_listing_setting_revisions", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
+  storeConnectionId: integer("store_connection_id").notNull(),
+  productId: integer("product_id").notNull(),
+  previousRevisionId: integer("previous_revision_id"),
+  /** Set only for a revision written by a many-products request. */
+  requestId: bigint("request_id", { mode: "number" }),
+  ...listingSettingValueColumns(),
+  /** Own main text and the product-level catalog hash it was written against; both null = Card Shellz text. */
+  bodyText: text("body_text"),
+  bodyCatalogHash: varchar("body_catalog_hash", { length: 64 }),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  actorType: varchar("actor_type", { length: 40 }).notNull(),
+  actorId: varchar("actor_id", { length: 255 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  foreignKey({ name: "dropship_product_listing_setting_revision_owner_fk", columns: [table.storeConnectionId, table.vendorId],
+    foreignColumns: [dropshipStoreConnections.id, dropshipStoreConnections.vendorId] }),
+  foreignKey({ name: "dropship_product_listing_setting_revision_product_fk", columns: [table.productId],
+    foreignColumns: [products.id] }),
+  unique("dropship_product_listing_setting_revision_identity_uk")
+    .on(table.id, table.vendorId, table.storeConnectionId, table.productId),
+  foreignKey({ name: "dropship_product_listing_setting_revision_previous_fk",
+    columns: [table.previousRevisionId, table.vendorId, table.storeConnectionId, table.productId],
+    foreignColumns: [table.id, table.vendorId, table.storeConnectionId, table.productId] }),
+  foreignKey({ name: "dropship_product_listing_setting_revision_request_fk",
+    columns: [table.requestId, table.vendorId, table.storeConnectionId],
+    foreignColumns: [dropshipProductListingSettingRequests.id, dropshipProductListingSettingRequests.vendorId,
+      dropshipProductListingSettingRequests.storeConnectionId] }),
+  unique("dropship_product_listing_setting_revision_key_uk").on(table.vendorId, table.idempotencyKey),
+  ...listingSettingValueChecks("dropship_product_listing_setting_revision", table),
+  check("dropship_product_listing_setting_revision_body_chk", sql`(${table.bodyText} IS NULL AND ${table.bodyCatalogHash} IS NULL)
+    OR (${table.bodyText} IS NOT NULL AND ${table.bodyCatalogHash} IS NOT NULL
+      AND length(btrim(${table.bodyText})) > 0 AND length(${table.bodyText}) <= 20000
+      AND ${table.bodyCatalogHash} ~ '^[a-f0-9]{64}$')`),
+  check("dropship_product_listing_setting_revision_key_chk", sql`${table.idempotencyKey} ~ '^[A-Za-z0-9:_-]{8,200}$'`),
+  check("dropship_product_listing_setting_revision_hash_chk", sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`),
+  check("dropship_product_listing_setting_revision_actor_chk", sql`${table.actorType} IN ('vendor', 'admin', 'system')`),
+  check("dropship_product_listing_setting_revision_actor_id_chk", sql`btrim(${table.actorId}) <> ''`),
+  index("dropship_product_listing_setting_revision_target_idx").on(table.storeConnectionId, table.productId, table.id),
+  index("dropship_product_listing_setting_revision_request_idx").on(table.requestId).where(sql`${table.requestId} IS NOT NULL`),
+]);
+
+/** The current product listing settings: a pointer to the revision in force (migration 0736). */
+export const dropshipProductListingSettings = dropshipSchema.table("dropship_product_listing_settings", {
+  vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
+  storeConnectionId: integer("store_connection_id").notNull(),
+  productId: integer("product_id").notNull(),
+  revisionId: integer("revision_id").notNull(),
+}, (table) => [
+  primaryKey({ name: "dropship_product_listing_setting_pk", columns: [table.storeConnectionId, table.productId] }),
+  foreignKey({ name: "dropship_product_listing_setting_owner_fk", columns: [table.storeConnectionId, table.vendorId],
+    foreignColumns: [dropshipStoreConnections.id, dropshipStoreConnections.vendorId] }),
+  foreignKey({ name: "dropship_product_listing_setting_product_fk", columns: [table.productId], foreignColumns: [products.id] }),
+  foreignKey({ name: "dropship_product_listing_setting_revision_fk",
+    columns: [table.revisionId, table.vendorId, table.storeConnectionId, table.productId],
+    foreignColumns: [dropshipProductListingSettingRevisions.id, dropshipProductListingSettingRevisions.vendorId,
+      dropshipProductListingSettingRevisions.storeConnectionId, dropshipProductListingSettingRevisions.productId] }),
+  index("dropship_product_listing_setting_vendor_idx").on(table.vendorId, table.storeConnectionId),
+]);
+
+/** Immutable revisions of a vendor's listing settings for one Card Shellz category (migration 0737). */
+export const dropshipCategoryListingSettingRevisions = dropshipSchema.table("dropship_category_listing_setting_revisions", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
+  storeConnectionId: integer("store_connection_id").notNull(),
+  categoryId: integer("category_id").notNull(),
+  /** The category's name when saved, for the audit trail; readers show the current name. */
+  categoryName: varchar("category_name", { length: 100 }).notNull(),
+  previousRevisionId: integer("previous_revision_id"),
+  ...listingSettingValueColumns(),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  actorType: varchar("actor_type", { length: 40 }).notNull(),
+  actorId: varchar("actor_id", { length: 255 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  foreignKey({ name: "dropship_category_listing_setting_revision_owner_fk", columns: [table.storeConnectionId, table.vendorId],
+    foreignColumns: [dropshipStoreConnections.id, dropshipStoreConnections.vendorId] }),
+  foreignKey({ name: "dropship_category_listing_setting_revision_category_fk", columns: [table.categoryId],
+    foreignColumns: [productCategories.id] }),
+  unique("dropship_category_listing_setting_revision_identity_uk")
+    .on(table.id, table.vendorId, table.storeConnectionId, table.categoryId),
+  foreignKey({ name: "dropship_category_listing_setting_revision_previous_fk",
+    columns: [table.previousRevisionId, table.vendorId, table.storeConnectionId, table.categoryId],
+    foreignColumns: [table.id, table.vendorId, table.storeConnectionId, table.categoryId] }),
+  unique("dropship_category_listing_setting_revision_key_uk").on(table.vendorId, table.idempotencyKey),
+  check("dropship_category_listing_setting_revision_category_name_chk", sql`btrim(${table.categoryName}) <> ''`),
+  ...listingSettingValueChecks("dropship_category_listing_setting_revision", table),
+  check("dropship_category_listing_setting_revision_key_chk", sql`${table.idempotencyKey} ~ '^[A-Za-z0-9:_-]{8,200}$'`),
+  check("dropship_category_listing_setting_revision_hash_chk", sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`),
+  check("dropship_category_listing_setting_revision_actor_chk", sql`${table.actorType} IN ('vendor', 'admin', 'system')`),
+  check("dropship_category_listing_setting_revision_actor_id_chk", sql`btrim(${table.actorId}) <> ''`),
+  index("dropship_category_listing_setting_revision_target_idx").on(table.storeConnectionId, table.categoryId, table.id),
+]);
+
+/** The current category listing settings: a pointer to the revision in force (migration 0737). */
+export const dropshipCategoryListingSettings = dropshipSchema.table("dropship_category_listing_settings", {
+  vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
+  storeConnectionId: integer("store_connection_id").notNull(),
+  categoryId: integer("category_id").notNull(),
+  revisionId: integer("revision_id").notNull(),
+}, (table) => [
+  primaryKey({ name: "dropship_category_listing_setting_pk", columns: [table.storeConnectionId, table.categoryId] }),
+  foreignKey({ name: "dropship_category_listing_setting_owner_fk", columns: [table.storeConnectionId, table.vendorId],
+    foreignColumns: [dropshipStoreConnections.id, dropshipStoreConnections.vendorId] }),
+  foreignKey({ name: "dropship_category_listing_setting_category_fk", columns: [table.categoryId],
+    foreignColumns: [productCategories.id] }),
+  foreignKey({ name: "dropship_category_listing_setting_revision_fk",
+    columns: [table.revisionId, table.vendorId, table.storeConnectionId, table.categoryId],
+    foreignColumns: [dropshipCategoryListingSettingRevisions.id, dropshipCategoryListingSettingRevisions.vendorId,
+      dropshipCategoryListingSettingRevisions.storeConnectionId, dropshipCategoryListingSettingRevisions.categoryId] }),
+  index("dropship_category_listing_setting_vendor_idx").on(table.vendorId, table.storeConnectionId),
+]);
+
+/**
+ * Category marks (migration 0737): the Card Shellz category each chosen
+ * product was in when the vendor last confirmed it (null = no category).
+ * Derived history with no foreign key to any catalog table; a trigger refuses
+ * DELETE, identity changes and seen_at moving back.
+ */
+export const dropshipProductCategorySeen = dropshipSchema.table("dropship_product_category_seen", {
+  vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
+  storeConnectionId: integer("store_connection_id").notNull(),
+  productId: integer("product_id").notNull(),
+  categoryId: integer("category_id"),
+  seenAt: timestamp("seen_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  primaryKey({ name: "dropship_product_category_seen_pk", columns: [table.storeConnectionId, table.productId] }),
+  foreignKey({ name: "dropship_product_category_seen_owner_fk", columns: [table.storeConnectionId, table.vendorId],
+    foreignColumns: [dropshipStoreConnections.id, dropshipStoreConnections.vendorId] }),
 ]);
 
 export const dropshipStoreSetupChecks = dropshipSchema.table(

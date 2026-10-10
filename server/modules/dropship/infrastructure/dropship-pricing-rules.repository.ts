@@ -37,9 +37,12 @@ export class PgDropshipPricingRulesRepository implements PricingRulesRepository 
             [review.id, vendorId, storeConnectionId, JSON.stringify(review.input), JSON.stringify(review.rows), review.hash, memberId, review.createdAt]);
         },
         loadReview: async (id) => {
+          // Only store default reviews (migration 0738): a review of another
+          // kind has another input shape and reads as not found here, never
+          // as a store review that fails its contract.
           const result = await client.query<{ id: string; input: unknown; rows: unknown; review_hash: string; created_at: Date }>(
             `SELECT id, input, rows, review_hash, created_at FROM dropship.dropship_pricing_reviews
-             WHERE id = $1 AND vendor_id = $2 AND store_connection_id = $3`, [id, vendorId, storeConnectionId]);
+             WHERE id = $1 AND vendor_id = $2 AND store_connection_id = $3 AND kind = 'store_default'`, [id, vendorId, storeConnectionId]);
           const row = result.rows[0];
           if (!row) return null;
           const input = reviewPricingRulesInputSchema.safeParse(row.input);

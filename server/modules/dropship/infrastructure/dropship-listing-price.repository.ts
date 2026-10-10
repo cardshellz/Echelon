@@ -12,6 +12,7 @@ interface PriceRow {
   pricing_mode?: ListingPricingMode | null;
 }
 interface RevisionRow extends PriceRow { request_hash: string; store_connection_id: number }
+type Client = Pick<PoolClient, "query">;
 
 export class PgDropshipListingPriceRepository implements ListingPriceRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
@@ -45,27 +46,7 @@ export class PgDropshipListingPriceRepository implements ListingPriceRepository 
         await client.query(`SELECT pv.id FROM catalog.product_variants pv
           JOIN catalog.products p ON p.id = pv.product_id WHERE pv.id = $1 FOR SHARE OF pv, p`, [input.productVariantId]);
       }
-      const target = { ...input, vendorId };
-      const result = await operation({
-        vendorId, catalog: PgDropshipListingPreviewRepository.readerForTransaction(client),
-        loadSaved: () => loadSaved(client, target),
-        loadRulePrice: async (candidate) => (await loadListingRulePrices(client, {
-          vendorId, storeConnectionId: target.storeConnectionId, candidates: [candidate],
-        })).get(candidate.productVariantId) ?? null,
-        loadProductCost: (candidate) => loadProductCost(client, vendorId, candidate.productVariantId),
-        loadReplay: (replayInput) => {
-          if (!input.idempotencyKey || replayInput.idempotencyKey !== input.idempotencyKey) {
-            throw new DropshipError("DROPSHIP_IDEMPOTENCY_CONFLICT", "Price writes require the transaction's original save key.");
-          }
-          return findReplay(client, target, replayInput);
-        },
-        save: (saveInput) => {
-          if (!input.idempotencyKey || saveInput.idempotencyKey !== input.idempotencyKey) {
-            throw new DropshipError("DROPSHIP_IDEMPOTENCY_CONFLICT", "Price writes require the transaction's original save key.");
-          }
-          return saveWithClient(client, target, saveInput);
-        },
-      });
+      const result = await operation(listingPriceTransactionForClient(client, { ...input, vendorId }));
       await client.query("COMMIT");
       return result;
     } catch (error) {
@@ -75,7 +56,38 @@ export class PgDropshipListingPriceRepository implements ListingPriceRepository 
   }
 }
 
-async function loadSaved(client: PoolClient, input: ListingPriceTarget & { vendorId: number }): Promise<SavedListingPriceRevision | null> {
+/**
+ * The price transaction for one size on a client that already holds this file's
+ * locks (request key when keyed, store, owner rows, selection SHARE locks and the
+ * size FOR SHARE; see execute). It takes no lock itself. Its key guards accept only
+ * `target.idempotencyKey`, so a caller that shares its client (PR 8's listing-settings
+ * transaction, plan D29) controls which key may write.
+ */
+export function listingPriceTransactionForClient(client: Client,
+  target: ListingPriceTarget & { vendorId: number; memberId: string; idempotencyKey?: string }): ListingPriceTransaction {
+  return {
+    vendorId: target.vendorId, catalog: PgDropshipListingPreviewRepository.readerForTransaction(client),
+    loadSaved: () => loadSaved(client, target),
+    loadRulePrice: async (candidate) => (await loadListingRulePrices(client, {
+      vendorId: target.vendorId, storeConnectionId: target.storeConnectionId, candidates: [candidate],
+    })).get(candidate.productVariantId) ?? null,
+    loadProductCost: (candidate) => loadProductCost(client, target.vendorId, candidate.productVariantId),
+    loadReplay: (replayInput) => {
+      if (!target.idempotencyKey || replayInput.idempotencyKey !== target.idempotencyKey) {
+        throw new DropshipError("DROPSHIP_IDEMPOTENCY_CONFLICT", "Price writes require the transaction's original save key.");
+      }
+      return findReplay(client, target, replayInput);
+    },
+    save: (saveInput) => {
+      if (!target.idempotencyKey || saveInput.idempotencyKey !== target.idempotencyKey) {
+        throw new DropshipError("DROPSHIP_IDEMPOTENCY_CONFLICT", "Price writes require the transaction's original save key.");
+      }
+      return saveWithClient(client, target, saveInput);
+    },
+  };
+}
+
+async function loadSaved(client: Client, input: ListingPriceTarget & { vendorId: number }): Promise<SavedListingPriceRevision | null> {
   const result = await client.query<PriceRow>(`SELECT product_variant_id, revision_id, override_price_cents, pricing_mode, updated_at
     FROM dropship.dropship_listing_price_settings
     WHERE vendor_id = $1 AND store_connection_id = $2 AND product_variant_id = $3 FOR UPDATE`,
@@ -83,13 +95,13 @@ async function loadSaved(client: PoolClient, input: ListingPriceTarget & { vendo
   return result.rows[0] ? mapSaved(result.rows[0]) : null;
 }
 
-async function loadProductCost(client: PoolClient, vendorId: number, productVariantId: number) {
+async function loadProductCost(client: Client, vendorId: number, productVariantId: number) {
   const costs = await PgShellzClubProductCostAdapter.forTransaction(client).loadProductCosts({ vendorId, productVariantIds: [productVariantId] });
   return costs.get(productVariantId) ?? null;
 }
 
 /** The revision an earlier save with this key wrote; a key reused for another change is a conflict. */
-async function findReplay(client: PoolClient, target: ListingPriceTarget & { vendorId: number },
+async function findReplay(client: Client, target: ListingPriceTarget & { vendorId: number },
   input: { idempotencyKey: string; requestHash: string }): Promise<SavedListingPriceRevision | null> {
   const replay = await client.query<RevisionRow>(`SELECT id AS revision_id, product_variant_id,
     store_connection_id, override_price_cents, pricing_mode, created_at AS updated_at, request_hash
@@ -104,7 +116,7 @@ async function findReplay(client: PoolClient, target: ListingPriceTarget & { ven
   return mapSaved(revision);
 }
 
-async function saveWithClient(client: PoolClient,
+async function saveWithClient(client: Client,
   target: ListingPriceTarget & { vendorId: number; memberId: string },
   input: SaveListingPriceInput & { requestHash: string; now: Date }): Promise<{ saved: SavedListingPriceRevision; idempotentReplay: boolean }> {
   // Replay the operation's saved revision, never overwrite a later edit.

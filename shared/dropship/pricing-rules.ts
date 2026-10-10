@@ -4,6 +4,13 @@ import { listingAmountCentsSchema, listingPriceBasisSchema, listingPriceCentsSch
 
 export const PRICING_REVIEW_PAGE_SIZE = 50;
 export const MAX_PRICING_REVIEW_ITEMS = 10_000;
+/**
+ * What a stored price review checks (= the dropship_pricing_reviews kind
+ * CHECK, migration 0738). The kind is a column, never a key of the review's
+ * hashed `input`. Rows stored before 0738 read as `store_default`.
+ */
+export const PRICING_REVIEW_KINDS = ["store_default", "category_price", "product_prices"] as const;
+export type PricingReviewKind = (typeof PRICING_REVIEW_KINDS)[number];
 const id = z.number().int().positive().max(MAX_LISTING_PRICE_CENTS);
 /** A known money amount in integer cents: a cost or a reference retail price. */
 export const pricingAmountCentsSchema = listingAmountCentsSchema;
