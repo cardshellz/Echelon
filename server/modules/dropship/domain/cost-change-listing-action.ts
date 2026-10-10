@@ -62,13 +62,15 @@ export interface CostChangeListingPriceClassification {
 /**
  * The same resolution the listing preview uses (`resolveListingPrice`), named
  * by what the .ops cost does to it. `rulePrice` is the rule price at the cost
- * being judged, so a rule-priced listing resolves even before it is repriced.
+ * being judged, so a rule-priced listing resolves even before it is repriced;
+ * `blockedByLimit` says a blocking Card Shellz limit refuses that price, so an
+ * `inherit` listing is on its retail price instead, as the preview prices it.
  */
 export function classifyCostChangeListingPrice(input: {
   saved: Pick<SavedListingPriceRevision, "overridePriceCents" | "pricingMode"> | null;
   existingListingPriceCents: number | null;
   defaultPriceCents: number | null;
-  rulePrice: { priceCents: number | null; basis: RulePriceBasis | null } | null;
+  rulePrice: { priceCents: number | null; basis: RulePriceBasis | null; blockedByLimit?: boolean } | null;
 }): CostChangeListingPriceClassification {
   const resolved = resolveListingPrice(input);
   switch (resolved.source) {

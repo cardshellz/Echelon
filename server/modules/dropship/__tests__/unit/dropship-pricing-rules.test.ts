@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { calculateRulePrice, resolvePricingRule, pricingBasisCents, pricingImpactRowSchema, pricingProfileSchema, pricingRecipeSchema, type PricingProfile, type PricingRecipe } from "../../../../../shared/dropship/pricing-rules";
-import { resolveListingPrice, saveListingPriceInputSchema, MAX_LISTING_PRICE_CENTS } from "../../../../../shared/dropship/listing-price";
+import { LISTING_PRICING_MODES, listingPriceFollowsRules, resolveListingPrice, saveListingPriceInputSchema, MAX_LISTING_PRICE_CENTS } from "../../../../../shared/dropship/listing-price";
 
 const recipe: PricingRecipe = { basis: "product_cost", markupBps: 3000, flatCents: 100, rounding: "cent" };
 const candidate = { productVariantId: 66, productId: 7, category: "Mailers", productLineIds: [2, 3] };
@@ -66,6 +66,56 @@ describe("deterministic vendor pricing rules", () => {
     expect(saveListingPriceInputSchema.safeParse({ ...save, priceCents: 999, pricingMode: "rules" }).success).toBe(false);
     expect(saveListingPriceInputSchema.safeParse({ ...save, priceCents: null, pricingMode: "fixed" }).success).toBe(false);
     expect(saveListingPriceInputSchema.safeParse({ ...save, priceCents: null, pricingMode: "rules" }).success).toBe(true);
+  });
+  it("prices an inherit size by the rules when they give a price, else by retail, never by an earlier push (A3, L1)", () => {
+    const sources = { existingListingPriceCents: 999, defaultPriceCents: 899, rulePrice: { priceCents: 1152 } };
+    const inherit = { overridePriceCents: null, pricingMode: "inherit" as const };
+    expect(resolveListingPrice({ ...sources, saved: inherit })).toEqual({ effectivePriceCents: 1152, source: "rules" });
+    expect(listingPriceFollowsRules({ saved: inherit, rulePrice: sources.rulePrice })).toBe(true);
+    // No rules: the retail price, even though an earlier push saved $9.99 on the listing.
+    expect(resolveListingPrice({ ...sources, saved: inherit, rulePrice: null })).toEqual({ effectivePriceCents: 899, source: "catalog_default" });
+    expect(listingPriceFollowsRules({ saved: inherit, rulePrice: null })).toBe(false);
+    // Rules that can't price the size (a tie, no cost, out of range): retail too, not "unavailable".
+    expect(resolveListingPrice({ ...sources, saved: inherit, rulePrice: { priceCents: null } })).toEqual({ effectivePriceCents: 899, source: "catalog_default" });
+    expect(listingPriceFollowsRules({ saved: inherit, rulePrice: { priceCents: null } })).toBe(false);
+    // No rule price and no retail: no price at all.
+    expect(resolveListingPrice({ ...sources, saved: inherit, rulePrice: null, defaultPriceCents: null })).toEqual({ effectivePriceCents: null, source: "unavailable" });
+    expect(resolveListingPrice({ ...sources, saved: inherit, rulePrice: { priceCents: null }, defaultPriceCents: null }))
+      .toEqual({ effectivePriceCents: null, source: "unavailable" });
+  });
+  it("puts an inherit size on its retail price when a blocking Card Shellz limit refuses the rule price (L1)", () => {
+    const sources = { existingListingPriceCents: 999, defaultPriceCents: 899 };
+    const inherit = { overridePriceCents: null, pricingMode: "inherit" as const };
+    const blocked = { priceCents: 500, blockedByLimit: true };
+    expect(listingPriceFollowsRules({ saved: inherit, rulePrice: blocked })).toBe(false);
+    expect(resolveListingPrice({ ...sources, saved: inherit, rulePrice: blocked })).toEqual({ effectivePriceCents: 899, source: "catalog_default" });
+    // With no retail price either, the size has no price; the earlier push's $9.99 is never used.
+    expect(resolveListingPrice({ ...sources, saved: inherit, rulePrice: blocked, defaultPriceCents: null }))
+      .toEqual({ effectivePriceCents: null, source: "unavailable" });
+    // Not blocked, or not said: the rule price.
+    expect(resolveListingPrice({ ...sources, saved: inherit, rulePrice: { priceCents: 500, blockedByLimit: false } }))
+      .toEqual({ effectivePriceCents: 500, source: "rules" });
+    // `rules`, a size with no setting and a typed price never read the flag.
+    expect(resolveListingPrice({ ...sources, saved: { overridePriceCents: null, pricingMode: "rules" }, rulePrice: blocked }))
+      .toEqual({ effectivePriceCents: 500, source: "rules" });
+    expect(resolveListingPrice({ ...sources, saved: null, rulePrice: blocked })).toEqual({ effectivePriceCents: 500, source: "rules" });
+    expect(resolveListingPrice({ ...sources, saved: { overridePriceCents: 1399, pricingMode: "fixed" }, rulePrice: blocked }))
+      .toEqual({ effectivePriceCents: 1399, source: "override" });
+  });
+  it("leaves rules and catalog default as they were next to inherit", () => {
+    const sources = { existingListingPriceCents: 999, defaultPriceCents: 899, rulePrice: { priceCents: null } };
+    expect(resolveListingPrice({ ...sources, saved: { overridePriceCents: null, pricingMode: "rules" } })).toEqual({ effectivePriceCents: null, source: "unavailable" });
+    expect(listingPriceFollowsRules({ saved: { pricingMode: "rules" }, rulePrice: null })).toBe(true);
+    expect(resolveListingPrice({ ...sources, saved: { overridePriceCents: null, pricingMode: "catalog_default" }, rulePrice: { priceCents: 1152 } }))
+      .toEqual({ effectivePriceCents: 899, source: "catalog_default" });
+    expect(listingPriceFollowsRules({ saved: { pricingMode: "catalog_default" }, rulePrice: { priceCents: 1152 } })).toBe(false);
+    expect(LISTING_PRICING_MODES).toEqual(["fixed", "catalog_default", "rules", "inherit"]);
+  });
+  it("accepts inherit only without a price", () => {
+    const save = { expectedRevisionId: 4, idempotencyKey: "inherit-1" };
+    expect(saveListingPriceInputSchema.safeParse({ ...save, priceCents: null, pricingMode: "inherit" }).success).toBe(true);
+    expect(saveListingPriceInputSchema.safeParse({ ...save, priceCents: 999, pricingMode: "inherit" }).success).toBe(false);
+    expect(saveListingPriceInputSchema.safeParse({ ...save, priceCents: null, pricingMode: "auction" }).success).toBe(false);
   });
   it("does not mutate group ordering or candidates", () => {
     const before = JSON.stringify({ profile, candidate });

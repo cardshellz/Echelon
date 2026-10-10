@@ -23,7 +23,10 @@ export interface QueuedListingIntentRefreshDependencies {
  *   one the listing was queued with is kept, so a changed category never fails
  *   a push (owner decision).
  * - Under "wait for review", a rule price that moved since queueing is the
- *   vendor's to review, so the push fails for good instead (C5).
+ *   vendor's to review, so the push fails for good instead (C5). A size that
+ *   follows the store's pricing counts as rule priced even while the rules
+ *   cannot price it and it falls back to retail: a move from the rule price
+ *   to retail (or back) is also the vendor's to review.
  */
 export async function refreshQueuedListingIntent(
   deps: QueuedListingIntentRefreshDependencies,
@@ -61,8 +64,9 @@ export async function refreshQueuedListingIntent(
     });
   }
   const policy = await deps.resolveCostChangePolicy();
+  const rulePriced = typeof row.rulePriceEvidenceHash === "string" || row.followsStorePricing === true;
   const verdict = decideQueuedRulePricePublication({
-    rulePriced: typeof row.rulePriceEvidenceHash === "string",
+    rulePriced,
     queuedPriceCents: input.queuedPriceCents,
     currentPriceCents: row.listingIntent.priceCents,
     rulePricedListings: policy.settings.rulePricedListings,
@@ -75,6 +79,7 @@ export async function refreshQueuedListingIntent(
         productVariantId: input.productVariantId,
         queuedPriceCents: input.queuedPriceCents,
         currentPriceCents: row.listingIntent.priceCents,
+        followsStorePricing: row.followsStorePricing === true,
         retryable: false,
         classification: "permanent",
       },

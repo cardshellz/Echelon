@@ -83,7 +83,9 @@ async function applyReview(client: PoolClient, target: Target, review: StoredPri
   await client.query(`INSERT INTO dropship.dropship_pricing_profiles (vendor_id, store_connection_id, revision_id)
     VALUES ($1,$2,$3) ON CONFLICT (store_connection_id) DO UPDATE SET revision_id = EXCLUDED.revision_id`,
     [target.vendorId, target.storeConnectionId, revisionId]);
-  const adoption = review.rows.filter((row) => !row.preserved).map((row) => ({
+  // A size that follows the store's pricing (`inherit`) already takes the new
+  // rules; re-saving it as `rules` would drop its retail fallback.
+  const adoption = review.rows.filter((row) => !row.preserved && row.followsStorePricing !== true).map((row) => ({
     variant_id: row.productVariantId, previous_id: row.settingRevisionId,
     request_key: `pricing-rule:${review.id}:${row.productVariantId}`,
     request_hash: pricingHash({ reviewHash: review.hash, productVariantId: row.productVariantId }),
@@ -115,6 +117,8 @@ async function applyReview(client: PoolClient, target: Target, review: StoredPri
     VALUES ($1,$2,'dropship_pricing_profile',$3,'pricing_rules_applied','vendor',$4,'info',$5::jsonb,$6)`,
     [target.vendorId, target.storeConnectionId, String(revisionId), target.memberId,
       JSON.stringify({ beforeRevisionId: review.input.expectedRevisionId, revisionId, reviewId: review.id, reviewHash: review.hash,
-        adoptedCount: adoption.length, preservedCount: review.rows.length - adoption.length, marketplaceWrite: false }), now]);
+        adoptedCount: adoption.length, preservedCount: review.rows.filter((row) => row.preserved).length,
+        followsStorePricingCount: review.rows.filter((row) => row.followsStorePricing === true).length,
+        marketplaceWrite: false }), now]);
   return revisionId;
 }

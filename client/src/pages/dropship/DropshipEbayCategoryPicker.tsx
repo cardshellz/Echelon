@@ -23,6 +23,9 @@ export type RenderEbayAuthorizationRecovery = (error: unknown) => ReactNode;
 
 type PickerMode = "search" | "browse";
 
+/** Shown with `showLeafHint` (Listing settings R:580): only final categories can be used. */
+export const EBAY_CATEGORY_LEAF_HINT = "Pick the last level. eBay only accepts those.";
+
 /**
  * Picks one eBay category from eBay's own US category list, by search or by
  * browsing the tree. Only final-level categories can be picked, because eBay
@@ -35,6 +38,8 @@ export function DropshipEbayCategoryPicker({
   onPick,
   onCancel,
   renderAuthorizationRecovery,
+  hideIds = false,
+  showLeafHint = false,
 }: {
   storeConnectionId: number;
   label: string;
@@ -42,6 +47,10 @@ export function DropshipEbayCategoryPicker({
   onPick: (category: EbayCategory) => void;
   onCancel: () => void;
   renderAuthorizationRecovery?: RenderEbayAuthorizationRecovery;
+  /** Leaves out each category's eBay number (Listing settings shows words only). Off by default, as the old step shows it. */
+  hideIds?: boolean;
+  /** Says that only the last level can be picked. Off by default. */
+  showLeafHint?: boolean;
 }) {
   const [mode, setMode] = useState<PickerMode>("search");
   const [search, setSearch] = useState(initialQuery);
@@ -102,6 +111,8 @@ export function DropshipEbayCategoryPicker({
       onPick={pick}
       onOpen={open}
       renderAuthorizationRecovery={renderAuthorizationRecovery}
+      hideIds={hideIds}
+      showLeafHint={showLeafHint}
     />
   );
 }
@@ -131,6 +142,10 @@ export function EbayCategoryPickerView(props: {
   onPick: (option: EbayCategoryOption) => void;
   onOpen: (option: EbayCategoryOption) => void;
   renderAuthorizationRecovery?: RenderEbayAuthorizationRecovery;
+  /** Leaves out each category's eBay number. Off by default. */
+  hideIds?: boolean;
+  /** Says that only the last level can be picked. Off by default. */
+  showLeafHint?: boolean;
 }) {
   return (
     <div className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50 p-3" role="group" aria-label={props.label}>
@@ -148,6 +163,7 @@ export function EbayCategoryPickerView(props: {
           Browse all categories
         </Button>
       </div>
+      {props.showLeafHint && <p className="text-xs text-zinc-600">{EBAY_CATEGORY_LEAF_HINT}</p>}
       {props.mode === "search" ? (
         <div className="space-y-2">
           <Input aria-label="Search eBay categories" value={props.search} maxLength={100}
@@ -186,7 +202,7 @@ function SearchResults(props: Parameters<typeof EbayCategoryPickerView>[0]) {
   if (props.searchResults.length === 0) {
     return <p className="text-xs text-zinc-500">eBay has no suggestions for "{props.searchedText}". Try other words, or browse all categories.</p>;
   }
-  return <OptionList options={props.searchResults} onPick={props.onPick} onOpen={props.onOpen} />;
+  return <OptionList options={props.searchResults} onPick={props.onPick} onOpen={props.onOpen} hideIds={props.hideIds === true} />;
 }
 
 function BrowseResults(props: Parameters<typeof EbayCategoryPickerView>[0]) {
@@ -204,15 +220,18 @@ function BrowseResults(props: Parameters<typeof EbayCategoryPickerView>[0]) {
           <Button type="button" size="sm" onClick={() => props.onPick(props.browseParent!)}>Use this category</Button>
         </div>
       )}
-      {props.browseChildren.length > 0 && <OptionList options={props.browseChildren} onPick={props.onPick} onOpen={props.onOpen} />}
+      {props.browseChildren.length > 0 && (
+        <OptionList options={props.browseChildren} onPick={props.onPick} onOpen={props.onOpen} hideIds={props.hideIds === true} />
+      )}
     </div>
   );
 }
 
-function OptionList({ options, onPick, onOpen }: {
+function OptionList({ options, onPick, onOpen, hideIds }: {
   options: EbayCategoryOption[];
   onPick: (option: EbayCategoryOption) => void;
   onOpen: (option: EbayCategoryOption) => void;
+  hideIds: boolean;
 }) {
   return (
     <ul className="max-h-72 divide-y overflow-y-auto overscroll-contain rounded border bg-white" aria-label="eBay categories">
@@ -220,7 +239,7 @@ function OptionList({ options, onPick, onOpen }: {
         <li key={option.categoryId} className="flex flex-wrap items-center justify-between gap-2 p-2">
           <div className="min-w-0">
             <p className="text-sm font-medium">{option.categoryName}</p>
-            <p className="text-xs text-zinc-500">{categoryPathLabel(option)} · #{option.categoryId}</p>
+            <p className="text-xs text-zinc-500">{categoryPathLabel(option)}{hideIds ? null : <> · #{option.categoryId}</>}</p>
           </div>
           {option.leaf ? (
             <Button type="button" size="sm" onClick={() => onPick(option)}>Use this category</Button>

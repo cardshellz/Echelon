@@ -22,6 +22,7 @@ import {
   type EffectiveCostIncrease,
   type NewCostChangeListingHold,
 } from "../../application/dropship-cost-change-listing-action-service";
+import type { DropshipPricingPolicyRecord } from "../../application/dropship-listing-preview-service";
 import type { DropshipLogEvent, DropshipNotificationSenderInput } from "../../application/dropship-ports";
 import { costChangeRepriceIdempotencyKey, idSetHash } from "../../domain/cost-change-listing-action";
 
@@ -68,7 +69,7 @@ class FakeRepository implements DropshipCostChangeListingActionRepository {
   async listEffectiveIncreasesWithoutAction(input: { now: Date; limit: number }) { this.reads.push(input); return this.entries.slice(0, input.limit); }
   async loadVendorFacts(input: { vendorId: number; productVariantIds: readonly number[] }) {
     this.reads.push(input);
-    const facts = this.facts.get(input.vendorId) ?? { listings: [], savedPrices: [], profiles: new Map(), candidates: new Map() };
+    const facts = this.facts.get(input.vendorId) ?? { listings: [], savedPrices: [], profiles: new Map(), candidates: new Map(), pricingPolicies: [] };
     return { ...facts, listings: facts.listings.filter((row) => input.productVariantIds.includes(row.productVariantId)) };
   }
   async recordEntryActions(input: { vendorId: number; entries: readonly CostChangeEntryActionRecord[]; listingActions: readonly CostChangeListingActionRecord[]; holds: readonly NewCostChangeListingHold[] }) {
@@ -174,6 +175,7 @@ describe("DropshipCostChangeListingActionService", () => {
       ],
       profiles: patch.profiles ?? new Map([[9, costRules]]),
       candidates: patch.candidates ?? new Map([61, 62, 63, 64].map((id) => [id, candidate(id)])),
+      pricingPolicies: patch.pricingPolicies ?? [],
     };
   }
 
@@ -503,10 +505,28 @@ describe("classifyListing", () => {
   it("prices a rule-priced listing at the cost being judged, not at what it sold for", () => {
     const facts: CostActionVendorFacts = {
       listings: [], savedPrices: [{ storeConnectionId: 9, productVariantId: 61, overridePriceCents: null, pricingMode: "rules" }],
-      profiles: new Map([[9, costRules]]), candidates: new Map([[61, candidate(61)]]),
+      profiles: new Map([[9, costRules]]), candidates: new Map([[61, candidate(61)]]), pricingPolicies: [],
     };
     expect(classifyListing(facts, listing(1, 61), 999)).toEqual({ source: "rules_cost", priceCents: 1399, followsCost: true });
     expect(classifyListing({ ...facts, profiles: new Map() }, listing(1, 61), 999)).toEqual({ source: "unavailable", priceCents: null, followsCost: false });
+  });
+
+  it("puts an inherit listing on its retail price when a blocking Card Shellz limit refuses the rule price at the new cost (L1)", () => {
+    const ceiling = (mode: DropshipPricingPolicyRecord["mode"]): DropshipPricingPolicyRecord => ({ id: 3, scopeType: "catalog",
+      productLineId: null, productId: null, productVariantId: null, category: null, mode, floorPriceCents: null, ceilingPriceCents: 1200 });
+    const facts: CostActionVendorFacts = {
+      listings: [], savedPrices: [{ storeConnectionId: 9, productVariantId: 61, overridePriceCents: null, pricingMode: "inherit" }],
+      profiles: new Map([[9, costRules]]), candidates: new Map([[61, candidate(61)]]), pricingPolicies: [ceiling("block_listing_push")],
+    };
+    // $13.99 at the new cost is above the $12.00 maximum, so the listing is priced, and judged, at its $8.99 retail price.
+    expect(classifyListing(facts, listing(1, 61), 999)).toEqual({ source: "catalog_default", priceCents: 899, followsCost: false });
+    // A warn-only limit does not stop the rule price; a "rules" listing keeps it whatever the limit.
+    expect(classifyListing({ ...facts, pricingPolicies: [ceiling("warn_only")] }, listing(1, 61), 999))
+      .toEqual({ source: "rules_cost", priceCents: 1399, followsCost: true });
+    expect(classifyListing({ ...facts, savedPrices: [{ ...facts.savedPrices[0], pricingMode: "rules" }] }, listing(1, 61), 999))
+      .toEqual({ source: "rules_cost", priceCents: 1399, followsCost: true });
+    // Below the maximum the rule price is usable again.
+    expect(classifyListing(facts, listing(1, 61), 800)).toEqual({ source: "rules_cost", priceCents: 1120, followsCost: true });
   });
 });
 

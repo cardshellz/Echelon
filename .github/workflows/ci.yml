@@ -59,6 +59,12 @@ jobs:
       # Separate runners keep TypeScript heaps and incremental caches isolated.
       - name: Application types
         if: matrix.project == 'application'
+        # A full check of this program needs ~4.2 GB (tsc --extendedDiagnostics
+        # --incremental false, Oct 2026: main 4,170,245K), at Node's ~4 GB
+        # default, so tsc dies out of memory on some runs. Same headroom as
+        # the server test types below.
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: npm run check
       - name: Server test types
         if: matrix.project == 'server-tests'
@@ -146,6 +152,7 @@ jobs:
           client/src/lib/__tests__/dropship-listing-preview.test.ts
           client/src/lib/__tests__/dropship-listing-price.test.ts
           client/src/lib/__tests__/dropship-pricing-rules.test.ts
+          client/src/pages/dropship/__tests__/DropshipPricingRulesPanel.test.ts
           client/src/pages/dropship/__tests__/DropshipListingPreview.test.ts
           client/src/pages/dropship/__tests__/DropshipListingPriceEditor.test.ts
           client/src/lib/__tests__/dropship-catalog-steps.test.ts
@@ -154,6 +161,25 @@ jobs:
           client/src/lib/__tests__/dropship-ebay-category-rules.test.ts
           client/src/pages/dropship/__tests__/DropshipEbayCategoryRulesPanel.test.ts
           client/src/lib/__tests__/dropship-unsaved-changes.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-price-words.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-drafts.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsFramework.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-access.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-words.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-store-requests.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsPolicyShelf.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-content-requests.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsCategoryDescription.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-recipe.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsPriceRow.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsTabs.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-drawer.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsProductDrawer.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-attention.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsHeaderBannerStrip.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsStep.test.ts
+          client/src/lib/__tests__/dropship-ebay-listing-setup.test.ts
+          client/src/lib/__tests__/dropship-ebay-listing-query-sync.test.ts
       # These paths have no "unit" in them, so test:unit never selects them.
       - name: Dropship program finance contracts
         run: >-

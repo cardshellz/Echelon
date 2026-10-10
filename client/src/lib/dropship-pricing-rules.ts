@@ -26,6 +26,33 @@ export function profileDraft(profile: PricingProfile | null): ProfileDraft {
 export function pricingDraftsMatch(a: ProfileDraft, b: ProfileDraft): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
+/** What the pricing rules form holds when newly saved rules arrive. */
+export interface PricingFormState {
+  draft: ProfileDraft | null;
+  /** The saved rules the form was last set from, as a draft; null before the first read. */
+  formSource: ProfileDraft | null;
+  reviewShown: boolean;
+  releaseFixed: boolean;
+  /** No review, page, apply or reload in flight or unconfirmed. */
+  editing: boolean;
+}
+/**
+ * Whether the form takes newly saved rules in place of what it holds: when
+ * it holds nothing yet, or still holds, untouched, the rules it was last set
+ * from (no edit, no review shown, fixed prices kept, nothing in flight).
+ *
+ * The Listing settings step's Price row shares this form's saved-rules read,
+ * so a store price saved there changes the saved rules under this form while
+ * it sits closed in "Older settings". Without this, the untouched form would
+ * keep the old rules and report a change the vendor never made (Listing
+ * settings PR 7). A form the vendor changed is never replaced, so their
+ * change is never lost; it is told apart from the saved rules as before.
+ */
+export function pricingFormTakesSavedRules(form: PricingFormState): boolean {
+  if (form.draft === null) return true;
+  return form.formSource !== null && form.editing && !form.reviewShown && !form.releaseFixed
+    && pricingDraftsMatch(form.draft, form.formSource);
+}
 export function parseNonnegativeHundredths(value: string, label: string): number {
   if (!/^\d+(?:\.\d{1,2})?$/.test(value.trim()) || value.length > 20) throw new Error(`${label} needs a nonnegative number with at most two decimal places.`);
   const [whole, fraction = ""] = value.trim().split(".");

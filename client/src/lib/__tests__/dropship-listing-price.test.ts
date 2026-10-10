@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ListingPriceSetting } from "@shared/dropship/listing-price";
-import { belowCostNote, describeListingPriceBuiltFrom, displayListingPrice, draftFromListingPrice, isListingPriceDirty, listingPriceEndpoint,
-  listingPriceInput, parseListingPriceCents, prepareListingPriceSave, readListingPrice, readSavedListingPrice,
-  reconcileListingPriceDraft } from "../dropship-listing-price";
+import { belowCostNote, describeListingPriceBuiltFrom, displayListingPrice, draftFromListingPrice, followsRulesNow, inheritedListingPrice,
+  isListingPriceDirty, listingPriceEndpoint, listingPriceInput, parseListingPriceCents, prepareListingPriceSave, readListingPrice,
+  readSavedListingPrice, reconcileListingPriceDraft } from "../dropship-listing-price";
 
 const identity = { storeConnectionId: 12, productVariantId: 34 };
 function price(): ListingPriceSetting {
@@ -98,13 +98,70 @@ describe("saved price draft and retry identity", () => {
   });
 });
 
+describe("an inherit size in the old price editors (A3, L1)", () => {
+  const onRules = { ...price(), overridePriceCents: null, effectivePriceCents: 1152, source: "rules" as const, pricingMode: "inherit" as const,
+    ruleName: "Store default rule", rulePriceCents: 1152, rulesConfigured: true };
+  const onRetail = { ...price(), overridePriceCents: null, effectivePriceCents: 899, source: "catalog_default" as const,
+    pricingMode: "inherit" as const, ruleName: null, rulePriceCents: null, rulesConfigured: false };
+  it("shows Use pricing rules for an inherit size the rules price, and is not dirty", () => {
+    expect(followsRulesNow(onRules)).toBe(true);
+    const draft = draftFromListingPrice(onRules);
+    expect(draft).toMatchObject({ useDefault: false, useRules: true, value: "11.52" });
+    expect(isListingPriceDirty(draft)).toBe(false);
+  });
+  it("shows the catalog default for an inherit size with no rules, and is not dirty", () => {
+    expect(followsRulesNow(onRetail)).toBe(false);
+    const draft = draftFromListingPrice(onRetail);
+    expect(draft).toMatchObject({ useDefault: true, value: "8.99" });
+    expect(draft.useRules).toBeUndefined();
+    expect(isListingPriceDirty(draft)).toBe(false);
+  });
+  it("shows the catalog default for an inherit size its rules can't price, since it is on the retail price", () => {
+    const fallback = { ...onRetail, rulesConfigured: true, pricingIssue: "pricing_rule_priority_conflict" };
+    expect(followsRulesNow(fallback)).toBe(false);
+    expect(draftFromListingPrice(fallback)).toMatchObject({ useDefault: true, value: "8.99" });
+    expect(isListingPriceDirty(draftFromListingPrice(fallback))).toBe(false);
+  });
+  it("treats choosing Use catalog default or a typed price on an inherit-with-rules size as a change", () => {
+    const draft = draftFromListingPrice(onRules);
+    const toDefault = { ...draft, useRules: false, useDefault: true };
+    expect(isListingPriceDirty(toDefault)).toBe(true);
+    expect(prepareListingPriceSave(identity, toDefault, null, () => "to-default").request)
+      .toEqual({ priceCents: null, expectedRevisionId: 9, idempotencyKey: "to-default" });
+    expect(isListingPriceDirty({ ...draft, useRules: false, value: "12.00" })).toBe(true);
+  });
+  it("keeps a rules size following the rules even when they can't price it", () => {
+    expect(followsRulesNow({ pricingMode: "rules", source: "unavailable" })).toBe(true);
+    expect(followsRulesNow({ pricingMode: "catalog_default", source: "catalog_default" })).toBe(false);
+    expect(followsRulesNow({ pricingMode: undefined, source: "rules" })).toBe(false);
+  });
+  it("says what an inherit save would price the size at: the rule price, else retail, else nothing", () => {
+    expect(inheritedListingPrice({ rulePriceCents: 1152, defaultPriceCents: 899 })).toEqual({ priceCents: 1152, from: "rules" });
+    expect(inheritedListingPrice({ rulePriceCents: null, defaultPriceCents: 899 })).toEqual({ priceCents: 899, from: "retail" });
+    expect(inheritedListingPrice({ defaultPriceCents: 899 })).toEqual({ priceCents: 899, from: "retail" });
+    expect(inheritedListingPrice({ rulePriceCents: null, defaultPriceCents: null })).toEqual({ priceCents: null, from: null });
+  });
+  it("says an inherit save takes the retail price when a blocking Card Shellz limit refuses the rule price (L1)", () => {
+    // W9 names the refused rule price; the server then saves inherit at the retail price.
+    expect(inheritedListingPrice({ rulePriceCents: 500, defaultPriceCents: 1200, pricingIssue: "pricing_rule_outside_limit" }))
+      .toEqual({ priceCents: 1200, from: "retail" });
+    expect(inheritedListingPrice({ rulePriceCents: 500, defaultPriceCents: null, pricingIssue: "pricing_rule_outside_limit" }))
+      .toEqual({ priceCents: null, from: null });
+    expect(inheritedListingPrice({ rulePriceCents: 500, defaultPriceCents: 1200, pricingIssue: null })).toEqual({ priceCents: 500, from: "rules" });
+  });
+});
+
 describe("price response boundary", () => {
   it("validates reads and saves, including idempotent replays", () => {
     expect(readListingPrice({ price: price() }, identity)).toEqual(price());
     expect(readSavedListingPrice({ price: price(), idempotentReplay: true }, identity)).toEqual(price());
   });
+  it("reads an inherit answer", () => {
+    const inherit = { ...price(), overridePriceCents: null, effectivePriceCents: 899, source: "catalog_default" as const, pricingMode: "inherit" as const };
+    expect(readListingPrice({ price: inherit }, identity)).toEqual(inherit);
+  });
   it.each([{ storeConnectionId: 99 }, { productVariantId: 99 }, { effectivePriceCents: -1 },
-    { revisionId: "9" }, { source: "guessed" }, { extraSecret: "not allowed" }])("rejects mismatched or malformed responses %s", (change) => {
+    { revisionId: "9" }, { source: "guessed" }, { pricingMode: "auction" }, { extraSecret: "not allowed" }])("rejects mismatched or malformed responses %s", (change) => {
     expect(() => readListingPrice({ price: { ...price(), ...change } }, identity)).toThrow();
     expect(() => readSavedListingPrice({ price: { ...price(), ...change }, idempotentReplay: false }, identity)).toThrow();
   });
