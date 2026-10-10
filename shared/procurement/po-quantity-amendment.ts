@@ -1,13 +1,31 @@
 import { z } from "zod";
+import { PO_LINE_TYPES } from "./po-line-type";
 
 export const poAmendmentIdSchema = z.number().int().positive().max(2_147_483_647);
 const money = z.number().int().nonnegative().safe();
 const signedMoney = z.number().int().safe();
+export const poCorrectionPricingSchema = z.discriminatedUnion("basis", [
+  z.object({ basis: z.literal("per_piece"), quantityPieces: poAmendmentIdSchema, unitCostMills: money }).strict(),
+  z.object({ basis: z.literal("extended_total"), quantityPieces: poAmendmentIdSchema, quotedTotalCents: money }).strict(),
+  z.object({ basis: z.literal("per_purchase_uom"), purchaseUom: z.string().trim().min(1).max(50),
+    uomQuantity: poAmendmentIdSchema, piecesPerUom: poAmendmentIdSchema, quotedCostMillsPerUom: money }).strict(),
+]);
 export const poQuantityChangeSchema = z.object({
   lineId: poAmendmentIdSchema,
   quantityPieces: poAmendmentIdSchema,
-  priceTreatment: z.enum(["keep_product_total", "keep_quoted_rate"]),
-}).strict();
+  priceTreatment: z.enum(["keep_product_total", "keep_quoted_rate", "edit_line", "edit_charge"]),
+  pricing: poCorrectionPricingSchema.optional(), packagingCostCents: money.optional(),
+  discountCents: money.optional(), taxCents: money.optional(), chargeTotalCents: signedMoney.optional(),
+}).strict().superRefine((change, ctx) => {
+  const fields = [change.pricing, change.packagingCostCents, change.discountCents, change.taxCents];
+  if (change.priceTreatment === "edit_line") {
+    if (fields.some(value => value === undefined) || change.chargeTotalCents !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Review product pricing, packaging, discount and tax for a line correction." });
+  } else if (change.priceTreatment === "edit_charge") {
+    if (change.chargeTotalCents === undefined || fields.some(value => value !== undefined)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Enter the charge or credit amount." });
+  } else if (fields.some(value => value !== undefined) || change.chargeTotalCents !== undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Explicit amounts require a line correction." });
+  }
+});
 export const poQuantityChangesSchema = z.array(poQuantityChangeSchema).min(1).max(100).superRefine((changes, ctx) => {
   if (new Set(changes.map((change) => change.lineId)).size !== changes.length) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Each PO line may appear only once." });
@@ -27,8 +45,13 @@ export const poQuantityLineViewSchema = z.object({
   orderQty: z.number().int().nonnegative(),
   receivedQty: z.number().int().nonnegative(),
   invoicedQty: z.number().int().nonnegative().safe(),
-  unitCostMills: money,
+  unitCostMills: signedMoney,
   totalProductCostCents: money,
+  // Optional only for receipts of already-committed legacy quantity commands.
+  // New context responses always provide these fields; the editor requires them.
+  packagingCostCents: money.optional(), discountCents: money.optional(), taxCents: money.optional(),
+  componentTotalCents: signedMoney.optional(), lineType: z.enum(PO_LINE_TYPES).optional(),
+  pricing: poCorrectionPricingSchema.nullable().optional(),
   lineTotalCents: signedMoney,
   status: z.string(),
   blockedReason: z.string().nullable(),
@@ -49,7 +72,7 @@ export const poQuantityAmendmentPreviewSchema = z.object({
   lines: z.array(z.object({
     before: poQuantityLineViewSchema,
     after: poQuantityLineViewSchema,
-    priceTreatment: poQuantityChangeSchema.shape.priceTreatment,
+    priceTreatment: z.enum(["keep_product_total", "keep_quoted_rate", "edit_line", "edit_charge"]),
   })),
   beforeTotalCents: money,
   afterTotalCents: money,
@@ -75,3 +98,11 @@ export type PoQuantityApprovalRequest = z.infer<typeof poQuantityApprovalRequest
 export type PoQuantityAmendmentContext = z.infer<typeof poQuantityAmendmentContextSchema>;
 export type PoQuantityAmendmentPreview = z.infer<typeof poQuantityAmendmentPreviewSchema>;
 export type PoQuantityAmendmentResult = z.infer<typeof poQuantityAmendmentResultSchema>;
+
+/** One exact calculation shared by the server and the editable form. */
+export function poLineAmountCents(productCents: number, packagingCents: number, discountCents: number, taxCents: number): number {
+  for (const value of [productCents, packagingCents, discountCents, taxCents]) money.parse(value);
+  const total = BigInt(productCents) + BigInt(packagingCents) - BigInt(discountCents) + BigInt(taxCents);
+  if (total < BigInt(0) || total > BigInt(Number.MAX_SAFE_INTEGER)) throw new RangeError("The resulting line total is outside the supported range.");
+  return Number(total);
+}

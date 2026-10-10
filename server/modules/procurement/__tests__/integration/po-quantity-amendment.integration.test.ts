@@ -242,6 +242,103 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       expect((await pending).httpStatus).toBe(403); expect(await evidence()).toEqual(before);
     } finally { await holder.query("ROLLBACK"); holder.release(); await pending; }
   });
+  describe("simple PO line editing", () => {
+    const editRequest = async (change: Partial<PoQuantityApprovalRequest["changes"][number]> = {}): Promise<PoQuantityApprovalRequest> => ({
+      sourceVersion: (await service.context(1, "admin-user")).sourceVersion,
+      changes: [{ lineId: 11, quantityPieces: 10, priceTreatment: "edit_line", pricing: { basis: "per_piece", quantityPieces: 10, unitCostMills: 15000 }, packagingCostCents: 125, discountCents: 10, taxCents: 5, ...change }],
+      reason: "Supplier document confirms the revised PO line values", approvalConfirmed: true,
+    });
+    it("saves a price-only edit with all reviewed components and immutable before/after evidence", async () => {
+      const request = await editRequest(), before = await evidence(), protectedBefore = await protectedRecords();
+      const preview = await service.preview(1, { sourceVersion: request.sourceVersion, changes: request.changes, reason: request.reason }, "admin-user");
+      expect(preview).toMatchObject({ beforeTotalCents: 1100, afterTotalCents: 1620, lines: [{ before: { orderQty: 10, lineTotalCents: 1100 }, after: { orderQty: 10, unitCostMills: 15000, totalProductCostCents: 1500, packagingCostCents: 125, discountCents: 10, taxCents: 5, lineTotalCents: 1620 } }] });
+      expect(await evidence()).toEqual(before);
+      expect(await post(request)).toMatchObject({ status: 200, body: { revisionNumber: 1, preview } });
+      expect(await protectedRecords()).toEqual(protectedBefore);
+      expect((await pool.query("SELECT subtotal_cents,total_cents,status,financial_status FROM procurement.purchase_orders")).rows[0]).toEqual({ subtotal_cents: "1620", total_cents: "1620", status: "received", financial_status: "paid" });
+      const revisions = (await pool.query("SELECT field_changed,old_value,new_value,changed_by,notes FROM procurement.po_revisions ORDER BY id")).rows;
+      for (const [field, oldValue, newValue] of [["unitCostMills", "10000", "15000"], ["totalProductCostCents", "1000", "1500"], ["packagingCostCents", "100", "125"], ["discountCents", "0", "10"], ["taxCents", "0", "5"], ["lineTotalCents", "1100", "1620"]]) {
+        expect(revisions).toContainEqual({ field_changed: field, old_value: oldValue, new_value: newValue, changed_by: "admin-user", notes: request.reason });
+      }
+      const events = (await pool.query("SELECT event_type,actor_id,payload_json FROM procurement.po_events")).rows;
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ event_type: "line_amendment_approved", actor_id: "admin-user", payload_json: { reason: request.reason, before: { header: { totalCents: 1100 }, lines: [{ lineTotalCents: 1100 }] }, after: { header: { totalCents: 1620 }, lines: [{ lineTotalCents: 1620 }] } } });
+      await expect(pool.query("UPDATE procurement.po_events SET actor_id='forged'")).rejects.toMatchObject({ code: "23514" });
+    });
+    it("recalculates quantity at the prefilled piece price instead of reducing that price", async () => {
+      const request = await editRequest({ quantityPieces: 20, pricing: { basis: "per_piece", quantityPieces: 20, unitCostMills: 10000 }, packagingCostCents: 100, discountCents: 0, taxCents: 0 });
+      const protectedBefore = await protectedRecords();
+      expect(await post(request)).toMatchObject({ status: 200, body: { preview: { beforeTotalCents: 1100, afterTotalCents: 2100 } } });
+      expect((await pool.query("SELECT order_qty,received_qty,unit_cost_mills,total_product_cost_cents,line_total_cents FROM procurement.purchase_order_lines WHERE id=11")).rows[0]).toEqual({ order_qty: 20, received_qty: 20, unit_cost_mills: "10000", total_product_cost_cents: "2000", line_total_cents: "2100" });
+      expect(await protectedRecords()).toEqual(protectedBefore);
+    });
+    it("keeps exact extended totals and rounding residuals through the database constraints", async () => {
+      const request = await editRequest({ quantityPieces: 3, pricing: { basis: "extended_total", quantityPieces: 3, quotedTotalCents: 1001 }, packagingCostCents: 100, discountCents: 0, taxCents: 0 });
+      expect((await post(request)).status).toBe(200);
+      expect((await pool.query("SELECT order_qty,pricing_basis,quoted_total_cents,total_product_cost_cents,unit_cost_mills,pricing_remainder_mills,line_total_cents FROM procurement.purchase_order_lines WHERE id=11")).rows[0]).toEqual({ order_qty: 3, pricing_basis: "extended_total", quoted_total_cents: "1001", total_product_cost_cents: "1001", unit_cost_mills: "33367", pricing_remainder_mills: "-1", line_total_cents: "1101" });
+    });
+    it("preserves purchase UOM provenance when editing its quoted rate", async () => {
+      await pool.query("UPDATE procurement.purchase_order_lines SET pricing_basis='per_purchase_uom',purchase_uom='case',purchase_uom_quantity=2,pieces_per_purchase_uom=5,quoted_unit_cost_mills=50000 WHERE id=11");
+      const request = await editRequest({ pricing: { basis: "per_purchase_uom", purchaseUom: "case", uomQuantity: 2, piecesPerUom: 5, quotedCostMillsPerUom: 60000 }, packagingCostCents: 100, discountCents: 0, taxCents: 0 });
+      expect((await post(request)).status).toBe(200);
+      expect((await pool.query("SELECT order_qty,purchase_uom,purchase_uom_quantity,pieces_per_purchase_uom,quoted_unit_cost_mills,unit_cost_mills,total_product_cost_cents,line_total_cents FROM procurement.purchase_order_lines WHERE id=11")).rows[0]).toEqual({ order_qty: 10, purchase_uom: "case", purchase_uom_quantity: 2, pieces_per_purchase_uom: 5, quoted_unit_cost_mills: "60000", unit_cost_mills: "12000", total_product_cost_cents: "1200", line_total_cents: "1300" });
+    });
+    it("requires explicit reviewed components to repair a legacy total gap without guessing its allocation", async () => {
+      await pool.query("UPDATE procurement.purchase_order_lines SET order_qty=25000,received_qty=25000,unit_cost_cents=50,unit_cost_mills=5023,total_product_cost_cents=1255750,packaging_cost_cents=41500,line_total_cents=1338750,pricing_basis='legacy_unknown',pricing_source='legacy',quoted_unit_cost_mills=NULL WHERE id=11; UPDATE procurement.purchase_orders SET subtotal_cents=1338750,total_cents=1338750 WHERE id=1");
+      const context = await service.context(1, "admin-user");
+      expect(context.lines[0]).toMatchObject({ lineTotalCents: 1338750, componentTotalCents: 1297250, packagingCostCents: 41500 });
+      const request = await editRequest({ quantityPieces: 25000, pricing: { basis: "per_piece", quantityPieces: 25000, unitCostMills: 5023 }, packagingCostCents: 83000, discountCents: 0, taxCents: 0 });
+      const protectedBefore = await protectedRecords();
+      expect(await post(request)).toMatchObject({ status: 200, body: { preview: { beforeTotalCents: 1338750, afterTotalCents: 1338750, lines: [{ before: { packagingCostCents: 41500 }, after: { packagingCostCents: 83000, componentTotalCents: 1338750 } }] } } });
+      expect(await protectedRecords()).toEqual(protectedBefore);
+    });
+    it.each(["fee", "tax", "discount", "rebate", "adjustment"])("edits a %s amount and recomputes linked matching without a goods receipt", async (lineType) => {
+      const oldAmount = ["discount", "rebate"].includes(lineType) ? -50 : 50;
+      const newAmount = oldAmount < 0 ? -75 : 75;
+      await pool.query("INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,product_name,line_type,order_qty,received_qty,status,unit_cost_cents,unit_cost_mills,line_total_cents,pricing_basis,pricing_source) VALUES(12,1,2,'Document charge',$1,1,0,'open',$2,$3,$2,'not_applicable','manual')", [lineType, oldAmount, Number(BigInt(oldAmount) * BigInt(100))]);
+      await pool.query("UPDATE procurement.purchase_orders SET subtotal_cents=$1,total_cents=$1 WHERE id=1", [1100 + oldAmount]);
+      await pool.query("INSERT INTO procurement.vendor_invoice_lines(id,vendor_invoice_id,line_number,purchase_order_line_id,description,qty_invoiced,unit_cost_cents,unit_cost_mills,line_total_cents,match_status) VALUES(82,71,2,12,'Document charge',1,$1,$2,$1,'matched')", [oldAmount, Number(BigInt(oldAmount) * BigInt(100))]);
+      const request = await editRequest(); request.changes = [{ lineId: 12, quantityPieces: 1, priceTreatment: "edit_charge", chargeTotalCents: newAmount }];
+      const protectedBefore = await protectedRecords();
+      expect(await post(request)).toMatchObject({ status: 200, body: { preview: { afterTotalCents: 1100 + newAmount } } });
+      expect((await pool.query("SELECT line_type,order_qty,received_qty,line_total_cents FROM procurement.purchase_order_lines WHERE id=12")).rows[0]).toEqual({ line_type: lineType, order_qty: 1, received_qty: 0, line_total_cents: String(newAmount) });
+      expect((await pool.query("SELECT match_status,qty_received FROM procurement.vendor_invoice_lines WHERE id=82")).rows[0]).toEqual({ match_status: "price_discrepancy", qty_received: 0 });
+      expect(await protectedRecords()).toEqual(protectedBefore);
+    });
+    it("rolls back a complete multi-line edit if audit insertion fails", async () => {
+      await pool.query("INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,product_name,line_type,order_qty,status,unit_cost_cents,unit_cost_mills,line_total_cents,pricing_basis) VALUES(12,1,2,'Fee','fee',1,'open',50,5000,50,'not_applicable'); UPDATE procurement.purchase_orders SET subtotal_cents=1150,total_cents=1150 WHERE id=1");
+      const request = await editRequest(); request.changes.push({ lineId: 12, quantityPieces: 1, priceTreatment: "edit_charge", chargeTotalCents: 75 });
+      await pool.query("CREATE OR REPLACE FUNCTION public.amendment_test_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Simulated immutable audit failure'; END $$; CREATE TRIGGER amendment_test_failure BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION public.amendment_test_failure()");
+      const before = await evidence(), protectedBefore = await protectedRecords();
+      expect((await post(request)).status).toBe(500);
+      expect(await evidence()).toEqual(before); expect(await protectedRecords()).toEqual(protectedBefore);
+    });
+    it("rejects competing price edits and safely replays the winning approval", async () => {
+      const request = await editRequest(), other = { ...request, changes: [{ ...request.changes[0], pricing: { basis: "per_piece" as const, quantityPieces: 10, unitCostMills: 20000 } }] };
+      const command = descriptor(request), second = descriptor(other);
+      const results = await Promise.all([service.approve(1, request, "admin-user", command), service.approve(1, other, "admin-user", second)]);
+      expect(results.map(result => result.httpStatus).sort()).toEqual([200, 409]);
+      const after = await evidence();
+      const winnerIndex = results.findIndex(result => result.httpStatus === 200);
+      const replay = await service.approve(1, winnerIndex === 0 ? request : other, "admin-user", winnerIndex === 0 ? command : second);
+      expect(replay).toMatchObject({ httpStatus: 200, replayed: true }); expect(await evidence()).toEqual(after);
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_events")).rows[0].count).toBe(1);
+    });
+    it("applies approval tiers to the new total when a price edit crosses a threshold", async () => {
+      await pool.query("UPDATE inventory.warehouse_settings SET require_approval=true; INSERT INTO procurement.po_approval_tiers(tier_name,threshold_cents,approver_role,active) VALUES('Finance',2000,'Finance Director',1)");
+      const request = await editRequest({ pricing: { basis: "per_piece", quantityPieces: 10, unitCostMills: 20000 } });
+      const before = await evidence(); expect((await post(request)).status).toBe(403); expect(await evidence()).toEqual(before);
+    });
+    it.each(["lead-user", "custom-user", "scoped-user"])("rejects a PO price edit without current unrestricted administrator authority: %s", async (actor) => {
+      const request = await editRequest(); request.sourceVersion = (await service.context(1, actor)).sourceVersion; requestActor = actor;
+      const before = await evidence(); expect((await post(request)).status).toBe(403); expect(await evidence()).toEqual(before);
+    });
+    it.each([{ resourceKey: "purchase_order:2" }, { commandName: "ap.invoice.quantity_correction" }, { routeTemplate: "/api/other/:id" }])("rejects a mismatched direct command scope: %s", async (scope) => {
+      const request = await editRequest(), before = await evidence();
+      await expect(service.approve(1, request, "admin-user", { ...descriptor(request), ...scope })).rejects.toMatchObject({ statusCode: 403, code: "PO_AMENDMENT_ACTOR_INVALID" });
+      expect(await evidence()).toEqual(before);
+    });
+  });
   describe("admin-approved invoice quantity corrections", () => {
     beforeEach(async () => {
       // The PO has already been corrected; receiving and the paid bill remain intact.

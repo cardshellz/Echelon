@@ -2601,7 +2601,7 @@ export function createPurchasingService(
         }
         const approvalEvents = await tx.select({ payloadJson: poEventsTable.payloadJson })
           .from(poEventsTable)
-          .where(and(eq(poEventsTable.poId, poId), inArray(poEventsTable.eventType, ["approved", "quantity_amendment_approved"])))
+          .where(and(eq(poEventsTable.poId, poId), inArray(poEventsTable.eventType, ["approved", "quantity_amendment_approved", "line_amendment_approved"])))
           .orderBy(desc(poEventsTable.id)).limit(1).for("share");
         const authorityStillCovers = purchaseApprovalSnapshotCovers({
           snapshot: approvalEvents[0]?.payloadJson?.approval_authority, tier,

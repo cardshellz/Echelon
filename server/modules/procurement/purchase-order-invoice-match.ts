@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { centsToMills } from "@shared/utils/money";
+import { isPoLineType } from "@shared/procurement/po-line-type";
 
 export const PURCHASE_ORDER_INVOICE_MATCH_STATUSES = [
   "pending",
@@ -15,6 +16,7 @@ export type PurchaseOrderInvoiceMatchStatus =
 
 export type PurchaseOrderMatchLine = {
   id: number;
+  lineType?: string;
   orderQty: number;
   receivedQty: number | null;
   unitCostCents: number | null;
@@ -54,11 +56,25 @@ function requireSafeNonnegativeInteger(value: unknown, field: string): number {
 function authoritativeUnitCostMills(
   value: { unitCostCents: number | null; unitCostMills: number | null },
   field: string,
+  signed = false,
 ): number {
+  if (signed) {
+    const amount = Number(value.unitCostMills ?? centsToMills(value.unitCostCents ?? 0));
+    if (!Number.isSafeInteger(amount)) throw new Error(`${field}.unitCostMills must be a safe integer`);
+    return amount;
+  }
   const mills = value.unitCostMills == null
     ? centsToMills(requireSafeNonnegativeInteger(value.unitCostCents ?? 0, `${field}.unitCostCents`))
     : requireSafeNonnegativeInteger(value.unitCostMills, `${field}.unitCostMills`);
   return requireSafeNonnegativeInteger(mills, `${field}.unitCostMills`);
+}
+function financialLine(line: PurchaseOrderMatchLine | undefined): boolean {
+  if (!line || line.lineType === undefined) return false;
+  if (!isPoLineType(line.lineType)) throw new Error(`purchaseOrderLine[${line.id}].lineType is invalid`);
+  return line.lineType !== "product";
+}
+function signedLine(line: PurchaseOrderMatchLine | undefined): boolean {
+  return !!line && financialLine(line) && ["discount", "rebate", "adjustment"].includes(line.lineType!);
 }
 
 /**
@@ -77,6 +93,7 @@ export function computePurchaseOrderInvoiceMatchSourceFingerprint(input: {
     "purchaseOrderId",
   );
   if (purchaseOrderId === 0) throw new Error("purchaseOrderId must be positive");
+  const poLinesById = new Map(input.purchaseOrderLines.map(line => [line.id, line]));
 
   const purchaseOrderLines = input.purchaseOrderLines
     .map((line) => {
@@ -84,6 +101,9 @@ export function computePurchaseOrderInvoiceMatchSourceFingerprint(input: {
       if (id === 0) throw new Error("purchaseOrderLine.id must be positive");
       return {
         id,
+        // Preserve existing product fingerprints; financial-line taxonomy is
+        // new matching evidence and cannot reuse a product variance approval.
+        ...(financialLine(line) ? { lineType: line.lineType } : {}),
         orderQty: requireSafeNonnegativeInteger(
           line.orderQty,
           `purchaseOrderLine[${id}].orderQty`,
@@ -95,6 +115,7 @@ export function computePurchaseOrderInvoiceMatchSourceFingerprint(input: {
         unitCostMills: authoritativeUnitCostMills(
           line,
           `purchaseOrderLine[${id}]`,
+          signedLine(line),
         ),
       };
     })
@@ -139,6 +160,7 @@ export function computePurchaseOrderInvoiceMatchSourceFingerprint(input: {
         unitCostMills: authoritativeUnitCostMills(
           line,
           `vendorInvoiceLine[${id}]`,
+          signedLine(poLinesById.get(purchaseOrderLineId ?? 0)),
         ),
       };
     })
@@ -171,7 +193,8 @@ export function evaluatePurchaseOrderInvoiceMatches(input: {
     if (id === 0) throw new Error("purchaseOrderLine.id must be positive");
     requireSafeNonnegativeInteger(line.orderQty, `purchaseOrderLine[${id}].orderQty`);
     requireSafeNonnegativeInteger(line.receivedQty ?? 0, `purchaseOrderLine[${id}].receivedQty`);
-    authoritativeUnitCostMills(line, `purchaseOrderLine[${id}]`);
+    financialLine(line);
+    authoritativeUnitCostMills(line, `purchaseOrderLine[${id}]`, signedLine(line));
     poLinesById.set(id, line);
   }
 
@@ -183,7 +206,7 @@ export function evaluatePurchaseOrderInvoiceMatches(input: {
       line.qtyInvoiced,
       `vendorInvoiceLine[${id}].qtyInvoiced`,
     );
-    authoritativeUnitCostMills(line, `vendorInvoiceLine[${id}]`);
+    authoritativeUnitCostMills(line, `vendorInvoiceLine[${id}]`, signedLine(poLinesById.get(line.purchaseOrderLineId ?? 0)));
     if (line.purchaseOrderLineId == null) continue;
     const purchaseOrderLineId = requireSafeNonnegativeInteger(
       line.purchaseOrderLineId,
@@ -230,15 +253,21 @@ export function evaluatePurchaseOrderInvoiceMatches(input: {
     const invoiceUnitCostMills = authoritativeUnitCostMills(
       line,
       `vendorInvoiceLine[${line.id}]`,
+      signedLine(poLine),
     );
     const poUnitCostMills = authoritativeUnitCostMills(
       poLine,
       `purchaseOrderLine[${poLine.id}]`,
+      signedLine(poLine),
     );
 
     let matchStatus: PurchaseOrderInvoiceMatchStatus;
     if (invoiceUnitCostMills !== poUnitCostMills) {
       matchStatus = "price_discrepancy";
+    } else if (financialLine(poLine)) {
+      // Fees, tax and credits are commercial lines, not received goods. Their
+      // signed price and ordered quantity still match; receipts are irrelevant.
+      matchStatus = aggregateInvoicedQty === orderedQty ? "matched" : "qty_discrepancy";
     } else if (aggregateInvoicedQty > receivedQtyBigInt) {
       matchStatus = "over_billed";
     } else if (

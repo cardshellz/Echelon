@@ -172,6 +172,18 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     }
   });
 
+  it.each(["quantity_amendment_approved", "line_amendment_approved"])("sending recognizes the latest admin amendment approval: %s", async (eventType) => {
+    await service.approve(1, "admin-user");
+    const snapshot = (await evidence()).events[0].payload_json.approval_authority;
+    await pool.query(`BEGIN;
+      UPDATE procurement.purchase_orders SET subtotal_cents=20000,total_cents=20000,revision_number=1,approved_at=now(),updated_at=now() WHERE id=1;
+      UPDATE procurement.purchase_order_lines SET unit_cost_cents=20000,unit_cost_mills=2000000,quoted_unit_cost_mills=2000000,total_product_cost_cents=20000,line_total_cents=20000,updated_at=now() WHERE id=11;
+      COMMIT`);
+    await pool.query("INSERT INTO procurement.po_events(po_id,event_type,actor_type,actor_id,payload_json) VALUES(1,$1,'user','admin-user',$2)", [eventType, JSON.stringify({ approval_authority: { ...snapshot, totalCents: 20000 } })]);
+    expect((await service.send(1, "admin-user")).status).toBe("sent");
+    expect((await evidence()).header[0]).toMatchObject({ status: "sent", total_cents: "20000", revision_number: 1 });
+  });
+
   it("rejects a forged HTTP/session role and preserves every purchase, line, history and audit field", async () => {
     requestActor = "wrong-user";
     const before = await evidence();
