@@ -25,6 +25,21 @@ function invoiceLine(overrides: Record<string, unknown> = {}) {
 }
 
 describe("evaluatePurchaseOrderInvoiceMatches", () => {
+  it.each(["fee", "tax", "discount", "rebate", "adjustment"])("matches a %s without requiring receipt of goods", (lineType) => {
+    const rate = ["discount", "rebate", "adjustment"].includes(lineType) ? -10000 : 10000;
+    const purchase = { ...poLine, lineType, orderQty: 1, receivedQty: 0, unitCostCents: Number(BigInt(rate) / BigInt(100)), unitCostMills: rate };
+    expect(evaluatePurchaseOrderInvoiceMatches({ purchaseOrderLines: [purchase], invoiceLines: [invoiceLine({ qtyInvoiced: 1, unitCostCents: Number(BigInt(rate) / BigInt(100)), unitCostMills: rate })] })[0].matchStatus).toBe("matched");
+    expect(evaluatePurchaseOrderInvoiceMatches({ purchaseOrderLines: [purchase], invoiceLines: [invoiceLine({ qtyInvoiced: 2, unitCostCents: Number(BigInt(rate) / BigInt(100)), unitCostMills: rate })] })[0].matchStatus).toBe("qty_discrepancy");
+    expect(evaluatePurchaseOrderInvoiceMatches({ purchaseOrderLines: [purchase], invoiceLines: [invoiceLine({ qtyInvoiced: 1, unitCostCents: Number(BigInt(rate) / BigInt(100)), unitCostMills: rate + 1 })] })[0].matchStatus).toBe("price_discrepancy");
+    expect(() => computePurchaseOrderInvoiceMatchSourceFingerprint({ purchaseOrderId: 1, purchaseOrderLines: [purchase], activeInvoices: [{ id: 30, status: "paid" }], invoiceLines: [invoiceLine({ qtyInvoiced: 1, unitCostCents: Number(BigInt(rate) / BigInt(100)), unitCostMills: rate })] })).not.toThrow();
+  });
+  it("preserves product fingerprints while distinguishing a charge from a product", () => {
+    const source = { purchaseOrderId: 1, purchaseOrderLines: [poLine], activeInvoices: [{ id: 30, status: "paid" }], invoiceLines: [invoiceLine()] };
+    const before = computePurchaseOrderInvoiceMatchSourceFingerprint(source);
+    expect(computePurchaseOrderInvoiceMatchSourceFingerprint({ ...source, purchaseOrderLines: [{ ...poLine, lineType: "product" }] })).toBe(before);
+    expect(computePurchaseOrderInvoiceMatchSourceFingerprint({ ...source, purchaseOrderLines: [{ ...poLine, lineType: "fee" }] })).not.toBe(before);
+    expect(() => evaluatePurchaseOrderInvoiceMatches({ ...source, purchaseOrderLines: [{ ...poLine, lineType: "unknown" }] })).toThrow(/lineType is invalid/);
+  });
   it("matches current ordered, received, and invoiced quantity at mill precision", () => {
     expect(evaluatePurchaseOrderInvoiceMatches({
       purchaseOrderLines: [poLine],

@@ -44,7 +44,10 @@ export function createPoQuantityAmendmentService(database: AmendmentDatabase, no
       });
     },
     async approve(id: number, rawRequest: unknown, actorId: string, descriptor: FinancialCommandDescriptor) {
-      if (descriptor.actorType !== "user" || descriptor.actorId !== actorId) throw new FinancialCommandError("The authenticated approver does not match the command actor.", 403, "PO_AMENDMENT_ACTOR_INVALID");
+      const poId = input(poAmendmentIdSchema, id);
+      if (descriptor.actorType !== "user" || descriptor.actorId !== actorId || descriptor.method !== "POST"
+        || descriptor.routeTemplate !== "/api/purchase-orders/:id/quantity-amendment" || descriptor.resourceKey !== `purchase_order:${poId}`
+        || descriptor.commandName !== "purchase_order.quantity_amendment.approve") throw new FinancialCommandError("The command does not match this PO or authenticated approver.", 403, "PO_AMENDMENT_ACTOR_INVALID");
       return runTransactionalFinancialCommand({
         repository, descriptor,
         classifyFailure: (error) => error instanceof PoQuantityAmendmentError ? {
@@ -55,7 +58,6 @@ export function createPoQuantityAmendmentService(database: AmendmentDatabase, no
           kind: "rejected", httpStatus: 409, errorCode: "PO_AMENDMENT_SOURCE_INVALID", errorMessage: "Recorded source data is invalid.", body: { error: "Recorded source data is invalid. Review the source evidence.", code: "PO_AMENDMENT_SOURCE_INVALID" },
         } : { kind: "retryable", errorCode: "PO_AMENDMENT_FAILED", errorMessage: "The quantity correction could not be completed. Retry the saved request." },
         work: async (tx) => {
-          const poId = input(poAmendmentIdSchema, id);
           const request = input(poQuantityApprovalRequestSchema, rawRequest);
           const source = await readQuantityAmendmentSource(tx, poId, actorId);
           assertQuantityAmendmentAuthority(source.actor);

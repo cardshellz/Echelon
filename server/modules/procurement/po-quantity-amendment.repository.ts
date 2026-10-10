@@ -60,21 +60,31 @@ export async function persistQuantityAmendment(
   approvalEvidence: PurchaseApprovalSnapshot,
 ) {
   const { header, lines } = source.facts;
+  const lineEdit = plan.preview.lines.some(line => ["edit_line", "edit_charge"].includes(line.priceTreatment));
+  const actionName = lineEdit ? "PO edit" : "quantity correction";
   const revisionNumber = (header.revisionNumber ?? 0) + 1;
   if (!Number.isSafeInteger(revisionNumber) || revisionNumber > 2_147_483_647) throw new PoQuantityAmendmentError("The revision limit has been reached.", "PO_AMENDMENT_REVISION_LIMIT");
   for (const change of plan.patches) {
     const before = lines.find((line) => line.id === change.id)!;
-    await tx.update(purchaseOrderLines).set({
+    const [updated] = await tx.update(purchaseOrderLines).set({
       ...change.patch,
       fullyReceivedDate: change.patch.status === "received" ? before.fullyReceivedDate ?? approvedAt : null,
       // Keep the original quote reference/dates as document provenance. The
       // event records both quote shapes and the admin's explicit price treatment.
       updatedAt: sql`GREATEST(${approvedAt}::timestamp, ${before.updatedAt}::timestamp + interval '1 millisecond')`,
-    }).where(and(eq(purchaseOrderLines.id, change.id), eq(purchaseOrderLines.purchaseOrderId, header.id)));
-    await tx.insert(poRevisions).values({
-      purchaseOrderId: header.id, revisionNumber, changedBy: actorId, changeType: "qty_changed", fieldChanged: "orderQty",
-      oldValue: String(before.orderQty), newValue: String(change.patch.orderQty), lineId: change.id, notes: plan.preview.reason, createdAt: approvedAt,
-    });
+    }).where(and(eq(purchaseOrderLines.id, change.id), eq(purchaseOrderLines.purchaseOrderId, header.id))).returning({ id: purchaseOrderLines.id });
+    if (!updated) throw new PoQuantityAmendmentError("The locked PO line could not be updated.", "PO_AMENDMENT_UPDATE_FAILED");
+    const changedFields = Object.keys(change.patch) as (keyof typeof change.patch)[];
+    for (const field of changedFields) {
+      const newValue = change.patch[field];
+      if (newValue === undefined || before[field] === newValue) continue;
+      await tx.insert(poRevisions).values({
+        purchaseOrderId: header.id, revisionNumber, changedBy: actorId,
+        changeType: field === "orderQty" ? "qty_changed" : field === "status" ? "status_changed" : "price_changed", fieldChanged: field,
+        oldValue: before[field] === null ? null : String(before[field]), newValue: newValue === null ? null : String(newValue),
+        lineId: change.id, notes: plan.preview.reason, createdAt: approvedAt,
+      });
+    }
   }
   const statusChanged = header.status !== plan.preview.afterStatus;
   const [afterHeader] = await tx.update(purchaseOrders).set({
@@ -85,18 +95,19 @@ export async function persistQuantityAmendment(
     physicalStatus: plan.preview.afterStatus === "received" ? "received" : plan.preview.afterStatus === "partially_received" ? "receiving" : header.physicalStatus,
     updatedBy: actorId, updatedAt: sql`GREATEST(${approvedAt}::timestamp, ${header.updatedAt}::timestamp + interval '1 millisecond')`,
   }).where(eq(purchaseOrders.id, header.id)).returning();
+  if (!afterHeader) throw new PoQuantityAmendmentError("The locked PO could not be updated.", "PO_AMENDMENT_UPDATE_FAILED");
   await tx.insert(poStatusHistory).values({
     purchaseOrderId: header.id, fromStatus: header.status, toStatus: plan.preview.afterStatus,
     changedBy: actorId, changedAt: approvedAt, revisionNumber,
-    notes: `Admin approved quantity correction (revision ${revisionNumber})${statusChanged ? "; receiving status recalculated" : ""}: ${plan.preview.reason}`,
+    notes: `Admin approved ${actionName} (revision ${revisionNumber})${statusChanged ? "; receiving status recalculated" : ""}: ${plan.preview.reason}`,
   });
   const match = await recomputePurchaseOrderInvoiceMatchesInTransaction(header.id, tx, actorId, approvedAt);
   const superseded = await replacePurchaseOrderMatchExceptions({ tx, purchaseOrderId: header.id, exceptions: source.exceptions, match,
-    actorId, at: approvedAt, supersessionNote: `Superseded by admin-approved quantity revision ${revisionNumber}.`,
-    messagePrefix: `Quantity revision ${revisionNumber}`, revisionNumber });
+    actorId, at: approvedAt, supersessionNote: `Superseded by admin-approved ${actionName}, revision ${revisionNumber}.`,
+    messagePrefix: `PO revision ${revisionNumber}`, revisionNumber });
   const afterLines = await tx.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.purchaseOrderId, header.id)).orderBy(asc(purchaseOrderLines.id));
   const [event] = await tx.insert(poEvents).values({
-    poId: header.id, eventType: "quantity_amendment_approved", actorType: "user", actorId, createdAt: approvedAt,
+    poId: header.id, eventType: lineEdit ? "line_amendment_approved" : "quantity_amendment_approved", actorType: "user", actorId, createdAt: approvedAt,
     payloadJson: {
       contractVersion: 1, commandKey, revisionNumber, reason: plan.preview.reason, approvedAt: approvedAt.toISOString(),
       approvalEvidence: source.actor, approval_authority: approvalEvidence, reviewedSourceVersion: source.sourceVersion,
