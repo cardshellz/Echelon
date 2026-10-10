@@ -767,6 +767,31 @@ const configured =
           .quantity,
       ).toBe(4);
     });
+    it("keeps an earlier group timeout fenced when a repaired job observes a different group with the same member SKU", async () => {
+      const f=fixture();f.fail("timeout");
+      const original=await f.service.enqueue(identity,"operator");
+      await f.service.processDue(1,original.id);
+      const prior=(await database.pool.query(`SELECT id::text,state,scope->>'externalInventoryItemId' AS item
+        FROM inventory.quantity_publication_attempts WHERE scope->>'externalScopeId'=$1 AND state='uncertain'`,[identity.accountId])).rows;
+      expect(prior).toHaveLength(1);expect(prior[0].item).toBe("group:PACK");
+      const mutationCount=f.mutations.length;
+      const previous=(await f.store.get(original.id)).providerIdentity;
+      identity={...identity,groupKey:"new-proven-provider-group"};
+      const client=await database.pool.connect();
+      let replacementId:string;
+      try {
+        await client.query("BEGIN");
+        const replacement=await f.store.enqueueInsideTransaction(client,identity,randomUUID(),"operator",clock(),identity);
+        replacementId=replacement.id;await client.query("COMMIT");
+      } catch(error) {await client.query("ROLLBACK");throw error;} finally {client.release();}
+      expect(replacementId).not.toBe(original.id);
+      await f.service.processDue(1,replacementId);
+      expect(await f.store.get(replacementId)).toMatchObject({state:"awaiting_evidence",code:"EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED",
+        message:expect.stringContaining(prior[0].id)});
+      expect(f.mutations).toHaveLength(mutationCount);
+      expect(await f.store.get(original.id)).toMatchObject({state:"needs_attention",code:"EBAY_SYNC_SOURCE_SUPERSEDED",providerIdentity:previous});
+      expect((await database.pool.query("SELECT state FROM inventory.quantity_publication_attempts WHERE id=$1",[prior[0].id])).rows[0].state).toBe("uncertain");
+    });
     it("resumes the already saved job after an explicit unknown-outcome decision even if no follow-up enqueue commits", async () => {
       const f = fixture();
       f.fail("timeout");

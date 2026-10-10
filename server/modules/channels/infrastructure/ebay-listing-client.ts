@@ -44,6 +44,7 @@ function normalizePublishedListingResponse(response: unknown): { listingId: stri
 
 const ebayObservedOfferSchema = z
   .object({
+    sku: z.string().min(1).max(100).refine(value => value.trim().length > 0),
     offerId: z.string().trim().min(1).max(255),
     status: z.enum(["PUBLISHED", "UNPUBLISHED"]),
     availableQuantity: z
@@ -60,7 +61,12 @@ const ebayObservedOfferSchema = z
       .passthrough()
       .optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((offer, context) => {
+    if (offer.listingId && offer.listing?.listingId && offer.listingId !== offer.listing.listingId) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["listingId"], message: "Conflicting listing identifiers." });
+    }
+  });
 
 const ebayOffersResponseSchema = z
   .object({

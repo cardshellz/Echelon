@@ -108,6 +108,12 @@
     "modules/identity",
     "server/routes/pick-priority.routes.ts"
   ],
+  "channels.ebay_listing_mapping_rejections": [
+    "modules/channels"
+  ],
+  "channels.ebay_listing_mapping_repairs": [
+    "modules/channels"
+  ],
   "channels.ebay_listing_sync_admission_failures": [
     "modules/channels"
   ],

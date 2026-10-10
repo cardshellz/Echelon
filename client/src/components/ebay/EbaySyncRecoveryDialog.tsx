@@ -20,15 +20,6 @@ const recoveryResultSchema = ebayPublicationRecoveryResultSchema.extend({
 }).refine((result) => result.job !== null || (result.productId !== undefined && result.nextAction === "retry_publish"), {
   message: "A recovery without a saved job must identify the product and its next action.",
 });
-const identitySchema = z.object({
-  groupKey: z.string().nullable(),
-  variants: z.array(z.object({
-    variantId: z.number().int().positive(), catalogSku: z.string().optional(), sku: z.string(),
-    externalSku: z.string().nullable().optional(), offerId: z.string().nullable().optional(), listingId: z.string().nullable().optional(),
-  })),
-}).nullable();
-const mappingSchema = z.object({ job: ebayListingSyncJobSchema.nullable(), sourceIdentity: identitySchema, providerIdentity: identitySchema });
-
 interface EbaySyncRecoveryDialogProps {
   jobId: string | null;
   productId: number | null;
@@ -38,11 +29,10 @@ interface EbaySyncRecoveryDialogProps {
   onRecheck: () => void;
   onRecovered: () => void;
   checking: boolean;
-  mode: "recovery" | "mapping";
   onIssueAction: (issue: EbayListingIssue, productId: number, jobId?: string) => void;
 }
 
-export function EbaySyncRecoveryDialog({ jobId, productId, productName, issue, onClose, onRecheck, onRecovered, checking, mode, onIssueAction }: EbaySyncRecoveryDialogProps) {
+export function EbaySyncRecoveryDialog({ jobId, productId, productName, issue, onClose, onRecheck, onRecovered, checking, onIssueAction }: EbaySyncRecoveryDialogProps) {
   const queryClient = useQueryClient();
   const [acknowledged, setAcknowledged] = useState(false);
   const [recovered, setRecovered] = useState(false);
@@ -54,12 +44,7 @@ export function EbaySyncRecoveryDialog({ jobId, productId, productName, issue, o
   const recovery = useQuery({
     queryKey: [resourcePath, "recovery"],
     queryFn: async () => recoverySchema.parse(await (await apiRequest("GET", `${resourcePath}/recovery`)).json()),
-    enabled: productId !== null && mode === "recovery", staleTime: 0,
-  });
-  const mapping = useQuery({
-    queryKey: [resourcePath],
-    queryFn: async () => mappingSchema.parse(await (await apiRequest("GET", resourcePath)).json()),
-    enabled: productId !== null && mode === "mapping", staleTime: 0,
+    enabled: productId !== null, staleTime: 0,
   });
   const resume = useMutation({
     mutationFn: async () => {
@@ -82,7 +67,7 @@ export function EbaySyncRecoveryDialog({ jobId, productId, productName, issue, o
   });
   useEffect(() => {
     setAcknowledged(false); setRecovered(false); setRetryPublish(false); setResumedJob(null); recoveryCommand.current = null; resume.reset();
-  }, [jobId, productId, mode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [jobId, productId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { setAcknowledged(false); }, [recovery.data?.previewHash]);
   const resumedIssue = resumedJob && ["needs_attention", "awaiting_evidence"].includes(resumedJob.state)
     ? resumedJob.issue ?? resolveEbayListingIssue({ code: resumedJob.code, message: resumedJob.message, productId: resumedJob.productId, jobId: resumedJob.id, state: resumedJob.state }) : null;
@@ -91,7 +76,7 @@ export function EbaySyncRecoveryDialog({ jobId, productId, productName, issue, o
     <Dialog open={productId !== null} onOpenChange={(open) => { if (!open && !resume.isPending) onClose(); }}>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{mode === "mapping" ? "Review listing mapping" : "Resolve listing sync"}</DialogTitle>
+          <DialogTitle>Resolve listing sync</DialogTitle>
           <DialogDescription>{productName}. Review the saved request before resuming updates.</DialogDescription>
         </DialogHeader>
         {recovered ? <div role="status" className="space-y-2 text-sm">
@@ -101,33 +86,12 @@ export function EbaySyncRecoveryDialog({ jobId, productId, productName, issue, o
           {resumedIssue && resumedJob && <EbayListingIssueCard issue={resumedIssue} onAction={(nextIssue) => { onClose(); onIssueAction(nextIssue, resumedJob.productId, resumedJob.id); }} />}
         </div> : <>
           {issue && <EbayListingIssueCard issue={issue} />}
-          {mode === "mapping" && <div className="space-y-3 text-sm">
-            {mapping.isLoading && <p role="status">Loading saved listing mapping…</p>}
-            {mapping.isError && <p role="alert">The mapping could not be loaded. Refresh it before trying another update.</p>}
-            {mapping.data && <>
-              {([ ["Saved source mapping", mapping.data.sourceIdentity], ["Resolved eBay mapping", mapping.data.providerIdentity] ] as const).map(([label, identity]) => <section key={label} className="rounded-md border p-3 space-y-2">
-                <h3 className="font-medium">{label}</h3>
-                {identity ? <>
-                  <p className="break-words">Group: {identity.groupKey ?? "No group saved"}</p>
-                  {identity.variants.map((variant) => <dl key={variant.variantId} className="border-t pt-2 break-words text-xs space-y-1">
-                    <div><dt className="inline font-medium">Catalog SKU: </dt><dd className="inline">{variant.catalogSku ?? variant.sku}</dd></div>
-                    <div><dt className="inline font-medium">eBay SKU: </dt><dd className="inline">{variant.externalSku ?? variant.sku}</dd></div>
-                    <div><dt className="inline font-medium">Offer: </dt><dd className="inline">{variant.offerId ?? "Not verified"}</dd></div>
-                    <div><dt className="inline font-medium">Listing: </dt><dd className="inline">{variant.listingId ?? "Not verified"}</dd></div>
-                  </dl>)}
-                </> : <p>No verified mapping was saved at this stage. Review the issue above; Echelon must verify the eBay listing before it can update it.</p>}
-              </section>)}
-              <p>Catalog and eBay SKUs may differ. Echelon must verify which variant each offer belongs to before sending an update.</p>
-              <Button variant="outline" disabled={checking} onClick={onRecheck}>{checking ? "Checking mapping…" : "Verify mapping again"}</Button>
-            </>}
-            <Button variant="outline" disabled={mapping.isFetching} onClick={() => mapping.refetch()}>Refresh mapping details</Button>
-          </div>}
-          {mode === "recovery" && recovery.isLoading && <p role="status">Loading saved request details…</p>}
-          {mode === "recovery" && recovery.isError && <div role="alert" className="space-y-2 text-sm">
+          {recovery.isLoading && <p role="status">Loading saved request details…</p>}
+          {recovery.isError && <div role="alert" className="space-y-2 text-sm">
             <p>Saved request details could not be loaded. No recovery was performed.</p>
             <Button variant="outline" onClick={() => recovery.refetch()}>Reload request details</Button>
           </div>}
-          {mode === "recovery" && recovery.data && <div className="space-y-3 text-sm">
+          {recovery.data && <div className="space-y-3 text-sm">
             {recovery.data.attempts.length === 0 && <p>{jobId
               ? "No unresolved request is currently recorded for this sync. Continue the saved sync to check its current state."
               : "No unresolved request is currently recorded for this product. Retry Publish to check its existing eBay offers and finish setup using current inventory."}</p>}

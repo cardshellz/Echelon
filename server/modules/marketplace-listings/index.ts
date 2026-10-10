@@ -12,6 +12,7 @@ export * from "./domain/lifecycle";
 export * from "./domain/listing-registration-plan";
 export * from "./domain/listing-replacement-plan";
 export * from "./domain/registration-errors";
+export * from "./domain/ebay-listing-inspection";
 export * from "./infrastructure/pg-listing-registration.repository";
 export * from "./infrastructure/pg-listing-replacement-execution.repository";
 export * from "./infrastructure/pg-listing-replacement-owner-reader";
