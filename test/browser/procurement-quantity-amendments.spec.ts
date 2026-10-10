@@ -15,7 +15,9 @@ const line: PoQuantityAmendmentContext["lines"][number] = {
 type Captured = { key: string; body: PoQuantityApprovalRequest };
 function previewFor(body: PoQuantityPreviewRequest, lines: PoQuantityAmendmentContext["lines"]): PoQuantityAmendmentPreview {
   const changes = body.changes.map(change => {
-    const before = lines.find(value => value.id === change.lineId)!;
+    // Each preview owns its snapshots; legacy receipt tests intentionally omit
+    // new fields without changing the current fixture or later tests.
+    const before = structuredClone(lines.find(value => value.id === change.lineId)!);
     let after = { ...before, orderQty: change.quantityPieces };
     if (change.priceTreatment === "edit_charge") after = { ...after, lineTotalCents: change.chargeTotalCents! };
     else {
