@@ -645,7 +645,7 @@ export const purchaseOrderLines = procurementSchema.table("purchase_order_lines"
   notes: text("notes"),
 
   // Line taxonomy (migration 0563) — enables discount/fee/tax/rebate/adjustment
-  // lines alongside product lines. See PO_LINE_TYPES below for the full set.
+  // lines alongside product lines. See the shared PO_LINE_TYPES taxonomy for the full set.
   // 'product' is the default for back-compat; existing rows are implicitly
   // product. parent_line_id is an optional self-reference used by non-product
   // lines to target a specific product line (e.g. "10% off line 2"). Parent
@@ -802,29 +802,8 @@ export const purchaseOrderLines = procurementSchema.table("purchase_order_lines"
   ),
 ]);
 
-// ---------------------------------------------------------------------------
-// PO line taxonomy (migration 0563)
-// ---------------------------------------------------------------------------
-// product     — ordered goods. requires product_id. cost_mills >= 0, qty > 0.
-// discount    — flat/percent discount line. no variant. cost_mills <= 0, qty == 1.
-// fee         — freight, tooling, surcharge. no variant. cost_mills >= 0, qty >= 1.
-// tax         — itemized tax. no variant. cost_mills >= 0, qty == 1.
-// rebate      — forward-looking rebate. no variant. cost_mills <= 0, qty == 1.
-// adjustment  — catch-all. signed. qty == 1.
-export const PO_LINE_TYPES = [
-  "product",
-  "discount",
-  "fee",
-  "tax",
-  "rebate",
-  "adjustment",
-] as const;
-
-export type PoLineType = (typeof PO_LINE_TYPES)[number];
-
-export function isPoLineType(value: unknown): value is PoLineType {
-  return typeof value === "string" && (PO_LINE_TYPES as readonly string[]).includes(value);
-}
+// Compatibility exports: the taxonomy is independent of database definitions.
+export { PO_LINE_TYPES, isPoLineType, type PoLineType } from "../procurement/po-line-type";
 
 export const insertPurchaseOrderLineSchema = createInsertSchema(purchaseOrderLines).omit({
   id: true,
