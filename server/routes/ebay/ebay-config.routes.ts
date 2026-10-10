@@ -1,3 +1,4 @@
+import { readEbayConnectionHealth } from "../../modules/channels/ebay-connection-health";
 import { syncActiveListings, triggerPricingRuleSync } from "../../modules/channels/ebay-listing-sync";
 import express, { type Request, type Response } from "express";
 import { eq, and, sql, asc, isNotNull, inArray, isNull, desc } from "drizzle-orm";
@@ -14,7 +15,6 @@ import {
   inventoryLevels,
 } from "@shared/schema";
 import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, ebayApiRequest, ebayApiRequestWithRateNotify, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
-import { upsertChannelListing, upsertPushError, clearPushError, resolveChannelPrice, applyPricingRule, determineVariationAspectName, delay } from "../../modules/channels/infrastructure/ebay-listing-helpers";
 import {
   markEbayVariantListingPendingForRelist,
   setEbayVariantListingIntent,
@@ -26,16 +26,18 @@ export const router = express.Router();
   // -----------------------------------------------------------------------
   // GET /api/ebay/channel-config — Full eBay channel configuration
   // -----------------------------------------------------------------------
-  router.get("/api/ebay/channel-config", requireAuth, async (_req: Request, res: Response) => {
+  router.get("/api/ebay/channel-config", requireAuth, requirePermission("channels", "view"), async (_req: Request, res: Response) => {
     try {
       const authService = getAuthService();
 
-      // Token info
-      const [tokenRow] = await (db as any)
+      // Report credentials for the same environment used by the live health check.
+      // Without an OAuth configuration, neither stored environment is authoritative.
+      const [tokenRow] = authService ? await (db as any)
         .select()
         .from(ebayOauthTokens)
-        .where(eq(ebayOauthTokens.channelId, EBAY_CHANNEL_ID))
-        .limit(1);
+        .where(and(eq(ebayOauthTokens.channelId, EBAY_CHANNEL_ID),
+          eq(ebayOauthTokens.environment, authService.getEnvironment())))
+        .limit(1) : [];
 
       // Channel
       const [channel] = await (db as any)
@@ -48,26 +50,9 @@ export const router = express.Router();
       const conn = await getChannelConnection();
       const metadata = (conn?.metadata as Record<string, any>) || {};
 
-      // Username
-      let ebayUsername: string | null = null;
-      if (tokenRow?.accessToken && authService) {
-        try {
-          const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
-          const environment = process.env.EBAY_ENVIRONMENT || "production";
-          const baseUrl = environment === "sandbox"
-            ? "https://api.sandbox.ebay.com"
-            : "https://api.ebay.com";
-          const userResp = await fetch(`${baseUrl}/commerce/identity/v1/user/`, {
-            headers: { Authorization: `Bearer ${accessToken}`,
-                    "Content-Language": "en-US",
-                    "Accept-Language": "en-US", Accept: "application/json" },
-          });
-          if (userResp.ok) {
-            const userData = await userResp.json();
-            ebayUsername = userData.username || null;
-          }
-        } catch {}
-      }
+      const connectionHealth = tokenRow?.accessToken && authService
+        ? await readEbayConnectionHealth(authService, EBAY_CHANNEL_ID)
+        : { connectionHealth: "not_connected" as const, connectionIssue: null, ebayUsername: null };
 
       // Category mappings
       const mappings = await (db as any)
@@ -135,7 +120,7 @@ export const router = express.Router();
         res.json({
           connected: !!tokenRow?.accessToken,
           channel: channel || null,
-          ebayUsername,
+          ...connectionHealth,
           tokenInfo: tokenRow ? {
             accessTokenExpiresAt: tokenRow.accessTokenExpiresAt || tokenRow.access_token_expires_at,
             refreshTokenExpiresAt: tokenRow.refreshTokenExpiresAt || tokenRow.refresh_token_expires_at,
@@ -187,7 +172,7 @@ export const router = express.Router();
 
   // PUT /api/ebay/category-mapping — Save category mappings (batch upsert)
   // -----------------------------------------------------------------------
-  router.put("/api/ebay/category-mapping", requireAuth, async (req: Request, res: Response) => {
+  router.put("/api/ebay/category-mapping", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
       const { mappings } = req.body as {
         mappings: Array<{
@@ -265,7 +250,7 @@ export const router = express.Router();
   // -----------------------------------------------------------------------
   // POST /api/ebay/sync-store-categories — Create eBay store categories
   // -----------------------------------------------------------------------
-  router.post("/api/ebay/sync-store-categories", requireAuth, async (req: Request, res: Response) => {
+  router.post("/api/ebay/sync-store-categories", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
       const authService = getAuthService();
       if (!authService) {
@@ -353,7 +338,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // PUT /api/ebay/product-category/:productId — Set per-product category override
   // -----------------------------------------------------------------------
-  router.put("/api/ebay/product-category/:productId", requireAuth, async (req: Request, res: Response) => {
+  router.put("/api/ebay/product-category/:productId", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
       const productId = parseInt(req.params.productId);
       if (isNaN(productId)) {
@@ -384,7 +369,7 @@ ${categoriesXml}
   // -----------------------------------------------------------------------
   // PUT /api/ebay/variant-exclusion/:variantId — Toggle per-variant eBay exclusion
   // -----------------------------------------------------------------------
-  router.put("/api/ebay/variant-exclusion/:variantId", requireAuth, async (req: Request, res: Response) => {
+  router.put("/api/ebay/variant-exclusion/:variantId", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
       const variantId = parseInt(req.params.variantId);
       if (isNaN(variantId)) {
@@ -430,7 +415,7 @@ ${categoriesXml}
 
   // PUT /api/ebay/toggle-type-listing/:productTypeSlug — Toggle listingEnabled for a product type
   // -----------------------------------------------------------------------
-  router.put("/api/ebay/toggle-type-listing/:productTypeSlug", requireAuth, async (req: Request, res: Response) => {
+  router.put("/api/ebay/toggle-type-listing/:productTypeSlug", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
       const { productTypeSlug } = req.params;
       if (!productTypeSlug) {
@@ -462,4 +447,3 @@ ${categoriesXml}
       res.status(500).json({ error: err.message });
     }
   });
-

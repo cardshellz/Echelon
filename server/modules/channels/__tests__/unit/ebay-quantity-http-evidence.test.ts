@@ -65,11 +65,25 @@ describe("eBay quantity request evidence and rejection handling", () => {
     expect(JSON.stringify(test.results)).not.toContain("Try back");
   });
 
-  it.each([401,403,429])("retains HTTP %s as a rejection and honors a long Retry-After without sleeping", async status => {
+  it.each([[401, "EBAY_AUTH_REQUIRED"], [403, "EBAY_PROVIDER_ACCESS_DENIED"], [429, "EBAY_PROVIDER_RATE_LIMITED"]] as const)("retains HTTP %s as a rejection and honors a long Retry-After without sleeping", async (status, code) => {
     const request = vi.fn<typeof fetch>(async () => new Response("{}", { status, headers: { "Retry-After": "7200" } }));
     const test = setup(request);
-    await expect(test.collector.run(() => test.client.createOrReplaceInventoryItem("P5", item))).rejects.toMatchObject({ code: "EBAY_QUANTITY_REJECTED" });
+    await expect(test.collector.run(() => test.client.createOrReplaceInventoryItem("P5", item))).rejects.toMatchObject({ code });
     expect(test.results[0]).toMatchObject({ outcome: "rejected", retryNotBefore: "2026-09-08T22:00:00.000Z" });
+    expect(request).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { errors: [{ errorId: 1100, category: "REQUEST", message: "Access denied" }], code: "EBAY_OAUTH_SCOPE_MISSING" },
+    { errors: [{ errorId: 25002, category: "BUSINESS", message: "Seller cannot access this resource" }], code: "EBAY_PROVIDER_ACCESS_DENIED" },
+    { errors: [{ errorId: 1100, category: "REQUEST" }, { errorId: 25002, category: "BUSINESS" }], code: "EBAY_PROVIDER_ACCESS_DENIED" },
+    { errors: [{ errorId: 1100, category: "APPLICATION" }], code: "EBAY_PROVIDER_ACCESS_DENIED" },
+  ])("preserves the reason for HTTP403 without inventing an expired token: $code", async example => {
+    const request = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ errors: example.errors }), { status: 403 }));
+    const test = setup(request);
+    await expect(test.collector.run(() => test.client.createOrReplaceInventoryItem("P5", item))).rejects.toMatchObject({ code: example.code });
+    expect(test.results[0]).toMatchObject({ outcome: "rejected", requestTerminated: true, httpStatus: 403, cooldownScope: "account" });
+    expect(test.collector.provesTerminalRejection()).toBe(true);
     expect(request).toHaveBeenCalledOnce();
   });
 

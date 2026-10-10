@@ -46,8 +46,17 @@ export class PostgresQuantityPublicationRecoveryRepository implements QuantityPu
           destinationKind: attempt.scope.destinationKind, connectionId: attempt.scope.connectionId, providerKey: attempt.scope.providerKey,
           providerScopeType: attempt.scope.providerScopeType, externalScopeId: attempt.scope.externalScopeId,
           externalInventoryItemId: attempt.scope.externalInventoryItemId,
-          providerAnswer: summarizeProviderAnswer(attempt.state, receipts.get(attempt.attemptId) ?? []),
-          requestTermination: this.requestTermination(attempt.attemptId, attempt.state, timings.get(attempt.attemptId), receipts.get(attempt.attemptId) ?? [], now),
+          // This generic receipt projection lacks request hashes/finality and
+          // cannot prove historical eBay bulk responses. The canonical eBay
+          // response-recovery owner verifies complete receipts; unknown effects
+          // remain available through the explicit eBay operator resume flow.
+          providerAnswer: attempt.scope.providerKey === "ebay" ? null
+            : summarizeProviderAnswer(attempt.state, receipts.get(attempt.attemptId) ?? []),
+          // eBay's provider work is not bounded by our local HTTP timeout. Its
+          // explicit resume owner preserves unknown effects instead of converting
+          // elapsed time into a terminal-response attestation.
+          requestTermination: attempt.scope.providerKey === "ebay" ? null
+            : this.requestTermination(attempt.attemptId, attempt.state, timings.get(attempt.attemptId), receipts.get(attempt.attemptId) ?? [], now),
         })) });
     });
   }

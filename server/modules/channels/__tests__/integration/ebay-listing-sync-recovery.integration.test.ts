@@ -25,6 +25,8 @@ import {
   attestQuantityPublicationAttemptInsideTransaction,
 } from "../../../inventory-planning/infrastructure/quantity-publication-admission.repository";
 import { PostgresQuantityProviderResponseRecovery } from "../../../inventory-planning/infrastructure/quantity-provider-response-recovery.repository";
+import { PostgresEbayPublicationRecoveryRepository } from "../../../inventory-planning/infrastructure/ebay-publication-recovery.repository";
+import { EbayPublicationRecoveryService } from "../../../inventory-planning/application/ebay-publication-recovery.service";
 import { observeEbayQuantityRequest } from "../../../inventory-planning/application/quantity-provider-request-evidence";
 import type { QuantityPublicationScope } from "../../../inventory-planning/domain/quantity-publication-admission";
 import { PostgresEbayListingSyncRepository } from "../../infrastructure/ebay-listing-sync.repository";
@@ -70,6 +72,9 @@ const configured =
         "0716_inventory_publication_reconciliation.sql",
         "0729_ebay_listing_sync_recovery.sql",
         "0731_ebay_listing_sync_verification_checkpoint.sql",
+        "0732_ebay_listing_sync_identity_admission.sql",
+        "0733_ebay_provider_response_finality.sql",
+        "0734_ebay_operator_republication_recovery.sql",
       ])
         await database.pool.query(
           readFileSync(resolve(process.cwd(), "migrations", file), "utf8"),
@@ -501,13 +506,14 @@ const configured =
                 {
                   method: "POST",
                   path: "/sell/inventory/v1/bulk_update_price_quantity",
-                  body: { revision: index },
+                  body: { requests: [{ sku: "P5", offers: [], shipToLocationAvailability: { quantity: index } }] },
                 },
                 () =>
                   executeEbayQuantityHttp({
                     url: "https://api.example.test/quantity",
                     method: "POST",
                     path: "/sell/inventory/v1/bulk_update_price_quantity",
+                    body: { requests: [{ sku: "P5", offers: [], shipToLocationAvailability: { quantity: index } }] },
                     headers: {},
                     now: clock,
                     request: async () =>
@@ -612,14 +618,18 @@ const configured =
       expect(
         await competitor.claim(clock(), randomUUID(), first.id),
       ).toBeNull();
+      const joinedCommandKey = randomUUID();
       const newer = await competitor.enqueue(
         identity,
-        randomUUID(),
+        joinedCommandKey,
         "other-operator",
         clock(),
       );
       expect(newer.id).toBe(first.id);
       expect(newer.revision).toBe("2");
+      expect((await f.service.getByCommand(joinedCommandKey, identity.channelId))?.id).toBe(first.id);
+      expect(await f.service.getByCommand(joinedCommandKey, identity.channelId + 1)).toBeNull();
+      expect(await f.service.getByCommand(randomUUID(), identity.channelId)).toBeNull();
       await f.store.finish(
         claim!.job,
         {
@@ -635,6 +645,7 @@ const configured =
       expect((await f.store.get(first.id)).state).toBe("queued");
       await f.service.processDue(1, first.id);
       expect((await f.store.get(first.id)).state).toBe("completed");
+      expect((await f.service.getByCommand(joinedCommandKey, identity.channelId))?.state).toBe("completed");
       expect(
         f.mutations.filter((r) => r.path.includes("inventory_item_group")),
       ).toHaveLength(1);
@@ -755,6 +766,32 @@ const configured =
         f.provider.currentItem().availability.shipToLocationAvailability
           .quantity,
       ).toBe(4);
+    });
+    it("resumes the already saved job after an explicit unknown-outcome decision even if no follow-up enqueue commits", async () => {
+      const f = fixture();
+      f.fail("timeout");
+      const job = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, job.id);
+      advance();
+      await f.service.processDue(1, job.id);
+      expect((await f.store.get(job.id)).state).toBe("awaiting_evidence");
+      const recovery = new EbayPublicationRecoveryService(new PostgresEbayPublicationRecoveryRepository(database.pool), clock);
+      const scopes = [scope("group:PACK"), { ...scope("P5"), productId: 20, productVariantId: 101 }];
+      const preview = await recovery.preview(scopes);
+      const result = await recovery.resume({ scopes, previewHash: preview.previewHash, idempotencyKey: randomUUID(),
+        actor: "operator", acknowledgeUnknownOutcome: true });
+      expect(result.providerWriteAttempted).toBe(false);
+      expect((await database.pool.query("SELECT state,completed_at,resolution_basis FROM inventory.quantity_publication_attempts WHERE id=ANY($1::bigint[])",
+        [result.attemptIds])).rows).toEqual([{ state: "superseded_unknown", completed_at: null, resolution_basis: null }]);
+      expect((await database.pool.query("SELECT scope->>'productVariantId' AS variant,reason FROM inventory.quantity_publication_catchup WHERE scope->>'externalScopeId'=$1 AND scope->>'externalInventoryItemId'='P5'",
+        [identity.accountId])).rows).toEqual([{ variant: "101", reason: "ebay_operator_resume_unknown_outcome" }]);
+      // Simulate the response/queue step being lost after the recovery transaction.
+      // The saved worker resumes using its own due schedule and current plan.
+      advance();
+      f.provider.setQuantity(4);
+      await f.service.processDue(1, job.id);
+      expect((await f.store.get(job.id)).state).toBe("completed");
+      expect(f.provider.currentItem().availability.shipToLocationAvailability.quantity).toBe(4);
     });
     it("rolls response recovery evidence and the fence transition back together, then resumes the saved job", async () => {
       const f = fixture();
@@ -882,6 +919,77 @@ const configured =
           { ...scope("P5"), externalScopeId: "different-account" },
         ]),
       ).toMatchObject({ busy: false, resolved: [], unresolved: [] });
+    });
+    it("completes the exact provider alias after a catalog rename without overwriting its saved mapping", async () => {
+      identity = { ...identity, variants: identity.variants.map(member => ({ ...member, catalogSku: "PACK-CURRENT" })) };
+      await database.pool.query("UPDATE catalog.product_variants SET sku='PACK-CURRENT' WHERE id=101");
+      try {
+        const f = fixture();
+        const job = await f.service.enqueue(identity, "operator");
+        await f.service.processDue(1, job.id);
+        expect(await f.store.get(job.id)).toMatchObject({ state: "completed", result: { synced: 1, errors: 0 } });
+        expect((await database.pool.query("SELECT external_sku,external_variant_id,external_product_id,last_synced_price,last_synced_qty,sync_status FROM channels.channel_listings WHERE product_variant_id=101")).rows[0])
+          .toEqual({ external_sku: "P5", external_variant_id: "offer-101", external_product_id: "listing-20", last_synced_price: 1149, last_synced_qty: 999, sync_status: "synced" });
+      } finally { await database.pool.query("UPDATE catalog.product_variants SET sku='P5' WHERE id=101"); }
+    });
+    it("binds observed provider identity once, replays it, and refuses changed bindings or unowned SQL", async () => {
+      const f = fixture();
+      const job = await f.service.enqueue(identity, "operator");
+      const claim = (await f.store.claim(clock(), randomUUID(), job.id))!;
+      const observed = { ...identity, groupKey: "VERIFIED-EXTERNAL-GROUP" };
+      try {
+        await f.store.bindProviderIdentity(claim.job, observed, clock());
+        await f.store.bindProviderIdentity(claim.job, observed, clock());
+        expect((await f.store.get(job.id)).providerIdentity).toEqual(observed);
+        expect((await database.pool.query("SELECT count(*)::int AS count FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND evidence->>'key'='provider_identity'", [job.id])).rows[0].count).toBe(1);
+        await expect(f.store.bindProviderIdentity(claim.job, { ...observed, groupKey: "DIFFERENT-GROUP" }, clock()))
+          .rejects.toMatchObject({ code: "EBAY_SYNC_PROVIDER_IDENTITY_CHANGED" });
+        await expect(database.pool.query("UPDATE channels.ebay_listing_sync_jobs SET provider_identity_hash=$2 WHERE id=$1", [job.id, "b".repeat(64)]))
+          .rejects.toThrow();
+        await f.store.finish(claim.job, { state: "needs_attention", result: null, code: "TEST_COMPLETED", message: null, nextAttemptAt: clock() }, clock());
+      } finally { await claim.release(); }
+    });
+    it("persists admission failures and serializes global command replay across different products", async () => {
+      const f = fixture();
+      await database.pool.query("INSERT INTO catalog.products(id,sku) VALUES(21,'OTHER-PRODUCT') ON CONFLICT(id) DO NOTHING");
+      const rejected = { channelId: 1, productId: 21, variantIds: [102], actor: "operator", commandKey: randomUUID(),
+        code: "EBAY_SYNC_MAPPING_INVALID", message: "Review the saved eBay mapping." };
+      const first = await f.store.recordAdmissionFailure(rejected, clock());
+      expect(await f.store.recordAdmissionFailure(rejected, clock())).toEqual(first);
+      expect((await f.store.list(1)).find(row => row.productId === 21)).toMatchObject({ kind: "admission", state: "needs_attention", code: rejected.code });
+      await expect(f.store.enqueue(identity, rejected.commandKey, "operator", clock())).rejects.toMatchObject({ code: "EBAY_SYNC_REPLAY_CONFLICT" });
+      const commandKey = randomUUID();
+      const outcomes = await Promise.allSettled([
+        f.store.enqueue(identity, commandKey, "operator", clock()),
+        f.store.recordAdmissionFailure({ ...rejected, commandKey }, clock()),
+      ]);
+      expect(outcomes.filter(outcome => outcome.status === "fulfilled")).toHaveLength(1);
+      expect(outcomes.filter(outcome => outcome.status === "rejected")).toHaveLength(1);
+      const count = (await database.pool.query("SELECT (SELECT count(*) FROM channels.ebay_listing_sync_commands WHERE command_key=$1)+(SELECT count(*) FROM channels.ebay_listing_sync_admission_failures WHERE command_key=$1) AS count", [commandKey])).rows[0].count;
+      expect(Number(count)).toBe(1);
+      if (outcomes[0].status === "fulfilled") {
+        const claim = (await f.store.claim(clock(), randomUUID(), outcomes[0].value.id))!;
+        try { await f.store.finish(claim.job, { state: "needs_attention", result: null, code: "TEST_COMPLETED", message: null, nextAttemptAt: clock() }, clock()); }
+        finally { await claim.release(); }
+      }
+    });
+    it("supersedes an idle changed source mapping while preserving its unresolved quantity history, but refuses a live owner", async () => {
+      const f = fixture();
+      f.fail("timeout");
+      const original = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, original.id);
+      const evidence = (await database.pool.query("SELECT to_jsonb(a) AS value FROM inventory.quantity_publication_attempts a WHERE scope->>'externalScopeId'=$1", [identity.accountId])).rows;
+      const changed = { ...identity, variants: identity.variants.map(member => ({ ...member, sku: "P5-RENAMED", externalSku: "P5-RENAMED" })) };
+      const replacement = await f.store.enqueue(changed, randomUUID(), "operator", clock());
+      expect(replacement.id).not.toBe(original.id);
+      expect(await f.store.get(original.id)).toMatchObject({ state: "needs_attention", code: "EBAY_SYNC_SOURCE_SUPERSEDED" });
+      expect((await database.pool.query("SELECT to_jsonb(a) AS value FROM inventory.quantity_publication_attempts a WHERE scope->>'externalScopeId'=$1", [identity.accountId])).rows).toEqual(evidence);
+      const claim = (await f.store.claim(clock(), randomUUID(), replacement.id))!;
+      try {
+        await expect(f.store.enqueue(identity, randomUUID(), "operator", clock())).rejects.toMatchObject({ code: "PUBLICATION_SCOPE_BUSY" });
+        expect((await f.store.get(replacement.id)).state).toBe("running");
+        await f.store.finish(claim.job, { state: "needs_attention", result: null, code: "TEST_COMPLETED", message: null, nextAttemptAt: clock() }, clock());
+      } finally { await claim.release(); }
     });
     it("recovers only the affected stock while an unrelated publisher remains active", async () => {
       const f = fixture();

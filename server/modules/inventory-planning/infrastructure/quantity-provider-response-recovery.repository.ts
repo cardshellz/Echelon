@@ -103,7 +103,7 @@ export class PostgresQuantityProviderResponseRecovery {
         const receipts = (
           await client.query(
             `SELECT q.id::text AS "requestId",q.ordinal,q.method,q.path,q.request_hash AS "requestHash",
-          r.outcome,r.http_status AS "httpStatus",r.response_hash AS "responseHash",COALESCE(r.error_codes,'{}') AS "errorCodes",
+          r.outcome,r.http_status AS "httpStatus",r.response_hash AS "responseHash",COALESCE(r.error_codes,'{}') AS "errorCodes",r.request_terminated AS "requestTerminated",
           CASE WHEN r.recorded_at IS NULL THEN NULL ELSE to_char(r.recorded_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS "recordedAt"
           FROM inventory.quantity_provider_requests q LEFT JOIN inventory.quantity_provider_request_results r ON r.request_id=q.id
           WHERE q.attempt_id=$1 ORDER BY q.ordinal`,

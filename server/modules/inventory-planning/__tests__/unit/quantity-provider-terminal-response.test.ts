@@ -37,6 +37,7 @@ describe("eBay final response recovery proof", () => {
       outcome: "completed",
       httpStatus: 200,
       errorCodes: [],
+      requestTerminated: true,
     });
     expect(
       terminalEbayResponseEvidence([first, receipt({ ordinal: 2 })]),
@@ -47,6 +48,20 @@ describe("eBay final response recovery proof", () => {
         receipt({ ordinal: 2 }),
       ]),
     ).toBeNull();
+  });
+  it.each([undefined, null, false])("does not trust a historical HTTP 200 bulk completion without finality proof (%s)", requestTerminated => {
+    expect(terminalEbayResponseEvidence([receipt({ method: "POST", path: "/sell/inventory/v1/bulk_update_price_quantity",
+      outcome: "completed", httpStatus: 200, errorCodes: [], requestTerminated })])).toBeNull();
+  });
+  it.each([
+    { outcome: "completed" as const, httpStatus: 204, errorCodes: [] },
+    { outcome: "uncertain" as const, httpStatus: 500, errorCodes: ["25002"] },
+    { outcome: "rejected" as const, httpStatus: 400, errorCodes: ["25004"] },
+  ])("explicit non-final evidence overrides historical status/outcome inference %j", patch => {
+    expect(terminalEbayResponseEvidence([receipt({ ...patch, requestTerminated: false })])).toBeNull();
+  });
+  it("preserves historical synchronous PUT completion without claiming missing bulk operation proof", () => {
+    expect(terminalEbayResponseEvidence([receipt({ outcome: "completed", httpStatus: 204, errorCodes: [], requestTerminated: null })])).not.toBeNull();
   });
   it.each([
     { httpStatus: null, responseHash: null, errorCodes: [], recordedAt: null },

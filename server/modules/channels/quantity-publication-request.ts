@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { QuantityPublicationAdmissionError } from "../inventory-planning/domain/quantity-publication-admission";
 import { observeEbayQuantityRequest } from "../inventory-planning/application/quantity-provider-request-evidence";
+import { readEbayBulkQuantityResponse } from "./adapters/ebay/ebay-quantity-update";
 
 export interface EbayQuantityHttpRequest {
   method: string; path: string; body?: unknown; expectNoContent?: boolean;
@@ -145,30 +146,8 @@ function canonicalWriteBody(input: EbayQuantityHttpRequest, quantity: number): u
 }
 
 function assertBulkSuccess(value: unknown, body: unknown): void {
-  const rows = record(value).responses;
-  const failed = (value: unknown): boolean => {
-    const row = record(value);
-    return typeof row.statusCode !== "number" || ![200,201,204].includes(row.statusCode)
-      || (Array.isArray(row.errors) && row.errors.length > 0)
-      || (Array.isArray(row.offers) && row.offers.some(failed));
-  };
-  if (!Array.isArray(rows) || rows.length === 0 || rows.some(failed)) throw invalid("The provider did not confirm every quantity mutation; no successful admission is recorded.");
-  const requests = record(body).requests;
-  if (!Array.isArray(requests) || requests.length !== 1) throw invalid("One exact SKU is required for a bulk quantity admission.");
-  const requested = record(requests[0]);
-  if (typeof requested.sku !== "string" || !Array.isArray(requested.offers)) throw invalid("Exact bulk request identity is missing.");
-  for (const offered of requested.offers) {
-    const offerId = record(offered).offerId;
-    if (typeof offerId !== "string" || !rows.some(raw => {
-      const row = record(raw);
-      if (row.sku !== undefined && row.sku !== requested.sku) return false;
-      return row.offerId === offerId || (row.sku === requested.sku && Array.isArray(row.offers)
-        && row.offers.some(nested => record(nested).offerId === offerId));
-    })) throw invalid("A requested offer quantity was not confirmed by the provider.");
-  }
-  if (requested.offers.length === 0 && !rows.some(raw => record(raw).sku === requested.sku)) {
-    throw invalid("The requested inventory SKU quantity was not confirmed by the provider.");
-  }
+  const results = readEbayBulkQuantityResponse(value, body);
+  if (!results || results.some(result => !result.confirmed)) throw invalid("The provider did not confirm every exact SKU/offer quantity mutation; no successful admission is recorded.");
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -224,16 +203,9 @@ async function refreshCanonicalEbayQuantity(sku: string, quantity: number, marke
   });
   if (offers.length) {
     // The quantity endpoint avoids echoing read-only offer/listing metadata into a PUT.
-    const updated = record(await request({ method: "POST", path: "/sell/inventory/v1/bulk_update_price_quantity",
-      body: { requests: [{ sku, shipToLocationAvailability: { quantity }, offers }] } }));
-    const results = Array.isArray(updated.responses) ? updated.responses.map(record) : [];
-    const successful = (result: Record<string, unknown>) => typeof result.statusCode === "number"
-      && [200,201,204].includes(result.statusCode) && (!Array.isArray(result.errors) || result.errors.length === 0);
-    if (results.length === 0 || results.some(result => !successful(result)) || offers.some(offer => !results.some(result =>
-      result.offerId === offer.offerId || (result.sku === sku && Array.isArray(result.offers)
-        && result.offers.some(raw => { const nested = record(raw); return nested.offerId === offer.offerId && successful(nested); }))))) {
-      throw invalid("Provider did not confirm every retained offer quantity before publication.");
-    }
+    const body = { requests: [{ sku, shipToLocationAvailability: { quantity }, offers }] };
+    const updated = await request({ method: "POST", path: "/sell/inventory/v1/bulk_update_price_quantity", body });
+    assertBulkSuccess(updated, body);
   } else {
     // No retained offer exists yet. Replace only the inventory item's supported
     // aggregate quantity; unmodeled alternate pools were rejected above.

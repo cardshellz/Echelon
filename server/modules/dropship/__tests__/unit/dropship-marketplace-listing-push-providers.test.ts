@@ -1,4 +1,8 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Pool } from "pg";
+import { PostgresDropshipEbayPushPublicationReader, type DropshipEbayPushPublicationReader } from "../../infrastructure/dropship-ebay-push-publication.reader";
+import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
+import { DropshipEbayRegistrationCredentialAdapter } from "../../infrastructure/dropship-ebay-registration-credential-adapter";
 import { createAdmittedEbayQuantityTestOwner } from "../../../channels/__tests__/fixtures/quantity-publication-admission";
 import type {
   DropshipMarketplaceListingPushRequest,
@@ -158,7 +162,7 @@ describe("dropship marketplace listing push providers", () => {
     const fetcher = new FakeFetch([
       jsonResponse({ offers: [] }), emptyResponse(), jsonResponse({ offerId: "offer-101" }),
       new Response("provider unavailable after offer creation", { status: 503 }),
-      jsonResponse({ offers: [{ offerId: "offer-101" }] }), emptyResponse(), emptyResponse(),
+      jsonResponse({ offers: [{ offerId: "offer-101", sku: "SKU-101", marketplaceId: "EBAY_US", format: "FIXED_PRICE", status: "UNPUBLISHED" }] }), emptyResponse(), emptyResponse(),
     ]);
     const provider = createEbayProvider(credentials, fetcher.fetch);
     const request = makeRequest({ platform: "ebay", marketplaceConfig: ebayMarketplaceConfig() });
@@ -226,7 +230,7 @@ describe("dropship marketplace listing push providers", () => {
   it("publishes an eBay offer when listing mode is live", async () => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([
-      jsonResponse({ offers: [{ offerId: "offer-101" }] }),
+      jsonResponse({ offers: [{ offerId: "offer-101", sku: "SKU-101", marketplaceId: "EBAY_US", format: "FIXED_PRICE", status: "UNPUBLISHED" }] }),
       emptyResponse(),
       emptyResponse(),
       jsonResponse({ offerId: "offer-101", sku: "SKU-101", marketplaceId: "EBAY_US" }),
@@ -261,6 +265,46 @@ describe("dropship marketplace listing push providers", () => {
       expect(headers.get("Content-Language")).toBe(call.init.method === "GET" ? null : "en-US");
     }
     expect(fetcher.calls.map((call) => call.init.method)).toEqual(["GET", "PUT", "PUT", "GET", "POST"]);
+  });
+
+  it("adopts a published Dropship offer using the shared observer and exact vendor-owned parent product", async () => {
+    const credential = ebayCredential();
+    const credentials = new FakeCredentialRepository(credential);
+    const query = vi.fn(async () => ({ rows: [{ product_id: 20,product_variant_id:101,is_active:true }] }));
+    const readCalls: string[] = [];
+    const observedOffer = { offerId:"offer-101",sku:"SKU-101",marketplaceId:"EBAY_US",format:"FIXED_PRICE",status:"PUBLISHED",
+      listing:{ listingId:"listing-101",listingStatus:"ACTIVE" } };
+    const observer = new EbayMarketplaceRegistrationObserver(new DropshipEbayRegistrationCredentialAdapter({
+      loadStoreConnection: async () => ({ id:22,vendorId:10,platform:"ebay",status:"connected",marketplaceIds:["EBAY_US"] }),
+    }, { loadFreshForStoreConnection: async () => credential }), {
+      get: async input => {
+        readCalls.push(input.path);
+        if (input.path.includes("/identity/")) return { status:200,body:{ userId:"seller-1",username:"seller" } };
+        if (input.path.includes("/inventory_item/")) return { status:200,body:{ sku:"SKU-101",groupIds:[] } };
+        return { status:200,body:{ total:1,offers:[observedOffer] } };
+      },
+    });
+    const reader = new PostgresDropshipEbayPushPublicationReader({ query } as unknown as Pick<Pool,"query">,observer);
+    const fetcher = new FakeFetch([jsonResponse({ offers:[observedOffer] }),emptyResponse(),emptyResponse()]);
+    const provider = createEbayProvider(credentials,fetcher.fetch,reader);
+    const request = makeRequest({ platform:"ebay",listingMode:"live",marketplaceConfig:ebayMarketplaceConfig() });
+    await expect(provider.pushListing(request)).resolves.toMatchObject({ externalListingId:"listing-101",externalOfferId:"offer-101" });
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("pv.product_id"),[50,10,22,101]);
+    expect(readCalls).toHaveLength(3);
+    expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET","PUT","PUT"]);
+    await expect(reader.resolve({ ...request,vendorId:99 },credential,{ listingId:"listing-101",members:[{ variantId:101,sku:"SKU-101",offerId:"offer-101" }] }))
+      .rejects.toMatchObject({ code:"DROPSHIP_EBAY_PUBLICATION_ACCOUNT_UNVERIFIED" });
+    await expect(reader.resolve(request,{ ...credential,externalAccountId:"different-seller" },{ listingId:"listing-101",members:[{ variantId:101,sku:"SKU-101",offerId:"offer-101" }] }))
+      .rejects.toMatchObject({ code:"EBAY_SYNC_IDENTITY_CHANGED" });
+    const grouped = makeGroupedRebuildDraft();
+    const rebuildDraft = { ...grouped,productId:20,itemGroup:null,
+      offers:[{ ...grouped.offers[0],variantId:101,sku:"SKU-101",payload:{ ...grouped.offers[0].payload,sku:"SKU-101" } }] };
+    await expect(reader.resolveRebuild({ vendorId:10,storeConnectionId:22,draft:rebuildDraft },credential,
+      { listingId:"listing-101",members:[{ variantId:101,sku:"SKU-101",offerId:"offer-101" }] })).resolves.toMatchObject({ listingIdentity:{ externalId:"listing-101" } });
+    expect(query).toHaveBeenLastCalledWith(expect.stringContaining("pv.product_id=$3"),[10,22,20,[101]]);
+    query.mockResolvedValueOnce({ rows:[] });
+    await expect(reader.resolveRebuild({ vendorId:10,storeConnectionId:22,draft:rebuildDraft },credential,
+      { listingId:"listing-101",members:[{ variantId:101,sku:"SKU-101",offerId:"offer-101" }] })).rejects.toMatchObject({ code:"DROPSHIP_EBAY_PUBLICATION_MAPPING_CHANGED" });
   });
 
   it("creates an authenticated eBay replacement lifecycle client for a Dropship store", async () => {
@@ -332,8 +376,8 @@ describe("dropship marketplace listing push providers", () => {
       jsonResponse(currentGroup),
       jsonResponse(currentGroup),
       emptyResponse(),
-      jsonResponse({ offers: [{ offerId: "offer-keep", status: "UNPUBLISHED" }] }),
-      jsonResponse({ offers: [{ offerId: "offer-new", status: "UNPUBLISHED" }] }),
+      jsonResponse({ offers: [{ offerId: "offer-keep", sku: "CATALOG-KEEP", marketplaceId: "EBAY_US", format: "FIXED_PRICE", status: "UNPUBLISHED" }] }),
+      jsonResponse({ offers: [{ offerId: "offer-new", sku: "CATALOG-NEW", marketplaceId: "EBAY_US", format: "FIXED_PRICE", status: "UNPUBLISHED" }] }),
       emptyResponse(),
       emptyResponse(),
       emptyResponse(),
@@ -620,6 +664,7 @@ describe("dropship marketplace listing push providers", () => {
 function createEbayProvider(
   credentials: DropshipMarketplaceCredentialRepository,
   fetchFn: typeof fetch,
+  existingPublication?: DropshipEbayPushPublicationReader,
 ): EbayDropshipListingPushProvider {
   const compatiblePreflight = {
     compatible: true,
@@ -638,6 +683,7 @@ function createEbayProvider(
     },
     managedLocationProvider(),
     () => quantityAdmission,
+    existingPublication,
   );
 }
 

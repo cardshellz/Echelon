@@ -59,6 +59,8 @@ interface EbayRouteListingDraftInput {
   storeCategoryNames: string[];
   merchantLocationKey: string;
   retainUnlistedVariantsInGroup?: boolean;
+  /** Existing listing maintenance uses the provider-observed key, including no group for a single item. */
+  existingGroupKey?: string | null;
 }
 
 const ebayListingBuilder = new EbayListingBuilder();
@@ -67,7 +69,11 @@ export function buildEbayRouteListingDraft(
   input: EbayRouteListingDraftInput,
 ): BuiltEbayListingDraft {
   const listingPolicies = resolveRequiredPolicies(input.effectivePolicies);
-  const groupKey = input.product.sku || `PROD-${input.productId}`;
+  const groupKey = input.existingGroupKey === undefined
+    ? input.product.sku || `PROD-${input.productId}` : input.existingGroupKey;
+  if (input.existingGroupKey !== undefined && input.isMultiVariant && groupKey === null) {
+    throw new Error("An existing multi-variant eBay listing requires its verified group key.");
+  }
   const descriptionHtml = input.product.description || `<p>${escapeHtml(input.product.name)}</p>`;
   const variants: ChannelVariantPayload[] = [];
   const availableQuantityByVariantId = new Map<number, number>();
@@ -152,7 +158,8 @@ export function buildEbayRouteListingDraft(
     storeCategoryNames: input.storeCategoryNames,
     variationAspectName: input.isMultiVariant ? input.variationAspectName : undefined,
     variationValueByVariantId,
-    itemGroupKey: groupKey,
+    itemGroupKey: groupKey ?? undefined,
+    preserveExistingGroup: input.existingGroupKey !== undefined && groupKey !== null,
     itemGroupAspects: input.aspects,
     includeVariantSkusInGroup: true,
     retainUnlistedVariantsInGroup: input.retainUnlistedVariantsInGroup === true,

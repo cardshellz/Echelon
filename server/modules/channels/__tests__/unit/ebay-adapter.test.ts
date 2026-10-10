@@ -19,6 +19,7 @@ import {
 } from "../../adapters/ebay/ebay-category-map";
 import type { ChannelListingPayload } from "../../channel-adapter.interface";
 import { QuantityPublicationAdmissionError } from "../../../inventory-planning/domain/quantity-publication-admission";
+import type { EbayPublishedListingIdentityResolver } from "../../listing-connectors/ebay-listing.connector";
 
 // ---------------------------------------------------------------------------
 // Mock DB
@@ -1004,6 +1005,31 @@ describe("eBay listing photo ownership", () => {
     const { adapter, resolve } = setup();
     await adapter.pushListings(2, [{ ...SAMPLE_LISTING, imageSyncMode: "preserve" }]);
     expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ mode: "preserve", readExistingPhotos: expect.any(Function) }));
+  });
+  it("wires published rediscovery to the shared observer using the verified channel account", async () => {
+    const { adapter, pushListing } = setup();
+    vi.spyOn(adapter as any, "getAuthService").mockResolvedValue({
+      getVerifiedProviderAccount: async () => ({ externalAccountId: "seller-42" }),
+      getAccessToken: async () => "test-only", getEnvironment: () => "sandbox",
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const url = new URL(String(input));
+      if (url.pathname === "/commerce/identity/v1/user/") return Response.json({ userId: "seller-42", username: "seller" });
+      if (url.pathname.includes("/inventory_item_group/")) return Response.json({ variantSKUs: SAMPLE_LISTING.variants.map(variant => variant.sku) });
+      if (url.pathname.includes("/inventory_item/")) return Response.json({ sku: decodeURIComponent(url.pathname.split("/").at(-1)!), groupIds: ["ACTUAL-EBAY-GROUP"] });
+      if (url.pathname.endsWith("/offer")) {
+        const sku = url.searchParams.get("sku")!;
+        return Response.json({ offers: [{ sku, offerId: `offer-${sku}`, marketplaceId: "EBAY_US", status: "PUBLISHED",
+          listing: { listingId: "listing-42", listingStatus: "ACTIVE" } }], total: 1 });
+      }
+      throw new Error(`Unexpected provider read ${url.pathname}`);
+    });
+    await adapter.pushListings(2, [SAMPLE_LISTING]);
+    const { resolvePublishedIdentity } = pushListing.mock.calls[0][0] as { resolvePublishedIdentity: EbayPublishedListingIdentityResolver };
+    await expect(resolvePublishedIdentity({ listingId: "listing-42", members: SAMPLE_LISTING.variants.map(variant => ({
+      variantId: variant.variantId, sku: variant.sku!, offerId: `offer-${variant.sku}`,
+    })) })).resolves.toMatchObject({ publicationKeyIdentity: { externalId: "ACTUAL-EBAY-GROUP" },
+      providerAccount: { externalAccountId: "seller-42" }, listingIdentity: { externalId: "listing-42" } });
   });
   it("fails before any listing writer when Catalog cannot resolve a selected photo", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});

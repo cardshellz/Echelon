@@ -8,9 +8,12 @@
  */
 
 import { ebayProductSyncResultSchema, ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
+import { ebayListingIssueSchema, type EbayListingIssue } from "@shared/types/ebay-listing-issue";
+import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
+import { listingSyncIssueFromError } from "@/lib/ebay-listing-issue";
 import { z } from "zod";
 import React, { useState, useEffect, useCallback, useMemo } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChannelWorkspaceHeader } from "@/components/channels/ChannelWorkspaceHeader";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -70,6 +73,8 @@ import { EbayCategoryPicker } from "@/components/ebay/EbayCategoryPicker";
 import { AspectEditor } from "@/components/ebay/AspectEditor";
 import { PushProgressModal } from "@/components/ebay/PushProgressModal";
 import { SyncProgressModal } from "@/components/ebay/SyncProgressModal";
+import { EbayListingIssueCard } from "@/components/ebay/EbayListingIssueCard";
+import { EbaySyncRecoveryDialog } from "@/components/ebay/EbaySyncRecoveryDialog";
 import { MarketplaceListingRegistrationDialog } from "@/components/marketplace/MarketplaceListingRegistrationDialog";
 import { MarketplaceListingChangesDialog } from "@/components/marketplace/MarketplaceListingChangesDialog";
 import {
@@ -84,6 +89,8 @@ import { reconcileMarketplaceListing } from "@/lib/marketplace-listing-reconcili
 
 interface ChannelConfig {
   connected: boolean;
+  connectionHealth?: "verified" | "needs_attention" | "not_connected";
+  connectionIssue?: EbayListingIssue | null;
   channel: { id: number; name: string; status: string } | null;
   ebayUsername: string | null;
   tokenInfo: {
@@ -362,13 +369,14 @@ export default function EbayChannelPage() {
   const {
     data: config,
     isLoading: configLoading,
+    isFetching: configFetching,
     error: configError,
   } = useQuery<ChannelConfig>({
     queryKey: ["/api/ebay/channel-config"],
   });
 
   // ---- Policies ----
-  const { data: policies, isLoading: policiesLoading } = useQuery<PoliciesResponse>({
+  const { data: policies, isLoading: policiesLoading, error: policiesError, refetch: refetchPolicies } = useQuery<PoliciesResponse>({
     queryKey: ["/api/ebay/policies"],
     enabled: !!config?.connected,
   });
@@ -380,7 +388,7 @@ export default function EbayChannelPage() {
   });
 
   // ---- Listing feed ----
-  const { data: feedData, isLoading: feedLoading } = useQuery<{ feed: FeedItem[]; total: number }>({
+  const { data: feedData, isLoading: feedLoading, error: feedError, refetch: refetchFeed } = useQuery<{ feed: FeedItem[]; total: number }>({
     queryKey: ["/api/ebay/listing-feed"],
     enabled: !!config?.connected,
   });
@@ -676,22 +684,26 @@ export default function EbayChannelPage() {
   const [pushModalOpen, setPushModalOpen] = useState(false);
   const [syncModalOpen, setSyncModalOpen] = useState(false);
   const [pushProductIds, setPushProductIds] = useState<number[]>([]);
+  const [pushRunId, setPushRunId] = useState(0);
 
   const handlePushAll = () => {
     const readyProducts = feedData?.feed?.filter((f) => f.status === "ready") || [];
     if (readyProducts.length === 0) return;
     const ids = readyProducts.map((f) => f.id);
     setPushProductIds(ids);
+    setPushRunId((previous) => previous + 1);
     setPushModalOpen(true);
   };
 
   const handlePushSingle = (productId: number) => {
     setPushProductIds([productId]);
+    setPushRunId((previous) => previous + 1);
     setPushModalOpen(true);
   };
 
   const handleRetryFailed = (failedIds: number[]) => {
     setPushProductIds(failedIds);
+    setPushRunId((previous) => previous + 1);
     setPushModalOpen(true);
   };
 
@@ -702,13 +714,41 @@ export default function EbayChannelPage() {
 
   // ---- Sync Single Product ----
   const [syncingProductIds, setSyncingProductIds] = useState<Set<number>>(new Set());
+  const [localSyncIssues, setLocalSyncIssues] = useState<Map<number, { issue: EbayListingIssue; commandKey: string | null }>>(new Map());
+  const [recoveryTarget, setRecoveryTarget] = useState<{ jobId: string | null; productId: number; name: string; issue: EbayListingIssue; mode: "recovery" | "mapping" } | null>(null);
+  const uncertainCommands = [...localSyncIssues].flatMap(([productId, local]) => local.commandKey ? [{ productId, commandKey: local.commandKey }] : []);
+  const commandReceipts = useQueries({ queries: uncertainCommands.map(({ productId, commandKey }) => ({
+    queryKey: ["/api/ebay/listings/sync-jobs", "command", commandKey],
+    queryFn: async () => {
+      const response = await apiRequest("GET", `/api/ebay/listings/sync-jobs/${commandKey}`);
+      const receipt = z.object({ job: ebayListingSyncJobSchema }).parse(await response.json());
+      if (receipt.job.productId !== productId) throw new Error("The saved sync receipt belongs to a different product.");
+      return { commandKey, job: receipt.job };
+    },
+    retry: false, staleTime: 0, refetchInterval: 10_000,
+  })) });
+  useEffect(() => {
+    for (const receipt of commandReceipts) {
+      if (!receipt.data) continue;
+      const { commandKey, job } = receipt.data;
+      if (localSyncIssues.get(job.productId)?.commandKey !== commandKey) continue;
+      // The server resolves exact command membership, including commands that
+      // coalesced into an older active job. A product's old completion is no proof.
+      queryClient.setQueryData<z.infer<typeof ebayListingSyncJobSchema>[]>(["/api/ebay/listings/sync-jobs"], (previous = []) =>
+        [job, ...previous.filter((candidate) => candidate.productId !== job.productId)]);
+      setLocalSyncIssues((previous) => {
+        if (previous.get(job.productId)?.commandKey !== commandKey) return previous;
+        const next = new Map(previous); next.delete(job.productId); return next;
+      });
+    }
+  }, [commandReceipts, localSyncIssues, queryClient]);
 
   const syncProductMutation = useMutation({
     mutationFn: async ({ productId, commandKey }: { productId: number; commandKey: string }) => {
       const resp = await apiRequest("POST", `/api/ebay/listings/sync-product/${productId}`, { commandKey });
       return ebayProductSyncResultSchema.parse(await resp.json());
     },
-    onSuccess: (data, { productId }) => {
+    onSuccess: (data, { productId, commandKey }) => {
       setSyncingProductIds((prev) => { const next = new Set(prev); next.delete(productId); return next; });
       const { synced, priceChanges, qtyChanges, errors, pending } = data;
       const changes: string[] = [];
@@ -716,10 +756,20 @@ export default function EbayChannelPage() {
       if (qtyChanges > 0) changes.push(`${qtyChanges} qty`);
       const changeStr = changes.length > 0 ? `: ${changes.join(", ")} updated` : "";
       const errorMessage = data.details.find(detail => !detail.success && detail.error)?.error;
+      const failure = data.details.find(detail => !detail.success);
+      const savedJob = data.jobs.find((candidate) => candidate.productId === productId);
+      if (savedJob) queryClient.setQueryData<z.infer<typeof ebayListingSyncJobSchema>[]>(["/api/ebay/listings/sync-jobs"], (previous = []) =>
+        [savedJob, ...previous.filter((candidate) => candidate.productId !== productId)]);
+      setLocalSyncIssues((previous) => {
+        const next = new Map(previous);
+        if (failure && !savedJob) next.set(productId, { issue: failure.issue ?? resolveEbayListingIssue({ code: failure.code, message: failure.error, productId }), commandKey });
+        else next.delete(productId);
+        return next;
+      });
       toast({
         title: errors > 0 ? (synced > 0 ? "Sync Incomplete" : "Sync Needs Attention") : pending > 0 ? "Sync Saved" : (synced > 0 ? "Product Synced" : "Nothing to Sync"),
         description: errors > 0
-          ? `${synced} variant${synced !== 1 ? "s" : ""} synced; ${errors} error${errors !== 1 ? "s" : ""}. ${errorMessage || "Check the listing error and retry."}`
+          ? `${synced} variant${synced !== 1 ? "s" : ""} synced; ${errors} error${errors !== 1 ? "s" : ""}. ${errorMessage || "Open the listing's next step below to resolve the problem."}`
           : pending > 0 ? "Your update is saved. Echelon will process it and recover interrupted work automatically. Progress remains available after you leave this page."
           : `Synced ${synced} variant${synced !== 1 ? "s" : ""}${changeStr}`,
         ...(errors > 0 ? { variant: "destructive" as const } : {}),
@@ -728,18 +778,35 @@ export default function EbayChannelPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/listings/sync-jobs"] });
     },
-    onError: (err: Error, { productId }) => {
+    onError: (err: Error, { productId, commandKey }) => {
       setSyncingProductIds((prev) => { const next = new Set(prev); next.delete(productId); return next; });
-      const raw = err.message || "Unknown error";
-      const isHtml = raw.includes("<!DOCTYPE") || raw.includes("<html");
-      const description = isHtml ? "eBay server returned an error page. Check server logs." : raw.length > 200 ? raw.substring(0, 200) + "…" : raw;
-      toast({ title: "Sync Failed", description, variant: "destructive" });
+      const issue = listingSyncIssueFromError(err, productId);
+      setLocalSyncIssues((previous) => new Map(previous).set(productId, { issue, commandKey }));
+      toast({ title: "Sync Failed", description: `${issue.message} ${issue.nextStep}`, variant: "destructive" });
     },
   });
 
-  const handleSyncProduct = (productId: number) => {
+  const handleSyncProduct = (productId: number, commandKey: string = crypto.randomUUID()) => {
     setSyncingProductIds((prev) => new Set([...prev, productId]));
-    syncProductMutation.mutate({ productId, commandKey: crypto.randomUUID() });
+    syncProductMutation.mutate({ productId, commandKey });
+  };
+
+  const handleIssueAction = (issue: EbayListingIssue, productId: number, jobId?: string) => {
+    const item = feedData?.feed.find((candidate) => candidate.id === productId);
+    if (issue.action.kind === "retry_sync" && issue.retryable) {
+      const local = localSyncIssues.get(productId);
+      const commandKey = local?.issue.code === issue.code ? local.commandKey ?? undefined : undefined;
+      if (item?.externalListingId) handleSyncProduct(productId, commandKey);
+      else handlePushSingle(productId);
+      return;
+    }
+    if (issue.action.kind === "check_recovery" || issue.action.kind === "review_mapping") {
+      const savedJobId = jobId ?? latestSyncJobs.get(productId)?.id;
+      setRecoveryTarget({ jobId: savedJobId ?? null, productId, name: item?.name ?? `Product ${productId}`, issue, mode: issue.action.kind === "review_mapping" ? "mapping" : "recovery" });
+      return;
+    }
+    setExpandedProducts((previous) => new Set(previous).add(productId));
+    document.getElementById(`ebay-product-${productId}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
   };
 
   // ---- Verify / Reconcile Listings ----
@@ -948,6 +1015,11 @@ export default function EbayChannelPage() {
   // ---- Computed ----
 
   const hasLocation = !!config?.config?.merchantLocationKey;
+  const parsedConnectionIssue = ebayListingIssueSchema.safeParse(config?.connectionIssue);
+  const connectionIssue = parsedConnectionIssue.success ? parsedConnectionIssue.data
+    : config?.connectionHealth === "needs_attention"
+      ? resolveEbayListingIssue({ code: "EBAY_AUTH_RESPONSE_INVALID", message: "The eBay connection could not be verified. Refresh the connection check to load its current details." })
+      : null;
   const hasPolicies = !!(
     config?.config?.fulfillmentPolicyId &&
     config?.config?.returnPolicyId &&
@@ -965,7 +1037,7 @@ export default function EbayChannelPage() {
     } else if (feedFilter === "ended") {
       items = items.filter((i) => i.status === "ended" || i.status === "deleted");
     } else if (feedFilter === "errors") {
-      items = items.filter((i) => i.status === "error");
+      items = items.filter((i) => i.status === "error" || localSyncIssues.has(i.id) || ["needs_attention", "awaiting_evidence"].includes(latestSyncJobs.get(i.id)?.state ?? ""));
     } else if (feedFilter !== "all") {
       items = items.filter((i) => i.status === feedFilter);
     }
@@ -978,7 +1050,7 @@ export default function EbayChannelPage() {
       );
     }
     return items;
-  }, [feedData, feedFilter, feedSearch]);
+  }, [feedData, feedFilter, feedSearch, latestSyncJobs, localSyncIssues]);
 
   const feedCounts = useMemo(() => {
     if (!feedData?.feed) return { all: 0, ready: 0, missing_config: 0, missing_specifics: 0, listed: 0, excluded: 0, ended: 0, errors: 0 };
@@ -992,9 +1064,13 @@ export default function EbayChannelPage() {
       listed: feed.filter((f) => f.status === "listed").length,
       excluded: feed.filter((f) => f.status === "excluded").length,
       ended: feed.filter((f) => f.status === "ended" || f.status === "deleted").length,
-      errors: feed.filter((f) => f.status === "error").length,
+      errors: feed.filter((f) => f.status === "error" || localSyncIssues.has(f.id) || ["needs_attention", "awaiting_evidence"].includes(latestSyncJobs.get(f.id)?.state ?? "")).length,
     };
-  }, [feedData]);
+  }, [feedData, latestSyncJobs, localSyncIssues]);
+
+  const existingListingCount = (feedData?.feed ?? []).filter((item) =>
+    item.externalListingId && ["listed", "error"].includes(item.status),
+  ).length;
 
   const storeCats = storeCatsData?.categories || [];
 
@@ -1016,6 +1092,7 @@ export default function EbayChannelPage() {
             <AlertCircle className="h-10 w-10 text-destructive mx-auto mb-3" />
             <p className="text-destructive font-medium">Failed to load eBay configuration</p>
             <p className="text-sm text-muted-foreground mt-1">{(configError as Error).message}</p>
+            <Button className="mt-3" variant="outline" onClick={() => queryClient.invalidateQueries({ queryKey: ["/api/ebay/channel-config"] })}>Reload connection settings</Button>
           </CardContent>
         </Card>
       </div>
@@ -1030,7 +1107,7 @@ export default function EbayChannelPage() {
       {/* ================================================================== */}
       {/* SECTION 1: Store Setup                                             */}
       {/* ================================================================== */}
-      <Card>
+      <Card id="ebay-store-setup">
         <CardHeader className="px-3 sm:px-6">
           <CardTitle className="flex items-center gap-2">
             <ShieldCheck className="h-5 w-5" />
@@ -1040,11 +1117,16 @@ export default function EbayChannelPage() {
         </CardHeader>
         <CardContent className="space-y-6 px-3 sm:px-6">
           {/* Connection Status */}
-          <div>
+          <div id="connection">
             <Label className="text-xs uppercase tracking-wider text-muted-foreground font-medium">Connection</Label>
             <div className="flex flex-col sm:flex-row sm:items-center gap-3 mt-2">
               <div className="flex items-center gap-3 flex-1">
-                {config?.connected ? (
+                {config?.connectionHealth === "needs_attention" ? (
+                  <Badge variant="outline" className="border-amber-500 text-amber-800 dark:text-amber-300 gap-1.5 py-1 px-3">
+                    <AlertCircle className="h-3.5 w-3.5" />
+                    Connection needs attention
+                  </Badge>
+                ) : config?.connected && config.connectionHealth !== "not_connected" ? (
                   <Badge variant="default" className="bg-green-600 hover:bg-green-600 gap-1.5 py-1 px-3">
                     <CheckCircle2 className="h-3.5 w-3.5" />
                     Connected
@@ -1067,12 +1149,20 @@ export default function EbayChannelPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => window.open("/api/ebay/oauth/consent", "_blank")}
+                onClick={() => window.open(config?.channel?.id ? `/api/ebay/oauth/consent?channelId=${config.channel.id}` : "/api/ebay/oauth/consent", "_blank", "noopener,noreferrer")}
               >
                 <ExternalLink className="h-4 w-4 mr-2" />
                 {config?.connected ? "Reconnect" : "Connect eBay"}
               </Button>
+              <Button variant="outline" size="sm" disabled={configFetching} onClick={() => {
+                void queryClient.invalidateQueries({ queryKey: ["/api/ebay/channel-config"] });
+                void refetchPolicies();
+                void refetchStoreCats();
+              }}>Refresh connection</Button>
             </div>
+            {connectionIssue && <div className="mt-3"><EbayListingIssueCard issue={connectionIssue} busy={configFetching} onAction={(issue) => {
+              if (issue.action.kind === "retry_sync" && issue.retryable) void queryClient.invalidateQueries({ queryKey: ["/api/ebay/channel-config"] });
+            }} /></div>}
             {config?.tokenInfo && (
               <div className="mt-3 flex flex-wrap gap-4 text-xs text-muted-foreground">
                 <span className="flex items-center gap-1">
@@ -1090,6 +1180,12 @@ export default function EbayChannelPage() {
           </div>
 
           <Separator />
+
+          {policiesError && <div role="alert" className="space-y-2 rounded-md border border-amber-300 p-3 text-sm">
+            <p className="font-medium">eBay business policies could not be loaded</p>
+            <p>Reload the policies before changing shipping, returns or payment settings. If authorization has expired, reconnect the eBay account above.</p>
+            <Button variant="outline" size="sm" onClick={() => refetchPolicies()}>Reload business policies</Button>
+          </div>}
 
           {/* Merchant Location */}
           <div>
@@ -1232,6 +1328,7 @@ export default function EbayChannelPage() {
                     onClick={() => savePoliciesMutation.mutate()}
                     disabled={
                       savePoliciesMutation.isPending ||
+                      !!policiesError ||
                       !policySelections.fulfillmentPolicyId ||
                       !policySelections.returnPolicyId ||
                       !policySelections.paymentPolicyId
@@ -1241,7 +1338,7 @@ export default function EbayChannelPage() {
                     <Save className="h-4 w-4 mr-2" />
                     Save Policies
                   </Button>
-                  {hasPolicies && (
+                  {hasPolicies && !policiesError && (
                     <Badge variant="default" className="bg-green-600 hover:bg-green-600 gap-1.5">
                       <CheckCircle2 className="h-3.5 w-3.5" />
                       All configured
@@ -1789,11 +1886,11 @@ export default function EbayChannelPage() {
                 variant="outline"
                 size="sm"
                 className="flex-1 sm:flex-none min-h-[44px] sm:min-h-0"
-                disabled={feedCounts.listed === 0}
+                disabled={existingListingCount === 0 || !!feedError || syncJobsQuery.isError}
                 onClick={handleSyncAll}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
-                Sync All ({feedCounts.listed})
+                Sync All ({existingListingCount})
               </Button>
               <Button
                 variant="outline"
@@ -1813,11 +1910,11 @@ export default function EbayChannelPage() {
                 variant="outline"
                 size="sm"
                 className="flex-1 sm:flex-none min-h-[44px] sm:min-h-0"
-                disabled={feedCounts.ready === 0 && feedCounts.errors === 0}
+                disabled={feedCounts.ready === 0}
                 onClick={handlePushAll}
               >
                 <Zap className="h-4 w-4 mr-2" />
-                Push to eBay ({feedCounts.ready + feedCounts.errors})
+                Push to eBay ({feedCounts.ready})
               </Button>
             </div>
           </div>
@@ -1825,6 +1922,12 @@ export default function EbayChannelPage() {
         <CardContent className="px-3 sm:px-6">
           {!config?.connected ? (
             <p className="text-sm text-muted-foreground">Connect to eBay first.</p>
+          ) : feedError ? (
+            <div role="alert" className="space-y-2 rounded-md border border-red-300 p-3 text-sm">
+              <p className="font-medium">Listings could not be loaded</p>
+              <p>Your listings are not confirmed up to date. Reload the listing feed before starting another update.</p>
+              <Button variant="outline" size="sm" onClick={() => refetchFeed()}>Reload listings</Button>
+            </div>
           ) : feedLoading ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground py-8">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -1832,6 +1935,13 @@ export default function EbayChannelPage() {
             </div>
           ) : (
             <>
+              {syncJobsQuery.isError && (
+                <div role="alert" className="mb-3 space-y-2 rounded-md border border-amber-300 p-3 text-sm">
+                  <p className="font-medium">Saved sync status is unavailable</p>
+                  <p>We cannot tell whether an update is still running or needs your attention. Refresh its status before starting another sync.</p>
+                  <Button variant="outline" size="sm" onClick={() => syncJobsQuery.refetch()}>Refresh sync status</Button>
+                </div>
+              )}
               {/* Filters */}
               <div className="flex flex-col gap-3 mb-4">
                 <div className="grid grid-cols-3 sm:flex sm:flex-wrap gap-1.5 sm:gap-1">
@@ -1893,6 +2003,10 @@ export default function EbayChannelPage() {
                     {filteredFeed.map((item) => {
                       const syncJob = latestSyncJobs.get(item.id);
                       const syncPending = syncJob && ["queued","running","recovering"].includes(syncJob.state);
+                      const syncIssue = localSyncIssues.get(item.id)?.issue ?? (syncJob && ["awaiting_evidence", "needs_attention"].includes(syncJob.state)
+                        ? syncJob.issue ?? resolveEbayListingIssue({ code: syncJob.code, message: syncJob.message, productId: item.id, jobId: syncJob.id, state: syncJob.state })
+                        : item.status === "error" && item.syncError && !syncPending
+                          ? resolveEbayListingIssue({ message: item.syncError, productId: item.id }) : null);
                       const isExcluded = item.status === "excluded";
                       const isExpanded = expandedProducts.has(item.id);
                       const hasVariants = item.variants && item.variants.length > 0;
@@ -1946,6 +2060,7 @@ export default function EbayChannelPage() {
                       return (
                         <React.Fragment key={item.id}>
                         <TableRow
+                          id={`ebay-product-${item.id}`}
                           className={`sm:table-row flex flex-col p-3 sm:p-0 gap-2 sm:gap-0 ${isExcluded ? "opacity-50" : ""} cursor-pointer hover:bg-muted/50`}
                           onClick={() => hasVariants && toggleProductExpanded(item.id)}
                         >
@@ -1985,8 +2100,9 @@ export default function EbayChannelPage() {
                             </span>
                             {syncJob && syncJob.state !== "completed" && (
                               <p role="status" aria-label={`Sync status for ${item.name}`} className="text-xs mt-1" title={syncJob.message ?? undefined}>
-                                {syncJob.state === "queued" ? "Sync saved — waiting to run" : syncJob.state === "running" ? "Sync in progress" : syncJob.state === "recovering" ? "Sync saved — recovering automatically" : syncJob.state === "awaiting_evidence" ? "Sync needs evidence" : "Sync needs attention"}
-                                {syncJob.message && <span className="block text-muted-foreground">{syncJob.message}</span>}
+                                {syncJob.state === "queued" ? "Sync saved — waiting to run" : syncJob.state === "running" ? "Sync in progress" : syncJob.state === "recovering" ? "Sync saved — recovering automatically" : "Update paused — see the next step below"}
+                                {syncPending && syncJob.message && <span className="block text-muted-foreground">{syncJob.message}</span>}
+                                {syncJob.state === "recovering" && <span className="block text-muted-foreground">Next check: {new Date(syncJob.nextAttemptAt).toLocaleString()}</span>}
                               </p>
                             )}
                             <div className="flex flex-wrap gap-1.5 mt-0.5">
@@ -2036,7 +2152,7 @@ export default function EbayChannelPage() {
                                   </Button>
                                 </>
                               )}
-                              {item.status === "error" && !syncPending && (
+                              {item.status === "error" && !syncPending && !syncIssue && (
                                 <>
                                   <Badge variant="destructive" className="text-xs py-1 px-2">Error</Badge>
                                   <Button
@@ -2071,12 +2187,12 @@ export default function EbayChannelPage() {
                               )}
                               {item.status === "listed" && (
                                 <>
-                                  <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">Listed</Badge>
+                                  <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">{syncIssue ? "Listed · update paused" : "Listed"}</Badge>
                                   <Button
                                     variant="outline"
                                     size="sm"
                                     className="min-h-[44px] min-w-[44px] px-3 text-xs"
-                                    disabled={syncingProductIds.has(item.id)}
+                                    disabled={syncingProductIds.has(item.id) || !!syncPending || !!syncIssue || syncJobsQuery.isError}
                                     onClick={(e) => { e.stopPropagation(); handleSyncProduct(item.id); }}
                                     title="Sync this listing"
                                   >
@@ -2114,7 +2230,7 @@ export default function EbayChannelPage() {
                               )}
                             </div>
                             {/* Error message inline on mobile */}
-                            {item.syncError && item.status === "error" && (!syncJob || syncJob.state === "completed") && (
+                            {item.syncError && item.status === "error" && !syncIssue && (!syncJob || syncJob.state === "completed") && (
                               <p className="text-xs text-red-600 mt-1 sm:hidden line-clamp-2" title={item.syncError}>
                                 {item.syncError}
                               </p>
@@ -2172,7 +2288,7 @@ export default function EbayChannelPage() {
                                     </Button>
                                   </>
                                 )}
-                                {item.status === "error" && !syncPending && (
+                                {item.status === "error" && !syncPending && !syncIssue && (
                                   <>
                                     <Badge variant="destructive" className="text-xs" title={item.syncError || undefined}>Error</Badge>
                                     <Button
@@ -2207,12 +2323,12 @@ export default function EbayChannelPage() {
                                 )}
                                 {item.status === "listed" && (
                                   <>
-                                    <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">Listed</Badge>
+                                    <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">{syncIssue ? "Listed · update paused" : "Listed"}</Badge>
                                     <Button
                                       variant="ghost"
                                       size="sm"
                                       className="h-6 w-6 p-0"
-                                      disabled={syncingProductIds.has(item.id)}
+                                      disabled={syncingProductIds.has(item.id) || !!syncPending || !!syncIssue || syncJobsQuery.isError}
                                       onClick={(e) => { e.stopPropagation(); handleSyncProduct(item.id); }}
                                       title="Sync this listing"
                                     >
@@ -2262,7 +2378,7 @@ export default function EbayChannelPage() {
                                 )}
                               </div>
                               {/* Error message inline — desktop */}
-                              {item.syncError && item.status === "error" && (!syncJob || syncJob.state === "completed") && (
+                              {item.syncError && item.status === "error" && !syncIssue && (!syncJob || syncJob.state === "completed") && (
                                 <p className="text-[10px] text-red-600 max-w-[180px] truncate" title={item.syncError}>
                                   {item.syncError}
                                 </p>
@@ -2275,6 +2391,11 @@ export default function EbayChannelPage() {
                             </div>
                           </TableCell>
                         </TableRow>
+                        {syncIssue && <TableRow className="block sm:table-row">
+                          <TableCell colSpan={6} className="block sm:table-cell p-3">
+                            <EbayListingIssueCard issue={syncIssue} busy={syncingProductIds.has(item.id)} onAction={(issue) => handleIssueAction(issue, item.id, syncJob?.id)} />
+                          </TableCell>
+                        </TableRow>}
                         {/* Expanded variant rows */}
                         {isExpanded && hasVariants && item.variants.map((variant) => (
                           <React.Fragment key={`v-${variant.id}`}>
@@ -2786,14 +2907,30 @@ export default function EbayChannelPage() {
       <SyncProgressModal
         open={syncModalOpen}
         onClose={() => setSyncModalOpen(false)}
+        onIssueAction={handleIssueAction}
+      />
+
+      <EbaySyncRecoveryDialog
+        jobId={recoveryTarget?.jobId ?? null}
+        productId={recoveryTarget?.productId ?? null}
+        productName={recoveryTarget?.name ?? ""}
+        issue={recoveryTarget?.issue ?? null}
+        mode={recoveryTarget?.mode ?? "recovery"}
+        onIssueAction={handleIssueAction}
+        onClose={() => setRecoveryTarget(null)}
+        checking={recoveryTarget ? syncingProductIds.has(recoveryTarget.productId) : false}
+        onRecheck={() => { if (recoveryTarget) { if (recoveryTarget.jobId) handleSyncProduct(recoveryTarget.productId); else handlePushSingle(recoveryTarget.productId); } }}
+        onRecovered={() => { if (recoveryTarget) setLocalSyncIssues((previous) => { const next = new Map(previous); next.delete(recoveryTarget.productId); return next; }); }}
       />
 
       {/* Push Progress Modal (SSE-based) */}
       <PushProgressModal
+        key={pushRunId}
         open={pushModalOpen}
         onClose={() => setPushModalOpen(false)}
         productIds={pushProductIds}
         onRetryFailed={handleRetryFailed}
+        onIssueAction={handleIssueAction}
       />
     </div>
   );

@@ -3,19 +3,19 @@
  *
  * Handles the OAuth2 authorization code grant flow for eBay:
  * - Token refresh (access tokens expire every 2 hours)
- * - Refresh token rotation (new refresh token on every use)
- * - Thread-safe token refresh (prevents concurrent refresh storms)
+ * - Retains refresh credentials when the token endpoint returns only an access token
+ * - Coalesces concurrent refreshes for the same channel within this service
  * - Persistent storage in ebay_oauth_tokens table
  *
- * IMPORTANT: eBay refresh tokens CHANGE on every refresh call.
- * We must persist the new refresh token immediately or lose access.
+ * The provider's expires_in values determine expiry; successful refresh does not
+ * imply that the existing refresh token's lifetime restarted.
  */
 
 import { eq, and, isNull, or } from "drizzle-orm";
 import { z } from "zod";
 import { ebayOauthTokens } from "@shared/schema";
 import { persistAuditEvent } from "../../../../infrastructure/auditLogger";
-import type { EbayTokenResponse } from "./ebay-types";
+import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provider.error";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -75,7 +75,22 @@ export interface EbayProviderAccountClaimAuditContext {
 export interface EbayAuthDependencies {
   readonly fetch?: typeof fetch;
   readonly now?: () => Date;
+  readonly requestTimeoutMs?: number;
 }
+
+export class EbayAuthError extends Error {
+  constructor(readonly code: "EBAY_AUTH_REQUIRED" | "EBAY_AUTH_EXPIRED" | "EBAY_AUTH_UNAVAILABLE" | "EBAY_AUTH_RESPONSE_INVALID" | "EBAY_AUTH_CONFIGURATION_INVALID" | "EBAY_AUTH_REFRESH_SUPERSEDED" | "EBAY_OAUTH_SCOPE_MISSING", message: string) {
+    super(message); this.name = "EbayAuthError";
+  }
+}
+
+const TOKEN_REQUEST_TIMEOUT_MS = 30_000;
+const tokenLifetime = z.number().int().positive().max(2_147_483_647);
+const ebayTokenResponseSchema = z.object({
+  access_token: z.string().min(1), expires_in: tokenLifetime,
+  refresh_token: z.string().min(1).optional(), refresh_token_expires_in: tokenLifetime.optional(),
+});
+type ValidatedEbayTokenResponse = z.infer<typeof ebayTokenResponseSchema>;
 
 export class EbayProviderAccountIdentityConflictError extends Error {
   readonly code = "EBAY_PROVIDER_ACCOUNT_IDENTITY_CONFLICT";
@@ -169,9 +184,10 @@ const DEFAULT_SCOPES = [
 // ---------------------------------------------------------------------------
 
 export class EbayAuthService {
-  private refreshPromise: Promise<string> | null = null;
+  private readonly refreshPromises = new Map<number, Promise<string>>();
   private readonly fetchFn: typeof fetch;
   private readonly now: () => Date;
+  private readonly requestTimeoutMs: number;
 
   constructor(
     private readonly db: DrizzleDb,
@@ -180,6 +196,10 @@ export class EbayAuthService {
   ) {
     this.fetchFn = dependencies.fetch ?? fetch;
     this.now = dependencies.now ?? (() => new Date());
+    this.requestTimeoutMs = dependencies.requestTimeoutMs ?? TOKEN_REQUEST_TIMEOUT_MS;
+    if (!Number.isSafeInteger(this.requestTimeoutMs) || this.requestTimeoutMs <= 0 || this.requestTimeoutMs > TOKEN_REQUEST_TIMEOUT_MS) {
+      throw new Error("eBay authorization request timeout must be a positive integer no greater than the default deadline.");
+    }
   }
 
   /**
@@ -188,11 +208,11 @@ export class EbayAuthService {
    * Thread-safe — concurrent callers share a single refresh request.
    */
   async getAccessToken(channelId: number): Promise<string> {
+    if (!Number.isSafeInteger(channelId) || channelId < 1) throw new EbayAuthError("EBAY_AUTH_REQUIRED", "Select a valid eBay channel before requesting authorization.");
     const token = await this.getStoredToken(channelId);
     if (!token) {
-      throw new Error(
-        `No eBay OAuth tokens found for channel ${channelId}. ` +
-        `Complete the OAuth consent flow first. Use getConsentUrl() to generate the consent URL.`
+      throw new EbayAuthError("EBAY_AUTH_REQUIRED",
+        `No eBay authorization exists for channel ${channelId}. Open eBay Connection settings and connect the intended account.`
       );
     }
 
@@ -203,21 +223,15 @@ export class EbayAuthService {
       return token.accessToken;
     }
 
-    // Token expired or about to expire — refresh it
-    // Use lock to prevent concurrent refresh storms
-    if (!this.refreshPromise) {
-      const refreshTask = this.refreshAccessToken(channelId, token.refreshToken);
-      const timeoutTask = new Promise<string>((_, reject) => {
-        setTimeout(() => reject(new Error("eBay token refresh timed out after 30s")), 30000);
-      });
-
-      this.refreshPromise = Promise.race([refreshTask, timeoutTask])
-        .finally(() => {
-          this.refreshPromise = null;
-        });
+    if (token.refreshTokenExpiresAt && new Date(token.refreshTokenExpiresAt).getTime() <= now.getTime()) {
+      throw new EbayAuthError("EBAY_AUTH_EXPIRED", "The eBay account authorization expired. Open eBay Connection settings and reconnect the account.");
     }
-
-    return this.refreshPromise;
+    let refresh = this.refreshPromises.get(channelId);
+    if (!refresh) {
+      refresh = this.refreshAccessToken(channelId, token.refreshToken).finally(() => { this.refreshPromises.delete(channelId); });
+      this.refreshPromises.set(channelId, refresh);
+    }
+    return refresh;
   }
 
   /**
@@ -269,36 +283,9 @@ export class EbayAuthService {
     channelId: number,
     authorizationCode: string,
   ): Promise<void> {
-    const tokenUrl = TOKEN_URLS[this.config.environment];
-    const credentials = Buffer.from(
-      `${this.config.clientId}:${this.config.clientSecret}`,
-    ).toString("base64");
-
-    const response = await this.fetchFn(tokenUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Authorization: `Basic ${credentials}`,
-      },
-      body: new URLSearchParams({
-        grant_type: "authorization_code",
-        code: authorizationCode,
-        redirect_uri: this.config.ruName,
-      }).toString(),
-    });
-
-    if (!response.ok) {
-      const rawBody = await response.text();
-      const isHtml = rawBody.trimStart().startsWith("<");
-      const errorBody = isHtml
-        ? `HTTP ${response.status} (server returned HTML error page)`
-        : rawBody.substring(0, 300);
-      throw new Error(
-        `eBay token exchange failed (${response.status}): ${errorBody}`,
-      );
-    }
-
-    const tokenData: EbayTokenResponse = await response.json();
+    const tokenData = await this.requestToken(new URLSearchParams({
+      grant_type: "authorization_code", code: authorizationCode, redirect_uri: this.config.ruName,
+    }));
     const observedAccount = await this.observeProviderAccount(
       tokenData.access_token,
     );
@@ -332,46 +319,9 @@ export class EbayAuthService {
     channelId: number,
     refreshToken: string,
   ): Promise<string> {
-    const tokenUrl = TOKEN_URLS[this.config.environment];
-    const credentials = Buffer.from(
-      `${this.config.clientId}:${this.config.clientSecret}`,
-    ).toString("base64");
-
-    console.log(`[EbayAuth] Refreshing access token for channel ${channelId}`);
-
-    const response = await this.fetchFn(tokenUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Authorization: `Basic ${credentials}`,
-      },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-        scope: DEFAULT_SCOPES,
-      }).toString(),
-    });
-
-    if (!response.ok) {
-      const rawBody = await response.text();
-      // Strip HTML and truncate to avoid dumping full error pages into error messages
-      const isHtml = rawBody.trimStart().startsWith("<");
-      const errorBody = isHtml
-        ? `HTTP ${response.status} (server returned HTML error page)`
-        : rawBody.substring(0, 300);
-      // If refresh token is invalid/expired, we need human intervention
-      if (response.status === 400 || response.status === 401) {
-        throw new Error(
-          `eBay refresh token expired or invalid for channel ${channelId}. ` +
-          `Re-authorize via OAuth consent flow. Error: ${errorBody}`,
-        );
-      }
-      throw new Error(
-        `eBay token refresh failed (${response.status}): ${errorBody}`,
-      );
-    }
-
-    const tokenData: EbayTokenResponse = await response.json();
+    const tokenData = await this.requestToken(new URLSearchParams({
+      grant_type: "refresh_token", refresh_token: refreshToken, scope: DEFAULT_SCOPES,
+    }));
     await this.persistTokens(channelId, tokenData, refreshToken);
 
     console.log(
@@ -382,13 +332,43 @@ export class EbayAuthService {
     return tokenData.access_token;
   }
 
+  /** Timeout cancels local I/O; no detached refresh may persist after its caller failed. */
+  private async requestToken(body: URLSearchParams): Promise<ValidatedEbayTokenResponse> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    timeout.unref?.();
+    try {
+      const response = await this.fetchFn(TOKEN_URLS[this.config.environment], {
+        method: "POST", signal: controller.signal,
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: `Basic ${Buffer.from(`${this.config.clientId}:${this.config.clientSecret}`).toString("base64")}` },
+        body: body.toString(),
+      });
+      if (!response.ok) {
+        // Never expose token endpoint bodies: they can echo credentials or contain HTML.
+        const failure = z.object({ error: z.string().regex(/^[a-z_]{1,80}$/) }).safeParse(await response.json().catch(() => null));
+        const errorCode = failure.success ? failure.data.error : null;
+        if (errorCode === "invalid_grant") throw new EbayAuthError("EBAY_AUTH_EXPIRED", "eBay rejected the account authorization (invalid_grant). Open Connection settings and reconnect the intended account.");
+        if (["invalid_client", "invalid_scope", "unauthorized_client", "unsupported_grant_type"].includes(errorCode ?? "")) throw new EbayAuthError("EBAY_AUTH_CONFIGURATION_INVALID", `eBay rejected the application's authorization configuration (${errorCode}). An administrator must review the application credentials and requested scopes before reconnecting.`);
+        if (response.status === 400 || response.status === 401) throw new EbayAuthError("EBAY_AUTH_RESPONSE_INVALID", `eBay rejected the authorization request (HTTP ${response.status}${errorCode ? `, ${errorCode}` : ""}). An administrator must review the connection before it can be retried.`);
+        throw new EbayAuthError("EBAY_AUTH_UNAVAILABLE", `eBay authorization is temporarily unavailable (HTTP ${response.status}). Retry after eBay responds normally.`);
+      }
+      const parsed = ebayTokenResponseSchema.safeParse(await response.json());
+      if (!parsed.success) throw new EbayAuthError("EBAY_AUTH_RESPONSE_INVALID", "eBay returned an invalid authorization response. No credentials were saved. Reconnect or ask an administrator to review the response contract.");
+      if (controller.signal.aborted) throw new EbayAuthError("EBAY_AUTH_UNAVAILABLE", "eBay authorization timed out. Retry the connection from eBay Connection settings.");
+      return parsed.data;
+    } catch (error) {
+      if (error instanceof EbayAuthError || error instanceof ChannelFulfillmentProviderError) throw error;
+      throw new EbayAuthError("EBAY_AUTH_UNAVAILABLE", "The eBay authorization request could not finish. Retry from Connection settings when the connection is available.");
+    } finally { clearTimeout(timeout); }
+  }
   private async persistTokens(
     channelId: number,
-    tokenData: EbayTokenResponse,
+    tokenData: ValidatedEbayTokenResponse,
     previousRefreshToken?: string,
     observedAccount?: EbayObservedProviderAccount,
   ): Promise<void> {
     const now = this.now();
+    const existing = await this.getStoredToken(channelId);
     const accessTokenExpiresAt = new Date(
       now.getTime() + tokenData.expires_in * 1000,
     );
@@ -401,7 +381,7 @@ export class EbayAuthService {
 
     const refreshTokenExpiresAt = tokenData.refresh_token_expires_in
       ? new Date(now.getTime() + tokenData.refresh_token_expires_in * 1000)
-      : null;
+      : newRefreshToken === existing?.refreshToken ? existing.refreshTokenExpiresAt : null;
 
     const identityValues = observedAccount
       ? {
@@ -425,7 +405,6 @@ export class EbayAuthService {
     };
 
     // Upsert: insert or update on conflict (channelId + environment)
-    const existing = await this.getStoredToken(channelId);
     if (existing) {
       if (
         observedAccount &&
@@ -458,12 +437,10 @@ export class EbayAuthService {
         : and(
             eq(ebayOauthTokens.channelId, channelId),
             eq(ebayOauthTokens.environment, this.config.environment),
+            previousRefreshToken === undefined ? undefined : eq(ebayOauthTokens.refreshToken, previousRefreshToken),
           );
-      const result = observedAccount
-        ? await update.where(where).returning({
-            externalAccountId: ebayOauthTokens.externalAccountId,
-          })
-        : await update.where(where);
+      const result = await update.where(where).returning({ externalAccountId: ebayOauthTokens.externalAccountId });
+      if (!observedAccount && !result[0]) throw new EbayAuthError("EBAY_AUTH_REFRESH_SUPERSEDED", "The eBay connection changed while authorization was refreshing. Retry using the current saved connection.");
       if (observedAccount && !result[0]) {
         const current = await this.getStoredToken(channelId);
         if (current?.externalAccountId) {
@@ -536,21 +513,26 @@ export class EbayAuthService {
       `${IDENTITY_API_URLS[this.config.environment]}/commerce/identity/v1/user/`,
       {
         method: "GET",
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
         headers: {
           Authorization: `Bearer ${accessToken}`,
           Accept: "application/json",
         },
       },
-    );
+    ).catch((error: unknown) => {
+      // The fulfillment transport has already classified and sanitized its failures.
+      // Preserve permanent denial versus transient transport failure for that caller.
+      if (error instanceof ChannelFulfillmentProviderError) throw error;
+      throw new EbayAuthError("EBAY_AUTH_UNAVAILABLE", "The eBay account identity request could not finish. Retry the connection when eBay responds normally.");
+    });
     if (!response.ok) {
-      const rawBody = await response.text();
-      throw new Error(
-        `eBay identity observation failed (${response.status}): ` +
-          rawBody.substring(0, 300),
-      );
+      await response.body?.cancel();
+      if (response.status === 401 || response.status === 403) throw new EbayAuthError("EBAY_OAUTH_SCOPE_MISSING", "eBay did not authorize account identity verification. Reconnect the intended account and approve the requested permissions.");
+      if (response.status === 429 || response.status >= 500) throw new EbayAuthError("EBAY_AUTH_UNAVAILABLE", `eBay account verification is temporarily unavailable (HTTP ${response.status}). Retry the connection after eBay responds normally.`);
+      throw new EbayAuthError("EBAY_AUTH_RESPONSE_INVALID", `eBay account identity could not be verified (HTTP ${response.status}). Reconnect with the intended account and approve its requested permissions.`);
     }
 
-    const parsed = ebayIdentityResponseSchema.safeParse(await response.json());
+    const parsed = ebayIdentityResponseSchema.safeParse(await response.json().catch(() => null));
     if (!parsed.success) {
       throw new Error(
         `eBay identity response did not contain a valid immutable userId: ` +

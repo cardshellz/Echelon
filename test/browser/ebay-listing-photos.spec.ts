@@ -10,7 +10,11 @@ test("a failed uploaded photo is shown as failure and the same listing can be re
   await expect(page.locator('li[role="status"]').filter({ hasText:"Product Synced" })).toHaveCount(0);
   expect(state.requests).toHaveLength(1);
   await page.screenshot({ path:info.outputPath("ebay-photo-failure.png"),fullPage:true });
+  await expect(page.getByRole("link", { name: "Open product images" })).toHaveAttribute("href", "/products/1?tab=images");
+  await expect(page.getByTitle("Sync this listing",{ exact:true }).filter({ visible:true })).toBeDisabled();
   state.response=success;
+  // Returning after the catalog correction reloads current state before another update.
+  await page.reload();
   await page.getByTitle("Sync this listing",{ exact:true }).filter({ visible:true }).click();
   await expect(page.locator('li[role="status"]').filter({ hasText:"Product Synced" })).toContainText("Synced 2 variants");
   expect(state.requests).toHaveLength(2);

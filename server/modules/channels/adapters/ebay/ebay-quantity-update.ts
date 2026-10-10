@@ -11,24 +11,73 @@ const updateSchema = z.object({
   quantity: z.number().int().nonnegative().safe(),
 });
 const providerError = z.object({
-  errorId: z.number().int().optional(),
+  errorId: z.number().int().nonnegative().safe().optional(),
+  category: z.string().optional(),
   message: z.string().optional(),
   longMessage: z.string().optional(),
 });
 const operation = z.object({
   offerId: identity.optional(),
-  statusCode: z.number().int(),
+  statusCode: z.number().int().min(100).max(599),
   errors: z.array(providerError).optional(),
 });
 const responseSchema = z.object({
   errors: z.array(providerError).optional(),
   responses: z.array(operation.extend({
-    statusCode: z.number().int().optional(),
+    statusCode: z.number().int().min(100).max(599).optional(),
     sku: identity.optional(),
     offers: z.array(operation.extend({ offerId: identity })).min(1).optional(),
   }).refine(row => row.statusCode !== undefined || row.offers !== undefined))
-    .min(1).max(EBAY_QUANTITY_BATCH_LIMIT * 2),
+    .min(1).max(EBAY_QUANTITY_BATCH_LIMIT * 251),
 });
+const bulkIdentitySchema = z.object({ requests: z.array(z.object({ sku: identity,
+  offers: z.array(z.object({ offerId: identity })).max(250),
+})).min(1).max(EBAY_QUANTITY_BATCH_LIMIT) });
+export interface EbayBulkQuantityResult {
+  sku: string;
+  complete: boolean;
+  confirmed: boolean;
+  statusCode?: number;
+  errors: Partial<EbayError>[];
+  operations: Array<{ statusCode?: number; errors?: Partial<EbayError>[] }>;
+}
+
+/** One protocol reader for transport evidence, admission, and caller results.
+ * The provider identifies results by SKU/offer, never by array position.
+ * Combined/nested responses retained by existing adapters remain supported.
+ * https://developer.ebay.com/api-docs/sell/inventory/resources/inventory_item/methods/bulkUpdatePriceQuantity
+ */
+export function readEbayBulkQuantityResponse(value: unknown, request: unknown): EbayBulkQuantityResult[] | null {
+  const expected = bulkIdentitySchema.safeParse(request);
+  const parsed = responseSchema.safeParse(value);
+  if (!expected.success || !parsed.success) return null;
+  const requests = expected.data.requests;
+  const bySku = new Map(requests.map(row => [row.sku, row]));
+  const byOffer = new Map(requests.flatMap(row => row.offers.map(offer => [offer.offerId, row] as const)));
+  if (bySku.size !== requests.length || byOffer.size !== requests.reduce((sum, row) => sum + row.offers.length, 0)) return null;
+  const grouped = new Map<string, typeof parsed.data.responses>();
+  for (const row of parsed.data.responses) {
+    const owner = row.sku ? bySku.get(row.sku) : row.offerId ? byOffer.get(row.offerId) : undefined;
+    if (!owner || (row.offerId !== undefined && byOffer.get(row.offerId) !== owner)
+      || (row.offers !== undefined && (row.offerId !== undefined || row.offers.some(offer => byOffer.get(offer.offerId) !== owner)))) return null;
+    const rows = grouped.get(owner.sku) ?? [];
+    rows.push(row);
+    grouped.set(owner.sku, rows);
+  }
+  return requests.map(requested => {
+    const rows = grouped.get(requested.sku) ?? [];
+    const itemRows = rows.filter(row => row.offerId === undefined && row.offers === undefined);
+    const offerIds = rows.flatMap(row => row.offerId ? [row.offerId] : (row.offers ?? []).map(offer => offer.offerId));
+    const complete = itemRows.length <= 1 && offerIds.length === requested.offers.length
+      && new Set(offerIds).size === offerIds.length && (requested.offers.length > 0 || itemRows.length === 1);
+    const operations = rows.flatMap(row => [ ...(row.statusCode === undefined ? [] : [row]), ...(row.offers ?? []) ]);
+    const errors = [...(parsed.data.errors ?? []), ...rows.flatMap(row => row.errors ?? []),
+      ...rows.flatMap(row => (row.offers ?? []).flatMap(offer => offer.errors ?? []))];
+    const failed = operations.find(row => !SUCCESS_STATUSES.has(row.statusCode ?? 0) || row.errors?.length);
+    return { sku: requested.sku, complete, confirmed: complete && errors.length === 0 && failed === undefined,
+      statusCode: failed?.statusCode ?? operations.at(-1)?.statusCode, errors, operations };
+  });
+}
 
 export type EbayQuantityUpdate = z.infer<typeof updateSchema>;
 export interface EbayQuantityUpdateResult {
@@ -74,36 +123,12 @@ export function readEbayQuantityUpdateResults(
   const unconfirmed = (): EbayQuantityUpdateResult[] => validated.map(update => ({
     sku: update.sku, offerId: update.offerId, confirmed: false, errors: [],
   }));
-  const parsed = responseSchema.safeParse(value);
-  if (!parsed.success) return unconfirmed();
-  const bySku = new Map(validated.map(update => [update.sku, update]));
-  const byOffer = new Map(validated.map(update => [update.offerId, update]));
-  const grouped = new Map<string, typeof parsed.data.responses>();
-  for (const row of parsed.data.responses) {
-    const update = row.sku ? bySku.get(row.sku) : row.offerId ? byOffer.get(row.offerId) : undefined;
-    if (!update || (row.offerId !== undefined && row.offerId !== update.offerId)
-      || (row.offers !== undefined && (row.offerId !== undefined || row.offers.length !== 1
-        || row.offers[0]!.offerId !== update.offerId))) return unconfirmed();
-    const group = grouped.get(update.sku) ?? [];
-    group.push(row);
-    grouped.set(update.sku, group);
-  }
-  return validated.map(update => {
-    const rows = grouped.get(update.sku) ?? [];
-    const itemRows = rows.filter(row => row.offerId === undefined && row.offers === undefined);
-    const offerRows = rows.filter(row => row.offerId !== undefined || row.offers !== undefined);
-    // One combined acknowledgement OR a distinct item plus offer acknowledgement.
-    const complete = offerRows.length === 1 && itemRows.length <= 1 && rows.length <= 2;
-    const operations = rows.flatMap(row => [row, ...(row.offers ?? [])]);
-    const errors = [...(parsed.data.errors ?? []), ...operations.flatMap(row => row.errors ?? [])];
-    const failed = operations.find(row => (row.statusCode !== undefined && !SUCCESS_STATUSES.has(row.statusCode)) || row.errors?.length);
-    return {
-      sku: update.sku, offerId: update.offerId,
-      confirmed: complete && errors.length === 0 && failed === undefined,
-      statusCode: failed?.statusCode ?? offerRows[0]?.offers?.[0]?.statusCode ?? offerRows[0]?.statusCode,
-      errors,
-    };
-  });
+  const parsed = readEbayBulkQuantityResponse(value, { requests: validated.map(update => ({
+    sku: update.sku, offers: [{ offerId: update.offerId }],
+  })) });
+  if (!parsed) return unconfirmed();
+  return parsed.map((row, index) => ({ sku: row.sku, offerId: validated[index]!.offerId,
+    confirmed: row.confirmed, statusCode: row.statusCode, errors: row.errors }));
 }
 
 function validateUpdates(updates: readonly EbayQuantityUpdate[]): EbayQuantityUpdate[] {

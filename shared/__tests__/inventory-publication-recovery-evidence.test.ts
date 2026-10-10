@@ -13,10 +13,10 @@ describe("recovery evidence words", () => {
     expect(providerAnswerEvidence({ attemptId: "482", providerKey: "ebay" }, answer)).toEqual({
       evidenceKind: "provider_terminal_request_record", terminalOutcome: "completed", evidenceHash: "b".repeat(64),
       evidenceReference: "Stored provider request 9002: POST /sell/inventory/v1/offer/77/publish answered HTTP 400 (codes 25002) at 2026-09-29T09:30:00.000Z",
-      reason: "eBay answered every request of attempt 482; the last answer was HTTP 400 with codes 25002, a refusal that wrote no quantity.",
+      reason: "eBay answered every request of attempt 482; the last answer was HTTP 400 with codes 25002. Historical quantity effects have not been verified.",
     });
     expect(providerAnswerEvidence({ attemptId: "1", providerKey: "walmart" }, { ...answer, errorCodes: [] }).reason)
-      .toBe("Walmart answered every request of attempt 1; the last answer was HTTP 400 with codes none supplied, a refusal that wrote no quantity.");
+      .toBe("Walmart answered every request of attempt 1; the last answer was HTTP 400 with codes none supplied. Historical quantity effects have not been verified.");
   });
 
   it("builds termination words from the stored record, with not_sent for an attempt that never sent a request", () => {
