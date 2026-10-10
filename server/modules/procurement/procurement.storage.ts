@@ -181,10 +181,10 @@ export interface IProcurementStorage {
   getInboundShipmentsCount(filters?: any): Promise<number>;
   getInboundShipmentById(id: number, executor?: any): Promise<InboundShipment | undefined>;
   getInboundShipmentByNumber(shipmentNumber: string): Promise<InboundShipment | undefined>;
-  createInboundShipment(data: InsertInboundShipment): Promise<InboundShipment>;
+  createInboundShipment(data: InsertInboundShipment, executor?: any, recordedAt?: Date): Promise<InboundShipment>;
   updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor?: any, recordedAt?: Date): Promise<InboundShipment | null>;
   deleteInboundShipment(id: number, executor?: any): Promise<boolean>;
-  generateShipmentNumber(): Promise<string>;
+  generateShipmentNumber(executor?: any, recordedAt?: Date): Promise<string>;
   getInboundShipmentLines(inboundShipmentId: number, executor?: any): Promise<InboundShipmentLine[]>;
   getInboundShipmentLineById(id: number, executor?: any): Promise<InboundShipmentLine | undefined>;
   getInboundShipmentLinesByPo(purchaseOrderId: number): Promise<InboundShipmentLine[]>;
@@ -1094,8 +1094,8 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
-  async createInboundShipment(data: InsertInboundShipment): Promise<InboundShipment> {
-    const result = await db.insert(inboundShipments).values(data as any).returning();
+  async createInboundShipment(data: InsertInboundShipment, executor: any = db, recordedAt = new Date()): Promise<InboundShipment> {
+    const result = await executor.insert(inboundShipments).values({ ...data, createdAt: recordedAt, updatedAt: recordedAt } as any).returning();
     return result[0];
   },
 
@@ -1109,21 +1109,19 @@ export const procurementMethods: IProcurementStorage = {
     return result.length > 0;
   },
 
-  async generateShipmentNumber(): Promise<string> {
-    const today = new Date();
+  async generateShipmentNumber(executor: any = db, today = new Date()): Promise<string> {
     const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
     const prefix = `SHP-${dateStr}-`;
-    const existing = await db.select({ shipmentNumber: inboundShipments.shipmentNumber })
+    const existing = await executor.select({ shipmentNumber: inboundShipments.shipmentNumber })
       .from(inboundShipments)
-      .where(like(inboundShipments.shipmentNumber, `${prefix}%`))
-      .orderBy(desc(inboundShipments.shipmentNumber))
+      .where(sql`${inboundShipments.shipmentNumber} ~ ${`^${prefix}[0-9]+$`}`)
+      .orderBy(desc(sql`substring(${inboundShipments.shipmentNumber} from ${prefix.length + 1}::integer)::numeric`))
       .limit(1);
-    let nextNum = 1;
-    if (existing.length > 0 && existing[0].shipmentNumber) {
-      const lastNum = parseInt(existing[0].shipmentNumber.replace(prefix, ''), 10);
-      if (!isNaN(lastNum)) nextNum = lastNum + 1;
-    }
-    return `${prefix}${String(nextNum).padStart(3, '0')}`;
+    // User-supplied numeric suffixes may exceed Number.MAX_SAFE_INTEGER.
+    // Keep the allocator exact even for those values and after 999 -> 1000.
+    const previous = existing[0]?.shipmentNumber?.slice(prefix.length);
+    const nextNum = previous ? BigInt(previous) + BigInt(1) : BigInt(1);
+    return `${prefix}${nextNum.toString().padStart(3, '0')}`;
   },
 
   async getInboundShipmentLines(inboundShipmentId: number, executor: any = db): Promise<InboundShipmentLine[]> {

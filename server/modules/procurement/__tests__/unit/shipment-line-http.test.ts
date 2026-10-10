@@ -25,7 +25,7 @@ import { FinancialCommandError } from "../../../../platform/commands/transaction
 
 let server: Server | undefined;
 let url: string;
-const service = { executeLineCommandInTransaction: vi.fn() };
+const service = { executeLineCommandInTransaction: vi.fn(), createShipmentFromPoInTransaction: vi.fn() };
 const KEY = "shipment-line-http-fixture";
 
 async function send(method: string, path: string, body: unknown, headers: Record<string, string> = {}) {
@@ -52,6 +52,7 @@ beforeEach(async () => {
   mocks.repository.reserve.mockResolvedValue({ kind: "claimed", claim: { commandId: 1, leaseToken: "fixture" } });
   mocks.repository.executeClaim.mockImplementation(async (_claim, _descriptor, work) => ({ commandId: 1, replayed: false, terminalState: "succeeded", ...await work({ name: "fixture-transaction" }) }));
   service.executeLineCommandInTransaction.mockResolvedValue({ id: 31, inboundShipmentId: 7, version: "a".repeat(64) });
+  service.createShipmentFromPoInTransaction.mockResolvedValue({ shipment: { id: 77, shipmentNumber: "NEW" }, purchaseOrderId: 10, lines: [{ id: 31 }] });
   const app = express();
   app.use(express.json());
   app.locals.services = { shipmentTracking: service };
@@ -125,4 +126,42 @@ describe("shipment line HTTP command contract", () => {
     expect(result.headers.get("Retry-After")).toBe("3");
     expect(service.executeLineCommandInTransaction).not.toHaveBeenCalled();
   });
+});
+
+describe("atomic PO creation HTTP command", () => {
+  const body = { header: { shipmentNumber: "NEW" }, source: { purchaseOrderId: 10, lineSelections: [{ poLineId: 21, qty: 2 }] } };
+  it("requires both existing permissions and passes the complete request to the transaction owner", async () => {
+    const result = await send("POST", "/api/inbound-shipments/from-po", body, { "Idempotency-Key": KEY });
+    expect(result.status).toBe(201);
+    expect(mocks.permission.mock.calls).toEqual([["purchasing", "create"], ["purchasing", "edit"]]);
+    expect(mocks.repository.reserve).toHaveBeenCalledWith(expect.objectContaining({ actorId: "procurement.shipment-create", resourceKey: "purchase_order:10", commandName: "procurement.shipment.create-from-po" }));
+    expect(service.createShipmentFromPoInTransaction).toHaveBeenCalledWith(expect.any(Object), body, "owner-1", expect.any(Date));
+    expect(service.executeLineCommandInTransaction).not.toHaveBeenCalled();
+  });
+  it("rejects a missing key before any write", async () => {
+    expect(await send("POST", "/api/inbound-shipments/from-po", body)).toMatchObject({ status: 400, body: { code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REQUIRED" } });
+    expect(service.createShipmentFromPoInTransaction).not.toHaveBeenCalled();
+  });
+  it("rejects an invalid PO identity and an unauthenticated actor", async () => {
+    expect(await send("POST", "/api/inbound-shipments/from-po", { ...body, source: { purchaseOrderId: -1 } }, { "Idempotency-Key": KEY })).toMatchObject({ status: 400 });
+    mocks.actorId = undefined;
+    expect(await send("POST", "/api/inbound-shipments/from-po", body, { "Idempotency-Key": KEY })).toMatchObject({ status: 401 });
+    expect(mocks.repository.reserve).not.toHaveBeenCalled();
+  });
+  it("replays without re-entering creation", async () => {
+    const receipt = { shipment: { id: 77 }, purchaseOrderId: 10, lines: [{ id: 31 }] };
+    mocks.repository.reserve.mockResolvedValue({ kind: "replay", result: { commandId: 1, replayed: true, terminalState: "succeeded", httpStatus: 201, body: receipt } });
+    const result = await send("POST", "/api/inbound-shipments/from-po", body, { "Idempotency-Key": KEY });
+    expect(result).toMatchObject({ status: 201, body: receipt });
+    expect(result.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(service.createShipmentFromPoInTransaction).not.toHaveBeenCalled();
+  });
+  it("records an unavailable header reference as a definitive rejection", async () => {
+    service.createShipmentFromPoInTransaction.mockRejectedValueOnce(new Error("FK failure", { cause: { code: "23503", schema: "procurement", table: "inbound_shipments" } }));
+    mocks.repository.rejectClaim.mockImplementation(async (_claim, _descriptor, rejection) => ({ commandId: 1, replayed: false, terminalState: "rejected", ...rejection }));
+    const result = await send("POST", "/api/inbound-shipments/from-po", body, { "Idempotency-Key": KEY });
+    expect(result).toMatchObject({ status: 422, body: { code: "SHIPMENT_CREATE_REFERENCE_INVALID", commandStatus: "rejected" } });
+    expect(mocks.repository.markRetryable).not.toHaveBeenCalled();
+  });
+
 });

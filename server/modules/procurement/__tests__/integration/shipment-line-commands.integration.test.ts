@@ -1,3 +1,4 @@
+import { shipmentCreateFromPoSchema, shipmentCreatedFromPoSchema, type ShipmentCreateFromPo } from "@shared/procurement/shipment-create-from-po";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -42,6 +43,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
   let service: ShipmentTrackingService;
   let createService: typeof import("../../shipment-tracking.service").createShipmentTrackingService;
   let storage: typeof import("../../procurement.storage").procurementMethods & Pick<typeof import("../../../catalog/catalog.storage").productMethods, "getProductVariantById">;
+  let createCommandModule: typeof import("../../shipment-create-commands");
   let commandModule: typeof import("../../shipment-line-commands");
   let repositoryFactory: typeof import("../../../../platform/commands/command-results.repository").createDrizzleFinancialCommandRepository;
   let defaultModulePool: pg.Pool | undefined;
@@ -155,6 +157,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
         ADD FOREIGN KEY (inbound_shipment_id) REFERENCES procurement.inbound_shipments(id) ON DELETE SET NULL;
       ALTER TABLE procurement.receiving_lines
         ADD FOREIGN KEY (purchase_order_line_id) REFERENCES procurement.purchase_order_lines(id) ON DELETE SET NULL;
+      CREATE UNIQUE INDEX inbound_shipments_shipment_number_active_uidx ON procurement.inbound_shipments(shipment_number) WHERE status != 'cancelled';
       CREATE UNIQUE INDEX receiving_orders_shipment_po_active_uidx
         ON procurement.receiving_orders(inbound_shipment_id,purchase_order_id)
         WHERE inbound_shipment_id IS NOT NULL AND purchase_order_id IS NOT NULL AND status IN ('draft','open','receiving','verified');
@@ -186,6 +189,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
         import("../../shipment-tracking.service"), import("../../procurement.storage"), import("../../shipment-line-commands"),
         import("../../../../platform/commands/command-results.repository"), import("../../../../db"), import("../../../catalog/catalog.storage"),
       ]);
+      createCommandModule = await import("../../shipment-create-commands");
       createService = serviceModule.createShipmentTrackingService;
       storage = { ...storageModule.procurementMethods, getProductVariantById: catalogModule.productMethods.getProductVariantById };
       commandModule = commands;
@@ -216,6 +220,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
         (29,19,1,101,300,300,10,10,'TEST-OTHER',100,100,10000,'open');
       INSERT INTO procurement.inbound_shipments(id,shipment_number,status,allocation_method_default,estimated_total_cost_cents,actual_total_cost_cents,total_pieces,total_cartons)
         VALUES(1,'TEST-SHIP-1','costing','by_line_count',500,500,500,2),(2,'TEST-SHIP-2','draft','by_line_count',0,0,0,0),(9,'TEST-SHIP-9','closed','by_line_count',0,0,0,0);
+      SELECT setval(pg_get_serial_sequence('procurement.inbound_shipments','id'), 9);
       INSERT INTO procurement.inbound_shipment_lines(id,inbound_shipment_id,purchase_order_id,purchase_order_line_id,product_variant_id,sku,qty_shipped,carton_count,allocated_cost_cents,landed_unit_cost_cents)
         VALUES(11,1,10,21,200,'TEST-PRODUCT',500,2,500,101);
       INSERT INTO procurement.inbound_freight_costs(id,inbound_shipment_id,cost_type,estimated_cents,actual_cents,vendor_id,allocation_method,cost_status)
@@ -229,7 +234,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     try {
       if (pool) {
         const cleanup: Array<() => Promise<unknown>> = [];
-        if (commandTablesReady) cleanup.push(() => pool.query("DELETE FROM public.financial_command_results WHERE actor_id=$1 AND idempotency_key LIKE $2", ["procurement.shipment-line", `${runId}-%`]));
+        if (commandTablesReady) cleanup.push(() => pool.query("DELETE FROM public.financial_command_results WHERE actor_id = ANY($1::text[]) AND idempotency_key LIKE $2", [["procurement.shipment-line", "procurement.shipment-create"], `${runId}-%`]));
         if (ownsAudit) cleanup.push(() => pool.query("DROP TABLE public.audit_events"));
         else if (auditReady) cleanup.push(() => pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, delegateId]]));
         // Both schemas are created only by this suite; never drop pre-existing schemas.
@@ -753,4 +758,140 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     expect((await pool.query("SELECT SUM(qty_shipped)::int AS pieces FROM procurement.inbound_shipment_lines WHERE purchase_order_line_id=22")).rows)
       .toEqual([{ pieces: 10 }]);
   });
+  function creation(name = "NEW-PO-SHIPMENT", qty = 40): ShipmentCreateFromPo {
+    return shipmentCreateFromPoSchema.parse({ header: { shipmentNumber: name, mode: "sea_fcl" },
+      source: { purchaseOrderId: 10, lineSelections: [{ poLineId: 22, qty }] } });
+  }
+  function creationDescriptor(name: string, body: unknown): FinancialCommandDescriptor {
+    return { actorType: "service", actorId: createCommandModule.SHIPMENT_CREATE_PRINCIPAL,
+      ...createCommandModule.shipmentCreateScope(10), idempotencyKey: `${runId}-create-${name}`,
+      requestHash: createHash("sha256").update(JSON.stringify(body)).digest("hex"), contractVersion: 1 };
+  }
+  function creationCommands(target = service) {
+    return createCommandModule.createShipmentCreateCommands(target, repositoryFactory(database), () => NOW);
+  }
+  function executeCreation(input: unknown, target = service) {
+    return database.transaction((tx) => target.createShipmentFromPoInTransaction(tx, input, actorId, NOW));
+  }
+
+  it("atomically creates a linked PO shipment, totals, history, audit and durable receipt; lost responses replay exactly", async () => {
+    await pool.query("UPDATE catalog.product_variants SET weight_grams=8165.12,length_mm=457.20,width_mm=228.60,height_mm=152.40 WHERE id=201");
+    const input = creation(); const request = creationDescriptor("replay", input);
+    const first = await creationCommands().execute(input, actorId, request);
+    expect(first).toMatchObject({ httpStatus: 201, replayed: false, terminalState: "succeeded" });
+    const result = shipmentCreatedFromPoSchema.parse(first.body);
+    expect(result).toMatchObject({ purchaseOrderId: 10, lines: [{ purchaseOrderId: 10, purchaseOrderLineId: 22, qtyShipped: 40 }] });
+    expect((await pool.query("SELECT total_pieces,created_by,created_at AT TIME ZONE 'UTC' AS created_at FROM procurement.inbound_shipments WHERE id=$1", [result.shipment.id])).rows)
+      .toEqual([{ total_pieces: 40, created_by: actorId, created_at: NOW }]);
+    expect((await pool.query("SELECT weight_kg FROM procurement.inbound_shipment_lines WHERE inbound_shipment_id=$1", [result.shipment.id])).rows).toEqual([{ weight_kg: "8.165" }]);
+    expect((await pool.query("SELECT from_status,to_status,changed_by,changed_at AT TIME ZONE 'UTC' AS changed_at FROM procurement.inbound_shipment_status_history WHERE inbound_shipment_id=$1", [result.shipment.id])).rows)
+      .toEqual([{ from_status: null, to_status: "draft", changed_by: actorId, changed_at: NOW }]);
+    expect((await pool.query("SELECT action FROM public.audit_events WHERE actor=$1 ORDER BY id", [actorId])).rows)
+      .toEqual([{ action: "procurement.shipment_line.add-from-po" }, { action: "procurement.shipment.create-from-po" }]);
+    const committed = await state();
+    expect(await creationCommands().execute(input, delegateId, request)).toMatchObject({ replayed: true, body: first.body });
+    expect(await state()).toEqual(committed);
+    const changed = creation("CHANGED-NUMBER");
+    await expect(creationCommands().execute(changed, actorId, { ...creationDescriptor("replay", changed) })).rejects.toMatchObject({ statusCode: 422 });
+    expect(await state()).toEqual(committed);
+  });
+
+  it.each([
+    ["empty selection", { header: {}, source: { purchaseOrderId: 10, lineSelections: [] } }, 400],
+    ["implicit selection", { header: {}, source: { purchaseOrderId: 10 } }, 400],
+    ["foreign PO line", { header: {}, source: { purchaseOrderId: 10, lineSelections: [{ poLineId: 29, qty: 1 }] } }, 422],
+    ["one invalid quantity in a batch", { header: {}, source: { purchaseOrderId: 10, lineSelections: [{ poLineId: 21, qty: 20 }, { poLineId: 22, qty: 101 }] } }, 409],
+    ["duplicate shipment number", { header: { shipmentNumber: "TEST-SHIP-1" }, source: { purchaseOrderId: 10, lineSelections: [{ poLineId: 22, qty: 1 }] } }, 409],
+  ])("rejects %s without leaving a header, line, history or audit", async (name, input, status) => {
+    const before = await state();
+    const request = creationDescriptor(String(name).replaceAll(" ", "-"), input);
+    const result = await creationCommands().execute(input, actorId, request);
+    expect(result).toMatchObject({ httpStatus: status, terminalState: "rejected" });
+    expect(await state()).toEqual(before);
+    expect(await creationCommands().execute(input, actorId, request)).toMatchObject({ replayed: true, body: JSON.parse(JSON.stringify(result.body)) });
+  });
+
+  it("rolls back the header when a catalog dimension is invalid", async () => {
+    await pool.query("UPDATE catalog.product_variants SET weight_grams=-1 WHERE id=201");
+    const before = await state(); const input = creation();
+    expect(await creationCommands().execute(input, actorId, creationDescriptor("dimension", input)))
+      .toMatchObject({ httpStatus: 409, terminalState: "rejected", body: { code: "SHIPMENT_LINE_SOURCE_REVIEW_REQUIRED" } });
+    expect(await state()).toEqual(before);
+  });
+
+  it.each(["history", "totals", "audit", "receipt"])("rolls back every creation write on %s failure", async (failure) => {
+    const before = await state();
+    let target = service;
+    if (failure === "history" || failure === "totals") {
+      const method = failure === "history" ? "createInboundShipmentStatusHistory" : "updateInboundShipment";
+      const failingStorage = { ...storage, [method]: async (...args: unknown[]) => {
+        await (storage[method] as (...values: unknown[]) => Promise<unknown>)(...args);
+        throw new Error("Injected failure after actual write");
+      } };
+      target = createService(database, failingStorage as Parameters<typeof createService>[1], undefined, () => NOW);
+    }
+    const constraint = failure === "audit" ? "ALTER TABLE public.audit_events ADD CONSTRAINT create_test_failure CHECK(action <> 'procurement.shipment.create-from-po')"
+      : failure === "receipt" ? "ALTER TABLE public.financial_command_results ADD CONSTRAINT create_test_failure CHECK(command_name <> 'procurement.shipment.create-from-po' OR status <> 'succeeded') NOT VALID" : null;
+    if (constraint) await pool.query(constraint);
+    try {
+      const input = creation();
+      await expect(creationCommands(target).execute(input, actorId, creationDescriptor(failure, input))).rejects.toThrow();
+      expect(await state()).toEqual(before);
+      expect((await pool.query("SELECT status FROM public.financial_command_results WHERE idempotency_key=$1", [creationDescriptor(failure, input).idempotencyKey])).rows)
+        .toEqual([{ status: "retryable" }]);
+    } finally {
+      if (constraint) await pool.query(`ALTER TABLE public.${failure === "audit" ? "audit_events" : "financial_command_results"} DROP CONSTRAINT create_test_failure`);
+    }
+    // The failed attempt left only a recoverable command reservation. Once the
+    // fault is removed, the same intent creates exactly one complete shipment.
+    const input = creation(); const request = creationDescriptor(failure, input);
+    const deadline = Date.now() + 5_000;
+    while (!(await pool.query("SELECT next_attempt_at <= transaction_timestamp() AS ready FROM public.financial_command_results WHERE idempotency_key=$1", [request.idempotencyKey])).rows[0]?.ready) {
+      if (Date.now() >= deadline) throw new Error("Command retry did not become available");
+      await new Promise((resume) => setTimeout(resume, 20));
+    }
+    expect(await creationCommands().execute(input, actorId, request)).toMatchObject({ httpStatus: 201, replayed: false });
+    expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.inbound_shipments WHERE shipment_number='NEW-PO-SHIPMENT'")).rows).toEqual([{ count: 1 }]);
+  });
+
+  it("allows only one concurrent creation to consume the same remaining PO quantity, leaving no losing draft", async () => {
+    const results = await Promise.all([outcome(executeCreation(creation("COMPETING-A", 70))), outcome(executeCreation(creation("COMPETING-B", 70)))]);
+    expect(results.filter((result) => result.ok)).toHaveLength(1);
+    expect(results.find((result) => !result.ok)).toMatchObject({ error: { details: { code: "SHIPMENT_LINE_QUANTITY_EXCEEDED" } } });
+    expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.inbound_shipments WHERE shipment_number LIKE 'COMPETING-%'")).rows).toEqual([{ count: 1 }]);
+  });
+
+  it("serializes auto-numbered creation across PO and standalone paths, including suffix rollover", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET shipment_number='SHP-20260906-999' WHERE id=9");
+    const input = creation(); delete input.header.shipmentNumber;
+    const [poResult, standalone] = await Promise.all([executeCreation(input), service.createShipment({ mode: "sea_fcl" }, actorId)]);
+    expect([poResult.shipment.shipmentNumber, standalone.shipmentNumber].sort()).toEqual(["SHP-20260906-1000", "SHP-20260906-1001"]);
+  });
+
+  it("concurrent delivery of the same creation key produces one shipment and replays after completion", async () => {
+    const input = creation(); const request = creationDescriptor("concurrent", input);
+    const commands = creationCommands();
+    const attempts = await Promise.all([outcome(commands.execute(input, actorId, request)), outcome(commands.execute(input, delegateId, request))]);
+    expect(attempts.some((result) => result.ok)).toBe(true);
+    for (const attempt of attempts) if (!attempt.ok) expect(attempt.error).toMatchObject({ code: "FINANCIAL_COMMAND_IN_PROGRESS" });
+    expect(await commands.execute(input, actorId, request)).toMatchObject({ replayed: true, httpStatus: 201 });
+    expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.inbound_shipments WHERE shipment_number='NEW-PO-SHIPMENT'")).rows).toEqual([{ count: 1 }]);
+  });
+
+  it.each([
+    ["SHP-20260906-0000000002", "SHP-20260906-010"],
+    ["SHP-20260906-9007199254740993", "SHP-20260906-9007199254740994"],
+  ])("orders numeric shipment suffixes exactly for %s", async (existing, expected) => {
+    await pool.query("UPDATE procurement.inbound_shipments SET shipment_number='SHP-20260906-009' WHERE id=1");
+    await pool.query("UPDATE procurement.inbound_shipments SET shipment_number=$1 WHERE id=9", [existing]);
+    expect(await service.createShipment({}, actorId)).toMatchObject({ shipmentNumber: expected });
+  });
+
+  it("rejects exhausted auto numbers without a header or history", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET shipment_number='SHP-20260906-99999999999999999' WHERE id=9");
+    const before = await state();
+    await expect(service.createShipment({}, actorId)).rejects.toMatchObject({ details: { code: "SHIPMENT_NUMBER_EXHAUSTED" } });
+    expect(await state()).toEqual(before);
+  });
+
 });

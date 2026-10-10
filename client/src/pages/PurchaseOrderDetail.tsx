@@ -2,7 +2,8 @@ import { parseShipmentReceiptResolution, requiresReceiptUnitReview } from "@/lib
 import React from "react";
 import { PoQuantityAmendment } from '@/features/purchasing/PoQuantityAmendment';
 import { useAuth } from "@/lib/auth";
-import { createShipmentLineCommandClient, createShipmentLineRecoveryStore } from "@/lib/shipment-line-command";
+import { createPoShipmentClient, type ShipmentCreateRecovery } from "@/lib/shipment-create-from-po";
+import { shipmentCreateFromPoSchema, type ShipmentCreateFromPo } from "@shared/procurement/shipment-create-from-po";
 import {
   dollarsToCents,
   formatMills,
@@ -980,9 +981,8 @@ function parsePositiveInt(value: string | null): number | null {
 
 export default function PurchaseOrderDetail() {
   const { user: shipmentCommandUser } = useAuth();
-  const shipmentLineCommands = React.useMemo(() => shipmentCommandUser?.id ? createShipmentLineCommandClient(
-    () => "shipment-line-" + crypto.randomUUID(),
-    createShipmentLineRecoveryStore(() => window.sessionStorage, shipmentCommandUser.id),
+  const poShipmentClient = React.useMemo(() => shipmentCommandUser?.id ? createPoShipmentClient(
+    shipmentCommandUser.id, () => window.sessionStorage, () => "po-shipment-" + crypto.randomUUID(),
   ) : null, [shipmentCommandUser?.id]);
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -1077,7 +1077,17 @@ export default function PurchaseOrderDetail() {
   const [lineSelections, setLineSelections] = useState<Record<number, { checked: boolean; qty: number }>>({});
   const [lineQtyErrors, setLineQtyErrors] = useState<Record<number, string>>({});
 
-  const { data: shippableLinesData } = useQuery<{ lines: any[]; reviewRequiredLines?: Array<{ id: number; sku: string | null; code: string; error: string }> }>({
+  const [shipmentRecoveryState, setShipmentRecoveryState] = useState<{ poId: number; userId: string; saved: ShipmentCreateRecovery | null; error: string | null } | null>(null);
+  const creationRecovery = shipmentRecoveryState?.poId === poId && shipmentRecoveryState.userId === shipmentCommandUser?.id ? shipmentRecoveryState.saved : null;
+  const creationRecoveryError = shipmentRecoveryState?.poId === poId && shipmentRecoveryState.userId === shipmentCommandUser?.id ? shipmentRecoveryState.error : null;
+  const refreshShipmentRecovery = React.useCallback(() => {
+    if (!poId || !poShipmentClient || !shipmentCommandUser?.id) return;
+    try { setShipmentRecoveryState({ poId, userId: shipmentCommandUser.id, saved: poShipmentClient.read(poId), error: null }); }
+    catch (error) { setShipmentRecoveryState({ poId, userId: shipmentCommandUser.id, saved: null, error: error instanceof Error ? error.message : "Saved shipment request cannot be read." }); }
+  }, [poId, poShipmentClient, shipmentCommandUser?.id]);
+  useEffect(() => { refreshShipmentRecovery(); }, [refreshShipmentRecovery, showCreateShipmentDialog]);
+
+  const { data: shippableLinesData, isFetching: shippableLinesLoading, isError: shippableLinesError, refetch: refetchShippableLines } = useQuery<{ lines: any[]; reviewRequiredLines?: Array<{ id: number; sku: string | null; code: string; error: string }> }>({
     queryKey: [`/api/purchase-orders/${poId}/shippable-lines`],
     enabled: !!poId && showCreateShipmentDialog,
   });
@@ -2361,65 +2371,58 @@ export default function PurchaseOrderDetail() {
     },
   });
 
+  const selectedShipmentLines = (shippableLinesData?.lines ?? [])
+    .filter((line: any) => lineSelections[line.id]?.checked)
+    .map((line: any) => ({ poLineId: line.id, qty: lineSelections[line.id].qty }));
+  const shipmentSelectionReady = !!poShipmentClient && !!shippableLinesData && !shippableLinesLoading && !shippableLinesError
+    && selectedShipmentLines.length > 0 && selectedShipmentLines.every((selection) =>
+      Number.isSafeInteger(selection.qty) && selection.qty > 0
+      && selection.qty <= shippableLinesData.lines.find((line: any) => line.id === selection.poLineId)?.remainingQty);
+
   const createShipmentMutation = useMutation({
     retry: false,
-    onMutate: captureNavigation,
-    mutationFn: async (form: typeof newShipmentForm) => {
-      if (!shipmentLineCommands) throw new Error("Sign in before creating a shipment.");
-      // Chain: add selected lines from PO
-      const selectedLines = (shippableLinesData?.lines ?? [])
-        .filter((line: any) => lineSelections[line.id]?.checked && lineSelections[line.id]?.qty > 0)
-        .map((line: any) => ({ poLineId: line.id, qty: lineSelections[line.id].qty }));
-
-
-      const res = await fetch("/api/inbound-shipments", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mode: form.mode || undefined,
-          shipmentNumber: form.shipmentNumber || undefined,
-          shipperName: form.shipperName || undefined,
-          forwarderName: form.forwarderName || undefined,
-          carrierName: form.carrierName || undefined,
-        }),
-      });
-      if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create shipment"); }
-      const shipment = await res.json();
-
-      if (selectedLines.length > 0) {
-        try {
-          const result = await shipmentLineCommands.execute(shipment.id, {
-            operation: "add-from-po", body: { purchaseOrderId: poId!, lineSelections: selectedLines },
-          });
-          return { shipment, lineError: null, lineCount: result.operation === "add-from-po" ? result.lines.length : 0 };
-        } catch (e: any) {
-          return { shipment, lineError: e.message, lineCount: 0 };
-        }
-      }
-      return { shipment, lineError: null, lineCount: 0 };
+    onMutate: (variables: { input: ShipmentCreateFromPo; saved?: ShipmentCreateRecovery; navigation: NavigationSnapshot }) => variables.navigation,
+    mutationFn: async ({ input, saved }: { input: ShipmentCreateFromPo; saved?: ShipmentCreateRecovery; navigation: NavigationSnapshot }) => {
+      if (!poShipmentClient) throw new Error("Sign in before creating a shipment.");
+      return poShipmentClient.execute(input, saved);
     },
-    onSuccess: ({ shipment, lineError, lineCount }, _variables, context) => {
-      if (context?.poId) queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${context.poId}/shipments`] });
-      if (lineError) {
-        toast({
-          title: "Shipment created",
-          description: `${shipment.shipmentNumber} created but failed to add lines: ${lineError}. Open the shipment and review any saved line command before adding more lines.`,
-          variant: "destructive",
-        });
-      } else if (lineCount > 0) {
-        toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created with ${lineCount} line${lineCount === 1 ? "" : "s"}` });
-      } else {
-        toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created` });
-      }
+    onSuccess: ({ shipment, lines, purchaseOrderId }, _variables, context) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${purchaseOrderId}/shipments`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${purchaseOrderId}/shippable-lines`] });
+      toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created with ${lines.length} line${lines.length === 1 ? "" : "s"}` });
       if (!context?.isCurrent()) return;
       setShowCreateShipmentDialog(false);
       setLineSelections({});
+      setLineQtyErrors({});
       navigate(context.childHref(`/shipments/${shipment.id}`));
     },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    onError: (error: Error, variables) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${variables.input.source.purchaseOrderId}/shippable-lines`] });
+      toast({ title: "Shipment creation needs attention", description: error.message, variant: "destructive" });
+    },
+    onSettled: (_result, _error, _variables, context) => {
+      if (context?.isCurrent()) refreshShipmentRecovery();
     },
   });
+
+  const submitPoShipment = () => {
+    try {
+      const navigation = captureNavigation();
+      if (creationRecovery) {
+        createShipmentMutation.mutate({ input: creationRecovery.input, saved: creationRecovery, navigation });
+        return;
+      }
+      if (!shipmentSelectionReady || !newShipmentForm.shipperName.trim()) throw new Error("Select at least one loaded PO line with a valid quantity and a shipper.");
+      const input = shipmentCreateFromPoSchema.parse({ header: {
+        mode: newShipmentForm.mode || undefined, shipmentNumber: newShipmentForm.shipmentNumber.trim() || undefined,
+        shipperName: newShipmentForm.shipperName.trim(), forwarderName: newShipmentForm.forwarderName || undefined,
+        carrierName: newShipmentForm.carrierName || undefined,
+      }, source: { purchaseOrderId: poId, lineSelections: selectedShipmentLines } });
+      createShipmentMutation.mutate({ input, navigation });
+    } catch (error) {
+      toast({ title: "Check shipment details", description: error instanceof Error ? error.message : "Invalid shipment details", variant: "destructive" });
+    }
+  };
 
   const openCreateInvoiceDialogFromPo = async () => {
     let invoiceNumber = "";
@@ -5246,7 +5249,15 @@ export default function PurchaseOrderDetail() {
             <DialogTitle>Create Inbound Shipment</DialogTitle>
             <DialogDescription>Set up shipment details and select PO lines to include in this shipment.</DialogDescription>
           </DialogHeader>
+          {createShipmentMutation.isError && createShipmentMutation.variables?.input.source.purchaseOrderId === poId && <p role="alert" className="text-destructive">{createShipmentMutation.error.message}</p>}
+          {creationRecoveryError && <p role="alert" className="text-destructive">{creationRecoveryError}</p>}
+          {creationRecovery && <div role="alert" className="rounded border p-3 space-y-2">
+            <p>The previous shipment request still needs confirmation. Retry its saved details before creating another shipment.</p>
+            <p>{creationRecovery.input.header.shipmentNumber || "Auto-numbered shipment"} · {creationRecovery.input.source.lineSelections!.length} selected lines</p>
+            <ul>{creationRecovery.input.source.lineSelections!.map((line) => <li key={line.poLineId}>PO line {line.poLineId}: {line.qty} pieces</li>)}</ul>
+          </div>}
           <div className="space-y-4">
+          {!creationRecovery && <fieldset disabled={createShipmentMutation.isPending || !!creationRecoveryError} className="space-y-4">
             <div className="space-y-2">
               <Label>Shipment # (optional — auto-generated if blank)</Label>
               <Input
@@ -5401,6 +5412,8 @@ export default function PurchaseOrderDetail() {
                 )}
               </div>
 
+              {shippableLinesLoading && <p role="status">Loading eligible purchase order lines…</p>}
+              {shippableLinesError && <div role="alert"><p>Purchase order lines could not be loaded.</p><Button variant="outline" onClick={() => refetchShippableLines()}>Retry loading lines</Button></div>}
               {Array.isArray(shippableLinesData?.reviewRequiredLines) && shippableLinesData.reviewRequiredLines.length > 0 && (
                 <div role="alert" className="rounded border border-amber-500/50 p-3 text-sm space-y-1">
                   <p className="font-medium">Some purchase lines need source review before shipping</p>
@@ -5423,7 +5436,7 @@ export default function PurchaseOrderDetail() {
                     </TableHeader>
                     <TableBody>
                       {shippableLinesData.lines.map((line: any) => {
-                        const sel = lineSelections[line.id] ?? { checked: true, qty: line.remainingQty };
+                        const sel = lineSelections[line.id] ?? { checked: false, qty: line.remainingQty };
                         const error = lineQtyErrors[line.id];
                         return (
                           <TableRow key={line.id}>
@@ -5483,20 +5496,19 @@ export default function PurchaseOrderDetail() {
               ) : null}
             </div>
 
+          </fieldset>}
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => { setShowCreateShipmentDialog(false); setLineSelections({}); setLineQtyErrors({}); }}>Cancel</Button>
               <Button
-                onClick={() => createShipmentMutation.mutate(newShipmentForm)}
+                onClick={submitPoShipment}
                 disabled={
-                  createShipmentMutation.isPending ||
-                  !newShipmentForm.shipperName.trim() ||
-                  (shippableLinesData !== undefined && shippableLinesData.lines.length === 0) ||
-                  Object.keys(lineQtyErrors).length > 0
+                  createShipmentMutation.isPending || !!creationRecoveryError || !poShipmentClient ||
+                  (!creationRecovery && (!shipmentSelectionReady || !newShipmentForm.shipperName.trim()))
                 }
               >
-                {createShipmentMutation.isPending ? "Creating..." : "Create Shipment"}
+                {createShipmentMutation.isPending ? "Confirming..." : creationRecovery ? "Retry saved shipment request" : "Create Shipment"}
               </Button>
-              {shippableLinesData !== undefined && shippableLinesData.lines.length === 0 && (
+              {!creationRecovery && shippableLinesData !== undefined && shippableLinesData.lines.length === 0 && (
                 <p className="text-xs text-muted-foreground absolute -bottom-5 right-0">No eligible lines available to add.</p>
               )}
             </div>

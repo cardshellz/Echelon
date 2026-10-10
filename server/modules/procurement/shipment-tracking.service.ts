@@ -1,3 +1,4 @@
+import { shipmentCreateFromPoSchema, verifyShipmentCreatedFromPo, type ShipmentCreatedFromPo } from "@shared/procurement/shipment-create-from-po";
 import { buildShipmentAllocationBasis, resolveShipmentAllocationMethod, shipmentAllocationBasisMatches, DIMENSIONAL_ALLOCATION_METHODS } from "./domain/shipment-allocation-basis";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "./shipment-cost-application.service";
@@ -117,10 +118,10 @@ interface Storage {
   getInboundShipmentsCount(filters?: any): Promise<number>;
   getInboundShipmentById(id: number, executor?: any): Promise<InboundShipment | undefined>;
   getInboundShipmentByNumber(shipmentNumber: string): Promise<InboundShipment | undefined>;
-  createInboundShipment(data: InsertInboundShipment): Promise<InboundShipment>;
+  createInboundShipment(data: InsertInboundShipment, executor?: any, recordedAt?: Date): Promise<InboundShipment>;
   updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor?: any, recordedAt?: Date): Promise<InboundShipment | null>;
   deleteInboundShipment(id: number, executor?: any): Promise<boolean>;
-  generateShipmentNumber(): Promise<string>;
+  generateShipmentNumber(executor?: any, recordedAt?: Date): Promise<string>;
   // Lines
   getInboundShipmentLines(inboundShipmentId: number, executor?: any): Promise<InboundShipmentLine[]>;
   getInboundShipmentLineById(id: number, executor?: any): Promise<InboundShipmentLine | undefined>;
@@ -535,14 +536,22 @@ export function createShipmentTrackingService(
 
   // ─── CRUD ───────────────────────────────────────────────────────
 
-  async function createShipment(rawData: unknown, userId?: string) {
+  async function createShipment(rawData: unknown, userId?: string): Promise<InboundShipment> {
+    return db.transaction((tx: any) => createShipmentInTransaction(tx, rawData, userId, clock()));
+  }
+
+  async function createShipmentInTransaction(tx: any, rawData: unknown, userId: string | undefined, now: Date) {
     const parsed = shipmentHeaderCreateSchema.parse(rawData);
     const data = {
       ...parsed,
       ...(parsed.eta !== undefined ? { eta: parsed.eta === null ? null : new Date(parsed.eta) } : {}),
       ...(parsed.etd !== undefined ? { etd: parsed.etd === null ? null : new Date(parsed.etd) } : {}),
     };
-    const shipmentNumber = data.shipmentNumber || await storage.generateShipmentNumber();
+    // All header creation paths share this transaction-scoped allocator lock.
+    // Keep it until the header and its dependent writes commit or roll back.
+    if (!data.shipmentNumber) await tx.execute(sqlTag`SELECT pg_advisory_xact_lock(hashtextextended('procurement.shipment-number', 0))`);
+    const shipmentNumber = data.shipmentNumber || await storage.generateShipmentNumber(tx, now);
+    if (shipmentNumber.length > 30) throw new ShipmentTrackingError("Automatic shipment numbers are exhausted for this date. Enter a different shipment number.", 409, { code: "SHIPMENT_NUMBER_EXHAUSTED" });
     const allocationMethodDefault = data.mode ? MODE_DEFAULT_ALLOCATION[data.mode] || "by_volume" : "by_volume";
 
     let shipment: InboundShipment;
@@ -553,14 +562,15 @@ export function createShipmentTrackingService(
         status: "draft",
         allocationMethodDefault,
         createdBy: userId || null,
-      } as InsertInboundShipment);
+      } as InsertInboundShipment, tx, now);
     } catch (error: any) {
-      if (error?.code === "23505") {
+      const cause = error?.cause ?? error;
+      if (cause?.code === "23505" && cause?.constraint === "inbound_shipments_shipment_number_active_uidx") {
         throw new ShipmentTrackingError(`Shipment number '${shipmentNumber}' already in use by an active record.`, 409);
       }
       throw error;
     }
-    await recordStatusChange(shipment.id, null, "draft", userId, "Shipment created");
+    await recordStatusChange(shipment.id, null, "draft", userId, "Shipment created", tx, now);
     return shipment;
   }
 
@@ -1628,11 +1638,50 @@ export function createShipmentTrackingService(
     };
   }
 
+  const lineMutationOwner = createShipmentLineMutationOwner({
+    storage, lockShipment, resolveDimensions: resolveDimensionsForVariant,
+    recomputeTotals: recomputeShipmentTotals,
+    refreshAllocations: async (tx, shipmentId, shipment, recordedAt) => {
+      // Physical line edits change charge distribution. Preserve the same
+      // verified currency basis required by the shipment charge owner.
+      for (const cost of await storage.getInboundFreightCosts(shipmentId, tx)) assertCostCurrencyBasis(cost);
+      return refreshAllocationsForShipmentInTransaction(tx, shipmentId, shipment, recordedAt);
+    },
+  });
+
+  async function createShipmentFromPoInTransaction(tx: any, rawInput: unknown, actorId: string, now: Date): Promise<ShipmentCreatedFromPo> {
+    const input = shipmentCreateFromPoSchema.parse(rawInput);
+    if (!actorId?.trim() || !(now instanceof Date) || !Number.isFinite(now.getTime())) throw new ShipmentTrackingError("A valid actor and command clock are required", 500);
+    const shipment = await createShipmentInTransaction(tx, input.header, actorId, now);
+    await lineMutationOwner.executeLineCommandInTransaction(tx, {
+      operation: "add-from-po", resourceId: shipment.id, body: input.source,
+    }, actorId, now);
+    const lines = await storage.getInboundShipmentLines(shipment.id, tx);
+    // A mismatch is an infrastructure failure: roll back, retain the command
+    // key, and never acknowledge a partial or empty PO shipment as successful.
+    const receipt = {
+      shipment: { id: shipment.id, shipmentNumber: shipment.shipmentNumber },
+      purchaseOrderId: input.source.purchaseOrderId,
+      lines: lines.map(({ id, inboundShipmentId, purchaseOrderId, purchaseOrderLineId, qtyShipped }) =>
+        ({ id, inboundShipmentId, purchaseOrderId, purchaseOrderLineId, qtyShipped })),
+    };
+    let result: ShipmentCreatedFromPo;
+    try { result = verifyShipmentCreatedFromPo(input, receipt); }
+    catch (cause) { throw new Error("Shipment creation receipt is inconsistent", { cause }); }
+    await tx.insert(auditEvents).values({ timestamp: now, level: "AUDIT", actor: actorId,
+      action: "procurement.shipment.create-from-po", target: `shipment:${shipment.id}`,
+      changes: { before: null, after: { shipment: await getShipment(shipment.id, tx), lines } },
+      context: { purchaseOrderId: input.source.purchaseOrderId },
+    });
+    return result;
+  }
+
   // ─── Public API ────────────────────────────────────────────────
 
   return {
     // CRUD
     createShipment,
+    createShipmentFromPoInTransaction,
     getShipment,
     getShipments,
     getShipmentPurchaseOrders,
@@ -1652,16 +1701,7 @@ export function createShipmentTrackingService(
     cancel,
 
     // Lines
-    executeLineCommandInTransaction: createShipmentLineMutationOwner({
-      storage, lockShipment, resolveDimensions: resolveDimensionsForVariant,
-      recomputeTotals: recomputeShipmentTotals,
-      refreshAllocations: async (tx, shipmentId, shipment, recordedAt) => {
-        // Physical line edits change charge distribution. Preserve the same
-        // verified currency basis required by the shipment charge owner.
-        for (const cost of await storage.getInboundFreightCosts(shipmentId, tx)) assertCostCurrencyBasis(cost);
-        return refreshAllocationsForShipmentInTransaction(tx, shipmentId, shipment, recordedAt);
-      },
-    }).executeLineCommandInTransaction,
+    executeLineCommandInTransaction: lineMutationOwner.executeLineCommandInTransaction,
     getLines: (shipmentId: number) => storage.getInboundShipmentLines(shipmentId),
     getEnrichedLines: getEnrichedLines,
     getLinesByPo: (poId: number) => storage.getInboundShipmentLinesByPo(poId),
