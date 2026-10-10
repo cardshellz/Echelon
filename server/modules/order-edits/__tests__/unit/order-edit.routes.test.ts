@@ -2,6 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import {
+  ORDER_EDIT_LINE_DISPLAY_HEADER,
+  ORDER_EDIT_LINE_DISPLAY_VERSION,
+  orderEditOperationSchema,
+  type OrderEditOperation,
+} from "@shared/order-edits/order-edit.contract";
 import { registerOrderEditRoutes } from "../../interfaces/order-edit.routes";
 import type { OrderEditService } from "../../application/order-edit.service";
 import {
@@ -11,6 +17,31 @@ import {
 } from "../fixtures/order-edit-preview.fixture";
 
 const KEY = "22222222-2222-4222-8222-222222222222";
+const displayOperation: OrderEditOperation = {
+  operationId: KEY,
+  orderNumber: "#100",
+  currency: "USD",
+  previousTotalCents: 2000,
+  updatedTotalCents: 3000,
+  balanceDueCents: 1000,
+  refundDueCents: 0,
+  lines: [{
+    id: "gid://shopify/CalculatedLineItem/1",
+    variantId: "gid://shopify/ProductVariant/10",
+    added: false,
+    title: "Product",
+    variantTitle: "Pack",
+    quantity: 3,
+    totalCents: 3000,
+  }],
+  status: "ready",
+  canAbandon: true,
+  warnings: [],
+  expiresAt: "2026-10-06T00:00:00.000Z",
+  paymentDeadline: null,
+  paymentUrl: null,
+  error: null,
+};
 describe("order edit staff HTTP boundary", () => {
   let server: Server;
   let url: string;
@@ -29,6 +60,10 @@ describe("order edit staff HTTP boundary", () => {
     enabled: true,
   }));
   const quote = vi.fn();
+  const getOperation = vi.fn();
+  const commit = vi.fn();
+  const reconcile = vi.fn();
+  const abandon = vi.fn();
   const preview = vi.fn();
   const warmPreview = vi.fn();
   const catalogCategories = vi.fn();
@@ -86,6 +121,10 @@ describe("order edit staff HTTP boundary", () => {
         state,
         settings,
         quote,
+        get: getOperation,
+        commit,
+        reconcile,
+        abandon,
         preview,
         warmPreview,
         catalogCategories,
@@ -114,6 +153,73 @@ describe("order edit staff HTTP boundary", () => {
       Origin: url,
     },
     body: JSON.stringify({ paymentWindowMinutes: 30, enabled: true }),
+  });
+  it.each(["", "/commit", "/reconcile", "/abandon"])(
+    "preserves strict legacy operation responses and opts new clients into SKU display metadata for %s",
+    async (action) => {
+      for (const handler of [getOperation, commit, reconcile, abandon])
+        handler.mockResolvedValue(displayOperation);
+      const legacyLineSchema = orderEditOperationSchema.shape.lines.element
+        .omit({ variantId: true, added: true });
+      for (const version of [undefined, "unsupported-version", ORDER_EDIT_LINE_DISPLAY_VERSION]) {
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+          Origin: url,
+          "Idempotency-Key": KEY,
+        };
+        if (version !== undefined) headers[ORDER_EDIT_LINE_DISPLAY_HEADER] = version;
+        const response = await fetch(`${url}/api/order-edits/admin/operations/${KEY}${action}`, {
+          method: action ? "POST" : "GET",
+          headers,
+          ...(action ? { body: "{}" } : {}),
+        });
+        expect(response.status).toBe(200);
+        const result = await response.json();
+        expect(result.updatedTotalCents).toBe(3000);
+        expect(result.balanceDueCents).toBe(1000);
+        expect(result.lines[0].id).toBe(displayOperation.lines[0].id);
+        if (version === ORDER_EDIT_LINE_DISPLAY_VERSION) {
+          expect(result.lines).toEqual(displayOperation.lines);
+        } else {
+          expect(legacyLineSchema.safeParse(result.lines[0]).success).toBe(true);
+          expect(result.lines[0]).not.toHaveProperty("variantId");
+          expect(result.lines[0]).not.toHaveProperty("added");
+        }
+      }
+      expect(displayOperation.lines[0]).toHaveProperty("variantId");
+    },
+  );
+
+  it.each([false, true])("negotiates quote and preview line metadata without changing amounts, opt-in=%s", async (optIn) => {
+    quote.mockResolvedValue(displayOperation);
+    const calculation = previewCalculation();
+    preview.mockImplementationOnce(async (input) => ({
+      phase: "preview",
+      input,
+      calculatedAt: new Date(PREVIEW_NOW).toISOString(),
+      expiresAt: new Date(PREVIEW_NOW + 60000).toISOString(),
+      ...calculation,
+      lines: calculation.lines.map((line) => ({
+        ...line, variantId: "gid://shopify/ProductVariant/10", added: false,
+      })),
+    }));
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json", Origin: url, "Idempotency-Key": KEY,
+    };
+    if (optIn) headers[ORDER_EDIT_LINE_DISPLAY_HEADER] = ORDER_EDIT_LINE_DISPLAY_VERSION;
+    for (const [path, body] of [
+      ["quotes", { ...previewInput(), requestKey: KEY }],
+      ["previews", previewInput()],
+    ] as const) {
+      const response = await fetch(`${url}/api/order-edits/admin/${path}`, {
+        method: "POST", headers, body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(200);
+      const result = await response.json();
+      expect(result.lines[0].variantId).toBe(optIn ? "gid://shopify/ProductVariant/10" : undefined);
+      expect(result.lines[0].added).toBe(optIn ? false : undefined);
+      expect(result.lines[0].totalCents).toBe(path === "quotes" ? 3000 : calculation.lines[0].totalCents);
+    }
   });
   it("uses staff permissions for every catalog read and does not stage a financial command", async () => {
     const paths = [

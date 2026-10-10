@@ -572,6 +572,11 @@ export class ShopifyOrderEditProvider
       shippingRepricing,
       lines: pricing.lines.map((line) => ({
         id: line.id,
+        variantId: line.variantId,
+        added: !context.snapshot.lines.some(
+          (original) =>
+            original.quantity > 0 && original.variantId === line.variantId,
+        ),
         title: line.title,
         variantTitle: line.variantTitle,
         quantity: line.quantity,

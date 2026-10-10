@@ -4210,6 +4210,9 @@ describe("calculation-only background order previews", () => {
     });
     expect(result.financials.totalCents).toBe(3680);
     expect(result.financials.itemsNetCents).toBe(3000);
+    expect(result.lines).toMatchObject([
+      { variantId: id("ProductVariant", 10), added: false, quantity: 3, totalCents: 3000 },
+    ]);
     expect(calculatePreview).toHaveBeenCalledWith(snapshot, [
       { variantId: id("ProductVariant", 10), quantity: 3, netCents: 3000 },
     ]);
@@ -4257,6 +4260,10 @@ describe("calculation-only background order previews", () => {
       additions: [{ variantId: id("ProductVariant", 20), quantity: 1 }],
     });
     expect(result.financials.itemsNetCents).toBe(2500);
+    expect(result.lines.map(({ variantId, added }) => ({ variantId, added }))).toEqual([
+      { variantId: id("ProductVariant", 10), added: false },
+      { variantId: id("ProductVariant", 20), added: true },
+    ]);
     expect(context).toEqual(before);
     expect(h.requests[2].variables).toEqual({
       ids: [id("ProductVariant", 20)],

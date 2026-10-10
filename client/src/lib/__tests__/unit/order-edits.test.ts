@@ -16,6 +16,7 @@ import type {
   OrderEditOperation,
   OrderEditQuoteInput,
 } from "@shared/order-edits/order-edit.contract";
+import { ORDER_EDIT_LINE_DISPLAY_HEADER, ORDER_EDIT_LINE_DISPLAY_VERSION } from "@shared/order-edits/order-edit.contract";
 
 const key = "7862fe7b-a70b-42e8-9ae7-4e2fb16448d0";
 const schema = z.object({ status: z.literal("ready") });
@@ -309,6 +310,7 @@ describe("order edit transport", () => {
       body: "{}",
     });
     expect(new Headers(options?.headers).get("Idempotency-Key")).toBe(key);
+    expect(new Headers(options?.headers).get(ORDER_EDIT_LINE_DISPLAY_HEADER)).toBe(ORDER_EDIT_LINE_DISPLAY_VERSION);
   });
 
   it("classifies an ambiguous commit without sending a second command", async () => {
