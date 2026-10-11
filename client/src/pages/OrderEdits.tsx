@@ -16,19 +16,23 @@ import {
   type OrderEditOrder,
   type OrderEditQuoteInput,
   type OrderEditState,
-  type OrderEditVariant,
 } from "@shared/order-edits/order-edit.contract";
+import type { OrderEditCatalogVariant } from "@shared/order-edits/order-edit-catalog";
+import type { MemberPlanPresentation } from "@shared/membership/member-plan-presentation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { OrderEditProductPicker } from "@/components/order-edits/OrderEditProductPicker";
+import { OrderEditItems } from "@/components/order-edits/OrderEditItems";
+import { MemberProductPrice } from "@/components/MemberProductPrice";
 import { useAuth } from "@/lib/auth";
 import { useDebounce } from "@/hooks/use-debounce";
 import {
-  OrderEditTotals,
-  OrderEditPayments,
+  OrderEditSummary,
+  OrderEditCalculationDetails,
+  OrderEditPaymentDetails,
 } from "@/components/order-edits/OrderEditFinancials";
 import {
   MIN_ORDER_EDIT_PAYMENT_WINDOW_HOURS,
@@ -251,7 +255,11 @@ export function OrderDraft({
     ),
   );
   const [additions, setAdditions] = useState<
-    Array<{ variant: OrderEditVariant; quantity: string }>
+    Array<{
+      variant: OrderEditCatalogVariant;
+      plan: MemberPlanPresentation | null;
+      quantity: string;
+    }>
   >([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -436,7 +444,55 @@ export function OrderDraft({
             }
           />
         )}
-        <div className="divide-y rounded-md border">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-medium">Items in your order</h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Update quantities or add a product.
+            </p>
+          </div>
+          {canEdit && (
+            <OrderEditProductPicker
+              api={api}
+              connectionId={order.connectionId}
+              staffId={staffId}
+              omsOrderId={order.omsOrderId}
+              expectedRevision={order.revision}
+              enabled={mutable && active}
+              includedVariantIds={
+                new Set([
+                  ...order.lines
+                    .map((line) => line.variantId)
+                    .filter((id): id is string => id !== null),
+                  ...additions.map((item) => item.variant.variantId),
+                ])
+              }
+              onAdd={(variant, plan) => {
+                if (
+                  !mutable ||
+                  !variant.available ||
+                  order.lines.some(
+                    (line) => line.variantId === variant.variantId,
+                  )
+                )
+                  return;
+                command.current = null;
+                setError(null);
+                setAdditions((current) =>
+                  current.some(
+                    (item) => item.variant.variantId === variant.variantId,
+                  )
+                    ? current
+                    : [...current, { variant, plan, quantity: "1" }],
+                );
+              }}
+            />
+          )}
+        </div>
+        <div
+          className="divide-y rounded-md border"
+          aria-label="Editable order items"
+        >
           {order.lines.map((line) => (
             <div
               key={line.lineItemId}
@@ -486,6 +542,16 @@ export function OrderDraft({
                     .filter(Boolean)
                     .join(" · ")}
                 </p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <MemberProductPrice
+                    priceCents={item.variant.priceCents}
+                    retailPriceCents={item.variant.retailPriceCents}
+                    plan={item.plan}
+                  />
+                  <span className="text-xs text-muted-foreground">
+                    each · before coupons and rewards
+                  </span>
+                </div>
               </div>
               <Input
                 className="w-24"
@@ -526,45 +592,9 @@ export function OrderDraft({
           ))}
         </div>
         <p className="text-xs text-muted-foreground">
-          Set quantity to 0 to remove a line. Prices, discounts and tax are
-          verified by the server. Shipping and eligible free shipping are
-          recalculated when you review changes.
+          Set quantity to 0 to remove an item. Discounts, shipping and tax are
+          recalculated for your changes.
         </p>
-        {canEdit && (
-          <OrderEditProductPicker
-            api={api}
-            connectionId={order.connectionId}
-            staffId={staffId}
-            omsOrderId={order.omsOrderId}
-            expectedRevision={order.revision}
-            enabled={mutable && active}
-            includedVariantIds={
-              new Set([
-                ...order.lines
-                  .map((line) => line.variantId)
-                  .filter((id): id is string => id !== null),
-                ...additions.map((item) => item.variant.variantId),
-              ])
-            }
-            onAdd={(variant) => {
-              if (
-                !mutable ||
-                !variant.available ||
-                order.lines.some((line) => line.variantId === variant.variantId)
-              )
-                return;
-              command.current = null;
-              setError(null);
-              setAdditions((current) =>
-                current.some(
-                  (item) => item.variant.variantId === variant.variantId,
-                )
-                  ? current
-                  : [...current, { variant, quantity: "1" }],
-              );
-            }}
-          />
-        )}
         <p className="text-xs text-muted-foreground">
           Shipping address changes are not supported in this pilot.
         </p>
@@ -573,7 +603,7 @@ export function OrderDraft({
         {valid && active && (
           <p role="status" className="text-xs text-muted-foreground">
             {currentPreview
-              ? `Updated total preview: ${formatOrderEditMoney(currentPreview.financials.totalCents, order.currency)}. Review verifies these totals before applying changes.`
+              ? "Updated totals are ready. Review verifies them before applying changes."
               : preview.isFetching
                 ? "Preparing updated totals…"
                 : preview.isError
@@ -581,20 +611,35 @@ export function OrderDraft({
                   : "Updated totals will appear after you finish changing items."}
           </p>
         )}
-        {order.financials && (
-          <OrderEditTotals
-            columns={[{ label: "Current order", financials: order.financials }]}
-          />
-        )}
+        <OrderEditSummary
+          totals={[
+            { label: "Current order total", totalCents: order.totalCents },
+            ...(currentPreview
+              ? [
+                  {
+                    label: "Preview total",
+                    totalCents: currentPreview.financials.totalCents,
+                  },
+                ]
+              : []),
+          ]}
+        />
+        <OrderEditCalculationDetails
+          columns={[
+            ...(order.financials
+              ? [{ label: "Current order", financials: order.financials }]
+              : []),
+            ...(currentPreview
+              ? [{ label: "Preview", financials: currentPreview.financials }]
+              : []),
+          ]}
+        />
         {order.settlement && (
-          <OrderEditPayments settlement={order.settlement} />
+          <OrderEditPaymentDetails settlement={order.settlement} />
         )}
         <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
-          <p className="text-sm">
-            Current order total{" "}
-            <strong>
-              {formatOrderEditMoney(order.totalCents, order.currency)}
-            </strong>
+          <p className="text-xs text-muted-foreground">
+            Review the updated total before applying changes.
           </p>
           <Button
             type="button"
@@ -638,26 +683,17 @@ export function OrderEditPreviewReview({
         </p>
         {preview && (
           <>
-            <div className="divide-y rounded-md border">
-              {preview.lines.map((line) => (
-                <div
-                  key={line.id}
-                  className="flex flex-wrap items-center gap-3 p-3 text-sm"
-                >
-                  <div className="min-w-0 flex-1">
-                    <p className="font-medium">{line.title}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {line.variantTitle}
-                    </p>
-                  </div>
-                  <p>Qty {line.quantity}</p>
-                  <p className="tabular-nums">
-                    {formatOrderEditMoney(line.totalCents, order.currency)}
-                  </p>
-                </div>
-              ))}
-            </div>
-            <OrderEditTotals
+            <OrderEditItems lines={preview.lines} showAdded />
+            <OrderEditSummary
+              totals={[
+                { label: "Current order total", totalCents: order.totalCents },
+                {
+                  label: "Preview total · verifying",
+                  totalCents: preview.financials.totalCents,
+                },
+              ]}
+            />
+            <OrderEditCalculationDetails
               columns={[
                 ...(order.financials
                   ? [{ label: "Before edit", financials: order.financials }]
@@ -729,6 +765,47 @@ export function OrderEditOperationView({
         : financials?.current
           ? [{ label: "Current order", financials: financials.current }]
           : [];
+  const summaryTotals =
+    totalsColumns.length > 0
+      ? totalsColumns.map(({ label, financials: values }) => ({
+          label,
+          totalCents: values.totalCents,
+        }))
+      : operation.quoteAvailable === false
+        ? [
+            {
+              label: "Current order total",
+              totalCents: operation.updatedTotalCents,
+            },
+          ]
+        : [
+            { label: "Original total", totalCents: operation.previousTotalCents },
+            {
+              label: showCurrent ? "Current order total" : "Quoted total",
+              totalCents: operation.updatedTotalCents,
+            },
+          ];
+  const difference = payable
+    ? {
+        label:
+          operation.status === "ready"
+            ? "Payment required for these changes:"
+            : operation.status === "awaiting_payment"
+              ? "Amount still due:"
+              : "Payment difference:",
+        amountCents: operation.balanceDueCents,
+      }
+    : refundable
+      ? {
+          label:
+            operation.status === "ready"
+              ? "Refund for these changes:"
+              : "Refund difference:",
+          amountCents: operation.refundDueCents,
+        }
+      : operation.status === "ready"
+        ? { label: "No additional payment", amountCents: 0 }
+        : undefined;
   return (
     <Card>
       <CardHeader>
@@ -751,103 +828,18 @@ export function OrderEditOperationView({
             show their recorded status.
           </p>
         )}
-        <div className="divide-y rounded-md border">
-          {operation.lines.map((line) => (
-            <div key={line.id} className="flex items-center gap-3 p-3">
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium">{line.title}</p>
-                {line.variantTitle && (
-                  <p className="text-xs text-muted-foreground">
-                    {line.variantTitle}
-                  </p>
-                )}
-              </div>
-              <p className="text-sm">Qty {line.quantity}</p>
-              <p className="text-sm tabular-nums">{money(line.totalCents)}</p>
-            </div>
-          ))}
-        </div>
-        {operation.shippingRepricing &&
-          (!showCurrent || operation.status === "completed") && (
-            <div
-              className="rounded-md border p-4 text-sm"
-              aria-label="Recalculated shipping"
-            >
-              <p className="font-medium">
-                Recalculated shipping · {operation.shippingRepricing.title}
-              </p>
-              <dl className="mt-3 grid grid-cols-2 gap-2">
-                <dt>Current checkout rate</dt>
-                <dd className="text-right tabular-nums">
-                  {money(operation.shippingRepricing.grossCents)}
-                </dd>
-                {operation.shippingRepricing.discountCents > 0 && (
-                  <>
-                    <dt>
-                      {operation.shippingRepricing.discountLabels.join(", ") ||
-                        "Shipping benefit"}
-                    </dt>
-                    <dd className="text-right tabular-nums">
-                      −{money(operation.shippingRepricing.discountCents)}
-                    </dd>
-                  </>
-                )}
-                <dt className="font-medium">Shipping charged</dt>
-                <dd className="text-right font-medium tabular-nums">
-                  {money(operation.shippingRepricing.netCents)}
-                </dd>
-              </dl>
-            </div>
-          )}
-        {totalsColumns.length > 0 ? (
-          <OrderEditTotals columns={totalsColumns} />
-        ) : (
-          <dl className="ml-auto grid max-w-sm grid-cols-2 gap-x-4 gap-y-2 text-sm">
-            <dt>
-              {operation.quoteAvailable === false
-                ? "Current order total"
-                : "Original total"}
-            </dt>
-            <dd className="text-right tabular-nums">
-              {money(operation.previousTotalCents)}
-            </dd>
-            {operation.quoteAvailable !== false && (
-              <>
-                <dt>{showCurrent ? "Current order total" : "Quoted total"}</dt>
-                <dd className="text-right tabular-nums">
-                  {money(operation.updatedTotalCents)}
-                </dd>
-              </>
-            )}
-            {payable && (
-              <>
-                <dt className="font-semibold">Payment difference</dt>
-                <dd className="text-right font-semibold tabular-nums">
-                  {money(operation.balanceDueCents)}
-                </dd>
-              </>
-            )}
-            {refundable && (
-              <>
-                <dt className="font-semibold">Refund difference</dt>
-                <dd className="text-right font-semibold tabular-nums">
-                  {money(operation.refundDueCents)}
-                </dd>
-              </>
-            )}
-          </dl>
-        )}
-        {totalsColumns.length > 0 &&
-          operation.status === "ready" &&
-          (payable || refundable) && (
-            <p className="text-right text-sm font-semibold">
-              {payable
-                ? `Payment required for these changes: ${money(operation.balanceDueCents)}`
-                : `Refund for these changes: ${money(operation.refundDueCents)}`}
-            </p>
-          )}
+        <OrderEditItems lines={operation.lines} showAdded={!showCurrent} />
+        <OrderEditSummary totals={summaryTotals} difference={difference} />
+        <OrderEditCalculationDetails
+          columns={totalsColumns}
+          shipping={
+            !showCurrent || operation.status === "completed"
+              ? operation.shippingRepricing
+              : null
+          }
+        />
         {operation.settlement && (
-          <OrderEditPayments
+          <OrderEditPaymentDetails
             settlement={operation.settlement}
             pendingChanges={operation.status === "ready"}
           />

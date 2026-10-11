@@ -42,6 +42,12 @@ export const orderEditPreviewSchema = z
         z
           .object({
             id: z.string().min(1),
+            variantId: z
+              .string()
+              .regex(/^gid:\/\/shopify\/ProductVariant\/\d+$/)
+              .nullable()
+              .optional(),
+            added: z.boolean().optional(),
             title: z.string().min(1),
             variantTitle: z.string().nullable(),
             quantity: z.number().int().positive().safe(),
