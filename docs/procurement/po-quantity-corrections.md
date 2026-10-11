@@ -2,6 +2,8 @@
 
 Open the PO and choose **Edit PO**. Quantities, prices and line charges are prefilled. Edit the values you need, enter a reason or supplier reference, then choose **Review changes**. The review shows changed quantities and amounts, current and new PO totals, and receiving status. Confirm the review and choose **Approve & save PO**. Actions stay inside the modal while line details scroll.
 
+From an invoice, choose **Edit PO** beside the linked PO number. The same action is available in the invoice quantity correction dialog. It opens the PO editor directly and preserves the route back to the invoice. The separate **Correct invoice quantity** action still changes the invoice count only.
+
 An active user must have current system **Administrator** membership and an unrestricted `purchasing:approve` grant. Existing configured PO amount/role approval tiers apply to the new total. The administrator approves directly in this form. Session role strings cannot authorize the command.
 
 Product lines support editable piece quantities, product prices, packaging totals, discounts and taxes. Quantity changes keep the prefilled pricing basis: a piece price recalculates the product total; an exact product total recalculates the derived piece price; a purchase-unit quote requires whole purchase units. The administrator can switch between a piece price and a product total. Price-only edits are supported. Fee, tax, rebate, discount and adjustment lines have one editable charge/credit amount; identities and quantities stay fixed. Parsing and calculation use exact integer cents/mills and BigInt.

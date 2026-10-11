@@ -8,6 +8,7 @@ import {
   procurementRecordHref,
   procurementRecordLabel,
   procurementTabHref,
+  type ProcurementChildNavigationOptions,
 } from "@/lib/procurement-navigation";
 
 /** URL-backed document context works with browser history, reload and copied links. */
@@ -28,7 +29,7 @@ export function useProcurementNavigation() {
       const href = procurementTabHref(path, search, tab);
       if (href && tab !== current?.tab) navigate(href);
     },
-    childHref: (destination: string, options?: { replaceCurrent?: boolean }) => procurementChildHref(path, search, destination, options),
+    childHref: (destination: string, options?: ProcurementChildNavigationOptions) => procurementChildHref(path, search, destination, options),
     backHref: (fallback: string) => procurementBackHref(search, fallback),
     backLabel: parent ? `Back to ${procurementRecordLabel(parent)}` : null,
     purchaseHref: journey.purchase ? procurementRecordHref(journey.purchase) : null,
