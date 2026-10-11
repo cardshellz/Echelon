@@ -1,4 +1,5 @@
 import {
+  customType,
   bigint,
   bigserial,
   check,
@@ -109,3 +110,56 @@ export const ebayListingSyncEvents = channelsSchema.table(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   },
 );
+
+// Migration 0736 enforces immutable receipts and the atomic workflow/job fence.
+const xid8 = customType<{ data: string }>({ dataType: () => "xid8" });
+export const ebayListingMappingRepairs = channelsSchema.table("ebay_listing_mapping_repairs", {
+  commandKey: uuid("command_key").primaryKey().references(() => ebayListingSyncCommands.commandKey),
+  channelId: integer("channel_id").notNull().references(() => channels.id),
+  connectionId: integer("connection_id").notNull().references(() => channelConnections.id),
+  productId: integer("product_id").notNull().references(() => products.id),
+  environment: text("environment").notNull(),
+  requestHash: text("request_hash").notNull(),
+  reviewHash: text("review_hash").notNull(),
+  actor: text("actor").notNull(),
+  beforeIdentity: jsonb("before_identity").notNull(),
+  afterIdentity: jsonb("after_identity").notNull(),
+  queuedIdentity: jsonb("queued_identity").notNull(),
+  beforeRows: jsonb("before_rows").notNull(),
+  afterRows: jsonb("after_rows").notNull(),
+  observation: jsonb("observation").notNull(),
+  jobId: uuid("job_id").notNull().references(() => ebayListingSyncJobs.id),
+  appliedAt: timestamp("applied_at", { withTimezone: true }).notNull(),
+  ownerTransactionId: xid8("owner_transaction_id").notNull().default(sql`pg_current_xact_id()`),
+}, table => [
+  index("ebay_listing_mapping_repairs_product").on(table.channelId,table.productId,table.appliedAt.desc()),
+  check("ebay_listing_mapping_repairs_environment_check",sql`${table.environment} IN ('production','sandbox')`),
+  check("ebay_listing_mapping_repairs_request_hash_check",sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`),
+  check("ebay_listing_mapping_repairs_review_hash_check",sql`${table.reviewHash} ~ '^[a-f0-9]{64}$'`),
+  check("ebay_listing_mapping_repairs_actor_check",sql`length(btrim(${table.actor})) BETWEEN 1 AND 200`),
+  check("ebay_listing_mapping_repairs_before_identity_check",sql`jsonb_typeof(${table.beforeIdentity})='object'`),
+  check("ebay_listing_mapping_repairs_after_identity_check",sql`jsonb_typeof(${table.afterIdentity})='object'`),
+  check("ebay_listing_mapping_repairs_queued_identity_check",sql`jsonb_typeof(${table.queuedIdentity})='object'`),
+  check("ebay_listing_mapping_repairs_before_rows_check",sql`jsonb_typeof(${table.beforeRows})='array' AND jsonb_array_length(${table.beforeRows}) BETWEEN 1 AND 250`),
+  check("ebay_listing_mapping_repairs_after_rows_check",sql`jsonb_typeof(${table.afterRows})='array' AND jsonb_array_length(${table.afterRows})=jsonb_array_length(${table.beforeRows})`),
+  check("ebay_listing_mapping_repairs_observation_check",sql`jsonb_typeof(${table.observation})='object'`),
+]);
+
+export const ebayListingMappingRejections = channelsSchema.table("ebay_listing_mapping_rejections", {
+  commandKey: uuid("command_key").primaryKey(),
+  channelId: integer("channel_id").notNull().references(() => channels.id),
+  productId: integer("product_id").notNull().references(() => products.id),
+  requestHash: text("request_hash").notNull(),
+  reviewHash: text("review_hash").notNull(),
+  actor: text("actor").notNull(),
+  errorCode: text("error_code").notNull(),
+  errorMessage: text("error_message").notNull(),
+  rejectedAt: timestamp("rejected_at", { withTimezone: true }).notNull(),
+}, table => [
+  index("ebay_listing_mapping_rejections_product").on(table.channelId,table.productId,table.rejectedAt.desc()),
+  check("ebay_listing_mapping_rejections_request_hash_check",sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`),
+  check("ebay_listing_mapping_rejections_review_hash_check",sql`${table.reviewHash} ~ '^[a-f0-9]{64}$'`),
+  check("ebay_listing_mapping_rejections_actor_check",sql`length(btrim(${table.actor})) BETWEEN 1 AND 200`),
+  check("ebay_listing_mapping_rejections_error_code_check",sql`length(${table.errorCode}) BETWEEN 1 AND 100`),
+  check("ebay_listing_mapping_rejections_error_message_check",sql`length(${table.errorMessage}) BETWEEN 1 AND 1000`),
+]);

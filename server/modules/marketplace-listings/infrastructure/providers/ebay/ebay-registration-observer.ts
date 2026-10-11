@@ -32,6 +32,8 @@ import {
   type EbayRegistrationReadTransport,
 } from "./ebay-registration-contracts";
 
+import type { EbayListingInspection, EbayListingInspectionIssue, EbayListingInspectedSku } from "../../../domain/ebay-listing-inspection";
+
 const EBAY_PROVIDER = "ebay" as const;
 const DEFAULT_PAGE_SIZE = 200;
 const DEFAULT_MAX_PAGES = 1_000;
@@ -193,6 +195,56 @@ export class EbayMarketplaceRegistrationObserver
         );
     assertDistinctMemberIdentities(selected.members);
 
+    return this.publicationObservation(selected, providerAccount, credential, owner.marketplaceId);
+  }
+
+  /** Inspect every requested SKU using the same credential, pagination, and
+   * response validation as registration. This never guesses a Catalog group. */
+  async inspectExistingPublication(input: Omit<ObserveMarketplaceListingInput, "locator">): Promise<EbayListingInspection> {
+    const snapshot = parseObservationSnapshot({ owner: { ...input.owner }, memberCandidates: input.memberCandidates });
+    const owner = assertEbayOwner(snapshot.owner);
+    const credential = parseReadCredential(await this.credentials.loadFreshCredential(owner));
+    const providerAccount = await this.observeProviderAccount(credential);
+    const snapshots: ObservedSku[] = [];
+    const skus: EbayListingInspectedSku[] = [];
+    for (const candidate of snapshot.memberCandidates) {
+      try {
+        const observed = await this.observeSku(credential, owner.marketplaceId, candidate.sku);
+        snapshots.push(observed);
+        skus.push({ sku: candidate.sku, inventoryItemExists: observed.inventoryItem !== null,
+          offers: observed.offers.map(offer => ({ sku: offer.sku ?? null, offerId: offer.offerId, status: offer.status,
+            listingId: offer.listing?.listingId ?? null, listingStatus: offer.listing?.listingStatus ?? null })), issue: null });
+      } catch (error) {
+        skus.push({ sku: candidate.sku, inventoryItemExists: null, offers: [], issue: inspectionIssue(error) });
+      }
+    }
+    let publication: MarketplaceObservedListingPublication | null = null;
+    let publicationIssue: EbayListingInspectionIssue | null = null;
+    let groupKey: string | null = null;
+    let groupSkus: readonly string[] | null = null;
+    if (skus.every(member => member.issue === null)) {
+      try {
+        const listingId = resolveCoherentListingId(snapshots, null);
+        const selected = await this.discoverPublicationByListing(credential, owner.marketplaceId, listingId, snapshot.memberCandidates, new Map(snapshots.map(member => [member.sku, member])));
+        assertDistinctMemberIdentities(selected.members);
+        publication = this.publicationObservation(selected, providerAccount, credential, owner.marketplaceId);
+        groupKey = selected.groupKey;
+        groupSkus = selected.groupKey === null ? null : selected.groupVariantSkus;
+      } catch (error) {
+        publicationIssue = inspectionIssue(error);
+        groupKey = publicationIssue.groupKey ?? null;
+        groupSkus = publicationIssue.groupVariantSkus ?? null;
+      }
+    }
+    const observedAt = this.now();
+    if (!(observedAt instanceof Date) || Number.isNaN(observedAt.getTime()))
+      throw observationError("EBAY_REGISTRATION_CLOCK_INVALID", "The eBay registration observer clock returned an invalid timestamp.");
+    return { providerAccount, observedAt: new Date(observedAt), skus, publication, publicationIssue, groupKey, groupSkus };
+  }
+
+  private publicationObservation(selected: SelectedPublication, providerAccount: MarketplaceProviderAccountObservation,
+    credential: EbayRegistrationReadCredential, marketplaceId: string): MarketplaceObservedListingPublication {
+
     const observedAt = this.now();
     if (!(observedAt instanceof Date) || Number.isNaN(observedAt.getTime())) {
       throw observationError(
@@ -209,7 +261,7 @@ export class EbayMarketplaceRegistrationObserver
           externalId: member.offerId,
           identityNamespace: buildEbayRegistrationIdentityNamespace({
             environment: credential.environment,
-            marketplaceId: owner.marketplaceId,
+            marketplaceId,
             role: "offer",
           }),
         },
@@ -217,7 +269,7 @@ export class EbayMarketplaceRegistrationObserver
           externalId: member.sku,
           identityNamespace: buildEbayRegistrationIdentityNamespace({
             environment: credential.environment,
-            marketplaceId: owner.marketplaceId,
+            marketplaceId,
             role: "inventory_item",
           }),
         },
@@ -226,14 +278,14 @@ export class EbayMarketplaceRegistrationObserver
 
     return {
       providerAccount,
-      marketplaceId: owner.marketplaceId,
+      marketplaceId,
       publicationKeyIdentity: selected.groupKey === null
         ? null
         : {
             externalId: selected.groupKey,
             identityNamespace: buildEbayRegistrationIdentityNamespace({
               environment: credential.environment,
-              marketplaceId: owner.marketplaceId,
+              marketplaceId,
               role: "inventory_item_group",
             }),
           },
@@ -241,7 +293,7 @@ export class EbayMarketplaceRegistrationObserver
         externalId: selected.listingId,
         identityNamespace: buildEbayRegistrationIdentityNamespace({
           environment: credential.environment,
-          marketplaceId: owner.marketplaceId,
+          marketplaceId,
           role: "listing",
         }),
       },
@@ -250,7 +302,7 @@ export class EbayMarketplaceRegistrationObserver
       members,
       evidence: buildPublicationEvidence(
         credential.environment,
-        owner.marketplaceId,
+        marketplaceId,
         selected,
       ),
       observedAt: new Date(observedAt.getTime()),
@@ -317,6 +369,7 @@ export class EbayMarketplaceRegistrationObserver
       "variantSKUs",
       100,
     );
+    try {
     const observedSkus: ObservedSku[] = [];
     for (const sku of variantSkus) {
       const observed = await this.observeSku(
@@ -359,6 +412,11 @@ export class EbayMarketplaceRegistrationObserver
       groupVariantSkus: variantSkus,
       members,
     };
+    } catch (error) {
+      if (error instanceof MarketplaceListingRegistrationError)
+        throw observationError(error.code, error.message, { ...error.context, groupKey: normalizedGroupKey, groupVariantSkus: variantSkus });
+      throw error;
+    }
   }
 
   private async discoverPublicationByListing(
@@ -366,10 +424,11 @@ export class EbayMarketplaceRegistrationObserver
     marketplaceId: string,
     listingId: string,
     candidates: readonly ListingRegistrationVariantCandidate[],
+    inspectedSkus?: ReadonlyMap<string, ObservedSku>,
   ): Promise<SelectedPublication> {
     const matched: Array<{ observed: ObservedSku; member: SelectedMember }> = [];
     for (const candidate of candidates) {
-      const observed = await this.observeSku(
+      const observed = inspectedSkus?.get(candidate.sku) ?? await this.observeSku(
         credential,
         marketplaceId,
         candidate.sku,
@@ -702,15 +761,15 @@ function resolveCoherentListingId(
       255,
     );
   }
-  const listingIds = normalizeUniqueTexts(
+  // Group members normally repeat the same listing ID. Uniqueness applies to
+  // the distinct publications, not to each occurrence across variant offers.
+  const listingIds = [...new Set(
     observedSkus.flatMap(({ offers }) =>
       offers
         .filter((offer) => offer.status === "PUBLISHED" && offer.listing)
-        .map((offer) => offer.listing!.listingId)
+        .map((offer) => normalizeProviderText(offer.listing!.listingId, "listingId", 255))
     ),
-    "listingIds",
-    255,
-  );
+  )];
   if (listingIds.length !== 1) {
     throw observationError(
       "EBAY_REGISTRATION_LISTING_AMBIGUOUS",
@@ -915,6 +974,21 @@ function buildPublicationEvidence(
         groupIds: [...member.groupIds],
       }))
       .sort((left, right) => compareCanonicalText(left.sku, right.sku)),
+  };
+}
+
+function inspectionIssue(error: unknown): EbayListingInspectionIssue {
+  if (!(error instanceof MarketplaceListingRegistrationError)) return { code: "EBAY_REGISTRATION_PROVIDER_READ_UNAVAILABLE", message: "The eBay listing could not be read completely. Check the connection and retry." };
+  const context = error.context;
+  const safeText = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 255;
+  return { code: error.code, message: error.message,
+    ...(typeof context.status === "number" ? { status: context.status } : {}),
+    ...(safeText(context.sku) ? { sku: context.sku } : {}),
+    ...(safeText(context.listingId) ? { listingId: context.listingId } : {}),
+    ...(safeText(context.groupKey) ? { groupKey: context.groupKey } : {}),
+    ...(safeText(context.listingStatus) ? { listingStatus: context.listingStatus } : {}),
+    ...(Array.isArray(context.groupVariantSkus) && context.groupVariantSkus.length <= 10000 && context.groupVariantSkus.every(safeText)
+      ? { groupVariantSkus: context.groupVariantSkus } : {}),
   };
 }
 
