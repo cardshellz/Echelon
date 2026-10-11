@@ -7,6 +7,9 @@ import {
 
 export const ORDER_EDIT_API = "/api/order-edits/admin";
 export const ORDER_EDIT_PAGE = "/order-edits";
+// Response-only capability; it never grants editing or pricing authority.
+export const ORDER_EDIT_LINE_DISPLAY_HEADER = "X-Order-Edit-Line-Display";
+export const ORDER_EDIT_LINE_DISPLAY_VERSION = "variant-v1";
 // Operational input bound; the merchant must explicitly choose the payment window.
 export const MAX_ORDER_EDIT_PAYMENT_WINDOW_MINUTES = 7 * 24 * 60;
 const id = z.number().int().positive().safe();
@@ -196,9 +199,16 @@ export const orderEditOperationSchema = z
       z
         .object({
           id: z.string(),
+          // Older saved responses may lack catalog identity; keep those rows separate.
+          variantId: z
+            .string()
+            .regex(/^gid:\/\/shopify\/ProductVariant\/\d+$/)
+            .nullable()
+            .optional(),
+          added: z.boolean().optional(),
           title: z.string(),
           variantTitle: z.string().nullable(),
-          quantity: z.number().int().nonnegative(),
+          quantity: z.number().int().nonnegative().safe(),
           totalCents: money,
         })
         .strict(),

@@ -110,9 +110,9 @@ async function failure(promise: Promise<unknown>): Promise<DropshipError> {
   return error as DropshipError;
 }
 
-/** The 0737 revision columns in table order, the generated identity left out. */
+/** The 0738 revision columns in table order, the generated identity left out. */
 function migrationRevisionColumns(): string[] {
-  const sql = readFileSync(resolve(process.cwd(), "migrations/0737_dropship_category_listing_settings.sql"), "utf8");
+  const sql = readFileSync(resolve(process.cwd(), "migrations/0738_dropship_category_listing_settings.sql"), "utf8");
   const body = /CREATE TABLE IF NOT EXISTS dropship\.dropship_category_listing_setting_revisions \(([\s\S]*?)\n\);/.exec(sql)?.[1] ?? "";
   return body.split("\n").map((line) => /^\s+([a-z_]+) (integer|bigint|varchar|text|jsonb|timestamptz)\b/.exec(line)?.[1])
     .filter((column): column is string => column !== undefined && column !== "id");

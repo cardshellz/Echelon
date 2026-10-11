@@ -64,7 +64,7 @@ function storedRow(id: string, kind: string, input: unknown): StoredRow {
   return { id, vendor_id: 10, store_connection_id: 44, kind, input, rows: [], review_hash: "a".repeat(64), created_at: NOW };
 }
 
-describe("PgDropshipPricingRulesRepository store default review loader (migration 0738)", () => {
+describe("PgDropshipPricingRulesRepository store default review loader (migration 0739)", () => {
   it("asks only for store default reviews, with today's three parameters, inside today's transaction", async () => {
     const client = new ScriptedClient();
     client.stored.push(storedRow(STORE_REVIEW_ID, "store_default", storeReview.input));
@@ -103,7 +103,7 @@ describe("PgDropshipPricingRulesRepository store default review loader (migratio
     expect(client.sql.at(-1)).toBe("ROLLBACK");
   });
 
-  it("stores a review without naming a kind, as code deployed before 0738 does, so the column default records it", async () => {
+  it("stores a review without naming a kind, as code deployed before 0739 does, so the column default records it", async () => {
     const client = new ScriptedClient();
 
     await repositoryFor(client).execute("member-1", 44, (tx) => tx.storeReview(storeReview));

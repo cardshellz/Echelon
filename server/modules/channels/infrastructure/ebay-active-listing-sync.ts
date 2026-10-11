@@ -54,6 +54,7 @@ import {
   resolveChannelPrice,
   delay,
 } from "./ebay-listing-helpers";
+import type { EbayListingMappingSource } from "../ebay-listing-mapping.service";
 export interface SyncFilter {
   productIds?: number[];
   productTypeSlugs?: string[];
@@ -67,7 +68,8 @@ const filterSchema = z
   })
   .strict()
   .nullable();
-async function readActiveEbaySyncRows(filter: SyncFilter | null, allSavedMembers = false) {
+type EbayListingReadDatabase = Pick<typeof db, "select">;
+async function readActiveEbaySyncRows(filter: SyncFilter | null, allSavedMembers = false, readDb: EbayListingReadDatabase = db) {
   // Build the filter clause for active listings. Do not filter variants by
   // catalog or eBay listing state here: sold variants must remain in an
   // existing variation group even when they are no longer sellable.
@@ -104,7 +106,7 @@ async function readActiveEbaySyncRows(filter: SyncFilter | null, allSavedMembers
   }
 
   // Get all synced listings with their product/variant data
-  return await db
+  return await readDb
     .select({
       listing_id: channelListings.id,
       product_variant_id: channelListings.productVariantId,
@@ -178,15 +180,14 @@ async function readActiveEbaySyncRows(filter: SyncFilter | null, allSavedMembers
       asc(productVariants.id),
     );
 }
-async function context() {
-  const authService = getAuthService();
+async function context(readDb: EbayListingReadDatabase = db, authService = getAuthService()) {
   if (!authService)
     throw new EbayListingSyncError(
       "EBAY_SYNC_AUTH_REQUIRED",
       "eBay OAuth is not configured.",
     );
   const account = await authService.getVerifiedProviderAccount(EBAY_CHANNEL_ID);
-  const connections = await db
+  const connections = await readDb
     .select()
     .from(channelConnections)
     .where(eq(channelConnections.channelId, EBAY_CHANNEL_ID))
@@ -223,6 +224,25 @@ function identityFromRows(
     accountId: ctx.account.externalAccountId,
     marketplaceId: ctx.marketplaceId,
   });
+}
+/** Shared complete source snapshot for diagnosis and transaction-fenced repair.
+ * The optional database is the caller's transaction, never a provider writer. */
+interface MappingSourceReadOptions { database?: EbayListingReadDatabase; authService?: ReturnType<typeof getAuthService> }
+export async function readExistingEbayListingMappingIdentity(productId: number, options: MappingSourceReadOptions = {}) {
+  z.number().int().positive().max(2147483647).parse(productId);
+  const readDb = options.database ?? db;
+  const ctx = await context(readDb, options.authService === undefined ? getAuthService() : options.authService);
+  const rows = await readActiveEbaySyncRows({ productIds: [productId] }, true, readDb);
+  return { identity: identityFromRows(rows, ctx), environment: ctx.authService.getEnvironment(), rows };
+}
+export async function readExistingEbayListingMappingSource(productId: number, options: MappingSourceReadOptions = {}): Promise<EbayListingMappingSource> {
+  const snapshot = await readExistingEbayListingMappingIdentity(productId, options);
+  const availability = await atpService.getAtpPerVariant(productId);
+  const byVariantId = new Map(availability.map(member => [member.productVariantId, member.atpUnits]));
+  return { identity: snapshot.identity, environment: snapshot.environment,
+    candidates: snapshot.identity.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku,
+      isActive: snapshot.rows.find(row => row.variant_id === member.variantId)!.variant_is_active,
+      availableQuantity: byVariantId.get(member.variantId) ?? 0 })) };
 }
 async function readExistingEbayIdentitySnapshot(productId: number, expected?: EbayListingSyncIdentity) {
   const ctx = await context(),

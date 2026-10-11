@@ -23,7 +23,7 @@ import { listingSettingsInvariantFailed } from "../domain/listing-setting-values
 /**
  * What the product and category listing-settings writers share (plan PR 8a,
  * section 3.8): one mapping each way between stored values and the revision
- * columns of migrations 0736 and 0737, and the request ledger. Every function
+ * columns of migrations 0737 and 0738, and the request ledger. Every function
  * takes the caller's transaction client, assumes the caller holds the locks
  * (plan 3.9) and takes none itself. Repositories do not log; PR 9's services do.
  */
@@ -38,7 +38,7 @@ export interface ListingSettingWriteScope {
   requestKey: string;
 }
 
-/** The value columns both revision tables have, in table order (0736, 0737). */
+/** The value columns both revision tables have, in table order (0737, 0738). */
 export const CATEGORY_LISTING_SETTING_VALUE_COLUMNS = [
   "price_basis", "price_markup_bps", "price_flat_cents", "price_rounding",
   "ebay_category_id", "ebay_category_name", "ebay_category_path",
@@ -49,7 +49,7 @@ export const CATEGORY_LISTING_SETTING_VALUE_COLUMNS = [
   "text_above_mode", "text_above",
   "text_below_mode", "text_below",
 ] as const;
-/** Product revisions add the main text (0736 only). */
+/** Product revisions add the main text (0737 only). */
 export const PRODUCT_LISTING_SETTING_VALUE_COLUMNS = [
   ...CATEGORY_LISTING_SETTING_VALUE_COLUMNS, "body_text", "body_catalog_hash",
 ] as const;
@@ -329,7 +329,7 @@ interface ListingSettingRequestRow {
 }
 
 const REQUEST_HASH_PATTERN = /^[a-f0-9]{64}$/;
-/** = the varchar(255) actor_id columns (0736, 0737). Checked in UTF-16 code units, which never count fewer than PostgreSQL's characters. */
+/** = the varchar(255) actor_id columns (0737, 0738). Checked in UTF-16 code units, which never count fewer than PostgreSQL's characters. */
 export const MAX_LISTING_SETTING_ACTOR_ID_LENGTH = 255;
 
 /** The request an earlier call with this key wrote, or null. No lock: rows never change, and the caller holds the request-key lock. */

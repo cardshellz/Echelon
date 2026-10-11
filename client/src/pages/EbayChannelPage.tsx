@@ -74,6 +74,7 @@ import { AspectEditor } from "@/components/ebay/AspectEditor";
 import { PushProgressModal } from "@/components/ebay/PushProgressModal";
 import { SyncProgressModal } from "@/components/ebay/SyncProgressModal";
 import { EbayListingIssueCard } from "@/components/ebay/EbayListingIssueCard";
+import { EbayMappingRepairDialog } from "@/components/ebay/EbayMappingRepairDialog";
 import { EbaySyncRecoveryDialog } from "@/components/ebay/EbaySyncRecoveryDialog";
 import { MarketplaceListingRegistrationDialog } from "@/components/marketplace/MarketplaceListingRegistrationDialog";
 import { MarketplaceListingChangesDialog } from "@/components/marketplace/MarketplaceListingChangesDialog";
@@ -2912,16 +2913,31 @@ export default function EbayChannelPage() {
 
       <EbaySyncRecoveryDialog
         jobId={recoveryTarget?.jobId ?? null}
-        productId={recoveryTarget?.productId ?? null}
+        productId={recoveryTarget?.mode === "recovery" ? recoveryTarget.productId : null}
         productName={recoveryTarget?.name ?? ""}
         issue={recoveryTarget?.issue ?? null}
-        mode={recoveryTarget?.mode ?? "recovery"}
         onIssueAction={handleIssueAction}
         onClose={() => setRecoveryTarget(null)}
         checking={recoveryTarget ? syncingProductIds.has(recoveryTarget.productId) : false}
         onRecheck={() => { if (recoveryTarget) { if (recoveryTarget.jobId) handleSyncProduct(recoveryTarget.productId); else handlePushSingle(recoveryTarget.productId); } }}
         onRecovered={() => { if (recoveryTarget) setLocalSyncIssues((previous) => { const next = new Map(previous); next.delete(recoveryTarget.productId); return next; }); }}
       />
+
+      {recoveryTarget?.mode === "mapping" && <EbayMappingRepairDialog
+        key={recoveryTarget.productId}
+        productId={recoveryTarget.productId}
+        productName={recoveryTarget.name}
+        onClose={() => setRecoveryTarget(null)}
+        onIssueAction={handleIssueAction}
+        onQueued={(job) => setLocalSyncIssues((previous) => { const next = new Map(previous); next.delete(job.productId); return next; })}
+        onReviewRegisteredListing={async () => {
+          const currentFeed = await refetchFeed();
+          const product = currentFeed.data?.feed.find((item) => item.id === recoveryTarget.productId);
+          if (currentFeed.isError || !product) throw new Error("The current product could not be loaded for listing review.");
+          setRecoveryTarget(null);
+          setListingChangesTarget(product);
+        }}
+      />}
 
       {/* Push Progress Modal (SSE-based) */}
       <PushProgressModal

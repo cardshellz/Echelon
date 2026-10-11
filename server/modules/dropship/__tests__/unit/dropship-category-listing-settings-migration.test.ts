@@ -20,10 +20,10 @@ import {
   MAX_LISTING_SETTING_ACTOR_ID_LENGTH,
 } from "../../infrastructure/dropship-listing-setting-shared.repository";
 
-const MIGRATION_FILE = "0737_dropship_category_listing_settings.sql";
+const MIGRATION_FILE = "0738_dropship_category_listing_settings.sql";
 const migrationSql = readFileSync(resolve(process.cwd(), "migrations", MIGRATION_FILE), "utf8");
 /** The product settings migration, whose value CHECKs the category revisions repeat. */
-const productMigrationSql = readFileSync(resolve(process.cwd(), "migrations/0736_dropship_product_listing_settings.sql"), "utf8");
+const productMigrationSql = readFileSync(resolve(process.cwd(), "migrations/0737_dropship_product_listing_settings.sql"), "utf8");
 
 const REVISIONS_TABLE = "dropship.dropship_category_listing_setting_revisions";
 const SETTINGS_TABLE = "dropship.dropship_category_listing_settings";
@@ -73,9 +73,9 @@ const DRIZZLE_TABLES: ReadonlyArray<readonly [string, PgTable]> = [
   [MARKS_TABLE, dropshipProductCategorySeen],
 ];
 
-describe("0737 dropship category listing settings migration", () => {
+describe("0738 dropship category listing settings migration", () => {
   it("is the only migration with its number", () => {
-    const sameNumber = readdirSync(resolve(process.cwd(), "migrations")).filter((file) => file.startsWith("0737_"));
+    const sameNumber = readdirSync(resolve(process.cwd(), "migrations")).filter((file) => file.startsWith("0738_"));
     expect(sameNumber).toEqual([MIGRATION_FILE]);
   });
 
@@ -164,7 +164,7 @@ describe("0737 dropship category listing settings migration", () => {
         expect(expression, purpose).toBeDefined();
         expect(category.get(`dropship_category_listing_setting_revision_${purpose}_chk`), purpose).toBe(expression);
       }
-      // The corrected forms (no NULL CHECK result), as 0736 pins them.
+      // The corrected forms (no NULL CHECK result), as 0737 pins them.
       expect(category.get("dropship_category_listing_setting_revision_price_chk")).toMatch(/^num_nonnulls\(/);
       expect(category.get("dropship_category_listing_setting_revision_ebay_category_chk")).toMatch(/^num_nonnulls\(/);
       expect(category.get("dropship_category_listing_setting_revision_shelf_chk")).toContain("shelf_mode IS NOT NULL AND shelf_mode = 'own'");
@@ -312,7 +312,7 @@ describe("0737 dropship category listing settings migration", () => {
       expect(name, name).toMatch(/^[a-z_]+$/);
     }
     expect(new Set(names).size).toBe(names.length);
-    // Nothing collides with 0736's names either (constraint and index names share the schema).
+    // Nothing collides with 0737's names either (constraint and index names share the schema).
     const productNames = new Set(objectNames(productMigrationSql));
     expect(names.filter((name) => productNames.has(name))).toEqual([]);
     expect(triggers(migrationSql).map((trigger) => trigger.fn)).toEqual([
@@ -365,7 +365,7 @@ describe("0737 dropship category listing settings migration", () => {
   });
 });
 
-describe("Drizzle declarations of the 0737 tables", () => {
+describe("Drizzle declarations of the 0738 tables", () => {
   it("declare each table on the dropship schema under the migration's name", () => {
     for (const [table, drizzle] of DRIZZLE_TABLES) {
       const config = getTableConfig(drizzle);
@@ -404,7 +404,7 @@ describe("Drizzle declarations of the 0737 tables", () => {
 });
 
 // ---------------------------------------------------------------------------
-// SQL text helpers (each takes the migration text, so 0736 can be read too)
+// SQL text helpers (each takes the migration text, so 0737 can be read too)
 
 function sqlList(values: readonly string[]): string {
   return values.map((value) => `'${value}'`).join(", ");

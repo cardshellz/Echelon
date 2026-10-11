@@ -15,6 +15,7 @@ export function listingFailureStatus(error: unknown): number {
   if (error instanceof z.ZodError) return 400;
   const code = error instanceof Error && 'code' in error ? error.code : null;
   if (code === 'EBAY_SYNC_JOB_NOT_FOUND') return 404;
+  if (code === 'EBAY_MAPPING_REPAIR_UNSAFE' || code === 'EBAY_MAPPING_SOURCE_INVALID' || code === 'EBAY_MAPPING_PRODUCT_NOT_ELIGIBLE') return 409;
   if (typeof code === 'string' && /CONFLICT|CHANGED|BUSY|STALE|SCOPE|RECOVERY/.test(code)) return 409;
   return 500;
 }

@@ -35,7 +35,7 @@ import {
 
 /**
  * A vendor's listing settings for one Card Shellz category (W12, plan PR 8a
- * section 3.8; migration 0737). Keyed by catalog.product_categories.id, never
+ * section 3.8; migration 0738). Keyed by catalog.product_categories.id, never
  * by name: the revision keeps the name at save for the audit trail, readers
  * show the live one (plan D19).
  *
@@ -57,7 +57,7 @@ const REQUEST_HASH_PATTERN = /^[a-f0-9]{64}$/;
 /** Issue paths and codes only: a vendor's own text never goes into an error. */
 const MAX_REPORTED_ISSUES = 10;
 
-/** The revision's value columns, in table order (0737), as the joined `r.` columns. */
+/** The revision's value columns, in table order (0738), as the joined `r.` columns. */
 const REVISION_VALUE_COLUMNS_SQL = CATEGORY_LISTING_SETTING_VALUE_COLUMNS.map((column) => `r.${column}`).join(", ");
 
 const REVISION_INSERT_COLUMNS = [
@@ -163,7 +163,7 @@ export async function saveCategoryListingSettingWithClient(
     categoryId: input.categoryId, categoryName, previousRevisionId: actualRevisionId, values: after,
     requestHash: input.requestHash, now: input.now,
   });
-  // The coherence trigger (0737) refuses a revision whose predecessor is not the current row.
+  // The coherence trigger (0738) refuses a revision whose predecessor is not the current row.
   await client.query(
     `INSERT INTO dropship.dropship_category_listing_settings (vendor_id, store_connection_id, category_id, revision_id)
      VALUES ($1, $2, $3, $4)

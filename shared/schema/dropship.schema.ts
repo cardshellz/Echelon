@@ -941,7 +941,7 @@ export const dropshipListingPriceSettings = dropshipSchema.table("dropship_listi
 
 /**
  * The value columns product and category listing setting revisions share
- * (migrations 0736, 0737), in the migrations' column order. A null value
+ * (migrations 0737, 0738), in the migrations' column order. A null value
  * follows the default. A function, because a Drizzle column belongs to one table.
  */
 function listingSettingValueColumns() {
@@ -1020,7 +1020,7 @@ function listingSettingValueChecks(prefix: string, table: ListingSettingValueTab
 
 /**
  * Append-only ledger of keyed many-products listing setting requests
- * (migration 0736): one row per vendor and request key, so a retried request
+ * (migration 0737): one row per vendor and request key, so a retried request
  * is answered from its first outcome. A trigger refuses UPDATE and DELETE.
  */
 export const dropshipProductListingSettingRequests = dropshipSchema.table("dropship_product_listing_setting_requests", {
@@ -1050,7 +1050,7 @@ export const dropshipProductListingSettingRequests = dropshipSchema.table("drops
   check("dropship_product_listing_setting_requests_actor_id_chk", sql`btrim(${table.actorId}) <> ''`),
 ]);
 
-/** Immutable revisions of a vendor's own listing settings for one product (migration 0736). */
+/** Immutable revisions of a vendor's own listing settings for one product (migration 0737). */
 export const dropshipProductListingSettingRevisions = dropshipSchema.table("dropship_product_listing_setting_revisions", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
@@ -1096,7 +1096,7 @@ export const dropshipProductListingSettingRevisions = dropshipSchema.table("drop
   index("dropship_product_listing_setting_revision_request_idx").on(table.requestId).where(sql`${table.requestId} IS NOT NULL`),
 ]);
 
-/** The current product listing settings: a pointer to the revision in force (migration 0736). */
+/** The current product listing settings: a pointer to the revision in force (migration 0737). */
 export const dropshipProductListingSettings = dropshipSchema.table("dropship_product_listing_settings", {
   vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
   storeConnectionId: integer("store_connection_id").notNull(),
@@ -1114,7 +1114,7 @@ export const dropshipProductListingSettings = dropshipSchema.table("dropship_pro
   index("dropship_product_listing_setting_vendor_idx").on(table.vendorId, table.storeConnectionId),
 ]);
 
-/** Immutable revisions of a vendor's listing settings for one Card Shellz category (migration 0737). */
+/** Immutable revisions of a vendor's listing settings for one Card Shellz category (migration 0738). */
 export const dropshipCategoryListingSettingRevisions = dropshipSchema.table("dropship_category_listing_setting_revisions", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
@@ -1149,7 +1149,7 @@ export const dropshipCategoryListingSettingRevisions = dropshipSchema.table("dro
   index("dropship_category_listing_setting_revision_target_idx").on(table.storeConnectionId, table.categoryId, table.id),
 ]);
 
-/** The current category listing settings: a pointer to the revision in force (migration 0737). */
+/** The current category listing settings: a pointer to the revision in force (migration 0738). */
 export const dropshipCategoryListingSettings = dropshipSchema.table("dropship_category_listing_settings", {
   vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
   storeConnectionId: integer("store_connection_id").notNull(),
@@ -1169,7 +1169,7 @@ export const dropshipCategoryListingSettings = dropshipSchema.table("dropship_ca
 ]);
 
 /**
- * Category marks (migration 0737): the Card Shellz category each chosen
+ * Category marks (migration 0738): the Card Shellz category each chosen
  * product was in when the vendor last confirmed it (null = no category).
  * Derived history with no foreign key to any catalog table; a trigger refuses
  * DELETE, identity changes and seen_at moving back.

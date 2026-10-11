@@ -191,6 +191,40 @@ beforeEach(() => {
 });
 
 describe("order financial presentation", () => {
+  it("consolidates protected SKU lines without losing their differently allocated discounts", () => {
+    const html = renderOperation({
+      ...operation,
+      lines: [
+        { ...operation.lines[0], id: "original", variantId: "gid://shopify/ProductVariant/345", quantity: 1, totalCents: 10099, added: false },
+        { ...operation.lines[0], id: "increase", variantId: "gid://shopify/ProductVariant/345", quantity: 1, totalCents: 11999, added: false },
+        { ...operation.lines[0], id: "new", variantId: "gid://shopify/ProductVariant/346", title: "New product", quantity: 1, totalCents: 399, added: true },
+      ],
+    });
+    const items = html.match(/<section aria-label="Items in your order">(.*?)<\/section>/)?.[1];
+    expect(items).toBeDefined();
+    expect(items!.match(/<li /g)).toHaveLength(2);
+    expect(items).toContain("Qty 2");
+    expect(items).toContain("$220.98");
+    expect(items!.match(/Added/g)).toHaveLength(1);
+  });
+
+  it("keeps the full financial and payment details collapsed while the server's total and payment difference stay visible", () => {
+    const html = renderOperation({
+      ...operation,
+      financials: { before: discountedFinancials, quoted: discountedFinancials, current: discountedFinancials },
+      settlement: { receivedCents: 1000, refundedCents: 0, netPaidCents: 1000, outstandingCents: 0, activity: [] },
+    });
+    const details = html.match(/<details[^>]*>/g);
+    expect(details).toHaveLength(2);
+    expect(details!.every((tag) => !tag.includes("open="))).toBe(true);
+    const summary = html.match(/<section aria-label="Order summary".*?<\/section>/)?.[0];
+    expect(summary).toContain("$107.96");
+    expect(summary).toContain("Payment required for these changes:");
+    expect(summary).toContain("$10.00");
+    expect(html).toContain("Discounts, shipping and tax");
+    expect(html).toContain("Payments and refunds");
+  });
+
   it("shows each percentage code and fixed credit with its exact before/after amount", () => {
     const before: OrderEditFinancials = {
       ...discountedFinancials,
@@ -320,7 +354,7 @@ describe("order financial presentation", () => {
       "$112.45",
     ])
       expect(html).toContain(amount);
-    expect(html).toContain("Payment required for these changes: $4.49");
+    expect(html.replace(/<[^>]*>/g, "")).toContain("Payment required for these changes: $4.49");
   });
   it("shows received payments, issued refunds, pending history, and remaining balance separately", () => {
     const html = renderOperation({
@@ -611,7 +645,7 @@ describe("verified order edit review", () => {
       refundDueCents: 500,
     });
     expect(html).toContain("Apply changes and refund $5.00");
-    expect(html).toContain("Refund difference");
+    expect(html).toContain("Refund for these changes:");
     const pending = renderOperation({
       ...operation,
       status: "refunding",

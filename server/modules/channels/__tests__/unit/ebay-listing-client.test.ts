@@ -41,6 +41,16 @@ describe("eBay inventory group read response contract", () => {
     expect(failure).toMatchObject({ code: "EBAY_SYNC_PROVIDER_RESPONSE_INVALID", issue: { action: { kind: "review_mapping" } } });
     expect(JSON.stringify(failure)).not.toContain("secret-provider-value");
   });
+  it.each([undefined, null, "", "  ", 42])("classifies an absent or invalid echoed SKU as invalid provider evidence, not a mapping mismatch: %s", sku => {
+    expect(() => normalizeEbayObservedOffers({ offers: [{ sku, offerId: "offer", status: "PUBLISHED", listing: { listingId: "listing" } }] }))
+      .toThrowError(expect.objectContaining({ code: "EBAY_SYNC_PROVIDER_RESPONSE_INVALID" }));
+  });
+  it("preserves the returned identity and refuses conflicting listing identifiers", () => {
+    expect(normalizeEbayObservedOffers({ offers: [{ sku: "SKU", offerId: "offer", status: "PUBLISHED", listing: { listingId: "listing" } }] }))
+      .toEqual([{ sku: "SKU", offerId: "offer", status: "PUBLISHED", listingId: "listing", listing: { listingId: "listing" } }]);
+    expect(() => normalizeEbayObservedOffers({ offers: [{ sku: "SKU", offerId: "offer", status: "PUBLISHED", listingId: "different", listing: { listingId: "listing" } }] }))
+      .toThrowError(expect.objectContaining({ code: "EBAY_SYNC_PROVIDER_RESPONSE_INVALID" }));
+  });
   it.each([null, {}, { offerId: 42 }, { offerId: " " }])("classifies incomplete offer creation without claiming creation failed", async response => {
     api.request.mockResolvedValue(response);
     const admission: EbayQuantityRequestAdmission = { item: async (_sku, work) => work(0), group: async (_key, _skus, work) => work(new Map()), reducing: async (_identity, work) => work() };

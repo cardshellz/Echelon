@@ -300,6 +300,29 @@ export function serviceHarness(
 }
 
 describe("private order edit orchestration", () => {
+  it("presents verified variant identities and marks only a new product added, keeping Shopify source lines intact", async () => {
+    const h = serviceHarness();
+    const originalQuote = await h.provider.quote.getMockImplementation()!();
+    const sourceLine = originalQuote.lines[0];
+    const lines = [
+      { ...sourceLine, quantity: 2, totalCents: 2000 },
+      { ...sourceLine, calculatedLineId: "gid://shopify/CalculatedLineItem/2", originalLineId: null, quantity: 1, totalCents: 1000 },
+      { ...sourceLine, calculatedLineId: "gid://shopify/CalculatedLineItem/3", originalLineId: null, variantId: "gid://shopify/ProductVariant/20", quantity: 1, totalCents: 5000 },
+    ];
+    h.provider.quote.mockResolvedValueOnce({ ...originalQuote, lines, totalCents: 8000, outstandingCents: 6000, deltaCents: 6000 });
+    const result = await h.service.quote({
+      ...h.input,
+      additions: [{ variantId: "gid://shopify/ProductVariant/20", quantity: 1 }],
+    }, "staff");
+    expect(result.lines.map(({ id, variantId, added, quantity, totalCents }) => ({ id, variantId, added, quantity, totalCents }))).toEqual([
+      { id: sourceLine.calculatedLineId, variantId: "gid://shopify/ProductVariant/10", added: false, quantity: 2, totalCents: 2000 },
+      { id: "gid://shopify/CalculatedLineItem/2", variantId: "gid://shopify/ProductVariant/10", added: false, quantity: 1, totalCents: 1000 },
+      { id: "gid://shopify/CalculatedLineItem/3", variantId: "gid://shopify/ProductVariant/20", added: true, quantity: 1, totalCents: 5000 },
+    ]);
+    expect(h.record().quote!.lines).toEqual(lines);
+    expect(h.provider.commit).not.toHaveBeenCalled();
+  });
+
   it("validates the connection before catalog discovery without changing orders, holds or money", async () => {
     const pageInfo = { hasNextPage: false, endCursor: null };
     const catalog = {

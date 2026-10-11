@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PRICING_REVIEW_KINDS as SHARED_PRICING_REVIEW_KINDS, type PricingReviewKind } from "../../../../../shared/dropship/pricing-rules";
 
-const MIGRATION_FILE = "0738_dropship_pricing_review_kind.sql";
+const MIGRATION_FILE = "0739_dropship_pricing_review_kind.sql";
 const migrationSql = readFileSync(resolve(process.cwd(), "migrations", MIGRATION_FILE), "utf8");
 const REVIEWS_TABLE = "dropship.dropship_pricing_reviews";
 
@@ -14,9 +14,9 @@ const PRICING_REVIEW_KINDS = ["store_default", "category_price", "product_prices
 type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 const kindsMatchTheContract: Exact<typeof PRICING_REVIEW_KINDS[number], PricingReviewKind> = true;
 
-describe("0738 dropship pricing review kind migration", () => {
+describe("0739 dropship pricing review kind migration", () => {
   it("is the only migration with its number", () => {
-    expect(readdirSync(resolve(process.cwd(), "migrations")).filter((file) => file.startsWith("0738_"))).toEqual([MIGRATION_FILE]);
+    expect(readdirSync(resolve(process.cwd(), "migrations")).filter((file) => file.startsWith("0739_"))).toEqual([MIGRATION_FILE]);
   });
 
   it("is exactly: add the kind column with its default, then drop and add its CHECK", () => {

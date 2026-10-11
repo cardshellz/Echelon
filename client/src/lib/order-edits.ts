@@ -23,6 +23,8 @@ import {
 import {
   ORDER_EDIT_API,
   ORDER_EDIT_PAGE,
+  ORDER_EDIT_LINE_DISPLAY_HEADER,
+  ORDER_EDIT_LINE_DISPLAY_VERSION,
   orderEditStateSchema,
   orderEditSettingsInputSchema,
   orderEditConnectionSchema,
@@ -95,6 +97,7 @@ export async function orderEditRequest<T>(
     );
   const mutation = method !== "GET" && !options.calculationOnly;
   const headers = new Headers({ Accept: "application/json" });
+  headers.set(ORDER_EDIT_LINE_DISPLAY_HEADER, ORDER_EDIT_LINE_DISPLAY_VERSION);
   if (options.body !== undefined)
     headers.set("Content-Type", "application/json");
   if (options.key !== undefined)

@@ -29,8 +29,8 @@ const PRIOR_MIGRATIONS = [
   "0735_dropship_listing_price_inherit_mode.sql",
 ];
 const PR8_MIGRATIONS = [
-  "0736_dropship_product_listing_settings.sql", "0737_dropship_category_listing_settings.sql",
-  "0738_dropship_pricing_review_kind.sql",
+  "0737_dropship_product_listing_settings.sql", "0738_dropship_category_listing_settings.sql",
+  "0739_dropship_pricing_review_kind.sql",
 ];
 
 /**
@@ -89,7 +89,7 @@ const OWN_SHELF: ProductListingSettingBulkPatch = { storeShelf: { mode: "own", s
 
 type Row = Record<string, unknown>;
 
-describeDatabase.sequential("product and category listing settings (migrations 0736-0738) on PostgreSQL", () => {
+describeDatabase.sequential("product and category listing settings (migrations 0737-0739) on PostgreSQL", () => {
   const schema = `dropship_listing_setting_writes_${process.pid}`;
   let pool: pg.Pool;
   let created = false;
@@ -335,7 +335,7 @@ describeDatabase.sequential("product and category listing settings (migrations 0
     `);
   });
 
-  it("applies 0736, 0737 and 0738 again without changing a constraint, trigger, index or column", async () => {
+  it("applies 0737, 0738 and 0739 again without changing a constraint, trigger, index or column", async () => {
     const before = await schemaInventory();
     for (const file of PR8_MIGRATIONS) await execute(migration(file));
     expect(await schemaInventory()).toBe(before);
@@ -861,7 +861,7 @@ describeDatabase.sequential("product and category listing settings (migrations 0
       .toEqual([{ entity_id: "101", event_type: "listing_price_saved", actor_type: "vendor", actor_id: MEMBER }]);
   });
 
-  it("keeps the store pricing review loader to store default reviews (0738)", async () => {
+  it("keeps the store pricing review loader to store default reviews (0739)", async () => {
     const storeReviewId = "1f6f2b0e-6c55-4a39-9a51-6f1f0f6f5b10";
     const productReviewId = "2a7e3c1f-7d66-4b4a-8b62-7a2a1a7a6c21";
     const input = { expectedRevisionId: null, releaseFixedOverrides: false,

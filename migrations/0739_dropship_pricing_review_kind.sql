@@ -1,4 +1,4 @@
--- 0738: a kind on each stored price review (Listing settings redesign, M4 /
+-- 0739: a kind on each stored price review (Listing settings redesign, M4 /
 -- PR 8): store_default (a store default price change, today's only kind),
 -- category_price (one Card Shellz category) and product_prices (many
 -- products). The kind is a column, never part of the hashed input, because

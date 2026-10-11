@@ -23,6 +23,7 @@ export default defineConfig({
     "catalog-images.spec.ts",
     "ebay-listing-photos.spec.ts",
     "ebay-listing-sync-recovery.spec.ts",
+    "ebay-listing-mapping-repair.spec.ts",
   ],
   fullyParallel: false,
   workers: 1,

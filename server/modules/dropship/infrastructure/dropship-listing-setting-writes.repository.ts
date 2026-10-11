@@ -77,7 +77,7 @@ const CATEGORY_LOCK_SQL = "SELECT id FROM catalog.product_categories WHERE id = 
 const PRODUCT_LOCK_SQL = "SELECT id FROM catalog.products WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
 const VARIANT_LOCK_SQL = "SELECT id FROM catalog.product_variants WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
 
-/** The request-key unique constraints of 0736 and 0737; a 23505 on any other constraint is not a key reuse and is rethrown. */
+/** The request-key unique constraints of 0737 and 0738; a 23505 on any other constraint is not a key reuse and is rethrown. */
 const REQUEST_KEY_CONSTRAINTS: ReadonlySet<string> = new Set([
   "dropship_product_listing_setting_requests_key_idx",
   "dropship_product_listing_setting_revision_key_uk",

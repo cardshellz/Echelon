@@ -2,6 +2,8 @@ import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import {
   ORDER_EDIT_API,
+  ORDER_EDIT_LINE_DISPLAY_HEADER,
+  ORDER_EDIT_LINE_DISPLAY_VERSION,
   orderEditConnectionSchema,
   orderEditOperationSchema,
   orderEditOrdersSchema,
@@ -38,6 +40,23 @@ const searchQuery = z
   })
   .strict();
 const emptyBody = z.object({}).strict();
+
+function sendLineDisplayResponse<
+  T extends { lines: Array<{ variantId?: string | null; added?: boolean }> },
+>(req: Request, res: Response, response: T): void {
+  // Older open tabs use strict line schemas. Only clients opting in receive
+  // display metadata; financial amounts and command handling are identical.
+  res.json(
+    req.get(ORDER_EDIT_LINE_DISPLAY_HEADER) === ORDER_EDIT_LINE_DISPLAY_VERSION
+      ? response
+      : {
+          ...response,
+          lines: response.lines.map(
+            ({ variantId: _variant, added: _added, ...line }) => line,
+          ),
+        },
+  );
+}
 
 export interface OrderEditRouteDependencies {
   service: OrderEditService;
@@ -263,7 +282,9 @@ export function registerOrderEditRoutes(
     handle(
       false,
       async (req, res, actor) => {
-        res.json(
+        sendLineDisplayResponse(
+          req,
+          res,
           orderEditPreviewSchema.parse(
             await service.preview(
               orderEditPreviewInputSchema.parse(req.body),
@@ -285,7 +306,9 @@ export function registerOrderEditRoutes(
           "The quote request key does not match.",
           400,
         );
-      res.json(
+      sendLineDisplayResponse(
+        req,
+        res,
         orderEditOperationSchema.parse(await service.quote(input, actor)),
       );
     }),
@@ -293,7 +316,9 @@ export function registerOrderEditRoutes(
   app.get(
     `${ORDER_EDIT_API}/operations/:operationId`,
     handle(false, async (req, res) => {
-      res.json(
+      sendLineDisplayResponse(
+        req,
+        res,
         orderEditOperationSchema.parse(
           await service.get(operationId.parse(req.params.operationId)),
         ),
@@ -314,7 +339,7 @@ export function registerOrderEditRoutes(
                 actor,
               )
             : await service[action](id, actor);
-        res.json(orderEditOperationSchema.parse(result));
+        sendLineDisplayResponse(req, res, orderEditOperationSchema.parse(result));
       }),
     );
   }

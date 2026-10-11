@@ -37,7 +37,7 @@ import {
   PRODUCT_LISTING_SETTING_VALUE_COLUMNS,
 } from "../../infrastructure/dropship-listing-setting-shared.repository";
 
-const MIGRATION_FILE = "0736_dropship_product_listing_settings.sql";
+const MIGRATION_FILE = "0737_dropship_product_listing_settings.sql";
 const migrationSql = readFileSync(resolve(process.cwd(), "migrations", MIGRATION_FILE), "utf8");
 
 const LEDGER_TABLE = "dropship.dropship_product_listing_setting_requests";
@@ -102,9 +102,9 @@ const DRIZZLE_TABLES: ReadonlyArray<readonly [string, PgTable]> = [
   [SETTINGS_TABLE, dropshipProductListingSettings],
 ];
 
-describe("0736 dropship product listing settings migration", () => {
+describe("0737 dropship product listing settings migration", () => {
   it("is the only migration with its number", () => {
-    const sameNumber = readdirSync(resolve(process.cwd(), "migrations")).filter((file) => file.startsWith("0736_"));
+    const sameNumber = readdirSync(resolve(process.cwd(), "migrations")).filter((file) => file.startsWith("0737_"));
     expect(sameNumber).toEqual([MIGRATION_FILE]);
   });
 
@@ -503,7 +503,7 @@ describe("0736 dropship product listing settings migration", () => {
   });
 });
 
-describe("Drizzle declarations of the 0736 tables", () => {
+describe("Drizzle declarations of the 0737 tables", () => {
   it("declare each table on the dropship schema under the migration's name", () => {
     for (const [table, drizzle] of DRIZZLE_TABLES) {
       const config = getTableConfig(drizzle);
