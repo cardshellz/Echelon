@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { calculateRulePrice, resolvePricingRule, pricingBasisCents, pricingImpactRowSchema, pricingProfileSchema, pricingRecipeSchema, type PricingProfile, type PricingRecipe } from "../../../../../shared/dropship/pricing-rules";
+import { CATEGORY_PRICE_RULE_NAME, PRODUCT_PRICE_RULE_NAME, type PricingRuleCandidate, type RulePriceResult } from "../../../../../shared/dropship/pricing-rules";
+import { matchesCatalogScope } from "../../../../../shared/dropship/catalog-scope";
 import { LISTING_PRICING_MODES, listingPriceFollowsRules, resolveListingPrice, saveListingPriceInputSchema, MAX_LISTING_PRICE_CENTS } from "../../../../../shared/dropship/listing-price";
 
 const recipe: PricingRecipe = { basis: "product_cost", markupBps: 3000, flatCents: 100, rounding: "cent" };
-const candidate = { productVariantId: 66, productId: 7, category: "Mailers", productLineIds: [2, 3] };
+const candidate = { productVariantId: 66, productId: 7, category: "Mailers", categoryId: null, productLineIds: [2, 3] };
 const profile: PricingProfile = { defaultRecipe: recipe, groups: [] };
 describe("deterministic vendor pricing rules", () => {
   it.each([[3000, 0, 1052], [0, 200, 1009], [3000, 100, 1152]])("809 cents plus %s bps and %s cents = %s", (markupBps, flatCents, expected) => {
@@ -130,6 +132,108 @@ describe("deterministic vendor pricing rules", () => {
     // 1249 × 1.2 = 1498.8, rounded half-up to 1499: the reviewed $14.99.
     const retail = { defaultRecipe: { basis: "catalog_retail" as const, markupBps: 2000, flatCents: 0, rounding: "cent" as const }, groups: [] };
     expect(resolvePricingRule({ profile: retail, candidate, ...amounts })).toMatchObject({ priceCents: 1499, basis: "catalog_retail" });
+  });
+});
+
+/**
+ * `resolvePricingRule` as it was before product and category prices (HEAD
+ * 46dd3f11), word for word. Frozen here so the no-recipe path is compared
+ * against the code it replaced, not against itself.
+ */
+function legacyResolvePricingRule(input: {
+  profile: PricingProfile | null; candidate: PricingRuleCandidate;
+  productCostCents: number | null; catalogRetailCents: number | null;
+}): RulePriceResult {
+  if (!input.profile) return { priceCents: null, ruleName: null, ruleId: null, issue: "pricing_rules_not_configured", basis: null };
+  const matches = input.profile.groups.filter(({ scope }) => matchesCatalogScope(scope, input.candidate))
+    .sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
+  if (matches.length > 1 && matches[0].priority === matches[1].priority) {
+    return { priceCents: null, ruleName: null, ruleId: null, issue: "pricing_rule_priority_conflict", basis: null };
+  }
+  const winner = matches[0];
+  const recipe = winner?.recipe ?? input.profile.defaultRecipe;
+  return { ...calculateRulePrice(recipe, pricingBasisCents(recipe.basis, input)),
+    ruleName: winner?.name ?? "Store default rule", ruleId: winner?.id ?? null };
+}
+
+describe("product and category prices in the rule order (listing settings design 5.1)", () => {
+  const productRecipe: PricingRecipe = { basis: "product_cost", markupBps: 0, flatCents: 500, rounding: "cent" };
+  const categoryRecipe: PricingRecipe = { basis: "catalog_retail", markupBps: 1000, flatCents: 0, rounding: "up_99" };
+  const inCategory = { ...candidate, categoryId: 12 };
+  const amounts = { productCostCents: 809, catalogRetailCents: 899 };
+  type GroupRule = PricingProfile["groups"][number];
+  const group = (id: string, priority: number, scope: GroupRule["scope"]): GroupRule =>
+    ({ id, name: `Group ${id}`, priority, scope, recipe: { ...recipe, markupBps: 0, flatCents: 200 } });
+  const groups = {
+    none: [],
+    category: [group("cat", 5, { type: "category", category: "Mailers" })],
+    productLine: [group("line", 5, { type: "product_line", productLineId: 2 })],
+    product: [group("prod", 5, { type: "product", productId: 7 })],
+    listings: [group("pick", 1, { type: "listings", productVariantIds: [66] })],
+    unmatched: [group("other", 5, { type: "category", category: "Binders" })],
+    tie: [group("a", 5, { type: "category", category: "Mailers" }), group("b", 5, { type: "product_line", productLineId: 3 })],
+  };
+  const profiles: Array<[string, PricingProfile | null]> = [
+    ["no profile", null], ...Object.entries(groups).map(([name, list]): [string, PricingProfile] => [name, { defaultRecipe: recipe, groups: list }]),
+  ];
+
+  it.each(profiles)("with no product or category price gives today's result, key for key: %s", (_name, current) => {
+    for (const subject of [candidate, inCategory]) {
+      for (const costs of [amounts, { productCostCents: null, catalogRetailCents: 899 }]) {
+        const today = legacyResolvePricingRule({ profile: current, candidate: subject, ...costs });
+        for (const recipes of [{}, { productRecipe: null, categoryRecipe: null }, { productRecipe: undefined, categoryRecipe: undefined }]) {
+          const result = resolvePricingRule({ profile: current, candidate: subject, ...costs, ...recipes });
+          expect(JSON.stringify(result)).toBe(JSON.stringify(today));
+          // JSON drops an undefined key, so check the key is absent, not undefined.
+          expect("ruleLevel" in result).toBe(false);
+        }
+      }
+    }
+  });
+
+  it.each(profiles)("a product's own price beats every older group rule, a tie and the store default: %s", (_name, current) => {
+    expect(resolvePricingRule({ profile: current, candidate: inCategory, ...amounts, productRecipe, categoryRecipe })).toEqual({
+      priceCents: 1309, ruleName: PRODUCT_PRICE_RULE_NAME, ruleId: "product:7", issue: null, basis: "product_cost", ruleLevel: "product",
+    });
+  });
+
+  it("an older group rule, or a tie, comes before the category price", () => {
+    for (const list of [groups.category, groups.productLine, groups.product, groups.listings]) {
+      expect(resolvePricingRule({ profile: { defaultRecipe: recipe, groups: list }, candidate: inCategory, ...amounts, categoryRecipe }))
+        .toEqual({ priceCents: 1009, ruleName: list[0].name, ruleId: list[0].id, issue: null, basis: "product_cost" });
+    }
+    expect(resolvePricingRule({ profile: { defaultRecipe: recipe, groups: groups.tie }, candidate: inCategory, ...amounts, categoryRecipe }))
+      .toEqual({ priceCents: null, ruleName: null, ruleId: null, issue: "pricing_rule_priority_conflict", basis: null });
+  });
+
+  it.each([["no profile", null], ["no matching group", { defaultRecipe: recipe, groups: groups.unmatched }]] as const)(
+    "the category price comes before the store default: %s", (_name, current) => {
+      // 899 + 10% = 988.9, rounded half-up to 989, then up to .99.
+      expect(resolvePricingRule({ profile: current, candidate: inCategory, ...amounts, categoryRecipe })).toEqual({
+        priceCents: 999, ruleName: CATEGORY_PRICE_RULE_NAME, ruleId: "category:12", issue: null, basis: "catalog_retail", ruleLevel: "category",
+      });
+    });
+
+  it("names the level's own reason when its recipe cannot price the size", () => {
+    expect(resolvePricingRule({ profile: null, candidate, productCostCents: null, catalogRetailCents: 899, productRecipe })).toEqual({
+      priceCents: null, ruleName: PRODUCT_PRICE_RULE_NAME, ruleId: "product:7", issue: "pricing_basis_unavailable", basis: "product_cost",
+      ruleLevel: "product",
+    });
+    expect(resolvePricingRule({ profile: null, candidate: inCategory, productCostCents: 809, catalogRetailCents: null, categoryRecipe }))
+      .toMatchObject({ priceCents: null, ruleId: "category:12", issue: "pricing_basis_unavailable", ruleLevel: "category" });
+  });
+
+  it("refuses a category price for a size whose product has no Card Shellz category", () => {
+    expect(() => resolvePricingRule({ profile, candidate, ...amounts, categoryRecipe })).toThrow(RangeError);
+    // With no category price the same size resolves as always.
+    expect(resolvePricingRule({ profile, candidate, ...amounts, categoryRecipe: null })).toMatchObject({ ruleName: "Store default rule" });
+  });
+
+  it("does not mutate the recipes or the candidate", () => {
+    const before = JSON.stringify({ productRecipe, categoryRecipe, inCategory });
+    resolvePricingRule({ profile, candidate: inCategory, ...amounts, productRecipe, categoryRecipe });
+    resolvePricingRule({ profile: null, candidate: inCategory, ...amounts, categoryRecipe });
+    expect(JSON.stringify({ productRecipe, categoryRecipe, inCategory })).toBe(before);
   });
 });
 

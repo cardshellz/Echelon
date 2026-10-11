@@ -9,6 +9,7 @@ import type {
   DropshipListingCatalogCandidate,
   DropshipListingPackageReadiness,
   DropshipListingPreviewRepository,
+  DropshipListingResolverLoadInput,
   DropshipListingStoreContext,
   DropshipListingPushJobItemRecord,
   DropshipListingPushJobRecord,
@@ -21,9 +22,14 @@ import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection
 import type { DropshipVendorSelectionRule, DropshipVendorVariantOverride } from "../domain/vendor-selection";
 import type { SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
 import type { ListingRulePrice } from "../application/dropship-rule-price";
+import {
+  EMPTY_LISTING_SETTING_LAYERS,
+  type ListingSettingLayers,
+} from "../application/dropship-listing-setting-layers";
 import { loadListingRulePrices } from "./dropship-rule-price.loader";
 import { readResolvedListingContents } from "./dropship-listing-content.reader";
 import { readResolvedEbayCategories } from "./dropship-ebay-category-rules.reader";
+import { readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
 
 type ListingDatabasePool = Pick<Pool, "query"> & {
   connect(): Promise<Pick<PoolClient, "query" | "release">>;
@@ -90,6 +96,7 @@ interface CandidateRow {
   title: string | null;
   description: string | null;
   category: string | null;
+  category_id: number | null;
   ebay_browse_category_id: string | null;
   ebay_browse_category_name: string | null;
   brand: string | null;
@@ -165,7 +172,29 @@ interface JobItemRow {
 export class PgDropshipListingPreviewRepository implements DropshipListingPreviewRepository {
   constructor(private readonly dbPool: ListingDatabasePool = defaultPool) {}
 
-  async loadRulePrices(input: { vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[] }): Promise<Map<number, ListingRulePrice>> {
+  /**
+   * The preview's one read of the product and category listing settings (plan
+   * PR 8b, D26), in a read-only snapshot like the other resolver reads. No
+   * candidates, no transaction: there is nothing to read.
+   */
+  async loadListingSettingLayers(input: {
+    vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[];
+  }): Promise<ListingSettingLayers> {
+    if (input.candidates.length === 0) return EMPTY_LISTING_SETTING_LAYERS;
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const layers = await readListingSettingLayers(client, {
+        vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, candidates: input.candidates,
+      });
+      await client.query("COMMIT");
+      return layers;
+    } catch (error) { await rollbackQuietly(client); throw error; }
+    finally { client.release(); }
+  }
+
+  /** The three resolver reads below take the preview's `layers` and pass them on, so the loaders read no settings again. */
+  async loadRulePrices(input: DropshipListingResolverLoadInput): Promise<Map<number, ListingRulePrice>> {
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
@@ -349,6 +378,7 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
            COALESCE(p.title, p.name) AS title,
            p.description,
            p.category,
+           p.category_id,
            COALESCE(
              NULLIF(BTRIM(p.ebay_browse_category_id), ''),
              supplier_ebay_category.ebay_browse_category_id
@@ -582,7 +612,7 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     }
   }
 
-  async loadListingContents(input: { vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[] }) {
+  async loadListingContents(input: DropshipListingResolverLoadInput) {
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
@@ -595,7 +625,7 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     } finally { client.release(); }
   }
 
-  async loadEbayCategories(input: { vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[] }) {
+  async loadEbayCategories(input: DropshipListingResolverLoadInput) {
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
@@ -930,6 +960,7 @@ function mapCandidateRow(row: CandidateRow): DropshipListingCatalogCandidate {
     productVariantId: row.product_variant_id,
     productLineIds: row.product_line_ids ?? [],
     category: row.category,
+    categoryId: row.category_id,
     ebayBrowseCategoryId: row.ebay_browse_category_id,
     ebayBrowseCategoryName: row.ebay_browse_category_name,
     productIsActive: row.product_is_active,

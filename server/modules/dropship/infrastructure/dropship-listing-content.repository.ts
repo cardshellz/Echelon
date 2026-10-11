@@ -5,6 +5,7 @@ import { contentConflict, type ContentRepository, type ContentTransaction } from
 import { DropshipError } from "../domain/errors";
 import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog.reader";
 import { readContentProfile, readListingContentSettings } from "./dropship-listing-content.reader";
+import { readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
 
 type Client = Pick<PoolClient, "query">;
 /** Whose content is written, and who writes it (audited as a vendor). */
@@ -39,6 +40,10 @@ export class PgDropshipListingContentRepository implements ContentRepository {
       };
       const result = await operation({
         vendorId, ...selectedCatalogReaderForTransaction(client), loadProfile, loadSaved,
+        // A plain read on this client: the store lock above already keeps product
+        // and category setting writers out until commit (they take the same lock).
+        loadListingSettingLayers: (candidate) => readListingSettingLayers(client,
+          { vendorId, storeConnectionId: input.storeConnectionId, candidates: [candidate] }),
         findReplay: (kind, key, hash) => findContentReplayWithClient(client, target, kind, key, hash),
         saveProfile: async (save, hash, now) => {
           assertWrite(save.idempotencyKey);

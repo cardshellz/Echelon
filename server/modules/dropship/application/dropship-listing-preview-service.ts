@@ -61,6 +61,14 @@ import type {
 import type {
   DropshipEbayListingPolicyOverride,
 } from "./dropship-ebay-listing-policy-override-service";
+import {
+  layersFor,
+  mergeListingPolicyOverride,
+  resolveListingStoreShelf,
+  type ListingPolicyOverrideIds,
+  type ListingSettingLayers,
+} from "./dropship-listing-setting-layers";
+import { readEbayStoreShelfDefault } from "../domain/ebay-listing-setup-config";
 import type { DropshipEbayReturnPaymentPolicyChecker } from "./dropship-ebay-return-payment-policy-check";
 import {
   ebayReturnPaymentPolicyBlockers,
@@ -98,6 +106,13 @@ export interface DropshipListingStoreContext {
 }
 
 export interface DropshipListingCatalogCandidate extends DropshipCatalogVariantCandidate, DropshipCanonicalListingContent {
+  /**
+   * The product's Card Shellz category (`catalog.products.category_id`); null
+   * when it has none. Category listing settings key by it; older group rules
+   * keep matching `category` by name. No hash spreads a candidate, so this
+   * field changes no evidence or preview hash.
+   */
+  categoryId: number | null;
   unitsPerVariant: number;
   /** Unmodified catalog value for advisory validation; do not change existing quantity semantics. */
   catalogUnitsPerVariant?: number | null;
@@ -242,10 +257,34 @@ export interface CreateDropshipListingPushJobRepositoryResult {
   idempotentReplay: boolean;
 }
 
+/**
+ * What the three resolver loaders read. `layers` is the preview's one read of
+ * the product and category listing settings (plan PR 8b, D26); a loader given
+ * it reads no settings of its own, so price, description and eBay category
+ * follow the same rows as the policies and shelves.
+ */
+export interface DropshipListingResolverLoadInput {
+  vendorId: number;
+  storeConnectionId: number;
+  candidates: readonly DropshipListingCatalogCandidate[];
+  layers?: ListingSettingLayers;
+}
+
 export interface DropshipListingPreviewRepository {
-  loadListingContents?(input: { vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[] }): Promise<Map<number, import("../../../../shared/dropship/listing-content").ResolvedListingContent>>;
-  loadEbayCategories?(input: { vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[] }): Promise<Map<number, ResolvedEbayListingCategory>>;
-  loadRulePrices?(input: { vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[] }): Promise<Map<number, ListingRulePrice>>;
+  /**
+   * The product and category listing settings of the candidates, read once
+   * per preview in one snapshot (plan PR 8b, D26). Required, never defaulted
+   * to empty layers: a preview that skipped it would price, describe and
+   * categorise by product rows while its policies and shelves ignored them.
+   */
+  loadListingSettingLayers(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    candidates: readonly DropshipListingCatalogCandidate[];
+  }): Promise<ListingSettingLayers>;
+  loadListingContents?(input: DropshipListingResolverLoadInput): Promise<Map<number, import("../../../../shared/dropship/listing-content").ResolvedListingContent>>;
+  loadEbayCategories?(input: DropshipListingResolverLoadInput): Promise<Map<number, ResolvedEbayListingCategory>>;
+  loadRulePrices?(input: DropshipListingResolverLoadInput): Promise<Map<number, ListingRulePrice>>;
   listSavedListingPrices(input: {
     vendorId: number; storeConnectionId: number; productVariantIds: readonly number[];
   }): Promise<SavedListingPriceRevision[]>;
@@ -426,21 +465,40 @@ export class DropshipListingPreviewService {
         storeConnectionId: parsed.storeConnectionId, productVariantIds: uniqueVariantIds }),
     ]);
 
+    // One read of the product and category listing settings per preview (plan
+    // PR 8b, D26), for every platform: price and description apply to every
+    // store. The price, description and eBay category loaders, the policies
+    // and the shelves all follow these rows, so a preview never disagrees with
+    // itself. The queue's re-check reads them again under the store lock.
+    const layers = await this.deps.repository.loadListingSettingLayers({
+      vendorId: parsed.vendorId,
+      storeConnectionId: parsed.storeConnectionId,
+      candidates,
+    });
+    // Built before the live eBay checks below, so a policy that only a product
+    // or its category sets is checked like a size's own (plan F5).
+    const listingPolicyOverrides = context.platform === "ebay"
+      ? mergeListingPolicyOverrides({ candidates, sizeOverrides: ebayListingPolicyOverrides, layers })
+      : [];
+    const storeShelfDefault = context.platform === "ebay" && config
+      ? readEbayStoreShelfDefault(config.marketplaceConfig)
+      : null;
+
     const ruleEligibleCandidates = candidates.filter((candidate) => {
       const exposure = evaluateDropshipCatalogExposure(candidate, adminRules, generatedAt);
       return exposure.exposed && evaluateDropshipVendorCatalogSelection({ candidate, adminExposureDecision: exposure,
         rules: selectionRules, rawAtpUnits: 0, override: overrides.find((row) => row.productVariantId === candidate.productVariantId) ?? null }).selected;
     });
     const rulePrices = await this.deps.repository.loadRulePrices?.({ vendorId: parsed.vendorId,
-      storeConnectionId: parsed.storeConnectionId, candidates: ruleEligibleCandidates }) ?? new Map<number, ListingRulePrice>();
+      storeConnectionId: parsed.storeConnectionId, candidates: ruleEligibleCandidates, layers }) ?? new Map<number, ListingRulePrice>();
     const contents = await this.deps.repository.loadListingContents?.({ vendorId: parsed.vendorId,
-      storeConnectionId: parsed.storeConnectionId, candidates: ruleEligibleCandidates });
+      storeConnectionId: parsed.storeConnectionId, candidates: ruleEligibleCandidates, layers });
     // Every eBay row resolves its category through the store's current rules. The
     // push-time refresh calls this again, so a push publishes the category the rules
     // name when it is sent; a changed category never refuses a queue or fails a push.
     const ebayCategories = context.platform === "ebay"
       ? await this.deps.repository.loadEbayCategories?.({ vendorId: parsed.vendorId,
-        storeConnectionId: parsed.storeConnectionId, candidates })
+        storeConnectionId: parsed.storeConnectionId, candidates, layers })
       : undefined;
     if (ebayCategories && candidates.some((candidate) => !ebayCategories.has(candidate.productVariantId))) {
       throw new Error("eBay category resolution returned an incomplete catalog result.");
@@ -468,12 +526,12 @@ export class DropshipListingPreviewService {
           this.loadEbayFulfillmentPreflights({
             context,
             config,
-            policyOverrides: ebayListingPolicyOverrides,
+            policyOverrides: listingPolicyOverrides,
           }),
           this.loadEbayReturnPaymentPolicyCheck({
             context,
             config,
-            policyOverrides: ebayListingPolicyOverrides,
+            policyOverrides: listingPolicyOverrides,
           }),
         ])
       : [
@@ -497,7 +555,7 @@ export class DropshipListingPreviewService {
       ]),
     );
     const listingPolicyOverridesByVariantId = new Map(
-      ebayListingPolicyOverrides.map((override) => [override.productVariantId, override]),
+      listingPolicyOverrides.map((override) => [override.productVariantId, override]),
     );
     const rows = uniqueVariantIds.map((productVariantId) => {
       const candidate = candidatesByVariantId.get(productVariantId);
@@ -552,7 +610,16 @@ export class DropshipListingPreviewService {
           ?? null,
         marketplaceListing: this.deps.marketplaceListing,
         generatedAt,
-        storeCategoryNames: storeCategoryNamesByVariantId.get(productVariantId) ?? [],
+        // The size's own shelf row, else its product's or category's shelves,
+        // else the store's shelf default (PR 6), which reaches listings from
+        // here on (plan 4.10 item 2). Shelves are eBay store categories only.
+        storeCategoryNames: context.platform === "ebay"
+          ? resolveListingStoreShelf({
+              sizeNames: storeCategoryNamesByVariantId.get(productVariantId) ?? null,
+              ...layersFor(layers, candidate),
+              storeDefault: storeShelfDefault,
+            }).names
+          : [],
         ebayFulfillmentPreflight: effectiveFulfillmentPolicyId
           ? ebayFulfillmentPreflights.get(effectiveFulfillmentPolicyId) ?? null
           : null,
@@ -670,7 +737,7 @@ export class DropshipListingPreviewService {
   private async loadEbayFulfillmentPreflights(input: {
     context: DropshipListingStoreContext;
     config: DropshipStoreListingConfig;
-    policyOverrides: readonly DropshipEbayListingPolicyOverride[];
+    policyOverrides: readonly ListingPolicyOverrideIds[];
   }): Promise<Map<string, DropshipEbayFulfillmentPolicyPreflight>> {
     const marketplaceId = readNestedString(
       input.config.marketplaceConfig,
@@ -743,7 +810,7 @@ export class DropshipListingPreviewService {
   private async loadEbayReturnPaymentPolicyCheck(input: {
     context: DropshipListingStoreContext;
     config: DropshipStoreListingConfig;
-    policyOverrides: readonly DropshipEbayListingPolicyOverride[];
+    policyOverrides: readonly ListingPolicyOverrideIds[];
   }): Promise<DropshipEbayReturnPaymentPolicyCheck> {
     const marketplaceId = readNestedString(input.config.marketplaceConfig, "marketplaceId");
     if (!marketplaceId) return NOT_CHECKED_RETURN_PAYMENT_POLICIES;
@@ -1128,7 +1195,8 @@ function buildListingPreviewRow(input: {
   ebayFulfillmentPreflight: DropshipEbayFulfillmentPolicyPreflight | null;
   /** From the live check of the listing's effective return and payment policy ids. */
   ebayReturnPaymentPolicyBlockers: readonly string[];
-  ebayListingPolicyOverride: DropshipEbayListingPolicyOverride | null;
+  /** The size's merged policy ids (mergeListingPolicyOverride); only the three ids are read. */
+  ebayListingPolicyOverride: ListingPolicyOverrideIds | null;
 }): DropshipListingPreviewRow {
   const blockers: string[] = [...(input.resolvedContent?.issues ?? [])];
   const warnings: string[] = [];
@@ -1460,9 +1528,49 @@ function normalizeString(value: string | null | undefined): string | null {
   return normalized ? normalized : null;
 }
 
+/**
+ * Every size's policy override with its product's and its category's policies
+ * merged in (mergeListingPolicyOverride: size, then product, then category,
+ * then the store's own policy). The sizes' stored rows come first, in their
+ * stored order, then the sizes whose only policies come from a product or a
+ * category. A stored row for a size the catalog no longer offers is passed on
+ * as it is (its preview row is a missing-catalog row). With no product or
+ * category policies this is the stored list itself, so the same ids reach the
+ * live eBay checks in the same order as before PR 8b (plan D1).
+ */
+function mergeListingPolicyOverrides(input: {
+  candidates: readonly DropshipListingCatalogCandidate[];
+  sizeOverrides: readonly DropshipEbayListingPolicyOverride[];
+  layers: ListingSettingLayers;
+}): ListingPolicyOverrideIds[] {
+  const candidatesByVariantId = new Map(input.candidates.map((candidate) => [candidate.productVariantId, candidate]));
+  const sizesWithOwnRow = new Set(input.sizeOverrides.map((size) => size.productVariantId));
+  const merged: ListingPolicyOverrideIds[] = input.sizeOverrides.flatMap((size) => {
+    const candidate = candidatesByVariantId.get(size.productVariantId);
+    if (!candidate) return [size];
+    const { override } = mergeListingPolicyOverride({
+      productVariantId: size.productVariantId, size, ...layersFor(input.layers, candidate),
+    });
+    return override ? [override] : [];
+  });
+  for (const candidate of input.candidates) {
+    if (sizesWithOwnRow.has(candidate.productVariantId)) continue;
+    const { override } = mergeListingPolicyOverride({
+      productVariantId: candidate.productVariantId, size: null, ...layersFor(input.layers, candidate),
+    });
+    if (override) merged.push(override);
+  }
+  return merged;
+}
+
+/**
+ * The store's listing config with one size's policy ids over its own. Only
+ * the three ids are read, so a stored per-size row and a merged override
+ * (mergeListingPolicyOverride) apply the same way.
+ */
 export function applyEbayListingPolicyOverride(
   config: DropshipStoreListingConfig | null,
-  override: DropshipEbayListingPolicyOverride | null,
+  override: ListingPolicyOverrideIds | null,
 ): DropshipStoreListingConfig | null {
   if (!config || !override) return config;
   const currentBusinessPolicies = isPlainRecord(config.marketplaceConfig.businessPolicies)
@@ -1488,9 +1596,15 @@ export function applyEbayListingPolicyOverride(
   };
 }
 
+/**
+ * The policy ids a listing sends, and which of them the size's merged override
+ * set. A product's or category's policy counts as overridden like a size's
+ * own: this shape is in the preview hash and the listing metadata, so it keeps
+ * one form; the per-field source is shown by the listing-settings facts.
+ */
 function buildBusinessPolicySelection(
   config: DropshipStoreListingConfig | null,
-  override: DropshipEbayListingPolicyOverride | null,
+  override: ListingPolicyOverrideIds | null,
 ): DropshipListingPreviewRow["businessPolicySelection"] {
   if (!config) return null;
   const overriddenFields: NonNullable<

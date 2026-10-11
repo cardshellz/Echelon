@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { contentCandidate, noContentProfile } from "../fixtures/listing-content.fixture";
 import { resolveListingContent, listingCatalogHash, sanitizeListingDescription, textDescriptionHtml, prepareContentProfile } from "../../application/dropship-listing-content-resolver";
 import { DropshipListingContentService, type ContentTransaction } from "../../application/dropship-listing-content-service";
+import { EMPTY_LISTING_SETTING_LAYERS } from "../../application/dropship-listing-setting-layers";
 import { contentProfileSchema, descriptionTextSchema, saveListingContentInputSchema, MAX_DESCRIPTION_HTML_LENGTH,
   type ContentProfileState, type SavedListingContent } from "../../../../../shared/dropship/listing-content";
 const now = new Date("2026-09-07T12:00:00Z");
@@ -133,6 +134,7 @@ describe("local description authority", () => {
       listSelectionRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]), listVariantOverrides: vi.fn(async () => []), listExistingListings: vi.fn(async () => []),
     }, listVariantIds: vi.fn(async () => []), listProductLines: vi.fn(async () => []),
       loadProfile: vi.fn(async () => profile), loadSaved: vi.fn(async () => saved), findReplay: vi.fn(async () => false),
+      loadListingSettingLayers: vi.fn(async () => EMPTY_LISTING_SETTING_LAYERS),
       saveProfile: vi.fn(async (input) => { profile = { profile: input.profile, revisionId: 1, updatedAt: now.toISOString() }; }),
       saveListing: vi.fn(async (_variant, input) => { saved = { customText: input.customText, catalogHash: input.expectedCatalogHash, revisionId: (saved?.revisionId ?? 0) + 1, updatedAt: now.toISOString() }; }) };
     service = new DropshipListingContentService({ repository: { execute: async (_input, op) => op(tx) },

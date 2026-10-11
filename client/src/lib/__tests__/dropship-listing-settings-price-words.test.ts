@@ -75,6 +75,20 @@ describe("builtFromWords", () => {
       .toBe("Store default: your cost $0.00 + 20% plus $1.00");
   });
 
+  it("names a product's own price and its category's price with what they start from (interim, R:§3.7)", () => {
+    expect(builtFromWords(size({ source: "rules", basis: "product_cost", basisAmountCents: 980,
+      rule: { kind: "product", name: "Toploader 35pt", recipe: COST_20_PLUS_1 } })))
+      .toBe("This product: your cost $9.80 + 20% plus $1.00");
+    expect(builtFromWords(size({ source: "rules", basis: "catalog_retail", basisAmountCents: 625,
+      rule: { kind: "category", name: "Toploaders", recipe: { basis: "catalog_retail", markupBps: 2500, flatCents: 0, rounding: "up_99" } } })))
+      .toBe("Category: Toploaders, retail $6.25 + 25%, up to .99");
+    for (const kind of ["store_default", "group", "product", "category"] as const) {
+      const words = builtFromWords(size({ source: "rules", basis: "catalog_retail", basisAmountCents: 1_250,
+        rule: { kind, name: "Sleeves", recipe: RETAIL_20_UP } }));
+      expect(words).not.toMatch(RAW_CODE);
+    }
+  });
+
   it("names the last published and retail prices, saved or not", () => {
     expect(builtFromWords(size({ source: "last_published", settingRevisionId: null }))).toBe("Last published price (no store price yet)");
     expect(builtFromWords(size({ source: "catalog_price", settingRevisionId: null }))).toBe("Retail price (no store price yet)");

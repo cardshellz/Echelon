@@ -84,8 +84,13 @@ export const LISTING_SETTINGS_PRICE_ISSUES = [
 export const LISTING_SETTINGS_LIMIT_MODES = ["warn", "block_listing", "refuse_orders"] as const;
 
 export const listingSettingsPriceRuleSchema = z.object({
-  /** `store_default` is the store's default recipe; `group` is an older group rule. */
-  kind: z.enum(["store_default", "group"]),
+  /**
+   * `store_default` is the store's default recipe; `group` is an older group
+   * rule; `product` is the product's own price (`name` is the product's);
+   * `category` is its Card Shellz category's price (`name` is the category's
+   * current name).
+   */
+  kind: z.enum(["store_default", "group", "product", "category"]),
   name: z.string().min(1),
   recipe: pricingRecipeSchema,
 }).strict();
@@ -142,7 +147,7 @@ export const listingSettingsProductRowSchema = z.object({
   sizesTotal: count,
   priceRange: z.object({ minCents: listingPriceCentsSchema, maxCents: listingPriceCentsSchema }).strict().nullable(),
   exactPriceCount: count,
-  /** Settings at least one chosen size has its own value for. */
+  /** Settings the product, or at least one chosen size, has its own value for. */
   ownSettings: z.array(z.enum(LISTING_SETTINGS_FIELDS)),
   /** Settings whose value is not the same on every chosen size. */
   sizesDiffer: z.array(z.enum(LISTING_SETTINGS_FIELDS)),
@@ -167,24 +172,32 @@ export const listingSettingsProductsResponseSchema = pageOf(listingSettingsProdu
 // ---------------------------------------------------------------------------
 
 /**
- * Where a size gets a setting's value today, before product and category
- * settings exist (design PRs 8 to 11):
+ * Where a size gets a setting's value, closest first (the order the
+ * precedence reads, design 5.1):
  * - `size`: a value left on this size by today's per-size settings;
+ * - `product`: the product's own setting;
  * - `group_rule`: an older group rule, named in `ruleName`;
+ * - `category`: the setting of the product's Card Shellz category, named in `ruleName`;
  * - `store_default`: the store default;
  * - `catalog`: Card Shellz (the eBay category it chose for the product, or its main text);
  * - `none`: nothing is set.
+ * The facts engine lists a value's sources in this order. Today's five keep
+ * their relative order, so a value that comes only from them reads as before.
  */
-export const LISTING_SETTINGS_VALUE_SOURCES = ["size", "group_rule", "store_default", "catalog", "none"] as const;
+export const LISTING_SETTINGS_VALUE_SOURCES = ["size", "product", "group_rule", "category", "store_default", "catalog", "none"] as const;
+/** The sources that carry a name: the older group rule's, or the category's current name. */
+const NAMED_VALUE_SOURCES: ReadonlySet<ListingSettingsValueSource> = new Set<ListingSettingsValueSource>(["group_rule", "category"]);
+/** The sources that are the product's own value: a size's (today's per-size settings) or the product's. */
+const OWN_VALUE_SOURCES: ReadonlySet<ListingSettingsValueSource> = new Set<ListingSettingsValueSource>(["size", "product"]);
 
 const valueSourceSchema = z.object({
   source: z.enum(LISTING_SETTINGS_VALUE_SOURCES),
-  /** The older group rule's name; null for every other source. */
+  /** The older group rule's name, or the Card Shellz category's current name; null for every other source. */
   ruleName: z.string().min(1).nullable(),
   /** The chosen sizes that get the value from here, in the order `sizes` lists them. */
   productVariantIds: z.array(id).min(1),
-}).strict().refine((entry) => (entry.source === "group_rule") === (entry.ruleName !== null),
-  "A group rule is named, and no other source is.");
+}).strict().refine((entry) => NAMED_VALUE_SOURCES.has(entry.source) === (entry.ruleName !== null),
+  "A group rule and a category are named, and no other source is.");
 
 /**
  * Every distinct value of one setting among the product's chosen sizes, most
@@ -286,9 +299,9 @@ export const listingSettingsProductDetailSchema = z.object({
   for (const field of LISTING_SETTINGS_FIELDS) {
     const settings = LISTING_SETTINGS_FIELD_SETTINGS[field].map((key) => detail.settings[key]);
     const differ = settings.some((values) => values.length > 1);
-    const own = settings.some((values) => values.some((value) => value.sources.some((entry) => entry.source === "size")));
+    const own = settings.some((values) => values.some((value) => value.sources.some((entry) => OWN_VALUE_SOURCES.has(entry.source))));
     if (differ !== detail.product.sizesDiffer.includes(field)) issue(`Sizes differ for ${field} only when it has more than one value.`, ["product", "sizesDiffer"]);
-    if (own !== detail.product.ownSettings.includes(field)) issue(`${field} is an own setting only when a size has its own value.`, ["product", "ownSettings"]);
+    if (own !== detail.product.ownSettings.includes(field)) issue(`${field} is an own setting only when a size or the product has its own value.`, ["product", "ownSettings"]);
   }
 });
 

@@ -84,7 +84,7 @@ describeDatabase.sequential("catalog candidate retail price PostgreSQL guarantee
     // (catalog migrations and shared/schema/shopify.schema.ts for the cache).
     await execute(`
       CREATE TABLE catalog.products (id integer PRIMARY KEY, sku varchar(100), name text NOT NULL, title text,
-        description text, category varchar(100), ebay_browse_category_id varchar(50), ebay_browse_category_name text,
+        description text, category varchar(100), category_id integer, ebay_browse_category_id varchar(50), ebay_browse_category_name text,
         brand text, condition text, item_specifics jsonb, is_active boolean NOT NULL DEFAULT true, product_type varchar(100));
       CREATE TABLE catalog.product_variants (id integer PRIMARY KEY, product_id integer NOT NULL REFERENCES catalog.products(id),
         sku varchar(100), name text NOT NULL, gtin text, mpn text, weight_grams numeric(10,2),

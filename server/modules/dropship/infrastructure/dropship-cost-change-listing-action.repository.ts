@@ -28,7 +28,9 @@ import type {
   NewCostChangeListingHold,
 } from "../application/dropship-cost-change-listing-action-service";
 import type { DropshipPricingPolicyRecord } from "../application/dropship-listing-preview-service";
+import type { ListingSettingLayers } from "../application/dropship-listing-setting-layers";
 import { mapCostScheduleError } from "./dropship-cost-schedule.repository";
+import { readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
 
 /**
  * PG repository for cost change listing actions (migration 0713). Reads are
@@ -39,7 +41,8 @@ import { mapCostScheduleError } from "./dropship-cost-schedule.repository";
 
 export interface CostActionCatalogReader {
   listCatalogCandidates(productVariantIds: readonly number[]): Promise<Array<{
-    productVariantId: number; productId: number; category: string | null; productLineIds: readonly number[]; defaultRetailPriceCents: number | null;
+    productVariantId: number; productId: number; category: string | null; categoryId: number | null;
+    productLineIds: readonly number[]; defaultRetailPriceCents: number | null;
   }>>;
   /** The active Card Shellz price limits, as the listing preview reads them. */
   listPricingPolicies(): Promise<DropshipPricingPolicyRecord[]>;
@@ -210,7 +213,9 @@ export class PgDropshipCostChangeListingActionRepository implements DropshipCost
     assertPositiveInteger(input.vendorId, "vendorId");
     const productVariantIds = [...new Set(input.productVariantIds)];
     for (const id of productVariantIds) assertPositiveInteger(id, "productVariantId");
-    if (productVariantIds.length === 0) return { listings: [], savedPrices: [], profiles: new Map(), candidates: new Map(), pricingPolicies: [] };
+    if (productVariantIds.length === 0) {
+      return { listings: [], savedPrices: [], profiles: new Map(), layersByStore: new Map(), candidates: new Map(), pricingPolicies: [] };
+    }
     try {
       const listings = await this.dbPool.query<ListingRow>(
         `SELECT l.id, l.store_connection_id, l.product_variant_id, l.status, l.vendor_retail_price_cents, l.platform,
@@ -243,14 +248,28 @@ export class PgDropshipCostChangeListingActionRepository implements DropshipCost
         this.catalog.listCatalogCandidates(productVariantIds),
         this.catalog.listPricingPolicies(),
       ]);
+      const candidatesById = new Map(candidates.map((candidate): [number, CostActionCandidate] => [candidate.productVariantId, {
+        productVariantId: candidate.productVariantId, productId: candidate.productId, category: candidate.category,
+        categoryId: candidate.categoryId,
+        productLineIds: candidate.productLineIds, defaultRetailPriceCents: candidate.defaultRetailPriceCents,
+      }]));
+      // Each store's product and category settings, read after the reads
+      // above and one store at a time, so the reads keep a fixed order.
+      const layersByStore = new Map<number, ListingSettingLayers>();
+      for (const storeConnectionId of storeConnectionIds) {
+        const storeVariantIds = new Set(listings.rows.filter((row) => row.store_connection_id === storeConnectionId)
+          .map((row) => row.product_variant_id));
+        layersByStore.set(storeConnectionId, await readListingSettingLayers(this.dbPool, {
+          vendorId: input.vendorId, storeConnectionId,
+          candidates: [...storeVariantIds].flatMap((id) => { const candidate = candidatesById.get(id); return candidate ? [candidate] : []; }),
+        }));
+      }
       return {
         listings: listings.rows.map(mapListingRow),
         savedPrices: savedPrices.rows.map(mapSavedPriceRow),
         profiles: new Map(profiles.rows.map((row) => [row.store_connection_id, mapProfileRow(row)])),
-        candidates: new Map(candidates.map((candidate): [number, CostActionCandidate] => [candidate.productVariantId, {
-          productVariantId: candidate.productVariantId, productId: candidate.productId, category: candidate.category,
-          productLineIds: candidate.productLineIds, defaultRetailPriceCents: candidate.defaultRetailPriceCents,
-        }])),
+        layersByStore,
+        candidates: candidatesById,
         pricingPolicies,
       };
     } catch (error) {

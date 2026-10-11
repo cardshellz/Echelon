@@ -9,6 +9,7 @@ import {
 import { DropshipError } from "../domain/errors";
 import { readEbayCategoryRules } from "./dropship-ebay-category-rules.reader";
 import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
+import { readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
 import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog.reader";
 
 export class PgDropshipEbayCategoryRulesRepository implements EbayCategoryRulesRepository {
@@ -49,6 +50,8 @@ export class PgDropshipEbayCategoryRulesRepository implements EbayCategoryRulesR
         loadState,
         loadStoreListingConfig: () => PgDropshipListingPreviewRepository.readerForTransaction(client)
           .getStoreListingConfig(input.storeConnectionId),
+        loadListingSettingLayers: (candidates) => readListingSettingLayers(client,
+          { vendorId, storeConnectionId: input.storeConnectionId, candidates }),
         findReplay: (idempotencyKey, requestHash) => findEbayCategoryRulesReplayWithClient(client,
           { vendorId, storeConnectionId: input.storeConnectionId }, idempotencyKey, requestHash),
         saveProfile: async (save) => {

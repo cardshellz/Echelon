@@ -6,6 +6,7 @@ import type { PricingRulesRepository, PricingRulesTransaction, StoredPricingRevi
 import { pricingHash } from "../application/dropship-rule-price";
 import { DropshipError } from "../domain/errors";
 import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog.reader";
+import { readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
 import { readPricingProfile } from "./dropship-pricing-profile.reader";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 
@@ -30,6 +31,7 @@ export class PgDropshipPricingRulesRepository implements PricingRulesRepository 
         ...selectedCatalogReaderForTransaction(client),
         costs: PgShellzClubProductCostAdapter.forTransaction(client),
         loadProfile: () => readPricingProfile(client, storeConnectionId, vendorId),
+        loadRuleLayers: (candidates) => readListingSettingLayers(client, { vendorId, storeConnectionId, candidates }),
         storeReview: async (review) => {
           await client.query(`INSERT INTO dropship.dropship_pricing_reviews
             (id, vendor_id, store_connection_id, input, rows, review_hash, actor_id, created_at)

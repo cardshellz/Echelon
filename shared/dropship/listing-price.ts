@@ -9,6 +9,17 @@ export const listingAmountCentsSchema = z.number().int().min(0).max(MAX_LISTING_
 /** What a pricing rule starts from: the vendor's .ops cost or the catalog reference retail. */
 export const listingPriceBasisSchema = z.enum(["product_cost", "catalog_retail"]);
 /**
+ * The level whose own recipe priced a size, when it is not the store's
+ * pricing rules: the product's own price, or its Card Shellz category's
+ * (listing settings design 5.1). A result, answer or review row carries it
+ * only for these levels and leaves it out for the store default, an older
+ * group rule, a tie or no rule, so those stay byte-identical. Kept here, not
+ * in pricing-rules.ts, because that module imports this one.
+ */
+export const RULE_PRICE_LEVELS = ["product", "category"] as const;
+export type RulePriceLevel = (typeof RULE_PRICE_LEVELS)[number];
+export const rulePriceLevelSchema = z.enum(RULE_PRICE_LEVELS);
+/**
  * How one size's price is chosen (`dropship_listing_price_settings.pricing_mode`):
  * - `fixed`: a price the vendor typed (the only mode with a price of its own);
  * - `catalog_default`: the Card Shellz retail price;
@@ -52,6 +63,12 @@ export const listingPriceSettingSchema = listingPriceTargetSchema.extend({
   rulesConfigured: z.boolean().optional(),
   /** What the store's rule for this size starts from, when the store has rules. */
   ruleBasis: listingPriceBasisSchema.nullable().optional(),
+  /**
+   * Sent only when the product's own price or its category's priced the
+   * rule price (`ruleName` then names that level). Absent for the store's
+   * pricing rules, so today's answers are unchanged.
+   */
+  ruleLevel: rulePriceLevelSchema.optional(),
   /** The vendor's .ops cost for one sellable pack, or null when it is not known. */
   productCostCents: listingAmountCentsSchema.nullable().optional(),
   updatedAt: z.string().datetime().nullable(),

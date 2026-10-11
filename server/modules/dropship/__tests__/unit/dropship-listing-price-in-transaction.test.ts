@@ -27,7 +27,7 @@ describe("saveListingPriceInTransaction", () => {
   beforeEach(() => {
     context = { vendorId: 10, vendorStatus: "active", entitlementStatus: "active", storeConnectionId: 22,
       storeStatus: "connected", setupStatus: "complete", platform: "ebay", storeLaunchReady: true };
-    candidate = { productId: 7, productVariantId: 101, productLineIds: [], category: "Mailers", productIsActive: true,
+    candidate = { productId: 7, productVariantId: 101, productLineIds: [], category: "Mailers", categoryId: null, productIsActive: true,
       variantIsActive: true, variantUomType: "pack", defaultRetailPriceCents: 899, unitsPerVariant: 1, sku: "MAILER-101",
       productName: "Mailers", variantName: "Pack", title: null, description: null, ebayBrowseCategoryId: null,
       ebayBrowseCategoryName: null, brand: null, gtin: null, mpn: null, condition: null, itemSpecifics: null, imageUrls: [],

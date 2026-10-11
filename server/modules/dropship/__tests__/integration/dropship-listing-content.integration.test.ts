@@ -1,11 +1,14 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import pg, { type Pool } from "pg";
+import pg, { type Pool, type PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDropshipListingContentRepository } from "../../infrastructure/dropship-listing-content.repository";
 import { DropshipListingContentService, type ContentRepository } from "../../application/dropship-listing-content-service";
-import { contentCandidate } from "../fixtures/listing-content.fixture";
-import { listingCatalogHash } from "../../application/dropship-listing-content-resolver";
+import { contentCandidate, noContentProfile } from "../fixtures/listing-content.fixture";
+import { listingCatalogHash, productCatalogHash, resolveListingContent } from "../../application/dropship-listing-content-resolver";
+import type { ProductListingSettingPatch, CategoryListingSettingPatch } from "../../../../../shared/dropship/listing-setting-values";
+import { saveProductListingSettingWithClient } from "../../infrastructure/dropship-product-listing-settings.repository";
+import { saveCategoryListingSettingWithClient } from "../../infrastructure/dropship-category-listing-settings.repository";
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 const testUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -14,6 +17,8 @@ const target = { storeConnectionId: 22, productVariantId: 101 };
 (testUrl && disposable ? describe : describe.skip).sequential("content PostgreSQL guarantees", () => {
   const schema = `dropship_content_${process.pid}`;
   let pool: pg.Pool; let service: DropshipListingContentService; let created = false;
+  // The Card Shellz category the mocked catalog gives product 7 (null = none).
+  let candidateCategoryId: number | null = null;
   const qualify = (sql: string) => sql.replaceAll("dropship.", `"${schema}".`).replaceAll("catalog.", `"${schema}".`);
   const query = (sql: string, values?: unknown[]) => pool.query(qualify(sql), values);
   beforeAll(async () => {
@@ -25,12 +30,13 @@ const target = { storeConnectionId: 22, productVariantId: 101 };
       CREATE TABLE dropship.dropship_vendors (id int PRIMARY KEY, member_id text);
       CREATE TABLE dropship.dropship_store_connections (id int PRIMARY KEY, vendor_id int REFERENCES dropship.dropship_vendors(id), UNIQUE(id,vendor_id));
       CREATE TABLE catalog.products (id int PRIMARY KEY,
-      inventory_tracking_default boolean NOT NULL DEFAULT true
+      inventory_tracking_default boolean NOT NULL DEFAULT true, category_id int
     );
       CREATE TABLE catalog.product_variants (id int PRIMARY KEY, product_id int REFERENCES catalog.products(id),
       inventory_tracking_override boolean
     );
       CREATE TABLE catalog.product_line_products (product_id int);
+      CREATE TABLE catalog.product_categories (id integer PRIMARY KEY, name varchar(100) NOT NULL);
       CREATE TABLE dropship.dropship_catalog_rules (id int);
       CREATE TABLE dropship.dropship_vendor_selection_rules (id int);
       CREATE TABLE dropship.dropship_vendor_variant_overrides (id int);
@@ -41,8 +47,14 @@ const target = { storeConnectionId: 22, productVariantId: 101 };
       INSERT INTO dropship.dropship_store_connections VALUES (22,10),(23,11),(24,10);
       INSERT INTO catalog.products VALUES (7);
       INSERT INTO catalog.product_variants VALUES (101,7),(102,7);
+      INSERT INTO catalog.product_categories VALUES (5,'Mailers');
     `);
     await query(readFileSync(resolve(process.cwd(), "migrations/0660_dropship_vendor_listing_content.sql"), "utf8"));
+    // 0738 and 0739 hold the product and category listing settings the per-size
+    // editor resolves descriptions with (PR 8b); the store stub has their (id, vendor_id) key.
+    for (const file of ["0738_dropship_product_listing_settings.sql", "0739_dropship_category_listing_settings.sql"]) {
+      await query(readFileSync(resolve(process.cwd(), "migrations", file), "utf8"));
+    }
     const scoped = { connect: async () => { const client = await pool.connect();
       return { query: (sql: string, values?: unknown[]) => client.query(qualify(sql), values), release: () => client.release() }; } } as unknown as Pool;
     const repository = new PgDropshipListingContentRepository(scoped);
@@ -52,7 +64,7 @@ const target = { storeConnectionId: 22, productVariantId: 101 };
       ...tx, catalog: { ...tx.catalog,
         loadStoreContext: async () => ({ vendorId: tx.vendorId, storeConnectionId: input.storeConnectionId, vendorStatus: "active",
           entitlementStatus: "active", storeStatus: "connected", setupStatus: "ready", platform: "ebay", storeLaunchReady: true }),
-        listCatalogCandidates: async (ids) => ids.map((id) => ({ ...contentCandidate(), productVariantId: id })),
+        listCatalogCandidates: async (ids) => ids.map((id) => ({ ...contentCandidate(), productVariantId: id, categoryId: candidateCategoryId })),
         listCatalogExposureRules: async () => [{ id: 1, scopeType: "catalog", action: "include" }],
         listSelectionRules: async () => [{ id: 1, scopeType: "catalog", action: "include" }],
         listVariantOverrides: async () => [], listExistingListings: async () => [],
@@ -60,8 +72,14 @@ const target = { storeConnectionId: 22, productVariantId: 101 };
     })) };
     service = new DropshipListingContentService({ repository: withCatalogFixture, clock: { now: () => now }, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
   });
-  beforeEach(async () => { await query(`TRUNCATE dropship.dropship_listing_content_settings, dropship.dropship_listing_content_revisions,
-    dropship.dropship_content_profiles, dropship.dropship_content_profile_revisions, dropship.dropship_audit_events RESTART IDENTITY`); });
+  beforeEach(async () => {
+    candidateCategoryId = null;
+    await query(`TRUNCATE dropship.dropship_listing_content_settings, dropship.dropship_listing_content_revisions,
+    dropship.dropship_content_profiles, dropship.dropship_content_profile_revisions, dropship.dropship_audit_events,
+    dropship.dropship_product_listing_settings, dropship.dropship_product_listing_setting_revisions,
+    dropship.dropship_product_listing_setting_requests, dropship.dropship_category_listing_settings,
+    dropship.dropship_category_listing_setting_revisions RESTART IDENTITY`);
+  });
   afterAll(async () => { if (created) await pool.query(`DROP SCHEMA "${schema}" CASCADE`); await pool?.end(); });
   function save(key: string, customText: string | null = "My copy", revision: number | null = null, store = 22) {
     return service.saveForMember("member-1", { ...target, storeConnectionId: store }, {
@@ -74,6 +92,26 @@ const target = { storeConnectionId: 22, productVariantId: 101 };
       (SELECT count(*)::int FROM dropship.dropship_listing_content_settings) AS settings,
       (SELECT count(*)::int FROM dropship.dropship_audit_events) AS audits`);
     return result.rows[0];
+  }
+  /** One committed product or category settings save through PR 8a's writers, as PR 9's routes will make it. */
+  async function saveSettings(target: { productId: number; patch: ProductListingSettingPatch } | { categoryId: number; patch: CategoryListingSettingPatch }, key: string) {
+    const client = await pool.connect();
+    const scoped = { query: (sql: string, values?: unknown[]) => client.query(qualify(sql), values) } as unknown as Pick<PoolClient, "query">;
+    const scope = { vendorId: 10, storeConnectionId: 22, actor: { actorType: "vendor" as const, actorId: "member-1" }, requestKey: key };
+    try {
+      await client.query("BEGIN");
+      if ("productId" in target) {
+        await saveProductListingSettingWithClient(scoped, scope, { productId: target.productId, expectedRevisionId: null,
+          patch: target.patch, requestHash: "a".repeat(64), now });
+      } else {
+        await saveCategoryListingSettingWithClient(scoped, scope, { categoryId: target.categoryId, expectedRevisionId: null,
+          patch: target.patch, requestHash: "a".repeat(64), now });
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
   }
   it("atomically saves immutable history, current pointer, and before/after audit", async () => {
     const first = await save("first");
@@ -131,5 +169,28 @@ const target = { storeConnectionId: 22, productVariantId: 101 };
     await expect(service.saveProfile("member-1", 22, { profile, expectedRevisionId: null, idempotencyKey: "other" })).rejects.toMatchObject({ code: "DROPSHIP_CONTENT_VERSION_CONFLICT" });
     await expect(query("UPDATE dropship.dropship_content_profile_revisions SET profile='{}'")).rejects.toMatchObject({ code: "23514" });
     expect(first.state.revisionId).toBe(1);
+  });
+  it("resolves descriptions with the product's and its category's settings, as the preview does (PR 8b)", async () => {
+    candidateCategoryId = 5;
+    await saveSettings({ productId: 7, patch: { textAbove: { mode: "own", text: "Product above" },
+      mainText: { text: "Product words", catalogHash: productCatalogHash(contentCandidate()) } } }, "settings:product-1");
+    await saveSettings({ categoryId: 5, patch: { textBelow: { mode: "own", text: "Category below" } } }, "settings:category-1");
+    const shown = await service.getForMember("member-1", target);
+    expect(shown).toMatchObject({ customText: null, revisionId: null });
+    expect(shown.resolved).toMatchObject({ source: "custom", needsCatalogReview: false, issues: [],
+      descriptionHtml: "<p>Product above</p><p>Product words</p><p>Category below</p>" });
+    // The size's own text still wins over the product's, saved against the per-size hash.
+    const saved = await save("size-over-product", "Size words");
+    expect(saved.content.resolved.descriptionHtml).toBe("<p>Product above</p><p>Size words</p><p>Category below</p>");
+    // A product with no Card Shellz category ignores every category setting.
+    candidateCategoryId = null;
+    expect((await service.getForMember("member-1", target)).resolved.descriptionHtml).toBe("<p>Product above</p><p>Size words</p>");
+    expect(await counts()).toEqual({ revisions: 1, settings: 1, audits: 3 });
+  });
+  it("a store with no product or category settings resolves exactly as before them", async () => {
+    await saveSettings({ productId: 7, patch: { textAbove: { mode: "own", text: "Store 22 only" } } }, "settings:product-2");
+    const other = await service.getForMember("member-1", { ...target, storeConnectionId: 24 });
+    expect(other.resolved).toEqual(resolveListingContent({ candidate: contentCandidate(), profile: noContentProfile, saved: null }));
+    expect((await service.getForMember("member-1", target)).resolved.descriptionText).toContain("Store 22 only");
   });
 });

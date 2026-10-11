@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { catalogScopeSchema, matchesCatalogScope, catalogTargetsInputSchema, catalogTargetsResponseSchema } from "./catalog-scope";
-import { listingAmountCentsSchema, listingPriceBasisSchema, listingPriceCentsSchema, MAX_LISTING_PRICE_CENTS } from "./listing-price";
+import {
+  listingAmountCentsSchema, listingPriceBasisSchema, listingPriceCentsSchema, MAX_LISTING_PRICE_CENTS, rulePriceLevelSchema,
+  type RulePriceLevel,
+} from "./listing-price";
 
 export const PRICING_REVIEW_PAGE_SIZE = 50;
 export const MAX_PRICING_REVIEW_ITEMS = 10_000;
@@ -74,6 +77,12 @@ export const pricingImpactRowSchema = z.object({
    * Shellz price limit refuses the rule price). Omitted otherwise.
    */
   retailFallbackIssue: z.string().min(1).optional(),
+  /**
+   * Present only when the product's own price or its category's priced the
+   * new price (RulePriceResult.ruleLevel). Omitted for the store's pricing
+   * rules, so a review stored before this field existed hashes the same.
+   */
+  ruleLevel: rulePriceLevelSchema.optional(),
 }).strict();
 /** The review's rule name for a size that follows the store's pricing but whose rules give it no usable price, so it uses its retail price. */
 export const RETAIL_FALLBACK_RULE_NAME = "Retail price (no rule prices this size)";
@@ -97,10 +106,24 @@ export const pricingTargetsResponseSchema = catalogTargetsResponseSchema;
 
 export interface PricingRuleCandidate {
   productVariantId: number; productId: number; category: string | null; productLineIds: readonly number[];
+  /**
+   * The product's Card Shellz category (`catalog.products.category_id`); null
+   * when it has none. Category settings are keyed by it; older group rules
+   * keep matching `category` by name.
+   */
+  categoryId: number | null;
 }
 export type RulePriceBasis = PricingRecipe["basis"];
-/** `basis` names what the winning recipe prices from; null when no recipe was chosen. */
-export interface RulePriceResult { priceCents: number | null; ruleName: string | null; ruleId: string | null; issue: string | null; basis: RulePriceBasis | null }
+/**
+ * `basis` names what the winning recipe prices from; null when no recipe was chosen.
+ * `ruleLevel` is set only when the product's own price or its category's won
+ * (listing settings design 5.1), and absent otherwise, so a store-default,
+ * group, tie or no-rule result is unchanged.
+ */
+export interface RulePriceResult {
+  priceCents: number | null; ruleName: string | null; ruleId: string | null; issue: string | null; basis: RulePriceBasis | null;
+  ruleLevel?: RulePriceLevel;
+}
 
 /** The amount a recipe basis prices from: the .ops cost or the catalog reference retail. */
 export function pricingBasisCents(basis: RulePriceBasis, amounts: {
@@ -125,17 +148,60 @@ export function calculateRulePrice(recipeInput: PricingRecipe, basisCents: numbe
   return { priceCents: Number(cents), ruleName: null, ruleId: null, issue: null, basis: recipe.basis };
 }
 
+/**
+ * The names and ids a product's or a category's own price is shown and hashed
+ * under (plan D15). A group id cannot contain ":" (pricingGroupRuleSchema), so
+ * `product:<id>` and `category:<id>` never collide with a group's. The id is
+ * the catalog id, never the category's name: a Card Shellz rename must not
+ * change any evidence.
+ */
+export const PRODUCT_PRICE_RULE_NAME = "Product price";
+export const CATEGORY_PRICE_RULE_NAME = "Category price";
+export const productPriceRuleId = (productId: number): string => `product:${productId}`;
+export const categoryPriceRuleId = (categoryId: number): string => `category:${categoryId}`;
+
+/**
+ * The size's rule price, one recipe, never stacked (listing settings design
+ * 5.1, plan 4.4): the product's own price, then the store's older group rules
+ * (the lowest priority wins; a tie at the top is a conflict), then the
+ * product's Card Shellz category's price, then the store default recipe.
+ * Nothing set at any level is `pricing_rules_not_configured`.
+ *
+ * With no product or category recipe the result is today's, field for field
+ * and key for key: `ruleLevel` is only ever set for those two levels.
+ * `categoryRecipe` is the recipe of the size's own category, so a size with no
+ * category (`categoryId` null) cannot have one; passing it anyway is a
+ * caller's fault and throws.
+ */
 export function resolvePricingRule(input: {
   profile: PricingProfile | null; candidate: PricingRuleCandidate;
   productCostCents: number | null; catalogRetailCents: number | null;
+  /** The recipe the size's product sets as its own price, when it sets one. */
+  productRecipe?: PricingRecipe | null;
+  /** The recipe the size's Card Shellz category sets as its price, when it sets one. */
+  categoryRecipe?: PricingRecipe | null;
 }): RulePriceResult {
-  if (!input.profile) return { priceCents: null, ruleName: null, ruleId: null, issue: "pricing_rules_not_configured", basis: null };
-  const matches = input.profile.groups.filter(({ scope }) => matchesCatalogScope(scope, input.candidate))
+  const productRecipe = input.productRecipe ?? null;
+  const categoryRecipe = input.categoryRecipe ?? null;
+  const { categoryId } = input.candidate;
+  if (categoryRecipe !== null && categoryId === null) {
+    throw new RangeError("A category price was given for a size whose product has no Card Shellz category.");
+  }
+  if (productRecipe !== null) {
+    return { ...calculateRulePrice(productRecipe, pricingBasisCents(productRecipe.basis, input)),
+      ruleName: PRODUCT_PRICE_RULE_NAME, ruleId: productPriceRuleId(input.candidate.productId), ruleLevel: "product" };
+  }
+  const matches = (input.profile?.groups ?? []).filter(({ scope }) => matchesCatalogScope(scope, input.candidate))
     .sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
   if (matches.length > 1 && matches[0].priority === matches[1].priority) {
     return { priceCents: null, ruleName: null, ruleId: null, issue: "pricing_rule_priority_conflict", basis: null };
   }
   const winner = matches[0];
+  if (!winner && categoryRecipe !== null && categoryId !== null) {
+    return { ...calculateRulePrice(categoryRecipe, pricingBasisCents(categoryRecipe.basis, input)),
+      ruleName: CATEGORY_PRICE_RULE_NAME, ruleId: categoryPriceRuleId(categoryId), ruleLevel: "category" };
+  }
+  if (!input.profile) return { priceCents: null, ruleName: null, ruleId: null, issue: "pricing_rules_not_configured", basis: null };
   const recipe = winner?.recipe ?? input.profile.defaultRecipe;
   return { ...calculateRulePrice(recipe, pricingBasisCents(recipe.basis, input)),
     ruleName: winner?.name ?? "Store default rule", ruleId: winner?.id ?? null };

@@ -6,6 +6,7 @@ import type { DropshipVendorVariantOverride } from "../../domain/vendor-selectio
 import { prepareEbayCategoryRules, resolveEbayListingCategory } from "../../application/dropship-ebay-category-resolver";
 import type { DropshipListingCatalogCandidate, DropshipListingStoreContext } from "../../application/dropship-listing-preview-service";
 import type { ListingSettingsInputs } from "../../application/dropship-listing-settings-facts";
+import { EMPTY_LISTING_SETTING_LAYERS } from "../../application/dropship-listing-setting-layers";
 import {
   DropshipListingSettingsService,
   type ListingSettingsLoad,
@@ -19,7 +20,7 @@ const T0 = new Date("2026-10-06T12:00:00.000Z");
 
 function candidate(productVariantId: number, productId = 501): DropshipListingCatalogCandidate {
   return {
-    productId, productVariantId, productLineIds: [], category: "Toploaders", ebayBrowseCategoryId: "183438",
+    productId, productVariantId, productLineIds: [], category: "Toploaders", categoryId: null, ebayBrowseCategoryId: "183438",
     ebayBrowseCategoryName: "Toploaders", productIsActive: true, variantIsActive: true, variantUomType: "pack",
     unitsPerVariant: 1, defaultRetailPriceCents: 999, sku: `SKU-${productVariantId}`, productName: `Product ${productId}`,
     variantName: `Size ${productVariantId}`, title: "Title", description: "Text", brand: null, gtin: null, mpn: null,
@@ -41,6 +42,8 @@ function inputs(candidates: DropshipListingCatalogCandidate[]): ListingSettingsI
     shelfAssignments: new Map(), ebayCategoryRules: emptyState,
     ebayCategories: new Map(candidates.map((row) => [row.productVariantId, resolveEbayListingCategory(row, prepared)])),
     content: emptyState, contentSettings: new Map(), pausedSince: new Map(),
+    // No product or category rows (plan D1): the summary reads as it did before 8b.
+    layers: EMPTY_LISTING_SETTING_LAYERS, categoryNames: new Map(),
   };
 }
 
