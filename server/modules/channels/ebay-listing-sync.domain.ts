@@ -23,6 +23,7 @@ export const ebayListingSyncIdentitySchema = z
             sku: z.string().trim().min(1).max(100),
             catalogSku: z.string().trim().min(1).max(100).optional(),
             contentSyncEnabled: z.boolean().optional(),
+            mappingExists: z.boolean().optional(),
             externalSku: z.string().min(1).max(100).nullable(),
             offerId: z.string().min(1).max(255).nullable(),
             listingId: z.string().min(1).max(255).nullable(),
@@ -54,9 +55,19 @@ export const syncIdentityHash = (identity: EbayListingSyncIdentity): string =>
   });
 export const syncStageHash = (value: unknown): string =>
   createHash("sha256").update(canonicalJson(value)).digest("hex");
+export const ebayPublicationAcceptedSchema = z.object({ listingId: z.string().trim().min(1).max(255),
+  offerIds: z.record(z.string().regex(/^[1-9][0-9]*$/), z.string().trim().min(1).max(255)) }).strict();
+export type EbayPublicationAccepted = z.infer<typeof ebayPublicationAcceptedSchema>;
 export const storedEbayListingSyncJobSchema = ebayListingSyncJobSchema.extend({
+  operation: z.enum(["sync", "publish"]).default("sync"),
   identity: ebayListingSyncIdentitySchema,
   providerIdentity: ebayListingSyncIdentitySchema.nullable().default(null),
+  publicationTarget: ebayListingSyncIdentitySchema.nullable().default(null),
+  publicationAccepted: ebayPublicationAcceptedSchema.nullable().default(null),
+  publicationWriteCompleted: z.boolean().default(false),
+  publicationWriteStarted: z.boolean().default(false),
+  publicationAcceptedRevision: z.string().regex(/^[1-9][0-9]*$/).nullable().default(null),
+  publicationIntentHash: z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),
   revision: z.string().regex(/^[1-9][0-9]*$/),
   claimedRevision: z
     .string()
@@ -71,6 +82,14 @@ export const storedEbayListingSyncJobSchema = ebayListingSyncJobSchema.extend({
 export type StoredEbayListingSyncJob = z.infer<
   typeof storedEbayListingSyncJobSchema
 >;
+export const publicationRetryReviewHash = (job: StoredEbayListingSyncJob): string => syncStageHash({
+  id: job.id, revision: job.revision, identity: job.identity, publicationTarget: job.publicationTarget,
+  publicationWriteStarted: job.publicationWriteStarted, publicationWriteCompleted: job.publicationWriteCompleted,
+  publicationAccepted: job.publicationAccepted, publicationIntentHash: job.publicationIntentHash,
+});
+export interface EbayPublicationRetryAuthorization {
+  jobId: string; channelId: number; expectedRevision: string; reviewHash: string; commandKey: string; actor: string;
+}
 export class EbayListingSyncError extends Error {
   constructor(
     readonly code: string,
@@ -82,6 +101,7 @@ export class EbayListingSyncError extends Error {
   }
 }
 const WAIT_CODES = new Set([
+  "EBAY_PUBLICATION_READBACK_PENDING",
   "EBAY_PROVIDER_RATE_LIMITED",
   "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED",
   "PUBLICATION_PROVIDER_COOLDOWN",
@@ -148,14 +168,14 @@ export function syncFailure(
       : "The listing update could not finish. Inspect the saved sync job before retrying.";
   return {
     state:
-      code === "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED"
+      code === "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" || code === "EBAY_PUBLICATION_RESPONSE_UNCERTAIN"
         ? "awaiting_evidence"
         : retrying
           ? "recovering"
           : "needs_attention",
     code,
     message,
-    resetAttempts: waiting || code === "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED",
+    resetAttempts: waiting || code === "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" || code === "EBAY_PUBLICATION_RESPONSE_UNCERTAIN",
     nextAttemptAt: new Date(
       Number.isFinite(retryAfter) ? Math.max(minimum, retryAfter) : minimum,
     ),

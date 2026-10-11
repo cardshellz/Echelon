@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 import { ebayPublicationRecoveryConfirmationSchema } from "@shared/types/ebay-publication-recovery";
+import { ebayListingRecoveryConfirmationSchema } from "@shared/types/ebay-listing-recovery";
 import type { EbayProductSyncResult } from "@shared/types/ebay-listing-sync";
 import type { EbayPublicationRecoveryService } from "../inventory-planning/quantity-publication";
 import type { QuantityPublicationScope } from "../inventory-planning/domain/quantity-publication-admission";
-import { EbayListingSyncError, type StoredEbayListingSyncJob } from "./ebay-listing-sync.domain";
+import { EbayListingSyncError, publicationRetryReviewHash, type StoredEbayListingSyncJob } from "./ebay-listing-sync.domain";
 import { ebayListingSyncIdentitySchema, type EbayListingSyncIdentity } from "./ebay-listing-sync.domain";
 import type { EbayListingSyncService } from "./ebay-listing-sync.service";
 
@@ -12,7 +13,7 @@ import type { EbayListingSyncService } from "./ebay-listing-sync.service";
  * This owner never rewrites provider evidence or chooses a quantity. */
 export class EbayListingRecoveryService {
   constructor(
-    private readonly jobs: Pick<EbayListingSyncService, "get" | "getByCommand" | "getAdmission">,
+    private readonly jobs: Pick<EbayListingSyncService, "get" | "getByCommand" | "getAdmission" | "enqueue" | "authorizePublicationRetry">,
     private readonly recovery: Pick<EbayPublicationRecoveryService, "preview" | "resume">,
     private readonly enqueue: (productId: number, actor: string, commandKey: string) => Promise<EbayProductSyncResult>,
     private readonly readProductIdentity?: (productId: number) => Promise<EbayListingSyncIdentity>,
@@ -38,16 +39,33 @@ export class EbayListingRecoveryService {
 
   async preview(id: string, channelId: number) {
     const job = await this.ownedJob(id, channelId);
-    return { ...(await this.recovery.preview(this.scopes(job))), jobId: job.id, productId: job.productId };
+    const inventory = await this.recovery.preview(this.scopes(job));
+    const publicationRetry = this.requiresPublicationRetry(job) ? { reviewHash: publicationRetryReviewHash(job), revision: job.revision,
+      message: "Echelon saved the start of a publish request, but its final outcome is unconfirmed. Authorizing another attempt preserves that unknown outcome and resumes this same saved publication. The worker will recheck the exact offers and group before writing; it will not publish again if eBay shows them as published." } : null;
+    return { ...inventory, canResume: inventory.canResume || (publicationRetry !== null && inventory.blockReason === "no_pending_attempts"),
+      blockReason: publicationRetry && inventory.blockReason === "no_pending_attempts" ? null : inventory.blockReason,
+      publicationRetry, jobId: job.id, productId: job.productId };
   }
 
   async resume(id: string, channelId: number, actor: string, input: unknown) {
-    const command = ebayPublicationRecoveryConfirmationSchema.extend({ idempotencyKey: z.string().uuid() }).parse(input);
+    const command = ebayListingRecoveryConfirmationSchema.extend({ idempotencyKey: z.string().uuid() }).parse(input);
     const job = await this.ownedJob(id, channelId);
+    if (command.publicationRetryHash) return this.resumePublication(job, channelId, actor, command);
+    if (this.requiresPublicationRetry(job)) throw new EbayListingSyncError("EBAY_RECOVERY_PREVIEW_CHANGED",
+      "Review the saved publication attempt and acknowledge its unknown outcome before authorizing another publish attempt.");
     const result = await this.recovery.resume({ ...command, scopes: this.scopes(job), actor });
     try {
       // The receipt commits first. If the process stops here, the already durable
       // blocked job will retry; replaying this command also safely retries enqueue.
+      if (job.operation === "publish") {
+        // Keep the immutable source/target of this saved publication. Published
+        // readback can legitimately exist now even though its original local
+        // mapping never committed, so maintenance admission cannot reconstruct it.
+        const current = await this.ownedJob(id, channelId);
+        if (current.state === "completed") return { ...result, job: this.publicJob(current) };
+        const resumed = await this.jobs.enqueue(job.identity, actor, command.idempotencyKey, "publish");
+        return { ...result, job: this.publicJob(resumed) };
+      }
       const queued = await this.enqueue(job.productId, actor, command.idempotencyKey);
       const next = queued.jobs.find(member => member.productId === job.productId);
       if (!next) throw new Error("Canonical sync admission did not save a result.");
@@ -57,6 +75,52 @@ export class EbayListingRecoveryService {
     } catch (cause) {
       throw new EbayListingSyncError("EBAY_RECOVERY_FOLLOWUP_PENDING",
         "Recovery was authorized and saved, but the immediate sync could not be queued. The saved blocked update remains available. Refresh its status; retry this same recovery confirmation to resume queueing without changing the old receipt.", { cause });
+    }
+  }
+
+  private requiresPublicationRetry(job: StoredEbayListingSyncJob): boolean {
+    return job.operation === "publish" && job.publicationWriteStarted && !job.publicationWriteCompleted && job.publicationAccepted === null;
+  }
+
+  private async resumePublication(job: StoredEbayListingSyncJob, channelId: number, actor: string,
+    command: z.infer<typeof ebayListingRecoveryConfirmationSchema>) {
+    const authorize = () => this.jobs.authorizePublicationRetry({ jobId: job.id, channelId, actor,
+      expectedRevision: job.revision, reviewHash: command.publicationRetryHash!, commandKey: command.idempotencyKey });
+    const prior = await this.jobs.getByCommand(command.idempotencyKey, channelId);
+    if (prior) {
+      if (prior.id !== job.id) throw new EbayListingSyncError("EBAY_RECOVERY_REPLAY_CONFLICT", "This confirmation belongs to another saved publication. Review this job again.");
+      // The owner validates actor and original review hash before returning its
+      // immutable receipt. Current job revision may already have advanced.
+      const replay = await authorize();
+      return { attemptIds: [], replayed: replay.replayed, providerWriteAttempted: false as const,
+        publicationRetryAuthorized: true, job: this.publicJob(replay.job) };
+    }
+    if (!this.requiresPublicationRetry(job) || command.publicationRetryHash !== publicationRetryReviewHash(job))
+      throw new EbayListingSyncError("EBAY_RECOVERY_PREVIEW_CHANGED", "The saved publication changed after your review. Review its current outcome before authorizing another attempt.");
+    const { publicationRetryHash: _publicationRetryHash, ...inventoryCommand } = command;
+    let result: { attemptIds: string[]; replayed: boolean; providerWriteAttempted: false };
+    try {
+      // Replay inventory's immutable receipt first: it may have committed before
+      // the channel authorization connection failed on the previous request.
+      result = await this.recovery.resume({ ...inventoryCommand, scopes: this.scopes(job), actor });
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "EBAY_RECOVERY_SCOPE_CHANGED") throw error;
+      const fresh = await this.recovery.preview(this.scopes(job));
+      if (fresh.blockReason !== "no_pending_attempts" || fresh.attempts.length !== 0 || fresh.previewHash !== command.previewHash)
+        throw new EbayListingSyncError("EBAY_RECOVERY_PREVIEW_CHANGED", "The inventory publication evidence changed after your review. Review the updated requests before resuming.");
+      // There was no inventory attempt to supersede. The following channel
+      // receipt authorizes only its own interrupted workflow, with empty IDs.
+      result = { attemptIds: [], replayed: false, providerWriteAttempted: false };
+    }
+    try {
+      const authorized = await authorize();
+      return { ...result, replayed: result.replayed || authorized.replayed,
+        publicationRetryAuthorized: true, job: this.publicJob(authorized.job) };
+    } catch (cause) {
+      if (cause instanceof EbayListingSyncError && ["EBAY_PUBLICATION_RETRY_REVIEW_CHANGED", "EBAY_PUBLICATION_RETRY_NOT_ALLOWED",
+        "EBAY_SYNC_REPLAY_CONFLICT", "EBAY_RECOVERY_REPLAY_CONFLICT"].includes(cause.code)) throw cause;
+      throw new EbayListingSyncError("EBAY_RECOVERY_FOLLOWUP_PENDING",
+        "Recovery evidence was checked, but the saved publication's retry authorization could not be confirmed. Retry this same confirmation to recover its exact result; no new publish was sent by this request.", { cause });
     }
   }
 
@@ -95,10 +159,11 @@ export class EbayListingRecoveryService {
   }
 
   private scopes(job: StoredEbayListingSyncJob): QuantityPublicationScope[] {
-    const identity = job.providerIdentity ?? job.identity;
+    const identity = job.providerIdentity ?? (job.operation === "publish" ? job.publicationTarget : null) ?? job.identity;
     // Older source group keys were catalog-derived guesses. Only a provider
     // observation can authorize including a group in this recovery's scope.
-    return this.identityScopes({ ...identity, groupKey: job.providerIdentity?.groupKey ?? null });
+    return this.identityScopes({ ...identity, groupKey: job.providerIdentity?.groupKey
+      ?? (job.operation === "publish" ? job.publicationTarget?.groupKey : null) ?? null });
   }
 
   private identityScopes(identity: EbayListingSyncIdentity): QuantityPublicationScope[] {
@@ -110,8 +175,8 @@ export class EbayListingRecoveryService {
   }
 
   private publicJob(job: StoredEbayListingSyncJob) {
-    const { id, kind, productId, state, code, message, nextAttemptAt, updatedAt } = job;
-    return { id, kind, productId, state, code, message, nextAttemptAt, updatedAt,
+    const { id, kind, operation, productId, state, code, message, nextAttemptAt, updatedAt } = job;
+    return { id, kind, operation, productId, state, code, message, nextAttemptAt, updatedAt,
       ...(code ? { issue: resolveEbayListingIssue({ code, message, productId, jobId: id, state }) } : {}) };
   }
 }

@@ -19,13 +19,4 @@ export const ebaySyncProgressEventSchema = z.discriminatedUnion("type", [
   streamError,
 ]);
 
-export const ebayPushProgressEventSchema = z.discriminatedUnion("type", [
-  productProgress.extend({ status: z.enum(["success", "error", "skipped"]), variantsListed: count.optional(), listingId: z.string().optional(),
-    variantDetails: z.array(z.object({ sku: z.string(), success: z.boolean(), error: z.string().optional() })).optional(),
-  }),
-  z.object({ type: z.literal("complete"), cancelled: z.boolean(), summary: z.object({ succeeded: count, failed: count, skipped: count, total: count }) }),
-  z.object({ type: z.literal("rate_limited"), waitSeconds: count, product: z.string(), productId: z.number().int().positive() }),
-  streamError,
-]);
 export type EbaySyncProgressEvent = z.infer<typeof ebaySyncProgressEventSchema>;
-export type EbayPushProgressEvent = z.infer<typeof ebayPushProgressEventSchema>;

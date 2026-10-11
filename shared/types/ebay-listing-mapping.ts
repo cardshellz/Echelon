@@ -39,7 +39,7 @@ export const ebayListingMappingReviewSchema = z.object({
   canApply: z.boolean(),
   allowedToApply: z.boolean().default(false),
   requiredPermission: z.string().nullable().default("channels:edit"),
-  action: z.object({ kind: z.enum(["apply_fix", "resume_sync", "manual", "reconnect", "retry_read", "review_registered_listing"]), label: text }).strict(),
+  action: z.object({ kind: z.enum(["apply_fix", "resume_sync", "finish_publish", "manual", "reconnect", "retry_read", "review_registered_listing"]), label: text }).strict(),
   manualSteps: z.array(z.object({ text, href: z.string().max(2000).optional() }).strict()).max(10),
 }).strict();
 export const ebayListingMappingApplySchema = z.object({

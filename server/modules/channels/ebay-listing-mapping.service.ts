@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { listingRegistrationOwnerSnapshotSchema, type ListingRegistrationVariantCandidate,
-  type MarketplaceObservedListingPublication, type ObserveMarketplaceListingInput } from "../marketplace-listings";
+  type MarketplaceObservedListingPublication, type ObserveMarketplaceListingInput, type EbayListingInspection } from "../marketplace-listings";
 import { ebayListingMappingApplySchema, ebayListingMappingResultSchema, mappingRepairFailureDisposition, type EbayListingMappingResult,
   type EbayListingMappingReview } from "@shared/types/ebay-listing-mapping";
 import { EbayListingSyncError, ebayListingSyncIdentitySchema, syncStageHash, type EbayListingSyncIdentity } from "./ebay-listing-sync.domain";
@@ -13,16 +13,18 @@ export interface EbayListingMappingSource {
   environment: "production" | "sandbox";
   candidates: readonly ListingRegistrationVariantCandidate[];
 }
-export interface EbayListingMappingRepairPlan {
+interface EbayListingMappingCommandPlan {
   source: EbayListingMappingSource;
-  provenIdentity: EbayListingSyncIdentity;
-  observation: MarketplaceObservedListingPublication;
   reviewHash: string;
   commandKey: string;
   requestHash: string;
   actor: string;
   now: Date;
 }
+export type EbayListingMappingRepairPlan = EbayListingMappingCommandPlan & (
+  | { operation?: "sync"; provenIdentity: EbayListingSyncIdentity; observation: MarketplaceObservedListingPublication }
+  | { operation: "publish"; targetIdentity: EbayListingSyncIdentity; inspectionEvidence: EbayListingInspection }
+);
 export interface EbayListingMappingRepairStore {
   findReplay(input: { productId: number; channelId: number; commandKey: string; requestHash?: string; actor?: string }): Promise<EbayListingMappingResult | null>;
   apply(plan: EbayListingMappingRepairPlan): Promise<EbayListingMappingResult>;
@@ -44,6 +46,7 @@ export interface EbayListingMappingDependencies {
   readSource(productId: number): Promise<EbayListingMappingSource>;
   inspect(input: Omit<ObserveMarketplaceListingInput, "locator">): Promise<unknown>;
   assertCompatible(source: EbayListingMappingSource, observation: MarketplaceObservedListingPublication, provenIdentity: EbayListingSyncIdentity): Promise<void>;
+  assertPublishCompatible?(source: EbayListingMappingSource, targetIdentity: EbayListingSyncIdentity, inspection: EbayListingInspection): Promise<void>;
   store: EbayListingMappingRepairStore;
   now(): Date;
   reportDiagnosticFailure(event: { productId: number; phase: "source" | "provider" | "compatibility"; code: string; errorName: string }): void;
@@ -72,7 +75,7 @@ export class EbayListingMappingService {
     if (replay) return this.result(replay, productId, command.commandKey, command.reviewHash);
     try {
       const { source, diagnosis } = await this.evaluate(productId, channelId);
-      if (!diagnosis.review.canApply || !diagnosis.provenIdentity || !diagnosis.observation) {
+      if (!diagnosis.review.canApply || (!diagnosis.publicationPlan && (!diagnosis.provenIdentity || !diagnosis.observation))) {
         const diagnosticCode = diagnosis.review.diagnosticCode ?? "EBAY_MAPPING_REPAIR_UNSAFE";
         const manualRefusal = ["manual", "review_registered_listing"].includes(diagnosis.review.action.kind);
         const code = manualRefusal && mappingRepairFailureDisposition(diagnosticCode) !== "review_again"
@@ -81,8 +84,12 @@ export class EbayListingMappingService {
       }
       if (diagnosis.review.reviewHash !== command.reviewHash)
         throw new EbayListingSyncError("EBAY_MAPPING_REVIEW_STALE", "The saved mapping or eBay listing changed after your review. Check eBay again before applying a fix.");
-      return this.result(await this.dependencies.store.apply({ source, provenIdentity: diagnosis.provenIdentity,
-        observation: diagnosis.observation, reviewHash: command.reviewHash, commandKey: command.commandKey,
+      if (diagnosis.publicationPlan) return this.result(await this.dependencies.store.apply({
+        operation: "publish", source, ...diagnosis.publicationPlan,
+        reviewHash: command.reviewHash, commandKey: command.commandKey, requestHash, actor: parsedActor, now: this.now(),
+      }), productId, command.commandKey, command.reviewHash);
+      return this.result(await this.dependencies.store.apply({ source, provenIdentity: diagnosis.provenIdentity!,
+        observation: diagnosis.observation!, reviewHash: command.reviewHash, commandKey: command.commandKey,
         requestHash, actor: parsedActor, now: this.now() }), productId, command.commandKey, command.reviewHash);
     } catch (error) {
       if (!(error instanceof Error) || !("code" in error) || typeof error.code !== "string"
@@ -114,8 +121,14 @@ export class EbayListingMappingService {
     assertEbayListingSourceIdentityUnchanged(source.identity, current.identity);
     if (source.environment !== current.environment || syncStageHash(this.members(source)) !== syncStageHash(this.members(current)))
       throw new EbayListingSyncError("EBAY_MAPPING_REVIEW_STALE", "The account environment or product membership changed during the eBay check. Check again.");
-    if (diagnosis.observation && diagnosis.provenIdentity) {
-      try { await this.dependencies.assertCompatible(source, diagnosis.observation, diagnosis.provenIdentity); }
+    if ((diagnosis.observation && diagnosis.provenIdentity) || diagnosis.publicationPlan) {
+      try {
+        if (diagnosis.publicationPlan) {
+          if (!this.dependencies.assertPublishCompatible)
+            throw new EbayListingSyncError("EBAY_PUBLICATION_OWNER_UNAVAILABLE", "Publication ownership could not be checked. Retry after the listing service is available.");
+          await this.dependencies.assertPublishCompatible(source, diagnosis.publicationPlan.targetIdentity, diagnosis.publicationPlan.inspectionEvidence);
+        } else await this.dependencies.assertCompatible(source, diagnosis.observation!, diagnosis.provenIdentity!);
+      }
       catch (error) {
         if (error instanceof Error && "code" in error && error.code === "EBAY_MAPPING_CANONICAL_CONFLICT") {
           diagnosis = mappingBlockedReview({ productId, observedAt: this.now(), rows: diagnosis.review.rows,

@@ -112,8 +112,9 @@ export function EbayMappingRepairDialog({ productId, productName, onClose, onQue
   function rememberResult(value: EbayListingMappingResult) {
     setResult(value); setCommand(null); setApplyIssue(null);
     try { sessionStorage.removeItem(storageKey); } catch { /* Retaining a completed command is safe: its receipt is replayed on reopen. */ }
-    queryClient.setQueryData<EbayListingSyncJob[]>(["/api/ebay/listings/sync-jobs"], (previous = []) =>
-      [value.job, ...previous.filter((job) => job.productId !== productId)]);
+    // A replayed receipt can reference an older job than the product's latest
+    // request. Keep its status here; let the server choose the current feed job.
+    void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listings/sync-jobs"], exact: true });
     void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
     onQueued(value.job);
   }
@@ -154,7 +155,7 @@ export function EbayMappingRepairDialog({ productId, productName, onClose, onQue
     if (command) { setApplyIssue(null); apply.mutate(command); return; }
     const current = review.data;
     if (!current?.canApply || !current.allowedToApply || !current.reviewHash ||
-      !["apply_fix", "resume_sync"].includes(current.action.kind) || review.isFetching || review.isError || reviewRequired) return;
+      !["apply_fix", "resume_sync", "finish_publish"].includes(current.action.kind) || review.isFetching || review.isError || reviewRequired) return;
     const nextCommand = { reviewHash: current.reviewHash, commandKey: crypto.randomUUID() };
     try {
       // Save before sending: closing/reloading after a lost response must use
@@ -182,22 +183,29 @@ export function EbayMappingRepairDialog({ productId, productName, onClose, onQue
     refetchInterval: (query) => query.state.data?.state === "completed" ? false : 10_000,
   });
   const job = savedJob.data ?? result?.job;
+  const publishing = job?.operation === "publish" || review.data?.action.kind === "finish_publish";
+  useEffect(() => {
+    if (savedJob.data) void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listings/sync-jobs"], exact: true });
+    if (savedJob.data?.state === "completed") void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+  }, [savedJob.data, queryClient]);
   const jobIssue = job && ["awaiting_evidence", "needs_attention"].includes(job.state)
     ? job.issue ?? resolveEbayListingIssue({ code: job.code, message: job.message, productId, jobId: job.id, state: job.state }) : null;
   const reviewData = review.data;
   const canSubmit = initialized && reviewData?.canApply && reviewData.allowedToApply && reviewData.reviewHash &&
-    ["apply_fix", "resume_sync"].includes(reviewData.action.kind) && storageFailure !== "read" && !review.isFetching && !review.isError && !reviewRequired;
+    ["apply_fix", "resume_sync", "finish_publish"].includes(reviewData.action.kind) && storageFailure !== "read" && !review.isFetching && !review.isError && !reviewRequired;
   return <Dialog open onOpenChange={(open) => { if (!open && !apply.isPending) onClose(); }}>
     <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-      <DialogHeader><DialogTitle>Fix eBay listing mapping</DialogTitle><DialogDescription>{productName}</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>{publishing ? "Finish publishing on eBay" : "Fix eBay listing mapping"}</DialogTitle><DialogDescription>{productName}</DialogDescription></DialogHeader>
       {storageError && <p role="alert" className="text-sm text-destructive">{storageError}</p>}
       {storageFailure === "read" && <Button variant="outline" className="min-h-11" onClick={loadSavedCommand}>Retry loading saved request</Button>}
       {result && job ? <div className="space-y-3 text-sm">
-        <p role="status" className="font-medium">{job.state === "completed" ? "Listing sync completed." : jobIssue ? "Mapping request saved. The listing needs the correction below." : "Mapping request saved. Listing sync is queued or running."}</p>
+        <p role="status" className="font-medium">{publishing
+          ? job.state === "completed" ? "Published on eBay. Listing and pictures verified." : job.code === "EBAY_PUBLICATION_READBACK_PENDING" ? "eBay accepted publication. Checking the published listing and pictures automatically." : jobIssue ? "Publishing request saved. The listing needs the correction below." : "Publishing is queued or running. Publication is not yet confirmed."
+          : job.state === "completed" ? "Listing sync completed." : jobIssue ? "Mapping request saved. The listing needs the correction below." : "Mapping request saved. Listing sync is queued or running."}</p>
         {job.state !== "completed" && <p>The listing update is not yet confirmed complete. You can close this dialog and follow its saved status in the listing feed.</p>}
         {jobIssue && <EbayListingIssueCard issue={jobIssue} onAction={(issue) => { onClose(); onIssueAction(issue, productId, job.id); }} />}
         {savedJob.isError && <p role="alert">The latest sync status could not be loaded. The saved request is still available; refresh its status below.</p>}
-        <Button variant="outline" className="min-h-11" disabled={savedJob.isFetching} onClick={() => savedJob.refetch()}>Refresh sync status</Button>
+        <Button variant="outline" className="min-h-11" disabled={savedJob.isFetching} onClick={() => savedJob.refetch()}>{publishing ? "Refresh publishing status" : "Refresh sync status"}</Button>
       </div> : command ? <div className="space-y-3 text-sm">
         <p role="status" className="font-medium">{apply.isPending ? "Saving the mapping fix…" : "Checking whether your fix was saved."}</p>
         <p>A missing response does not tell us whether the fix was applied. Echelon checks this exact request; retrying below uses the same request and cannot create a second repair.</p>
@@ -230,14 +238,14 @@ export function EbayMappingRepairDialog({ productId, productName, onClose, onQue
             return <li key={index}>{href ? <a href={href} target="_blank" rel="noopener noreferrer" className="inline-block underline text-primary py-2 break-words">{step.text} (opens in a new tab)</a> : step.text}</li>;
           })}</ol></section>}
           {reviewData.diagnosticCode && <p className="text-xs text-muted-foreground break-all">Diagnostic code: {reviewData.diagnosticCode}</p>}
-          {!reviewData.allowedToApply && ["apply_fix", "resume_sync"].includes(reviewData.action.kind) && <p role="status">You can review this fix, but applying it requires permission to edit channels{reviewData.requiredPermission ? ` (${reviewData.requiredPermission})` : ""}. A team member with that permission can open this product and apply the reviewed fix.</p>}
+          {!reviewData.allowedToApply && ["apply_fix", "resume_sync", "finish_publish"].includes(reviewData.action.kind) && <p role="status">You can review this fix, but applying it requires permission to edit channels{reviewData.requiredPermission ? ` (${reviewData.requiredPermission})` : ""}. A team member with that permission can open this product and apply the reviewed fix.</p>}
           {!reviewData.allowedToApply && reviewData.action.kind === "review_registered_listing" && <p role="status">Opening the registered listing change workflow requires permission to edit channels{reviewData.requiredPermission ? ` (${reviewData.requiredPermission})` : ""}. A team member with that permission can review the registered listing for this product.</p>}
         </>}
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" className="min-h-11" disabled={!initialized || review.isFetching || storageFailure === "read"} onClick={() => void recheck()}>{review.isFetching ? "Checking mapping…" : reviewData?.action.kind === "retry_read" ? reviewData.action.label : "Recheck mapping"}</Button>
           {reviewData?.action.kind === "reconnect" && <Button asChild variant="outline" className="min-h-11"><a href="/channels/ebay#connection" target="_blank" rel="noopener noreferrer">Open connection settings</a></Button>}
           {reviewData?.action.kind === "review_registered_listing" && <Button className="min-h-11" disabled={!reviewData.allowedToApply || registeredListingReview.isPending} onClick={() => registeredListingReview.mutate()}>{registeredListingReview.isPending ? "Loading listing…" : reviewData.action.label}</Button>}
-          {reviewData && ["apply_fix", "resume_sync"].includes(reviewData.action.kind) && <Button className="min-h-11" disabled={!canSubmit || apply.isPending} onClick={submitFix}>{reviewData.action.label}</Button>}
+          {reviewData && ["apply_fix", "resume_sync", "finish_publish"].includes(reviewData.action.kind) && <Button className="min-h-11" disabled={!canSubmit || apply.isPending} onClick={submitFix}>{reviewData.action.label}</Button>}
         </div>
         {registeredListingReview.isError && <p role="alert">The registered listing review could not be opened. Refresh the listing feed, then try Review registered listing again.</p>}
       </div>}

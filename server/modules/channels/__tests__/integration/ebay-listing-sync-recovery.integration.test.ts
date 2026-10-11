@@ -75,6 +75,8 @@ const configured =
         "0732_ebay_listing_sync_identity_admission.sql",
         "0733_ebay_provider_response_finality.sql",
         "0734_ebay_operator_republication_recovery.sql",
+        "0736_ebay_listing_mapping_repairs.sql",
+        "0737_ebay_publication_completion.sql",
       ])
         await database.pool.query(
           readFileSync(resolve(process.cwd(), "migrations", file), "utf8"),

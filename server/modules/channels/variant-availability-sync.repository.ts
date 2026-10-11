@@ -379,6 +379,8 @@ export async function markVariantAvailabilitySynced(
       input.quantity,
     ]);
 
+    // This queue supports eBay only. A quantity acknowledgement can establish a
+    // mapping, but cannot certify publication or erase its existing failure.
     if (input.externalSku || input.externalVariantId || input.externalProductId) {
       await client.query(`
         INSERT INTO channels.channel_listings (
@@ -393,7 +395,7 @@ export async function markVariantAvailabilitySynced(
           sync_error,
           created_at,
           updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, transaction_timestamp(), 'synced', NULL,
+        ) VALUES ($1, $2, $3, $4, $5, $6, transaction_timestamp(), 'pending', NULL,
                   transaction_timestamp(), transaction_timestamp())
         ON CONFLICT (channel_id, product_variant_id)
         DO UPDATE SET
@@ -402,8 +404,6 @@ export async function markVariantAvailabilitySynced(
           external_sku = COALESCE(EXCLUDED.external_sku, channels.channel_listings.external_sku),
           last_synced_qty = EXCLUDED.last_synced_qty,
           last_synced_at = EXCLUDED.last_synced_at,
-          sync_status = 'synced',
-          sync_error = NULL,
           updated_at = transaction_timestamp()
       `, [
         claim.channelId,

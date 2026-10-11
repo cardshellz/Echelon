@@ -35,6 +35,11 @@ export const ebayListingSyncJobs = channelsSchema.table(
       .references(() => products.id),
     identity: jsonb("identity").notNull(),
     identityHash: text("identity_hash").notNull(),
+    operation: text("operation").notNull().default("sync"),
+    publicationTarget: jsonb("publication_target"),
+    publicationTargetHash: text("publication_target_hash"),
+    publicationAccepted: jsonb("publication_accepted"),
+    publicationAcceptedHash: text("publication_accepted_hash"),
     state: text("state").notNull().default("queued"),
     revision: bigint("revision", { mode: "bigint" })
       .notNull()
@@ -53,6 +58,11 @@ export const ebayListingSyncJobs = channelsSchema.table(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },
   (table) => [
+    check("ebay_listing_sync_jobs_operation_check",sql`${table.operation} IN ('sync','publish')`),
+    check("ebay_sync_publication_target_pair",sql`(${table.publicationTarget} IS NULL)=(${table.publicationTargetHash} IS NULL)`),
+    check("ebay_sync_publication_target_operation",sql`${table.publicationTarget} IS NULL OR ${table.operation}='publish'`),
+    check("ebay_sync_publication_accepted_pair",sql`(${table.publicationAccepted} IS NULL)=(${table.publicationAcceptedHash} IS NULL)`),
+    check("ebay_sync_publication_accepted_target",sql`${table.publicationAccepted} IS NULL OR (${table.operation}='publish' AND ${table.publicationTarget} IS NOT NULL)`),
     uniqueIndex("ebay_listing_sync_one_active")
       .on(table.channelId, table.productId)
       .where(
@@ -109,6 +119,7 @@ export const ebayListingSyncEvents = channelsSchema.table(
     evidence: jsonb("evidence").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   },
+  (table) => [index("ebay_listing_sync_events_job_sequence").on(table.jobId, table.id)],
 );
 
 // Migration 0736 enforces immutable receipts and the atomic workflow/job fence.
@@ -128,6 +139,7 @@ export const ebayListingMappingRepairs = channelsSchema.table("ebay_listing_mapp
   beforeRows: jsonb("before_rows").notNull(),
   afterRows: jsonb("after_rows").notNull(),
   observation: jsonb("observation").notNull(),
+  operation: text("operation").notNull().default("sync"),
   jobId: uuid("job_id").notNull().references(() => ebayListingSyncJobs.id),
   appliedAt: timestamp("applied_at", { withTimezone: true }).notNull(),
   ownerTransactionId: xid8("owner_transaction_id").notNull().default(sql`pg_current_xact_id()`),
@@ -143,6 +155,8 @@ export const ebayListingMappingRepairs = channelsSchema.table("ebay_listing_mapp
   check("ebay_listing_mapping_repairs_before_rows_check",sql`jsonb_typeof(${table.beforeRows})='array' AND jsonb_array_length(${table.beforeRows}) BETWEEN 1 AND 250`),
   check("ebay_listing_mapping_repairs_after_rows_check",sql`jsonb_typeof(${table.afterRows})='array' AND jsonb_array_length(${table.afterRows})=jsonb_array_length(${table.beforeRows})`),
   check("ebay_listing_mapping_repairs_observation_check",sql`jsonb_typeof(${table.observation})='object'`),
+  check("ebay_listing_mapping_repairs_operation_check",sql`${table.operation} IN ('sync','publish')`),
+  check("ebay_mapping_publish_admission_preserves_source",sql`${table.operation}<>'publish' OR (${table.beforeIdentity}=${table.afterIdentity} AND ${table.beforeRows}=${table.afterRows} AND ${table.observation}->>'kind' IS NOT DISTINCT FROM 'unpublished_inspection')`),
 ]);
 
 export const ebayListingMappingRejections = channelsSchema.table("ebay_listing_mapping_rejections", {

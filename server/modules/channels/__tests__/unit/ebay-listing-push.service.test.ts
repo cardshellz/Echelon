@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { EbayListingPushService, EbayListingPushSkipped, ebayListingPushFailure, ebayListingPushRequestSchema } from "../../ebay-listing-push.service";
+import { ebayListingPushResponseSchema } from "@shared/types/ebay-listing-push";
 
 describe("shared eBay publication batch", () => {
   it.each(["EBAY_CATALOG_PHOTO_REQUIRED", "EBAY_LISTING_PREFLIGHT_FAILED", "STOCK_LISTING_ATP_NOT_READY", "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED", "EBAY_AUTH_REQUIRED"])(
@@ -10,7 +11,7 @@ describe("shared eBay publication batch", () => {
       });
       const onProduct = vi.fn();
       const result = await new EbayListingPushService({ execute }).push({ productIds: [1, 2] }, { onProduct });
-      expect(result.summary).toEqual({ succeeded: 1, failed: 1, skipped: 0, total: 2 });
+      expect(result.summary).toEqual({ succeeded: 1, failed: 1, skipped: 0, queued: 0, total: 2 });
       expect(result.results[0]).toMatchObject({ productId: 1, success: false, code, issue: { code } });
       expect(result.results[0].issue?.nextStep).toBeTruthy();
       expect(result.results[1].listingId).toBe("listing-2");
@@ -33,7 +34,7 @@ describe("shared eBay publication batch", () => {
   it("counts exclusions separately and redacts sensitive provider diagnostics", async () => {
     const execute = vi.fn(async () => { throw new EbayListingPushSkipped("Product is excluded."); });
     const result = await new EbayListingPushService({ execute }).push({ productIds: [1] });
-    expect(result.summary).toEqual({ succeeded: 0, failed: 0, skipped: 1, total: 1 });
+    expect(result.summary).toEqual({ succeeded: 0, failed: 0, skipped: 1, queued: 0, total: 1 });
     expect(ebayListingPushFailure(1, new Error("Authorization: Bearer secret https://user:pass@example.com" )).error).not.toContain("secret");
   });
 
@@ -56,5 +57,25 @@ describe("shared eBay publication batch", () => {
     expect(failure.code).toBe("EBAY_LISTING_OPERATION_FAILED");
     expect(failure.issue?.action.kind).toBe("contact_support");
     expect(JSON.stringify(failure)).not.toContain("confidential");
+  });
+  it("counts a saved publication as queued and retains its exact request and actor", async () => {
+    const commandKey="18000000-0000-4000-8000-000000000001";
+    const job={id:"18000000-0000-4000-8000-000000000002",productId:1,kind:"sync" as const,operation:"publish" as const,
+      state:"queued" as const,code:null,message:null,nextAttemptAt:"2026-10-11T12:00:00Z",updatedAt:"2026-10-11T12:00:00Z"};
+    const execute=vi.fn(async()=>({productId:1,productName:"First",variantCount:2,success:false,status:"queued" as const,job}));
+    const request={productIds:[1],commands:[{productId:1,commandKey}]};
+    const result=await new EbayListingPushService({execute}).push(request,{actor:"operator"});
+    expect(result.summary).toEqual({succeeded:0,failed:0,skipped:0,queued:1,total:1});
+    expect(execute).toHaveBeenCalledExactlyOnceWith(1,request,undefined,"operator");
+    expect(ebayListingPushResponseSchema.parse(result).results[0]).toMatchObject({success:false,status:"queued",job:{id:job.id}});
+    expect(ebayListingPushResponseSchema.safeParse({...result,results:[{...result.results[0],success:true}]}).success).toBe(false);
+  });
+  it.each([
+    [{productId:2,commandKey:"18000000-0000-4000-8000-000000000001"}],
+    [],
+    [{productId:1,commandKey:"invalid"}],
+    [{productId:1,commandKey:"18000000-0000-4000-8000-000000000001"},{productId:1,commandKey:"18000000-0000-4000-8000-000000000002"}],
+  ].map(commands=>({commands})))("refuses incomplete or mismatched command scopes", ({commands})=>{
+    expect(ebayListingPushRequestSchema.safeParse({productIds:[1],commands}).success).toBe(false);
   });
 });

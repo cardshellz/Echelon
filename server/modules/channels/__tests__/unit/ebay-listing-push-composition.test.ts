@@ -9,6 +9,7 @@ const fixture = vi.hoisted(() => ({
   },
   connector: { pushListing: vi.fn(), previewListingRebuild: vi.fn(), updateExistingListing: vi.fn(), executeListingRebuild: vi.fn() },
   photos: vi.fn(), prices: vi.fn(), quantities: vi.fn(), build: vi.fn(), identity: vi.fn(),
+  inspect: vi.fn(), jobs: { getByCommand: vi.fn(), getAdmission: vi.fn(), enqueue: vi.fn(), recordAdmissionFailure: vi.fn() },
 }));
 vi.mock("../../../../db", () => ({ db: {}, pool: { query: fixture.query }, getDatabasePoolSnapshot: () => ({ maximumConnections: 20 }) }));
 vi.mock("../../infrastructure/ebay-api-runtime", () => ({
@@ -21,7 +22,8 @@ vi.mock("../../infrastructure/ebay-listing-client", () => ({
 vi.mock("../../infrastructure/ebay-listing-helpers", () => ({ determineVariationAspectName: () => "Pack Size", resolveChannelPrice: fixture.prices }));
 vi.mock("../../ebay-listing-draft", () => ({ buildEbayRouteListingDraft: fixture.build }));
 vi.mock("../../ebay-listing-sync", () => ({ readExistingEbayListingIdentityForProduct: fixture.identity }));
-vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", () => ({ createEbayMarketplaceRegistrationAdapters: () => ({ observer: {} }) }));
+vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", () => ({ createEbayMarketplaceRegistrationAdapters: () => ({ observer: {}, inspector: { inspectExistingPublication: fixture.inspect } }) }));
+vi.mock("../../infrastructure/ebay-active-listing-sync", () => ({ ebayListingSyncService: fixture.jobs }));
 vi.mock("../../infrastructure/ebay-listing-push.repository", () => ({
   PostgresEbayListingPushRepository: class { constructor() { return fixture.repository; } },
 }));
@@ -29,8 +31,8 @@ vi.mock("../../listing-connectors/ebay-listing.connector", () => ({
   EbayMarketplaceListingConnector: class { constructor() { return fixture.connector; } },
 }));
 
-import { ebayListingPushService } from "../../infrastructure/ebay-listing-push";
-import { EbayListingSyncError } from "../../ebay-listing-sync.domain";
+import { ebayListingPushService, prepareEbayPublicationCompletion, readEbayPublicationSource } from "../../infrastructure/ebay-listing-push";
+import { EbayListingSyncError, storedEbayListingSyncJobSchema } from "../../ebay-listing-sync.domain";
 
 describe("eBay publication application composition", () => {
   beforeEach(() => {
@@ -41,7 +43,7 @@ describe("eBay publication application composition", () => {
     fixture.auth.getAccessToken.mockResolvedValue("test-only-token");
     fixture.repository.readProduct.mockImplementation(async (id: number) => ({ id, name: `Product ${id}`, sku: "CATALOG-GROUP", product_type: "pack", ebay_browse_category_id: "123" }));
     fixture.repository.readCategory.mockResolvedValue(null);
-    fixture.repository.readVariants.mockResolvedValue([{ id: 101, sku: "PROVIDER-PACK", catalog_sku: "CATALOG-PACK", price_cents: 999, external_variant_id: "offer-101", external_product_id: null }]);
+    fixture.repository.readVariants.mockResolvedValue([{ id: 101, sku: "PROVIDER-PACK", catalog_sku: "CATALOG-PACK", price_cents: 999, external_variant_id: "offer-101", external_product_id: null, external_sku: "PROVIDER-PACK", mapping_exists: true }]);
     fixture.repository.currentListingIds.mockResolvedValue([]);
     fixture.repository.readAspects.mockResolvedValue({});
     fixture.photos.mockResolvedValue({});
@@ -52,29 +54,60 @@ describe("eBay publication application composition", () => {
     fixture.identity.mockResolvedValue({ groupKey: "PROVIDER-GROUP" });
     fixture.repository.projectSuccess.mockResolvedValue(undefined);
     fixture.repository.recordFailure.mockResolvedValue(undefined);
+    fixture.jobs.getByCommand.mockResolvedValue(null); fixture.jobs.getAdmission.mockResolvedValue(null);
+    fixture.jobs.enqueue.mockImplementation(async (identity, _actor, id) => storedEbayListingSyncJobSchema.parse({
+      id, operation: "publish", productId: identity.productId, state: "queued", code: null, message: null,
+      nextAttemptAt: "2026-10-11T20:00:00Z", updatedAt: "2026-10-11T20:00:00Z", identity, revision: "1", claimedRevision: null,
+      ownerToken: null, attempts: 0, result: null, verificationIntentHash: null, verificationRevision: null,
+    }));
+    fixture.inspect.mockResolvedValue({ providerAccount: { provider: "ebay", externalAccountId: "seller-1" },
+      observedAt: new Date("2026-10-11T20:00:00Z"), skus: [{ sku: "PROVIDER-PACK", inventoryItemExists: true,
+        offers: [{ sku: "PROVIDER-PACK", offerId: "offer-101", status: "UNPUBLISHED", listingId: null, listingStatus: null }], issue: null }],
+      unpublishedTarget: { groupKey: null, skus: ["PROVIDER-PACK"] }, publication: null, publicationIssue: null, groupKey: null, groupSkus: null });
   });
 
-  it("uses the provider alias for publication and the catalog identity for photos, then projects only after the provider completes", async () => {
+  it("queues ordinary Publish without provider calls or claiming success", async () => {
     const result = await ebayListingPushService.push({ productIds: [20] });
-    expect(result.summary.succeeded).toBe(1);
+    expect(result.summary.queued).toBe(1); expect(result.summary.succeeded).toBe(0);
+    expect(fixture.jobs.enqueue).toHaveBeenCalledWith(expect.objectContaining({ productId: 20 }), "ebay-listing-publish", expect.any(String), "publish");
+    expect(fixture.connector.pushListing).not.toHaveBeenCalled(); expect(fixture.photos).not.toHaveBeenCalled();
+    expect(fixture.repository.projectSuccess).not.toHaveBeenCalled();
+  });
+
+  it("uses the provider alias for publication and Catalog identity for photos in the shared worker preparation", async () => {
+    const source = await readEbayPublicationSource(20);
+    await prepareEbayPublicationCompletion(source, null);
     expect(fixture.photos.mock.calls[0][0].variants).toEqual([{ variantId: 101, sku: "CATALOG-PACK" }]);
+    expect(fixture.photos.mock.calls[0][0].mode).toBe("catalog");
     expect(fixture.build.mock.calls[0][0].variants[0].sku).toBe("PROVIDER-PACK");
-    expect(fixture.repository.projectSuccess.mock.invocationCallOrder[0]).toBeGreaterThan(fixture.connector.pushListing.mock.invocationCallOrder[0]);
+    expect(fixture.repository.projectSuccess).not.toHaveBeenCalled();
     expect(fixture.connector.executeListingRebuild).not.toHaveBeenCalled();
     expect(fixture.repository.recordFailure).not.toHaveBeenCalled();
   });
 
-  it("isolates preparation failures inside the real product owner and continues the next product", async () => {
-    fixture.photos.mockRejectedValueOnce(new EbayListingSyncError("EBAY_CATALOG_PHOTO_REQUIRED", "Include a photo for this variant."));
+  it("keeps intentionally absent ATP rows under the existing draft builder policy", async () => {
+    fixture.quantities.mockResolvedValue([]);
+    const source = await readEbayPublicationSource(20);
+    await expect(prepareEbayPublicationCompletion(source, null)).resolves.toMatchObject({ sourceIdentity: source });
+    expect(fixture.inspect.mock.calls[0][0].memberCandidates).toEqual([{ productVariantId: 101, sku: "PROVIDER-PACK", isActive: true, availableQuantity: 0 }]);
+    // No synthesized availability row is added to the quantity owner's input.
+    expect(fixture.build.mock.calls[0][0].atpByVariantId).toEqual(new Map());
+    expect(fixture.connector.pushListing).not.toHaveBeenCalled();
+  });
+
+  it("isolates admission failures and continues the next product", async () => {
+    fixture.repository.readProduct.mockRejectedValueOnce(new EbayListingSyncError("EBAY_LISTING_PREFLIGHT_FAILED", "Activate this product."));
+    fixture.jobs.recordAdmissionFailure.mockImplementation(async value => ({ id: value.commandKey, kind: "admission", operation: "sync", productId: value.productId,
+      state: "needs_attention", code: value.code, message: value.message, nextAttemptAt: "2026-10-11T20:00:00Z", updatedAt: "2026-10-11T20:00:00Z" }));
     const result = await ebayListingPushService.push({ productIds: [20, 21] });
-    expect(result.summary).toEqual({ succeeded: 1, failed: 1, skipped: 0, total: 2 });
-    expect(result.results[0].issue?.action.kind).toBe("edit_photos");
-    expect(fixture.repository.recordFailure).toHaveBeenCalledExactlyOnceWith(20, "Include a photo for this variant.");
-    expect(fixture.repository.projectSuccess.mock.calls[0][0]).toBe(21);
+    expect(result.summary).toEqual({ succeeded: 0, queued: 1, failed: 1, skipped: 0, total: 2 });
+    expect(fixture.jobs.recordAdmissionFailure).toHaveBeenCalledOnce();
+    expect(fixture.jobs.enqueue.mock.calls[0][0].productId).toBe(21);
   });
 
   it("requires Sync for an already mapped listing without overwriting its status", async () => {
     fixture.repository.currentListingIds.mockResolvedValue(["listing-20"]);
+    fixture.jobs.recordAdmissionFailure.mockResolvedValue({ id: "c7c3a7d4-6cdf-4cc9-a5a1-4d2e5e9c4bc1", productId: 20, operation: "sync", kind: "admission", state: "needs_attention" });
     const result = await ebayListingPushService.push({ productIds: [20] });
     expect(result.results[0].code).toBe("EBAY_LISTING_ALREADY_PUBLISHED");
     expect(fixture.connector.pushListing).not.toHaveBeenCalled();
@@ -93,11 +126,11 @@ describe("eBay publication application composition", () => {
     expect(fixture.connector.executeListingRebuild).not.toHaveBeenCalled();
   });
 
-  it("reports a lost local projection as unconfirmed instead of claiming publication completed", async () => {
-    fixture.repository.projectSuccess.mockRejectedValue(new Error("database write failed"));
+  it("reports uncertain job admission without provider calls or claiming publication completed", async () => {
+    fixture.jobs.enqueue.mockRejectedValue(new Error("database write failed"));
     const result = await ebayListingPushService.push({ productIds: [20] });
     expect(result.summary.succeeded).toBe(0);
-    expect(result.results[0]).toMatchObject({ success: false, code: "EBAY_SYNC_PERSISTENCE_FAILED" });
-    expect(fixture.repository.recordFailure).toHaveBeenCalledOnce();
+    expect(result.results[0]).toMatchObject({ success: false, code: "EBAY_SYNC_ADMISSION_UNSAVED" });
+    expect(fixture.repository.recordFailure).not.toHaveBeenCalled(); expect(fixture.connector.pushListing).not.toHaveBeenCalled();
   });
 });
