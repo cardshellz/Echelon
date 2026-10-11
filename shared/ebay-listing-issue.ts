@@ -34,6 +34,26 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     return issue("Recovery is saved; the follow-up is pending", "The recovery decision committed, but the immediate listing follow-up could not be queued.",
       "Refresh the saved sync status. If it remains blocked, retry the same recovery confirmation; its saved receipt prevents a duplicate recovery decision.",
       false, "check_recovery", "Review saved recovery");
+  if (["EBAY_MAPPING_REVIEW_STALE", "EBAY_MAPPING_REVIEW_CHANGED"].includes(code))
+    return issue("Review the current listing before applying this fix", "The listing or saved mapping changed after this review.",
+      "Recheck the mapping to load the current comparison and recommendation. Review those changes before applying a new correction.",
+      false, "review_mapping", "Review current mapping");
+  if (code === "EBAY_MAPPING_COMMAND_CONFLICT")
+    return issue("The saved request belongs to a different confirmation", "This request reference is already associated with another product, review, or requester.",
+      "Keep the request reference shown in the mapping dialog. An administrator must compare its saved receipt with this product and requester before another correction is sent.",
+      false, "review_mapping", "Check saved mapping request");
+  if (["EBAY_MAPPING_REPAIR_UNSAFE", "EBAY_MAPPING_OWNERSHIP_CONFLICT", "EBAY_MAPPING_CANONICAL_CONFLICT", "EBAY_MAPPING_SOURCE_INVALID", "EBAY_MAPPING_SCOPE_INVALID"].includes(code))
+    return issue("This mapping needs a different correction", "Echelon cannot safely apply the proposed mapping correction.",
+      "Open the current mapping review for the exact conflicting variants and the recommended next action.",
+      false, "review_mapping", "Review mapping issue");
+  if (["EBAY_MAPPING_PERSISTENCE_FAILED", "EBAY_MAPPING_RECEIPT_SCOPE_INVALID"].includes(code))
+    return issue("Check the saved mapping repair", "The result of this mapping repair could not be confirmed.",
+      "Keep this request reference. Use Check saved request or Retry this fix in the mapping dialog; Echelon will reuse the same request instead of creating another repair.",
+      false, "review_mapping", "Check mapping repair");
+  if (code === "EBAY_MAPPING_PRODUCT_NOT_ELIGIBLE")
+    return issue("Choose which variants to update", "This product has no included variants available for listing sync.",
+      "Enable the intended product and variant inclusion switches in the listing feed, then recheck this product's mapping.",
+      false, "edit_listing", "Open listing feed", "/channels/ebay");
   if (["EBAY_SYNC_PRODUCT_NOT_FOUND", "EBAY_LISTING_INPUT_INVALID"].includes(code))
     return issue("Refresh the listing selection", "The selected product is missing or the request is invalid.",
       "Return to the listing feed and refresh it. Select the current product before requesting another update.",
@@ -85,7 +105,7 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     "EBAY_SYNC_LISTING_IDENTITY_REQUIRED", "EBAY_SYNC_MEMBERSHIP_CHANGED", "EBAY_SYNC_GROUP_IDENTITY_REQUIRED", "EBAY_SYNC_PROVIDER_IDENTITY_INVALID",
     "EBAY_SYNC_RETAINED_IDENTITY_CHANGED"].includes(code))
     return issue("Review the existing listing mapping", "The saved product-to-eBay mapping could not be verified.",
-      "Review the catalog variant, eBay SKU, offer and listing shown in the details. Recheck after correcting the mapping; Echelon will verify the existing listing before updating it.",
+      "Open the mapping review to compare the saved mapping with eBay, see the exact issue and review the recommended correction. Apply the verified fix there when available.",
       false, "review_mapping", "Review listing mapping");
   if (["EBAY_QUANTITY_DAILY_LIMIT", "PUBLICATION_PROVIDER_COOLDOWN", "EBAY_PROVIDER_RATE_LIMITED"].includes(code))
     return issue("eBay is temporarily limiting updates", "eBay has asked Echelon to wait before another update.",

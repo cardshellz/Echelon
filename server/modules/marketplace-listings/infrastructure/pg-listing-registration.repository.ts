@@ -1,3 +1,4 @@
+import { buildListingRegistrationPlan, type ListingRegistrationVariantCandidate, type MarketplaceObservedListingPublication } from "../domain/listing-registration-plan";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { appendListingVerification } from "./pg-listing-verification-writer";
 
@@ -155,8 +156,95 @@ interface PostgresErrorShape {
 type RollbackResult =
   Readonly<{ ok: true }> | Readonly<{ ok: false; error: unknown }>;
 
+export interface MappingCompatibilityInput {
+  owner: ListingOwnerRef;
+  observation: MarketplaceObservedListingPublication;
+  memberCandidates: readonly ListingRegistrationVariantCandidate[];
+}
+function mappingCompatibilityPlan(input: MappingCompatibilityInput): ListingRegistrationPlan {
+  const plan = buildListingRegistrationPlan({
+    ...input, snapshot: { owner: input.owner, memberCandidates: input.memberCandidates },
+    locator: { externalListingId: input.observation.listingIdentity.externalId,
+      providerPublicationKey: input.observation.publicationKeyIdentity?.externalId ?? null },
+    requestedBy: { type: "service", id: "local-mapping-compatibility-read" },
+    idempotencyKey: "local-mapping-compatibility-read", correlationId: null,
+  });
+  if (plan.owner.kind !== "channel") throw mappingCompatibilityConflict();
+  return plan;
+}
+async function lockMappingCompatibilityAccount(client: PoolClient, plan: ListingRegistrationPlan): Promise<void> {
+  if (plan.owner.kind !== "channel") throw mappingCompatibilityConflict();
+  await client.query("SELECT id FROM channels.channels WHERE id=$1 FOR UPDATE", [plan.owner.channelId]);
+  await lockProviderAccountIdentity(client,plan);
+}
+
 export class PgMarketplaceListingRegistrationRepository implements MarketplaceListingRegistrationRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
+
+  /** Read-only compatibility gate for an owner repairing its local identifiers.
+   * The same account lock as registration and scope row lock as replacement keep
+   * a concurrent canonical claim from crossing this check's transaction. */
+  async acquireMappingCompatibilityLocks(input: MappingCompatibilityInput, client: PoolClient): Promise<void> {
+    // Acquire only the registration account prefix here. Scope and account-row
+    // locks follow catalog locks because verification takes variants -> scope.
+    await lockMappingCompatibilityAccount(client,mappingCompatibilityPlan(input));
+  }
+
+  async assertCompatiblePublication(input: MappingCompatibilityInput, transactionClient?: PoolClient): Promise<void> {
+    const plan = mappingCompatibilityPlan(input);
+    if (plan.owner.kind !== "channel") throw mappingCompatibilityConflict();
+    const client = transactionClient ?? await this.dbPool.connect();
+    try {
+      if (!transactionClient) {
+        await client.query("BEGIN");
+        await client.query("SET LOCAL lock_timeout='2s'");
+        await client.query("SET LOCAL statement_timeout='10s'");
+      }
+      // Registration takes the channel row before its account advisory lock.
+      await lockMappingCompatibilityAccount(client,plan);
+      const scope = (await client.query<ScopeRow>(scopeLookupSql(plan.owner), scopeLookupParams(plan.owner))).rows[0];
+      const account = (await client.query(`SELECT id,owner_kind,channel_id FROM marketplace.provider_accounts
+        WHERE provider=$1 AND account_namespace=$2 AND external_account_id=$3 FOR UPDATE`,
+      [plan.providerAccount.provider,plan.providerAccount.accountNamespace,plan.providerAccount.externalAccountId])).rows[0];
+      if (account && (account.owner_kind !== "channel" || account.channel_id !== plan.owner.channelId)) throw mappingCompatibilityConflict();
+      const active = scope ? (await client.query(`SELECT id,external_listing_id,provider_publication_key FROM marketplace.listing_publications
+        WHERE scope_id=$1 AND status='active' FOR UPDATE`, [scope.id])).rows : [];
+      const operations = scope ? (await client.query(`SELECT 1 FROM marketplace.listing_replacement_operations
+        WHERE scope_id=$1 AND status IN ('planned','running','compensating','manual_recovery_required')`, [scope.id])).rows : [];
+      if (operations.length || active.length > 1) throw mappingCompatibilityConflict();
+      // A registered scope whose publication is no longer active belongs to its
+      // existing lifecycle recovery, not an independent local mapping repair.
+      if (scope && !active.length && (await client.query("SELECT 1 FROM marketplace.listing_registrations WHERE scope_id=$1", [scope.id])).rowCount)
+        throw mappingCompatibilityConflict();
+      if (active[0]) {
+        if (active[0].external_listing_id !== plan.externalListingId
+          || active[0].provider_publication_key !== plan.providerPublicationKey) throw mappingCompatibilityConflict();
+        const binding = (await client.query("SELECT provider_account_id FROM marketplace.listing_scope_provider_accounts WHERE scope_id=$1", [scope!.id])).rows[0];
+        if (!account || String(binding?.provider_account_id) !== String(account.id)) throw mappingCompatibilityConflict();
+        const members = (await client.query(`SELECT product_variant_id,sku_snapshot,external_variant_id,external_offer_id,external_inventory_item_id
+          FROM marketplace.listing_publication_members WHERE publication_id=$1 AND disposition='included' ORDER BY product_variant_id`, [active[0].id])).rows;
+        const wanted = plan.members.filter(member => member.disposition === "included");
+        if (members.length !== wanted.length || members.some(member => !wanted.some(next => next.productVariantId === member.product_variant_id
+          && next.skuSnapshot === member.sku_snapshot && next.externalVariantId === member.external_variant_id
+          && next.externalOfferId === member.external_offer_id && next.externalInventoryItemId === member.external_inventory_item_id))) throw mappingCompatibilityConflict();
+      }
+      if (account) {
+        for (const identity of plan.identityClaims) {
+          const claims = (await client.query(`SELECT claim.scope_id,claim.publication_id,claim.identity_role,member.product_variant_id
+            FROM marketplace.provider_identity_claims claim LEFT JOIN marketplace.listing_publication_members member ON member.id=claim.member_id
+            WHERE claim.provider_account_id=$1 AND claim.identity_namespace=$2 AND claim.external_id=$3`,
+          [account.id,identity.identityNamespace,identity.externalId])).rows;
+          if (claims.some(claim => !scope || !active[0] || String(claim.scope_id) !== String(scope.id)
+            || String(claim.publication_id) !== String(active[0].id) || claim.identity_role !== identity.role
+            || claim.product_variant_id !== identity.productVariantId)) throw mappingCompatibilityConflict();
+        }
+      }
+      if (!transactionClient) await client.query("COMMIT");
+    } catch (error) {
+      if (!transactionClient) await client.query("ROLLBACK");
+      throw error;
+    } finally { if (!transactionClient) client.release(); }
+  }
 
   async findCurrentRegistration(
     owner: ListingOwnerRef,
@@ -1860,4 +1948,9 @@ function toRequiredStatusDate(
     );
   }
   return toDate(value, field);
+}
+
+function mappingCompatibilityConflict(): MarketplaceListingRegistrationError {
+  return new MarketplaceListingRegistrationError("EBAY_MAPPING_CANONICAL_CONFLICT",
+    "The canonical marketplace registration owns different listing identifiers or unfinished replacement work. Review that registration before repairing this local mapping.");
 }

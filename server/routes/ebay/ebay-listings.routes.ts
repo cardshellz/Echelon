@@ -19,6 +19,8 @@ import { EbayPublicationRecoveryService, PostgresEbayPublicationRecoveryReposito
 import { resolveEbayListingIssue } from '@shared/ebay-listing-issue';
 import { listingFailure, listingFailureStatus } from './ebay-listing-errors';
 import { registerEbayListingRecoveryRoutes } from './ebay-listing-recovery.routes';
+import { registerEbayListingMappingRoutes } from './ebay-listing-mapping.routes';
+import { ebayListingMappingService } from '../../modules/channels/ebay-listing-mapping';
 import { readEbayPushRecoveryIdentity } from '../../modules/channels/ebay-listing-push';
 import { ebayListingSyncJobSchema } from '@shared/types/ebay-listing-sync';
 import { queueVariantAvailabilityRepair } from "../../modules/channels/variant-availability-sync.service";
@@ -441,6 +443,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
     catch {res.status(500).json({error:'Listing sync history could not be loaded.'});}
   });
   registerEbayListingRecoveryRoutes(router, ebayListingRecovery, EBAY_CHANNEL_ID);
+  registerEbayListingMappingRoutes(router, ebayListingMappingService, EBAY_CHANNEL_ID);
 
   // -----------------------------------------------------------------------
   // Channel Pricing Rules endpoints
