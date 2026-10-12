@@ -10,6 +10,7 @@ import type {
   ProductListingSettingPatch,
   ProductListingSettingRow,
 } from "../../../../shared/dropship/listing-setting-values";
+import type { RequestKeyUse } from "../domain/listing-setting-request-key-use";
 import type { SaveEbayCategoryRulesProfileInput } from "./dropship-ebay-category-rules-service";
 import type { ListingPriceCatalogReader, ListingPriceTransaction } from "./dropship-listing-price-service";
 import type { SelectedCatalogReader } from "./dropship-selected-catalog";
@@ -17,8 +18,10 @@ import type { SelectedCatalogReader } from "./dropship-selected-catalog";
 /**
  * The write port for product and category listing settings (plan PR 8a,
  * section 3.7). PR 8 builds the repository behind it; PR 9's services (W5,
- * W6, W7, W12, W13) are its only callers. Types only.
+ * W6, W7, W8, W12, W13) are its only callers. Types only.
  */
+
+export type { RequestKeyUse };
 
 export type ListingSettingActor = { actorType: ListingSettingActorType; actorId: string };
 /** `unchanged`: the change sets what is already stored, so nothing is written (plan D12). `replayed`: the request key already wrote it. */
@@ -124,6 +127,16 @@ export interface ListingSettingWriteTransaction extends ListingSettingReadTransa
   readonly requestKey: string;
   /** Authorization reads (PR 9), as the content and price transactions have. */
   readonly catalog: ListingPriceCatalogReader;
+  /**
+   * Every row this request key wrote (plan PR 9, P16): the product and
+   * category revision and the ledger row under the key, and every size,
+   * policy, shelf and content child under its prefixes, all of this vendor.
+   * One statement, no lock; under the request lock it cannot change, so a
+   * service runs it right after the gate and answers a replay from it,
+   * calling no writer. A stored row that breaks its contract is
+   * DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED.
+   */
+  findRequestKeyUse(): Promise<RequestKeyUse>;
   /**
    * Selection SHARE locks, then categories, products and sizes FOR SHARE, in
    * ascending ids. Only before any write; a call after a write is

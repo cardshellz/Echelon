@@ -7,6 +7,8 @@ import { reviewPricingRulesInputSchema, applyPricingRulesInputSchema, pricingTar
 import { DropshipError } from "../../domain/errors";
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 import { registerDropshipPricingRulesRoutes } from "../../interfaces/http/dropship-pricing-rules.routes";
+import { DROPSHIP_BULK_JSON_LIMIT_BYTES, PRICING_RULES_TOO_LARGE_MESSAGE } from "../../interfaces/http/dropship-bulk-json.middleware";
+import { installGlobalJsonBodyParser } from "../../../shipping-engine/interfaces/http/rate-table-admin-body.middleware";
 
 const profile = { defaultRecipe: { basis: "product_cost" as const, markupBps: 3000, flatCents: 100, rounding: "cent" as const }, groups: [] };
 const reviewInput = { profile, expectedRevisionId: null, releaseFixedOverrides: false };
@@ -65,5 +67,49 @@ describe("store pricing HTTP contracts", () => {
     service.getForMember.mockRejectedValueOnce(new Error("secret source details"));
     const response = await request(); expect(response.status).toBe(500);
     expect(JSON.stringify(await response.json())).not.toContain("secret");
+  });
+});
+
+describe("store pricing review body behind the 1 MiB parser (plan PR 9, P8)", () => {
+  let server: http.Server; let url: string;
+  const service = {
+    getForMember: vi.fn(), reviewPageForMember: vi.fn(), applyForMember: vi.fn(), targetsForMember: vi.fn(),
+    reviewForMember: vi.fn(async (_member: string, _store: unknown, body: unknown) => { reviewPricingRulesInputSchema.parse(body); return review; }),
+  };
+  beforeEach(async () => {
+    vi.clearAllMocks(); const app = express();
+    app.use((req, _res, next) => { const memberId = req.header("X-Test-Member");
+      req.session = { ...(memberId ? { dropship: { memberId } } : {}) } as Request["session"]; next(); });
+    // The production order: the global 100 KB parser skips the review POST, which parses its own body after sign-in.
+    installGlobalJsonBodyParser(app);
+    registerDropshipPricingRulesRoutes(app, service); server = http.createServer(app);
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/dropship/listings/stores/22/pricing-rules`;
+  });
+  afterEach(async () => new Promise<void>((done, reject) => server.close((error) => error ? reject(error) : done())));
+  const post = (text: string, member: string | null = "member-1") => fetch(`${url}/reviews`, { method: "POST",
+    headers: { "Content-Type": "application/json", ...(member ? { "X-Test-Member": member } : {}) }, body: text });
+
+  it("parses a rule set past the 100 KB global limit (10,000 single sizes) and hands it over unchanged", async () => {
+    const large = { ...reviewInput, profile: { ...profile, groups: [{ id: "sizes", name: "Single sizes", priority: 1,
+      scope: { type: "listings", productVariantIds: Array.from({ length: 10_000 }, (_, index) => 1_000_000_000 + index) },
+      recipe: profile.defaultRecipe }] } };
+    const text = JSON.stringify(large);
+    expect(text.length).toBeGreaterThan(100 * 1024);
+    const response = await post(text);
+    expect(response.status).toBe(200);
+    expect(service.reviewForMember).toHaveBeenCalledWith("member-1", 22, large);
+  });
+
+  it("refuses a body over 1 MiB with 413 in the pricing rules' own words, never calling the service", async () => {
+    const response = await post(JSON.stringify({ ...reviewInput, padding: "x".repeat(DROPSHIP_BULK_JSON_LIMIT_BYTES + 1) }));
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: { code: "DROPSHIP_REQUEST_TOO_LARGE", message: PRICING_RULES_TOO_LARGE_MESSAGE } });
+    expect(service.reviewForMember).not.toHaveBeenCalled();
+  });
+
+  it("still refuses an anonymous review before parsing it", async () => {
+    expect((await post(JSON.stringify(reviewInput), null)).status).toBe(401);
+    expect(service.reviewForMember).not.toHaveBeenCalled();
   });
 });

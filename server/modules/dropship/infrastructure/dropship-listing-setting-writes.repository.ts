@@ -1,6 +1,10 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
-import { LISTING_SETTING_KEY_PATTERN } from "../../../../shared/dropship/listing-setting-values";
+import {
+  LISTING_SETTING_KEY_PATTERN,
+  LISTING_SETTING_REQUEST_OPERATIONS,
+  type ListingSettingRequestOperation,
+} from "../../../../shared/dropship/listing-setting-values";
 import type { ListingPriceTransaction } from "../application/dropship-listing-price-service";
 import type {
   ListingSettingActor,
@@ -9,7 +13,13 @@ import type {
   ListingSettingWriteTransaction,
 } from "../application/dropship-listing-setting-writes";
 import { DropshipError } from "../domain/errors";
-import { isListingSettingChildKey, listingSettingChildKey, listingSettingsInvariantFailed } from "../domain/listing-setting-values";
+import { REQUEST_KEY_CHILD_SOURCES, type RequestKeyChildSource, type RequestKeyUse } from "../domain/listing-setting-request-key-use";
+import {
+  isListingSettingChildKey,
+  listingSettingChildKey,
+  listingSettingChildKeyPrefix,
+  listingSettingsInvariantFailed,
+} from "../domain/listing-setting-values";
 import { readCategoryListingSettings, saveCategoryListingSettingWithClient } from "./dropship-category-listing-settings.repository";
 import { saveEbayCategoryRulesProfileWithClient } from "./dropship-ebay-category-rules.repository";
 import { saveListingContentWithClient } from "./dropship-listing-content.repository";
@@ -45,7 +55,8 @@ import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog
  *    deadlocks with order acceptance);
  * 4. lockCatalog, when the operation calls it: the selection tables in SHARE
  *    MODE, then categories, products and sizes FOR SHARE in ascending ids
- *    (categories before products, the order a Card Shellz rename writes them);
+ *    (categories before products, the order a Card Shellz rename writes them).
+ *    The replay probe (findRequestKeyUse) takes no lock and may run before it;
  * 5. the target rows FOR UPDATE, inside the writers;
  * 6. the writes: ledger, revisions, current rows, audit.
  *
@@ -70,18 +81,29 @@ const VENDOR_OWNER_SQL = `SELECT v.id AS vendor_id FROM dropship.dropship_vendor
 const SYSTEM_OWNER_SQL = `SELECT sc.vendor_id FROM dropship.dropship_store_connections sc
        JOIN dropship.dropship_vendors v ON v.id = sc.vendor_id
        WHERE sc.id = $1 FOR SHARE OF v, sc`;
-/** The same SHARE locks W9 and the content writer take: admin rule replacement and selection phantoms wait, catalog reads do not. */
-const SELECTION_LOCK_SQL = `LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selection_rules,
+/**
+ * The same SHARE locks W9 and the content writer take: admin rule replacement
+ * and selection phantoms wait, catalog reads do not. Exported for W1's apply
+ * (plan PR 9, P37), which takes them after the store lock and the owner rows.
+ */
+export const LISTING_SELECTION_LOCK_SQL = `LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selection_rules,
        dropship.dropship_vendor_variant_overrides, catalog.product_line_products IN SHARE MODE`;
 const CATEGORY_LOCK_SQL = "SELECT id FROM catalog.product_categories WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
 const PRODUCT_LOCK_SQL = "SELECT id FROM catalog.products WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
 const VARIANT_LOCK_SQL = "SELECT id FROM catalog.product_variants WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
 
-/** The request-key unique constraints of 0738 and 0739; a 23505 on any other constraint is not a key reuse and is rethrown. */
+/**
+ * The request-key unique constraints of 0738 and 0739, and the size price
+ * child key of 0657 (plan PR 9, P32): two members of one vendor sending one
+ * key hold different request locks, so both can miss the replay probe and the
+ * second insert is a key reuse, not a fault. A 23505 on any other constraint
+ * is not a key reuse and is rethrown.
+ */
 const REQUEST_KEY_CONSTRAINTS: ReadonlySet<string> = new Set([
   "dropship_product_listing_setting_requests_key_idx",
   "dropship_product_listing_setting_revision_key_uk",
   "dropship_category_listing_setting_revision_key_uk",
+  "dropship_listing_price_revision_idempotency_uk",
 ]);
 const PRODUCT_FOREIGN_KEYS: ReadonlySet<string> = new Set([
   "dropship_product_listing_setting_revision_product_fk",
@@ -91,12 +113,59 @@ const CATEGORY_FOREIGN_KEYS: ReadonlySet<string> = new Set([
   "dropship_category_listing_setting_revision_category_fk",
   "dropship_category_listing_setting_category_fk",
 ]);
+/**
+ * Every row a request key wrote (plan PR 9, section 4.6), in one statement
+ * with no lock: the product and category revision and the ledger row under
+ * the key, and every child under its size, policy, shelf and content
+ * prefixes ($3-$6). Each branch is the vendor's rows only, on a (vendor_id,
+ * idempotency_key) unique index. The prefixes are compared with left(), not
+ * LIKE, so no character of a key is a pattern.
+ */
+const REQUEST_KEY_USE_SQL = `SELECT 'product' AS source, r.id::bigint AS id, r.store_connection_id, r.product_id AS target_id,
+       r.request_hash::text AS request_hash, r.request_id, NULL::text AS operation
+  FROM dropship.dropship_product_listing_setting_revisions r WHERE r.vendor_id = $1 AND r.idempotency_key = $2
+UNION ALL SELECT 'category', r.id, r.store_connection_id, r.category_id, r.request_hash, NULL, NULL
+  FROM dropship.dropship_category_listing_setting_revisions r WHERE r.vendor_id = $1 AND r.idempotency_key = $2
+UNION ALL SELECT 'ledger', q.id, q.store_connection_id, NULL, q.request_hash, NULL, q.operation
+  FROM dropship.dropship_product_listing_setting_requests q WHERE q.vendor_id = $1 AND q.idempotency_key = $2
+UNION ALL SELECT 'size', r.id, r.store_connection_id, r.product_variant_id, r.request_hash, NULL, NULL
+  FROM dropship.dropship_listing_price_revisions r WHERE r.vendor_id = $1 AND left(r.idempotency_key, length($3::text)) = $3::text
+UNION ALL SELECT 'policy', r.id, r.store_connection_id, r.product_variant_id, r.request_hash, NULL, NULL
+  FROM dropship.dropship_ebay_listing_policy_override_revisions r WHERE r.vendor_id = $1 AND left(r.idempotency_key, length($4::text)) = $4::text
+UNION ALL SELECT 'shelf', r.id, r.store_connection_id, r.product_variant_id, r.request_hash, NULL, NULL
+  FROM dropship.dropship_ebay_store_category_assignment_revisions r WHERE r.vendor_id = $1 AND left(r.idempotency_key, length($5::text)) = $5::text
+UNION ALL SELECT 'content', r.id, r.store_connection_id, r.product_variant_id, r.request_hash, NULL, NULL
+  FROM dropship.dropship_listing_content_revisions r WHERE r.vendor_id = $1 AND left(r.idempotency_key, length($6::text)) = $6::text`;
+const REQUEST_HASH_PATTERN = /^[a-f0-9]{64}$/;
+
 const UNIQUE_VIOLATION = "23505";
 const FOREIGN_KEY_VIOLATION = "23503";
 const CHECK_VIOLATION = "23514";
 const DEADLOCK_DETECTED = "40P01";
-/** Not raised under READ COMMITTED today; mapped so PR 9's SERIALIZABLE option (W7) inherits the right class. */
+/**
+ * Not raised under READ COMMITTED, which every listing-settings writer runs
+ * (plan PR 9, P3: no isolation option is added). Mapped anyway, so one could
+ * only ever surface as a retryable BUSY, never as a 500.
+ */
 const SERIALIZATION_FAILURE = "40001";
+/**
+ * The database dropped or refused the connection: SQLSTATE class 08, too many
+ * connections, an administrator or crash shutdown, or a server still starting
+ * (the list of shipstation.service.ts and the inventory replenishment
+ * classifier). Retryable: a failure before COMMIT wrote nothing, and if COMMIT
+ * itself was cut off a retry with the same key is answered by the replay probe
+ * (plan P16), so it can never write twice.
+ */
+const CONNECTION_FAILURE_PREFIX = "08";
+const CONNECTION_FAILURE_STATES: ReadonlySet<string> = new Set(["53300", "57P01", "57P02", "57P03"]);
+/** Node's socket errors on the database connection, retryable for the same reason. */
+const CONNECTION_FAILURE_ERRNOS: ReadonlySet<string> = new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE"]);
+/**
+ * pg-pool's own words when no connection is free within `connectionTimeoutMillis`
+ * (node_modules/pg-pool/index.js); the error has no code. server/db.ts records
+ * the pool saturating with exactly this error.
+ */
+const POOL_ACQUIRE_TIMEOUT_MESSAGE = "timeout exceeded when trying to connect";
 
 /** The four writers that use the transaction's own key: each at most once per transaction (plan D30). */
 type ParentKeyWriter = "saveProduct" | "saveProductsBulk" | "saveCategory" | "acknowledgeCategoryMoves";
@@ -180,7 +249,13 @@ export class PgDropshipListingSettingWritesRepository implements ListingSettingW
   private async inTransaction<T>(
     body: (client: QueryClient, guarded: QueryClient, isOpen: () => boolean) => Promise<T>,
   ): Promise<T> {
-    const client = await this.dbPool.connect();
+    let client: PoolClient;
+    try {
+      client = await this.dbPool.connect();
+    } catch (error) {
+      // No transaction was opened, so nothing to roll back; a pool timeout or a refused connection is retryable.
+      throw isPoolAcquireTimeout(error) ? databaseUnavailable("pool_acquire_timeout") : mapListingSettingWriteError(error);
+    }
     let open = true;
     const isOpen = () => open;
     try {
@@ -245,6 +320,10 @@ class WriteTransactionState {
       loadCategoryMarks: async (productIds) => {
         this.assertOpen();
         return readProductCategoryMarks(client, { ...target, productIds });
+      },
+      findRequestKeyUse: async () => {
+        this.assertOpen();
+        return readRequestKeyUse(client, { vendorId: scope.vendorId, requestKey: scope.requestKey });
       },
       lockCatalog: (input) => this.lockCatalog(input),
       saveProduct: async (input) => {
@@ -311,7 +390,7 @@ class WriteTransactionState {
     const productIds = lockIds(input.productIds, "productIds");
     const productVariantIds = lockIds(input.productVariantIds, "productVariantIds");
     this.catalogLocked = true;
-    await this.client.query(SELECTION_LOCK_SQL);
+    await this.client.query(LISTING_SELECTION_LOCK_SQL);
     if (categoryIds.length > 0) await this.client.query(CATEGORY_LOCK_SQL, [categoryIds]);
     if (productIds.length > 0) await this.client.query(PRODUCT_LOCK_SQL, [productIds]);
     if (productVariantIds.length > 0) {
@@ -464,6 +543,73 @@ class SystemTransactionState {
   }
 }
 
+interface RequestKeyUseRow {
+  source: unknown; id: unknown; store_connection_id: unknown; target_id: unknown;
+  request_hash: unknown; request_id: unknown; operation: unknown;
+}
+
+/**
+ * The replay probe's rows, parsed strictly (plan 4.6): every id a positive
+ * int (bigint ids arrive as strings), every hash 64 hex characters, a ledger
+ * operation the ledger's CHECK allows, and at most one product revision,
+ * category revision and ledger row (each is unique on the vendor and key).
+ * Children come back by kind, then size, then revision id.
+ */
+async function readRequestKeyUse(client: QueryClient, input: { vendorId: number; requestKey: string }): Promise<RequestKeyUse> {
+  // The domain's child kinds, in the probe's parameter order ($3-$6): one list for the SQL, this parser and the classifier.
+  const prefixes = REQUEST_KEY_CHILD_SOURCES.map((kind) => listingSettingChildKeyPrefix(input.requestKey, kind));
+  const result = await client.query<RequestKeyUseRow>(REQUEST_KEY_USE_SQL, [input.vendorId, input.requestKey, ...prefixes]);
+  const use: { -readonly [K in keyof RequestKeyUse]: RequestKeyUse[K] } = {
+    productRevision: null, categoryRevision: null, ledger: null, children: [],
+  };
+  const children: Array<RequestKeyUse["children"][number]> = [];
+  for (const row of result.rows) {
+    const source = row.source;
+    const id = probeId(row.id, source, "id");
+    const storeConnectionId = probeId(row.store_connection_id, source, "store_connection_id");
+    const requestHash = probeHash(row.request_hash, source);
+    if (source === "product") {
+      if (use.productRevision) throw probeRowInvalid(source, "id");
+      use.productRevision = { revisionId: id, productId: probeId(row.target_id, source, "target_id"), storeConnectionId, requestHash,
+        requestId: row.request_id === null ? null : probeId(row.request_id, source, "request_id") };
+    } else if (source === "category") {
+      if (use.categoryRevision) throw probeRowInvalid(source, "id");
+      use.categoryRevision = { revisionId: id, categoryId: probeId(row.target_id, source, "target_id"), storeConnectionId, requestHash };
+    } else if (source === "ledger") {
+      if (use.ledger) throw probeRowInvalid(source, "id");
+      if (!(LISTING_SETTING_REQUEST_OPERATIONS as readonly unknown[]).includes(row.operation)) throw probeRowInvalid(source, "operation");
+      use.ledger = { requestId: id, operation: row.operation as ListingSettingRequestOperation, storeConnectionId, requestHash };
+    } else if ((REQUEST_KEY_CHILD_SOURCES as readonly unknown[]).includes(source)) {
+      children.push({ kind: source as RequestKeyChildSource, revisionId: id,
+        productVariantId: probeId(row.target_id, source, "target_id"), storeConnectionId, requestHash });
+    } else {
+      throw probeRowInvalid(source, "source");
+    }
+  }
+  const kindOrder = (kind: RequestKeyChildSource) => REQUEST_KEY_CHILD_SOURCES.indexOf(kind);
+  use.children = children.sort((left, right) => kindOrder(left.kind) - kindOrder(right.kind)
+    || left.productVariantId - right.productVariantId || left.revisionId - right.revisionId);
+  return use;
+}
+
+/** int4 and bigint ids alike; a bigint arrives as a string and is refused unless it is a whole number. */
+function probeId(value: unknown, source: unknown, column: string): number {
+  const id = typeof value === "number" ? value : typeof value === "string" && /^[1-9]\d{0,15}$/.test(value) ? Number(value) : Number.NaN;
+  if (!Number.isSafeInteger(id) || id <= 0) throw probeRowInvalid(source, column);
+  return id;
+}
+
+function probeHash(value: unknown, source: unknown): string {
+  if (typeof value !== "string" || !REQUEST_HASH_PATTERN.test(value)) throw probeRowInvalid(source, "request_hash");
+  return value;
+}
+
+function probeRowInvalid(source: unknown, column: string): DropshipError {
+  return listingSettingsInvariantFailed("A stored row of a listing settings request key failed its contract.", {
+    source: typeof source === "string" ? source : null, column,
+  });
+}
+
 /**
  * Database errors as the listing-settings codes (plan 3.9). A DropshipError
  * passes unchanged. Anything unmapped is rethrown as it is: an unexpected
@@ -504,7 +650,21 @@ export function mapListingSettingWriteError(error: unknown): unknown {
         sqlState: code, retryable: true, classification: "transient",
       });
   }
+  if (code.startsWith(CONNECTION_FAILURE_PREFIX) || CONNECTION_FAILURE_STATES.has(code) || CONNECTION_FAILURE_ERRNOS.has(code)) {
+    return databaseUnavailable(code);
+  }
   return error;
+}
+
+/** The connection failures above as the retryable BUSY answer (503 with Retry-After). */
+function databaseUnavailable(failure: string): DropshipError {
+  return new DropshipError("DROPSHIP_LISTING_SETTINGS_BUSY", "Listing settings couldn't be reached right now. Try again in a few seconds.", {
+    failure, retryable: true, classification: "transient",
+  });
+}
+
+function isPoolAcquireTimeout(error: unknown): boolean {
+  return error instanceof Error && error.message === POOL_ACQUIRE_TIMEOUT_MESSAGE;
 }
 
 interface DatabaseErrorFields {

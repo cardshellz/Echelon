@@ -7,6 +7,7 @@ import type { DropshipListingContentService } from "../../application/dropship-l
 import { createDropshipListingContentService } from "../../infrastructure/dropship-listing-content.factory";
 import { DropshipError } from "../../domain/errors";
 import { requireDropshipAuth } from "./dropship-auth.routes";
+import { CONTENT_PROFILE_TOO_LARGE_MESSAGE, parseDropshipBulkJsonFor } from "./dropship-bulk-json.middleware";
 
 export function registerDropshipListingContentRoutes(app: Express,
   service: Pick<DropshipListingContentService, "getProfile" | "saveProfile" | "getForMember" | "previewForMember" | "saveForMember" | "targetsForMember"> = createDropshipListingContentService()): void {
@@ -18,8 +19,10 @@ export function registerDropshipListingContentRoutes(app: Express,
   app.get(`${base}/content-profile/targets`, requireDropshipAuth, limiter, async (req, res) => respond(res, catalogTargetsResponseSchema,
     () => service.targetsForMember(req.session.dropship!.memberId, parseId(req.params.storeConnectionId),
       { type: req.query.type, search: req.query.search ?? "", page: req.query.page === undefined ? 0 : parseId(String(req.query.page)) })));
-  app.put(`${base}/content-profile`, requireDropshipAuth, limiter, async (req, res) => respond(res, saveContentProfileResponseSchema,
-    () => service.saveProfile(req.session.dropship!.memberId, parseId(req.params.storeConnectionId), req.body)));
+  // Template text alone can pass the 100 KB global limit; this route parses up to 1 MiB after auth.
+  app.put(`${base}/content-profile`, requireDropshipAuth, limiter, parseDropshipBulkJsonFor(CONTENT_PROFILE_TOO_LARGE_MESSAGE),
+    async (req, res) => respond(res, saveContentProfileResponseSchema,
+      () => service.saveProfile(req.session.dropship!.memberId, parseId(req.params.storeConnectionId), req.body)));
   const path = `${base}/variants/:productVariantId/content`;
   app.get(path, requireDropshipAuth, limiter, async (req, res) => respond(res, listingContentResponseSchema,
     async () => ({ content: await service.getForMember(req.session.dropship!.memberId, target(req.params)) })));
