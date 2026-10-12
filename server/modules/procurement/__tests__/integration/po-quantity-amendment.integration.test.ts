@@ -298,8 +298,17 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       const request = { ...await editRequest(), closedPurchaseOrderConfirmed: true as const }, key = randomUUID();
       const protectedBefore = await protectedRecords();
       const replies = await Promise.all([post(request, key), post(request, key)]);
-      expect(replies[0].body).toEqual(replies[1].body); expect(replies.map(reply => reply.status)).toEqual([200, 200]);
-      expect(replies.map(reply => reply.replayed).sort()).toEqual(["false", "true"]); expect(replies[0]).toMatchObject({ status: 200, body: { revisionNumber: 1, preview: { afterTotalCents: 1620, beforeStatus: "closed", afterStatus: "closed", closedPurchaseOrder: true } } });
+      const committed = replies.find(reply => reply.status === 200 && reply.replayed === "false");
+      if (!committed) throw new Error("The original closed-PO correction did not commit.");
+      expect(replies.filter(reply => reply.status === 200 && reply.replayed === "false")).toHaveLength(1);
+      expect(committed).toMatchObject({ status: 200, body: { revisionNumber: 1, preview: { afterTotalCents: 1620, beforeStatus: "closed", afterStatus: "closed", closedPurchaseOrder: true } } });
+      for (const reply of replies) {
+        // A duplicate can arrive before commit (busy) or after it (replayed).
+        // Both use the same intent; neither is permitted to apply a second revision.
+        if (reply.status === 409) expect(reply.body).toMatchObject({ code: "FINANCIAL_COMMAND_IN_PROGRESS" });
+        else { expect(reply.status).toBe(200); expect(reply.body).toEqual(committed.body); }
+      }
+      expect(await post(request, key)).toEqual({ status: 200, body: committed.body, replayed: "true" });
       expect((await pool.query("SELECT status,physical_status,closed_at,closed_by,received_line_count,financial_status FROM procurement.purchase_orders WHERE id=1")).rows[0]).toEqual(closure);
       expect((await pool.query("SELECT status,received_qty,fully_received_date FROM procurement.purchase_order_lines WHERE id=11")).rows[0]).toEqual(lineClosure);
       expect(await protectedRecords()).toEqual(protectedBefore);
