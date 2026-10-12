@@ -29,6 +29,22 @@ describe("procurement document journeys", () => {
     expect(parseProcurementRecord(...parts(receipt))).toEqual({ kind: "receipt", id: 31, tab: "detail" });
   });
 
+  it("opens the requested PO editor while preserving the invoice and purchase journey", () => {
+    const invoice = procurementChildHref("/purchase-orders/17", "tab=exceptions", "/ap-invoices/71");
+    const editor = procurementChildHref(...parts(invoice), "/purchase-orders/99", { editPo: true });
+    expect(new URLSearchParams(parts(editor)[1]).getAll("editPo")).toEqual(["1"]);
+    expect(parseProcurementRecord(...parts(editor))).toEqual({ kind: "purchase", id: 99, tab: "lines" });
+    expect(parseProcurementJourney(parts(editor)[1]).purchase?.id).toBe(17);
+    expect(procurementBackHref(parts(editor)[1], "/purchase-orders")).toBe(invoice);
+    // A later document journey restores the PO view without replaying UI actions.
+    const child = procurementChildHref(...parts(editor), "/shipments/42");
+    expect(procurementBackHref(parts(child)[1], "/shipments")).not.toContain("editPo");
+  });
+
+  it.each(["/ap-invoices/71", "/shipments/42", "/receiving?open=31"])("rejects a PO editor request for %s", destination => {
+    expect(() => procurementChildHref("/ap-invoices/71", "", destination, { editPo: true })).toThrow("The PO editor requires a purchase order destination");
+  });
+
   it("supports standalone document chains without inventing a purchase", () => {
     const invoice = procurementChildHref("/shipments/42", "tab=costs", "/ap-invoices/71");
     expect(parseProcurementJourney(parts(invoice)[1]).purchase).toBeNull();

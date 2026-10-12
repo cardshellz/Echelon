@@ -10,6 +10,13 @@ export interface ProcurementRecord {
   workspace?: { selected: ProcurementWorkspaceRef; trail: ProcurementWorkspaceRef[] };
 }
 
+// Opening an editor is navigation only; the amendment service still owns approval.
+export const PO_EDITOR_QUERY_PARAM = "editPo";
+export interface ProcurementChildNavigationOptions {
+  replaceCurrent?: boolean;
+  editPo?: boolean;
+}
+
 export interface ProcurementJourney {
   purchase: ProcurementRecord | null;
   trail: ProcurementRecord[];
@@ -118,7 +125,7 @@ export function procurementChildHref(
   path: string,
   search: string,
   destination: string,
-  options: { replaceCurrent?: boolean } = {},
+  options: ProcurementChildNavigationOptions = {},
 ): string {
   const separator = destination.indexOf("?");
   const target = parseProcurementRecord(separator < 0 ? destination : destination.slice(0, separator), separator < 0 ? "" : destination.slice(separator + 1));
@@ -128,7 +135,10 @@ export function procurementChildHref(
   const journey = parseProcurementJourney(search);
   const purchase = journey.purchase ?? (current?.kind === "purchase" ? current : null);
   const trail = current && !options.replaceCurrent ? [...journey.trail, current] : journey.trail;
-  return procurementRecordHref(target, { purchase, trail: trail.slice(-MAX_TRAIL_DEPTH) });
+  const href = procurementRecordHref(target, { purchase, trail: trail.slice(-MAX_TRAIL_DEPTH) });
+  if (!options.editPo) return href;
+  if (target.kind !== "purchase") throw new Error("The PO editor requires a purchase order destination");
+  return `${href}&${PO_EDITOR_QUERY_PARAM}=1`;
 }
 
 export function procurementBackHref(search: string, fallback: string): string {
