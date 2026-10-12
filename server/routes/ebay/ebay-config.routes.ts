@@ -1,4 +1,5 @@
 import { readEbayConnectionHealth } from "../../modules/channels/ebay-connection-health";
+import { publicationSelectionBusyIssue } from "../../modules/inventory-planning/publication-selection-work";
 import { syncActiveListings, triggerPricingRuleSync } from "../../modules/channels/ebay-listing-sync";
 import express, { type Request, type Response } from "express";
 import { eq, and, sql, asc, isNotNull, inArray, isNull, desc } from "drizzle-orm";
@@ -242,6 +243,8 @@ export const router = express.Router();
       }
     } catch (err: any) {
       console.error("[eBay Category Mapping] Error:", err.message);
+      const busy = publicationSelectionBusyIssue(err);
+      if (busy) return res.status(409).json({ ...busy, error: busy.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -408,6 +411,8 @@ ${categoriesXml}
       }
     } catch (err: any) {
       console.error("[eBay Variant Exclusion] Error:", err.message);
+      const busy = publicationSelectionBusyIssue(err);
+      if (busy) return res.status(409).json({ ...busy, error: busy.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -444,6 +449,8 @@ ${categoriesXml}
       }
     } catch (err: any) {
       console.error("[eBay Toggle Type Listing] Error:", err.message);
+      const busy = publicationSelectionBusyIssue(err);
+      if (busy) return res.status(409).json({ ...busy, error: busy.message });
       res.status(500).json({ error: err.message });
     }
   });

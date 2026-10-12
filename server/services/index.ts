@@ -29,10 +29,9 @@ import { createListingPublicationService } from "../listing-publication.composit
 import { VerifiedListingStockService } from "../modules/inventory-planning/application/verified-listing-stock.service";
 import { WalmartStockConnectionService } from "../modules/channels/adapters/walmart/walmart-stock-connection.service";
 import { createListingUpdateService } from "../listing-update.composition";
-import { InventoryPublicationMembershipService } from "../modules/inventory-planning/application/inventory-publication-membership.service";
 import { InventoryPublicationInitialScopeService } from "../modules/inventory-planning/application/inventory-publication-initial-scope.service";
 import { PostgresInitialPublicationScopeStore } from "../modules/inventory-planning/infrastructure/inventory-publication-initial-scope.repository";
-import { PostgresInventoryPublicationMembershipStore } from "../modules/inventory-planning/infrastructure/inventory-publication-membership.repository";
+import { PostgresVerifiedListingStockStore } from "../modules/inventory-planning/infrastructure/verified-listing-stock.repository";
 import {
   InventoryUseCases,
   createInventoryLotService,
@@ -168,6 +167,7 @@ import { PostgresChannelQuantityPublicationCatchupRepository } from "../modules/
 import { createVariantAvailabilitySyncService } from "../modules/channels/variant-availability-sync.service";
 import { InventoryPublicationOutboxService } from "../modules/inventory-planning/application/inventory-publication-outbox.service";
 import { PostgresInventoryPublicationOutboxRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-outbox.repository";
+import { PostgresPublicationSelectionWork } from "../modules/inventory-planning/infrastructure/publication-selection-work.repository";
 import { quantityPublicationAdmission, createQuantityPublicationCatchupService } from "../modules/inventory-planning/infrastructure/quantity-publication-runtime";
 import { InventoryPublicationReadbackService } from "../modules/inventory-planning/application/inventory-publication-readback.service";
 import { PostgresInventoryPublicationReadbackRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-readback.repository";
@@ -421,9 +421,8 @@ export function createServices(
   const listingPublication = createListingPublicationService({pool: databasePool, walmart, channelCatalog, quantityAdmission: quantityPublicationAdmission});
   const listingUpdates = createListingUpdateService(databasePool, walmart);
   const listingLifecycle = createListingLifecycleService(databasePool, walmart, listingLifecycleStore);
-  const inventoryPublicationMembership = new InventoryPublicationMembershipService(new PostgresInventoryPublicationMembershipStore(databasePool));
   const walmartStockConnection = new WalmartStockConnectionService(walmart,
-    new VerifiedListingStockService(new PostgresInventoryPublicationMembershipStore(databasePool)));
+    new VerifiedListingStockService(new PostgresVerifiedListingStockStore(databasePool)));
   const inventoryPublicationInitialScope = new InventoryPublicationInitialScopeService(new PostgresInitialPublicationScopeStore(databasePool));
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(shopifyAdapter);
@@ -467,6 +466,7 @@ export function createServices(
     adapterRegistry,
     inventoryPublication: inventoryPublicationRuntime,
   });
+  const inventoryPublicationSelectionWork = new PostgresPublicationSelectionWork(databasePool);
   const inventoryPublicationOutbox = new InventoryPublicationOutboxService(
     new PostgresInventoryPublicationOutboxRepository(),
     inventoryPublicationTransports,
@@ -725,6 +725,7 @@ export function createServices(
     inventoryPublicationWork,
     variantAvailabilitySync,
     inventoryPublicationOutbox,
+    inventoryPublicationSelectionWork,
     quantityPublicationCatchup,
     inventoryPublicationReadback,
     inventoryAvailabilityClaims,
@@ -753,7 +754,6 @@ export function createServices(
     walmartStockConnection,
     listingUpdates,
     listingLifecycle,
-    inventoryPublicationMembership,
     inventoryPublicationInitialScope,
   };
 }

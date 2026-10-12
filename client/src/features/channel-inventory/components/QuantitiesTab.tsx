@@ -292,9 +292,8 @@ function PreviewTable({ view, channel, target, preview, canEdit, onReload, reloa
         <div className="mt-3 space-y-3 text-muted-foreground">
           <p>Stock captured {formatAbsoluteTime(preview.shadowCapturedAt)}. {pluralize(preview.warehouseIds.length, "selected warehouse")}.
             {" "}Warehouse settings: {preview.sourceBindingAuthority}. {pluralize(preview.selectedPolicies.length, "saved rule")}; {draftPolicies} not applied.</p>
-          {preview.membership && <p>SKU selection: {preview.membership.mode === "explicit"
-            ? `${preview.membership.includedVariantIds.length} selected for this product`
-            : "All eligible SKUs in this product"}.</p>}
+          {preview.membership?.mode === "explicit" && <p>Channel listings: {pluralize(preview.membership.includedVariantIds.length, "SKU")} in this product's stock check.
+            {" "}Selection comes from the channel's listing feed. Excluded listings remain in the check while their removal is being verified.</p>}
           {preview.hold && <p>Hold entered by {preview.hold.heldBy} on {formatAbsoluteTime(preview.hold.heldAt)}.</p>}
           {preview.blockers.length > 0 && <ul className="space-y-2">
             {preview.blockers.map((blocker) => (
@@ -392,20 +391,14 @@ function describeEmptyPreview(preview: Preview): { title: string; description: s
   }
   if (preview.membership?.mode === "explicit" && preview.membership.includedVariantIds.length === 0) {
     return {
-      title: "No SKUs selected for stock updates",
-      description: "This preview includes only SKUs selected for this account. None are selected for this product yet.",
+      title: "No channel listings need a stock update",
+      description: "This product has no selected listings or removals awaiting verification for this account. Choose products and variants in the channel's listing feed.",
     };
   }
   if (preview.blockers.some((blocker) => blocker.code !== "PUBLICATION_TARGET_NOT_IN_PREVIEW")) {
     return {
       title: "Stock could not be calculated",
       description: "Resolve the setup issues above, then recalculate stock.",
-    };
-  }
-  if (preview.membership?.mode === "whole_product") {
-    return {
-      title: "No eligible SKUs to preview",
-      description: "This product has no active, sellable SKUs that ship and track inventory.",
     };
   }
   return {

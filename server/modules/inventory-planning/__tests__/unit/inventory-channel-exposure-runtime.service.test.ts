@@ -218,7 +218,66 @@ describe("audited deferred Dropship ATP reads", () => {
   });
 });
 
-describe("explicit publication membership", () => {
+describe("channel-owned stock selection", () => {
+  function selectedTarget(actions: Array<"publish" | "zero" | "read_only" | "none">, input: Parameters<typeof target>[0] = {}) {
+    const selected = target(input);
+    selected.selection = { productId: 10, fingerprint: HASH, variants: actions.map((action, index) => ({
+      productVariantId: 101 + index, action, reason: "Current channel decision", blockers: [],
+    })) };
+    return selected;
+  }
+  function plan(selected: ActiveInventoryPublicationTargetSnapshot, purpose: "publication" | "deferred_dropship_quantity_read" = "publication") {
+    return planInventoryChannelExposureProduct(canonicalContext([selected]), 10, { warn: vi.fn() }, purpose);
+  }
+  it("uses channel selection even when old independent membership excluded every SKU", () => {
+    const selected = selectedTarget(["publish", "publish"]);
+    selected.membership = { mode: "explicit", includedVariantIds: [] };
+    expect(plan(selected).targets[0]).toMatchObject({ publishable: true,
+      rows: [{ productVariantId: 101, publishedUnits: "25" }, { productVariantId: 102, publishedUnits: "7" }] });
+  });
+  it("clears a deselected retained identity while keeping its real ATP and mapping", () => {
+    const selected = selectedTarget(["zero", "publish"]);
+    const result = plan(selected).targets[0];
+    expect(result).toMatchObject({ publishable: true, rows: [
+      { productVariantId: 101, canonicalAtpUnits: "25", publishedUnits: "0", mapping: { externalInventoryItemId: "external-91-101" } },
+      { productVariantId: 102, canonicalAtpUnits: "7", publishedUnits: "7" },
+    ] });
+  });
+  it("does not publish unselected catalog candidates or read-only drafts", () => {
+    expect(plan(selectedTarget(["none", "read_only"])).targets).toEqual([]);
+  });
+  it("does not charge retained zero duties against another channel's partition share", () => {
+    const clearing = selectedTarget(["zero", "none"], { policy: policyValue({ allocationSemantics: "partitioned", shareBps: 8000 }) });
+    const publishing = selectedTarget(["publish", "none"], { publicationTargetId: 92, channelId: 8,
+      policy: policyValue({ allocationSemantics: "partitioned", shareBps: 8000 }) });
+    const result = planInventoryChannelExposureProduct(canonicalContext([clearing, publishing]), 10, { warn: vi.fn() });
+    expect(result.targets.map(row => row.publishable)).toEqual([true, true]);
+    expect(result.targets[0].rows[0].publishedUnits).toBe("0");
+    expect(result.targets[1].rows[0].publishedUnits).toBe("20");
+  });
+  it("preserves full ATP supply when the channel only selects a pack", () => {
+    const selected = selectedTarget(["none", "publish"]);
+    expect(plan(selected).targets[0].rows).toMatchObject([{ productVariantId: 102, canonicalAtpUnits: "7", publishedUnits: "7" }]);
+  });
+  it("requires exact mapping and preserves quarantine blockers even for a zero", () => {
+    const selected = selectedTarget(["zero", "none"]);
+    selected.mappings = [];
+    selected.selection!.variants[0].blockers = [{ code: "LISTING_QUARANTINED", message: "Review the saved listing identity." }];
+    expect(plan(selected).targets[0]).toMatchObject({ publishable: false, rows: [{ publishedUnits: "0", blockers: [
+      { code: "LISTING_QUARANTINED" }, { code: "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING" },
+    ] }] });
+  });
+  it("permits ATP preview for selected Dropship drafts without granting provider authority", () => {
+    const selected = selectedTarget(["none", "read_only"]);
+    selected.destinationKind = "dropship_store_connection"; selected.channelConnectionId = null; selected.dropshipStoreConnectionId = 1;
+    selected.mappings = []; selected.deferredDropshipQuantityVariantIds = [102];
+    expect(plan(selected, "deferred_dropship_quantity_read").targets[0]).toMatchObject({ readOnly: true, publishable: false,
+      rows: [{ productVariantId: 102, canonicalAtpUnits: "7", publishedUnits: "7", mapping: null, blockers: [] }] });
+    expect(plan(selected).targets).toEqual([]);
+  });
+});
+
+describe("historical cutover publication scope", () => {
   it("does not require mappings for deliberately excluded variants", async () => {
     const selected = target();
     selected.membership = { mode:"explicit",includedVariantIds:[101] };

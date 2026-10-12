@@ -2,8 +2,7 @@ import type { Pool, PoolClient } from "pg";
 import type { InventoryAvailabilityTransactionQueryClient } from "../application/inventory-availability-transaction-query.port";
 
 import type { SupplySnapshotDto } from "@shared/types/inventory-availability-planner";
-import { initialPublicationScopeReceiptSchema } from "@shared/types/inventory-publication-initial-scope";
-import { selectDeferredPublicationQuantityVariants } from "../domain/inventory-publication-scope";
+import { readPublicationStockSelection } from "./inventory-publication-selection.reader";
 import {
   channelExposurePolicyValueSchema,
   type ChannelExposurePolicyValue,
@@ -36,7 +35,6 @@ type SupplySnapshotCapture = (
 ) => Promise<SupplySnapshotDto>;
 
 interface PublicationTargetRow {
-  membership_mode?: unknown;
   publication_target_id: unknown;
   publication_target_revision: unknown;
   destination_kind: unknown;
@@ -293,7 +291,6 @@ async function loadSelectedPublicationTargets(
     : `AND target.id = $${targetValues.length}`;
   const targetResult = await client.query<PublicationTargetRow>(
     `SELECT target.id AS publication_target_id,
-            COALESCE(to_jsonb(target)->>'membership_mode','whole_product') AS membership_mode,
             target.revision::text AS publication_target_revision,
             target.destination_kind,
             target.channel_id,
@@ -419,24 +416,9 @@ async function loadSelectedPublicationTargets(
   }>("SELECT id,warehouse_id,lifecycle_status FROM warehouse.fulfillment_nodes WHERE id=ANY($1::integer[]) ORDER BY id", [overrideNodeIds])).rows;
   const mappings = groupMappingsByTarget(mappingResult.rows);
   const variantHolds = groupVariantHoldsByTarget(variantHoldResult.rows);
-  // Old destinations need no membership lookup. Keeping the product filter on
-  // catalog identity (not active/sellable flags) makes an invalid included SKU
-  // visible to the planner instead of silently dropping its publication duty.
-  const explicitTargetIds = targetResult.rows.filter(row => row.membership_mode === "explicit")
-    .map(row => positiveInteger(row.publication_target_id, "membership.targetId"));
-  const membershipRows = explicitTargetIds.length === 0 ? [] : (await client.query<{
-    publication_target_id: number; product_variant_id: number;
-  }>(`SELECT h.publication_target_id,h.product_variant_id
-      FROM inventory.publication_membership_heads h
-      JOIN inventory.publication_membership_versions v ON v.id=h.active_version_id
-      JOIN catalog.product_variants variant ON variant.id=h.product_variant_id
-      WHERE h.publication_target_id=ANY($1::integer[]) AND v.included=true AND variant.product_id=$2
-      ORDER BY h.publication_target_id,h.product_variant_id`, [explicitTargetIds, productId])).rows;
-  const deferredTargetIds = includeDeferredDropshipQuantities ? targetResult.rows
-    .filter(row => row.membership_mode === "explicit" && row.destination_kind === "dropship_store_connection")
-    .map(row => positiveInteger(row.publication_target_id, "deferred.targetId")) : [];
-  const deferredByTarget = await loadDeferredDropshipQuantityVariants(client, deferredTargetIds, productVariantIds);
-  return targetResult.rows.map((row): ActiveInventoryPublicationTargetSnapshot => {
+  const snapshots: ActiveInventoryPublicationTargetSnapshot[] = [];
+  // Sequential reads reuse the same transaction and its consistent snapshot.
+  for (const row of targetResult.rows) {
     const publicationTargetId = positiveInteger(row.publication_target_id, "publicationTarget.id");
     const channelId = positiveInteger(row.channel_id, "publicationTarget.channelId");
     const targetDestinationKind = destinationKind(row.destination_kind);
@@ -460,7 +442,10 @@ async function loadSelectedPublicationTargets(
       });
     }
     literal(row.publication_target_state, targetState, "publicationTarget.state");
-    return {
+    const selection = await readPublicationStockSelection(client, {
+      destinationKind: targetDestinationKind, channelId, channelConnectionId, dropshipStoreConnectionId,
+    }, { productId, productVariantIds });
+    snapshots.push({
       publicationTargetId,
       publicationTargetRevision: positiveBigintString(
         row.publication_target_revision,
@@ -485,36 +470,14 @@ async function loadSelectedPublicationTargets(
       policies: policies.get(channelId) ?? [],
       mappings: mappings.get(publicationTargetId) ?? [],
       variantHolds: variantHolds.get(publicationTargetId) ?? [],
-      ...(deferredByTarget.has(publicationTargetId)
-        ? { deferredDropshipQuantityVariantIds: deferredByTarget.get(publicationTargetId)! } : {}),
-      membership: row.membership_mode === "explicit"
-        ? { mode: "explicit", includedVariantIds: membershipRows.filter(member => member.publication_target_id === publicationTargetId)
-          .map(member => positiveInteger(member.product_variant_id, "membership.productVariantId")) }
-        : { mode: "whole_product" },
-    };
-  });
-}
-
-/** A subsequent include OR exclude decision ends the temporary read exception.
- * No failed-listing identity is guessed, and no unrelated SKU is admitted. */
-export async function loadDeferredDropshipQuantityVariants(client: InventoryAvailabilityTransactionQueryClient,
-  targetIds: readonly number[], productVariantIds: readonly number[]): Promise<Map<number, number[]>> {
-  if (targetIds.length === 0 || productVariantIds.length === 0) return new Map();
-  const rows = (await client.query<{ publication_target_id: number; receipt: unknown; decided_variant_ids: number[] }>(
-    `SELECT receipt.publication_target_id, receipt.receipt,
-      ARRAY(SELECT head.product_variant_id FROM inventory.publication_membership_heads head
-        WHERE head.publication_target_id=receipt.publication_target_id ORDER BY head.product_variant_id) AS decided_variant_ids
-     FROM inventory.publication_initial_scope_receipts receipt
-     JOIN inventory.inventory_publication_targets target ON target.id=receipt.publication_target_id
-     WHERE target.id=ANY($1::integer[]) AND target.destination_kind='dropship_store_connection'
-       AND target.membership_mode='explicit' ORDER BY target.id`, [targetIds])).rows;
-  return new Map(rows.map(row => {
-    const receipt = initialPublicationScopeReceiptSchema.parse(row.receipt);
-    if (receipt.publicationTargetId !== row.publication_target_id) throw invalidRow(
-      "Deferred Dropship receipt belongs to a different target.", { publicationTargetId: row.publication_target_id });
-    return [row.publication_target_id, selectDeferredPublicationQuantityVariants(
-      receipt.deferredUnpublishedVariantIds ?? [], productVariantIds, row.decided_variant_ids)];
-  }));
+      selection,
+      ...(includeDeferredDropshipQuantities && targetDestinationKind === "dropship_store_connection"
+        ? { deferredDropshipQuantityVariantIds: selection.variants
+          .filter(variant => variant.action === "read_only" || variant.action === "publish")
+          .map(variant => variant.productVariantId) } : {}),
+    });
+  }
+  return snapshots;
 }
 
 function mapBindings(rows: readonly SourceBindingRow[]): Map<number, ActivePublicationSourceBindingSnapshot> {

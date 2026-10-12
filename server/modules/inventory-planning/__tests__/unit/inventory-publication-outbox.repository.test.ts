@@ -46,8 +46,8 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
       status: "superseded",
     });
     expect(work).not.toHaveBeenCalled();
-    expect(client.queries.some(({ sql }) =>
-      sql.includes("SUPERSEDED_BEFORE_PROVIDER_WRITE")
+    expect(client.queries.some(({ sql, values }) =>
+      values?.includes("SUPERSEDED_BEFORE_PROVIDER_WRITE")
       && sql.includes("inventory_publication_attempts"))).toBe(true);
     expect(client.queries.map(({ sql }) => sql)).toEqual([
       expect.stringContaining("pg_advisory_lock"),
@@ -72,10 +72,11 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
     await expect(repository.runIfCurrent(claim(), vi.fn())).resolves.toEqual({
       status: "superseded",
     });
-    const transition = client.queries.find(({ sql }) =>
+    const transition = client.queries.find(({ sql, values }) =>
       sql.includes("UPDATE inventory.inventory_publication_outbox")
-      && sql.includes("SUPERSEDED_BEFORE_PROVIDER_WRITE"));
-    expect(transition?.values).toEqual(["41", "lease-runtime"]);
+      && values?.includes("SUPERSEDED_BEFORE_PROVIDER_WRITE"));
+    expect(transition?.values).toEqual(["41", "lease-runtime", "SUPERSEDED_BEFORE_PROVIDER_WRITE",
+      "A newer desired revision exists; no provider request was made."]);
     expect(client.queries.map(({ sql }) => sql)).toContain("COMMIT");
   });
 

@@ -6,10 +6,13 @@ import { requirePermission } from "../../routes/middleware";
 import { financialCommandFromRequest } from "../../platform/commands/http-command";
 import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
 import { createBulkInventoryTrackingService } from "./bulk-inventory-tracking.service";
+import { publicationSelectionBusyIssue } from "../inventory-planning/publication-selection-work";
 
 import { InventoryTrackingHistoryCapacityError } from "@shared/catalog/inventory-tracking-history";
 
 function sendError(res: Response, error: unknown): Response {
+  const busy = publicationSelectionBusyIssue(error);
+  if (busy) return res.status(409).json({ ...busy, error: busy.message });
   if (error instanceof InventoryTrackingHistoryCapacityError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
   if (error instanceof FinancialCommandError) {
     for (const [key, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(key, value);

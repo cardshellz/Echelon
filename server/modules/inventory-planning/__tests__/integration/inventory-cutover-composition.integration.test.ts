@@ -39,6 +39,7 @@ import { ChannelDefinitionService } from "../../application/inventory-channel-de
 import { PostgresChannelDefinitionStore } from "../../infrastructure/inventory-channel-definition.repository";
 import { activateReviewedWarehouseSourcesInsideTransaction } from "../../../warehouse/infrastructure/warehouse-source-activation.repository";
 import { readInventoryProductBalances } from "../../infrastructure/inventory-product-balances.reader";
+import { installStockSelectionFixture } from "../fixtures/stock-selection.fixture";
 
 // Only the application's process-global connection is disabled. Every owner under
 // test receives the uniquely created disposable pool/client; no owner is mocked.
@@ -46,6 +47,20 @@ vi.mock("../../../../db", () => ({ pool: {} }));
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const dbDescribe = databaseUrl && disposable ? describe : describe.skip;
+
+async function selectCompositionListing(database: InventoryCutoverTestDatabase) {
+  await installStockSelectionFixture(database.pool);
+  await database.pool.query(`INSERT INTO channels.channel_feeds
+    (channel_id,product_variant_id,channel_variant_id,channel_inventory_item_id,channel_sku)
+    VALUES(36,101,'test-variant','test-item','P5')`);
+}
+
+async function seedSeparateExternalDestination(database: InventoryCutoverTestDatabase) {
+  // A channel-only feed identifies one connection. The separate external account
+  // must not make the selected Shopify account's saved identity ambiguous.
+  await database.pool.query("INSERT INTO channels.channels(id,name,provider) VALUES(37,'External Shopify','shopify')");
+  await database.pool.query(cutoverCompositionObserveOnlySeedSql.replaceAll("36", "37"));
+}
 
 async function proveRoutineDefinitionApply(database: InventoryCutoverTestDatabase) {
   await database.pool.query(readFileSync(resolve(process.cwd(), "migrations/0680_inventory_product_definition_applications.sql"), "utf8"));
@@ -107,6 +122,9 @@ async function proveRoutineSafetyApply(database: InventoryCutoverTestDatabase) {
         definition_hash,change_reason,idempotency_key,request_hash,created_by)
         VALUES(1,301,1,'other-item','OTHER-EA',repeat('b',64),'Second item','other-mapping',repeat('b',64),'operator') RETURNING id`)).rows[0];
       await client.query("INSERT INTO inventory.publication_variant_mapping_heads(publication_target_id,product_variant_id,draft_mapping_id,revision,updated_by,update_reason) VALUES(1,301,$1,1,'operator','Second item')", [mapping.id]);
+      await client.query(`INSERT INTO channels.channel_feeds
+        (channel_id,product_variant_id,channel_variant_id,channel_inventory_item_id,channel_sku)
+        VALUES(36,301,'other-variant','other-item','OTHER-EA')`);
       await promoteInventoryCutoverDefinitionsInsideTransaction(client, { contractVersion: "inventory_cutover_selection_manifest_v1", productIds: [30], publicationTargetIds: [1],
         selections: [{ kind: "variant_mapping", key: "1:301", definitionId: mapping.id, definitionHash: "b".repeat(64) }] }, { actor: "operator", reason: "Fixture mapping", occurredAt: new Date() });
     }
@@ -308,6 +326,7 @@ dbDescribe.sequential.each([
     await installCutoverCompositionMigrations(database.pool);
     await database.pool.query(cutoverCompositionSeedSql);
     await database.pool.query(cutoverCompositionChannelSeedSql);
+    await selectCompositionListing(database);
     await database.pool.query(`INSERT INTO warehouse.warehouses(id,code,warehouse_type,hub_warehouse_id)
       VALUES(2,'RESERVE','bulk_storage',1)`);
     await database.pool.query(`DELETE FROM oms.order_item_costs; DELETE FROM inventory.inventory_transactions;
@@ -448,7 +467,8 @@ dbDescribe.sequential("cutover abort, concurrent provider and external-owned des
     await installCutoverCompositionMigrations(database.pool);
     await database.pool.query(cutoverCompositionSeedSql);
     await database.pool.query(cutoverCompositionChannelSeedSql);
-    await database.pool.query(cutoverCompositionObserveOnlySeedSql);
+    await selectCompositionListing(database);
+    await seedSeparateExternalDestination(database);
     await installCutoverAdmissionFixturePrerequisites(database.pool);
     await database.pool.query(`UPDATE channels.channels
       SET status='active', sync_enabled=true, sync_mode='live'
@@ -539,6 +559,7 @@ dbDescribe.sequential.each([
     // Production regression: sources are prepared as drafts, not pre-activated
     // by a fixture. Excluded mapping drafts must not enter the reviewed set.
     await database.pool.query(cutoverCompositionChannelSeed({ activeSource: false, explicitMembership: true }));
+    await selectCompositionListing(database);
     await database.pool.query(`INSERT INTO warehouse.warehouses(id,code) VALUES(90,'EXTERNAL');
       INSERT INTO warehouse.fulfillment_nodes(code,name,node_type,warehouse_id,inventory_authority,fulfillment_authority,created_by)
         VALUES('EXTERNAL','Uncommissioned 3PL','third_party_logistics',90,'external_provider','external_provider','operator');
@@ -552,7 +573,7 @@ dbDescribe.sequential.each([
         VALUES(1,102,1,false,repeat('b',64),repeat('b',64),'operator',transaction_timestamp());
       INSERT INTO inventory.publication_membership_heads(publication_target_id,product_variant_id,active_version_id)
         SELECT 1,102,id FROM inventory.publication_membership_versions WHERE product_variant_id=102`);
-    await database.pool.query(cutoverCompositionObserveOnlySeedSql);
+    await seedSeparateExternalDestination(database);
     await database.pool.query(`INSERT INTO inventory.promise_safety_policy_versions(scope_key,scope_type,product_variant_id,warehouse_id,version,policy_mode,definition_hash,change_reason,idempotency_key,request_hash,created_by)
       VALUES('network:variant:101','network_variant',101,NULL,1,'off',repeat('e',64),'Test network SKU policy','composition-network-safety',repeat('e',64),'operator'),
         ('warehouse:1:variant:101','warehouse_variant',101,1,1,'off',repeat('f',64),'Test warehouse SKU policy','composition-warehouse-safety',repeat('f',64),'operator');

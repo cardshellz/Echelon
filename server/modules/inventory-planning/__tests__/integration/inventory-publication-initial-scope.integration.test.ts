@@ -9,7 +9,6 @@ import { InventoryPublicationInitialScopeService } from "../../application/inven
 import { PostgresInitialPublicationScopeStore } from "../../infrastructure/inventory-publication-initial-scope.repository";
 import { acquireInventoryCutoverFenceInsideTransaction } from "../../infrastructure/inventory-cutover-admission-fence.repository";
 import { PostgresInventoryPublicationReadbackRepository } from "../../infrastructure/inventory-publication-readback.repository";
-import { loadDeferredDropshipQuantityVariants } from "../../infrastructure/inventory-channel-exposure-runtime.repository";
 import { createAuthorityAwareInventoryPublicationService, createInventoryChannelQuantityRuntimeService } from "../../infrastructure/inventory-availability-runtime-publication.repository";
 import { activateWalmartPublicationInventoryFixture } from "../fixtures/walmart-publication-inventory.fixture";
 import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
@@ -82,7 +81,11 @@ dbDescribe.sequential("pre-cutover explicit-scope non-live exclusion", () => {
     const shadows = new PostgresInventoryAvailabilityShadowRepository(database.pool);
     await new InventoryAvailabilityShadowService(shadows).runProductShadow(20, { idempotencyKey: "exclusion-shadow" }, "operator");
     const preview = new PostgresInventoryChannelExposureAdminStore(drizzle(database.pool, { schema }), shadows);
-    expect((await preview.preview(1, 20)).membership).toEqual({ mode: "explicit", includedVariantIds: [], excludedVariantIds: [101] });
+    // The historical exclusion receipt remains unchanged; it does not override
+    // the current Shopify feed's stock selection.
+    expect((await preview.preview(1, 20)).selection?.variants).toEqual(expect.arrayContaining([
+      expect.objectContaining({ productVariantId: 101, action: "publish" }),
+    ]));
   });
   it("rejects a stale revision without appending any version", async () => {
     const input = await command();
@@ -154,14 +157,14 @@ dbDescribe.sequential("pre-cutover explicit-scope non-live exclusion", () => {
   it("rolls back the whole batch when a later destination fails, then commits both together", async () => {
     await database.pool.query(`INSERT INTO inventory.inventory_publication_targets(channel_id,channel_connection_id,fulfillment_node_id,
       provider_scope_type,external_scope_id,publication_authority,state,change_reason,created_by)
-      VALUES(36,8,1,'location','second-location','echelon','disabled','Fixture second target','operator');
+      VALUES(35,7,1,'location','second-location','echelon','disabled','Fixture second target','operator');
       UPDATE inventory.inventory_publication_targets SET state='preview',revision=revision+1,
         activated_by='operator',activated_at=transaction_timestamp() WHERE id=3`);
     const initial = new InventoryPublicationInitialScopeService(new PostgresInitialPublicationScopeStore(database.pool), { now: () => NOW });
     const second = { publicationTargetId: 3, expectedTargetRevision: "2" };
     await initial.prepare({ ...second, expectedReviewHash: (await initial.review(second)).reviewHash,
       idempotencyKey: "second-initial" }, "operator");
-    request.exclusions.push({ ...request.exclusions[0]!, publicationTargetId: 3, channelConnectionId: 8, externalScopeId: "second-location" });
+    request.exclusions.push({ ...request.exclusions[0]!, publicationTargetId: 3, channelConnectionId: 7, externalScopeId: "second-location" });
     const input = await command();
     await database.pool.query(`CREATE FUNCTION public.reject_second_exclusion_audit() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN IF NEW.action='inventory_availability.publication_scope.pre_cutover_excluded'
@@ -205,7 +208,7 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
     expect((await database.pool.query("SELECT * FROM inventory.publication_initial_scope_receipts")).rows).toEqual([]);
     expect((await database.pool.query("SELECT * FROM inventory.publication_membership_heads")).rows).toEqual([]);
   }
-  it("distinguishes inactive and unconfigured comparison evidence without changing stock, feeds or publication", async () => {
+  it("retains an inactive feed's zero-stock duty while distinguishing an unconfigured comparison destination", async () => {
     // Complete this reduced feed fixture for the real repeatable-read capture.
     await database.pool.query(`ALTER TABLE channels.channel_feeds ADD COLUMN last_synced_qty integer;
       ALTER TABLE channels.channel_feeds ADD COLUMN last_synced_at timestamptz;
@@ -223,28 +226,28 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
     const before = await protectedRows();
     const store = new PostgresInventoryChannelExposureAdminStore(drizzle(database.pool, { schema }), shadows);
     const scopes = await Promise.all([store.preview(1, 20), store.preview(2, 20)]);
-    expect(scopes.map(scope => scope.membership)).toEqual([
-      { mode: "explicit", includedVariantIds: [] },
-      { mode: "explicit", includedVariantIds: [] },
-    ]);
+    expect(scopes[0].selection?.variants).toEqual(expect.arrayContaining([
+      expect.objectContaining({ productVariantId: 101, action: "zero" }),
+    ]));
+    expect(scopes[1].selection?.variants.every(variant => variant.action === "read_only")).toBe(true);
     const registeredTargets = (await database.pool.query<{ channelId: number }>(
       'SELECT channel_id AS "channelId" FROM inventory.inventory_publication_targets ORDER BY id',
     )).rows;
     const evidence = await new PostgresInventoryAvailabilityActivationDryRunRepository(database.pool)
-      .captureCurrentPublicationEvidence([{ channelId: 36, productVariantId: 101 }, { channelId: 104, productVariantId: 101 }]);
+      .captureCurrentPublicationEvidence([{ channelId: 35, productVariantId: 101 }, { channelId: 104, productVariantId: 101 }]);
     expect(evidence[0]).toMatchObject({ mappingState: "inactive", channelInventoryItemId: "test-item", lastAcknowledgedUnits: "5" });
-    expect(evidence[0]!.configuredTargets).toHaveLength(2);
+    expect(evidence[0]!.configuredTargets).toHaveLength(1);
     expect(evidence[1]).toMatchObject({ mappingState: "missing", feedId: null, configuredTargets: [] });
-    expect(evidence.map(row => isComparisonOnlyPublicationEvidence(row, scopes, registeredTargets))).toEqual([true, true]);
+    expect(evidence.map(row => isComparisonOnlyPublicationEvidence(row, scopes, registeredTargets))).toEqual([false, true]);
     expect(await protectedRows()).toEqual(before);
   });
-  it("keeps a failed listing unchanged, persists its deferral, and reads canonical ATP without provider work", async () => {
+  it("preserves the historical failed-listing deferral receipt without changing the listing or stock", async () => {
     await database.pool.query(`INSERT INTO dropship.dropship_vendors(id,business_name) VALUES(1,'Test vendor');
       INSERT INTO dropship.dropship_store_connections(id,vendor_id,platform,status,external_account_id)
         VALUES(1,1,'ebay','connected','account-one');
       INSERT INTO inventory.inventory_publication_targets(destination_kind,channel_id,dropship_store_connection_id,fulfillment_node_id,
         provider_scope_type,external_scope_id,publication_authority,state,change_reason,created_by)
-        VALUES('dropship_store_connection',36,1,1,'account','account-one','echelon','disabled','Fixture Dropship','operator');
+        VALUES('dropship_store_connection',35,1,1,'account','account-one','echelon','disabled','Fixture Dropship','operator');
       UPDATE inventory.inventory_publication_targets SET state='preview',revision=revision+1,activated_by='operator',activated_at=transaction_timestamp() WHERE id=3;
       INSERT INTO dropship.dropship_vendor_listings VALUES(1,1,101,'failed','unfinished-listing','unfinished-offer');
       INSERT INTO inventory.publication_source_binding_versions(publication_target_id,version,definition_hash,change_reason,idempotency_key,request_hash,created_by)
@@ -264,60 +267,6 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
     expect(await service.prepare(command, "operator")).toMatchObject({ ...prepared, alreadyApplied: true });
     expect(await protectedRows()).toEqual(before);
     expect((await database.pool.query("SELECT * FROM inventory.publication_membership_heads WHERE publication_target_id=3")).rows).toEqual([]);
-    const client = await database.pool.connect();
-    try { expect([...await loadDeferredDropshipQuantityVariants(client, [3], [101, 102])]).toEqual([[3, [101]]]); }
-    finally { client.release(); }
-
-    const shadows = new PostgresInventoryAvailabilityShadowRepository(database.pool);
-    await new InventoryAvailabilityShadowService(shadows).runProductShadow(20, { idempotencyKey: "deferred-atp-shadow" }, "operator");
-    const preview = await new PostgresInventoryChannelExposureAdminStore(drizzle(database.pool, { schema }), shadows).preview(3, 20);
-    expect(preview).toMatchObject({ deferredDropshipQuantityVariantIds: [101], rows: [], blockers: [], sourceBindingAuthority: "draft" });
-    const reviewedRun = await seedCompositionReviewedDryRun(database.pool);
-    reviewedRun.products[0]!.publicationTargetSelections = [{ publicationTargetId: 3, revision: "3",
-      membership: { mode: "explicit", includedVariantIds: [], excludedVariantIds: [] },
-      targetIdentity: { channelId: 36, destinationKind: "dropship_store_connection", channelConnectionId: null, dropshipStoreConnectionId: 1,
-        providerScopeType: "account", externalScopeId: "account-one", publicationAuthority: "echelon", state: "preview" },
-      quantityReadConfiguration: { productVariantIds: [101], sourceBindingId: preview.sourceBindingId!,
-        sourceBindingVersion: preview.sourceBindingVersion!, sourceBindingDefinitionHash: preview.sourceBindingDefinitionHash!,
-        policySelections: preview.selectedPolicies } }];
-    const reviewClient = await database.pool.connect();
-    try {
-      await reviewClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-      await assertDryRunSelectionsCurrent(reviewClient, reviewedRun, false);
-      const changed = structuredClone(reviewedRun);
-      changed.products[0]!.publicationTargetSelections![0]!.quantityReadConfiguration!.sourceBindingDefinitionHash = "a".repeat(64);
-      await expect(assertDryRunSelectionsCurrent(reviewClient, changed, false)).rejects.toMatchObject({ code: "ACTIVATION_SOURCE_BINDING_CHANGED" });
-      await reviewClient.query("ROLLBACK");
-    } finally { reviewClient.release(); }
-
-    // Synthetic active lineage in this disposable fixture: exercise the actual
-    // runtime DB reader/authority lock, not a mocked ATP number or provider.
-    await database.pool.query(`UPDATE inventory.publication_source_binding_versions SET lifecycle_status='sealed',sealed_by='operator',sealed_at=transaction_timestamp()
-      WHERE publication_target_id=3;
-      UPDATE inventory.publication_source_binding_heads SET active_binding_id=draft_binding_id,draft_binding_id=NULL,
-        revision=revision+1,updated_by='operator',update_reason='Fixture activation' WHERE publication_target_id=3;
-      UPDATE inventory.inventory_publication_targets SET state='live',revision=revision+1 WHERE id=3;`);
-    const activationClient = await database.pool.connect();
-    try {
-      await activationClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
-      await acquireInventoryCutoverFenceInsideTransaction(activationClient, { expectedAuthority: "legacy", expectedConfigurationRunId: null });
-      await activateWalmartPublicationInventoryFixture(activationClient);
-      await activationClient.query("COMMIT");
-    } catch (error) { await activationClient.query("ROLLBACK"); throw error; }
-    finally { activationClient.release(); }
-    const legacy = vi.fn(async () => [{ productVariantId: 101, quantity: 999 }]);
-    const quantities = await createInventoryChannelQuantityRuntimeService(database.pool).readProduct({ productId: 20,
-      channelId: 36, target: { destinationKind: "dropship_store_connection", connectionId: 1, providerKey: "ebay" }, triggeredBy: "test" }, legacy);
-    expect(quantities.authority).toBe("canonical");
-    expect(quantities.rows).toHaveLength(1);
-    expect(quantities.rows[0]).toMatchObject({ productVariantId: 101, publicationTargetIds: [3] });
-    expect(quantities.rows[0]!.quantity).toBeGreaterThan(0);
-    expect(quantities.rows[0]!.quantity).not.toBe(999);
-    expect(legacy).not.toHaveBeenCalled();
-    const publication = await createAuthorityAwareInventoryPublicationService(database.pool, { channelId: 36 })
-      .publishProduct({ productId: 20, publicationTargetId: 3, dryRun: false }, legacy);
-    expect(publication).toMatchObject({ authority: "canonical", publication: { rows: [], enqueuedRows: 0 } });
-    expect((await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox")).rows).toEqual([]);
     expect((await database.pool.query("SELECT * FROM dropship.dropship_vendor_listings")).rows).toEqual(listingBefore);
   });
   it("reviews without writes, then changes only target scope, membership and immutable audit evidence", async () => {
@@ -370,7 +319,7 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
       .rejects.toMatchObject({ code: "INITIAL_SCOPE_REVIEW_STALE" });
     await assertPristine();
   });
-  it.each([false, true])("selects provider reads from the actual membership decision (bundle excluded=%s)", async excluded => {
+  it.each([false, true])("selects provider reads from the current channel feed despite historical membership (bundle excluded=%s)", async excluded => {
     const input = { ...selection, excludedVariants: excluded
       ? [{ productVariantId: 101, reason: "unsupported_bundle" as const }] : [] };
     const reviewed = await service.review(input);
@@ -382,7 +331,7 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
     expect(result.kind).toBe("started");
     if (result.kind !== "started") throw new Error("Expected a new readback review");
     expect(result.targets.map(row => ({ target: row.publicationTargetId, variant: row.productVariantId })))
-      .toEqual(excluded ? [] : [{ target: 1, variant: 101 }]);
+      .toEqual([{ target: 1, variant: 101 }]);
     expect((await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox")).rows).toEqual([]);
   });
   it("rolls back an omitted excluded membership decision", async () => {
@@ -431,7 +380,7 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
       .toEqual([{ product_variant_id: 101, included: false }]);
   });
   it("imports a missing snapshot from the existing Shopify listing in the same transaction, with retry-safe audit", async () => {
-    await database.pool.query("INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(36,102,'NEW','existing-item-102')");
+    await database.pool.query("INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(35,102,'NEW','existing-item-102')");
     const before = await protectedRows();
     expect(await review()).toMatchObject({ ready: true, includedVariantIds: [101,102],
       mappingImports: [{ productVariantId: 102, externalInventoryItemId: "existing-item-102", externalSku: "NEW" }] });
@@ -472,8 +421,8 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
       .toEqual([{ channel_inventory_item_id:null }]);
   });
   it("uses existing eBay listing SKU precedence and includes listing-only identities", async () => {
-    await database.pool.query(`UPDATE channels.channels SET provider='ebay' WHERE id=36;
-      INSERT INTO channels.channel_listings VALUES(1,36,101,'test-item','offer-existing'),(2,36,102,'LISTING-ONLY','offer-only');
+    await database.pool.query(`UPDATE channels.channels SET provider='ebay' WHERE id=35;
+      INSERT INTO channels.channel_listings(id,channel_id,product_variant_id,external_sku,external_variant_id) VALUES(1,35,101,'test-item','offer-existing'),(2,35,102,'LISTING-ONLY','offer-only');
       UPDATE channels.channel_feeds SET channel_inventory_item_id=NULL,channel_sku='stale-feed-sku';`);
     // The fixture's sealed mapping has another externalSku: a real conflict is
     // visible, never overwritten just because the automatic import is available.
@@ -482,7 +431,7 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
     expect((await review()).mappingImports).toEqual([{ productVariantId:102,externalInventoryItemId:"LISTING-ONLY",externalSku:"LISTING-ONLY",sourceKeys:["channel-listing:2"] }]);
   });
   it("rejects a stale automatic import when the existing listing changes", async () => {
-    await database.pool.query("INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(36,102,'NEW','old-id')");
+    await database.pool.query("INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(35,102,'NEW','old-id')");
     const input = await command();
     await database.pool.query("UPDATE channels.channel_feeds SET channel_inventory_item_id='new-id' WHERE product_variant_id=102");
     await expect(service.prepare(input,"operator")).rejects.toMatchObject({ code:"INITIAL_SCOPE_REVIEW_STALE" });
@@ -490,7 +439,7 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
     expect((await database.pool.query("SELECT * FROM inventory.publication_variant_mapping_versions WHERE publication_target_id=1 AND product_variant_id=102")).rows).toEqual([]);
   });
   it.each(["version insert","head insert","audit insert","head omitted"])("rolls back imported mappings, membership and receipt on %s failure", async failure => {
-    await database.pool.query("INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(36,102,'NEW','new-id')");
+    await database.pool.query("INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(35,102,'NEW','new-id')");
     const input = await command(); const before = await protectedRows();
     const table = failure.startsWith("version") ? "inventory.publication_variant_mapping_versions"
       : failure.startsWith("head") ? "inventory.publication_variant_mapping_heads" : "public.audit_events";
@@ -501,7 +450,7 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
     await assertPristine(); expect(await protectedRows()).toEqual(before);
   });
   it("rejects a silently changed imported identity at the deferred database receipt guard", async () => {
-    await database.pool.query("INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(36,102,'NEW','reviewed-id')");
+    await database.pool.query("INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(35,102,'NEW','reviewed-id')");
     const input=await command(); const before=await protectedRows();
     await database.pool.query(`CREATE FUNCTION public.change_import_identity() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN NEW.external_inventory_item_id:='different-id'; RETURN NEW; END $$;
@@ -539,7 +488,7 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
   });
   it.each(["external_provider", "manual"])("does not commission a %s target", async authority => {
     await database.pool.query(`INSERT INTO inventory.inventory_publication_targets(channel_id,channel_connection_id,fulfillment_node_id,provider_scope_type,
-      external_scope_id,publication_authority,state,change_reason,created_by) VALUES(36,7,1,'location','outside',$1,'disabled','Fixture outside','operator');
+      external_scope_id,publication_authority,state,change_reason,created_by) VALUES(35,7,1,'location','outside',$1,'disabled','Fixture outside','operator');
       `, [authority]);
     await database.pool.query("UPDATE inventory.inventory_publication_targets SET state='preview',revision=revision+1,activated_by='operator',activated_at=transaction_timestamp() WHERE external_scope_id='outside'");
     const target = { publicationTargetId: 3, expectedTargetRevision: "2" };
@@ -560,7 +509,7 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
     expect(await protectedRows()).toEqual(before); await assertPristine();
   });
   it.each(["walmart", "future_provider"])("does not infer an empty legacy listing census for %s", async provider => {
-    await database.pool.query("UPDATE channels.channels SET provider=$1 WHERE id=36", [provider]);
+    await database.pool.query("UPDATE channels.channels SET provider=$1 WHERE id=35", [provider]);
     await database.pool.query("DELETE FROM channels.channel_feeds");
     expect((await review()).blockers.map(row => row.code)).toContain("INITIAL_SCOPE_PROVIDER_UNSUPPORTED");
     await expect(service.prepare(await command(), "operator")).rejects.toMatchObject({ code: "INITIAL_SCOPE_REVIEW_BLOCKED" });
@@ -604,9 +553,9 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
     await assertPristine();
   });
   it("keeps an unresolved planned eBay publication blocked even when no active listing exists", async () => {
-    await database.pool.query(`UPDATE channels.channels SET provider='ebay' WHERE id=36;
+    await database.pool.query(`UPDATE channels.channels SET provider='ebay' WHERE id=35;
       INSERT INTO marketplace.listing_scopes VALUES(10,'channel','ebay');
-      INSERT INTO marketplace.channel_listing_scopes VALUES(10,36);
+      INSERT INTO marketplace.channel_listing_scopes VALUES(10,35);
       INSERT INTO marketplace.listing_publications VALUES(11,10,'planned',NULL);`);
     const before = await protectedRows();
     const checked = await review();
@@ -672,7 +621,7 @@ dbDescribe.sequential("audited preview-only initial publication scope", () => {
     const writer = await database.pool.connect();
     try {
       await writer.query("BEGIN"); await writer.query("SET LOCAL lock_timeout='200ms'");
-      await expect(writer.query("INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(36,102,'NEW','new-item')"))
+      await expect(writer.query("INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(35,102,'NEW','new-item')"))
         .rejects.toMatchObject({ code: "55P03" });
     } finally { await writer.query("ROLLBACK"); writer.release(); resume(); }
     expect(await pending).toMatchObject({ includedVariantIds: [101] });

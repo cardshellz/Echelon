@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Pool } from "pg";
+import { installStockSelectionFixture } from "./stock-selection.fixture";
 import {
   cutoverCompositionSeedSql,
   cutoverCompositionChannelSeedSql,
@@ -16,7 +17,15 @@ export async function installWalmartPublicationInventoryFixture(
 ): Promise<void> {
   await installCutoverCompositionMigrations(pool);
   await pool.query(cutoverCompositionSeedSql);
-  await pool.query(cutoverCompositionChannelSeedSql);
+  // The historical Shopify destination has its own channel. Sharing channel36
+  // with two accounts would make legacy channel-only feed identities ambiguous.
+  await pool.query(cutoverCompositionChannelSeedSql.replaceAll("36", "35"));
+  await pool.query(`INSERT INTO channels.channels(id,name,provider,status) VALUES(36,'Walmart','walmart','active');
+    INSERT INTO inventory.channel_exposure_policy_versions(scope_key,channel_id,scope_type,version,allocation_semantics,eligible,share_bps,
+      holdback_sellable_units,max_publish_mode,min_publish_sellable_units,definition_hash,change_reason,idempotency_key,request_hash,created_by)
+      VALUES('channel:36',36,'channel',1,'exposure',true,10000,0,'unlimited',0,repeat('e',64),'Full Walmart exposure','walmart-exposure',repeat('e',64),'operator');
+    INSERT INTO inventory.channel_exposure_policy_heads(scope_key,channel_id,draft_policy_id,revision,updated_by,update_reason)
+      SELECT scope_key,channel_id,id,1,'operator','Reviewed Walmart exposure' FROM inventory.channel_exposure_policy_versions WHERE scope_key='channel:36';`);
   for (const file of [
     "0709_walmart_quantity_admission.sql",
     "0716_inventory_publication_reconciliation.sql",
@@ -52,6 +61,8 @@ export async function installWalmartPublicationInventoryFixture(
     INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(36,101,'P5','P5');
     UPDATE inventory.inventory_publication_targets SET state='preview',revision=revision+1,activated_by='operator',activated_at=transaction_timestamp() WHERE id=2;
   `);
+  await installStockSelectionFixture(pool);
+  await pool.query(readFileSync(resolve("migrations/0744_inventory_publication_mapping_preparation.sql"),"utf8"));
   if ((options.targetState ?? "live") === "live") {
     await pool.query("UPDATE inventory.inventory_publication_targets SET state='live',revision=revision+1 WHERE id=2");
   }

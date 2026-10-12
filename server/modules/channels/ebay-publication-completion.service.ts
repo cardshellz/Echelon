@@ -13,7 +13,7 @@ export interface PreparedEbayPublication extends PreparedEbayListingSync {
   draft: EbayListingConnectorDraft;
   inspection: EbayListingInspection;
   inspect(): Promise<EbayListingInspection>;
-  assertInventoryReady(): Promise<void>;
+  assertInventoryReady(context?: { commandKey: string; actor: string }): Promise<void>;
   resolvePublishedIdentity: EbayPublishedListingIdentityResolver;
 }
 type PublicationRecovery = { reconcile(scopes: readonly QuantityPublicationScope[]): Promise<{ busy: boolean; resolved: string[]; unresolved: string[] }> };
@@ -29,6 +29,8 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
     const [source, stage, checkpoint, bindProviderIdentity, context] = args;
     if (context?.operation !== "publish" || !bindProviderIdentity)
       throw new EbayListingSyncError("EBAY_PUBLICATION_OWNER_REQUIRED", "Publication must run through its saved job and identity checkpoints.");
+    const inventoryContext = context.jobId && context.requestedBy
+      ? { commandKey: context.jobId, actor: context.requestedBy } : undefined;
     const prepared = await this.prepare(source, context.publicationTarget);
     assertEbayListingSourceIdentityUnchanged(source, prepared.sourceIdentity);
     const observed = resolveEbayPublicationTarget(source, prepared.inspection);
@@ -45,7 +47,7 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
     const changedContent = context.publicationIntentHash !== null && context.publicationIntentHash !== syncContentIntentHash(prepared.draft);
     if (prepared.inspection.publication && (refreshRequested || changedContent
       || (!context.publicationAccepted && !context.publicationWriteCompleted && !context.publicationWriteStarted))) {
-      await prepared.assertInventoryReady();
+      await prepared.assertInventoryReady(inventoryContext);
       return this.maintain(prepared, observed).execute(source, stage, checkpoint,
         identity => bindProviderIdentity(identity, prepared.inspection.publication!));
     }
@@ -64,7 +66,7 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
       // Validate the complete stock scope before even zero-quantity preparation
       // writes. Per-request inventory admission still owns quantity decisions.
       // Accepted publications can finish read-only verification without this gate.
-      await prepared.assertInventoryReady();
+      await prepared.assertInventoryReady(inventoryContext);
       const result = await this.connector.pushListing({ client: prepared.client, draft: prepared.draft,
         resolvePublishedIdentity: prepared.resolvePublishedIdentity, stage });
       if (!result.published || !result.externalProductId)
