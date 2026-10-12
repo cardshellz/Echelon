@@ -10,9 +10,10 @@ import { DropshipError } from "../domain/errors";
 import { evaluateListingPriceAgainstCost } from "../domain/listing-price-cost";
 import { evaluateListingPricingPolicy, withRulePriceLimitCheck, type DropshipListingPreviewRepository,
   type DropshipListingCatalogCandidate } from "./dropship-listing-preview-service";
+import type { ListingSettingLayers } from "./dropship-listing-setting-layers";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
 import type { DropshipProductCostReader } from "./dropship-product-cost";
-import { createRulePriceResolver, pricingHash } from "./dropship-rule-price";
+import { createRulePriceResolver, pricingHash, rulePriceContextOf } from "./dropship-rule-price";
 
 export interface StoredPricingReview {
   id: string; input: ReviewPricingRulesInput; rows: PricingImpactRow[]; hash: string; createdAt: Date;
@@ -24,6 +25,13 @@ export interface PricingRulesTransaction {
   listVariantIds(afterId: number, limit: number): Promise<number[]>;
   listProductLines(ids: number[]): Promise<Array<{ id: number; name: string }>>;
   loadProfile(): Promise<PricingProfileState>;
+  /**
+   * The product and category listing settings of these sizes, read in this
+   * transaction, so a review and its apply price each size as the preview
+   * does: a product's or a category's own price beats the store's recipes
+   * where the listing settings design puts it (plan 4.4).
+   */
+  loadRuleLayers(candidates: readonly { productId: number; categoryId: number | null }[]): Promise<ListingSettingLayers>;
   storeReview(review: StoredPricingReview): Promise<void>;
   loadReview(id: string): Promise<StoredPricingReview | null>;
   findApplication(input: ApplyPricingRulesInput): Promise<{ revisionId: number } | null>;
@@ -110,18 +118,20 @@ export class DropshipPricingRulesService {
       tx.catalog.listExistingListings({ storeConnectionId, productVariantIds: ids }),
       tx.costs.loadProductCosts({ vendorId: tx.vendorId, productVariantIds: ids }), tx.catalog.listPricingPolicies(),
     ]);
+    const layers = await tx.loadRuleLayers(selected);
     const savedById = new Map(saved.map((row) => [row.productVariantId, row]));
     const listingById = new Map(listings.map((row) => [row.productVariantId, row]));
     const proposed: PricingProfileState = { revisionId: input.expectedRevisionId, profile: input.profile, updatedAt: null };
     // One resolver per profile for the whole review: each hashes its profile once, not once per size.
-    const currentRules = createRulePriceResolver({ state: current });
-    const proposedRules = createRulePriceResolver({ state: proposed });
+    // Both price from the same product and category settings: the review changes only the store's recipes.
+    const currentRules = createRulePriceResolver(rulePriceContextOf(current, layers));
+    const proposedRules = createRulePriceResolver(rulePriceContextOf(proposed, layers));
     return selected.map((candidate) => {
       const setting = savedById.get(candidate.productVariantId) ?? null;
       const existing = listingById.get(candidate.productVariantId)?.vendorRetailPriceCents ?? null;
       const cost = costs.get(candidate.productVariantId) ?? null;
       const productCostCents = cost?.status === "available" ? cost.unitCostCents : null;
-      const oldRule = currentRules.configured ? currentRules.price(candidate, cost) : null;
+      const oldRule = currentRules.covers(candidate) ? currentRules.price(candidate, cost) : null;
       const old = resolveListingPrice({ saved: setting, existingListingPriceCents: existing,
         defaultPriceCents: candidate.defaultRetailPriceCents, rulePrice: withRulePriceLimitCheck(candidate, guardrails, oldRule) });
       // Only a typed price is preserved. A price an earlier push saved on the
@@ -153,6 +163,8 @@ export class DropshipPricingRulesService {
         ? [...policy.warnings, ...evaluateListingPriceAgainstCost({ priceCents, unitCostCents: productCostCents }).warnings]
         : [];
       const basis = preserved ? null : onRetail ? "catalog_retail" : rule.basis;
+      // The level is named only where the row names the rule (`ruleName` = the rule's).
+      const ruleLevel = preserved || onRetail ? undefined : rule.ruleLevel;
       return pricingImpactRowSchema.parse({ productVariantId: candidate.productVariantId,
         title: candidate.title?.trim() || candidate.productName, sku: candidate.sku,
         previousPriceCents: old.effectivePriceCents, priceCents, productCostCents,
@@ -162,7 +174,7 @@ export class DropshipPricingRulesService {
         sizeName: candidate.variantName, basis,
         basisCents: basisAmountCents(basis, { productCostCents, catalogRetailCents: candidate.defaultRetailPriceCents }),
         warnings, ...(inherited ? { followsStorePricing: true as const } : {}),
-        ...(retailFallbackIssue ? { retailFallbackIssue } : {}) });
+        ...(retailFallbackIssue ? { retailFallbackIssue } : {}), ...(ruleLevel ? { ruleLevel } : {}) });
     });
   }
 }

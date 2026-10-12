@@ -1,7 +1,12 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { describe, expect, it, vi } from "vitest";
+import type { ProductListingSettingValues } from "../../../../../shared/dropship/listing-setting-values";
+import { EMPTY_LISTING_SETTING_LAYERS } from "../../application/dropship-listing-setting-layers";
+import { EMPTY_CATEGORY_LISTING_SETTING_VALUES, EMPTY_PRODUCT_LISTING_SETTING_VALUES } from "../../domain/listing-setting-values";
+import { readResolvedEbayCategories } from "../../infrastructure/dropship-ebay-category-rules.reader";
 import { PgDropshipEbayCategoryRulesRepository } from "../../infrastructure/dropship-ebay-category-rules.repository";
-import { SLEEVES, rulesProfile } from "../fixtures/ebay-category-rules.fixture";
+import { productValuesToColumns } from "../../infrastructure/dropship-listing-setting-shared.repository";
+import { MAILERS, SLEEVES, TOPLOADERS, categoryCandidate, rulesProfile } from "../fixtures/ebay-category-rules.fixture";
 
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
 
@@ -14,12 +19,14 @@ class ScriptedClient {
   headRevision: { id: number; profile: unknown; created_at: Date } | null = null;
   replay: { request_hash: string; store_connection_id: number } | null = null;
   ownerFound = true;
+  productSettings: Record<string, unknown>[] = [];
 
   async query<T>(text: string, params: unknown[] = []): Promise<{ rows: T[] }> {
     const sql = text.trim();
     this.sql.push(sql);
     this.params.push(params);
     if (sql.includes("FROM dropship.dropship_vendors v")) return rows<T>(this.ownerFound ? [{ vendor_id: 10 }] : []);
+    if (sql.includes("FROM dropship.dropship_product_listing_settings s")) return rows<T>(this.productSettings);
     if (sql.includes("FROM dropship.dropship_ebay_category_rule_profiles p")) return rows<T>(this.headRevision ? [this.headRevision] : []);
     if (sql.startsWith("SELECT request_hash, store_connection_id")) return rows<T>(this.replay ? [this.replay] : []);
     if (sql.startsWith("INSERT INTO dropship.dropship_ebay_category_rule_revisions")) {
@@ -37,6 +44,15 @@ function rows<T>(values: unknown[]): { rows: T[] } {
 function poolFor(client: ScriptedClient): Pool {
   return { connect: vi.fn(async () => client) } as unknown as Pool;
 }
+
+/** A product's current settings as PostgreSQL hands them back: jsonb arrays parsed again, the revision time as a Date. */
+function storedProductSettings(productId: number, values: Partial<ProductListingSettingValues>): Record<string, unknown> {
+  return { product_id: productId, revision_id: 70 + productId,
+    ...(JSON.parse(JSON.stringify(productValuesToColumns({ ...EMPTY_PRODUCT_LISTING_SETTING_VALUES, ...values }))) as Record<string, unknown>),
+    created_at: NOW };
+}
+
+const isLayerRead = (sql: string) => /FROM dropship\.dropship_(product|category)_listing_settings s\b/.test(sql);
 
 describe("PgDropshipEbayCategoryRulesRepository", () => {
   it("reads in a read-only snapshot without the store lock or row locks", async () => {
@@ -129,6 +145,27 @@ describe("PgDropshipEbayCategoryRulesRepository", () => {
     expect(client.sql.at(-1)).toBe("ROLLBACK");
   });
 
+  it("reads the product and category settings in the review's read-only snapshot, scoped to the member's store", async () => {
+    const client = new ScriptedClient();
+    client.productSettings = [storedProductSettings(7, { ebayCategory: MAILERS })];
+    const repository = new PgDropshipEbayCategoryRulesRepository(poolFor(client));
+
+    const layers = await repository.execute({ memberId: "member-1", storeConnectionId: 44, mode: "read" },
+      (tx) => tx.loadListingSettingLayers([{ productId: 7, categoryId: 31 }, { productId: 8, categoryId: null }]));
+
+    expect(layers.products.get(7)?.values.ebayCategory).toEqual(MAILERS);
+    expect(layers.categories.size).toBe(0);
+    const reads = client.sql.flatMap((sql, index) => isLayerRead(sql) ? [{ sql, params: client.params[index] }] : []);
+    expect(reads).toHaveLength(2);
+    expect(reads[0].sql).toContain("FROM dropship.dropship_product_listing_settings s");
+    expect(reads[0].params).toEqual([10, 44, [7, 8]]);
+    expect(reads[1].sql).toContain("FROM dropship.dropship_category_listing_settings s");
+    expect(reads[1].params).toEqual([10, 44, [31]]);
+    expect(client.sql[0]).toBe("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    expect(client.sql.some((sql) => /\bFOR (UPDATE|SHARE)\b|pg_advisory/.test(sql))).toBe(false);
+    expect(client.sql.at(-1)).toBe("COMMIT");
+  });
+
   it("refuses persisted rules that no longer satisfy the contract", async () => {
     const client = new ScriptedClient();
     client.headRevision = { id: 5, profile: { version: 2, rules: "broken" }, created_at: NOW };
@@ -136,5 +173,67 @@ describe("PgDropshipEbayCategoryRulesRepository", () => {
 
     await expect(repository.execute({ memberId: "member-1", storeConnectionId: 44, mode: "read" }, (tx) => tx.loadState()))
       .rejects.toThrow("failed their contract");
+  });
+});
+
+describe("readResolvedEbayCategories", () => {
+  const scope = { vendorId: 10, storeConnectionId: 44 };
+  const asClient = (client: ScriptedClient) => client as unknown as Pick<PoolClient, "query">;
+  const inMailers = categoryCandidate({ productVariantId: 101, productId: 7, categoryId: 31 });
+  const unsorted = categoryCandidate({ productVariantId: 102, productId: 8, categoryId: null, ebayBrowseCategoryId: null, ebayBrowseCategoryName: null });
+
+  it("uses the layers it is given and reads only the rules", async () => {
+    const client = new ScriptedClient();
+    client.headRevision = { id: 5, profile: rulesProfile({ defaultCategory: SLEEVES }), created_at: NOW };
+    const layers = {
+      products: new Map([[7, { storeConnectionId: 44, productId: 7, revisionId: 77, updatedAt: NOW.toISOString(),
+        values: { ...EMPTY_PRODUCT_LISTING_SETTING_VALUES, ebayCategory: TOPLOADERS } }]]),
+      categories: new Map([[31, { storeConnectionId: 44, categoryId: 31, revisionId: 81, updatedAt: NOW.toISOString(),
+        values: { ...EMPTY_CATEGORY_LISTING_SETTING_VALUES, ebayCategory: MAILERS } }]]),
+    };
+
+    const resolved = await readResolvedEbayCategories(asClient(client), { ...scope, candidates: [inMailers, unsorted], layers });
+
+    expect(client.sql).toHaveLength(1);
+    expect(client.sql[0]).toContain("FROM dropship.dropship_ebay_category_rule_profiles p");
+    expect(resolved.get(101)).toEqual({ categoryId: TOPLOADERS.categoryId, categoryName: "Toploaders", source: "product",
+      ruleId: null, ruleName: null, rulesRevisionId: 5 });
+    expect(resolved.get(102)).toMatchObject({ categoryId: SLEEVES.categoryId, source: "store_default" });
+  });
+
+  it("reads the layers itself, on the caller's client, when none are given", async () => {
+    const client = new ScriptedClient();
+    client.productSettings = [storedProductSettings(7, { ebayCategory: TOPLOADERS })];
+
+    const resolved = await readResolvedEbayCategories(asClient(client), { ...scope, candidates: [inMailers, unsorted] });
+
+    expect(client.sql[0]).toContain("FROM dropship.dropship_ebay_category_rule_profiles p");
+    expect(client.sql.filter(isLayerRead)).toHaveLength(2);
+    expect(client.sql.some((sql) => /\bFOR (UPDATE|SHARE)\b|pg_advisory|^(INSERT|UPDATE|DELETE)/.test(sql))).toBe(false);
+    expect(resolved.get(101)).toMatchObject({ categoryId: TOPLOADERS.categoryId, source: "product", rulesRevisionId: null });
+    expect(resolved.get(102)).toEqual({ categoryId: null, categoryName: null, source: "none", ruleId: null, ruleName: null, rulesRevisionId: null });
+  });
+
+  it("with no product or category settings resolves exactly as with empty layers, skipping the category read for sizes without one", async () => {
+    const read = new ScriptedClient();
+    const given = new ScriptedClient();
+    for (const client of [read, given]) client.headRevision = { id: 6, profile: rulesProfile({ rules: [
+      { id: "mailers", name: "Mailers", scope: { type: "category", category: "Mailers" }, category: MAILERS },
+    ] }), created_at: NOW };
+    const candidates = [{ ...inMailers, categoryId: null }, unsorted];
+
+    const fromRead = await readResolvedEbayCategories(asClient(read), { ...scope, candidates });
+    const fromGiven = await readResolvedEbayCategories(asClient(given), { ...scope, candidates, layers: EMPTY_LISTING_SETTING_LAYERS });
+
+    expect(fromRead).toEqual(fromGiven);
+    expect(fromRead.get(101)).toMatchObject({ source: "rule", ruleId: "mailers" });
+    expect(read.sql.filter(isLayerRead)).toEqual([expect.stringContaining("FROM dropship.dropship_product_listing_settings s")]);
+    expect(given.sql.filter(isLayerRead)).toEqual([]);
+  });
+
+  it("sends only the rules read for no candidates", async () => {
+    const client = new ScriptedClient();
+    await expect(readResolvedEbayCategories(asClient(client), { ...scope, candidates: [] })).resolves.toEqual(new Map());
+    expect(client.sql).toHaveLength(1);
   });
 });

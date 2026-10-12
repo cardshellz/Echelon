@@ -10,7 +10,8 @@ import { loadSelectedCandidates } from "../application/dropship-selected-catalog
 import { readEbayCategoryRules } from "./dropship-ebay-category-rules.reader";
 import { readContentProfile, readListingContentSettings } from "./dropship-listing-content.reader";
 import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
-import { loadRulePriceContext } from "./dropship-rule-price.loader";
+import { readCatalogCategoryNames, readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
+import { readPricingProfile } from "./dropship-pricing-profile.reader";
 import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog.reader";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 
@@ -33,14 +34,17 @@ function rowsDigest(columns: string, from: string, orderBy: string): string {
  * The store's owner and a fingerprint of every Dropship-owned value the views
  * read, in one row, so the cache key costs one query. Each part is the value
  * itself, or the id of the immutable revision that holds it: the three
- * profiles, and the price and description settings, whose triggers keep each
- * row equal to its revision (migrations 0657, 0659, 0660, 0717). So every
- * committed save, reset or delete changes the fingerprint. What Card Shellz
- * owns with no revision (catalog facts, .ops costs, the eBay category
+ * profiles, the price and description settings, and the product and category
+ * settings, whose triggers keep each row equal to its revision (migrations
+ * 0657, 0659, 0660, 0717, 0738, 0739; the last two refuse a delete, so a reset
+ * is a new revision too). So every committed save, reset or delete changes the
+ * fingerprint. What Card Shellz owns with no revision (catalog facts, a
+ * product's category and that category's name, .ops costs, the eBay category
  * mappings, exposure time windows) is covered by the cache's time limit
- * instead (Listing settings design 8.4). The reads in this file and these parts
- * change together: the PostgreSQL suite fails when a load reads a Dropship
- * table that is not here.
+ * instead (Listing settings design 8.4). The category marks (0739) are not
+ * read by these views yet. The reads in this file and these parts change
+ * together: the PostgreSQL suite fails when a load reads a Dropship table that
+ * is not here.
  */
 const FINGERPRINT_SQL = `
 WITH owner AS (
@@ -67,6 +71,10 @@ SELECT o.vendor_id, json_build_array(
      WHERE s.vendor_id = o.vendor_id AND s.store_connection_id = o.store_connection_id`, "s.product_variant_id")},
   ${rowsDigest("s.product_variant_id, s.revision_id", `dropship.dropship_listing_content_settings s
      WHERE s.vendor_id = o.vendor_id AND s.store_connection_id = o.store_connection_id`, "s.product_variant_id")},
+  ${rowsDigest("s.product_id, s.revision_id", `dropship.dropship_product_listing_settings s
+     WHERE s.vendor_id = o.vendor_id AND s.store_connection_id = o.store_connection_id`, "s.product_id")},
+  ${rowsDigest("s.category_id, s.revision_id", `dropship.dropship_category_listing_settings s
+     WHERE s.vendor_id = o.vendor_id AND s.store_connection_id = o.store_connection_id`, "s.category_id")},
   ${rowsDigest("s.product_variant_id, s.revision_id, s.fulfillment_policy_id, s.return_policy_id, s.payment_policy_id, s.updated_at",
     `dropship.dropship_ebay_listing_policy_overrides s
      WHERE s.vendor_id = o.vendor_id AND s.store_connection_id = o.store_connection_id`, "s.product_variant_id")},
@@ -135,7 +143,7 @@ export class PgDropshipListingSettingsRepository implements ListingSettingsRepos
     if (!store) throw new Error(`Listing settings found the owner of store ${storeConnectionId} but not its context.`);
     if (store.platform !== "ebay") return { state: "not_ebay", fingerprint, store };
 
-    const pricing = (await loadRulePriceContext(client, { vendorId, storeConnectionId })).state;
+    const pricing = await readPricingProfile(client, storeConnectionId, vendorId);
     const listingConfig = await reader.getStoreListingConfig(storeConnectionId);
     const ebayCategoryRules = await readEbayCategoryRules(client, vendorId, storeConnectionId);
     const content = await readContentProfile(client, vendorId, storeConnectionId);
@@ -152,12 +160,16 @@ export class PgDropshipListingSettingsRepository implements ListingSettingsRepos
     }
 
     const ids = candidates.map((row) => row.productVariantId);
+    // The product and category settings, once, for every resolver below (plan D26), and the live names of
+    // the categories that have settings (plan D19). Plain reads in this snapshot, like everything else here.
+    const layers = await readListingSettingLayers(client, { vendorId, storeConnectionId, candidates });
+    const categoryNames = await readCatalogCategoryNames(client, [...layers.categories.keys()]);
     let costReadFailed = false;
     const costs = await PgShellzClubProductCostAdapter.forTransaction(client, (failure) => {
       costReadFailed = true;
       this.reportCostReadFailure({ vendorId, storeConnectionId, variantCount: failure.variantCount, stage: failure.stage });
     }).loadProductCosts({ vendorId, productVariantIds: ids });
-    const preparedCategories = prepareEbayCategoryRules(ebayCategoryRules.revisionId, ebayCategoryRules.profile);
+    const preparedCategories = prepareEbayCategoryRules(ebayCategoryRules.revisionId, ebayCategoryRules.profile, layers);
     const inputs: ListingSettingsInputs = {
       store,
       candidates,
@@ -179,6 +191,8 @@ export class PgDropshipListingSettingsRepository implements ListingSettingsRepos
       content,
       contentSettings: await readListingContentSettings(client, vendorId, storeConnectionId, ids),
       pausedSince: await readLiveHolds(client, { vendorId, storeConnectionId, productVariantIds: ids }),
+      layers,
+      categoryNames,
     };
     return { state: "ok", fingerprint, inputs, costReadFailed };
   }

@@ -114,7 +114,12 @@ export const saveEbayCategoryRulesResponseSchema = z.object({
   idempotentReplay: z.boolean(),
 }).strict();
 
-export const ebayCategorySourceValues = ["rule", "store_default", "catalog", "none"] as const;
+/**
+ * Where a listing's eBay category comes from, closest first: the product's own
+ * setting, an older rule, the product's Card Shellz category's setting, the
+ * store default, the Card Shellz base category, or none.
+ */
+export const ebayCategorySourceValues = ["product", "rule", "category", "store_default", "catalog", "none"] as const;
 export type EbayCategorySource = (typeof ebayCategorySourceValues)[number];
 
 const resolvedCategorySummarySchema = z.object({
@@ -132,7 +137,15 @@ export const ebayCategoryRulesReviewSchema = z.object({
   unchangedCount: count,
   withoutCategoryBefore: count,
   withoutCategoryAfter: count,
-  bySource: z.object({ rule: count, store_default: count, catalog: count, none: count }).strict(),
+  /**
+   * `product` and `category` are sent only when some listing gets its category
+   * there, so the review of a store without product or category settings reads
+   * as before.
+   */
+  bySource: z.object({
+    rule: count, store_default: count, catalog: count, none: count,
+    product: count.optional(), category: count.optional(),
+  }).strict(),
   byRule: z.array(z.object({ ruleId, matched: count }).strict()).max(MAX_EBAY_CATEGORY_RULES),
   byCategory: z.array(z.object({
     categoryId: ebayCategoryIdSchema, categoryName: z.string().nullable(), count,

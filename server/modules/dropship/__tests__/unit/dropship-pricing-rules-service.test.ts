@@ -5,6 +5,7 @@ import type { DropshipProductCost } from "../../application/dropship-product-cos
 import { RETAIL_FALLBACK_RULE_NAME, type PricingProfileState } from "../../../../../shared/dropship/pricing-rules";
 import type { SavedListingPriceRevision } from "../../../../../shared/dropship/listing-price";
 import { pricingHash } from "../../application/dropship-rule-price";
+import { EMPTY_LISTING_SETTING_LAYERS } from "../../application/dropship-listing-setting-layers";
 
 const now = new Date("2026-09-07T12:00:00.000Z");
 const reviewId = "02892196-a1f2-4e72-823a-32188b9cb234";
@@ -23,7 +24,7 @@ describe("store pricing review and approval", () => {
   beforeEach(() => {
     candidates = Array.from({ length: 1000 }, (_, index) => ({ productId: 7, productVariantId: index + 1,
       productName: "Mailers", variantName: `Pack ${index + 1}`, title: `Mailer ${index + 1}`, sku: `SKU-${index + 1}`,
-      productLineIds: [2], category: "Mailers", productIsActive: true, variantIsActive: true, variantUomType: "pack",
+      productLineIds: [2], category: "Mailers", categoryId: null, productIsActive: true, variantIsActive: true, variantUomType: "pack",
       defaultRetailPriceCents: 899, unitsPerVariant: 50 } as DropshipListingCatalogCandidate));
     state = { profile: null, revisionId: null, updatedAt: null }; stored = null; settings = []; currentCost = cost;
     const catalog = {
@@ -37,7 +38,7 @@ describe("store pricing review and approval", () => {
     tx = { vendorId: 10, catalog, costs: { loadProductCosts: vi.fn(async ({ productVariantIds }) => new Map(productVariantIds.map((id) => [id, currentCost]))) },
       listVariantIds: vi.fn(async (afterId, limit) => candidates.filter((row) => row.productVariantId > afterId).slice(0, limit).map((row) => row.productVariantId)),
       listProductLines: vi.fn(async () => [{ id: 2, name: "Mailing supplies" }]),
-      loadProfile: vi.fn(async () => state), storeReview: vi.fn(async (review) => { stored = review; }),
+      loadProfile: vi.fn(async () => state), loadRuleLayers: vi.fn(async () => EMPTY_LISTING_SETTING_LAYERS), storeReview: vi.fn(async (review) => { stored = review; }),
       loadReview: vi.fn(async () => stored), findApplication: vi.fn(async () => null), applyReview: vi.fn(async () => 1) };
     service = new DropshipPricingRulesService({ repository: { execute: async (_member, _store, operation) => operation(tx) },
       clock: { now: () => now }, newId: () => reviewId, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
@@ -54,6 +55,9 @@ describe("store pricing review and approval", () => {
     expect(result.rows[0]).toMatchObject({ previousPriceCents: 899, priceCents: 1152, productCostCents: 809 });
     expect(tx.catalog.listCatalogCandidates).toHaveBeenCalledTimes(4);
     expect(tx.costs.loadProductCosts).toHaveBeenCalledTimes(1);
+    // One product and category settings read per review, for the selected sizes.
+    expect(tx.loadRuleLayers).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(tx.loadRuleLayers).mock.calls[0][0]).toHaveLength(1000);
     const last = await service.reviewPageForMember("member-1", 22, reviewId, 19);
     expect(last.rows[49].productVariantId).toBe(1000);
     expect(tx.applyReview).not.toHaveBeenCalled();

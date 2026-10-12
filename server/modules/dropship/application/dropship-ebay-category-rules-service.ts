@@ -19,6 +19,7 @@ import { DropshipError } from "../domain/errors";
 import { prepareEbayCategoryRules, summarizeEbayCategoryRulesReview } from "./dropship-ebay-category-resolver";
 import { DROPSHIP_DEFAULT_EBAY_MARKETPLACE_ID } from "./dropship-listing-config-service";
 import type { DropshipListingStoreContext } from "./dropship-listing-preview-service";
+import type { ListingSettingLayers } from "./dropship-listing-setting-layers";
 import type { DropshipStoreListingConfig } from "./dropship-marketplace-listing-provider";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
 import { loadSelectedCandidates, selectedCatalogTargets, type SelectedCatalogReader } from "./dropship-selected-catalog";
@@ -62,6 +63,8 @@ export interface SaveEbayCategoryRulesProfileInput {
 export interface EbayCategoryRulesTransaction extends SelectedCatalogReader {
   loadState(): Promise<EbayCategoryRulesState>;
   loadStoreListingConfig(): Promise<DropshipStoreListingConfig | null>;
+  /** The candidates' product and category settings, read in this transaction's snapshot (plan PR 8b, 4.6). */
+  loadListingSettingLayers(candidates: readonly { productId: number; categoryId: number | null }[]): Promise<ListingSettingLayers>;
   /** True when this key already saved this exact request; throws when the key saved a different one. */
   findReplay(idempotencyKey: string, requestHash: string): Promise<boolean>;
   saveProfile(input: SaveEbayCategoryRulesProfileInput): Promise<void>;
@@ -128,11 +131,14 @@ export class DropshipEbayCategoryRulesService {
       const current = await tx.loadState();
       if (current.revisionId !== parsed.expectedRevisionId) throw versionConflict(identity.storeConnectionId);
       const candidates = await loadSelectedCandidates(tx, this.deps.clock.now(), "category_review");
+      // Before and after share one read of the product and category settings, so
+      // only the draft can change a listing's category in this review.
+      const layers = await tx.loadListingSettingLayers(candidates);
       return summarizeEbayCategoryRulesReview({
         expectedRevisionId: parsed.expectedRevisionId,
         candidates,
-        before: prepareEbayCategoryRules(current.revisionId, current.profile),
-        after: prepareEbayCategoryRules(current.revisionId, proposed),
+        before: prepareEbayCategoryRules(current.revisionId, current.profile, layers),
+        after: prepareEbayCategoryRules(current.revisionId, proposed, layers),
       });
     });
   }

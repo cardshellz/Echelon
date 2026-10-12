@@ -8,10 +8,14 @@ import {
   listingSettingsSummarySchema,
 } from "../../../../../shared/dropship/listing-settings";
 import type { EbayCategoryRulesState } from "../../../../../shared/dropship/ebay-category-rules";
+import {
+  categoryListingSettingRowSchema, productListingSettingRowSchema,
+  type CategoryListingSettingValues, type ProductListingSettingValues,
+} from "../../../../../shared/dropship/listing-setting-values";
 import type { PricingProfileState } from "../../../../../shared/dropship/pricing-rules";
 import { prepareEbayCategoryRules, resolveEbayListingCategory } from "../../application/dropship-ebay-category-resolver";
 import type { DropshipEbayListingPolicyOverride } from "../../application/dropship-ebay-listing-policy-override-service";
-import { listingCatalogHash } from "../../application/dropship-listing-content-resolver";
+import { listingCatalogHash, productCatalogHash, resolveListingContent } from "../../application/dropship-listing-content-resolver";
 import type {
   DropshipListingCatalogCandidate, DropshipListingStoreContext, DropshipPricingPolicyRecord,
 } from "../../application/dropship-listing-preview-service";
@@ -26,8 +30,10 @@ import {
   selectListingSettingsProducts,
   type ListingSettingsInputs,
 } from "../../application/dropship-listing-settings-facts";
+import { EMPTY_LISTING_SETTING_LAYERS, type ListingSettingLayers } from "../../application/dropship-listing-setting-layers";
 import type { DropshipStoreListingConfig } from "../../application/dropship-marketplace-listing-provider";
 import type { DropshipProductCost } from "../../application/dropship-product-cost";
+import { DropshipError } from "../../domain/errors";
 
 const GENERATED_AT = new Date("2026-10-06T12:00:00.000Z");
 const EMPTY_PRICING: PricingProfileState = { revisionId: null, profile: null, updatedAt: null };
@@ -38,7 +44,7 @@ const COST_RECIPE = { basis: "product_cost", markupBps: 5_000, flatCents: 0, rou
 
 function candidate(patch: Partial<DropshipListingCatalogCandidate> = {}): DropshipListingCatalogCandidate {
   return {
-    productId: 501, productVariantId: 101, productLineIds: [9], category: "Toploaders",
+    productId: 501, productVariantId: 101, productLineIds: [9], category: "Toploaders", categoryId: null,
     ebayBrowseCategoryId: "183438", ebayBrowseCategoryName: "Card Toploaders & Holders",
     productIsActive: true, variantIsActive: true, variantUomType: "pack", unitsPerVariant: 25,
     defaultRetailPriceCents: 1_199, sku: "TL-35-25", productName: "Toploader 35pt", variantName: "Pack of 25",
@@ -78,9 +84,16 @@ function policy(patch: Partial<DropshipPricingPolicyRecord>): DropshipPricingPol
     mode: "warn_only", floorPriceCents: null, ceilingPriceCents: null, ...patch };
 }
 
+/** Card Shellz categories by id with their current names, as the load reads them (plan D19). */
+const TOPLOADERS_CATEGORY = 40;
+const SLEEVES_CATEGORY = 41;
+const CATEGORY_NAMES: ReadonlyMap<number, string> = new Map([[TOPLOADERS_CATEGORY, "Toploaders"], [SLEEVES_CATEGORY, "Sleeves"]]);
+
 function inputs(candidates: DropshipListingCatalogCandidate[], patch: Partial<ListingSettingsInputs> = {}): ListingSettingsInputs {
   const categoryRules = patch.ebayCategoryRules ?? EMPTY_CATEGORY_RULES;
-  const prepared = prepareEbayCategoryRules(categoryRules.revisionId, categoryRules.profile);
+  const layers = patch.layers ?? EMPTY_LISTING_SETTING_LAYERS;
+  // The load resolves eBay categories with the same layers it hands the facts.
+  const prepared = prepareEbayCategoryRules(categoryRules.revisionId, categoryRules.profile, layers);
   const sizesTotal = new Map<number, number>();
   for (const row of candidates) sizesTotal.set(row.productId, (sizesTotal.get(row.productId) ?? 0) + 1);
   return {
@@ -100,6 +113,8 @@ function inputs(candidates: DropshipListingCatalogCandidate[], patch: Partial<Li
     content: EMPTY_CONTENT,
     contentSettings: new Map(),
     pausedSince: new Map(),
+    layers,
+    categoryNames: CATEGORY_NAMES,
     ...patch,
   };
 }
@@ -586,6 +601,327 @@ describe("listing settings facts: one product", () => {
     expect(listingSettingsProductDetailSchema.safeParse({ ...answer, sizes: answer.sizes.slice(1) }).success).toBe(false);
     expect(listingSettingsProductDetailSchema.safeParse({ ...answer,
       stock: { state: "unavailable", retryable: true, checkedAt: GENERATED_AT.toISOString() } }).success).toBe(false);
+  });
+});
+
+describe("listing settings facts: product and category settings", () => {
+  const SAVED_AT = "2026-10-01T00:00:00.000Z";
+  const SLEEVES_EBAY = { categoryId: "261328", categoryName: "Card Sleeves", path: ["Collectibles", "Card Sleeves"] };
+  const TOPLOADERS_EBAY = { categoryId: "183438", categoryName: "Toploaders & Holders", path: ["Collectibles", "Toploaders & Holders"] };
+  /** Example numbers: an $11.99 retail price plus $3.00 is $14.99. */
+  const RETAIL_PLUS_300 = { basis: "catalog_retail", markupBps: 0, flatCents: 300, rounding: "cent" } as const;
+  const small = candidate({ productVariantId: 101, variantName: "Pack of 25", sku: "TL-25", categoryId: TOPLOADERS_CATEGORY });
+  const large = candidate({ productVariantId: 102, variantName: "Pack of 100", sku: "TL-100", categoryId: TOPLOADERS_CATEGORY,
+    defaultRetailPriceCents: 3_999 });
+
+  function productValues(patch: Partial<ProductListingSettingValues> = {}): ProductListingSettingValues {
+    return { price: null, ebayCategory: null, storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null,
+      textAbove: null, textBelow: null, mainText: null, ...patch };
+  }
+  function categoryValues(patch: Partial<CategoryListingSettingValues> = {}): CategoryListingSettingValues {
+    const { mainText: _productOnly, ...values } = productValues();
+    return { ...values, ...patch };
+  }
+  /** Current rows as the 8a readers return them, parsed with the stored contract so a fixture can't hold a value no row can. */
+  function layers(rows: {
+    products?: ReadonlyArray<readonly [number, ProductListingSettingValues]>;
+    categories?: ReadonlyArray<readonly [number, CategoryListingSettingValues]>;
+  }): ListingSettingLayers {
+    return {
+      products: new Map((rows.products ?? []).map(([productId, values], index) => [productId, productListingSettingRowSchema.parse(
+        { storeConnectionId: 5, productId, revisionId: 800 + index, updatedAt: SAVED_AT, values })])),
+      categories: new Map((rows.categories ?? []).map(([categoryId, values], index) => [categoryId, categoryListingSettingRowSchema.parse(
+        { storeConnectionId: 5, categoryId, revisionId: 900 + index, updatedAt: SAVED_AT, values })])),
+    };
+  }
+  function configWith(extra: Record<string, unknown>): DropshipStoreListingConfig {
+    const base = config();
+    return { ...base, marketplaceConfig: { ...base.marketplaceConfig, ...extra } };
+  }
+  const select = (input: ListingSettingsInputs, productId = 501) => {
+    const selection = selectListingSettingsProduct(buildListingSettingsFacts(input), productId);
+    if (!selection) throw new Error("expected the product");
+    return selection;
+  };
+  /** The answer the route sends: the contract checks that only group rules and categories are named, and the own-setting flags. */
+  const detail = (selection: ReturnType<typeof select>) => listingSettingsProductDetailSchema.parse({
+    storeConnectionId: 5, ...selection, sizes: selection.sizes.map((size) => ({ ...size, stockUnits: 0 })),
+    stock: { state: "ok", checkedAt: GENERATED_AT.toISOString() }, generatedAt: GENERATED_AT.toISOString(),
+  });
+  const pricesPage = (rows: unknown[]) => listingSettingsPricesResponseSchema.parse({ storeConnectionId: 5, page: 0, pageSize: 50,
+    total: rows.length, rows, generatedAt: GENERATED_AT.toISOString() });
+  const sourceOf = (selection: ReturnType<typeof select>, key: keyof ReturnType<typeof select>["settings"]) =>
+    selection.settings[key].flatMap((value) => value.sources.map((entry) => [entry.source, entry.ruleName, entry.productVariantIds]));
+
+  it("gives every size the product's own settings, as the product's own values", () => {
+    const own = productValues({
+      price: COST_RECIPE,
+      ebayCategory: SLEEVES_EBAY,
+      storeShelf: { mode: "own", shelves: [{ id: "11", name: "Supplies:Toploaders" }] },
+      shippingPolicy: { id: "F-product", name: "Product shipping" },
+      textAbove: { mode: "own", text: "Ships next day." },
+      textBelow: { mode: "none" },
+      mainText: { text: "Our own words.", catalogHash: productCatalogHash(small) },
+    });
+    const input = inputs([small, large], { layers: layers({ products: [[501, own]] }), costs: new Map([[101, cost(800)], [102, cost(2_000)]]) });
+    const selection = select(input);
+    // Example numbers: a cost of $8.00 plus 50% is $12.00, and $20.00 plus 50% is $30.00.
+    expect(selection.sizes.map((size) => [size.price.productVariantId, size.price.priceCents, size.price.source])).toEqual([
+      [101, 1_200, "rules"], [102, 3_000, "rules"],
+    ]);
+    expect(selection.sizes[0].price).toMatchObject({ basis: "product_cost", basisAmountCents: 800, issue: null,
+      rule: { kind: "product", name: "Toploader 35pt", recipe: COST_RECIPE } });
+    expect(selection.settings.shippingPolicy).toEqual([
+      { value: { policyId: "F-product" }, sources: [{ source: "product", ruleName: null, productVariantIds: [101, 102] }] },
+    ]);
+    expect(sourceOf(selection, "returnPolicy")).toEqual([["store_default", null, [101, 102]]]);
+    expect(selection.settings.ebayCategory).toEqual([{ value: { categoryId: "261328", categoryName: "Card Sleeves" },
+      sources: [{ source: "product", ruleName: null, productVariantIds: [101, 102] }] }]);
+    expect(selection.settings.storeShelf).toEqual([{ value: { names: ["Supplies:Toploaders"] },
+      sources: [{ source: "product", ruleName: null, productVariantIds: [101, 102] }] }]);
+    expect(selection.settings.descriptionTemplate).toEqual([{ value: { hasIntroduction: true, hasFooter: false, groupConflict: false },
+      sources: [{ source: "product", ruleName: null, productVariantIds: [101, 102] }] }]);
+    expect(selection.settings.mainText).toEqual([
+      { value: { own: true }, sources: [{ source: "product", ruleName: null, productVariantIds: [101, 102] }] },
+    ]);
+    expect(detail(selection).product).toMatchObject({ ownSettings: ["shipping_policy", "ebay_category", "store_shelf", "description"],
+      sizesDiffer: [], fixes: [] });
+    expect(pricesPage(selection.sizes.map((size) => size.price)).rows).toHaveLength(2);
+    const summary = buildListingSettingsSummary(buildListingSettingsFacts(input), GENERATED_AT);
+    expect(summary.counts).toMatchObject({ productsWithOwnSettings: 1, productsNeedingFix: 0 });
+    expect(selectListingSettingsProducts(buildListingSettingsFacts(input), { search: "", show: "own_settings", page: 0 }).total).toBe(1);
+  });
+
+  it("gives a category's settings to its products, named by the category's current Card Shellz name", () => {
+    const shared = layers({ categories: [[TOPLOADERS_CATEGORY, categoryValues({
+      price: RETAIL_PLUS_300,
+      ebayCategory: TOPLOADERS_EBAY,
+      storeShelf: { mode: "own", shelves: [{ id: "12", name: "Toploaders" }] },
+      returnPolicy: { id: "R-category", name: null },
+      textBelow: { mode: "own", text: "Thank you for your order." },
+    })]] });
+    const selection = select(inputs([small], { layers: shared }));
+    // No store rules: the category's own price covers the size.
+    expect(selection.sizes[0].price).toMatchObject({ priceCents: 1_499, source: "rules", basis: "catalog_retail", basisAmountCents: 1_199,
+      rule: { kind: "category", name: "Toploaders", recipe: RETAIL_PLUS_300 } });
+    expect(sourceOf(selection, "returnPolicy")).toEqual([["category", "Toploaders", [101]]]);
+    expect(selection.settings.returnPolicy[0].value).toEqual({ policyId: "R-category" });
+    expect(sourceOf(selection, "shippingPolicy")).toEqual([["store_default", null, [101]]]);
+    expect(selection.settings.ebayCategory).toEqual([{ value: { categoryId: "183438", categoryName: "Toploaders & Holders" },
+      sources: [{ source: "category", ruleName: "Toploaders", productVariantIds: [101] }] }]);
+    expect(selection.settings.storeShelf[0]).toEqual({ value: { names: ["Toploaders"] },
+      sources: [{ source: "category", ruleName: "Toploaders", productVariantIds: [101] }] });
+    expect(selection.settings.descriptionTemplate[0]).toEqual({ value: { hasIntroduction: false, hasFooter: true, groupConflict: false },
+      sources: [{ source: "category", ruleName: "Toploaders", productVariantIds: [101] }] });
+    expect(sourceOf(selection, "mainText")).toEqual([["catalog", null, [101]]]);
+    // A category's value is not the product's own.
+    expect(detail(selection).product).toMatchObject({ ownSettings: [], sizesDiffer: [] });
+    expect(pricesPage([selection.sizes[0].price]).rows[0].rule).toMatchObject({ kind: "category", name: "Toploaders" });
+
+    // A Card Shellz rename shows at once and changes no value.
+    const renamed = select(inputs([small], { layers: shared, categoryNames: new Map([[TOPLOADERS_CATEGORY, "Top loaders"]]) }));
+    expect(sourceOf(renamed, "returnPolicy")).toEqual([["category", "Top loaders", [101]]]);
+    expect(renamed.sizes[0].price.rule).toMatchObject({ kind: "category", name: "Top loaders" });
+    expect(renamed.settings.storeShelf.map((value) => value.value)).toEqual(selection.settings.storeShelf.map((value) => value.value));
+    expect(renamed.sizes[0].price.priceCents).toBe(1_499);
+  });
+
+  it("skips the category step for a product with no Card Shellz category, whatever category rows exist", () => {
+    const noCategory = candidate({ categoryId: null });
+    const everything = layers({ categories: [[TOPLOADERS_CATEGORY, categoryValues({ price: RETAIL_PLUS_300, ebayCategory: TOPLOADERS_EBAY,
+      returnPolicy: { id: "R-category", name: null }, storeShelf: { mode: "none" }, textAbove: { mode: "own", text: "Hi" } })]] });
+    const withRows = buildListingSettingsFacts(inputs([noCategory], { layers: everything, categoryNames: new Map() }));
+    const without = buildListingSettingsFacts(inputs([noCategory]));
+    expect(withRows.sizes).toEqual(without.sizes);
+    expect(withRows.products).toEqual(without.products);
+    expect(withRows.sizes[0].price).toMatchObject({ priceCents: 1_199, source: "catalog_price", rule: null });
+  });
+
+  it("follows the new category's settings after Card Shellz moves the product", () => {
+    const both = layers({ categories: [
+      [TOPLOADERS_CATEGORY, categoryValues({ returnPolicy: { id: "R-toploaders", name: null }, price: RETAIL_PLUS_300 })],
+      [SLEEVES_CATEGORY, categoryValues({ returnPolicy: { id: "R-sleeves", name: null }, price: RETAIL_RECIPE })],
+    ] });
+    const before = select(inputs([small], { layers: both }));
+    expect(before.settings.returnPolicy).toEqual([{ value: { policyId: "R-toploaders" },
+      sources: [{ source: "category", ruleName: "Toploaders", productVariantIds: [101] }] }]);
+    expect(before.sizes[0].price).toMatchObject({ priceCents: 1_499, rule: { kind: "category", name: "Toploaders" } });
+    const moved = select(inputs([{ ...small, categoryId: SLEEVES_CATEGORY }], { layers: both }));
+    expect(moved.settings.returnPolicy).toEqual([{ value: { policyId: "R-sleeves" },
+      sources: [{ source: "category", ruleName: "Sleeves", productVariantIds: [101] }] }]);
+    expect(moved.sizes[0].price).toMatchObject({ priceCents: 1_199, rule: { kind: "category", name: "Sleeves", recipe: RETAIL_RECIPE } });
+  });
+
+  it("takes the closest value for each setting: the size's leftover, then the product's, then the category's", () => {
+    const sizeText = (customText: string): SavedListingContent =>
+      ({ revisionId: 3, customText, catalogHash: listingCatalogHash(small), updatedAt: SAVED_AT });
+    const stack = layers({
+      products: [[501, productValues({
+        shippingPolicy: { id: "F-product", name: null }, returnPolicy: { id: "R-product", name: null },
+        storeShelf: { mode: "none" }, textAbove: { mode: "own", text: "Product above." },
+        mainText: { text: "Product words.", catalogHash: productCatalogHash(small) },
+      })]],
+      categories: [[TOPLOADERS_CATEGORY, categoryValues({
+        price: RETAIL_PLUS_300, shippingPolicy: { id: "F-category", name: null }, returnPolicy: { id: "R-category", name: null },
+        paymentPolicy: { id: "P-category", name: null }, storeShelf: { mode: "own", shelves: [{ id: "12", name: "Toploaders" }] },
+        textAbove: { mode: "own", text: "Category above." }, textBelow: { mode: "own", text: "Category below." },
+      })]],
+    });
+    const input = inputs([small, large], {
+      layers: stack,
+      listingConfig: configWith({ storeShelfDefault: { ids: ["7"], names: ["Store shelf"] } }),
+      policyOverrides: new Map([[101, override(101, { fulfillmentPolicyId: "F-size" })]]),
+      shelfAssignments: new Map([[101, ["Size shelf"]]]),
+      contentSettings: new Map([[101, sizeText("Size words.")]]),
+    });
+    const selection = select(input);
+    expect(sourceOf(selection, "shippingPolicy")).toEqual([["size", null, [101]], ["product", null, [102]]]);
+    expect(selection.settings.shippingPolicy.map((value) => value.value.policyId)).toEqual(["F-size", "F-product"]);
+    expect(sourceOf(selection, "returnPolicy")).toEqual([["product", null, [101, 102]]]);
+    expect(sourceOf(selection, "paymentPolicy")).toEqual([["category", "Toploaders", [101, 102]]]);
+    // The product's "none" beats both the category's shelves and the store default.
+    expect(selection.settings.storeShelf).toEqual([
+      { value: { names: ["Size shelf"] }, sources: [{ source: "size", ruleName: null, productVariantIds: [101] }] },
+      { value: { names: [] }, sources: [{ source: "product", ruleName: null, productVariantIds: [102] }] },
+    ]);
+    // Text above from the product, below from the category: one value, from its closer part (plan D18).
+    expect(selection.settings.descriptionTemplate).toEqual([{ value: { hasIntroduction: true, hasFooter: true, groupConflict: false },
+      sources: [{ source: "product", ruleName: null, productVariantIds: [101, 102] }] }]);
+    expect(sourceOf(selection, "mainText")).toEqual([["size", null, [101]], ["product", null, [102]]]);
+    expect(selection.sizes.map((size) => size.price.rule?.kind)).toEqual(["category", "category"]);
+    expect(detail(selection).product).toMatchObject({
+      ownSettings: ["shipping_policy", "return_policy", "store_shelf", "description"],
+      sizesDiffer: ["shipping_policy", "store_shelf", "description"],
+    });
+    // The step 3 preview builds the same description from the same layers: product text above, category text below, the product's main text.
+    const preview = resolveListingContent({ candidate: large, profile: EMPTY_CONTENT, saved: null, layers: stack });
+    expect(preview).toMatchObject({ source: "custom", templateName: "This product", needsCatalogReview: false });
+    expect(preview.descriptionText).toContain("Product above.");
+    expect(preview.descriptionText).toContain("Product words.");
+    expect(preview.descriptionText).toContain("Category below.");
+  });
+
+  it("puts the store's older group rules after the product and before the category", () => {
+    const group = { id: "toploaders", name: "Toploaders group", priority: 1, scope: { type: "category" as const, category: "Toploaders" } };
+    const categoryOnly = layers({ categories: [[TOPLOADERS_CATEGORY, categoryValues({
+      price: RETAIL_PLUS_300, ebayCategory: SLEEVES_EBAY, textAbove: { mode: "own", text: "Category above." },
+      textBelow: { mode: "own", text: "Category below." },
+    })]] });
+    const older = {
+      pricing: pricing({ defaultRecipe: COST_RECIPE, groups: [{ ...group, recipe: RETAIL_RECIPE }] }),
+      ebayCategoryRules: { revisionId: 4, updatedAt: SAVED_AT, profile: { version: 1 as const, defaultCategory: null,
+        rules: [{ id: "big", name: "Big packs", scope: { type: "listings" as const, productVariantIds: [101] }, category: TOPLOADERS_EBAY }] } },
+      content: { revisionId: 2, updatedAt: SAVED_AT, profile: { defaultTemplate: { introduction: "Store above.", footer: "" },
+        groups: [{ ...group, template: { introduction: "Group above.", footer: "Group below." } }] } },
+    } satisfies Partial<ListingSettingsInputs>;
+    const groupWins = select(inputs([small, large], { ...older, layers: categoryOnly }));
+    expect(groupWins.sizes.map((size) => size.price.rule)).toEqual([
+      { kind: "group", name: "Toploaders group", recipe: RETAIL_RECIPE }, { kind: "group", name: "Toploaders group", recipe: RETAIL_RECIPE },
+    ]);
+    // The older eBay rule names size 101 only; size 102 falls through to its category.
+    expect(sourceOf(groupWins, "ebayCategory")).toEqual([["group_rule", "Big packs", [101]], ["category", "Toploaders", [102]]]);
+    expect(sourceOf(groupWins, "descriptionTemplate")).toEqual([["group_rule", "Toploaders group", [101, 102]]]);
+
+    const productAbove = layers({ products: [[501, productValues({ price: COST_RECIPE, textAbove: { mode: "none" } })]],
+      categories: [[TOPLOADERS_CATEGORY, categoryValues({ price: RETAIL_PLUS_300 })]] });
+    const productWins = select(inputs([small], { ...older, layers: productAbove, costs: new Map([[101, cost(800)]]) }));
+    expect(productWins.sizes[0].price).toMatchObject({ priceCents: 1_200, rule: { kind: "product", name: "Toploader 35pt" } });
+    // Text above is the product's "None"; text below still comes from the group, so the closer source names the product.
+    expect(productWins.settings.descriptionTemplate).toEqual([{ value: { hasIntroduction: false, hasFooter: true, groupConflict: false },
+      sources: [{ source: "product", ruleName: null, productVariantIds: [101] }] }]);
+  });
+
+  it("gives sizes without a shelf of their own the store shelf default (the documented change at the 8b deploy)", () => {
+    const withDefault = configWith({ storeShelfDefault: { ids: ["7", "9"], names: ["Supplies", "Supplies:Toploaders"] } });
+    const selection = select(inputs([small, large], { listingConfig: withDefault, shelfAssignments: new Map([[101, ["Size shelf"]]]) }));
+    expect(selection.settings.storeShelf).toEqual([
+      { value: { names: ["Size shelf"] }, sources: [{ source: "size", ruleName: null, productVariantIds: [101] }] },
+      { value: { names: ["Supplies", "Supplies:Toploaders"] }, sources: [{ source: "store_default", ruleName: null, productVariantIds: [102] }] },
+    ]);
+    expect(detail(selection).product).toMatchObject({ ownSettings: ["store_shelf"], sizesDiffer: ["store_shelf"] });
+    // A malformed default is no default, as the setup view reads it.
+    const malformed = select(inputs([large], { listingConfig: configWith({ storeShelfDefault: { ids: ["7"], names: [] } }) }));
+    expect(sourceOf(malformed, "storeShelf")).toEqual([["none", null, [102]]]);
+  });
+
+  it("asks for a check of the product's own text only when the product's catalog facts changed", () => {
+    const text = (catalogHash: string) => layers({ products: [[501, productValues({ mainText: { text: "Product words.", catalogHash } })]] });
+    const stale = buildListingSettingsFacts(inputs([small], { layers: text("0".repeat(64)) }));
+    expect(stale.sizes[0].fixes).toEqual(["own_text_needs_check"]);
+    expect(buildListingSettingsSummary(stale, GENERATED_AT).attention.items)
+      .toContainEqual({ code: "own_text_needs_check", count: 1, productId: null, productName: null });
+    expect(buildListingSettingsFacts(inputs([small], { layers: text(productCatalogHash(small)) })).sizes[0].fixes).toEqual([]);
+    // A size-only catalog change does not ask the vendor to re-check product text (design record 8.3).
+    const resized = { ...small, variantName: "Pack of 30", sku: "TL-30", gtin: "0123456789012", mpn: "M-30", unitsPerVariant: 30 };
+    expect(buildListingSettingsFacts(inputs([resized], { layers: text(productCatalogHash(small)) })).sizes[0].fixes).toEqual([]);
+    expect(buildListingSettingsFacts(inputs([{ ...small, description: "New words." }], { layers: text(productCatalogHash(small)) }))
+      .sizes[0].fixes).toEqual(["own_text_needs_check"]);
+    // A size with its own text does not use the product's, so the product's text is not checked for it.
+    const sizeText: SavedListingContent = { revisionId: 3, customText: "Size words.", catalogHash: listingCatalogHash(small), updatedAt: SAVED_AT };
+    expect(buildListingSettingsFacts(inputs([small], { layers: text("0".repeat(64)), contentSettings: new Map([[101, sizeText]]) }))
+      .sizes[0].fixes).toEqual([]);
+  });
+
+  it("prices inherit and rules sizes by the product's own price in a store without rules", () => {
+    const own = layers({ products: [[501, productValues({ price: COST_RECIPE })]] });
+    const inherit = onlyPrice(inputs([small], { layers: own, costs: new Map([[101, cost(800)]]),
+      savedPrices: new Map([[101, savedPrice(101, { pricingMode: "inherit" })]]) }));
+    expect(inherit).toMatchObject({ priceCents: 1_200, source: "rules", rule: { kind: "product" }, issue: null });
+    const rules = onlyPrice(inputs([small], { layers: own, costs: new Map([[101, cost(800)]]),
+      savedPrices: new Map([[101, savedPrice(101, { pricingMode: "rules" })]]) }));
+    expect(rules).toMatchObject({ priceCents: 1_200, source: "rules", issue: null });
+    // Without a known cost the product's recipe gives no price: an inherit size falls back to retail and says why.
+    const noCost = onlyPrice(inputs([small], { layers: own, costs: new Map([[101, cost(null)]]),
+      savedPrices: new Map([[101, savedPrice(101, { pricingMode: "inherit" })]]) }));
+    expect(noCost).toMatchObject({ priceCents: 1_199, source: "retail_fallback", rule: null, issue: "pricing_basis_unavailable" });
+    // An exact price still beats every rule.
+    expect(onlyPrice(inputs([small], { layers: own,
+      savedPrices: new Map([[101, savedPrice(101, { overridePriceCents: 999, pricingMode: "fixed" })]]) })))
+      .toMatchObject({ priceCents: 999, source: "exact", rule: null });
+    // A blank Card Shellz product name still labels the rule.
+    expect(onlyPrice(inputs([{ ...small, productName: " " }], { layers: own, costs: new Map([[101, cost(800)]]) })).rule)
+      .toMatchObject({ kind: "product", name: "Product price" });
+  });
+
+  it("keeps the Own settings chip, its count and the column in step for a product whose only own value is its price", () => {
+    const input = inputs([small], { layers: layers({ products: [[501, productValues({ price: COST_RECIPE })]] }),
+      costs: new Map([[101, cost(800)]]) });
+    const facts = buildListingSettingsFacts(input);
+    // The product's recipe prices the size ...
+    expect(facts.sizes[0].price).toMatchObject({ priceCents: 1_200, rule: { kind: "product" } });
+    // ... but the row has no price field, so none of the three counts it (hasOwnSettings; widening the row is PR 9/10 work).
+    expect(detail(select(input)).product).toMatchObject({ ownSettings: [], exactPriceCount: 0 });
+    expect(buildListingSettingsSummary(facts, GENERATED_AT).counts).toMatchObject({ productsWithOwnSettings: 0 });
+    expect(selectListingSettingsProducts(facts, { search: "", show: "own_settings", page: 0 }).total).toBe(0);
+  });
+
+  it("changes nothing for rows of products and categories no chosen size has", () => {
+    const elsewhere = layers({
+      products: [[999, productValues({ price: COST_RECIPE, storeShelf: { mode: "none" }, shippingPolicy: { id: "F-other", name: null } })]],
+      categories: [[SLEEVES_CATEGORY, categoryValues({ price: RETAIL_PLUS_300, returnPolicy: { id: "R-other", name: null } })]],
+    });
+    const base = { pricing: pricing({ defaultRecipe: COST_RECIPE, groups: [] }), costs: new Map([[101, cost(800)], [102, cost(2_000)]]),
+      policyOverrides: new Map([[102, override(102, { returnPolicyId: "R1" })]]), shelfAssignments: new Map([[101, ["Size shelf"]]]) };
+    const withRows = buildListingSettingsFacts(inputs([small, large], { ...base, layers: elsewhere }));
+    const without = buildListingSettingsFacts(inputs([small, large], base));
+    expect(withRows.sizes).toEqual(without.sizes);
+    expect(withRows.products).toEqual(without.products);
+    expect(buildListingSettingsSummary(withRows, GENERATED_AT)).toEqual(buildListingSettingsSummary(without, GENERATED_AT));
+  });
+
+  it("refuses a category value it has no Card Shellz name for: the load reads one for every category with settings", () => {
+    const shared = layers({ categories: [[TOPLOADERS_CATEGORY, categoryValues({ returnPolicy: { id: "R-category", name: null } })]] });
+    const error = (() => {
+      try {
+        buildListingSettingsFacts(inputs([small], { layers: shared, categoryNames: new Map() }));
+      } catch (caught) {
+        return caught;
+      }
+      return null;
+    })();
+    expect(error).toBeInstanceOf(DropshipError);
+    expect(error).toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED",
+      context: { categoryId: TOPLOADERS_CATEGORY, productVariantId: 101, classification: "fatal" } });
   });
 });
 

@@ -26,7 +26,8 @@ import type { DropshipListingVariantHoldGate } from "./dropship-listing-tier-ser
 import { formatNotificationCurrency } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import { withRulePriceLimitCheck, type DropshipPricingPolicyRecord } from "./dropship-listing-preview-service";
-import { createRulePriceResolver } from "./dropship-rule-price";
+import { EMPTY_LISTING_SETTING_LAYERS, type ListingSettingLayers } from "./dropship-listing-setting-layers";
+import { createRulePriceResolver, NO_PRICING_PROFILE_STATE, rulePriceContextOf } from "./dropship-rule-price";
 import type { DropshipClock, DropshipLogger, DropshipNotificationSender } from "./dropship-ports";
 
 /**
@@ -109,6 +110,8 @@ export interface CostActionCandidate {
   productVariantId: number;
   productId: number;
   category: string | null;
+  /** The product's Card Shellz category (`catalog.products.category_id`); null when it has none. */
+  categoryId: number | null;
   productLineIds: readonly number[];
   defaultRetailPriceCents: number | null;
 }
@@ -119,6 +122,13 @@ export interface CostActionVendorFacts {
   savedPrices: CostActionSavedPrice[];
   /** Pricing rules per store connection; absent when the store has none. */
   profiles: Map<number, PricingProfileState>;
+  /**
+   * The product and category listing settings of the named variants, per
+   * store connection with listings (an entry for every such store, empty when
+   * it has none). A product's or a category's own price prices a listing by
+   * rule even in a store with no pricing rules.
+   */
+  layersByStore: Map<number, ListingSettingLayers>;
   candidates: Map<number, CostActionCandidate>;
   /** The active Card Shellz price limits, which decide whether an `inherit` listing can use its rule price. */
   pricingPolicies: readonly DropshipPricingPolicyRecord[];
@@ -705,10 +715,13 @@ export function classifyListing(facts: CostActionVendorFacts, listing: CostActio
   const saved = facts.savedPrices.find((candidate) =>
     candidate.storeConnectionId === listing.storeConnectionId && candidate.productVariantId === listing.productVariantId) ?? null;
   const candidate = facts.candidates.get(listing.productVariantId) ?? null;
-  const profile = facts.profiles.get(listing.storeConnectionId) ?? null;
   // The shared resolver the listing preview prices through, at the cost being judged, checked against the same limits.
-  const rulePrice = profile && candidate
-    ? withRulePriceLimitCheck(candidate, facts.pricingPolicies, createRulePriceResolver({ state: profile }).priceAtCost(candidate, costCents))
+  const resolver = createRulePriceResolver(rulePriceContextOf(
+    facts.profiles.get(listing.storeConnectionId) ?? NO_PRICING_PROFILE_STATE,
+    facts.layersByStore.get(listing.storeConnectionId) ?? EMPTY_LISTING_SETTING_LAYERS,
+  ));
+  const rulePrice = candidate && resolver.covers(candidate)
+    ? withRulePriceLimitCheck(candidate, facts.pricingPolicies, resolver.priceAtCost(candidate, costCents))
     : null;
   return classifyCostChangeListingPrice({
     saved: saved ? { overridePriceCents: saved.overridePriceCents, pricingMode: saved.pricingMode ?? undefined } : null,
@@ -817,7 +830,7 @@ function emptyPassResult(): DropshipCostListingActionPassResult {
 }
 
 function emptyFacts(): CostActionVendorFacts {
-  return { listings: [], savedPrices: [], profiles: new Map(), candidates: new Map(), pricingPolicies: [] };
+  return { listings: [], savedPrices: [], profiles: new Map(), layersByStore: new Map(), candidates: new Map(), pricingPolicies: [] };
 }
 
 function groupByVendor(entries: readonly EffectiveCostIncrease[]): Map<number, EffectiveCostIncrease[]> {

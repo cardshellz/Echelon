@@ -8,11 +8,15 @@ import { PgDropshipListingPriceRepository } from "../../infrastructure/dropship-
 import { PgDropshipListingPreviewRepository } from "../../infrastructure/dropship-listing-preview.repository";
 import { PgDropshipPricingRulesRepository } from "../../infrastructure/dropship-pricing-rules.repository";
 import { PgDropshipListingContentRepository } from "../../infrastructure/dropship-listing-content.repository";
+import { PgDropshipListingSettingWritesRepository } from "../../infrastructure/dropship-listing-setting-writes.repository";
+import { PgShellzClubProductCostAdapter } from "../../infrastructure/shellz-club-product-cost.adapter";
 import { resolveListingContent, listingCatalogHash } from "../../application/dropship-listing-content-resolver";
 import { contentCandidate, noContentProfile } from "../fixtures/listing-content.fixture";
 import type { StoredPricingReview } from "../../application/dropship-pricing-rules-service";
 import type { CreateDropshipListingPushJobRepositoryInput } from "../../application/dropship-listing-preview-service";
 import type { ListingPricingMode, SaveListingPriceInput } from "../../../../../shared/dropship/listing-price";
+import { listingSettingRequestHash } from "../../domain/listing-setting-values";
+import type { DropshipProductCost } from "../../application/dropship-product-cost";
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 config({ path: resolve(process.cwd(), ".env.test") });
 const testUrl = process.env.ECHELON_TEST_DATABASE_URL;
@@ -27,6 +31,7 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
   let previews: PgDropshipListingPreviewRepository;
   let pricingRules: PgDropshipPricingRulesRepository;
   let contentRepository: PgDropshipListingContentRepository;
+  let settingWrites: PgDropshipListingSettingWritesRepository;
   let created = false;
   const qualify = (sql: string) => sql.replaceAll("dropship.", `"${schema}".`).replaceAll("catalog.", `"${schema}".`);
   beforeAll(async () => {
@@ -41,12 +46,13 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
       CREATE TABLE dropship.dropship_vendors (id integer PRIMARY KEY, member_id text);
       CREATE TABLE dropship.dropship_store_connections (id integer PRIMARY KEY, vendor_id integer NOT NULL REFERENCES dropship.dropship_vendors(id));
       CREATE TABLE catalog.products (id integer PRIMARY KEY,
-      inventory_tracking_default boolean NOT NULL DEFAULT true
+      inventory_tracking_default boolean NOT NULL DEFAULT true, category_id integer
     );
       CREATE TABLE catalog.product_variants (id integer PRIMARY KEY, product_id integer REFERENCES catalog.products(id),
       inventory_tracking_override boolean
     );
       CREATE TABLE catalog.product_line_products (product_id integer);
+      CREATE TABLE catalog.product_categories (id integer PRIMARY KEY, name varchar(100) NOT NULL);
       CREATE TABLE dropship.dropship_catalog_rules (id integer);
       CREATE TABLE dropship.dropship_vendor_selection_rules (id integer);
       CREATE TABLE dropship.dropship_vendor_variant_overrides (id integer);
@@ -79,12 +85,18 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
     const reviewKindMigration = qualify(readFileSync(resolve(process.cwd(), "migrations/0740_dropship_pricing_review_kind.sql"), "utf8"));
     await pool.query(reviewKindMigration);
     await pool.query(reviewKindMigration);
+    // 0738 and 0739 hold the product and category listing settings the rule-price loader reads (PR 8b).
+    // 0657 gives the store connections the (id, vendor_id) key their owner FKs reference.
+    for (const file of ["0738_dropship_product_listing_settings.sql", "0739_dropship_category_listing_settings.sql"]) {
+      await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations", file), "utf8")));
+    }
     const scopedPool = { connect: async () => { const client = await pool!.connect();
       return { query: (sql: string, values?: unknown[]) => client.query(qualify(sql), values), release: () => client.release() }; } } as unknown as Pool;
     repository = new PgDropshipListingPriceRepository(scopedPool);
     previews = new PgDropshipListingPreviewRepository(scopedPool);
     pricingRules = new PgDropshipPricingRulesRepository(scopedPool);
     contentRepository = new PgDropshipListingContentRepository(scopedPool);
+    settingWrites = new PgDropshipListingSettingWritesRepository(scopedPool);
   });
   beforeEach(async () => { await pool!.query(qualify(`TRUNCATE dropship.dropship_listing_price_settings,
     dropship.dropship_listing_price_revisions, dropship.dropship_audit_events,
@@ -92,7 +104,10 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
     dropship.dropship_listing_push_job_items, dropship.dropship_pricing_profiles,
     dropship.dropship_pricing_profile_revisions, dropship.dropship_pricing_reviews,
     dropship.dropship_pricing_applications, dropship.dropship_content_profiles, dropship.dropship_content_profile_revisions,
-    dropship.dropship_listing_content_settings, dropship.dropship_listing_content_revisions RESTART IDENTITY`)); });
+    dropship.dropship_listing_content_settings, dropship.dropship_listing_content_revisions,
+    dropship.dropship_product_listing_settings, dropship.dropship_product_listing_setting_revisions,
+    dropship.dropship_product_listing_setting_requests, dropship.dropship_category_listing_settings,
+    dropship.dropship_category_listing_setting_revisions, dropship.dropship_product_category_seen RESTART IDENTITY`)); });
   afterAll(async () => { if (created && pool) await pool.query(`DROP SCHEMA "${schema}" CASCADE`); await pool?.end(); });
 
   function save(key: string, priceCents: number | null = 1299, expectedRevisionId: number | null = null, variant = 101, store = 22,
@@ -412,6 +427,35 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
       for (const [key, mode, cents] of rows) await expect(insertRevision(key, mode, cents)).resolves.toBeDefined();
       expect((await state()).revisions.map((row) => row.pricing_mode)).toEqual(["rules", "catalog_default", "fixed", null, null, "inherit"]);
     });
+  });
+  it("prices a size by its product's own price, saved through the listing settings writer, in a store with no pricing rules", async () => {
+    const recipe = { basis: "product_cost" as const, markupBps: 3_000, flatCents: 100, rounding: "cent" as const };
+    const key = "listing-settings:product-price";
+    const saved = await settingWrites.execute({ memberId: "member-1", storeConnectionId: 22, idempotencyKey: key },
+      (tx) => tx.saveProduct({ productId: 7, expectedRevisionId: null, patch: { price: recipe },
+        requestHash: listingSettingRequestHash({ key, recipe }), now }));
+    expect(saved).toMatchObject({ outcome: "changed", changedFields: ["price"], row: { productId: 7, values: { price: recipe } } });
+    // The .ops cost reader reads membership tables this suite does not create.
+    const cost: DropshipProductCost = { status: "available", unitCostCents: 809, planId: "ops-plan", source: "variant_fixed_price",
+      overrideId: "cost-1", issue: null, retailPriceCents: null, discountBps: null };
+    const loadProductCosts = vi.fn(async () => new Map([[101, cost]]));
+    const costs = vi.spyOn(PgShellzClubProductCostAdapter, "forTransaction")
+      .mockReturnValue({ loadProductCosts } as unknown as PgShellzClubProductCostAdapter);
+    try {
+      const rulePrice = await repository.execute({ memberId: "member-1", storeConnectionId: 22, productVariantId: 101 },
+        (tx) => tx.loadRulePrice!(contentCandidate()));
+      // 809 x 1.3 + 100 = 1,151.7, rounded half-up.
+      expect(rulePrice).toMatchObject({ priceCents: 1152, ruleName: "Product price", ruleId: "product:7", ruleLevel: "product",
+        issue: null, basis: "product_cost", profileRevisionId: null, productCost: cost });
+      expect(rulePrice!.evidenceHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(loadProductCosts).toHaveBeenCalledWith({ vendorId: 10, productVariantIds: [101] });
+      // Another vendor's store never sees vendor 10's product price.
+      await expect(repository.execute({ memberId: "member-2", storeConnectionId: 23, productVariantId: 101 },
+        (tx) => tx.loadRulePrice!(contentCandidate()))).resolves.toBeNull();
+    } finally { costs.mockRestore(); }
+    // Reading the price wrote nothing: the one revision and audit row are the save's.
+    expect((await pool!.query(qualify("SELECT count(*)::int AS n FROM dropship.dropship_product_listing_setting_revisions"))).rows[0].n).toBe(1);
+    expect((await state()).audits).toHaveLength(1);
   });
   it("saves do not rewrite an already queued publication snapshot or applied listing price", async () => {
     const first = await save("queue-price");

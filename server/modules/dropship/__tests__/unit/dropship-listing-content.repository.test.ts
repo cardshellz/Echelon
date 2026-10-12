@@ -285,6 +285,27 @@ describe("PgDropshipListingContentRepository (pinned statements)", () => {
     expect(client.release).toHaveBeenCalledTimes(3);
   });
 
+  // Plan PR 8b, 4.7: the per-size editor resolves the description with the same
+  // product and category settings as the preview. The pinned statement lists
+  // above prove the read is lazy: no other operation sends it.
+  it("reads a size's product and category settings on the transaction's client, after its locks, with no lock text", async () => {
+    const client = new ScriptedClient();
+    const repository = new PgDropshipListingContentRepository(poolFor(client));
+
+    const layers = await repository.execute(writeTarget("content:listing-1", VARIANT),
+      (tx) => tx.loadListingSettingLayers({ productId: 7, categoryId: 5 }));
+
+    expect(layers.products.size + layers.categories.size).toBe(0);
+    const locked = [...lockedPrefix("content:listing-1").map(([sql]) => sql), SQL.selectionLocks, SQL.sizeLock];
+    expect(client.sql().slice(0, locked.length)).toEqual(locked);
+    const reads = client.calls.slice(locked.length, -1);
+    expect(reads.map(([sql, params]) => [/^SELECT .* FROM dropship\.dropship_(product|category)_listing_settings s /.exec(sql)?.[1], params]))
+      .toEqual([["product", [VENDOR, STORE, [7]]], ["category", [VENDOR, STORE, [5]]]]);
+    for (const [sql] of reads) expect(sql).not.toMatch(/\bFOR (UPDATE|SHARE)\b/);
+    expect(client.sql().at(-1)).toBe(SQL.commit);
+    expect(client.release).toHaveBeenCalledOnce();
+  });
+
   it("reports a store that is not the member's as not found and rolls back", async () => {
     const client = new ScriptedClient();
     client.ownerFound = false;

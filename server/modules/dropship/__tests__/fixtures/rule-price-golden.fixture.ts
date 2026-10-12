@@ -6,7 +6,11 @@
  * changes what vendors were shown and what a queued push checks, so they are
  * written out here, never regenerated to make a test pass.
  */
-import type { PricingProfileState } from "../../../../../shared/dropship/pricing-rules";
+import type {
+  CategoryListingSettingRow, CategoryListingSettingValues, ProductListingSettingRow,
+} from "../../../../../shared/dropship/listing-setting-values";
+import type { PricingProfileState, PricingRecipe } from "../../../../../shared/dropship/pricing-rules";
+import type { ListingSettingLayers } from "../../application/dropship-listing-setting-layers";
 import type { DropshipProductCost } from "../../application/dropship-product-cost";
 
 // Keys in the order readPricingProfile returns them (the schema's order): the
@@ -46,7 +50,7 @@ const unavailableCost: DropshipProductCost = { status: "unavailable", unitCostCe
 export interface GoldenRulePriceCase {
   name: string;
   candidate: {
-    productVariantId: number; productId: number; category: string | null;
+    productVariantId: number; productId: number; category: string | null; categoryId: number | null;
     productLineIds: readonly number[]; defaultRetailPriceCents: number | null;
   };
   cost: DropshipProductCost | null;
@@ -54,29 +58,29 @@ export interface GoldenRulePriceCase {
 
 export const GOLDEN_RULE_PRICE_CASES: readonly GoldenRulePriceCase[] = [
   { name: "store default from the .ops cost, rounded up to .99",
-    candidate: { productVariantId: 1001, productId: 100, category: "Mailers", productLineIds: [], defaultRetailPriceCents: 999 }, cost: cost(809) },
+    candidate: { productVariantId: 1001, productId: 100, category: "Mailers", categoryId: null, productLineIds: [], defaultRetailPriceCents: 999 }, cost: cost(809) },
   { name: "category rule from the catalog retail",
-    candidate: { productVariantId: 2001, productId: 200, category: "Sleeves", productLineIds: [], defaultRetailPriceCents: 1_499 }, cost: cost(700) },
+    candidate: { productVariantId: 2001, productId: 200, category: "Sleeves", categoryId: null, productLineIds: [], defaultRetailPriceCents: 1_499 }, cost: cost(700) },
   { name: "product line rule with a flat amount, product lines given out of order",
-    candidate: { productVariantId: 3001, productId: 310, category: "Toploaders", productLineIds: [11, 7, 3], defaultRetailPriceCents: 1_299 }, cost: cost(455) },
+    candidate: { productVariantId: 3001, productId: 310, category: "Toploaders", categoryId: null, productLineIds: [11, 7, 3], defaultRetailPriceCents: 1_299 }, cost: cost(455) },
   { name: "product rule wins over the product line rule by priority",
-    candidate: { productVariantId: 3002, productId: 300, category: "Toploaders", productLineIds: [7], defaultRetailPriceCents: 1_299 }, cost: cost(455) },
+    candidate: { productVariantId: 3002, productId: 300, category: "Toploaders", categoryId: null, productLineIds: [7], defaultRetailPriceCents: 1_299 }, cost: cost(455) },
   { name: "hand-picked size rule wins over everything",
-    candidate: { productVariantId: 5001, productId: 300, category: "Sleeves", productLineIds: [7], defaultRetailPriceCents: 2_000 }, cost: cost(455) },
+    candidate: { productVariantId: 5001, productId: 300, category: "Sleeves", categoryId: null, productLineIds: [7], defaultRetailPriceCents: 2_000 }, cost: cost(455) },
   { name: "two matching rules at one priority",
-    candidate: { productVariantId: 6001, productId: 600, category: "Binders", productLineIds: [9], defaultRetailPriceCents: 2_499 }, cost: cost(1_000) },
+    candidate: { productVariantId: 6001, productId: 600, category: "Binders", categoryId: null, productLineIds: [9], defaultRetailPriceCents: 2_499 }, cost: cost(1_000) },
   { name: "store default with the .ops cost unknown",
-    candidate: { productVariantId: 7001, productId: 700, category: "Mailers", productLineIds: [], defaultRetailPriceCents: 999 }, cost: unavailableCost },
+    candidate: { productVariantId: 7001, productId: 700, category: "Mailers", categoryId: null, productLineIds: [], defaultRetailPriceCents: 999 }, cost: unavailableCost },
   { name: "store default with no cost read at all",
-    candidate: { productVariantId: 7002, productId: 700, category: "Mailers", productLineIds: [], defaultRetailPriceCents: 999 }, cost: null },
+    candidate: { productVariantId: 7002, productId: 700, category: "Mailers", categoryId: null, productLineIds: [], defaultRetailPriceCents: 999 }, cost: null },
   { name: "category rule with no catalog retail",
-    candidate: { productVariantId: 8001, productId: 800, category: "Sleeves", productLineIds: [], defaultRetailPriceCents: null }, cost: cost(300) },
+    candidate: { productVariantId: 8001, productId: 800, category: "Sleeves", categoryId: null, productLineIds: [], defaultRetailPriceCents: null }, cost: cost(300) },
   { name: "a recipe that lands above the largest listing price",
-    candidate: { productVariantId: 9001, productId: 900, category: "Graded slabs", productLineIds: [], defaultRetailPriceCents: 99_999_999 }, cost: cost(5_000) },
+    candidate: { productVariantId: 9001, productId: 900, category: "Graded slabs", categoryId: null, productLineIds: [], defaultRetailPriceCents: 99_999_999 }, cost: cost(5_000) },
   { name: "a zero cost with no markup or flat amount prices at zero, which is out of range",
-    candidate: { productVariantId: 9101, productId: 910, category: "Binders", productLineIds: [], defaultRetailPriceCents: 500 }, cost: cost(0) },
+    candidate: { productVariantId: 9101, productId: 910, category: "Binders", categoryId: null, productLineIds: [], defaultRetailPriceCents: 500 }, cost: cost(0) },
   { name: "half a cent rounds up (15 x 1.5 + 1 = 23.5)",
-    candidate: { productVariantId: 9201, productId: 300, category: "Toploaders", productLineIds: [], defaultRetailPriceCents: 1_299 }, cost: cost(15) },
+    candidate: { productVariantId: 9201, productId: 300, category: "Toploaders", categoryId: null, productLineIds: [], defaultRetailPriceCents: 1_299 }, cost: cost(15) },
 ];
 
 export interface GoldenRulePrice {
@@ -131,4 +135,147 @@ export const GOLDEN_RULE_PRICES: readonly GoldenRulePrice[] = [
   { productVariantId: 9201, priceCents: 24, ruleName: "35pt toploaders", ruleId: "toploader-35pt",
     issue: null, basis: "product_cost", profileRevisionId: 41,
     evidenceHash: "8c7ec637995fdceaef04e1cefdfb6c0369ca1c2d1b8b0e257fd6fafc4b054117" },
+];
+
+// ---------------------------------------------------------------------------
+// Product and category prices (listing settings, PR 8b). Every pin above has
+// no product or category row; the helpers below build the layers the v2
+// cases add, with every other setting left to follow its default.
+// ---------------------------------------------------------------------------
+
+/** A product's own price: 30% over the .ops cost, plus 25 cents. */
+export const GOLDEN_PRODUCT_RECIPE: PricingRecipe = { basis: "product_cost", markupBps: 3_000, flatCents: 25, rounding: "cent" };
+/** A category's price: the catalog retail price, rounded up to .99. */
+export const GOLDEN_CATEGORY_RECIPE: PricingRecipe = { basis: "catalog_retail", markupBps: 0, flatCents: 0, rounding: "up_99" };
+/** A category's price that follows the .ops cost: 50% over it, rounded up to .99. */
+export const GOLDEN_CATEGORY_COST_RECIPE: PricingRecipe = { basis: "product_cost", markupBps: 5_000, flatCents: 0, rounding: "up_99" };
+export const GOLDEN_LAYER_UPDATED_AT = "2026-10-05T09:30:00.000Z";
+
+/**
+ * The current Card Shellz names of the categories the cases below use
+ * (`catalog.product_categories`). Shown by the listing-settings facts, never
+ * hashed (plan D15, D19), so a rename moves no pin.
+ */
+export const GOLDEN_CATEGORY_NAMES: ReadonlyMap<number, string> = new Map([[4, "Mailers"], [5, "Shipping supplies"]]);
+
+/**
+ * The first golden size placed in Card Shellz category 4: the one candidate
+ * with a category id, so the layers read sends its category query too (plan
+ * F10: the loader's query count is 2 without category ids, 3 with one).
+ */
+export const GOLDEN_CATEGORIZED_CANDIDATE: GoldenRulePriceCase["candidate"] = { ...GOLDEN_RULE_PRICE_CASES[0].candidate, categoryId: 4 };
+
+const NO_CATEGORY_VALUES: CategoryListingSettingValues = {
+  price: null, ebayCategory: null, storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null,
+  textAbove: null, textBelow: null,
+};
+
+export function goldenProductPriceRow(productId: number, price: PricingRecipe, revisionId = 1): ProductListingSettingRow {
+  return { storeConnectionId: 22, productId, revisionId, updatedAt: GOLDEN_LAYER_UPDATED_AT,
+    values: { ...NO_CATEGORY_VALUES, price, mainText: null } };
+}
+
+export function goldenCategoryPriceRow(categoryId: number, price: PricingRecipe, revisionId = 1): CategoryListingSettingRow {
+  return { storeConnectionId: 22, categoryId, revisionId, updatedAt: GOLDEN_LAYER_UPDATED_AT, values: { ...NO_CATEGORY_VALUES, price } };
+}
+
+/** Layers holding the given product and category prices, keyed as readListingSettingLayers keys them. */
+export function goldenLayers(input: {
+  products?: ReadonlyArray<readonly [productId: number, price: PricingRecipe]>;
+  categories?: ReadonlyArray<readonly [categoryId: number, price: PricingRecipe]>;
+}): ListingSettingLayers {
+  return {
+    products: new Map((input.products ?? []).map(([productId, price]) => [productId, goldenProductPriceRow(productId, price)])),
+    categories: new Map((input.categories ?? []).map(([categoryId, price]) => [categoryId, goldenCategoryPriceRow(categoryId, price)])),
+  };
+}
+
+/**
+ * Product and category prices, one size each (plan 4.11, recipe version 2).
+ * Each case is one of the sizes above in a store with the golden profile or
+ * with none, with the given product and category prices saved, and the
+ * size's saved price setting: none (the rules own the size) or `inherit`.
+ */
+export interface GoldenRulePriceV2Case {
+  name: string;
+  productVariantId: number;
+  /** The Card Shellz category the size's product is in for this case. */
+  categoryId: number | null;
+  pricingProfile: "golden" | "none";
+  products: ReadonlyArray<readonly [productId: number, price: PricingRecipe]>;
+  categories: ReadonlyArray<readonly [categoryId: number, price: PricingRecipe]>;
+  savedPricingMode: "inherit" | null;
+}
+
+export interface GoldenRulePriceV2 extends GoldenRulePrice {
+  /** Set only when the product's or the category's own price won (plan D15); null = absent from the result. */
+  ruleLevel: "product" | "category" | null;
+}
+
+export const GOLDEN_RULE_PRICE_V2_CASES: readonly GoldenRulePriceV2Case[] = [
+  { name: "a product's own price in a store with no pricing profile",
+    productVariantId: 1001, categoryId: null, pricingProfile: "none", products: [[100, GOLDEN_PRODUCT_RECIPE]], categories: [], savedPricingMode: null },
+  { name: "a product's own price beats the group rule that prices its category",
+    productVariantId: 2001, categoryId: null, pricingProfile: "golden", products: [[200, GOLDEN_PRODUCT_RECIPE]], categories: [], savedPricingMode: null },
+  { name: "a product's own price beats two group rules that tie",
+    productVariantId: 6001, categoryId: null, pricingProfile: "golden", products: [[600, GOLDEN_PRODUCT_RECIPE]], categories: [], savedPricingMode: null },
+  { name: "an older group rule beats the category's price",
+    productVariantId: 2001, categoryId: 4, pricingProfile: "golden", products: [], categories: [[4, GOLDEN_CATEGORY_RECIPE]], savedPricingMode: null },
+  { name: "two group rules that tie come before the category's price",
+    productVariantId: 6001, categoryId: 4, pricingProfile: "golden", products: [], categories: [[4, GOLDEN_CATEGORY_RECIPE]], savedPricingMode: null },
+  { name: "a category's price in a store with no pricing profile",
+    productVariantId: 1001, categoryId: 4, pricingProfile: "none", products: [], categories: [[4, GOLDEN_CATEGORY_RECIPE]], savedPricingMode: null },
+  { name: "a category's price beats the store default",
+    productVariantId: 1001, categoryId: 4, pricingProfile: "golden", products: [], categories: [[4, GOLDEN_CATEGORY_RECIPE]], savedPricingMode: null },
+  { name: "a category's price from the .ops cost",
+    productVariantId: 1001, categoryId: 5, pricingProfile: "none", products: [], categories: [[5, GOLDEN_CATEGORY_COST_RECIPE]], savedPricingMode: null },
+  { name: "an inherit size follows its product's own price",
+    productVariantId: 1001, categoryId: null, pricingProfile: "none", products: [[100, GOLDEN_PRODUCT_RECIPE]], categories: [], savedPricingMode: "inherit" },
+  { name: "the product moved to another category with the same price",
+    productVariantId: 1001, categoryId: 5, pricingProfile: "none", products: [],
+    categories: [[4, GOLDEN_CATEGORY_RECIPE], [5, GOLDEN_CATEGORY_RECIPE]], savedPricingMode: null },
+];
+
+/**
+ * Pinned from the PR 8b resolver, one entry per case above, in order. The
+ * cents are worked out in each comment; the version 2 recipe the hashes come
+ * from is written out in rule-price-golden.test.ts. The two group-rule cases
+ * keep their version 1 pins from GOLDEN_RULE_PRICES: a category id is not in
+ * version 1, so a category price that does not win moves nothing.
+ */
+export const GOLDEN_RULE_PRICES_V2: readonly GoldenRulePriceV2[] = [
+  // 809 x 1.3 + 25 = 1,076.7, rounded half up.
+  { productVariantId: 1001, priceCents: 1_077, ruleName: "Product price", ruleId: "product:100", ruleLevel: "product",
+    issue: null, basis: "product_cost", profileRevisionId: null,
+    evidenceHash: "80858a6ea284e9055886c2f3213f07d3bb91ef7bf0b71314086b37907281d9cc" },
+  // 700 x 1.3 + 25 = 935; the Sleeves group would give 1,499.
+  { productVariantId: 2001, priceCents: 935, ruleName: "Product price", ruleId: "product:200", ruleLevel: "product",
+    issue: null, basis: "product_cost", profileRevisionId: 41,
+    evidenceHash: "719626ff1f3ab3b98c314e8450500d34608967a0a6b69e19b44bc35d6ad5c655" },
+  // 1,000 x 1.3 + 25 = 1,325; Binders A and B tie at priority 30.
+  { productVariantId: 6001, priceCents: 1_325, ruleName: "Product price", ruleId: "product:600", ruleLevel: "product",
+    issue: null, basis: "product_cost", profileRevisionId: 41,
+    evidenceHash: "125d7bad768a1ee2c68a8f111da3eb0fb32084e488c8c064f3cd021cbadbfd91" },
+  { ...GOLDEN_RULE_PRICES[1], ruleLevel: null },
+  { ...GOLDEN_RULE_PRICES[5], ruleLevel: null },
+  // The $9.99 retail price is already .99.
+  { productVariantId: 1001, priceCents: 999, ruleName: "Category price", ruleId: "category:4", ruleLevel: "category",
+    issue: null, basis: "catalog_retail", profileRevisionId: null,
+    evidenceHash: "7d7cd4fa8c320e2b42ecd2820e63ed68d041aead2e689740456512388337a950" },
+  // The same evidence as with no profile: version 2 leaves the profile out (plan D14).
+  { productVariantId: 1001, priceCents: 999, ruleName: "Category price", ruleId: "category:4", ruleLevel: "category",
+    issue: null, basis: "catalog_retail", profileRevisionId: 41,
+    evidenceHash: "7d7cd4fa8c320e2b42ecd2820e63ed68d041aead2e689740456512388337a950" },
+  // 809 x 1.5 = 1,213.5, rounded half up to 1,214, then up to 1,299.
+  { productVariantId: 1001, priceCents: 1_299, ruleName: "Category price", ruleId: "category:5", ruleLevel: "category",
+    issue: null, basis: "product_cost", profileRevisionId: null,
+    evidenceHash: "7f3c66c67dcdd68c739bb0fb5b00fc6cde69e587521400e1bab2fd9bfba72252" },
+  // The saved setting is not rule evidence: the same pin as the first case.
+  { productVariantId: 1001, priceCents: 1_077, ruleName: "Product price", ruleId: "product:100", ruleLevel: "product",
+    issue: null, basis: "product_cost", profileRevisionId: null,
+    evidenceHash: "80858a6ea284e9055886c2f3213f07d3bb91ef7bf0b71314086b37907281d9cc" },
+  // The same price from category 5: the category id and rule id are hashed, so the move changes the evidence.
+  { productVariantId: 1001, priceCents: 999, ruleName: "Category price", ruleId: "category:5", ruleLevel: "category",
+    issue: null, basis: "catalog_retail", profileRevisionId: null,
+    evidenceHash: "f744b834077a70bda2d83cfc609564c55f39962e1ab179c2e59733c6c64f9e4e" },
 ];

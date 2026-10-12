@@ -43,6 +43,18 @@ import type {
   DropshipStoreListingConfig,
 } from "../../application/dropship-marketplace-listing-provider";
 import type { DropshipEbayListingPolicyOverride } from "../../application/dropship-ebay-listing-policy-override-service";
+import {
+  EMPTY_LISTING_SETTING_LAYERS,
+  type ListingSettingLayers,
+} from "../../application/dropship-listing-setting-layers";
+import type {
+  CategoryListingSettingValues,
+  ProductListingSettingValues,
+} from "../../../../../shared/dropship/listing-setting-values";
+import {
+  EMPTY_CATEGORY_LISTING_SETTING_VALUES,
+  EMPTY_PRODUCT_LISTING_SETTING_VALUES,
+} from "../../domain/listing-setting-values";
 import type { DropshipEbayReturnPaymentPolicyCheckInput } from "../../application/dropship-ebay-return-payment-policy-check";
 import type {
   DropshipProvisionVendorRepositoryResult,
@@ -1523,7 +1535,9 @@ describe("DropshipListingPreviewService", () => {
       expect(stale.rows[0].previewHash).toBe(current.rows[0].previewHash);
     });
 
-    it("leaves the preview as it was when the shelf default changes or is removed", async () => {
+    it("sends the shelf default to a size with no shelf of its own, only as its shelves (PR 8b, plan 4.10 item 2)", async () => {
+      ebayStore({ businessPolicyNames: storedNames() });
+      const none = await preview();
       ebayStore({ businessPolicyNames: storedNames(), storeShelfDefault: shelfDefault });
       const first = await preview();
       ebayStore({
@@ -1531,14 +1545,42 @@ describe("DropshipListingPreviewService", () => {
         storeShelfDefault: { ids: ["202", "101"], names: ["Supplies > Sleeves", "Toploaders"] },
       });
       const changed = await preview();
-      ebayStore({ businessPolicyNames: storedNames() });
-      const removed = await preview();
 
-      for (const result of [changed, removed]) {
+      expect(none.rows[0].storeCategoryNames).toEqual([]);
+      expect(first.rows[0].storeCategoryNames).toEqual(["Toploaders"]);
+      expect(first.rows[0].listingIntent?.storeCategoryNames).toEqual(["Toploaders"]);
+      // eBay takes the first shelf, then the second, in the order the default saved them.
+      expect(changed.rows[0].storeCategoryNames).toEqual(["Supplies > Sleeves", "Toploaders"]);
+      for (const result of [none, first, changed]) {
+        expect(result.rows[0].previewStatus).toBe("ready");
+        // The default itself never enters the intent; it reaches a listing only as its shelves.
         expect(result.rows[0].listingIntent?.marketplaceConfig).toEqual(listingKeys);
         expect(result.rows[0].listingIntent?.marketplaceConfig).not.toHaveProperty("storeShelfDefault");
-        expect(result.rows[0].previewHash).toBe(first.rows[0].previewHash);
       }
+      expect({ ...first.rows[0].listingIntent, storeCategoryNames: [] }).toEqual(none.rows[0].listingIntent);
+      expect(new Set([none, first, changed].map((result) => result.rows[0].previewHash)).size).toBe(3);
+    });
+
+    it("keeps a size's own shelf over the store's shelf default", async () => {
+      repository.storeCategoryAssignments = [{ productVariantId: 101, storeCategoryNames: ["Supplies:Toploaders"] }];
+      ebayStore({ businessPolicyNames: storedNames() });
+      const withoutDefault = await preview();
+      ebayStore({ businessPolicyNames: storedNames(), storeShelfDefault: shelfDefault });
+      const withDefault = await preview();
+
+      expect(withDefault.rows[0].storeCategoryNames).toEqual(["Supplies:Toploaders"]);
+      expect(withDefault.rows[0].previewHash).toBe(withoutDefault.rows[0].previewHash);
+    });
+
+    it("never sends a shelf to a store that is not eBay, whatever its config holds", async () => {
+      repository.config = { ...repository.config!, marketplaceConfig: { profileId: "profile-1", storeShelfDefault: shelfDefault } };
+      const withDefault = await preview();
+      repository.config = { ...repository.config!, marketplaceConfig: { profileId: "profile-1" } };
+      const without = await preview();
+
+      expect(withDefault.rows[0].storeCategoryNames).toEqual([]);
+      expect(withDefault.rows[0].listingIntent?.storeCategoryNames).toEqual([]);
+      expect(withDefault.rows[0].previewHash).toBe(without.rows[0].previewHash);
     });
 
     it("still changes the preview when a key the listing does use changes", async () => {
@@ -1549,6 +1591,218 @@ describe("DropshipListingPreviewService", () => {
 
       expect(after.rows[0].listingIntent?.marketplaceConfig).toMatchObject({ merchantLocationKey: "another-location" });
       expect(after.rows[0].previewHash).not.toBe(before.rows[0].previewHash);
+    });
+  });
+
+  describe("product and category listing settings (PR 8b)", () => {
+    const PRODUCT_ID = 501;
+    const CATEGORY_ID = 31;
+    /** An eBay store whose own policies are `businessPolicies`; no shelf default unless a test saves one. */
+    function ebayStore(businessPolicies: Record<string, string>, extra: Record<string, unknown> = {}) {
+      repository.context = { ...repository.context, platform: "ebay" };
+      repository.config = {
+        ...repository.config!,
+        platform: "ebay",
+        marketplaceConfig: { profileId: "profile-1", marketplaceId: "EBAY_US", businessPolicies, ...extra },
+      };
+    }
+    function saveSettings(settings: {
+      product?: Partial<ProductListingSettingValues>;
+      category?: Partial<CategoryListingSettingValues>;
+    }) {
+      repository.layers = {
+        products: new Map(settings.product ? [[PRODUCT_ID, { storeConnectionId: 22, productId: PRODUCT_ID, revisionId: 71,
+          updatedAt: now.toISOString(), values: { ...EMPTY_PRODUCT_LISTING_SETTING_VALUES, ...settings.product } }]] : []),
+        categories: new Map(settings.category ? [[CATEGORY_ID, { storeConnectionId: 22, categoryId: CATEGORY_ID, revisionId: 72,
+          updatedAt: now.toISOString(), values: { ...EMPTY_CATEGORY_LISTING_SETTING_VALUES, ...settings.category } }]] : []),
+      };
+    }
+    const preview = () => service.previewForMember("member-1", {
+      storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1299,
+    });
+
+    it("reads the settings once per preview and hands that same read to the price, description and eBay category loaders", async () => {
+      ebayStore({ fulfillmentPolicyId: "fulfillment-default" });
+      saveSettings({ product: { shippingPolicy: { id: "fulfillment-product", name: null } } });
+      const contentLayers: Array<ListingSettingLayers | undefined> = [];
+      const categoryLayers: Array<ListingSettingLayers | undefined> = [];
+      repository.loadListingContents = async (input) => {
+        contentLayers.push(input.layers);
+        return new Map(input.candidates.map((candidate) => [candidate.productVariantId,
+          resolveListingContent({ candidate, profile: noContentProfile, saved: null })]));
+      };
+      const prepared = prepareEbayCategoryRules(null, null);
+      repository.loadEbayCategories = async (input) => {
+        categoryLayers.push(input.layers);
+        return new Map(input.candidates.map((candidate) => [candidate.productVariantId, resolveEbayListingCategory(candidate, prepared)]));
+      };
+
+      await preview();
+
+      expect(repository.layerReads).toEqual([{ vendorId: 10, storeConnectionId: 22, productVariantIds: [101] }]);
+      expect(repository.ruleLayers).toBe(repository.layers);
+      expect(contentLayers).toHaveLength(1);
+      expect(contentLayers[0]).toBe(repository.layers);
+      expect(categoryLayers).toHaveLength(1);
+      expect(categoryLayers[0]).toBe(repository.layers);
+    });
+
+    it("reads the settings for a store that is not eBay too: price and description apply to every store", async () => {
+      // A saved product setting makes the read a distinct object, so the identity
+      // checks below fail if a store that is not eBay is handed the empty layers.
+      saveSettings({ product: { textAbove: { mode: "own", text: "Shipped today." } } });
+      const contentLayers: Array<ListingSettingLayers | undefined> = [];
+      repository.loadListingContents = async (input) => {
+        contentLayers.push(input.layers);
+        return new Map(input.candidates.map((candidate) => [candidate.productVariantId,
+          resolveListingContent({ candidate, profile: noContentProfile, saved: null, layers: input.layers })]));
+      };
+      repository.loadEbayCategories = async () => { throw new Error("A store that is not eBay resolves no eBay category."); };
+
+      const result = await preview();
+
+      expect(repository.context.platform).toBe("shopify");
+      expect(repository.layers).not.toBe(EMPTY_LISTING_SETTING_LAYERS);
+      expect(repository.layerReads).toHaveLength(1);
+      expect(repository.ruleLayers).toBe(repository.layers);
+      expect(contentLayers).toHaveLength(1);
+      expect(contentLayers[0]).toBe(repository.layers);
+      expect(result.rows[0].listingIntent?.description).toContain("Shipped today.");
+    });
+
+    it("checks a product's shipping policy on eBay before the rows, for a size with no policy of its own (F5)", async () => {
+      // The store has no shipping policy of its own: only the product names one.
+      ebayStore({});
+      saveSettings({ product: { shippingPolicy: { id: "fulfillment-product", name: "Product shipping" } } });
+      ebayPolicyPreflight = { ...ebayPolicyPreflight, compatible: false,
+        issues: [{ code: "shipping_service_unsupported:VendorCourier", message: "VendorCourier is unsupported." }] };
+
+      const blocked = await preview();
+
+      expect(evaluatedFulfillmentPolicyIds).toEqual(["fulfillment-product"]);
+      // The row is judged by its product policy's live check, not left unchecked.
+      expect(blocked.rows[0].blockers).toContain("ebay_fulfillment_policy:shipping_service_unsupported:VendorCourier");
+      expect(blocked.rows[0].businessPolicySelection).toEqual({ fulfillmentPolicyId: "fulfillment-product",
+        returnPolicyId: null, paymentPolicyId: null, overriddenFields: ["fulfillmentPolicyId"] });
+
+      ebayPolicyPreflight = { ...ebayPolicyPreflight, compatible: true, issues: [] };
+      const ready = await preview();
+      expect(ready.rows[0].previewStatus).toBe("ready");
+      expect(ready.rows[0].listingIntent?.marketplaceConfig).toMatchObject({
+        businessPolicies: { fulfillmentPolicyId: "fulfillment-product" },
+      });
+    });
+
+    it("checks a product's return and payment policies with the store's own on eBay", async () => {
+      ebayStore({ fulfillmentPolicyId: "fulfillment-default", returnPolicyId: "return-default", paymentPolicyId: "payment-default" });
+      saveSettings({ product: { returnPolicy: { id: "return-product", name: null }, paymentPolicy: { id: "payment-product", name: null } } });
+      gonePaymentPolicyIds = new Set(["payment-product"]);
+
+      const result = await preview();
+
+      expect(checkedReturnPaymentPolicies).toEqual([expect.objectContaining({
+        returnPolicyIds: ["return-default", "return-product"], paymentPolicyIds: ["payment-default", "payment-product"],
+      })]);
+      expect(result.rows[0].blockers).toContain("ebay_payment_policy:not_found");
+      expect(result.rows[0].businessPolicySelection).toEqual({ fulfillmentPolicyId: "fulfillment-default",
+        returnPolicyId: "return-product", paymentPolicyId: "payment-product", overriddenFields: ["returnPolicyId", "paymentPolicyId"] });
+    });
+
+    it("merges field by field: the size's own policy, then the product's, then the category's, then the store's", async () => {
+      ebayStore({ fulfillmentPolicyId: "fulfillment-default", returnPolicyId: "return-default", paymentPolicyId: "payment-default" });
+      repository.candidate.categoryId = CATEGORY_ID;
+      repository.listingPolicyOverrides = [{ productVariantId: 101, revisionId: 3, fulfillmentPolicyId: "fulfillment-size",
+        returnPolicyId: null, paymentPolicyId: null, updatedAt: now }];
+      saveSettings({
+        product: { shippingPolicy: { id: "fulfillment-product", name: null }, returnPolicy: { id: "return-product", name: null } },
+        category: { returnPolicy: { id: "return-category", name: null }, paymentPolicy: { id: "payment-category", name: null } },
+      });
+
+      const result = await preview();
+
+      expect(result.rows[0].businessPolicySelection).toEqual({ fulfillmentPolicyId: "fulfillment-size",
+        returnPolicyId: "return-product", paymentPolicyId: "payment-category",
+        overriddenFields: ["fulfillmentPolicyId", "returnPolicyId", "paymentPolicyId"] });
+      // Only the ids a listing can send are checked: the product's shipping policy loses to the size's.
+      expect(evaluatedFulfillmentPolicyIds).toEqual(["fulfillment-default", "fulfillment-size"]);
+      expect(checkedReturnPaymentPolicies[0]).toMatchObject({
+        returnPolicyIds: ["return-default", "return-product"], paymentPolicyIds: ["payment-default", "payment-category"],
+      });
+    });
+
+    it("applies a category's settings only to a product in that category", async () => {
+      ebayStore({ fulfillmentPolicyId: "fulfillment-default" });
+      saveSettings({ category: { shippingPolicy: { id: "fulfillment-category", name: null },
+        storeShelf: { mode: "own", shelves: [{ id: "401", name: "Toploaders" }] } } });
+
+      repository.candidate.categoryId = null;
+      const noCategory = await preview();
+      repository.candidate.categoryId = CATEGORY_ID + 1;
+      const otherCategory = await preview();
+      repository.candidate.categoryId = CATEGORY_ID;
+      const inCategory = await preview();
+
+      for (const result of [noCategory, otherCategory]) {
+        expect(result.rows[0].businessPolicySelection).toMatchObject({ fulfillmentPolicyId: "fulfillment-default", overriddenFields: [] });
+        expect(result.rows[0].storeCategoryNames).toEqual([]);
+      }
+      expect(otherCategory.rows[0].previewHash).toBe(noCategory.rows[0].previewHash);
+      expect(inCategory.rows[0].businessPolicySelection).toMatchObject({ fulfillmentPolicyId: "fulfillment-category",
+        overriddenFields: ["fulfillmentPolicyId"] });
+      expect(inCategory.rows[0].storeCategoryNames).toEqual(["Toploaders"]);
+    });
+
+    it("takes the shelf from the size, then the product, then the category, then the store default; a product's None means no shelf", async () => {
+      ebayStore({ fulfillmentPolicyId: "fulfillment-default" }, { storeShelfDefault: { ids: ["900"], names: ["Everything"] } });
+      repository.candidate.categoryId = CATEGORY_ID;
+      const shelvesFor = async (settings: Parameters<typeof saveSettings>[0]) => {
+        saveSettings(settings);
+        return (await preview()).rows[0].storeCategoryNames;
+      };
+      const categoryShelf = { mode: "own" as const, shelves: [{ id: "401", name: "Category shelf" }] };
+      const productShelves = { mode: "own" as const, shelves: [{ id: "301", name: "Mailers:Bubble" }, { id: "302", name: "Sale" }] };
+
+      expect(await shelvesFor({})).toEqual(["Everything"]);
+      expect(await shelvesFor({ category: { storeShelf: categoryShelf } })).toEqual(["Category shelf"]);
+      expect(await shelvesFor({ product: { storeShelf: productShelves }, category: { storeShelf: categoryShelf } }))
+        .toEqual(["Mailers:Bubble", "Sale"]);
+      expect(await shelvesFor({ product: { storeShelf: { mode: "none" } }, category: { storeShelf: categoryShelf } })).toEqual([]);
+      repository.storeCategoryAssignments = [{ productVariantId: 101, storeCategoryNames: ["Size shelf"] }];
+      expect(await shelvesFor({ product: { storeShelf: productShelves } })).toEqual(["Size shelf"]);
+    });
+
+    it("ignores product policies and shelves in a store that is not eBay", async () => {
+      const without = await preview();
+      saveSettings({ product: { shippingPolicy: { id: "fulfillment-product", name: null },
+        storeShelf: { mode: "own", shelves: [{ id: "301", name: "Mailers" }] } } });
+      const withSettings = await preview();
+
+      expect(withSettings.rows[0].businessPolicySelection).toBeNull();
+      expect(withSettings.rows[0].storeCategoryNames).toEqual([]);
+      expect(withSettings.rows[0].previewHash).toBe(without.rows[0].previewHash);
+      expect(evaluatedFulfillmentPolicyIds).toEqual([]);
+    });
+
+    it("with no settings passes the stored per-size policy rows to eBay exactly as they are", async () => {
+      ebayStore({ fulfillmentPolicyId: "fulfillment-default", returnPolicyId: "return-default" });
+      repository.listingPolicyOverrides = [{ productVariantId: 101, revisionId: 3, fulfillmentPolicyId: "fulfillment-size",
+        returnPolicyId: "return-size", paymentPolicyId: null, updatedAt: now }];
+
+      const result = await preview();
+
+      expect(repository.layers).toBe(EMPTY_LISTING_SETTING_LAYERS);
+      expect(evaluatedFulfillmentPolicyIds).toEqual(["fulfillment-default", "fulfillment-size"]);
+      expect(checkedReturnPaymentPolicies[0]).toMatchObject({ returnPolicyIds: ["return-default", "return-size"], paymentPolicyIds: [] });
+      expect(result.rows[0].businessPolicySelection).toEqual({ fulfillmentPolicyId: "fulfillment-size",
+        returnPolicyId: "return-size", paymentPolicyId: null, overriddenFields: ["fulfillmentPolicyId", "returnPolicyId"] });
+    });
+
+    it("fails the preview when the settings cannot be read, instead of building it without them", async () => {
+      repository.loadListingSettingLayers = async () => {
+        throw new DropshipError("DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", "A stored row broke its contract.");
+      };
+      await expect(preview()).rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED" });
+      expect(repository.ruleCandidateIds).toEqual([]);
     });
   });
 });
@@ -1681,10 +1935,24 @@ class FakeAtpProvider implements DropshipAtpProvider {
 class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
   loadListingContents?: DropshipListingPreviewRepository["loadListingContents"];
   loadEbayCategories?: DropshipListingPreviewRepository["loadEbayCategories"];
+  /** The store's product and category listing settings; none unless a test saves some. */
+  layers: ListingSettingLayers = EMPTY_LISTING_SETTING_LAYERS;
+  /** Each listing-settings read, with the sizes it was asked for. */
+  layerReads: Array<{ vendorId: number; storeConnectionId: number; productVariantIds: number[] }> = [];
+  async loadListingSettingLayers(input: {
+    vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[];
+  }): Promise<ListingSettingLayers> {
+    this.layerReads.push({ vendorId: input.vendorId, storeConnectionId: input.storeConnectionId,
+      productVariantIds: input.candidates.map((row) => row.productVariantId) });
+    return this.layers;
+  }
   rulePrices = new Map<number, ListingRulePrice>();
   ruleCandidateIds: number[] = [];
-  async loadRulePrices(input: { candidates: readonly DropshipListingCatalogCandidate[] }): Promise<Map<number, ListingRulePrice>> {
+  /** The layers the preview handed the rule-price loader (undefined = none). */
+  ruleLayers: ListingSettingLayers | undefined;
+  async loadRulePrices(input: { candidates: readonly DropshipListingCatalogCandidate[]; layers?: ListingSettingLayers }): Promise<Map<number, ListingRulePrice>> {
     this.ruleCandidateIds = input.candidates.map((row) => row.productVariantId);
+    this.ruleLayers = input.layers;
     return new Map([...this.rulePrices].filter(([id]) => this.ruleCandidateIds.includes(id)));
   }
   savedPrices: SavedListingPriceRevision[] = [];
@@ -1832,6 +2100,7 @@ function makeCandidate(): DropshipListingCatalogCandidate {
     productVariantId: 101,
     productLineIds: [9],
     category: "Protectors",
+    categoryId: null,
     ebayBrowseCategoryId: "183438",
     ebayBrowseCategoryName: "Card Toploaders & Holders",
     productIsActive: true,

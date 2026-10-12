@@ -5,6 +5,7 @@ import { listingContentTargetSchema, listingContentSettingSchema, previewListing
   type ListingContentSetting, type SavedListingContent, type SaveContentProfileInput, type SaveListingContentInput } from "../../../../shared/dropship/listing-content";
 import type { ListingPriceCatalogReader } from "./dropship-listing-price-service";
 import type { DropshipListingCatalogCandidate } from "./dropship-listing-preview-service";
+import type { ListingSettingLayers } from "./dropship-listing-setting-layers";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
 import { evaluateDropshipCatalogExposure } from "../domain/catalog-exposure";
 import { evaluateDropshipVendorCatalogSelection } from "../domain/vendor-selection";
@@ -19,6 +20,12 @@ export interface ContentTransaction extends SelectedCatalogReader {
   findReplay(kind: "profile" | "listing", key: string, hash: string): Promise<boolean>;
   saveProfile(input: SaveContentProfileInput, hash: string, now: Date): Promise<void>;
   saveListing(variantId: number, input: SaveListingContentInput, hash: string, now: Date): Promise<void>;
+  /**
+   * The product and category listing settings the size follows, read in this
+   * transaction under its store lock (plan PR 8b, 4.7), so this editor resolves
+   * the same description the preview does.
+   */
+  loadListingSettingLayers(candidate: Pick<DropshipListingCatalogCandidate, "productId" | "categoryId">): Promise<ListingSettingLayers>;
 }
 export interface ContentRepository {
   execute<T>(input: { memberId: string; storeConnectionId: number; productVariantId?: number; idempotencyKey?: string },
@@ -55,7 +62,9 @@ export class DropshipListingContentService {
     const parsed = listingContentTargetSchema.parse(target);
     return this.execute(memberId, parsed.storeConnectionId, parsed, async (tx) => {
       const candidate = await this.authorizeListing(tx, parsed.productVariantId);
-      return project(parsed, candidate, await tx.loadProfile(), await tx.loadSaved(parsed.productVariantId));
+      const profile = await tx.loadProfile();
+      const layers = await tx.loadListingSettingLayers(candidate);
+      return project(parsed, candidate, profile, await tx.loadSaved(parsed.productVariantId), layers);
     });
   }
   async previewForMember(memberId: string, target: unknown, input: unknown): Promise<ListingContentSetting> {
@@ -64,13 +73,14 @@ export class DropshipListingContentService {
     return this.execute(memberId, parsedTarget.storeConnectionId, parsedTarget, async (tx) => {
       const candidate = await this.authorizeListing(tx, parsedTarget.productVariantId);
       const profile = await tx.loadProfile();
+      const layers = await tx.loadListingSettingLayers(candidate);
       const saved = await tx.loadSaved(parsedTarget.productVariantId);
-      const current = project(parsedTarget, candidate, profile, saved);
+      const current = project(parsedTarget, candidate, profile, saved, layers);
       assertCurrent(current, parsed);
       // The transient revision never leaves this operation or enters persistence.
       return project(parsedTarget, candidate, profile, { revisionId: saved?.revisionId ?? null,
         customText: parsed.customText, catalogHash: current.resolved.catalogHash,
-        updatedAt: saved?.updatedAt ?? this.deps.clock.now().toISOString() });
+        updatedAt: saved?.updatedAt ?? this.deps.clock.now().toISOString() }, layers);
     });
   }
   async saveForMember(memberId: string, target: unknown, input: unknown): Promise<{ content: ListingContentSetting; idempotentReplay: boolean }> {
@@ -81,14 +91,15 @@ export class DropshipListingContentService {
       { ...parsedTarget, idempotencyKey: parsed.idempotencyKey }, async (tx) => {
         const candidate = await this.authorizeListing(tx, parsedTarget.productVariantId);
         const profile = await tx.loadProfile();
+        const layers = await tx.loadListingSettingLayers(candidate);
         const replay = await tx.findReplay("listing", parsed.idempotencyKey, hash);
         if (!replay) {
-          const current = project(parsedTarget, candidate, profile, await tx.loadSaved(parsedTarget.productVariantId));
+          const current = project(parsedTarget, candidate, profile, await tx.loadSaved(parsedTarget.productVariantId), layers);
           assertCurrent(current, parsed);
           await tx.saveListing(parsedTarget.productVariantId, parsed, hash, this.deps.clock.now());
         }
         // An old retry returns current state and never restores an older draft.
-        return { content: project(parsedTarget, candidate, profile, await tx.loadSaved(parsedTarget.productVariantId)), idempotentReplay: replay };
+        return { content: project(parsedTarget, candidate, profile, await tx.loadSaved(parsedTarget.productVariantId), layers), idempotentReplay: replay };
       });
     this.log(memberId, parsedTarget.storeConnectionId, result.content.revisionId, "description", result.idempotentReplay);
     return result;
@@ -125,10 +136,16 @@ export class DropshipListingContentService {
       context: { actorId, storeId, revisionId, kind, idempotentReplay: replay } });
   }
 }
+/**
+ * The size's own text and the description it resolves to, with the product
+ * and category settings it follows, as the preview builds it. `customText` and
+ * `revisionId` stay the size's own: this editor writes only those, and its
+ * version check keeps the per-size catalog hash (plan 4.7).
+ */
 function project(target: ListingContentTarget, candidate: DropshipListingCatalogCandidate, profile: ContentProfileState,
-  saved: (Omit<SavedListingContent, "revisionId"> & { revisionId: number | null }) | null): ListingContentSetting {
+  saved: (Omit<SavedListingContent, "revisionId"> & { revisionId: number | null }) | null, layers: ListingSettingLayers): ListingContentSetting {
   return listingContentSettingSchema.parse({ ...target, customText: saved?.customText ?? null, revisionId: saved?.revisionId ?? null,
-    updatedAt: saved?.updatedAt ?? null, resolved: resolveListingContent({ candidate, profile, saved }) });
+    updatedAt: saved?.updatedAt ?? null, resolved: resolveListingContent({ candidate, profile, saved, layers }) });
 }
 function assertCurrent(current: ListingContentSetting, input: { expectedRevisionId: number | null; expectedProfileRevisionId: number | null; expectedCatalogHash: string }): void {
   if (current.revisionId !== input.expectedRevisionId || current.resolved.profileRevisionId !== input.expectedProfileRevisionId

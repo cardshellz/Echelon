@@ -129,8 +129,13 @@ export function builtFromWords(price: ListingSettingsSizePrice): string {
     case "rules": {
       if (!price.rule) return "Your pricing rules"; // interim; a rule-owned price always names its rule
       const recipe = ruleRecipeWords(price.rule.recipe, price.basisAmountCents);
-      return price.rule.kind === "store_default" ? `Store default: ${recipe}`
-        : `From your older group rule “${price.rule.name}”: ${recipe}`;
+      switch (price.rule.kind) {
+        case "store_default": return `Store default: ${recipe}`;
+        case "group": return `From your older group rule “${price.rule.name}”: ${recipe}`;
+        // Interim lines (R:§3.7): no product or category price exists before PR 9 saves one.
+        case "product": return `This product: ${recipe}`;
+        case "category": return `Category: ${price.rule.name}, ${recipe}`;
+      }
     }
     case "last_published": return "Last published price (no store price yet)";
     case "catalog_price": return price.settingRevisionId === null ? "Retail price (no store price yet)" : "Retail price (kept from before)";

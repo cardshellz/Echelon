@@ -16,24 +16,33 @@ import {
   type ListingSettingsRailState, type ListingSettingsSettingKey, type ListingSettingsSizePrice, type ListingSettingsSummary,
   type ListingSettingsValueSource,
 } from "../../../../shared/dropship/listing-settings";
-import { pricingBasisCents, type PricingProfile, type PricingProfileState, type RulePriceResult } from "../../../../shared/dropship/pricing-rules";
+import type { ListingSettingMainText } from "../../../../shared/dropship/listing-setting-values";
+import {
+  PRODUCT_PRICE_RULE_NAME, pricingBasisCents, type PricingProfileState, type RulePriceResult,
+} from "../../../../shared/dropship/pricing-rules";
 import type { EbayCategoryRulesState } from "../../../../shared/dropship/ebay-category-rules";
 import type { DescriptionTemplate } from "../../../../shared/dropship/listing-content";
+import { readEbayStoreShelfDefault, type EbayStoreShelfDefault } from "../domain/ebay-listing-setup-config";
+import { listingSettingsInvariantFailed } from "../domain/listing-setting-values";
 import { evaluateListingPriceAgainstCost } from "../domain/listing-price-cost";
 import { computeDropshipMarketplaceQuantity, type DropshipVendorVariantOverride } from "../domain/vendor-selection";
 import type { ResolvedEbayListingCategory } from "./dropship-ebay-category-resolver";
 import type { DropshipEbayListingPolicyOverride } from "./dropship-ebay-listing-policy-override-service";
 import {
-  listingCatalogHash, needsListingCatalogReview, prepareContentProfile, resolveContentTemplate, textDescriptionHtml,
+  listingCatalogHash, needsListingCatalogReview, needsProductCatalogReview, prepareContentProfile, productCatalogHash,
+  resolveContentTemplate, textDescriptionHtml, type TemplatePartSource,
 } from "./dropship-listing-content-resolver";
 import {
   applyEbayListingPolicyOverride, pricingPolicyMatchesCandidate, withRulePriceLimitCheck,
   type DropshipExistingVendorListing, type DropshipListingCatalogCandidate,
   type DropshipListingStoreContext, type DropshipPricingPolicyRecord,
 } from "./dropship-listing-preview-service";
+import {
+  layersFor, mergeListingPolicyOverride, resolveListingStoreShelf, type ListingSettingLayers, type ListingSettingLayerValues,
+} from "./dropship-listing-setting-layers";
 import type { DropshipStoreListingConfig } from "./dropship-marketplace-listing-provider";
 import type { DropshipProductCost } from "./dropship-product-cost";
-import { createRulePriceResolver } from "./dropship-rule-price";
+import { createRulePriceResolver, rulePriceContextOf } from "./dropship-rule-price";
 import type { DropshipAtpSnapshot } from "./dropship-selection-atp-service";
 
 /**
@@ -43,8 +52,11 @@ import type { DropshipAtpSnapshot } from "./dropship-selection-atp-service";
  * rail line. No I/O and no clock: the caller passes `generatedAt`.
  *
  * Each value comes from the functions the preview and the push already use
- * (price, limits, cost, policy override, eBay category, description
- * template), so this view says what step 3 would send.
+ * (price, limits, cost, policy override, store shelf, eBay category,
+ * description template), over the same product and category settings, so
+ * this view says what step 3 would send. With no product or category rows
+ * and no store shelf default every value and source is what it was before
+ * those settings existed (plan PR 8b, D1).
  */
 
 export interface ListingSettingsInputs {
@@ -67,6 +79,17 @@ export interface ListingSettingsInputs {
   contentSettings: ReadonlyMap<number, SavedListingContent>;
   /** When each paused size's live cost-change hold began. */
   pausedSince: ReadonlyMap<number, Date>;
+  /**
+   * The store's product and category settings for the chosen sizes, read once
+   * in the load's snapshot (plan D26). `ebayCategories` were resolved with the
+   * same layers.
+   */
+  layers: ListingSettingLayers;
+  /**
+   * The current Card Shellz name of every category in `layers` (plan D19): the
+   * name a value from that category is shown under. Display only; never hashed.
+   */
+  categoryNames: ReadonlyMap<number, string>;
 }
 
 /**
@@ -121,30 +144,40 @@ const POLICY_KEYS = [
 /** Per-product attention lines, in the order a product's problems are named. */
 const PRODUCT_ATTENTION_FIXES = ["no_ebay_category", "size_cannot_be_priced", "description_group_conflict"] as const satisfies
   readonly (ListingSettingsFixCode & ListingSettingsAttentionCode)[];
+/** The sources that are the product's own value: one left on a size by today's per-size settings, or the product's own setting. */
+const OWN_VALUE_SOURCES: ReadonlySet<ListingSettingsValueSource> = new Set<ListingSettingsValueSource>(["size", "product"]);
 const LOCALE = "en-US";
 /** Names sort the way a person reads them: case aside, and "Pack of 25" before "Pack of 100". Ids break ties. */
 const NAME_ORDER = new Intl.Collator(LOCALE, { sensitivity: "base", numeric: true });
 
 export function buildListingSettingsFacts(inputs: ListingSettingsInputs): ListingSettingsFacts {
-  const resolver = createRulePriceResolver({ state: inputs.pricing });
+  const resolver = createRulePriceResolver(rulePriceContextOf(inputs.pricing, inputs.layers));
   const preparedContent = prepareContentProfile(inputs.content);
+  // Read once: the preview reads the same default for every size of the store.
+  const storeShelfDefault = inputs.listingConfig ? readEbayStoreShelfDefault(inputs.listingConfig.marketplaceConfig) : null;
   const interner = new SizeValueInterner();
   const templateTexts = new TemplateTexts();
   const sizes = [...inputs.candidates].sort(compareCandidates).map((candidate) => {
+    const layer = layersFor(inputs.layers, candidate);
     const price = sizePriceFacts(candidate, inputs, resolver);
-    const template = resolveContentTemplate(preparedContent, candidate);
+    const template = resolveContentTemplate(preparedContent, candidate, inputs.layers);
     const savedContent = inputs.contentSettings.get(candidate.productVariantId) ?? null;
+    // The product's own main text applies only to a size without its own, as in resolveListingContent.
+    const productText = savedContent?.customText != null ? null : layer.product?.mainText ?? null;
     const category = inputs.ebayCategories.get(candidate.productVariantId);
     if (!category) throw new Error(`Listing settings has no eBay category result for size ${candidate.productVariantId}.`);
     const fixes = new Set<ListingSettingsFixCode>();
     if (category.source === "none") fixes.add("no_ebay_category");
     if (price.priceCents === null) fixes.add("size_cannot_be_priced");
-    // The catalog hash is worked out only for sizes with their own text, the only ones it can flag.
+    // Each catalog hash is worked out only for sizes with own text that uses it, the only ones it can flag:
+    // a size's text against its size's catalog facts, the product's text against the product's (plan D17).
     if (savedContent?.customText != null && needsListingCatalogReview(savedContent, listingCatalogHash(candidate))) fixes.add("own_text_needs_check");
+    if (productText !== null && needsProductCatalogReview(productText, productCatalogHash(candidate))) fixes.add("own_text_needs_check");
     if (template.conflict) fixes.add("description_group_conflict");
     return {
       price,
-      values: sizeValues({ candidate, inputs, category, template, savedContent, interner, templateTexts }),
+      values: sizeValues({ candidate, inputs, layer, category, template, savedContent, productText, storeShelfDefault,
+        interner, templateTexts }),
       fixes: LISTING_SETTINGS_FIX_CODES.filter((code) => fixes.has(code)),
     } satisfies ListingSettingsSizeFacts;
   });
@@ -166,8 +199,8 @@ function sizePriceFacts(candidate: DropshipListingCatalogCandidate, inputs: List
   const saved = inputs.savedPrices.get(id) ?? null;
   const cost = inputs.costs.get(id) ?? null;
   const costCents = cost?.status === "available" ? validAmount(cost.unitCostCents) : null;
-  // Without rules there is no rule price, as in the preview and the per-size price.
-  const rulePrice = resolver.configured
+  // A size nothing can price by rule has no rule price, as in the preview and the per-size price.
+  const rulePrice = resolver.covers(candidate)
     ? withRulePriceLimitCheck(candidate, inputs.pricingPolicies, resolver.priceAtCost(candidate, costCents))
     : null;
   const ruleOwned = listingPriceFollowsRules({ saved, rulePrice });
@@ -187,7 +220,7 @@ function sizePriceFacts(candidate: DropshipListingCatalogCandidate, inputs: List
     sku: candidate.sku,
     priceCents,
     source: retailFallback ? "retail_fallback" : PRICE_SOURCE[resolved.source],
-    rule: ruleOwned && rulePrice ? describeRule(rulePrice, inputs.pricing.profile) : null,
+    rule: ruleOwned && rulePrice ? describeRule(rulePrice, candidate, inputs) : null,
     basis,
     basisAmountCents: basis ? validAmount(pricingBasisCents(basis, { productCostCents: costCents, catalogRetailCents: candidate.defaultRetailPriceCents })) : null,
     issue: retailFallback ? ruleIssue(rulePrice) : priceIssue({ ruleOwned, rulePrice, priceCents }),
@@ -216,11 +249,11 @@ function priceIssue(input: { ruleOwned: boolean; rulePrice: RulePriceResult | nu
 }
 
 /**
- * Why the store's rules give a `retail_fallback` size no usable price: null
- * when the store has no rules, so none covers the size. A configured store's
- * rules always name why they give no price (`resolvePricingRule`); a price
- * they give is unusable only when a blocking Card Shellz limit refuses it.
- * Any other answer is a code fault.
+ * Why the rules give a `retail_fallback` size no usable price: null when no
+ * rule covers the size (no store rules, no product or category price). Rules
+ * that cover it always name why they give no price (`resolvePricingRule`); a
+ * price they give is unusable only when a blocking Card Shellz limit refuses
+ * it. Any other answer is a code fault.
  */
 function ruleIssue(rulePrice: (RulePriceResult & { blockedByLimit: boolean }) | null): ListingSettingsPriceIssue | null {
   if (rulePrice === null) return null;
@@ -230,13 +263,57 @@ function ruleIssue(rulePrice: (RulePriceResult & { blockedByLimit: boolean }) | 
   throw new Error(`Pricing rules gave a size no price without a known reason (${issue ?? "none"}).`);
 }
 
-/** The rule that won, with the recipe it priced by. A tie names no rule: none of them priced the size. */
-function describeRule(rulePrice: RulePriceResult, profile: PricingProfile | null): ListingSettingsPriceRule | null {
+/**
+ * The rule that won, with the recipe it priced by. A tie names no rule: none
+ * of them priced the size. The level is read first: a product's or a
+ * category's own price has no group id, and the store may have no profile.
+ * The product is named by its Card Shellz name and the category by its
+ * current one (plan D15, D19); names are display only and never hashed.
+ */
+function describeRule(rulePrice: RulePriceResult, candidate: DropshipListingCatalogCandidate,
+  inputs: ListingSettingsInputs): ListingSettingsPriceRule | null {
+  if (rulePrice.ruleLevel === "product") {
+    const recipe = inputs.layers.products.get(candidate.productId)?.values.price ?? null;
+    if (recipe === null) throw rulePriceWithoutRecipe("product", candidate);
+    // A blank Card Shellz name cannot label a rule (the contract's name is never empty); the level's own name stands in.
+    return { kind: "product", name: candidate.productName.trim() ? candidate.productName : PRODUCT_PRICE_RULE_NAME, recipe };
+  }
+  if (rulePrice.ruleLevel === "category") {
+    const categoryId = candidate.categoryId;
+    const recipe = categoryId === null ? null : inputs.layers.categories.get(categoryId)?.values.price ?? null;
+    if (categoryId === null || recipe === null) throw rulePriceWithoutRecipe("category", candidate);
+    return { kind: "category", name: categoryName(inputs, candidate), recipe };
+  }
+  const profile = inputs.pricing.profile;
   if (!profile || rulePrice.ruleName === null) return null;
   if (rulePrice.ruleId === null) return { kind: "store_default", name: rulePrice.ruleName, recipe: profile.defaultRecipe };
   const group = profile.groups.find((row) => row.id === rulePrice.ruleId);
   if (!group) throw new Error(`Pricing rule ${rulePrice.ruleId} is missing from the profile it was resolved from.`);
   return { kind: "group", name: group.name, recipe: group.recipe };
+}
+
+/** The resolver priced by a level whose recipe is not in the layers it was built from: a code fault, never retried. */
+function rulePriceWithoutRecipe(level: "product" | "category", candidate: DropshipListingCatalogCandidate) {
+  return listingSettingsInvariantFailed(`Listing settings found a ${level} rule price without the ${level}'s recipe.`, {
+    ruleLevel: level, productId: candidate.productId, productVariantId: candidate.productVariantId, categoryId: candidate.categoryId,
+  });
+}
+
+/**
+ * The current Card Shellz name of the size's category, whose settings give it
+ * a value. The load reads a name for every category in the layers, in the
+ * same snapshot, and a category with settings cannot be deleted (migration
+ * 0739's foreign key), so a missing name, or a category value on a product
+ * with no category, means the inputs were built wrong: fatal.
+ */
+function categoryName(inputs: ListingSettingsInputs, candidate: DropshipListingCatalogCandidate): string {
+  const name = candidate.categoryId === null ? undefined : inputs.categoryNames.get(candidate.categoryId);
+  if (name === undefined) {
+    throw listingSettingsInvariantFailed("Listing settings has no Card Shellz name for a category whose settings it uses.", {
+      productId: candidate.productId, productVariantId: candidate.productVariantId, categoryId: candidate.categoryId,
+    });
+  }
+  return name;
 }
 
 function priceLimits(candidate: DropshipListingCatalogCandidate, policies: readonly DropshipPricingPolicyRecord[],
@@ -252,59 +329,81 @@ function priceLimits(candidate: DropshipListingCatalogCandidate, policies: reado
 
 /**
  * Each setting's value on one size, with where the size gets it. The values
- * are the ones the preview and the push use: the policy override applied to
- * the store's policies, the resolved eBay category, the shelf names in their
- * order (first shelf, then second), and the template and main text the
- * description is built from.
+ * are the ones the preview and the push use: the size's policy override
+ * merged with the product's and category's policies (mergeListingPolicyOverride)
+ * and applied to the store's, the resolved eBay category, the shelf names in
+ * their order (first shelf, then second, resolveListingStoreShelf), and the
+ * template and main text the description is built from. A value from an
+ * older group rule carries the rule's name, and one from a category the
+ * category's current name; no other source is named.
  */
 function sizeValues(input: {
   candidate: DropshipListingCatalogCandidate;
   inputs: ListingSettingsInputs;
+  layer: ListingSettingLayerValues;
   category: ResolvedEbayListingCategory;
   template: ReturnType<typeof resolveContentTemplate>;
   savedContent: SavedListingContent | null;
+  productText: ListingSettingMainText | null;
+  storeShelfDefault: EbayStoreShelfDefault | null;
   interner: SizeValueInterner;
   templateTexts: TemplateTexts;
 }): ListingSettingsSizeValues {
-  const { candidate, inputs, category, template, savedContent, interner } = input;
-  const override = inputs.policyOverrides.get(candidate.productVariantId) ?? null;
-  const effective = applyEbayListingPolicyOverride(inputs.listingConfig, override);
+  const { candidate, inputs, layer, category, template, savedContent, productText, interner } = input;
+  const named = (source: ListingSettingsValueSource, groupRuleName: string | null): string | null =>
+    source === "group_rule" ? groupRuleName : source === "category" ? categoryName(inputs, candidate) : null;
+  const merged = mergeListingPolicyOverride({ productVariantId: candidate.productVariantId,
+    size: inputs.policyOverrides.get(candidate.productVariantId) ?? null, ...layer });
+  const effective = applyEbayListingPolicyOverride(inputs.listingConfig, merged.override);
   const policy = <K extends (typeof POLICY_KEYS)[number]>(entry: K) => {
     const policyId = businessPolicyId(effective, entry.key);
-    // An override applies only over a listing config (applyEbayListingPolicyOverride), so only then is it the size's own.
-    const own = inputs.listingConfig !== null && override !== null && override[entry.key] !== null;
-    const source: ListingSettingsValueSource = policyId === null ? "none" : own ? "size" : "store_default";
-    return interner.get(entry.setting, policyId ?? "", source, null, { policyId });
+    // An override applies only over a listing config (applyEbayListingPolicyOverride), so only then is it where the policy comes from.
+    const from = inputs.listingConfig === null ? null : merged.sources[entry.key];
+    const source: ListingSettingsValueSource = policyId === null ? "none" : from ?? "store_default";
+    return interner.get(entry.setting, policyId ?? "", source, named(source, null), { policyId });
   };
-  const shelf = inputs.shelfAssignments.get(candidate.productVariantId) ?? [];
+  const shelf = resolveListingStoreShelf({ sizeNames: inputs.shelfAssignments.get(candidate.productVariantId) ?? null, ...layer,
+    storeDefault: input.storeShelfDefault });
   const texts = input.templateTexts.of(template.template);
+  const templateFrom = templateSource(template);
+  const ebayCategorySource = CATEGORY_SOURCE[category.source];
   const ownText = savedContent?.customText ?? null;
   return {
     shippingPolicy: policy(POLICY_KEYS[0]),
     returnPolicy: policy(POLICY_KEYS[1]),
     paymentPolicy: policy(POLICY_KEYS[2]),
-    // Today a size gets its eBay category from the store's rules, its default or the catalog, never its own.
     // The key is the category id, as eBay lists by it; the name is a label that can differ for the same id.
-    ebayCategory: interner.get("ebayCategory", category.categoryId ?? "", CATEGORY_SOURCE[category.source],
-      category.source === "rule" ? category.ruleName : null, { categoryId: category.categoryId, categoryName: category.categoryName }),
-    storeShelf: interner.get("storeShelf", JSON.stringify(shelf), shelf.length > 0 ? "size" : "none", null, { names: [...shelf] }),
+    ebayCategory: interner.get("ebayCategory", category.categoryId ?? "", ebayCategorySource,
+      named(ebayCategorySource, category.ruleName), { categoryId: category.categoryId, categoryName: category.categoryName }),
+    storeShelf: interner.get("storeShelf", JSON.stringify(shelf.names), shelf.source, named(shelf.source, null), { names: shelf.names }),
     descriptionTemplate: template.conflict
       ? interner.get("descriptionTemplate", "conflict", "none", null, { hasIntroduction: false, hasFooter: false, groupConflict: true })
-      : interner.get("descriptionTemplate", texts.key, templateSource(template), template.groupName,
+      : interner.get("descriptionTemplate", texts.key, templateFrom, named(templateFrom, template.groupName),
         { hasIntroduction: texts.hasIntroduction, hasFooter: texts.hasFooter, groupConflict: false }),
-    mainText: ownText === null
-      ? interner.get("mainText", "catalog", "catalog", null, { own: false })
-      : interner.get("mainText", ownTextKey(ownText), "size", null, { own: true }),
+    // A size's own text, else the product's, else the Card Shellz text. Equal texts are one value, wherever they are set.
+    mainText: ownText !== null
+      ? interner.get("mainText", ownTextKey(ownText), "size", null, { own: true })
+      : productText !== null
+        ? interner.get("mainText", ownTextKey(productText.text), "product", null, { own: true })
+        : interner.get("mainText", "catalog", "catalog", null, { own: false }),
   };
 }
 
 const CATEGORY_SOURCE: Readonly<Record<ResolvedEbayListingCategory["source"], ListingSettingsValueSource>> = {
-  rule: "group_rule", store_default: "store_default", catalog: "catalog", none: "none",
+  product: "product", rule: "group_rule", category: "category", store_default: "store_default", catalog: "catalog", none: "none",
 };
 
+/** The template parts' sources, closest first (resolveContentTemplate's order). */
+const TEMPLATE_PART_SOURCES = ["product", "group_rule", "category", "store_default", "none"] as const satisfies readonly TemplatePartSource[];
+
+/**
+ * Where a size's text above and below come from: the closer of its two parts'
+ * sources (plan D18), since the view has one source per value. A template
+ * from one place gives that place, as before product and category settings.
+ */
 function templateSource(template: ReturnType<typeof resolveContentTemplate>): ListingSettingsValueSource {
-  if (template.groupName !== null) return "group_rule";
-  return template.template ? "store_default" : "none";
+  const { textAbove, textBelow } = template.parts;
+  return TEMPLATE_PART_SOURCES.find((source) => source === textAbove.source || source === textBelow.source) ?? "none";
 }
 
 /**
@@ -414,7 +513,7 @@ function productFacts(sizes: readonly ListingSettingsSizeFacts[], inputs: Listin
         priceRange: prices.length ? { minCents: Math.min(...prices), maxCents: Math.max(...prices) } : null,
         exactPriceCount: productSizes.filter((size) => size.price.source === "exact").length,
         ownSettings: LISTING_SETTINGS_FIELDS.filter((field) => LISTING_SETTINGS_FIELD_SETTINGS[field]
-          .some((setting) => productSizes.some((size) => size.values[setting].source === "size"))),
+          .some((setting) => productSizes.some((size) => OWN_VALUE_SOURCES.has(size.values[setting].source)))),
         sizesDiffer: LISTING_SETTINGS_FIELDS.filter((field) => LISTING_SETTINGS_FIELD_SETTINGS[field]
           .some((setting) => new Set(productSizes.map((size) => size.values[setting].key)).size > 1)),
         fixes: LISTING_SETTINGS_FIX_CODES.filter((code) => fixes.has(code)),
@@ -525,10 +624,14 @@ function productShown(product: ListingSettingsProductFacts, show: ListingSetting
 }
 
 /**
- * A product with a size that has its own value for a setting or an exact
- * price: what the Products tab lists under "Own settings" (its Own settings
- * column names exact prices first, ownSettingsWords), so the chip, its count
- * and the column agree.
+ * A product with its own value for a setting (set on the product, or left on
+ * one of its sizes) or a size with an exact price: what the Products tab
+ * lists under "Own settings" (its Own settings column names exact prices
+ * first, ownSettingsWords), so the chip, its count and the column agree.
+ * A product's own price recipe is not counted: the row has no field for it
+ * (LISTING_SETTINGS_FIELDS), so counting it here alone would list a product
+ * under the chip with nothing in its column. No route writes product rows
+ * before PR 9 (plan section 5); counting it needs the row contract widened first.
  */
 function hasOwnSettings(product: ListingSettingsProductFacts): boolean {
   return product.row.ownSettings.length > 0 || product.row.exactPriceCount > 0;
@@ -609,7 +712,11 @@ function settingValues<V>(sizes: readonly ListingSettingsSizeFacts[],
     .map((option) => ({ value: option.value, sources: [...option.sources.values()].sort(compareValueSources) }));
 }
 
-/** The closest source first, as the precedence reads: the size's own value, an older group rule, the store default, Card Shellz. */
+/**
+ * The closest source first, as the precedence reads: the size's own value,
+ * the product's, an older group rule, the product's category's, the store
+ * default, Card Shellz.
+ */
 const SOURCE_ORDER: ReadonlyMap<ListingSettingsValueSource, number> = new Map(LISTING_SETTINGS_VALUE_SOURCES.map((source, index) => [source, index]));
 
 function compareValueSources(a: ValueSourceEntry, b: ValueSourceEntry): number {

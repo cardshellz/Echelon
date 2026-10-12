@@ -329,11 +329,16 @@ describe("the product drawer (C16, C17)", () => {
   it("tags every source for every setting in plain words", () => {
     for (const key of LISTING_SETTINGS_SETTING_KEYS) {
       for (const source of LISTING_SETTINGS_VALUE_SOURCES) {
-        const words = drawerSourceWords(key, { source, ruleName: source === "group_rule" ? "Envelopes" : null });
+        const named = source === "group_rule" || source === "category";
+        const words = drawerSourceWords(key, { source, ruleName: named ? "Envelopes" : null });
         expectPlain(words.tag);
         expectPlain(words.note);
       }
     }
+    // Product and category values (interim tags, R:§3.7). A category is named by the server.
+    expect(drawerSourceWords("shippingPolicy", { source: "product", ruleName: null })).toEqual({ tag: "This product", note: null });
+    expect(drawerSourceWords("storeShelf", { source: "category", ruleName: "Sleeves" })).toEqual({ tag: "From category: Sleeves", note: null });
+    expect(drawerSourceWords("ebayCategory", { source: "category", ruleName: null }).tag).toBe("From its Card Shellz category");
     expect(drawerSourceWords("shippingPolicy", { source: "store_default", ruleName: null })).toEqual({ tag: "Store default", note: null });
     expect(drawerSourceWords("descriptionTemplate", { source: "group_rule", ruleName: "Envelopes" }))
       .toEqual({ tag: "From your older group rule “Envelopes”", note: GROUP_RULE_ORDER_NOTE });
