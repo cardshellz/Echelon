@@ -18,7 +18,7 @@ describe("listing price local draft authority", () => {
   beforeEach(() => {
     context = { vendorId: 10, vendorStatus: "onboarding", entitlementStatus: "active",
       storeConnectionId: 22, storeStatus: "connected", setupStatus: "incomplete", platform: "ebay", storeLaunchReady: false };
-    const candidate = { productId: 7, productVariantId: 101, productLineIds: [], category: "Mailers",
+    const candidate = { productId: 7, productVariantId: 101, productLineIds: [], category: "Mailers", categoryId: null,
       productIsActive: true, variantIsActive: true, variantUomType: "pack", defaultRetailPriceCents: 899 } as DropshipListingCatalogCandidate;
     tx = {
       vendorId: 10,
@@ -146,7 +146,7 @@ describe("a price save never leaves a size without a price it can be listed at",
   beforeEach(() => {
     const context: DropshipListingStoreContext = { vendorId: 10, vendorStatus: "active", entitlementStatus: "active",
       storeConnectionId: 22, storeStatus: "connected", setupStatus: "complete", platform: "ebay", storeLaunchReady: true };
-    candidate = { productId: 7, productVariantId: 101, productLineIds: [], category: "Mailers",
+    candidate = { productId: 7, productVariantId: 101, productLineIds: [], category: "Mailers", categoryId: null,
       productIsActive: true, variantIsActive: true, variantUomType: "pack", defaultRetailPriceCents: 899 } as DropshipListingCatalogCandidate;
     tx = {
       vendorId: 10,
@@ -277,7 +277,7 @@ describe("inherit: a size with no price of its own (A3, L1)", () => {
   beforeEach(() => {
     const context: DropshipListingStoreContext = { vendorId: 10, vendorStatus: "active", entitlementStatus: "active",
       storeConnectionId: 22, storeStatus: "connected", setupStatus: "complete", platform: "ebay", storeLaunchReady: true };
-    candidate = { productId: 7, productVariantId: 101, productLineIds: [], category: "Mailers",
+    candidate = { productId: 7, productVariantId: 101, productLineIds: [], category: "Mailers", categoryId: null,
       productIsActive: true, variantIsActive: true, variantUomType: "pack", defaultRetailPriceCents: 899 } as DropshipListingCatalogCandidate;
     // The repository keeps one request hash per key and refuses a key reused for another change, as the PostgreSQL one does.
     const hashes = new Map<string, string>();

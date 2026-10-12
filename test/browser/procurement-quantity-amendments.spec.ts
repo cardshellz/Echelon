@@ -69,7 +69,7 @@ async function setup(page: Page, options: { admin?: boolean; stale?: boolean; lo
 }
 async function review(page: Page, keepProductTotal = false) {
   const modal = page.getByRole("dialog"); await modal.getByLabel("Quantity (pieces)").fill("25000");
-  if (keepProductTotal) { await modal.getByLabel("Price entered as").click(); await page.getByRole("option", { name: "Product total", exact: true }).click(); }
+  if (keepProductTotal) { await modal.getByRole("button", { name: "Pricing options for line 1" }).click(); await page.getByLabel("Price entered as").click(); await page.getByRole("option", { name: "Product total", exact: true }).click(); await page.keyboard.press("Escape"); }
   await modal.getByLabel("Reason for editing / supplier reference").fill("Supplier confirmed the revised PO line values");
   await modal.getByRole("button", { name: "Review changes", exact: true }).click(); await expect(modal.getByText("PO total:", { exact: false })).toBeVisible(); return modal;
 }
@@ -101,7 +101,7 @@ test("a user without current admin approval authority receives a clear explanati
 });
 test("stale evidence requires discard and reload before approval", async ({ page }) => {
   const state = await setup(page, { stale: true }); const modal = page.getByRole("dialog");
-  await modal.getByLabel("Quantity (pieces)").fill("25000"); await modal.getByLabel("Price entered as").click(); await page.getByRole("option", { name: "Product total", exact: true }).click();
+  await modal.getByLabel("Quantity (pieces)").fill("25000"); await modal.getByRole("button", { name: "Pricing options for line 1" }).click(); await page.getByLabel("Price entered as").click(); await page.getByRole("option", { name: "Product total", exact: true }).click(); await page.keyboard.press("Escape");
   await modal.getByLabel("Reason for editing / supplier reference").fill("Supplier confirmed the correction"); await modal.getByRole("button", { name: "Review changes", exact: true }).click();
   await expect(modal.getByRole("alert")).toHaveText(/receipt changed/); await expect(modal.getByRole("button", { name: "Review changes", exact: true })).toBeDisabled();
   await modal.getByRole("button", { name: "Discard review and reload PO" }).click(); await expect(modal).toHaveCount(0);
@@ -135,12 +135,13 @@ test("keeps the prefilled piece price when quantity doubles", async ({ page }) =
   const state = await setup(page), modal = page.getByRole("dialog");
   await expect(modal.getByLabel("Quantity (pieces)")).toHaveValue("12500"); await expect(modal.getByLabel("Product price per piece (USD)")).toHaveValue("0.5000");
   await review(page); await expect(modal.getByText("PO total: 6250.00 → 12500.00 USD", { exact: true })).toBeVisible();
-  await expect(modal.getByRole("row").filter({ hasText: "Product price per piece" })).toHaveText(/0\.5000.*0\.5000/); await save(page); expect(state.failures).toEqual([]);
+  await expect(modal.getByRole("row").filter({ hasText: "Product price per piece" })).toHaveCount(0); await save(page); expect(state.failures).toEqual([]);
 });
 test("edits price and charges without changing quantity", async ({ page }) => {
   const state = await setup(page), modal = page.getByRole("dialog");
   await modal.getByLabel("Product price per piece (USD)").fill("0.5355"); await modal.getByLabel("Packaging total (USD)").fill("100.00");
-  await modal.getByLabel("Discount (USD)", { exact: true }).fill("25.00"); await modal.getByLabel("Tax (USD)", { exact: true }).fill("10.00");
+  await modal.getByRole("button", { name: "Tax and discount for line 1" }).click();
+  await page.getByLabel("Discount (USD)", { exact: true }).fill("25.00"); await page.getByLabel("Tax (USD)", { exact: true }).fill("10.00"); await page.keyboard.press("Escape");
   await modal.getByLabel("Reason for editing / supplier reference").fill("Correct price from the supplier document"); await modal.getByRole("button", { name: "Review changes", exact: true }).click();
   await expect(modal.getByText("PO total: 6250.00 → 6778.75 USD", { exact: true })).toBeVisible(); await save(page);
   expect(state.approvals[0].body.changes[0]).toMatchObject({ quantityPieces: 12500, pricing: { unitCostMills: 5355 }, packagingCostCents: 10000, discountCents: 2500, taxCents: 1000 }); expect(state.failures).toEqual([]);
@@ -217,4 +218,23 @@ test("rejects a context for another PO before exposing editable values", async (
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText("does not match this PO");
   await expect(page.getByRole("dialog").getByLabel("Quantity (pieces)")).toHaveCount(0);
   expect(state.approvals).toEqual([]); expect(state.previews).toEqual([]); expect(state.failures).toEqual([]);
+});
+
+test("uses compact rows for eleven lines and summarizes only the edited fields", async ({ page }, testInfo) => {
+  const lines = Array.from({ length: 11 }, (_, i) => ({ ...line, id: 11 + i, lineNumber: 1 + i, name: `Product ${i + 1} with the supplier name` }));
+  const state = await setup(page, { lines }), modal = page.getByRole("dialog");
+  await expect(modal.getByRole("table")).toBeVisible();
+  const rows = modal.getByRole("row"); await expect(rows).toHaveCount(12);
+  if (testInfo.project.name === "desktop") {
+    const row = await rows.nth(1).boundingBox(); expect(row!.height).toBeLessThan(110);
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await modal.screenshot({ path: testInfo.outputPath("compact-po-eleven-lines.png") });
+  await modal.locator("#correct-price-18").fill("0.5355");
+  await modal.getByLabel("Reason for editing / supplier reference").fill("Supplier price confirmed for line eight");
+  await modal.getByRole("button", { name: "Review changes", exact: true }).click();
+  const summary = modal.getByRole("table", { name: "PO change summary" });
+  await expect(summary.getByRole("row")).toHaveCount(4);
+  await expect(summary).toContainText("8 · Product 8"); await expect(summary).not.toContainText("Quantity");
+  expect(state.previews[0].changes.map(row => row.lineId)).toEqual([18]); expect(state.failures).toEqual([]);
 });

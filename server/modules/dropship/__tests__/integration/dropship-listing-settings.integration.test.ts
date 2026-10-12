@@ -4,14 +4,19 @@ import { resolve } from "node:path";
 import { config } from "dotenv";
 import pg, { type Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  CategoryListingSettingPatch, ProductListingSettingPatch,
+} from "../../../../../shared/dropship/listing-setting-values";
 import { listingSettingsProductDetailSchema } from "../../../../../shared/dropship/listing-settings";
 import { listingCatalogHash } from "../../application/dropship-listing-content-resolver";
 import { DropshipListingPriceService } from "../../application/dropship-listing-price-service";
-import { buildListingSettingsFacts } from "../../application/dropship-listing-settings-facts";
+import { buildListingSettingsFacts, selectListingSettingsProduct } from "../../application/dropship-listing-settings-facts";
 import { DropshipListingSettingsService, type ListingSettingsLoad } from "../../application/dropship-listing-settings-service";
+import { listingSettingRequestHash } from "../../domain/listing-setting-values";
 import { PgDropshipListingContentRepository } from "../../infrastructure/dropship-listing-content.repository";
 import { PgDropshipListingPreviewRepository } from "../../infrastructure/dropship-listing-preview.repository";
 import { PgDropshipListingPriceRepository } from "../../infrastructure/dropship-listing-price.repository";
+import { PgDropshipListingSettingWritesRepository } from "../../infrastructure/dropship-listing-setting-writes.repository";
 import { PgDropshipListingSettingsRepository } from "../../infrastructure/dropship-listing-settings.repository";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
@@ -40,11 +45,19 @@ const OBJECTS: ReadonlySet<string> = new Set([
   "dropship.dropship_ebay_category_rule_revisions", "dropship.dropship_ebay_category_rule_profiles",
   "dropship.dropship_ebay_store_category_assignment_revisions", "dropship.dropship_ebay_store_category_assignments",
   "dropship.dropship_ebay_listing_policy_override_revisions", "dropship.dropship_ebay_listing_policy_overrides",
+  "dropship.dropship_product_listing_setting_requests", "dropship.dropship_product_listing_setting_revisions",
+  "dropship.dropship_product_listing_settings",
+  "dropship.dropship_category_listing_setting_revisions", "dropship.dropship_category_listing_settings",
+  "dropship.dropship_product_category_seen",
   "dropship.guard_listing_price_revision_immutable", "dropship.guard_listing_price_setting_coherence",
   "dropship.guard_pricing_profile_coherence", "dropship.guard_content_revision_immutable",
   "dropship.guard_content_profile_coherence", "dropship.guard_listing_content_coherence",
   "dropship.guard_ebay_category_rule_revision_immutable", "dropship.guard_ebay_category_rule_profile_coherence",
-  "catalog.products", "catalog.product_variants", "catalog.product_line_products", "catalog.product_assets",
+  "dropship.guard_product_listing_setting_revision_immutable", "dropship.guard_product_listing_setting_coherence",
+  "dropship.guard_product_listing_setting_request_append_only",
+  "dropship.guard_category_listing_setting_revision_immutable", "dropship.guard_category_listing_setting_coherence",
+  "dropship.guard_product_category_seen",
+  "catalog.products", "catalog.product_variants", "catalog.product_categories", "catalog.product_line_products", "catalog.product_assets",
   "ebay.ebay_category_mappings", "channels.channels", "public.shopify_variants", "public.app_settings",
   "membership.plans", "membership.member_subscriptions", "membership.plan_channel_access",
   "membership.plan_variant_overrides", "membership.plan_collection_exclusions", "membership.product_collections",
@@ -61,18 +74,23 @@ const NAMED_BY_REVISION_ID: ReadonlyMap<string, string> = new Map([
   ["dropship_content_profile_revisions", "dropship_content_profiles.revision_id (migration 0660)"],
   ["dropship_listing_content_revisions", "dropship_listing_content_settings.revision_id (migration 0660)"],
   ["dropship_ebay_category_rule_revisions", "dropship_ebay_category_rule_profiles.revision_id (migration 0717)"],
+  ["dropship_product_listing_setting_revisions", "dropship_product_listing_settings.revision_id (migration 0738)"],
+  ["dropship_category_listing_setting_revisions", "dropship_category_listing_settings.revision_id (migration 0739)"],
 ]);
 
 const REAL_MIGRATIONS = [
   "0657_dropship_listing_price_settings.sql", "0659_dropship_store_pricing_rules.sql",
   "0660_dropship_vendor_listing_content.sql", "0717_dropship_ebay_category_rules.sql",
   "215_dropship_ebay_product_category_scope.sql", "217_dropship_ebay_listing_policy_overrides.sql",
+  // Product and category settings (PR 8a): 0738 takes 0657's (id, vendor_id) store index, 0739 the categories stub.
+  "0738_dropship_product_listing_settings.sql", "0739_dropship_category_listing_settings.sql",
 ];
 
 const STORE_RULES = 22; // vendor 10, eBay, store pricing rules
 const STORE_NO_RULES = 24; // vendor 10, eBay, no pricing rules
 const STORE_SHOPIFY = 25; // vendor 10, not eBay
 const STORE_OTHER_VENDOR = 23; // vendor 11
+const TOPLOADERS = 3; // Card Shellz category of product 7 (sizes 101-103); product 8 has none
 
 interface Statement { connection: number; sql: string }
 
@@ -198,6 +216,25 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
       ON CONFLICT (store_connection_id, product_variant_id) DO UPDATE SET revision_id = EXCLUDED.revision_id,
         store_category_names = EXCLUDED.store_category_names`, [STORE_RULES, productVariantId, revision.rows[0].id, JSON.stringify([shelf])]);
   }
+  /** One product's or one category's settings through PR 8a's writers, as PR 9's routes will save them. */
+  async function saveProductSetting(productId: number, patch: ProductListingSettingPatch, key: string, storeConnectionId = STORE_RULES) {
+    return new PgDropshipListingSettingWritesRepository(scopedPool()).execute(
+      { memberId: "member-1", storeConnectionId, idempotencyKey: `listing-settings:${key}` },
+      async (tx) => {
+        const current = (await tx.loadProducts([productId])).get(productId) ?? null;
+        return tx.saveProduct({ productId, expectedRevisionId: current?.revisionId ?? null, patch,
+          requestHash: listingSettingRequestHash({ key, patch }), now: NOW });
+      });
+  }
+  async function saveCategorySetting(categoryId: number, patch: CategoryListingSettingPatch, key: string, storeConnectionId = STORE_RULES) {
+    return new PgDropshipListingSettingWritesRepository(scopedPool()).execute(
+      { memberId: "member-1", storeConnectionId, idempotencyKey: `listing-settings:${key}` },
+      async (tx) => {
+        const current = (await tx.loadCategories([categoryId])).get(categoryId) ?? null;
+        return tx.saveCategory({ categoryId, expectedRevisionId: current?.revisionId ?? null, patch,
+          requestHash: listingSettingRequestHash({ key, patch }), now: NOW });
+      });
+  }
   /** Row contents of every table in the isolated schema, to prove a read changed nothing. */
   async function databaseState(): Promise<Record<string, string | null>> {
     const tables = await pool.query<{ table_name: string }>(
@@ -221,8 +258,9 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
       ssl: /localhost|127\.0\.0\.1/.test(testUrl) ? false : { rejectUnauthorized: true } });
     await pool.query(`CREATE SCHEMA "${schema}"`); created = true;
     // The columns the reads and writers use, with the owning migrations' types
-    // (0086, 0094, 0713, and the Shellz Club cost source). The settings tables
-    // come from their real migrations below, triggers included.
+    // (0086, 0094, 0108's categories and products.category_id, 0713, and the
+    // Shellz Club cost source). The settings tables come from their real
+    // migrations below, triggers included.
     await execute(`
       CREATE TABLE dropship.dropship_vendors (id integer PRIMARY KEY, member_id varchar(255) NOT NULL,
         current_subscription_id varchar(255), current_plan_id varchar(255), status varchar(30) NOT NULL,
@@ -238,8 +276,10 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
         marketplace_config jsonb NOT NULL DEFAULT '{}'::jsonb, required_config_keys jsonb NOT NULL DEFAULT '[]'::jsonb,
         required_product_fields jsonb NOT NULL DEFAULT '[]'::jsonb, is_active boolean NOT NULL DEFAULT true,
         updated_at timestamptz NOT NULL DEFAULT now());
+      CREATE TABLE catalog.product_categories (id integer PRIMARY KEY, name varchar(100) NOT NULL);
       CREATE TABLE catalog.products (id integer PRIMARY KEY, sku varchar(100), name text NOT NULL, title text,
-        description text, category varchar(100), ebay_browse_category_id varchar(50), ebay_browse_category_name text,
+        description text, category varchar(100), category_id integer REFERENCES catalog.product_categories(id) ON DELETE SET NULL,
+        ebay_browse_category_id varchar(50), ebay_browse_category_name text,
         brand text, condition text, item_specifics jsonb, is_active boolean NOT NULL DEFAULT true,
         product_type varchar(100), shopify_product_id varchar(100),
         inventory_tracking_default boolean NOT NULL DEFAULT true);
@@ -327,8 +367,10 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
       INSERT INTO channels.channels VALUES (67, 'Dropship', 'dropship', 'internal', 'active'), (69, 'Card Shellz eBay', 'ebay', 'internal', 'active');
       INSERT INTO ebay.ebay_category_mappings (channel_id, product_type_slug, ebay_browse_category_id, ebay_browse_category_name)
         VALUES (69, 'toploader', '183438', 'Toploaders');
-      INSERT INTO catalog.products (id, sku, name, category, product_type, shopify_product_id)
-        VALUES (7, 'TL', 'Toploader 3x4', 'Toploaders', 'toploader', '8000000007'), (8, 'SL', 'Penny sleeves', 'Sleeves', 'sleeve', '8000000008');
+      INSERT INTO catalog.product_categories (id, name) VALUES (3, 'Toploaders'), (5, 'Sleeves');
+      INSERT INTO catalog.products (id, sku, name, category, category_id, product_type, shopify_product_id)
+        VALUES (7, 'TL', 'Toploader 3x4', 'Toploaders', 3, 'toploader', '8000000007'),
+               (8, 'SL', 'Penny sleeves', 'Sleeves', NULL, 'sleeve', '8000000008');
       INSERT INTO catalog.product_variants (id, product_id, sku, name, shopify_variant_id, weight_grams, sales_eligibility)
         VALUES (101, 7, 'TL-25', 'Pack of 25', '7000000101', 120.5, 'sellable'),
                (102, 7, 'TL-100', 'Pack of 100', '7000000102', 480, 'sellable'),
@@ -508,11 +550,25 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
     ["the vendor's entitlement", () => execute("UPDATE dropship.dropship_vendors SET entitlement_status = 'lapsed' WHERE id = 10")],
     ["the store's connection", () => execute("UPDATE dropship.dropship_store_connections SET status = 'needs_reauth' WHERE id = 22")],
     ["the store's tokens", () => execute("UPDATE dropship.dropship_store_connections SET refresh_token_ref = NULL WHERE id = 22")],
+    ["a product setting", () => saveProductSetting(8, { returnPolicy: { id: "return-p", name: null } }, "change-product-8")],
+    ["a category setting", () => saveCategorySetting(TOPLOADERS, { storeShelf: { mode: "none" } }, "change-category-3")],
   ];
   it.each(changes)("changes the fingerprint when %s changes", async (_change, change) => {
     const before = await fingerprint();
     await change();
     expect(await fingerprint()).not.toBe(before);
+  });
+
+  it("changes the fingerprint when a product or category setting is reset to the default", async () => {
+    await saveProductSetting(8, { storeShelf: { mode: "none" } }, "reset-product-set");
+    await saveCategorySetting(TOPLOADERS, { storeShelf: { mode: "none" } }, "reset-category-set");
+    const before = await fingerprint();
+    // A reset is a new revision (0738 and 0739 refuse a delete), so the current row's revision id moves.
+    await saveProductSetting(8, { storeShelf: null }, "reset-product");
+    const afterProduct = await fingerprint();
+    expect(afterProduct).not.toBe(before);
+    await saveCategorySetting(TOPLOADERS, { storeShelf: null }, "reset-category");
+    expect(await fingerprint()).not.toBe(afterProduct);
   });
 
   const unrelated: Array<[string, () => Promise<unknown>]> = [
@@ -526,6 +582,8 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
       UPDATE dropship.dropship_vendor_listings SET last_pushed_at = now(), updated_at = now(), pushed_quantity = 7 WHERE store_connection_id = 22;
       UPDATE dropship.dropship_store_listing_configs SET updated_at = now() WHERE store_connection_id = 22`)],
     ["an inactive Card Shellz rule", () => execute("INSERT INTO dropship.dropship_catalog_rules (id, scope_type, action, is_active) VALUES (2, 'catalog', 'exclude', false)")],
+    ["another store's product setting", () => saveProductSetting(7, { storeShelf: { mode: "none" } }, "other-store-product-7", STORE_NO_RULES)],
+    ["another store's category setting", () => saveCategorySetting(TOPLOADERS, { storeShelf: { mode: "none" } }, "other-store-category-3", STORE_NO_RULES)],
   ];
   it.each(unrelated)("keeps the fingerprint when only %s changes", async (_change, change) => {
     const before = await fingerprint();
@@ -573,6 +631,74 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
     expect(row && { ...row, matchedSize: undefined }).toEqual({ ...detail.product, matchedSize: undefined });
     const prices = await service.listPricesForMember("member-1", { storeConnectionId: STORE_RULES });
     expect(detail.sizes.map((size) => size.price)).toEqual(prices.rows.filter((price) => price.productId === 7));
+  });
+
+  it("shows a product's own value as the product's and a category's as the category's, reading without a lock or a write", async () => {
+    await saveProductSetting(8, { returnPolicy: { id: "return-p", name: "Product returns" }, storeShelf: { mode: "none" } }, "sources-product-8");
+    await saveCategorySetting(TOPLOADERS, {
+      storeShelf: { mode: "own", shelves: [{ id: "12", name: "Supplies:Toploaders" }] },
+      ebayCategory: { categoryId: "261328", categoryName: "Card Sleeves", path: ["Collectibles", "Card Sleeves"] },
+      shippingPolicy: { id: "ship-c", name: null },
+    }, "sources-category-3");
+    // The category's live name is shown, not the one its revision kept at save (plan D19).
+    await execute("UPDATE catalog.product_categories SET name = 'Top loaders' WHERE id = 3");
+    const before = await databaseState();
+    const statements: Statement[] = [];
+    const result = okLoad(await load(STORE_RULES, { statements }));
+    for (const { sql } of statements) {
+      expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|LOCK TABLE|FOR UPDATE|FOR SHARE|pg_advisory\w*)\b/i);
+    }
+    expect(await databaseState()).toEqual(before);
+    expect(statements.some((statement) => /\bdropship\.dropship_product_listing_settings\b/.test(statement.sql))).toBe(true);
+    expect(statements.some((statement) => /\bdropship\.dropship_category_listing_settings\b/.test(statement.sql))).toBe(true);
+    expect([...result.inputs.layers.products.keys()]).toEqual([8]);
+    expect([...result.inputs.layers.categories.keys()]).toEqual([TOPLOADERS]);
+    expect(result.inputs.categoryNames).toEqual(new Map([[TOPLOADERS, "Top loaders"]]));
+
+    const facts = buildListingSettingsFacts(result.inputs);
+    const sleeves = selectListingSettingsProduct(facts, 8)!;
+    expect(sleeves.settings.returnPolicy).toEqual([{ value: { policyId: "return-p" },
+      sources: [{ source: "product", ruleName: null, productVariantIds: [201] }] }]);
+    expect(sleeves.settings.storeShelf).toEqual([{ value: { names: [] }, sources: [{ source: "product", ruleName: null, productVariantIds: [201] }] }]);
+    // Product 8 has no Card Shellz category, so the category's settings do not reach it.
+    expect(sleeves.settings.shippingPolicy[0].sources).toEqual([{ source: "store_default", ruleName: null, productVariantIds: [201] }]);
+    // Its size keeps its own main text (saved in beforeEach), so the description is its own too.
+    expect(sleeves.product.ownSettings).toEqual(["return_policy", "store_shelf", "description"]);
+    const toploaders = selectListingSettingsProduct(facts, 7)!;
+    expect(toploaders.settings.shippingPolicy).toEqual([
+      { value: { policyId: "ship-c" }, sources: [{ source: "category", ruleName: "Top loaders", productVariantIds: [101, 103] }] },
+      // Size 102's own leftover policy is closer than the category's.
+      { value: { policyId: "ship-b" }, sources: [{ source: "size", ruleName: null, productVariantIds: [102] }] },
+    ]);
+    expect(toploaders.settings.storeShelf).toEqual([
+      { value: { names: ["Supplies:Toploaders"] }, sources: [{ source: "category", ruleName: "Top loaders", productVariantIds: [102, 103] }] },
+      { value: { names: ["Toploaders"] }, sources: [{ source: "size", ruleName: null, productVariantIds: [101] }] },
+    ]);
+    expect(toploaders.settings.ebayCategory).toEqual([{ value: { categoryId: "261328", categoryName: "Card Sleeves" },
+      sources: [{ source: "category", ruleName: "Top loaders", productVariantIds: [101, 102, 103] }] }]);
+    for (const selection of [sleeves, toploaders]) {
+      expect(listingSettingsProductDetailSchema.safeParse({ storeConnectionId: STORE_RULES, ...selection,
+        sizes: selection.sizes.map((size) => ({ ...size, stockUnits: 0 })),
+        stock: { state: "ok", checkedAt: NOW.toISOString() }, generatedAt: NOW.toISOString() }).success).toBe(true);
+    }
+  });
+
+  it("gives a size priced by its category's own price the price the per-size price read gives, in a store without rules", async () => {
+    await saveCategorySetting(TOPLOADERS, { price: { basis: "catalog_retail", markupBps: 0, flatCents: 100, rounding: "cent" } },
+      "category-price-3", STORE_NO_RULES);
+    const facts = buildListingSettingsFacts(okLoad(await load(STORE_NO_RULES)).inputs);
+    // Example numbers: retail $8.99 + $1.00 is $9.99 and $29.99 + $1.00 is $30.99; the 200 pack has no retail price to start from.
+    const expected = { 101: [999, "rules"], 102: [3099, "rules"], 103: [null, "none"], 201: [599, "exact"] } as const;
+    for (const price of facts.sizes.map((size) => size.price)) {
+      const single = await priceService().getForMember("member-1", { storeConnectionId: STORE_NO_RULES, productVariantId: price.productVariantId });
+      expect([price.priceCents, price.source]).toEqual(expected[price.productVariantId as 101 | 102 | 103 | 201]);
+      expect(price.priceCents).toBe(single.effectivePriceCents);
+      if (price.productId === 7) {
+        expect(price.rule).toMatchObject({ kind: "category", name: "Toploaders" });
+        expect(single).toMatchObject({ ruleName: "Category price", ruleLevel: "category" });
+      }
+    }
+    expect(facts.sizes.find((size) => size.price.productVariantId === 103)!.price.issue).toBe("pricing_basis_unavailable");
   });
 
   it("has every Dropship table a load reads in the fingerprint", async () => {

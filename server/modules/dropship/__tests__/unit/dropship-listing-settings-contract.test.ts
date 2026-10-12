@@ -4,15 +4,22 @@ import {
   LISTING_SETTINGS_FIELDS,
   LISTING_SETTINGS_PAGE_SIZE,
   LISTING_SETTINGS_SETTING_KEYS,
+  LISTING_SETTINGS_VALUE_SOURCES,
   MAX_LISTING_SETTINGS_PAGE,
   listingSettingsPricesInputSchema,
   listingSettingsPricesResponseSchema,
+  listingSettingsProductDetailSchema,
   listingSettingsProductInputSchema,
   listingSettingsProductSettingsSchema,
   listingSettingsProductsInputSchema,
   listingSettingsSizePriceSchema,
   listingSettingsSummarySchema,
 } from "../../../../../shared/dropship/listing-settings";
+import { RULE_PRICE_LEVELS, listingPriceSettingSchema } from "../../../../../shared/dropship/listing-price";
+import { pricingImpactRowSchema, resolvePricingRule, type PricingProfile } from "../../../../../shared/dropship/pricing-rules";
+import { ebayCategoryRulesReviewSchema, ebayCategorySourceValues } from "../../../../../shared/dropship/ebay-category-rules";
+import { prepareEbayCategoryRules, summarizeEbayCategoryRulesReview } from "../../application/dropship-ebay-category-resolver";
+import { MAILERS, SLEEVES, categoryCandidate, rulesProfile } from "../fixtures/ebay-category-rules.fixture";
 
 const sizePrice = {
   productVariantId: 11, productId: 7, productName: "Toploader 35pt", sizeName: "Pack of 25", sku: "TL-35-25",
@@ -142,5 +149,137 @@ describe("listing settings contracts: one product", () => {
     expect(policy.safeParse(value("group_rule", null)).success).toBe(false);
     expect(policy.safeParse(value("store_default", "Toploaders")).success).toBe(false);
     expect(policy.safeParse([]).success).toBe(false);
+  });
+});
+
+/**
+ * PR 8b widens the read contracts for product and category settings (plan 4.2).
+ * Nothing sends the new values until such settings are saved, and every payload
+ * built from today's sources parses, and reads, as before.
+ */
+describe("listing settings contracts: product and category values", () => {
+  const RECIPE = { basis: "product_cost", markupBps: 2_000, flatCents: 100, rounding: "cent" } as const;
+  const value = (source: string, ruleName: string | null) =>
+    [{ value: { policyId: "F1" }, sources: [{ source, ruleName, productVariantIds: [11] }] }];
+  const unset = <T>(value: T, source = "none") => [{ value, sources: [{ source, ruleName: null, productVariantIds: [11] }] }];
+  /** A one-size product whose shipping policy comes from `source`; every other setting is unset. */
+  const detail = (source: string, ruleName: string | null, ownSettings: string[]) => ({
+    storeConnectionId: 5,
+    product: { productId: 7, productName: "Toploader 35pt", category: "Toploaders", sizesChosen: 1, sizesTotal: 1,
+      priceRange: { minCents: 1_499, maxCents: 1_499 }, exactPriceCount: 1, ownSettings, sizesDiffer: [], fixes: [] },
+    settings: {
+      shippingPolicy: value(source, ruleName),
+      returnPolicy: unset({ policyId: null }),
+      paymentPolicy: unset({ policyId: null }),
+      ebayCategory: unset({ categoryId: null, categoryName: null }),
+      storeShelf: unset({ names: [] }),
+      descriptionTemplate: unset({ hasIntroduction: false, hasFooter: false, groupConflict: false }),
+      mainText: unset({ own: false }, "catalog"),
+    },
+    sizes: [{ price: sizePrice, fixes: [], stockUnits: 4 }],
+    stock: { state: "ok", checkedAt: "2026-10-06T12:00:00.000Z" },
+    generatedAt: "2026-10-06T12:00:00.000Z",
+  });
+
+  it("lists the sources closest first and keeps today's sources in today's order", () => {
+    expect(LISTING_SETTINGS_VALUE_SOURCES).toEqual(["size", "product", "group_rule", "category", "store_default", "catalog", "none"]);
+    const today = ["size", "group_rule", "store_default", "catalog", "none"];
+    expect(LISTING_SETTINGS_VALUE_SOURCES.filter((source) => today.includes(source))).toEqual(today);
+  });
+
+  it("takes a product value unnamed and a category value named by the category", () => {
+    const policy = listingSettingsProductSettingsSchema.shape.shippingPolicy;
+    expect(policy.safeParse(value("product", null)).success).toBe(true);
+    expect(policy.safeParse(value("product", "Toploader 35pt")).success).toBe(false);
+    expect(policy.safeParse(value("category", "Toploaders")).success).toBe(true);
+    expect(policy.safeParse(value("category", null)).success).toBe(false);
+    expect(policy.safeParse(value("product_default", null)).success).toBe(false);
+  });
+
+  it("counts a product's own value as its own setting, and a category's value as not", () => {
+    expect(listingSettingsProductDetailSchema.safeParse(detail("product", null, ["shipping_policy"])).success).toBe(true);
+    expect(listingSettingsProductDetailSchema.safeParse(detail("product", null, [])).success).toBe(false);
+    expect(listingSettingsProductDetailSchema.safeParse(detail("category", "Toploaders", [])).success).toBe(true);
+    expect(listingSettingsProductDetailSchema.safeParse(detail("category", "Toploaders", ["shipping_policy"])).success).toBe(false);
+    // Today's payloads read as before.
+    expect(listingSettingsProductDetailSchema.safeParse(detail("size", null, ["shipping_policy"])).success).toBe(true);
+    expect(listingSettingsProductDetailSchema.safeParse(detail("store_default", null, [])).success).toBe(true);
+    expect(listingSettingsProductDetailSchema.safeParse(detail("group_rule", "Envelopes", [])).success).toBe(true);
+  });
+
+  it("names a product or a category price rule, and keeps today's kinds", () => {
+    const priced = (kind: string) => ({ ...sizePrice, source: "rules", basis: "product_cost", basisAmountCents: 1_200, settingRevisionId: null,
+      rule: { kind, name: "Toploaders", recipe: RECIPE } });
+    for (const kind of ["store_default", "group", "product", "category"]) {
+      expect(listingSettingsSizePriceSchema.parse(priced(kind))).toEqual(priced(kind));
+    }
+    expect(listingSettingsSizePriceSchema.safeParse(priced("size")).success).toBe(false);
+  });
+
+  it("sends the rule level on a price answer and a review row only for the new levels", () => {
+    expect(RULE_PRICE_LEVELS).toEqual(["product", "category"]);
+    const answer = { storeConnectionId: 5, productVariantId: 11, revisionId: null, overridePriceCents: null,
+      effectivePriceCents: 1_499, defaultPriceCents: 1_299, source: "rules", ruleName: "Store default rule", updatedAt: null };
+    const parsedAnswer = listingPriceSettingSchema.parse(answer);
+    expect(parsedAnswer).toEqual(answer);
+    expect("ruleLevel" in parsedAnswer).toBe(false);
+    expect(listingPriceSettingSchema.parse({ ...answer, ruleName: "Category price", ruleLevel: "category" }).ruleLevel).toBe("category");
+    expect(listingPriceSettingSchema.safeParse({ ...answer, ruleLevel: "store_default" }).success).toBe(false);
+
+    const row = { productVariantId: 11, title: "Toploader 35pt", sku: "TL-35-25", previousPriceCents: 1_299, priceCents: 1_499,
+      productCostCents: 1_200, ruleName: "Store default rule", preserved: false, issues: [], settingRevisionId: null,
+      evidenceHash: "a".repeat(64) };
+    const parsedRow = pricingImpactRowSchema.parse(row);
+    // A stored review row from before this field existed parses unchanged, so it hashes the same.
+    expect(JSON.stringify(parsedRow)).toBe(JSON.stringify(row));
+    expect(pricingImpactRowSchema.parse({ ...row, ruleName: "Product price", ruleLevel: "product" }).ruleLevel).toBe("product");
+    expect(pricingImpactRowSchema.safeParse({ ...row, ruleLevel: "group" }).success).toBe(false);
+  });
+
+  it("leaves the rule level off every result the store's pricing rules give", () => {
+    const profile: PricingProfile = { defaultRecipe: RECIPE, groups: [
+      { id: "sleeves", name: "Sleeves", priority: 1, scope: { type: "category", category: "Sleeves" }, recipe: RECIPE },
+      { id: "tie-a", name: "Tie A", priority: 2, scope: { type: "category", category: "Binders" }, recipe: RECIPE },
+      { id: "tie-b", name: "Tie B", priority: 2, scope: { type: "category", category: "Binders" }, recipe: RECIPE },
+    ] };
+    const resolve = (category: string, withProfile = true) => resolvePricingRule({ profile: withProfile ? profile : null,
+      candidate: { productVariantId: 11, productId: 7, category, categoryId: 3, productLineIds: [] },
+      productCostCents: 1_000, catalogRetailCents: 1_499 });
+    for (const result of [resolve("Mailers"), resolve("Sleeves"), resolve("Binders"), resolve("Mailers", false)]) {
+      expect("ruleLevel" in result).toBe(false);
+    }
+  });
+
+  it("reads an eBay category review without product or category counts as before", () => {
+    expect(ebayCategorySourceValues).toEqual(["product", "rule", "category", "store_default", "catalog", "none"]);
+    const review = { expectedRevisionId: null, selectedCount: 3, changedCount: 1, unchangedCount: 2, withoutCategoryBefore: 1,
+      withoutCategoryAfter: 0, bySource: { rule: 1, store_default: 2, catalog: 0, none: 0 }, byRule: [], byCategory: [],
+      otherCategoriesCount: 0, changes: [] };
+    expect(JSON.stringify(ebayCategoryRulesReviewSchema.parse(review))).toBe(JSON.stringify(review));
+    const withNew = { ...review, bySource: { ...review.bySource, product: 2, category: 1 } };
+    expect(ebayCategoryRulesReviewSchema.parse(withNew)).toEqual(withNew);
+    expect(ebayCategoryRulesReviewSchema.safeParse({ ...review, bySource: { ...review.bySource, size: 1 } }).success).toBe(false);
+    expect(ebayCategoryRulesReviewSchema.safeParse({ ...review, bySource: { ...review.bySource, product: -1 } }).success).toBe(false);
+    const change = { productVariantId: 11, sku: null, title: "Toploader 35pt",
+      before: { categoryId: null, categoryName: null, source: "none", ruleId: null },
+      after: { categoryId: SLEEVES.categoryId, categoryName: SLEEVES.categoryName, source: "category", ruleId: null } };
+    expect(ebayCategoryRulesReviewSchema.safeParse({ ...review, changes: [change] }).success).toBe(true);
+  });
+
+  it("builds today's eBay category review counts, with no product or category key", () => {
+    const review = summarizeEbayCategoryRulesReview({
+      expectedRevisionId: null,
+      candidates: [
+        categoryCandidate({ productVariantId: 1, category: "Mailers", categoryId: 3 }),
+        categoryCandidate({ productVariantId: 2, category: "Sleeves", categoryId: 4 }),
+        categoryCandidate({ productVariantId: 3, category: "Binders", categoryId: null, ebayBrowseCategoryId: null, ebayBrowseCategoryName: null }),
+      ],
+      before: prepareEbayCategoryRules(null, null),
+      after: prepareEbayCategoryRules(2, rulesProfile({ defaultCategory: MAILERS,
+        rules: [{ id: "sleeves", name: "Sleeves", scope: { type: "category", category: "Sleeves" }, category: SLEEVES }] })),
+    });
+    expect(Object.keys(review.bySource)).toEqual(["rule", "store_default", "catalog", "none"]);
+    expect(review.bySource).toEqual({ rule: 1, store_default: 2, catalog: 0, none: 0 });
+    expect(ebayCategoryRulesReviewSchema.parse(review)).toEqual(review);
   });
 });

@@ -2,6 +2,8 @@ import type { PoolClient } from "pg";
 import { contentProfileStateSchema, descriptionTextSchema, type ContentProfileState, type SavedListingContent } from "../../../../shared/dropship/listing-content";
 import { prepareContentProfile, resolveListingContent } from "../application/dropship-listing-content-resolver";
 import type { DropshipListingCatalogCandidate } from "../application/dropship-listing-preview-service";
+import type { ListingSettingLayers } from "../application/dropship-listing-setting-layers";
+import { readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
 
 type Reader = Pick<PoolClient, "query">;
 export async function readContentProfile(client: Reader, vendorId: number, storeId: number): Promise<ContentProfileState> {
@@ -34,12 +36,23 @@ export async function readListingContentSettings(client: Reader, vendorId: numbe
      WHERE s.vendor_id = $1 AND s.store_connection_id = $2 AND s.product_variant_id = ANY($3::int[])`, [vendorId, storeId, ids]);
   return new Map(result.rows.map((row) => [row.product_variant_id, mapContentRevision(row)]));
 }
+/**
+ * Each candidate's description under the store's templates, its own size text
+ * and its product and category settings. `layers` is the preview's one read of
+ * those settings (plan PR 8b, D26); without it they are read here, after
+ * today's two reads, on the caller's client, so they share its transaction:
+ * the queue's re-check reads them under the store lock, and a product text
+ * change then refuses the queued evidence.
+ */
 export async function readResolvedListingContents(client: Reader, input: {
-  vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[];
+  vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[]; layers?: ListingSettingLayers;
 }) {
   const profile = await readContentProfile(client, input.vendorId, input.storeConnectionId);
   const preparedProfile = prepareContentProfile(profile);
   const settings = await readListingContentSettings(client, input.vendorId, input.storeConnectionId, input.candidates.map((row) => row.productVariantId));
+  const layers = input.layers ?? await readListingSettingLayers(client, {
+    vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, candidates: input.candidates,
+  });
   return new Map(input.candidates.map((candidate) => [candidate.productVariantId,
-    resolveListingContent({ candidate, profile, preparedProfile, saved: settings.get(candidate.productVariantId) ?? null })]));
+    resolveListingContent({ candidate, profile, preparedProfile, saved: settings.get(candidate.productVariantId) ?? null, layers })]));
 }

@@ -454,6 +454,13 @@ export function drawerSourceWords(
     case "size":
       // Interim: the values left on single sizes by today's per-size settings.
       return { tag: "Set on each size", note: null };
+    // Interim tags (R:§3.7) until the full drawer (PR 10). The server sends these
+    // sources only once product or category settings are saved (PR 9).
+    case "product":
+      return { tag: "This product", note: null };
+    case "category":
+      // The server names the category; a nameless one still says where the value comes from.
+      return { tag: source.ruleName ? `From category: ${source.ruleName}` : "From its Card Shellz category", note: null };
     case "catalog":
       // The main text says "Card Shellz text" itself.
       return { tag: key === "ebayCategory" ? "Card Shellz picks" : null, note: null };

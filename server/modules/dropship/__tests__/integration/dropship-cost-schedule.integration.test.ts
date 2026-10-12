@@ -59,11 +59,13 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
     await pool.query(qualify(`
       CREATE TABLE dropship.dropship_vendors (
         id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, business_name varchar(200), status varchar(30) NOT NULL DEFAULT 'active');
-      CREATE TABLE catalog.products (id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, name text NOT NULL);
+      CREATE TABLE catalog.products (id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, name text NOT NULL, category_id integer);
+      CREATE TABLE catalog.product_categories (id integer PRIMARY KEY, name varchar(100) NOT NULL);
       CREATE TABLE catalog.product_variants (
         id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, product_id integer NOT NULL REFERENCES catalog.products(id),
         sku varchar(100), name text NOT NULL);
-      CREATE TABLE dropship.dropship_store_connections (id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, vendor_id integer NOT NULL);
+      CREATE TABLE dropship.dropship_store_connections (id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, vendor_id integer NOT NULL,
+        UNIQUE (id, vendor_id));
       INSERT INTO dropship.dropship_store_connections (vendor_id) VALUES (1), (1), (2), (3);
       CREATE TABLE dropship.dropship_listing_push_jobs (id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, vendor_id integer NOT NULL);
       INSERT INTO dropship.dropship_listing_push_jobs (vendor_id) VALUES (1);
@@ -92,14 +94,16 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
         (1, 2, '{"defaultRecipe":{"basis":"product_cost","markupBps":4000,"flatCents":0,"rounding":"cent"},"groups":[]}', '2026-09-01T00:00:00Z');
       INSERT INTO dropship.dropship_pricing_profiles (store_connection_id, vendor_id, revision_id) VALUES (2, 1, 1);
     `));
+    // 0738 and 0739 hold the product and category listing settings loadVendorFacts reads (PR 8b); their owner
+    // FKs reference the store connections' (id, vendor_id) key above.
     for (const file of ["0710_dropship_cost_change_policy.sql", "0711_dropship_cost_schedule.sql", "0712_dropship_cost_change_notices.sql",
-      "0713_dropship_cost_change_listing_actions.sql"]) {
+      "0713_dropship_cost_change_listing_actions.sql", "0738_dropship_product_listing_settings.sql", "0739_dropship_category_listing_settings.sql"]) {
       await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations", file), "utf8")));
     }
     repository = new PgDropshipCostScheduleRepository(qualifiedPool());
     notices = new PgDropshipCostChangeNoticeRepository(qualifiedPool());
     actions = new PgDropshipCostChangeListingActionRepository(qualifiedPool(), {
-      listCatalogCandidates: async (ids) => ids.map((id) => ({ productVariantId: id, productId: 1, category: null, productLineIds: [], defaultRetailPriceCents: 899 })),
+      listCatalogCandidates: async (ids) => ids.map((id) => ({ productVariantId: id, productId: 1, category: null, categoryId: null, productLineIds: [], defaultRetailPriceCents: 899 })),
       listPricingPolicies: async () => [],
     });
   });
@@ -361,6 +365,10 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
     expect(facts.savedPrices).toEqual([{ storeConnectionId: 2, productVariantId: 1, overridePriceCents: null, pricingMode: "rules" }]);
     expect(facts.profiles.get(2)?.profile?.defaultRecipe.basis).toBe("product_cost");
     expect(facts.candidates.get(1)?.defaultRetailPriceCents).toBe(899);
+    // Every store with a listing gets its product and category settings; none are saved here.
+    expect(facts.layersByStore).toEqual(new Map([
+      [1, { products: new Map(), categories: new Map() }], [2, { products: new Map(), categories: new Map() }],
+    ]));
 
     const decidedAt = AFTER;
     const record = {

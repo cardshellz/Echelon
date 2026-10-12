@@ -245,6 +245,8 @@ function projectSetting(target: ListingPriceTarget, sources: PriceSources, saved
     ruleName: sources.rulePrice?.ruleName ?? null, pricingIssue: rulePriceIssue(sources.rulePrice),
     rulePriceCents: sources.rulePrice?.priceCents ?? null, rulesConfigured: sources.rulePrice !== null,
     ruleBasis: sources.rulePrice?.basis ?? null, productCostCents: costCents.success ? costCents.data : null,
+    // Only for a product's or a category's own price, so a store-rule answer is unchanged.
+    ...(sources.rulePrice?.ruleLevel ? { ruleLevel: sources.rulePrice.ruleLevel } : {}),
     ...resolveListingPrice({ ...sources, saved }), updatedAt: saved?.updatedAt ?? null,
   });
 }

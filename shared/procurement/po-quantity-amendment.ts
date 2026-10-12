@@ -63,6 +63,13 @@ export const poQuantityAmendmentContextSchema = z.object({
   canApprove: z.boolean(),
   blockedReason: z.string().nullable(),
   lines: z.array(poQuantityLineViewSchema),
+  totalCents: money.optional(),
+  invoiceIssues: z.array(z.object({
+    invoiceId: poAmendmentIdSchema, invoiceNumber: z.string(), invoiceLineId: poAmendmentIdSchema,
+    lineNumber: poAmendmentIdSchema, poLineId: poAmendmentIdSchema.nullable(), name: z.string(), status: z.string(),
+    invoiceQuantity: money, orderedQuantity: money.nullable(), receivedQuantity: money.nullable(),
+    invoiceLineAmountCents: money, poLineAmountCents: signedMoney.nullable(), currency: z.string(),
+  }).strict()).optional(),
 });
 export const poQuantityAmendmentPreviewSchema = z.object({
   purchaseOrderId: poAmendmentIdSchema,

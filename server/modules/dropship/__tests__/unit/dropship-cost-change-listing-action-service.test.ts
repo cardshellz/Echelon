@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_DROPSHIP_COST_CHANGE_POLICY, type DropshipCostChangePolicySettings } from "../../../../../shared/dropship/cost-change-policy";
-import type { PricingProfileState } from "../../../../../shared/dropship/pricing-rules";
+import type { PricingProfileState, PricingRecipe } from "../../../../../shared/dropship/pricing-rules";
 import {
   COST_CHANGE_HOLD_ACTOR_ID,
   COST_LISTING_NOTICE_LISTED,
@@ -23,6 +23,7 @@ import {
   type NewCostChangeListingHold,
 } from "../../application/dropship-cost-change-listing-action-service";
 import type { DropshipPricingPolicyRecord } from "../../application/dropship-listing-preview-service";
+import type { ListingSettingLayers } from "../../application/dropship-listing-setting-layers";
 import type { DropshipLogEvent, DropshipNotificationSenderInput } from "../../application/dropship-ports";
 import { costChangeRepriceIdempotencyKey, idSetHash } from "../../domain/cost-change-listing-action";
 
@@ -50,7 +51,7 @@ function listing(listingId: number, productVariantId: number, patch: Partial<Cos
 }
 
 function candidate(productVariantId: number) {
-  return { productVariantId, productId: 1, category: null, productLineIds: [], defaultRetailPriceCents: 899 };
+  return { productVariantId, productId: 1, category: null, categoryId: null, productLineIds: [], defaultRetailPriceCents: 899 };
 }
 
 class FakeRepository implements DropshipCostChangeListingActionRepository {
@@ -69,7 +70,8 @@ class FakeRepository implements DropshipCostChangeListingActionRepository {
   async listEffectiveIncreasesWithoutAction(input: { now: Date; limit: number }) { this.reads.push(input); return this.entries.slice(0, input.limit); }
   async loadVendorFacts(input: { vendorId: number; productVariantIds: readonly number[] }) {
     this.reads.push(input);
-    const facts = this.facts.get(input.vendorId) ?? { listings: [], savedPrices: [], profiles: new Map(), candidates: new Map(), pricingPolicies: [] };
+    const facts = this.facts.get(input.vendorId)
+      ?? { listings: [], savedPrices: [], profiles: new Map(), layersByStore: new Map(), candidates: new Map(), pricingPolicies: [] };
     return { ...facts, listings: facts.listings.filter((row) => input.productVariantIds.includes(row.productVariantId)) };
   }
   async recordEntryActions(input: { vendorId: number; entries: readonly CostChangeEntryActionRecord[]; listingActions: readonly CostChangeListingActionRecord[]; holds: readonly NewCostChangeListingHold[] }) {
@@ -174,6 +176,7 @@ describe("DropshipCostChangeListingActionService", () => {
           .map((row) => ({ storeConnectionId: 9, productVariantId: row.productVariantId, overridePriceCents: row.vendorRetailPriceCents, pricingMode: "fixed" as const })),
       ],
       profiles: patch.profiles ?? new Map([[9, costRules]]),
+      layersByStore: patch.layersByStore ?? new Map(),
       candidates: patch.candidates ?? new Map([61, 62, 63, 64].map((id) => [id, candidate(id)])),
       pricingPolicies: patch.pricingPolicies ?? [],
     };
@@ -505,7 +508,7 @@ describe("classifyListing", () => {
   it("prices a rule-priced listing at the cost being judged, not at what it sold for", () => {
     const facts: CostActionVendorFacts = {
       listings: [], savedPrices: [{ storeConnectionId: 9, productVariantId: 61, overridePriceCents: null, pricingMode: "rules" }],
-      profiles: new Map([[9, costRules]]), candidates: new Map([[61, candidate(61)]]), pricingPolicies: [],
+      profiles: new Map([[9, costRules]]), layersByStore: new Map(), candidates: new Map([[61, candidate(61)]]), pricingPolicies: [],
     };
     expect(classifyListing(facts, listing(1, 61), 999)).toEqual({ source: "rules_cost", priceCents: 1399, followsCost: true });
     expect(classifyListing({ ...facts, profiles: new Map() }, listing(1, 61), 999)).toEqual({ source: "unavailable", priceCents: null, followsCost: false });
@@ -516,7 +519,8 @@ describe("classifyListing", () => {
       productLineId: null, productId: null, productVariantId: null, category: null, mode, floorPriceCents: null, ceilingPriceCents: 1200 });
     const facts: CostActionVendorFacts = {
       listings: [], savedPrices: [{ storeConnectionId: 9, productVariantId: 61, overridePriceCents: null, pricingMode: "inherit" }],
-      profiles: new Map([[9, costRules]]), candidates: new Map([[61, candidate(61)]]), pricingPolicies: [ceiling("block_listing_push")],
+      profiles: new Map([[9, costRules]]), layersByStore: new Map(), candidates: new Map([[61, candidate(61)]]),
+      pricingPolicies: [ceiling("block_listing_push")],
     };
     // $13.99 at the new cost is above the $12.00 maximum, so the listing is priced, and judged, at its $8.99 retail price.
     expect(classifyListing(facts, listing(1, 61), 999)).toEqual({ source: "catalog_default", priceCents: 899, followsCost: false });
@@ -527,6 +531,52 @@ describe("classifyListing", () => {
       .toEqual({ source: "rules_cost", priceCents: 1399, followsCost: true });
     // Below the maximum the rule price is usable again.
     expect(classifyListing(facts, listing(1, 61), 800)).toEqual({ source: "rules_cost", priceCents: 1120, followsCost: true });
+  });
+
+  /** One product's own price, or with `categoryId` that category's, as the listing settings layers hold it (no other setting). */
+  function priceLayers(productId: number, price: PricingRecipe, categoryId?: number): ListingSettingLayers {
+    const values = { price, ebayCategory: null, storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null,
+      textAbove: null, textBelow: null };
+    return {
+      products: categoryId === undefined
+        ? new Map([[productId, { storeConnectionId: 9, productId, revisionId: 1, updatedAt: EFFECTIVE.toISOString(), values: { ...values, mainText: null } }]])
+        : new Map(),
+      categories: categoryId === undefined
+        ? new Map()
+        : new Map([[categoryId, { storeConnectionId: 9, categoryId, revisionId: 1, updatedAt: EFFECTIVE.toISOString(), values }]]),
+    };
+  }
+
+  it("classifies a listing in a store with no pricing rules on its product's own price, following the cost when that price does", () => {
+    const facts: CostActionVendorFacts = {
+      listings: [], savedPrices: [{ storeConnectionId: 9, productVariantId: 61, overridePriceCents: null, pricingMode: "rules" }],
+      profiles: new Map(), candidates: new Map([[61, candidate(61)]]), pricingPolicies: [],
+      layersByStore: new Map([[9, priceLayers(1, { basis: "product_cost", markupBps: 5000, flatCents: 0, rounding: "cent" })]]),
+    };
+    // $9.99 + 50% = $14.985, rounded half-up.
+    expect(classifyListing(facts, listing(1, 61), 999)).toEqual({ source: "rules_cost", priceCents: 1499, followsCost: true });
+    // Without the product's price the store has no rules at all.
+    expect(classifyListing({ ...facts, layersByStore: new Map() }, listing(1, 61), 999))
+      .toEqual({ source: "unavailable", priceCents: null, followsCost: false });
+    // Another store's settings never price this store's listing.
+    expect(classifyListing({ ...facts, layersByStore: new Map([[10, facts.layersByStore.get(9)!]]) }, listing(1, 61), 999))
+      .toEqual({ source: "unavailable", priceCents: null, followsCost: false });
+  });
+
+  it("classifies a category's retail-based price as not following the cost, and the product's own price beats the store's rules", () => {
+    const retailCategory = priceLayers(1, { basis: "catalog_retail", markupBps: 0, flatCents: 0, rounding: "cent" }, 4);
+    const inCategory = { ...candidate(61), categoryId: 4 };
+    const facts: CostActionVendorFacts = {
+      listings: [], savedPrices: [{ storeConnectionId: 9, productVariantId: 61, overridePriceCents: null, pricingMode: "rules" }],
+      profiles: new Map(), candidates: new Map([[61, inCategory]]), pricingPolicies: [], layersByStore: new Map([[9, retailCategory]]),
+    };
+    expect(classifyListing(facts, listing(1, 61), 999)).toEqual({ source: "rules_retail", priceCents: 899, followsCost: false });
+    // A size with no Card Shellz category ignores the category's price.
+    expect(classifyListing({ ...facts, candidates: new Map([[61, candidate(61)]]) }, listing(1, 61), 999))
+      .toEqual({ source: "unavailable", priceCents: null, followsCost: false });
+    const ownPrice = priceLayers(1, { basis: "catalog_retail", markupBps: 1000, flatCents: 0, rounding: "cent" });
+    expect(classifyListing({ ...facts, profiles: new Map([[9, costRules]]), layersByStore: new Map([[9, ownPrice]]) }, listing(1, 61), 999))
+      .toEqual({ source: "rules_retail", priceCents: 989, followsCost: false });
   });
 });
 

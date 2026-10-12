@@ -11,9 +11,11 @@ import {
   type SaveEbayCategoryRulesProfileInput,
 } from "../../application/dropship-ebay-category-rules-service";
 import type { DropshipListingCatalogCandidate, DropshipListingStoreContext } from "../../application/dropship-listing-preview-service";
+import { EMPTY_LISTING_SETTING_LAYERS, type ListingSettingLayers } from "../../application/dropship-listing-setting-layers";
 import type { DropshipStoreListingConfig } from "../../application/dropship-marketplace-listing-provider";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
 import { DropshipError } from "../../domain/errors";
+import { EMPTY_CATEGORY_LISTING_SETTING_VALUES, EMPTY_PRODUCT_LISTING_SETTING_VALUES } from "../../domain/listing-setting-values";
 import type { EbayCategoryBrowseResult, EbayCategoryOption, EbayCategoryRulesState } from "../../../../../shared/dropship/ebay-category-rules";
 import { MAILERS, SLEEVES, TOPLOADERS, categoryCandidate, categoryOption, rulesProfile, rulesState } from "../fixtures/ebay-category-rules.fixture";
 
@@ -30,6 +32,8 @@ class FakeRepository implements EbayCategoryRulesRepository {
   revisions = new Map<string, { hash: string; storeConnectionId: number }>();
   executions: Array<{ mode: "read" | "write"; idempotencyKey?: string }> = [];
   saves: SaveEbayCategoryRulesProfileInput[] = [];
+  layers: ListingSettingLayers = EMPTY_LISTING_SETTING_LAYERS;
+  layerReads: Array<Array<{ productId: number; categoryId: number | null }>> = [];
 
   async execute<T>(
     input: Parameters<EbayCategoryRulesRepository["execute"]>[0],
@@ -51,6 +55,10 @@ class FakeRepository implements EbayCategoryRulesRepository {
       listProductLines: async () => [],
       loadState: async () => this.state,
       loadStoreListingConfig: async () => this.config,
+      loadListingSettingLayers: async (candidates) => {
+        this.layerReads.push(candidates.map(({ productId, categoryId }) => ({ productId, categoryId })));
+        return this.layers;
+      },
       findReplay: async (key, hash) => {
         const revision = this.revisions.get(key);
         if (!revision) return false;
@@ -237,6 +245,44 @@ describe("DropshipEbayCategoryRulesService review", () => {
       bySource: { rule: 1, store_default: 1, catalog: 0, none: 0 } });
     expect(fixture.repository.saves).toEqual([]);
     expect(fixture.repository.executions.every((execution) => execution.mode === "read")).toBe(true);
+  });
+
+  it("reads the product and category settings once and resolves before and after with them", async () => {
+    const fixture = makeFixture();
+    fixture.repository.candidates = [
+      categoryCandidate({ productVariantId: 1, productId: 7, category: "Mailers", categoryId: null }),
+      categoryCandidate({ productVariantId: 2, productId: 8, category: "Boxes", categoryId: 31, ebayBrowseCategoryId: null, ebayBrowseCategoryName: null }),
+      categoryCandidate({ productVariantId: 3, productId: 9, category: "Boxes", categoryId: null, ebayBrowseCategoryId: null, ebayBrowseCategoryName: null }),
+    ];
+    fixture.repository.layers = {
+      products: new Map([[7, { storeConnectionId: 44, productId: 7, revisionId: 70, updatedAt: NOW.toISOString(),
+        values: { ...EMPTY_PRODUCT_LISTING_SETTING_VALUES, ebayCategory: TOPLOADERS } }]]),
+      categories: new Map([[31, { storeConnectionId: 44, categoryId: 31, revisionId: 80, updatedAt: NOW.toISOString(),
+        values: { ...EMPTY_CATEGORY_LISTING_SETTING_VALUES, ebayCategory: TOPLOADERS } }]]),
+    };
+
+    const review = await fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: null, draft });
+
+    expect(fixture.repository.layerReads).toEqual([[
+      { productId: 7, categoryId: null }, { productId: 8, categoryId: 31 }, { productId: 9, categoryId: null },
+    ]]);
+    // The product's own category beats the draft's Mailers rule and the category setting beats its store
+    // default, before and after alike, so only the size with neither moves (none → the draft's store default).
+    expect(review).toMatchObject({ selectedCount: 3, changedCount: 1, unchangedCount: 2, withoutCategoryBefore: 1, withoutCategoryAfter: 0,
+      bySource: { rule: 0, store_default: 1, catalog: 0, none: 0, product: 1, category: 1 },
+      byRule: [{ ruleId: "mailers", matched: 0 }] });
+    expect(review.changes.map((change) => [change.productVariantId, change.after.source])).toEqual([[3, "store_default"]]);
+    expect(fixture.repository.executions.every((execution) => execution.mode === "read")).toBe(true);
+  });
+
+  it("keeps today's four counts when no product or category sets an eBay category", async () => {
+    const fixture = makeFixture();
+    fixture.repository.candidates = [categoryCandidate({ productVariantId: 1, category: "Mailers", categoryId: 31 })];
+
+    const review = await fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: null, draft });
+
+    expect(Object.keys(review.bySource)).toEqual(["rule", "store_default", "catalog", "none"]);
+    expect(fixture.repository.layerReads).toHaveLength(1);
   });
 
   it("refuses to review against rules that changed since they were loaded", async () => {

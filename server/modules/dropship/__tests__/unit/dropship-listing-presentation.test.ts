@@ -5,6 +5,7 @@ import {
 import { isSafeDropshipPreviewImageUrl, dropshipListingPresentationSchema } from "../../../../../shared/dropship/listing-presentation";
 import type { DropshipListingCatalogCandidate, DropshipListingPreviewRepository, DropshipListingPreviewRow } from "../../application/dropship-listing-preview-service";
 import { DropshipListingPreviewService } from "../../application/dropship-listing-preview-service";
+import { EMPTY_LISTING_SETTING_LAYERS } from "../../application/dropship-listing-setting-layers";
 import type { DropshipMarketplaceListingIntent } from "../../application/dropship-marketplace-listing-provider";
 import { resolveDropshipPublicationPreview } from "../../infrastructure/dropship-listing-publication-preview.provider";
 import { buildDropshipEbayListingDraft, parseEbayListingConfig } from "../../infrastructure/dropship-ebay-listing-push.provider";
@@ -19,7 +20,7 @@ const productCost: DropshipProductCost = { status: "available", unitCostCents: 8
 const candidate: DropshipListingCatalogCandidate = {
   productId: 5, productVariantId: 7, productLineIds: [], productIsActive: true, variantIsActive: true, variantUomType: "pack",
   sku: "PACK-25", productName: "Card protectors", variantName: "25 pack", title: "Card protectors 25 pack",
-  description: "<p>Protect <strong>25 cards</strong>.</p>", category: "Protectors", ebayBrowseCategoryId: "183438",
+  description: "<p>Protect <strong>25 cards</strong>.</p>", category: "Protectors", categoryId: null, ebayBrowseCategoryId: "183438",
   ebayBrowseCategoryName: "Card Toploaders", brand: "Card Shellz", gtin: "123456789012", mpn: "PACK-25",
   condition: "used", itemSpecifics: { Material: ["Plastic"] }, imageUrls: ["https://images.test/one.jpg"],
   weightGrams: 100, unitsPerVariant: 25, defaultRetailPriceCents: 1299,
@@ -233,6 +234,8 @@ describe("dropship private listing image authorization", () => {
       listCatalogExposureRules: vi.fn(async () => [{ scopeType: "catalog", action: overrides.excluded ? "exclude" : "include" }]),
       listSelectionRules: vi.fn(async () => [{ id: 2, scopeType: "catalog", action: "include", autoConnectNewSkus: false, autoListNewSkus: false, isActive: true }]),
       listVariantOverrides: vi.fn(async () => []),
+      // Required on the port (plan PR 8b, D26); an image is authorized by exposure and selection only.
+      loadListingSettingLayers: vi.fn(async () => EMPTY_LISTING_SETTING_LAYERS),
     };
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const service = new DropshipListingPreviewService({ listingPhotos: { listPublicationPhotos: async () => new Map() }, repository: repository as unknown as DropshipListingPreviewRepository,
@@ -248,6 +251,7 @@ describe("dropship private listing image authorization", () => {
     await expect(service.imageForMember("member-1", { storeConnectionId: 9, productVariantId: 7, assetId: 3 })).resolves.toMatchObject({ mimeType: "image/png" });
     expect(repository.loadStoreContext).toHaveBeenCalledWith({ vendorId: 10, storeConnectionId: 9 });
     expect(readImageFile).toHaveBeenCalledWith({ storeConnectionId: 9, productVariantId: 7, assetId: 3 });
+    expect(repository.loadListingSettingLayers).not.toHaveBeenCalled();
   });
   it("does not read blobs for another vendor's store", async () => {
     const { service, readImageFile } = setup({ storeMissing: true });

@@ -32,7 +32,7 @@ function result<T extends QueryResultRow>(rows: T[], rowCount = rows.length): Qu
 const POLICY = { id: 4, scopeType: "catalog" as const, productLineId: null, productId: null, productVariantId: null, category: null,
   mode: "block_listing_push" as const, floorPriceCents: 1000, ceilingPriceCents: null };
 const catalog = {
-  listCatalogCandidates: vi.fn(async (ids: readonly number[]) => ids.map((id) => ({ productVariantId: id, productId: 1, category: "Envelopes", productLineIds: [3], defaultRetailPriceCents: 899 }))),
+  listCatalogCandidates: vi.fn(async (ids: readonly number[]) => ids.map((id) => ({ productVariantId: id, productId: 1, category: "Envelopes", categoryId: 4, productLineIds: [3], defaultRetailPriceCents: 899 }))),
   listPricingPolicies: vi.fn(async () => [POLICY]),
 };
 
@@ -70,18 +70,58 @@ describe("PgDropshipCostChangeListingActionRepository", () => {
     expect(facts.listings).toEqual([{ listingId: 1, storeConnectionId: 9, productVariantId: 61, status: "active", vendorRetailPriceCents: 1099, platform: "shopify", variantSku: "SKU-61", variantName: "Single", productName: "Armor Envelope" }]);
     expect(facts.savedPrices).toEqual([{ storeConnectionId: 9, productVariantId: 61, overridePriceCents: null, pricingMode: "rules" }]);
     expect(facts.profiles.get(9)).toEqual({ revisionId: 7, profile, updatedAt: EFFECTIVE.toISOString() });
-    expect(facts.candidates.get(62)).toEqual({ productVariantId: 62, productId: 1, category: "Envelopes", productLineIds: [3], defaultRetailPriceCents: 899 });
+    expect(facts.candidates.get(62)).toEqual({ productVariantId: 62, productId: 1, category: "Envelopes", categoryId: 4, productLineIds: [3], defaultRetailPriceCents: 899 });
     // The limits decide whether an `inherit` listing can use its rule price, as in the preview.
     expect(facts.pricingPolicies).toEqual([POLICY]);
+    // The store's product and category listing settings are read after everything above, for its listings' products only.
+    expect(calls[3]?.sql).toContain("FROM dropship.dropship_product_listing_settings s");
+    expect(calls[3]?.values).toEqual([5, 9, [1]]);
+    expect(calls[4]?.sql).toContain("FROM dropship.dropship_category_listing_settings s");
+    expect(calls[4]?.values).toEqual([5, 9, [4]]);
+    expect(calls).toHaveLength(5);
+    expect(facts.layersByStore).toEqual(new Map([[9, { products: new Map(), categories: new Map() }]]));
+  });
+
+  it("reads each store's listing settings once, for that store's listings only, and gives every store with listings an entry", async () => {
+    const created = new Date("2026-10-01T09:00:00.000Z");
+    const recipeColumns = { price_basis: "product_cost", price_markup_bps: 2500, price_flat_cents: 0, price_rounding: "cent" };
+    const otherColumns = Object.fromEntries(["ebay_category_id", "ebay_category_name", "ebay_category_path", "shelf_mode", "shelf_ids",
+      "shelf_names", "fulfillment_policy_id", "fulfillment_policy_name", "return_policy_id", "return_policy_name", "payment_policy_id",
+      "payment_policy_name", "text_above_mode", "text_above", "text_below_mode", "text_below", "body_text", "body_catalog_hash"]
+      .map((column) => [column, null]));
+    const { pool, calls } = fakePool([
+      result([
+        { id: 1, store_connection_id: 9, product_variant_id: 61, status: "active", vendor_retail_price_cents: null, platform: "ebay", variant_sku: null, variant_name: "Single", product_name: "Armor Envelope" },
+        { id: 2, store_connection_id: 12, product_variant_id: 62, status: "active", vendor_retail_price_cents: null, platform: "ebay", variant_sku: null, variant_name: "Case", product_name: "Armor Envelope" },
+      ]),
+      result([]), result([]),
+      // Store 9: product 1 sets its own price; the category read finds nothing.
+      result([{ product_id: 1, revision_id: 3, ...recipeColumns, ...otherColumns, created_at: created }]), result([]),
+      // Store 12: nothing set.
+      result([]), result([]),
+    ]);
+    const facts = await repository(pool).loadVendorFacts({ vendorId: 5, productVariantIds: [61, 62] });
+
+    expect(calls.slice(3).map((call) => [call.sql.includes("dropship_product_listing_settings s") ? "products" : "categories", call.values]))
+      .toEqual([["products", [5, 9, [1]]], ["categories", [5, 9, [4]]], ["products", [5, 12, [1]]], ["categories", [5, 12, [4]]]]);
+    expect([...facts.layersByStore.keys()]).toEqual([9, 12]);
+    expect(facts.layersByStore.get(9)?.products.get(1)).toEqual({ storeConnectionId: 9, productId: 1, revisionId: 3,
+      updatedAt: created.toISOString(), values: { price: { basis: "product_cost", markupBps: 2500, flatCents: 0, rounding: "cent" },
+        ebayCategory: null, storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null, textAbove: null,
+        textBelow: null, mainText: null } });
+    expect(facts.layersByStore.get(12)).toEqual({ products: new Map(), categories: new Map() });
   });
 
   it("answers without a query when no variant is named, and skips the profile read when no listing names a store", async () => {
     const { pool, calls } = fakePool([result([]), result([])]);
-    expect(await repository(pool).loadVendorFacts({ vendorId: 5, productVariantIds: [] })).toEqual({ listings: [], savedPrices: [], profiles: new Map(), candidates: new Map(), pricingPolicies: [] });
+    expect(await repository(pool).loadVendorFacts({ vendorId: 5, productVariantIds: [] }))
+      .toEqual({ listings: [], savedPrices: [], profiles: new Map(), layersByStore: new Map(), candidates: new Map(), pricingPolicies: [] });
     expect(calls).toEqual([]);
     const facts = await repository(pool).loadVendorFacts({ vendorId: 5, productVariantIds: [61] });
     expect(calls.map((call) => call.sql.slice(0, 40))).toEqual(["SELECT l.id, l.store_connection_id, l.pr", "SELECT store_connection_id, product_vari"]);
     expect(facts.profiles.size).toBe(0);
+    // No store has a listing, so no store's listing settings are read.
+    expect(facts.layersByStore.size).toBe(0);
   });
 
   it("maps every stored pricing mode, including inherit and a legacy null", async () => {

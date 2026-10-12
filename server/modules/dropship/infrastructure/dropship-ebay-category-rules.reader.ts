@@ -6,6 +6,8 @@ import {
   type EbayCategoryCandidate,
   type ResolvedEbayListingCategory,
 } from "../application/dropship-ebay-category-resolver";
+import type { ListingSettingLayers } from "../application/dropship-listing-setting-layers";
+import { readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
 
 type Reader = Pick<PoolClient, "query">;
 
@@ -24,12 +26,24 @@ export async function readEbayCategoryRules(client: Reader, vendorId: number, st
   return state.data;
 }
 
+/**
+ * Each candidate's eBay category under the store's rules and its product and
+ * category settings. `layers` is the preview's one read of those settings
+ * (plan PR 8b, D26); without it they are read here, on the caller's client,
+ * so they share its transaction and snapshot.
+ */
 export async function readResolvedEbayCategories(client: Reader, input: {
   vendorId: number;
   storeConnectionId: number;
   candidates: readonly EbayCategoryCandidate[];
+  layers?: ListingSettingLayers;
 }): Promise<Map<number, ResolvedEbayListingCategory>> {
   const state = await readEbayCategoryRules(client, input.vendorId, input.storeConnectionId);
-  const prepared = prepareEbayCategoryRules(state.revisionId, state.profile);
+  const layers = input.layers ?? await readListingSettingLayers(client, {
+    vendorId: input.vendorId,
+    storeConnectionId: input.storeConnectionId,
+    candidates: input.candidates,
+  });
+  const prepared = prepareEbayCategoryRules(state.revisionId, state.profile, layers);
   return new Map(input.candidates.map((candidate) => [candidate.productVariantId, resolveEbayListingCategory(candidate, prepared)]));
 }

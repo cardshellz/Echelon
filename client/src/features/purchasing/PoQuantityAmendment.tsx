@@ -1,5 +1,9 @@
+import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
+import { CompactPoLineTable } from "@/features/po-edit/CompactPoLineTable";
+import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { PoAmendmentLineTable, type PoAmendmentLineDraft } from "./PoAmendmentLineTable";
 import { useEffect, useRef, useState } from "react";
-import { useLocation, useSearch } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 import { PO_EDITOR_QUERY_PARAM } from "@/lib/procurement-navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
@@ -17,9 +21,7 @@ import { FinancialCommandRequestError, financialCommandFetchJson, financialComma
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 
 const savedIntentSchema = z.object({
@@ -27,7 +29,7 @@ const savedIntentSchema = z.object({
 }).strict();
 type ApprovalIntent = z.infer<typeof savedIntentSchema>;
 type LineView = PoQuantityAmendmentContext["lines"][number];
-type LineDraft = { quantity: string; basis: "per_piece" | "extended_total" | "per_purchase_uom"; price: string; packaging: string; discount: string; tax: string; charge: string; touched: boolean };
+type LineDraft = PoAmendmentLineDraft;
 function lineDraft(line: LineView): LineDraft {
   const pricing = line.pricing;
   return { quantity: String(line.orderQty), basis: pricing?.basis ?? "per_piece",
@@ -73,38 +75,45 @@ function pendingIntent(key: string): ApprovalIntent | null {
   return savedIntentSchema.parse(JSON.parse(raw));
 }
 function Impact({ preview }: { preview: PoQuantityAmendmentPreview }) {
+  const rows = preview.lines.flatMap(({ before, after }) => {
+    const fields: [string, string, string][] = [
+      ["Quantity", before.orderQty.toLocaleString(), after.orderQty.toLocaleString()],
+      ["Product price per piece", exactMoneyAsInput(before.unitCostMills, 4), exactMoneyAsInput(after.unitCostMills, 4)],
+      ["Product total", exactMoneyAsInput(before.totalProductCostCents, 2), exactMoneyAsInput(after.totalProductCostCents, 2)],
+      ["Line total", exactMoneyAsInput(before.lineTotalCents, 2), exactMoneyAsInput(after.lineTotalCents, 2)],
+    ];
+    for (const [name, field] of [["Packaging", "packagingCostCents"], ["Discount", "discountCents"], ["Tax", "taxCents"]] as const) {
+      if (before[field] !== undefined && after[field] !== undefined) fields.push([name, exactMoneyAsInput(before[field], 2), exactMoneyAsInput(after[field], 2)]);
+    }
+    return fields.filter(([name, oldValue, newValue]) => oldValue !== newValue && (before.lineType === undefined || before.lineType === "product" || ["Quantity", "Line total"].includes(name)))
+      .map(([name, oldValue, newValue]) => ({ lineId: before.id, lineNumber: before.lineNumber, product: before.name, name, oldValue, newValue }));
+  });
+  const fieldCounts = new Map<number, number>();
+  for (const row of rows) fieldCounts.set(row.lineId, (fieldCounts.get(row.lineId) ?? 0) + 1);
   return <div className="space-y-3">
-    {preview.lines.map(({ before, after }) => <div key={before.id} className="rounded border p-3 text-sm space-y-1">
-      <p className="font-semibold break-words">Line {before.lineNumber} · {before.name}</p>
-      <table className="w-full table-fixed" aria-label={`Changes for line ${before.lineNumber}`}>
-        <thead><tr className="border-b"><th className="w-[40%] py-1 text-left">What changes</th><th className="w-[30%] text-right">Current</th><th className="w-[30%] text-right">After editing</th></tr></thead>
-        <tbody>{([
-          ["Quantity", String(before.orderQty.toLocaleString()), String(after.orderQty.toLocaleString())],
-          ["Product price per piece", exactMoneyAsInput(before.unitCostMills, 4), exactMoneyAsInput(after.unitCostMills, 4)],
-          ["Product total", exactMoneyAsInput(before.totalProductCostCents, 2), exactMoneyAsInput(after.totalProductCostCents, 2)],
-          ...(before.packagingCostCents !== undefined && after.packagingCostCents !== undefined ? [["Packaging", exactMoneyAsInput(before.packagingCostCents, 2), exactMoneyAsInput(after.packagingCostCents, 2)]] : []),
-          ...(before.discountCents !== undefined && after.discountCents !== undefined ? [["Discount", exactMoneyAsInput(before.discountCents, 2), exactMoneyAsInput(after.discountCents, 2)]] : []),
-          ...(before.taxCents !== undefined && after.taxCents !== undefined ? [["Tax", exactMoneyAsInput(before.taxCents, 2), exactMoneyAsInput(after.taxCents, 2)]] : []),
-          ["Line total", exactMoneyAsInput(before.lineTotalCents, 2), exactMoneyAsInput(after.lineTotalCents, 2)],
-        ]).filter(([name]) => before.lineType === undefined || before.lineType === "product" || ["Quantity", "Line total"].includes(name)).map(([name, oldValue, newValue]) => <tr key={name} className="border-b"><th scope="row" className="py-1 text-left font-normal break-words">{name}</th><td className="text-right break-words">{oldValue}</td><td className={`text-right break-words ${oldValue !== newValue ? "font-semibold text-green-800 dark:text-green-300" : ""}`}>{newValue}</td></tr>)}</tbody>
-      </table>
-      {before.lineType === "product" && <p className="text-xs text-muted-foreground">Received: {after.receivedQty.toLocaleString()} · Invoiced: {after.invoicedQty.toLocaleString()} pieces</p>}
-    </div>)}
+    <p className="text-sm font-semibold">Review {preview.lines.length} changed line{preview.lines.length === 1 ? "" : "s"}</p>
+    <CompactPoLineTable aria-label="PO change summary" className="min-w-[520px]"><TableHeader><TableRow className="bg-slate-50"><TableHead>Line</TableHead><TableHead>What changes</TableHead><TableHead className="text-right">Current</TableHead><TableHead className="text-right">After editing</TableHead></TableRow></TableHeader>
+      <TableBody>{rows.map((row, index) => <TableRow key={`${row.lineId}:${row.name}`}>
+        {(index === 0 || rows[index - 1].lineId !== row.lineId) && <TableCell rowSpan={fieldCounts.get(row.lineId)} className="max-w-[240px] py-2 align-top"><span className="line-clamp-2" title={row.product}>{row.lineNumber} · {row.product}</span></TableCell>}
+        <TableCell className="py-2">{row.name}</TableCell><TableCell className="py-2 text-right font-mono">{row.oldValue}</TableCell><TableCell className="py-2 text-right font-mono font-semibold text-green-800 dark:text-green-300">{row.newValue}</TableCell>
+      </TableRow>)}</TableBody>
+    </CompactPoLineTable>
     <p className="font-semibold">PO total: {exactMoneyAsInput(preview.beforeTotalCents, 2)} → {exactMoneyAsInput(preview.afterTotalCents, 2)} {preview.currency}</p>
-    <p className="text-sm">Receiving status: {preview.beforeStatus} → {preview.afterStatus}</p>
+    {preview.beforeStatus !== preview.afterStatus && <p className="text-sm">Receiving status: {preview.beforeStatus} → {preview.afterStatus}</p>}
     <p className="text-sm text-muted-foreground">Saving edits the PO. Invoices, payments and received stock stay unchanged.</p>
     {preview.warnings.filter(warning => warning.startsWith("Line ")).map(warning => <p key={warning} className="text-sm text-amber-800 dark:text-amber-300">{warning}</p>)}
     <details className="rounded border p-3 text-sm"><summary className="cursor-pointer">Invoice and inventory details</summary>
       <ul className="mt-2 list-disc space-y-1 pl-5">{preview.warnings.filter(warning => !warning.startsWith("Line ")).map(warning => <li key={warning}>{warning}</li>)}</ul>
       {preview.invoiceMatches.filter(match => match.before !== match.after || match.after !== "matched").map(match => <p key={match.invoiceLineId} className="mt-2">Invoice #{match.invoiceId}, line #{match.invoiceLineId}: {match.before.replaceAll("_", " ")} → <strong>{match.after.replaceAll("_", " ")}</strong></p>)}
     </details>
-    <p className="text-sm whitespace-pre-wrap break-words">Reason: {preview.reason}</p>
   </div>;
 }
+
 function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload }: {
   context: PoQuantityAmendmentContext; storageKey: string; setBusy: (busy: boolean) => void; onSaved: () => void; onReload: () => void;
 }) {
   const [context] = useState(loadedContext);
+  const navigation = useProcurementNavigation();
   const recovery = useRef<{ intent: ApprovalIntent | null; error: string | null } | null>(null);
   if (!recovery.current) {
     try {
@@ -166,6 +175,7 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
   const missingDetails = context.lines.some(line => line.lineType === undefined || line.pricing === undefined || line.packagingCostCents === undefined || line.discountCents === undefined || line.taxCents === undefined);
   const blocked = !context.canApprove ? "A current Administrator with purchasing approval permission must approve this edit." : context.blockedReason ?? (missingDetails ? "Current line pricing could not be loaded. Reload the PO before editing." : null);
   function updateDraft(id: number, patch: Partial<LineDraft>) {
+    if (locked || blocked) return;
     setDrafts(values => ({ ...values, [id]: { ...values[id], ...patch, touched: true } }));
     setConfirmed(false); setValidationError(null);
   }
@@ -194,23 +204,19 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
   const impact = saved?.preview ?? unresolved?.preview ?? review?.preview;
   return <div className="flex min-h-0 flex-col"><div className="min-h-0 space-y-4 overflow-y-auto pr-1">
     {blocked && <p role="alert" className="text-sm text-destructive">{blocked}</p>}
+    {(context.invoiceIssues?.length ?? 0) > 0 && <details open={context.invoiceIssues!.length === 1} className="rounded border border-amber-300 bg-amber-50/50 p-3 text-sm">
+      <summary className="cursor-pointer font-semibold">Invoice issues ({context.invoiceIssues!.length})</summary>
+      {context.invoiceIssues!.map(issue => <div key={issue.invoiceLineId} className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-amber-200 pt-2">
+        <div><p className="font-medium">{issue.invoiceNumber} · Line {issue.lineNumber} · {issue.name}</p>
+          <p>Invoice {issue.invoiceQuantity.toLocaleString()} pieces · PO {issue.orderedQuantity?.toLocaleString() ?? "not linked"} · Received {issue.receivedQuantity?.toLocaleString() ?? "not linked"}</p>
+          <p>Invoice line {exactMoneyAsInput(issue.invoiceLineAmountCents, 2)} {issue.currency} · PO line {issue.poLineAmountCents === null ? "not linked" : `${exactMoneyAsInput(issue.poLineAmountCents, 2)} ${context.currency}`}</p>
+        </div><Button asChild variant="outline" className="min-h-[44px]"><Link href={navigation.childHref(`/ap-invoices/${issue.invoiceId}`, { invoiceLineCorrectionId: issue.invoiceLineId })}>Correct invoice</Link></Button>
+      </div>)}
+    </details>}
     {recovery.current.error && <p role="alert" className="text-sm text-destructive">{recovery.current.error}</p>}
     {!impact && !blocked && <fieldset disabled={locked} className="space-y-3">
-      <p className="text-xs text-muted-foreground">Product prices exclude the packaging amount entered separately below.</p>
-      {context.lines.map((line) => <div className="rounded border p-3 space-y-2" key={line.id}>
-        <p className="text-sm font-semibold break-words">Line {line.lineNumber} · {line.name}</p>
-        {line.lineType === "product" && <p className="text-xs text-muted-foreground">Received {line.receivedQty.toLocaleString()} · Invoiced {line.invoicedQty.toLocaleString()} pieces</p>}
-        {line.blockedReason ? <p className="text-sm text-muted-foreground">{line.blockedReason}</p> : line.lineType !== "product" ? <div><Label htmlFor={`charge-${line.id}`}>Charge / credit total ({context.currency})</Label><Input id={`charge-${line.id}`} inputMode="decimal" value={drafts[line.id].charge} onChange={event => updateDraft(line.id, { charge: event.target.value })} /><p className="mt-1 text-xs text-muted-foreground">Use a negative amount for a credit or discount.</p></div> : <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          <div><Label htmlFor={`correct-quantity-${line.id}`}>Quantity (pieces)</Label><Input id={`correct-quantity-${line.id}`} inputMode="numeric" value={drafts[line.id].quantity} onChange={event => updateDraft(line.id, { quantity: event.target.value })} /></div>
-          <div><Label htmlFor={`price-basis-${line.id}`}>Price entered as</Label><Select value={drafts[line.id].basis} disabled={locked} onValueChange={basis => updateDraft(line.id, { basis: basis as LineDraft["basis"], price: basis === "extended_total" ? exactMoneyAsInput(line.totalProductCostCents, 2) : basis === "per_purchase_uom" && line.pricing?.basis === "per_purchase_uom" ? exactMoneyAsInput(line.pricing.quotedCostMillsPerUom, 4) : exactMoneyAsInput(line.unitCostMills, 4) })}><SelectTrigger id={`price-basis-${line.id}`}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="per_piece">Price per piece</SelectItem><SelectItem value="extended_total">Product total</SelectItem>{line.pricing?.basis === "per_purchase_uom" && <SelectItem value="per_purchase_uom">Price per {line.pricing.purchaseUom}</SelectItem>}</SelectContent></Select></div>
-          <div><Label htmlFor={`correct-price-${line.id}`}>{drafts[line.id].basis === "extended_total" ? "Product total" : drafts[line.id].basis === "per_purchase_uom" && line.pricing?.basis === "per_purchase_uom" ? `Price per ${line.pricing.purchaseUom}` : "Product price per piece"} ({context.currency})</Label><Input id={`correct-price-${line.id}`} inputMode="decimal" value={drafts[line.id].price} onChange={event => updateDraft(line.id, { price: event.target.value })} /></div>
-          <div><Label htmlFor={`packaging-${line.id}`}>Packaging total ({context.currency})</Label><Input id={`packaging-${line.id}`} inputMode="decimal" value={drafts[line.id].packaging} onChange={event => updateDraft(line.id, { packaging: event.target.value })} /></div>
-          <div><Label htmlFor={`discount-${line.id}`}>Discount ({context.currency})</Label><Input id={`discount-${line.id}`} inputMode="decimal" value={drafts[line.id].discount} onChange={event => updateDraft(line.id, { discount: event.target.value })} /></div>
-          <div><Label htmlFor={`tax-${line.id}`}>Tax ({context.currency})</Label><Input id={`tax-${line.id}`} inputMode="decimal" value={drafts[line.id].tax} onChange={event => updateDraft(line.id, { tax: event.target.value })} /></div>
-        </div>}
-        {!line.blockedReason && <p className="text-sm">Line total: <span>{exactMoneyAsInput(line.lineTotalCents, 2)} {context.currency}</span> → <strong>{newTotalLabel(line, drafts[line.id], context.currency)}</strong></p>}
-        {line.componentTotalCents !== undefined && line.componentTotalCents !== line.lineTotalCents && <p className="text-sm text-amber-800 dark:text-amber-300">The saved line total does not equal its product, packaging, discount and tax amounts. Check this line against the supplier document before editing.</p>}
-      </div>)}
+      <p className="text-xs text-muted-foreground">Enter product price and packaging separately.</p>
+      <PoAmendmentLineTable disabled={locked} lines={context.lines} drafts={drafts} currency={context.currency} onChange={updateDraft} totalLabel={newTotalLabel} />
       <div><Label htmlFor="quantity-correction-reason">Reason for editing / supplier reference</Label><Textarea id="quantity-correction-reason" value={reason} maxLength={2000} onChange={(event) => setReason(event.target.value)} /></div>
     </fieldset>}
     {impact && <Impact preview={impact} />}
@@ -273,7 +279,7 @@ export function PoQuantityAmendment({ purchaseOrderId, status }: { purchaseOrder
   return <>
     <Button variant="outline" className="flex-1 sm:flex-none min-h-[44px]" onClick={() => setOpen(true)}>Edit PO</Button>
     <Dialog open={open} onOpenChange={changeOpen}>
-      <DialogContent className="flex max-h-[90dvh] flex-col overflow-hidden sm:max-w-4xl" onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }} onInteractOutside={(event) => { if (busy) event.preventDefault(); }}>
+      <DialogContent className="flex max-h-[90dvh] flex-col overflow-hidden w-[calc(100vw-2rem)] sm:max-w-6xl" onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }} onInteractOutside={(event) => { if (busy) event.preventDefault(); }}>
         <DialogHeader><DialogTitle>Edit purchase order</DialogTitle><DialogDescription>Edit quantities and prices, review the new total, then save with administrator approval.</DialogDescription></DialogHeader>
         {context.isPending && <p>Loading current PO evidence…</p>}
         {context.error && <p role="alert" className="text-sm text-destructive">Could not load correction evidence. {context.error.message}</p>}
