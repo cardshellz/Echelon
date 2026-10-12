@@ -1,4 +1,6 @@
 import { useRef, useState } from "react";
+import { useLocation } from "wouter";
+import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { invoiceQuantityContextSchema, invoiceQuantityPreviewSchema, invoiceQuantityApprovalRequestSchema, invoiceQuantityResultSchema,
@@ -149,21 +151,32 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
 }
 export function InvoiceQuantityCorrection({ lineId, lineNumber, needsCorrection, onSaved }: { lineId: number; lineNumber: number; needsCorrection: boolean; onSaved: () => void }) {
   const { user } = useAuth();
+  const [, navigate] = useLocation();
+  const procurementNavigation = useProcurementNavigation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false), [busy, setBusy] = useState(false);
   const storageKey = `invoice-quantity-correction:${user?.id}:${lineId}`;
   const [pendingReceipt, setPendingReceipt] = useState(() => { try { return sessionStorage.getItem(storageKey) !== null; } catch { return false; } });
   const context = useQuery({ queryKey: [`/api/vendor-invoice-lines/${lineId}/quantity-correction`], enabled: open,
-    queryFn: async () => invoiceQuantityContextSchema.parse(await financialCommandFetchJson(`/api/vendor-invoice-lines/${lineId}/quantity-correction`, { credentials: "include" })) });
+    queryFn: async () => {
+      const loaded = invoiceQuantityContextSchema.parse(await financialCommandFetchJson(`/api/vendor-invoice-lines/${lineId}/quantity-correction`, { credentials: "include" }));
+      if (loaded.invoiceLineId !== lineId) throw new Error("The loaded correction does not match this invoice line. Reload the invoice.");
+      return loaded;
+    } });
+  const editPoHref = context.data ? procurementNavigation.childHref(`/purchase-orders/${context.data.purchaseOrderId}`, { editPo: true }) : null;
   function reload() { setOpen(false); onSaved(); void context.refetch(); }
   // A committed correction can clear the mismatch before the browser receives
   // its response. Keep its saved command accessible for verification after reload.
   if (!needsCorrection && !pendingReceipt && !open) return null;
   return <>
-    <Button size="sm" variant="outline" className="mt-2 min-h-[36px] whitespace-normal text-xs" onClick={() => setOpen(true)} aria-label={`${needsCorrection ? "Fix quantity" : "Verify quantity confirmation"} for line ${lineNumber}`}>{needsCorrection ? "Fix quantity" : "Verify quantity confirmation"}</Button>
+    <Button size="sm" variant="outline" className="mt-2 min-h-[36px] whitespace-normal text-xs" onClick={() => setOpen(true)} aria-label={`${needsCorrection ? "Correct invoice quantity" : "Verify quantity confirmation"} for line ${lineNumber}`}>{needsCorrection ? "Correct invoice quantity" : "Verify quantity confirmation"}</Button>
     <Dialog open={open} onOpenChange={(value) => { if (!busy) setOpen(value); }}><DialogContent className="flex max-h-[90dvh] flex-col overflow-hidden sm:max-w-2xl" onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }} onInteractOutside={(event) => { if (busy) event.preventDefault(); }}>
       <DialogHeader><DialogTitle>Correct invoice quantity · Line {context.data?.lineNumber ?? lineNumber}</DialogTitle><DialogDescription>{context.data && <span className="mb-1 block line-clamp-2 font-medium">{context.data.name}</span>}Check the supplier's quantity. Review the current and proposed values before confirming.</DialogDescription></DialogHeader>
+      {editPoHref && <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 rounded border bg-muted/50 p-3">
+        <p className="text-sm">Edit ordered quantities and prices on the PO.</p>
+        <Button variant="outline" className="min-h-[44px]" disabled={busy} onClick={() => navigate(editPoHref)}>Edit PO</Button>
+      </div>}
       {context.isLoading && <p>Loading the invoice and PO quantities…</p>}
       {context.error && <p role="alert">{context.error.message}</p>}
       {context.data && <QuantityEditor key={`${lineId}:${open}`} loaded={context.data} storageKey={storageKey} onSaved={() => {

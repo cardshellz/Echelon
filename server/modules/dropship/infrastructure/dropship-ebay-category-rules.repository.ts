@@ -1,9 +1,10 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import {
   versionConflict,
   type EbayCategoryRulesRepository,
   type EbayCategoryRulesTransaction,
+  type SaveEbayCategoryRulesProfileInput,
 } from "../application/dropship-ebay-category-rules-service";
 import { DropshipError } from "../domain/errors";
 import { readEbayCategoryRules } from "./dropship-ebay-category-rules.reader";
@@ -48,40 +49,14 @@ export class PgDropshipEbayCategoryRulesRepository implements EbayCategoryRulesR
         loadState,
         loadStoreListingConfig: () => PgDropshipListingPreviewRepository.readerForTransaction(client)
           .getStoreListingConfig(input.storeConnectionId),
-        findReplay: async (idempotencyKey, requestHash) => {
-          const replay = await client.query<{ request_hash: string; store_connection_id: number }>(
-            `SELECT request_hash, store_connection_id FROM dropship.dropship_ebay_category_rule_revisions
-             WHERE vendor_id = $1 AND idempotency_key = $2`, [vendorId, idempotencyKey]);
-          const row = replay.rows[0];
-          if (!row) return false;
-          if (row.request_hash !== requestHash || row.store_connection_id !== input.storeConnectionId) {
-            throw new DropshipError("DROPSHIP_IDEMPOTENCY_CONFLICT",
-              "This save key was already used for a different eBay category change.", { storeConnectionId: input.storeConnectionId });
-          }
-          return true;
-        },
+        findReplay: (idempotencyKey, requestHash) => findEbayCategoryRulesReplayWithClient(client,
+          { vendorId, storeConnectionId: input.storeConnectionId }, idempotencyKey, requestHash),
         saveProfile: async (save) => {
           if (!writing || save.idempotencyKey !== input.idempotencyKey) {
             throw new Error("eBay category rules can only be written by the write transaction of their own request key.");
           }
-          const before = await loadState();
-          if (before.revisionId !== save.expectedRevisionId) throw versionConflict(input.storeConnectionId);
-          const revision = await client.query<{ id: number }>(`INSERT INTO dropship.dropship_ebay_category_rule_revisions
-            (vendor_id, store_connection_id, previous_revision_id, profile, idempotency_key, request_hash, actor_id, created_at)
-            VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8) RETURNING id`,
-          [vendorId, input.storeConnectionId, save.expectedRevisionId, JSON.stringify(save.profile), save.idempotencyKey,
-            save.requestHash, input.memberId, save.now]);
-          const revisionId = revision.rows[0]?.id;
-          if (!revisionId) throw new Error("eBay category rules revision insert returned no identity.");
-          await client.query(`INSERT INTO dropship.dropship_ebay_category_rule_profiles (vendor_id, store_connection_id, revision_id)
-            VALUES ($1,$2,$3) ON CONFLICT (store_connection_id) DO UPDATE SET revision_id = EXCLUDED.revision_id`,
-          [vendorId, input.storeConnectionId, revisionId]);
-          await client.query(`INSERT INTO dropship.dropship_audit_events
-            (vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at)
-            VALUES ($1,$2,'dropship_ebay_category_rules',$3,'ebay_category_rules_saved','vendor',$4,'info',$5::jsonb,$6)`,
-          [vendorId, input.storeConnectionId, String(input.storeConnectionId), input.memberId, JSON.stringify({
-            revisionId, previousRevisionId: before.revisionId, before: before.profile, after: save.profile,
-          }), save.now]);
+          await saveEbayCategoryRulesProfileWithClient(client,
+            { vendorId, storeConnectionId: input.storeConnectionId, actorId: input.memberId }, save);
         },
       });
       await client.query("COMMIT");
@@ -93,4 +68,49 @@ export class PgDropshipEbayCategoryRulesRepository implements EbayCategoryRulesR
       client.release();
     }
   }
+}
+
+/** True when this key already saved this exact request; throws when the key saved another one or another store's. */
+export async function findEbayCategoryRulesReplayWithClient(client: Pick<PoolClient, "query">,
+  target: { vendorId: number; storeConnectionId: number }, idempotencyKey: string, requestHash: string): Promise<boolean> {
+  const replay = await client.query<{ request_hash: string; store_connection_id: number }>(
+    `SELECT request_hash, store_connection_id FROM dropship.dropship_ebay_category_rule_revisions
+     WHERE vendor_id = $1 AND idempotency_key = $2`, [target.vendorId, idempotencyKey]);
+  const row = replay.rows[0];
+  if (!row) return false;
+  if (row.request_hash !== requestHash || row.store_connection_id !== target.storeConnectionId) {
+    throw new DropshipError("DROPSHIP_IDEMPOTENCY_CONFLICT",
+      "This save key was already used for a different eBay category change.", { storeConnectionId: target.storeConnectionId });
+  }
+  return true;
+}
+
+/**
+ * Writes a new rules revision, points the store at it and audits before and after.
+ * The caller holds the push-job store lock and the owner rows (see execute) and
+ * checks the request key; this takes no lock. A stale expected revision is
+ * DROPSHIP_EBAY_CATEGORY_RULES_VERSION_CONFLICT before any write.
+ */
+export async function saveEbayCategoryRulesProfileWithClient(client: Pick<PoolClient, "query">,
+  target: { vendorId: number; storeConnectionId: number; actorId: string },
+  save: SaveEbayCategoryRulesProfileInput): Promise<{ revisionId: number }> {
+  const before = await readEbayCategoryRules(client, target.vendorId, target.storeConnectionId);
+  if (before.revisionId !== save.expectedRevisionId) throw versionConflict(target.storeConnectionId);
+  const revision = await client.query<{ id: number }>(`INSERT INTO dropship.dropship_ebay_category_rule_revisions
+    (vendor_id, store_connection_id, previous_revision_id, profile, idempotency_key, request_hash, actor_id, created_at)
+    VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8) RETURNING id`,
+  [target.vendorId, target.storeConnectionId, save.expectedRevisionId, JSON.stringify(save.profile), save.idempotencyKey,
+    save.requestHash, target.actorId, save.now]);
+  const revisionId = revision.rows[0]?.id;
+  if (!revisionId) throw new Error("eBay category rules revision insert returned no identity.");
+  await client.query(`INSERT INTO dropship.dropship_ebay_category_rule_profiles (vendor_id, store_connection_id, revision_id)
+    VALUES ($1,$2,$3) ON CONFLICT (store_connection_id) DO UPDATE SET revision_id = EXCLUDED.revision_id`,
+  [target.vendorId, target.storeConnectionId, revisionId]);
+  await client.query(`INSERT INTO dropship.dropship_audit_events
+    (vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at)
+    VALUES ($1,$2,'dropship_ebay_category_rules',$3,'ebay_category_rules_saved','vendor',$4,'info',$5::jsonb,$6)`,
+  [target.vendorId, target.storeConnectionId, String(target.storeConnectionId), target.actorId, JSON.stringify({
+    revisionId, previousRevisionId: before.revisionId, before: before.profile, after: save.profile,
+  }), save.now]);
+  return { revisionId };
 }

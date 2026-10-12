@@ -47,7 +47,7 @@ export class DropshipListingPriceService {
     const parsed = listingPriceTargetSchema.parse(target);
     assertMember(memberId);
     return this.deps.repository.execute({ ...parsed, memberId }, async (tx) => {
-      const { candidate, sources } = await this.authorize(tx, parsed, this.deps.clock.now());
+      const { candidate, sources } = await authorizeListingPrice(tx, parsed, this.deps.clock.now());
       return projectSetting(parsed, sources, await tx.loadSaved(), await loadCost(tx, candidate, sources));
     });
   }
@@ -64,22 +64,8 @@ export class DropshipListingPriceService {
       priceCents: parsed.priceCents, expectedRevisionId: parsed.expectedRevisionId,
       ...(parsed.pricingMode ? { pricingMode: parsed.pricingMode } : {}),
     })).digest("hex");
-    const result = await this.deps.repository.execute({ ...parsedTarget, memberId, idempotencyKey: parsed.idempotencyKey }, async (tx) => {
-      const { candidate, sources, policies } = await this.authorize(tx, parsedTarget, now);
-      // A retried save returns what the first one wrote and is not checked again:
-      // it already happened, and the rules below may have changed since.
-      const replay = await tx.loadReplay({ idempotencyKey: parsed.idempotencyKey, requestHash });
-      if (replay) {
-        return { price: projectSetting(parsedTarget, sources, replay, await loadCost(tx, candidate, sources)), idempotentReplay: true };
-      }
-      if (parsed.pricingMode === "rules" && !sources.rulePrice) {
-        throw new DropshipError("DROPSHIP_PRICING_RULES_NOT_CONFIGURED", "Configure store pricing rules before using them for this listing.");
-      }
-      await assertPriceKept(tx, parsedTarget, candidate, sources, policies, parsed);
-      const saved = await tx.save({ ...parsed, requestHash, now });
-      return { price: projectSetting(parsedTarget, sources, saved.saved, await loadCost(tx, candidate, sources)),
-        idempotentReplay: saved.idempotentReplay };
-    });
+    const result = await this.deps.repository.execute({ ...parsedTarget, memberId, idempotencyKey: parsed.idempotencyKey },
+      (tx) => saveListingPriceInTransaction(tx, parsedTarget, parsed, requestHash, now));
     this.deps.logger.info({
       code: result.idempotentReplay ? "DROPSHIP_LISTING_PRICE_REPLAYED" : "DROPSHIP_LISTING_PRICE_SAVED",
       message: "Local listing price setting saved; no marketplace publication was requested.",
@@ -88,46 +74,90 @@ export class DropshipListingPriceService {
     });
     return result;
   }
+}
 
-  private async authorize(tx: ListingPriceTransaction, target: ListingPriceTarget, now: Date): Promise<{
-    candidate: DropshipListingCatalogCandidate; sources: PriceSources; policies: DropshipPricingPolicyRecord[];
-  }> {
-    const context = await tx.catalog.loadStoreContext({ vendorId: tx.vendorId, storeConnectionId: target.storeConnectionId });
-    if (!context) throw new DropshipError("DROPSHIP_STORE_CONNECTION_REQUIRED", "Store connection was not found.");
-    if (!["active", "onboarding"].includes(context.vendorStatus)) {
-      throw new DropshipError("DROPSHIP_LISTING_VENDOR_BLOCKED", "Your vendor status does not permit listing-price changes.");
-    }
-    if (context.entitlementStatus !== "active") {
-      throw new DropshipError("DROPSHIP_LISTING_ENTITLEMENT_BLOCKED", "An active .ops entitlement is required.");
-    }
-    // Token health is not authority for a local draft. Paused, grace-period, and
-    // disconnected connections remain blocked; actual publication keeps its gates.
-    if (!["connected", "needs_reauth", "refresh_failed"].includes(context.storeStatus)) {
-      throw new DropshipError("DROPSHIP_LISTING_STORE_BLOCKED", "This store is not available for listing-price changes.");
-    }
-    const [candidates, rules, selections, overrides, listings, policies] = await Promise.all([
-      tx.catalog.listCatalogCandidates([target.productVariantId]),
-      tx.catalog.listCatalogExposureRules(), tx.catalog.listSelectionRules(tx.vendorId),
-      tx.catalog.listVariantOverrides({ vendorId: tx.vendorId, productVariantIds: [target.productVariantId] }),
-      tx.catalog.listExistingListings({ storeConnectionId: target.storeConnectionId, productVariantIds: [target.productVariantId] }),
-      // Every answer needs the limits, not only a save: an `inherit` size whose
-      // rule price a blocking limit refuses is on its retail price (L1).
-      tx.catalog.listPricingPolicies(),
-    ]);
-    const candidate = candidates.find((row) => row.productVariantId === target.productVariantId);
-    if (!candidate) throw new DropshipError("DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "Listing price is not available for this item.");
-    const exposure = evaluateDropshipCatalogExposure(candidate, rules, now);
-    const selection = evaluateDropshipVendorCatalogSelection({
-      candidate, adminExposureDecision: exposure, rules: selections, rawAtpUnits: 0,
-      override: overrides.find((row) => row.productVariantId === target.productVariantId) ?? null,
-    });
-    if (!exposure.exposed || !selection.selected) {
-      throw new DropshipError("DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "Select an available catalog item before setting its listing price.");
-    }
-    return { candidate, policies, sources: { defaultPriceCents: candidate.defaultRetailPriceCents,
-      rulePrice: withRulePriceLimitCheck(candidate, policies, await tx.loadRulePrice?.(candidate) ?? null),
-      existingListingPriceCents: listings.find((row) => row.productVariantId === target.productVariantId)?.vendorRetailPriceCents ?? null } };
+/**
+ * W9's save of one size's price inside `tx`: authorize the store, vendor and
+ * entitlement and the size's selection, replay a saved key, refuse "rules" without
+ * a rule price, refuse a price that would be lost or break a Card Shellz limit
+ * (assertPriceKept), then save. Exported so a listing-settings transaction writes
+ * size prices only through these checks (plan D29). `target` and `input` must
+ * already be parsed (listingPriceTargetSchema, saveListingPriceInputSchema); the
+ * caller logs. `target` must be the store and size `tx` was built for: the checks
+ * read `target`, while `tx` reads and writes its own size's rows. A revision for
+ * another size is refused (assertSameSize) before the caller can commit.
+ */
+export async function saveListingPriceInTransaction(tx: ListingPriceTransaction, target: ListingPriceTarget,
+  input: SaveListingPriceInput, requestHash: string, now: Date): Promise<{ price: ListingPriceSetting; idempotentReplay: boolean }> {
+  const { candidate, sources, policies } = await authorizeListingPrice(tx, target, now);
+  // A retried save returns what the first one wrote and is not checked again:
+  // it already happened, and the rules below may have changed since.
+  const replay = await tx.loadReplay({ idempotencyKey: input.idempotencyKey, requestHash });
+  if (replay) {
+    assertSameSize(target, replay);
+    return { price: projectSetting(target, sources, replay, await loadCost(tx, candidate, sources)), idempotentReplay: true };
   }
+  if (input.pricingMode === "rules" && !sources.rulePrice) {
+    throw new DropshipError("DROPSHIP_PRICING_RULES_NOT_CONFIGURED", "Configure store pricing rules before using them for this listing.");
+  }
+  await assertPriceKept(tx, target, candidate, sources, policies, input);
+  const saved = await tx.save({ ...input, requestHash, now });
+  assertSameSize(target, saved.saved);
+  return { price: projectSetting(target, sources, saved.saved, await loadCost(tx, candidate, sources)),
+    idempotentReplay: saved.idempotentReplay };
+}
+
+/**
+ * A `tx` built for another size than `target` would write that size after the
+ * checks ran on `target`'s prices, limits and selection. Throwing inside the
+ * transaction rolls the write back. W9 builds both from one target, so this
+ * never fires on its path; it guards a caller that pairs them wrongly (D29).
+ */
+function assertSameSize(target: ListingPriceTarget, revision: SavedListingPriceRevision): void {
+  if (revision.productVariantId === target.productVariantId) return;
+  throw new DropshipError("DROPSHIP_LISTING_PRICE_INVARIANT_FAILED", "The listing price transaction is for a different size.", {
+    ...target, transactionProductVariantId: revision.productVariantId,
+  });
+}
+
+async function authorizeListingPrice(tx: ListingPriceTransaction, target: ListingPriceTarget, now: Date): Promise<{
+  candidate: DropshipListingCatalogCandidate; sources: PriceSources; policies: DropshipPricingPolicyRecord[];
+}> {
+  const context = await tx.catalog.loadStoreContext({ vendorId: tx.vendorId, storeConnectionId: target.storeConnectionId });
+  if (!context) throw new DropshipError("DROPSHIP_STORE_CONNECTION_REQUIRED", "Store connection was not found.");
+  if (!["active", "onboarding"].includes(context.vendorStatus)) {
+    throw new DropshipError("DROPSHIP_LISTING_VENDOR_BLOCKED", "Your vendor status does not permit listing-price changes.");
+  }
+  if (context.entitlementStatus !== "active") {
+    throw new DropshipError("DROPSHIP_LISTING_ENTITLEMENT_BLOCKED", "An active .ops entitlement is required.");
+  }
+  // Token health is not authority for a local draft. Paused, grace-period, and
+  // disconnected connections remain blocked; actual publication keeps its gates.
+  if (!["connected", "needs_reauth", "refresh_failed"].includes(context.storeStatus)) {
+    throw new DropshipError("DROPSHIP_LISTING_STORE_BLOCKED", "This store is not available for listing-price changes.");
+  }
+  const [candidates, rules, selections, overrides, listings, policies] = await Promise.all([
+    tx.catalog.listCatalogCandidates([target.productVariantId]),
+    tx.catalog.listCatalogExposureRules(), tx.catalog.listSelectionRules(tx.vendorId),
+    tx.catalog.listVariantOverrides({ vendorId: tx.vendorId, productVariantIds: [target.productVariantId] }),
+    tx.catalog.listExistingListings({ storeConnectionId: target.storeConnectionId, productVariantIds: [target.productVariantId] }),
+    // Every answer needs the limits, not only a save: an `inherit` size whose
+    // rule price a blocking limit refuses is on its retail price (L1).
+    tx.catalog.listPricingPolicies(),
+  ]);
+  const candidate = candidates.find((row) => row.productVariantId === target.productVariantId);
+  if (!candidate) throw new DropshipError("DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "Listing price is not available for this item.");
+  const exposure = evaluateDropshipCatalogExposure(candidate, rules, now);
+  const selection = evaluateDropshipVendorCatalogSelection({
+    candidate, adminExposureDecision: exposure, rules: selections, rawAtpUnits: 0,
+    override: overrides.find((row) => row.productVariantId === target.productVariantId) ?? null,
+  });
+  if (!exposure.exposed || !selection.selected) {
+    throw new DropshipError("DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "Select an available catalog item before setting its listing price.");
+  }
+  return { candidate, policies, sources: { defaultPriceCents: candidate.defaultRetailPriceCents,
+    rulePrice: withRulePriceLimitCheck(candidate, policies, await tx.loadRulePrice?.(candidate) ?? null),
+    existingListingPriceCents: listings.find((row) => row.productVariantId === target.productVariantId)?.vendorRetailPriceCents ?? null } };
 }
 
 interface PriceSources {

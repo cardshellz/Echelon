@@ -669,6 +669,9 @@ export default function APInvoiceDetail() {
                   <Link href={procurementNavigation.childHref(`/purchase-orders/${link.purchaseOrderId}`)} className="font-mono text-blue-600 hover:underline">
                     {link.poNumber}
                   </Link>
+                  <Button asChild variant="outline" size="sm" className="ml-1 min-h-[44px]">
+                    <Link href={procurementNavigation.childHref(`/purchase-orders/${link.purchaseOrderId}`, { editPo: true })} aria-label={`Edit PO ${link.poNumber}`}>Edit PO</Link>
+                  </Button>
                   {canEdit && (
                     <button
                       type="button"
