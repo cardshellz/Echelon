@@ -147,6 +147,7 @@ function setup() {
     taxonomy: vi.fn(),
   };
   const channels = {
+    withListingWrites: vi.fn(async (_account: unknown, _skus: readonly string[], work: () => Promise<unknown>) => work()),
     connection: vi.fn().mockResolvedValue({
       channel_id: 104,
       connection_id: 5,
@@ -168,6 +169,16 @@ function setup() {
 }
 
 describe("Walmart listing provider", () => {
+  it("refuses a queued creation after a durable publication stop, without sending a feed", async () => {
+    const { provider, api, channels } = setup();
+    const item = await provider.prepare(account, { catalog, draft: draft(), priceCents: 1299 });
+    channels.withListingWrites.mockRejectedValue(new WalmartApiError("LISTING_PUBLICATION_STOPPED", "Stopped", false));
+    await expect(runWithListingSetupZeroAdmission(intent(), () => provider.submit(account, {
+      operationId, correlationId, items: [item], zeroStockAdmission: intent(), beforeSubmit: async () => {},
+    }))).rejects.toMatchObject({ code: "LISTING_PUBLICATION_STOPPED", effect: "not_sent" });
+    expect(channels.withListingWrites).toHaveBeenCalledWith(account, [item.sku], expect.any(Function));
+    expect(api.submitFeed).not.toHaveBeenCalled();
+  });
   it("includes an uploaded catalog photo as the third secondary image and preserves explicit listing overrides", async () => {
     const { provider } = setup();
     const uploaded = createCatalogPublicImageUrl({ CATALOG_PUBLIC_BASE_URL: "https://catalog.example.com" })(42, "ab".repeat(32), "image/jpeg");

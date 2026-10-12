@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { ListingTaxonomy } from "@shared/types/channel-listing-publication";
+import { listingLifecycleSkuSchema } from "@shared/types/channel-listing-lifecycle";
 import type { WalmartClient, WalmartResponseMetadata } from "./walmart-client";
 import { WalmartApiError } from "./walmart-client";
 import {
@@ -355,6 +356,23 @@ export class WalmartListingApi {
         false,
       );
     return page;
+  }
+
+  /** Acceptance only queues retirement; observe() must confirm RETIRED before
+   * Echelon hides the listing. https://developer.walmart.com/us-marketplace/reference/retireanitem */
+  async retire(sku: string, correlationId: string): Promise<void> {
+    listingLifecycleSkuSchema.parse(sku);
+    z.string().uuid().parse(correlationId);
+    const encoded = encodeURIComponent(sku).replace(/[!'()*]/g, character =>
+      `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+    const response = await this.client.requestWithMetadata("DELETE", `/v3/items/${encoded}`, undefined, { correlationId });
+    const receipt = parse(z.object({
+      sku: sellerSku,
+      message: z.string().min(1).max(5_000),
+      errors: z.array(z.unknown()).max(0).nullish(),
+      error: z.array(z.unknown()).max(0).nullish(),
+    }), response.data);
+    if (receipt.sku !== sku) throw new WalmartApiError("WALMART_RETIRE_SKU_MISMATCH", "Walmart returned a different SKU for the unpublish request.", false);
   }
 
   async observe(sku: string): Promise<WalmartListingObservation> {
