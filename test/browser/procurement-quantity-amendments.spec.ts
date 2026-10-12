@@ -173,7 +173,10 @@ test("rejects fractional quantities and fractional cents before submission", asy
   await expect(modal.getByRole("alert")).toBeVisible(); expect(state.previews).toEqual([]); expect(state.approvals).toEqual([]); expect(state.failures).toEqual([]);
 });
 test("short viewports keep the save button inside the modal while content scrolls", async ({ page }) => {
-  await page.setViewportSize({ width: 800, height: 450 }); const state = await setup(page); await review(page);
+  await page.setViewportSize({ width: 800, height: 450 }); const state = await setup(page);
+  await expect(page.getByLabel("Reason for editing / supplier reference")).toBeInViewport({ ratio: 1 });
+  await review(page);
+  await expect(page.getByLabel(confirmation)).toBeInViewport({ ratio: 1 });
   const modal = page.getByRole("dialog"), action = modal.getByRole("button", { name: saveAction, exact: true });
   const box = await action.boundingBox(), bounds = await modal.boundingBox(); expect(box && bounds && box.y >= bounds.y && box.y + box.height <= bounds.y + bounds.height + 1 && box.y + box.height <= 450).toBeTruthy(); expect(state.failures).toEqual([]);
 });
