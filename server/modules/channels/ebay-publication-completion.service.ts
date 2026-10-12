@@ -13,6 +13,7 @@ export interface PreparedEbayPublication extends PreparedEbayListingSync {
   draft: EbayListingConnectorDraft;
   inspection: EbayListingInspection;
   inspect(): Promise<EbayListingInspection>;
+  assertInventoryReady(): Promise<void>;
   resolvePublishedIdentity: EbayPublishedListingIdentityResolver;
 }
 type PublicationRecovery = { reconcile(scopes: readonly QuantityPublicationScope[]): Promise<{ busy: boolean; resolved: string[]; unresolved: string[] }> };
@@ -44,6 +45,7 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
     const changedContent = context.publicationIntentHash !== null && context.publicationIntentHash !== syncContentIntentHash(prepared.draft);
     if (prepared.inspection.publication && (refreshRequested || changedContent
       || (!context.publicationAccepted && !context.publicationWriteCompleted && !context.publicationWriteStarted))) {
+      await prepared.assertInventoryReady();
       return this.maintain(prepared, observed).execute(source, stage, checkpoint,
         identity => bindProviderIdentity(identity, prepared.inspection.publication!));
     }
@@ -59,6 +61,10 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
       `A prior publication request has no provable final response (attempts ${recovered.unresolved.join(", ")}). Review recovery and resume this saved publication before another write.`);
     let accepted = context.publicationAccepted;
     if (!accepted && !context.publicationWriteCompleted && !context.publicationWriteStarted) {
+      // Validate the complete stock scope before even zero-quantity preparation
+      // writes. Per-request inventory admission still owns quantity decisions.
+      // Accepted publications can finish read-only verification without this gate.
+      await prepared.assertInventoryReady();
       const result = await this.connector.pushListing({ client: prepared.client, draft: prepared.draft,
         resolvePublishedIdentity: prepared.resolvePublishedIdentity, stage });
       if (!result.published || !result.externalProductId)

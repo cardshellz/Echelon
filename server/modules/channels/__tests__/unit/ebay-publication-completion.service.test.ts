@@ -31,9 +31,10 @@ async function fixture() {
     memberCandidates: [{ productVariantId: 101, sku: "P5", isActive: true, availableQuantity: 7 }] };
   const inspect = () => observer.inspectExistingPublication(observationInput);
   const original = await base.prepare();
+  const assertInventoryReady = vi.fn(async () => {});
   const prepare = vi.fn(async (): Promise<PreparedEbayPublication> => {
     const inspection = await inspect();
-    return { ...original, sourceIdentity: source, identity: resolveEbayPublicationTarget(source, inspection), inspection, inspect,
+    return { ...original, assertInventoryReady, sourceIdentity: source, identity: resolveEbayPublicationTarget(source, inspection), inspection, inspect,
       draft: { ...original.draft, itemGroup: null, publishMode: "publish", hasExistingExternalIds: false,
         existingOfferIdsByVariantId: { 101: "offer-101" } },
       resolvePublishedIdentity: async () => (await inspect()).publication!,
@@ -51,12 +52,20 @@ async function fixture() {
     if (key === "publish") context.publicationWriteCompleted = true;
   });
   const executor = new EbayPublicationCompletionExecution(prepare, recovery, new EbayMarketplaceListingConnector(), compatibility);
-  return { ...base, source, prepare, recovery, context, bind, compatibility, stages,
+  return { ...base, source, prepare, recovery, context, bind, compatibility, stages, assertInventoryReady,
     run: () => executor.execute(source, stage, null, bind, context),
     setVisibility: (value: boolean) => { visible = value; }, setPublished: () => { published = true; } };
 }
 
 describe("saved eBay publication completion", () => {
+  it("rejects missing stock enrollment before any provider preparation write", async () => {
+    const f = await fixture();
+    f.assertInventoryReady.mockRejectedValue(new EbayListingSyncError("EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED", "Connect stock first."));
+    await expect(f.run()).rejects.toMatchObject({ code: "EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED" });
+    expect(f.client.updateOffer).not.toHaveBeenCalled();
+    expect(f.client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
+    expect(f.client.publishOffer).not.toHaveBeenCalled();
+  });
   it("reuses the exact offer, sends canonical photos, records acceptance and verifies publication before completion", async () => {
     const f = await fixture(); const result = await f.run();
     expect(result).toMatchObject({ synced: 1, errors: 0 });
@@ -72,6 +81,7 @@ describe("saved eBay publication completion", () => {
     const f = await fixture(); f.setVisibility(false);
     await expect(f.run()).rejects.toMatchObject({ code: "EBAY_PUBLICATION_READBACK_PENDING" });
     const itemWrites = vi.mocked(f.client.createOrReplaceInventoryItem).mock.calls.length;
+    f.assertInventoryReady.mockRejectedValue(new Error("Future stock configuration unavailable"));
     await expect(f.run()).rejects.toMatchObject({ code: "EBAY_PUBLICATION_READBACK_PENDING" });
     expect(f.client.publishOffer).toHaveBeenCalledTimes(1);
     expect(f.client.createOrReplaceInventoryItem).toHaveBeenCalledTimes(itemWrites);

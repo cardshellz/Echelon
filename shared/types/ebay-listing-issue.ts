@@ -7,7 +7,7 @@ export const ebayListingIssueSchema = z.object({
   nextStep: z.string().min(1).max(1000),
   retryable: z.boolean(),
   action: z.object({
-    kind: z.enum(["retry_sync", "check_recovery", "check_status", "reconnect", "edit_photos", "edit_listing", "review_mapping", "contact_support"]),
+    kind: z.enum(["retry_sync", "check_recovery", "check_status", "reconnect", "edit_photos", "edit_listing", "review_mapping", "review_publication_stock", "contact_support"]),
     label: z.string().min(1).max(100),
     // Navigation stays inside the application; provider error text cannot supply a URL.
     href: z.string().regex(/^\/(?!\/)[A-Za-z0-9/_?=&.#%-]*$/).max(500).optional(),

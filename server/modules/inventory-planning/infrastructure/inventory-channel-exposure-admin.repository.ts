@@ -79,7 +79,7 @@ import {
   type InventoryAvailabilityShadowStore,
 } from "./inventory-availability-shadow.repository";
 
-type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type Transaction = Pick<Parameters<Parameters<typeof db.transaction>[0]>[0], "execute" | "insert" | "update" | "delete" | "select">;
 const IDEMPOTENCY_LOCK_NAMESPACE = 918420;
 const POLICY_LOCK_NAMESPACE = 918425;
 const SOURCE_BINDING_LOCK_NAMESPACE = 918426;
@@ -647,7 +647,13 @@ implements InventoryChannelExposureAdminStore {
   async saveVariantMappingDraft(
     command: SavePublicationVariantMappingDraftCommand,
   ): Promise<ChannelExposureDraftSaveResult> {
-    return this.database.transaction(async (tx) => {
+    return this.database.transaction(tx => this.saveVariantMappingDraftInsideTransaction(tx, command));
+  }
+
+  /** The inventory enrollment owner supplies its existing transaction. The
+   * ordinary configuration path and enrollment share this one draft writer. */
+  async saveVariantMappingDraftInsideTransaction(tx: Transaction,
+    command: SavePublicationVariantMappingDraftCommand): Promise<ChannelExposureDraftSaveResult> {
       const receiptKey = `${VARIANT_MAPPING_RECEIPT_PREFIX}${command.idempotencyKey}`;
       await lockIdempotency(tx, command.idempotencyKey);
       const replay = await loadReplay(tx, receiptKey, command.requestHash);
@@ -807,7 +813,6 @@ implements InventoryChannelExposureAdminStore {
       }, { timestamp: command.occurredAt, emitStructuredLog: false });
       await completeReceipt(tx, receiptKey, "publication_variant_mapping_draft_save", result);
       return result;
-    });
   }
 
   async savePolicyDraft(

@@ -42,6 +42,20 @@ describe("shared eBay issue actions", () => {
     ["EBAY_SYNC_PRODUCT_NOT_ELIGIBLE","edit_listing",false],
     ["EBAY_SYNC_PRODUCT_NOT_FOUND","edit_listing",false],
     ["UNRECOGNIZED_CODE","contact_support",false],
+    ["STOCK_LISTING_ATP_NOT_READY","review_publication_stock",false],
+    ["EBAY_PUBLICATION_STOCK_REVIEW_STALE","review_publication_stock",false],
+    ["EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED","review_publication_stock",false],
+    ["STOCK_LISTING_SOURCE_CHANGED","review_publication_stock",false],
+    ["EBAY_PUBLICATION_STOCK_SOURCE_CHANGED","review_mapping",false],
+    ["EBAY_WITHDRAWAL_IN_PROGRESS","check_status",false],
+    ["EBAY_WITHDRAWAL_READBACK_PENDING","check_status",false],
+    ["EBAY_WITHDRAWAL_UNVERIFIED","check_status",false],
+    ["EBAY_WITHDRAWAL_RESPONSE_UNCERTAIN","check_recovery",false],
+    ["EBAY_WITHDRAWAL_OWNER_REQUIRED","edit_listing",false],
+    ["EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED","review_publication_stock",false],
+    ["EBAY_PUBLICATION_STOCK_COMMAND_CONFLICT","review_publication_stock",false],
+    ["EBAY_EXCLUSION_PERSISTENCE_FAILED","retry_sync",true],
+    ["EBAY_SYNC_ACCOUNT_UNVERIFIED","reconnect",false],
   ] as const)("%s has an explicit next action and retry policy", (code,action,retryable) => {
     const issue = resolveEbayListingIssue({ code, productId: 20, jobId: "655ca747-20b9-4940-9c61-019baf1c11c1" });
     expect(issue.action.kind).toBe(action); expect(issue.retryable).toBe(retryable);

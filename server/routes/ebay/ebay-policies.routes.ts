@@ -21,11 +21,8 @@ import {
   createEbayRouteListingLifecycleClient,
   getExistingEbayInventoryImageUrls,
 } from "./ebay-listing-connector-client";
-import {
-  markEbayProductListingsPendingForRelist,
-  setEbayProductListingIntent,
-  withdrawEbayProductListings,
-} from "./ebay-listing-state";
+import { ebayListingExclusionService } from "../../modules/channels/ebay-listing-exclusion";
+import { registerEbayListingExclusionRoutes } from "./ebay-listing-exclusion.routes";
 
 export const router = express.Router();
 
@@ -38,49 +35,7 @@ async function getEbayRouteMarketplaceId(): Promise<string> {
 }
 
   // -----------------------------------------------------------------------
-  router.put("/api/ebay/product-exclusion/:productId", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
-    try {
-      const productId = parseInt(req.params.productId);
-      if (isNaN(productId)) {
-        res.status(400).json({ error: "Invalid product ID" });
-        return;
-      }
-      const { excluded } = req.body as { excluded: boolean };
-      if (typeof excluded !== "boolean") {
-        res.status(400).json({ error: "excluded (boolean) is required" });
-        return;
-      }
-
-      await setEbayProductListingIntent(productId, !excluded);
-
-      if (!excluded) {
-        await markEbayProductListingsPendingForRelist(productId);
-        res.json({
-          success: true,
-          productId,
-          excluded,
-          remoteAction: "pending_relist",
-        });
-        return;
-      }
-
-      try {
-        const remote = await withdrawEbayProductListings(productId);
-        res.json({ success: true, productId, excluded, remote });
-      } catch (remoteErr: any) {
-        res.status(502).json({
-          success: false,
-          productId,
-          excluded,
-          error: remoteErr.message,
-          message: "Local eBay listing intent was saved, but remote eBay withdrawal failed.",
-        });
-      }
-    } catch (err: any) {
-      console.error("[eBay Product Exclusion] Error:", err.message);
-      res.status(500).json({ error: err.message });
-    }
-  });
+registerEbayListingExclusionRoutes(router, ebayListingExclusionService);
 
   // -----------------------------------------------------------------------
   // PUT /api/ebay/product-policies/:productId — Set policy overrides for a product

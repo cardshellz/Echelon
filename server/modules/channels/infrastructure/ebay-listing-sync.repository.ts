@@ -27,6 +27,7 @@ import { assertEbayListingSourceIdentityUnchanged } from "../ebay-existing-listi
 import { EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE, ebayListingWorkflowLockKey } from "../ebay-listing-workflow-lock";
 import { PgMarketplaceListingRegistrationRepository, type MarketplaceObservedListingPublication } from "../../marketplace-listings";
 import { assertEbayPublicationObservation } from "../ebay-publication-observation";
+import { assertEbayPublicationTargetUnchanged } from "../ebay-publication-completion.domain";
 import { assertEbayMappingOwnership } from "./ebay-listing-mapping-ownership";
 
 const LOCK_NAMESPACE = 918427;
@@ -39,7 +40,13 @@ const currentPublicationStart = `evidence.event='stage_started' AND evidence.evi
 const rowSql = `SELECT id::text,product_id AS "productId",state,error_code AS code,error_message AS message,
   next_attempt_at AS "nextAttemptAt",updated_at AS "updatedAt",identity,revision::text,claimed_revision::text AS "claimedRevision",
   owner_token::text AS "ownerToken",attempts,result,verification_intent_hash AS "verificationIntentHash",
-  verification_revision::text AS "verificationRevision",provider_identity AS "providerIdentity",operation,
+  verification_revision::text AS "verificationRevision",provider_identity AS "providerIdentity",operation,requested_by AS "requestedBy",
+  EXISTS(SELECT 1 FROM channels.ebay_listing_sync_events evidence WHERE evidence.job_id=channels.ebay_listing_sync_jobs.id
+    AND evidence.event='stage_completed' AND evidence.evidence->>'key'='withdraw') AS "withdrawalWriteCompleted",
+  EXISTS(SELECT 1 FROM channels.ebay_listing_sync_events evidence WHERE evidence.job_id=channels.ebay_listing_sync_jobs.id
+    AND evidence.event='stage_started' AND evidence.evidence->>'key'='withdraw'
+    AND evidence.id>COALESCE((SELECT max(withdrawal_authorization.id) FROM channels.ebay_listing_sync_events withdrawal_authorization
+      WHERE withdrawal_authorization.job_id=evidence.job_id AND withdrawal_authorization.event='withdrawal_retry_authorized'),0)) AS "withdrawalWriteStarted",
   publication_target AS "publicationTarget",publication_accepted AS "publicationAccepted",
   EXISTS(SELECT 1 FROM channels.ebay_listing_sync_events evidence WHERE evidence.job_id=ebay_listing_sync_jobs.id
     AND ${currentPublicationStart}) AS "publicationWriteStarted",
@@ -61,6 +68,19 @@ function decode(row: Record<string, unknown>): StoredEbayListingSyncJob {
 function hasPublicationBarrier(job: StoredEbayListingSyncJob): boolean {
   return job.operation === "publish" && (job.publicationWriteStarted || job.publicationWriteCompleted || job.publicationAccepted !== null);
 }
+function validatePublicationTarget(source: EbayListingSyncIdentity, input: EbayListingSyncIdentity): EbayListingSyncIdentity {
+  const target = ebayListingSyncIdentitySchema.parse(input);
+  if (target.channelId !== source.channelId || target.connectionId !== source.connectionId
+    || target.productId !== source.productId || target.accountId !== source.accountId || target.marketplaceId !== source.marketplaceId
+    || (source.groupKey !== null && target.groupKey !== source.groupKey)
+    || target.variants.length !== source.variants.length || source.variants.some(member => !target.variants.some(next =>
+      next.variantId === member.variantId && next.sku === member.sku && next.catalogSku === member.catalogSku
+      && (next.contentSyncEnabled ?? true) === (member.contentSyncEnabled ?? true) && next.mappingExists === member.mappingExists
+      && next.externalSku === (member.externalSku ?? member.sku) && next.listingId === null
+      && (member.offerId === null || next.offerId === member.offerId))))
+    throw new EbayListingSyncError("EBAY_SYNC_PROVIDER_IDENTITY_CHANGED", "The publication target does not match the saved local and provider identities.");
+  return target;
+}
 const publicationRetryInputSchema = z.object({
   jobId:z.string().uuid(),channelId:z.number().int().positive().max(2147483647),expectedRevision:z.string().regex(/^[1-9][0-9]*$/),
   reviewHash:z.string().regex(/^[a-f0-9]{64}$/),commandKey:z.string().uuid(),actor:z.string().trim().min(1).max(200),
@@ -73,7 +93,7 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
     commandKey: string,
     actor: string,
     now: Date,
-    operation: "sync" | "publish" = "sync",
+    operation: "sync" | "publish" | "withdraw" = "sync",
   ): Promise<StoredEbayListingSyncJob> {
     const client = await this.pool.connect();
     try {
@@ -99,12 +119,16 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
     actor: string,
     now: Date,
     verifiedProviderIdentity?: EbayListingSyncIdentity,
-    operation: "sync" | "publish" = "sync",
+    operation: "sync" | "publish" | "withdraw" = "sync",
+    reviewedPublicationTarget?: EbayListingSyncIdentity,
   ): Promise<StoredEbayListingSyncJob> {
     identity = ebayListingSyncIdentitySchema.parse(identity);
-    if (operation !== "sync" && operation !== "publish") throw new EbayListingSyncError("EBAY_SYNC_OPERATION_INVALID", "The saved listing operation is invalid.");
+    if (operation !== "sync" && operation !== "publish" && operation !== "withdraw") throw new EbayListingSyncError("EBAY_SYNC_OPERATION_INVALID", "The saved listing operation is invalid.");
     if (operation === "publish" && identity.variants.some(member => member.mappingExists === undefined || member.listingId !== null))
       throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "Publication requires the exact current unpublished mapping, including whether each mapping exists.");
+    if (reviewedPublicationTarget && operation !== "publish")
+      throw new EbayListingSyncError("EBAY_SYNC_OPERATION_INVALID", "Only a publication request can retain a reviewed publication target.");
+    const reviewedTarget = reviewedPublicationTarget ? validatePublicationTarget(identity, reviewedPublicationTarget) : null;
     // Product command serialization is distinct from quantity admission. Joining
     // a pending job records a new requested revision without taking its HTTP lock.
     await client.query("SELECT pg_advisory_xact_lock($1,hashtext($2))", [
@@ -112,6 +136,8 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       `enqueue:${identity.channelId}:${identity.productId}`,
     ]);
     await client.query("SELECT pg_advisory_xact_lock($1,hashtext($2))", [LOCK_NAMESPACE, `command:${commandKey}`]);
+    if ((await client.query("SELECT 1 FROM channels.ebay_listing_exclusion_commands WHERE command_key=$1 AND job_id IS NULL", [commandKey])).rowCount)
+      throw new EbayListingSyncError("EBAY_SYNC_REPLAY_CONFLICT", "This command already belongs to a local product inclusion or exclusion receipt.");
     if ((await client.query("SELECT 1 FROM channels.ebay_listing_sync_admission_failures WHERE command_key=$1", [commandKey])).rowCount)
       throw new EbayListingSyncError("EBAY_SYNC_REPLAY_CONFLICT", "This request was already saved as a rejected admission. Start a new sync after correcting its issue.");
     const replay = (
@@ -139,12 +165,16 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
           .rows[0],
       );
       if (job.operation !== operation) throw new EbayListingSyncError("EBAY_SYNC_REPLAY_CONFLICT", "This command already belongs to a different listing operation.");
+      if (reviewedTarget) {
+        if (!job.publicationTarget) throw new EbayListingSyncError("EBAY_SYNC_REPLAY_CONFLICT", "This command was saved without the reviewed publication target.");
+        assertEbayPublicationTargetUnchanged(job.publicationTarget, reviewedTarget);
+      }
       return job;
     }
     const priorTerminal = (await client.query(rowSql + " WHERE channel_id=$1 AND product_id=$2 AND operation='publish' AND state='needs_attention'", [identity.channelId,identity.productId])).rows.map(decode).find(hasPublicationBarrier);
     if (priorTerminal) throw this.priorPublicationRequired(priorTerminal.id);
     const active = (
-      await client.query<{ id: string; identity: EbayListingSyncIdentity; providerIdentity: EbayListingSyncIdentity | null; operation: "sync" | "publish" }>(
+      await client.query<{ id: string; identity: EbayListingSyncIdentity; providerIdentity: EbayListingSyncIdentity | null; operation: "sync" | "publish" | "withdraw" }>(
         `SELECT id::text,identity,provider_identity AS "providerIdentity",operation FROM channels.ebay_listing_sync_jobs
       WHERE channel_id=$1 AND product_id=$2 AND state IN ('queued','running','recovering','awaiting_evidence') FOR UPDATE`,
         [identity.channelId, identity.productId],
@@ -153,6 +183,8 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
     let id: string;
     let reusable = !!active;
     if (active) {
+      if (active.operation === "withdraw" && operation !== "withdraw")
+        throw Object.assign(new EbayListingSyncError("EBAY_WITHDRAWAL_IN_PROGRESS", "This product's saved withdrawal must finish before another listing operation can start."), { jobId: active.id });
       try {
         if (active.operation !== operation) throw new EbayListingSyncError("EBAY_SYNC_OPERATION_CHANGED", "A new listing operation requires its own durable request.");
         assertEbayListingSourceIdentityUnchanged(active.identity, identity);
@@ -166,6 +198,8 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         if (!locked) throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY", "An update using the earlier mapping is still running. The new mapping can be synced after that update finishes.");
         const current = decode((await client.query(rowSql + " WHERE id=$1",[active.id])).rows[0]);
         if (hasPublicationBarrier(current)) throw this.priorPublicationRequired(current.id);
+        if (current.operation === "withdraw" && (current.withdrawalWriteCompleted || current.withdrawalWriteStarted))
+          throw Object.assign(new EbayListingSyncError("EBAY_WITHDRAWAL_IN_PROGRESS", "eBay accepted this saved withdrawal. Its original listing must be verified before changing the request's mapping."), { jobId: current.id });
         // Retain the old command and its provider evidence; only an idle job can
         // be superseded. Quantity admission independently fences unresolved writes.
         await client.query("UPDATE channels.ebay_listing_sync_jobs SET state='needs_attention',owner_token=NULL,claimed_revision=NULL,error_code='EBAY_SYNC_SOURCE_SUPERSEDED',error_message='A newer sync request replaced the changed source mapping.',updated_at=$2 WHERE id=$1", [active.id, now.toISOString()]);
@@ -201,10 +235,28 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       `INSERT INTO channels.ebay_listing_sync_commands(command_key,job_id,identity_hash,actor,created_at) VALUES($1,$2,$3,$4,$5)`,
       [commandKey, id, syncIdentityHash(identity), actor, now.toISOString()],
     );
-    const job = decode(
+    let job = decode(
       (await client.query(rowSql + " WHERE id=$1", [id])).rows[0],
     );
-    await this.event(client, job, "requested", { commandKey, actor }, now);
+    if (reviewedTarget) validatePublicationTarget(job.identity, reviewedTarget);
+    if (reviewedTarget && job.publicationTarget) assertEbayPublicationTargetUnchanged(job.publicationTarget, reviewedTarget);
+    if (reviewedTarget && !job.publicationTarget) {
+      // A reviewed stock-enrollment command must retain the same planned group
+      // across the commit/worker boundary. This is preparation, never a claim
+      // that eBay published it. The worker still observes the target before writes.
+      for (const key of [job.id, ebayListingWorkflowLockKey(identity.channelId, identity.productId)]) {
+        const acquired = (await client.query<{ acquired: boolean }>("SELECT pg_try_advisory_xact_lock($1,hashtext($2)) AS acquired", [LOCK_NAMESPACE, key])).rows[0]?.acquired;
+        if (!acquired) throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY", "A provider operation is running for this listing. Recheck the saved request before applying this publication review.");
+      }
+      if (job.ownerToken !== null || job.claimedRevision !== null || job.state === "running")
+        throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY", "The listing worker is still preparing this publication. Wait for its current attempt to finish before applying the review.");
+      const targetHash = syncIdentityHash(reviewedTarget);
+      await this.event(client, job, "requested", { commandKey, actor, reviewedPublicationTarget: reviewedTarget, targetHash, sourceIdentityHash: syncIdentityHash(identity),
+        ownerTransactionId: (await client.query("SELECT pg_current_xact_id()::text AS id")).rows[0].id }, now);
+      await client.query("UPDATE channels.ebay_listing_sync_jobs SET publication_target=$2::jsonb,publication_target_hash=$3 WHERE id=$1",
+        [job.id, canonicalJson(reviewedTarget), targetHash]);
+      job = decode((await client.query(rowSql + " WHERE id=$1", [job.id])).rows[0]);
+    } else await this.event(client, job, "requested", { commandKey, actor }, now);
     return job;
   }
   private priorPublicationRequired(jobId: string): EbayListingSyncError {
@@ -224,7 +276,7 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       const {expectedRevision,...request}=input;
       const requestHash=syncStageHash(request);
       const replay=(await client.query(`SELECT command.job_id::text,command.actor,event.evidence FROM channels.ebay_listing_sync_commands command
-        LEFT JOIN channels.ebay_listing_sync_events event ON event.job_id=command.job_id AND event.event='publication_retry_authorized'
+        LEFT JOIN channels.ebay_listing_sync_events event ON event.job_id=command.job_id AND event.event IN ('publication_retry_authorized','withdrawal_retry_authorized')
           AND event.evidence->>'commandKey'=command.command_key::text WHERE command.command_key=$1`,[input.commandKey])).rows[0];
       if(replay){
         if(replay.job_id!==input.jobId || replay.actor!==input.actor || replay.evidence?.requestHash!==requestHash)
@@ -238,7 +290,10 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         if(!acquired) throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY","This listing still has an active provider operation. Wait for it to finish, then review recovery again.");
       }
       const job=decode((await client.query(rowSql+" WHERE id=$1 FOR UPDATE",[input.jobId])).rows[0]);
-      if(job.operation!=="publish" || !job.publicationTarget || !job.publicationWriteStarted || job.publicationWriteCompleted || job.publicationAccepted || job.state==="completed")
+      const mayRetryPublication = job.operation === "publish" && job.publicationTarget && job.publicationWriteStarted && !job.publicationWriteCompleted && !job.publicationAccepted;
+      const mayRetryWithdrawal = job.operation === "withdraw" && job.providerIdentity && job.withdrawalWriteStarted && !job.withdrawalWriteCompleted
+        && ["queued", "running", "recovering", "awaiting_evidence"].includes(job.state);
+      if ((!mayRetryPublication && !mayRetryWithdrawal) || job.state === "completed")
         throw new EbayListingSyncError("EBAY_PUBLICATION_RETRY_NOT_ALLOWED","This request has no unaccepted publication attempt to authorize. Recheck its saved status; a completed or accepted publish cannot be resent.");
       if(job.revision!==expectedRevision || publicationRetryReviewHash(job)!==input.reviewHash)
         throw new EbayListingSyncError("EBAY_PUBLICATION_RETRY_REVIEW_CHANGED","The saved publication changed after this review. Review its current recovery before authorizing a retry.");
@@ -246,8 +301,9 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY","Another saved request owns this listing. Review that request before authorizing this publication.");
       await client.query("INSERT INTO channels.ebay_listing_sync_commands(command_key,job_id,identity_hash,actor,created_at) VALUES($1,$2,$3,$4,$5)",
         [input.commandKey,input.jobId,syncIdentityHash(job.identity),input.actor,now.toISOString()]);
-      await this.event(client,{...job,claimedRevision:null,ownerToken:null},"publication_retry_authorized",{
+      await this.event(client,{...job,claimedRevision:null,ownerToken:null},job.operation === "withdraw" ? "withdrawal_retry_authorized" : "publication_retry_authorized",{
         ...request,requestHash,beforeRevision:job.revision,identity:job.identity,publicationTarget:job.publicationTarget,publicationIntentHash:job.publicationIntentHash,
+        ...(job.operation === "withdraw" ? { providerIdentity: job.providerIdentity } : {}),
         ownerTransactionId:(await client.query("SELECT pg_current_xact_id()::text AS id")).rows[0].id,
       },now);
       await client.query(`UPDATE channels.ebay_listing_sync_jobs SET revision=revision+1,state='queued',owner_token=NULL,claimed_revision=NULL,
@@ -334,16 +390,8 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
     });
   }
   async bindPublicationTarget(job: StoredEbayListingSyncJob, input: EbayListingSyncIdentity, now: Date): Promise<void> {
-    const target = ebayListingSyncIdentitySchema.parse(input);
-    const source = job.identity;
-    if (job.operation !== "publish" || target.channelId !== source.channelId || target.connectionId !== source.connectionId
-      || target.productId !== source.productId || target.accountId !== source.accountId || target.marketplaceId !== source.marketplaceId
-      || target.variants.length !== source.variants.length || source.variants.some(member => !target.variants.some(next =>
-        next.variantId === member.variantId && next.sku === member.sku && next.catalogSku === member.catalogSku
-        && (next.contentSyncEnabled ?? true) === (member.contentSyncEnabled ?? true) && next.mappingExists === member.mappingExists
-        && next.externalSku === (member.externalSku ?? member.sku) && next.listingId === null
-        && (member.offerId === null || next.offerId === member.offerId))))
-      throw new EbayListingSyncError("EBAY_SYNC_PROVIDER_IDENTITY_CHANGED", "The publication target does not match the saved local and provider identities.");
+    if (job.operation !== "publish") throw new EbayListingSyncError("EBAY_SYNC_OPERATION_INVALID", "Only a publication request can retain a publication target.");
+    const target = validatePublicationTarget(job.identity, input);
     const hash = syncIdentityHash(target);
     const client = this.client(job);
     await this.transaction(client, async () => {
@@ -388,10 +436,10 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       );
     return decode(row);
   }
-  async getByCommand(commandKey: string, channelId: number): Promise<StoredEbayListingSyncJob | null> {
+  async getByCommand(commandKey: string, channelId: number, transactionClient?: PoolClient): Promise<StoredEbayListingSyncJob | null> {
     // A second command can join an existing job. Recover a lost HTTP response
     // through that durable membership, never by assuming command ID equals job ID.
-    const row = (await this.pool.query(rowSql + ` WHERE channel_id=$2 AND id=(
+    const row = (await (transactionClient ?? this.pool).query(rowSql + ` WHERE channel_id=$2 AND id=(
       SELECT job_id FROM channels.ebay_listing_sync_commands WHERE command_key=$1)`, [commandKey, channelId])).rows[0];
     return row ? decode(row) : null;
   }
@@ -531,11 +579,13 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       const currentRevision=current.revision;
       // A business error after the send began cannot turn uncertainty into a
       // fresh publish command. Keep its saved recovery reachable and active.
-      const retainBarrier=outcome.state==="needs_attention" && hasPublicationBarrier(current);
+      const retainBarrier=outcome.state==="needs_attention" && (hasPublicationBarrier(current) || (current.operation === "withdraw" && (current.withdrawalWriteCompleted || current.withdrawalWriteStarted)));
       if(retainBarrier) outcome={...outcome,state:"awaiting_evidence",resetAttempts:true,
         nextAttemptAt:new Date(Math.max(outcome.nextAttemptAt.getTime(),now.getTime()+PUBLICATION_EVIDENCE_RECHECK_MS))};
       if (job.operation === "publish" && outcome.result && outcome.state === "completed" && currentRevision === job.claimedRevision) {
         await this.projectPublication(client, job, outcome.result, now);
+      } else if (job.operation === "withdraw" && outcome.result && outcome.state === "completed" && currentRevision === job.claimedRevision) {
+        await this.projectWithdrawal(client, job, outcome.result, now);
       } else if (job.operation === "sync" && outcome.result)
         for (const detail of outcome.result.details) {
           const member = job.identity.variants.find(
@@ -601,6 +651,24 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         now,
       );
     });
+  }
+  private async projectWithdrawal(client: PoolClient, job: StoredEbayListingSyncJob,
+    result: NonNullable<Parameters<EbayListingSyncStore["finish"]>[1]["result"]>, now: Date): Promise<void> {
+    const verified = (await client.query(`SELECT 1 FROM channels.ebay_listing_sync_jobs j
+      WHERE j.id=$1 AND j.provider_identity IS NOT NULL AND j.verification_revision=j.claimed_revision
+      AND EXISTS(SELECT 1 FROM channels.ebay_listing_sync_events e WHERE e.job_id=j.id AND e.revision=j.claimed_revision
+        AND e.owner_token=j.owner_token AND e.event='stage_completed' AND e.evidence->>'key'='verification'
+        AND e.evidence->>'preparedIntentHash'=j.verification_intent_hash)`, [job.id])).rowCount;
+    if (!verified || result.errors || result.details.length !== job.identity.variants.length
+      || job.identity.variants.some(member => result.details.filter(detail => detail.success && detail.variantId===member.variantId && detail.variantSku===member.sku).length!==1))
+      throw new EbayListingSyncError("EBAY_WITHDRAWAL_UNVERIFIED", "The exact eBay offers must be verified unpublished before ending the saved listing.");
+    for (const member of job.identity.variants) {
+      const changed = await client.query(`UPDATE channels.channel_listings SET sync_status='ended',sync_error=NULL,last_synced_at=$3,updated_at=$3
+        WHERE channel_id=$1 AND product_variant_id=$2 AND external_sku IS NOT DISTINCT FROM $4
+          AND external_variant_id IS NOT DISTINCT FROM $5 AND external_product_id IS NOT DISTINCT FROM $6`,
+        [job.identity.channelId,member.variantId,now,member.externalSku,member.offerId,member.listingId]);
+      if (changed.rowCount!==1) throw new EbayListingSyncError("EBAY_SYNC_PROJECTION_IDENTITY_CHANGED", "The listing mapping changed before withdrawal completion. Its saved identifiers were not overwritten.");
+    }
   }
   private async projectPublication(client: PoolClient, job: StoredEbayListingSyncJob,
     result: NonNullable<Parameters<EbayListingSyncStore["finish"]>[1]["result"]>, now: Date): Promise<void> {

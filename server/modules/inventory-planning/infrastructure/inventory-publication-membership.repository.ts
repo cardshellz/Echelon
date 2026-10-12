@@ -32,6 +32,16 @@ import { quantityPublicationScopeLockKey } from "./quantity-publication-admissio
 import type { VerifiedStockListing, VerifiedListingStockResult, VerifiedListingStockStore } from "../application/verified-listing-stock.service";
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { prepareVerifiedStockMapping } from "./verified-listing-stock-mapping.repository";
+import type { ActivePublicationVariantMappingSnapshot } from "../application/inventory-channel-exposure-runtime.service";
+
+/** Inventory-internal review proposal. Existing draft identities are explicit;
+ * missing definitions stay missing (no invented mapping IDs). Only the known
+ * missing-mapping diagnostic can be deferred until the atomic materialization. */
+export interface PublicationMembershipMappingProposal {
+  mappings: readonly ActivePublicationVariantMappingSnapshot[];
+  newMappingVariantIds: readonly number[];
+  configurationChanged?: boolean;
+}
 
 const id = z.number().int().positive();
 const targetSchema = z.object({
@@ -255,8 +265,8 @@ export class PostgresInventoryPublicationMembershipStore
     return this.transaction(true, (client, scopeKeys) => this.applyInsideTransaction(client, scopeKeys, input, actor, requestHash, now));
   }
 
-  private async applyInsideTransaction(client: PoolClient, scopeKeys: string[], input: ApplyPublicationMembership,
-    actor: string, requestHash: string, now: Date): Promise<PublicationMembershipReceipt> {
+  async applyInsideTransaction(client: PoolClient, scopeKeys: string[], input: ApplyPublicationMembership,
+    actor: string, requestHash: string, now: Date, proposal?: PublicationMembershipMappingProposal): Promise<PublicationMembershipReceipt> {
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
         [`publication_membership:${input.idempotencyKey}`],
@@ -278,7 +288,7 @@ export class PostgresInventoryPublicationMembershipStore
           alreadyApplied: true,
         };
       }
-      const evidence = await captureReview(client, input, true);
+      const evidence = await captureReview(client, input, true, proposal);
       const { review, target } = evidence;
       if (review.reviewHash !== input.expectedReviewHash)
         throw error(
@@ -350,7 +360,7 @@ export class PostgresInventoryPublicationMembershipStore
       }
       let revision = target.revision;
       let publicationRows = 0;
-      if (changes.length) {
+      if (changes.length || proposal?.configurationChanged) {
         const updated = (
           await client.query<{ revision: string }>(
             `UPDATE inventory.inventory_publication_targets
@@ -435,7 +445,9 @@ export class PostgresInventoryPublicationMembershipStore
       return receipt;
   }
 
-  private async transaction<T>(
+  /** Inventory-owned composition only: the callback shares commit/rollback and
+   * any provider session locks; it must never call a provider while locked. */
+  async transaction<T>(
     write: boolean | "configuration",
     work: (client: PoolClient, scopeKeys: string[]) => Promise<T>,
     rollback = false,
@@ -507,10 +519,11 @@ export class PostgresInventoryPublicationMembershipStore
   }
 }
 
-async function captureReview(
+export async function captureReview(
   client: PoolClient,
   input: ReviewPublicationMembership,
   lock: boolean,
+  proposal?: PublicationMembershipMappingProposal,
 ): Promise<ReviewEvidence> {
   const authority = await loadAndLockRuntimeAuthority(client);
   const target = (
@@ -558,6 +571,12 @@ async function captureReview(
       ...input.changes.map((change) => change.productVariantId),
     ]),
   ]);
+  for (const variant of variants) {
+    const mapping = proposal?.mappings.find(row => row.productVariantId === variant.id);
+    if (mapping) Object.assign(variant, { mapping_id: mapping.mappingId, mapping_hash: mapping.definitionHash,
+      external_inventory_item_id: mapping.externalInventoryItemId, external_sku: mapping.externalSku, mapping_ready: true });
+    else if (proposal?.newMappingVariantIds.includes(variant.id)) variant.mapping_ready = true;
+  }
   const included = new Set(current.map((row) => row.product_variant_id));
   const changes = input.changes.map((change) => {
     const before = included.has(change.productVariantId);
@@ -629,6 +648,8 @@ async function captureReview(
         candidate.publicationTargetId === target.id
           ? {
               ...candidate,
+              mappings: proposal ? [...candidate.mappings.filter(mapping => !proposal.mappings.some(row => row.productVariantId === mapping.productVariantId)),
+                ...proposal.mappings.filter(mapping => selectedIds.includes(mapping.productVariantId))] : candidate.mappings,
               membership: {
                 mode: "explicit" as const,
                 includedVariantIds: selectedIds,
@@ -662,7 +683,8 @@ async function captureReview(
           issue(problem.code, problem.message, "configure_inventory"),
         );
       for (const row of selected?.rows ?? []) {
-        for (const problem of row.blockers)
+        for (const problem of row.blockers.filter(problem => !(problem.code === "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING"
+          && proposal?.newMappingVariantIds.includes(row.productVariantId))))
           blockers.push(
             issue(
               problem.code,
@@ -749,7 +771,7 @@ function inclusionBlockers(
   return [];
 }
 
-async function readTargets(
+export async function readTargets(
   client: PoolClient,
   channelId?: number,
   connectionId?: number,

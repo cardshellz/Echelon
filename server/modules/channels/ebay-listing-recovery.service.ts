@@ -40,8 +40,10 @@ export class EbayListingRecoveryService {
   async preview(id: string, channelId: number) {
     const job = await this.ownedJob(id, channelId);
     const inventory = await this.recovery.preview(this.scopes(job));
-    const publicationRetry = this.requiresPublicationRetry(job) ? { reviewHash: publicationRetryReviewHash(job), revision: job.revision,
-      message: "Echelon saved the start of a publish request, but its final outcome is unconfirmed. Authorizing another attempt preserves that unknown outcome and resumes this same saved publication. The worker will recheck the exact offers and group before writing; it will not publish again if eBay shows them as published." } : null;
+    const publicationRetry = this.requiresWorkflowRetry(job) ? { reviewHash: publicationRetryReviewHash(job), revision: job.revision,
+      message: job.operation === "withdraw"
+        ? "Echelon saved the start of a withdrawal, but its final outcome is unconfirmed. Authorizing another attempt preserves that unknown outcome and resumes this same saved removal. The worker first rechecks the exact offers and group; it will not withdraw again if eBay shows them as unpublished."
+        : "Echelon saved the start of a publish request, but its final outcome is unconfirmed. Authorizing another attempt preserves that unknown outcome and resumes this same saved publication. The worker will recheck the exact offers and group before writing; it will not publish again if eBay shows them as published." } : null;
     return { ...inventory, canResume: inventory.canResume || (publicationRetry !== null && inventory.blockReason === "no_pending_attempts"),
       blockReason: publicationRetry && inventory.blockReason === "no_pending_attempts" ? null : inventory.blockReason,
       publicationRetry, jobId: job.id, productId: job.productId };
@@ -50,20 +52,19 @@ export class EbayListingRecoveryService {
   async resume(id: string, channelId: number, actor: string, input: unknown) {
     const command = ebayListingRecoveryConfirmationSchema.extend({ idempotencyKey: z.string().uuid() }).parse(input);
     const job = await this.ownedJob(id, channelId);
-    if (command.publicationRetryHash) return this.resumePublication(job, channelId, actor, command);
-    if (this.requiresPublicationRetry(job)) throw new EbayListingSyncError("EBAY_RECOVERY_PREVIEW_CHANGED",
-      "Review the saved publication attempt and acknowledge its unknown outcome before authorizing another publish attempt.");
+    if (command.publicationRetryHash) return this.resumeWorkflow(job, channelId, actor, command);
+    if (this.requiresWorkflowRetry(job)) throw new EbayListingSyncError("EBAY_RECOVERY_PREVIEW_CHANGED",
+      "Review the saved listing attempt and acknowledge its unknown outcome before authorizing another attempt.");
     const result = await this.recovery.resume({ ...command, scopes: this.scopes(job), actor });
     try {
       // The receipt commits first. If the process stops here, the already durable
       // blocked job will retry; replaying this command also safely retries enqueue.
-      if (job.operation === "publish") {
-        // Keep the immutable source/target of this saved publication. Published
-        // readback can legitimately exist now even though its original local
-        // mapping never committed, so maintenance admission cannot reconstruct it.
+      if (job.operation === "publish" || job.operation === "withdraw") {
+        // Preserve the saved operation. A publication can lack a committed
+        // listing ID; a withdrawal is intentionally excluded from maintenance.
         const current = await this.ownedJob(id, channelId);
         if (current.state === "completed") return { ...result, job: this.publicJob(current) };
-        const resumed = await this.jobs.enqueue(job.identity, actor, command.idempotencyKey, "publish");
+        const resumed = await this.jobs.enqueue(job.identity, actor, command.idempotencyKey, job.operation);
         return { ...result, job: this.publicJob(resumed) };
       }
       const queued = await this.enqueue(job.productId, actor, command.idempotencyKey);
@@ -78,11 +79,12 @@ export class EbayListingRecoveryService {
     }
   }
 
-  private requiresPublicationRetry(job: StoredEbayListingSyncJob): boolean {
-    return job.operation === "publish" && job.publicationWriteStarted && !job.publicationWriteCompleted && job.publicationAccepted === null;
+  private requiresWorkflowRetry(job: StoredEbayListingSyncJob): boolean {
+    return (job.operation === "publish" && job.publicationWriteStarted && !job.publicationWriteCompleted && job.publicationAccepted === null)
+      || (job.operation === "withdraw" && job.withdrawalWriteStarted && !job.withdrawalWriteCompleted);
   }
 
-  private async resumePublication(job: StoredEbayListingSyncJob, channelId: number, actor: string,
+  private async resumeWorkflow(job: StoredEbayListingSyncJob, channelId: number, actor: string,
     command: z.infer<typeof ebayListingRecoveryConfirmationSchema>) {
     const authorize = () => this.jobs.authorizePublicationRetry({ jobId: job.id, channelId, actor,
       expectedRevision: job.revision, reviewHash: command.publicationRetryHash!, commandKey: command.idempotencyKey });
@@ -95,8 +97,8 @@ export class EbayListingRecoveryService {
       return { attemptIds: [], replayed: replay.replayed, providerWriteAttempted: false as const,
         publicationRetryAuthorized: true, job: this.publicJob(replay.job) };
     }
-    if (!this.requiresPublicationRetry(job) || command.publicationRetryHash !== publicationRetryReviewHash(job))
-      throw new EbayListingSyncError("EBAY_RECOVERY_PREVIEW_CHANGED", "The saved publication changed after your review. Review its current outcome before authorizing another attempt.");
+    if (!this.requiresWorkflowRetry(job) || command.publicationRetryHash !== publicationRetryReviewHash(job))
+      throw new EbayListingSyncError("EBAY_RECOVERY_PREVIEW_CHANGED", "The saved listing request changed after your review. Review its current outcome before authorizing another attempt.");
     const { publicationRetryHash: _publicationRetryHash, ...inventoryCommand } = command;
     let result: { attemptIds: string[]; replayed: boolean; providerWriteAttempted: false };
     try {

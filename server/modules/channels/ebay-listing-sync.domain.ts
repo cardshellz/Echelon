@@ -59,12 +59,15 @@ export const ebayPublicationAcceptedSchema = z.object({ listingId: z.string().tr
   offerIds: z.record(z.string().regex(/^[1-9][0-9]*$/), z.string().trim().min(1).max(255)) }).strict();
 export type EbayPublicationAccepted = z.infer<typeof ebayPublicationAcceptedSchema>;
 export const storedEbayListingSyncJobSchema = ebayListingSyncJobSchema.extend({
-  operation: z.enum(["sync", "publish"]).default("sync"),
+  operation: z.enum(["sync", "publish", "withdraw"]).default("sync"),
+  requestedBy: z.string().min(1).max(200).optional(),
   identity: ebayListingSyncIdentitySchema,
   providerIdentity: ebayListingSyncIdentitySchema.nullable().default(null),
   publicationTarget: ebayListingSyncIdentitySchema.nullable().default(null),
   publicationAccepted: ebayPublicationAcceptedSchema.nullable().default(null),
   publicationWriteCompleted: z.boolean().default(false),
+  withdrawalWriteCompleted: z.boolean().default(false),
+  withdrawalWriteStarted: z.boolean().default(false),
   publicationWriteStarted: z.boolean().default(false),
   publicationAcceptedRevision: z.string().regex(/^[1-9][0-9]*$/).nullable().default(null),
   publicationIntentHash: z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),
@@ -86,6 +89,8 @@ export const publicationRetryReviewHash = (job: StoredEbayListingSyncJob): strin
   id: job.id, revision: job.revision, identity: job.identity, publicationTarget: job.publicationTarget,
   publicationWriteStarted: job.publicationWriteStarted, publicationWriteCompleted: job.publicationWriteCompleted,
   publicationAccepted: job.publicationAccepted, publicationIntentHash: job.publicationIntentHash,
+  ...(job.operation === "withdraw" ? { operation: job.operation, providerIdentity: job.providerIdentity,
+    withdrawalWriteStarted: job.withdrawalWriteStarted, withdrawalWriteCompleted: job.withdrawalWriteCompleted } : {}),
 });
 export interface EbayPublicationRetryAuthorization {
   jobId: string; channelId: number; expectedRevision: string; reviewHash: string; commandKey: string; actor: string;
@@ -101,6 +106,7 @@ export class EbayListingSyncError extends Error {
   }
 }
 const WAIT_CODES = new Set([
+  "EBAY_WITHDRAWAL_READBACK_PENDING",
   "EBAY_PUBLICATION_READBACK_PENDING",
   "EBAY_PROVIDER_RATE_LIMITED",
   "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED",
@@ -168,14 +174,14 @@ export function syncFailure(
       : "The listing update could not finish. Inspect the saved sync job before retrying.";
   return {
     state:
-      code === "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" || code === "EBAY_PUBLICATION_RESPONSE_UNCERTAIN"
+      code === "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" || code === "EBAY_PUBLICATION_RESPONSE_UNCERTAIN" || code === "EBAY_WITHDRAWAL_RESPONSE_UNCERTAIN"
         ? "awaiting_evidence"
         : retrying
           ? "recovering"
           : "needs_attention",
     code,
     message,
-    resetAttempts: waiting || code === "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" || code === "EBAY_PUBLICATION_RESPONSE_UNCERTAIN",
+    resetAttempts: waiting || code === "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" || code === "EBAY_PUBLICATION_RESPONSE_UNCERTAIN" || code === "EBAY_WITHDRAWAL_RESPONSE_UNCERTAIN",
     nextAttemptAt: new Date(
       Number.isFinite(retryAfter) ? Math.max(minimum, retryAfter) : minimum,
     ),

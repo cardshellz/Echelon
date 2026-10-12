@@ -21,6 +21,8 @@ import { listingFailure, listingFailureStatus } from './ebay-listing-errors';
 import { registerEbayListingRecoveryRoutes } from './ebay-listing-recovery.routes';
 import { registerEbayListingMappingRoutes } from './ebay-listing-mapping.routes';
 import { ebayListingMappingService } from '../../modules/channels/ebay-listing-mapping';
+import { registerEbayPublicationStockRoutes } from './ebay-publication-stock.routes';
+import { ebayPublicationStockService } from '../../modules/channels/ebay-publication-stock';
 import { readEbayPushRecoveryIdentity } from '../../modules/channels/ebay-listing-push';
 import { ebayListingSyncJobSchema } from '@shared/types/ebay-listing-sync';
 import { queueVariantAvailabilityRepair } from "../../modules/channels/variant-availability-sync.service";
@@ -448,6 +450,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
   });
   registerEbayListingRecoveryRoutes(router, ebayListingRecovery, EBAY_CHANNEL_ID);
   registerEbayListingMappingRoutes(router, ebayListingMappingService, EBAY_CHANNEL_ID);
+  registerEbayPublicationStockRoutes(router, ebayPublicationStockService);
 
   // -----------------------------------------------------------------------
   // Channel Pricing Rules endpoints

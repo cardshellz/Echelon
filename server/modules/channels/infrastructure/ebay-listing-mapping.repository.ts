@@ -1,3 +1,4 @@
+import { lockEbayListingSource } from "./ebay-listing-source-fence";
 import { z } from "zod";
 import type { Pool, PoolClient } from "pg";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -165,28 +166,12 @@ export class PostgresEbayListingMappingRepairRepository implements EbayListingMa
   }
 
   private async lockSource(client: PoolClient, plan: EbayListingMappingRepairPlan): Promise<void> {
-    const identity = plan.source.identity;
-    const channel = (await client.query("SELECT provider FROM channels.channels WHERE id=$1 FOR UPDATE", [identity.channelId])).rows[0];
-    if (channel?.provider?.toLowerCase() !== "ebay") throw sourceChanged();
-    const connections = (await client.query("SELECT id FROM channels.channel_connections WHERE channel_id=$1 ORDER BY id FOR UPDATE", [identity.channelId])).rows;
-    if (connections.length !== 1 || connections[0].id !== identity.connectionId) throw sourceChanged();
-    const account = (await client.query(`SELECT external_account_id,external_account_identity_scheme,external_account_verified_at
-      FROM ebay.ebay_oauth_tokens WHERE channel_id=$1 AND environment=$2 FOR UPDATE`, [identity.channelId,plan.source.environment])).rows[0];
-    if (account?.external_account_id !== identity.accountId || account?.external_account_identity_scheme !== "provider_user_id" || !account?.external_account_verified_at) throw sourceChanged();
-    if (!(await client.query("SELECT id FROM catalog.products WHERE id=$1 FOR UPDATE", [identity.productId])).rowCount) throw sourceChanged();
-    // Parent row locks also prevent a concurrent new mapping/override referencing
-    // an existing variant and a new variant referencing this product.
-    await client.query("SELECT id FROM catalog.product_variants WHERE product_id=$1 ORDER BY id FOR UPDATE", [identity.productId]);
-    // Parent locks prevent new child rows, but non-key changes to existing
-    // eligibility overrides need their own locks through the source reread.
-    await client.query("SELECT id FROM channels.channel_product_overrides WHERE channel_id=$1 AND product_id=$2 ORDER BY id FOR UPDATE", [identity.channelId,identity.productId]);
-    await client.query(`SELECT id FROM channels.channel_variant_overrides WHERE channel_id=$1
-      AND product_variant_id IN (SELECT id FROM catalog.product_variants WHERE product_id=$2) ORDER BY id FOR UPDATE`, [identity.channelId,identity.productId]);
-    await client.query(`SELECT id FROM ebay.ebay_category_mappings WHERE channel_id=$1
-      AND product_type_slug=(SELECT product_type FROM catalog.products WHERE id=$2) ORDER BY id FOR UPDATE`, [identity.channelId,identity.productId]);
-    await client.query("SELECT product_variant_id FROM channels.channel_listings WHERE channel_id=$1 AND product_variant_id=ANY($2::integer[]) ORDER BY product_variant_id FOR UPDATE", [identity.channelId,identity.variants.map(member => member.variantId)]);
+    try { await lockEbayListingSource(client, plan.source.identity, plan.source.environment); }
+    catch (error) {
+      if (error instanceof EbayListingSyncError && error.code === "EBAY_PUBLICATION_STOCK_SOURCE_CHANGED") throw sourceChanged();
+      throw error;
+    }
   }
-
   /** Preview and apply use the same exact local ownership check. The apply
    * caller additionally owns the short table lock and transaction source fence. */
   async checkMappingOwnership(input: EbayListingMappingSource["identity"], transactionClient?: PoolClient): Promise<void> {

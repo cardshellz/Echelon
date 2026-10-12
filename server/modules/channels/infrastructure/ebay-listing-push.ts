@@ -15,6 +15,11 @@ import { resolveEbayPublicationTarget, assertEbayPublicationTargetUnchanged } fr
 import type { PreparedEbayPublication } from "../ebay-publication-completion.service";
 import { admitEbayPublication } from "../ebay-publication-admission.service";
 import { randomUUID } from "node:crypto";
+import type { PoolClient } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
+import * as schema from "@shared/schema";
+import { EbayAuthService, createEbayAuthConfig } from "../adapters/ebay/ebay-auth.service";
+import { assertEbayPublicationReady } from "../../inventory-planning/quantity-publication";
 
 const repository = new PostgresEbayListingPushRepository(pool, EBAY_CHANNEL_ID, () => new Date(),
   () => getDatabasePoolSnapshot().maximumConnections);
@@ -27,11 +32,11 @@ const metadataSchema = z.object({
   merchantLocationKey: z.string().trim().min(1).optional().default("card-shellz-hq"),
 }).passthrough();
 
-async function context() {
-  const auth = getAuthService();
+async function context(client?: PoolClient) {
+  const auth = client ? new EbayAuthService(drizzle(client, { schema }), createEbayAuthConfig()) : getAuthService();
   if (!auth) throw new EbayListingSyncError("EBAY_SYNC_AUTH_REQUIRED", "eBay OAuth is not configured. Reconnect the intended eBay account in Connection settings.");
   const account = await auth.getVerifiedProviderAccount(EBAY_CHANNEL_ID);
-  const connections = await pool.query<{ id: number; metadata: unknown }>(
+  const connections = await (client ?? pool).query<{ id: number; metadata: unknown }>(
     "SELECT id, metadata FROM channels.channel_connections WHERE channel_id=$1 LIMIT 2", [EBAY_CHANNEL_ID]);
   if (!account || connections.rows.length !== 1)
     throw new EbayListingSyncError("EBAY_SYNC_AUTH_REQUIRED", "One verified eBay account connection is required before publishing. Reconnect the intended account.");
@@ -41,14 +46,14 @@ async function context() {
 
 /** Read-only scope source shared with initial publication. A recovery receipt
  * permits fresh canonical inventory; it never manufactures a published listing. */
-export async function readEbayPublicationSource(productId: number): Promise<EbayListingSyncIdentity> {
+export async function readEbayPublicationSource(productId: number, client?: PoolClient): Promise<EbayListingSyncIdentity> {
   z.number().int().positive().max(2_147_483_647).parse(productId);
-  const ctx = await context();
-  const product = await repository.readProduct(productId);
-  if ((await repository.currentListingIds(productId)).length > 0)
+  const ctx = await context(client);
+  const product = await repository.readProduct(productId, client);
+  if ((await repository.currentListingIds(productId, client)).length > 0)
     throw new EbayListingSyncError("EBAY_LISTING_ALREADY_PUBLISHED", "This product already has a saved eBay listing. Use its Sync action and review that saved update's recovery details.");
-  await repository.readCategory(product.product_type);
-  const variants = await repository.readVariants(productId);
+  await repository.readCategory(product.product_type, client);
+  const variants = await repository.readVariants(productId, client);
   return ebayListingSyncIdentitySchema.parse({ channelId: EBAY_CHANNEL_ID, productId,
     connectionId: ctx.connectionId, accountId: ctx.account.externalAccountId, marketplaceId: ctx.metadata.marketplaceId,
     groupKey: null,
@@ -147,7 +152,12 @@ export async function prepareEbayPublicationCompletion(source: EbayListingSyncId
   const { draft, clientInput, prices, resolvePublishedIdentity } = await preparePushDraft({ ctx, product, category,
     variants, listingIds: [], groupKey: identity.groupKey, existingGroupKey: identity.groupKey, quantities });
   assertEbayListingSourceIdentityUnchanged(source, await readEbayPublicationSource(source.productId));
-  return { sourceIdentity, identity, inspection, inspect, draft: { ...draft,
+  return { sourceIdentity, identity, inspection, inspect,
+    assertInventoryReady: () => assertEbayPublicationReady(pool, {
+      channelId: source.channelId, connectionId: ctx.connectionId, productId: source.productId,
+      accountId: ctx.account.externalAccountId, environment: ctx.auth.getEnvironment(),
+      variants: identity.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku })),
+    }), draft: { ...draft,
     existingOfferIdsByVariantId: Object.fromEntries(identity.variants.map(member => [member.variantId, member.offerId])) },
     client: createEbayRouteListingLifecycleClient(clientInput), resolvePublishedIdentity,
     variants: variants.map(member => ({ variantId: member.id, sku: member.sku, productName: product.name,
