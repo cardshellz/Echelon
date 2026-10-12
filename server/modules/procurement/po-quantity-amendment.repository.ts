@@ -37,6 +37,9 @@ export async function readQuantityAmendmentSource(tx: AmendmentTransaction, purc
   const invoiceLines = allInvoiceLines.filter((line) => line.purchaseOrderLineId === null || lineIds.has(line.purchaseOrderLineId));
   const receipts = await tx.select().from(poReceipts).where(eq(poReceipts.purchaseOrderId, purchaseOrderId)).orderBy(asc(poReceipts.id));
   const exceptions = await tx.select().from(poExceptions).where(and(eq(poExceptions.poId, purchaseOrderId), eq(poExceptions.kind, "match_mismatch"))).orderBy(asc(poExceptions.id)).for("update");
+  // Row locks do not cover newly inserted tiers or a new DEFAULT settings row.
+  // Freeze policy creation as well as edits until this short command finishes.
+  await tx.execute(sql`LOCK TABLE ${warehouseSettings}, ${poApprovalTiers} IN SHARE MODE`);
   const settingsRows = await tx.select({ requireApproval: warehouseSettings.requireApproval }).from(warehouseSettings).where(eq(warehouseSettings.warehouseCode, "DEFAULT")).limit(1).for("share");
   const fallback = settingsRows.length ? settingsRows : await tx.select({ requireApproval: warehouseSettings.requireApproval }).from(warehouseSettings).limit(1).for("share");
   // Mirrors the procurement setting owner and schema DEFAULT false. Disabling

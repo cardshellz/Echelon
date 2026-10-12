@@ -93,3 +93,15 @@ export function purchaseApprovalSnapshotCovers(input: {
     && recordedTier.approverRole === tier.data.approverRole
     && evidence.actor.roles.some((role) => role.id === evidence.matchedRoleId && matchesRequiredRole(role, tier.data.approverRole));
 }
+
+/** Select the same current amount tier for PO and invoice corrections. The
+ * caller separately enforces its administrator gate, even when tiers are off. */
+export function buildCurrentPurchaseApprovalSnapshot(input: {
+  actor: PurchaseApprovalActor; requireApproval: boolean; approvalTiers: readonly PurchaseApprovalTier[]; totalCents: number;
+}): PurchaseApprovalSnapshot {
+  const totalCents = amount.parse(input.totalCents);
+  const tiers = input.requireApproval ? input.approvalTiers.map(tier => tierSchema.parse(tier))
+    .filter(tier => tier.thresholdCents <= totalCents).sort((a, b) => b.thresholdCents - a.thresholdCents || a.id - b.id) : [];
+  assertUniqueHighestApprovalTier(tiers.slice(0, 2));
+  return buildPurchaseApprovalSnapshot({ actor: input.actor, requireApproval: input.requireApproval, tier: tiers[0] ?? null, totalCents });
+}
