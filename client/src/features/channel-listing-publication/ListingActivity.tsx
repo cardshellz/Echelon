@@ -19,15 +19,11 @@ const operationLabels: Record<ListingOperation["state"], string> = {
 type ActivityAction = "check" | "edit";
 
 export function ListingActivity({
-  channelId,
-  connectionId,
   operations,
   canEdit,
   onReconcile,
   onEditFailed,
 }: {
-  channelId: number;
-  connectionId: number;
   operations: ListingOperation[];
   canEdit: boolean;
   onReconcile(id: string): Promise<void>;
@@ -170,7 +166,7 @@ export function ListingActivity({
                                   <p className="text-xs text-muted-foreground">Add failed items to the draft for correction and review. Existing draft edits are preserved.</p>
                                 </div>
                               )}
-                              <ListingActivityDetails channelId={channelId} connectionId={connectionId} operation={operation} />
+                              <ListingActivityDetails operation={operation} />
                             </div>
                           </td>
                         </tr>

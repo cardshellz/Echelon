@@ -28,11 +28,11 @@ import { captureActiveSupplySnapshotInsideTransaction } from "./inventory-availa
 import type { SupplySnapshotDto } from "@shared/types/inventory-availability-planner";
 import { assertInventoryCutoverFenceHeldInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { InventoryChannelQuantityRuntimeService } from "../application/inventory-channel-quantity-runtime.service";
+import { readPublicationStockSelection, selectionRequiresPublication } from "./inventory-publication-selection.reader";
 
 type ClientPool = Pick<Pool, "connect"> & { options?: { max?: number } };
 
 interface TargetRow extends Record<string, unknown> {
-  membership_mode?: string;
   publication_target_id: number;
   publication_target_revision: string;
   destination_kind: string;
@@ -285,6 +285,11 @@ async function createPublicationContext(
   return {
     ...authority,
     listActivePublicationProductIds: (channelId) => listActivePublicationProductIds(client, channelId),
+    listUnmanagedPublicationVariantIds: async productId => (await client.query<{ id: number }>(
+      `SELECT id FROM catalog.product_variants
+       WHERE product_id=$1 AND NOT (is_active AND requires_shipping
+         AND COALESCE(track_inventory,true) AND sales_eligibility='sellable') ORDER BY id`, [productId],
+    )).rows.map(row => positiveInteger(row.id, "productVariantId")),
     planProduct: async (productId, channelId, purpose = "publication") => {
       const supplySnapshot = await captureActiveSupplySnapshotInsideTransaction(client, productId);
       const managedSellableVariantIds = await loadManagedSellableVariantIds(client, productId);
@@ -343,10 +348,6 @@ async function listActivePublicationProductIds(
        ON variant.id = mapping_head.product_variant_id
      WHERE target.state = 'live'
        AND target.publication_authority = 'echelon'
-       AND variant.is_active = true
-       AND variant.requires_shipping = true
-       AND COALESCE(variant.track_inventory, true) = true
-       AND variant.sales_eligibility = 'sellable'
        ${channelFilter}
      ORDER BY variant.product_id`,
     values,
@@ -370,7 +371,6 @@ async function loadZeroPublicationTargets(
   if (input.channelId != null) values.push(positiveInteger(input.channelId, "channelId"));
   const targetRows = (await client.query<TargetRow>(
     `SELECT target.id AS publication_target_id,
-            COALESCE(to_jsonb(target)->>'membership_mode','whole_product') AS membership_mode,
             target.revision::text AS publication_target_revision,
             target.destination_kind,
             target.channel_id, channel_row.name AS channel_name,
@@ -458,15 +458,25 @@ async function loadZeroPublicationTargets(
     policiesByChannel.set(positiveInteger(row.channel_id, "policy.channelId"), rows);
   }
   const mappingsByTarget = new Map<number, ActivePublicationVariantMapping[]>();
-  const explicitTargetIds = [...new Set(targetRows.filter(row=>row.membership_mode==="explicit").map(row=>row.publication_target_id))];
-  const members = explicitTargetIds.length===0 ? [] : (await client.query<{ publication_target_id:number;product_variant_id:number }>(
-    `SELECT h.publication_target_id,h.product_variant_id FROM inventory.publication_membership_heads h
-     JOIN inventory.publication_membership_versions v ON v.id=h.active_version_id
-     WHERE h.publication_target_id=ANY($1::integer[]) AND h.product_variant_id=ANY($2::integer[]) AND v.included=true`,
-    [explicitTargetIds,variantIds])).rows;
+  const selectedByTarget = new Map<number, Set<number>>();
+  for (const targetId of targetIds) {
+    const target = targetRows.find(row => row.publication_target_id === targetId)!;
+    const selection = await readPublicationStockSelection(client, {
+      destinationKind: publicationDestinationKind(target.destination_kind),
+      channelId: target.channel_id,
+      channelConnectionId: target.channel_connection_id,
+      dropshipStoreConnectionId: target.dropship_store_connection_id,
+    }, { productId, productVariantIds: variantIds });
+    const required = selection.variants.filter(variant => selectionRequiresPublication(variant.action));
+    if (required.some(variant => variant.blockers.length > 0)) {
+      throw runtimeError("INVENTORY_PUBLICATION_SELECTION_BLOCKED",
+        "The listing owner cannot verify the retained listing to clear. Correct its exact listing link before retrying.",
+        { publicationTargetId: targetId, blockers: required.flatMap(variant => variant.blockers) });
+    }
+    selectedByTarget.set(targetId, new Set(required.map(variant => variant.productVariantId)));
+  }
   for (const row of mappingRows) {
-    if (explicitTargetIds.includes(row.publication_target_id)
-      && !members.some(member=>member.publication_target_id===row.publication_target_id && member.product_variant_id===row.product_variant_id)) continue;
+    if (!selectedByTarget.get(row.publication_target_id)?.has(row.product_variant_id)) continue;
     if (row.lifecycle_status !== "sealed") {
       throw runtimeError(
         "INVENTORY_PUBLICATION_ACTIVE_MAPPING_INVALID",
@@ -487,7 +497,7 @@ async function loadZeroPublicationTargets(
   const rowsByTarget = new Map<number, TargetRow[]>();
   for (const row of targetRows) {
     const targetId = positiveInteger(row.publication_target_id, "publicationTargetId");
-    if (row.membership_mode==="explicit" && !mappingsByTarget.has(targetId)) continue;
+    if (!selectedByTarget.get(targetId)?.size) continue;
     const rows = rowsByTarget.get(targetId) ?? [];
     rows.push(row);
     rowsByTarget.set(targetId, rows);

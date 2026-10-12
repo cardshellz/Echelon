@@ -106,3 +106,20 @@ describe("procurement document journeys", () => {
     expect(search).toContain("tab=lines");
   });
 });
+
+describe("direct invoice line correction navigation", () => {
+  it("opens the selected line and preserves the PO return without repeating the editor action on a later journey", () => {
+    const correction = procurementChildHref("/purchase-orders/17", "tab=lines", "/ap-invoices/71", { invoiceLineCorrectionId: 72 });
+    expect(new URLSearchParams(parts(correction)[1]).getAll("correctLine")).toEqual(["72"]);
+    expect(procurementBackHref(parts(correction)[1], "/ap-invoices")).toBe("/purchase-orders/17?tab=lines&purchase=purchase%3A17%3Alines");
+    const child = procurementChildHref(...parts(correction), "/purchase-orders/17");
+    expect(procurementBackHref(parts(child)[1], "/purchase-orders")).not.toContain("correctLine");
+  });
+  it.each([0, -1, 1.5, NaN, 2_147_483_648])("rejects invalid line IDs %s", invoiceLineCorrectionId => {
+    expect(() => procurementChildHref("/purchase-orders/17", "", "/ap-invoices/71", { invoiceLineCorrectionId })).toThrow();
+  });
+  it("rejects correction requests for other document types or simultaneous PO editing", () => {
+    expect(() => procurementChildHref("/purchase-orders/17", "", "/purchase-orders/17", { invoiceLineCorrectionId: 72 })).toThrow();
+    expect(() => procurementChildHref("/purchase-orders/17", "", "/purchase-orders/17", { editPo: true, invoiceLineCorrectionId: 72 })).toThrow();
+  });
+});

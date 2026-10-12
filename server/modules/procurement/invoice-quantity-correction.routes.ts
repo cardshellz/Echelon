@@ -7,6 +7,7 @@ import { financialCommandFromRequest } from "../../platform/commands/http-comman
 import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
 import { logger } from "../../platform/observability/logger";
 import { createInvoiceQuantityCorrectionService } from "./invoice-quantity-correction.service";
+import { PurchaseApprovalAuthorityError } from "./purchase-order-approval.policy";
 import { InvoiceQuantityCorrectionError } from "./invoice-quantity-correction.policy";
 
 const pathId = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(invoiceQuantityIdSchema);
@@ -18,6 +19,10 @@ function id(value: string): number {
 export function registerInvoiceQuantityCorrectionRoutes(app: Express, service = createInvoiceQuantityCorrectionService(db, () => new Date())) {
   const root = "/api/vendor-invoice-lines/:lineId/quantity-correction";
   function failure(error: unknown, req: Request, res: Response) {
+    if (error instanceof PurchaseApprovalAuthorityError) {
+      logger.warn("procurement.invoice_quantity_correction", { outcome: "rejected", actor_id: req.session.user?.id, invoice_line_id: req.params.lineId, error_code: error.details.code });
+      return res.status(error.statusCode).json({ error: error.message, code: error.details.code });
+    }
     if (error instanceof FinancialCommandError || error instanceof InvoiceQuantityCorrectionError) {
       logger.warn("procurement.invoice_quantity_correction", { outcome: "rejected", invoice_line_id: req.params.lineId,
         actor_id: req.session.user?.id, error_code: error.code, http_status: error.statusCode });

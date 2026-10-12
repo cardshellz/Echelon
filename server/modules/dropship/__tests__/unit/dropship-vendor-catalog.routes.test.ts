@@ -74,6 +74,20 @@ describe("dropship vendor catalog routes", () => {
     });
     expect(service.lastReplaceInput).toBeNull();
   });
+
+  it("returns a safe retryable conflict when stock publication is finishing", async () => {
+    vi.spyOn(service, "replaceSelectionRules").mockRejectedValue(new Error("private SQL", {
+      cause: { code: "55P03", message: "PUBLICATION_SELECTION_BUSY" },
+    }));
+    server = await startServer(buildApp(service as unknown as DropshipSelectionAtpService, true));
+    const response = await jsonRequest(`${server.url}/api/dropship/catalog/selection-rules`, {
+      method: "PUT", headers: { "Content-Type": "application/json", "Idempotency-Key": "retry-selection" },
+      body: JSON.stringify({ rules: [] }),
+    });
+    expect(response.status).toBe(409);
+    expect(response.body).toEqual({ error: { code: "PUBLICATION_SELECTION_BUSY", retryable: true,
+      message: "A stock update is finishing. Your selection was not saved; retry it in a moment." } });
+  });
 });
 
 class FakeDropshipSelectionAtpService {

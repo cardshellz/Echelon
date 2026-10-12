@@ -1,0 +1,104 @@
+import { describe, expect, it } from "vitest";
+import { decideDropshipStockPublicationSelection } from "../../domain/stock-publication-selection";
+
+type Input = Parameters<typeof decideDropshipStockPublicationSelection>[0];
+const now = new Date("2026-10-12T12:00:00Z");
+function input(overrides: Partial<Input> = {}): Input {
+  return {
+    productVariantId: 101,
+    candidate: { productId: 20, productVariantId: 101, productLineIds: [3], category: "Supplies",
+      productIsActive: true, variantIsActive: true, variantUomType: "pack",
+      requiresShipping: true, trackInventory: true, salesEligibility: "sellable" },
+    rules: [{ id: 1, scopeType: "catalog", action: "include" }],
+    vendorRules: [{ id: 2, scopeType: "catalog", action: "include" }],
+    override: null,
+    listing: { id: 50, productVariantId: 101, status: "active", externalListingId: "listing-1",
+      externalOfferId: "offer-1", livePushItemId: null },
+    config: { listingMode: "live", inventoryMode: "managed_quantity_sync", isActive: true },
+    storePaused: false, now, ...overrides,
+  };
+}
+const decide = (value: Partial<Input> = {}) => decideDropshipStockPublicationSelection(input(value));
+
+describe("Dropship listing intent owns stock selection", () => {
+  it.each(["active", "queued", "pushing", "failed", "blocked", "drift_detected"])(
+    "retains selected provider duty while status is %s", status => {
+      expect(decide({ listing: { ...input().listing!, status } })).toMatchObject({ action: "publish", blockers: [] });
+    });
+
+  it("treats a saved live push as publication intent even before IDs exist", () => {
+    expect(decide({ listing: { ...input().listing!, status: "failed", externalListingId: null,
+      externalOfferId: null, livePushItemId: 77 } })).toMatchObject({ action: "publish", reason: "saved_live_push" });
+  });
+
+  it.each([null, "failed", "preview_ready", "not_listed"])(
+    "allows a selected unpublished %s candidate to preview ATP without authorizing publication", status => {
+      const listing = status === null ? null : { ...input().listing!, status, externalListingId: null, externalOfferId: null };
+      expect(decide({ listing })).toMatchObject({ action: "read_only", reason: "selected_catalog_preview" });
+    });
+
+  it("does not make autolist selection alone into a saved publish command", () => {
+    expect(decide({ listing: null, vendorRules: [{ id: 2, scopeType: "catalog", action: "include", autoListNewSkus: true }] }).action)
+      .toBe("read_only");
+  });
+
+  it.each(["vendor_rule", "vendor_override", "admin_rule", "inactive_variant", "internal_variant", "untracked_variant"])(
+    "retains zero duty for %s deselection", reason => {
+      const value = input();
+      if (reason === "vendor_rule") value.vendorRules = [...value.vendorRules,
+        { id: 3, scopeType: "variant", action: "exclude", productVariantId: 101 }];
+      if (reason === "vendor_override") value.override = { productVariantId: 101, enabledOverride: false };
+      if (reason === "admin_rule") value.rules = [...value.rules,
+        { id: 4, scopeType: "product", action: "exclude", productId: 20 }];
+      if (reason === "inactive_variant") value.candidate!.variantIsActive = false;
+      if (reason === "internal_variant") value.candidate!.salesEligibility = "internal_only";
+      if (reason === "untracked_variant") value.candidate!.trackInventory = false;
+      expect(decideDropshipStockPublicationSelection(value).action).toBe("zero");
+    });
+
+  it("keeps deselection zero duty after managed sync is disabled", () => {
+    expect(decide({ vendorRules: [], config: { ...input().config!, inventoryMode: "disabled" } }).action).toBe("zero");
+    expect(decide({ vendorRules: [], listing: null }).action).toBe("none");
+  });
+
+  it.each(["listing", "store", "config"])("zeroes a retained %s pause", source => {
+    const value = input();
+    if (source === "listing") value.listing!.status = "paused";
+    if (source === "store") value.storePaused = true;
+    if (source === "config") value.config!.isActive = false;
+    expect(decideDropshipStockPublicationSelection(value).action).toBe("zero");
+  });
+
+  it("never resurrects ended listings from historical selection", () => {
+    expect(decide({ listing: { ...input().listing!, status: "ended" } })).toMatchObject({ action: "none", reason: "listing_ended" });
+    expect(decide({ listing: { ...input().listing!, status: "ended", livePushItemId: 78 } }).action).toBe("publish");
+  });
+
+  it.each(["draft_first", "manual_only"] as const)("does not turn %s configuration into live consent", listingMode => {
+    const config = { ...input().config!, listingMode };
+    expect(decide({ config }).action).toBe("zero");
+    expect(decide({ config, listing: null }).action).toBe("read_only");
+  });
+
+  it.each(["manual_quantity", "disabled"] as const)("does not assign positive stock with %s mode", inventoryMode => {
+    const config = { ...input().config!, inventoryMode };
+    expect(decide({ config }).action).toBe("zero");
+    expect(decide({ config, listing: null }).action).toBe("read_only");
+    expect(decide({ config, listing: { ...input().listing!, externalListingId: null,
+      externalOfferId: null, livePushItemId: 77 } }).action).toBe("zero");
+  });
+
+  it("honors effective catalog rules and does not mutate inputs", () => {
+    const value = input({ rules: [{ id: 1, scopeType: "catalog", action: "include",
+      endsAt: new Date("2026-10-12T12:00:01Z") }] });
+    const before = structuredClone(value);
+    expect(decideDropshipStockPublicationSelection(value).action).toBe("publish");
+    expect(decideDropshipStockPublicationSelection({ ...value, now: new Date("2026-10-12T12:00:01Z") }).action).toBe("zero");
+    expect(value).toEqual(before);
+  });
+
+  it("reports missing catalog identity without silently dropping a retained listing", () => {
+    expect(decide({ candidate: null })).toMatchObject({ action: "zero", blockers: [{ code: "DROPSHIP_STOCK_CATALOG_IDENTITY_MISSING" }] });
+    expect(decide({ candidate: null, listing: null }).action).toBe("none");
+  });
+});

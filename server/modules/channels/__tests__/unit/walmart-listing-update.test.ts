@@ -79,6 +79,7 @@ function setup() {
     taxonomy: vi.fn(),
   };
   const channels = {
+    withListingWrites: vi.fn(async (_account: unknown, _skus: readonly string[], work: () => Promise<unknown>) => work()),
     connection: vi.fn(async () => connection),
     listingApi: vi.fn(() => api),
     requireRuntime: vi.fn(),
@@ -90,6 +91,16 @@ function setup() {
 }
 
 describe("Walmart existing-listing maintenance", () => {
+  it("blocks queued content, price and shipping maintenance after a publication stop", async () => {
+    const { provider, account, record, api, channels } = setup();
+    const prepared = await provider.prepare(account, updateSource, record.intent.command);
+    channels.withListingWrites.mockRejectedValue(new WalmartApiError("LISTING_PUBLICATION_STOPPED", "Stopped", false));
+    const beforeSend = vi.fn();
+    await expect(provider.send({ ...record.intent, prepared }, testId(4), beforeSend))
+      .rejects.toMatchObject({ code: "LISTING_PUBLICATION_STOPPED", effect: "not_sent" });
+    expect(channels.withListingWrites).toHaveBeenCalledWith(account, [record.intent.command.sku], expect.any(Function));
+    expect(beforeSend).not.toHaveBeenCalled(); expect(api.submitMaintenance).not.toHaveBeenCalled();
+  });
   it.each([{ priceCents: 2498 }, { attributes: { Orderable: { ShippingWeight: 3 } } }])(
     "blocks older reviews without product content when Walmart reports a different type: %j",
     async (changes) => {

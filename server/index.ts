@@ -498,6 +498,7 @@ function startEchelonSyncScheduler(
   startListingPublicationWorker(ebayListingSyncService, "ebay_listing_sync_worker");
   startListingPublicationWorker(services.listingPublication);
   startListingPublicationWorker(services.listingUpdates, "listing_update_worker");
+  startListingPublicationWorker(services.listingLifecycle, "listing_lifecycle_worker");
   startWalmartStockConnectionWorker(services.walmartStockConnection);
 
   if (process.env.WALMART_ORDER_POLLING_ENABLED !== "false" && !schedulersDisabled("WALMART_ORDER_POLLING_DISABLED")) {
@@ -843,7 +844,7 @@ function startEchelonSyncScheduler(
       }
 
       if (!schedulersDisabled("INVENTORY_PUBLICATION_WORKER_DISABLED")) {
-        startInventoryPublicationOutboxWorker(services.inventoryPublicationOutbox);
+        startInventoryPublicationOutboxWorker(services.inventoryPublicationOutbox, services.inventoryPublicationSelectionWork);
         const catchupWorker = startQuantityPublicationCatchupWorker(services.quantityPublicationCatchup);
         httpServer.once("close", () => {
           void catchupWorker.stop().catch(() => {

@@ -167,6 +167,17 @@ export class WalmartConnectionRepository {
       FROM channels.channel_feeds WHERE channel_id=$1 AND is_active=1 AND quarantined_at IS NULL ORDER BY product_variant_id`, [channelId]);
     return result.rows;
   }
+  async inventoryMappings(channelId: number, productVariantIds: readonly number[]) {
+    positiveId.parse(channelId);
+    const variantIds = z.array(positiveId).parse(productVariantIds);
+    if (variantIds.length === 0) return [];
+    // Deselection retires publication intent, not the identity needed to clear
+    // provider stock and verify that zero. Admission owns current selection.
+    const result = await this.query<{ product_variant_id: number; channel_sku: string }>(`SELECT product_variant_id,channel_sku
+      FROM channels.channel_feeds WHERE channel_id=$1 AND product_variant_id=ANY($2::int[])
+        AND quarantined_at IS NULL ORDER BY product_variant_id`, [channelId, variantIds]);
+    return result.rows;
+  }
   async markPoll(channelId: number, now: Date, outcome: { checkpoint?: Date; errorCode?: string } = {}): Promise<void> {
     await this.query(`WITH observed AS (UPDATE channels.walmart_connections SET last_poll_at=$2,
       checkpoint_at=COALESCE($3,checkpoint_at), last_success_at=CASE WHEN $3::timestamptz IS NOT NULL THEN $2 ELSE last_success_at END,

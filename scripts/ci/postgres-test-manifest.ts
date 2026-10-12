@@ -7,6 +7,11 @@
 export const POSTGRES_SHARD_COUNT = 8;
 
 export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
+  "server/modules/channels/__tests__/integration/channel-stock-selection.integration.test.ts",
+  "server/modules/dropship/__tests__/integration/dropship-stock-publication-selection.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/publication-selection-work.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/stock-selection-publication-flow.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/inventory-publication-readback-selection.integration.test.ts",
   "server/modules/procurement/__tests__/integration/po-quantity-amendment.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/canonical-pick-case-break.integration.test.ts",
   "server/modules/marketplace-listings/__tests__/integration/listing-replacement-recovery.integration.test.ts",
@@ -156,5 +161,6 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/inventory-planning/__tests__/integration/ebay-publication-readiness.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-product-category-listing-settings.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-ebay-category-rules.integration.test.ts",
+  "server/modules/marketplace-listings/__tests__/integration/listing-lifecycle.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-listing-setting-writes.integration.test.ts",
 ]);

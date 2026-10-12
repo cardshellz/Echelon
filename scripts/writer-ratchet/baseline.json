@@ -727,6 +727,9 @@
   "inventory.publication_listing_setup_scopes": [
     "modules/inventory-planning"
   ],
+  "inventory.publication_mapping_preparations": [
+    "modules/inventory-planning"
+  ],
   "inventory.publication_membership_applications": [
     "modules/inventory-planning"
   ],
@@ -734,6 +737,12 @@
     "modules/inventory-planning"
   ],
   "inventory.publication_membership_versions": [
+    "modules/inventory-planning"
+  ],
+  "inventory.publication_selection_attempts": [
+    "modules/inventory-planning"
+  ],
+  "inventory.publication_selection_work": [
     "modules/inventory-planning"
   ],
   "inventory.publication_source_binding_heads": [
@@ -862,6 +871,12 @@
     "modules/marketplace-listings"
   ],
   "marketplace.channel_listing_item_claims": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.channel_listing_lifecycle": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.channel_listing_lifecycle_events": [
     "modules/marketplace-listings"
   ],
   "marketplace.channel_listing_operations": [

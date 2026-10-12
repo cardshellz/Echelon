@@ -13,6 +13,13 @@ import {
 import { safeEbayErrorMessage } from "../../adapters/ebay/ebay-quantity-http";
 import { syncContentIntentHash } from "../../ebay-listing-sync-content";
 describe("existing eBay listing sync execution", () => {
+  it.each(["STOCK_MAPPING_PROVIDER_BUSY", "STOCK_MAPPING_CONCURRENT_CHANGE", "STOCK_MAPPING_CLEANUP_UNCERTAIN",
+    "STOCK_MAPPING_REVIEW_STALE", "STOCK_MAPPING_TARGET_CHANGED"])("retries transient stock preparation %s with a finite budget", code => {
+    const failure = new EbayListingSyncError(code, "Recheck the saved listing's current stock preparation.");
+    const now = new Date("2026-10-12T12:00:00Z");
+    expect(syncFailure(failure, 1, now)).toMatchObject({ code, state: "recovering", resetAttempts: false, message: failure.message });
+    expect(syncFailure(failure, 5, now)).toMatchObject({ code, state: "needs_attention", resetAttempts: false });
+  });
   const recovered = () => ({
     reconcile: vi.fn(async () => ({
       busy: false,

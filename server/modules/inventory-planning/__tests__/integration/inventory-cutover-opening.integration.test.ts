@@ -5,6 +5,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpeningSource, OpeningVerification } from "@shared/types/inventory-cutover-opening";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { cutoverCompositionBaseSql, cutoverCompositionSeedSql, cutoverCompositionChannelSeedSql, installCutoverCompositionMigrations, seedCompositionReviewedDryRun } from "../fixtures/inventory-cutover-composition-database.fixture";
+import { installStockSelectionFixture } from "../fixtures/stock-selection.fixture";
 import { installCutoverAdmissionFixturePrerequisites } from "../fixtures/inventory-cutover-admission.fixture";
 import { InventoryCutoverOpeningService } from "../../application/inventory-cutover-opening.service";
 import { PostgresInventoryCutoverOpeningRepository } from "../../infrastructure/inventory-cutover-opening.repository";
@@ -329,6 +330,10 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
   it.each(["inventory_cutover_opening_v1", "inventory_cutover_opening_v2"] as const)("%s carries empty-bin proof through opening, publication and atomic handoff without losing custody or demand", async contractVersion => {
     await seedOpeningPromise();
     await pool.query(cutoverCompositionChannelSeedSql);
+    await installStockSelectionFixture(pool);
+    await pool.query(`INSERT INTO channels.channel_feeds
+      (channel_id,product_variant_id,channel_variant_id,channel_inventory_item_id,channel_sku)
+      VALUES(36,101,'test-variant','test-item','P5')`);
     const { source, input } = await promiseOpeningRequest(contractVersion);
     const strict = planCutoverReconstruction(source.evidence);
     expect(strict.ready).toBe(false);

@@ -13,6 +13,7 @@ export interface EbayListingIssueInput {
 export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListingIssue {
   const code = input.code && /^[A-Z0-9_]{1,100}$/.test(input.code) ? input.code : "EBAY_LISTING_OPERATION_FAILED";
   const productPath = Number.isSafeInteger(input.productId) && input.productId! > 0 ? `/products/${input.productId}` : "/channels/ebay";
+  const inventoryPath = Number.isSafeInteger(input.productId) && input.productId! > 0 ? `/channels/inventory?product=${input.productId}` : "/channels/inventory";
   const reference = input.jobId && /^[a-f0-9-]{36}$/i.test(input.jobId) ? input.jobId : undefined;
   const message = safeListingDiagnostic(input.message);
   const issue = (title: string, fallback: string, nextStep: string, retryable: boolean,
@@ -21,17 +22,72 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       action: { kind, label, ...(href ? { href } : {}) }, ...(reference ? { reference } : {}),
       ...(input.productId ? { details: [{ label: "Product ID", value: String(input.productId) }] } : {}) });
 
-  if (["STOCK_LISTING_ATP_NOT_READY", "EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED", "EBAY_PUBLICATION_STOCK_REVIEW_STALE", "EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED", "STOCK_LISTING_SOURCE_CHANGED"].includes(code))
-    return issue("Review stock setup before publishing", "The listing's connection to inventory is missing or needs a correction.",
-      "Review each SKU's current quantity and proposed stock connection. Apply Connect stock and publish when the review is ready, or follow the exact correction shown there.",
-      false, "review_publication_stock", "Review stock setup");
+  if (code === "PUBLICATION_SELECTION_BUSY")
+    return issue("A stock update is finishing", "Your channel selection was not saved because a stock update is still finishing.",
+      "Wait a moment, then retry the same selection change. If the inclusion dialog is open, use its retry button so the original request reference is kept.",
+      false, "edit_listing", "Return to listing selection", "/channels/ebay");
+  if (code === "CHANNEL_SELECTION_CONNECTION_UNRESOLVED")
+    return issue("Correct the saved eBay connection", "The stock destination does not identify one exact saved channel connection.",
+      "Open Connection settings and verify the intended seller account. An administrator must correct any missing, duplicate or mismatched saved connection before you retry this listing request.",
+      false, "reconnect", "Open connection settings", "/channels/ebay#connection");
+  if (["CHANNEL_SELECTION_JOB_SCOPE_CHANGED", "CHANNEL_SELECTION_AMBIGUOUS", "PUBLICATION_SELECTION_IDENTITY_INCOMPLETE"].includes(code))
+    return issue("Review the saved listing identities", "The saved listing selection does not identify one consistent product and variant scope.",
+      "Open the mapping review and compare the product, variants and saved eBay identities. Correct any verified mapping issue there; if duplicate or conflicting saved records remain, copy this code and request reference for an administrator.",
+      false, "review_mapping", "Review listing mapping");
+  if (["DROPSHIP_STOCK_SELECTION_AMBIGUOUS", "DROPSHIP_STOCK_STORE_NOT_FOUND"].includes(code))
+    return issue("Correct the Dropship store connection", "A stock destination's Dropship store connection or listing selection could not be resolved.",
+      "Open Dropship administration and check the affected store connection and listing configuration. An administrator must correct the missing connection or duplicate selection records before this saved listing request can continue.",
+      false, "edit_listing", "Open Dropship administration", "/dropship");
+  if (code === "DROPSHIP_CATALOG_VARIANT_UOM_TYPE_INVALID")
+    return issue("Correct the variant's unit of measure", "A catalog variant has an invalid unit of measure, so its store listing eligibility cannot be verified.",
+      "Open this product's variants and correct the affected variant's unit of measure. Then retry the saved listing request so stock selection can be checked again.",
+      false, "edit_listing", "Open product variants", `${productPath}?tab=variants`);
+  if (code === "PUBLICATION_SELECTION_DESTINATION_INVALID")
+    return issue("Correct the inventory destination", "The stock destination has inconsistent channel or store connection ownership.",
+      "Open Channel Inventory for this product and check the selected destination. An administrator must correct its channel or store connection ownership before retrying the saved listing request.",
+      false, "edit_listing", "Open inventory settings", inventoryPath);
+  if (code === "PUBLICATION_SELECTION_CLOCK_INVALID")
+    return issue("Stock selection needs an administrator check", "The saved operation could not obtain a valid transaction time for stock selection.",
+      "Copy this code and request reference for an administrator to inspect the failed operation. Its saved request remains available; do not change listing mappings to work around this failure.",
+      false, "contact_support", "Copy diagnostic details");
+  if (["EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED", "EBAY_PUBLICATION_STOCK_REVIEW_STALE", "EBAY_PUBLICATION_STOCK_APPLY_RETIRED", "STOCK_LISTING_EXCLUDED"].includes(code))
+    return issue("Continue publishing this selected product", "The previous publication stopped before its inventory connections were ready.",
+      "Retry this product. The saved publishing workflow checks the existing offers and prepares matching inventory connections from your channel selection before publishing with current stock and pictures.",
+      true, "retry_sync", "Retry publishing");
+  if (["STOCK_MAPPING_CONCURRENT_CHANGE", "STOCK_MAPPING_PROVIDER_BUSY", "STOCK_MAPPING_CLEANUP_UNCERTAIN",
+    "STOCK_MAPPING_REVIEW_STALE", "STOCK_MAPPING_TARGET_CHANGED"].includes(code))
+    return issue("Inventory preparation needs another check", "The inventory connection changed or has earlier work to finish.",
+      "Retry this saved listing request. Echelon checks current inventory connections and any unfinished stock updates before it can publish.",
+      true, "retry_sync", "Retry saved listing");
+  if (code === "STOCK_MAPPING_COMMAND_CONFLICT")
+    return issue("Check the saved inventory preparation request", "This request reference belongs to different inventory preparation inputs.",
+      "Keep the original request reference and copy its diagnostic details for an administrator to inspect. Do not replace it while the saved outcome is being checked.",
+      false, "contact_support", "Copy diagnostic details");
+  if (code === "STOCK_LISTING_NOT_SELECTED")
+    return issue("This product is not selected for eBay", "The channel selection excludes this product or variant.",
+      "Return to the eBay listing feed and enable the product and variants you intend to sell. Then use Publish; inventory preparation follows that selection.",
+      false, "edit_listing", "Review channel selection", "/channels/ebay");
+  if (["STOCK_LISTING_ATP_NOT_READY", "EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED", "STOCK_LISTING_TARGET_MISMATCH", "STOCK_LISTING_GLOBAL_STOP",
+    "STOCK_LISTING_HELD", "STOCK_LISTING_QUANTITY_UNAVAILABLE", "STOCK_LISTING_MAPPING_CONFLICT", "STOCK_LISTING_MAPPING_REVIEW_REQUIRED",
+    "STOCK_MAPPING_NOT_READY", "STOCK_LISTING_TARGET_UNAVAILABLE", "STOCK_MAPPING_SCOPE_TOO_LARGE", "STOCK_MAPPING_AUTHORITY_CHANGED"].includes(code))
+    return issue("Correct the inventory issue before publishing", "The canonical inventory checks did not allow this listing to publish.",
+      "Open Channel Inventory for this product, choose eBay, and correct the reported stock destination, warehouse, hold, mapping or quantity issue. Then return to the listing feed and retry Publish.",
+      false, "edit_listing", "Open inventory settings", inventoryPath);
+  if (code === "STOCK_LISTING_ACCOUNT_CHANGED")
+    return issue("Reconnect the expected eBay seller account", "The inventory destination and current eBay account do not match.",
+      "Open Connection settings and reconnect the intended seller account. Retry Publish after the account is verified.",
+      false, "reconnect", "Open connection settings", "/channels/ebay#connection");
+  if (code === "STOCK_LISTING_SOURCE_CHANGED")
+    return issue("Review the selected product variants", "A catalog variant or its exact eBay SKU changed before publication.",
+      "Open this product's variants and check their SKU and sale eligibility. Correct the reported variant, then review its eBay listing mapping before retrying Publish.",
+      false, "edit_listing", "Open product variants", `${productPath}?tab=variants`);
   if (code === "EBAY_PUBLICATION_STOCK_COMMAND_CONFLICT")
     return issue("Check the saved stock request", "This command reference is already associated with a different stock review or requester.",
-      "Keep the original request reference and check its saved receipt in the stock review. An administrator must compare the referenced product, review and requester before any replacement command is sent.",
-      false, "review_publication_stock", "Check saved stock request");
+      "Keep the original request reference. An administrator must compare the saved receipt's product, review and requester before another command is sent. Copy the diagnostic details for that check.",
+      false, "contact_support", "Copy diagnostic details");
   if (code === "EBAY_PUBLICATION_STOCK_SOURCE_CHANGED")
     return issue("Review the current listing before connecting stock", "The product's account, inclusion or eBay mapping changed after its stock review.",
-      "Refresh the listing and check its current mapping. Then review the current stock setup before publishing.",
+      "Refresh the listing and check its current mapping. Correct the reported identity or selection change, then retry Publish from the listing feed.",
       false, "review_mapping", "Review current listing");
   if (["EBAY_WITHDRAWAL_IN_PROGRESS", "EBAY_WITHDRAWAL_READBACK_PENDING", "EBAY_WITHDRAWAL_UNVERIFIED"].includes(code))
     return issue("Checking removal from eBay", "The saved removal has not yet been verified complete on eBay.",

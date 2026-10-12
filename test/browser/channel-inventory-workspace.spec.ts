@@ -233,7 +233,7 @@ test("lost enable response retries the exact request without a second enable", a
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
-test("empty stock selection does not claim the catalog has no sellable SKUs", async ({ page }, info) => {
+test("empty channel selection directs selection to the listing feed without another enrollment setting", async ({ page }, info) => {
   const state = await setup(page, {
     query: "?channel=3&destination=5&tab=quantities&product=10",
     viewOverrides: { publicationTargets: [target({ state: "disabled", hasPriorLiveStop: false })] },
@@ -244,7 +244,8 @@ test("empty stock selection does not claim the catalog has no sellable SKUs", as
   });
   state.status.rows = state.status.rows.map(row => ({ ...row, activeInventoryItemId: null, desired: null, acknowledged: null, observed: null }));
   await page.evaluate(() => window.dispatchEvent(new Event("channel-inventory-test-refresh")));
-  await expect(page.getByText("No SKUs selected for stock updates", { exact: true })).toBeVisible();
+  await expect(page.getByText("No channel listings need a stock update", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Choose products and variants in the channel's listing feed/)).toBeVisible();
   await expect(page.getByText(/no sellable, tracked SKUs/i)).toHaveCount(0);
   await expect(page.getByLabel("SKUs without stock update records")).toContainText("CARD-P5");
   await expect(page.getByText(/PUBLICATION_TARGET_NOT_IN_PREVIEW/)).not.toBeVisible();

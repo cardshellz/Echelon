@@ -1,3 +1,4 @@
+import { PoVarianceApproval, hasPendingPoVarianceApproval } from "@/features/purchasing/PoVarianceApproval";
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview } from "@/lib/shipment-receipt-units";
 import React from "react";
 import { PoQuantityAmendment } from '@/features/purchasing/PoQuantityAmendment';
@@ -664,8 +665,7 @@ const STATUS_BADGES: Record<string, { variant: "default" | "secondary" | "outlin
 // ── ExceptionCard ────────────────────────────────────────────────────
 // One open or acknowledged exception. Severity drives the left border
 // color; status drives which actions render. Resolve and dismiss prompt
-// for a free-text note via window.prompt for now (small enough surface
-// that a full dialog isn't worth the weight).
+// for nonfinancial notes. Financial variances use a reviewed admin command.
 function ExceptionCard({
   ex,
   purchaseOrderId,
@@ -673,6 +673,7 @@ function ExceptionCard({
   onAcknowledge,
   onResolve,
   onDismiss,
+  onVarianceApproved,
   busy,
   relatedUsers,
 }: {
@@ -682,6 +683,7 @@ function ExceptionCard({
   onAcknowledge: () => void;
   onResolve: (note: string) => void;
   onDismiss: (note: string) => void;
+  onVarianceApproved: () => void;
   busy: boolean;
   relatedUsers?: Record<string, { username: string; displayName: string | null }>;
 }) {
@@ -782,14 +784,9 @@ function ExceptionCard({
                   Acknowledge
                 </Button>
               )}
-              <Button
-                size="sm"
-                onClick={handleResolve}
-                disabled={busy}
-                data-testid={`resolve-exception-${ex.id}`}
-              >
-                {isMatchMismatch ? "Accept current variance" : "Mark resolved"}
-              </Button>
+              {isMatchMismatch ? <PoVarianceApproval exceptionId={ex.id} disabled={busy} onSaved={onVarianceApproved} /> : <Button
+                size="sm" onClick={handleResolve} disabled={busy} data-testid={`resolve-exception-${ex.id}`}
+              >Mark resolved</Button>}
               <Button
                 size="sm"
                 variant="ghost"
@@ -1276,7 +1273,7 @@ export default function PurchaseOrderDetail() {
   // the header pill + tab counter regardless of which tab is active).
   // includeResolved param flips when user expands the resolved section so
   // we don't pull every closed exception on initial load.
-  const [showResolvedExceptions, setShowResolvedExceptions] = useState(false);
+  const [showResolvedExceptions, setShowResolvedExceptions] = useState(() => hasPendingPoVarianceApproval(poId, shipmentCommandUser?.id));
   const { data: exceptionsData, refetch: refetchExceptions } = useQuery<{ exceptions: any[] }>({
     queryKey: [`/api/purchase-orders/${poId}/exceptions`, showResolvedExceptions],
     queryFn: async () => {
@@ -1289,6 +1286,9 @@ export default function PurchaseOrderDetail() {
     },
     enabled: !!poId,
   });
+  useEffect(() => {
+    if (hasPendingPoVarianceApproval(poId, shipmentCommandUser?.id)) setShowResolvedExceptions(true);
+  }, [poId, shipmentCommandUser?.id]);
   const allExceptions = exceptionsData?.exceptions ?? [];
   const openExceptions = allExceptions.filter((e: any) =>
     ["open", "acknowledged"].includes(e.status),
@@ -3750,6 +3750,11 @@ export default function PurchaseOrderDetail() {
                     dismissExceptionMutation.isPending
                   }
                   relatedUsers={relatedUsers}
+                  onVarianceApproved={() => {
+                    void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/exceptions`] });
+                    void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/history`] });
+                    void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+                  }}
                 />
               ))}
             </div>
@@ -3798,6 +3803,7 @@ export default function PurchaseOrderDetail() {
                             {ex.resolvedBy ? ` by ${formatActor(ex.resolvedBy, relatedUsers)}` : ""}
                           </span>
                         </div>
+                        {ex.kind === "match_mismatch" && <PoVarianceApproval exceptionId={ex.id} resolved disabled={false} onSaved={() => { void refetchExceptions(); }} />}
                         {ex.resolutionNote && (
                           <div className="mt-1 text-muted-foreground italic">
                             “{ex.resolutionNote}”

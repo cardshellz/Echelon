@@ -64,6 +64,8 @@ export interface InventoryAvailabilityRuntimePublicationContext {
   authorityRevision: string;
   activationRunId: string | null;
   listActivePublicationProductIds(channelId?: number): Promise<number[]>;
+  /** Retained identities for variants no longer eligible for positive stock. */
+  listUnmanagedPublicationVariantIds?(productId: number): Promise<number[]>;
   planProduct(productId: number, channelId?: number,
     purpose?: "publication" | "deferred_dropship_quantity_read"): Promise<InventoryChannelExposureRuntimePlan>;
   loadActivePublicationTargets(input: {
@@ -146,9 +148,8 @@ export class AuthorityAwareInventoryPublicationService {
     return this.executor.execute(async (context) => context.authority);
   }
 
-  /** Retains canonical ATP for failed Dropship listings in the audited initial
-   * deferral receipt. Other memberships and all provider-write gates are unchanged.
-   * The read shares the existing authority lock, supply snapshot and planner. */
+  /** Selected Dropship candidates can preview canonical ATP before a listing
+   * mapping exists. This read never authorizes a provider write. */
   async readDropshipProductQuantities<T>(input: {
     productId: number; dryRun: true; triggeredBy: string;
   }, legacyReader: () => Promise<T>): Promise<InventoryChannelQuantityRouteResult<T>> {
@@ -294,6 +295,12 @@ export class AuthorityAwareInventoryPublicationService {
       input.productVariantId,
       input.publicationTargetId,
     );
+    for (const variantId of await context.listUnmanagedPublicationVariantIds?.(input.productId) ?? []) {
+      if (input.productVariantId != null && input.productVariantId !== variantId) continue;
+      rows.push(...await zeroPublicationIntents(context, input.productId, variantId,
+        input.channelId ?? this.channelId, input.publicationTargetId));
+    }
+    assertUnambiguousProviderScopes(rows, context, input.productId);
     for (const row of rows.filter((candidate) => candidate.blockerCodes.length > 0)) {
       this.logger.warn({
         event: "canonical_inventory_publication_projection_blocked",
@@ -350,28 +357,7 @@ export class AuthorityAwareInventoryPublicationService {
     },
   ): Promise<CanonicalInventoryPublicationResult> {
     const activationRunId = canonicalActivationRunId(context);
-    const targets = await context.loadActivePublicationTargets({
-      productId: input.productId,
-      productVariantIds: [input.productVariantId],
-      channelId: input.channelId,
-    });
-    const rows = targets.map((target) => {
-      const mapping = target.mappings.find((candidate) =>
-        candidate.productVariantId === input.productVariantId);
-      if (!mapping) {
-        throw publicationError(
-          "CANONICAL_PUBLICATION_MAPPING_MISSING",
-          "A live Echelon publication target has no active provider identity for the inactive variant.",
-          context,
-          {
-            productId: input.productId,
-            productVariantId: input.productVariantId,
-            publicationTargetId: target.publicationTargetId,
-          },
-        );
-      }
-      return intent(target, mapping, input.productVariantId, null, "0", []);
-    });
+    const rows = await zeroPublicationIntents(context, input.productId, input.productVariantId, input.channelId);
     assertUnambiguousProviderScopes(rows, context, input.productId);
     const queued = await context.enqueueFullPublications(activationRunId, rows);
     this.logger.info({
@@ -396,6 +382,20 @@ export class AuthorityAwareInventoryPublicationService {
       ...queued,
     };
   }
+}
+
+async function zeroPublicationIntents(context: InventoryAvailabilityRuntimePublicationContext,
+  productId: number, productVariantId: number, channelId?: number, publicationTargetId?: number,
+): Promise<CanonicalInventoryPublicationIntent[]> {
+  const targets = await context.loadActivePublicationTargets({ productId, productVariantIds: [productVariantId], channelId });
+  return targets.filter(target => publicationTargetId == null || target.publicationTargetId === publicationTargetId)
+    .map(target => {
+      const mapping = target.mappings.find(candidate => candidate.productVariantId === productVariantId);
+      if (!mapping) throw publicationError("CANONICAL_PUBLICATION_MAPPING_MISSING",
+        "A retained listing has no exact provider identity to clear. Correct its saved listing link before retrying.",
+        context, { productId, productVariantId, publicationTargetId: target.publicationTargetId });
+      return intent(target, mapping, productVariantId, null, "0", []);
+    });
 }
 
 function publicationIntentsFromPlan(

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { publicationMembershipBlockerSchema, publicationMembershipReceiptSchema } from "./inventory-publication-membership";
+import { publicationMappingPreparationReceiptSchema } from "./inventory-publication-mapping-preparation";
 
 const id = z.number().int().positive().max(2_147_483_647);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -18,7 +19,6 @@ export const inventoryEbayPublicationReadinessSchema = z.object({
   variants: z.array(z.object({
     productVariantId: id, sku: identity,
     mappingAction: z.enum(["none", "promote_draft", "create"]),
-    membershipAction: z.enum(["none", "include"]),
     desiredQuantity: z.string().regex(/^(0|[1-9][0-9]*)$/).nullable(),
   }).strict()),
   blockers: z.array(publicationMembershipBlockerSchema), effects: z.array(z.string()),
@@ -30,8 +30,10 @@ export const inventoryEbayPublicationReadinessApplySchema = z.object({
 export const inventoryEbayPublicationReadinessReceiptSchema = z.object({
   channelId: id, productId: id, commandKey: z.string().uuid(),
   reviewHash: hash, contextHash: hash, appliedAt: z.string().datetime(), appliedBy: z.string().trim().min(1).max(100),
-  membership: publicationMembershipReceiptSchema, alreadyApplied: z.boolean(),
-}).strict();
+  /** Retained only to read immutable receipts written before selection authority moved to Channels. */
+  membership: publicationMembershipReceiptSchema.optional(),
+  mappingPreparation: publicationMappingPreparationReceiptSchema.optional(), alreadyApplied: z.boolean(),
+}).strict().refine(value => Boolean(value.membership) !== Boolean(value.mappingPreparation), "Receipt must describe exactly one historical enrollment or current mapping preparation.");
 export type InventoryEbayPublicationReadinessInput = z.infer<typeof inventoryEbayPublicationReadinessInputSchema>;
 export type InventoryEbayPublicationReadiness = z.infer<typeof inventoryEbayPublicationReadinessSchema>;
 export type InventoryEbayPublicationReadinessApply = z.infer<typeof inventoryEbayPublicationReadinessApplySchema>;

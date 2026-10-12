@@ -6,7 +6,7 @@ const selectionNotices: Record<
   Exclude<OrderEditCatalogSelectionFlow, "order_edit">,
   string
 > = {
-  membership: "Membership selected. Adding a membership to an existing order is not enabled in this editor yet.",
+  membership: "Memberships must be purchased separately. You can continue editing the other items in this order.",
   subscription: "Subscription selected. This editor does not yet support choosing its subscription plan.",
   gift_card: "Gift card selected. Adding gift cards to an existing order is not enabled in this editor yet.",
   bundle: "Bundle selected. This editor does not yet support adding its components.",

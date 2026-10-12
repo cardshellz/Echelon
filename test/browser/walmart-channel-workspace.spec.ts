@@ -3,9 +3,10 @@ import { readFileSync } from "node:fs";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import type { ChannelCatalogRow } from "../../shared/types/channel-catalog";
 import { listingDraftItemSchema, listingOperationSchema } from "../../shared/types/channel-listing-publication";
-import { createMembershipMock, createPublicationMock, handleMembershipRequest, handlePublicationRequest, PUBLICATION_BASE } from "./walmart-publication-fixtures";
+import { createPublicationMock, handlePublicationRequest, PUBLICATION_BASE } from "./walmart-publication-fixtures";
 import { editorSchema } from "../../server/modules/channels/adapters/walmart/walmart-listing-schema";
 import { createListingUpdateMock, handleListingUpdateRequest, listingChangeHistory, UPDATE_BASE } from "./walmart-listing-update-fixtures";
+import { createListingLifecycleMock, handleListingLifecycleRequest } from "./walmart-listing-lifecycle-fixtures";
 
 const BASE = "/api/channels/77";
 const status = { channelId: 77, connectionId: 9, partnerId: "10002558022", partnerName: "Card Shellz", environment: "production",
@@ -28,7 +29,7 @@ const listing = (sku: string, matched = true): ChannelCatalogRow => ({ sku, titl
 async function setup(page: Page, options: { readOnly?: boolean; connected?: boolean; catalogError?: boolean; catalogEmpty?: boolean; remoteRows?: ChannelCatalogRow[]; blocked?: boolean; inventoryAccess?: "view" | "activate" } = {}) {
   const state = { writes: [] as { path: string; body: any }[], reads: [] as string[], errors: [] as string[], unexpected: [] as string[],
     connected: options.connected !== false, linked: false, catalogError: options.catalogError ?? false,
-    remoteRows: options.remoteRows ?? (options.catalogEmpty ? [] : null), publication: createPublicationMock(), membership: createMembershipMock(), updates: createListingUpdateMock() };
+    remoteRows: options.remoteRows ?? (options.catalogEmpty ? [] : null), publication: createPublicationMock(), updates: createListingUpdateMock(), lifecycle: createListingLifecycleMock() };
   page.on("pageerror", error => state.errors.push(error.message));
   await page.route("**/*", route => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
   await page.route("**/api/**", async route => {
@@ -36,7 +37,7 @@ async function setup(page: Page, options: { readOnly?: boolean; connected?: bool
     if (req.method() === "GET") state.reads.push(url.pathname + url.search);
     if (await handleListingUpdateRequest(route, state.updates)) return;
     if (await handlePublicationRequest(route, state.publication)) return;
-    if (await handleMembershipRequest(route, state.membership)) return;
+    if (await handleListingLifecycleRequest(route, state.lifecycle)) return;
     if (req.method() === "GET") {
       if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "operator", username: "operator", role: "lead" }, roles: ["lead"],
         permissions: [...(options.readOnly ? ["channels:view"] : ["channels:view", "channels:edit"]), ...(options.inventoryAccess ? ["inventory_planning:view"] : []), ...(options.inventoryAccess === "activate" ? ["inventory_planning:activate"] : [])] } });
@@ -115,7 +116,7 @@ test("existing listing edits include unchanged product content and shipping with
   await page.getByRole("button", { name: /^Show change details/ }).click();
   await expect(page.getByText("Walmart reports the submitted product type. Listing status is shown separately above.")).toBeVisible();
   expect(state.updates.writes.at(-1)?.path).toMatch(/\/status$/);
-  expect(state.publication.writes).toEqual([]); expect(state.membership.writes).toEqual([]);
+  expect(state.publication.writes).toEqual([]);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
@@ -1711,10 +1712,8 @@ test("publication activity uses compact expandable rows for long errors and mixe
   await expect(batchDetails.getByText("$9.99", { exact: true })).toBeVisible();
   await expect(batchDetails.getByText("Item verified", { exact: true })).toBeVisible();
   await expect(batchDetails.getByText("One item needs correction.", { exact: true })).toBeVisible();
-  await batchDetails.getByRole("button", { name: "Review stock publishing", exact: true }).click();
-  await expect(page.getByRole("dialog")).toBeVisible();
-  expect(state.membership.writes[0].body).toEqual({ channelId: 77, channelConnectionId: 9, productVariantIds: [1] });
-  await page.keyboard.press("Escape");
+  await expect(batchDetails.getByRole("link", { name: "Channel Inventory", exact: true })).toHaveAttribute("href", "/channels/inventory");
+  await expect(batchDetails.getByRole("button", { name: "Review stock publishing", exact: true })).toHaveCount(0);
   await activity.locator(`[data-submission-id="${activityIds.processing}"]`).getByRole("button", { name: "Check Walmart status", exact: true }).click();
   await expect(activity.locator(`[data-submission-id="${activityIds.processing}"]`).getByText("Processed", { exact: true })).toBeVisible();
   await expect(failedRow.getByRole("button", { name: /^Hide details/ })).toHaveAttribute("aria-expanded", "true");
@@ -1905,42 +1904,25 @@ async function verifyFirstPublication(page: Page) {
   await page.getByRole("button", { name: /^Show details for CARD-1,/ }).click();
 }
 
-test("stock selection reviews exact verified SKUs and queues canonical updates with activation permission", async ({ page }) => {
-  const state = await setup(page, { inventoryAccess: "activate" });
-  await verifyFirstPublication(page);
-  await page.getByRole("button", { name: "Review stock publishing", exact: true }).click();
-  await expect(page.getByLabel("Publish stock for CARD-1", { exact: true })).not.toBeChecked();
-  await page.getByLabel("Publish stock for CARD-1", { exact: true }).check();
-  await page.getByRole("button", { name: "Review stock changes", exact: true }).click();
-  await expect(page.getByText("policy quantity 8", { exact: false })).toBeVisible();
-  expect(state.membership.writes.filter(write => write.path.endsWith("/apply"))).toHaveLength(0);
-  await page.getByRole("button", { name: "Apply stock selection", exact: true }).click();
-  await expect(page.getByRole("status").filter({ hasText: "inventory updates queued; Walmart quantities are not yet confirmed" })).toBeVisible();
-  const apply = state.membership.writes.find(write => write.path.endsWith("/apply"))!;
-  expect(apply.body).toMatchObject({ publicationTargetId: 200, expectedTargetRevision: "2", changes: [{ productVariantId: 1, included: true }], expectedReviewHash: "f".repeat(64) });
-  expect(apply.body.idempotencyKey).toEqual(expect.any(String));
-  expect(state.membership.writes[0].body).toEqual({ channelId: 77, channelConnectionId: 9, productVariantIds: [1] });
-  await page.keyboard.press("Escape");
-  await expect(page.getByText("Inventory setup required", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Review stock publishing", exact: true })).toBeVisible();
-  expect(state.errors).toEqual([]);
-});
-
-test("stock review requires inventory activation permission and exposes missing setup", async ({ page }) => {
-  const state = await setup(page, { inventoryAccess: "view" });
-  await verifyFirstPublication(page);
-  await page.getByRole("button", { name: "Review stock publishing", exact: true }).click();
-  await page.getByLabel("Publish stock for CARD-1", { exact: true }).check();
-  await page.getByRole("button", { name: "Review stock changes", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Apply stock selection", exact: true })).toBeDisabled();
-  await expect(page.getByText("Inventory activation permission is required to apply this review.", { exact: true })).toBeVisible();
-  state.membership.blocked = true;
-  await page.getByRole("button", { name: "Refresh readiness", exact: true }).click();
-  await expect(page.getByText("A Walmart inventory destination is required", { exact: true })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Open Channel Inventory setup", exact: true })).toBeVisible();
-  expect(state.membership.writes.filter(write => write.path.endsWith("/apply"))).toHaveLength(0);
-  expect(state.errors).toEqual([]);
-});
+for (const inventoryAccess of [undefined, "activate"] as const) {
+  test(`verified channel listings have no second stock-selection step (${inventoryAccess ?? "channel permissions only"})`, async ({ page }) => {
+    const state = await setup(page, { inventoryAccess });
+    await verifyFirstPublication(page);
+    const details = page.getByRole("region", { name: /^Submission details for CARD-1,/ });
+    await expect(details.getByText("Item verified", { exact: true })).toBeVisible();
+    await expect(details.getByText("Stock updates follow this channel's selected listings.", { exact: false })).toBeVisible();
+    await expect(details.getByRole("link", { name: "Channel Inventory", exact: true })).toHaveAttribute("href", "/channels/inventory");
+    await expect(page.getByRole("button", { name: "Review stock publishing", exact: true })).toHaveCount(0);
+    await expect(page.getByLabel("Publish stock for CARD-1", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Apply stock selection", exact: true })).toHaveCount(0);
+    expect(state.publication.submittedItems.map(item => item.variantId)).toEqual([1]);
+    expect(state.publication.operations).toHaveLength(1);
+    expect(state.publication.writes.at(-1)?.path).toMatch(/\/reconcile$/);
+    expect(state.writes).toEqual([]);
+    expect(state.errors).toEqual([]);
+    expect(state.unexpected).toEqual([]);
+  });
+}
 
 test("listing changes use compact expandable rows in a separate activity tab", async ({ page }, info) => {
   const state = await setup(page);
@@ -2109,4 +2091,96 @@ test("listing changes load failures can be retried", async ({ page }) => {
   await expect(activity.locator("[data-listing-update-id]")).toHaveCount(7);
   await expect(activity.getByRole("alert")).toHaveCount(0);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("listing lifecycle actions explain unpublishing without requiring a reason", async ({ page }, info) => {
+  const state = await setup(page, { remoteRows: [{ ...listing("CARD-P5"), publishedStatus: "SYSTEM_PROBLEM" }, listing("OTHER-SKU")] });
+  await page.getByRole("button", { name: "More actions for CARD-P5", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Unpublish from Walmart", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "Unpublish from Walmart?" })).toBeVisible();
+  await expect(dialog.getByText("Your catalog product, existing orders, and listing history are kept.")).toBeVisible();
+  await expect(dialog.getByRole("textbox")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Unpublish from Walmart", exact: true })).toBeEnabled();
+  await dialog.screenshot({ path: info.outputPath("unpublish-listing-confirmation.png") });
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(state.lifecycle.writes).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
+test("unpublishing keeps the listing and other SKUs editable until Walmart confirms", async ({ page }) => {
+  const state = await setup(page, { remoteRows: [listing("CARD-P5"), listing("OTHER-SKU")] });
+  await page.getByRole("button", { name: "More actions for CARD-P5", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Unpublish from Walmart", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Unpublish from Walmart", exact: true }).click();
+  const row = page.getByRole("row").filter({ hasText: "Product CARD-P5" });
+  await expect(row.getByText("Unpublishing", { exact: true })).toBeVisible();
+  await expect(row.getByRole("button", { name: "Edit listing CARD-P5", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Edit listing OTHER-SKU", exact: true })).toBeEnabled();
+  await row.getByRole("button", { name: "Check unpublish status", exact: true }).click();
+  await expect(row.getByText("Unpublished", { exact: true })).toBeVisible();
+  state.remoteRows = [listing("OTHER-SKU")]; // Walmart may stop returning the retired listing.
+  await page.reload();
+  await expect(page.getByRole("row").filter({ hasText: "Product CARD-P5" }).getByText("Unpublished", { exact: true })).toBeVisible();
+  expect(state.lifecycle.writes[0].body).toMatchObject({ action: "unpublish", sku: "CARD-P5", account: { connectionId: 9 } });
+  expect(state.errors).toEqual([]);
+});
+
+test("remove waits for confirmed retirement and stays removed after refresh", async ({ page }, info) => {
+  const state = await setup(page, { remoteRows: [listing("CARD-P5"), listing("OTHER-SKU")] });
+  await page.getByRole("button", { name: "More actions for CARD-P5", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Remove from Echelon", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText(/remove it from this listing feed once Walmart confirms/)).toBeVisible();
+  await dialog.screenshot({ path: info.outputPath("remove-listing-confirmation.png") });
+  await dialog.getByRole("button", { name: "Unpublish and remove", exact: true }).click();
+  const row = page.getByRole("row").filter({ hasText: "Product CARD-P5" });
+  await expect(row.getByText("Unpublishing", { exact: true })).toBeVisible();
+  state.lifecycle.failCheck = true;
+  await row.getByRole("button", { name: "Check unpublish status", exact: true }).click();
+  await expect(row.getByText("Unpublish needs attention", { exact: true })).toBeVisible();
+  state.lifecycle.failCheck = false;
+  await row.getByRole("button", { name: "Check unpublish status", exact: true }).click();
+  await expect(row).toHaveCount(0);
+  state.remoteRows = [listing("OTHER-SKU")];
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Edit listing OTHER-SKU", exact: true })).toBeVisible();
+  await expect(row).toHaveCount(0);
+  await page.getByRole("checkbox", { name: "Show removed listings", exact: true }).check();
+  await expect(row.getByText("Removed from Echelon", { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(state.errors).toEqual([]);
+});
+
+test("a rejected unpublish command preserves the listing and displays the error", async ({ page }) => {
+  const state = await setup(page);
+  state.lifecycle.failRequest = true;
+  await page.getByRole("button", { name: "More actions for CARD-P5", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Unpublish from Walmart", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "Unpublish from Walmart", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toHaveText("Walmart account changed. Refresh and try again.");
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Edit listing CARD-P5", exact: true })).toBeVisible();
+  expect(state.lifecycle.items).toEqual([]);
+});
+
+test("view-only users cannot unpublish or remove a Walmart listing", async ({ page }) => {
+  const state = await setup(page, { readOnly: true });
+  await expect(page.getByText("Product CARD-P5", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^More actions for/ })).toHaveCount(0);
+  expect(state.lifecycle.writes).toEqual([]);
+});
+
+test("unpublish confirmation stays bound to the account reviewed before a reconnect", async ({ page }) => {
+  const state = await setup(page);
+  await page.getByRole("button", { name: "More actions for CARD-P5", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Unpublish from Walmart", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  state.lifecycle.account = { ...state.lifecycle.account, accountId: "different-account", revision: 2 };
+  await expect.poll(() => state.lifecycle.lookupRevision, { timeout: 20_000 }).toBe(2);
+  await dialog.getByRole("button", { name: "Unpublish from Walmart", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toHaveText("Walmart account changed. Refresh and try again.");
+  expect(state.lifecycle.writes[0].body).toMatchObject({ account: { accountId: "10002558022", revision: 1 } });
+  expect(state.lifecycle.items).toEqual([]);
 });

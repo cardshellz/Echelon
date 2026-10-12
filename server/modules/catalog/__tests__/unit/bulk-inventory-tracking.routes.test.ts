@@ -56,6 +56,14 @@ describe("bulk inventory tracking HTTP boundary", () => {
     expect(mocks.permission.mock.calls).toEqual([["inventory", "edit"], ["inventory", "edit"]]);
     expect(mocks.preview).not.toHaveBeenCalled(); expect(mocks.apply).not.toHaveBeenCalled();
   });
+  it("returns the exact selection concurrency guard as a retryable conflict", async () => {
+    mocks.apply.mockRejectedValue(new Error("private SQL", { cause: { code: "55P03", message: "PUBLICATION_SELECTION_BUSY" } }));
+    const response = await post("apply", applyInput, "same-stock-request");
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({ code: "PUBLICATION_SELECTION_BUSY", retryable: true,
+      error: "A stock update is finishing. Your selection was not saved; retry it in a moment." });
+    expect(JSON.stringify(response.body)).not.toContain("private SQL");
+  });
   it.each([[], [0], [-1], [1.5], [1, 1], [Number.MAX_SAFE_INTEGER + 1], ["1"],
     Array.from({ length: MAX_BULK_INVENTORY_TRACKING_PRODUCTS + 1 }, (_, index) => index + 1)].map(productIds => ({ productIds })))
     ("rejects invalid selection $productIds before calling the owner", async ({ productIds }) => {
